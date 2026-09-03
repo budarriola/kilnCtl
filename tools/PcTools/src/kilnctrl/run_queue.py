@@ -123,12 +123,23 @@ class RunQueueFaultError(RunQueueError):
 
 def is_rested(status_body: dict, tol_c: float = DEFAULT_RESTED_TOL_C) -> bool:
     """True iff every valid thermocouple channel in a ``GET /api/status``
-    body is within ``tol_c`` of its own cold junction. A channel reporting
-    ``valid: false`` or a null ``temp_c``/``cj_c`` (MAX31856.c leaves both
-    NaN on a faulted/absent channel -- dashboard_http.c line ~461) is
-    ignored rather than treated as "not rested": a dead channel should not
-    block every other zone's queue forever, and the ceiling/fault checks
-    below catch a genuinely unsafe start on their own terms."""
+    body is no more than ``tol_c`` ABOVE its own cold junction. A channel
+    reporting ``valid: false`` or a null ``temp_c``/``cj_c`` (MAX31856.c
+    leaves both NaN on a faulted/absent channel -- dashboard_http.c line
+    ~461) is ignored rather than treated as "not rested": a dead channel
+    should not block every other zone's queue forever, and the
+    ceiling/fault checks below catch a genuinely unsafe start on their own
+    terms.
+
+    This is deliberately ONE-sided, not ``abs(temp_c - cj_c) > tol_c``. The
+    MAX31856's on-board cold-junction sensor self-heats, so a genuinely
+    cold, rested kiln reads BELOW its own cold junction -- confirmed live
+    with the kiln cold: zone temps 26.91/26.78/26.63C against cold
+    junctions 28.22/28.39/28.62C, i.e. 1.31-1.99C below CJ. A two-sided
+    check with a 1.0C tolerance would fail that forever and refuse to ever
+    start. A zone colder than its cold junction is rested; only a zone
+    reading HOTTER than its cold junction by more than tol_c indicates
+    residual heat."""
     channels = status_body.get("channels")
     if not channels:
         # No channel data at all is NOT "rested" -- an empty/absent list
@@ -144,7 +155,7 @@ def is_rested(status_body: dict, tol_c: float = DEFAULT_RESTED_TOL_C) -> bool:
         if temp_c is None or cj_c is None:
             continue
         saw_any = True
-        if abs(float(temp_c) - float(cj_c)) > tol_c:
+        if float(temp_c) - float(cj_c) > tol_c:
             return False
     return saw_any
 
@@ -506,11 +517,28 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     check_targets_within_ceiling(plan, zones)
 
     # Re-confirm rested immediately before the POST -- wait_until_rested may
-    # have returned a while ago if the ceiling check above was slow.
+    # have returned a while ago if the ceiling check above was slow. A
+    # marginal drift here should send this entry back to waiting for rest,
+    # not abort the whole remaining queue (a single entry's drift says
+    # nothing about whether the other queued entries are safe) -- so retry
+    # a bounded number of times before giving up. The overall
+    # rested_timeout_s is still honoured on each retry's wait, so this
+    # cannot spin forever.
+    _PRESTART_RECONFIRM_ATTEMPTS = 3
     status = get_status(cfg.host, cfg.http_timeout_s)
-    if not is_rested(status, cfg.rested_tol_c):
-        raise RunQueueError("zones drifted out of rested tolerance between the rested "
-                             "wait and the start -- refusing to start")
+    for attempt in range(1, _PRESTART_RECONFIRM_ATTEMPTS + 1):
+        if is_rested(status, cfg.rested_tol_c):
+            break
+        log.info("[%s] drifted out of rested tolerance before start (attempt %d/%d) -- "
+                  "waiting for zones to rest again", entry.label, attempt,
+                  _PRESTART_RECONFIRM_ATTEMPTS)
+        if attempt == _PRESTART_RECONFIRM_ATTEMPTS:
+            raise RunQueueError(
+                f"zones drifted out of rested tolerance between the rested wait and the "
+                f"start, and did not re-settle after {_PRESTART_RECONFIRM_ATTEMPTS} "
+                f"retries -- refusing to start")
+        wait_until_rested(cfg)
+        status = get_status(cfg.host, cfg.http_timeout_s)
 
     log.info("[%s] starting profile %d, capturing to %s", entry.label, entry.profile_id, entry.log_path)
     result = start_profile(cfg.host, entry.profile_id, cfg.http_timeout_s)

@@ -70,6 +70,24 @@ class IsRestedTest(unittest.TestCase):
         st = _status([_channel(99.0, 25.0, valid=False)])
         self.assertFalse(rq.is_rested(st, tol_c=1.0))
 
+    def test_below_cold_junction_from_self_heating_is_rested(self):
+        # Live reading with the kiln genuinely cold: the MAX31856's
+        # on-board cold-junction sensor self-heats, so all three zones read
+        # BELOW their own cold junction by 1.31-1.99C. A two-sided
+        # abs(temp_c - cj_c) > 1.0C tolerance fails this forever -- the
+        # one-sided check must treat it as rested.
+        st = _status([
+            _channel(26.91, 28.22), _channel(26.78, 28.39), _channel(26.63, 28.62),
+        ])
+        self.assertTrue(rq.is_rested(st, tol_c=1.0))
+
+    def test_above_cold_junction_over_tolerance_is_not_rested(self):
+        # The other direction still must refuse: a channel genuinely
+        # HOTTER than its own cold junction by more than tol_c is real
+        # residual heat, not self-heating noise.
+        st = _status([_channel(26.91, 28.22), _channel(30.0, 25.0)])
+        self.assertFalse(rq.is_rested(st, tol_c=1.0))
+
 
 class CheckNoFaultTest(unittest.TestCase):
     def test_all_zero_ok(self):
@@ -480,6 +498,52 @@ class RunEntryEndToEndTest(unittest.TestCase):
         with self.assertRaises(rq.RunQueueFaultError):
             _patched_run_entry(entry, cfg, transport, entry.preset_name)
         self.assertEqual(transport.started_profile_id, 7)  # it did start, then faulted
+
+
+class PrestartRestedRetryTest(unittest.TestCase):
+    """Regression coverage for the live failed-campaign defect: a single
+    entry's marginal drift between wait_until_rested() and the start POST
+    used to raise RunQueueError straight out of run_entry, aborting every
+    remaining queued run. It must instead retry wait_until_rested() a
+    bounded number of times before giving up."""
+
+    def _run(self, status_sequence, rested_timeout_s=5.0):
+        tmpdir = tempfile.mkdtemp()
+        log_path = os.path.join(tmpdir, "run.jsonl")
+        transport = _ScriptedTransport(
+            status_sequence=status_sequence,
+            exec_sequence=[_exec([0], state="running"), _exec([0], state="done")],
+            plan_body=_plan([20, 45, 60]),
+            zones_body=_zones([80.0, 80.0, 80.0]),
+        )
+        entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7, log_path=log_path, label="t")
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.0,
+                                 sleep=transport.sleep, now=transport.now,
+                                 cooldown_s=0.0, rested_timeout_s=rested_timeout_s)
+        calls = _patched_run_entry(entry, cfg, transport, entry.preset_name)
+        return transport, calls
+
+    def test_drift_before_start_retries_and_proceeds(self):
+        rested = _status([_channel(25.1, 25.0)])
+        warm = _status([_channel(35.0, 25.0)])
+        # 1: wait_until_rested's own poll (rested) -> returns.
+        # 2: pre-start re-check reads drifted/warm -> attempt 1 fails.
+        # 3: the retry's wait_until_rested poll (rested) -> returns.
+        # 4: the retry's re-check reads rested -> proceeds to start.
+        transport, _calls = self._run(status_sequence=[rested, warm, rested, rested])
+        self.assertEqual(transport.started_profile_id, 7)
+
+    def test_drift_before_start_raises_after_attempts_exhausted(self):
+        rested = _status([_channel(25.1, 25.0)])
+        warm = _status([_channel(35.0, 25.0)])
+        # Every wait_until_rested poll sees a momentary rested reading (so
+        # it returns instead of timing out on its own), but every pre-start
+        # re-check that follows sees drifted/warm again -- proves this is
+        # the bounded-retries-exhausted path, not wait_until_rested's own
+        # timeout.
+        with self.assertRaises(rq.RunQueueError) as ctx:
+            self._run(status_sequence=[rested, warm, rested, warm, rested, warm])
+        self.assertIn("did not re-settle", str(ctx.exception))
 
 
 # --------------------------------------------------------------------------
