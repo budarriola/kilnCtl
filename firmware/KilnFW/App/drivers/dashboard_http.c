@@ -35,6 +35,7 @@
 #include "safety_trip_words.h" /* shared cause/remedy/fault-source decode -- see that header's own comment */
 #include "sim_backend.h"
 #include "uart_task_ids.h"
+#include "ramp_assist_cfg.h"
 #include "unit_pref.h"
 #include "watchdog_cfg.h"
 #include "wifi_provision_http.h"
@@ -438,6 +439,7 @@ void dashboard_get_status(dashboard_status_t *out)
      * dashboard_http.h's field comment. unit_pref_get() is O(1) RAM-only, so
      * this costs nothing extra on either the HTTP or LCD poll path. */
     out->temp_unit = unit_pref_get();
+    out->ramp_assist_enabled = ramp_assist_cfg_enabled();
     /* Local state, always knowable -- deliberately not inside the "did the
      * safety link answer" block above. See the field comment. */
     out->zone_blocked_mask = relay_authority_latched_blocked_mask();
@@ -922,6 +924,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * field, the same boundary point unit_pref_convert() enforces on the LCD
      * side. */
     APPEND(",\"temp_unit\":\"%s\"", unit_pref_suffix(ds.temp_unit));
+
+    /* 2026-09-02, forthcoming "ramp assist" feature: ADDITIVE field, same
+     * "older client just never heard of this key" reasoning as temp_unit
+     * above. The flag ONLY -- see ramp_assist_cfg.h's header comment; this
+     * value does not yet change anything about how a ramp or dwell runs. */
+    APPEND(",\"ramp_assist_enabled\":%s", ds.ramp_assist_enabled ? "true" : "false");
 
     /* 2026-08-30, PROFILES.md "Scheduled start + candling": ADDITIVE fields,
      * same "older client just never heard of these keys" reasoning as

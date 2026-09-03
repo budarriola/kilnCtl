@@ -49,6 +49,7 @@
 #include "ota_http.h"
 #include "profile_executor.h"
 #include "profiles_builtin.h"
+#include "ramp_assist_cfg.h"
 #include "unit_pref.h"
 #include "profiles_http.h"
 #include "log_http.h"
@@ -1229,6 +1230,16 @@ void app_main(void)
     if (unit_pref_err != ESP_OK) {
         ESP_LOGW(TAG, "unit_pref_start failed: %s -- defaulting to Celsius this boot",
                  esp_err_to_name(unit_pref_err));
+    }
+
+    // 2026-09-02, forthcoming "ramp assist" feature: same non-fatal, load-
+    // before-first-poll placement as unit_pref_start() just above -- a
+    // failed load leaves ramp_assist_cfg_enabled() at its safe default
+    // (disabled) for this boot only, never a reason to fail app_main.
+    esp_err_t ramp_assist_err = ramp_assist_cfg_start();
+    if (ramp_assist_err != ESP_OK) {
+        ESP_LOGW(TAG, "ramp_assist_cfg_start failed: %s -- ramp assist stays disabled this boot",
+                 esp_err_to_name(ramp_assist_err));
     }
 
     esp_err_t zones_err = zones_http_start();

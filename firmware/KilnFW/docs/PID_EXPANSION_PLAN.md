@@ -1892,14 +1892,30 @@ All three the owner asked for, all while ramp-lock is holding:
 - LCD. Constraint: KilnFW LCD pages are 320x480 LVGL and must fit without
   scrolling — split into a separate page rather than scroll an existing one.
 
-### 7.5 `ramp_assist_enabled` setting — LANDING NOW (another agent)
+### 7.5 `ramp_assist_enabled` setting — DONE (control surface only; §7.2/7.3 behaviour still not built)
 
-`ramp_assist_cfg.c`/`.h` exist, kiln-wide, persisted, default OFF, wired into
-`dashboard_http.c` and `diagnostics_http.c` (`GET /api/ramp_assist`). Defaults
-to ON only once validated on a real firing (§7.6). **Testing hazard:** if left
-enabled during a tuning run or an A/B comparison, it silently changes ramps
-and dwells mid-run and invalidates the measurement. Experiments must PIN the
-flag explicitly rather than inherit whatever it defaults to.
+`ramp_assist_cfg.c`/`.h` exist, kiln-wide (not per-zone), persisted (`kiln_nvs`
+partition, `kiln_cfg` namespace, same pattern as `unit_pref.c`), default OFF.
+Wired into `dashboard_http.c` (`GET /api/status`'s `ramp_assist_enabled`
+field) and `diagnostics_http.c` (`GET`/`POST /api/ramp_assist`, alongside the
+watchdog-panic toggle) — see `docs/WEB_UI.md`'s API reference for the wire
+shape. `diagnostics_page.html` has the toggle, reading the board's actual
+state and showing an explicit error (not a misleading "off") if the read
+fails. Reachable from tooling as `ramp_assist_get_enabled`/
+`ramp_assist_set_enabled` (`mcp_server_ramp_assist.py`, confirm-gated write),
+and `config_presets.py`'s `ramp_assist_enabled` is now a REQUIRED top-level
+preset field so every preset pins it explicitly — all four schema-valid
+presets under `config_presets/` currently pin it OFF. Defaults to ON only
+once validated on a real firing (§7.6) — that flip is a future change to this
+module's default, not part of this pass. **Testing hazard:** if left enabled
+during a tuning run or an A/B comparison, it silently changes ramps and
+dwells mid-run and invalidates the measurement. Experiments must PIN the flag
+explicitly rather than inherit whatever it defaults to — `run_queue.py`'s
+preset-apply path now does this automatically.
+
+**NOT part of this pass:** the flag has no consumer yet. §7.2's auto-stretch
+and §7.3's dwell credit still need to be built and will read
+`ramp_assist_cfg_enabled()` at decision time.
 
 ### 7.6 Validation before defaulting ON — NOT STARTED
 

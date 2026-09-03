@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import unittest.mock
 
-from kilnctrl import config_presets, safety_cfg_http_client, zones_http_client  # noqa: E402
+from kilnctrl import config_presets, ramp_assist_http_client, safety_cfg_http_client, zones_http_client  # noqa: E402
 from kilnctrl.devices import OkReason  # noqa: E402
 
 
@@ -226,6 +226,7 @@ class ValidationTest(unittest.TestCase):
     def test_zone_missing_required_field_rejected(self):
         directory = self._write({
             "name": "broken",
+            "ramp_assist_enabled": False,
             "zones": [{"index": 0, "relay_mask": 1}],
         })
         with self.assertRaises(config_presets.ConfigPresetError) as ctx:
@@ -238,7 +239,8 @@ class ValidationTest(unittest.TestCase):
             "pid_kp": 0.0, "pid_ki": 0.0, "pid_kd": 0.0, "max_ramp_c_per_hr": 0.0,
             "max_temp_c": 80.0, "min_temp_c": 0.0,
         }
-        directory = self._write({"name": "broken", "zones": [dict(base), dict(base)]})
+        directory = self._write({"name": "broken", "ramp_assist_enabled": False,
+                                 "zones": [dict(base), dict(base)]})
         with self.assertRaises(config_presets.ConfigPresetError) as ctx:
             self._load_from(directory, "broken")
         self.assertIn("duplicate", str(ctx.exception).lower())
@@ -320,12 +322,19 @@ class ApplyPresetZonesHostTest(unittest.TestCase):
         fake = FakeControl()
         ok_result = zones_http_client.ZonesApplyResult(ok=True, post_response="ok")
         with unittest.mock.patch.object(zones_http_client, "apply_zone_preset",
-                                         return_value=ok_result) as mock_apply:
+                                         return_value=ok_result) as mock_apply, \
+             unittest.mock.patch.object(ramp_assist_http_client, "set_enabled",
+                                         return_value={"ok": True, "enabled": False}) as mock_ra:
             result = config_presets.apply_preset(fake, preset, zones_host="kiln.local")
         mock_apply.assert_called_once()
         called_host = mock_apply.call_args[0][0]
         self.assertEqual(called_host, "kiln.local")
         self.assertEqual(result.zones_result, ok_result)
+        # ramp_assist_enabled is pinned over its own endpoint, not through
+        # zones_http_client -- confirm it was actually called with the
+        # preset's pinned value (bench_fixture.json pins False).
+        mock_ra.assert_called_once_with("kiln.local", False)
+        self.assertEqual(result.ramp_assist_result, {"ok": True, "enabled": False})
         # Every ZONE field is now written; what remains in not_written is the
         # safety section, which needs its own safety_host (see
         # SafetySectionTest below).
@@ -342,10 +351,31 @@ class ApplyPresetZonesHostTest(unittest.TestCase):
             ok=False, mismatches=["zone 0.max_temp_c: expected 80.0, board reports 0.0"],
             post_response="ok")
         with unittest.mock.patch.object(zones_http_client, "apply_zone_preset",
-                                         return_value=failed_result):
+                                         return_value=failed_result), \
+             unittest.mock.patch.object(ramp_assist_http_client, "set_enabled",
+                                         return_value={"ok": True, "enabled": False}):
             result = config_presets.apply_preset(fake, preset, zones_host="kiln.local")
         self.assertFalse(result.all_ok)
         self.assertIn("max_temp_c", result.describe())
+        self.assertIn("FAILED", result.describe())
+
+    def test_ramp_assist_write_failure_makes_all_ok_false(self):
+        """NEGATIVE TEST: the zones HTTP write can succeed while pinning
+        ramp_assist_enabled fails -- all_ok must reflect that too, not just
+        the zones half. This is the exact silent-invalidation hazard the
+        field exists to prevent: a preset must not read as fully applied
+        when the one flag that decides whether a firing's ramp/dwell shape
+        can be trusted did not actually land."""
+        preset = config_presets.load_preset_data("bench_fixture")
+        fake = FakeControl()
+        ok_result = zones_http_client.ZonesApplyResult(ok=True, post_response="ok")
+        with unittest.mock.patch.object(zones_http_client, "apply_zone_preset",
+                                         return_value=ok_result), \
+             unittest.mock.patch.object(ramp_assist_http_client, "set_enabled",
+                                         return_value={"ok": False, "error": "ESP_FAIL"}):
+            result = config_presets.apply_preset(fake, preset, zones_host="kiln.local")
+        self.assertFalse(result.all_ok)
+        self.assertIn("ramp_assist_enabled", result.describe())
         self.assertIn("FAILED", result.describe())
 
 

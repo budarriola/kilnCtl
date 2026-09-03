@@ -58,7 +58,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from . import safety_cfg_http_client, zones_http_client
+from . import ramp_assist_http_client, safety_cfg_http_client, zones_http_client
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .control import ControlClient
@@ -79,7 +79,19 @@ _REQUIRED_ZONE_FIELDS = (
     "pid_kp", "pid_ki", "pid_kd", "max_ramp_c_per_hr",
     "max_temp_c", "min_temp_c",
 )
-_REQUIRED_TOP_FIELDS = ("name", "zones")
+#: "ramp_assist_enabled" is REQUIRED, not optional, and deliberately has no
+#: default this module supplies -- ramp_assist_cfg.h's forthcoming feature
+#: (kiln-wide, not per-zone: warn/stretch-ramp/credit-dwell when the kiln
+#: cannot keep up with a commanded rate) can silently change the ramp/dwell
+#: shape a firing actually runs. A PID tuning run or A/B controller
+#: comparison's tracking-error numbers are only comparable if every preset
+#: PINS this explicitly rather than inheriting whatever the board happens to
+#: have left over from a previous session -- see apply_preset()'s own
+#: docstring and mcp_server_ramp_assist.py's module docstring for the full
+#: hazard. A preset missing this field fails validation outright (the same
+#: "malformed preset caught early" discipline _REQUIRED_ZONE_FIELDS already
+#: applies), rather than silently defaulting to either value.
+_REQUIRED_TOP_FIELDS = ("name", "zones", "ramp_assist_enabled")
 
 
 def presets_dir() -> str:
@@ -160,6 +172,10 @@ def _validate(name: str, data: object) -> None:
         if idx in seen_index:
             raise ConfigPresetError(f"preset {name!r}: duplicate zone index {idx}")
         seen_index.add(idx)
+    if not isinstance(data["ramp_assist_enabled"], bool):
+        raise ConfigPresetError(f"preset {name!r}: 'ramp_assist_enabled' must be a bool (true/false), "
+                                "not inherited or inferred -- see this field's own comment above "
+                                "_REQUIRED_TOP_FIELDS for why it must be pinned explicitly")
     _validate_safety_sections(name, data)
 
 
@@ -235,6 +251,13 @@ class PresetApplyResult:
     #: the POST/read-back-verify result for the preset's "safety" section
     #: (safety_cfg_http_client.py). None means "not attempted this call".
     safety_result: "Optional[safety_cfg_http_client.SafetyApplyResult]" = None
+    #: Set only when ``apply_preset()`` was called with ``zones_host`` --
+    #: the board's own POST /api/ramp_assist response
+    #: (``{"ok":true,"enabled":<bool>}`` or ``{"ok":false,"error":...}``) for
+    #: pinning ``ramp_assist_enabled``. None means "not attempted this call",
+    #: not "attempted and unknown" -- check ``not_written`` to tell the two
+    #: apart (same convention as ``zones_result``/``safety_result``).
+    ramp_assist_result: "Optional[dict]" = None
 
     def describe(self) -> str:
         lines = [f"preset {self.preset_name!r}:"]
@@ -253,6 +276,10 @@ class PresetApplyResult:
         if self.safety_result is not None:
             for line in self.safety_result.describe().splitlines():
                 lines.append("  " + line)
+        if self.ramp_assist_result is not None:
+            status = "ok" if self.ramp_assist_result.get("ok") else "FAILED"
+            lines.append(f"  ramp_assist_enabled pinned over HTTP: {status} "
+                        f"({self.ramp_assist_result})")
         if self.not_written:
             lines.append(
                 "  NOT written back (no zones_host given this call; preset value is "
@@ -265,7 +292,8 @@ class PresetApplyResult:
         pid_model_ok = all(z.pid_ok and (z.model_ok in (None, True)) for z in self.zones)
         zones_ok = self.zones_result is None or self.zones_result.ok
         safety_ok = self.safety_result is None or self.safety_result.ok
-        return pid_model_ok and zones_ok and safety_ok
+        ramp_assist_ok = self.ramp_assist_result is None or bool(self.ramp_assist_result.get("ok"))
+        return pid_model_ok and zones_ok and safety_ok and ramp_assist_ok
 
 
 #: Zone-level fields this preset schema carries that only zones_http_client's
@@ -330,6 +358,19 @@ def apply_preset(control: "ControlClient", preset: dict,
     commissioning check on a bench whose CTs are not fitted. See this
     module's docstring.
 
+    ``ramp_assist_enabled`` (REQUIRED on every preset, see
+    ``_REQUIRED_TOP_FIELDS``'s own comment): when ``zones_host`` is given,
+    ALSO PINS the kiln-wide ramp-assist flag (ramp_assist_cfg.h) over
+    POST /api/ramp_assist to exactly the value the preset names -- never
+    left to inherit whatever the board happens to already have. This is the
+    load-bearing reason the field is required rather than optional: ramp
+    assist can silently stretch a ramp or shorten a dwell, which would
+    invalidate a PID tuning run or A/B comparison's tracking-error numbers
+    if it were left to chance. See ``ramp_assist_result`` on the returned
+    ``PresetApplyResult``. When ``zones_host`` is omitted, the field is
+    reported in ``not_written`` instead, same as the rest of the
+    zones-http-only fields.
+
     Never touches relays, never resets, never enables anything."""
     results = []
     for zone in preset["zones"]:
@@ -355,9 +396,12 @@ def apply_preset(control: "ControlClient", preset: dict,
         )
 
     zones_result = None
+    ramp_assist_result = None
     if zones_host:
         zones_result = zones_http_client.apply_zone_preset(
             zones_host, preset, timeout=zones_timeout, verify=verify_zones)
+        ramp_assist_result = ramp_assist_http_client.set_enabled(
+            zones_host, bool(preset["ramp_assist_enabled"]))
         not_written = []
     else:
         not_written = sorted(
@@ -368,6 +412,7 @@ def apply_preset(control: "ControlClient", preset: dict,
                 if field in zone
             }
             | ({"thermo_count", "relay_count"} & preset.keys())
+            | {"ramp_assist_enabled"}
         )
     safety_result = None
     if safety_host:
@@ -379,4 +424,5 @@ def apply_preset(control: "ControlClient", preset: dict,
             f"safety.{k}" for k in preset[safety_cfg_http_client.SAFETY_SECTION]})
 
     return PresetApplyResult(preset_name=preset["name"], zones=results, not_written=not_written,
-                              zones_result=zones_result, safety_result=safety_result)
+                              zones_result=zones_result, safety_result=safety_result,
+                              ramp_assist_result=ramp_assist_result)

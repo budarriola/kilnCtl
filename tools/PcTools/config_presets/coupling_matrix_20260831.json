@@ -52,6 +52,7 @@
 
   "name": "coupling_matrix_20260831",
   "description": "Adopted 3-zone coupling matrix (commit 78f2134's measurement, correctly packaged this time) overlaid on this bench's current PID/relay/limit config so applying it changes only the coupling matrix.",
+  "ramp_assist_enabled": false,
   "thermo_count": 3,
   "relay_count": 3,
   "zones": [

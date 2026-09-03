@@ -745,6 +745,10 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
 
     STATUS_APPEND(",\"temp_unit\":\"%s\"", "F");
 
+    /* 2026-09-02, forthcoming "ramp assist" feature: worst case is "false" (5
+     * bytes) not "true" (4) -- mirrors dashboard_http.c's own APPEND exactly. */
+    STATUS_APPEND(",\"ramp_assist_enabled\":%s", "false");
+
     STATUS_APPEND(",\"time_synced\":%s", "true");
     STATUS_APPEND(",\"time_now_epoch\":%lld", (long long)9999999999LL);
     STATUS_APPEND(",\"time_last_sync_epoch\":%lld", (long long)9999999999LL);

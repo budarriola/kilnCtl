@@ -237,10 +237,22 @@ read-back (an ACK is never accepted as proof that a value landed):
 | `zones[].pid_*` / model | UART CONTROL task (`control.py`) | always |
 | the rest of `zones_cfg_t` | `GET`/`POST /api/zones` (`zones_http_client.py`) | `host=` |
 | `"safety"` | `POST /api/safety/commissioning` (`safety_cfg_http_client.py`) | `safety_host=` |
+| `ramp_assist_enabled` | `POST /api/ramp_assist` (`ramp_assist_http_client.py`) | `host=` |
 
 `host` and `safety_host` are normally the **same address**: both endpoints are
 served by the ESP32, which is the only thing that can talk to the RP2040 at
 all. Omit either and that section is reported as reference data, not written.
+
+**`ramp_assist_enabled` is a REQUIRED top-level field on every preset, not
+optional.** It pins the kiln-wide "ramp assist" flag (`docs/PID_EXPANSION_
+PLAN.md` §7.5) to a known value rather than letting an experiment inherit
+whatever the board happens to already have. This is not a style preference:
+enabling ramp assist mid-run lets the executor silently stretch a ramp or
+shorten a dwell, which invalidates a PID tuning run or A/B controller
+comparison's tracking-error numbers outright. Every preset shipped in
+`config_presets/` pins it `false`. `run_queue.py`'s HTTP-only apply path pins
+it the same way, so a queued campaign can never start a firing without an
+explicit answer to "is ramp assist on."
 
 **The `"safety_ct_channel_map_backup"` section is never applied by default.**
 `ct_channel_map[0..2]` states which relay each current transformer is

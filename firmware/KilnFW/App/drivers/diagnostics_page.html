@@ -330,6 +330,26 @@ e.g. sitting at a breakpoint) -- it does NOT stop the hang itself. A disabled pa
 flash and survives a reboot; the setting is shown here and in the dashboard status so it is never
 silently on. Starting a firing while this is disabled requires an extra confirmation.</p>
 
+<!-- ramp_assist_cfg.h -- the kiln-wide (not per-zone) on/off switch for the
+     forthcoming "ramp assist" feature (cone/heat-work-based ramp-stretch and
+     dwell-credit, not yet implemented -- this control is the flag only).
+     Same GET/POST-toggle shape as the watchdog-panic control above, and the
+     same class="danger-btn" language: PID tuning and A/B controller
+     comparisons need this OFF so tracking-error numbers stay comparable
+     between runs (see the note below) -- toggling it is consequential enough
+     to read the same way every other "changes how the kiln actually runs"
+     control on this page does. -->
+<h2>Ramp assist</h2>
+<div class="card">
+  <div class="row"><span class="label">Ramp assist</span><span class="value" id="rampAssistState">--</span></div>
+</div>
+<button type="button" class="danger-btn" id="rampAssistToggleBtn">--</button>
+<p class="note">Ramp assist is for real firings, not PID tuning or A/B controller comparisons. When
+enabled, the executor may automatically stretch ramps and shorten dwells to keep up with the kiln's
+real capability -- a tuning or comparison run needs the RAW, unassisted schedule to produce
+comparable tracking-error numbers. Leave this OFF for tuning. The setting is written to flash and
+survives a reboot; it is shown here and in the dashboard status so it is never silently on.</p>
+
 <h2>Subsystems &amp; storage</h2>
 <div class="card">
   <div class="row"><span class="label">I/O board</span><span class="value" id="ioReady">--</span></div>
@@ -570,6 +590,65 @@ here:</p>
     return fetch('/api/watchdog_cfg').then(function (r) { return r.json(); }).then(function (j) {
       renderWatchdogCfg(!!j.panic_disabled);
     }).catch(function () {});
+  }
+
+  // ramp_assist_cfg.h -- own small poll/render loop, same pattern as
+  // renderWatchdogCfg()/pollWatchdogCfg() just above. Unlike that one, a
+  // failed read here renders an explicit ERROR state rather than leaving the
+  // "--" placeholder in place -- the flag being toggled is the one that keeps
+  // a PID tuning run's ramp/dwell schedule raw and comparable, so this page
+  // must never let a fetch failure read as "confirmed off" when it is really
+  // "unknown". Always shows the board's ACTUAL current state, read fresh on
+  // load, never an assumed default.
+  function renderRampAssist(enabled) {
+    var stateEl = document.getElementById('rampAssistState');
+    var btn = document.getElementById('rampAssistToggleBtn');
+    if (enabled) {
+      stateEl.textContent = 'ENABLED -- the executor may stretch ramps and shorten dwells';
+      stateEl.style.color = 'var(--warn)';
+      btn.textContent = 'Disable ramp assist';
+    } else {
+      stateEl.textContent = 'disabled (default -- raw, unassisted schedule)';
+      stateEl.style.color = '';
+      btn.textContent = 'Enable ramp assist';
+    }
+    btn.disabled = false;
+    btn.onclick = function () {
+      var nextEnabled = !enabled;
+      if (nextEnabled && !window.kcConfirm(
+          'Enable ramp assist? A PID tuning run or A/B controller comparison needs this OFF so ' +
+          'tracking-error numbers stay comparable between runs -- with it enabled, the executor may ' +
+          'automatically stretch ramps and shorten dwells during a firing. Continue?')) {
+        return;
+      }
+      fetch('/api/ramp_assist', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'enabled=' + (nextEnabled ? '1' : '0'),
+      }).then(function (r) { return r.json(); }).then(function (result) {
+        if (result && result.ok) {
+          renderRampAssist(!!result.enabled);
+        } else {
+          renderRampAssistError();
+        }
+      }).catch(function () { renderRampAssistError(); });
+    };
+  }
+  function renderRampAssistError() {
+    var stateEl = document.getElementById('rampAssistState');
+    var btn = document.getElementById('rampAssistToggleBtn');
+    stateEl.textContent = 'ERROR -- could not read the board (unknown, NOT confirmed off)';
+    stateEl.style.color = 'var(--warn)';
+    btn.textContent = 'Retry';
+    btn.disabled = false;
+    btn.onclick = function () { pollRampAssist(); };
+  }
+  function pollRampAssist() {
+    return fetch('/api/ramp_assist').then(function (r) {
+      if (!r.ok) { throw new Error('http ' + r.status); }
+      return r.json();
+    }).then(function (j) {
+      renderRampAssist(!!j.enabled);
+    }).catch(function () { renderRampAssistError(); });
   }
 
   function setStale(staleSeconds) {
@@ -928,6 +1007,7 @@ here:</p>
   schedule();
   pollCrash();
   pollWatchdogCfg();
+  pollRampAssist();
   pollThermoFaults();
   scheduleThermoFaults();
   pollPartitions();

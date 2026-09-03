@@ -61,7 +61,7 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional, Sequence
 
-from kilnctrl import zones_http_client
+from kilnctrl import ramp_assist_http_client, zones_http_client
 
 log = logging.getLogger(__name__)
 
@@ -529,6 +529,21 @@ def _apply_preset_http_only(control, preset: dict, zones_host: "Optional[str]" =
         raise RunQueueError(
             f"POST /api/zones for preset {preset.get('name')!r} was ACKed but a read-back "
             f"disagreed: {result.mismatches}")
+
+    # PIN ramp_assist_enabled -- REQUIRED on every preset (config_presets.py's
+    # _REQUIRED_TOP_FIELDS), for the identical reason config_presets.
+    # apply_preset() pins it when it has a zones_host: this queue is exactly
+    # the automated-experiment path the hazard is about -- a run that
+    # inherited whatever the board happened to have left over from a
+    # previous session (rather than an explicit pin) is the silent-
+    # invalidation failure mode ramp_assist_cfg.h's header comment warns
+    # about. Raises, same as the zones mismatch above, rather than starting a
+    # firing whose ramp/dwell behaviour the caller did not actually pin.
+    ramp_assist_result = ramp_assist_http_client.set_enabled(
+        zones_host, bool(preset["ramp_assist_enabled"]), timeout=timeout)
+    if not ramp_assist_result.get("ok"):
+        raise RunQueueError(
+            f"POST /api/ramp_assist for preset {preset.get('name')!r} failed: {ramp_assist_result}")
     return result
 
 

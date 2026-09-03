@@ -405,6 +405,14 @@ typedef struct {
      * boundary" this preference's header comment asks for. */
     unit_pref_t temp_unit;
 
+    /* 2026-09-02, forthcoming "ramp assist" feature: the kiln-wide (not
+     * per-zone) persisted on/off flag (ramp_assist_cfg.h), reported here so
+     * the diagnostics page's toggle -- and any other reader -- shows the
+     * board's ACTUAL current state rather than an assumed default. This
+     * struct is the flag only; nothing in this codebase yet reads it to
+     * change ramp/dwell behaviour -- see ramp_assist_cfg.h's header comment. */
+    bool ramp_assist_enabled;
+
     /* 2026-08-30, PROFILES.md "Scheduled start + candling": time_sync.c's
      * wall-clock status, for display/scheduling-intent only -- see that
      * module's header comment for the hard boundary (never a duration/

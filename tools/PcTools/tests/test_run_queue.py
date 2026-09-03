@@ -263,17 +263,38 @@ class ApplyPresetHttpOnlyTest(unittest.TestCase):
             "coupling_coeff": [0.0, 10.0],
         }
         zone.update(zone_overrides)
-        return {"name": "fake_coupling_only", "zones": [zone]}
+        return {"name": "fake_coupling_only", "ramp_assist_enabled": False, "zones": [zone]}
 
     def test_coupling_only_preset_applies_over_http_with_no_control(self):
         preset = self._preset()
         with unittest.mock.patch.object(
                 rq.zones_http_client, "apply_zone_preset",
-                return_value=rq.zones_http_client.ZonesApplyResult(ok=True)) as mock_apply:
+                return_value=rq.zones_http_client.ZonesApplyResult(ok=True)) as mock_apply, \
+             unittest.mock.patch.object(
+                 rq.ramp_assist_http_client, "set_enabled",
+                 return_value={"ok": True, "enabled": False}) as mock_ra:
             result = rq._apply_preset_http_only(None, preset, zones_host="203.0.113.10")
         self.assertTrue(result.ok)
         mock_apply.assert_called_once()
         self.assertEqual(mock_apply.call_args.args[0], "203.0.113.10")
+        # ramp_assist_enabled must be pinned too -- the preset's own value
+        # (False here), not left to whatever the board already has.
+        mock_ra.assert_called_once_with("203.0.113.10", False, timeout=unittest.mock.ANY)
+
+    def test_ramp_assist_pin_failure_raises(self):
+        """NEGATIVE TEST: the zones write can succeed while pinning
+        ramp_assist_enabled fails -- this must raise, not report success,
+        since starting a firing without the flag actually pinned is exactly
+        the silent-invalidation hazard this field exists to prevent."""
+        preset = self._preset()
+        with unittest.mock.patch.object(
+                rq.zones_http_client, "apply_zone_preset",
+                return_value=rq.zones_http_client.ZonesApplyResult(ok=True)), \
+             unittest.mock.patch.object(
+                 rq.ramp_assist_http_client, "set_enabled",
+                 return_value={"ok": False, "error": "ESP_FAIL"}):
+            with self.assertRaises(rq.RunQueueError):
+                rq._apply_preset_http_only(None, preset, zones_host="203.0.113.10")
 
     def test_verify_mismatch_raises(self):
         preset = self._preset()
@@ -329,6 +350,9 @@ class ApplyPresetHttpOnlyTest(unittest.TestCase):
              unittest.mock.patch.object(
                  rq.zones_http_client, "apply_zone_preset",
                  return_value=rq.zones_http_client.ZonesApplyResult(ok=True)), \
+             unittest.mock.patch.object(
+                 rq.ramp_assist_http_client, "set_enabled",
+                 return_value={"ok": True, "enabled": False}), \
              unittest.mock.patch.object(rq, "get_status", transport.get_status), \
              unittest.mock.patch.object(rq, "get_exec", transport.get_exec), \
              unittest.mock.patch.object(rq, "get_zones", transport.get_zones), \

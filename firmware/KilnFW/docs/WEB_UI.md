@@ -26,7 +26,7 @@ Source of truth:
   `/api/zones`, current-sweep, tuning-recommendation endpoints
 - `App/drivers/profiles_http.c` — `/profiles`, the profile CRUD API
 - `App/drivers/diagnostics_http.c` — `/diagnostics`, `/safety`, crash
-  report, watchdog config, thermo faults
+  report, watchdog config, ramp-assist toggle, thermo faults
 - `App/drivers/safety_cfg_http.c` — `/safety/commissioning`,
   `/api/safety/commissioning`
 - `App/drivers/readiness_http.c` — `/readiness`, `/api/readiness`
@@ -121,7 +121,7 @@ out of flash as `text/html`; there is no filesystem and no templating.
 | `GET /settings/zones` | `zones_page.html` | zone/thermocouple config, PID gains, autotune UI, tuning-recommendation panel |
 | `GET /settings/safety` | `safety_config_page.html` | safety timing config, served by `zones_http.c` |
 | `GET /readiness` | `readiness_page.html` | pre-fire checklist |
-| `GET /diagnostics` | `diagnostics_page.html` | crash reports, watchdog config, Danger Zone manual relay control |
+| `GET /diagnostics` | `diagnostics_page.html` | crash reports, watchdog config, ramp-assist toggle, Danger Zone manual relay control |
 | `GET /safety` | `safety_page.html` | safety processor live status |
 | `GET /safety/commissioning` | `safety_commissioning_page.html` | safety commissioning workflow |
 | `GET /settings` | `settings_page.html` | general settings, factory reset |
@@ -305,6 +305,44 @@ render.
   fabricated kiln the executor is controlling.
 - The whole response is built into one 768-byte buffer with a truncate-on-
   overflow `APPEND` macro; a truncated response is sent rather than an error.
+
+### `GET`/`POST /api/ramp_assist` (`diagnostics_http.c`)
+
+The kiln-wide (not per-zone) on/off switch for the forthcoming "ramp assist"
+feature (`ramp_assist_cfg.c`/`.h`, `docs/PID_EXPANSION_PLAN.md` §7.5): during
+a real firing, if the kiln cannot keep up with a commanded ramp rate, the
+executor will warn, auto-stretch the schedule so every target is still
+reached, and credit dwell time already spent near the target. **That
+behaviour is not built yet** — this endpoint is the on/off flag only, same
+GET/POST-toggle shape as `/api/watchdog_cfg` just above it in
+`diagnostics_http.c`.
+
+```
+GET /api/ramp_assist  ->  {"enabled":false}
+POST /api/ramp_assist body="enabled=1"  ->  {"ok":true,"enabled":true}
+```
+
+- Persisted (`kiln_nvs` partition, `kiln_cfg` namespace — same single-scalar
+  pattern as `unit_pref.c`'s preference, not `kiln_cfg_store.c`'s versioned
+  per-slot blob), default **OFF**. A board that has never heard of this key,
+  or whose stored byte is out of range, always comes up disabled — never the
+  other way.
+- Also reported on `GET /api/status`'s `ramp_assist_enabled` field
+  (`dashboard_http.c`) so a client doesn't need a second round trip.
+- `diagnostics_page.html` has the toggle, under its own "Ramp assist"
+  section. It reads the board's actual current state on load, not an assumed
+  default, and shows an explicit error state (not a misleading "off") if the
+  read fails.
+- **Testing hazard:** enabling this during a PID tuning run or an A/B
+  controller comparison lets the executor silently stretch a ramp or shorten
+  a dwell mid-run, which invalidates every tracking-error number the run
+  produces — see `ramp_assist_cfg.h`'s header comment. `tools/PcTools`'
+  `config_presets.py` makes `ramp_assist_enabled` a REQUIRED field on every
+  preset for exactly this reason: an experiment must PIN the flag, never
+  inherit whatever the board already has.
+- Reachable from tooling as `ramp_assist_get_enabled`/`ramp_assist_set_enabled`
+  (`mcp_server_ramp_assist.py`); the setter is confirm-gated, same idiom as
+  `adaptive_tune_set_enabled`.
 
 ### `POST /api/diagnostics/danger/relay` (`diagnostics_http.c`)
 

@@ -58,6 +58,7 @@
 
   "name": "coupling_matrix_pre20260902",
   "description": "Pre-adoption 3-zone coupling matrix (live on the bench immediately before commit 78f2134), overlaid on the same bench PID/relay/limit config as coupling_matrix_20260831.json so the two presets differ only in the coupling matrix.",
+  "ramp_assist_enabled": false,
   "thermo_count": 3,
   "relay_count": 3,
   "zones": [

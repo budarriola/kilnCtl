@@ -14,6 +14,7 @@
 #include "dashboard_http.h"
 #include "http_form.h"
 #include "kiln_io.h"
+#include "ramp_assist_cfg.h"
 #include "thermo_owner.h"
 #include "watchdog_cfg.h"
 #include "web_encoding.h"
@@ -401,6 +402,70 @@ static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
 }
 #undef WATCHDOG_CFG_BODY_MAX
 
+/* GET /api/ramp_assist -- current state of the kiln-wide ramp-assist toggle
+ * (ramp_assist_cfg.h). Also carried in GET /api/status (dashboard_http.c)
+ * for the persistent indicator; this endpoint exists so the diagnostics
+ * page's own control doesn't need to depend on that other page's response
+ * shape -- same split watchdog_cfg_get_handler()/GET /api/watchdog_cfg
+ * already establishes just above. */
+static esp_err_t ramp_assist_get_handler(httpd_req_t *req)
+{
+    char json[64];
+    int n = snprintf(json, sizeof(json), "{\"enabled\":%s}",
+                     ramp_assist_cfg_enabled() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+/* POST /api/ramp_assist -- body: enabled=0|1 (form-encoded, same convention
+ * as watchdog_cfg_post_handler() just above and dashboard_http.c's other
+ * small POST setters). Persists to NVS AND applies immediately -- see
+ * ramp_assist_cfg_set_enabled(). This is the flag ONLY: no ramp-stretching or
+ * dwell-credit behaviour lives behind this handler, that consumer lands
+ * separately and simply reads ramp_assist_cfg_enabled() at decision time --
+ * see ramp_assist_cfg.h's header comment for why the toggle and the behaviour
+ * it will gate are deliberately split across separate work. */
+#define RAMP_ASSIST_BODY_MAX 32
+static esp_err_t ramp_assist_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > RAMP_ASSIST_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[RAMP_ASSIST_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char val[4];
+    int val_len = http_form_find_field(body, "enabled", val, sizeof(val));
+    if (val_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"enabled\" field");
+        return ESP_OK;
+    }
+    bool enabled = (val[0] == '1');
+
+    esp_err_t err = ramp_assist_cfg_set_enabled(enabled);
+    char json[96];
+    int n;
+    if (err == ESP_OK) {
+        n = snprintf(json, sizeof(json), "{\"ok\":true,\"enabled\":%s}", enabled ? "true" : "false");
+    } else {
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(err));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+#undef RAMP_ASSIST_BODY_MAX
+
 /* --- danger_mode.h's diagnostics-page section: status/start/stop/relay --- */
 
 /* GET /api/diagnostics/danger -- current window state, for the page's own
@@ -648,6 +713,12 @@ esp_err_t diagnostics_http_start(void)
     static const httpd_uri_t watchdog_cfg_post_uri = {
         .uri = "/api/watchdog_cfg", .method = HTTP_POST, .handler = watchdog_cfg_post_handler,
     };
+    static const httpd_uri_t ramp_assist_get_uri = {
+        .uri = "/api/ramp_assist", .method = HTTP_GET, .handler = ramp_assist_get_handler,
+    };
+    static const httpd_uri_t ramp_assist_post_uri = {
+        .uri = "/api/ramp_assist", .method = HTTP_POST, .handler = ramp_assist_post_handler,
+    };
     static const httpd_uri_t danger_get_uri = {
         .uri = "/api/diagnostics/danger", .method = HTTP_GET, .handler = danger_get_handler,
     };
@@ -707,6 +778,16 @@ esp_err_t diagnostics_http_start(void)
     err = httpd_register_uri_handler(server, &watchdog_cfg_post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/watchdog_cfg) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &ramp_assist_get_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/ramp_assist) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &ramp_assist_post_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/ramp_assist) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &danger_get_uri);
