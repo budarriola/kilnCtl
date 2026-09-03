@@ -185,6 +185,20 @@ static void spi_owner_task(void *arg)
             result = ESP_ERR_INVALID_ARG;
         }
 
+        /* DISPLAY_ST7796_PLAN.md 9.6: fire the caller's completion callback
+         * now, from this task's own thread -- never an ISR. Only
+         * spi_owner_transfer_async() ever sets request.async, and only when
+         * owner->async_flush was true at enqueue time; the caller that
+         * queued this request already released its own half of the slot's
+         * refcount and is not waiting on slot->sem, so nothing below this
+         * needs to change for the async case -- the owner task's own
+         * give+release still runs unconditionally and brings the refcount to
+         * 0 (draining the semaphore nobody will ever take), exactly as it
+         * already does for an orphaned (timed-out) synchronous request. */
+        if (request.async && request.async_cb) {
+            request.async_cb(request.async_ctx, result);
+        }
+
         /* Write into the module-owned slot (never the caller's stack -- see
          * the pool comment above) and give its semaphore first, exactly as
          * kiln_io_owner.c's/thermo_owner.c's owner_task() tails do; only
@@ -216,7 +230,8 @@ esp_err_t spi_owner_init(spi_owner_t *owner,
                              UBaseType_t task_priority,
                              uint32_t stack_depth,
                              BaseType_t core_id,
-                             bool dma_use_psram)
+                             bool dma_use_psram,
+                             bool async_flush)
 {
     if (!owner) {
         return ESP_ERR_INVALID_ARG;
@@ -225,6 +240,7 @@ esp_err_t spi_owner_init(spi_owner_t *owner,
     memset(owner, 0, sizeof(*owner));
     owner->host = host;
     owner->dma_use_psram = dma_use_psram;
+    owner->async_flush = async_flush;
     owner->request_queue = xQueueCreate(queue_len, sizeof(spi_owner_request_t));
     if (!owner->request_queue) {
         ESP_LOGE(TAG, "failed to create request queue");
@@ -499,4 +515,96 @@ esp_err_t spi_owner_transfer_polling(spi_owner_t *owner,
 {
     return spi_owner_transfer_impl(owner, device, tx_buffer, tx_length, rx_buffer, rx_length, cs_pin,
                                     /*use_polling=*/true);
+}
+
+/* DISPLAY_ST7796_PLAN.md 9.6 -- see this function's declaration comment in
+ * esp_spi_owner.h for the exact contract and why it is deliberately NOT
+ * ESP-IDF's spi_device_queue_trans()/get_trans_result() + a completion ISR.
+ * That fuller design needs a second per-device transaction queue
+ * (queue_size >= 2), pre/post ISR callbacks marked IRAM_ATTR using
+ * gpio_ll_set_level() instead of gpio_set_level() for CS (section 9's "Facts
+ * established"), and lv_display_set_flush_wait_cb() wired in lvgl_port.c --
+ * real changes to the SPI device/ISR configuration that cannot be exercised
+ * by this project's host-test FreeRTOS/spi_master stubs (spi_owner_task()
+ * itself never runs off-target -- see test_esp_spi_owner.c's own header
+ * comment) and so cannot be given the same "written and host-tested, only
+ * bench-unverified" treatment 9.3/9.4 got. What is implemented here instead
+ * is the part of 9.6 the plan doc itself calls out as the actual point --
+ * "the gain is that the caller returns early, not that transfers interleave"
+ * -- by having spi_owner_task() call the transfer synchronously exactly as
+ * it does today and then invoke the caller's callback itself, so the CALLER
+ * (lvgl_port.c's flush path) never blocks on the completion semaphore. */
+esp_err_t spi_owner_transfer_async(spi_owner_t *owner,
+                                 spi_device_handle_t device,
+                                 const uint8_t *tx_buffer,
+                                 size_t tx_length,
+                                 int cs_pin,
+                                 spi_owner_async_done_cb_t cb,
+                                 void *ctx)
+{
+    if (!owner || !owner->initialized || !owner->request_queue || !device) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!owner->async_flush) {
+        /* Default OFF: never touches the queue, so an owner initialized
+         * with async_flush=false (every owner in today's tree,
+         * CONFIG_KILNCTL_SPI_ASYNC_FLUSH default n) behaves as if this
+         * function did not exist. Callers must fall back to
+         * spi_owner_transfer(). */
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    if (owner->wedged) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(owner->slot_lock, portMAX_DELAY);
+    int idx = owner_slot_pool_alloc(owner->slot_refcount, owner->slot_count);
+    xSemaphoreGive(owner->slot_lock);
+    if (idx < 0) {
+        ESP_LOGE(TAG, "result-slot pool exhausted -- failing this async transfer, not latching wedged");
+        return ESP_ERR_NO_MEM;
+    }
+
+    spi_owner_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.device = device;
+    request.tx_buffer = tx_buffer;
+    request.tx_length = tx_length;
+    request.cs_pin = cs_pin;
+    request.slot = idx;
+    request.async = true;
+    request.async_cb = cb;
+    request.async_ctx = ctx;
+
+    if (xQueueSend(owner->request_queue, &request, pdMS_TO_TICKS(SPI_OWNER_TRANSFER_TIMEOUT_MS)) !=
+        pdTRUE) {
+        /* Same shape as spi_owner_transfer_impl()'s enqueue-failure branch:
+         * nobody but this call ever held the slot, so release both halves
+         * ourselves and latch wedged -- the owner is stuck on whatever it is
+         * currently processing. */
+        xSemaphoreTake(owner->slot_lock, portMAX_DELAY);
+        owner_slot_pool_release(owner->slot_refcount, owner->slot_count, idx);
+        owner_slot_pool_release(owner->slot_refcount, owner->slot_count, idx);
+        xSemaphoreGive(owner->slot_lock);
+        owner->wedged = true;
+        ESP_LOGE(TAG, "async request queue did not accept a transfer within %ums -- "
+                      "owner task presumed wedged, failing all transfers until spi_owner_deinit()",
+                 (unsigned)SPI_OWNER_TRANSFER_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* Enqueued successfully. Unlike spi_owner_transfer(), this caller does
+     * not wait on the slot's completion semaphore at all -- it releases its
+     * own half of the refcount right now, the same "this side is done
+     * touching the slot" release a synchronous caller performs after taking
+     * (or timing out on) that semaphore. The owner task's own release, after
+     * it fires async_cb() and gives the (now-uncollected) semaphore, brings
+     * the refcount the rest of the way to 0 and recycles the slot. */
+    xSemaphoreTake(owner->slot_lock, portMAX_DELAY);
+    owner_slot_pool_release(owner->slot_refcount, owner->slot_count, idx);
+    xSemaphoreGive(owner->slot_lock);
+
+    return ESP_OK;
 }

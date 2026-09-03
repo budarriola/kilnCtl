@@ -64,6 +64,23 @@
 #else
 #define KILNCTL_SPI_HARDWARE_CS 0
 #endif
+/* DISPLAY_ST7796_PLAN.md 9.6, default OFF -- same normalization reasoning as
+ * the two macros above. */
+#if CONFIG_KILNCTL_SPI_ASYNC_FLUSH
+#define KILNCTL_SPI_ASYNC_FLUSH 1
+#else
+#define KILNCTL_SPI_ASYNC_FLUSH 0
+#endif
+/* DISPLAY_ST7796_PLAN.md 9.7, default OFF. Only meaningful on a panel whose
+ * descriptor already carries bytes_per_pixel == 2 (ST7796, COLMOD 0x55) --
+ * see panel_spi.c's ili9488_blit_data()/ili9488_push_scratch() for what this
+ * skips when on. Never affects the ILI9488 (bytes_per_pixel == 3), the only
+ * panel that has ever run on this board's hardware. */
+#if CONFIG_KILNCTL_DISPLAY_ZERO_COPY_FLUSH
+#define KILNCTL_DISPLAY_ZERO_COPY_FLUSH 1
+#else
+#define KILNCTL_DISPLAY_ZERO_COPY_FLUSH 0
+#endif
 
 /* --- MAX31856 thermocouple channels (thermocouple daughterboard via J6) ---
  * CS and ~FAULT are real ESP32-S3 GPIOs; ~DRDY is not -- it lands on the

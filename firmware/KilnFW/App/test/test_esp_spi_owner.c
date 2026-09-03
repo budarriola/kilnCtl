@@ -59,7 +59,8 @@ static void test_wedge_latches_and_fails_fast(void)
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/false);
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
     TEST_CHECK(!owner.wedged, "a freshly-initialized owner is not wedged");
 
@@ -145,7 +146,8 @@ static void test_completion_timeout_orphans_slot(void)
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/false);
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 9, 8, 7, 6 };
@@ -182,7 +184,8 @@ static void test_pool_sized_queue_len_plus_one(void)
     UBaseType_t queue_len = 4;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, queue_len, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/false);
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
     TEST_CHECK(owner.slot_count == (size_t)queue_len + 1,
                "pool is sized queue_len + 1, not queue_len");
@@ -211,7 +214,8 @@ static void test_pool_exhaustion_fails_closed_not_wedged(void)
     UBaseType_t queue_len = 4;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, queue_len, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/false);
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     for (UBaseType_t i = 0; i < queue_len + 1; i++) {
@@ -251,7 +255,8 @@ static void test_owner_task_dispatches_polling_vs_queued(void)
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/false);
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 1, 2, 3, 4 };
@@ -302,7 +307,8 @@ static void test_owner_task_dispatches_queued_when_not_polling(void)
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/false);
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 9, 9, 9, 9 };
@@ -356,7 +362,8 @@ static void test_owner_task_skips_gpio_when_cs_pin_negative(void)
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/false);
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 1, 2, 3, 4 };
@@ -402,7 +409,8 @@ static void test_owner_task_bitbangs_cs_when_cs_pin_valid(void)
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/false);
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 1, 2, 3, 4 };
@@ -448,7 +456,8 @@ static void test_owner_task_sets_dma_psram_flag_on_queued_path(void)
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/true);
+                                         /*dma_use_psram=*/true,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
     TEST_CHECK(owner.dma_use_psram, "owner.dma_use_psram reflects the init-time argument");
 
@@ -496,7 +505,8 @@ static void test_owner_task_never_sets_dma_psram_flag_on_polling_path(void)
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
                                          2048 /*stack*/, -1 /*core*/,
-                                         /*dma_use_psram=*/true);
+                                         /*dma_use_psram=*/true,
+                                         /*async_flush=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 1, 2, 3, 4 };
@@ -531,6 +541,158 @@ static void test_owner_task_never_sets_dma_psram_flag_on_polling_path(void)
     g_stub_queue_ring_enabled = 0;
 }
 
+// DISPLAY_ST7796_PLAN.md 9.6: default OFF (async_flush=false, i.e.
+// CONFIG_KILNCTL_SPI_ASYNC_FLUSH default n) must make
+// spi_owner_transfer_async() refuse outright, without ever touching the
+// request queue -- exactly the behavior every existing caller in today's
+// tree relies on (none of them call this function; if this guard were ever
+// deleted or inverted, a caller that later opts in on a real board would
+// silently get no async behavior at all, or -- if the guard's SENSE were
+// flipped -- a bench-verified-only path would start running against a
+// caller that never asked for it). Mutate the `if (!owner->async_flush)`
+// check to `if (owner->async_flush)` and this test goes red (returns ESP_OK
+// and a queue send happens instead of the immediate refusal).
+static void test_async_transfer_refused_when_flag_off(void)
+{
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/false);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+    TEST_CHECK(!owner.async_flush, "owner.async_flush reflects the init-time argument (false)");
+
+    uint8_t tx[4] = { 1, 2, 3, 4 };
+    g_stub_queue_send_calls = 0;
+
+    esp_err_t err = spi_owner_transfer_async(&owner, (spi_device_handle_t)0x1, tx, sizeof(tx),
+                                              /*cs_pin=*/5, NULL, NULL);
+    TEST_CHECK(err == ESP_ERR_NOT_SUPPORTED,
+               "async transfer against an owner with async_flush=false is refused outright");
+    TEST_CHECK(g_stub_queue_send_calls == 0,
+               "the refusal never touches xQueueSend() -- no request was queued");
+}
+
+// Positive control, same owner shape as the dma_use_psram tests above: with
+// async_flush=true, a hand-built async request run through spi_owner_task()
+// must (a) still perform the transfer via spi_device_transmit() exactly like
+// a synchronous request, and (b) invoke the caller-supplied async_cb with
+// the transfer's result, from the owner task's own call -- proving the
+// callback actually fires rather than being silently dropped. Mutate the
+// `if (request.async && request.async_cb)` guard in esp_spi_owner.c (delete
+// it, or the call inside it) and this goes red (the callback counter stays
+// 0).
+static int s_async_cb_calls;
+static esp_err_t s_async_cb_last_result;
+static void *s_async_cb_last_ctx;
+static void test_async_done_cb(void *ctx, esp_err_t result)
+{
+    s_async_cb_calls++;
+    s_async_cb_last_result = result;
+    s_async_cb_last_ctx = ctx;
+}
+
+static void test_owner_task_fires_async_callback(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/true);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    uint8_t tx[4] = { 9, 9, 9, 9 };
+    int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(idx >= 0, "setup: a slot for the hand-built async request");
+
+    int marker = 42;
+    s_async_cb_calls = 0;
+    s_async_cb_last_result = ESP_FAIL;
+    s_async_cb_last_ctx = NULL;
+
+    spi_owner_request_t async_req;
+    memset(&async_req, 0, sizeof(async_req));
+    async_req.device = (spi_device_handle_t)0x1;
+    async_req.tx_buffer = tx;
+    async_req.tx_length = sizeof(tx);
+    async_req.cs_pin = 5;
+    async_req.slot = idx;
+    async_req.async = true;
+    async_req.async_cb = test_async_done_cb;
+    async_req.async_ctx = &marker;
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+
+    TEST_CHECK(xQueueSend(owner.request_queue, &async_req, 0) == pdTRUE,
+               "setup: async request accepted by the ring");
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    spi_owner_task(&owner);
+
+    TEST_CHECK(s_async_cb_calls == 1, "async_cb fired exactly once for the async request");
+    TEST_CHECK(s_async_cb_last_result == ESP_OK,
+               "async_cb was given the transfer's own result (the stub's spi_device_transmit succeeds)");
+    TEST_CHECK(s_async_cb_last_ctx == &marker, "async_cb received the exact ctx pointer the request carried");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
+// Negative control, same shape as 9.3's polling-path control above: a
+// SYNCHRONOUS request (async=false, the default/every other request in this
+// file) must never call async_cb, even though owner.async_flush is true --
+// proves the callback is gated on request.async, not just on the owner-wide
+// flag.
+static void test_owner_task_never_fires_async_callback_on_sync_request(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/true);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    uint8_t tx[4] = { 1, 1, 1, 1 };
+    int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(idx >= 0, "setup: a slot for the hand-built sync request");
+
+    s_async_cb_calls = 0;
+
+    spi_owner_request_t sync_req;
+    memset(&sync_req, 0, sizeof(sync_req));
+    sync_req.device = (spi_device_handle_t)0x1;
+    sync_req.tx_buffer = tx;
+    sync_req.tx_length = sizeof(tx);
+    sync_req.cs_pin = 5;
+    sync_req.slot = idx;
+    sync_req.async = false; /* default -- every existing caller */
+    sync_req.async_cb = test_async_done_cb; /* set but must not be called */
+    sync_req.async_ctx = NULL;
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+
+    TEST_CHECK(xQueueSend(owner.request_queue, &sync_req, 0) == pdTRUE,
+               "setup: sync request accepted by the ring");
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    spi_owner_task(&owner);
+
+    TEST_CHECK(s_async_cb_calls == 0,
+               "a synchronous request never fires async_cb, even with an owner-wide async_flush=true "
+               "and a non-NULL async_cb sitting in the request struct");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
 void run_test_esp_spi_owner(void)
 {
     TEST_SECTION("esp_spi_owner");
@@ -544,4 +706,7 @@ void run_test_esp_spi_owner(void)
     test_owner_task_bitbangs_cs_when_cs_pin_valid();
     test_owner_task_sets_dma_psram_flag_on_queued_path();
     test_owner_task_never_sets_dma_psram_flag_on_polling_path();
+    test_async_transfer_refused_when_flag_off();
+    test_owner_task_fires_async_callback();
+    test_owner_task_never_fires_async_callback_on_sync_request();
 }

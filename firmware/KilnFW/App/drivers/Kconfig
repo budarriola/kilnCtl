@@ -121,6 +121,75 @@ menu "KilnCtrl Hardware Configuration"
                 room to spare. SPI3 has only 3 -- do not enable this option
                 if KILNCTL_SPI_HOST_SPI3 is selected; the 4th device has
                 nowhere to go.
+
+        config KILNCTL_SPI_ASYNC_FLUSH
+            bool "Let the display flush hand off to the SPI owner without blocking the caller"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 9.6. Today spi_owner_transfer()
+                blocks its caller (the LVGL flush callback) until the owner
+                task finishes the whole SPI transfer -- the double LVGL draw
+                buffer therefore buys nothing, since the task that would fill
+                the other buffer is the same one sitting blocked.
+
+                With this on, esp_spi_owner.c's new spi_owner_transfer_async()
+                is allowed to enqueue a request and return immediately; the
+                owner task still issues every transfer -- sync or async,
+                display or thermocouple -- strictly one at a time in queue
+                order (the single-owner/no-interleaving invariant in section
+                8 is unaffected), and fires the caller's completion callback
+                itself once the transfer finishes, from its own task thread
+                (never an ISR). This is deliberately NOT ESP-IDF's
+                spi_device_queue_trans()/get_trans_result() plus a hardware
+                completion interrupt -- see spi_owner_transfer_async()'s own
+                comment in esp_spi_owner.c for exactly what is and is not
+                implemented, and why the fuller ISR-driven design cannot be
+                host-tested off-target the way this flag's plumbing was.
+
+                Off by default: with this false, spi_owner_transfer_async()
+                returns ESP_ERR_NOT_SUPPORTED without touching the queue, and
+                no caller in today's tree calls it -- lvgl_port.c's flush
+                path still calls spi_owner_transfer() exactly as before.
+                Written and host-tested for the flag plumbing only (like
+                9.3/9.4); NOT flash-verified -- confirming it works needs the
+                same bench sequence 9.3/9.4 call for: nothing energized, a
+                fresh 9.1 flush-duration measurement, and confirmation the
+                MAX31856 channels still answer correctly with a display flush
+                in flight, since this is new control flow on the exact bus
+                arbitration DISPLAY_ST7796_PLAN.md section 13 flags as the
+                standing async risk.
+
+        config KILNCTL_DISPLAY_ZERO_COPY_FLUSH
+            bool "Skip the display driver's scratch-buffer copy on a 16bpp panel"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 9.7. On the ST7796 (COLMOD 0x55,
+                bytes_per_pixel == 2) the wire's RGB565 bytes already ARE the
+                panel's RAMWR byte stream -- panel_spi.c's blit path already
+                skips the per-pixel conversion loop for this panel (a
+                memcpy() into the driver's DMA scratch buffer stands in for
+                it), but that memcpy is itself unnecessary: the source bytes
+                (BLIT_DATA's UART payload, or on a real zero-copy caller
+                LVGL's own draw buffer) can be handed to spi_owner_transfer()
+                directly.
+
+                With this on and only on a panel descriptor with
+                bytes_per_pixel == 2, the driver DMAs straight out of the
+                caller-supplied buffer, chunked the same as always, with no
+                scratch copy. Costs nothing extra in RAM (it REMOVES the
+                scratch copy step); does not remove the scratch buffer's
+                allocation itself, since the ILI9488 (bytes_per_pixel == 3,
+                the only panel that has ever run on this board) still needs
+                it for the RGB565->RGB666 widening and this option never
+                touches that path.
+
+                Off by default, and inert on the ILI9488 regardless of this
+                setting (it is gated on bytes_per_pixel == 2, which only the
+                never-yet-bench-verified ST7796 descriptor sets). NOT
+                flash-verified -- there is no working ST7796 bring-up yet
+                (see the plan doc's STOP block) for a zero-copy flush to be
+                measured against; this option exists so the code path is
+                ready the moment there is.
     endmenu
 
     menu "MAX31856 Thermocouple Channels (via J6)"

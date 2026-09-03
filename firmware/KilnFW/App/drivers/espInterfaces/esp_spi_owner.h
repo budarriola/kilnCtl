@@ -70,6 +70,20 @@ typedef struct {
      */
     bool dma_use_psram;
 
+    /* DISPLAY_ST7796_PLAN.md 9.6: set from spi_owner_init()'s async_flush
+     * parameter (in turn CONFIG_KILNCTL_SPI_ASYNC_FLUSH, default OFF). When
+     * true, spi_owner_transfer_async() below is allowed to enqueue a
+     * fire-and-forget request instead of returning ESP_ERR_NOT_SUPPORTED --
+     * see that function's own comment for exactly what "async" means here
+     * (the caller returns as soon as the request is queued, not once the SPI
+     * transfer completes; the owner task still issues every transfer on the
+     * bus one at a time, in queue order, so the single-owner/no-interleaving
+     * invariant in DISPLAY_ST7796_PLAN.md section 8 is unchanged). Default
+     * OFF: with this false, spi_owner_transfer_async() is a no-op that never
+     * touches the queue, so spi_owner_transfer() is the only path any
+     * existing caller takes, exactly as today. */
+    bool async_flush;
+
     /* Module-owned pool backing spi_owner_transfer()'s per-request result
      * storage and completion semaphore -- see this header's own top-of-file
      * note in esp_spi_owner.c and owner_slot_pool.h's invariant. Sized to
@@ -110,7 +124,27 @@ typedef struct {
      * that task and nowhere else -- never from an ISR or from a caller's own
      * task context, where a busy-wait would be harmful. */
     bool use_polling;
+
+    /* DISPLAY_ST7796_PLAN.md 9.6: set only by spi_owner_transfer_async().
+     * When true, spi_owner_task() invokes async_cb(async_ctx, result) itself
+     * once the transfer finishes, from the owner task's own thread (never an
+     * ISR -- see spi_owner_transfer_async()'s comment), instead of relying on
+     * a caller parked in xSemaphoreTake() on the slot's completion semaphore.
+     * The caller that queued this request has already released its own half
+     * of the slot's refcount and is not waiting on anything. */
+    bool async;
+    void (*async_cb)(void *ctx, esp_err_t result);
+    void *async_ctx;
 } spi_owner_request_t;
+
+/* DISPLAY_ST7796_PLAN.md 9.6 completion callback type. Called from the SPI
+ * owner task's own thread (spi_owner_task(), never an ISR -- this
+ * implementation does not use spi_device_queue_trans()/get_trans_result(),
+ * see spi_owner_transfer_async()'s comment for exactly what "async" covers
+ * and does not cover here), so it may safely do anything a normal task
+ * context can do -- including calling lv_display_flush_ready(), which LVGL's
+ * own threading doc names as callable from any context anyway. */
+typedef void (*spi_owner_async_done_cb_t)(void *ctx, esp_err_t result);
 
 /* Operator-visible accessor for spi_owner_t::wedged (opus review, commit
  * f3a1600, part (b) of the G2 fix) -- callers that surface board health
@@ -124,13 +158,18 @@ bool spi_owner_is_wedged(const spi_owner_t *owner);
  * above for what it changes). Not read from Kconfig inside this file so the
  * behavior stays a plain, host-testable struct field rather than a
  * compile-time #if buried in the owner task. */
+/* async_flush: DISPLAY_ST7796_PLAN.md 9.6, CONFIG_KILNCTL_SPI_ASYNC_FLUSH
+ * passed through by the caller (default OFF; see spi_owner_t::async_flush
+ * above for what it changes). Same "plain struct field, not a raw #if
+ * inside this file" reasoning as dma_use_psram. */
 esp_err_t spi_owner_init(spi_owner_t *owner,
                              spi_host_device_t host,
                              UBaseType_t queue_len,
                              UBaseType_t task_priority,
                              uint32_t stack_depth,
                              BaseType_t core_id,
-                             bool dma_use_psram);
+                             bool dma_use_psram,
+                             bool async_flush);
 esp_err_t spi_owner_deinit(spi_owner_t *owner);
 esp_err_t spi_owner_transfer(spi_owner_t *owner,
                                  spi_device_handle_t device,
@@ -156,6 +195,39 @@ esp_err_t spi_owner_transfer_polling(spi_owner_t *owner,
                                  uint8_t *rx_buffer,
                                  size_t rx_length,
                                  int cs_pin);
+
+/* DISPLAY_ST7796_PLAN.md 9.6: a write-only (rx is never needed for a display
+ * flush) transfer that hands off to the owner task and returns as soon as
+ * the request is QUEUED, not once it completes -- `cb(ctx, result)` fires
+ * later from the owner task's own thread (see spi_owner_async_done_cb_t
+ * above). This is deliberately a narrower contract than a real DMA-queued/
+ * ISR-driven async transfer (ESP-IDF's spi_device_queue_trans() +
+ * get_trans_result(), a second device queue_size, a pre/post ISR callback
+ * driving lv_display_flush_ready() straight from the SPI completion
+ * interrupt) -- see this function's .c-file comment for exactly why that
+ * fuller design is not what this implementation does. What IS delivered,
+ * and is exactly the win DISPLAY_ST7796_PLAN.md 9.6 names as the actual
+ * point ("the gain is that the caller returns early, not that transfers
+ * interleave"): the LVGL task is no longer blocked on
+ * xSemaphoreTake(slot->sem, ...) for the transfer's own SPI clock time, and
+ * transfer ordering/single-owner arbitration (section 8) is fully preserved
+ * because the owner task still issues every request -- sync or async, display
+ * or thermocouple -- strictly one at a time, in queue order; nothing here
+ * lets two transfers overlap on the wire.
+ *
+ * Default OFF (owner->async_flush false, i.e. CONFIG_KILNCTL_SPI_ASYNC_FLUSH
+ * off): returns ESP_ERR_NOT_SUPPORTED immediately, without touching the
+ * queue -- callers must check for that and fall back to
+ * spi_owner_transfer(), which is what every caller in today's tree still
+ * does exclusively. rx is not supported (a display flush never reads back);
+ * pass tx_buffer/tx_length only. */
+esp_err_t spi_owner_transfer_async(spi_owner_t *owner,
+                                 spi_device_handle_t device,
+                                 const uint8_t *tx_buffer,
+                                 size_t tx_length,
+                                 int cs_pin,
+                                 spi_owner_async_done_cb_t cb,
+                                 void *ctx);
 
 #ifdef __cplusplus
 }

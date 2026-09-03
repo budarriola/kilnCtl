@@ -1689,6 +1689,38 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
         size_t n = (size_t)(pixels - sent);
         if (n > chunk_pixels) n = chunk_pixels;
 
+        if (bpp == 2 && KILNCTL_DISPLAY_ZERO_COPY_FLUSH) {
+            /* DISPLAY_ST7796_PLAN.md 9.7, CONFIG_KILNCTL_DISPLAY_ZERO_COPY_FLUSH
+             * (default OFF). The Phase 3 fast path just below already proved
+             * there is nothing to COMPUTE for a bpp==2 panel; this goes one
+             * step further and skips the memcpy() into disp->scratch too --
+             * &data[sent*2] is DMA'd straight to the panel. Only reachable
+             * when bpp == 2, i.e. only on the ST7796 descriptor, which has
+             * never run on real hardware (see the plan doc's STOP block) --
+             * inert on the ILI9488 (bpp == 3) regardless of the Kconfig
+             * setting, and inert on the ST7796 too unless this option is
+             * explicitly turned on.
+             *
+             * Correctness note this option's own Kconfig help repeats: the
+             * transfer below requires `data` itself to be DMA-capable
+             * (internal DRAM 4-byte aligned, or PSRAM -- see section 9's
+             * "Facts established" alignment bullets). lvgl_port.c's flush
+             * callback passes LVGL's own PSRAM draw buffer, which qualifies;
+             * a BLIT_DATA frame decoded straight off the UART link may not,
+             * so this is scoped bench-tuning behind an explicit opt-in, not
+             * something safe to turn on unconditionally for every caller of
+             * this shared function. */
+            err = ili9488_tx(disp, &data[sent * 2], n * 2);
+            sent += n;
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "BLIT_DATA transfer failed: %s; aborting", esp_err_to_name(err));
+                ili9488_blit_clear_state(disp);
+                ili9488_unlock(disp);
+                return err;
+            }
+            continue;
+        }
+
         if (bpp == 2) {
             /* Phase 3 fast path: at COLMOD 0x55 (ST7796) the wire's RGB565
              * u16-LE IS the RAMWR byte stream -- panel_codec's "null

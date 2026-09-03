@@ -369,10 +369,12 @@ esp_err_t MAX31856_bus_init(MAX31856BusClass *bus,
     /* Queue deep enough that all three channels plus a UART-driven raw
      * register poke can be in flight without a caller blocking on the queue
      * itself (each caller still blocks on its own completion semaphore). */
-    /* DISPLAY_ST7796_PLAN.md 9.3: CONFIG_KILNCTL_SPI_DMA_USE_PSRAM, default
-     * OFF -- see esp_spi_owner.h's spi_owner_t::dma_use_psram comment. */
+    /* DISPLAY_ST7796_PLAN.md 9.3/9.6: CONFIG_KILNCTL_SPI_DMA_USE_PSRAM and
+     * CONFIG_KILNCTL_SPI_ASYNC_FLUSH, both default OFF -- see
+     * esp_spi_owner.h's spi_owner_t::dma_use_psram/async_flush comments. */
     err = spi_owner_init(&bus->owner, host, 8, 5, 4096, tskNO_AFFINITY,
-                          KILNCTL_SPI_DMA_USE_PSRAM ? true : false);
+                          KILNCTL_SPI_DMA_USE_PSRAM ? true : false,
+                          KILNCTL_SPI_ASYNC_FLUSH ? true : false);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_owner_init failed: %s", esp_err_to_name(err));
         if (bus->bus_owned) {

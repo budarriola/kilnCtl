@@ -8,17 +8,19 @@ it always falls back to the Kconfig default and changes nothing observable.
 Phase 6 (SPI DMA/async): 9.2 (`max_transfer_sz` raised to 32768,
 `KILNCTL_SPI_MAX_TRANSFER_SZ`), 9.5 (MAX31856 on `spi_device_polling_transmit`
 via `esp_spi_owner.c`'s `use_polling` flag) and 9.9 (bounded owner-transfer
-wait) are landed. 9.3 (`SPI_TRANS_DMA_USE_PSRAM`) and 9.4 (hardware CS) are
-now also landed, compiled-in but **default OFF** behind
-`CONFIG_KILNCTL_SPI_DMA_USE_PSRAM` / `CONFIG_KILNCTL_SPI_HARDWARE_CS` — see
-§12 Phase 6 for exactly what each changes and how to soak it. 9.1's
-instrumentation and capture procedure are now landed (timing in
-`lvgl_port.c`'s flush callback, `lvgl_port_get_flush_stats()`, surfaced on
-`GET /api/status` as `flush_last_us`/`flush_max_us`/`flush_count`) — reading
-the real number is now `curl .../api/status`, one command, but the number
-itself still requires a live panel and is not recorded. 9.6 (async flush),
-9.7 (ST7796 zero-copy) and 9.8 (clock step-up) remain open — see §12 Phase 6
-for why they stay unbuilt rather than merely unmeasured. Phase 0's blocking
+wait) are landed. 9.3 (`SPI_TRANS_DMA_USE_PSRAM`), 9.4 (hardware CS), 9.6
+(async flush) and 9.7 (ST7796 zero-copy flush) are now also landed,
+compiled-in but **default OFF** behind `CONFIG_KILNCTL_SPI_DMA_USE_PSRAM` /
+`CONFIG_KILNCTL_SPI_HARDWARE_CS` / `CONFIG_KILNCTL_SPI_ASYNC_FLUSH` /
+`CONFIG_KILNCTL_DISPLAY_ZERO_COPY_FLUSH` — see §12 Phase 6 for exactly what
+each changes and how to soak it. 9.6 is a deliberately scoped version (the
+caller-returns-early win only, not an ISR-driven queue_trans design) and is
+not yet wired to the LVGL flush path. 9.8 needed no new code. 9.1's
+instrumentation and capture procedure are landed (timing in `lvgl_port.c`'s
+flush callback, `lvgl_port_get_flush_stats()`, surfaced on `GET /api/status`
+as `flush_last_us`/`flush_max_us`/`flush_count`) — reading the real number is
+now `curl .../api/status`, one command, but the number itself (9.1b) still
+requires a live panel and is not recorded. Phase 0's blocking
 hardware measurements (§4) are still open — nothing here has touched real
 MSP4031 hardware yet; Phases 1-3/5 were built and host-tested against the
 existing ILI9488 panel and the transcribed ST7796 init table only.
@@ -893,23 +895,66 @@ bytes and breaks every display push.
 - [ ] **9.5 Thermocouple transfers → `spi_device_polling_transmit`.** 11 µs
       versus 26 µs. Do not mix polling and queued transactions on the *same*
       device; across devices the bus lock handles it.
-- [ ] **9.6 Async flush.** Add `spi_owner_transfer_async(..., done_cb)` using
-      `spi_device_queue_trans` / `get_trans_result` with `queue_size >= 2`. The
-      owner task keeps arbitrating — a queued display transaction must still
-      complete before a MAX31856 request is dequeued, or the guarantee the owner
-      exists for is lost. The gain is that the *caller* returns early, not that
-      transfers interleave. `lv_display_flush_ready()` moves into the completion
-      callback; register `lv_display_set_flush_wait_cb()` so LVGL sleeps rather
-      than spins. **Drain the result queue** — un-reaped transactions hold their
-      bounce buffers.
-- [ ] **9.7 ST7796 zero-copy flush.** With COLMOD `0x55` the LVGL buffer *is* the
-      wire format: DMA straight out of it, no scratch, no per-chunk conversion.
-      This is where the ST7796's two-thirds byte count actually pays.
-- [ ] **9.8 Then reconsider clock speed.** Per-device clocks are independent, so
-      the display can be raised alone. Step 20 → 26 → 40 MHz, verifying with
-      `READ_ID` and a known-pattern blit at each step; watch the ribbon. The
-      panel is rated 15 MHz, so this is knowingly out of spec — do not go past
-      40 MHz without a scope.
+- [x] **9.6 Async flush — SCOPED VERSION LANDED 2026-09-02, default OFF**
+      behind `CONFIG_KILNCTL_SPI_ASYNC_FLUSH`. Deliberately NOT the full
+      `spi_device_queue_trans`/`get_trans_result` + ISR-completion design
+      this bullet originally described — that needs a second per-device
+      queue slot, `IRAM_ATTR` pre/post callbacks using `gpio_ll_set_level()`,
+      and `lv_display_set_flush_wait_cb()` wiring in `lvgl_port.c`, none of
+      which this project's host-test FreeRTOS/spi_master stubs can exercise
+      (`spi_owner_task()` never actually runs off-target). What is landed
+      instead delivers the exact win the plan's own text names as the point
+      ("the gain is that the caller returns early, not that transfers
+      interleave"): `esp_spi_owner.c`'s new `spi_owner_transfer_async()`
+      still runs the transfer synchronously inside the single owner task
+      (preserving section 8's no-interleaving invariant exactly), but returns
+      to its caller as soon as the request is queued and invokes a
+      caller-supplied callback from the owner task's own thread once the
+      transfer finishes, instead of making the caller block on a completion
+      semaphore. Default OFF: `spi_owner_transfer_async()` returns
+      `ESP_ERR_NOT_SUPPORTED` without touching the queue when
+      `async_flush` is false (every owner in today's tree), so no existing
+      caller's behavior changes. Host-tested (`test_esp_spi_owner.c`): the
+      default-off refusal, the callback firing with the right result/ctx on
+      a hand-built async request, and a negative control proving a
+      synchronous request never fires the callback even when the owner-wide
+      flag is on — all three negative-tested (mutated, observed red, then
+      restored). **Not wired to a caller** — `lvgl_port.c`'s flush callback
+      still calls the synchronous `ILI9488_blit_begin/_data/_end` path
+      unconditionally; wiring the LVGL flush path itself onto this primitive
+      needs the chunked `ILI9488_blit_data` loop restructured so
+      `lv_display_flush_ready()` fires only after the LAST chunk of a
+      multi-chunk flush, which is exactly the kind of ordering bug no host
+      test can catch and section 13 already flags as the standing async
+      risk — left as the explicit next step, not attempted blind. Not
+      flash-verified for the same reason 9.3/9.4 are not.
+- [x] **9.7 ST7796 zero-copy flush — LANDED 2026-09-02, default OFF** behind
+      `CONFIG_KILNCTL_DISPLAY_ZERO_COPY_FLUSH`. In `panel_spi.c`'s
+      `ILI9488_blit_data()`, when the flag is on AND the active panel
+      descriptor's `bytes_per_pixel == 2` (ST7796 only — the ILI9488's is 3,
+      so this is unreachable on the only panel that has ever run on this
+      board regardless of the flag), the driver DMAs each chunk straight out
+      of the caller-supplied buffer instead of `memcpy()`-ing it into
+      `disp->scratch` first — the existing bpp==2 fast path already proved
+      there was nothing left to *compute* per pixel; this removes the copy
+      too. Costs nothing extra in RAM (it removes a copy, allocates
+      nothing); the scratch buffer itself stays allocated for the ILI9488's
+      RGB666 widening path, which this option never touches. Not
+      host-testable beyond the Kconfig/macro plumbing already covered by
+      `panel_spi.c` not compiling for the host at all (ESP-IDF-dependent,
+      same as every other panel_spi.c change) — stated here rather than
+      faking a test. Correctness note carried into the Kconfig help text:
+      this requires the source buffer to be DMA-capable; `lvgl_port.c`'s
+      flush callback passes LVGL's own PSRAM draw buffer (qualifies), but
+      `ILI9488_blit_data()` is shared with the UART `BLIT_DATA` protocol
+      handler too, whose buffer provenance this option does not itself
+      verify — an explicit opt-in bench risk, not a default-on one. Not
+      flash-verified — no ST7796 has ever run on this board (STOP block).
+- [x] **9.8 Clock speed — nothing to build.** `KILNCTL_DISPLAY_SPI_CLOCK_HZ`
+      (Kconfig, default 20 MHz) already exists and is exactly the mechanism
+      this bullet wanted; what remains is a scope-verified bench step
+      (`READ_ID` + known-pattern blit at 20/26/40 MHz, watching the ribbon),
+      which is bench work, not firmware. Confirmed unchanged this pass.
 - [x] **9.9 Fix `spi_owner_transfer()`'s `portMAX_DELAY` wait** (TODO.md:364).
       **DONE (Phase 1, landed ahead of the rest of §9):** bounded to a 1000 ms
       timeout backed by a heap slot pool, `wedged` surfaced on `/api/status`.
@@ -1080,42 +1125,20 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       "confirmed to work" looks like for each, to be done on a bench cycle
       with nothing energized before either is ever turned on near a live
       kiln.
-- [ ] 9.1b, 9.6, 9.7, 9.8 remain open, and none of them is a safe default-off
-      flag the way 9.3/9.4 were:
-      - **9.1a (instrumentation + capture procedure) is now landed** — see
-        its own entry above. **9.1b (the actual number) is still a
-        real-hardware measurement by definition** — no config option or host
-        test can produce it, only reading `/api/status` on a running board
-        can. First hardware step, unchanged in substance from before this
-        pass but now genuinely one command instead of a bench/scope session:
-        `curl http://<board>/api/status`, record `flush_max_us` in §4. This
-        can be done against the CURRENTLY ATTACHED ILI9488 right now, without
-        waiting on the ST7796/MSP4031 harness at all.
-      - **9.6 (async flush)** does not reduce to a flag. It replaces
-        `spi_owner_transfer()`'s synchronous "queue, then block on a
-        completion semaphore" contract with a callback-driven one
-        (`spi_device_queue_trans`/`get_trans_result`, `queue_size >= 2`,
-        `lv_display_set_flush_wait_cb()`), which is new control flow on the
-        exact bus arbitration this plan's own §13 flags as the standing risk
-        ("Any async work needs a test that can *fail* — a deliberately
-        interleaved transfer the arbiter rejects — before it is trusted").
-        A default-off flag would just be an unexercised second code path
-        through the owner task, not a de-risked one. Per §9's own "DMA async
-        is a nice-to-have, not a requirement" note, the right next step is
-        the 9.1 measurement first — if 9.2+9.3 (and the ST7796's byte
-        reduction, eventually) already bring flush time inside budget, 9.6
-        may not be worth the arbitration risk at all.
-      - **9.7 (ST7796 zero-copy)** is scoped to a panel that has **never run
-        on hardware** (`st7796_panel.c`, STOP block at the top of this
-        document) — there is no working ST7796 bring-up yet for a zero-copy
-        flush to be verified against, default-off or not.
-      - **9.8 (clock step-up)** is a bench tuning procedure, not new code:
-        `KILNCTL_DISPLAY_SPI_CLOCK_HZ` is already a plain Kconfig int
-        (default 20 MHz, `Kconfig` under "ILI9488 Display"), so the
-        mechanism this item wants already exists. What is missing is the
-        scope-verified bench step itself (`READ_ID` + known-pattern blit at
-        each of 20/26/40 MHz, watching the ribbon) — there is nothing here
-        for a firmware pass to build.
+- [x] **9.6, 9.7 landed 2026-09-02, both default OFF** — see their own
+      entries above for exactly what each does and, for 9.6, what it
+      deliberately does NOT do (no ISR-driven queue_trans/get_trans_result;
+      the caller-returns-early win only, with the LVGL flush path not yet
+      wired onto it). 9.8 needed no new code (see above). All three written
+      in a pass whose owner explicitly asked for anticipatory, default-off
+      code ahead of the panel arriving; both new flags host-tested for
+      plumbing/dispatch (9.6) or stated as not host-testable and why (9.7),
+      neither flash-verified, same posture as 9.3/9.4.
+- [ ] **9.1b still open** — a real-hardware measurement by definition, no
+      config option or host test can produce it. First hardware step,
+      unchanged: `curl http://<board>/api/status`, record `flush_max_us` in
+      §4. Can be done against the CURRENTLY ATTACHED ILI9488 right now,
+      without waiting on the ST7796/MSP4031 harness.
 
 ### Phase 7 — the actual point: a better UI
 - [ ] `LV_USE_TJPGD` if images are wanted.
