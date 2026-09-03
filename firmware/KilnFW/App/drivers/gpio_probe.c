@@ -28,6 +28,7 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "gpio_probe_denylist.h"
 #include "profile_executor.h"
 #include "settings.h"
 #include "stack_margin.h"
@@ -37,41 +38,17 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 #define BRIDGE_REPLY_MAX UART_PROTO_MAX_PAYLOAD
 #define BRIDGE_REPLY_ACK_TIMEOUT_MS 200u
 
-/* Pins this probe may never touch -- not "should not", *may not*. Every one
- * of these is load-bearing for something the probe itself depends on (the PC
- * link), for another peripheral (SPI/I2C/the SX1509/the display), or is the
- * one safety-domain pin whose misuse is silent and one-directional.
- * SAFETY_FAULT_IO (GPIO6) is the one the TODO calls out by name: a debug
- * tool that can drive it can silently tell the safety processor "the main
- * controller is fine" while nothing of the sort is true. Checked against
- * SET_MODE, WRITE and READ alike -- "never touch" means never touch, not
- * "never write".
- *
- * SAFETY_TX_IO/SAFETY_RX_IO (GPIO4/5) are deliberately *not* on this list,
- * unlike GPIO6: they carry the safety-link UART data, not a one-way status
- * claim, so probing them cannot make the safety processor believe something
- * false -- at worst it collides with UART1 and the link stops responding,
- * which is self-evident rather than silent. `firmware/SaftyFW/docs/HARDWARE.md`
- * section 1's coordinated GPIO test (`tools/PcTools/TODO.md` capability 1c)
- * requires driving/reading exactly these two pins from the probe; denying
- * them here would make that test impossible to run through this path. */
+/* Deny-list itself -- see gpio_probe_denylist.h's own header comment for
+ * the full rationale (what's on it, why SAFETY_TX_IO/SAFETY_RX_IO are
+ * deliberately NOT on it) and why it lives in its own header rather than
+ * inline here (host-testability: this translation unit, once
+ * CONFIG_KILNCTL_ENABLE_GPIO_PROBE pulls in both profile_executor.h and
+ * gpio_probe.h's real espInterfaces/uart_protocol.h, cannot itself be
+ * compiled by the host-test harness -- gpio_probe_pin_is_denied() can be,
+ * on its own, and test_gpio_probe.c does exactly that). */
 static bool gpio_probe_is_denied(int gpio_num)
 {
-    const int denied[] = {
-        KILN_SPI_SCLK_IO, KILN_SPI_MOSI_IO, KILN_SPI_MISO_IO,
-        THERMO_CS0_IO, THERMO_CS1_IO, THERMO_CS2_IO,
-        I2C_MASTER_SCL_IO, I2C_MASTER_SDA_IO,
-        SX1509_IRQ_IO, SX1509_RESET_IO,
-        DISPLAY_CS_IO,
-        UART_OWNER_TX_IO, UART_OWNER_RX_IO,
-        SAFETY_FAULT_IO,
-    };
-    for (size_t i = 0; i < sizeof(denied) / sizeof(denied[0]); ++i) {
-        if (denied[i] == gpio_num) {
-            return true;
-        }
-    }
-    return false;
+    return gpio_probe_pin_is_denied(gpio_num);
 }
 
 /* Refused whenever a profile could be actively driving relays: this probe

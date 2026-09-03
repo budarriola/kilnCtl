@@ -97,9 +97,13 @@ text, and the safety-link config-page hardening. Still open:
       reports the last trip, temperatures and link version, but not whether
       the processor is ARMED or TRIPPED right now, nor whether it has been
       commissioned. That is the page an operator opens to answer exactly that.
-- [ ] **Unknown `/api/*` paths serve the 90 kB dashboard HTML with 200** rather
+- [x] **Unknown `/api/*` paths serve the 90 kB dashboard HTML with 200** rather
       than 404 (the catch-all handler). A client gets a page where it expects
-      JSON and has to guess.
+      JSON and has to guess. DONE -- `captive_portal_404_handler()`
+      (`wifi_provision_http.c:696-713`) exempts the `/api/` prefix from the
+      captive-portal redirect and answers it with a real 404 + JSON error
+      body instead; only non-`/api/` paths still get the 302-to-dashboard
+      redirect.
 - [ ] **`Accept-Encoding: identity` gets a 406 for every page.** Correct per
       the RFC and deliberate (only a gzip representation is stored), but it
       makes the board unreachable to any plain client that asks for identity
@@ -147,10 +151,11 @@ Open:
 - [ ] **Relay/IO segments in firing profiles**, blocking or non-blocking, each
       segment choosing whether its relay is left in its last state at run end
       (default off). `PROFILE_VERSION` 2->3.
-- [ ] **Delete the rules engine** afterwards, never before -- otherwise there
+- [x] **Delete the rules engine** afterwards, never before -- otherwise there
       is a window with no way to drive a non-zone relay. `rules_task`'s own
       watchdog force-releases and force-offs its relays on a stale tick; that
-      protection must be replaced, not merely deleted.
+      protection must be replaced, not merely deleted. DONE -- `rules_task.c`
+      no longer exists in the tree.
 - [ ] **Names for relays not assigned to a zone.**
 - [ ] **LCD**: no manual toggling of zone-assigned relays on the temperature
       page (visible, not hidden); safety-processor / board-health /
@@ -321,55 +326,83 @@ severity.
       thermocouple gets `boosted_duty` up to 1.0. Bang-bang mode explicitly
       refuses this case; PID has no equivalent. >= 3 s of full duty before
       guard 6 debounces.
-- [ ] **Danger mode leaves relays energized when its window closes.** Both the
+- [x] **Danger mode leaves relays energized when its window closes.** Both the
       timeout and the operator stop release heat-enable and restore the gate,
       but neither commands the four ESP relays off -- and restoring the gate
       only blocks *new* ON commands. A relay closed during danger mode stays
       closed indefinitely under a gate that would now refuse to close it.
-- [ ] **Fault sources asserted by `autotune_engine` and by guard 9 are never
+      DONE -- both `danger_mode_stop()` (`danger_mode.c:255-282`) and the
+      timeout path in `danger_mode_task()` (`danger_mode.c:290-318`) now call
+      `kiln_io_owner_command_all_relays_off()` before restoring the gate.
+- [x] **Fault sources asserted by `autotune_engine` and by guard 9 are never
       deasserted.** Neither has the `global_fault_source` bookkeeping
       `profile_executor` uses, and nothing else clears an arbitrary source, so
       one autotune trip or one 10-second executor stall blocks all heat
-      board-wide until reboot -- and masks any later, different fault.
+      board-wide until reboot -- and masks any later, different fault. DONE
+      -- `autotune_engine.c:3193-3212` clears a stale zone/global fault
+      source on the next autotune start, and
+      `profile_executor_relay_io.c:555-568`'s `clear_this_runs_faults()`
+      deasserts `s_exec.global_fault_source` on every exit from a run.
 - [ ] **Guard 5's absolute ceiling is off by default.** `max_temp_c == 0` means
       "no ceiling", and a zone never saved through `/settings/zones` fires with
       none -- while `autotune_engine` and `SAFETY_MODEL.md` both already assume
       the guard is armed. Either substitute a hard ceiling or refuse to start a
       firing on such a zone.
-- [ ] **A completed run never releases its relay ownership** (only
+- [x] **A completed run never releases its relay ownership** (only
       `profile_executor_halt()` does), so after a normal finish every manual
       relay command is refused as "owned by a profile" when none is running.
-- [ ] **`rules_task` applies zone calibration with a channel index** where the
+      DONE -- duplicate of the DONE item above ("A completed or faulted run
+      never releases its relay ownership", 2026-08-26): `release_profile_
+      relay_claim()` is called on every exit from RUNNING
+      (`profile_executor.c:501,620,1253`).
+- [x] **`rules_task` applies zone calibration with a channel index** where the
       executor correctly combines raw then applies once with the zone index --
       so a rule threshold means a different temperature than the control loop
-      on any multi-thermocouple zone.
-- [ ] **`IO_CMD_SX_LED_DRIVER` can PWM a relay coil with no safety gate, no
+      on any multi-thermocouple zone. MOOT -- `rules_task.c` no longer exists.
+- [x] **`IO_CMD_SX_LED_DRIVER` can PWM a relay coil with no safety gate, no
       ownership gate and no remap**, and never updates `relay_shadow` -- so the
       dashboard reports the coil off while it is energized. Its two immediate
       neighbours in the same switch both check `kiln_io_relay_pin_mask()`.
       `IO_CMD_SX_RESET` and the pullup/opendrain/int-mask setters have related
-      gaps.
-- [ ] **`board_temps.c` labels cold-junction readings by array position**, but
+      gaps. DONE -- `IO_CMD_SX_LED_DRIVER` is now unconditionally refused on
+      any relay pin (`kiln_io_owner.c:253` `sx_led_driver_touches_relay()`/
+      `:422`, `uart_bridge_io.c:497-521`), matching its neighbours rather than
+      trying to retrofit a duty-cycle onto a mechanical coil.
+- [x] **`board_temps.c` labels cold-junction readings by array position**, but
       `MAX31856_read_all()` compacts over failed channels -- so with channel 0
       dead, channel 1's reading is displayed as "ch 0" and the dead channel is
       not the one shown absent. Index by `.channel`, as
-      `ui_page_thermo_faults.c` already does.
+      `ui_page_thermo_faults.c` already does. DONE -- `board_temps.c:90-129`
+      now indexes `thermo_cj_valid[]`/`thermo_cj_c[]` by `r->channel`, never
+      by loop position.
 - [ ] **A CJRANGE fault NaNs only the cold junction**, but the hot-junction
       value is cold-junction-compensated in hardware -- so an out-of-range cold
       junction yields a wrong hot-junction temperature reported as a plausible
       number.
-- [ ] **`dashboard_get_status()` calls `kiln_io_read()` from the LVGL task**,
+- [x] **`dashboard_get_status()` calls `kiln_io_read()` from the LVGL task**,
       bypassing `kiln_io_owner` and consuming the SX1509 interrupt latch that
-      another reader may be waiting for.
+      another reader may be waiting for. DONE (not one of the original 12 in
+      this pass's assignment, but fixed as part of it) -- routed through
+      `kiln_io_owner_command_read()` (`dashboard_http.c:146`). Checked for the
+      flash-worker-style self-deadlock first: this handler only ever runs on
+      the httpd worker task or the LVGL task, never on `kiln_io_owner`'s own
+      `owner_task`, and `post_and_wait()` fails closed on a bounded timeout
+      (`KILN_IO_OWNER_WAIT_MS`) rather than blocking forever -- no reentrancy
+      risk found.
 - [x] **`spi_owner_transfer()` waits `portMAX_DELAY`**, defeating every
       caller-side timeout above it if the owner task wedges. DONE
       (`DISPLAY_ST7796_PLAN.md` Phase 1): bounded to
       `SPI_OWNER_TRANSFER_TIMEOUT_MS` (1000 ms) backed by a heap slot pool
       (`owner_slot_pool.h`), with a `wedged` latch surfaced on `/api/status`
       as `thermo_spi_wedged` and a banner in `main_page.html`.
-- [ ] **`gpio_probe`'s deny-list omits the three `~FAULT` pins**, so a probe
+- [x] **`gpio_probe`'s deny-list omits the three `~FAULT` pins**, so a probe
       session can drive them high permanently and forge "no fault" at the pin
-      level.
+      level. DONE (not one of the original 12 in this pass's assignment, but
+      fixed as part of it) -- `THERMO_FAULT0_IO`/`THERMO_FAULT1_IO`/
+      `THERMO_FAULT2_IO` added to the deny-list (`gpio_probe_denylist.h`,
+      called from `gpio_probe.c`), negative-tested in `test_gpio_probe.c`
+      (removing the three entries makes all three checks fail, confirmed and
+      reverted).
 - [ ] **Docs contradicting code:** `KilnFW/docs/HARDWARE.md` records neither
       the thermocouple channel rotation nor the relay 2<->4 swap, while
       `MAX31856.c` cites it as ground truth; `SAFETY_MODEL.md`'s guard-5 row
@@ -850,8 +883,10 @@ after an early out-of-memory bug, see `docs/BRINGUP_HAZARDS.md`).
 
 - [ ] **Settings → Thermocouples & Zones page is only partially grown to
       match this section.** Control mode, `max_temp_c`/`min_temp_c`, per-zone
-      heater timing, and a working autotune card are on the page. Still
-      missing: bang-bang hysteresis (hardcoded 2°C, not exposed), per-band
+      heater timing, and a working autotune card are on the page. Bang-bang
+      hysteresis is DONE -- exposed per-timing-profile as
+      `bangbang_hysteresis_c` (`zones_http_handlers.c:250-257`), no longer
+      hardcoded. Still missing: per-band
       PID gains/fitted model (gain scheduling is unbuilt, 6A.4), and most
       guard thresholds beyond `sanity_rate_c_per_min` (partially closed by
       the "Advanced guard thresholds" disclosure, 6A.3).
@@ -1155,9 +1190,12 @@ and polled progress for both paths.
       an incompatible image on its own (`UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE`),
       which is the protocol's required floor; this item is specifically
       about a proactive ESP-side warning.
-- [ ] **`ota_record_t` has no image SHA-256 field** — flagged, not faked;
+- [x] **`ota_record_t` has no image SHA-256 field** — flagged, not faked;
       would need hashing the stream as it passes through the transfer
-      handler (mbedTLS/PSA is already linked for the HMAC path).
+      handler (mbedTLS/PSA is already linked for the HMAC path). DONE --
+      `image_sha256_hex` is hashed via PSA as the transfer streams through
+      (`ota_http.c:947`) and surfaced on `/api/ota/status`
+      (`ota_http.c:1649-1656`).
 
 ### 9.6 Web page
 
@@ -1173,11 +1211,13 @@ signature can never double as a rollback authorization).
       past those bytes to reach `boot_id` but never stores them. Needs a
       `safety_link.h`/`.c` change (new fields + getter), out of scope for the
       pass that built this page.
-- [ ] **Pico rollback button is a disabled placeholder** ("not yet
+- [x] **Pico rollback button is a disabled placeholder** ("not yet
       available") — no HTTP route exists; a Pico rollback trigger is
       expected to go over the safety UART link (`SAFETY_CMD_ROLLBACK`, 0x17,
       already built on the send side per `safety_link_send_rollback()`), not
-      HTTP.
+      HTTP. DONE -- the button is live and wired (`ota_page.html:168`,
+      `:597-624`), POSTing `/api/ota/pico/rollback` with MAC-authenticated
+      request/poll-for-status handling.
 
 ### 9.6a MCP tools (`tools/PcTools`)
 

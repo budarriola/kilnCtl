@@ -143,7 +143,24 @@ void dashboard_get_status(dashboard_status_t *out)
     if (out->io_ready) {
         kiln_io_state_t st;
         memset(&st, 0, sizeof(st));
-        esp_err_t err = kiln_io_read(s_dash.io, &st);
+        /* Routed through kiln_io_owner (not a direct kiln_io_read(s_dash.io,
+         * ...) -- see this repo's "bypassed owner module" bug class) so a
+         * concurrent relay command from profile_executor.c/autotune_engine.c
+         * can never race this read against the owner's own in-flight write.
+         * Safe against the flash-worker-style self-deadlock: this handler
+         * always runs on the httpd worker task or the LVGL task (see every
+         * other dashboard_get_status() call site -- ui_page_home.c,
+         * ui_page_temperature.c, ui_page_diagnostics.c), never on
+         * kiln_io_owner's own owner_task, so post_and_wait() inside
+         * kiln_io_owner_command_read() blocks on a queue/semaphore the
+         * owner task itself is free to service, not one it is already
+         * holding. It also fails closed on a bounded timeout
+         * (KILN_IO_OWNER_WAIT_MS, kiln_io_owner.c's post_and_wait()) rather
+         * than blocking forever, so a wedged owner cannot hang this
+         * handler either -- err below just comes back ESP_ERR_TIMEOUT, same
+         * shape as any other kiln_io_owner_command_*() failure this file
+         * already handles. */
+        esp_err_t err = kiln_io_owner_command_read(&st);
         for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
             out->relay_on[relay - 1] = (st.relay_shadow & (1u << (relay - 1))) != 0;
         }

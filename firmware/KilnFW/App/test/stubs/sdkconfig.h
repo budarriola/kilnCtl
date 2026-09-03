@@ -40,4 +40,33 @@
 #define CONFIG_KILNCTL_UART_PROTOCOL_TASK_PRIORITY 5
 #define CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE 4096
 
+/* Added for gpio_probe.c's host test (test_gpio_probe.c), which #includes
+ * gpio_probe.c directly with CONFIG_KILNCTL_ENABLE_GPIO_PROBE forced on
+ * (see that file's own comment) to reach gpio_probe_is_denied() -- every one
+ * of these is expanded by settings.h into the deny-list array gpio_probe.c
+ * builds, so unlike the "never expanded, can stay undefined" macros this
+ * file's top comment describes, these need real, DISTINCT integer values --
+ * the test proves specific GPIO numbers are refused, so two deny-list pins
+ * silently aliasing the same test value would hide a missing entry. Values
+ * are arbitrary test doubles, not meant to match this board's real pinout
+ * (that lives in the real, gitignored sdkconfig, per CLAUDE.md/
+ * feedback_gitignored_config_hides_mismatch.md). */
+#define CONFIG_KILNCTL_ENABLE_GPIO_PROBE 1
+#define CONFIG_KILNCTL_SPI_SCLK_IO 10
+#define CONFIG_KILNCTL_SPI_MOSI_IO 11
+#define CONFIG_KILNCTL_SPI_MISO_IO 12
+#define CONFIG_KILNCTL_THERMO_CS0_IO 13
+#define CONFIG_KILNCTL_THERMO_CS1_IO 14
+#define CONFIG_KILNCTL_THERMO_CS2_IO 15
+#define CONFIG_KILNCTL_THERMO_FAULT0_IO 16
+#define CONFIG_KILNCTL_THERMO_FAULT1_IO 21
+#define CONFIG_KILNCTL_THERMO_FAULT2_IO 47
+#define CONFIG_KILNCTL_I2C_SCL_IO 19
+#define CONFIG_KILNCTL_I2C_SDA_IO 20
+#define CONFIG_KILNCTL_SX1509_IRQ_IO 33
+#define CONFIG_KILNCTL_SX1509_RESET_IO 34
+#define CONFIG_KILNCTL_DISPLAY_CS_IO 35
+#define CONFIG_KILNCTL_UART_TX_IO 43
+#define CONFIG_KILNCTL_UART_RX_IO 44
+
 #endif // TEST_STUB_SDKCONFIG_H

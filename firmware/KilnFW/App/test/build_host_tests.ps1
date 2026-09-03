@@ -77,6 +77,7 @@ $sources = @(
     (Join-Path $testDir "test_touch_dev.c"),
     (Join-Path $testDir "test_ramp_ident.c"),
     (Join-Path $testDir "test_bx_worker_reentrancy.c"),
+    (Join-Path $testDir "test_gpio_probe.c"),
     (Join-Path $testDir "test_iter_tune.c"),
     (Join-Path $testDir "test_cone_table.c"),
     (Join-Path $testDir "test_ramp_lock_onesided.c"),

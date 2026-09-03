@@ -55,6 +55,7 @@ void run_test_esp_spi_owner(void);
 void run_test_touch_dev(void);
 void run_test_ramp_ident(void);
 void run_test_bx_worker_reentrancy(void);
+void run_test_gpio_probe(void);
 void run_test_iter_tune(void);
 void run_test_ramp_lock_onesided(void);
 // run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
@@ -117,6 +118,7 @@ int main(void)
     run_test_touch_dev();
     run_test_ramp_ident();
     run_test_bx_worker_reentrancy();
+    run_test_gpio_probe();
     run_test_iter_tune();
     run_test_ramp_lock_onesided();
 
