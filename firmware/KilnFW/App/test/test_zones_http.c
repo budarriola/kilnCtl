@@ -1764,6 +1764,239 @@ static void test_nvs_save_load_round_trip_current_version(void)
     nvs_test_clear();
 }
 
+// Dedicated v1 blob test (v1/v2 previously only reached indirectly via
+// convert_zone_v1() as invoked by convert_zone_v3()/etc.'s own tests). v1
+// predates continue_on_zone_trip/safety_tc_type entirely -- those come out at
+// their documented defaults (0 / THERMO_TC_K) -- but the per-zone fields v1
+// DOES carry (name, gains, thresholds, model params) must be the real staged
+// values, not zeros or a wrong-offset read.
+static void test_nvs_load_from_v1_blob_upconverts_fields_correctly(void)
+{
+    TEST_SECTION("nvs_load_from -- a v1 blob (predates continue_on_zone_trip/safety_tc_type) "
+                 "upconverts every zone's real field values correctly");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v1_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 1;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].cal_offset_c = 1.5f;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].pid_ki = 0.2f;
+    src.zones[0].pid_kd = 0.1f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.zones[0].min_temp_c = -10.0f;
+    src.zones[0].model_k_dc = 7.0f;
+    src.zones[0].model_tau_s = 300.0f;
+    src.zones[0].model_dead_time_s = 12.0f;
+
+    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].cal_offset_c = 2.5f;
+    src.zones[1].pid_kp = 4.5f;
+    src.zones[1].max_temp_c = 1250.0f;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v1 blob must migrate to a valid current config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 0, "v1 predates continue_on_zone_trip -- documented default 0");
+    TEST_CHECK(out_cfg.safety_tc_type == THERMO_TC_K, "v1 predates safety_tc_type -- documented default THERMO_TC_K");
+
+    TEST_CHECK(strcmp(out_cfg.zones[0].name, "ZoneA") == 0, "zones[0].name (real v1 value) carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01, "zones[0].relay_mask carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[0].cal_offset_c, 1.5f, 1e-6, "zones[0].cal_offset_c carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[0].pid_kp, 3.5f, 1e-6, "zones[0].pid_kp carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[0].pid_ki, 0.2f, 1e-6, "zones[0].pid_ki carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1150.0f, 1e-6, "zones[0].max_temp_c carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[0].min_temp_c, -10.0f, 1e-6, "zones[0].min_temp_c carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 7.0f, 1e-6, "zones[0].model_k_dc carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 300.0f, 1e-6, "zones[0].model_tau_s carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_dead_time_s, 12.0f, 1e-6, "zones[0].model_dead_time_s carried through");
+    TEST_CHECK(out_cfg.zones[0].tc_type == THERMO_TC_K, "zones[0].tc_type defaults to THERMO_TC_K (v1 predates it)");
+    TEST_CHECK(out_cfg.zones[0].thermo_mask == 0x01, "zones[0].thermo_mask defaults to legacy 1<<0 mapping");
+
+    TEST_CHECK(strcmp(out_cfg.zones[1].name, "ZoneB") == 0, "zones[1].name must NOT be shifted");
+    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
+    TEST_CHECK_NEAR(out_cfg.zones[1].cal_offset_c, 2.5f, 1e-6, "zones[1].cal_offset_c must be the real value");
+    TEST_CHECK_NEAR(out_cfg.zones[1].pid_kp, 4.5f, 1e-6, "zones[1].pid_kp must be the real value");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c must be the real value");
+    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x02, "zones[1].thermo_mask defaults to legacy 1<<1 mapping");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Dedicated v2 blob test -- v2 adds continue_on_zone_trip over v1 but shares
+// v1's zone layout (zone_cfg_v1_t) and converter (convert_zone_v1()).
+static void test_nvs_load_from_v2_blob_upconverts_fields_correctly(void)
+{
+    TEST_SECTION("nvs_load_from -- a v2 blob (adds continue_on_zone_trip over v1) upconverts "
+                 "every zone's real field values correctly");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v2_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 2;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.continue_on_zone_trip = 1;
+
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+
+    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].pid_kp = 4.5f;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].model_tau_s = 250.0f;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v2 blob must migrate to a valid current config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "v2's real continue_on_zone_trip value carried through (unlike v1's forced 0)");
+    TEST_CHECK(out_cfg.safety_tc_type == THERMO_TC_K, "v2 predates safety_tc_type -- documented default THERMO_TC_K");
+
+    TEST_CHECK(strcmp(out_cfg.zones[1].name, "ZoneB") == 0, "zones[1].name must NOT be shifted");
+    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
+    TEST_CHECK_NEAR(out_cfg.zones[1].pid_kp, 4.5f, 1e-6, "zones[1].pid_kp must be the real value");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c must be the real value");
+    TEST_CHECK_NEAR(out_cfg.zones[1].model_tau_s, 250.0f, 1e-6, "zones[1].model_tau_s must be the real value");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Dedicated v3 blob test -- v3 adds the 8 guard thresholds over v1's zone
+// layout; still predates thermo_mask/tc_type/ct_mask.
+static void test_nvs_load_from_v3_blob_upconverts_guard_thresholds_correctly(void)
+{
+    TEST_SECTION("nvs_load_from -- a v3 blob (adds the 8 guard thresholds) upconverts every "
+                 "zone's real field values, guard thresholds included, correctly");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v3_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 3;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.continue_on_zone_trip = 1;
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.zones[0].guard_wrong_dir_window_s = 45.0f;
+    src.zones[0].guard_runaway_margin_c = 15.0f;
+
+    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].guard_wrong_dir_window_s = 55.0f;
+    src.zones[1].guard_wrong_dir_rate_c_per_min = 5.0f;
+    src.zones[1].guard_off_settle_s = 20.0f;
+    src.zones[1].guard_runaway_rate_c_per_min = 8.0f;
+    src.zones[1].guard_runaway_margin_c = 25.0f;
+    src.zones[1].guard_drift_period_s = 60.0f;
+    src.zones[1].guard_sensor_fault_debounce_ticks = 3.0f;
+    src.zones[1].guard_frozen_window_s = 90.0f;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v3 blob must migrate to a valid current config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
+
+    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_wrong_dir_window_s, 55.0f, 1e-6, "zones[1].guard_wrong_dir_window_s -- new in v3 -- carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_wrong_dir_rate_c_per_min, 5.0f, 1e-6, "zones[1].guard_wrong_dir_rate_c_per_min carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_off_settle_s, 20.0f, 1e-6, "zones[1].guard_off_settle_s carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_rate_c_per_min, 8.0f, 1e-6, "zones[1].guard_runaway_rate_c_per_min carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 25.0f, 1e-6, "zones[1].guard_runaway_margin_c carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_drift_period_s, 60.0f, 1e-6, "zones[1].guard_drift_period_s carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_sensor_fault_debounce_ticks, 3.0f, 1e-6, "zones[1].guard_sensor_fault_debounce_ticks carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_frozen_window_s, 90.0f, 1e-6, "zones[1].guard_frozen_window_s carried through");
+
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01, "zones[0].relay_mask still correct (sanity check)");
+    TEST_CHECK_NEAR(out_cfg.zones[0].guard_wrong_dir_window_s, 45.0f, 1e-6, "zones[0].guard_wrong_dir_window_s still correct (sanity check)");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Dedicated v4 blob test -- v4 appends thermo_mask (a REAL, operator-set
+// value now, not the legacy 1<<chan_idx default v1/v3 fall back to) at the
+// tail of v3's zone layout; still predates tc_type.
+static void test_nvs_load_from_v4_blob_upconverts_thermo_mask_correctly(void)
+{
+    TEST_SECTION("nvs_load_from -- a v4 blob (adds real thermo_mask over v3) upconverts every "
+                 "zone's real field values, including the operator-set thermo_mask, correctly");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v4_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 4;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.zones[0].thermo_mask = 0x04; // deliberately NOT 1<<0, to distinguish real value from the legacy default
+
+    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].guard_runaway_margin_c = 25.0f;
+    src.zones[1].thermo_mask = 0x01; // deliberately NOT 1<<1
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v4 blob must migrate to a valid current config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
+
+    TEST_CHECK(out_cfg.zones[0].thermo_mask == 0x04,
+              "zones[0].thermo_mask is the real v4 operator-set value, not the legacy 1<<0 default");
+    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
+    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x01,
+              "zones[1].thermo_mask is the real v4 operator-set value, not the legacy 1<<1 default");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 25.0f, 1e-6, "zones[1].guard_runaway_margin_c carried through");
+    TEST_CHECK(out_cfg.zones[1].tc_type == THERMO_TC_K, "zones[1].tc_type defaults to THERMO_TC_K (v4 predates it)");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // Item 2 -- the actual historical bug: an old-version (v5, i.e. the exact
 // "3 -> 4, 4 -> 5 grew zone_cfg_t mid-struct" case the defect report calls
 // out) blob with DISTINCT values on zones[0], zones[1] and zones[2] must land
@@ -2587,6 +2820,139 @@ static void test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero(
 // (e.g. an intermediate value never making it into the final struct) is
 // exactly the kind of thing that would NOT show up testing each hop in
 // isolation.
+// Dedicated v6 blob test -- v6 shares v7's zone layout (zone_cfg_v7_t) and
+// converter (convert_zone_v7()) but predates v7's own crc32 field. Only v7
+// had a dedicated blob test before this; v6 was only reached indirectly.
+static void test_nvs_load_from_v6_blob_upconverts_fields_correctly(void)
+{
+    TEST_SECTION("nvs_load_from -- a v6 blob (v7's zone layout, no crc32 yet) upconverts every "
+                 "zone's real field values, including ct_mask, correctly");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v6_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 6;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 4;
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].tc_type = 2;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.zones[0].ct_mask = 0x01;
+
+    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].tc_type = 3;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].guard_runaway_margin_c = 25.0f;
+    src.zones[1].ct_mask = 0x02;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v6 blob must migrate to a valid current config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
+    TEST_CHECK(out_cfg.safety_tc_type == 4, "top-level safety_tc_type (real v6 value) carried through");
+
+    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
+    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x02, "zones[1].thermo_mask must NOT be shifted");
+    TEST_CHECK(out_cfg.zones[1].tc_type == 3, "zones[1].tc_type carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 25.0f, 1e-6, "zones[1].guard_runaway_margin_c carried through");
+    TEST_CHECK(out_cfg.zones[1].ct_mask == 0x02, "zones[1].ct_mask -- new since v4 -- carried through, not shifted");
+
+    TEST_CHECK(out_cfg.zones[0].ct_mask == 0x01, "zones[0].ct_mask still correct (sanity check)");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 0.0f, 1e-6, "v6 predates pc_link_abort_silence_ms -- documented default 0");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// End-to-end composition test: the OLDEST supported version (v1) all the way
+// to CURRENT (v15), asserting real field values -- not just defaults --
+// survive every hop. "Composes by inspection" was the audit's own phrase for
+// this gap; this test replaces that inspection with an executed assertion.
+// A test that only checked new-field defaults (coupling_diag_k_dc == 0, etc.)
+// would pass even if every pre-existing field were silently dropped along the
+// way -- so this asserts real, non-default, non-zero values for fields that
+// have existed since v1 (name, pid_kp, max_temp_c, model_tau_s) all still
+// read back correctly out of the fully-migrated v15 struct.
+static void test_nvs_load_from_v1_blob_chains_end_to_end_to_v15_preserving_real_values(void)
+{
+    TEST_SECTION("nvs_load_from -- a v1 blob migrates end-to-end to the current (v15) config: "
+                 "real v1 field values (not just new-field defaults) survive every hop");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v1_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 1;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "OldestZone");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].cal_offset_c = 1.5f;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].pid_ki = 0.2f;
+    src.zones[0].pid_kd = 0.1f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.zones[0].min_temp_c = -10.0f;
+    src.zones[0].model_k_dc = 7.0f;
+    src.zones[0].model_tau_s = 300.0f;
+    src.zones[0].model_dead_time_s = 12.0f;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].pid_kp = 4.5f;
+    src.zones[1].max_temp_c = 1250.0f;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a v1 blob must migrate end-to-end to a valid current (v15) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v15) version");
+
+    // Real values that existed at v1 and must have survived every hop to v15.
+    TEST_CHECK(strcmp(out_cfg.zones[0].name, "OldestZone") == 0,
+              "zones[0].name -- present since v1 -- survives all the way to v15");
+    TEST_CHECK_NEAR(out_cfg.zones[0].pid_kp, 3.5f, 1e-6, "zones[0].pid_kp survives all the way to v15");
+    TEST_CHECK_NEAR(out_cfg.zones[0].pid_ki, 0.2f, 1e-6, "zones[0].pid_ki survives all the way to v15");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1150.0f, 1e-6, "zones[0].max_temp_c survives all the way to v15");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 300.0f, 1e-6, "zones[0].model_tau_s survives all the way to v15");
+    TEST_CHECK_NEAR(out_cfg.zones[1].pid_kp, 4.5f, 1e-6, "zones[1].pid_kp (a DIFFERENT zone's value) survives too, unshifted");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives too, unshifted");
+
+    // Fields introduced well after v1 (coupling matrix: v11/v12; tuning
+    // quality record: v13; adaptive_tune_enabled: v14; coupling_diag_k_dc:
+    // v15) correctly land at their documented zero/unset defaults, since a v1
+    // board never had any such data to carry.
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[j], 0.0f, 1e-6, "v1 has no coupling data -- 0 (unset)");
+        TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[j], 0.0f, 1e-6, "v1 has no coupling tau data -- 0 (unset)");
+        TEST_CHECK_NEAR(out_cfg.zones[0].coupling_dead_time_s[j], 0.0f, 1e-6, "v1 has no coupling dead-time data -- 0 (unset)");
+    }
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 0.0f, 1e-6, "v1 has no coupling_diag_k_dc -- 0 (unset)");
+    TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 0, "v1 has no adaptive_tune_enabled -- documented default 0");
+    TEST_CHECK(out_cfg.zones[0].tuning_valid == 0, "v1 has no tuning-quality record -- documented default 0 (not valid)");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 static void test_nvs_load_from_v9_blob_chains_through_v10_to_v11_with_zero_coupling(void)
 {
     TEST_SECTION("nvs_load_from -- a v9 blob migrates through v10 to v11 (end-to-end): valid, "
@@ -6499,7 +6865,13 @@ void run_test_zones_http(void)
     test_nvs_load_from_bad_crc_is_rejected();
     test_nvs_load_from_failed_validation_is_rejected();
     test_nvs_save_load_round_trip_current_version();
+    test_nvs_load_from_v1_blob_upconverts_fields_correctly();
+    test_nvs_load_from_v2_blob_upconverts_fields_correctly();
+    test_nvs_load_from_v3_blob_upconverts_guard_thresholds_correctly();
+    test_nvs_load_from_v4_blob_upconverts_thermo_mask_correctly();
     test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly();
+    test_nvs_load_from_v6_blob_upconverts_fields_correctly();
+    test_nvs_load_from_v1_blob_chains_end_to_end_to_v15_preserving_real_values();
     test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields();
     test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly();
     test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile();
