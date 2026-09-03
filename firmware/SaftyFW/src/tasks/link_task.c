@@ -554,15 +554,11 @@ static volatile uint32_t s_last_diag_tx_tail_after = 0;
 // more for CONFIG_PAGE (also codec-built, also observed dark) to learn
 // whether this is one bug or three. `volatile`, SWD-only, safe to delete
 // once the call-path question is settled.
-static volatile uint32_t s_diag_send_entry_count = 0;
 static volatile uint32_t s_diag_encode_len = 0;
 static volatile uint8_t  s_diag_encode_status = 0;
-static volatile uint32_t s_diag_pre_broadcast_count = 0;
 
-static volatile uint32_t s_power_send_entry_count = 0;
 static volatile uint32_t s_power_encode_len = 0;
 static volatile uint8_t  s_power_encode_status = 0;
-static volatile uint32_t s_power_pre_broadcast_count = 0;
 
 // 2026-08-28 diagnostic -- which page_index was actually requested and what
 // page_index the OUTGOING reply's header actually carries, for the MOST
@@ -572,10 +568,8 @@ static volatile uint32_t s_power_pre_broadcast_count = 0;
 // up carrying the wrong index.
 static volatile uint32_t s_last_config_page_requested_index = 0xFFu;
 static volatile uint32_t s_last_config_page_reply_index = 0xFFu;
-static volatile uint32_t s_config_page_send_entry_count = 0;
 static volatile uint32_t s_config_page_encode_len = 0;
 static volatile uint8_t  s_config_page_encode_status = 0;
-static volatile uint32_t s_config_page_pre_broadcast_count = 0;
 // --- end diagnostic statics ----------------------------------------------
 
 // --- DIAGNOSTIC: 2026-08-23 GET_CONFIG_PAGE stage1-vs-stage2 investigation -
@@ -586,25 +580,10 @@ static volatile uint32_t s_config_page_pre_broadcast_count = 0;
 // BROADCAST-filter/switch) or whether it dispatches into
 // link_task_handle_get_config_page() but that handler (or
 // link_task_send_config_page() below it) declines to reply (stage 2).
-// These four latch exactly that boundary, over SWD, without guessing:
-//   s_diag_dispatch_accepted_count     -- bumped once per BROADCAST frame
-//     that passes kilnlink_unstuff()+kilnlink_frame_decode()+the
-//     msg_type==BROADCAST/length!=0 filter, i.e. every frame that reaches
-//     the dispatch switch at all (any cmd, not just GET_CONFIG_PAGE). If
-//     this never moves, the request never even decodes -- stage 1, before
-//     the switch.
-//   s_diag_get_config_page_seen_count  -- bumped once per dispatched frame
-//     whose payload[0] == KILNLINK_GET_CONFIG_PAGE_CMD, REGARDLESS of
-//     whether frame.length matches KILNLINK_GET_CONFIG_PAGE_LEN. If this
-//     stays zero while s_diag_dispatch_accepted_count moves, the request is
-//     arriving as some OTHER frame type/cmd byte (stage 1, wrong cmd) --
-//     if this moves but s_diag_get_config_page_handled_count does not, the
-//     frame's length never matches (stage 1, wrong length).
-//   s_diag_get_config_page_handled_count -- bumped once per GET_CONFIG_PAGE
-//     frame whose length DID match, i.e. every call into
-//     link_task_handle_get_config_page(). If this moves, stage 1 is cleared
-//     entirely: the request arrives and dispatches correctly, and any
-//     silence is stage 2, inside the handler or link_task_send_config_page().
+// Three call-path counters that latched exactly that boundary over SWD
+// (s_diag_dispatch_accepted_count, s_diag_get_config_page_seen_count,
+// s_diag_get_config_page_handled_count) settled the question and were
+// removed 2026-09-03 -- nothing in firmware ever read them.
 //   s_diag_page_last_outcome -- one of the DIAG_PAGE_OUTCOME_* values below,
 //     set at every exit point link_task_handle_get_config_page()/
 //     link_task_send_config_page() can take, so the LAST one latched shows
@@ -645,9 +624,6 @@ static volatile uint32_t s_page_reply_us_last = 0;
 static volatile uint32_t s_page_reply_us_max = 0;
 static volatile uint32_t s_page_reply_samples = 0;
 
-static volatile uint32_t s_diag_dispatch_accepted_count = 0;
-static volatile uint32_t s_diag_get_config_page_seen_count = 0;
-static volatile uint32_t s_diag_get_config_page_handled_count = 0;
 static volatile uint8_t  s_diag_page_last_outcome = 0;
 #define DIAG_PAGE_OUTCOME_NONE            0u /* never touched this boot */
 #define DIAG_PAGE_OUTCOME_HANDLER_ENTERED 1u /* handler running, no verdict yet -- should never be the LAST value observed */
@@ -930,8 +906,6 @@ static uint8_t link_task_context_age_100ms(void)
 
 static void link_task_send_diag(void)
 {
-    s_diag_send_entry_count++; // 2026-08-23 call-path diagnostic, checkpoint 1
-
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     bool warn_active = false;
     uint8_t diag_state = 0;
@@ -1036,7 +1010,6 @@ static void link_task_send_diag(void)
         return; // can't happen for a fixed sizeof(payload) == KILNLINK_DIAG_LEN buffer
     }
 
-    s_diag_pre_broadcast_count++; // 2026-08-23 call-path diagnostic, checkpoint 3
     link_task_send_broadcast(payload, (uint8_t)len);
 }
 
@@ -1071,8 +1044,6 @@ static void link_task_send_trip_event(const kilnlink_trip_t *tr)
 // this file does not need calibration-struct visibility to build the frame.
 static void link_task_send_power(void)
 {
-    s_power_send_entry_count++; // 2026-08-23 call-path diagnostic, checkpoint 1
-
     current_sense_power_t pw;
     current_task_get_power(&pw);
 
@@ -1116,7 +1087,6 @@ static void link_task_send_power(void)
                  // other encode call site in this file.
     }
 
-    s_power_pre_broadcast_count++; // 2026-08-23 call-path diagnostic, checkpoint 3
     link_task_send_broadcast(payload, (uint8_t)len);
 }
 
@@ -2018,7 +1988,6 @@ static void link_task_handle_get_param(const kilnlink_frame_t *frame)
 static void link_task_send_config_page(uint8_t page_index)
 {
     s_last_config_page_requested_index = page_index; // 2026-08-28 diagnostic
-    s_config_page_send_entry_count++; // 2026-08-23 call-path diagnostic, checkpoint 1
 
     config_store_record_t rec;
     config_store_get_full_record(&rec);
@@ -2089,7 +2058,6 @@ static void link_task_send_config_page(uint8_t page_index)
         s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_PACK_FAILED; // 2026-08-23 diagnostic
         return; // can't happen -- payload is sized to the wire's own payload cap
     }
-    s_config_page_pre_broadcast_count++; // 2026-08-23 call-path diagnostic, checkpoint 3
     link_task_send_broadcast(payload, (uint8_t)len);
     s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_REPLIED; // 2026-08-23 diagnostic
 }
@@ -2131,8 +2099,6 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     if (frame.msg_type != KILNLINK_MSG_BROADCAST || frame.length == 0) {
         return; // the Pico never participates in the ACK'd DATA/ACK/NACK transport
     }
-
-    s_diag_dispatch_accepted_count++; // 2026-08-23 diagnostic -- see statics block above
 
     uint8_t cmd = frame.payload[0];
     switch (cmd) {
@@ -2211,9 +2177,7 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         // Own id (0x24) since KILNLINK_PROTOCOL_VERSION 7 -- no longer
         // shared with the reply (SAFETY_CMD_CONFIG_PAGE, KILNLINK_CONFIG_
         // PAGE_CMD, 0x1F).
-        s_diag_get_config_page_seen_count++; // 2026-08-23 diagnostic -- counts regardless of length match
         if (frame.length == KILNLINK_GET_CONFIG_PAGE_LEN) {
-            s_diag_get_config_page_handled_count++; // 2026-08-23 diagnostic
             // 2026-08-25 measurement, see s_page_reply_us_max's declaration:
             // brackets the handler so the ESP-observable service latency for
             // this one command can be read as a number instead of inferred.
