@@ -2196,6 +2196,16 @@ changing the normalisation to match the old (incorrect) header wording
 without also revisiting Ea would turn that 7% into roughly 2x. See
 `cone_table.h`'s top-of-file comment for the full corrected rationale.
 
+### 7.3.2 Band-width duplicate removed (2026-09-02)
+
+`ramp_assist.py` carried its own copy of the bracketing-pair band-half-width
+formula (`_local_band_half_c`/`_band_bottom_c_fixed`), written as a
+workaround while `cone_table.band_bottom_c` still had the collapse defect
+fixed in §7.3.1. Verified numerically equivalent across the table (between
+cones, on/above/below a cone, both range boundaries) and removed; the
+simulator now calls `cone_table.band_bottom_c` directly, so the simulator
+and the firmware share exactly one band-width formula.
+
 ### 7.4 Warning surfaces — NOT STARTED
 
 All three the owner asked for, all while ramp-lock is holding:

@@ -41,17 +41,16 @@ WHAT THIS MODELS, and how it maps onto the plan:
   (a candling hold) or chain two dwells back to back, and neither of those
   is reached via a ramp->dwell transition.
 
-  Band-width note (DEFECT 2, see ``_band_bottom_c_fixed`` below):
-  ``cone_table.band_bottom_c`` anchors the credit band's half-width on the
-  distance from the segment target down to the nearest tabulated cone
-  BELOW it, not on the local cone spacing -- for a target a hair above a
-  tabulated cone this collapses the band to a few thousandths of a degree
-  instead of the several degrees the surrounding cone spacing implies, so
-  a target entered a fraction of a degree differently earns wildly
-  different credit for no physical reason. This module works around it at
-  its own call sites (see ``_band_bottom_c_fixed``); ``cone_table.c``/
-  ``.py`` should be corrected to match (handed off, not edited here -- see
-  that function's docstring for why).
+  Band-width note (DEFECT 2, RESOLVED): ``cone_table.band_bottom_c`` used
+  to anchor the credit band's half-width on the distance from the segment
+  target down to the nearest tabulated cone BELOW it, not on the local
+  cone spacing -- for a target a hair above a tabulated cone that
+  collapsed the band to a few thousandths of a degree instead of the
+  several degrees the surrounding cone spacing implies. Fixed in
+  ``cone_table.c``/``.py`` (commit f84d4c8) to use the bracketing-pair
+  half-spacing formula; this module no longer carries its own copy of
+  that formula and calls ``cone_table.band_bottom_c`` directly, so the
+  simulator and the firmware now provably share one band-width formula.
 
 WHAT THIS CANNOT MODEL (see also the module-level scenario report emitted
 by ``run_ramp_assist_scenarios.py``-style callers, and ``plant_sim.py``'s
@@ -88,7 +87,6 @@ own TRUST section, which every claim below inherits):
 from __future__ import annotations
 
 import dataclasses
-import math
 from typing import List, Optional, Sequence
 
 import numpy as np
@@ -151,69 +149,6 @@ def check_schedule_feasible(schedule: Sequence[ScheduleStep], max_temp_c: float)
     for i, step in enumerate(schedule):
         if isinstance(step, RampStep) and step.target_c > max_temp_c:
             raise RampAssistRefused(step.target_c, max_temp_c, i)
-
-
-def _local_band_half_c(target_c: float) -> float:
-    """DEFECT 2 WORKAROUND (ramp-assist side): ``cone_table.band_bottom_c``
-    anchors the credit band's half-width on the DISTANCE from ``target_c``
-    down to the nearest tabulated cone strictly below it, rather than on
-    the local cone spacing. That collapses the band to near-zero width for
-    any target a hair above a tabulated cone -- e.g. target 1222.21 C, one
-    hundredth of a degree above cone 6's 1222.2 C, gets a 0.005 C band
-    instead of the ~8 C the neighbouring cone spacing implies (cone
-    5->cone 6 is 1186.1->1222.2, cone 6->cone 7 is 1222.2->1238.9). See
-    PID_EXPANSION_PLAN.md §7.3's defect-2 note for the full numeric
-    demonstration (target 1222.19 -> width 18.045; 1222.21 -> width 0.005;
-    1223.00 -> width 0.400).
-
-    ``cone_table.c``/``.py`` should adopt the fix below directly --
-    interpolate half the LOCAL spacing from the BRACKETING PAIR of table
-    entries (``(upper - lower) / 2``), not from ``target_c`` down to the
-    lower one (``(target_c - lower) / 2``). It is implemented here instead
-    of there because another agent is concurrently correcting ten wrong
-    temperatures in that module and this fix must not collide with that
-    edit. Reads ``ct.CONE_TABLE`` (public data) only -- does not modify
-    ``cone_table.py``.
-
-    Raises the same ``ct.ConeTableError`` variants as ``band_bottom_c`` for
-    the same out-of-range inputs, so call sites can catch one exception
-    type regardless of which of the two functions they use.
-    """
-    table = ct.CONE_TABLE
-    if not math.isfinite(target_c):
-        raise ct.ConeTableError("invalid_input")
-    if target_c <= table[0][1]:
-        raise ct.ConeTableError("out_of_range_low")
-    if target_c > table[-1][1]:
-        raise ct.ConeTableError("out_of_range_high")
-
-    lower_idx = None
-    for i in range(len(table) - 1, -1, -1):
-        if table[i][1] < target_c:
-            lower_idx = i
-            break
-    if lower_idx is None:
-        raise ct.ConeTableError("out_of_range_low")  # unreachable, parity guard
-
-    lower_temp_c = table[lower_idx][1]
-    if lower_idx + 1 < len(table):
-        upper_temp_c = table[lower_idx + 1][1]
-    else:
-        # target_c sits at/below CONE_TABLE[-1] (guarded above), and no
-        # entry above lower_idx exists -- only reachable when target_c
-        # equals the last entry exactly. Use the spacing below it instead.
-        upper_temp_c = table[lower_idx][1]
-        lower_temp_c = table[lower_idx - 1][1] if lower_idx > 0 else lower_temp_c
-    return (upper_temp_c - lower_temp_c) / 2.0
-
-
-def _band_bottom_c_fixed(target_c: float) -> float:
-    """``target_c`` minus ``_local_band_half_c(target_c)`` -- the corrected
-    band bottom this module uses for its own credit-eligibility gate (the
-    ``in_band`` check), in place of ``ct.band_bottom_c``. See
-    ``_local_band_half_c`` for why the fix lives here rather than in
-    ``cone_table.py``."""
-    return target_c - _local_band_half_c(target_c)
 
 
 # ---------------------------------------------------------------------------
@@ -444,15 +379,15 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
 
                 # Dwell credit gate (§7.3): only while lagging AND within
                 # the half-cone-step band below THIS step's own target.
-                # DEFECT 2 fix: uses _band_bottom_c_fixed (bracketing-pair
-                # half-spacing), not ct.band_bottom_c, which collapses to a
-                # near-zero band just above a tabulated cone -- see that
-                # function's docstring. This is the ramp-assist side of the
-                # fix; cone_table.c/.py's own band_bottom_c should adopt
-                # the same bracketing-pair formula (handed off, not edited
-                # here).
+                # cone_table.band_bottom_c now implements the corrected
+                # bracketing-pair half-spacing formula directly (DEFECT 2
+                # fixed in cone_table.c/.py, commit f84d4c8) -- ramp_assist
+                # used to carry a local duplicate of this formula as a
+                # workaround; that duplicate is gone, this is the one and
+                # only band-width formula shared by the simulator and the
+                # firmware.
                 try:
-                    band_bottom = _band_bottom_c_fixed(step.target_c)
+                    band_bottom = ct.band_bottom_c(step.target_c)
                     in_band = band_bottom <= actual_c < step.target_c
                 except ct.ConeTableError:
                     in_band = False  # target outside the cone table's range -- no credit, no crash

@@ -367,73 +367,61 @@ class ScaleSweepDiscriminatesCreditErrorsTests(unittest.TestCase):
 
 
 class BandWidthCliffTests(unittest.TestCase):
-    """DEFECT 2: ``cone_table.band_bottom_c`` anchors the credit band's
-    half-width on the distance from ``target_c`` down to the nearest
-    tabulated cone BELOW it, not on the local cone spacing -- so a target a
-    hair above a tabulated cone collapses the band to a near-zero width.
-    ``ramp_assist._local_band_half_c``/``_band_bottom_c_fixed`` work around
-    this on the ramp-assist side (see those functions' docstrings for why
-    the fix isn't in ``cone_table.py`` itself -- another agent owns that
-    module concurrently). This class pins the exact numbers from the
-    PID_EXPANSION_PLAN.md §7.3 defect-2 writeup.
+    """DEFECT 2: ``cone_table.band_bottom_c`` used to anchor the credit
+    band's half-width on the distance from ``target_c`` down to the
+    nearest tabulated cone BELOW it, not on the local cone spacing -- so a
+    target a hair above a tabulated cone collapsed the band to a
+    near-zero width. That was fixed directly in ``cone_table.c``/``.py``
+    (commit f84d4c8) to use the bracketing-pair formula. ``ramp_assist``
+    used to carry its own duplicate workaround
+    (``_local_band_half_c``/``_band_bottom_c_fixed``); that duplicate is
+    now removed and ``ramp_assist`` calls ``cone_table.band_bottom_c``
+    directly (see the ``ct.band_bottom_c`` call in the dwell-credit gate).
+    This class pins the exact numbers from the PID_EXPANSION_PLAN.md §7.3
+    defect-2 writeup against the ONE shared formula ramp_assist now uses.
 
-    NEGATIVE-TESTED: changed ``_local_band_half_c``'s
-    ``return (upper_temp_c - lower_temp_c) / 2.0`` to
-    ``return (target_c - lower_temp_c) / 2.0`` (the OLD, buggy formula
-    ``cone_table.band_bottom_c`` still uses). Ran this class; it failed
+    NEGATIVE-TESTED: temporarily edited ``cone_table.band_bottom_c`` in
+    ``tools/PcTools/src/kilnctrl/cone_table.py`` to reintroduce the old
+    buggy anchor (``return target_c - (target_c - lower_temp_c) / 2.0``
+    in place of ``return target_c - half``). Ran this class; it failed
     with:
-        AssertionError: 0.0049999999999954525 not greater than 5.0
-    (the fixed function collapsed to the same 0.005 C band the buggy
-    ``cone_table.band_bottom_c`` produces once mutated to match it).
-    Reverted; this class passes again.
+        AssertionError: 0.0049999999999954525 != 8.35 within 2 places
+    (band collapsed back to ~0.005 C at 1222.21, exactly the DEFECT 2
+    symptom -- proving this class does exercise the live formula
+    ramp_assist depends on, not a fixed constant). Reverted; this class
+    passes again.
     """
 
     def test_just_below_a_cone_gets_the_wide_local_spacing(self):
         # target 1222.19 is just BELOW cone 6 (1222.2) -- bracketed by
         # cone 5 (1186.1) and cone 6 (1222.2), so half the local spacing is
-        # (1222.2-1186.1)/2 = 18.05, matching the old formula closely here
-        # since 1222.19 is close to the midpoint-anchoring case too.
-        half = ra._local_band_half_c(1222.19)
-        self.assertAlmostEqual(half, 18.05, places=2)
+        # (1222.2-1186.1)/2 = 18.05.
+        width = 1222.19 - ct.band_bottom_c(1222.19)
+        self.assertAlmostEqual(width, 18.05, places=2)
 
     def test_just_above_a_cone_does_not_collapse(self):
         # target 1222.21 is one hundredth of a degree above cone 6
-        # (1222.2) -- the OLD band_bottom_c formula anchors on the
+        # (1222.2) -- the OLD band_bottom_c formula anchored on the
         # DISTANCE to cone 6 itself (0.01 C), collapsing the band to
         # 0.005 C. The fixed formula instead uses the local spacing to the
         # NEXT cone up (cone 7, 1238.9), giving ~8.35 C -- 1670x wider.
-        half = ra._local_band_half_c(1222.21)
-        self.assertGreater(half, 5.0, "band should not collapse just above a tabulated cone")
-        self.assertAlmostEqual(half, 8.35, places=2)
+        width = 1222.21 - ct.band_bottom_c(1222.21)
+        self.assertGreater(width, 5.0, "band should not collapse just above a tabulated cone")
+        self.assertAlmostEqual(width, 8.35, places=2)
 
     def test_a_degree_above_a_cone_still_uses_local_spacing(self):
         # target 1223.00 ("cone 6 plus a margin") -- still bracketed by
-        # cone 6/cone 7, so the fix gives the SAME ~8.35 C half-width as
+        # cone 6/cone 7, so the fix gives the SAME ~8.35 C width as
         # 1222.21 above, not the old formula's narrow 0.4 C.
-        half = ra._local_band_half_c(1223.00)
-        self.assertGreater(half, 5.0)
-        self.assertAlmostEqual(half, 8.35, places=2)
+        width = 1223.00 - ct.band_bottom_c(1223.00)
+        self.assertGreater(width, 5.0)
+        self.assertAlmostEqual(width, 8.35, places=2)
 
-    def test_cone_table_formula_no_longer_collapses_here(self):
-        # UPDATE: cone_table.band_bottom_c (firmware/KilnFW/App/drivers/
-        # cone_table.c + its Python mirror) has since been corrected to the
-        # same bracketing-pair formula this module's own workaround uses
-        # (_local_band_half_c/_band_bottom_c_fixed above) -- see
-        # cone_table.h's cone_table_band_bottom_c() comment for the fix and
-        # tools/PcTools/tests/test_cone_table.py for its own regression pin.
-        # This test used to document the collapse at 1222.21 as proof the
-        # workaround wasn't fixing a phantom problem; now that the shared
-        # function agrees with the workaround, both should give the SAME
-        # (correct, non-collapsed) answer. This class's workaround
-        # (_local_band_half_c/_band_bottom_c_fixed) is therefore redundant
-        # and could be collapsed onto ct.band_bottom_c directly -- left in
-        # place here since this module is owned by another agent.
-        self.assertGreater(1222.21 - ct.band_bottom_c(1222.21), 5.0)
-        self.assertGreater(1222.21 - ra._band_bottom_c_fixed(1222.21), 5.0)
-        self.assertAlmostEqual(
-            ct.band_bottom_c(1222.21), ra._band_bottom_c_fixed(1222.21), places=6,
-            msg="cone_table.band_bottom_c and ramp_assist's workaround should now agree exactly",
-        )
+    def test_ramp_assist_no_longer_carries_its_own_copy(self):
+        # The duplicate workaround functions are gone entirely -- there is
+        # exactly one band-width formula left for ramp_assist to call.
+        self.assertFalse(hasattr(ra, "_local_band_half_c"))
+        self.assertFalse(hasattr(ra, "_band_bottom_c_fixed"))
 
 
 class DwellStateMachineTests(unittest.TestCase):
