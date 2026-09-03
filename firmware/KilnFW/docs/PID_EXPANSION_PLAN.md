@@ -2815,146 +2815,131 @@ everywhere else in this codebase): bisque 150 °C/hr to 1062.8 °C, 30 min
 dwell; cone 6 150 °C/hr to 1222.2 °C, 15 min dwell; cone 10 100 °C/hr to
 1285.0 °C, 15 min dwell.
 
-**Item 1 — per-target credit/dwell-reduction (mass_mult=1.0, zone 0, the
-zone that actually reaches target+dwell — see the stall finding below):**
+**MIRROR-BUG CORRECTION (2026-09, supersedes the numbers first reported
+here):** this section's first pass ran against `ramp_assist.DEFAULT_LAG_BAND_C`
+while it was hard-coded to 3.0 °C with a comment claiming it mirrored
+`EXEC_RAMP_LOCK_BAND_C` — actually `PROGRESS_BAND_C` (guard 1's arrival
+band, `thermal_guard.c`), a different constant confused for it. The real
+firmware value, `PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`, is 25.0 °C — 8.3x
+wider. §7.1 above carried the same "3 °C" mistake in its own prose, most
+likely the actual source of the error. Separately, firmware commit 8f12449
+("Fix ramp-lock hot-start stall: one-sided lock + guard 4 arming backstop")
+changed the lock from a symmetric `abs(target_c - actual_c) > band` to a
+ONE-SIDED `(target_c - actual_c) > band` — only a zone COLDER than
+commanded locks; an overshoot no longer does. `ramp_assist.py` now mirrors
+both corrections: `DEFAULT_LAG_BAND_C = 25.0`, pinned against
+`profile_executor.h` by a new cross-language test
+(`RampAssistLagBandCrossLanguageTest`, `test_ramp_assist.py`), and the
+one-sided comparison. Every number below is the RE-RUN result at the
+corrected band and lock direction; the original 3 °C/symmetric numbers are
+struck through in spirit, not reproduced, to avoid anyone citing them
+again.
 
-| target | band width | credit_s | % of nominal dwell |
-|---|---|---|---|
-| bisque (cone 04) | 15.85 °C | 13.1 s | 0.7% |
-| cone 6 | 9.60 °C | 9.1 s | 1.0% |
-| cone 10 (100 °C/hr) | 12.50 °C | 0.0 s | 0.0% |
+**Item 1/2 — per-target, per-load credit/dwell-reduction, zone 0, at the
+REAL shipped band (mass_mult 1x/2x/4x):**
 
-**Verdict: negligible, not alarming, at 1x (unloaded) plant load.** The
-credit removes well under 1% of the dwell at bisque/cone-6 rates the model
-can almost track, and nothing at all at cone 10's slower 100 °C/hr rate
-(the plant tracks closely enough that the zone is rarely both lagging and
-in-band — credit is a function of how far behind the commanded ramp the
-zone falls, not of temperature alone). It neither erases a dwell nor looks
-inert-by-construction; at 1x load it is simply small because this model's
-1x plant rarely falls behind by more than a couple of degrees.
+| target | band width | credit_s (1x / 2x / 4x) |
+|---|---|---|
+| bisque (cone 04) | 15.85 °C | 0.0 s / 0.0 s / 0.0 s |
+| cone 6 | 9.60 °C | 0.0 s / 0.0 s / — |
+| cone 10 (100 °C/hr) | 12.50 °C | 0.0 s / — / — |
 
-**Item 2 — loaded (mass_mult) sweep, zone 0, credit_s (% of nominal
-dwell):**
+**Verdict: EXACTLY zero, not "small," at every load level measured — and
+this is provable, not just observed.** The credit-accrual gate requires a
+zone to be simultaneously (a) lagging by more than the 25 °C band and (b)
+inside the credit band below the segment target. The credit band's width
+is the local cone-table spacing halved; the WIDEST it is anywhere in the
+whole Orton table (cone 022–14) is 25.85 °C, at cone 019 (677.8 °C, a
+target none of these three scenarios use) — every other tabulated cone's
+band is narrower than 25 °C outright. So "lagging (>25 °C off) AND inside
+the credit band (8–18 °C wide at these three targets)" is a **structurally
+near-empty set for realistic cone-scale targets**, independent of load,
+rate, or the cross-zone stall discussed below — increasing mass_mult makes
+a zone fall further behind, but by the time it is more than 25 °C behind
+it has necessarily fallen well past its own 8–18 °C-wide credit band, not
+into it. `ShippedDefaultBandNeverFiresTests`
+(`test_ramp_assist_cone_scale.py`) pins this directly: bisque at 1x/2x/4x
+mass and cone 6 at 1x/2x mass all earn exactly `0.0` credit_s, and cone 6's
+time-in-band-while-lagging is exactly `0.0` s at 1x and 4x mass.
 
-| target | 1x | 2x | 4x |
-|---|---|---|---|
-| bisque | 13.1 s (0.7%) | 18.9 s (1.0%) | 154.5 s (8.6%) |
-| cone 6 | 9.1 s (1.0%) | 10.4 s (1.2%) | 72.4 s (8.0%) |
-| cone 10 | 0.0 s (0.0%) | 0.0 s (0.0%) | 75.8 s (8.4%) |
+**Item 3 — mechanism-only re-run (proves the accrual/audit/load-scaling
+logic is still correct when it IS given a band that lets it fire; NOT the
+shipped default).** Because the real band leaves nothing to measure,
+`ConeScaleMechanismRunsTests`/`LoadGrowsCreditTests`/`TimeInBandTests`/
+`CreditAuditHoldsAtConeScaleTests` now pass an explicit, synthetic
+`lag_band_c=3.0` override (documented at each call site, never the
+default) to confirm the mechanism itself — accrual gate, `credit_audit_pct`
+consistency, monotonic growth with load — is unaffected by the mirror fix:
+bisque at a faster 600 °C/hr rate (150 °C/hr no longer produces any
+lagging window worth measuring even at 3 °C, now that the lock is
+one-sided — see below) earns 38.4 s of credit, 2.1% of its 1800 s nominal
+dwell; `credit_audit_pct` reads 0.0000%; cone 6 credit_s grows from 1x to
+2x mass; cone 6 time-in-band grows from 1x to 4x mass. **This is evidence
+the underlying mechanism remains sound, not evidence it does anything at
+the shipped default.**
 
-Zones 1/2 (see the stall finding below) only complete the schedule at 2x
-mass and above, where they show the effect scaling *faster* than zone 0:
-bisque zone 2 reaches 8.0% of dwell at 2x and 13.9% at 4x; cone 6 zone 2
-reaches 7.8% at 2x; cone 10 zone 2 reaches 8.3% at 2x and **30.3% at 4x** —
-the single largest credit measured in this pass. **Verdict: credit and
-dwell-reduction grow monotonically with load in every scenario measured,
-consistent with the feature's stated purpose (load is when a kiln falls
-behind) — this is the one regime where the mechanism does something
-substantial in this model, up to roughly a third of a dwell at 4x mass on
-a lagging zone.**
+**Finding: the cross-zone "stall" reported in the original pass was two
+separate things, and one of them is now fixed at the source.** The
+original pass found zones 1/2 pushed by cross-zone coupling ABOVE their
+own frozen commanded target, read as "lagging" by the OLD symmetric lock
+exactly like a genuine shortfall, freezing the commanded target and
+computing a permanent zero hold duty. Firmware commit 8f12449 fixed this
+directly: the lock is now one-sided, so an overshoot no longer locks a
+zone at all. Re-run confirms this at cone scale — mutating `ramp_assist.py`
+back to the old symmetric `abs(actual_c - z.commanded_c) > lag_band_c` at
+`lag_band_c=3.0` (bisque, 150 °C/hr, 1x mass) reproduces the exact
+original failure, `targets_reached == [True, False, False]`; the real
+one-sided code gives `[True, True, True]` on the identical schedule. A
+SEPARATE, genuine catch-up failure remains at extreme load — bisque zone 2
+at 8x mass still does not reach target+dwell within a 150000 s cap under
+EITHER lock form, confirming that stall is a real "too far behind to catch
+up in the time simulated" condition, not an artifact of lock direction.
 
-**Item 3 — measured time-in-band-while-lagging** (ticks where the zone is
-both lagging and inside the credit band, zone 0 unless noted):
-
-| scenario | time-in-band-while-lagging |
-|---|---|
-| bisque, 1x | 35 s |
-| cone 6, 1x | 28 s |
-| cone 10, 1x | 0 s |
-| bisque, 2x (zone 2) | 379 s |
-| cone 6, 4x (zone 1) | 358 s |
-| cone 10, 4x (zone 2) | 751 s |
-
-**Verdict: seconds at 1x load, low minutes at 4x load — never "many
-minutes."** At the unloaded plant's own tracking accuracy the feature is
-close to inert simply because the zone spends almost no time both lagging
-and inside an 8–18 °C band; the loaded cases are the only ones that give
-the credit mechanism a window worth calling real.
-
-**Item 4 — physics sanity check.** `credit_audit_pct` (two-writer
-accrual/spend consistency) reads 0.0000% on every zone that earns nonzero
-credit in this pass — confirmed again at cone scale, not just bench scale
-(§7.3's own test suite already established this at bench scale). As
-documented there, this is BLIND to a wrong Ea/band/weight because it shares
-all of them with the value it is checking — a 0% audit is not evidence the
-underlying physics is right.
-
-An independent check was constructed for this pass: comparing `credit_s`
-(banked during the ramp, while lagging and in-band) against
-`catchup_deficit_s` (`dwell_nominal_s - dwell_heat_work_unassisted_s` —
-the REAL heat-work shortfall the unassisted run's dwell alone would show).
-These are two independently-measured quantities that both attempt to
-answer "how far behind is this zone," so their ratio is at least a
-plausibility check, not a proof:
-
-| case | credit_s | catchup_deficit_s | ratio |
-|---|---|---|---|
-| bisque 2x z0 | 18.9 | 9.9 | 1.90 |
-| bisque 2x z1 | 67.1 | 13.0 | 5.18 |
-| bisque 2x z2 | 143.3 | 18.1 | 7.90 |
-| cone6 2x z0 | 10.4 | 15.2 | 0.69 |
-| cone6 2x z1 | 32.7 | 20.7 | 1.58 |
-| cone6 2x z2 | 70.0 | 29.4 | 2.38 |
-| cone10 2x z2 | 74.6 | 23.5 | 3.18 |
-| cone6 4x z0 | 72.4 | 29.8 | 2.43 |
-
-The ratio spans roughly 0.7x–8x across scenarios rather than clustering
-near 1.0. **This is not proof of a bug** — the two quantities measure
-different windows (credit accrues over the whole ramp tail once in-band;
-catchup_deficit is measured only over the dwell that follows) and are not
-expected to match exactly even if the mechanism is entirely correct. But
-the spread is wide enough that it should be treated as an open question,
-not a confirmation: this pass cannot rule out that the credit is
-systematically over- or under-generous relative to the physical shortfall
-it is meant to offset. **No stronger independent physical check was
-available** — there is no measured high-temperature multi-zone dataset in
-this repo to compare against (see §3.4/3.7).
-
-**Finding: cross-zone stall at cone scale (model artifact, not a defect in
-the code under test).** With the schedule replicated identically across
-all three zones, `PhysicalKilnPlant`'s ASSUMED cross-zone coupling lets
-zone 0 (the fastest to build up duty) push zones 1/2's ACTUAL temperature
-above their own (still-low) commanded target early in the run, purely via
-coupling. The lag detector — mirrored unmodified from firmware, `abs(actual
-- commanded) > lag_band_c`, direction-agnostic — reads that overshoot as
-"lagging" exactly like a genuine shortfall, freezes the commanded target,
-and the zone's own feedforward then computes a negative hold duty (clamped
-to 0) forever: a permanent stall, not a slow catch-up. At 1x mass zones 1/2
-never complete the schedule inside a 40–70k-second cap; at 2x mass all
-three zones complete every target; at 4x mass one of the three stalls
-again in two of three targets. This is model-dependent (it is a property
-of `PHYS_COUPLING_FRAC`/`coupling_growth`'s ASSUMED strength, not of
-`ramp_assist.py`), but it means roughly a third of the zone-scenarios in
-this pass never got to exercise the dwell-credit mechanism at all — a
-gap this pass could not close, reported rather than hidden.
-
-**Overall verdict: the dwell credit is neither harmful (it is bounded,
-capped at the dwell's own nominal duration, and never negative) nor
-routinely dwell-erasing — but at the unloaded 1x plant load it is close
-enough to negligible (well under 1% of a dwell) that it is doing very
-little of practical value. Its one clearly useful regime in this model is
-under load (2x–4x mass), where it removes up to ~30% of a dwell on the
-worst-affected zone — plausibly useful, but unverifiable against a real
-kiln, and the credit-vs-catchup-deficit ratio (item 4) means even that
-number's correctness is not established, only its bounded/monotonic
-behavior.** Not inert, not alarming, not proven correct in magnitude.
+**Overall verdict, CHANGED from the original pass: at its real, correctly
+mirrored default (25 °C band, one-sided lock), the dwell-credit mechanism
+does essentially nothing at cone scale, at any load level tested (1x
+through 4x mass) — not "small," exactly zero, and provably so from the
+band-width arithmetic above, not merely an artifact of these three
+schedules' rates. It is not harmful (still bounded, capped, never
+negative) but it is also not "useful mainly under load" as the original
+pass concluded — that conclusion was itself downstream of the 8.3x-too-
+tight band. The mechanism-only re-run (Item 3) shows the underlying logic
+is still correct when given a band that lets it fire, so this is a
+magnitude/applicability finding, not a new implementation defect: as
+shipped, dwell credit would need either a much wider band than
+`PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`'s 25 °C, or targets that happen to
+land in cone table's rare >25 °C-band gaps (only cone 019, 677.8 °C, in the
+entire Orton range), to ever engage at these three representative
+targets.** This materially weakens the case for ever defaulting this
+feature ON without either revisiting the band/gate design or confirming
+on a real firing that ordinary cone-scale firings actually fall more than
+25 °C behind their commanded ramp for extended stretches (which the
+tracking data in Item 1 gives no reason to expect at 1x-4x simulated
+load).
 
 **What this pass cannot prove:** whether the credit's heat-work weight
 tracks a real ware load (§7's own "load is not measurable" framing);
 whether `PhysicalKilnPlant`'s assumed parameters resemble a real
-cone-10-capable kiln at all; whether the cross-zone stall above is a real
-physical phenomenon or purely an artifact of `PHYS_COUPLING_FRAC`'s
-ASSUMED strength; and, as always, anything about a real firing. A real
-firing remains required before the default flips to ON.
+cone-10-capable kiln at all — in particular, whether a real kiln under
+real load ever falls 25 °C+ behind its commanded ramp the way this finding
+would require for the feature to do anything; and, as always, anything
+about a real firing. A real firing remains required before the default
+flips to ON, and this pass's headline finding is itself a reason that
+firing should specifically look for >25 °C tracking lag before the feature
+is judged useful at all.
 
 Reproducible tests: `tools/PcTools/tests/test_ramp_assist_cone_scale.py`
 (new module, kept separate from `test_ramp_assist.py` per repo convention)
-— pins the accrual gate firing at cone scale, credit growing with load,
-measured time-in-band, and `credit_audit_pct` holding at cone scale.
-Every test in that module was negative-tested (mutate → observe the quoted
-real failure → revert); see each test's docstring. Full suite: `tools/
-PcTools/.venv/Scripts/python.exe -m pytest tools/PcTools/tests` — 1532
-passed, 12 skipped (pre-existing skips, unrelated to this pass).
+— `ShippedDefaultBandNeverFiresTests` pins the real-default zero-credit
+finding; `ConeScaleMechanismRunsTests`/`LoadGrowsCreditTests`/
+`TimeInBandTests`/`CreditAuditHoldsAtConeScaleTests` pin the mechanism
+itself via an explicit synthetic band. Every test in this module and in
+`test_ramp_assist.py` was negative-tested (mutate → observe the quoted
+real failure → revert); see each test's docstring, and
+`RampAssistLagBandCrossLanguageTest` for the new cross-language pin on the
+band constant itself. Full suite re-run for this correction:
+`tools/PcTools/.venv/Scripts/python.exe -m pytest tools/PcTools/tests` —
+`test_ramp_assist.py` 21 passed, `test_ramp_assist_cone_scale.py` 9 passed.
 
 ## 2026-09-03: ramp-lock hot-start stall (confirmed executor defect, fixed)
 

@@ -7,13 +7,18 @@ WHAT THIS MODELS, and how it maps onto the plan:
 
   Lag detection (§7.1, ALREADY BUILT in firmware, not re-implemented here):
   a zone is "lagging" (not achieving the commanded ramp rate) when
-  ``|actual_c - commanded_target_c| > lag_band_c`` (25.0 C, mirroring
+  ``(commanded_target_c - actual_c) > lag_band_c`` (25.0 C, mirroring
   ``PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`` -- see ``DEFAULT_LAG_BAND_C``'s own
   comment for the cross-language pin that now enforces this against
   ``profile_executor.h`` directly, and the "MIRROR BUG" note below for how
-  this was wrong for a while). While lagging, ``commanded_target_c`` for that
-  zone simply stops advancing -- the same mechanism the plan says already
-  guarantees every ramp endpoint is eventually reached.
+  this was wrong for a while). ONE-SIDED, not ``abs(...)``: only a zone
+  COLDER than commanded by more than the band locks (firmware commit
+  8f12449, "Fix ramp-lock hot-start stall: one-sided lock + guard 4 arming
+  backstop" -- the old symmetric form froze the whole shared setpoint
+  indefinitely on a zone that starts a firing already hot). While lagging,
+  ``commanded_target_c`` for that zone simply stops advancing -- the same
+  mechanism the plan says already guarantees every ramp endpoint is
+  eventually reached.
 
   Auto-stretch (§7.2): this module does not add a second mechanism for it.
   The lag-detector's own hold-and-resume behaviour above IS the stretch --
@@ -393,7 +398,19 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
             if isinstance(step, RampStep):
                 direction = _step_direction(seg_start_c[zi], step.target_c)
                 rate_c_per_s = direction * step.rate_c_per_min / 60.0
-                z.lagging = abs(actual_c - z.commanded_c) > lag_band_c
+                # ONE-SIDED (commit 8f12449, firmware profile_executor.c:383):
+                # ``(target_c - actual_c) > band`` -- only a zone COLDER than
+                # commanded by more than the band locks; a zone HOTTER than
+                # commanded (cross-zone coupling overshoot, or a downward
+                # ramp lagging on the cooling side) does NOT lock. Firmware
+                # used ``fabsf()`` here (a symmetric ``abs(target-actual) >
+                # band``) until 8f12449 fixed a hot-start stall: a zone that
+                # starts a firing already hot froze the whole shared
+                # setpoint indefinitely, since guards 1/2/7 gate on
+                # commanded duty (which a too-hot zone doesn't have) and
+                # guard 4 never armed. This module mirrored the OLD
+                # symmetric form; fixed here to match.
+                z.lagging = (z.commanded_c - actual_c) > lag_band_c
                 if z.lagging:
                     z.stretched_s += dt
                 else:

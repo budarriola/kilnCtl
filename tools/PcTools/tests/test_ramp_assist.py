@@ -76,7 +76,7 @@ class InertWhenCapableTests(unittest.TestCase):
     lag: assist should be very close to a no-op.
 
     NEGATIVE-TESTED: changed the lag threshold comparison in
-    ``run_ramp_assist`` from ``abs(actual_c - z.commanded_c) > lag_band_c``
+    ``run_ramp_assist`` from ``(z.commanded_c - actual_c) > lag_band_c``
     to ``> 0.0`` (i.e. "lagging" the instant there is ANY tracking error,
     which is true almost every tick even on an easy ramp). Re-ran; it
     failed with:
@@ -85,7 +85,7 @@ class InertWhenCapableTests(unittest.TestCase):
     that is "lagging" on any nonzero error never lets its commanded target
     advance at all, so it can never reach the segment target within
     max_sim_s). Reverted the mutation; this test passes again with the
-    real 3.0 C threshold.
+    real 25.0 C threshold.
     """
 
     def test_easy_ramp_is_nearly_inert(self):
