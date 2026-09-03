@@ -15,9 +15,10 @@ Status at time of writing (2026-09-02): **Phase 0 (§4.1/§4.2/§4.3) is built.*
 decision. §5.4 is decided-not-pursued (§4.1's attribution found the string
 pool is ordinary spread-out `ESP_LOG*` strings, not dead weight). §4.2's size
 baseline is now recorded against `eb17ea5` — see 4.2. §7's checklist for the
-single partition-table revision covering §5.1/§5.2 is the remaining hardware
-step: whether the new table has actually been written to the chip is NOT
-established by anything in this repo — see §4.2.
+single partition-table revision covering §5.1/§5.2 is closed: a live
+`GET /api/partitions` read on 2026-09-03 confirmed the on-chip table matches
+`partitions.csv`, 12/12 entries — see §8 item 3. **Nothing in this plan is
+still open.**
 
 **Phase 0, done (`699f5ab`):** `attribute_str_pool.py` +
 `check_flash_partition_map.ps1`. Methodology correction for §4.1: the map
@@ -564,13 +565,12 @@ history and are not hypothetical — each has already caused a problem here once
    `firmware/KilnFW/App/test/test_partition_info_http.c`
    (`build_host_tests.ps1`).
 
-   **After the next reflash** (this endpoint does not exist on the board
-   until it is reflashed with this change), run:
-   ```
-   uv run --project tools/PcTools python
-     tools/PcTools/scripts/check_chip_partition_table.py --host 192.168.1.156
-   ```
-   or `kiln_call(name="debug_check_partition_table", args={"host":"192.168.1.156"})`.
+   **DONE — 2026-09-03.** The board was reflashed 2026-09-03 07:36:20 and a
+   live `GET /api/partitions` read reported `MATCH`, 12/12 entries against
+   `partitions.csv` (running partition `factory`; `ota_0`/`ota_1` each
+   3,145,728 B at 0x210000/0x510000). The on-chip table is the post-`9ede138`
+   table this plan targeted. §8's remaining hardware step is closed; nothing
+   in this plan is still open.
 4. Leave `coredump` (5.3) alone unless something forces the issue.
 5. ~~Revisit 5.4 only if 4.1 justifies it~~ — 4.1 does not justify it;
    decided not pursued.
