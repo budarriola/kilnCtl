@@ -1205,6 +1205,71 @@ that with hardware evidence — it would need an in-flight step-response fit
 (commanded duty vs. temperature rate) compared against the identified τ, which
 this repo has no capture of. Flagged as the natural next step, not measured.
 
+**That step was taken 2026-09-02: `tools/PcTools/src/kilnctrl/load_estimator.py`
+(new, additive; `tests/test_load_estimator.py`). Verdict: NOT actionably
+observable from today's captures — a clean negative, closing this question.**
+
+*The estimator.* The plant obeys `dT_i/dt = (u_ss_i - T_i)/tau_i`,
+`u_ss_i = ambient + K_i·duty_delayed` (exactly `FOPDTPlant.step`'s own
+update, `K`/`L` the ADOPTED matrix/dead time already on the board). That is
+a one-parameter regression through the origin — `dT/dt` against the "drive"
+term `u_ss - T` — whose slope is `1/tau`; `mass_mult = tau_est / tau_identified`.
+Needs only what a `profile_exec` poll capture already has (commanded duty,
+`actual_c`, per zone) — no new firmware logging. Two conditioning rules,
+both found empirically and now load-bearing (mutation-tested):
+drive-term samples below `min_drive_c` (near a dwell, where noise dominates
+the near-zero denominator) are excluded, and so is the first `L[zone]`
+seconds of any regression window — the delay reconstruction has no duty
+history before the window starts, so it zero-order-holds the first sample
+backward; skipping that exclusion alone turns a true 4.0x sim run into a
+measured 4.53x, a >10% error the test suite now pins against regressing.
+
+*Simulation validation (known truth, noise-free):* recovers the injected
+`load_mass_sweep.py` mass multiplier to **<1% error at every tested load
+(1.0x/1.5x/2.0x/3.0x/4.0x), R²>0.9**, provided the regression runs over one
+contiguous ramp segment (pooling across a dwell gap breaks the delay
+reconstruction's contiguity assumption — an early implementation mistake,
+caught and fixed here, not a property of the method). Adding the honesty
+gate's own measurement chain (0.1 °C quantization + 0.05 °C noise) barely
+moves it (<0.05x error at 2.0x) — **sensor noise is not the limiting
+factor.** Convergence: at 2.0x load, the estimate is within 2% by ~120–180 s
+into a ramp and within 1% by ~180–240 s — call it "one dead time plus 2–4
+minutes" as the data budget.
+
+*Real captures* (`logs/coupling/p7_*_http.jsonl` + the rested-start
+`tests/fixtures/plant_sim/*.jsonl` firings, all profile 7, same
+unknown-but-constant load, 17 usable ramp windows total): estimates do
+**not** cluster near a consistent multiplier and the fit itself is mostly
+not distinguishable from noise. Zone 0 (best-behaved): range 0.16x–1.32x,
+median 0.54x, R²>0.3 in only 4 of 17 windows. Zone 1: range 0.16x–1.11x,
+median 0.57x, R² never exceeds 0.3 (max 0.05) — essentially no linear
+relationship recovered. Zone 2: range 0.18x–1.8x, median 0.74x, R² as low as
+−11.6. This is the inconsistency the task anticipated as itself the finding.
+
+*Why the sim result doesn't transfer, per the honesty gate:* the estimator
+is exact given the true K/tau/L; simulation validates only that the
+regression math is sound, and inherits none of the real plant's model
+error. On hardware, `u_ss` is computed from the ADOPTED `K`/`L` — which
+the pooled held-out RMS already puts at z0 1.05 / z1 0.61 / z2 0.67 °C
+(sec 3.2), and whose off-diagonal (cross-zone) dead time is separately
+measured at 135–158 s against 34–53 s on the diagonal (sec 2) while this
+estimator (like `load_mass_sweep.py`'s own FOPDT model) applies one
+per-zone dead time uniformly to every column of `duty`, own-zone and
+cross-zone alike. That structural mismatch, not sensor noise, is the
+leading suspect for why real fits are frequently anti-correlated (negative
+R²) rather than merely noisy — it would need per-zone AND per-source dead
+times to test, which no identification run in this repo has produced.
+
+**Bottom line: load is not observable in practice from the captures and
+model this repo has today.** The estimator is provably correct in
+simulation and provably unusable on the only hardware evidence available —
+both facts recorded, closing this section's open question without
+overclaiming. Nothing here should be used to gate-schedule or otherwise act
+on a real firing's load; the natural next step, if this is revisited, is a
+coupling-matrix re-identification that fits per-source dead time (matching
+sec 2's own 3–4x diagonal/off-diagonal split) rather than the single-delay
+FOPDT shortcut both this module and `load_mass_sweep.py` share.
+
 **Gap closed 2026-09-02: fuzzy strength × load, never crossed before now.**
 §3.6's fuzzy sweep and this section's load sweep each varied one axis while
 holding the other at its single tested point (fuzzy at the identified/1.0x
