@@ -52,7 +52,7 @@ def _write_shifted_copy(tmp_path, src_path, temp_shift_c: float, name: str) -> s
 # ---------------------------------------------------------------------------
 
 def test_compute_run_metrics_basic():
-    rows = ab.load_last_run(EXCERPT)
+    rows = ab.load_run(EXCERPT)
     metrics = ab.compute_run_metrics(rows)
     assert set(metrics) == {0, 1, 2}
     m0 = metrics[0]
@@ -152,9 +152,9 @@ def test_cli_run_missing_file(capsys):
 # second run against itself.
 # ---------------------------------------------------------------------------
 
-def test_load_last_run_refuses_multirun_capture_by_default():
+def test_load_run_refuses_multirun_capture_by_default():
     with pytest.raises(la.MultiRunError) as exc_info:
-        ab.load_last_run(TWO_RUN_EXCERPT)
+        ab.load_run(TWO_RUN_EXCERPT)
     msg = str(exc_info.value)
     assert "2 separate runs" in msg
     # both runs must be named -- row 0 and row 1 of split_runs' output --
@@ -166,9 +166,9 @@ def test_load_last_run_refuses_multirun_capture_by_default():
     assert "elapsed=12s" in msg
 
 
-def test_load_last_run_explicit_run_index_selects_one_run():
-    rows0 = ab.load_last_run(TWO_RUN_EXCERPT, run_index=0)
-    rows1 = ab.load_last_run(TWO_RUN_EXCERPT, run_index=1)
+def test_load_run_explicit_run_index_selects_one_run():
+    rows0 = ab.load_run(TWO_RUN_EXCERPT, run_index=0)
+    rows1 = ab.load_run(TWO_RUN_EXCERPT, run_index=1)
     assert len(rows0) == 12
     assert len(rows1) == 12
     assert rows0[0].elapsed_s == pytest.approx(7.0)
@@ -193,8 +193,8 @@ def test_compare_runs_with_explicit_run_index_proceeds_normally():
 def test_single_run_capture_still_works_unchanged():
     """A plain single-run capture must behave exactly as before -- no
     refusal, no explicit run index required."""
-    rows_implicit = ab.load_last_run(EXCERPT)
-    rows_explicit = ab.load_last_run(EXCERPT, run_index=0)
+    rows_implicit = ab.load_run(EXCERPT)
+    rows_explicit = ab.load_run(EXCERPT, run_index=0)
     assert rows_implicit == rows_explicit
     report = ab.compare_runs(EXCERPT, EXCERPT)
     assert "error" not in report
@@ -237,8 +237,8 @@ def test_cli_split_writes_two_files(tmp_path, capsys):
     for p in out:
         assert os.path.isfile(p)
     # each split file must now load cleanly with no --run needed.
-    rows0 = ab.load_last_run(out[0])
-    rows1 = ab.load_last_run(out[1])
+    rows0 = ab.load_run(out[0])
+    rows1 = ab.load_run(out[1])
     assert len(rows0) == 12
     assert len(rows1) == 12
 

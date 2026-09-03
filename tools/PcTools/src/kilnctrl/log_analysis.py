@@ -527,7 +527,7 @@ class MultiRunError(ValueError):
 
     2026-09-02: this is the fix for the near-miss where a telemetry poller
     left running across a kiln cooldown produced a two-run
-    ``p7_oldmatrix_http.jsonl``, and ``pid_ab_compare.load_last_run`` silently
+    ``p7_oldmatrix_http.jsonl``, and ``pid_ab_compare.load_run`` silently
     took the most recent run from each side -- comparing the second run
     against itself. The output looked entirely plausible (matched start
     temps, near-identical metrics, tidy verdicts) and would have been

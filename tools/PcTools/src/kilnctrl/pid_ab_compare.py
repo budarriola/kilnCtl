@@ -172,7 +172,7 @@ def compute_run_metrics(rows: Sequence[la.PollRow], band_c: float = 1.0) -> dict
 # Loading either capture shape, and picking the run
 # ---------------------------------------------------------------------------
 
-def load_last_run(path: str, run_index: Optional[int] = None) -> list:
+def load_run(path: str, run_index: Optional[int] = None) -> list:
     """Load an HTTP-capture JSONL and return ONE run's rows. HTTP captures
     are the only source this module accepts (that is the shape the fuzzy A/B
     runs are being recorded in); the classic ``HH:MM:SS {...}`` poll-capture
@@ -241,8 +241,8 @@ def compare_runs(
     run_index_a: Optional[int] = None, run_index_b: Optional[int] = None,
 ) -> dict:
     try:
-        rows_a = load_last_run(path_a, run_index=run_index_a)
-        rows_b = load_last_run(path_b, run_index=run_index_b)
+        rows_a = load_run(path_a, run_index=run_index_a)
+        rows_b = load_run(path_b, run_index=run_index_b)
     except (FileNotFoundError, OSError, la.MultiRunError, IndexError) as exc:
         return {"error": str(exc)}
     if not rows_a or not rows_b:
@@ -408,7 +408,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.cmd == "run":
         try:
-            rows = load_last_run(args.path, run_index=args.run)
+            rows = load_run(args.path, run_index=args.run)
         except (FileNotFoundError, OSError, la.MultiRunError, IndexError) as exc:
             print(f"error: {exc}")
             return 1
