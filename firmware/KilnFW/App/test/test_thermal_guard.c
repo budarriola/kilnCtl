@@ -443,6 +443,39 @@ void run_test_thermal_guard(void)
                    "trips right around 2*DRIFT_PERIOD_S (1200s = tick 120), not early and not late");
     }
 
+    /* Guard 4 / no_setpoint TWO-PRODUCER CONTRACT (2026-09-03): setpoint_c
+     * means different things to different callers -- profile_executor.c
+     * fills it with a genuine target, autotune_engine.c's STEP method fills
+     * it with a placeholder (the zone's ceiling) purely to keep guard 1's
+     * error positive. Guard 4's drift-at-setpoint check only makes sense
+     * against a real target, so a caller with a placeholder must set
+     * no_setpoint=true. This is the EXACT scenario from the arming-fix test
+     * just above -- same 50C gap that never closes, same commanded_duty=0,
+     * same 130 ticks -- with no_setpoint=true added and nothing else
+     * changed. Left unguarded, this is precisely the false trip a STEP
+     * autotune run's fake ceiling would eventually produce once its
+     * idle-arming backstop armed (a step_duty configured below
+     * progress_duty_min keeps commanded_duty low for the whole run, exactly
+     * this test's shape). If a future guard rule reads setpoint_c without
+     * checking no_setpoint first, this test -- not just profile_executor.c's
+     * own passing suite -- is what catches it. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 100.0f;    /* a STEP-method-style placeholder, not a real target */
+        in.no_setpoint = true;     /* ...so the caller says so explicitly */
+        in.measurement_c = 150.0f; /* same 50C gap as the arming-fix test above */
+        in.commanded_duty = 0.0f;
+        bool tripped = false;
+        for (int i = 0; i < 130 && !tripped; i++) { /* same 1300s window as the arming-fix test */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "no_setpoint=true keeps guard 4 inert on a placeholder setpoint, "
+                              "even across the same window that trips a real one");
+    }
+
     /* Guard 7: frozen sensor -- identical reading for the full window while
      * heat is commanded on. */
     {

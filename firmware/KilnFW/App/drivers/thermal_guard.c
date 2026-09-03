@@ -401,20 +401,30 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * setpoint_elapsed_s (the sustained-excursion clock) below, same as
      * always -- only a zone that stays BOTH outside the band AND idle for
      * two full DRIFT_PERIODs (one to arm, one sustained after) trips. */
-    float abs_error = fabsf(in->setpoint_c - in->measurement_c);
-    float drift_band_c = effective_f(cfg->drift_hysteresis_c, DRIFT_HYSTERESIS_C);
-    float drift_period_cfg = effective_f(cfg->drift_period_s, DRIFT_PERIOD_S);
-    bool settled_or_timed_out = state->at_setpoint_window_active || (state->idle_elapsed_s >= drift_period_cfg);
-    if (abs_error <= drift_band_c) {
-        state->at_setpoint_window_active = true;
-        state->at_setpoint_elapsed_s = 0.0f;
-    } else if (settled_or_timed_out) {
-        state->at_setpoint_elapsed_s += in->dt_s;
-        if (state->at_setpoint_elapsed_s >= drift_period_cfg) {
-            trip(state, THERMAL_GUARD_TRIP_DRIFT, "drifted >%.0fC from setpoint for %.0fs%s",
-                 (double)drift_band_c, (double)state->at_setpoint_elapsed_s,
-                 state->at_setpoint_window_active ? " after settling" : " (armed by run duration, never settled)");
-            return true;
+    /* in->no_setpoint: this caller's setpoint_c is a placeholder, not a
+     * target (thermal_guard_input_t's doc comment) -- "drifted from
+     * setpoint" is not a question that has an answer here, so guard 4 stays
+     * entirely inert rather than computing an abs_error from a number that
+     * was never meant to be compared against measurement_c. This also skips
+     * the idle-arming backstop above ever mattering: idle_elapsed_s still
+     * accumulates (harmless, unread by anything else), but nothing below
+     * reads settled_or_timed_out when no_setpoint is set. */
+    if (!in->no_setpoint) {
+        float abs_error = fabsf(in->setpoint_c - in->measurement_c);
+        float drift_band_c = effective_f(cfg->drift_hysteresis_c, DRIFT_HYSTERESIS_C);
+        float drift_period_cfg = effective_f(cfg->drift_period_s, DRIFT_PERIOD_S);
+        bool settled_or_timed_out = state->at_setpoint_window_active || (state->idle_elapsed_s >= drift_period_cfg);
+        if (abs_error <= drift_band_c) {
+            state->at_setpoint_window_active = true;
+            state->at_setpoint_elapsed_s = 0.0f;
+        } else if (settled_or_timed_out) {
+            state->at_setpoint_elapsed_s += in->dt_s;
+            if (state->at_setpoint_elapsed_s >= drift_period_cfg) {
+                trip(state, THERMAL_GUARD_TRIP_DRIFT, "drifted >%.0fC from setpoint for %.0fs%s",
+                     (double)drift_band_c, (double)state->at_setpoint_elapsed_s,
+                     state->at_setpoint_window_active ? " after settling" : " (armed by run duration, never settled)");
+                return true;
+            }
         }
     }
 

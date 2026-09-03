@@ -143,6 +143,37 @@ typedef struct {
     bool  sensor_ok;
     float measurement_c;
     float setpoint_c;
+    /* setpoint_c means two different things depending on the caller, and
+     * that ambiguity has already caused one real regression (guard 4's idle-
+     * arming backstop, 2026-09-03): profile_executor.c fills setpoint_c with
+     * a genuine target temperature the PID loop is driving toward. autotune_
+     * engine.c's STEP method has no target at all -- open-loop, it fills
+     * setpoint_c with a placeholder (historically the zone's max_temp_c
+     * ceiling, or raw_c+headroom with no ceiling configured) purely to keep
+     * guard 1's `error = setpoint_c - measurement_c` positive so guard 1's
+     * rise-check branch (not guard 2's falling-rate branch) is what
+     * evaluates a stalled STEP run. That placeholder is not a setpoint by
+     * any definition a *drift-from-setpoint* check can use.
+     *
+     * no_setpoint makes that distinction explicit instead of leaving a
+     * consumer to infer it from setpoint_c's magnitude. Default false (a
+     * plain struct literal that doesn't name it, or memset(0), reads as
+     * "setpoint_c is real") so every existing producer -- profile_executor.c
+     * included, which this field's addition must not require touching --
+     * keeps its current behavior with no source change. Only a producer
+     * whose setpoint_c is a placeholder, not a target, sets this true.
+     *
+     * Any NEW guard that reads setpoint_c to mean "the target this zone is
+     * trying to reach" (guard 4's drift check is the first; there will be
+     * more) MUST check no_setpoint first and skip its setpoint-dependent
+     * logic when true, exactly as guard 4 now does -- rather than compute
+     * something from a placeholder value and pass every existing test
+     * because profile_executor.c's tests never exercise the other producer.
+     * Guards 1/2, which reason about the SIGN and magnitude of error/rise
+     * rather than "are we near a real target", are deliberately unaffected
+     * by this field -- autotune_engine.c's own progress_rise_check_relaxed
+     * mechanism (below) is what covers STEP's guard 1/2 behavior instead. */
+    bool  no_setpoint;
     float commanded_duty; /* what this tick decided to drive, 0..1, AFTER any
                            * safety-refusal -- guards reason about what was
                            * actually commanded, not what control wanted */

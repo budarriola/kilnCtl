@@ -2577,6 +2577,18 @@ static void autotune_engine_tick_locked(void)
                                 ? raw_c
                           : (s_at.guard_cfg.max_temp_c > 0.0f ? s_at.guard_cfg.max_temp_c
                                                                : raw_c + step_test_guard_headroom_c),
+        /* STEP has no real setpoint at any state -- setpoint_c above is
+         * purely a placeholder to keep guard 1's error sign positive (or, in
+         * SETTLING, pinned harmlessly at 0; see that comment block above).
+         * no_setpoint tells thermal_guard.c's guard 4 (drift-at-setpoint) not
+         * to treat that placeholder as a real target -- see thermal_guard.h's
+         * doc comment on the field. Without this, guard 4 read STEP's
+         * max_temp_c-ceiling placeholder as if it were a genuine setpoint and
+         * could false-trip a healthy step test once idle_elapsed_s armed its
+         * backstop (e.g. a step_duty configured below progress_duty_min).
+         * RELAY has a genuine oscillation setpoint (relay_setpoint_c) and
+         * leaves guard 4 fully armed, as before. */
+        .no_setpoint = (s_at.method != AUTOTUNE_METHOD_RELAY),
         /* STEP method: the INTENDED duty (want_duty, pre-PWM), not the
          * post-PWM want_relay_on-gated value -- found while testing review
          * finding 3 (progress_duty_min override) at a realistic sub-1.0
