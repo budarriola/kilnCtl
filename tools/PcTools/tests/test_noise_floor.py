@@ -151,6 +151,52 @@ class ComputeRepeatSpreadTests(NoiseFloorTestCase):
 
 
 # ---------------------------------------------------------------------------
+# cooldown sidecar rejection
+# ---------------------------------------------------------------------------
+#
+# Found while validating the noise-floor pipeline against the first three
+# real profile-7 repeat captures (2026-09-02): a `*.cooldown.jsonl` sidecar
+# parses as a perfectly fine lone "run" on its own (it never trips the
+# multi-run boundary check pid_ab_compare.load_run already enforces, since
+# that check is a within-file one) and was being silently folded into a
+# repeat set as an extra "run", corrupting sample counts per-key (some keys
+# n=3, some n=2) because the sidecar only carries one segment's worth of
+# rows. compute_repeat_spread and build_start_report must refuse any
+# cooldown-sidecar path outright rather than analysing it.
+
+class CooldownSidecarRejectionTests(NoiseFloorTestCase):
+    def cooldown_path(self):
+        # Real name shape: "<run>.jsonl.cooldown.jsonl" -- reuse the excerpt
+        # fixture's content, only the path needs the sidecar suffix for the
+        # guard (a path-based check, not a content sniff) to trip.
+        return _write_offset_copy(self._tmp, EXCERPT, 0.0, "run1.jsonl.cooldown.jsonl")
+
+    def test_compute_repeat_spread_rejects_cooldown_sidecar(self):
+        with self.assertRaises(ValueError):
+            nf.compute_repeat_spread([EXCERPT, self.cooldown_path()])
+
+    def test_compute_repeat_spread_rejection_names_the_path(self):
+        cooldown = self.cooldown_path()
+        with self.assertRaises(ValueError) as ctx:
+            nf.compute_repeat_spread([EXCERPT, cooldown])
+        self.assertIn(cooldown, str(ctx.exception))
+        self.assertIn("cooldown", str(ctx.exception).lower())
+
+    def test_build_start_report_rejects_cooldown_sidecar(self):
+        with self.assertRaises(ValueError):
+            nf.build_start_report([EXCERPT, self.cooldown_path()])
+
+    def test_build_artifact_rejects_cooldown_sidecar(self):
+        with self.assertRaises(ValueError):
+            nf.build_artifact([EXCERPT, self.cooldown_path()])
+
+    def test_normal_repeats_unaffected_by_the_guard(self):
+        # The guard must not false-positive on ordinary run captures.
+        stats = nf.compute_repeat_spread(self.repeat_paths())
+        self.assertTrue(any(s.n == 3 for s in stats))
+
+
+# ---------------------------------------------------------------------------
 # build_artifact / load_artifact / floor_lookup
 # ---------------------------------------------------------------------------
 

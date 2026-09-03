@@ -135,6 +135,31 @@ def _flat_metric_values(metrics: dict) -> dict:
     return out
 
 
+#: Suffix used for cooldown sidecar captures (see module docstring / repo
+#: convention: ``<run>.jsonl.cooldown.jsonl``). A sidecar is telemetry
+#: recorded AFTER the run already reached ``state=done`` -- it is not a
+#: repeat firing, and it will happily parse as "one run" on its own (it
+#: rarely trips the multi-run boundary check, since it is its own file), so
+#: nothing upstream of this module catches it. It must be refused explicitly
+#: here rather than silently analysed as if it were an Nth repeat -- see
+#: ``_reject_cooldown_sidecar``.
+COOLDOWN_SIDECAR_SUFFIX = ".cooldown.jsonl"
+
+
+def _reject_cooldown_sidecar(path: str) -> None:
+    """Raise ``ValueError`` if ``path`` is a cooldown sidecar rather than a
+    run capture. Cooldown sidecars are NOT runs (see module docstring and
+    ``COOLDOWN_SIDECAR_SUFFIX``); every path-accepting entry point below
+    calls this before touching the file so one can never be silently folded
+    into a repeat set as an extra "run"."""
+    if path.endswith(COOLDOWN_SIDECAR_SUFFIX):
+        raise ValueError(
+            f"{path}: this is a COOLDOWN SIDECAR (telemetry recorded after "
+            "state=done), not a run capture -- refusing to analyse it as a "
+            "repeat firing. Pass the run capture itself, not its "
+            f"{COOLDOWN_SIDECAR_SUFFIX} sidecar.")
+
+
 def compute_repeat_spread(paths: Sequence[str], band_c: float = 1.0,
                            run_indices: Optional[Sequence[Optional[int]]] = None) -> list:
     """Load each path in ``paths`` as ONE run (via ``pid_ab_compare.load_run``
@@ -144,10 +169,14 @@ def compute_repeat_spread(paths: Sequence[str], band_c: float = 1.0,
     metrics, and return a list of :class:`SpreadStat`, one per
     ``(zone, metric, segment)`` key that appeared in at least one run.
 
-    Requires at least 2 paths -- spread from one run is not a measurement."""
+    Requires at least 2 paths -- spread from one run is not a measurement.
+    Any path that is a cooldown sidecar (see ``_reject_cooldown_sidecar``)
+    raises ``ValueError`` before any file is opened."""
     if len(paths) < 2:
         raise ValueError(
             f"compute_repeat_spread needs at least 2 repeat captures to measure a spread, got {len(paths)}")
+    for path in paths:
+        _reject_cooldown_sidecar(path)
 
     if run_indices is None:
         run_indices = [None] * len(paths)
@@ -356,6 +385,9 @@ def build_start_report(paths: Sequence[str], band_c: float = 1.0,
     condition is simply omitted from the numeric summaries (and counted in
     ``n_missing``), never raises.
     """
+    for path in paths:
+        _reject_cooldown_sidecar(path)
+
     if run_indices is None:
         run_indices = [None] * len(paths)
 
