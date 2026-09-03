@@ -79,6 +79,15 @@ const uint8_t zones_page_html_gz_start[1] = { 0 };
 const uint8_t zones_page_html_gz_end[1] = { 0 };
 const uint8_t safety_config_page_html_gz_start[1] = { 0 };
 const uint8_t safety_config_page_html_gz_end[1] = { 0 };
+// tuning_recommendations_json_start/_end (2026-09-02 host-link fix, commit
+// 333dd4e's build_host_tests.ps1 break): same 1-byte-placeholder convention
+// as the gz pairs above -- these two are ESP-IDF EMBED_FILES symbols with no
+// host-toolchain equivalent, and tuning_rec_get_handler() is never called by
+// these tests (only its extracted tuning_rec_body_len() helper is, with a
+// real synthetic buffer -- see test_tuning_rec_body_len_* below). A 1-byte
+// pair is enough for the linker.
+const uint8_t tuning_recommendations_json_start[1] = { 0 };
+const uint8_t tuning_recommendations_json_end[1] = { 0 };
 
 // ---- ota_http.c's interlock gate --------------------------------------------
 // zones_http.c's POST handler now refuses to rewrite zone config while a
@@ -2928,6 +2937,36 @@ static void test_post_then_get_round_trips_new_fields(void)
               "GET reports the untouched diagonal cell as 0 (never omitted)");
     TEST_CHECK(strstr(s_last_resp_body, "\"settings_source\":255") != NULL,
               "GET reports the posted settings_source (CUSTOM) exactly");
+}
+
+// tuning_rec_body_len() (2026-09-02 host-link fix, commit 333dd4e): the
+// real tuning_recommendations_json_start/_end symbols are ESP-IDF
+// EMBED_FILES symbols this host build cannot reproduce (see this file's
+// placeholder definitions above), so this exercises the extracted length
+// arithmetic directly with a real, deliberately-adjacent synthetic buffer --
+// the exact case the handler's own comment documents: EMBED_TXTFILES
+// appends a NUL after the file content and places _end past it, so the
+// reported length must be (end - start) - 1, never the bare difference.
+static void test_tuning_rec_body_len_strips_the_idf_appended_nul(void)
+{
+    TEST_SECTION("tuning_rec_body_len -- EMBED_TXTFILES trailing-NUL arithmetic");
+
+    // Ordinary case: content "abc" (3 bytes) + IDF's appended NUL (1 byte) =
+    // a 4-byte buffer, exactly like tuning_recommendations_json's real
+    // start/end pair.
+    static const uint8_t buf[] = { 'a', 'b', 'c', '\0' };
+    size_t n = tuning_rec_body_len(buf, buf + sizeof(buf));
+    TEST_CHECK(n == 3, "3 content bytes + 1 appended NUL must report length 3, not 4");
+
+    // Degenerate: start == end (diff 0) must floor at 0, not underflow a
+    // size_t to SIZE_MAX -- the `raw > 0 ? raw - 1 : 0` guard this tests.
+    n = tuning_rec_body_len(buf, buf);
+    TEST_CHECK(n == 0, "start == end must report length 0, not underflow");
+
+    // Degenerate: a 1-byte buffer (just the appended NUL, empty content)
+    // must also report 0, the same floor as start == end.
+    n = tuning_rec_body_len(buf, buf + 1);
+    TEST_CHECK(n == 0, "a 1-byte (NUL-only) buffer must report length 0");
 }
 
 // Coordinator review, 2026-08-31 httpd_worker stack-overflow fix:
@@ -6264,6 +6303,7 @@ void run_test_zones_http(void)
     test_post_coupling_diagonal_must_be_zero();
     test_post_settings_source_self_reference_refused();
     test_post_then_get_round_trips_new_fields();
+    test_tuning_rec_body_len_strips_the_idf_appended_nul();
     test_zones_get_handler_malloc_failure_returns_clean_500();
     test_zones_get_handler_succeeds_when_malloc_does_not_fail();
     test_fuzzy_strength_pct_setter_round_trip_and_bounds();

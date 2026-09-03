@@ -543,27 +543,43 @@ static esp_err_t ct_channel_map_get_handler(httpd_req_t *req)
  * body changes across firmware builds as the campaign's artifact is
  * updated, and a stale cached copy would silently show old recommendations
  * after a flash that carries new evidence. */
+/* REVIEW 2026-09-02 (Opus round 4): -1 for the NUL. EMBED_TXTFILES appends a
+ * null byte and places the _end symbol AFTER it (see the generated
+ * build/tuning_recommendations.json.S: the byte run ends
+ * "... 0x7d, 0x0d, 0x0a, 0x00" and the file's own
+ * tuning_recommendations_json_length symbol is 4152 while _end - _start is
+ * 4153). The sibling *_page_html_gz handlers use the bare difference and get
+ * away with it because a gzip decoder stops at the end of the deflate
+ * stream and ignores the trailing byte -- but JSON.parse() does not: a body
+ * with a trailing NUL throws SyntaxError, zones_page.html's
+ * fetch().then(r => r.json()) catch sets tuningRecArtifact = null, and the
+ * panel reports "no tuning recommendation data on this board yet" for every
+ * request, even with the real campaign artifact embedded. Send the file's
+ * own length, not the file plus the terminator IDF added for C-string use.
+ *
+ * Pulled out of tuning_rec_get_handler() as its own pure function (2026-09-02,
+ * host-link fix for commit 333dd4e) so the host test suite can prove this
+ * arithmetic directly: tuning_recommendations_json_start/_end are ESP-IDF
+ * EMBED_FILES symbols with no host-toolchain equivalent, so
+ * test_zones_http.c can only supply 1-byte placeholder stand-ins for THOSE
+ * two names (same convention as every other *_page_html_gz pair in this
+ * file) -- not a real adjacent start/end pair whose difference means
+ * anything. This helper takes start/end as plain arguments instead, so the
+ * test can hand it a real, deliberately-adjacent synthetic buffer and
+ * verify the "-1 for the trailing NUL, floor at 0" logic itself, independent
+ * of how the real symbols are laid out in flash. */
+static size_t tuning_rec_body_len(const uint8_t *start, const uint8_t *end)
+{
+    const size_t raw = (size_t)(end - start);
+    return raw > 0 ? raw - 1 : 0;
+}
+
 static esp_err_t tuning_rec_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
-    /* REVIEW 2026-09-02 (Opus round 4): -1 for the NUL. EMBED_TXTFILES
-     * appends a null byte and places the _end symbol AFTER it (see the
-     * generated build/tuning_recommendations.json.S: the byte run ends
-     * "... 0x7d, 0x0d, 0x0a, 0x00" and the file's own
-     * tuning_recommendations_json_length symbol is 4152 while
-     * _end - _start is 4153). The sibling *_page_html_gz handlers use the
-     * bare difference and get away with it because a gzip decoder stops at
-     * the end of the deflate stream and ignores the trailing byte -- but
-     * JSON.parse() does not: a body with a trailing NUL throws
-     * SyntaxError, zones_page.html's fetch().then(r => r.json()) catch
-     * sets tuningRecArtifact = null, and the panel reports "no tuning
-     * recommendation data on this board yet" for every request, even with
-     * the real campaign artifact embedded. Send the file's own length, not
-     * the file plus the terminator IDF added for C-string use. */
     const size_t tuning_rec_len =
-        (size_t)(tuning_recommendations_json_end - tuning_recommendations_json_start);
-    return httpd_resp_send(req, (const char *)tuning_recommendations_json_start,
-                           tuning_rec_len > 0 ? tuning_rec_len - 1 : 0);
+        tuning_rec_body_len(tuning_recommendations_json_start, tuning_recommendations_json_end);
+    return httpd_resp_send(req, (const char *)tuning_recommendations_json_start, tuning_rec_len);
 }
 
 esp_err_t zones_http_start(void)
