@@ -446,6 +446,43 @@ def _parse_run_arg(raw: str) -> QueueEntry:
     return QueueEntry(preset_name=preset, profile_id=int(profile_id), log_path=log_path, label=label)
 
 
+def _numbered_log_path(log_path: str, k: int) -> str:
+    """Insert ``_runK`` (1-based) before ``log_path``'s extension, e.g.
+    ``noise_floor_p7.jsonl`` -> ``noise_floor_p7_run1.jsonl``. Used by
+    :func:`expand_repeat` so N repeats of one entry can NEVER land in the
+    same file -- the exact failure mode (a poller left running across a
+    cooldown appended a second firing into one JSONL) that
+    ``log_analysis.MultiRunError`` had to be added to catch after the fact.
+    Guaranteeing distinct files up front is strictly better than detecting
+    the collision downstream."""
+    import os as _os
+    root, ext = _os.path.splitext(log_path)
+    return f"{root}_run{k}{ext}"
+
+
+def expand_repeat(entry: QueueEntry, n: int) -> list:
+    """Turn one :class:`QueueEntry` into ``n`` entries, same preset and
+    profile, each with its own numbered log path (see
+    :func:`_numbered_log_path`) and label -- this is the campaign-queue
+    primitive PID_EXPANSION_PLAN.md SS3.3's noise-floor item needs: N
+    firings of ONE fixed configuration, each independently waiting for a
+    genuinely rested start (``run_entry`` already does that per entry,
+    unconditionally -- expanding to N entries gets the "rest between every
+    repeat" requirement for free, no new waiting logic needed) and captured
+    to a file nothing else can land in."""
+    if n < 1:
+        raise ValueError(f"expand_repeat: n must be >= 1, got {n}")
+    out = []
+    for k in range(1, n + 1):
+        out.append(QueueEntry(
+            preset_name=entry.preset_name,
+            profile_id=entry.profile_id,
+            log_path=_numbered_log_path(entry.log_path, k),
+            label=f"{entry.label or entry.preset_name} run{k}/{n}",
+        ))
+    return out
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     import argparse
 
@@ -456,6 +493,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--run", action="append", required=True, dest="runs",
         metavar="PRESET:PROFILE_ID:LOG_PATH[:LABEL]",
         help="one queued entry; repeat for multiple runs, run in order")
+    parser.add_argument(
+        "--repeat", type=int, default=1, metavar="N",
+        help="repeat the single --run entry N times, same preset+profile, each waiting for "
+             "its own genuinely rested start (run_entry always waits rested first -- this "
+             "just runs it N times). Requires exactly one --run. log_path gets _run1.._runN "
+             "inserted before its extension so no two runs can land in the same file -- the "
+             "noise-floor campaign's turn-key form (PID_EXPANSION_PLAN.md SS3.3).")
     parser.add_argument("--poll-interval-s", type=float, default=DEFAULT_POLL_INTERVAL_S)
     parser.add_argument("--rested-tol-c", type=float, default=DEFAULT_RESTED_TOL_C)
     parser.add_argument("--rested-timeout-s", type=float, default=DEFAULT_RESTED_TIMEOUT_S)
@@ -474,6 +518,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     entries = [_parse_run_arg(r) for r in args.runs]
+    if args.repeat != 1:
+        if len(entries) != 1:
+            parser.error("--repeat requires exactly one --run entry")
+        entries = expand_repeat(entries[0], args.repeat)
+
     cfg = RunQueueConfig(
         host=args.host, poll_interval_s=args.poll_interval_s, rested_tol_c=args.rested_tol_c,
         rested_timeout_s=args.rested_timeout_s, cooldown_s=args.cooldown_s)

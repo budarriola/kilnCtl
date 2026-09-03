@@ -400,5 +400,61 @@ class RunEntryEndToEndTest(unittest.TestCase):
         self.assertEqual(transport.started_profile_id, 7)  # it did start, then faulted
 
 
+# --------------------------------------------------------------------------
+# --repeat / expand_repeat -- the noise-floor campaign's turn-key form
+# (PID_EXPANSION_PLAN.md SS3.3): N repeats of one entry, each with its own
+# log file so no two runs can ever land in one file.
+# --------------------------------------------------------------------------
+
+class ExpandRepeatTest(unittest.TestCase):
+    def test_expand_repeat_produces_n_entries_same_preset_and_profile(self):
+        entry = rq.QueueEntry(preset_name="p7_floor", profile_id=7,
+                               log_path="logs/coupling/noise_floor_p7.jsonl", label="floor")
+        entries = rq.expand_repeat(entry, 5)
+        self.assertEqual(len(entries), 5)
+        for e in entries:
+            self.assertEqual(e.preset_name, "p7_floor")
+            self.assertEqual(e.profile_id, 7)
+
+    def test_expand_repeat_gives_every_entry_a_distinct_log_path(self):
+        entry = rq.QueueEntry(preset_name="p7_floor", profile_id=7,
+                               log_path="logs/coupling/noise_floor_p7.jsonl", label="floor")
+        entries = rq.expand_repeat(entry, 5)
+        paths = [e.log_path for e in entries]
+        # Distinctness is the whole point: two repeats sharing a file is
+        # exactly the near-miss log_analysis.MultiRunError exists to catch
+        # after the fact -- expand_repeat must prevent it up front instead.
+        self.assertEqual(len(paths), len(set(paths)))
+
+    def test_expand_repeat_log_path_naming(self):
+        entry = rq.QueueEntry(preset_name="p7_floor", profile_id=7,
+                               log_path="logs/coupling/noise_floor_p7.jsonl", label="floor")
+        entries = rq.expand_repeat(entry, 3)
+        self.assertEqual(entries[0].log_path, "logs/coupling/noise_floor_p7_run1.jsonl")
+        self.assertEqual(entries[1].log_path, "logs/coupling/noise_floor_p7_run2.jsonl")
+        self.assertEqual(entries[2].log_path, "logs/coupling/noise_floor_p7_run3.jsonl")
+
+    def test_expand_repeat_labels_identify_the_run_number(self):
+        entry = rq.QueueEntry(preset_name="p7_floor", profile_id=7,
+                               log_path="x.jsonl", label="floor")
+        entries = rq.expand_repeat(entry, 2)
+        self.assertIn("run1/2", entries[0].label)
+        self.assertIn("run2/2", entries[1].label)
+
+    def test_expand_repeat_rejects_n_below_one(self):
+        entry = rq.QueueEntry(preset_name="p7_floor", profile_id=7, log_path="x.jsonl")
+        with self.assertRaises(ValueError):
+            rq.expand_repeat(entry, 0)
+
+    def test_main_repeat_requires_exactly_one_run(self):
+        with self.assertRaises(SystemExit):
+            rq.main([
+                "--host", "203.0.113.10",
+                "--run", "p7_floor:7:a.jsonl",
+                "--run", "p7_floor:7:b.jsonl",
+                "--repeat", "3",
+            ])
+
+
 if __name__ == "__main__":
     unittest.main()
