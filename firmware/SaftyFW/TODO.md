@@ -209,19 +209,22 @@ gating items are:
       `link_task_handle_set_clock()` both exist and are dispatched, with the
       `min()` ceiling clamp living in `safety_guards.c` and covered by
       property tests sweeping `1e30`/`NaN`/`±Inf` (verified 2026-08-22).
-- [ ] `KilnFW`'s `uart_protocol.c` delegating framing/CRC, proven byte-identical
-      to the pre-refactor output **before** the old code is deleted
+- [x] `KilnFW`'s `uart_protocol.c` delegating framing/CRC, proven byte-identical
+      to the pre-refactor output. **Re-swept 2026-09-03: already shipped.**
+      `App/drivers/espInterfaces/uart_protocol.c`'s `frame_and_send()`
+      (lines 97-113) calls `kilnlink_stuff()` directly, and the CRC sites
+      (lines 165, 204, 740, 847) call `kilnlink_crc16_ccitt_false()`
+      directly. The thin wrapper was deliberately removed 2026-08-27 so its
+      own name would stop tripping the isolation grep, proven byte-identical
+      in `App/test/test_uart_protocol_link_delegate.c` before removal.
 - [x] CI grep: no CRC or byte-stuffing implementation outside `CommonFW` —
       2026-08-22, `tools/check_link_impl_isolation.ps1`. Standalone (matching
-      `check_isolation.ps1`'s convention), not build-wired. **It currently
-      reports real hits** in `KilnFW`'s `uart_protocol.c`
-      (`crc16_ccitt_false()`/`stuff_and_send()`), the un-done delegation item
-      above. That is the check working, not a false positive — it goes green
-      when the item above lands. Its `UnitTestFw` host-test twin used to add
-      a second hit here; `firmware/UnitTestFw` was restored 2026-08-28 (the
-      bench-fixture firmware that had replaced it was removed), so that
-      second hit may be back too — re-run the check rather than assuming it
-      is still one hit.
+      `check_isolation.ps1`'s convention), not build-wired. **Re-run
+      2026-09-03: now green.** Output: "Link implementation isolation check
+      passed: no CRC/byte-stuffing implementation found outside
+      firmware/CommonFW." The "real hits" this entry used to report were the
+      pre-delegation `uart_protocol.c`, fixed by the item above — this is
+      the check working, not a false positive resolving itself.
 
 ## Phase 2 — Skeleton
 
