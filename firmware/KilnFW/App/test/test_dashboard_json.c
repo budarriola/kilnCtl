@@ -68,6 +68,8 @@ static void fill_worst_case_zone(profile_exec_zone_status_t *z, uint8_t zi)
     z->ramp_lag_held_s = -1234.56f;
     z->ramp_lag_commanded_rate_c_per_hr = -1234.56f;
     z->ramp_lag_achieved_rate_c_per_hr = -1234.56f;
+    /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit worst case. */
+    z->ramp_dwell_credit_s = -1234.56f;
     /* firing_stats worst case (PID_EXPANSION_PLAN.md Phase 7a dashboard
      * wiring, dashboard_json.h's DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE sizing
      * note): every %.2f/%.4f field at its widest plausible negative value,
@@ -227,6 +229,12 @@ static void test_exec_status_json_is_complete_and_well_formed_at_3_zones(void)
               "must contain ramp_lag_commanded_rate_c_per_hr");
     TEST_CHECK(strstr(json, "\"ramp_lag_achieved_rate_c_per_hr\"") != NULL,
               "must contain ramp_lag_achieved_rate_c_per_hr");
+
+    /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit must survive the same
+     * worst-case render, present in every zone object. */
+    int dwell_credit_objects = 0;
+    for (const char *p = json; (p = strstr(p, "\"ramp_dwell_credit_s\":")) != NULL; p += 22) dwell_credit_objects++;
+    TEST_CHECK(dwell_credit_objects == 3, "all 3 zones must carry ramp_dwell_credit_s");
 }
 
 /* dashboard_format_firing_history_json() -- GET /api/firing_history's body.

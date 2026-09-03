@@ -105,6 +105,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         "\"ff_membership_change_count\":%lu,"
                         "\"ramp_lag_sustained\":%s,\"ramp_lag_held_s\":%.2f,"
                         "\"ramp_lag_commanded_rate_c_per_hr\":%.2f,\"ramp_lag_achieved_rate_c_per_hr\":%.2f,"
+                        "\"ramp_dwell_credit_s\":%.2f,"
                         "\"firing_stats\":{\"mean_error_c\":%.2f,\"max_overshoot_c\":%.2f,"
                         "\"max_overshoot_elapsed_s\":%lu,\"max_overshoot_segment\":%u,"
                         "\"max_undershoot_c\":%.2f,\"max_undershoot_elapsed_s\":%lu,"
@@ -121,6 +122,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         (unsigned long)z->ff_membership_change_count,
                         z->ramp_lag_sustained ? "true" : "false", (double)z->ramp_lag_held_s,
                         (double)z->ramp_lag_commanded_rate_c_per_hr, (double)z->ramp_lag_achieved_rate_c_per_hr,
+                        (double)z->ramp_dwell_credit_s,
                         (double)fs->mean_error_c, (double)fs->max_overshoot_c,
                         (unsigned long)fs->max_overshoot_elapsed_s, fs->max_overshoot_segment,
                         (double)fs->max_undershoot_c, (unsigned long)fs->max_undershoot_elapsed_s,

@@ -254,6 +254,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
                                            ? s_exec.stretch_by_segment_s[s_exec.segment_index]
                                            : 0.0f;
         out->ramp_stretch_total_s = s_exec.stretch_total_s;
+        out->ramp_dwell_credit_applied_s = s_exec.dwell_credit_applied_s;
         out->run_start_c = s_exec.run_start_c;
         out->total_elapsed_s = s_exec.total_elapsed_s;
         out->warm_started = s_exec.warm_started;
@@ -271,7 +272,13 @@ void profile_executor_get_status(profile_exec_status_t *out)
             const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index < s_exec.profile.segment_count
                                                                          ? s_exec.segment_index
                                                                          : s_exec.profile.segment_count - 1];
-            uint32_t dwell_total_s = seg->dwell_min * 60u;
+            /* PID_EXPANSION_PLAN.md sec 7.3: mirror the same dwell_credit_
+             * applied_s subtraction the control tick's ready_to_advance
+             * check uses (profile_executor.c), so this reported remaining
+             * time agrees with when the schedule will actually advance --
+             * 0.0f (no change) whenever the flag was off at this dwell's
+             * entry, same bit-identical-with-flag-off guarantee. */
+            uint32_t dwell_total_s = seg->dwell_min * 60u - (uint32_t)s_exec.dwell_credit_applied_s;
             out->dwell_remaining_s = s_exec.segment_elapsed_s >= dwell_total_s ? 0 : dwell_total_s - s_exec.segment_elapsed_s;
         }
 
@@ -339,6 +346,10 @@ void profile_executor_get_status(profile_exec_status_t *out)
                     }
                 }
             }
+
+            /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit, ALWAYS reported
+             * (same convention as ramp_lag_* just above). */
+            zo->ramp_dwell_credit_s = z->dwell_credit_s;
         }
 
         if (s_exec.state == PROFILE_EXEC_FAULTED) {

@@ -351,6 +351,36 @@ typedef struct {
     bool     lag_sustained;       /* lag_held_s >= EXEC_SUSTAINED_LAG_S -- the reportable condition */
     float    lag_start_actual_c;  /* actual_c snapshot at the tick lag_held_s left 0, for the
                                    * achieved-rate arithmetic reported alongside lag_sustained */
+
+    /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit. Heat-work-weighted
+     * accumulator -- banked ONLY while this zone is lagging (the same
+     * instantaneous s_exec.ramp_lock_lagging_mask bit lag_held_s above
+     * watches) AND actual_c has already entered the half-cone-step band
+     * below the CURRENT ramp segment's own target_c (cone_table_band_
+     * bottom_c()), mirroring tools/PcTools/src/kilnctrl/ramp_assist.py's
+     * z.credit_s accrual (~line 301) exactly: `credit += weight * dt`.
+     * ALWAYS updated regardless of ramp_assist_cfg_enabled() -- see this
+     * zone's lag_held_s comment just above for why (owner wants visibility
+     * with assist off); see profile_executor.c's dwelling-transition code
+     * for why SPENDING this is gated even though banking it is not.
+     * Reset to 0.0f every time a dwell is entered (spent once, whether or
+     * not the spend was actually applied to the dwell timer -- same
+     * "z.credit_s = 0.0" unconditional reset ramp_assist.py's DwellStep
+     * branch uses regardless of its own apply_dwell_credit flag). */
+    float    dwell_credit_s;
+    /* Independent audit accumulator: computed at the IDENTICAL accrual
+     * gate as dwell_credit_s above, on its OWN separate cone_table_heat_
+     * work_weight() call and its own separate `+=` statement -- never
+     * derived from dwell_credit_s. This is the firmware analogue of
+     * ramp_assist.py's credit_reference_heat_s / credit_audit_pct
+     * (PID_EXPANSION_PLAN.md sec 7.3's "DEFECT 1" writeup): in correct
+     * code the two totals track each other to float precision for any
+     * schedule, but a regression confined to the real dwell_credit_s
+     * accrual line leaves this one untouched, so the two diverge by
+     * exactly the size of the regression -- see test_dwell_credit_audit_
+     * tracks_real_accrual() (and its adversarial negative test) in
+     * test_profile_executor_prestart.c. Reset alongside dwell_credit_s. */
+    float    dwell_credit_audit_s;
 } zone_runtime_t;
 
 /* TODO relay/IO segments: per-segment runtime tracking, one slot per
@@ -467,6 +497,27 @@ typedef struct {
      * run() like the rest of this struct's per-run state. */
     float stretch_by_segment_s[PROFILE_MAX_SEGMENTS];
     float stretch_total_s;
+
+    /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit -- last spend actually
+     * applied to a dwell's timer, in seconds. 0.0f for the whole life of a
+     * run that never lagged near a target, AND (load-bearing) 0.0f for the
+     * whole life of a run started with ramp_assist_cfg_enabled() false --
+     * per-zone dwell_credit_s (zone_runtime_t) still banks and is still
+     * reset at every dwell entry with the flag off (reporting stays live),
+     * this field specifically only reflects what was actually SPENT against
+     * segment_elapsed_s/dwell_min, which is the one piece gated on the flag.
+     * See profile_executor.c's dwelling-transition code (the "if
+     * (s_exec.target_c == seg->target_c)" branch) for where this is set,
+     * and ramp_assist_dwell_credit_spend() (profile_executor_ramp_assist.c)
+     * for the arithmetic -- min() across every active, non-faulted zone's
+     * own dwell_credit_s, because unlike ramp_assist.py's per-zone
+     * simulated dwell timers, this executor has exactly ONE shared
+     * segment_elapsed_s/dwelling pair across every zone (see this struct's
+     * doc comment further up): applying the smallest zone's earned credit
+     * is the conservative choice -- no zone is ever credited for heat work
+     * it did not itself accrue. Zeroed by profile_executor_run() like the
+     * rest of this struct's per-run state. */
+    float dwell_credit_applied_s;
 
     /* zones_config_generation() as of the last time this run read zone
      * settings (TODO.md 6A.7, "config reload while running"). Comparing one
@@ -636,6 +687,38 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg);
 void ramp_assist_zone_lag_tick(zone_runtime_t *z, bool lagging_now, float dt_s);
 void ramp_assist_stretch_tick(s_exec_state_t *ex, uint8_t segment_index, bool assist_enabled,
                               bool ramping_now, bool lock_held_now, float dt_s);
+
+/* PID_EXPANSION_PLAN.md sec 7.3: dwell credit. ALWAYS accrues (not gated on
+ * assist_enabled -- see zone_runtime_t.dwell_credit_s's own doc comment);
+ * `segment_target_c` is the CURRENT ramp segment's own final target (i.e.
+ * profile_segment_t.target_c, NOT the moving s_exec.target_c a ramp is
+ * still interpolating toward -- mirrors ramp_assist.py's zone_active_
+ * target_c() using step.target_c, not z.commanded_c). No-ops (banks
+ * nothing) when `ramping_now` or `lagging_now` is false, or when
+ * cone_table reports segment_target_c out of its covered range. */
+void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool lagging_now,
+                                   float segment_target_c, float dt_s);
+
+/* Computes the seconds to actually shorten a fresh dwell's timer by, given
+ * every active/non-faulted zone's currently-banked dwell_credit_s, and
+ * resets EVERY active zone's dwell_credit_s (and dwell_credit_audit_s) to
+ * 0.0f as a side effect -- "spent once", whether or not the spend this call
+ * returns is ever applied (ramp_assist.py's DwellStep branch does the same
+ * unconditional `z.credit_s = 0.0` regardless of apply_dwell_credit). When
+ * `assist_enabled` is false the return value is always 0.0f (nothing is
+ * ever subtracted from segment_elapsed_s/dwell_min with the flag off --
+ * this is the one gated half of dwell credit, see ramp_assist_cfg.h), but
+ * the reset-to-0 side effect still happens either way, matching the
+ * reference implementation exactly. The return value is the MINIMUM of
+ * every active, non-faulted zone's own banked credit (never a zone's own
+ * value alone) because this executor has exactly one shared segment_
+ * elapsed_s/dwelling pair across all zones, unlike ramp_assist.py's
+ * independent per-zone dwell timers -- see s_exec_state_t.dwell_credit_
+ * applied_s's doc comment for why min() is the conservative choice. Always
+ * clamped to [0, nominal_dwell_s] -- never a negative dwell. A run with no
+ * active zones returns 0.0f. */
+float ramp_assist_dwell_credit_spend(s_exec_state_t *ex, float nominal_dwell_s,
+                                     bool assist_enabled);
 
 /* ---- history ring buffer unpack (profile_executor.c; history_pack()/the
  * pack-temp/unpack-temp helpers stay static there, only used by the same

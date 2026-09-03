@@ -347,6 +347,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.ramp_lock_lagging_mask = 0;
     memset(s_exec.stretch_by_segment_s, 0, sizeof(s_exec.stretch_by_segment_s));
     s_exec.stretch_total_s = 0.0f;
+    /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit -- a previous run's last
+     * applied spend has no meaning against a freshly (re)started schedule,
+     * same "starts owing nothing" reasoning as stretch_total_s just above.
+     * Per-zone dwell_credit_s/dwell_credit_audit_s are zeroed by the
+     * memset(s_exec.zones, ...) a few lines down. */
+    s_exec.dwell_credit_applied_s = 0.0f;
     s_exec.fault_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
     s_exec.global_fault_source = 0;

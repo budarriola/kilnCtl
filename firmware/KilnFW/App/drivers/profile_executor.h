@@ -505,6 +505,14 @@ typedef struct {
     float    ramp_lag_held_s;
     float    ramp_lag_commanded_rate_c_per_hr;
     float    ramp_lag_achieved_rate_c_per_hr;
+
+    /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit, reported REGARDLESS of
+     * ramp_assist_enabled (same "accumulate/report always, spend gated"
+     * split as the lag fields just above) -- live heat-work-seconds this
+     * zone has banked toward its next dwell, reset to 0 the instant that
+     * dwell is entered whether or not the flag was on to actually spend it.
+     * See zone_runtime_t.dwell_credit_s (profile_executor_internal.h). */
+    float    ramp_dwell_credit_s;
 } profile_exec_zone_status_t;
 
 typedef struct {
@@ -535,6 +543,15 @@ typedef struct {
      * per-segment array (dashboard_json.h's per-field buffer budget). */
     float    ramp_stretch_segment_s;
     float    ramp_stretch_total_s;
+
+    /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit actually SPENT against
+     * the most recent dwell's timer, in seconds -- 0.0f for a run started
+     * with ramp_assist_cfg_enabled() false (load-bearing: dwell timing must
+     * stay bit-identical with the flag off, see ramp_assist_cfg.h). Mirrors
+     * ramp_stretch_total_s's "0 whole-run-life unless assist actually
+     * changed something" shape. See s_exec_state_t.dwell_credit_applied_s
+     * (profile_executor_internal.h) for the exact accumulation/reset rule. */
+    float    ramp_dwell_credit_applied_s;
     profile_exec_zone_status_t zones[MAX31856_CHANNEL_COUNT];
 
     /* Duration-model inputs for /api/profile_exec's total_planned_s/

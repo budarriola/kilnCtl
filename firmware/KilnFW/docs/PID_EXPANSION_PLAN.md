@@ -1941,7 +1941,7 @@ and the ramp ceiling are already re-checked at firing start in
 `profile_executor_run.c` (~line 231-321, ~line 505-528); the achievability
 gate belongs beside those checks, not as a separate pass.
 
-### 7.3 Dwell credit — NOT STARTED
+### 7.3 Dwell credit — FIRMWARE LANDED (2026-09-03, see §7.3.3)
 
 Heat-work-weighted accumulator, active only while the kiln is not rising at
 the desired rate, band from the segment target down half a cone step (uses
@@ -2068,6 +2068,23 @@ unambiguous discrimination between 0.5x/1.0x/2.0x/3.0x, which is what a
 correctness metric for this accumulator actually needs to provide. The
 raw-seconds regression (`w * dt` → `dt`) now reads ~3056%/3180%/3135%,
 not a suspicious exact zero.
+
+**Scope of what this proves — `credit_audit_pct` is a two-writer
+consistency check, not a correctness proof for the model.** Both the real
+accrual line and the audit line share the same weight function, the same
+`cone_table.band_bottom_c` band, the same target, the same accrual gate,
+and the same tick loop — so it detects only an ACCRUAL/SPEND
+IMPLEMENTATION SLIP between those two statements. It is blind to any
+error shared by both writers, because a shared error moves both sides of
+the ratio together and cancels out. Confirmed by two mutations that left
+it unmoved on this module's reference schedule: doubling the credit
+band's half-width moved `credit_s` from 32.45 to 132.16 (+307%), and
+raising Ea from 300 kJ/mol to 500 kJ/mol moved `credit_s` from 32.45 to
+27.26 (−16%) — `credit_audit_pct` read exactly 0.0% on every zone in both
+cases. The weight function, the Ea choice, and the band width itself are
+**not** validated by this check, and are not validated by any metric in
+this module — see `cone_table.h`'s Ea-sensitivity note (§7.3.1/7.3.2) for
+the current honest error range on Ea.
 
 A physically-grounded alternative was also tried and rejected before
 `credit_audit_pct` was adopted: comparing real heat work integrated over
@@ -2205,6 +2222,154 @@ fixed in §7.3.1. Verified numerically equivalent across the table (between
 cones, on/above/below a cone, both range boundaries) and removed; the
 simulator now calls `cone_table.band_bottom_c` directly, so the simulator
 and the firmware share exactly one band-width formula.
+
+### 7.3.3 Firmware port — DONE (2026-09-03)
+
+Ported the algorithm validated in `ramp_assist.py` (§7.3 above) onto the
+ESP32-S3 executor, in `profile_executor_ramp_assist.c`'s two new functions
+(alongside the sec 7.1/7.2 lag/stretch functions already there):
+
+- `ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool
+  lagging_now, float segment_target_c, float dt_s)` -- accrual, ported line
+  for line from `ramp_assist.py`'s RampStep branch: `in_band = band_bottom
+  <= actual_c < target_c`; `if lagging and in_band: credit += weight * dt`.
+  `segment_target_c` is the profile segment's own final `target_c`, not the
+  moving `s_exec.target_c` a ramp is still interpolating toward (mirrors
+  `zone_active_target_c()`'s use of `step.target_c`). Calls `cone_table_
+  band_bottom_c()`/`cone_table_heat_work_weight()` (both already firmware-
+  side, §7.3.1/7.3.2); an out-of-range target (either function returning
+  non-OK) banks nothing rather than crashing or guessing. **Always runs**,
+  regardless of `ramp_assist_cfg_enabled()` -- same "accrue/report always"
+  convention §7.1/7.4's sustained-lag fields already established, so an
+  operator gets live visibility into what the feature would be doing with
+  the flag off. Also fills an independent audit accumulator
+  (`zone_runtime_t.dwell_credit_audit_s`) on its own separate `cone_table_
+  heat_work_weight()` call, the firmware analogue of `ramp_assist.py`'s
+  `credit_reference_heat_s` (the DEFECT 1 lesson above, ported so a future
+  regression confined to the real accrual line is visible on the firmware
+  side too, not just caught in the simulator).
+
+- `ramp_assist_dwell_credit_spend(s_exec_state_t *ex, float nominal_dwell_s,
+  bool assist_enabled)` -- spend, called once per dwell entry (both
+  transition shapes: the normal ramp-reaches-target case and the
+  `ramp_c_per_hr<=0` instant-jump case, `profile_executor.c`'s dwelling-
+  transition code). Mirrors `ramp_assist.py`'s DwellStep branch:
+  `spend = credit if apply_dwell_credit else 0.0`, clamped to
+  `[0, nominal_dwell_s]`, and **every** active/non-faulted zone's
+  `dwell_credit_s`/`dwell_credit_audit_s` is reset to 0 unconditionally
+  (the reference implementation's own `z.credit_s = 0.0`, outside its
+  `apply_dwell_credit` branch -- "spent once" whether or not the spend was
+  actually applied). One firmware-specific adaptation, forced by an
+  architectural difference from the simulator: this executor has exactly
+  ONE shared `segment_elapsed_s`/`dwelling` pair across every active zone
+  (`s_exec_state_t`), not `ramp_assist.py`'s independent per-zone dwell
+  timers, so the single spend value applied to that shared timer is the
+  **minimum** of every active, non-faulted zone's own banked credit --
+  never any zone's alone. Conservative direction (matches `cone_table.h`'s
+  own documented under-credit-is-safe stance): no zone is ever credited
+  for heat work it did not itself accrue, at the cost of one heavily-
+  lagging zone capping every other zone's payback for that dwell.
+
+GATING, exactly as required: `ramp_assist_dwell_credit_tick()`'s accrual
+(and its report-only fields) is unconditional; `ramp_assist_dwell_credit_
+spend()`'s RETURN VALUE is the only gated piece -- `assist_enabled ==
+false` always returns 0.0, so `profile_executor.c`'s dwelling-transition
+code always records `s_exec.dwell_credit_applied_s = 0.0f` for that run,
+and the dwell's own `ready_to_advance` check (`segment_elapsed_s >=
+seg->dwell_min*60u - (uint32_t)dwell_credit_applied_s`) reduces to exactly
+`segment_elapsed_s >= seg->dwell_min*60u` -- the pre-existing expression,
+bit-identical, with the flag off. Proven by `ramp_assist_dwell_credit_
+spend()`'s own gated-on-flag host test plus an adversarial mutation
+(removing the `if (!assist_enabled) return 0.0f;` gate) that reliably
+fails that same test -- see below; a full FreeRTOS-task-driven bit-
+identical proof through the live tick loop was not attempted, because
+`test_profile_executor_prestart.c`'s own header comment already documents
+that this file cannot drive `profile_executor_run()`'s real control task
+without a task harness it deliberately does not build (see that file's
+"needs a whole task harness" note) -- so this proof is at the level of
+the two functions that changed, not an end-to-end run.
+
+Reporting (dashboard only, per the buffer budget below -- **not** added to
+`GET /api/status`, which the plan flagged as having only ~129B headroom):
+`profile_exec_zone_status_t.ramp_dwell_credit_s` (live per-zone banked
+credit, always reported) and `profile_exec_status_t.ramp_dwell_credit_
+applied_s` (top-level, last spend actually applied -- 0.0 unless assist
+was on at that dwell's own entry), both wired into `GET /api/profile_exec`
+(`dashboard_json.c`'s `append_zone_status_json()`, `control_fields==false`
+shape only -- `/api/control` untouched). `dashboard_json.h`'s
+`DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE` worst-case-per-zone figure was
+472B (Phase 7a) -> 616B (§7.1/7.4's four lag fields) -> **648B** (one more
+`"ramp_dwell_credit_s":-1234.56,` field, 32B: 8B value + 24B key/
+punctuation), still against the 1024B/zone allowance -- >375B headroom
+remains. `test_dashboard_json.c`'s `fill_worst_case_zone()`/worst-case
+render test were extended with the new field so a future addition is
+caught the same way §7.1/7.4's fields already are.
+
+Host-side discrimination check (owner asked whether an equivalent to
+`ramp_assist.py`'s `ScaleSweepDiscriminatesCreditErrorsTests` -- proving
+its `credit_audit_pct` metric returns exactly `(SCALE-1)*100%` for a
+0.5x/2x/3x-scaled credit -- is possible on the C side): concluded a direct
+port of that SPECIFIC sweep does not fit cleanly, because the firmware's
+`dwell_credit_audit_s` is not a percentage metric computed after the fact
+against a whole simulated run -- it is a live, independent per-tick
+accumulator compared directly to `dwell_credit_s` inside the SAME executor
+instance, so there is no separate "scaled copy of the run" to sweep a
+SCALE factor across without rewriting the accrual call site itself for
+each sweep point. What IS built and landed instead, proven equally
+discriminating by direct mutation (see below): the two accumulators are
+asserted to match to float precision in the correct-code case
+(`test_dwell_credit_tick_accrues_while_lagging_in_band`), and a mutation
+confined to the real `dwell_credit_s` accrual line (weight dropped, raw
+`dt_s` banked instead) reliably diverges the two -- i.e. this IS the
+audit-catches-a-scaled-regression property, just checked directly rather
+than via a synthesized percentage metric, since firmware has no
+"percentage vs. a separately-run baseline" concept to compute one against.
+
+MUTATION TESTING (per this task's own requirement -- every test proven to
+actually fail before being trusted): four independent single-line
+mutations were applied to `profile_executor_ramp_assist.c`, the affected
+test(s) run, the real failure text captured, then reverted:
+
+1. Accrual line `z->dwell_credit_s += w * dt_s;` -> `+= dt_s;` (raw
+   seconds, unweighted -- the exact DEFECT 1 shape from `ramp_assist.py`'s
+   own investigation above). Failed 4 checks, including the audit-vs-real
+   divergence this independent accumulator exists to catch:
+   `weight is in [0,1], so credit must be < raw dt_s (10.0)`,
+   `the independent audit accumulator must match the real one exactly in
+   healthy code`, `weight at the band bottom must be exactly 0.0`,
+   `closer to target must earn MORE credit per tick than closer to the
+   band bottom`.
+2. `ramp_assist_dwell_credit_spend()`'s `if (!assist_enabled) return
+   0.0f;` gate deleted. Failed exactly the gating test:
+   `assist_enabled == false must apply ZERO seconds of credit to the
+   dwell -- dwell timing must stay bit-identical with the flag off`.
+3. The per-zone minimum selection (`z->dwell_credit_s < min_credit_s`)
+   flipped to `>` (max instead of min). Failed:
+   `must apply the SMALLER of the two active zones' credit, not the
+   larger, and must ignore the inactive zone's smaller-still value`.
+4. The `if (spend > nominal_dwell_s) spend = nominal_dwell_s;` clamp
+   deleted. Failed:
+   `spend must clamp to nominal_dwell_s, never exceed it (a negative
+   resulting dwell_remaining_s would follow if it did)`.
+5. (also run) The `!lagging_now` half of the accrual gate dropped. Failed
+   the two zero-credit-while-not-lagging checks:
+   `not lagging must bank nothing, regardless of position in band`,
+   `audit accumulator must track the same zero`.
+
+All five mutations were confirmed applied (`grep MUTATION`), built, and
+run before being reverted; the reverted state was re-verified clean
+(`grep MUTATION` empty, all 20 host-test executables green) before this
+change was committed.
+
+`build_kilnfw` (ESP32-S3 target, via the `kilnctrl` MCP server) succeeded:
+"kilnfw-build: OK in 64.5s (219 log lines)", no new warnings or errors
+attributable to this change.
+
+**Not done in this pass:** §7.2 auto-stretch's own control behaviour
+(instrumentation only per §7.2's own status), §7.4's warning surfaces
+(banner/event-log/LCD) for the credit specifically, and §7.6's real-firing
+validation. `dwell_credit_applied_s`/`ramp_dwell_credit_s` are new
+plumbing those can build on, not a replacement for them.
 
 ### 7.4 Warning surfaces — NOT STARTED
 

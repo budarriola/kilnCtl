@@ -5192,6 +5192,209 @@ static void test_ramp_assist_stretch_tick_indexes_the_right_segment(void)
     TEST_CHECK(ex.stretch_total_s == 6.0f, "the running total must sum across every segment");
 }
 
+// ---------------------------------------------------------------------------
+// PID_EXPANSION_PLAN.md sec 7.3 -- profile_executor_ramp_assist.c's dwell
+// credit functions: ramp_assist_dwell_credit_tick() (accrual, ALWAYS runs)
+// and ramp_assist_dwell_credit_spend() (spend, gated on assist_enabled).
+// cone 021 = 600.0C, cone 020 = 626.1C (cone_table.c's s_cones[]) -- target
+// 626.1 puts the band bottom at 626.1 - (626.1-600.0)/2 = 613.05C, well
+// inside the cone table's covered range (586.1-1365.0C).
+
+static void test_dwell_credit_tick_accrues_only_while_lagging(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- a healthy on-rate ramp (lagging_now == false) "
+                 "earns ZERO credit even while inside the band");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 620.0f; // inside the 613.05-626.1 band
+
+    ramp_assist_dwell_credit_tick(&z, /*ramping_now*/ true, /*lagging_now*/ false, 626.1f, 10.0f);
+
+    TEST_CHECK(z.dwell_credit_s == 0.0f, "not lagging must bank nothing, regardless of position in band");
+    TEST_CHECK(z.dwell_credit_audit_s == 0.0f, "audit accumulator must track the same zero");
+}
+
+static void test_dwell_credit_tick_accrues_while_lagging_in_band(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- lagging AND inside the band banks weight*dt, "
+                 "and the independent audit accumulator matches it exactly");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 620.0f; // inside the 613.05-626.1 band, below target
+
+    ramp_assist_dwell_credit_tick(&z, /*ramping_now*/ true, /*lagging_now*/ true, 626.1f, 10.0f);
+
+    TEST_CHECK(z.dwell_credit_s > 0.0f, "lagging + in-band must bank SOME credit");
+    TEST_CHECK(z.dwell_credit_s < 10.0f, "weight is in [0,1], so credit must be < raw dt_s (10.0)");
+    TEST_CHECK(z.dwell_credit_audit_s == z.dwell_credit_s,
+              "the independent audit accumulator must match the real one exactly in healthy code");
+}
+
+static void test_dwell_credit_tick_zero_at_band_bottom_max_near_target(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- weight is ~0 right at the band bottom and grows "
+                 "toward its max just below target, monotonically closer to target = more credit/tick");
+    zone_runtime_t z_bottom, z_near_target;
+    memset(&z_bottom, 0, sizeof(z_bottom));
+    memset(&z_near_target, 0, sizeof(z_near_target));
+    z_bottom.actual_c = 613.05f;      // exactly the band bottom
+    z_near_target.actual_c = 626.0f;  // 0.1C short of the 626.1 target
+
+    ramp_assist_dwell_credit_tick(&z_bottom, true, true, 626.1f, 1.0f);
+    ramp_assist_dwell_credit_tick(&z_near_target, true, true, 626.1f, 1.0f);
+
+    TEST_CHECK(z_bottom.dwell_credit_s == 0.0f, "weight at the band bottom must be exactly 0.0 "
+              "(cone_table_heat_work_weight()'s documented current_c <= band_bottom_c clamp)");
+    TEST_CHECK(z_near_target.dwell_credit_s > 0.0f, "just below target must earn some credit");
+    TEST_CHECK(z_near_target.dwell_credit_s > z_bottom.dwell_credit_s,
+              "closer to target must earn MORE credit per tick than closer to the band bottom");
+}
+
+static void test_dwell_credit_tick_carries_across_back_to_back_ramps(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- credit accumulates across repeated calls (i.e. "
+                 "across a whole run of consecutive ramp segments) until something spends it");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 620.0f;
+
+    // First "ramp segment"'s worth of ticks.
+    for (int i = 0; i < 5; i++) {
+        ramp_assist_dwell_credit_tick(&z, true, true, 626.1f, 1.0f);
+    }
+    float after_first_ramp = z.dwell_credit_s;
+    TEST_CHECK(after_first_ramp > 0.0f, "first ramp must have banked something");
+
+    // A second, back-to-back ramp segment (different target, no dwell and
+    // no spend call in between) -- credit must carry forward, not reset.
+    // Kiln has made some progress since the first segment (actual_c rose
+    // from 620 toward the new 650 target), staying inside ITS OWN band
+    // (cone 020=626.1C/019=677.8C bracket 650C -> band bottom 624.15C).
+    z.actual_c = 640.0f;
+    for (int i = 0; i < 5; i++) {
+        ramp_assist_dwell_credit_tick(&z, true, true, 650.0f, 1.0f);
+    }
+    TEST_CHECK(z.dwell_credit_s > after_first_ramp,
+              "a second back-to-back ramp must ADD to the first ramp's credit, not replace it");
+}
+
+static void test_dwell_credit_tick_out_of_range_target_earns_nothing(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- a target below the cone table's covered range "
+                 "(cone 022's 586.1C) must bank no credit and must not crash");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 90.0f;
+
+    ramp_assist_dwell_credit_tick(&z, true, true, /*segment_target_c*/ 100.0f, 10.0f);
+
+    TEST_CHECK(z.dwell_credit_s == 0.0f, "out-of-range target must earn exactly zero credit, "
+              "never a silent garbage weight");
+}
+
+static void test_dwell_credit_spend_gated_on_flag(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_spend() -- returns 0.0 with assist_enabled == false, "
+                 "but still resets every active zone's banked credit either way");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 120.0f;
+    ex.zones[0].dwell_credit_audit_s = 120.0f;
+
+    float spend = ramp_assist_dwell_credit_spend(&ex, /*nominal_dwell_s*/ 600.0f, /*assist_enabled*/ false);
+
+    TEST_CHECK(spend == 0.0f, "assist_enabled == false must apply ZERO seconds of credit to the dwell "
+              "-- dwell timing must stay bit-identical with the flag off");
+    TEST_CHECK(ex.zones[0].dwell_credit_s == 0.0f,
+              "credit is spent (reset to 0) once regardless of whether it was actually applied -- "
+              "matches ramp_assist.py's unconditional z.credit_s = 0.0");
+    TEST_CHECK(ex.zones[0].dwell_credit_audit_s == 0.0f, "audit accumulator resets alongside it");
+}
+
+static void test_dwell_credit_spend_applies_when_enabled(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_spend() -- with assist_enabled == true, returns the banked "
+                 "credit and resets it");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 45.0f;
+
+    float spend = ramp_assist_dwell_credit_spend(&ex, 600.0f, true);
+
+    TEST_CHECK(spend == 45.0f, "must return exactly the banked credit when it fits under the nominal dwell");
+    TEST_CHECK(ex.zones[0].dwell_credit_s == 0.0f, "must reset to 0 after spending");
+}
+
+static void test_dwell_credit_spend_clamped_to_nominal_never_negative(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_spend() -- clamps to nominal_dwell_s, so a dwell can never "
+                 "go negative even with far more credit banked than the dwell is long");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 9999.0f; // absurdly large -- must not overshoot the dwell
+
+    float spend = ramp_assist_dwell_credit_spend(&ex, /*nominal_dwell_s*/ 300.0f, true);
+
+    TEST_CHECK(spend == 300.0f, "spend must clamp to nominal_dwell_s, never exceed it "
+              "(a negative resulting dwell_remaining_s would follow if it did)");
+}
+
+static void test_dwell_credit_spend_uses_minimum_across_active_zones(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_spend() -- with multiple active zones carrying DIFFERENT "
+                 "credit, the applied spend is the MINIMUM across them (this executor has one shared "
+                 "dwell timer, unlike ramp_assist.py's independent per-zone timers) -- never credits a "
+                 "zone for heat work another zone accrued but it did not");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 50.0f;
+    ex.zones[1].active = true;
+    ex.zones[1].dwell_credit_s = 80.0f;
+    ex.zones[2].active = false; // inactive -- must be ignored, not pull the min down to 0
+    ex.zones[2].dwell_credit_s = 5.0f;
+
+    float spend = ramp_assist_dwell_credit_spend(&ex, 600.0f, true);
+
+    TEST_CHECK(spend == 50.0f, "must apply the SMALLER of the two active zones' credit, not the "
+              "larger, and must ignore the inactive zone's smaller-still value");
+    TEST_CHECK(ex.zones[0].dwell_credit_s == 0.0f, "both active zones must still be reset");
+    TEST_CHECK(ex.zones[1].dwell_credit_s == 0.0f, "including the one whose credit was NOT the "
+              "applied minimum");
+}
+
+static void test_dwell_credit_spend_faulted_zone_ignored(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_spend() -- an active-but-faulted zone must not pull the "
+                 "minimum down, same active&&!faulted gate the rest of the control loop uses");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 200.0f;
+    ex.zones[1].active = true;
+    ex.zones[1].faulted = true;
+    ex.zones[1].dwell_credit_s = 1.0f; // would drag the min to 1.0 if faulted zones counted
+
+    float spend = ramp_assist_dwell_credit_spend(&ex, 600.0f, true);
+
+    TEST_CHECK(spend == 200.0f, "the faulted zone's tiny credit must not be counted toward the minimum");
+}
+
+static void test_dwell_credit_spend_no_active_zones_returns_zero(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_spend() -- no active zones at all must return 0.0, not crash "
+                 "on the sentinel");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+
+    float spend = ramp_assist_dwell_credit_spend(&ex, 600.0f, true);
+
+    TEST_CHECK(spend == 0.0f, "nothing to spend when nothing is active");
+}
+
 static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
 {
     TEST_SECTION("firing_stats_persist()/profile_executor_get_firing_history() -- round-trips a run record "
@@ -5459,6 +5662,19 @@ void run_test_profile_executor_prestart(void)
     test_ramp_assist_stretch_tick_gated_on_flag();
     test_ramp_assist_stretch_tick_requires_ramping_and_locked();
     test_ramp_assist_stretch_tick_indexes_the_right_segment();
+
+    // PID_EXPANSION_PLAN.md sec 7.3 -- dwell credit accrual/spend, order-independent.
+    test_dwell_credit_tick_accrues_only_while_lagging();
+    test_dwell_credit_tick_accrues_while_lagging_in_band();
+    test_dwell_credit_tick_zero_at_band_bottom_max_near_target();
+    test_dwell_credit_tick_carries_across_back_to_back_ramps();
+    test_dwell_credit_tick_out_of_range_target_earns_nothing();
+    test_dwell_credit_spend_gated_on_flag();
+    test_dwell_credit_spend_applies_when_enabled();
+    test_dwell_credit_spend_clamped_to_nominal_never_negative();
+    test_dwell_credit_spend_uses_minimum_across_active_zones();
+    test_dwell_credit_spend_faulted_zone_ignored();
+    test_dwell_credit_spend_no_active_zones_returns_zero();
 }
 
 

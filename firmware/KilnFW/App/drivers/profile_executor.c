@@ -463,10 +463,34 @@ void executor_task_entry(void *arg)
                 if (s_exec.target_c == seg->target_c) {
                     s_exec.dwelling = true;
                     s_exec.segment_elapsed_s = 0;
+                    /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit spend, at
+                     * the single point this shared schedule actually enters
+                     * a dwell. Resets every active zone's banked dwell_
+                     * credit_s (see ramp_assist_dwell_credit_spend()'s own
+                     * doc comment for why that reset is unconditional even
+                     * with the flag off) and, ONLY when ramp_assist_cfg_
+                     * enabled() is true, records how much of dwell_min this
+                     * dwell's ready_to_advance check below will treat as
+                     * already satisfied. With the flag off this is always
+                     * 0.0f, so the check below is bit-identical to before
+                     * this feature existed. */
+                    s_exec.dwell_credit_applied_s = ramp_assist_dwell_credit_spend(
+                        &s_exec, (float)(seg->dwell_min * 60u), ramp_assist_cfg_enabled());
                 }
             } else {
                 s_exec.target_c = seg->target_c;
-                if (s_exec.segment_elapsed_s >= seg->dwell_min * 60u) {
+                /* dwell_credit_applied_s is 0.0f unless ramp_assist_cfg_
+                 * enabled() was true at this dwell's own entry (see above),
+                 * so with the flag off (or never-lagging run) this compares
+                 * against exactly seg->dwell_min * 60u, unchanged from
+                 * before sec 7.3 -- the bit-identical requirement ramp_
+                 * assist_cfg.h documents. Cast-then-subtract, never the
+                 * reverse: dwell_credit_applied_s is already clamped to
+                 * [0, dwell_min*60] by ramp_assist_dwell_credit_spend(), so
+                 * this subtraction cannot underflow the uint32_t threshold. */
+                uint32_t dwell_threshold_s = seg->dwell_min * 60u -
+                                              (uint32_t)s_exec.dwell_credit_applied_s;
+                if (s_exec.segment_elapsed_s >= dwell_threshold_s) {
                     s_exec.segment_index++;
                     if (s_exec.segment_index >= s_exec.profile.segment_count) {
                         s_exec.state = PROFILE_EXEC_DONE;
@@ -530,13 +554,14 @@ void executor_task_entry(void *arg)
         }
 
         /* --- Ramp assist (PID_EXPANSION_PLAN.md sec 7): sustained-lag
-         * detection, per zone, ALWAYS -- and auto-stretch instrumentation,
-         * gated on the flag. Placed here for the same reason the firing-
-         * stats loop just above is: target_c/dwelling/segment_index and
-         * every zone's actual_c/lagging bit are already final for this
-         * tick. See profile_executor_ramp_assist.c's own doc comment for
-         * why neither call below is new schedule-altering control
-         * behaviour. */
+         * detection and sec 7.3's dwell-credit ACCRUAL, per zone, ALWAYS --
+         * and auto-stretch instrumentation, gated on the flag. Placed here
+         * for the same reason the firing-stats loop just above is: target_c/
+         * dwelling/segment_index and every zone's actual_c/lagging bit are
+         * already final for this tick. See profile_executor_ramp_assist.c's
+         * own doc comment for why neither call below (dwell-credit SPEND is
+         * the exception -- see the dwelling-transition code above) is new
+         * schedule-altering control behaviour. */
         {
             bool ramp_assist_on = ramp_assist_cfg_enabled();
             bool ramping_now = (seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) && !s_exec.dwelling;
@@ -544,6 +569,12 @@ void executor_task_entry(void *arg)
                 if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
                 bool lagging_now = (lagging & (1u << zi)) != 0;
                 ramp_assist_zone_lag_tick(&s_exec.zones[zi], lagging_now, dt_s);
+                /* seg->target_c, not s_exec.target_c: the segment's own
+                 * final target, not the still-interpolating commanded
+                 * value -- see ramp_assist_dwell_credit_tick()'s doc
+                 * comment (profile_executor_internal.h). */
+                ramp_assist_dwell_credit_tick(&s_exec.zones[zi], ramping_now, lagging_now,
+                                              seg->target_c, dt_s);
             }
             ramp_assist_stretch_tick(&s_exec, s_exec.segment_index, ramp_assist_on, ramping_now,
                                      s_exec.ramp_lock_held, dt_s);
