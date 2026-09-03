@@ -181,6 +181,24 @@
   .chan .faults.timeout { color: var(--muted); font-style: italic; }
   .chan .subrow { font-size: 0.9em; color: var(--muted); }
   .chan .subrow .bad { color: var(--warn); }
+  /* Flash partition table -- same .chan card family as the thermocouple
+     channels above (left-border color as the at-a-glance signal), not the
+     plain .card/.row list the rest of this page uses: a partition's most
+     important fact (is this the slot actually running right now) is a
+     binary highlight, the same shape of question the thermocouple cards
+     already answer with their left border. Offset/size are monospaced,
+     tabular-nums like every other numeric .value on this page, in a row
+     that can never force the page wider than the viewport on a phone --
+     same overflow-wrap discipline as .row .value, not the .crash-bt
+     overflow-x:auto treatment, since a partition row is short and fixed-
+     width unlike a variable-length backtrace. */
+  .part-row { border-left: 4px solid var(--border); }
+  .part-row.running { border-left-color: var(--ok); }
+  .part-row .title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4em; }
+  .part-row .title .name { font-weight: bold; }
+  .part-row .running-badge { font-size: 0.75em; font-weight: bold; color: var(--ok);
+                              border: 1px solid var(--ok); border-radius: var(--ui-radius);
+                              padding: 0.05em 0.5em; }
 </style>
 </head>
 <body>
@@ -282,6 +300,18 @@ control fault at all (e.g. no profile running). They are shown together here
 because both answer "what's wrong with this channel," not because they are
 the same measurement.</p>
 
+<h2>Flash partitions</h2>
+<!-- GET /api/partitions (partition_info_http.c) -- the LIVE table
+     esp_partition_find() reads off this running app, plus which OTA slot
+     esp_ota_get_running_partition() says is actually running -- not a
+     parse of the repo's partitions.csv or a raw JTAG flash read of 0x8000
+     (that path was tried and does not work; see that file's header
+     comment). Own independent poll (pollPartitions below), same pattern
+     as pollCrash()/pollThermoFaults(): this table is effectively static
+     for a given running image, so it is fetched once on load rather than
+     on the 2s status timer, and a slow/failed fetch here must never delay
+     or blank any other section of this page. -->
+<div id="partitionsSection"><p>Loading&hellip;</p></div>
 <h2>Task-watchdog panic (dev only)</h2>
 <div class="card">
   <div class="row"><span class="label">Panic on hung task</span><span class="value" id="wdPanicState">--</span></div>
@@ -621,6 +651,69 @@ here:</p>
     });
   }
 
+  // --- Flash partitions (partition_info_http.c) ---------------------------
+  // esp_partition_type_t / the handful of subtypes this codebase's
+  // partitions.csv actually uses (FLASH_BUDGET_PLAN.md) -- unrecognized
+  // values fall back to their raw number rather than guessing a name, since
+  // an unmapped subtype is exactly the kind of thing this table exists to
+  // surface honestly, not paper over.
+  var PART_TYPE_NAMES = { 0: 'app', 1: 'data' };
+  var PART_SUBTYPE_NAMES = {
+    0: { 0x00: 'factory', 0x10: 'ota_0', 0x11: 'ota_1', 0x20: 'test' },
+    1: { 0x00: 'ota', 0x01: 'phy', 0x02: 'nvs', 0x03: 'coredump', 0x04: 'nvs_keys',
+         0x05: 'efuse', 0x80: 'esphttpd', 0x81: 'fat', 0x82: 'spiffs' }
+  };
+  function partTypeName(type) { return PART_TYPE_NAMES[type] || ('type ' + type); }
+  function partSubtypeName(type, subtype) {
+    var table = PART_SUBTYPE_NAMES[type];
+    var name = table && table[subtype];
+    return name || ('0x' + subtype.toString(16).toUpperCase());
+  }
+  // Hex offset, not decimal -- offsets are how every other tool in this repo
+  // (partitions.csv, esptool, the removed JTAG-read path this endpoint
+  // replaces) already writes them, so this must match rather than force a
+  // mental decimal<->hex conversion. fmtKB/fmtMB above are reused for size
+  // rather than re-derived -- the endpoint sends raw offset/size integers
+  // (bytes), unformatted, so this is the one place in this poll that has to
+  // do the KB/MB conversion client-side rather than double-format a string
+  // the firmware already built.
+  function fmtOffset(n) { return '0x' + (n >>> 0).toString(16).toUpperCase().padStart(6, '0'); }
+  function fmtPartSize(bytes) {
+    if (bytes == null) return 'n/a';
+    return bytes >= 1024 * 1024 ? fmtMB(bytes) : fmtKB(bytes);
+  }
+  function renderPartitions(resp) {
+    var el = document.getElementById('partitionsSection');
+    var parts = (resp && resp.partitions) || [];
+    if (!parts.length) {
+      el.innerHTML = '<p>No partitions reported.</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      var running = !!(resp.running && p.label === resp.running);
+      html += '<div class="chan part-row' + (running ? ' running' : '') + '">' +
+              '<div class="title"><span class="name">' + window.kcEscapeHtml(p.label) + '</span>' +
+              (running ? '<span class="running-badge">RUNNING</span>' : '') + '</div>' +
+              '<div class="subrow">' + window.kcEscapeHtml(partTypeName(p.type)) + ' / ' +
+              window.kcEscapeHtml(partSubtypeName(p.type, p.subtype)) +
+              (p.encrypted ? '  &middot;  <span class="bad">encrypted</span>' : '') + '</div>' +
+              '<div class="subrow">Offset: ' + fmtOffset(p.offset) + '  &middot;  Size: ' + fmtPartSize(p.size) + '</div>' +
+              '</div>';
+    }
+    el.innerHTML = html;
+  }
+  function pollPartitions() {
+    return fetchJsonTimeout('/api/partitions', 4000).then(function (j) {
+      if (!j || !Array.isArray(j.partitions)) throw new Error('malformed /api/partitions response');
+      renderPartitions(j);
+    }).catch(function () {
+      document.getElementById('partitionsSection').innerHTML =
+        '<p>Could not load the flash partition table (board unreachable, or the request failed/timed out).</p>';
+    });
+  }
+
   // --- Thermocouple faults (folded in from thermo_faults_page.html) -------
   // Same MAX31856_MASK_xxx / MAX31856_FAULT_xxx bit layout as MAX31856.h and
   // ui_page_thermo_faults.c's format_fault_summary() -- SR shares bit
@@ -837,6 +930,7 @@ here:</p>
   pollWatchdogCfg();
   pollThermoFaults();
   scheduleThermoFaults();
+  pollPartitions();
 
   // UI_PLAN.md item 7: re-render the board-health temperatures and the
   // thermocouple-fault cards' CJ readings in the new unit immediately on
