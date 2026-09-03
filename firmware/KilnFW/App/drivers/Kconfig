@@ -23,6 +23,17 @@ menu "KilnCtrl Hardware Configuration"
             bool "SPI3"
         endchoice
 
+        # Hazard for whoever flips the host away from the default: SPI2 has
+        # 6 hardware CS lines (soc_caps.h SOC_SPI_PERIPH_CS_NUM(1) == 6),
+        # comfortably more than this bus's 4 devices (display + 3x MAX31856).
+        # SPI3 has only 3 (SOC_SPI_PERIPH_CS_NUM(2) == 3) -- one short of the
+        # 4 devices here. KILNCTL_SPI_HARDWARE_CS (below) hands each device's
+        # real GPIO to spics_io_num, which only works if the host has enough
+        # hardware CS slots for all of them; on SPI3 the 4th device would
+        # have no hardware CS to claim. DISPLAY_ST7796_PLAN.md Sec.9's "Facts
+        # established" table assumes SPI2 throughout -- do not enable
+        # KILNCTL_SPI_HARDWARE_CS on SPI3 without re-deriving that.
+
         config KILNCTL_SPI_SCLK_IO
             int "SPI SCLK GPIO"
             default 12
@@ -104,6 +115,12 @@ menu "KilnCtrl Hardware Configuration"
                 removes a per-transaction GPIO round trip, so flush time
                 should not regress) before ever enabling it on a board with
                 elements connected.
+
+                SPI host hazard: this bus has 4 devices (display + 3x
+                MAX31856). SPI2 (the default above) has 6 hardware CS lines,
+                room to spare. SPI3 has only 3 -- do not enable this option
+                if KILNCTL_SPI_HOST_SPI3 is selected; the 4th device has
+                nowhere to go.
     endmenu
 
     menu "MAX31856 Thermocouple Channels (via J6)"
