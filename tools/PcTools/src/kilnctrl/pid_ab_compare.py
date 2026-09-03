@@ -49,11 +49,11 @@ confounder, not every possible source of run-to-run variance.
 2026-09-02f -- THE START-TEMPERATURE CONFOUND IS NOT HYPOTHETICAL. Measured
 directly: the "rested" precondition is relative to the thermocouple cold
 junction, which lives on the board and self-heats -- it certifies "cooled to
-wherever the board is now", not "cooled to ambient". Across three captures
-claimed to be the same repeated configuration, start temperatures were
-27.60/28.64/28.78 °C -- a 1.18 °C range against the 1.00 °C
-``CONFOUND_THRESHOLD_C`` this module already refuses on; across the wider
-set of captures on hand the spread reaches 3.9 °C. The owner's decision:
+wherever the board is now", not "cooled to ambient". Across the checked-in
+6-run repeat campaign (was 3 runs as of this note's original writing),
+start temperatures span 27.60-28.88 °C -- a 1.29 °C range against the
+1.00 °C ``CONFOUND_THRESHOLD_C`` this module already refuses on; across the
+wider set of captures on hand the spread reaches 3.9 °C. The owner's decision:
 keep firing the same protocol (no change to the rested precondition) and
 instead make the comparison machinery ACCOUNT for the confound rather than
 pretend it isn't there. Two additions, both deliberately conservative:
@@ -84,12 +84,67 @@ pretend it isn't there. Two additions, both deliberately conservative:
     segment to the next, meaning the "floor" itself is noisy and a
     DISTINGUISHABLE/INDISTINGUISHABLE call built on it should be read with
     that in mind). Computed directly from the noise-floor artifact's own
-    entries -- e.g. this rig's measured floor for
-    ``dwell_steady_state_offset_c`` ranges 0.044-0.550 °C across
-    segments/zones (12x) while ``iae_normalized_whole_c`` ranges roughly
-    0.029-0.134 °C (4.6x) -- tighter, though still not perfectly flat. This
-    is reported alongside each comparison and in the artifact-level summary
-    so a reader can see which metrics can currently support a conclusion.
+    entries.
+
+2026-09-03 -- ADVERSARIAL STATISTICAL REVIEW, FIVE FINDINGS ACTED ON.
+
+  1. NO MULTIPLICITY CONTROL. A comparison evaluates 48 (zone, metric,
+     segment) keys, each with its own ~12%-at-n=6 per-key false-positive
+     rate (see below) and no correction. :func:`summarize_multiplicity`
+     reports the family size, the per-key false-positive rate for the n
+     actually backing each key, and the probability at least one
+     DISTINGUISHABLE verdict appears by chance alone -- both under an
+     (overstated) independence assumption and at the reviewer's estimated
+     effective family size (10-15, keys are correlated). It flags the one
+     pattern this module treats as potentially actionable: the SAME metric
+     DISTINGUISHABLE in the SAME direction across several zones/segments.
+     A single DISTINGUISHABLE key is, on its own, close to the expected
+     outcome under pure chance -- not a finding.
+  2. THE RANGE FLOOR IS NOT SCALE-STABLE ACROSS n. E[range]/sigma grows
+     with n (1.69 at n=3, 2.53 at n=6, 3.07 at n=10), so floors built from
+     different n are not on the same scale -- and the checked-in artifact
+     already mixes them (``z0:settle_time_s:1`` has n=3, every other key
+     has n=6). Every :class:`MetricComparison` now carries ``floor_n``, and
+     :func:`prediction_interval_floor` offers a scale-stable alternative --
+     ``t(.975, n-1) * std_c * sqrt(2)``, the honest answer to "could two new
+     same-config runs differ by this much?" -- reported alongside the range
+     floor as ``pi_floor_c`` / ``pi_distinguishable`` on every comparison.
+     THIS IS INFORMATIONAL ONLY: the PI floor is WIDER than the range floor
+     (t*sqrt(2) versus a bare range), so switching to it as the verdict
+     floor would lose some currently-DISTINGUISHABLE findings. That is the
+     statistically correct direction, but it is the owner's call, not a
+     silent default -- ``distinguishable``/the printed verdict still use
+     the range floor exactly as before; ``pi_distinguishable`` is reported
+     next to it so the cost of switching is visible on every key.
+  3. START-TEMPERATURE UNIT MISMATCH. ``noise_floor.extract_start_conditions``
+     computes ``start_temp_c_mean`` as the mean of ALL status channels in the
+     raw HTTP body (used for the artifact's own ``start_conditions`` /
+     ``LIKE_FOR_LIKE_THRESHOLD_C`` check). ``_first_valid_start_temp`` below
+     computes the PER-ZONE first valid ``actual_c`` (used for
+     ``CONFOUND_THRESHOLD_C`` / the REFUSED gate). Both constants happen to
+     be 1.0 °C, but they gate two DIFFERENT quantities -- an all-channel
+     mean versus one zone's own reading -- computed by two different modules
+     for two different purposes. This module cannot change
+     ``noise_floor.py`` (out of scope for this pass), so the fix here is to
+     stop letting the shared "1.0 °C" value read as "the same measurement":
+     see ``START_TEMP_METRIC_NOTE`` below, printed by every text report.
+  4. THE 1.0 °C CONFOUND-THRESHOLD JUSTIFICATION WAS AN ANECDOTE (a single
+     4.8 °C confounded pair bounds nothing). The real justification: fitting
+     ``fit_start_temp_sensitivity`` against the checked-in 6-run repeat set
+     gives per-zone sensitivities of roughly 0.009-0.133 °C per °C of start
+     delta; at the 1.0 °C threshold that predicts a 0.009-0.133 °C shift in
+     ``iae_normalized_whole_c``, against that same metric's measured
+     whole-run floors of 0.077-0.147 °C. The top of the predicted range
+     (0.133 °C) falls inside the measured-floor range (0.077-0.147 °C) --
+     i.e. 1.0 °C is roughly where the confound's OWN predicted contribution
+     reaches the noise floor, not an arbitrary round number.
+     ``CONFOUND_THRESHOLD_C`` is UNCHANGED; only its justification is fixed.
+  5. STALE FIGURES. Every number quoted in this module and in
+     ``PID_EXPANSION_PLAN.md`` SS3.3 that predates the 6-run repeat
+     campaign (``logs/coupling/noise_floor_p7*_run*.jsonl``) has been
+     re-measured against it -- see ``FLOOR_RELIABILITY_RATIO`` below for the
+     retuned reliability threshold, and the plan doc for the refreshed
+     ratio table.
 """
 from __future__ import annotations
 
@@ -97,13 +152,39 @@ import argparse
 import dataclasses
 import json
 import math
+import random
+from collections import Counter
 from typing import Optional, Sequence
 
 from kilnctrl import log_analysis as la
 from kilnctrl import http_capture_log as hc
 from kilnctrl import noise_floor as nf
 
+#: Deliberately tight -- see PROBLEM 4 in the module docstring for why this
+#: value (not just "some threshold exists") is justified: the fitted
+#: start-temp sensitivities (roughly 0.009-0.133 C/C on the checked-in 6-run
+#: set) times this threshold predict a confound contribution that falls
+#: inside this rig's measured whole-run IAE floor range (0.077-0.147 C) --
+#: i.e. 1.0 C is roughly where the confound's own predicted effect reaches
+#: the noise floor, not an anecdote-derived round number.
 CONFOUND_THRESHOLD_C = 1.0
+
+#: PROBLEM 3 (module docstring): this module's confound gate compares each
+#: zone's PER-ZONE first-valid ``actual_c`` against CONFOUND_THRESHOLD_C.
+#: noise_floor.py's own LIKE_FOR_LIKE_THRESHOLD_C (also 1.0 C, out of scope
+#: to change here) instead gates the MEAN across ALL status channels
+#: (noise_floor.extract_start_conditions). Both are "1.0 C" and both are
+#: about start-temperature drift, but they are not the same measurement --
+#: printed on every text report so a reader does not conflate them.
+START_TEMP_METRIC_NOTE = (
+    "START-TEMP UNIT NOTE: the per-zone deltas below (and the "
+    f"{CONFOUND_THRESHOLD_C:.1f}C confound gate) use each zone's own "
+    "first-valid actual_c. noise_floor.py's separate 'like-for-like' check "
+    "(same 1.0C threshold, LIKE_FOR_LIKE_THRESHOLD_C) uses a DIFFERENT "
+    "quantity -- the mean across ALL status channels from the raw capture. "
+    "Both measure start-temperature drift but are not interchangeable; do "
+    "not read a pass/fail on one as a pass/fail on the other."
+)
 
 NOISE_FLOOR_NOTE = (
     "NOISE FLOOR: UNKNOWN. Never measured on this rig (PID_EXPANSION_PLAN.md "
@@ -143,15 +224,44 @@ SENSITIVITY_METRIC = "iae_normalized_whole_c"
 #: across every (zone, segment) entry for that metric in the artifact) is
 #: flagged as having an UNSTABLE floor -- the DISTINGUISHABLE/
 #: INDISTINGUISHABLE call for that metric is only as trustworthy as the
-#: floor it's gated on. Chosen as "several-fold" rather than tuned to
-#: tonight's exact numbers, but deliberately set to fall between this rig's
-#: two real measured clusters: ~4.4-4.6x for iae_normalized_whole_c /
-#: ramp_mean_error_c (comparatively tight) and 8-30x for every other metric
-#: (dwell_steady_state_offset_c, dwell_entry_*, settle_time_s,
-#: ramp_worst_error_c -- unstable). With only 3 same-config repeats on hand
-#: today these ratios are themselves not precise; re-check this constant
-#: once a real N>=5 campaign lands (PID_EXPANSION_PLAN.md SS3.3).
-FLOOR_RELIABILITY_RATIO = 5.0
+#: floor it's gated on.
+#:
+#: 2026-09-03 RE-TUNED against the checked-in 6-run repeat campaign
+#: (logs/coupling/noise_floor_p7*_run*.jsonl, replacing the 3-run set the
+#: original 5.0 was picked against). The old value no longer separates the
+#: two clusters cleanly on real n>=5 data -- ramp_mean_error_c (was
+#: "reliable" at ~4.5x) is now 5.49x and dwell_entry_time_to_peak_s (was
+#: "unstable" at ~8-30x) is now 4.73x, both straddling the old boundary.
+#: 2026-09-03, SAME DAY -- these ratios were recomputed a second time after
+#: fixing a separate defect in log_analysis's HTTP-capture parser (it read
+#: actual_c while ignoring actual_valid, so the firmware's 0.0 "no reading
+#: yet" placeholder leaked into ramp_worst_error_c's segment-0 floor as a
+#: spurious ~27C outlier on 5 of 6 captures). The 6-run measured ratios,
+#: current as of the artifact regenerated after that fix:
+#:   iae_normalized_whole_c        1.91x   (tight cluster)
+#:   ramp_worst_error_c            2.57x   -- WAS 117.87x/"cannot resolve
+#:                                             anything" before the parser
+#:                                             fix; that framing is now wrong
+#:   iae_normalized_c              4.30x
+#:   dwell_entry_time_to_peak_s    4.73x
+#:   ramp_mean_error_c             5.49x
+#:   ---------------------------- gap ----------------------------
+#:   dwell_entry_overshoot_peak_c  6.55x   (unstable cluster)
+#:   dwell_steady_state_offset_c  13.98x
+#:   settle_time_s                15.27x
+#: The only clean gap in that list is between 5.49x and 6.55x -- unchanged
+#: by the parser fix, since only segment-0 windows (and so only
+#: ramp_worst_error_c / ramp_mean_error_c / iae_normalized_c /
+#: iae_normalized_whole_c) contained the placeholder sample. Threshold
+#: stays at 6.0 (was 5.0) to fall inside that gap rather than inside either
+#: cluster. Re-check again once a real campaign lands with materially more
+#: than 6 repeats -- these ratios are themselves computed from n=6 (n=3 for
+#: iae_normalized_whole_c, which only has 3 zone-level entries) and are not
+#: settled numbers. tools/PcTools/config_presets/tuning_recommendations.json
+#: and the zones_page.html panel built from the PRE-fix floors still say
+#: ramp_worst_error_c "cannot resolve anything useful" -- that is now false
+#: and those need regenerating (out of scope for this module).
+FLOOR_RELIABILITY_RATIO = 6.0
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +369,11 @@ def _first_valid_start_temp(rows: Sequence[la.PollRow], zone: int) -> float:
     exactly the kind of undetected confound this module exists to catch.
     ``math.nan`` is returned (matching this module's existing "no start
     temp available" convention) if every row for this zone is invalid or the
-    zone never appears."""
+    zone never appears.
+
+    See ``START_TEMP_METRIC_NOTE`` -- this is the PER-ZONE figure the
+    CONFOUND_THRESHOLD_C gate uses, deliberately not the same quantity as
+    noise_floor.extract_start_conditions's all-channel mean."""
     for r in rows:
         s = r.zones.get(zone)
         if s is None:
@@ -329,17 +443,108 @@ class MetricComparison:
     # (INDISTINGUISHABLE). None: floor unknown, distinguishability cannot be
     # assessed -- NOT the same thing as "distinguishable is false".
     distinguishable: Optional[bool] = None
+    # "A", "B", or "tie" -- which run had the lower (better) value, when a
+    # verdict was reached. None when no verdict was reached (n/a, REFUSED).
+    # Used by summarize_multiplicity to detect a same-metric/same-direction
+    # pattern across zones/segments; also lets format_compare_text and any
+    # caller avoid parsing the verdict string for this.
+    better: Optional[str] = None
+    # The repeat-set sample size (artifact entry "n") backing floor_c, when
+    # a floor was looked up. PROBLEM 2: the range floor is not comparable
+    # across different n (E[range]/sigma grows with n), so this is surfaced
+    # on every comparison rather than left implicit.
+    floor_n: Optional[int] = None
+    # The scale-stable alternative to floor_c: t(.975, n-1) * std_c *
+    # sqrt(2), the prediction interval for the difference of two NEW
+    # same-config runs. Reported alongside floor_c, never used to compute
+    # verdict/distinguishable -- see prediction_interval_floor and the
+    # module docstring's PROBLEM 2 section for why (it is WIDER, so
+    # defaulting to it would silently lose findings).
+    pi_floor_c: Optional[float] = None
+    # What distinguishable WOULD be if pi_floor_c were used instead of
+    # floor_c. None when pi_floor_c is unavailable or no verdict was
+    # reached. Purely informational -- never overrides `distinguishable`.
+    pi_distinguishable: Optional[bool] = None
     # Only populated for SENSITIVITY_METRIC when a start-temp sensitivity fit
     # was available (see fit_start_temp_sensitivity / compare_runs). Never
     # changes verdict/distinguishable -- purely explanatory.
     start_temp_adjustment: Optional[dict] = None
 
 
+#: t-distribution two-sided 97.5th-percentile critical values, keyed by
+#: degrees of freedom (df = n - 1). Small, fixed table -- this module has no
+#: scipy dependency and only ever needs df in the single digits (repeat
+#: campaigns run overnight, not for weeks). Values from standard t tables.
+_T_975_TABLE = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+    8: 2.306, 9: 2.262, 10: 2.228, 15: 2.131, 20: 2.086, 25: 2.060, 30: 2.042,
+}
+
+
+def _t_975(df: int) -> Optional[float]:
+    """t(.975, df). Exact for the tabulated df; linearly interpolated
+    between the nearest tabulated points otherwise; the large-sample normal
+    approximation (1.96) above df=30. Returns None for df < 1."""
+    if df is None or df < 1:
+        return None
+    if df in _T_975_TABLE:
+        return _T_975_TABLE[df]
+    if df > 30:
+        return 1.96
+    keys = sorted(_T_975_TABLE)
+    for lo, hi in zip(keys, keys[1:]):
+        if lo < df < hi:
+            frac = (df - lo) / (hi - lo)
+            return _T_975_TABLE[lo] + frac * (_T_975_TABLE[hi] - _T_975_TABLE[lo])
+    return 1.96
+
+
+def prediction_interval_floor(std_c: Optional[float], n: Optional[int]) -> Optional[float]:
+    """The scale-stable alternative to the range floor: a 95% prediction
+    interval for the DIFFERENCE between two new same-config runs,
+    ``t(.975, n-1) * std_c * sqrt(2)``. At n=6 this is about 3.6 sigma
+    (t(.975, 5) approx 2.571) versus the range floor's ~2.53 sigma at the
+    same n -- wider, on purpose: it directly answers "could two new
+    same-config runs differ by this much?" instead of "how spread out were
+    the n runs we happened to capture?" (the range's answer, which grows
+    with n rather than converging).
+
+    Returns None if std_c or n is unavailable, or n < 2 (need at least 1
+    degree of freedom)."""
+    if std_c is None or n is None or n < 2:
+        return None
+    t = _t_975(n - 1)
+    if t is None:
+        return None
+    return t * std_c * math.sqrt(2)
+
+
 def _cmp(zone: int, metric: str, segment: Optional[int], a: Optional[float], b: Optional[float],
-         start_delta_c: float, smaller_is_better: bool = True,
-         floor_c: Optional[float] = None) -> MetricComparison:
+         start_delta_c: float, compare_by_magnitude: bool = True,
+         floor_entry: Optional[dict] = None) -> MetricComparison:
+    """``compare_by_magnitude`` (formerly named ``smaller_is_better``, which
+    was a misnomer): both branches below prefer the run with the SMALLER
+    value -- the flag only chooses whether "smaller" is measured on
+    ``abs(value)`` (True, the default -- correct for signed error metrics
+    like ramp_mean_error_c, where a large negative undershoot should not
+    read as "better" than a small positive overshoot) or on the raw value
+    (False -- for metrics that are never negative, e.g. durations, where
+    abs() is a no-op anyway). No numeric consequence today since every
+    False caller passes non-negative durations, but the old name implied a
+    real behavioral toggle that does not exist.
+
+    ``floor_entry``, when given, is the noise_floor.json artifact entry dict
+    for this (zone, metric, segment) key -- not just the bare floor_c -- so
+    this function can also surface floor_n and compute the prediction-
+    interval alternative (see prediction_interval_floor)."""
+    floor_c = floor_entry.get("noise_floor_c") if floor_entry else None
+    floor_n = floor_entry.get("n") if floor_entry else None
+    std_c = floor_entry.get("std_c") if floor_entry else None
+    pi_floor_c = prediction_interval_floor(std_c, floor_n)
+
     if a is None or b is None or (isinstance(a, float) and math.isnan(a)) or (isinstance(b, float) and math.isnan(b)):
-        return MetricComparison(zone, metric, segment, a, b, None, "n/a: missing data", floor_c=floor_c)
+        return MetricComparison(zone, metric, segment, a, b, None, "n/a: missing data",
+                                 floor_c=floor_c, floor_n=floor_n, pi_floor_c=pi_floor_c)
     delta = b - a
     if start_delta_c > CONFOUND_THRESHOLD_C:
         return MetricComparison(
@@ -347,17 +552,19 @@ def _cmp(zone: int, metric: str, segment: Optional[int], a: Optional[float], b: 
             f"REFUSED: zone {zone} start-temp delta {start_delta_c:.1f}C exceeds the "
             f"{CONFOUND_THRESHOLD_C:.1f}C confound threshold -- cannot attribute this "
             f"difference to fuzzy strength",
-            floor_c=floor_c, distinguishable=None,
+            floor_c=floor_c, floor_n=floor_n, pi_floor_c=pi_floor_c, distinguishable=None,
         )
+    pi_distinguishable = (abs(delta) >= pi_floor_c) if pi_floor_c is not None else None
     if floor_c is not None and abs(delta) < floor_c:
         return MetricComparison(
             zone, metric, segment, a, b, delta,
             f"INDISTINGUISHABLE: |delta|={abs(delta):.3f} is below the measured noise "
             f"floor {floor_c:.3f} for this (zone, metric, segment) -- not attributable "
             f"to whatever is being compared",
-            floor_c=floor_c, distinguishable=False,
+            floor_c=floor_c, floor_n=floor_n, pi_floor_c=pi_floor_c,
+            distinguishable=False, pi_distinguishable=pi_distinguishable,
         )
-    if smaller_is_better:
+    if compare_by_magnitude:
         better = "B" if abs(b) < abs(a) else ("A" if abs(a) < abs(b) else "tie")
     else:
         better = "B" if b < a else ("A" if a < b else "tie")
@@ -369,9 +576,10 @@ def _cmp(zone: int, metric: str, segment: Optional[int], a: Optional[float], b: 
         distinguishable = None
     return MetricComparison(
         zone, metric, segment, a, b, delta,
-        f"PROVISIONAL: {better} {'lower-magnitude' if smaller_is_better else 'lower'} "
+        f"PROVISIONAL: {better} {'lower-magnitude' if compare_by_magnitude else 'lower'} "
         f"({floor_note} -- not a confirmed result)",
-        floor_c=floor_c, distinguishable=distinguishable,
+        floor_c=floor_c, floor_n=floor_n, pi_floor_c=pi_floor_c,
+        distinguishable=distinguishable, pi_distinguishable=pi_distinguishable, better=better,
     )
 
 
@@ -549,6 +757,168 @@ def summarize_metric_floor_reliability(artifact: Optional[dict]) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# PROBLEM 1: multiplicity. The verdict-per-key report has no correction; this
+# section reports the family size, the per-key false-positive rate the range
+# floor actually carries (Monte Carlo, since the range statistic has no
+# closed form here), and the one pattern the review calls potentially
+# actionable -- a same metric, same direction across several keys.
+# ---------------------------------------------------------------------------
+
+#: Monte Carlo trial count / seed for _range_floor_false_positive_rate.
+#: Fixed and deterministic so the reported rate does not wobble between
+#: runs of the same report.
+_ALPHA_TRIALS = 20000
+_ALPHA_SEED = 20260903
+
+#: The review's estimate of the effective (correlation-adjusted) number of
+#: independent tests behind a ~48-key report like this rig's -- not derived
+#: from this artifact, an honest range from the review itself. Used only to
+#: show that the naive independence-assumed probability below overstates
+#: the true familywise risk, not as a precise correction.
+EFFECTIVE_FAMILY_SIZE_RANGE = (10, 15)
+
+#: A metric is only flagged as a "consistent pattern" (see
+#: summarize_multiplicity) once at least this many DISTINGUISHABLE keys
+#: agree on both metric and direction. 3 is a floor, not a target -- it is
+#: chosen so a two-zone coincidence cannot pass as a pattern.
+CONSISTENT_PATTERN_MIN_KEYS = 3
+
+
+def _range_floor_false_positive_rate(n: Optional[int], trials: int = _ALPHA_TRIALS,
+                                      seed: int = _ALPHA_SEED) -> Optional[float]:
+    """Monte Carlo estimate of P(|difference of two NEW same-config draws|
+    exceeds the max-minus-min range of n other same-config draws), under a
+    normal same-config model. Scale-free (sigma=1 throughout -- the
+    probability does not depend on the population's actual sigma). This is
+    the per-key false-positive rate the range floor actually carries; it is
+    NOT 5%, and it grows with n (see the module docstring's PROBLEM 2).
+    Deterministic given (n, trials, seed) so a report's reported rate is
+    reproducible. Returns None for n < 2 (no range defined)."""
+    if n is None or n < 2:
+        return None
+    rng = random.Random(seed * 1000 + n)
+    hits = 0
+    for _ in range(trials):
+        sample = [rng.gauss(0.0, 1.0) for _ in range(n)]
+        floor = max(sample) - min(sample)
+        diff = rng.gauss(0.0, 1.0) - rng.gauss(0.0, 1.0)  # ~ N(0, 2)
+        if abs(diff) > floor:
+            hits += 1
+    return hits / trials
+
+
+@dataclasses.dataclass
+class MultiplicitySummary:
+    family_size: int
+    n_distinguishable: int
+    #: {n: monte-carlo false-positive rate for a range floor built from that n}
+    per_n_alpha: dict
+    #: sum, over every keyed comparison, of its own per-n false-positive
+    #: rate -- the expected NUMBER of spurious DISTINGUISHABLE verdicts in
+    #: this report by chance alone, if every comparison were truly null.
+    expected_false_positives: Optional[float]
+    #: P(at least one spurious DISTINGUISHABLE), assuming every key is an
+    #: INDEPENDENT test at its own per-n rate. Overstated -- keys share
+    #: zones/segments/underlying physics -- see prob_at_least_one_effective_*.
+    prob_at_least_one_independent: Optional[float]
+    effective_family_size_low: int
+    effective_family_size_high: int
+    #: P(at least one spurious DISTINGUISHABLE) recomputed at the review's
+    #: estimated effective (correlation-adjusted) family size, using the
+    #: false-positive rate for the n most keys actually have.
+    prob_at_least_one_effective_low: Optional[float]
+    prob_at_least_one_effective_high: Optional[float]
+    #: [{"metric", "direction" ("A"/"B"), "n_keys", "zones", "segments"}, ...]
+    #: for every metric where >= CONSISTENT_PATTERN_MIN_KEYS DISTINGUISHABLE
+    #: keys agree on direction -- the one pattern this module treats as
+    #: potentially actionable, sorted by n_keys descending.
+    consistent_patterns: list
+    note: str
+
+
+def summarize_multiplicity(comparisons: Sequence[MetricComparison]) -> MultiplicitySummary:
+    """PROBLEM 1's fix: report the family size, per-key false-positive rate,
+    and familywise risk this comparison never surfaced before, plus the one
+    signal the review calls potentially actionable (a same-metric,
+    same-direction pattern across multiple keys). Never changes any
+    individual comparison's verdict -- purely a summary layer read alongside
+    ``report["comparisons"]``."""
+    keyed = [c for c in comparisons if c.distinguishable is not None]
+    family_size = len(keyed)
+    distinguishable = [c for c in keyed if c.distinguishable]
+
+    ns = sorted({c.floor_n for c in keyed if c.floor_n is not None})
+    per_n_alpha = {n: _range_floor_false_positive_rate(n) for n in ns}
+
+    expected_fp = None
+    prob_indep = None
+    if per_n_alpha:
+        rates = [per_n_alpha[c.floor_n] for c in keyed if c.floor_n in per_n_alpha]
+        expected_fp = sum(rates) if rates else None
+        if rates:
+            prod = 1.0
+            for a in rates:
+                prod *= (1.0 - a)
+            prob_indep = 1.0 - prod
+
+    dominant_alpha = None
+    if ns:
+        counts = Counter(c.floor_n for c in keyed if c.floor_n is not None)
+        dominant_n = counts.most_common(1)[0][0]
+        dominant_alpha = per_n_alpha.get(dominant_n)
+    eff_lo, eff_hi = EFFECTIVE_FAMILY_SIZE_RANGE
+    prob_eff_lo = prob_eff_hi = None
+    if dominant_alpha is not None:
+        prob_eff_lo = 1.0 - (1.0 - dominant_alpha) ** eff_lo
+        prob_eff_hi = 1.0 - (1.0 - dominant_alpha) ** eff_hi
+
+    by_metric_dir: dict = {}
+    for c in distinguishable:
+        if c.better not in ("A", "B"):
+            continue
+        by_metric_dir.setdefault((c.metric, c.better), []).append(c)
+    patterns = []
+    for (metric, direction), keys in by_metric_dir.items():
+        if len(keys) >= CONSISTENT_PATTERN_MIN_KEYS:
+            patterns.append({
+                "metric": metric, "direction": direction, "n_keys": len(keys),
+                "zones": sorted({k.zone for k in keys}),
+                "segments": sorted({k.segment for k in keys if k.segment is not None}),
+            })
+    patterns.sort(key=lambda p: -p["n_keys"])
+
+    note = (
+        f"{family_size} (zone, metric, segment) keys evaluated, no multiplicity "
+        "correction applied to the raw per-key verdicts above. The range floor's own "
+        "per-key false-positive rate is NOT 5% -- it depends on n (see per_n_alpha) "
+        "and is roughly 12% at n=6. A SINGLE DISTINGUISHABLE key in a report this size "
+        "is close to the expected outcome under pure chance -- read it as PROVISIONAL "
+        "AT BEST, not a finding. prob_at_least_one_independent assumes every key is an "
+        "independent test and OVERSTATES the true risk (keys share zones, segments, and "
+        "underlying physics); prob_at_least_one_effective_low/high use the review's "
+        "estimated effective family size of 10-15 independent tests instead -- still "
+        "approximate, since the correlation structure between keys is not itself "
+        "measured. The one pattern treated as potentially actionable here: the SAME "
+        "metric DISTINGUISHABLE in the SAME direction across "
+        f">= {CONSISTENT_PATTERN_MIN_KEYS} zones/segments -- see consistent_patterns."
+    )
+
+    return MultiplicitySummary(
+        family_size=family_size,
+        n_distinguishable=len(distinguishable),
+        per_n_alpha=per_n_alpha,
+        expected_false_positives=expected_fp,
+        prob_at_least_one_independent=prob_indep,
+        effective_family_size_low=eff_lo,
+        effective_family_size_high=eff_hi,
+        prob_at_least_one_effective_low=prob_eff_lo,
+        prob_at_least_one_effective_high=prob_eff_hi,
+        consistent_patterns=patterns,
+        note=note,
+    )
+
+
 def compare_runs(
     path_a: str, path_b: str, band_c: float = 1.0,
     run_index_a: Optional[int] = None, run_index_b: Optional[int] = None,
@@ -581,8 +951,16 @@ def compare_runs(
         if not math.isnan(metrics_a[z].start_temp_c) and not math.isnan(metrics_b[z].start_temp_c)
     }
 
-    def _floor(z: int, metric: str, seg: Optional[int]) -> Optional[float]:
-        return nf.floor_lookup(noise_floor_artifact, z, metric, seg)
+    def _floor_entry(z: int, metric: str, seg: Optional[int]) -> Optional[dict]:
+        """The full noise_floor.json artifact entry (not just noise_floor_c)
+        for this key, so _cmp can also surface floor_n and compute the
+        prediction-interval alternative. Key format matches
+        noise_floor._key_str exactly (verified against noise_floor.py, not
+        imported from it -- that module is out of scope for this pass)."""
+        if not noise_floor_artifact:
+            return None
+        key = f"z{z}:{metric}:{'whole' if seg is None else seg}"
+        return noise_floor_artifact.get("entries", {}).get(key)
 
     if sensitivity_paths is None and noise_floor_artifact:
         sensitivity_paths = noise_floor_artifact.get("generated_from") or None
@@ -597,7 +975,7 @@ def compare_runs(
     for z in zones:
         ma, mb = metrics_a[z], metrics_b[z]
         sd = start_deltas.get(z, math.inf)  # unknown start temp -> maximally distrustful
-        whole_cmp = _cmp(z, "iae_normalized_whole_c", None, ma.iae_normalized_whole_c, mb.iae_normalized_whole_c, sd, floor_c=_floor(z, "iae_normalized_whole_c", None))
+        whole_cmp = _cmp(z, "iae_normalized_whole_c", None, ma.iae_normalized_whole_c, mb.iae_normalized_whole_c, sd, floor_entry=_floor_entry(z, "iae_normalized_whole_c", None))
         if whole_cmp.delta is not None:
             whole_cmp.start_temp_adjustment = _start_temp_adjustment(
                 sensitivity.get(z), ma.start_temp_c, mb.start_temp_c, whole_cmp.delta,
@@ -605,27 +983,27 @@ def compare_runs(
         comparisons.append(whole_cmp)
         segs = sorted(set(ma.iae_normalized_by_segment) & set(mb.iae_normalized_by_segment))
         for seg in segs:
-            comparisons.append(_cmp(z, "iae_normalized_c", seg, ma.iae_normalized_by_segment.get(seg), mb.iae_normalized_by_segment.get(seg), sd, floor_c=_floor(z, "iae_normalized_c", seg)))
+            comparisons.append(_cmp(z, "iae_normalized_c", seg, ma.iae_normalized_by_segment.get(seg), mb.iae_normalized_by_segment.get(seg), sd, floor_entry=_floor_entry(z, "iae_normalized_c", seg)))
         segs = sorted(set(ma.ramp_mean_error_c) & set(mb.ramp_mean_error_c))
         for seg in segs:
-            comparisons.append(_cmp(z, "ramp_mean_error_c", seg, ma.ramp_mean_error_c.get(seg), mb.ramp_mean_error_c.get(seg), sd, floor_c=_floor(z, "ramp_mean_error_c", seg)))
+            comparisons.append(_cmp(z, "ramp_mean_error_c", seg, ma.ramp_mean_error_c.get(seg), mb.ramp_mean_error_c.get(seg), sd, floor_entry=_floor_entry(z, "ramp_mean_error_c", seg)))
         segs = sorted(set(ma.ramp_worst_error_c) & set(mb.ramp_worst_error_c))
         for seg in segs:
-            comparisons.append(_cmp(z, "ramp_worst_error_c", seg, ma.ramp_worst_error_c.get(seg), mb.ramp_worst_error_c.get(seg), sd, floor_c=_floor(z, "ramp_worst_error_c", seg)))
+            comparisons.append(_cmp(z, "ramp_worst_error_c", seg, ma.ramp_worst_error_c.get(seg), mb.ramp_worst_error_c.get(seg), sd, floor_entry=_floor_entry(z, "ramp_worst_error_c", seg)))
         segs = sorted(set(ma.dwell_entry_overshoot_peak_c) & set(mb.dwell_entry_overshoot_peak_c))
         for seg in segs:
-            comparisons.append(_cmp(z, "dwell_entry_overshoot_peak_c", seg, ma.dwell_entry_overshoot_peak_c.get(seg), mb.dwell_entry_overshoot_peak_c.get(seg), sd, floor_c=_floor(z, "dwell_entry_overshoot_peak_c", seg)))
+            comparisons.append(_cmp(z, "dwell_entry_overshoot_peak_c", seg, ma.dwell_entry_overshoot_peak_c.get(seg), mb.dwell_entry_overshoot_peak_c.get(seg), sd, floor_entry=_floor_entry(z, "dwell_entry_overshoot_peak_c", seg)))
         segs = sorted(set(ma.dwell_entry_time_to_peak_s) & set(mb.dwell_entry_time_to_peak_s))
         for seg in segs:
             a_v, b_v = ma.dwell_entry_time_to_peak_s.get(seg), mb.dwell_entry_time_to_peak_s.get(seg)
-            comparisons.append(_cmp(z, "dwell_entry_time_to_peak_s", seg, a_v, b_v, sd, smaller_is_better=False, floor_c=_floor(z, "dwell_entry_time_to_peak_s", seg)))
+            comparisons.append(_cmp(z, "dwell_entry_time_to_peak_s", seg, a_v, b_v, sd, compare_by_magnitude=False, floor_entry=_floor_entry(z, "dwell_entry_time_to_peak_s", seg)))
         segs = sorted(set(ma.dwell_steady_state_offset_c) & set(mb.dwell_steady_state_offset_c))
         for seg in segs:
-            comparisons.append(_cmp(z, "dwell_steady_state_offset_c", seg, ma.dwell_steady_state_offset_c.get(seg), mb.dwell_steady_state_offset_c.get(seg), sd, floor_c=_floor(z, "dwell_steady_state_offset_c", seg)))
+            comparisons.append(_cmp(z, "dwell_steady_state_offset_c", seg, ma.dwell_steady_state_offset_c.get(seg), mb.dwell_steady_state_offset_c.get(seg), sd, floor_entry=_floor_entry(z, "dwell_steady_state_offset_c", seg)))
         segs = sorted(set(ma.settle_time_s) & set(mb.settle_time_s))
         for seg in segs:
             a_v, b_v = ma.settle_time_s.get(seg), mb.settle_time_s.get(seg)
-            comparisons.append(_cmp(z, "settle_time_s", seg, a_v, b_v, sd, smaller_is_better=False, floor_c=_floor(z, "settle_time_s", seg)))
+            comparisons.append(_cmp(z, "settle_time_s", seg, a_v, b_v, sd, compare_by_magnitude=False, floor_entry=_floor_entry(z, "settle_time_s", seg)))
 
     return {
         "path_a": path_a, "path_b": path_b,
@@ -640,6 +1018,8 @@ def compare_runs(
         "n_rows_a": len(rows_a), "n_rows_b": len(rows_b),
         "start_temp_sensitivity": sensitivity,
         "metric_floor_reliability": summarize_metric_floor_reliability(noise_floor_artifact),
+        "multiplicity": summarize_multiplicity(comparisons),
+        "start_temp_metric_note": START_TEMP_METRIC_NOTE,
     }
 
 
@@ -681,6 +1061,7 @@ def format_compare_text(report: dict) -> str:
     lines = [
         f"A/B compare: A={report['path_a']}  B={report['path_b']}",
         NOISE_FLOOR_KNOWN_NOTE if report.get("noise_floor_known") else NOISE_FLOOR_NOTE,
+        report.get("start_temp_metric_note", START_TEMP_METRIC_NOTE),
         "",
     ]
     for z in report["zones"]:
@@ -690,6 +1071,42 @@ def format_compare_text(report: dict) -> str:
             f"B={report['start_temps_b'][z]:.2f}C delta={d:.2f}C"
             + (f"  *** EXCEEDS {CONFOUND_THRESHOLD_C:.1f}C CONFOUND THRESHOLD ***" if d > CONFOUND_THRESHOLD_C else "")
         )
+
+    mult = report.get("multiplicity")
+    if mult is not None:
+        lines.append("")
+        lines.append(
+            f"MULTIPLICITY: {mult.family_size} keys evaluated, {mult.n_distinguishable} DISTINGUISHABLE, "
+            "no correction applied to the per-key verdicts below."
+        )
+        if mult.per_n_alpha:
+            alpha_s = ", ".join(f"n={n}: {a*100:.1f}%" for n, a in sorted(mult.per_n_alpha.items()))
+            lines.append(f"  per-key false-positive rate of the range floor (Monte Carlo): {alpha_s}")
+        if mult.expected_false_positives is not None:
+            lines.append(f"  expected spurious DISTINGUISHABLE keys by chance alone: {mult.expected_false_positives:.2f}")
+        if mult.prob_at_least_one_independent is not None:
+            lines.append(
+                f"  P(>=1 spurious DISTINGUISHABLE), independence assumed (overstated): "
+                f"{mult.prob_at_least_one_independent*100:.1f}%"
+            )
+        if mult.prob_at_least_one_effective_low is not None:
+            lines.append(
+                f"  P(>=1 spurious DISTINGUISHABLE), effective family size "
+                f"{mult.effective_family_size_low}-{mult.effective_family_size_high} (correlation-adjusted): "
+                f"{mult.prob_at_least_one_effective_low*100:.1f}%-{mult.prob_at_least_one_effective_high*100:.1f}%"
+            )
+        if mult.consistent_patterns:
+            lines.append("  CONSISTENT PATTERN(S) -- same metric, same direction, across multiple keys (potentially actionable):")
+            for p in mult.consistent_patterns:
+                lines.append(
+                    f"    {p['metric']:30s} {p['direction']} better in {p['n_keys']} keys "
+                    f"(zones {p['zones']}, segments {p['segments']})"
+                )
+        else:
+            lines.append("  no consistent same-metric/same-direction pattern found -- treat any lone DISTINGUISHABLE key with caution")
+        lines.append(f"  {mult.note}")
+        lines.append("")
+
     reliability = report.get("metric_floor_reliability") or {}
     if reliability:
         lines.append("metric floor reliability (per-metric spread of the measured floor across zones/segments):")

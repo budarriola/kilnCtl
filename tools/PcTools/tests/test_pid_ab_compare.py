@@ -145,7 +145,12 @@ def test_cli_compare_text(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "A/B compare" in out
-    assert "NOISE FLOOR: UNKNOWN" in out
+    # The CLI's default --noise-floor path is the checked-in, now-populated
+    # noise_floor.json artifact (real 6-run campaign) -- so a plain "compare"
+    # invocation with no --noise-floor override reports the floor as
+    # measured, not unknown, even though EXCERPT itself is unrelated to that
+    # campaign (noise_floor_known only checks the artifact is non-empty).
+    assert "NOISE FLOOR: measured" in out
 
 
 def test_cli_run_missing_file(capsys):
@@ -267,7 +272,7 @@ def test_cli_split_missing_file_errors(tmp_path, capsys):
 
 def test_cmp_below_floor_is_indistinguishable():
     c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.050,
-                start_delta_c=0.0, floor_c=0.2)
+                start_delta_c=0.0, floor_entry={"noise_floor_c": 0.2, "n": 6, "std_c": 0.05})
     assert c.verdict.startswith("INDISTINGUISHABLE")
     assert c.delta == pytest.approx(0.05)
     # the structured field must agree with the verdict text -- a caller
@@ -275,11 +280,12 @@ def test_cmp_below_floor_is_indistinguishable():
     # needs this to be correct on its own.
     assert c.distinguishable is False
     assert c.floor_c == pytest.approx(0.2)
+    assert c.floor_n == 6
 
 
 def test_cmp_above_floor_stays_provisional_not_indistinguishable():
     c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.500,
-                start_delta_c=0.0, floor_c=0.2)
+                start_delta_c=0.0, floor_entry={"noise_floor_c": 0.2, "n": 6, "std_c": 0.05})
     assert c.verdict.startswith("PROVISIONAL")
     assert "INDISTINGUISHABLE" not in c.verdict
     assert "DISTINGUISHABLE" in c.verdict
@@ -291,13 +297,13 @@ def test_cmp_exactly_at_floor_is_not_indistinguishable():
     floor is not below it, so it must still get a verdict (PROVISIONAL),
     proving the comparison isn't <=."""
     c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.0, b=1.25,
-                start_delta_c=0.0, floor_c=0.25)
+                start_delta_c=0.0, floor_entry={"noise_floor_c": 0.25, "n": 6, "std_c": 0.06})
     assert c.verdict.startswith("PROVISIONAL")
 
 
 def test_cmp_with_no_floor_falls_back_to_unknown_provisional():
     c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.001,
-                start_delta_c=0.0, floor_c=None)
+                start_delta_c=0.0, floor_entry=None)
     assert c.verdict.startswith("PROVISIONAL")
     assert "noise floor unknown" in c.verdict
 
@@ -308,7 +314,7 @@ def test_confound_gate_still_wins_over_a_known_floor():
     gate is about whether the comparison is valid at all, not about metric
     magnitude."""
     c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.001,
-                start_delta_c=5.0, floor_c=0.2)
+                start_delta_c=5.0, floor_entry={"noise_floor_c": 0.2, "n": 6, "std_c": 0.05})
     assert c.verdict.startswith("REFUSED")
 
 
@@ -409,7 +415,13 @@ def test_first_valid_start_temp_skips_invalid_placeholder_row():
     a literal 0.0 placeholder, not a real temperature. compute_run_metrics
     must not treat that placeholder as a real starting temperature."""
     rows = ab.load_run(REAL_REPEAT_SET[0])
-    assert rows[0].zones[0].actual_c == 0.0  # confirm the fixture actually has the placeholder row
+    # 2026-09-03: log_analysis's HTTP-capture parser now honors actual_valid
+    # itself (it used to read actual_c regardless, silently taking the
+    # firmware's literal 0.0 "no reading yet" placeholder as a real
+    # temperature -- the very bug this test's own docstring describes, but
+    # was, ironically, encoding into its own premise check). An invalid
+    # first sample now surfaces as NaN, not 0.0 -- confirm THAT instead.
+    assert math.isnan(rows[0].zones[0].actual_c)  # confirm the fixture actually has the placeholder row
     metrics = ab.compute_run_metrics(rows)
     for z, m in metrics.items():
         assert m.start_temp_c != 0.0
@@ -628,3 +640,174 @@ def test_cli_compare_end_to_end_on_real_repeat_set(capsys, tmp_path):
     out = capsys.readouterr().out
     assert "start-temp sensitivity" in out
     assert "metric floor reliability" in out
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-03 -- adversarial statistical review. Problem 1: no multiplicity
+# control over the 48-key report. Problem 2: the range floor is not
+# scale-stable across n; prediction_interval_floor is the scale-stable
+# alternative, reported alongside (never gating) the verdict.
+# ---------------------------------------------------------------------------
+
+def test_t_975_matches_known_table_values():
+    """Sanity check the hand-maintained t-table against textbook values --
+    if this drifts, prediction_interval_floor silently drifts with it."""
+    assert ab._t_975(1) == pytest.approx(12.706)
+    assert ab._t_975(5) == pytest.approx(2.571)   # n=6 repeat set
+    assert ab._t_975(9) == pytest.approx(2.262)
+    assert ab._t_975(100) == pytest.approx(1.96)  # large-sample fallback
+
+
+def test_prediction_interval_floor_wider_than_a_typical_range_floor():
+    """The whole point of PROBLEM 2's fix: the honest PI floor for n=6 is
+    materially WIDER than a range-of-6 floor built from the same std_c, so
+    presenting it does not just relabel the same number."""
+    std_c = 0.05
+    n = 6
+    pi = ab.prediction_interval_floor(std_c, n)
+    # t(.975, 5) * std_c * sqrt(2) = 2.571 * 0.05 * 1.4142 = 0.1818
+    assert pi == pytest.approx(2.571 * 0.05 * math.sqrt(2), rel=1e-3)
+    # E[range]/sigma at n=6 is ~2.53 (review's figure) -- a range floor for
+    # the same 6 draws would be roughly 2.53 * std_c = 0.1265, well below
+    # the PI floor above, demonstrating the PI is the wider, more
+    # conservative statistic the review asked for.
+    approx_range_floor = 2.53 * std_c
+    assert pi > approx_range_floor
+
+
+def test_prediction_interval_floor_none_when_inputs_missing():
+    assert ab.prediction_interval_floor(None, 6) is None
+    assert ab.prediction_interval_floor(0.1, None) is None
+    assert ab.prediction_interval_floor(0.1, 1) is None  # n=1 -> 0 df, undefined
+
+
+def test_cmp_reports_pi_floor_alongside_range_floor_without_changing_verdict():
+    """A comparison whose delta clears the (tight) range floor but would NOT
+    clear the (wider) PI floor must still come back DISTINGUISHABLE -- the
+    PI floor is informational (pi_distinguishable), never the gate."""
+    # range floor 0.2, but std_c=0.5 with n=6 gives a PI floor of
+    # t(.975,5)*0.5*sqrt(2) = 2.571*0.5*1.4142 ~= 1.817 -- comfortably above
+    # a delta of 0.3.
+    c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.300,
+                start_delta_c=0.0, floor_entry={"noise_floor_c": 0.2, "n": 6, "std_c": 0.5})
+    assert c.verdict.startswith("PROVISIONAL")
+    assert c.distinguishable is True          # the actual verdict: range floor cleared
+    assert c.pi_floor_c is not None
+    assert c.pi_floor_c > abs(c.delta)
+    assert c.pi_distinguishable is False       # the informational PI verdict: NOT cleared
+
+
+def test_floor_n_surfaced_on_every_comparison_with_a_known_floor():
+    """PROBLEM 2: floor_n must be visible on the structured comparison, not
+    just buried in the artifact -- this is what lets a caller (or a human
+    reading JSON output) notice n=3 mixed in with n=6."""
+    c = ab._cmp(0, "settle_time_s", 1, a=100.0, b=110.0, start_delta_c=0.0,
+                floor_entry={"noise_floor_c": 5.0, "n": 3, "std_c": 2.0})
+    assert c.floor_n == 3
+
+
+def test_real_artifact_n_is_consistent_within_each_metric_but_mixed_overall():
+    """Confirms the concrete claim in the module docstring: the checked-in
+    artifact mixes n across keys (z0:settle_time_s:1 has n=3, everything
+    else has n=6). This is a fact about the checked-in artifact, not a
+    synthetic fixture -- if the artifact is regenerated with a uniform n,
+    this test should be revisited, not silently left green on stale
+    reasoning."""
+    artifact = nf.load_artifact()
+    assert artifact is not None
+    ns = {entry["n"] for entry in artifact["entries"].values()}
+    assert ns == {3, 6}, (
+        "expected the checked-in artifact to mix n=3 and n=6 (the known "
+        "z0:settle_time_s:1 outlier) -- if this changed, the module "
+        "docstring's PROBLEM 2 example needs updating too"
+    )
+
+
+def _artifact_with_uniform_floor(n: int, std_c: float, floor_c: float) -> dict:
+    entries = {}
+    for zone in (0, 1, 2):
+        entries[f"z{zone}:iae_normalized_whole_c:whole"] = {
+            "zone": zone, "metric": "iae_normalized_whole_c", "segment": None,
+            "n": n, "mean": 0.0, "std_c": std_c, "noise_floor_c": floor_c,
+        }
+    return {"schema_version": 1, "generated_from": [], "band_c": 1.0,
+            "n_repeats": n, "note": "", "entries": entries}
+
+
+def test_summarize_multiplicity_family_size_and_alpha_for_real_report():
+    """End-to-end: compare_runs on real repeat-set captures against a
+    uniform-floor artifact must produce a multiplicity summary whose
+    family_size equals the number of keyed (floor-known) comparisons, and
+    whose per_n_alpha for n=6 is close to the review's ~12% figure."""
+    artifact = _artifact_with_uniform_floor(n=6, std_c=0.03, floor_c=0.001)
+    report = ab.compare_runs(REAL_REPEAT_SET[0], REAL_REPEAT_SET[1], noise_floor_artifact=artifact)
+    assert "error" not in report
+    mult = report["multiplicity"]
+    keyed = [c for c in report["comparisons"] if c.distinguishable is not None]
+    assert mult.family_size == len(keyed)
+    assert 6 in mult.per_n_alpha
+    assert 0.08 < mult.per_n_alpha[6] < 0.16  # review's Monte Carlo figure: ~0.121
+    assert mult.prob_at_least_one_independent is not None
+    assert mult.prob_at_least_one_independent > mult.per_n_alpha[6]  # multiple keys -> higher than any one
+
+
+def test_multiplicity_note_and_summary_survive_into_text_report():
+    artifact = _artifact_with_uniform_floor(n=6, std_c=0.03, floor_c=0.001)
+    report = ab.compare_runs(REAL_REPEAT_SET[0], REAL_REPEAT_SET[1], noise_floor_artifact=artifact)
+    text = ab.format_compare_text(report)
+    assert "MULTIPLICITY" in text
+    assert "keys evaluated" in text
+    assert "P(>=1 spurious DISTINGUISHABLE)" in text
+
+
+def test_start_temp_metric_note_present_in_every_text_report():
+    """PROBLEM 3: the two 1.0C thresholds gate different quantities -- prove
+    the disambiguating note is actually printed, not just documented."""
+    report = ab.compare_runs(EXCERPT, EXCERPT)
+    text = ab.format_compare_text(report)
+    assert "START-TEMP UNIT NOTE" in text
+    assert "DIFFERENT" in text
+
+
+# --- Single-lucky-key mutation guard -----------------------------------
+# THE POINT OF THIS TEST: a caller must not be able to satisfy
+# "consistent pattern" (the one thing this module calls potentially
+# actionable) with a SINGLE DISTINGUISHABLE key. Below MUTATES the module's
+# CONSISTENT_PATTERN_MIN_KEYS down to 1 to prove the real (>=3) threshold
+# actually does the rejecting -- restored in a try/finally.
+
+def test_single_lucky_distinguishable_key_is_not_a_consistent_pattern():
+    # Isolate "a single lucky key must not count as a pattern": build a
+    # report with exactly one DISTINGUISHABLE key among the rest
+    # (REFUSED or INDISTINGUISHABLE) and confirm no pattern is reported.
+    tight_artifact = _artifact_with_uniform_floor(n=6, std_c=0.001, floor_c=999.0)
+    # zones 0/1 have a >1.0C start-temp delta between these two real
+    # captures (REFUSED, so they never reach the floor gate at all -- see
+    # the printed deltas this asserts against below); zone 2's delta is
+    # small enough to be PROVISIONAL, so only its own floor matters. Give
+    # z2 alone a tiny floor so its delta clears -- i.e. exactly one lucky
+    # key -- and leave z0/z1's floors at the huge default (moot, since they
+    # are REFUSED regardless of floor).
+    tight_artifact["entries"]["z2:iae_normalized_whole_c:whole"]["noise_floor_c"] = 0.0001
+    lucky_report = ab.compare_runs(REAL_REPEAT_SET[0], REAL_REPEAT_SET[1], noise_floor_artifact=tight_artifact)
+    assert lucky_report["start_temp_deltas_c"][2] < ab.CONFOUND_THRESHOLD_C, "test setup depends on zone 2 not being REFUSED"
+    lucky_mult = lucky_report["multiplicity"]
+    assert lucky_mult.n_distinguishable == 1, "test setup must produce exactly one lucky key"
+    assert lucky_mult.consistent_patterns == [], (
+        "a single DISTINGUISHABLE key must never be reported as a consistent pattern"
+    )
+
+    # MUTATION: prove this isn't vacuous -- lower the real module's own
+    # threshold to 1 and confirm the SAME single-key report now DOES get
+    # flagged as a pattern, i.e. the >=3 threshold is actually load-bearing.
+    original = ab.CONSISTENT_PATTERN_MIN_KEYS
+    try:
+        ab.CONSISTENT_PATTERN_MIN_KEYS = 1
+        mutated_mult = ab.summarize_multiplicity(lucky_report["comparisons"])
+        assert mutated_mult.consistent_patterns != [], (
+            "MUTATION CHECK FAILED: lowering CONSISTENT_PATTERN_MIN_KEYS to 1 should have "
+            "made the single lucky key register as a pattern -- if it didn't, the real "
+            "test above proves nothing"
+        )
+    finally:
+        ab.CONSISTENT_PATTERN_MIN_KEYS = original
