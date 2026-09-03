@@ -1195,11 +1195,21 @@ same document's own 2026-08-29/30 bench sections contradict.
       (The confirming run this paragraph called for has since happened —
       see the top of this item.)
 - [ ] **The fuzzy layer has never run above `strength_pct = 0`** on hardware.
-      Every measurement in §2 is with it effectively off. A hardware run is
-      being set up as of this writing, blocked briefly by a
-      `zones_http_client` field-mapping bug (being fixed separately). A
-      profile-7 baseline with `fuzzy=0` on the current build is running
-      concurrently to have a same-build comparison point.
+      Every measurement in §2 is with it effectively off. A hardware run was
+      being set up as of the original writing, blocked briefly by a
+      `zones_http_client` field-mapping bug: firmware emits the JSON key
+      `fuzzy_strength_pct` (`zones_http_handlers.c` ~line 308-321) but the
+      POST form field is `z%u_fuzzy_strength`, no `_pct` suffix (~line 954),
+      and the client's `_ZONE_FIELD_FORM_KEY` map did not yet know that.
+      **That named blocker is resolved** — fixed in `b1ea749d`
+      (2026-08-31), covered by
+      `test_fuzzy_strength_override_matches_the_hardware_repro_command`
+      (`tools/PcTools/tests/test_zones_http_client.py` ~line 870) — so the
+      hardware run appears available again. Nobody has verified it was the
+      *only* thing blocking that run, and this checklist item stays
+      unchecked because the run itself has not happened. A profile-7
+      baseline with `fuzzy=0` on the current build is running concurrently
+      to have a same-build comparison point.
 
       **Simulated first, per owner decision (2026-09-02), before any
       hardware run.** `plant_sim.py` gained a line-for-line Python mirror
@@ -1416,6 +1426,20 @@ uninstrumented and uncompensated in every gain identification, every A/B
 controller comparison, and the noise-floor campaign (§3.3, §3.7 above): some
 fraction of any run-to-run scatter could be mains sag rather than the
 controller, and this cannot currently be ruled in or out.
+
+**PC-side tooling can grow a hard dependency on firmware that is not yet
+flashed.** `ramp_assist_enabled` became a REQUIRED `config_presets.py` field
+whose apply path calls `POST /api/ramp_assist`; the board was running
+firmware predating that endpoint, so every preset apply failed with
+`{"ok":false,"error":"no such endpoint"}` — a Python traceback mid-experiment
+instead of a clear message, threatening an unattended campaign. Lesson: when
+tooling gains a required field backed by a new endpoint, either the board
+must be reflashed or the tooling must handle the endpoint's absence
+deliberately (pinning a feature OFF is trivially satisfied when the firmware
+lacks the feature; pinning it ON is a hard failure against old firmware).
+Related: the bench board is currently running firmware older than the work
+committed on 2026-09-02, so anything landed that day is unverified on
+hardware until a reflash.
 
 ### 3.8 Load sensitivity — never tested on hardware, simulator-only 2026-09-02
 
