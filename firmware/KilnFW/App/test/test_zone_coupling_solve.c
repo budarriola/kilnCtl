@@ -283,9 +283,19 @@ static void test_hold_measured_diag_flag_switches_diagonal(void)
 //
 // The guarded-fallback half of the contract: `use_measured_diag_k_dc=true`
 // is not itself sufficient to change behaviour if the per-zone value was
-// never populated (zones_config_get_coupling_diag_k_dc() reports false, the
-// real firmware's own default state on every zone that has never been hand-
-// set or preset-loaded). Must reproduce test 1's flag-off answer exactly.
+// never populated. This test models the getter reporting false outright
+// (zone_index out of range, or a getter that has no data at all for this
+// zone) -- a LEGAL outcome the guard must also survive, but NOT what a real
+// board's every-zone-unmeasured state actually looks like: the real
+// accessor (zones_config_accessors.c's zones_config_get_coupling_diag_k_dc())
+// returns true for any in-range zone index regardless of whether the field
+// was ever written, and an unwritten coupling_diag_k_dc default-initializes
+// to 0.0f. So in production it is the getter reporting TRUE with `measured
+// == 0.0f` (and negative/NaN/+-Inf are reachable too, e.g. via backup_http.c
+// import of a corrupted/adversarial file) that represents "never measured
+// on every zone" -- exercised by the five tests immediately below this one,
+// which are the ones that actually pin the isfinite()/`> 0.0f` guard's
+// real-world job. Must reproduce test 1's flag-off answer exactly.
 static void test_hold_measured_diag_flag_falls_back_when_unmeasured(void)
 {
     TEST_SECTION("zone_coupling_solve: use_measured_diag_k_dc=true falls back to ff_k_dc when unmeasured");
@@ -309,6 +319,227 @@ static void test_hold_measured_diag_flag_falls_back_when_unmeasured(void)
     TEST_CHECK_NEAR(u0, 0.1614, 0.001, "flag on but unmeasured diag should fall back to the ff_k_dc hybrid solve");
 }
 
+// ---- tests 6-10: flag on, getter reports TRUE, but the stored value is
+// one of coupling_diagonal_k_dc()'s five documented "not usable" cases --
+// each must still fall back to ff_k_dc, exactly like test 5, because this is
+// what "never measured" actually looks like coming out of the real
+// zones_config_get_coupling_diag_k_dc() (see the corrected comment above
+// test 5, and coupling_diagonal_k_dc()'s own doc comment in
+// zone_coupling_solve.c). Deleting `&& isfinite(measured) && measured >
+// 0.0f` from that helper leaves test 1-5 green (they never populate the
+// stub with a "present, unusable" value) but must turn these five red,
+// because the stub now reports present=true with a value the un-guarded
+// code would use directly as G[row][row] -- see this file's mutation-test
+// notes in the report that shipped alongside this comment.
+static void run_present_but_unusable_case(const char *label, float bad_value)
+{
+    setup_adopted_matrix();
+    set_diag_k_dc(0, bad_value);
+    set_diag_k_dc(1, OWN_DIAG_Z1); // z1 IS usable -- isolates the assertion to z0's own guard
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_hold_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
+                                        &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, label);
+    // z1's diagonal is the own-diagonal value (OWN_DIAG_Z1) in this call, not
+    // FF_K_DC_Z1 -- so this is not test 1's exact hybrid answer (0.1614) or
+    // test 4's exact own-diagonal answer (0.2632); it is a THIRD, distinct
+    // number sitting between them, computed independently below so the
+    // check is falsifiable rather than accidentally matching either pinned
+    // constant.
+    TEST_CHECK_NEAR(u0, 0.25279, 0.001, label);
+}
+
+static void test_hold_measured_diag_present_but_zero_falls_back(void)
+{
+    TEST_SECTION("zone_coupling_solve: measured present, value == 0.0f -- must fall back to ff_k_dc");
+    run_present_but_unusable_case("present-but-zero must fall back to ff_k_dc-diagonal answer", 0.0f);
+}
+
+static void test_hold_measured_diag_present_but_negative_falls_back(void)
+{
+    TEST_SECTION("zone_coupling_solve: measured present, value < 0 -- must fall back to ff_k_dc");
+    run_present_but_unusable_case("present-but-negative must fall back to ff_k_dc-diagonal answer", -5.0f);
+}
+
+static void test_hold_measured_diag_present_but_nan_falls_back(void)
+{
+    TEST_SECTION("zone_coupling_solve: measured present, value == NaN -- must fall back to ff_k_dc");
+    run_present_but_unusable_case("present-but-NaN must fall back to ff_k_dc-diagonal answer", (float)NAN);
+}
+
+static void test_hold_measured_diag_present_but_posinf_falls_back(void)
+{
+    TEST_SECTION("zone_coupling_solve: measured present, value == +Inf -- must fall back to ff_k_dc");
+    run_present_but_unusable_case("present-but-+Inf must fall back to ff_k_dc-diagonal answer", (float)INFINITY);
+}
+
+static void test_hold_measured_diag_present_but_neginf_falls_back(void)
+{
+    TEST_SECTION("zone_coupling_solve: measured present, value == -Inf -- must fall back to ff_k_dc");
+    run_present_but_unusable_case("present-but--Inf must fall back to ff_k_dc-diagonal answer", (float)-INFINITY);
+}
+
+// ---- test 11: the singular-G consequence of a bad diagonal ---------------
+//
+// z1 here has NO measured coupling to anyone (its whole coupling_coeff row
+// is 0 -- an isolated zone in this particular system, e.g. one whose
+// off-diagonal cells were never commissioned) AND its diag_k_dc reads
+// present-but-zero. With the guard intact, coupling_diagonal_k_dc() falls
+// back to ff_k_dc for z1's diagonal, so z1's row is [0 (off-diag), ff_k_dc
+// (diag)] -- a normal, solvable row (COUPLING_SOLVE_OK expected below).
+// Delete the guard and z1's diagonal becomes the raw 0.0f the stub reports,
+// making the WHOLE row (off-diagonal AND diagonal both 0) identically
+// zero -- rank-deficient, unconditionally singular regardless of the other
+// rows. This is the concrete "zero diagonal makes G singular" case the
+// review called out; see this file's own mutation-test log for the actual
+// COUPLING_SOLVE_FALLBACK_SINGULAR failure this produces once the guard is
+// removed.
+static void test_hold_zero_row_and_zero_diag_is_solvable_with_guard(void)
+{
+    TEST_SECTION("zone_coupling_solve: guard intact -- an unmeasured, zero-coupling-row zone still "
+                 "produces a solvable (non-singular) system via the ff_k_dc fallback diagonal");
+    setup_adopted_matrix();
+    set_matrix_row(1, 0.0f, 0.0f, 0.0f); // z1: no measured coupling to anyone
+    set_diag_k_dc(1, 0.0f);              // and its own diag_k_dc reads present-but-zero
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_hold_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
+                                        &infeasible, &reason, &changed, &cache, &prev_sig);
+    (void)u0;
+
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "z1's ff_k_dc-diagonal fallback keeps the system solvable "
+              "even though z1's own coupling row and measured diag are both entirely unmeasured");
+    TEST_CHECK(used_matrix, "a genuine (non-fallback) 2x2 solve must engage here");
+}
+
+// ---- tests 12-14: climb-term coverage of the same flag, mirroring the
+// hold tests above -- PID_EXPANSION_PLAN.md's own documented history
+// (project_feedforward_climb_uncoupled.md) is a hold term that solved the
+// matrix while the climb term silently used the uncoupled formula; this
+// flag shipped with ZERO climb coverage prior to this file's addition,
+// which is exactly the shape of bug that history warns about. ------------
+
+// z0/z1 tau values -- arbitrary but fixed, distinct per zone (never equal,
+// so a row/column tau mixup would not accidentally cancel out).
+#define TAU_Z0 120.0f
+#define TAU_Z1 150.0f
+#define TAU_Z2 90.0f
+#define CLIMB_RATE_C_PER_S 0.5f
+
+// ---- test 12: climb diagonal provenance is ff_k_dc (flag off), pinned
+// against an independently hand-solved hybrid answer, with the own-diagonal
+// alternative ruled out explicitly -- the climb-term counterpart of test 1.
+static void test_climb_diagonal_is_ff_k_dc(void)
+{
+    TEST_SECTION("zone_coupling_solve_climb: diagonal provenance == ff_k_dc (flag off)");
+    setup_adopted_matrix();
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[1].ff_tau_s = TAU_Z1; // neighbor() defaults ff_tau_s to 0 -- the climb RHS needs z1's real tau
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_climb_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    // numpy.linalg.solve([[39.2459,27.32],[14.30,31.9669]], [60,75]) ==
+    // [-0.15162281, 2.41400343] (verified A@u reproduces b).
+    float u0 = zone_coupling_solve_climb(true, FF_K_DC_Z0, TAU_Z0, 0, false, zones, 3, CLIMB_RATE_C_PER_S,
+                                         &used_matrix, &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "2-member climb solve should succeed");
+    TEST_CHECK(used_matrix, "2-member climb solve should report used_matrix");
+    TEST_CHECK_NEAR(u0, -0.15162, 0.001, "z0 climb duty should match the ff_k_dc-diagonal hybrid solve");
+}
+
+// ---- test 13: use_measured_diag_k_dc=true switches the climb diagonal ----
+// The climb-term counterpart of test 4.
+static void test_climb_measured_diag_flag_switches_diagonal(void)
+{
+    TEST_SECTION("zone_coupling_solve_climb: use_measured_diag_k_dc=true selects the matrix's own "
+                 "diagonal");
+    setup_adopted_matrix();
+    set_diag_k_dc(0, OWN_DIAG_Z0);
+    set_diag_k_dc(1, OWN_DIAG_Z1);
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[1].ff_tau_s = TAU_Z1; // neighbor() defaults ff_tau_s to 0 -- the climb RHS needs z1's real tau
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_climb_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    // numpy.linalg.solve([[38.13,27.32],[14.30,35.90]], [60,75]) ==
+    // [0.107341, 2.04637949].
+    float u0 = zone_coupling_solve_climb(true, FF_K_DC_Z0, TAU_Z0, 0, true, zones, 3, CLIMB_RATE_C_PER_S,
+                                         &used_matrix, &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "flag-on 2-member climb solve should succeed");
+    TEST_CHECK_NEAR(u0, 0.10734, 0.001, "flag on + measured diag present should give the own-diagonal "
+                    "climb solve");
+    TEST_CHECK(fabs((double)u0 - (-0.15162)) > 0.05, "flag-on climb result should NOT match the "
+              "ff_k_dc-diagonal hybrid solve");
+}
+
+// ---- test 14: flag on but coupling_diag_k_dc unmeasured -- climb falls
+// back to ff_k_dc. The climb-term counterpart of test 5.
+static void test_climb_measured_diag_flag_falls_back_when_unmeasured(void)
+{
+    TEST_SECTION("zone_coupling_solve_climb: use_measured_diag_k_dc=true falls back to ff_k_dc when "
+                 "unmeasured");
+    setup_adopted_matrix(); // clears the diag stub -- nothing set for any zone
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[1].ff_tau_s = TAU_Z1; // neighbor() defaults ff_tau_s to 0 -- the climb RHS needs z1's real tau
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_climb_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    float u0 = zone_coupling_solve_climb(true, FF_K_DC_Z0, TAU_Z0, 0, true, zones, 3, CLIMB_RATE_C_PER_S,
+                                         &used_matrix, &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "flag-on, unmeasured-diag climb solve should still succeed");
+    TEST_CHECK_NEAR(u0, -0.15162, 0.001, "flag on but unmeasured diag should fall back to the ff_k_dc "
+                    "hybrid climb solve");
+}
+
 int main(void)
 {
     test_hold_diagonal_is_ff_k_dc();
@@ -316,6 +547,15 @@ int main(void)
     test_hold_membership_transition_step();
     test_hold_measured_diag_flag_switches_diagonal();
     test_hold_measured_diag_flag_falls_back_when_unmeasured();
+    test_hold_measured_diag_present_but_zero_falls_back();
+    test_hold_measured_diag_present_but_negative_falls_back();
+    test_hold_measured_diag_present_but_nan_falls_back();
+    test_hold_measured_diag_present_but_posinf_falls_back();
+    test_hold_measured_diag_present_but_neginf_falls_back();
+    test_hold_zero_row_and_zero_diag_is_solvable_with_guard();
+    test_climb_diagonal_is_ff_k_dc();
+    test_climb_measured_diag_flag_switches_diagonal();
+    test_climb_measured_diag_flag_falls_back_when_unmeasured();
 
     printf("zone_coupling_solve: %d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;

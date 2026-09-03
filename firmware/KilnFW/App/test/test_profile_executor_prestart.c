@@ -589,17 +589,38 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
 
 /* PID_EXPANSION_PLAN.md sec 3.2 ("the solver switch itself"): profile_
  * executor_feedforward.c's s_coupling_use_measured_diag_k_dc is compiled to
- * false, so zone_coupling_solve.c's coupling_diagonal_k_dc() helper never
- * actually calls this in any test this file runs -- it exists purely to
- * satisfy the linker (the call is compiled unconditionally into
- * zone_coupling_solve.c even though the runtime branch never takes it here).
- * "Never measured" (false) for every zone, matching every real board that
- * has never had a preset/hand-set value applied. */
+ * false in this executable (same as shipped firmware), so
+ * coupling_diagonal_k_dc() (zone_coupling_solve.c) never takes the branch
+ * that calls this getter at all -- it short-circuits on `use_measured`
+ * before making the call. Settable, not hardcoded false, so
+ * test_hold_wiring_ignores_measured_diag_while_flag_is_off() below can prove
+ * that: it populates g_stub_coupling_diag_present/g_stub_coupling_diag with
+ * a value that would visibly change the answer if it were ever read, then
+ * asserts the answer is unchanged -- the only way to make a future flip of
+ * s_coupling_use_measured_diag_k_dc to true show up as a failing test here,
+ * rather than as a silent no-test-change event (test-fidelity review,
+ * 2026-09-02, gap 3).
+ *
+ * Every OTHER test in this file leaves the stub at its default: present=false
+ * for every zone -- NOT because that is "the real firmware's own default
+ * state" (it is not: zones_config_accessors.c's real getter returns TRUE for
+ * any in-range zone regardless of whether the field was ever written, and an
+ * unwritten coupling_diag_k_dc default-initializes to 0.0f, so on a real
+ * board the getter reports true with value 0.0f, not false) -- but simply
+ * because the flag is compiled off here and the branch that would call this
+ * getter is unreached, so what it returns is otherwise irrelevant to every
+ * other test. See test_zone_coupling_solve.c for the tests that pin the
+ * real "present=true, value=0.0f/negative/NaN/+-Inf" guard behaviour that
+ * matters once the flag is ever on. */
+static bool  g_stub_coupling_diag_present[MAX31856_CHANNEL_COUNT];
+static float g_stub_coupling_diag[MAX31856_CHANNEL_COUNT];
 bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
 {
-    (void)zone_index;
-    (void)out_k_dc;
-    return false;
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !g_stub_coupling_diag_present[zone_index]) {
+        return false;
+    }
+    if (out_k_dc) *out_k_dc = g_stub_coupling_diag[zone_index];
+    return true;
 }
 
 /* adaptive_tune.c's coupled-solve apply path (PID_EXPANSION_PLAN.md 3.3, the
@@ -2317,6 +2338,8 @@ static void reset_coupling_test_state(void)
     g_stub_coupling_present[0] = true;
     g_stub_coupling_present[1] = true;
     g_stub_coupling_present[2] = true;
+    memset(g_stub_coupling_diag_present, 0, sizeof(g_stub_coupling_diag_present));
+    memset(g_stub_coupling_diag, 0, sizeof(g_stub_coupling_diag));
     /* Opus review, test-isolation hole: the (members,G,b) solve cache and
      * the membership-transition signature both live in file-static storage
      * OUTSIDE s_exec (deliberately -- they must survive across ticks, which
@@ -3169,6 +3192,108 @@ static void test_hold_singular_matrix_falls_back(void)
     TEST_CHECK(hold0 == legacy0, "the fallback value itself must still be the exact legacy formula");
     TEST_CHECK(isfinite(hold0), "a refused/singular solve must never leak a NaN/Inf into the hold term");
     TEST_CHECK(!infeasible, "a fallback is not a 'solve that needed clamping' -- infeasible must stay false");
+}
+
+/* Test-fidelity review, 2026-09-02, gap 3: profile_executor_feedforward.c's
+ * s_coupling_use_measured_diag_k_dc constant is `static const bool ... =
+ * false`, and BOTH link stubs in this tree (this file's
+ * zones_config_get_coupling_diag_k_dc() above, and
+ * test_adaptive_tune.c's) hardcoded `return false` before this test existed
+ * -- so a getter that never reports a usable measured value can never
+ * distinguish "the flag is off" from "the flag is on but nothing is
+ * measured yet". Flipping the constant to true in
+ * profile_executor_feedforward.c would have produced an IDENTICAL green
+ * suite: a no-test-change event for a real production-behaviour change.
+ *
+ * This test closes that hole by giving the getter something to find. It
+ * uses the SAME [affected][stepped] matrix and expected numbers as
+ * test_hold_matrix_solves_real_measured_gain_matrix() just above (real
+ * bench-measured 3x3, dT=15) but ALSO populates coupling_diag_k_dc for
+ * every zone with a value that is deliberately NOT any zone's ff_k_dc (see
+ * own_diag[] below) -- if solve_hold_for_zone()'s call into
+ * zone_coupling_solve_hold() ever forwarded `true` instead of the compiled
+ * `s_coupling_use_measured_diag_k_dc`, or if that constant itself were ever
+ * flipped, G[row][row] would pick up own_diag[] instead of ff_k_dc and this
+ * test's TEST_CHECK_NEAR against the ff_k_dc-diagonal answer would go red.
+ * Verified by mutation: temporarily forcing the call site's
+ * `s_coupling_use_measured_diag_k_dc` argument to a literal `true` and
+ * rebuilding reproduces exactly that failure (see this repo's report for
+ * the quoted output); reverted immediately after. */
+static void test_hold_wiring_ignores_measured_diag_while_flag_is_off(void)
+{
+    TEST_SECTION("solve_hold_for_zone()/solve_climb_for_zone() production wiring -- with "
+                 "s_coupling_use_measured_diag_k_dc compiled false, a POPULATED, DISTINCT "
+                 "coupling_diag_k_dc must be completely ignored -- proves the suite is sensitive "
+                 "to that constant, not merely to the flag argument in isolation");
+    reset_coupling_test_state();
+
+    const float diag[3]     = {31.9609f, 23.4805f, 21.7422f};
+    const float expect_u[3] = {0.200373f, 0.419902f, 0.588364f};
+    /* Deliberately far from every diag[] entry above, so a wiring bug that
+     * used these instead cannot coincidentally land within TEST_CHECK_NEAR's
+     * tolerance of the ff_k_dc answer. */
+    const float own_diag[3] = {90.0f, 91.0f, 92.0f};
+    const float ambient_c = 20.0f, setpoint_c = 35.0f;
+    s_exec.ambient_c = ambient_c;
+
+    g_stub_coupling[0][1] = 12.0586f; g_stub_coupling[0][2] = 6.0039f;
+    g_stub_coupling[1][0] = 5.7656f;  g_stub_coupling[1][2] = 6.7734f;
+    g_stub_coupling[2][0] = 2.4062f;  g_stub_coupling[2][1] = 4.1094f;
+
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true;
+        s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c;
+        s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i];
+        s_exec.zones[i].ff_tau_s = 260.0f + (float)i; /* distinct, nonzero -- climb below needs it */
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+        g_stub_coupling_diag_present[i] = true;
+        g_stub_coupling_diag[i] = own_diag[i];
+    }
+
+    for (uint8_t zi = 0; zi < 3; zi++) {
+        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f, NULL);
+        TEST_CHECK_NEAR(u_ff, expect_u[zi], 1e-4, "with the flag compiled off, a populated "
+                        "coupling_diag_k_dc must not move the hold duty at all -- the exact "
+                        "ff_k_dc-diagonal answer must still come out");
+    }
+
+    /* Climb-term counterpart, same production wiring, same "populated but
+     * must be ignored" property -- solve_climb_for_zone() takes the identical
+     * s_coupling_use_measured_diag_k_dc constant, and gap 3's history
+     * (project_feedforward_climb_uncoupled.md) is specifically the climb
+     * term silently diverging from an already-fixed hold term. Not pinned to
+     * a hand-solved number (that belongs to
+     * test_climb_matrix_solves_real_measured_gain_matrix()) -- this
+     * re-solves the SAME system with own_diag[] substituted on the diagonal
+     * and asserts the production answer does NOT match it, which is the
+     * direct negative check that own_diag[] was not silently used. */
+    const float rate_c_per_s = 120.0f / 3600.0f;
+    bool used_matrix = false, infeasible = false; coupling_solve_reason_t reason = COUPLING_SOLVE_OK;
+    bool membership_changed = false;
+    float climb0 = solve_climb_for_zone(&s_exec.zones[0], 0, rate_c_per_s, &used_matrix, &infeasible,
+                                        &reason, &membership_changed);
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "3-zone climb solve should succeed here too");
+
+    float own_diag_G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    memset(own_diag_G, 0, sizeof(own_diag_G));
+    own_diag_G[0][0] = own_diag[0]; own_diag_G[0][1] = 12.0586f; own_diag_G[0][2] = 6.0039f;
+    own_diag_G[1][0] = 5.7656f;     own_diag_G[1][1] = own_diag[1]; own_diag_G[1][2] = 6.7734f;
+    own_diag_G[2][0] = 2.4062f;     own_diag_G[2][1] = 4.1094f;     own_diag_G[2][2] = own_diag[2];
+    float b_climb[MAX31856_CHANNEL_COUNT] = {
+        rate_c_per_s * s_exec.zones[0].ff_tau_s,
+        rate_c_per_s * s_exec.zones[1].ff_tau_s,
+        rate_c_per_s * s_exec.zones[2].ff_tau_s,
+    };
+    float own_u[MAX31856_CHANNEL_COUNT];
+    coupling_solve_reason_t own_reason =
+        zone_coupling_gauss_solve_partial_pivot_vec(3, own_diag_G, b_climb, own_u);
+    TEST_CHECK(own_reason == COUPLING_SOLVE_OK, "the own-diagonal reference solve itself must succeed "
+              "for the disagreement check below to mean anything");
+    TEST_CHECK(fabsf(climb0 - own_u[0]) > 0.01f, "the production climb answer must NOT match what an "
+              "own-diagonal solve would have given -- if it did, the flag-off wiring silently used "
+              "coupling_diag_k_dc anyway");
 }
 
 /* Live-board defect (2026-08-31 firing): the CLIMB half of zone_feedforward()
@@ -5140,6 +5265,7 @@ void run_test_profile_executor_prestart(void)
     test_hold_diagonal_only_matches_legacy_exactly();
     test_hold_matrix_solves_real_measured_gain_matrix();
     test_hold_singular_matrix_falls_back();
+    test_hold_wiring_ignores_measured_diag_while_flag_is_off();
     test_climb_matrix_solves_real_measured_gain_matrix();
     test_climb_zero_coupling_is_bit_identical_to_legacy_formula();
     test_climb_singular_matrix_falls_back();

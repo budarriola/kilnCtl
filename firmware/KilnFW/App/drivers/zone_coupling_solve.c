@@ -181,7 +181,18 @@ static bool coupling_note_membership_signature(uint16_t *prev_membership_sig, ui
  * shape diagonal_hold/diagonal_climb's own `ff_k_dc` reads already use
  * (zones_config_get_coupling_diag_k_dc() reporting false, or a stored value
  * that is non-finite or <= 0.0f -- zones_http.h's own "not measured"
- * convention for this field -- both fall through to fallback_ff_k_dc). */
+ * convention for this field -- both fall through to fallback_ff_k_dc).
+ *
+ * On real hardware only the SECOND half of that guard ever actually fires:
+ * zones_config_accessors.c's zones_config_get_coupling_diag_k_dc() returns
+ * true for any in-range zone index regardless of whether
+ * coupling_diag_k_dc has ever been written (it has no separate "present"
+ * flag), and an un-set field default-initializes to 0.0f -- so "never
+ * measured" on the board is `measured == 0.0f` with the getter reporting
+ * true, not the getter reporting false. The `isfinite(measured) &&
+ * measured > 0.0f` checks are therefore load-bearing on their own, not
+ * redundant belt-and-braces alongside the return-value check -- see
+ * test_zone_coupling_solve.c's guard tests, which pin exactly this. */
 static float coupling_diagonal_k_dc(uint8_t member_zi, float fallback_ff_k_dc, bool use_measured)
 {
     if (!use_measured) {
