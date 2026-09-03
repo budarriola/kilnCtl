@@ -240,8 +240,25 @@ coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot_vec(uint8_t n,
  * *out_membership_changed is true when the SET of zones in this system (or
  * whether zi qualifies at all) differs from the last call for this zi. Callers
  * that care about bump-transfer (pid_family_zone_tick()) must re-seed on this
- * edge; this function only detects and reports it. */
-float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi,
+ * edge; this function only detects and reports it.
+ *
+ * `use_measured_diag_k_dc` (PID_EXPANSION_PLAN.md sec 3.2, "STORAGE LANDED
+ * 2026-09-02f" / "the solver switch itself"): when true, each member row's
+ * G[row][row] tries `zones_config_get_coupling_diag_k_dc(member, &v)` first
+ * and uses it if that call reports success AND `v` is finite and > 0.0f --
+ * the SAME guarded-fallback shape this file's own diagonal_hold/
+ * diagonal_climb already use for `ff_k_dc` (0.0f/not-finite/not-measured
+ * falls through). Any other outcome (getter reports false, or the stored
+ * value is not usable) falls back to `ff_k_dc` exactly as when this flag is
+ * false. False reproduces every caller's pre-existing behaviour bit-for-bit
+ * (the hybrid this codebase has run since 2026-09-02d): a caller must
+ * opt in per call, there is no compiled-in default that changes shipped
+ * behaviour by itself. See the header's own analysis for why this is not
+ * (yet) the shipped default: `coupling_diag_k_dc` has no autotune writer on
+ * this board today, only a PC-side preset or hand-set value, and the
+ * uncoupled 1x1 fallback's own diagonal choice is a separate, unresolved
+ * question this flag deliberately does not touch. */
+float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi, bool use_measured_diag_k_dc,
                                const zone_coupling_neighbor_t *zones, uint8_t zone_count,
                                float setpoint_c, float ambient_c, bool *out_used_matrix, bool *out_infeasible,
                                coupling_solve_reason_t *out_reason, bool *out_membership_changed,
@@ -298,8 +315,15 @@ typedef struct {
  * never silently corrupt the climb answer or vice versa. Callers are not
  * obliged to surface this edge separately if they already reseed on the hold
  * term's identical edge; see the call site's own comment for what this
- * codebase does. */
+ * codebase does.
+ *
+ * use_measured_diag_k_dc: same flag, same guarded-fallback semantics as
+ * zone_coupling_solve_hold()'s own doc comment -- kept independent per call
+ * (not cached/shared) so a caller could in principle run the hold and climb
+ * terms under different diagonal sources, though every caller in this tree
+ * passes the same value to both. */
 float zone_coupling_solve_climb(bool z_qualifies, float z_ff_k_dc, float z_ff_tau_s, uint8_t zi,
+                                bool use_measured_diag_k_dc,
                                 const zone_coupling_neighbor_t *zones, uint8_t zone_count,
                                 float rate_c_per_s, bool *out_used_matrix, bool *out_infeasible,
                                 coupling_solve_reason_t *out_reason, bool *out_membership_changed,

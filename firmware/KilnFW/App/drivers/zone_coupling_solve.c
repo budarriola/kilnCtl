@@ -173,7 +173,28 @@ static bool coupling_note_membership_signature(uint16_t *prev_membership_sig, ui
     return changed;
 }
 
-float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi,
+/* PID_EXPANSION_PLAN.md sec 3.2 ("STORAGE LANDED 2026-09-02f" / "the solver
+ * switch itself"): the diagonal candidate for member zone `member_zi`.
+ * `use_measured` false reproduces the shipped behaviour byte-for-byte --
+ * always `fallback_ff_k_dc`, no call to the config layer at all. `use_measured`
+ * true tries the matrix's own diagonal cell first, the SAME guarded-fallback
+ * shape diagonal_hold/diagonal_climb's own `ff_k_dc` reads already use
+ * (zones_config_get_coupling_diag_k_dc() reporting false, or a stored value
+ * that is non-finite or <= 0.0f -- zones_http.h's own "not measured"
+ * convention for this field -- both fall through to fallback_ff_k_dc). */
+static float coupling_diagonal_k_dc(uint8_t member_zi, float fallback_ff_k_dc, bool use_measured)
+{
+    if (!use_measured) {
+        return fallback_ff_k_dc;
+    }
+    float measured = 0.0f;
+    if (zones_config_get_coupling_diag_k_dc(member_zi, &measured) && isfinite(measured) && measured > 0.0f) {
+        return measured;
+    }
+    return fallback_ff_k_dc;
+}
+
+float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi, bool use_measured_diag_k_dc,
                                const zone_coupling_neighbor_t *zones, uint8_t zone_count,
                                float setpoint_c, float ambient_c, bool *out_used_matrix, bool *out_infeasible,
                                coupling_solve_reason_t *out_reason, bool *out_membership_changed,
@@ -225,26 +246,26 @@ float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi,
     memset(G, 0, sizeof(G));
     for (uint8_t row = 0; row < n; row++) {
         uint8_t s = members[row];
-        /* PROVENANCE (PID_EXPANSION_PLAN.md sec 3.2, "CORRECTION 2026-09-02d"):
-         * TWO candidate values exist for this cell and only one is ever
-         * used. `ff_k_dc` (used below) is the per-zone STEP-IDENTIFIED DC
-         * gain (autotune_engine.c's single-zone step test) -- always what
-         * runs. The matrix's OWN diagonal cell is the other candidate: it
-         * would come from the SAME rested multi-zone excitation runs as the
-         * off-diagonals it sits beside, and sec 3.2's analysis found it
-         * better supported by the data (lower condition number, better bias
-         * on 2 of 3 zones, wider feasible range) -- but it is NOT available
-         * here: zones_config_get_coupling()'s diagonal cell is contractually
-         * 0 (zones_http.h), and zones_config_set_coupling() refuses a
-         * nonzero one outright, so there is no persisted storage for it on
-         * this board. Sizing the resulting seam (the step this cell's
-         * choice makes at the moment a neighbour joins/leaves the coupled
-         * system) is test_zone_coupling_solve.c's job; see that file and
-         * sec 3.2 for the numbers. Do not swap this for the matrix's own
-         * diagonal without first adding that storage -- see sec 3.2's
-         * "cost" note. */
-        float k_dc_s = (s == zi) ? z_ff_k_dc : zones[s].ff_k_dc;
-        G[row][row] = k_dc_s;
+        /* PROVENANCE (PID_EXPANSION_PLAN.md sec 3.2, "STORAGE LANDED
+         * 2026-09-02f" / "the solver switch itself"): TWO candidate values
+         * exist for this cell. `ff_k_dc` (the fallback below) is the per-zone
+         * STEP-IDENTIFIED DC gain (autotune_engine.c's single-zone step
+         * test) -- what every caller ran exclusively before this flag
+         * existed, and still what runs whenever `use_measured_diag_k_dc` is
+         * false or the matrix's own cell is not (yet) populated for this
+         * zone. The matrix's OWN diagonal cell (`coupling_diag_k_dc`,
+         * zones_http.h) is the other candidate: it comes from the SAME
+         * rested multi-zone excitation runs as the off-diagonals it sits
+         * beside, and sec 3.2's analysis found it better supported by the
+         * data (lower condition number, better bias on 2 of 3 zones, wider
+         * feasible range) -- but nothing on this board writes it today
+         * (hand-set or PC-side preset only, no autotune pass). Sizing the
+         * seam between the two choices (the step switching sources makes at
+         * the moment a neighbour joins/leaves the coupled system) is
+         * test_zone_coupling_solve.c's job; see that file and sec 3.2 for
+         * the numbers. */
+        float fallback_k_dc_s = (s == zi) ? z_ff_k_dc : zones[s].ff_k_dc;
+        G[row][row] = coupling_diagonal_k_dc(s, fallback_k_dc_s, use_measured_diag_k_dc);
         float coupling_row[MAX31856_CHANNEL_COUNT];
         if (!zones_config_get_coupling(s, coupling_row)) {
             continue; /* no row at all for this zone -- every off-diagonal in it stays 0,
@@ -336,6 +357,7 @@ float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi,
  * The one substantive difference is b: a per-member array (rate_c_per_s *
  * that member's own tau) instead of one scalar shared by every row. */
 float zone_coupling_solve_climb(bool z_qualifies, float z_ff_k_dc, float z_ff_tau_s, uint8_t zi,
+                                bool use_measured_diag_k_dc,
                                 const zone_coupling_neighbor_t *zones, uint8_t zone_count,
                                 float rate_c_per_s, bool *out_used_matrix, bool *out_infeasible,
                                 coupling_solve_reason_t *out_reason, bool *out_membership_changed,
@@ -382,9 +404,9 @@ float zone_coupling_solve_climb(bool z_qualifies, float z_ff_k_dc, float z_ff_ta
     float b[MAX31856_CHANNEL_COUNT];
     for (uint8_t row = 0; row < n; row++) {
         uint8_t s = members[row];
-        float k_dc_s = (s == zi) ? z_ff_k_dc : zones[s].ff_k_dc;
+        float fallback_k_dc_s = (s == zi) ? z_ff_k_dc : zones[s].ff_k_dc;
         float tau_s = (s == zi) ? z_ff_tau_s : zones[s].ff_tau_s;
-        G[row][row] = k_dc_s;
+        G[row][row] = coupling_diagonal_k_dc(s, fallback_k_dc_s, use_measured_diag_k_dc);
         b[row] = rate_c_per_s * tau_s; /* NOT uniform across rows -- see this function's own doc
                                         * comment and the header's "LOAD-BEARING INVARIANT" note on
                                         * zone_coupling_solve_hold(), which this deliberately does

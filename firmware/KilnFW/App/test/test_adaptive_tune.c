@@ -122,6 +122,18 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     for (int j = 0; j < MAX31856_CHANNEL_COUNT; j++) out_row[j] = s_fake_coupling[zone_index][j];
     return true;
 }
+/* PID_EXPANSION_PLAN.md sec 3.2 ("the solver switch itself"): this file only
+ * exercises zone_coupling_gauss_solve_partial_pivot_vec() (the coupled
+ * identification's linear solve), never zone_coupling_solve_hold()/_climb(),
+ * so coupling_diagonal_k_dc()'s zones_config_get_coupling_diag_k_dc() call is
+ * dead code from this executable's point of view -- but it is still compiled
+ * into zone_coupling_solve.o, so the symbol must resolve at link time. */
+bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    (void)zone_index;
+    (void)out_k_dc;
+    return false;
+}
 bool zones_config_get_coupling_tau(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
 {
     if (zone_index >= TEST_MAX_ZONES) return false;

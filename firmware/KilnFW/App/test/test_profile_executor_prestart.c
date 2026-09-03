@@ -587,6 +587,21 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     return true;
 }
 
+/* PID_EXPANSION_PLAN.md sec 3.2 ("the solver switch itself"): profile_
+ * executor_feedforward.c's s_coupling_use_measured_diag_k_dc is compiled to
+ * false, so zone_coupling_solve.c's coupling_diagonal_k_dc() helper never
+ * actually calls this in any test this file runs -- it exists purely to
+ * satisfy the linker (the call is compiled unconditionally into
+ * zone_coupling_solve.c even though the runtime branch never takes it here).
+ * "Never measured" (false) for every zone, matching every real board that
+ * has never had a preset/hand-set value applied. */
+bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    (void)zone_index;
+    (void)out_k_dc;
+    return false;
+}
+
 /* adaptive_tune.c's coupled-solve apply path (PID_EXPANSION_PLAN.md 3.3, the
  * off-diagonal coupling_coeff refinement layer added alongside the
  * already-linked diagonal K_dc path above) also calls these three -- trivial

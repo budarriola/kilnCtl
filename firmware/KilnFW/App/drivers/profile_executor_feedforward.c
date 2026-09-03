@@ -131,6 +131,20 @@ uint8_t count_qualifying_coupling_neighbors(uint8_t zi)
 static zone_coupling_hold_cache_t s_coupling_hold_cache[MAX31856_CHANNEL_COUNT];
 static uint16_t s_coupling_prev_membership_sig[MAX31856_CHANNEL_COUNT];
 
+/* PID_EXPANSION_PLAN.md sec 3.2 ("STORAGE LANDED 2026-09-02f" / "the solver
+ * switch itself"): whether the coupled hold/climb solve prefers the coupling
+ * matrix's own measured diagonal cell (coupling_diag_k_dc) over the step-
+ * identified ff_k_dc, when the former is available. Deliberately false --
+ * the plan section explicitly scopes "flip this on" as its own, separately
+ * reviewed decision: coupling_diag_k_dc has no autotune writer on this board
+ * today (hand-set/PC-preset only), and whether the UNCOUPLED 1x1 fallback
+ * (diagonal_hold/diagonal_climb in zone_coupling_solve.c, which never routes
+ * through this flag at all) should switch too is a separate, unresolved
+ * question this flag does not answer. Flipping this one constant is now the
+ * entire remaining step -- see zone_coupling_solve.h's own doc comment on
+ * `use_measured_diag_k_dc` for the guarded-fallback contract this enables. */
+static const bool s_coupling_use_measured_diag_k_dc = false;
+
 static float solve_hold_for_zone(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float ambient_c,
                                   bool *out_used_matrix, bool *out_infeasible,
                                   coupling_solve_reason_t *out_reason, bool *out_membership_changed)
@@ -140,7 +154,8 @@ static float solve_hold_for_zone(const zone_runtime_t *z, uint8_t zi, float setp
     bool z_qualifies = zone_qualifies_as_coupling_neighbor(z);
     zone_coupling_hold_cache_t *cache_row = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_hold_cache[zi] : &s_coupling_hold_cache[0];
     uint16_t *prev_sig = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_prev_membership_sig[zi] : &s_coupling_prev_membership_sig[0];
-    return zone_coupling_solve_hold(z_qualifies, z->ff_k_dc, zi, zones, MAX31856_CHANNEL_COUNT, setpoint_c,
+    return zone_coupling_solve_hold(z_qualifies, z->ff_k_dc, zi, s_coupling_use_measured_diag_k_dc, zones,
+                                    MAX31856_CHANNEL_COUNT, setpoint_c,
                                     ambient_c, out_used_matrix, out_infeasible, out_reason,
                                     out_membership_changed, cache_row, prev_sig);
 }
@@ -164,7 +179,8 @@ static float solve_climb_for_zone(const zone_runtime_t *z, uint8_t zi, float rat
     bool z_qualifies = zone_qualifies_as_coupling_neighbor(z);
     zone_coupling_climb_cache_t *cache_row = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_climb_cache[zi] : &s_coupling_climb_cache[0];
     uint16_t *prev_sig = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_climb_prev_membership_sig[zi] : &s_coupling_climb_prev_membership_sig[0];
-    return zone_coupling_solve_climb(z_qualifies, z->ff_k_dc, z->ff_tau_s, zi, zones, MAX31856_CHANNEL_COUNT,
+    return zone_coupling_solve_climb(z_qualifies, z->ff_k_dc, z->ff_tau_s, zi, s_coupling_use_measured_diag_k_dc,
+                                     zones, MAX31856_CHANNEL_COUNT,
                                      rate_c_per_s, out_used_matrix, out_infeasible, out_reason,
                                      out_membership_changed, cache_row, prev_sig);
 }

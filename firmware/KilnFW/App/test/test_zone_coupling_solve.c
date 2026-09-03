@@ -48,6 +48,35 @@ static void set_matrix_row(uint8_t zi, float a, float b, float c)
     s_fake_row[zi][2] = c;
 }
 
+// ---- fake zones_config_get_coupling_diag_k_dc() -----------------------
+// PID_EXPANSION_PLAN.md sec 3.2 ("the solver switch itself"): the matrix's
+// own diagonal cell, kept in separate storage from s_fake_row above (whose
+// diagonal is always 0, mirroring zones_config_get_coupling()'s real
+// contract). Defaults to "not measured" (false) for every zone -- a test
+// that wants use_measured_diag_k_dc to actually change the answer must
+// call set_diag_k_dc() first.
+static bool  s_fake_diag_present[MAX31856_CHANNEL_COUNT];
+static float s_fake_diag[MAX31856_CHANNEL_COUNT];
+
+bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !s_fake_diag_present[zone_index]) return false;
+    *out_k_dc = s_fake_diag[zone_index];
+    return true;
+}
+
+static void set_diag_k_dc(uint8_t zi, float k_dc)
+{
+    s_fake_diag_present[zi] = true;
+    s_fake_diag[zi] = k_dc;
+}
+
+static void clear_diag_k_dc(void)
+{
+    memset(s_fake_diag_present, 0, sizeof(s_fake_diag_present));
+    memset(s_fake_diag, 0, sizeof(s_fake_diag));
+}
+
 // PID_EXPANSION_PLAN.md sec 3.2's adopted 2026-09-02 matrix, [affected][stepped]:
 //   [[38.13, 27.32, 21.72],
 //    [14.30, 35.90, 22.15],
@@ -68,6 +97,7 @@ static void set_matrix_row(uint8_t zi, float a, float b, float c)
 static void setup_adopted_matrix(void)
 {
     memset(s_fake_row, 0, sizeof(s_fake_row));
+    clear_diag_k_dc();
     set_matrix_row(0, 0.0f, 27.32f, 21.72f);
     set_matrix_row(1, 14.30f, 0.0f, 22.15f);
     set_matrix_row(2, 8.33f, 12.42f, 0.0f);
@@ -114,7 +144,7 @@ static void test_hold_diagonal_is_ff_k_dc(void)
     bool used_matrix = false, infeasible = false, membership_changed = false;
     coupling_solve_reason_t reason;
 
-    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &membership_changed, &cache, &prev_sig);
 
     TEST_CHECK(reason == COUPLING_SOLVE_OK, "2-member hold solve should succeed");
@@ -155,11 +185,11 @@ static void test_hold_full_system_hybrid_regression(void)
     bool used_matrix, infeasible, changed;
     coupling_solve_reason_t reason;
 
-    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache0, &sig0);
-    float u1 = zone_coupling_solve_hold(true, FF_K_DC_Z1, 1, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float u1 = zone_coupling_solve_hold(true, FF_K_DC_Z1, 1, false, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache1, &sig1);
-    float u2 = zone_coupling_solve_hold(true, FF_K_DC_Z2, 2, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float u2 = zone_coupling_solve_hold(true, FF_K_DC_Z2, 2, false, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache2, &sig2);
 
     TEST_CHECK_NEAR(u0, 0.0802, 0.001, "z0 full-system hybrid hold duty");
@@ -190,14 +220,14 @@ static void test_hold_membership_transition_step(void)
     coupling_solve_reason_t reason;
 
     // Before: no qualifying neighbours -- 1x1 fallback.
-    float before = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float before = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
                                             &infeasible, &reason, &changed, &cache, &prev_sig);
     TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS, "no neighbours yet -- 1x1 fallback expected");
     TEST_CHECK_NEAR(before, 0.7644, 0.001, "1x1 fallback duty == dT/ff_k_dc");
 
     // z1 now qualifies -- membership changes on this same call.
     zones[1].qualifies = true;
-    float after = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float after = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
                                            &infeasible, &reason, &changed, &cache, &prev_sig);
     TEST_CHECK(reason == COUPLING_SOLVE_OK, "z1 joining should produce a genuine 2-member solve");
     TEST_CHECK(changed, "membership change must be reported on the joining tick");
@@ -213,11 +243,79 @@ static void test_hold_membership_transition_step(void)
     TEST_CHECK(step > 0.3 && step < 0.9, "raw 1x1->2x2 transition step should be in the expected ballpark");
 }
 
+// ---- test 4: use_measured_diag_k_dc=true switches the diagonal source ----
+//
+// PID_EXPANSION_PLAN.md sec 3.2's "solver switch itself": with the flag on
+// AND coupling_diag_k_dc populated for both members, G[row][row] must be the
+// matrix's OWN diagonal (38.13/35.90), not ff_k_dc -- pinned against the
+// SAME own-diagonal answer (0.2632) test 1's header comment hand-solved and
+// explicitly ruled out for the flag-off case. If G[row][row] silently stayed
+// ff_k_dc regardless of the flag, this test would read 0.1614 (test 1's
+// value) instead and fail.
+static void test_hold_measured_diag_flag_switches_diagonal(void)
+{
+    TEST_SECTION("zone_coupling_solve: use_measured_diag_k_dc=true selects the matrix's own diagonal");
+    setup_adopted_matrix();
+    set_diag_k_dc(0, OWN_DIAG_Z0);
+    set_diag_k_dc(1, OWN_DIAG_Z1);
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_hold_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
+                                        &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "flag-on 2-member hold solve should succeed");
+    TEST_CHECK_NEAR(u0, 0.2632, 0.001, "flag on + measured diag present should give the own-diagonal solve");
+    TEST_CHECK(fabs((double)u0 - 0.1614) > 0.05, "flag-on result should NOT match the ff_k_dc-diagonal hybrid solve");
+}
+
+// ---- test 5: flag on but coupling_diag_k_dc unmeasured -- falls back to
+// ff_k_dc, does not crash or silently use zero/garbage --------------------
+//
+// The guarded-fallback half of the contract: `use_measured_diag_k_dc=true`
+// is not itself sufficient to change behaviour if the per-zone value was
+// never populated (zones_config_get_coupling_diag_k_dc() reports false, the
+// real firmware's own default state on every zone that has never been hand-
+// set or preset-loaded). Must reproduce test 1's flag-off answer exactly.
+static void test_hold_measured_diag_flag_falls_back_when_unmeasured(void)
+{
+    TEST_SECTION("zone_coupling_solve: use_measured_diag_k_dc=true falls back to ff_k_dc when unmeasured");
+    setup_adopted_matrix(); // clears the diag stub -- nothing set for any zone
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_hold_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
+                                        &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "flag-on, unmeasured-diag hold solve should still succeed");
+    TEST_CHECK_NEAR(u0, 0.1614, 0.001, "flag on but unmeasured diag should fall back to the ff_k_dc hybrid solve");
+}
+
 int main(void)
 {
     test_hold_diagonal_is_ff_k_dc();
     test_hold_full_system_hybrid_regression();
     test_hold_membership_transition_step();
+    test_hold_measured_diag_flag_switches_diagonal();
+    test_hold_measured_diag_flag_falls_back_when_unmeasured();
 
     printf("zone_coupling_solve: %d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;

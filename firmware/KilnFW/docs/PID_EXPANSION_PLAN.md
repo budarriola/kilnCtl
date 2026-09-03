@@ -241,25 +241,41 @@ client refusing the POST body as an unknown field. Deliberately named
 with this field on a real board (that disagreement is exactly what this
 section measured above).
 
-**Still not implemented: the solver switch itself.** `zone_coupling_solve.c`
-is untouched by this pass — `G[row][row] = ff_k_dc` still runs, on purpose;
-this pass only makes the alternative persistable. The seam sized above
-(2026-09-02e) still applies unchanged. What is left, now that storage
-exists, is a small, separately reviewed change: read `coupling_diag_k_dc`
-where it is nonzero (falling back to `ff_k_dc` where it is still 0, i.e.
-"not measured" — the same guarded-fallback shape `diagonal_hold`/
-`diagonal_climb`'s own `ff_k_dc` reads already use) behind a flag, an
-on-board identification pass to actually populate the field (today it can
-only be set by hand or by a PC-side preset built from `coupled_ident.py`'s
-offline analysis, never by autotune), and a decision on whether the
-uncoupled 1x1 fallback switches too or keeps `ff_k_dc` deliberately (the
-seam-sizing paragraph above is the reason that decision needs its own
-pass, not a byproduct of this one).
+**Solver switch itself LANDED 2026-09-02, still OFF by default.**
+`zone_coupling_solve_hold()`/`_climb()` gained a `use_measured_diag_k_dc`
+parameter: true tries `zones_config_get_coupling_diag_k_dc(member, &v)`
+first for each system member's `G[row][row]` and uses it when the call
+succeeds and `v` is finite and `> 0.0f`, falling back to `ff_k_dc` exactly
+as before otherwise — the same guarded-fallback shape `diagonal_hold`/
+`diagonal_climb`'s own `ff_k_dc` reads already use. The one caller
+(`profile_executor_feedforward.c`'s `solve_hold_for_zone()`/
+`solve_climb_for_zone()`) passes a single file-scope constant,
+`s_coupling_use_measured_diag_k_dc = false` — the flag this section called
+for, compiled in but off, so shipped behaviour is unchanged until someone
+flips one constant after weighing the two items still open below. Pinned by
+`test_zone_coupling_solve.c` (now 5 cases): the pre-existing 3 still pin the
+flag-off/hybrid answer, plus two new cases proving the flag actually
+switches sources (flag on + `coupling_diag_k_dc` populated reproduces the
+own-diagonal hand-solve, 0.2632, not the hybrid's 0.1614) and that it
+degrades safely when unmeasured (flag on, nothing populated, reproduces the
+hybrid 0.1614 exactly). Mutation-proven: forcing the helper to ignore the
+flag and always return the fallback reproduced
+`got 0.1614, want 0.2632` on the flag-on test; reverted, suite green again
+(18/18 in that executable, 20/20 executables overall). `build_kilnfw`
+confirmed OK after the change (no target-build regression).
 
-Made explicit in code instead (`zone_coupling_solve.c`, the `G[row][row]`
-assignment): a doc comment naming both candidates, why `ff_k_dc` is the one
-used, and pointing at this section and `test_zone_coupling_solve.c` for the
-seam numbers and the falsifiable pin on today's choice.
+Still open, unchanged from before this pass: an on-board identification
+pass to actually populate `coupling_diag_k_dc` (today it can only be set by
+hand or by a PC-side preset built from `coupled_ident.py`'s offline
+analysis, never by autotune), and a decision on whether the uncoupled 1x1
+fallback (`diagonal_hold`/`diagonal_climb`, which never routes through this
+flag) switches too or keeps `ff_k_dc` deliberately — the seam-sizing
+paragraph above (2026-09-02e) is why that decision needs its own pass, not
+a byproduct of this one. Flipping `s_coupling_use_measured_diag_k_dc` to
+true today would only change behaviour on a board that already has
+`coupling_diag_k_dc` populated by hand/preset for at least one zone; on
+every other board it is a no-op by construction (the unmeasured-fallback
+case above).
 
 **ADOPTED 2026-09-02 (owner decision).** Every cell has exactly one
 observation — no redundancy, no error bar — and that caveat travels with the
