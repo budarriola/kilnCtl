@@ -214,18 +214,89 @@ class CdpSession {
 // renderZones() itself. So the only thing missing is a non-zero
 // thermoCount/relayCount and a call to trigger the render that the real
 // page only makes after a successful fetch -- no mock server needed.
-const PAGE_FIXTURES = {
-  'zones_page.html': `
-(function () {
+// zones_page.html's tuning-recommendation panel (`#tuningRecPanel`, added in
+// 333dd4e) is a second, independent piece of dynamic content on this page:
+// it starts empty ("Enter a peak temperature above and click Recommend."),
+// then re-renders via renderTuningRecommendation() into one of FOUR distinct
+// states -- see that page's own TUNING_REC_LOOKUP_START comment block:
+//   measured / extrapolated / indistinguishable  (three confidence bases)
+//   plus the "no artifact" state (unavailable evidence JSON, or nothing
+//   entered yet -- the state every real board without the artifact shows).
+// Two real defects already shipped and were caught by REVIEW, not by this
+// sweep (7ba7bba: off-by-one byte truncated the served artifact so the panel
+// never rendered at all; ce595d2: an out-of-range peak rendered green
+// MEASURED and a missing confidence field threw a TypeError) -- neither
+// would have been visible to a sweep that only ever sees the pre-Recommend
+// empty state, because the static server never serves /api/tuning_recommendations
+// (see file header). So each state below is reached the same way the real
+// page reaches it -- by setting window.tuningRecArtifact (the module-level
+// var the page's own fetch() assigns into) to a fixture artifact shaped like
+// the real JSON, filling the peak/load inputs, and calling the page's own
+// exported renderTuningRecommendation() -- never by hand-writing HTML into
+// #tuningRecResult, which would test this sweep's fixture, not the page.
+const TUNING_REC_VARIANTS = {
+  no_artifact: `
+    window.tuningRecArtifact = null;
+    document.getElementById('tuningRecPeak').value = '1000';
+    document.getElementById('tuningRecLoad').value = 'any';
+    window.renderTuningRecommendation();
+  `,
+  measured: `
+    window.tuningRecArtifact = { schema_version: 1, sim_confidence: { extrapolation_boundary_c: 1100 },
+      recommendations: [{ load: 'empty', peak_temp_c_max: 1000, confidence: 'measured',
+        method: 'relay_autotune', rule: 'ziegler_nichols',
+        why: 'Held-out simulation runs at this peak/load confirm this method tracks best.' }] };
+    document.getElementById('tuningRecPeak').value = '900';
+    document.getElementById('tuningRecLoad').value = 'empty';
+    window.renderTuningRecommendation();
+  `,
+  extrapolated: `
+    window.tuningRecArtifact = { schema_version: 1, sim_confidence: { extrapolation_boundary_c: 900 },
+      recommendations: [{ load: 'full', peak_temp_c_max: 900, confidence: 'measured',
+        method: 'relay_autotune', rule: 'ziegler_nichols', why: 'Checked run at this peak/load.' }] };
+    document.getElementById('tuningRecPeak').value = '1350';
+    document.getElementById('tuningRecLoad').value = 'full';
+    window.renderTuningRecommendation();
+  `,
+  indistinguishable: `
+    window.tuningRecArtifact = { schema_version: 1, sim_confidence: { extrapolation_boundary_c: 1100 },
+      recommendations: [{ load: 'light', peak_temp_c_max: 1000, confidence: 'indistinguishable',
+        method: 'relay_autotune', runner_up: 'step_test', margin_c: 0.31,
+        why: 'Both methods land within simulation noise at this peak/load.' }] };
+    document.getElementById('tuningRecPeak').value = '850';
+    document.getElementById('tuningRecLoad').value = 'light';
+    window.renderTuningRecommendation();
+  `,
+};
+
+const ZONES_BASE_FIXTURE = `
   var tc = document.getElementById('thermoCount');
   var rc = document.getElementById('relayCount');
   if (!tc || !rc || typeof window.renderZones !== 'function') return 'renderZones not found';
   tc.value = 3;
   rc.value = 4;
   window.renderZones();
+`;
+
+// PAGE_FIXTURES values are either a single fixture-script string (run once,
+// as before) or an array of {suffix, script} variants -- main() sweeps every
+// variant at every width, so a page with N variants gets N times as many
+// (page, width) rows, each labelled 'zones_page.html [suffix]' in the
+// report. zones_page.html carries one variant per tuningRecPanel state (see
+// TUNING_REC_VARIANTS above) so every state is actually rendered and swept,
+// not just the pre-Recommend empty one the static server would otherwise
+// leave in place.
+const PAGE_FIXTURES = {
+  'zones_page.html': Object.keys(TUNING_REC_VARIANTS).map((suffix) => ({
+    suffix,
+    script: `
+(function () {
+${ZONES_BASE_FIXTURE}
+  ${TUNING_REC_VARIANTS[suffix]}
   return 'ok';
 })()
 `,
+  })),
 };
 
 // Setup script: mutates page state into the "worst case" the assertion pass
@@ -427,6 +498,20 @@ const IN_PAGE_SCRIPT = `
     return el.tagName.toLowerCase() + id + cls + (text ? (' "' + text + '"') : '');
   }
 
+  // Captures the tuningRecPanel confidence badge (the '[MEASURED]' /
+  // '[EXTRAPOLATED]' / '[INDISTINGUISHABLE]' span renderTuningRecommendation()
+  // writes into #tuningRecResult) so main() can compare it ACROSS the
+  // TUNING_REC_VARIANTS runs below and catch a regression that makes two
+  // confidence states render identically -- see that check's own comment
+  // for why text alone is not enough (an operator mistaking an
+  // extrapolated recommendation for a measured one was the review finding
+  // that added this panel's confidence rendering in the first place).
+  // null on any page without the panel (every page but zones_page.html).
+  var tuningBadgeEl = document.querySelector('#tuningRecResult span');
+  var tuningBadge = tuningBadgeEl
+    ? { color: getComputedStyle(tuningBadgeEl).color, text: tuningBadgeEl.textContent }
+    : null;
+
   return JSON.stringify({
     overflowFail: overflowFail,
     overflowDetail: overflowDetail,
@@ -435,6 +520,7 @@ const IN_PAGE_SCRIPT = `
     undersized: undersized,
     clipped: clipped,
     interactiveCount: all.length,
+    tuningBadge: tuningBadge,
   });
 })()
 `;
@@ -577,18 +663,74 @@ async function main() {
 
     for (const pf of pageFiles) {
       const pageUrl = `http://127.0.0.1:${staticPort}/${pf}`;
-      const fixtureScript = PAGE_FIXTURES[pf];
-      for (const width of args.widths) {
-        let result, failures;
-        try {
-          result = await sweepOnePage(args.port, pageUrl, width, fixtureScript);
-          failures = formatFailures(pf, width, result);
-        } catch (e) {
-          failures = [`  [error]    ${pf} @${width}px: sweep threw: ${e.message}`];
+      const fixture = PAGE_FIXTURES[pf];
+      // A fixture is either a single script (run once, no label) or an
+      // array of {suffix, script} variants -- see PAGE_FIXTURES' own
+      // comment. Normalise to a variants array here so the sweep loop
+      // below is the same either way.
+      const variants = Array.isArray(fixture)
+        ? fixture
+        : [{ suffix: null, script: fixture }];
+
+      // suffix -> { color, text } from the FIRST width swept for that
+      // variant (the badge does not depend on viewport width -- it's the
+      // same DOM content at every width, only its layout position moves).
+      // Used by the tuningBadge distinctness check below, once all
+      // variants for this page have been swept.
+      const badgesBySuffix = {};
+
+      for (const variant of variants) {
+        const label = variant.suffix ? `${pf} [${variant.suffix}]` : pf;
+        for (const width of args.widths) {
+          let result, failures;
+          try {
+            result = await sweepOnePage(args.port, pageUrl, width, variant.script);
+            failures = formatFailures(label, width, result);
+            if (variant.suffix && result && result.tuningBadge && !(variant.suffix in badgesBySuffix)) {
+              badgesBySuffix[variant.suffix] = result.tuningBadge;
+            }
+          } catch (e) {
+            failures = [`  [error]    ${label} @${width}px: sweep threw: ${e.message}`];
+          }
+          const pass = failures.length === 0;
+          if (!pass) anyFail = true;
+          rows.push({ page: label, width, pass, failures });
         }
-        const pass = failures.length === 0;
-        if (!pass) anyFail = true;
-        rows.push({ page: pf, width, pass, failures });
+      }
+
+      // Distinctness check: the tuning-recommendation panel's confidence
+      // states must not become visually indistinguishable from each other
+      // -- ce595d2 (review finding) is exactly the failure mode this
+      // guards: an out-of-range/extrapolated peak rendering as if it were
+      // MEASURED. 'measured' vs the other two must differ in BOTH color
+      // and text (by design: --ok is the only green). 'extrapolated' vs
+      // 'indistinguishable' are DELIBERATELY the same color (both
+      // var(--warn) -- see zones_page.html's TUNING_REC_LOOKUP_START
+      // comment: "told apart in the rendered text, not the color") so
+      // those two are only required to differ in text, not color.
+      const suffixes = Object.keys(badgesBySuffix);
+      if (suffixes.length > 1) {
+        for (let i = 0; i < suffixes.length; i++) {
+          for (let j = i + 1; j < suffixes.length; j++) {
+            const s1 = suffixes[i], s2 = suffixes[j];
+            const b1 = badgesBySuffix[s1], b2 = badgesBySuffix[s2];
+            const sameText = b1.text === b2.text;
+            const sameColor = b1.color === b2.color;
+            const isMeasuredPair = s1 === 'measured' || s2 === 'measured';
+            const indistinct = isMeasuredPair ? (sameText && sameColor) : sameText;
+            const label = `${pf} [tuning-distinct: ${s1} vs ${s2}]`;
+            const failures = indistinct
+              ? [`  [distinct]  ${label}: badges render identically (text="${b1.text}" color=${b1.color})`]
+              : [];
+            if (indistinct) anyFail = true;
+            // Always pushed (pass or fail), unlike the per-(page,width)
+            // rows above, so this check shows up in the total case count
+            // and in the PASS/FAIL table even when green -- a check that
+            // only appears in the output on failure is invisible proof
+            // that it exists at all.
+            rows.push({ page: label, width: '-', pass: !indistinct, failures });
+          }
+        }
       }
     }
   } finally {

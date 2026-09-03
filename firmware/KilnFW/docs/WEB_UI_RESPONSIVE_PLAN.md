@@ -220,6 +220,41 @@ Sweep is now 78/78 green.
     coverage improvement for this page's content independent of that one
     historic bug, per the negative test above.
 
+**Tuning-recommendation panel coverage (2026-09-02):** `zones_page.html`'s
+`#tuningRecPanel` (333dd4e, two review-caught defects since: `7ba7bba`,
+`ce595d2`) rendered three distinct confidence states the sweep never reached
+-- the static server's fetch to `/api/tuning_recommendations` 404s, so the
+panel stayed in its pre-Recommend empty state at every width. `PAGE_FIXTURES`
+now supports an array of `{suffix, script}` variants per page (was one script
+per page); `zones_page.html` carries four -- `no_artifact`, `measured`,
+`extrapolated`, `indistinguishable` -- each setting `window.tuningRecArtifact`
+to a fixture shaped like the real JSON and calling the page's own
+`renderTuningRecommendation()`, then swept at every width like any other
+content. A fifth check compares the rendered `[MEASURED]`/`[EXTRAPOLATED]`/
+`[INDISTINGUISHABLE]` badge's color and text pairwise across the three
+confidence variants, catching a regression that makes two states render
+identically (the class of bug `ce595d2` was). By design `extrapolated` and
+`indistinguishable` share `var(--warn)` -- only their text differs (see
+`zones_page.html`'s own `TUNING_REC_LOOKUP_START` comment) -- so that pair is
+required to differ in text only; `measured` vs either must differ in both
+color and text. Negative-tested: forcing `#tuningRecPanel` to `width:5000px`
+red-lit all 4 new `[overflow]` cases; shrinking `#tuningRecGoBtn` to 10x10px
+red-lit all 4 as `[target]`; remapping `EXTRAPOLATED`'s label to
+`INDISTINGUISHABLE` red-lit the new distinctness check. All reverted after
+confirming red. Sweep is now 99/99 green (was 78/78).
+
+Contrast check on the shared tokens (`theme.css`, light mode): `--ok`
+(`#1a7f37`) and `--warn` (`#9a6700`) both clear WCAG AA 4.5:1 against
+`--card-bg` (`#f7f7f7`) at 4.74:1 and 4.54:1. `--ok` vs `--warn` against each
+other is only 1.04:1 luminance contrast -- a viewer relying on brightness
+alone (not hue) would struggle to tell green from amber apart. This is not
+new: the design already relies on text, not color, to separate
+`extrapolated`/`indistinguishable` from each other, and the same
+low-luminance-contrast gap exists between `measured` and either of them.
+Flagging for the owner rather than changing unilaterally -- a non-colour cue
+(icon, border style) is a design-language change, and `--fault-color` (§5.1)
+is already an open token question waiting on the owner.
+
 Section 3 exists because someone ran headless-browser sweeps and wrote down
 what broke. Those sweeps were ad hoc and their results survive only as
 comments. This plan will change layout on every page, at widths the UI has
