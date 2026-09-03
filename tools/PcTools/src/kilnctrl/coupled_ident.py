@@ -200,6 +200,38 @@ SEC2_IDENTIFICATION_HYBRID_MATRIX = _hybrid(np.array([
     [9.70, 11.38, 0.00],
 ]))
 
+# THE TRUE PRE-ADOPTION BENCH MATRIX, hybridized -- what was actually live on
+# the board immediately before the 2026-09-02 adoption commit (78f2134's
+# removed side; see tools/PcTools/config_presets/coupling_matrix_pre20260902.json's
+# provenance comment). Sec 3.2's correction-block table calls this "pre-
+# adoption hybrid (old off-diagonals, ff_k_dc diagonal)" -- cond 1.92.
+PRE_ADOPTION_MATRIX_OFF_DIAGONAL = np.array([
+    [0.00, 12.0586, 6.0039],
+    [5.7656, 0.00, 6.7734],
+    [2.4062, 4.1094, 0.00],
+])
+PRE_ADOPTION_HYBRID_MATRIX = _hybrid(PRE_ADOPTION_MATRIX_OFF_DIAGONAL)
+
+# THE ADOPTED MATRIX'S OWN DIAGONAL -- sec 3.2's "own-diagonal (doc's
+# original figures, does not run)" row: the SAME 2026-09-02 rested
+# single-zone excitation that produced ADOPTED_MATRIX_OFF_DIAGONAL also
+# measured a diagonal, but zone_coupling_solve.c never reads it
+# (coupling_coeff[]'s diagonal is contractually 0 in storage) -- it always
+# substitutes FF_K_DC_DIAGONAL instead. This matrix is kept ONLY for offline
+# comparison (cond 4.64 vs the hybrid's 5.51); it is not, and cannot become,
+# something the solver runs without a firmware change (see PID_EXPANSION_PLAN.md
+# sec 3.2 "SEAM SIZED").
+ADOPTED_OWN_DIAGONAL = np.array([38.13, 35.90, 35.32])
+
+
+def _own_diagonal(off_diagonal_matrix: np.ndarray, diagonal: np.ndarray) -> np.ndarray:
+    m = off_diagonal_matrix.copy()
+    np.fill_diagonal(m, diagonal)
+    return m
+
+
+ADOPTED_OWN_DIAGONAL_MATRIX = _own_diagonal(ADOPTED_MATRIX_OFF_DIAGONAL, ADOPTED_OWN_DIAGONAL)
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -997,6 +1029,199 @@ def score_matrix(matrix: np.ndarray, observations: Sequence[JointObservation]
 
 
 # ---------------------------------------------------------------------------
+# Transient-aware score -- PID_EXPANSION_PLAN.md sec 3.2 "HARDWARE A/B,
+# 2026-09-03"
+# ---------------------------------------------------------------------------
+#
+# ``score_matrix`` above is structurally blind to transients: it only ever
+# sees the last 150 s of an already-settled dwell, where every zone's
+# temperature has finished responding to every other zone's duty -- exactly
+# the regime where a matrix's off-diagonal APPORTIONMENT (how much of a
+# row's heat it credits to which neighbour) cannot show up as a duty error,
+# because by settle time all of that credited heat has actually arrived. It
+# validates that a matrix is self-consistent at steady state; it says
+# nothing about whether a zone is over- or under-driven while a neighbour's
+# credited heat is still in flight (620-730 s off-diagonal tau / 135-158 s
+# dead time vs 264 s / 34-53 s on the diagonal -- sec 2). That is exactly
+# the failure mode the 2026-09-03 hardware A/B exposed: the bias metric
+# predicted z2 would improve and it got worse, because a bigger off-
+# diagonal credit that has not arrived yet is invisible to a metric that
+# only samples after everything has arrived.
+#
+# THE FIX: score the SAME ``u_pred = A^-1 @ (T - ambient)`` relation
+# ``score_matrix`` uses, but over the ramp and dwell-entry windows
+# ``pid_ab_compare.py`` itself scores (ramp windows in full, plus each
+# dwell's entry portion up to that zone's own post-transition overshoot
+# peak -- ``log_analysis.ramp_to_dwell_transitions``'s own definition of
+# "the transient", reused here rather than reinvented so this module's
+# windows and pid_ab_compare's are provably the same ones). During those
+# windows the plant has NOT reached steady state, so ``u_pred`` computed
+# against the actual (still-rising) T is systematically low whenever the
+# matrix is crediting neighbour heat that has not physically arrived yet
+# -- the observed duty is elevated (PID integral winding up to cover the
+# shortfall) while the still-lagging T makes the model think less duty was
+# needed. A matrix whose larger off-diagonals overcredit a zone's
+# neighbours therefore shows a MORE NEGATIVE transient-window bias on that
+# zone than a matrix with smaller off-diagonals would, even when both
+# matrices score identically (or the opposite way) on settled tails. That
+# is the one property this metric needs and the settled-tail one
+# structurally cannot have; see ``build_coupling_report``'s "section 7" for
+# whether it actually retrodicts the 2026-09-03 result.
+#
+# WHAT THIS METRIC DOES NOT VALIDATE: it is still a STATIC steady-state
+# inversion evaluated at a non-steady-state instant -- a diagnostic
+# reusing score_matrix's own algebra over a different sample set, not a
+# dynamic (tau/dead-time-aware) simulation of the transient. Every number
+# it reports is noisy for reasons that have nothing to do with the matrix
+# (thermal mass, ramp rate, wherever a poll happened to land in the
+# transient) as well as for reasons that do. It answers "does the matrix's
+# APPORTIONMENT look wrong while heat is still arriving", not "how much
+# worse will overshoot be" -- for that, see the doc's own G.u=b numeric
+# solve (sec 3.2's "moving from the old to the new matrix cuts each zone's
+# own commanded hold duty by...").
+#
+# RETRODICTION RESULT (2026-09-03, see build_coupling_report/section 7's
+# real numbers): this metric does NOT cleanly retrodict the hardware
+# asymmetry. Scored either pooled across both matched runs or against each
+# matrix's own run, the adopted hybrid's transient bias magnitude is LARGER
+# than the pre-adoption hybrid's on z0 AND z1 AND z2 -- it flags all three
+# zones as worse, with z1 (which measurably IMPROVED on hardware) flagged
+# as the largest regression of the three. It is directionally right only
+# for z2 (the zone that did get worse). A metric that gets one of two zones
+# backwards, and gets the wrong zone flagged as the bigger loser, is not a
+# selection gate -- see PID_EXPANSION_PLAN.md sec 3.2 for the full
+# discussion of why (transient-vs-steady bias is dominated by how far the
+# plant is from equilibrium, not by which matrix is driving it, for a
+# STATIC inversion like this one) and what is left as more reliable
+# evidence (the numeric G.u=b duty-offload solve already in that section).
+
+def transient_window_row_indices(rows: Sequence[log_analysis.PollRow]) -> set[int]:
+    """Row indices covered by the SAME windows ``pid_ab_compare.py`` scores
+    as "ramp" and "dwell-entry": every ramp window in full, plus -- for
+    each zone independently, since ``ramp_to_dwell_transitions`` is
+    per-zone -- the portion of the following dwell window from the
+    transition up to that zone's own post-transition overshoot peak (the
+    whole dwell window if no peak was found, e.g. a segment that never
+    overshoots). Deliberately reuses ``log_analysis.build_windows`` /
+    ``ramp_to_dwell_transitions`` rather than re-deriving ramp/dwell
+    boundaries, so a change to either module's windowing definition cannot
+    make this module and ``pid_ab_compare`` silently disagree about what
+    "the transient" means.
+    """
+    windows = log_analysis.build_windows(rows)
+    idxs: set[int] = set()
+    for w in windows:
+        if w.phase == "ramp":
+            idxs.update(range(w.start_idx, w.end_idx + 1))
+    for zone in ZONES:
+        for ev in log_analysis.ramp_to_dwell_transitions(rows, windows, zone):
+            dwell_w = next(
+                (w for w in windows
+                 if w.phase == "dwell" and w.segment_index == ev.segment_index
+                 and abs(w.start_s - ev.transition_at_s) < 1e-6),
+                None,
+            )
+            if dwell_w is None:
+                continue
+            if ev.peak_overshoot_at_s is None:
+                idxs.update(range(dwell_w.start_idx, dwell_w.end_idx + 1))
+                continue
+            for i in range(dwell_w.start_idx, dwell_w.end_idx + 1):
+                idxs.add(i)
+                if rows[i].elapsed_s >= ev.peak_overshoot_at_s:
+                    break
+    return idxs
+
+
+def score_matrix_transient(matrix: np.ndarray, rows: Sequence[log_analysis.PollRow]
+                            ) -> list[ZoneScore]:
+    """``score_matrix``'s exact algebra (``u_pred = matrix^-1 @ (T -
+    ambient)``, error = ``u_pred - u_actual``), sampled at every row inside
+    ``transient_window_row_indices`` instead of settled dwell tails. See
+    this section's module-level comment for what this validates and does
+    not. ``rows`` must already be a single run (as ``build_windows``
+    requires); ambient is that run's own first-sample per-zone reading,
+    same convention ``_run_ambient``/``dwell_observations_for_run`` use.
+    """
+    ambient = _run_ambient(rows)
+    if ambient is None or any(z not in ambient for z in ZONES):
+        return []
+    ambient_vec = np.array([ambient[z] for z in ZONES])
+    inv = np.linalg.inv(matrix)
+    idxs = sorted(transient_window_row_indices(rows))
+    errors = {z: [] for z in ZONES}
+    for i in idxs:
+        r = rows[i]
+        if any(z not in r.zones or math.isnan(r.zones[z].actual_c) for z in ZONES):
+            continue
+        T = np.array([r.zones[z].actual_c for z in ZONES])
+        u = np.array([r.zones[z].duty for z in ZONES])
+        u_pred = inv @ (T - ambient_vec)
+        err = u_pred - u
+        for z in ZONES:
+            errors[z].append(float(err[z]))
+    out = []
+    for z in ZONES:
+        a = np.array(errors[z]) if errors[z] else np.array([0.0])
+        out.append(ZoneScore(
+            zone=z, n=len(errors[z]),
+            mean_error=float(a.mean()) if errors[z] else float("nan"),
+            rms_error=float(np.sqrt((a ** 2).mean())) if errors[z] else float("nan"),
+        ))
+    return out
+
+
+def score_matrix_transient_from_http_paths(
+    matrix: np.ndarray, path_runs: Sequence[tuple],
+) -> list[ZoneScore]:
+    """``score_matrix_transient`` over one or more HTTP-capture files, each
+    given as ``(path, run_index_or_None)`` -- ``run_index=None`` is only
+    safe for a file known to hold exactly one run with zone data (see
+    ``log_analysis.select_run``); a multi-run file with no index given
+    raises ``log_analysis.MultiRunError`` rather than silently picking one
+    (the exact near-miss ``pid_ab_compare.load_run`` documents). Per-run
+    scores are pooled by concatenating each run's row-level errors before
+    the mean/rms reduction, not by averaging already-reduced per-run
+    scores, so a run that contributes more usable rows is weighted by its
+    own sample count rather than counted equally with a thin one.
+    """
+    from . import http_capture_log as hc
+
+    errors = {z: [] for z in ZONES}
+    for path, run_index in path_runs:
+        all_rows = hc.poll_rows(path)
+        if not all_rows:
+            continue
+        rows, _n_runs, _used = log_analysis.select_run(all_rows, path, run_index=run_index)
+        if not rows:
+            continue
+        ambient = _run_ambient(rows)
+        if ambient is None or any(z not in ambient for z in ZONES):
+            continue
+        ambient_vec = np.array([ambient[z] for z in ZONES])
+        inv = np.linalg.inv(matrix)
+        for i in sorted(transient_window_row_indices(rows)):
+            r = rows[i]
+            if any(z not in r.zones or math.isnan(r.zones[z].actual_c) for z in ZONES):
+                continue
+            T = np.array([r.zones[z].actual_c for z in ZONES])
+            u = np.array([r.zones[z].duty for z in ZONES])
+            u_pred = inv @ (T - ambient_vec)
+            err = u_pred - u
+            for z in ZONES:
+                errors[z].append(float(err[z]))
+    out = []
+    for z in ZONES:
+        a = np.array(errors[z]) if errors[z] else np.array([0.0])
+        out.append(ZoneScore(
+            zone=z, n=len(errors[z]),
+            mean_error=float(a.mean()) if errors[z] else float("nan"),
+            rms_error=float(np.sqrt((a ** 2).mean())) if errors[z] else float("nan"),
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Nonlinearity report
 # ---------------------------------------------------------------------------
 
@@ -1206,6 +1431,17 @@ DEFAULT_COOLDOWN_PATHS = [
     str(DEFAULT_LOGS_DIR / "cooldown_z2.jsonl"),
     str(DEFAULT_LOGS_DIR / "cooldown_after_coupid6.jsonl"),
 ]
+
+# The matched rested-start hardware A/B pair PID_EXPANSION_PLAN.md sec 3.2's
+# "HARDWARE A/B, 2026-09-03" entry analyzes: old matrix run 0 (31.1 C start)
+# vs new matrix run 0 (30.0 C start), both explicit run indices per that
+# section's own "--run-a 0 --run-b 0" note -- never the file's last run, see
+# ``log_analysis.MultiRunError``'s own history for why that matters for
+# these exact two files.
+DEFAULT_TRANSIENT_AB_PATH_RUNS = (
+    (str(DEFAULT_LOGS_DIR / "p7_oldmatrix_runC.jsonl"), 0),
+    (str(DEFAULT_LOGS_DIR / "p7_newmatrix2_http.jsonl"), 0),
+)
 
 # How much a cooldown trace is allowed to rise, step to step, before it is
 # no longer "a passive decay" -- these captures are continuous multi-hour
@@ -1436,6 +1672,26 @@ def build_coupling_report(single_zone_pairs: Optional[dict] = None,
         cooldown[path] = [dataclasses.asdict(f) for f in cooldown_taus_from_path(path)]
     result["cooldown"] = cooldown
 
+    # 7. transient-aware score (sec 3.2 "HARDWARE A/B, 2026-09-03") over the
+    # matched rested-start old-vs-new pair, for the three matrices sec 3.2's
+    # correction block scores: pre-adoption hybrid, adopted own-diagonal
+    # (does not run), and the adopted hybrid (what actually runs). Reported
+    # beside, not instead of, the settled-tail sec32 scores above -- see
+    # ``score_matrix_transient``'s module comment for what each one
+    # validates.
+    transient_matrices = {
+        "pre_adoption_hybrid": PRE_ADOPTION_HYBRID_MATRIX,
+        "adopted_own_diagonal": ADOPTED_OWN_DIAGONAL_MATRIX,
+        "adopted_hybrid": ADOPTED_HYBRID_MATRIX,
+    }
+    transient_scores = {
+        name: [dataclasses.asdict(s) for s in
+               score_matrix_transient_from_http_paths(m, DEFAULT_TRANSIENT_AB_PATH_RUNS)]
+        for name, m in transient_matrices.items()
+    }
+    result["transient_ab_paths"] = list(DEFAULT_TRANSIENT_AB_PATH_RUNS)
+    result["transient_scores"] = transient_scores
+
     return result
 
 
@@ -1498,6 +1754,15 @@ def format_coupling_report_text(report: dict) -> str:
             else:
                 lines.append(f"  zone{f['zone']}: tau={f['tau_s']:.1f}s T_inf={f['t_inf_c']:.2f}C "
                              f"rms_resid={f['rms_resid_c']:.3f}C n={f['n']}")
+    lines.append("")
+    lines.append("=== 7. transient-aware score (ramp + dwell-entry, matched hardware A/B) ===")
+    lines.append("NOT a replacement for section 4's settled-tail bias -- see score_matrix_transient's "
+                  "module comment for what each one validates and does not.")
+    lines.append(f"paths: {report.get('transient_ab_paths')}")
+    for name, scores in report.get("transient_scores", {}).items():
+        lines.append(f"{name} matrix scores:")
+        for s in scores:
+            lines.append(f"  zone{s['zone']}: n={s['n']:4d} mean={s['mean_error']:+.4f} rms={s['rms_error']:.4f}")
     return "\n".join(lines)
 
 

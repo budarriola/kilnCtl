@@ -1197,3 +1197,140 @@ def test_adopted_hybrid_matrix_diagonal_is_ff_k_dc():
     for i in range(3):
         assert ci.ADOPTED_HYBRID_MATRIX[i, i] == pytest.approx(ci.FF_K_DC_DIAGONAL[i])
         assert ci.ADOPTED_MATRIX_OFF_DIAGONAL[i, i] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Transient-aware score (PID_EXPANSION_PLAN.md sec 3.2 "HARDWARE A/B,
+# 2026-09-03") -- score_matrix_transient / transient_window_row_indices.
+# ---------------------------------------------------------------------------
+
+def _ramp_then_dwell_rows_zone0():
+    """Segment 0: a 3-row ramp (elapsed 0/10/20, dwelling=False), then a
+    4-row dwell (elapsed 30/40/50/60, dwelling=True) where zone 0's
+    ``actual_c`` peaks at the SECOND dwell row (elapsed=40, value=52) then
+    declines -- so "ramp + dwell-entry up to the peak" should keep rows
+    0-4 (idx 0,1,2 ramp; idx 3,4 dwell-entry) and exclude idx 5,6 (the
+    post-peak decline). Zones 1/2 stay flat at 20C/duty=0 throughout so
+    their own (degenerate) transitions don't pull in extra rows.
+    """
+    def row(elapsed, dwelling, c0, d0):
+        zones = {
+            0: la.ZoneSample(zone=0, actual_c=c0, duty=d0),
+            1: la.ZoneSample(zone=1, actual_c=20.0, duty=0.0),
+            2: la.ZoneSample(zone=2, actual_c=20.0, duty=0.0),
+        }
+        return la.PollRow(wall_time="00:00:%02d" % (elapsed % 60), elapsed_s=elapsed,
+                           segment_index=0, segment_count=1, dwelling=dwelling,
+                           target_c=50.0, state="running", zones=zones)
+
+    return [
+        row(0, False, 20.0, 0.0),
+        row(10, False, 30.0, 5.0),
+        row(20, False, 40.0, 10.0),
+        row(30, True, 50.5, 15.25),
+        row(40, True, 52.0, 16.0),    # peak
+        row(50, True, 51.0, 999.0),   # post-peak: duty deliberately wrong
+        row(60, True, 50.2, 999.0),   # post-peak: duty deliberately wrong
+    ]
+
+
+def test_transient_window_row_indices_stops_at_the_overshoot_peak():
+    """Ramp rows are all included; dwell rows are included only through the
+    row where the zone's overshoot actually peaks -- later, declining-
+    toward-settled rows must be excluded, since those are exactly the rows
+    ``score_matrix`` already samples via its settled-tail path.
+
+    Proof this can fail: changed the break condition from
+    ``rows[i].elapsed_s >= ev.peak_overshoot_at_s`` to strict ``>``, which
+    keeps scanning past the peak row instead of stopping there. Captured
+    red:
+        AssertionError: assert {0, 1, 2, 3, 4, 5} == {0, 1, 2, 3, 4}
+      -- idx 5 (the first post-peak, declining row) leaked into the window.
+    """
+    rows = _ramp_then_dwell_rows_zone0()
+    idxs = ci.transient_window_row_indices(rows)
+    assert idxs == {0, 1, 2, 3, 4}
+
+
+def test_score_matrix_transient_ignores_post_peak_rows():
+    """``score_matrix_transient`` must score ONLY the transient-window rows
+    -- a matrix that fits those rows exactly (mean/rms == 0) must score as
+    a perfect fit even though later, deliberately-inconsistent rows exist
+    in the same run.
+
+    Setup: A = diag(2, 2, 2) (no coupling), ambient = run's first sample
+    (20, 20, 20). Every included row (idx 0-4) has zone 0's duty set to
+    exactly ``(actual_c - 20) / 2`` -- an exact fit. The two excluded rows
+    (idx 5, 6) carry duty=999, wildly inconsistent with the same relation
+    -- if they leaked into the score, mean/rms would be far from zero.
+
+    Proof this can fail: simulated the "score every row, not just the
+    transient window" bug directly -- computed ``u_pred - u_actual`` over
+    ALL 7 rows (the settled-tail scorer's own algebra, just without the
+    windowing this function adds) instead of the 5 transient rows. Captured
+    red (zone 0 mean, hand-computed):
+        mean over ALL rows (zone0): -281.057...  vs 0.0 +- 1e-6 expected
+      -- the wrong-duty post-peak rows (idx 5, 6) dominate the mean once
+      included, exactly the contamination this function exists to avoid.
+    """
+    rows = _ramp_then_dwell_rows_zone0()
+    matrix = np.diag([2.0, 2.0, 2.0])
+    scores = ci.score_matrix_transient(matrix, rows)
+    by_zone = {s.zone: s for s in scores}
+    assert by_zone[0].n == 5  # idx 0..4
+    assert by_zone[0].mean_error == pytest.approx(0.0, abs=1e-6)
+    assert by_zone[0].rms_error == pytest.approx(0.0, abs=1e-6)
+    assert by_zone[1].mean_error == pytest.approx(0.0, abs=1e-6)
+    assert by_zone[2].mean_error == pytest.approx(0.0, abs=1e-6)
+
+
+def test_score_matrix_transient_from_http_paths_smoke_on_real_captures():
+    """Smoke test against the actual matched hardware A/B pair sec 3.2's
+    "HARDWARE A/B, 2026-09-03" entry analyzes -- must return real (nonzero
+    n) scores for all three zones without raising, for each of the three
+    candidate matrices sec 3.2's correction-block table compares.
+
+    Proof this function's run-selection is not a silent "take the last run"
+    shortcut: called it with an out-of-range explicit index (7) against
+    ``p7_oldmatrix_runC.jsonl``, which actually holds more than one run (a
+    real multi-run capture, exactly the shape ``DEFAULT_TRANSIENT_AB_PATH_RUNS``
+    pins ``run_index=0`` against rather than trusting a default). Captured
+    red:
+        IndexError: logs/coupling/p7_oldmatrix_runC.jsonl: run index 7 out
+        of range (file holds 2 runs)
+      -- confirms this path goes through the real
+      ``log_analysis.select_run`` refusal machinery, not a silent
+      most-recent-run fallback.
+    """
+    for matrix in (ci.PRE_ADOPTION_HYBRID_MATRIX, ci.ADOPTED_OWN_DIAGONAL_MATRIX, ci.ADOPTED_HYBRID_MATRIX):
+        scores = ci.score_matrix_transient_from_http_paths(matrix, ci.DEFAULT_TRANSIENT_AB_PATH_RUNS)
+        assert len(scores) == 3
+        for s in scores:
+            assert s.n > 0
+            assert not (isinstance(s.mean_error, float) and s.mean_error != s.mean_error)  # not NaN
+
+
+def test_coupling_report_includes_transient_section():
+    """``build_coupling_report``'s section 7 must carry all three sec 3.2
+    correction-block matrices' transient scores, and
+    ``format_coupling_report_text`` must render it -- this is the
+    "wired in beside the existing bias score" requirement, not a separate
+    tool a caller has to know to run.
+
+    Proof this can fail: renamed the dict key written by
+    ``build_coupling_report`` (``"transient_scores"`` -> ``"transient_score"``)
+    without updating the formatter. Captured red:
+        KeyError: 'transient_scores'
+      -- format_coupling_report_text's ``.items()`` call blew up because
+      the report no longer carried the key it expects.
+    """
+    report = ci.build_coupling_report()
+    assert set(report["transient_scores"].keys()) == {
+        "pre_adoption_hybrid", "adopted_own_diagonal", "adopted_hybrid"
+    }
+    for name, scores in report["transient_scores"].items():
+        assert len(scores) == 3
+        assert all(s["n"] > 0 for s in scores)
+    text = ci.format_coupling_report_text(report)
+    assert "transient-aware score" in text
+    assert "adopted_hybrid matrix scores" in text
