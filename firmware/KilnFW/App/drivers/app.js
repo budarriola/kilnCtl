@@ -60,7 +60,8 @@
     2: 'temperature moving the wrong direction', 3: 'runaway heating (welded contact / shorted SSR?)',
     4: 'drifted from setpoint after settling', 5: 'over absolute max temperature',
     6: 'under absolute min temperature', 7: 'sensor reading invalid',
-    8: 'reading frozen while duty > 0', 9: 'cross-zone plausibility check failed'
+    8: 'reading frozen while duty > 0', 9: 'cross-zone plausibility check failed',
+    10: 'relay autotune: no oscillation seen (element may be dead)'
   };
   window.thermalGuardWords = function (guard) { return THERMAL_GUARD_WORDS[guard] || ('guard ' + guard); };
 

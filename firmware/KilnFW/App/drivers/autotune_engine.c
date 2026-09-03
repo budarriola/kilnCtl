@@ -2624,8 +2624,23 @@ static void autotune_engine_tick_locked(void)
          * correctly inert for a normal relay run: want_duty's low branch is
          * a real nonzero duty (0.15 by default), so commanded_duty <= 0
          * never holds except at the edge case d == AUTOTUNE_RELAY_MAX_D
-         * (0.5, low branch truly 0) -- exactly the case where heat really
-         * is off and guard 3 SHOULD be able to see it.
+         * (0.5, low branch truly 0). CORRECTION: an earlier version of this
+         * comment claimed that edge case is "exactly the case where heat
+         * really is off and guard 3 SHOULD be able to see it" -- that is
+         * FALSE and contradicts relay_law_tick()'s own comment just above in
+         * this file (see "One consequence of centring on 0.5..."): a kiln
+         * keeps climbing for minutes after heat is genuinely cut, which is
+         * precisely why relay_law_tick() deliberately keeps the low branch
+         * nonzero at every OTHER d -- to keep guard 3's window from ever
+         * opening during ordinary cycling. At d == MAX_D that protection
+         * lapses and guard 3's window opens exactly as it would for any
+         * other zero-duty period, generic-heat-off false-positive risk and
+         * all; this fix neither improves nor worsens that one pre-existing
+         * edge case, it just correctly leaves it alone. The observable
+         * CLAIM this whole comment makes -- guard 3's behaviour at every d is
+         * identical before and after this fix, because the low branch was 0
+         * only at that same edge before and after -- remains true; only the
+         * sentence trying to justify it as a feature was wrong.
          *
          * profile_executor.c's own identical PWM/progress-window defect
          * (commanded_duty fed from the post-PWM relay state, resetting
@@ -2636,6 +2651,24 @@ static void autotune_engine_tick_locked(void)
          * questions the same defect class raises there. */
         .commanded_duty = sensor_ok ? want_duty : 0.0f,
         .dt_s = (float)dt_ms / 1000.0f,
+        /* Review finding (this fix's own false-trip exposure): feeding
+         * want_duty above finally armed guards 1/2 for the WHOLE relay run
+         * (both branches sit above progress_duty_min now), but the
+         * directional climbing/falling test they inherited from the step
+         * path is unsafe against a limit cycle -- a single window landing on
+         * the low branch's downswing, or on the cooling half of a
+         * wide-hysteresis cycle, reads as guard 2 or guard 1 respectively
+         * even though the run is healthy. See
+         * thermal_guard_input_t.relay_min_swing_c for the discriminator this
+         * uses instead (amplitude, not direction) and why 2*relay_h is a
+         * hard physical floor for ANY live element on this path:
+         * relay_law_tick() only flips branches when the measurement reaches
+         * setpoint -/+ relay_h, so a genuinely responding element cannot
+         * avoid producing at least that much peak-to-trough swing, while a
+         * dead one produces none of it regardless of which branch the law
+         * currently thinks it's driving. STEP leaves this at its zero
+         * default and keeps the existing directional test unchanged. */
+        .relay_min_swing_c = (s_at.method == AUTOTUNE_METHOD_RELAY) ? (2.0f * s_at.relay_h) : 0.0f,
     };
     if (thermal_guard_tick(&s_at.guard_state, &guard_cfg_this_tick, &gin)) {
         escalate_and_abort(s_at.guard_state.reason, s_at.guard_state.detail);

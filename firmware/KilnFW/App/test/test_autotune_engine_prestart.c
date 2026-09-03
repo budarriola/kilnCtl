@@ -2095,7 +2095,12 @@ static void test_guard1_still_trips_a_dead_element_that_never_gets_proven(void)
 // Starts a real relay-feedback run on zone 0, then jumps straight to
 // RELAY_CYCLING -- same rationale and same never-succeeding-task-create
 // workaround as start_stepping_run_rule() above.
-static void start_relay_cycling_run(float max_temp_c, float setpoint_c)
+// relay_d/hysteresis_c <= 0 mean "use the documented default" (relay_d ->
+// AUTOTUNE_RELAY_DEFAULT_D=0.35, hysteresis_c -> AUTOTUNE_RELAY_DEFAULT_H_C=
+// 2.0), same sentinel autotune_engine_run_relay() itself documents -- so
+// every pre-existing call site that passed 0.0f/0.0f keeps behaving exactly
+// as before.
+static void start_relay_cycling_run_with(float max_temp_c, float setpoint_c, float relay_d, float hysteresis_c)
 {
     static MAX31856BusClass bus;
     static SafetyLinkClass safety;
@@ -2113,7 +2118,7 @@ static void start_relay_cycling_run(float max_temp_c, float setpoint_c)
     s_stub_ch0_ok = true;
 
     char errbuf[96] = {0};
-    bool ok = autotune_engine_run_relay(0, setpoint_c, /*relay_d=*/0.0f, /*hysteresis_c=*/0.0f,
+    bool ok = autotune_engine_run_relay(0, setpoint_c, relay_d, hysteresis_c,
                                         AUTOTUNE_RULE_TYREUS_LUYBEN, errbuf, sizeof(errbuf));
     TEST_CHECK(ok, "test setup: relay run must start");
 
@@ -2122,6 +2127,58 @@ static void start_relay_cycling_run(float max_temp_c, float setpoint_c)
     s_at.phase_start_tick = 0;
     s_at.last_sample_tick = 0;
     xSemaphoreGive(s_at.lock);
+}
+
+static void start_relay_cycling_run(float max_temp_c, float setpoint_c)
+{
+    start_relay_cycling_run_with(max_temp_c, setpoint_c, /*relay_d=*/0.0f, /*hysteresis_c=*/0.0f);
+}
+
+// Drives a physically plausible relay LIMIT CYCLE through the real tick
+// loop, closed through the real relay_law_tick() -- unlike run_ticks()
+// above (a straight ramp in one direction, which can only ever exercise one
+// bang-bang branch), this actually reverses direction the way a real kiln
+// does, with a DEAD TIME between a branch change and the plant responding to
+// it. dead_time_ticks delays the plant's response to whichever branch
+// s_at.relay_on last selected; rate_high/low_c_per_min is the plant's rate
+// of change once the delayed effective branch takes hold (rate_low is
+// usually negative -- cooling on the low branch). 1 tick == 1s
+// (AUTOTUNE_ENGINE_TICK_MS).
+//
+// history[] holds the branch (true=high) the law selected on each past tick,
+// prefilled for the first dead_time_ticks entries with the run's actual
+// starting branch (s_at.relay_on -- true, per autotune_engine_run_relay()'s
+// own "start on the high branch" comment) so the very first ticks of the run
+// aren't an artificial edge this helper invented.
+static float run_relay_limit_cycle_ticks(float start_temp_c, int dead_time_ticks, float rate_high_c_per_min,
+                                          float rate_low_c_per_min, int n_ticks)
+{
+    static bool history[4096];
+    TEST_CHECK(dead_time_ticks + n_ticks <= (int)(sizeof(history) / sizeof(history[0])),
+               "test bug: history[] too small for this run's dead_time_ticks + n_ticks");
+    for (int i = 0; i < dead_time_ticks; i++) {
+        history[i] = s_at.relay_on;
+    }
+
+    float temp_c = start_temp_c;
+    for (int i = 0; i < n_ticks; i++) {
+        bool other_zone_active_hint = any_other_zone_profile_active(s_at.zone_index);
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        if (!state_is_running(s_at.state)) {
+            xSemaphoreGive(s_at.lock);
+            break;
+        }
+        s_stub_ch0_temp_c = temp_c;
+        s_at.other_zone_profile_active_hint = other_zone_active_hint;
+        autotune_engine_tick_locked();
+        history[dead_time_ticks + i] = s_at.relay_on;
+        xSemaphoreGive(s_at.lock);
+
+        bool effective_branch_high = history[i]; // whatever the law picked dead_time_ticks ago
+        float rate_c_per_min = effective_branch_high ? rate_high_c_per_min : rate_low_c_per_min;
+        temp_c += rate_c_per_min / 60.0f; // 1 tick == 1s
+    }
+    return temp_c;
 }
 
 static void test_relay_run_overrides_progress_duty_min_same_as_step_test(void)
@@ -2135,8 +2192,9 @@ static void test_relay_run_overrides_progress_duty_min_same_as_step_test(void)
 
 static void test_relay_run_flat_dead_element_now_trips_a_guard(void)
 {
-    TEST_SECTION("relay run: a dead/flat element still trips a guard, driven through the real autotune_engine "
-                 "tick loop -- this is the exact case that was silently inert before this pass' fix");
+    TEST_SECTION("relay run: a dead/flat element on the HIGH branch still trips a guard, driven through the "
+                 "real autotune_engine tick loop -- this is the exact case that was silently inert before "
+                 "this pass' fix");
     start_relay_cycling_run(/*max_temp_c=*/500.0f, /*setpoint_c=*/300.0f);
     // Flat, well below setpoint - h: the relay law latches its high branch
     // and never releases it (meas never crosses setpoint_c + h), so this
@@ -2145,23 +2203,100 @@ static void test_relay_run_flat_dead_element_now_trips_a_guard(void)
     run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/0.0f, /*n_ticks=*/320);
 
     TEST_CHECK(s_at.guard_state.is_tripped, "a dead element on a relay run must still trip a guard");
-    TEST_CHECK(s_at.guard_state.reason == THERMAL_GUARD_TRIP_HEATING_FAILED,
-               "specifically guard 1 (HEATING_FAILED) -- climbing (error > progress_band_c), not rising");
+    // Post-swing-discriminator (this pass): a RELAY run's guards 1/2 no
+    // longer reason about direction at all (see thermal_guard_input_t.
+    // relay_min_swing_c) -- a flat reading produces zero window swing
+    // regardless of which branch the law is stuck on, so this trips the
+    // relay-specific reason, not guard 1's directional HEATING_FAILED.
+    TEST_CHECK(s_at.guard_state.reason == THERMAL_GUARD_TRIP_RELAY_STALLED,
+               "the relay-cycling discriminator -- zero swing while cycling -- not guard 1/2's directional test");
 }
 
-static void test_relay_run_healthy_rising_element_does_not_spuriously_trip(void)
+static void test_relay_run_flat_dead_element_on_low_branch_also_trips(void)
 {
-    TEST_SECTION("relay run: a HEALTHY rising element does not spuriously trip guard 1 now that its progress "
-                 "window is continuously armed across the whole run (was previously never armed at all)");
+    TEST_SECTION("relay run: a dead/flat element on the LOW branch also trips a guard -- the task brief's own "
+                 "coverage gap (the pre-existing test only ever drove the high/0.85 branch)");
     start_relay_cycling_run(/*max_temp_c=*/500.0f, /*setpoint_c=*/300.0f);
-    // 1.0C/tick == 60C/min, comfortably clearing the default 0.5C/min
-    // sanity_rate_c_per_min bar -- a healthy element tracking the relay
-    // law's high branch. Runs long enough to cross guard 1's 300s default
-    // window at least once while still climbing (well short of setpoint).
-    run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/1.0f, /*n_ticks=*/320);
+    // Flat, well ABOVE setpoint + h: the relay law immediately switches to
+    // (and latches on) its low branch (0.15 default) and never releases it,
+    // since a dead element never falls back below setpoint - h either.
+    run_ticks(/*start_temp_c=*/400.0f, /*per_tick_delta_c=*/0.0f, /*n_ticks=*/320);
+
+    TEST_CHECK(!s_at.relay_on, "sanity: a reading this far above setpoint+h must select the LOW branch");
+    TEST_CHECK(s_at.guard_state.is_tripped, "a dead element stuck on the low branch must still trip a guard");
+    TEST_CHECK(s_at.guard_state.reason == THERMAL_GUARD_TRIP_RELAY_STALLED,
+               "zero swing while cycling, exactly as the high-branch case above -- direction never enters into it");
+}
+
+// Replaces a VACUOUS predecessor (a straight 1C/tick, 320-tick ramp) that
+// passed identically with the fix under test reverted: it never reversed
+// direction, so it could only ever occupy one bang-bang branch and never
+// exercised the low branch, a downswing, or anything resembling a real
+// limit cycle. This drives an actual closed-loop oscillation, with a
+// realistic dead time, through the real tick loop via
+// run_relay_limit_cycle_ticks() -- see that helper's own comment.
+static void test_relay_run_healthy_limit_cycle_does_not_spuriously_trip(void)
+{
+    TEST_SECTION("relay run: a HEALTHY limit cycle (real oscillation, realistic dead time) never trips a "
+                 "guard over a long run -- default d/h");
+    start_relay_cycling_run(/*max_temp_c=*/500.0f, /*setpoint_c=*/300.0f);
+    // Default d (0.35) / h (2.0C). 40s dead time (mid the documented 34-53s
+    // range) each direction; +/-6C/min once the delayed branch takes hold --
+    // comfortably clears 2*h=4C swing per half-cycle, so this is a genuinely
+    // healthy run, not a marginal one. 1200 ticks = 20min, several full
+    // cycles and several complete 300s guard windows.
+    run_relay_limit_cycle_ticks(/*start_temp_c=*/300.0f, /*dead_time_ticks=*/40,
+                                /*rate_high_c_per_min=*/6.0f, /*rate_low_c_per_min=*/-6.0f, /*n_ticks=*/1200);
+
+    TEST_CHECK(!s_at.guard_state.is_tripped, "a healthy oscillating element must never trip a guard");
+}
+
+// The GUARD 2 downswing scenario from the task brief, reproduced almost
+// verbatim: d=0.35, h=2.0, setpoint 300C, dead time inside the documented
+// 34-53s range. Before this pass' discriminator, a directional window
+// landing on the low branch's downswing (falling past 298C after the law
+// already dropped to the low branch at 302C) read as guard 2's
+// wrong-direction trip on a perfectly healthy cycle.
+static void test_relay_run_guard2_downswing_scenario_does_not_trip(void)
+{
+    TEST_SECTION("relay run: guard-2 downswing scenario (d=0.35, h=2.0, 300C, 34-53s dead time) does not trip "
+                 "a healthy cycle");
+    start_relay_cycling_run_with(/*max_temp_c=*/500.0f, /*setpoint_c=*/300.0f, /*relay_d=*/0.35f,
+                                 /*hysteresis_c=*/2.0f);
+    // 53s dead time (top of the documented range -- the slower, more
+    // exposed end) with a modest rate so the plant genuinely overshoots the
+    // 2C band by a couple of degrees each way (matching the task brief's
+    // "keeps falling past 298C" description) without being an unrealistic
+    // step change.
+    run_relay_limit_cycle_ticks(/*start_temp_c=*/300.0f, /*dead_time_ticks=*/53,
+                                /*rate_high_c_per_min=*/4.0f, /*rate_low_c_per_min=*/-4.0f, /*n_ticks=*/1800);
 
     TEST_CHECK(!s_at.guard_state.is_tripped,
-               "a healthy climbing element must not trip guard 1 just because its window can now complete");
+               "a healthy cycle in the exact scenario that used to false-trip guard 2 must not trip any guard");
+}
+
+// The GUARD 1 large-hysteresis scenario from the task brief: h=20.0
+// (AUTOTUNE_RELAY_MAX_H_C, legal) spends most of each low half-cycle more
+// than progress_band_c (3.0C default) below setpoint, which used to put
+// guard 1's directional "must be rising" test on a zone that is deliberately
+// COOLING for a big chunk of every cycle.
+static void test_relay_run_guard1_large_hysteresis_scenario_does_not_trip(void)
+{
+    TEST_SECTION("relay run: guard-1 large-hysteresis scenario (h=20.0=AUTOTUNE_RELAY_MAX_H_C) does not trip "
+                 "a healthy cycle");
+    start_relay_cycling_run_with(/*max_temp_c=*/500.0f, /*setpoint_c=*/300.0f, /*relay_d=*/0.35f,
+                                 /*hysteresis_c=*/AUTOTUNE_RELAY_MAX_H_C);
+    // 40s dead time, +/-20C/min -- fast enough that a single 300s guard
+    // window reliably spans more than one full half-cycle (band crossing
+    // ~40C/(20C/min)=120s, plus 40s dead time =~160s per half-cycle) so the
+    // window's observed swing is never a lucky/unlucky partial slice of the
+    // full ~50-60C peak-to-peak amplitude this cycle actually produces
+    // (2*h=40C is only the guaranteed floor, not the target).
+    run_relay_limit_cycle_ticks(/*start_temp_c=*/300.0f, /*dead_time_ticks=*/40,
+                                /*rate_high_c_per_min=*/20.0f, /*rate_low_c_per_min=*/-20.0f, /*n_ticks=*/2400);
+
+    TEST_CHECK(!s_at.guard_state.is_tripped,
+               "a healthy large-hysteresis cycle must not trip guard 1 for spending half its time cooling");
 }
 
 // ---------------------------------------------------------------------------
@@ -5073,7 +5208,10 @@ void run_test_autotune_engine_prestart(void)
     test_guard1_still_trips_a_dead_element_that_never_gets_proven();
     test_relay_run_overrides_progress_duty_min_same_as_step_test();
     test_relay_run_flat_dead_element_now_trips_a_guard();
-    test_relay_run_healthy_rising_element_does_not_spuriously_trip();
+    test_relay_run_flat_dead_element_on_low_branch_also_trips();
+    test_relay_run_healthy_limit_cycle_does_not_spuriously_trip();
+    test_relay_run_guard2_downswing_scenario_does_not_trip();
+    test_relay_run_guard1_large_hysteresis_scenario_does_not_trip();
 
     // Ownership tests (TODO.md 6A.6) -- order-independent relative to the
     // guard tests above (each calls start_stepping_run(), which re-zeroes

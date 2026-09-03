@@ -46,6 +46,8 @@ typedef enum {
     THERMAL_GUARD_TRIP_SENSOR_INVALID, /* guard 7 */
     THERMAL_GUARD_TRIP_FROZEN,         /* guard 8 */
     THERMAL_GUARD_TRIP_CROSS_ZONE,     /* guard 9 */
+    THERMAL_GUARD_TRIP_RELAY_STALLED,  /* guards 1/2's relay-cycling discriminator --
+                                        * see thermal_guard_input_t.relay_min_swing_c */
 } thermal_guard_trip_t;
 
 /* Per-zone thresholds. max_temp_c/min_temp_c come from zone_cfg_t
@@ -204,6 +206,54 @@ typedef struct {
      * construction never sets it, so an ordinary firing sees no behavior
      * change at all. */
     bool progress_rise_check_relaxed;
+
+    /* Selects guards 1/2's RELAY-CYCLING discriminator for this tick, added
+     * after review found the directional (climbing/falling) test from the
+     * step-test path structurally unsafe for a bang-bang relay run --
+     * autotune_engine.c's own comment on why the PWM-duty fix armed guards
+     * 1/2 for every tick of a relay run (previously they were inert on this
+     * path) explains how the exposure got here.
+     *
+     * A relay run does not behave like a step or a settled dwell: it is
+     * deliberately, continuously crossing back and forth through the
+     * setpoint, so `error > band` ("still climbing toward setpoint") and its
+     * negation are both true many times a minute and say nothing about
+     * health. Guard 1's "must be rising" and guard 2's "must not be falling"
+     * tests each cover only ONE half of a cycle that a healthy run is
+     * SUPPOSED to spend the other half doing -- evaluated against a single
+     * window landing on a downswing (guard 2) or the cooling half of a
+     * wide-hysteresis cycle (guard 1), either fires on a perfectly healthy
+     * oscillation.
+     *
+     * The property that actually distinguishes a live element from a dead
+     * one during relay cycling is not direction, it's AMPLITUDE: a live
+     * element's reading must cross both switching-band edges (setpoint -/+
+     * the run's hysteresis h) to have produced the cycling in the first
+     * place -- relay_law_tick() only flips branches when the measurement
+     * reaches setpoint-h or setpoint+h, so any element that is actually
+     * driving the plant guarantees a swing of at least 2*h peak-to-trough,
+     * before dead-time overshoot even adds to it. A dead or disconnected
+     * element produces no such swing regardless of which way the branch
+     * happens to be pointing -- the reading just sits flat (thermocouple
+     * noise only, typically well under 1C) while the relay law dutifully
+     * keeps switching on a schedule the plant never follows.
+     *
+     * So: when this field is > 0.0f, guards 1/2 stop asking "is it moving
+     * the right way" and instead track the min/max reading across the same
+     * rolling window, tripping THERMAL_GUARD_TRIP_RELAY_STALLED only if the
+     * window's whole span (max - min) stays below this floor -- direction
+     * never enters into it, so a downswing, a long cooling half-cycle, or a
+     * wide operator-chosen hysteresis (h up to AUTOTUNE_RELAY_MAX_H_C) never
+     * trips it as long as the element is genuinely producing the swing its
+     * own switching band requires. autotune_engine.c sets this to
+     * 2*relay_h (the physical floor above) only for AUTOTUNE_METHOD_RELAY;
+     * every other caller leaves it at its zero default and guards 1/2 keep
+     * their ordinary directional behaviour unchanged -- this field and
+     * progress_rise_check_relaxed are mutually exclusive in practice (STEP
+     * sets the latter, RELAY sets this one) but nothing here enforces that;
+     * a nonzero value here simply takes priority for guards 1/2 on this
+     * tick, and progress_rise_check_relaxed is ignored while it does. */
+    float relay_min_swing_c;
 } thermal_guard_input_t;
 
 typedef struct {
@@ -215,6 +265,14 @@ typedef struct {
     bool  progress_window_active;
     float progress_window_start_c;
     float progress_window_elapsed_s;
+    /* Relay-cycling discriminator's own running extremes across the SAME
+     * window as the fields above -- see thermal_guard_input_t.relay_min_swing_c.
+     * Tracked unconditionally whenever the window is active (trivially cheap,
+     * two comparisons a tick) so a mid-run switch of relay_min_swing_c from 0
+     * to nonzero -- not that any caller does this today -- would already see
+     * a populated window instead of one sample wide. */
+    float progress_window_min_c;
+    float progress_window_max_c;
 
     /* Guard 3: sustained duty==0 while temperature still rises.
      * runaway_baseline_c is where the temperature was when heat was commanded

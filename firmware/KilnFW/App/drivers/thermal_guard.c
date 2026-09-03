@@ -152,92 +152,131 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
             state->progress_window_active = true;
             state->progress_window_start_c = in->measurement_c;
             state->progress_window_elapsed_s = 0.0f;
+            state->progress_window_min_c = in->measurement_c;
+            state->progress_window_max_c = in->measurement_c;
         } else {
             state->progress_window_elapsed_s += in->dt_s;
-            /* wrong_dir_window_s is exposed to operators (Settings > Zones) as
-             * "how long heat may be commanded without the temperature
-             * responding" -- that description covers BOTH branches below, not
-             * just the falling-while-heating case its name suggests. Applying
-             * it only to the error<=0 branch left guard 1 (the case that
-             * actually matters when a heating element dies) stuck on the
-             * hardcoded PROGRESS_WINDOW_S with no per-zone override at all --
-             * confirmed on the bench: a dead element was only caught after a
-             * fixed 5 minutes regardless of the operator's configured 60s.
-             * Use the same effective_f() substitution for both branches so
-             * the field means what its UI label says. Each branch keeps its
-             * OWN pre-existing fallback (PROGRESS_WINDOW_S=300s for guard 1,
-             * WRONG_DIR_WINDOW_S=120s for guard 2) so an unconfigured zone
-             * (wrong_dir_window_s == 0) behaves exactly as it did before this
-             * fix -- only a zone that has actually set wrong_dir_window_s
-             * sees the new behaviour of it applying to guard 1 too. */
-            /* THE ARRIVAL BAND, added 2026-08-29. `error > 0` is not the
-             * same question as "is this zone still climbing toward
-             * setpoint", and treating it as such is what aborted a healthy
-             * three-segment firing on this bench mid-dwell: zone 0 was
-             * holding 50.7 C against a 52.0 C setpoint at full duty --
-             * settled, 1.3 C of steady-state offset, exactly as a PID
-             * should -- and guard 1 read "duty high, below setpoint, not
-             * rising" and tripped with "rose only -0.2C in 1min". Demanding
-             * a rise from a loop that has already arrived is demanding that
-             * it overshoot.
-             *
-             * So the rise test now applies only OUTSIDE the band. Inside it
-             * the zone still has to answer for itself -- it must not FALL --
-             * which is the shape a dead element takes once the plant is hot,
-             * and is guard 2's existing test applied to a case that
-             * previously had no test at all. See
-             * thermal_guard_cfg_t.progress_band_c. */
-            float band_c = effective_f(cfg->progress_band_c, PROGRESS_BAND_C);
-            bool climbing = (error > band_c);
-            float window_s = effective_f(cfg->wrong_dir_window_s,
-                                          climbing
-                                              ? effective_f(cfg->progress_window_s, PROGRESS_WINDOW_S)
-                                              : WRONG_DIR_WINDOW_S);
-            if (state->progress_window_elapsed_s >= window_s) {
-                float delta = in->measurement_c - state->progress_window_start_c;
-                float elapsed_min = state->progress_window_elapsed_s / 60.0f;
-                if (climbing) {
-                    /* Guard 1: heating, below setpoint, must be rising --
-                     * UNLESS the caller has already proven this element
-                     * genuinely heats (in->progress_rise_check_relaxed, see
-                     * thermal_guard_input_t's own comment). That relaxation
-                     * covers exactly this branch and nothing else: guard 2
-                     * below (falling while heating) and every other guard
-                     * still run unconditionally. */
-                    float expected = rate_cfg * elapsed_min;
-                    /* delta < expected is a STRICT inequality on purpose --
-                     * delta == expected means the zone cleared the bar
-                     * exactly and must NOT trip (see the test pinning this
-                     * boundary). %.2f below (not %.1f) is deliberate too: a
-                     * genuine near-miss like delta=0.494C/expected=0.500C
-                     * used to both round to "0.5C" at one decimal, so the
-                     * logged "rose only 0.5C ... need >=0.5C" read as an
-                     * inclusive-boundary bug when the actual numbers were
-                     * never equal -- see the bench trip this was found from. */
-                    if (delta < expected && !in->progress_rise_check_relaxed) {
-                        trip(state, THERMAL_GUARD_TRIP_HEATING_FAILED,
-                             "heating but rose only %.2fC in %.1fmin (need >=%.2fC)", (double)delta,
-                             (double)elapsed_min, (double)expected);
+            if (in->measurement_c < state->progress_window_min_c) {
+                state->progress_window_min_c = in->measurement_c;
+            }
+            if (in->measurement_c > state->progress_window_max_c) {
+                state->progress_window_max_c = in->measurement_c;
+            }
+            if (in->relay_min_swing_c > 0.0f) {
+                /* --- Relay-cycling discriminator (guards 1/2, RELAY mode) ---
+                 * See thermal_guard_input_t.relay_min_swing_c for the full
+                 * reasoning: direction is meaningless mid-cycle, so this
+                 * checks amplitude instead. Window length reuses guard 1's
+                 * own PROGRESS_WINDOW_S default (300s) rather than guard 2's
+                 * shorter WRONG_DIR_WINDOW_S (120s) -- a relay run's period
+                 * (dead time both directions plus the hysteresis crossing)
+                 * can comfortably exceed 120s on a slow zone, and this check
+                 * has no "climbing" branch to fall back to a longer window
+                 * for the way guard 1 used to. wrong_dir_window_s still wins
+                 * if an operator has actually configured it, same override
+                 * rule as the directional path below. */
+                float window_s = effective_f(cfg->wrong_dir_window_s, PROGRESS_WINDOW_S);
+                if (state->progress_window_elapsed_s >= window_s) {
+                    float swing = state->progress_window_max_c - state->progress_window_min_c;
+                    if (swing < in->relay_min_swing_c) {
+                        float elapsed_min = state->progress_window_elapsed_s / 60.0f;
+                        trip(state, THERMAL_GUARD_TRIP_RELAY_STALLED,
+                             "relay cycling but only %.2fC swing in %.1fmin (need >=%.2fC) -- "
+                             "element may be dead", (double)swing, (double)elapsed_min,
+                             (double)in->relay_min_swing_c);
                         return true;
                     }
-                } else {
-                    /* Guard 2: heating while at, above, or within the arrival
-                     * band of setpoint, and falling faster than the
-                     * wrong-direction threshold -- a miswired zone driving
-                     * full output and making things worse, or an element that
-                     * has died during a dwell. */
-                    float falling_c_per_min = -delta / elapsed_min;
-                    if (falling_c_per_min > effective_f(cfg->wrong_dir_rate_c_per_min, WRONG_DIR_RATE_C_PER_MIN)) {
-                        trip(state, THERMAL_GUARD_TRIP_WRONG_DIRECTION,
-                             "heating commanded but temperature falling %.2fC/min", (double)falling_c_per_min);
-                        return true;
-                    }
+                    state->progress_window_start_c = in->measurement_c;
+                    state->progress_window_elapsed_s = 0.0f;
+                    state->progress_window_min_c = in->measurement_c;
+                    state->progress_window_max_c = in->measurement_c;
                 }
-                /* Window satisfied (or the falling-but-under-threshold case
-                 * for guard 2) -- slide to a fresh window rather than
-                 * growing forever. */
-                state->progress_window_start_c = in->measurement_c;
-                state->progress_window_elapsed_s = 0.0f;
+            } else {
+                /* wrong_dir_window_s is exposed to operators (Settings > Zones) as
+                 * "how long heat may be commanded without the temperature
+                 * responding" -- that description covers BOTH branches below, not
+                 * just the falling-while-heating case its name suggests. Applying
+                 * it only to the error<=0 branch left guard 1 (the case that
+                 * actually matters when a heating element dies) stuck on the
+                 * hardcoded PROGRESS_WINDOW_S with no per-zone override at all --
+                 * confirmed on the bench: a dead element was only caught after a
+                 * fixed 5 minutes regardless of the operator's configured 60s.
+                 * Use the same effective_f() substitution for both branches so
+                 * the field means what its UI label says. Each branch keeps its
+                 * OWN pre-existing fallback (PROGRESS_WINDOW_S=300s for guard 1,
+                 * WRONG_DIR_WINDOW_S=120s for guard 2) so an unconfigured zone
+                 * (wrong_dir_window_s == 0) behaves exactly as it did before this
+                 * fix -- only a zone that has actually set wrong_dir_window_s
+                 * sees the new behaviour of it applying to guard 1 too. */
+                /* THE ARRIVAL BAND, added 2026-08-29. `error > 0` is not the
+                 * same question as "is this zone still climbing toward
+                 * setpoint", and treating it as such is what aborted a healthy
+                 * three-segment firing on this bench mid-dwell: zone 0 was
+                 * holding 50.7 C against a 52.0 C setpoint at full duty --
+                 * settled, 1.3 C of steady-state offset, exactly as a PID
+                 * should -- and guard 1 read "duty high, below setpoint, not
+                 * rising" and tripped with "rose only -0.2C in 1min". Demanding
+                 * a rise from a loop that has already arrived is demanding that
+                 * it overshoot.
+                 *
+                 * So the rise test now applies only OUTSIDE the band. Inside it
+                 * the zone still has to answer for itself -- it must not FALL --
+                 * which is the shape a dead element takes once the plant is hot,
+                 * and is guard 2's existing test applied to a case that
+                 * previously had no test at all. See
+                 * thermal_guard_cfg_t.progress_band_c. */
+                float band_c = effective_f(cfg->progress_band_c, PROGRESS_BAND_C);
+                bool climbing = (error > band_c);
+                float window_s = effective_f(cfg->wrong_dir_window_s,
+                                              climbing
+                                                  ? effective_f(cfg->progress_window_s, PROGRESS_WINDOW_S)
+                                                  : WRONG_DIR_WINDOW_S);
+                if (state->progress_window_elapsed_s >= window_s) {
+                    float delta = in->measurement_c - state->progress_window_start_c;
+                    float elapsed_min = state->progress_window_elapsed_s / 60.0f;
+                    if (climbing) {
+                        /* Guard 1: heating, below setpoint, must be rising --
+                         * UNLESS the caller has already proven this element
+                         * genuinely heats (in->progress_rise_check_relaxed, see
+                         * thermal_guard_input_t's own comment). That relaxation
+                         * covers exactly this branch and nothing else: guard 2
+                         * below (falling while heating) and every other guard
+                         * still run unconditionally. */
+                        float expected = rate_cfg * elapsed_min;
+                        /* delta < expected is a STRICT inequality on purpose --
+                         * delta == expected means the zone cleared the bar
+                         * exactly and must NOT trip (see the test pinning this
+                         * boundary). %.2f below (not %.1f) is deliberate too: a
+                         * genuine near-miss like delta=0.494C/expected=0.500C
+                         * used to both round to "0.5C" at one decimal, so the
+                         * logged "rose only 0.5C ... need >=0.5C" read as an
+                         * inclusive-boundary bug when the actual numbers were
+                         * never equal -- see the bench trip this was found from. */
+                        if (delta < expected && !in->progress_rise_check_relaxed) {
+                            trip(state, THERMAL_GUARD_TRIP_HEATING_FAILED,
+                                 "heating but rose only %.2fC in %.1fmin (need >=%.2fC)", (double)delta,
+                                 (double)elapsed_min, (double)expected);
+                            return true;
+                        }
+                    } else {
+                        /* Guard 2: heating while at, above, or within the arrival
+                         * band of setpoint, and falling faster than the
+                         * wrong-direction threshold -- a miswired zone driving
+                         * full output and making things worse, or an element that
+                         * has died during a dwell. */
+                        float falling_c_per_min = -delta / elapsed_min;
+                        if (falling_c_per_min > effective_f(cfg->wrong_dir_rate_c_per_min, WRONG_DIR_RATE_C_PER_MIN)) {
+                            trip(state, THERMAL_GUARD_TRIP_WRONG_DIRECTION,
+                                 "heating commanded but temperature falling %.2fC/min", (double)falling_c_per_min);
+                            return true;
+                        }
+                    }
+                    /* Window satisfied (or the falling-but-under-threshold case
+                     * for guard 2) -- slide to a fresh window rather than
+                     * growing forever. */
+                    state->progress_window_start_c = in->measurement_c;
+                    state->progress_window_elapsed_s = 0.0f;
+                }
             }
         }
     } else {
