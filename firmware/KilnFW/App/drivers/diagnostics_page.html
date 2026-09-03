@@ -275,6 +275,27 @@ ambient reading (board_temps.c), a different number from the kiln-process
 temperature shown on the dashboard -- this is board/enclosure health, not
 firing progress.</p>
 
+<h2>Relay contact wear</h2>
+<!-- relay_cycles.h -- lifetime contact-cycle counts, persisted, already in
+     GET /api/status's "relay_cycles" array (dashboard_http.c). Tracked and
+     served since introduction but never rendered anywhere until now (2026-
+     09-03): this codebase's recurring producer-without-consumer bug class.
+     Same .card/.row idiom as Memory/Flash-partitions above. Index i in the
+     array is relay (i+1), matching relay_on's own 1-based-in/0-based-out
+     indexing in dashboard_http.c; the label uses "R" + i, the same 0-based
+     display convention this page's own Danger Zone relay grid uses
+     (renderDangerRelays below: 'R' + (r.relay - 1)) -- one numbering
+     convention across this page, not a second one invented here. -->
+<div id="relayWearCard"><p>Loading&hellip;</p></div>
+<p class="note">Budget is "on the order of 10^5 operations" for this board's
+EE2-12NUH relays (relay_cycles.h, citing docs/HARDWARE.md) -- an order-of-
+magnitude figure from the part's own life rating, not a datasheet guarantee
+for this specific unit, so the proportion below is shown rounded to the
+nearest whole percent, not as a precise remaining-life gauge. A 60&nbsp;s
+time-proportioning window can spend that budget in a few hundred hours of
+firing; a controller that silently exhausts a relay's contact life is one
+that can fail mid-firing at cone temperature.</p>
+
 <h2>Thermocouple faults</h2>
 <!-- Folded in from thermo_faults_page.html (owner request, 2026-08-27:
      "Thermocouple Faults should also be combined into the diagnostic page")
@@ -524,6 +545,8 @@ here:</p>
       safetyBuildCard.innerHTML = buildRow('Not yet announced this boot', 'n/a');
     }
 
+    renderRelayWear(st.relay_cycles);
+
     var nvsCard = document.getElementById('nvsCard');
     if (st.nvs_sections && st.nvs_sections.length) {
       var html = '';
@@ -539,6 +562,28 @@ here:</p>
     } else {
       nvsCard.innerHTML = '<div class="row"><span class="label">NVS sections</span><span class="value">n/a</span></div>';
     }
+  }
+
+  // relay_cycles.h: "on the order of 10^5 operations" -- an order-of-
+  // magnitude figure, not a precise datasheet rating. Kept as a named
+  // constant here (not parsed out of the comment) since the source of
+  // truth is the physical part, and this page's <p class="note"> above
+  // already quotes and cites where the figure comes from.
+  var RELAY_CYCLE_BUDGET_ORDER = 100000;
+  function renderRelayWear(cycles) {
+    var card = document.getElementById('relayWearCard');
+    if (!cycles || !cycles.length) {
+      card.innerHTML = '<div class="row"><span class="label">Relay wear</span><span class="value">n/a</span></div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < cycles.length; i++) {
+      var n = cycles[i];
+      var pct = Math.round((n / RELAY_CYCLE_BUDGET_ORDER) * 100);
+      html += '<div class="row"><span class="label">Relay R' + i + '</span><span class="value kc-live-value">' +
+              n.toLocaleString() + ' cycles (~' + pct + '% of the ~10^5-cycle budget)</span></div>';
+    }
+    card.innerHTML = html;
   }
 
   // ESP32 die temp and each MAX31856's cold-junction reading are live board-
