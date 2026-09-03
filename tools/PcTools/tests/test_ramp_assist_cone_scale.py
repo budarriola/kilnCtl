@@ -103,6 +103,91 @@ same safe "unspent credit is lost, never negative" direction
 table above are therefore still the correct, current, re-verified reading
 of the real shipped code as of 2026-09-03 -- re-run to confirm, not
 carried forward stale.
+
+RE-RUN AGAINST REALISTIC MULTI-SEGMENT SCHEDULES (2026-09-03, see
+``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` section 7.6.2): the single
+RampStep+DwellStep shape above is not what a real firing looks like -- a
+real bisque/glaze schedule candles, ramps, and only then dwells, often more
+than once. ``BISQUE_MULTI``/``CONE6_MULTI``/``CONE10_MULTI`` below are built
+from this repo's own shipped profile catalogue
+(``firmware/KilnFW/App/drivers/profiles_builtin_table.inc``, sourced from
+digitalfire.com/schedule): bisque from ``BQ1000`` ("Plainsman Electric
+Bisque"), cone 6 from ``C6DHSC`` ("Plainsman Cone 6 Drop-and-hold, Slow
+Cool", cool-down leg dropped -- this simulator/plant has no forced-cooling
+model and the credit mechanism is about heating dwells only). Cone 10 has
+no shipped profile pairing a candle with a single soak, so ``CONE10_MULTI``
+adds a standard 150 C/30 min candle (ordinary pottery practice) ahead of
+``C10RPL`` ("Plainsman Cone 10R Firing")'s own ramp structure. Each
+schedule's FINAL target is snapped to this module's existing bisque/cone6/
+cone10 figures (1062.8/1222.2/1285.0 C) so the multi-segment and
+single-segment rows stay directly comparable; every other segment is the
+shipped profile's own values, unmodified.
+
+Re-run headline numbers, zone 0, 1 run per cell, REAL shipped code:
+
+| schedule | mass_mult | total banked (spent + discarded) | spent (applied to final dwell) | discarded (never spent) | spent as % of the dwell it was applied to |
+|---|---|---:|---:|---:|---:|
+| bisque (candle 121C/60min, 945C, final 1062.8C/30min) | 1x | 1160.8 s | 619.4 s | 541.5 s | 34.4% |
+| bisque | 2x | 153.3 s | 153.3 s | 0.0 s | 8.5% |
+| bisque | 4x | 425.9 s | 1.6 s | 424.3 s | 0.1% |
+| cone 6 (candle 121C/60min, 1148C, final 1222.2C/15min) | 1x | 248.2 s | 105.4 s | 142.8 s | 11.7% |
+| cone 6 | 2x | 0.0 s | 0.0 s | 0.0 s | 0.0% |
+| cone 6 | 4x | 53.1 s | 0.0 s | 53.1 s | 0.0% |
+| cone 10 (candle 150C/30min, 980C, final 1285.0C/15min) | 1x | 406.5 s | 406.5 s | 0.0 s | 45.2% |
+| cone 10 | 2x | 406.2 s | 406.2 s | 0.0 s | 45.1% |
+| cone 10 | 4x | 19.6 s | 0.0 s | 19.6 s | 0.0% |
+
+"Spent" and "discarded" are deliberately reported separately, not netted:
+``credit_s`` (``dwell_credit_parity``'s per-zone field) is credit that was
+actually applied to shrink a dwell; ``credit_reference_heat_s`` read
+straight off the raw ``run_ramp_assist`` result (not the "applied" audit
+variant ``dwell_credit_parity`` itself computes) is whatever was left
+banked and unspent when the run ended -- conflating the two would overstate
+the feature by counting heat-work that never shortened anything.
+
+WHAT ACTUALLY CHANGES FROM THE SINGLE-SEGMENT TABLE, AND WHAT DOESN'T: the
+multi-segment structure does NOT create a second real spend opportunity
+the way the module docstring's earlier synthetic two-``DwellStep`` example
+did. ``cone_table.CONE_TABLE``'s floor is 586.1 C (cone 022) -- every
+candle segment here (121 C, 150 C) sits below it, so ``in_band`` raises
+``ConeTableError`` and no credit accrues or is owed during the candle, and
+the candle dwell itself always receives a zero spend (nothing has
+accrued yet when it is entered). The intermediate ramp segments (945/1148/
+980 C) ARE inside the cone table's range and DO contribute banked credit
+that carries forward -- that is why the multi-segment "spent" figures above
+differ from the single-segment table's -- but there is still only ONE real
+dwell inside cone-table range in any of these three shipped-catalogue
+schedules, so there is still only one place for credit to be spent. This is
+an honest property of real bisque/cone/glaze recipes (they candle cold,
+below the range the credit band and its cone-table lookup can even
+evaluate), not a limitation of this test harness.
+
+**Heavy-load verdict, the owner's motivating case (a kiln tuned empty then
+fired full): UNCHANGED from the single-segment table.** At 4x mass, spent
+credit is 1.6 s / 0.0 s / 0.0 s (bisque/cone 6/cone 10) against 1800/900/
+900 s final dwells -- 0.1%, 0.0%, 0.0% of the dwell it was applied to. The
+"discarded" column shows real credit DOES accrue under heavy load (424.3 s
+at bisque 4x, 53.1 s at cone 6 4x, 19.6 s at cone 10 4x) -- it is not that
+nothing happens -- but under heavy load that credit accrues mostly during
+the terminal dwell itself (extended-past-ramp-end accrual, see the module
+docstring above), after the one dwell it could have shortened has already
+been sized, so it is banked and then simply discarded when the schedule
+ends. Realistic multi-segment structure does not give that credit anywhere
+else to go, because (as above) only one dwell in these schedules sits
+inside the cone table's covered range. **The feature does not materially
+help a loaded kiln** in either the single-segment or the multi-segment
+scenarios measured here -- a clear negative, not a magnitude quibble.
+
+STATISTICAL DISCIPLINE: every cell above is exactly ONE simulator run (no
+repeats/seeds -- ``run_ramp_assist``/``PhysicalKilnPlant`` are
+deterministic given ``mass_mult``, there is no stochastic element to
+average over). All nine runs stay at or below ~1285 C simulated zone
+temperature; none of this exercises the coupled hold/climb solve above its
+known ~62 C feasibility ceiling in any way that differs from the
+single-segment table already in this module -- that ceiling is a bench-rig
+(``PhysicalKilnPlant`` operates in a different, unmeasured-above-80C regime
+entirely per this module's own HONESTY NOTE above) constraint, not
+something these multi-segment runs newly cross.
 """
 from __future__ import annotations
 
@@ -126,6 +211,74 @@ def _parity(target_c, rate_c_per_hr, dwell_min, mass_mult, max_sim_s):
     return ra.dwell_credit_parity(
         sched, max_temp_c=1400.0, plant_regime='physical', start_temp_c=20.0,
         mass_mult=mass_mult, max_sim_s=max_sim_s)
+
+
+# ---------------------------------------------------------------------------
+# REALISTIC MULTI-SEGMENT schedules -- see the module docstring's "RE-RUN
+# AGAINST REALISTIC MULTI-SEGMENT SCHEDULES" section for the sourcing and
+# headline table. Built from firmware/KilnFW/App/drivers/
+# profiles_builtin_table.inc (this repo's own shipped profile catalogue,
+# itself sourced from digitalfire.com/schedule), with only the FINAL
+# target snapped to this module's existing bisque/cone6/cone10 figures so
+# the two tables stay directly comparable.
+# ---------------------------------------------------------------------------
+
+def _multi_sched(steps):
+    out = []
+    for kind, *args in steps:
+        if kind == 'r':
+            out.append(ra.RampStep(args[0], args[1] / 60.0))  # args[1] is C/hr
+        else:
+            out.append(ra.DwellStep(args[0]))  # args[0] is minutes
+    return out
+
+
+# Bisque: "BQ1000" / Plainsman Electric Bisque (shipped). Final target
+# snapped 1000 -> 1062.8 C (cone 04, this module's own bisque figure).
+BISQUE_MULTI = _multi_sched([
+    ('r', 121.0, 170.0), ('d', 60),
+    ('r', 945.0, 170.0),
+    ('r', 1062.8, 60.0), ('d', 30),
+])
+
+# Cone 6: "C6DHSC" / Plainsman Cone 6 Drop-and-hold, Slow Cool (shipped).
+# Cool-down leg (target below the previous segment's) dropped -- this
+# simulator/plant has no forced-cooling model and dwell credit is a
+# heating-dwell mechanism. Final target snapped 1204 -> 1222.2 C.
+CONE6_MULTI = _multi_sched([
+    ('r', 121.0, 60.0), ('d', 60),
+    ('r', 1148.0, 194.0),
+    ('r', 1222.2, 60.0), ('d', 15),
+])
+
+# Cone 10: "C10RPL" / Plainsman Cone 10R Firing (shipped) has no candle
+# dwell, and no shipped cone-10 profile in this catalogue pairs a candle
+# with a single soak -- a standard 150 C/30 min candle (ordinary pottery
+# practice) was added ahead of it. Final target snapped 1300 -> 1285.0 C.
+CONE10_MULTI = _multi_sched([
+    ('r', 150.0, 60.0), ('d', 30),
+    ('r', 980.0, 100.0),
+    ('r', 1285.0, 100.0), ('d', 15),
+])
+
+MULTI_SCHEDULES = {'bisque': BISQUE_MULTI, 'cone6': CONE6_MULTI, 'cone10': CONE10_MULTI}
+MULTI_MAX_SIM_S = {
+    'bisque': {1.0: 60000.0, 2.0: 65000.0, 4.0: 130000.0},
+    'cone6': {1.0: 60000.0, 2.0: 65000.0, 4.0: 110000.0},
+    'cone10': {1.0: 90000.0, 2.0: 95000.0, 4.0: 150000.0},
+}
+# The final dwell's own nominal duration -- the denominator "spent as % of
+# the dwell it was applied to" in the module docstring's table uses (NOT
+# the sum of every dwell in the schedule -- the candle dwell is always
+# entered with zero banked credit, see the docstring's "WHAT ACTUALLY
+# CHANGES" paragraph, so it is never the one credit shortens).
+MULTI_FINAL_DWELL_S = {'bisque': 30 * 60.0, 'cone6': 15 * 60.0, 'cone10': 15 * 60.0}
+
+
+def _multi_parity(which, mass_mult):
+    return ra.dwell_credit_parity(
+        MULTI_SCHEDULES[which], max_temp_c=1400.0, plant_regime='physical',
+        start_temp_c=20.0, mass_mult=mass_mult, max_sim_s=MULTI_MAX_SIM_S[which][mass_mult])
 
 
 class ShippedBandNowFiresAtLightLoadTests(unittest.TestCase):
@@ -254,6 +407,113 @@ class CreditAuditHoldsAtConeScaleTests(unittest.TestCase):
         self.assertGreater(pz['credit_s'], 0.0, "need a nonzero credit for this check to mean anything")
         self.assertLess(abs(pz['credit_audit_pct']), 0.5,
                          f"credit_audit_pct should be ~0 at cone scale too, got {pz['credit_audit_pct']:.4f}%")
+
+
+class RealisticMultiSegmentLightLoadTests(unittest.TestCase):
+    """Light-load (1x, and cone 10's slower rate also at 2x) credit on the
+    REALISTIC multi-segment ``BISQUE_MULTI``/``CONE6_MULTI``/``CONE10_MULTI``
+    schedules (see module docstring for sourcing) -- mirrors
+    ``ShippedBandNowFiresAtLightLoadTests`` above, which stays as the
+    single-segment comparison baseline and is NOT superseded by this class.
+
+    NEGATIVE-TESTED: temporarily reverted ``run_ramp_assist``'s RampStep
+    branch from ``behind_schedule = actual_c < z.commanded_c`` to
+    ``behind_schedule = z.lagging and in_band`` (the pre-fix mutually-
+    exclusive gate this whole module's fix addresses -- see the module
+    docstring). Re-ran ``test_bisque_multi_earns_real_credit_at_1x_load``;
+    it failed with:
+        AssertionError: 0.0 not greater than 0.0 : bisque multi-segment at
+        1x load must earn real credit under the corrected gate
+    (credit collapsed to exactly zero with the old gate, same as the
+    single-segment finding). Reverted; passes again.
+    """
+
+    def test_bisque_multi_earns_real_credit_at_1x_load(self):
+        res = _multi_parity('bisque', 1.0)
+        self.assertTrue(res['assisted']['targets_reached'][0])
+        pz = res['per_zone'][0]
+        self.assertGreater(pz['credit_s'], 0.0,
+                            "bisque multi-segment at 1x load must earn real credit under the corrected gate")
+        self.assertLessEqual(pz['credit_s'], MULTI_FINAL_DWELL_S['bisque'],
+                              "spent credit must still clamp below the final dwell's own nominal duration")
+
+    def test_cone6_multi_earns_real_credit_at_1x_load(self):
+        res = _multi_parity('cone6', 1.0)
+        self.assertTrue(res['assisted']['targets_reached'][0])
+        pz = res['per_zone'][0]
+        self.assertGreater(pz['credit_s'], 0.0,
+                            "cone 6 multi-segment at 1x load must earn real credit under the corrected gate")
+
+    def test_cone10_multi_earns_real_credit_at_1x_and_2x_load(self):
+        for mass_mult in (1.0, 2.0):
+            res = _multi_parity('cone10', mass_mult)
+            self.assertTrue(res['assisted']['targets_reached'][0], f"mass_mult={mass_mult}")
+            pz = res['per_zone'][0]
+            self.assertGreater(pz['credit_s'], 0.0,
+                                f"cone 10 multi-segment at {mass_mult}x load must earn real credit")
+
+
+class RealisticMultiSegmentHeavyLoadDoesNotHelpTests(unittest.TestCase):
+    """The loaded-kiln verdict on the REALISTIC multi-segment schedules:
+    at 4x mass, spent credit collapses to (near-)zero exactly as it does on
+    the single-segment schedules in ``CreditCollapsesAtHeavierLoadTests``
+    above -- multi-segment structure does not rescue the heavy-load case,
+    because (per the module docstring's "WHAT ACTUALLY CHANGES" paragraph)
+    every candle segment sits below ``cone_table.CONE_TABLE``'s 586.1 C
+    floor, so there is still only ONE dwell in any of these three shipped-
+    catalogue schedules inside the cone table's covered range for credit to
+    ever be spent against. This is the section of this module that answers
+    the owner's motivating question (a kiln tuned empty then fired full)
+    directly: the answer is NO, this does not materially help, on either
+    the single-segment or the multi-segment schedules measured.
+
+    Bisque at 4x is asserted ``<=`` a small tolerance rather than
+    ``assertEqual(..., 0.0)`` -- unlike the single-segment case this
+    schedule's intermediate 945 C ramp segment is itself inside the cone
+    table's range and contributes a small amount of carried-forward credit
+    (measured 1.64 s here, against a 1800 s final dwell -- 0.09%), which is
+    real but immaterial; the exact-zero pin stays on cone 6/cone 10, which
+    measured exactly 0.0 s.
+    """
+
+    def test_bisque_multi_negligible_credit_at_4x_load(self):
+        res = _multi_parity('bisque', 4.0)
+        self.assertTrue(res['assisted']['targets_reached'][0])
+        pz = res['per_zone'][0]
+        self.assertLess(pz['credit_s'], 5.0,
+                         "bisque multi-segment 4x credit_s should be immaterial (<5s of a 1800s dwell)")
+
+    def test_cone6_multi_zero_credit_at_2x_and_4x_load(self):
+        for mass_mult in (2.0, 4.0):
+            res = _multi_parity('cone6', mass_mult)
+            self.assertTrue(res['assisted']['targets_reached'][0], f"mass_mult={mass_mult}")
+            pz = res['per_zone'][0]
+            self.assertEqual(pz['credit_s'], 0.0, f"mass_mult={mass_mult} credit_s should be 0")
+
+    def test_cone10_multi_zero_credit_at_4x_load(self):
+        res = _multi_parity('cone10', 4.0)
+        self.assertTrue(res['assisted']['targets_reached'][0])
+        pz = res['per_zone'][0]
+        self.assertEqual(pz['credit_s'], 0.0, "cone10 multi-segment 4x credit_s should be 0")
+
+
+class RealisticMultiSegmentCreditAuditHoldsTests(unittest.TestCase):
+    """``credit_audit_pct`` consistency check (see
+    ``CreditAuditHoldsAtConeScaleTests`` above) re-run on a REALISTIC
+    multi-segment schedule -- confirms the audit accumulator's lockstep
+    reset (see ``ramp_assist.py``'s ``credit_reference_applied_s``) holds
+    when there is a real intervening ramp segment (945 C) and a real
+    candle dwell between the run's start and the dwell credit is spent
+    against, not just the single-ramp shape every other cone-scale test in
+    this module drives.
+    """
+
+    def test_credit_audit_pct_is_zero_on_multi_segment_schedule(self):
+        res = _multi_parity('bisque', 1.0)
+        pz = res['per_zone'][0]
+        self.assertGreater(pz['credit_s'], 0.0, "need a nonzero credit for this check to mean anything")
+        self.assertLess(abs(pz['credit_audit_pct']), 0.5,
+                         f"credit_audit_pct should be ~0 on a multi-segment schedule too, got {pz['credit_audit_pct']:.4f}%")
 
 
 if __name__ == '__main__':

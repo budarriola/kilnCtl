@@ -3435,6 +3435,114 @@ Full re-run for this extension:
 tools/PcTools/tests/test_ramp_assist.py tools/PcTools/tests/test_ramp_assist_cone_scale.py tools/PcTools/tests/test_ramp_assist_http_client.py`
 (45/45 passed).
 
+#### 7.6.2 Re-run against REALISTIC MULTI-SEGMENT schedules (2026-09-03)
+
+**Why this re-run exists:** every table above (§7.6, §7.6.1, §7.6.1a) drives
+a single `RampStep` + a single TERMINAL `DwellStep` — a real firing is not
+shaped like that. §7.6.1a's own "confirmed the mechanism itself does work"
+paragraph used a SYNTHETIC two-`DwellStep` schedule to prove credit can
+carry from one dwell to a later one; this section replaces that synthetic
+proof with schedules built from this repo's own shipped profile catalogue
+(`firmware/KilnFW/App/drivers/profiles_builtin_table.inc`, sourced from
+digitalfire.com/schedule) — bisque from `BQ1000` ("Plainsman Electric
+Bisque"), cone 6 from `C6DHSC` ("Plainsman Cone 6 Drop-and-hold, Slow
+Cool", cool-down leg dropped — no forced-cooling model exists in this
+simulator), cone 10 from `C10RPL` ("Plainsman Cone 10R Firing") with a
+standard 150 °C/30 min candle added (no shipped cone-10 profile in this
+catalogue pairs a candle with a single soak). Each schedule's FINAL target
+is snapped to the existing 1062.8/1222.2/1285.0 °C figures so the two
+tables stay directly comparable; every other segment is the shipped
+profile's own value, unmodified. Full sourcing and code:
+`tools/PcTools/tests/test_ramp_assist_cone_scale.py`'s "RE-RUN AGAINST
+REALISTIC MULTI-SEGMENT SCHEDULES" docstring section.
+
+**Headline numbers, zone 0, 1 run per cell, REAL shipped code:**
+
+| schedule | mass_mult | total banked (spent + discarded) | spent (applied to the final dwell) | discarded (never spent) | spent as % of that dwell |
+|---|---|---:|---:|---:|---:|
+| bisque (candle 121 °C/60 min, 945 °C, final 1062.8 °C/30 min) | 1x | 1160.8 s | 619.4 s | 541.5 s | 34.4% |
+| bisque | 2x | 153.3 s | 153.3 s | 0.0 s | 8.5% |
+| bisque | 4x | 425.9 s | 1.6 s | 424.3 s | 0.1% |
+| cone 6 (candle 121 °C/60 min, 1148 °C, final 1222.2 °C/15 min) | 1x | 248.2 s | 105.4 s | 142.8 s | 11.7% |
+| cone 6 | 2x | 0.0 s | 0.0 s | 0.0 s | 0.0% |
+| cone 6 | 4x | 53.1 s | 0.0 s | 53.1 s | 0.0% |
+| cone 10 (candle 150 °C/30 min, 980 °C, final 1285.0 °C/15 min) | 1x | 406.5 s | 406.5 s | 0.0 s | 45.2% |
+| cone 10 | 2x | 406.2 s | 406.2 s | 0.0 s | 45.1% |
+| cone 10 | 4x | 19.6 s | 0.0 s | 19.6 s | 0.0% |
+
+"Spent" and "discarded" are reported separately, deliberately not netted —
+conflating banked-and-discarded heat-work with credit that actually
+shortened a dwell would overstate the feature.
+
+**What multi-segment structure changes, and what it does not.**
+`cone_table.CONE_TABLE`'s floor is 586.1 °C (cone 022): every candle
+segment in all three schedules above (121 °C, 150 °C) sits below it, so
+the credit gate's `in_band` check raises `ConeTableError` there and no
+credit accrues or is owed during the candle — the candle dwell itself is
+always entered with zero banked credit and receives a zero spend. The
+intermediate ramp segments (945/1148/980 °C) ARE inside the cone table's
+range and DO contribute banked credit that carries forward into the final
+ramp+dwell — that is the entire reason the multi-segment "spent" figures
+differ from the single-segment table's — but there is still only ONE
+dwell inside cone-table range in any of these three shipped-catalogue
+schedules, so there is still only one place for credit to ever be spent.
+This is an honest property of real bisque/cone/glaze recipes (they candle
+cold, below the range the credit band's cone-table lookup can even
+evaluate), not a limitation of the test schedules chosen.
+
+**Heavy-load verdict — the owner's motivating case (a kiln tuned empty
+then fired full): UNCHANGED from §7.6.1a's single-segment table.** At 4x
+mass, spent credit is 1.6 s / 0.0 s / 0.0 s (bisque/cone 6/cone 10)
+against 1800/900/900 s final dwells — 0.1%, 0.0%, 0.0% of the dwell it was
+applied to. Real credit DOES accrue under heavy load (424.3 s at bisque
+4x, 53.1 s at cone 6 4x, 19.6 s at cone 10 4x, the "discarded" column) —
+it is not that nothing happens — but under heavy load that credit accrues
+mostly during the terminal dwell itself (§7.3's extended-past-ramp-end
+accrual), after the one dwell it could have shortened has already been
+sized, so it is banked and then discarded when the schedule ends.
+Realistic multi-segment structure does not give that credit anywhere else
+to go, because only one dwell in each of these schedules sits inside the
+cone table's covered range. **The dwell-credit feature does not
+materially help a loaded kiln**, on either the single-segment or the
+realistic multi-segment schedules measured — a clear negative, consistent
+with §7.6.1a, not a magnitude quibble introduced by the simpler test
+shape.
+
+**Statistical discipline:** every cell above is exactly ONE simulator run
+(`run_ramp_assist`/`PhysicalKilnPlant` are deterministic given `mass_mult`;
+there is no stochastic element to average over — same discipline as every
+other table in this section). None of these nine runs newly cross the
+coupled hold/climb solve's known ~62 °C feasibility ceiling (§ referenced
+throughout this document) in any way that differs from the single-segment
+table already in §7.6.1a — that ceiling is a bench-rig constraint;
+`PhysicalKilnPlant` operates in a separate, unmeasured-above-80 °C regime
+for all of these runs, as every table in this section already flags.
+
+**Recommendation, not a firmware change (out of scope for this pass):**
+because real recipes candle well below the cone table's floor, giving
+dwell credit a second real spend opportunity under load would require
+either lowering `cone_table.CONE_TABLE`'s floor to cover candling
+temperatures (Orton has no published cone below 022/586.1 °C, so this
+would need a different weighting model entirely below that point) or
+accepting that, for real recipes, this feature can only ever help the
+single dwell nearest the final target. Reported for the owner's
+consideration; no firmware file was touched to produce this section.
+
+Coverage: `tools/PcTools/tests/test_ramp_assist_cone_scale.py`'s
+`RealisticMultiSegmentLightLoadTests`/
+`RealisticMultiSegmentHeavyLoadDoesNotHelpTests`/
+`RealisticMultiSegmentCreditAuditHoldsTests` (5 new tests, all
+negative-tested — see each class's own docstring) pin this section's
+table; the single-segment classes (`ShippedBandNowFiresAtLightLoadTests`,
+`CreditCollapsesAtHeavierLoadTests`, `CreditAuditHoldsAtConeScaleTests`)
+are kept unchanged as the labelled single-segment comparison baseline, not
+superseded. Full re-run: `tools/PcTools/.venv/Scripts/python.exe -m
+pytest tools/PcTools/tests/test_ramp_assist_cone_scale.py` (14/14 passed,
+~9.5 minutes wall clock — this module simulates real hours of firing per
+scenario, see its own RUNTIME NOTE) and `tools/PcTools/tests/
+test_ramp_assist.py` (21/21 passed, unaffected — `ramp_assist.py` itself
+was not modified for this section).
+
 ## 2026-09-03: ramp-lock hot-start stall (confirmed executor defect, fixed)
 
 **The defect (owner-confirmed via adversarial code review).**
