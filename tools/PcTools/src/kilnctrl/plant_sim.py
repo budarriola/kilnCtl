@@ -408,15 +408,23 @@ class PhysicalKilnPlant:
         self.ambient = ambient
         self.n = N_ZONES
         self.temp = np.full(self.n, ambient) if start_temp is None else np.array(start_temp, dtype=float)
+        # Instance attributes, not bare module-global reads inside step(),
+        # specifically so a subclass (e.g. load_mass_sweep.LoadedPhysicalKilnPlant)
+        # can override the per-instance values in its own __init__ and reuse
+        # this step() unchanged instead of hand-copying it -- see
+        # load_mass_sweep.py's module docstring sec 3 / finding 6 tripwire.
+        self._p_max_w = PHYS_P_MAX_W
+        self._coupling_frac = PHYS_COUPLING_FRAC
+        self._thermal_mass = PHYS_THERMAL_MASS_J_PER_K
 
     def step(self, duty):
         duty = np.clip(duty, 0.0, 1.0)
-        own_power = PHYS_P_MAX_W * duty
+        own_power = self._p_max_w * duty
         growth = coupling_growth(self.temp)
-        coupling_power = (PHYS_COUPLING_FRAC * own_power.reshape(1, -1)).sum(axis=1) * growth
+        coupling_power = (self._coupling_frac * own_power.reshape(1, -1)).sum(axis=1) * growth
         loss = physical_loss_w(self.temp, self.ambient)
         net_w = own_power + coupling_power - loss
-        dTdt = net_w / PHYS_THERMAL_MASS_J_PER_K
+        dTdt = net_w / self._thermal_mass
         self.temp = np.clip(self.temp + dTdt * self.dt, self.ambient, self.MAX_PLAUSIBLE_TEMP_C)
         return self.temp.copy()
 
@@ -1051,6 +1059,11 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     ``measurement_quantum_c`` (0.1 for the real MAX31856 LSB) and is
     applied AFTER the additive Gaussian noise, matching the real chain
     (continuous sensor + noise, then ADC quantization).
+
+    The returned dict's ``measured`` array is the FED measurement series
+    (what each PID actually saw each tick, post noise+quantization) --
+    identical to ``temps`` when both measurement args are 0.0, and the
+    only honest way to test the noise/quantization chain end to end.
     """
     if plant_regime == 'physical':
         plant = PhysicalKilnPlant(DT, ambient=ambient, start_temp=start_temp)
@@ -1063,7 +1076,7 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     ff_fn = coupled_ff_hold_climb if climb_mode == 'coupled' else uncoupled_ff_hold_climb
 
     total_t = segs[-1][1]
-    times, targets, temps_log, duty_log = [], [], [], []
+    times, targets, temps_log, duty_log, meas_log = [], [], [], [], []
     duty = np.zeros(N_ZONES)
     t = 0.0
     rng = np.random.default_rng(measurement_seed) if measurement_noise_std_c > 0.0 else None
@@ -1079,6 +1092,7 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                     target_c = c0 + rate * (t - t0)
                     target_rate = rate
                 break
+        meas_row = np.zeros(N_ZONES)
         for i in range(N_ZONES):
             if climb_mode == 'coupled':
                 hold, climb, ff = ff_fn(target_c, target_rate, i, ambient=ambient,
@@ -1091,10 +1105,12 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
             if measurement_quantum_c > 0.0:
                 meas_c = round(meas_c / measurement_quantum_c) * measurement_quantum_c
             duty[i], _ = pids[i].update(target_c, meas_c, DT, ff, hold, integral_floor=integral_floor)
+            meas_row[i] = meas_c
         times.append(t)
         targets.append(target_c)
         temps_log.append(plant.temp.copy())
         duty_log.append(duty.copy())
+        meas_log.append(meas_row.copy())
         plant.step(duty)
         t += DT
 
@@ -1102,6 +1118,7 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     max_target = float(targets_arr.max()) if len(targets_arr) else float(ambient)
     return dict(t=np.array(times), target=targets_arr,
                 temps=np.array(temps_log), duty=np.array(duty_log),
+                measured=np.array(meas_log),
                 seg_bounds=[s[1] for s in segs],
                 max_target_c=max_target,
                 extrapolation=is_extrapolation(max_target),

@@ -388,22 +388,27 @@ def test_measurement_chain_quantization_and_noise_magnitude():
     pre-quantization noise magnitude implied by the spread of grid levels
     is close to the 0.05 C sigma actually plumbed in.
 
-    Proof this can fail: temporarily changed run_profile()'s applied sigma
-    at the call site here from 0.05 to 0.20 (a 4x wrong value the test
-    should catch) while leaving the assertion's expected value at 0.05.
-    Captured red output (caught by this test's own settle guard before
-    even reaching the std check, because the 4x-larger noise pushed the
-    steady-state sample spread above the guard's tolerance -- a genuine
-    failure, just via a different assertion in the same test than the one
-    ultimately kept, which is itself evidence the two checks are not
-    redundant):
+    This reads ``result['measured']`` -- the array run_profile() now
+    returns of the FED measurement series (what each PID actually saw,
+    post noise+quantization), added specifically so this test can check
+    the real chain instead of a local reconstruction. Also checks
+    reproducibility (same seed -> identical series) and that a different
+    seed diverges, so a seed that silently stopped being threaded through
+    would be caught too.
+
+    Proof this test is not vacuous: patched run_profile() (temporarily,
+    at the top of this test via monkeypatch) to ignore
+    measurement_quantum_c/measurement_noise_std_c/measurement_seed
+    entirely -- i.e. feed the PID the true plant temp unmodified, which is
+    exactly the bug the old (reconstruct-locally) version of this test
+    could not detect. Captured red output:
 
         FAILED tests/test_plant_sim.py::test_measurement_chain_quantization_and_noise_magnitude
-        AssertionError: plant did not settle -- true temperature still
-        drifting in the measurement window this test relies on being flat
-        assert 0.08383813604613977 < 0.05
+        AssertionError: measured series does not land on the 0.1 C
+        quantization grid -- measurement chain is not being applied
+        assert False
 
-    Reverted (sigma restored to 0.05), suite green again before this test
+    Reverted (monkeypatch removed), suite green again before this test
     was kept.
     """
     # Long flat dwell at a fixed target so the true plant temperature
@@ -419,32 +424,36 @@ def test_measurement_chain_quantization_and_noise_magnitude():
         "plant did not settle -- true temperature still drifting in the "
         "measurement window this test relies on being flat"
     )
-    # run_profile() does not expose the fed measurement directly, so
-    # reconstruct it independently: draw from the SAME rng stream/order the
-    # module uses (seed 7, one normal() draw per zone per tick, zone 0
-    # first) against each tick's TRUE plant temperature, then quantize --
-    # exactly what run_profile does internally, computed here fresh rather
-    # than trusted from it.
-    n_ticks = len(t)
-    rng = np.random.default_rng(7)
-    residuals = []
-    grid_ok = True
-    for i in range(n_ticks):
-        draws = rng.normal(0.0, 0.05, size=ps.N_ZONES)  # zones 0..2, in order
-        if not settled[i]:
-            continue
-        noisy = result['temps'][i, 0] + draws[0]
-        quantized = round(noisy / 0.1) * 0.1
-        if abs(quantized / 0.1 - round(quantized / 0.1)) > 1e-9:
-            grid_ok = False
-        residuals.append(quantized - result['temps'][i, 0])
 
-    assert grid_ok, "reconstructed measurement did not land on the 0.1 C quantization grid"
-    residuals = np.array(residuals)
+    measured_c = result['measured'][settled, 0]
+    quantum_levels = measured_c / 0.1
+    grid_ok = bool(np.all(np.abs(quantum_levels - np.round(quantum_levels)) < 1e-9))
+    assert grid_ok, (
+        "measured series does not land on the 0.1 C quantization grid -- "
+        "measurement chain is not being applied"
+    )
+
+    residuals = measured_c - true_c
     measured_std = float(residuals.std())
     assert abs(measured_std - 0.05) < 0.03, (
         f"measured noise std {measured_std:.4f} C not within 0.03 C of the "
         f"documented 0.05 C sigma"
+    )
+
+    # Reproducibility: same seed -> byte-identical fed measurement.
+    result_again = ps.run_profile(segs, start_temp=[40.0, 40.0, 40.0],
+                                   measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                                   measurement_seed=7)
+    assert np.array_equal(result['measured'], result_again['measured']), (
+        "same measurement_seed produced a different fed measurement series"
+    )
+
+    # A different seed must diverge (not collapse to the same draws).
+    result_other_seed = ps.run_profile(segs, start_temp=[40.0, 40.0, 40.0],
+                                        measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                                        measurement_seed=8)
+    assert not np.array_equal(result['measured'], result_other_seed['measured']), (
+        "different measurement_seed produced an identical fed measurement series"
     )
 
 

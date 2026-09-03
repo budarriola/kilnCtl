@@ -979,6 +979,27 @@ same document's own 2026-08-29/30 bench sections contradict.
       fail red — `plant did not settle` at spread 0.084 vs the 0.05 bound —
       before the std check was even reached; reverted, suite green again).
 
+      **Correction, opus review round four finding 2 (2026-09-02).** The
+      test named above did not actually read the value `run_profile()` fed
+      to the PID — it reconstructed noise+quantization locally from the
+      TRUE temps in `result['temps']` and checked properties of its own
+      reconstruction (a grid-rounding check that is tautological, and a
+      sigma check against its own hardcoded 0.05). Proof it was vacuous:
+      stubbing `run_profile()` to ignore
+      `measurement_quantum_c`/`measurement_noise_std_c`/`measurement_seed`
+      entirely still passed it. `run_profile()` now returns a `measured`
+      array (the actual fed series) and the test reads that instead, plus
+      checks same-seed reproducibility and different-seed divergence
+      directly. Re-mutated (measurement args ignored at the call site) and
+      confirmed this version goes red:
+      `AssertionError: measured series does not land on the 0.1 °C
+      quantization grid -- measurement chain is not being applied`;
+      reverted, suite green again. **The chain itself was real, not
+      inert** — the noise/quantization code path in `run_profile()` is a
+      straight-line application to `meas_c` before the PID update, with no
+      earlier bypass, so the ranking/conclusion above is unaffected. What
+      changed is the strength of the proof, not the result.
+
       **Ranking unchanged, and the honesty gate still applies for the same
       reason.** Every noisy-sweep number is within ~0.001–0.005 °C of the
       corresponding noise-free number above (seed-averaging over 20 draws
