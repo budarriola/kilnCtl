@@ -235,11 +235,13 @@ now a short list, which is the point:
 - Diagnose the HTTP concurrency reset above — it has a reproducer and two
   ruled-out mechanisms, so the next step is instrumenting the failing
   allocation, not more black-box testing.
-- A guard that every `src/**.c` is in its CMakeLists or explicitly excluded.
-  `tick_timing.c` was added to the host-test list and not to
-  `SaftyFW/CMakeLists.txt` on 2026-08-28: the host suite compiled it happily
-  and the target link failed on it. Host tests cannot see this class of
-  mistake, and it will recur.
+- ~~A guard that every `src/**.c` is in its CMakeLists or explicitly
+  excluded.~~ **Stale, corrected 2026-09-03: this shipped**, predating this
+  roadmap's last review — `tools/check_c_files_in_cmakelists.ps1`, wired
+  into `run_repo_checks`/`run_all_checks.ps1`. `tick_timing.c` (the incident
+  that motivated it, 2026-08-28: added to the host-test list but not
+  `SaftyFW/CMakeLists.txt`, so the host suite compiled it happily while the
+  real target link failed) is itself already fixed too.
 - ~~**PID Expansion Plan Phase 3b — cross-zone coupling feedforward.**~~
   **Stale, corrected 2026-09-02: this shipped.** The coupling matrix persists
   per-zone (`coupling_coeff[]`, `zones_config_accessors.c`/
@@ -255,15 +257,25 @@ now a short list, which is the point:
   whole-feature from the Thermocouples & Zones page, propagates into
   `profile_executor`'s per-zone `active` flag (already what `safety_link.c`
   sends to the Pico — no safety-side or link-protocol change needed).
-  **Prerequisite found during scoping:** `zone_cfg_v11_t` was never frozen
-  with a static assert the way every prior version was — fix that before any
-  v11→v12 bump, or repeat the two config-destroying bugs `PID_EXPANSION_PLAN.md`
-  Phase 2 already found and fixed for v9/v10
-- **New: Pico rollback from the OTA page**, plus a link-protocol reply frame
-  so a Pico rollback refusal is visible — it is currently fire-and-forget with
-  no ACK
-- **New: safety processor build identity** (commit + build date) shown on the
-  OTA page
+  ~~**Prerequisite found during scoping:** `zone_cfg_v11_t` was never frozen
+  with a static assert~~ — **stale, corrected 2026-09-03: it already is.**
+  `zones_config_json.h` carries `_Static_assert(sizeof(zone_cfg_v11_t) == 132,
+  ...)` (predates this roadmap's last review). The prerequisite is satisfied;
+  this feature is not blocked on it
+- ~~**New: Pico rollback from the OTA page**, plus a link-protocol reply
+  frame so a Pico rollback refusal is visible~~ — **stale, corrected
+  2026-09-03: this shipped.** `kilnlink_rollback_result.h` is exactly that
+  reply frame (`link_task.c`'s `link_task_handle_rollback()` sends it instead
+  of the old fire-and-forget path), and `ota_http.c`'s
+  `ota_pico_rollback_post_handler()` / `ota_pico_rollback_status_get_handler()`
+  drive it from `POST /api/ota/pico/rollback`. Not yet exercised against a
+  live mismatch (M8)
+- ~~**New: safety processor build identity** (commit + build date) shown on
+  the OTA page~~ — **stale, corrected 2026-09-03: this shipped.**
+  `saftyfw_build_info.h` is regenerated every build (`CMakeLists.txt`'s
+  `saftyfw_build_info` target) and reported over the link; `dashboard_http.c`
+  exposes `safety_build_commit`/`safety_build_datetime`/`safety_build_dirty`
+  and `ota_page.html` renders them
 
 **Closed 2026-08-27/28, no longer open:** the task stacks were re-read after a
 real firing and 4 kB of internal DRAM reclaimed; `rules_task`'s callees were
