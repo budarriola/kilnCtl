@@ -629,12 +629,11 @@ and got the minimal in-language fix:
   ` -- OVER LIMIT`) to the existing value string — same element, same CSS
   rule, more characters.
 
-**Proposal, not implemented**: `zones_page.html`'s RGA coupling-matrix
-diagonal cells (`td.rga-ok/-warn/-bad`) colour a bare number with no glyph.
-The verdict paragraph directly below already explains the worst cell in full
-text, so this is a secondary read, but a glyph suffix per cell would still be
-the honest fix — not done here because it risks widening the matrix's table
-columns (a repaint), which this pass avoided everywhere else too.
+**Landed 2026-09-02**: `zones_page.html`'s RGA diagonal cells now append
+✓/!/✗ (`rgaGlyph()`) after the number, in the same `<td>` so the 4x4 matrix's
+columns don't widen; `App/test/ui_status_color_allowlist.json`'s three
+`rga-*` entries are now stale (no longer colour-only) but untouched here —
+out of this pass's confined scope.
 
 `ota_page.html`'s light-mode `--ok: #2a7` also independently fails the
 background-contrast floor (2.77:1 vs `#f7f7f7`, below 3:1) — a page-local hex
