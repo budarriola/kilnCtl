@@ -1988,9 +1988,18 @@ function pickTuningRecommendation(artifact, peakTempC, load) {
     return { ok: false, reason: 'invalid_input' };
   }
   var wantLoad = load || 'any';
+  // REVIEW 2026-09-02 (Opus round 4, finding 4): with wantLoad === 'any'
+  // ("not sure" operator), a genuine artifact.load === 'any' row must be
+  // preferred over a load-specific one -- a load-specific row can be
+  // right for its load and wrong for a different one, and the renderer
+  // never used to print row.load, so an "any" request could silently come
+  // back as (say) a full-load-only recommendation with no indication.
+  // Priority: exact/any-load match for the request first, then by
+  // ceiling. When wantLoad === 'any' that means genuine 'any' rows sort
+  // before load-specific rows of the same ceiling.
   var rows = artifact.recommendations.slice().sort(function (a, b) {
-    var ap = (a.load === wantLoad && wantLoad !== 'any') ? 0 : 1;
-    var bp = (b.load === wantLoad && wantLoad !== 'any') ? 0 : 1;
+    var ap = (a.load === wantLoad || (wantLoad === 'any' && a.load === 'any')) ? 0 : 1;
+    var bp = (b.load === wantLoad || (wantLoad === 'any' && b.load === 'any')) ? 0 : 1;
     if (ap !== bp) return ap - bp;
     return a.peak_temp_c_max - b.peak_temp_c_max;
   }).filter(function (r) { return wantLoad === 'any' || r.load === 'any' || r.load === wantLoad; });
@@ -2031,10 +2040,18 @@ function pickTuningRecommendation(artifact, peakTempC, load) {
   // are left alone, never rewritten into each other or into 'measured'.
   var confidence = (typeof match.confidence === 'string' && match.confidence) ? match.confidence : 'unknown';
   if (beyondTestedRange && confidence === 'measured') confidence = 'extrapolated';
+  // Finding 4 (Opus review round 4): when the operator asked for 'any'
+  // (not sure) and the row that ended up covering the peak is a
+  // load-specific one (no genuine 'any' row reached that far), the
+  // recommendation is really "for <that load>", not a load-agnostic
+  // answer -- the caller must say so rather than silently showing a
+  // load-specific result under an unqualified banner.
+  var assumedLoad = (wantLoad === 'any' && match.load && match.load !== 'any') ? match.load : null;
   return {
     ok: true, row: match, confidence: confidence,
     beyond_tested_range: beyondTestedRange,
     extrapolation_boundary_c: boundary,
+    assumed_load: assumedLoad,
   };
 }
 
@@ -2103,6 +2120,12 @@ function renderTuningRecommendation() {
     html += '<p class="hint" style="color:var(--warn);">That peak is above every temperature the ' +
       'campaign simulated (highest tested here: ' + row.peak_temp_c_max + '&deg;C). Showing the ' +
       'highest-range recommendation there is; it was not checked at your peak.</p>';
+  }
+  if (result.assumed_load) {
+    html += '<p class="hint" style="color:var(--warn);">You selected "Unknown / not sure" for load, ' +
+      'but no load-agnostic recommendation covers that peak -- this is the ' +
+      '<b>' + window.kcEscapeHtml(result.assumed_load) + '</b>-load recommendation. If your firing will ' +
+      'not be ' + window.kcEscapeHtml(result.assumed_load) + '-loaded, pick the matching load above.</p>';
   }
   if (row.why) html += '<p class="hint">' + window.kcEscapeHtml(row.why) + '</p>';
   el.innerHTML = html;

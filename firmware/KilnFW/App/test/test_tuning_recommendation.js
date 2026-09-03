@@ -274,6 +274,76 @@ function measuredOnlyArtifact() {
 })();
 
 // ---------------------------------------------------------------------------
+// Group 5: REVIEW 2026-09-02 (Opus round 4, finding 4). wantLoad === 'any'
+// ("not sure" operator) must never silently hand back a load-specific row
+// with no indication -- either a genuine any-load row covers the peak, or
+// the caller is told which load the returned row assumes.
+// ---------------------------------------------------------------------------
+function loadSpecificOnlyArtifact() {
+  return {
+    schema_version: 1,
+    sim_confidence: { extrapolation_boundary_c: 80 },
+    recommendations: [
+      { peak_temp_c_max: 200, load: 'full', method: 'step', rule: 'cohen-coon',
+        confidence: 'measured', why: 'Full-load only coverage at this peak.' },
+      { peak_temp_c_max: 500, load: 'empty', method: 'relay', rule: 'ziegler-nichols',
+        confidence: 'measured', why: 'Empty-load only coverage at this peak.' },
+    ],
+  };
+}
+
+function anyRowHasHigherCeilingArtifact() {
+  return {
+    schema_version: 1,
+    sim_confidence: { extrapolation_boundary_c: 80 },
+    recommendations: [
+      // A ceiling-only sort (no load priority) would pick this LOWER-
+      // ceiling full-load row over the any-load row below, even though
+      // the any-load row also covers peak 90 -- this is exactly the case
+      // that distinguishes "prefer a genuine any row" from "lowest
+      // covering ceiling regardless of load".
+      { peak_temp_c_max: 100, load: 'full', method: 'step', rule: 'cohen-coon',
+        confidence: 'measured', why: 'Full-load, lower ceiling.' },
+      { peak_temp_c_max: 300, load: 'any', method: 'relay', rule: 'ziegler-nichols',
+        confidence: 'measured', why: 'Any-load, higher ceiling, still covers 90.' },
+    ],
+  };
+}
+
+(function testAnyPrefersGenuineAnyRowOverLoadSpecific() {
+  const ctx = loadFns(LOOKUP_SRC);
+  const r = ctx.pickTuningRecommendation(anyRowHasHigherCeilingArtifact(), 90, 'any');
+  assert(r.ok && r.row.load === 'any',
+    'an "any" request prefers a genuine any-load row when one covers the peak, even at a higher ' +
+    'ceiling than a covering load-specific row -- got ' + JSON.stringify(r.row));
+  assert(r.assumed_load === null || r.assumed_load === undefined,
+    'a genuine any-load match carries no assumed_load flag -- got ' + JSON.stringify(r.assumed_load));
+})();
+
+(function testAnyFallsBackToLoadSpecificAndFlagsAssumedLoad() {
+  const ctx = loadFns(LOOKUP_SRC);
+  // No any-load row exists in this artifact at all, so any request for
+  // 'any' MUST fall through to a load-specific row and say which load it
+  // assumed -- this is the vacuous case the finding was about: silently
+  // returning row.load === 'full' under an unqualified banner.
+  const r = ctx.pickTuningRecommendation(loadSpecificOnlyArtifact(), 150, 'any');
+  assert(r.ok && r.row.load === 'full',
+    'falls back to the lowest-covering load-specific row -- got ' + JSON.stringify(r.row));
+  assert(r.assumed_load === 'full',
+    'the caller is told this recommendation assumes full load -- got ' + JSON.stringify(r.assumed_load));
+})();
+
+(function testExactLoadRequestNeverFlagsAssumedLoad() {
+  const ctx = loadFns(LOOKUP_SRC);
+  // assumed_load only applies to the wantLoad === 'any' case -- an
+  // operator who explicitly picked 'full' asked for exactly this row, so
+  // there is nothing to caveat.
+  const r = ctx.pickTuningRecommendation(sampleArtifact(), 150, 'full');
+  assert(r.ok && r.row.load === 'full' && !r.assumed_load,
+    'an explicit load request never sets assumed_load -- got ' + JSON.stringify(r));
+})();
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log(passed + ' passed, ' + failed + ' failed');
 if (failed) {
