@@ -130,11 +130,19 @@ def loaded_K_tau(mass_mult: float, coupling_mult: float):
 class LoadedPhysicalKilnPlant(ps.PhysicalKilnPlant):
     """``PhysicalKilnPlant`` with thermal mass and cross-zone coupling
     scaled per module docstring sec 3, for the >80 C (cone-schedule) run.
-    Everything else (own power, radiative loss, temperature clamp) is
-    ``PhysicalKilnPlant.step`` unchanged -- duplicated here rather than
-    parameterizing the original because the original reads its constants
-    off module globals, not instance attributes, and this module does not
-    touch ``plant_sim.py``'s core."""
+
+    REVIEW 2026-09-02 (Opus round 4, finding 6): this used to hand-copy
+    ``PhysicalKilnPlant.step`` verbatim (own power, radiative loss,
+    temperature clamp) with no tripwire against the two drifting -- and
+    ``plant_sim.py`` is under active edit. ``PhysicalKilnPlant.step`` now
+    reads its power/coupling/thermal-mass constants off instance
+    attributes (``self._p_max_w``/``self._coupling_frac``/
+    ``self._thermal_mass``) set in ``__init__`` instead of bare module
+    globals, specifically so this subclass can override just those three
+    values here and DELEGATE to the inherited ``step()`` unchanged --
+    there is no longer a second copy of the per-tick physics to drift.
+    ``tests/test_load_mass_sweep.py`` pins that ``mass_mult=1.0,
+    coupling_mult=1.0`` reproduces ``PhysicalKilnPlant`` byte-for-byte."""
 
     def __init__(self, dt, ambient=20.0, start_temp=None, mass_mult=1.0, coupling_mult=1.0):
         super().__init__(dt, ambient=ambient, start_temp=start_temp)
@@ -142,17 +150,8 @@ class LoadedPhysicalKilnPlant(ps.PhysicalKilnPlant):
         self.coupling_mult = coupling_mult
         self._thermal_mass = ps.PHYS_THERMAL_MASS_J_PER_K * mass_mult
         self._coupling_frac = ps.PHYS_COUPLING_FRAC * coupling_mult
-
-    def step(self, duty):
-        duty = np.clip(duty, 0.0, 1.0)
-        own_power = ps.PHYS_P_MAX_W * duty
-        growth = ps.coupling_growth(self.temp)
-        coupling_power = (self._coupling_frac * own_power.reshape(1, -1)).sum(axis=1) * growth
-        loss = ps.physical_loss_w(self.temp, self.ambient)
-        net_w = own_power + coupling_power - loss
-        dTdt = net_w / self._thermal_mass
-        self.temp = np.clip(self.temp + dTdt * self.dt, self.ambient, self.MAX_PLAUSIBLE_TEMP_C)
-        return self.temp.copy()
+        # self._p_max_w left at the base class's value (own-zone element
+        # power is not scaled by load -- see module docstring sec 1).
 
 
 def _run_loop(plant, segs, kp, ki, kd, ambient, integral_floor='ff_hold'):

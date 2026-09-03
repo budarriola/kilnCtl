@@ -60,6 +60,36 @@ class LoadMassScalingTests(unittest.TestCase):
             f"(got {err_1x:.2f}C -> {err_4x:.2f}C) -- mass scaling may be a no-op",
         )
 
+    def test_loaded_physical_plant_delegates_to_base_step(self):
+        """Finding 6 (opus review round 4): LoadedPhysicalKilnPlant used to
+        hand-copy PhysicalKilnPlant.step() verbatim, with nothing to catch
+        the two drifting apart while plant_sim.py is under active edit.
+        LoadedPhysicalKilnPlant now overrides only the scaled instance
+        attributes and inherits step() unchanged -- so at
+        mass_mult=coupling_mult=1.0 (the reference point, no scaling
+        applied) it must reproduce PhysicalKilnPlant's own trajectory
+        byte-for-byte over several ticks, for any starting temps/duty
+        sequence, not just at t=0."""
+        import numpy as np
+        from kilnctrl import plant_sim as ps
+
+        start = [40.0, 55.0, 62.0]
+        base = ps.PhysicalKilnPlant(ps.DT, ambient=20.0, start_temp=list(start))
+        loaded = lms.LoadedPhysicalKilnPlant(ps.DT, ambient=20.0, start_temp=list(start),
+                                              mass_mult=1.0, coupling_mult=1.0)
+        duties = [
+            np.array([0.8, 0.5, 0.3]),
+            np.array([0.6, 0.6, 0.6]),
+            np.array([0.0, 1.0, 0.2]),
+            np.array([0.4, 0.4, 0.9]),
+        ]
+        for duty in duties:
+            t_base = base.step(duty.copy())
+            t_loaded = loaded.step(duty.copy())
+            self.assertTrue(np.array_equal(t_base, t_loaded),
+                             f"LoadedPhysicalKilnPlant at 1.0x/1.0x diverged from "
+                             f"PhysicalKilnPlant: {t_base} vs {t_loaded}")
+
     def test_identified_load_reproduces_unscaled_plant(self):
         """mass_mult=coupling_mult=1.0 must be byte-identical to calling
         FOPDTPlant with the module's own K_full/tau directly -- the 'load'
