@@ -352,6 +352,66 @@ identification), not a hand-edit of these matrix entries from this one
 offline pass, and not a code change to compensate for what is a
 measurement problem. No firmware change made here.
 
+**HARDWARE A/B, 2026-09-03: bias metric does not predict tracking; z1 and z2
+both went the opposite way it predicted.** Matched rested-start pair
+(`logs/coupling/p7_oldmatrix_runC.jsonl` run 0, 31.1 °C vs
+`p7_newmatrix2_http.jsonl` run 0, 30.0 °C — both re-derived with
+`pid_ab_compare compare --run-a 0 --run-b 0`, single matrix throughout, no
+guard/fault events, no merged runs). z0 refused (1.02 °C start delta, over
+threshold). z1: whole-run IAE 1.028→0.608, dwell overshoot 1.77/2.11→1.29/1.34,
+steady offset 0.82/1.08/0.58→0.30/0.43/0.11 — clearly better. z2: IAE
+0.820→0.899, overshoot 1.63/1.80→2.18/2.02, offset 0.90/0.82→1.02/0.92 —
+slightly worse. The `u_pred−u_actual` bias metric predicted the reverse: z1
+"slightly worse" (own-diagonal −0.007→−0.053; hybrid −0.056), z2 improving
+(+0.113→+0.032 own-diagonal, +0.137→+0.116 hybrid).
+
+Confounders checked and largely ruled out: start-temp deltas are 0.93 °C (z1)
+/ 0.89 °C (z2), under the 1.0 °C gate; no fault/guard fired in either run;
+`ff_hold_used_matrix` is true throughout both, `ff_hold_infeasible` never
+sets. The only prior data point on start-temp sensitivity (`holdfix_clean` vs
+`final`, 4.8 °C delta → 22–47 % IAE swings) is itself uncalibrated, but even
+naive linear scaling puts a ~0.9 °C delta at single-digit-percent swings —
+far short of z1's 41 % IAE drop, and the same order as z2's 10 % rise, so it
+cannot be excluded as a partial contributor to z2 but cannot be the z1 story.
+
+Mechanism, solved numerically from `zone_coupling_solve.c`'s actual G·u=b
+system (`ff_k_dc` diagonal, both matrices' off-diagonals, at the real dwell
+dT's — ratios are dT-independent since the system is linear): moving from the
+old to the new matrix cuts each zone's own commanded hold duty by **z0 −81 %,
+z1 −48 %, z2 −5 %** (condition number 1.92→5.51, matching the doc's own
+table above). z0 and z1 get a large feedforward offload; z2's own duty is
+almost untouched by the matrix change and instead becomes far more dependent
+on crediting its neighbours' heat (z2's row sum grows 3.18×, the largest of
+the three rows) — heat that, per §2, arrives through an off-diagonal path
+with 620–730 s τ and 135–158 s dead time, against 264 s / 34–53 s on the
+diagonal. The `u_pred−u_actual` bias metric is computed only from **settled
+dwell tails** (`coupled_ident.py`'s `u_pred = A⁻¹·(T−ambient)` against 150 s
+of already-arrived, steady-state duty) — it structurally cannot see this lag.
+z1's win is a genuine steady-state correction (its old-matrix duty really was
+too high, and the fix front-loads instantly). z2's loss looks like exactly
+the kind of transient the bias metric is blind to: z2 now leans on a much
+bigger, much later-arriving credit from z0/z1, so a dwell entry or short
+segment sees z2 under-driven while that credit is still in flight, PID
+integral winds up to cover the shortfall, and the delayed neighbour heat
+lands on top of it — overshoot, not the undershoot a static crediting
+argument alone would suggest.
+
+**Verdict on the bias metric: it is not the right metric to gate this kind of
+change on.** It validates the matrix's steady-state self-consistency, not
+its effect on tracking through a transient — and transients (ramps, dwell
+entries) are most of what whole-run IAE and overshoot are made of. Record
+this before it gets used to justify the next matrix swap.
+
+**What would settle it:** a same-day, same-matrix repeat pair (isolates
+run-to-run noise from the matrix effect, which this single A/B cannot do),
+and a bias metric computed over the SAME windows `pid_ab_compare` scores
+(ramp + dwell-entry, not just settled tails) so it can be compared
+apples-to-apples against what actually predicted the hardware outcome. The
+noise-floor campaign being built separately would settle the "is the z1/z2
+swing distinguishable from run-to-run noise at all" question, but not the
+transient-vs-steady-state question above — that needs the metric itself
+rebuilt over dynamic windows, not more repeats of the same static one.
+
 ### 3.3 Adaptive tuning — the layers not built
 
 Shipped (`fcc1fc0`, `a772d78`): dwell harvesting, diagonal-only least-squares
