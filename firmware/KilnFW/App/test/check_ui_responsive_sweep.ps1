@@ -1,4 +1,4 @@
-# check_ui_responsive_sweep.ps1 -- Phase 0 of WEB_UI_RESPONSIVE_PLAN.md
+# check_ui_responsive_sweep.ps1 -- Phase 0 of WEB_UI_RESPONSIVE.md
 # ("a real test matrix", sec 4). Runs ui_responsive_sweep.mjs (this
 # directory) -- a real headless-Chrome sweep over every *_page.html at
 # 320/360/390/768/1280/1920px, asserting no horizontal overflow, no

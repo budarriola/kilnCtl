@@ -45,7 +45,7 @@
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
   }
   *, *::before, *::after { box-sizing: border-box; }
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: min() shrink-to-fit stays, fixed 760px
+  /* WEB_UI_RESPONSIVE.md sec 6: min() shrink-to-fit stays, fixed 760px
      cap becomes the shared --kc-shell-max -- see backup_page.html's
      identical comment for the rationale. */
   body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
@@ -58,7 +58,7 @@
           border-radius: 6px; padding: 0.8em 1em; margin-bottom: 1em; }
   .zone h3 { font-size: 1em; margin: 0 0 0.6em 0; }
   label { display: block; font-weight: bold; font-size: 0.9em; margin-top: 0.7em; }
-  /* ui_responsive_sweep.mjs's 32px touch-target floor (WEB_UI_RESPONSIVE_PLAN.md
+  /* ui_responsive_sweep.mjs's 32px touch-target floor (WEB_UI_RESPONSIVE.md
      sec 4, WCAG 2.5.8): #pcLink (the one number input present without a live
      backend) measured 120x25 -- an ordinary text-style input, not a
      platform-locked control, so min-height is a real fix rather than an

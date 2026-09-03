@@ -62,7 +62,7 @@
 #define UI_THEME_COLOR_TEXT_SECONDARY      lv_color_hex(UI_THEME_COLOR_TEXT_SECONDARY_HEX)
 
 /* Dual-role alias, Phase 7 theme/style pass (TODO.md 1223-1225):
- * WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2 (2026-09-03) renamed the web
+ * WEB_UI_RESPONSIVE.md sec 5.1 item 2 (2026-09-03) renamed the web
  * dashboard's neutral-status token to `--neutral` (`main_page.html`,
  * `readiness_page.html`), and both pages define it as
  * `var(--ui-text-secondary)` in dark mode -- i.e. "neutral status" and
@@ -98,7 +98,7 @@
 #define UI_THEME_ACCENT_2_HEX   0xa15fd6
 #define UI_THEME_ACCENT_2       lv_color_hex(UI_THEME_ACCENT_2_HEX)
 
-/* Accent 3: teal/cyan. WEB_UI_RESPONSIVE_PLAN.md sec 7 (2026-09-03): also
+/* Accent 3: teal/cyan. WEB_UI_RESPONSIVE.md sec 7 (2026-09-03): also
  * designated the dominant/primary-action accent for the web UI's focus ring
  * (theme.css's button:focus-visible), since it was the one accent carrying
  * no existing safety meaning (accent-1 is pause, accent-5 is stop/danger).
@@ -141,7 +141,7 @@
 #define UI_THEME_CORNER_RADIUS_PX      10
 
 /* Spacing scale, Phase 7 theme/style pass (TODO.md 1223-1225): mirrors
- * theme.css's `--ui-space-1..5` (WEB_UI_RESPONSIVE_PLAN.md sec 7.2 item 2,
+ * theme.css's `--ui-space-1..5` (WEB_UI_RESPONSIVE.md sec 7.2 item 2,
  * 2026-09-03), same five pixel values, so a new LCD layout choosing a gap
  * has the same named rungs the web side reaches for instead of a fresh
  * literal. Additive only, like the web side's own adoption note: this does
@@ -177,7 +177,7 @@
 
 /* ---- Card shadow, Phase 7 theme/style pass (TODO.md 1223-1225) ----------
  * theme.css adopted two translucent-black drop shadows, `--ui-shadow-1`/`-2`
- * (WEB_UI_RESPONSIVE_PLAN.md sec 7.2 item 3, 2026-09-03):
+ * (WEB_UI_RESPONSIVE.md sec 7.2 item 3, 2026-09-03):
  *   --ui-shadow-1: 0 1px 2px rgba(0,0,0,.12), 0 1px 1px rgba(0,0,0,.08);
  *   --ui-shadow-2: 0 2px 6px rgba(0,0,0,.18), 0 1px 2px rgba(0,0,0,.1);
  * LVGL has no multi-layer box-shadow syntax to copy verbatim -- one

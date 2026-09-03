@@ -1,4 +1,4 @@
-// ui_responsive_sweep.mjs -- Phase 0 of WEB_UI_RESPONSIVE_PLAN.md ("a real
+// ui_responsive_sweep.mjs -- Phase 0 of WEB_UI_RESPONSIVE.md ("a real
 // test matrix"). Drives real headless Chrome over the Chrome DevTools
 // Protocol (CDP) via a plain WebSocket, so no npm/pip install is required --
 // this toolchain has neither Playwright nor Puppeteer available (see
@@ -60,7 +60,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DRIVERS_DIR = path.resolve(__dirname, '..', 'drivers');
 const DEFAULT_WIDTHS = [320, 360, 390, 768, 1280, 1920];
 const VIEWPORT_HEIGHT = 1400; // tall enough that vertical scroll never masks a horizontal-overflow bug
-const MIN_TARGET_PX = 32; // profiles_page.html catalogue Use/Save bug measured 81x19 -- see WEB_UI_RESPONSIVE_PLAN.md sec 3 item 3
+const MIN_TARGET_PX = 32; // profiles_page.html catalogue Use/Save bug measured 81x19 -- see WEB_UI_RESPONSIVE.md sec 3 item 3
 
 function findChrome() {
   const candidates = [
@@ -196,7 +196,7 @@ class CdpSession {
 }
 
 // Per-page data fixtures, keyed by filename, run BEFORE SETUP_SCRIPT below.
-// WEB_UI_RESPONSIVE_PLAN.md sec 3 items 2 and 4 were found to not reproduce
+// WEB_UI_RESPONSIVE.md sec 3 items 2 and 4 were found to not reproduce
 // under this sweep. Item 4 (diagnostics_page.html flex-wrap button overlap)
 // no longer applies -- that markup was rewritten into a stacked
 // `.linklist` block (see diagnostics_page.html's own 2026-08-22 comment
@@ -300,7 +300,7 @@ ${ZONES_BASE_FIXTURE}
 };
 
 // Setup script: mutates page state into the "worst case" the assertion pass
-// below needs to see -- the sticky Stop/Pause bar shown (WEB_UI_RESPONSIVE_PLAN.md
+// below needs to see -- the sticky Stop/Pause bar shown (WEB_UI_RESPONSIVE.md
 // sec 3's "bar covers the last interactive element" class only manifests while
 // it's up) and every <details> disclosure sprung open (its content is only
 // reachable to a real user after they click <summary>, so that's the state
@@ -333,7 +333,7 @@ const SETUP_SCRIPT = `
   var allDetails = document.querySelectorAll('details');
   for (var di = 0; di < allDetails.length; di++) {
     // zones_page.html's <details class="advguards"> is deliberately left
-    // CLOSED here -- see WEB_UI_RESPONSIVE_PLAN.md sec 3 item 2 and that
+    // CLOSED here -- see WEB_UI_RESPONSIVE.md sec 3 item 2 and that
     // page's own 2026-08-22 comment above ".advguards:not([open])": the
     // "offsettle overlaps saveBtn" bug this sweep exists to catch only
     // manifests while the <details> is closed (Chromium still lays out a

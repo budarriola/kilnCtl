@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ui_status_color_check.mjs -- standing guard added by the colour-dependence
-// audit (WEB_UI_RESPONSIVE_PLAN.md, "status token contrast" section).
+// audit (WEB_UI_RESPONSIVE.md, "status token contrast" section).
 //
 // Two independent checks, both mechanical and both intentionally narrow --
 // see the header comment on each function for exactly what it can and
@@ -13,14 +13,14 @@
 //      --bg). This is the "is this colour even legible" floor. It does NOT
 //      check the tokens against EACH OTHER -- --ok vs --warn is documented
 //      by this same audit at 1.0-1.7:1 (hue-only difference), which is a
-//      known, owner-gated, open decision (WEB_UI_RESPONSIVE_PLAN.md sec 7),
+//      known, owner-gated, open decision (WEB_UI_RESPONSIVE.md sec 7),
 //      not something this check is allowed to fail the build over. A token
 //      that genuinely fails this floor and is a PRE-EXISTING gap (found by
 //      this same audit, not introduced by it) is recorded in
 //      ui_status_color_contrast_exceptions.json with a note instead of
 //      being silently fixed here -- fixing it changes that page's rendered
 //      colour, which this pass is not authorized to do (see
-//      WEB_UI_RESPONSIVE_PLAN.md). A NEW token/page combination that fails
+//      WEB_UI_RESPONSIVE.md). A NEW token/page combination that fails
 //      is not covered by that file and fails the build.
 //
 //   2. checkColorOnlyAllowlist() -- scans every *_page.html for a CSS rule

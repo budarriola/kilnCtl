@@ -59,7 +59,7 @@
     --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
     --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
   }
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: fixed 480px cap replaced with the
+  /* WEB_UI_RESPONSIVE.md sec 6: fixed 480px cap replaced with the
      shared --kc-shell-max (theme.css) -- see main_page.html's identical
      change for the full rationale; this page carries the same 480px cap
      and is the other page sec 6 names as benefiting most. */
@@ -106,7 +106,7 @@
   }
   .zone { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.7em 1em; margin-bottom: 0.7em; }
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: same auto-fit pattern as
+  /* WEB_UI_RESPONSIVE.md sec 6: same auto-fit pattern as
      main_page.html's #channels (backup_page.html:77's original shape). A
      wider floor than #channels' 240px was tried first (320px, on the theory
      that a zone card carries more content -- relay/thermocouple checkbox
@@ -2308,7 +2308,7 @@ function rgaClass(v) {
   return 'rga-ok';
 }
 
-/* WEB_UI_RESPONSIVE_PLAN.md sec 11: the rga-ok/warn/bad classes above were
+/* WEB_UI_RESPONSIVE.md sec 11: the rga-ok/warn/bad classes above were
  * colour-only (measured as low as 1.03:1 pairwise -- not distinguishable by
  * a colour-blind viewer or a washed-out display). This maps each class to a
  * real character appended after the number, so the status reads without

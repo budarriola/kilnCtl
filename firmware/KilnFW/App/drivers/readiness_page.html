@@ -23,7 +23,7 @@
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --bad: #b00;
     --warn: #a67c00;
-    /* WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2, resolved 2026-09-03: --neutral
+    /* WEB_UI_RESPONSIVE.md sec 5.1 item 2, resolved 2026-09-03: --neutral
        is now the token actually used (was --cannot-yet). Same value as before
        the rename -- see the plan doc for the decision record. Note
        `.status-cannot_yet` below is a JS-generated status-enum class name
@@ -53,7 +53,7 @@
      text doesn't run the full width of a 27" monitor. Reasoned about
      320/360/390, 768/820, 1280/1920. */
   *, *::before, *::after { box-sizing: border-box; }
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: min() shrink-to-fit stays, fixed 640px
+  /* WEB_UI_RESPONSIVE.md sec 6: min() shrink-to-fit stays, fixed 640px
      cap becomes the shared --kc-shell-max -- see backup_page.html's
      identical comment for the rationale. */
   body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;

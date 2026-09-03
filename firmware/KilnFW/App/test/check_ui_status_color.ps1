@@ -1,5 +1,5 @@
 # check_ui_status_color.ps1 -- standing guard from the 2026-09
-# colour-dependence audit (WEB_UI_RESPONSIVE_PLAN.md).
+# colour-dependence audit (WEB_UI_RESPONSIVE.md).
 #
 # Runs ui_status_color_check.mjs (this directory): asserts every
 # --ok/--warn/--bad/--neutral status token clears a stated contrast floor

@@ -1,5 +1,10 @@
 # Web UI Responsive & Modernization Plan
 
+**Complete as of 2026-09-03.** Renamed from `WEB_UI_RESPONSIVE_PLAN.md` per the
+owner convention: a finished plan is documentation, not a plan. Kept here as a
+record of the decisions made and why; nothing below is open work (§8 is gated
+on a re-open condition not yet met, §9 is explicitly out of scope).
+
 Plan doc for making the KilnFW browser UI work across display sizes and look
 current. Browser clients only — the on-board ST7796 / LVGL display is out of
 scope here (see section 8).

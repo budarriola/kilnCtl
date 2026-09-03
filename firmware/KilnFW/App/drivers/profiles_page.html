@@ -38,7 +38,7 @@
     --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
     --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
   }
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: shared shell width instead of a fixed
+  /* WEB_UI_RESPONSIVE.md sec 6: shared shell width instead of a fixed
      560px cap -- see main_page.html's identical comment for the rationale. */
   body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
@@ -364,7 +364,7 @@ function checkRamp(input) {
   var rate = parseFloat(input.value) || 0;
   input.classList.remove('near-ceiling', 'over-ceiling');
   // near-ceiling/over-ceiling are colour-only in the CSS above (border-color,
-  // --warn vs --bad) -- WEB_UI_RESPONSIVE_PLAN.md's colour-contrast audit
+  // --warn vs --bad) -- WEB_UI_RESPONSIVE.md's colour-contrast audit
   // flagged that pair as only 1.0-1.1:1 apart in luminance, so a border
   // colour alone does not reliably tell the two states apart. `title` adds a
   // non-colour cue (read by a screen reader, and on hover/long-press) without

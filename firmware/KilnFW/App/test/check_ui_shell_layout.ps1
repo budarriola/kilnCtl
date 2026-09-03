@@ -6,7 +6,7 @@
 # AUTHORITATIVE check) can only tell you a page overflowed or an element
 # collided at ONE OF ITS SIX widths; it cannot tell you *why* a later edit
 # stopped passing, and -- more to the point here -- it cannot fail at all
-# if a WEB_UI_RESPONSIVE_PLAN.md sec 6 rule is deleted outright and the
+# if a WEB_UI_RESPONSIVE.md sec 6 rule is deleted outright and the
 # page quietly falls back to shrink-to-fit-content sizing that still
 # happens to pass every numeric assertion at every swept width. A rule
 # that only ever earns width, and never actively causes overflow, can be
@@ -143,7 +143,7 @@ foreach ($entry in $required) {
 }
 
 if ($missing.Count -gt 0) {
-    Write-Host "check_ui_shell_layout.ps1: FAILED -- $($missing.Count) required WEB_UI_RESPONSIVE_PLAN.md sec 6 rule(s) missing:" -ForegroundColor Red
+    Write-Host "check_ui_shell_layout.ps1: FAILED -- $($missing.Count) required WEB_UI_RESPONSIVE.md sec 6 rule(s) missing:" -ForegroundColor Red
     foreach ($m in $missing) { Write-Host "  $m" -ForegroundColor Red }
     exit 1
 }

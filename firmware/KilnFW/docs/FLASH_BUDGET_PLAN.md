@@ -387,7 +387,7 @@ freed `pico_img`'s old high slot (896 kB at 0xB10000). No data-loss risk:
 nothing ever lived there, and `pico_img` is looked up by name, not offset.
 
 The alternatives not taken, if the 604 kB is ever wanted: a `web` SPIFFS
-partition for OTA-able UI assets (`WEB_UI_RESPONSIVE_PLAN.md` §8 would be the
+partition for OTA-able UI assets (`WEB_UI_RESPONSIVE.md` §8 would be the
 consumer), or a data-recorder / expanded statistics partition. It is too small
 for an app partition (3 MB here) and is therefore data-only.
 

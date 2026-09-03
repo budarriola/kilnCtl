@@ -24,7 +24,7 @@
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --ok: #1a7a1a; --bad: #b00;
-    /* WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2, resolved 2026-09-03: --neutral
+    /* WEB_UI_RESPONSIVE.md sec 5.1 item 2, resolved 2026-09-03: --neutral
        is now the token actually used (was --off-color). Same value as before
        the rename -- see the plan doc for the decision record. */
     --neutral: #888;
@@ -43,7 +43,7 @@
     --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
     --neutral: var(--ui-text-secondary);
   }
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: fixed 480px cap replaced with the
+  /* WEB_UI_RESPONSIVE.md sec 6: fixed 480px cap replaced with the
      shared --kc-shell-max (theme.css) -- earns real width on a wide desktop
      display instead of sitting in a narrow centred ribbon, while still
      stopping well short of full-bleed unreadable line lengths. */
@@ -75,7 +75,7 @@
      the select rather than the row overflowing and forcing horizontal
      scroll; the select keeps flex:1 so it fills the row (or wraps to full
      width) instead of leaving the button an arbitrary leftover sliver. */
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: `repeat(auto-fit, minmax(...,1fr))` --
+  /* WEB_UI_RESPONSIVE.md sec 6: `repeat(auto-fit, minmax(...,1fr))` --
      backup_page.html:77's own .restore-controls rule is the pattern this
      copies (sec 6 names it explicitly as the target shape). Column count is
      automatic from the container's own width: one column on a phone (each

@@ -68,7 +68,7 @@
     --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
     --fault-color: var(--ui-accent-5);
   }
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: shared shell width instead of a fixed
+  /* WEB_UI_RESPONSIVE.md sec 6: shared shell width instead of a fixed
      620px cap -- see main_page.html's identical comment for the rationale. */
   body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
@@ -223,7 +223,7 @@
   .writewindow.ww-ok { background: var(--ok); color: #fff; }
   #guidedMsg { font-weight: bold; margin-top: 0.6em; }
   details#advancedDetails { margin-top: 1.6em; border-top: 2px solid var(--border); padding-top: 0.6em; }
-  /* ui_responsive_sweep.mjs's 32px touch-target floor (WEB_UI_RESPONSIVE_PLAN.md
+  /* ui_responsive_sweep.mjs's 32px touch-target floor (WEB_UI_RESPONSIVE.md
      sec 4, WCAG 2.5.8): measured 620x20 at every width the disclosure's
      content is actually reachable (sweep now springs every <details> open
      before asserting, so a closed accordion no longer hides this from the

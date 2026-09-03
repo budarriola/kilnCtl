@@ -101,7 +101,7 @@ What is still genuinely open is short:
 | [`firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`](firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md) | Second LCD panel (ST7796/MSP4031) support, runtime panel auto-detection, display SPI async/DMA |
 | [`firmware/KilnFW/docs/FLASH_BUDGET_PLAN.md`](firmware/KilnFW/docs/FLASH_BUDGET_PLAN.md) | The 16 MB flash: partition table, image size, what has been reclaimed |
 | [`firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md`](firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md) | Internal SRAM reclamation — allocator threshold, stack sizing, PSRAM relocation |
-| [`firmware/KilnFW/docs/WEB_UI_RESPONSIVE_PLAN.md`](firmware/KilnFW/docs/WEB_UI_RESPONSIVE_PLAN.md) | Browser UI across display sizes: token consolidation, shell layout, the responsive sweep |
+| [`firmware/KilnFW/docs/WEB_UI_RESPONSIVE.md`](firmware/KilnFW/docs/WEB_UI_RESPONSIVE.md) | Browser UI across display sizes: token consolidation, shell layout, the responsive sweep |
 | [`firmware/KilnFW/docs/ARCHITECTURE.md`](firmware/KilnFW/docs/ARCHITECTURE.md) | Tasks, priorities, owner-task queues, single-writer ownership doctrine |
 | [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–10 |
 | [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
@@ -337,7 +337,7 @@ Orton table (mirror test added so a future table edit can't repeat it).
 |---|---|---|
 | DRAM/PSRAM allocator-threshold work | A full soak (cold firing through cooldown) plus a Pico OTA relay-path measurement that has never been taken | `DRAM_PSRAM_PLAN.md` §5/§6/§9 |
 | Second LCD panel (ST7796/MSP4031) | The physical panel, and its pre-power STOP-block 5V I2C hazard check before the module ever touches J2 | `DISPLAY_ST7796_PLAN.md` §0/§4 |
-| Web UI palette/theme | Four open owner decisions: the `--fault-color`/`--bad` merge, whether to adopt `--neutral`, the section 7 palette, and LCD parity with the web tokens | `WEB_UI_RESPONSIVE_PLAN.md` |
+| Web UI palette/theme | Four open owner decisions: the `--fault-color`/`--bad` merge, whether to adopt `--neutral`, the section 7 palette, and LCD parity with the web tokens | `WEB_UI_RESPONSIVE.md` |
 | Ramp assist default (OFF → ON) | A real firing at cone temperatures — everything measured so far is bench-range (0–80 °C), well below where the cone table's heat-work weighting matters | `PID_EXPANSION_PLAN.md` §7 |
 | Fuzzy-PID layer's first above-zero hardware run | Nothing named now — its last blocker (a field-mapping bug) is fixed and the run is available; it just hasn't been run yet | `PID_EXPANSION_PLAN.md` §3.6 |
 

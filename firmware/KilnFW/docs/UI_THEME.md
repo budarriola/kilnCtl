@@ -25,10 +25,10 @@ and update both this table and `ui_theme.h` together if it needs correcting.
 | `UI_THEME_COLOR_TEXT_SECONDARY` | `#9aa0ae` | Secondary/dim text -- labels, units, less-important status text. |
 | `UI_THEME_ACCENT_1` | `#e8974e` | Accent 1 -- orange. Per-zone/per-metric color coding, assigned by 10.3, not fixed to a specific zone by this header. |
 | `UI_THEME_ACCENT_2` | `#a15fd6` | Accent 2 -- purple/magenta. |
-| `UI_THEME_ACCENT_3` | `#3ec6c6` | Accent 3 -- teal/cyan. Also the web UI's dominant/primary-action accent since WEB_UI_RESPONSIVE_PLAN.md sec 7 (2026-09-03) -- `theme.css`'s `button:focus-visible` ring. Same value, web-only usage change; if `kiln_ui.c`'s placeholder screen grows real button chrome, its primary/confirm buttons should reach for this accent too for parity. |
+| `UI_THEME_ACCENT_3` | `#3ec6c6` | Accent 3 -- teal/cyan. Also the web UI's dominant/primary-action accent since WEB_UI_RESPONSIVE.md sec 7 (2026-09-03) -- `theme.css`'s `button:focus-visible` ring. Same value, web-only usage change; if `kiln_ui.c`'s placeholder screen grows real button chrome, its primary/confirm buttons should reach for this accent too for parity. |
 | `UI_THEME_ACCENT_4` | `#5cc06e` | Accent 4 -- green. Matches the reference's nav-icon underline color. |
 | `UI_THEME_ACCENT_5` | `#d6555f` | Accent 5 -- red/amber. Held back for "attention" use (fault/alarm/stop) rather than a fifth ordinary zone color; the one accent here inferred rather than directly seen in the reference screenshots, so double-check it hardest once real hardware is available. |
-| `UI_THEME_COLOR_NEUTRAL` | `#9aa0ae` | **Dual-role token**, added Phase 7 (TODO.md 1223-1225). Alias for `UI_THEME_COLOR_TEXT_SECONDARY` -- same value, added so a "neutral status" call site can say that intent by name. Mirrors the web dashboard's `--neutral` (`main_page.html`, `readiness_page.html`, WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2, 2026-09-03), which is itself defined as `var(--ui-text-secondary)` in dark mode -- both front ends already treat "neutral status" and "secondary text" as the same color, this just gives the LCD side a name for that too. |
+| `UI_THEME_COLOR_NEUTRAL` | `#9aa0ae` | **Dual-role token**, added Phase 7 (TODO.md 1223-1225). Alias for `UI_THEME_COLOR_TEXT_SECONDARY` -- same value, added so a "neutral status" call site can say that intent by name. Mirrors the web dashboard's `--neutral` (`main_page.html`, `readiness_page.html`, WEB_UI_RESPONSIVE.md sec 5.1 item 2, 2026-09-03), which is itself defined as `var(--ui-text-secondary)` in dark mode -- both front ends already treat "neutral status" and "secondary text" as the same color, this just gives the LCD side a name for that too. |
 
 ## Spacing / sizing
 
@@ -41,7 +41,7 @@ and update both this table and `ui_theme.h` together if it needs correcting.
 
 ### Spacing scale (Phase 7, TODO.md 1223-1225)
 
-Mirrors `theme.css`'s `--ui-space-1..5` (WEB_UI_RESPONSIVE_PLAN.md sec 7.2
+Mirrors `theme.css`'s `--ui-space-1..5` (WEB_UI_RESPONSIVE.md sec 7.2
 item 2, 2026-09-03) pixel-for-pixel, so a new LCD layout has the same named
 rungs the web side already reaches for:
 
@@ -119,7 +119,7 @@ reinvent the palette when it gets built.
 ## Phase 7 theme/style pass (DISPLAY_ST7796_PLAN.md Phase 7, TODO.md 1223-1225)
 
 Styling-only pass, no navigation/content restructuring, no status-color
-repaint (WEB_UI_RESPONSIVE_PLAN.md sec 7.5's algebraic-impossibility proof
+repaint (WEB_UI_RESPONSIVE.md sec 7.5's algebraic-impossibility proof
 stands -- see that doc, not reopened here). What actually landed:
 
 - `UI_THEME_COLOR_NEUTRAL`, `UI_THEME_SPACE_1..5`, and

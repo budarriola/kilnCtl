@@ -23,7 +23,7 @@
   --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
   --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
   --ui-radius: 10px; --ui-padding: var(--ui-space-2); --ui-touch: 72px; --ui-status-bar: 32px;
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 7.2 item 2, adopted 2026-09-03: a spacing
+  /* WEB_UI_RESPONSIVE.md sec 7.2 item 2, adopted 2026-09-03: a spacing
      scale, additive alongside the existing --ui-padding (now an alias for
      --ui-space-2 so nothing that already reads --ui-padding changes value).
      Pages keep their existing ad hoc em spacing -- this gives NEW rules a
@@ -41,7 +41,7 @@
      background without needing a light/dark-specific rule. */
   --ui-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.08);
   --ui-shadow-2: 0 2px 6px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.1);
-  /* WEB_UI_RESPONSIVE_PLAN.md sec 6 ("earn the width above the cap"): every
+  /* WEB_UI_RESPONSIVE.md sec 6 ("earn the width above the cap"): every
      substantial page used to hardcode its own fixed `body { max-width: Npx }`
      (420-620px depending on page -- sec 2.1's table), correct on a phone but
      a narrow ribbon in the middle of an empty 1920px display. This is the one
@@ -351,7 +351,7 @@ a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch
    The flex now lives on .zone-group .card below -- the relay card that
    actually wanted it -- so a card is a plain block by default and only opts
    in where a single row is the real intent. */
-/* WEB_UI_RESPONSIVE_PLAN.md sec 6: `.card` now establishes an inline-size
+/* WEB_UI_RESPONSIVE.md sec 6: `.card` now establishes an inline-size
    containment context so a card can reflow off ITS OWN rendered width, not
    the viewport's. This is what makes one `.card` rule correct both stacked
    full-width on a phone and tiled 3-up in an auto-fit grid on a desktop
