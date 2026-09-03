@@ -240,7 +240,12 @@ color and text. Negative-tested: forcing `#tuningRecPanel` to `width:5000px`
 red-lit all 4 new `[overflow]` cases; shrinking `#tuningRecGoBtn` to 10x10px
 red-lit all 4 as `[target]`; remapping `EXTRAPOLATED`'s label to
 `INDISTINGUISHABLE` red-lit the new distinctness check. All reverted after
-confirming red. Sweep is now 99/99 green (was 78/78).
+confirming red. Sweep grew to 99 checks (was 78/78) but was NOT green here:
+`profiles_page.html`'s segment-row delete "×" (`button.small.remove`,
+`profiles_page.html:687,690`) rendered 29x32px, under the 32px touch-target
+floor, at all six swept widths -- 93/99. `button.small`
+(`profiles_page.html:95`) had `min-height: 32px` but no `min-width`; fixed by
+adding `min-width: 32px` to that rule. Sweep is now 99/99 green.
 
 Contrast check on the shared tokens (`theme.css`, light mode): `--ok`
 (`#1a7f37`) and `--warn` (`#9a6700`) both clear WCAG AA 4.5:1 against
