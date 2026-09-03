@@ -895,39 +895,193 @@ bytes and breaks every display push.
 - [ ] **9.5 Thermocouple transfers → `spi_device_polling_transmit`.** 11 µs
       versus 26 µs. Do not mix polling and queued transactions on the *same*
       device; across devices the bus lock handles it.
-- [x] **9.6 Async flush — SCOPED VERSION LANDED 2026-09-02, default OFF**
-      behind `CONFIG_KILNCTL_SPI_ASYNC_FLUSH`. Deliberately NOT the full
-      `spi_device_queue_trans`/`get_trans_result` + ISR-completion design
-      this bullet originally described — that needs a second per-device
-      queue slot, `IRAM_ATTR` pre/post callbacks using `gpio_ll_set_level()`,
-      and `lv_display_set_flush_wait_cb()` wiring in `lvgl_port.c`, none of
-      which this project's host-test FreeRTOS/spi_master stubs can exercise
-      (`spi_owner_task()` never actually runs off-target). What is landed
-      instead delivers the exact win the plan's own text names as the point
-      ("the gain is that the caller returns early, not that transfers
-      interleave"): `esp_spi_owner.c`'s new `spi_owner_transfer_async()`
-      still runs the transfer synchronously inside the single owner task
-      (preserving section 8's no-interleaving invariant exactly), but returns
-      to its caller as soon as the request is queued and invokes a
-      caller-supplied callback from the owner task's own thread once the
-      transfer finishes, instead of making the caller block on a completion
-      semaphore. Default OFF: `spi_owner_transfer_async()` returns
-      `ESP_ERR_NOT_SUPPORTED` without touching the queue when
-      `async_flush` is false (every owner in today's tree), so no existing
-      caller's behavior changes. Host-tested (`test_esp_spi_owner.c`): the
-      default-off refusal, the callback firing with the right result/ctx on
-      a hand-built async request, and a negative control proving a
-      synchronous request never fires the callback even when the owner-wide
-      flag is on — all three negative-tested (mutated, observed red, then
-      restored). **Not wired to a caller** — `lvgl_port.c`'s flush callback
-      still calls the synchronous `ILI9488_blit_begin/_data/_end` path
-      unconditionally; wiring the LVGL flush path itself onto this primitive
-      needs the chunked `ILI9488_blit_data` loop restructured so
-      `lv_display_flush_ready()` fires only after the LAST chunk of a
-      multi-chunk flush, which is exactly the kind of ordering bug no host
-      test can catch and section 13 already flags as the standing async
-      risk — left as the explicit next step, not attempted blind. Not
-      flash-verified for the same reason 9.3/9.4 are not.
+- [x] **9.6 Async flush — WIRED INTO lvgl_port.c 2026-09-03, still default
+      OFF** behind `CONFIG_KILNCTL_SPI_ASYNC_FLUSH`. `esp_spi_owner.c`'s
+      `spi_owner_transfer_async()` (landed 2026-09-02, described in the
+      paragraph below this one used to occupy) is now actually reached by a
+      caller: `panel_spi.c` gained `ILI9488_blit_data_async()`, and
+      `lvgl_port.c`'s `ili9488_flush_cb()` calls it instead of the
+      synchronous `ILI9488_blit_begin/_data/_end` path whenever
+      `KILNCTL_SPI_ASYNC_FLUSH` is compiled in (`#if`-gated, not a runtime
+      branch — with the flag off the compiler emits only the original
+      synchronous code, so behavior is bit-identical to before this pass,
+      not merely "runtime equivalent").
+
+      **Chunk-completion design: outstanding COUNT, not chained callbacks —
+      but the count this landing ever uses is 1.** `ILI9488_blit_data_async()`
+      sends every chunk of a flush *except the last* through the existing
+      blocking `ili9488_tx()`, exactly as the synchronous
+      `ILI9488_blit_data()` does; only the FINAL chunk goes through
+      `spi_owner_transfer_async()`. That is what keeps `disp->scratch`
+      (single-buffered, no double-buffer budget — see the DRAM note below)
+      safe without any counting at all in the common case: chunk N+1's
+      `memcpy()` cannot start until chunk N's own synchronous transfer has
+      already returned, so at most one transfer is ever outstanding when the
+      function returns. A `bool async_pending` (not an int) is therefore the
+      whole "how many chunks are still in flight" state today —
+      `ILI9488Class::async_pending` in `panel_spi.h`. It was deliberately
+      *not* hardcoded as a single-shot special case, though: the completion
+      side (`ili9488_blit_async_trampoline()`) and the guard it installs
+      (`ili9488_reject_if_blitting()`, `ILI9488_blit_begin()`) are written
+      against "an async operation may still be outstanding", the general
+      shape a real multi-chunk-in-flight pipeline would need, not against
+      "exactly one flag flip always happens next". Chaining callbacks
+      (chunk N's completion re-arming chunk N+1) was considered and
+      rejected: `spi_owner_transfer_async()`'s completion callback runs
+      **on the SPI owner task's own thread**, before that task has gone
+      back to read its next queue entry — calling `spi_owner_transfer[_async]()`
+      again from inside it would either get lucky on queue space or block
+      the owner task waiting on itself to drain its own queue, which never
+      resolves and ends in a 1000 ms owner-task freeze plus a permanent
+      `wedged` latch (`esp_spi_owner.c`'s own timeout comment). This is also
+      why the trailing NOP `ILI9488_blit_end()` normally sends is *not* sent
+      for an async-dispatched flush — see `ILI9488_blit_data_async()`'s
+      doc comment for the full reasoning; the short version is that any new
+      command (the next `ILI9488_blit_begin()`, always issued before more
+      pixels can be sent) terminates a live RAMWR stream on its own, so the
+      NOP was only ever redundant insurance against a second caller writing
+      raw data into an open window — which `async_pending` now refuses
+      outright instead.
+
+      **Second caller (UART `BLIT_DATA`) verdict: still fully synchronous,
+      and now actively guarded, not just "not touched".**
+      `ILI9488_blit_data()` — the function the UART protocol handler calls —
+      is unmodified in its own transfer logic; `ILI9488_blit_data_async()`
+      is a separate function. What changed is that `ili9488_reject_if_blitting()`
+      (called by every non-blit draw operation) and `ILI9488_blit_begin()`
+      now check `async_pending` *first* and refuse outright
+      (`ESP_ERR_INVALID_STATE`) rather than "abandon" the way they do for a
+      merely-open blit window, because abandoning is safe when nothing is
+      mid-transfer but not when an async chunk may still be DMA'ing out of
+      `disp->scratch`. This closes the race the previous landing's own note
+      flagged: without it, `disp->blit.active` is already `false` the
+      instant the last chunk is handed off (closed early, under the lock,
+      exactly like `ILI9488_blit_end()` does), so the UART handler's
+      `ILI9488_blit_data()` — or `ILI9488_blit_begin()`, or `ILI9488_clear()`,
+      or any other draw call — could otherwise sail past every existing
+      check and start writing the same scratch buffer a live DMA might
+      still be reading. `ILI9488_blit_data()` gained the same check for a
+      clearer log line, though `!disp->blit.active` already caught it.
+
+      **Both flags on together (`KILNCTL_SPI_ASYNC_FLUSH` +
+      `KILNCTL_DISPLAY_ZERO_COPY_FLUSH`) verdict: SAFE, and not by luck.**
+      With zero-copy on, the async last chunk's DMA source is `data` itself
+      — LVGL's own PSRAM draw buffer (`px_map`), not a copy. LVGL's contract
+      is that it will not reuse/repaint that buffer until
+      `lv_display_flush_ready()` has been called for the flush that used it.
+      This design defers exactly that call — via `done_cb`, invoked from
+      `ili9488_blit_async_trampoline()` — until the async transfer has
+      *actually completed*, not merely been queued. So the buffer's
+      lifetime is guaranteed to outlive the DMA by construction: the two
+      options are not just individually safe, the async design's own
+      completion-deferral is precisely what zero-copy's buffer-lifetime
+      requirement needs. Neither option refuses the other at compile time;
+      none is needed.
+
+      **Lock discipline across the async gap.** `ILI9488_blit_data_async()`
+      releases `disp->lock` (a real FreeRTOS mutex) before the async
+      transfer can complete — it must, since a mutex may only be *given*
+      back by the task that holds it, and the completion runs on the SPI
+      owner task, a different task than whichever called
+      `ILI9488_blit_data_async()`. `ili9488_blit_async_trampoline()` instead
+      *takes* `disp->lock` itself (legal — any task may take a mutex; only
+      giving it back is restricted to the holder) to clear `async_pending`
+      and retrieve the stashed `done_cb`/ctx, then gives it back itself —
+      a balanced take/give on the same task, no cross-task-give hazard.
+
+      **Known, deliberately unclosed gap:** `ILI9488_deinit()` does not wait
+      for `async_pending` to clear before freeing `disp->scratch`. Not
+      reachable today — every call site is an `ILI9488_start()`
+      init-failure cleanup path, before any flush has ever run — but it is
+      a real gap if `ILI9488_deinit()` is ever called at runtime with a
+      flush outstanding. Left as a documented invariant
+      (`ILI9488Class::async_pending`'s comment in `panel_spi.h`) rather than
+      solved, to keep this pass's scope to the flush path itself.
+
+      **DRAM cost: zero bytes.** No new buffer, static or otherwise —
+      `async_pending` (1 byte) and the stashed `async_done_cb`/`async_done_ctx`
+      (two pointers) are new fields on the existing, already-allocated
+      `ILI9488Class` instance (one instance, file-static in `main.c`), not a
+      per-flush or per-chunk allocation. `lvgl_port.c`'s `s_async_flush_ctx`
+      is likewise one static struct (two fields: an `lv_display_t*` and an
+      `int64_t`), reused every flush, never allocated. Nothing here touches
+      the ~1.6 kB DRAM headroom section 10 measures.
+
+      **Host-tested** (`test_esp_spi_owner.c`,
+      `test_async_chunk_accounting_fires_once_after_last_chunk`): builds N=3
+      hand-built async requests against the real `spi_owner_task()`
+      dispatch loop (host-reachable via the ring-buffer queue stub — see
+      that file's own header comment) and proves a "ready" callback,
+      decrementing an outstanding count, fires **exactly once, only after
+      all three chunks' completions have been observed** — not merely
+      "exactly once" (a fire-after-the-first-chunk bug also fires exactly
+      once, just at the wrong time, which is why the check records *which*
+      completion count was current when ready fired, not just whether it
+      fired). Negative-tested for real: mutated the fire condition from
+      "outstanding reaches 0" to "the first completion has been seen",
+      rebuilt, and observed the actual failure —
+      `test_esp_spi_owner.c:788: ready fired only once ALL 3 chunks'
+      completions had already been observed -- i.e. after the LAST chunk,
+      not the first` — then restored the file and rebuilt clean
+      (6134/6134 → 6135/6135 with the new test, both green). This proves the
+      underlying `spi_owner_transfer_async()` primitive supports the
+      "outstanding count, fire once at zero" pattern correctly; it does
+      **not** reach `panel_spi.c`'s actual `async_pending`/
+      `ili9488_blit_async_trampoline()` code, which — like every other
+      `panel_spi.c` change in this plan — is not host-testable at all
+      (ESP-IDF/LVGL-dependent, does not compile for the host). Stated
+      plainly rather than faked: the panel-level wiring is proven by
+      `build_kilnfw` succeeding with the flag both off and on, and by
+      inspection/reasoning above, not by a host test.
+
+      **`build_kilnfw`: both configurations built clean.** Flag OFF
+      (today's checked-in `sdkconfig` default): `kilnfw-build: OK in 29.6s`.
+      Flag ON (`CONFIG_KILNCTL_SPI_ASYNC_FLUSH=y`, forced via a local,
+      reverted `sdkconfig` edit — not committed, `sdkconfig` stays
+      gitignored per usual): full rebuild, `kilnfw-build: OK in 128.0s`, no
+      errors. `sdkconfig` was restored to the flag-off default and rebuilt
+      clean again afterward, so the checked-in default state is unchanged.
+
+      **Not flash-verified** — no board time was available for this pass
+      (an unrelated A/B firing experiment is running on the only bench unit
+      right now) and this is exactly the kind of change 9.6/9.7's own
+      earlier notes and section 13 already flag as needing a bench pass
+      before enabling on a board with elements connected. **What a bench
+      session should measure, in order, nothing energized first:**
+        1. With the flag OFF (today's default), confirm `/api/status`'s
+           `flush_last_us`/`flush_max_us`/`flush_count` still match the
+           synchronous baseline measured 2026-08-31:
+           `last=6932us, max=90637us, count=1152` — this pass changed no
+           code on the flag-off path, so this should be an exact behavioral
+           no-op; any drift here means something outside this change moved,
+           not this change itself.
+        2. Flip the flag on, reflash, and re-read the same three numbers
+           after equivalent UI traffic. **The number to beat is
+           `max=90637us`** — the synchronous worst-case chunked flush. A
+           real win shows as a materially lower `flush_max_us`, or, at
+           minimum, no regression relative to it: with only the LAST chunk
+           deferred (this landing's scoped design, not the full pipelined
+           N-chunks-in-flight design 9.6 originally described), the
+           expected win is the *tail* of a flush, not is not most of it —
+           if `flush_max_us` does not move at all, that is evidence the
+           tail truly is negligible next to the earlier synchronous chunks
+           for this panel's transfer sizes, not evidence of a bug.
+        3. With a display flush deliberately kept in flight (e.g. a
+           full-screen redraw), verify all three still-live MAX31856
+           channels answer correctly — this is new control flow on the
+           exact bus arbitration section 13 flags as the standing async
+           risk, sharing the same owner task and queue.
+        4. Watch for any `ESP_LOGE`/`ESP_LOGW` from
+           `ili9488_reject_if_blitting()`, `ILI9488_blit_begin()`, or
+           `ILI9488_blit_data()` mentioning "async flush's last chunk is
+           still in flight" during normal UI use — a legitimate hit would
+           mean some other draw call is racing the tail of a flush, which
+           should not happen given LVGL's own flush-serialization contract,
+           and would be worth investigating rather than dismissing.
+        5. Only after 1-4 look clean: repeat with
+           `CONFIG_KILNCTL_DISPLAY_ZERO_COPY_FLUSH` also on (ST7796 only,
+           still unreachable on the ILI9488 this board actually runs today)
+           to exercise the both-flags-on path this section reasons is safe.
 - [x] **9.7 ST7796 zero-copy flush — LANDED 2026-09-02, default OFF** behind
       `CONFIG_KILNCTL_DISPLAY_ZERO_COPY_FLUSH`. In `panel_spi.c`'s
       `ILI9488_blit_data()`, when the flag is on AND the active panel

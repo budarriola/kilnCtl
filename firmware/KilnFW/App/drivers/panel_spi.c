@@ -530,6 +530,18 @@ static void ili9488_blit_clear_state(ILI9488Class *disp)
  * loudly, because a stuck blit is otherwise invisible from the PC side. */
 static esp_err_t ili9488_reject_if_blitting(ILI9488Class *disp)
 {
+    /* DISPLAY_ST7796_PLAN.md 9.6: checked first and REFUSED, never
+     * abandoned. disp->blit.active is already false during an outstanding
+     * async chunk (ILI9488_blit_data_async() clears it before handing the
+     * last chunk to the SPI owner), so without this check a draw call
+     * landing in that gap would sail straight through the check below and
+     * start writing disp->scratch (or issuing a new transfer on the same
+     * device) while a DMA may still be reading it. See
+     * ILI9488Class::async_pending's comment in panel_spi.h. */
+    if (disp->async_pending) {
+        ESP_LOGE(TAG, "operation attempted while an async flush's last chunk is still in flight; refusing");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!disp->blit.active) return ESP_OK;
     ESP_LOGE(TAG, "operation attempted with a blit open (%u/%u pixels sent); aborting the blit",
              (unsigned)disp->blit.pixels_done, (unsigned)disp->blit.pixels_total);
@@ -1612,6 +1624,14 @@ esp_err_t ILI9488_blit_begin(ILI9488Class *disp, uint16_t x, uint16_t y, uint16_
     if (!ili9488_ready(disp)) return ESP_ERR_INVALID_STATE;
 
     if (!ili9488_lock(disp)) return ESP_ERR_TIMEOUT;
+    if (disp->async_pending) {
+        /* Same reasoning as ili9488_reject_if_blitting(): a blit already
+         * open is safe to abandon (nothing is mid-transfer), an async
+         * flush's last chunk still in flight is not. */
+        ili9488_unlock(disp);
+        ESP_LOGE(TAG, "BLIT_BEGIN while an async flush's last chunk is still in flight; refusing");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (disp->blit.active) {
         ESP_LOGW(TAG, "BLIT_BEGIN with a blit already open (%u/%u pixels); abandoning the old one",
                  (unsigned)disp->blit.pixels_done, (unsigned)disp->blit.pixels_total);
@@ -1643,6 +1663,15 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
 
     if (!ili9488_lock(disp)) return ESP_ERR_TIMEOUT;
 
+    if (disp->async_pending) {
+        /* disp->blit.active is already false in this window (see
+         * async_pending's comment in panel_spi.h), so the check below would
+         * already catch this with a less specific message -- this one is
+         * just clearer about why. */
+        ili9488_unlock(disp);
+        ESP_LOGE(TAG, "BLIT_DATA while an async flush's last chunk is still in flight; refusing");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!disp->blit.active) {
         ili9488_unlock(disp);
         ESP_LOGE(TAG, "BLIT_DATA with no open window");
@@ -1748,6 +1777,236 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
 
     disp->blit.pixels_done += pixels;
     ili9488_unlock(disp);
+    return ESP_OK;
+}
+
+/* DISPLAY_ST7796_PLAN.md 9.6. Fires from the SPI owner task's own thread
+ * (spi_owner_transfer_async()'s documented contract -- never an ISR), once,
+ * after the one and only chunk ILI9488_blit_data_async() ever dispatches
+ * asynchronously has actually completed on the wire.
+ *
+ * Takes disp->lock itself to clear async_pending and retrieve the stashed
+ * done_cb/ctx. This is legal even though the lock was last taken (and
+ * released) by a different task (whichever called
+ * ILI9488_blit_data_async()): a FreeRTOS mutex may be TAKEN by any task: it
+ * only has to be GIVEN BACK by whoever currently holds it, and here the same
+ * task (the owner task) both takes and gives it back, so there is no
+ * cross-task-give hazard. By the time this runs,
+ * ILI9488_blit_data_async() has already unlocked and returned, so this take
+ * succeeds immediately unless some other caller (the UART BLIT_DATA handler,
+ * or a non-blit draw call) is genuinely mid-operation -- ordinary
+ * contention, not a deadlock.
+ *
+ * Must NOT call ili9488_tx()/ili9488_write_cmd()/spi_owner_transfer[_async]()
+ * or anything else that enqueues a new request on this SAME owner: this runs
+ * ON the owner task's own thread, inside spi_owner_task()'s loop, before it
+ * has gone back to read the next queue entry. Re-entering the owner from
+ * here would need the queue to have a free slot available right now to work
+ * at all, and if it does not, this task would be blocking on itself to
+ * drain its own queue -- that never resolves; SPI_OWNER_TRANSFER_TIMEOUT_MS
+ * later the enqueue call gives up and latches `wedged`, freezing the owner
+ * task for a full second and then permanently taking the whole bus down
+ * (display AND every MAX31856 channel routed through it) for something that
+ * was never actually stuck. This is exactly why ILI9488_blit_data_async()
+ * does not send the trailing NOP from here -- see its own comment. */
+static void ili9488_blit_async_trampoline(void *ctx, esp_err_t result)
+{
+    ILI9488Class *disp = (ILI9488Class *)ctx;
+    spi_owner_async_done_cb_t user_cb;
+    void *user_ctx;
+
+    if (ili9488_lock(disp)) {
+        user_cb = disp->async_done_cb;
+        user_ctx = disp->async_done_ctx;
+        disp->async_done_cb = NULL;
+        disp->async_done_ctx = NULL;
+        disp->async_pending = false;
+        ili9488_unlock(disp);
+    } else {
+        /* ILI9488_LOCK_TIMEOUT_MS (5s) elapsed without the lock -- something
+         * else is wedged far worse than this transfer. Fail safe in the
+         * direction that matters most: still deliver the completion (a
+         * caller waiting on lv_display_flush_ready() must never wedge
+         * forever over this), read the stashed callback without the lock
+         * rather than losing it, but leave async_pending set -- refusing
+         * new blits is the safer failure than silently allowing one while
+         * this diagnosis is still unresolved. */
+        ESP_LOGE(TAG, "async completion could not take the display lock; delivering anyway, "
+                      "leaving async_pending latched");
+        user_cb = disp->async_done_cb;
+        user_ctx = disp->async_done_ctx;
+    }
+
+    if (user_cb) {
+        user_cb(user_ctx, result);
+    }
+}
+
+esp_err_t ILI9488_blit_data_async(ILI9488Class *disp, const uint8_t *data, size_t len,
+                                   spi_owner_async_done_cb_t done_cb, void *cb_ctx)
+{
+    if (!done_cb) return ESP_ERR_INVALID_ARG; /* nothing to signal -- caller bug, not runtime error */
+    if (!ili9488_ready(disp)) {
+        done_cb(cb_ctx, ESP_ERR_INVALID_STATE);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!data && len > 0) {
+        done_cb(cb_ctx, ESP_ERR_INVALID_ARG);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!ili9488_lock(disp)) {
+        done_cb(cb_ctx, ESP_ERR_TIMEOUT);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (disp->async_pending) {
+        ili9488_unlock(disp);
+        ESP_LOGE(TAG, "BLIT_DATA_ASYNC with a previous async flush still in flight");
+        done_cb(cb_ctx, ESP_ERR_INVALID_STATE);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!disp->blit.active) {
+        ili9488_unlock(disp);
+        ESP_LOGE(TAG, "BLIT_DATA_ASYNC with no open window");
+        done_cb(cb_ctx, ESP_ERR_INVALID_STATE);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if ((len & 1u) != 0) {
+        ESP_LOGE(TAG, "BLIT_DATA_ASYNC length %u is odd (split RGB565 pixel); aborting", (unsigned)len);
+        ili9488_blit_clear_state(disp);
+        ili9488_unlock(disp);
+        done_cb(cb_ctx, ESP_ERR_INVALID_ARG);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint32_t pixels = (uint32_t)(len / 2);
+    if (panel_codec_blit_overruns(pixels, disp->blit.pixels_total, disp->blit.pixels_done)) {
+        ESP_LOGE(TAG, "BLIT_DATA_ASYNC overruns the window: %u more pixels, %u remaining; aborting",
+                 (unsigned)pixels,
+                 (unsigned)(disp->blit.pixels_total - disp->blit.pixels_done));
+        ili9488_blit_clear_state(disp);
+        ili9488_unlock(disp);
+        done_cb(cb_ctx, ESP_ERR_INVALID_SIZE);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    size_t chunk_pixels = ili9488_chunk_pixels(disp);
+    if (chunk_pixels == 0) {
+        ESP_LOGE(TAG, "chunk_bytes (%u) is smaller than one pixel; aborting the blit",
+                 (unsigned)disp->chunk_bytes);
+        ili9488_blit_clear_state(disp);
+        ili9488_unlock(disp);
+        done_cb(cb_ctx, ESP_ERR_INVALID_STATE);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (pixels == 0) {
+        /* Degenerate empty flush -- nothing to send, nothing to ever go
+         * async. Close the blit exactly like ILI9488_blit_end() (minus the
+         * NOP -- see this function's declaration comment for why that is
+         * safe) and deliver done_cb synchronously right here. */
+        ili9488_blit_clear_state(disp);
+        ili9488_unlock(disp);
+        done_cb(cb_ctx, ESP_OK);
+        return ESP_OK;
+    }
+
+    uint8_t bpp = disp->panel->bytes_per_pixel;
+    uint32_t sent = 0;
+    while (sent < pixels) {
+        size_t n = (size_t)(pixels - sent);
+        if (n > chunk_pixels) n = chunk_pixels;
+        bool last_chunk = (sent + n >= pixels);
+
+        const uint8_t *tx_ptr;
+        size_t tx_len = n * bpp;
+        if (bpp == 2 && KILNCTL_DISPLAY_ZERO_COPY_FLUSH) {
+            /* DISPLAY_ST7796_PLAN.md 9.7 combined with 9.6: `data` is DMA'd
+             * straight from the caller's buffer for every chunk, including
+             * the async last one. This is exactly why deferring done_cb
+             * until real completion (not merely "queued") matters here: for
+             * this chunk, `data` -- lvgl_port.c's LVGL draw buffer -- IS the
+             * DMA source, not a copy of it, and LVGL will not reuse/repaint
+             * that buffer until lv_display_flush_ready() has been called.
+             * Since this driver defers that call (via done_cb) until the
+             * SPI owner's completion callback actually fires,
+             * both-flags-on is SAFE: the buffer's lifetime is guaranteed to
+             * outlive the transfer by construction, not by luck. */
+            tx_ptr = &data[sent * 2];
+        } else if (bpp == 2) {
+            memcpy(disp->scratch, &data[sent * 2], n * 2);
+            tx_ptr = disp->scratch;
+        } else {
+            for (size_t i = 0; i < n; ++i) {
+                const uint8_t *src = &data[(sent + i) * 2];
+                uint16_t color = (uint16_t)(src[0] | ((uint16_t)src[1] << 8));  /* u16 LE on the wire */
+                panel_codec_rgb565_to_rgb666(color, &disp->scratch[i * 3]);
+            }
+            tx_ptr = disp->scratch;
+        }
+
+        if (!last_chunk) {
+            /* Every chunk before the last stays fully synchronous -- this
+             * is what makes the copy-path branches above safe: the memcpy
+             * for chunk N+1 cannot start (next loop iteration) until this
+             * ili9488_tx() has already returned, i.e. until chunk N's own
+             * transfer has completed. Only the FINAL chunk is ever
+             * outstanding when this function returns. */
+            esp_err_t err = ili9488_tx(disp, tx_ptr, tx_len);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "BLIT_DATA_ASYNC transfer failed: %s; aborting", esp_err_to_name(err));
+                ili9488_blit_clear_state(disp);
+                ili9488_unlock(disp);
+                done_cb(cb_ctx, err);
+                return err;
+            }
+            sent += n;
+            continue;
+        }
+
+        /* Last chunk: close the blit's logical state now, under the lock --
+         * exactly what ILI9488_blit_end() does, minus the NOP (see this
+         * function's declaration comment) -- and hand the transfer itself
+         * to the SPI owner asynchronously. async_pending is the guard that
+         * keeps a second caller off disp->scratch/the bus until this
+         * transfer's completion callback clears it. */
+        disp->blit.pixels_done += pixels;
+        ili9488_blit_clear_state(disp);
+        disp->async_done_cb = done_cb;
+        disp->async_done_ctx = cb_ctx;
+        disp->async_pending = true;
+
+        esp_err_t err = spi_owner_transfer_async(disp->owner, disp->dev, tx_ptr, tx_len, disp->cs_gpio,
+                                                  ili9488_blit_async_trampoline, disp);
+        if (err != ESP_OK) {
+            /* CONFIG_KILNCTL_SPI_ASYNC_FLUSH off (ESP_ERR_NOT_SUPPORTED) or
+             * a genuine enqueue failure -- either way nothing was queued and
+             * the trampoline will never run, so undo the async bookkeeping,
+             * send this last chunk synchronously right here instead of
+             * leaving it half-sent, and deliver done_cb ourselves. */
+            disp->async_pending = false;
+            disp->async_done_cb = NULL;
+            disp->async_done_ctx = NULL;
+            esp_err_t sync_err = ili9488_tx(disp, tx_ptr, tx_len);
+            ili9488_unlock(disp);
+            if (sync_err != ESP_OK) {
+                ESP_LOGE(TAG, "BLIT_DATA_ASYNC fallback transfer failed: %s", esp_err_to_name(sync_err));
+            }
+            done_cb(cb_ctx, sync_err);
+            return sync_err;
+        }
+
+        ili9488_unlock(disp);
+        return ESP_OK; /* done_cb fires later, from the SPI owner task */
+    }
+
+    /* Unreachable: pixels > 0 was established above, and every loop
+     * iteration either continues (not the last chunk) or returns (the last
+     * chunk, either branch). Kept only so the function has a defined return
+     * if that invariant is ever violated by a future edit. */
+    ili9488_unlock(disp);
+    done_cb(cb_ctx, ESP_OK);
     return ESP_OK;
 }
 

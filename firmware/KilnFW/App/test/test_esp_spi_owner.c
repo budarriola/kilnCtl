@@ -693,6 +693,103 @@ static void test_owner_task_never_fires_async_callback_on_sync_request(void)
     g_stub_queue_ring_enabled = 0;
 }
 
+// DISPLAY_ST7796_PLAN.md 9.6, wiring the async primitive into a real flush
+// (panel_spi.c's ILI9488_blit_data_async(), lvgl_port.c's
+// ili9488_flush_async_done()). panel_spi.c itself is not host-testable
+// (ESP-IDF dependent, same as every other panel_spi.c change -- see that
+// file's own top comment and this project's build), so this proves the
+// pattern one level down, at the primitive spi_owner_transfer_async()
+// actually gives a caller: an outstanding-chunk COUNT, decremented in each
+// chunk's own completion callback, with "the flush is done" (here: a
+// test-side counter standing in for lv_display_flush_ready()) fired exactly
+// once, only when the count reaches zero -- i.e. only after the LAST chunk,
+// never the first.
+//
+// Shipped panel_spi.c only ever has ONE async chunk in flight per flush
+// (every chunk before the last stays fully synchronous -- see
+// ILI9488_blit_data_async()'s own comment for why disp->scratch is not safe
+// to pipeline), so this test's N=3 case is deliberately more general than
+// what ships today: it proves the counting itself is sound, independent of
+// panel_spi.c's specific choice to only ever use it with N=1.
+static int s_chunk_outstanding;
+static int s_chunk_ready_calls;
+// Total completion callbacks observed so far, incremented unconditionally on
+// every call -- separate from s_chunk_outstanding so "ready fired, but too
+// early" is actually observable. Without this, a mutant that fires ready on
+// the FIRST chunk instead of the LAST still ends with s_chunk_outstanding==0
+// and s_chunk_ready_calls==1 (ready fires exactly once either way -- only
+// WHEN it fires differs), so a check that only counts calls at the end is
+// vacuous against exactly the bug this test exists to catch.
+static int s_chunk_calls_seen;
+// Snapshot of s_chunk_calls_seen at the moment ready fired -- must equal
+// kChunks (every chunk already completed) for a correct "after the LAST
+// chunk" implementation.
+static int s_chunk_calls_seen_at_ready;
+static void test_chunk_done_cb(void *ctx, esp_err_t result)
+{
+    (void)ctx;
+    (void)result;
+    s_chunk_calls_seen++;
+    s_chunk_outstanding--;
+    if (s_chunk_outstanding == 0) {
+        s_chunk_ready_calls++;
+        s_chunk_calls_seen_at_ready = s_chunk_calls_seen;
+    }
+}
+
+static void test_async_chunk_accounting_fires_once_after_last_chunk(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 8 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false,
+                                         /*async_flush=*/true);
+    TEST_CHECK(init_err == ESP_OK, "setup: owner initialized with async_flush=true");
+
+    const int kChunks = 3;
+    uint8_t tx[4] = { 1, 2, 3, 4 };
+    s_chunk_outstanding = kChunks;
+    s_chunk_ready_calls = 0;
+    s_chunk_calls_seen = 0;
+    s_chunk_calls_seen_at_ready = -1;
+
+    for (int i = 0; i < kChunks; i++) {
+        int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+        TEST_CHECK(idx >= 0, "setup: a slot for this chunk's request");
+
+        spi_owner_request_t req;
+        memset(&req, 0, sizeof(req));
+        req.device = (spi_device_handle_t)0x1;
+        req.tx_buffer = tx;
+        req.tx_length = sizeof(tx);
+        req.cs_pin = 5;
+        req.slot = idx;
+        req.async = true;
+        req.async_cb = test_chunk_done_cb;
+        TEST_CHECK(xQueueSend(owner.request_queue, &req, 0) == pdTRUE,
+                   "setup: chunk request accepted by the ring");
+    }
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    spi_owner_task(&owner);
+
+    TEST_CHECK(s_chunk_outstanding == 0, "every chunk's completion callback ran");
+    TEST_CHECK(s_chunk_ready_calls == 1, "the flush-ready equivalent fired exactly once");
+    TEST_CHECK(s_chunk_calls_seen_at_ready == kChunks,
+               "ready fired only once ALL 3 chunks' completions had already been observed -- i.e. "
+               "after the LAST chunk, not the first (a fire-after-first-chunk mutant would still "
+               "fire exactly once, just with s_chunk_calls_seen_at_ready == 1, not 3)");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
 void run_test_esp_spi_owner(void)
 {
     TEST_SECTION("esp_spi_owner");
@@ -709,4 +806,5 @@ void run_test_esp_spi_owner(void)
     test_async_transfer_refused_when_flag_off();
     test_owner_task_fires_async_callback();
     test_owner_task_never_fires_async_callback_on_sync_request();
+    test_async_chunk_accounting_fires_once_after_last_chunk();
 }

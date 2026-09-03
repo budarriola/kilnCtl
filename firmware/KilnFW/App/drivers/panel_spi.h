@@ -142,6 +142,46 @@ typedef struct {
 
     ILI9488BlitState blit;
 
+    /* DISPLAY_ST7796_PLAN.md 9.6, wiring spi_owner_transfer_async() into a
+     * real flush path (ILI9488_blit_data_async() below). Set (under lock)
+     * the moment the LAST chunk of an async-dispatched blit has been handed
+     * to the SPI owner, and cleared (also under lock, but by the owner
+     * task's own thread -- see ili9488_blit_async_trampoline()'s comment in
+     * the .c file for why that is safe) once that transfer's completion
+     * callback has actually run. This driver only ever has ONE async
+     * transfer outstanding per instance at a time (ILI9488_blit_data_async()
+     * sends every chunk before the last synchronously, exactly like
+     * ILI9488_blit_data()), so a single bool is the whole "how many chunks
+     * are still in flight" state -- no counter needed.
+     *
+     * Guards disp->scratch (the copy-path chunk staging buffer) and the bus
+     * itself against a second caller starting a NEW transfer while this one
+     * might still be reading its source: ili9488_reject_if_blitting() and
+     * ILI9488_blit_begin() both refuse outright (do not "abandon", the way
+     * they do for a merely-open blit window) while this is true, because
+     * abandoning would let the caller immediately write into scratch or
+     * issue a new SPI transaction on the same device out from under a live
+     * DMA. This is the guard against the UART BLIT_DATA handler (a second,
+     * always-synchronous caller of the shared blit machinery) racing an
+     * LVGL async flush; LVGL's own next flush cannot race it because LVGL
+     * will not call the flush callback again until lv_display_flush_ready()
+     * has been called, which this driver defers until exactly this flag
+     * clears (see lvgl_port.c). NOT re-checked by ILI9488_deinit(): nothing
+     * in this tree calls it while a flush could be outstanding (only
+     * ILI9488_start()'s own init-failure cleanup paths do, before any flush
+     * has ever run), so that gap is unreached today rather than closed. */
+    volatile bool async_pending;
+
+    /* Stashed across the async gap above so ili9488_blit_async_trampoline()
+     * (owner task thread) knows what to call once the outstanding transfer
+     * finishes. Valid only while async_pending is true; written only by
+     * ILI9488_blit_data_async() (under lock) and consumed/cleared only by
+     * the trampoline. A plain struct field, not a heap allocation -- there
+     * is at most one outstanding async flush per instance, so nothing needs
+     * to be sized per-flush. */
+    spi_owner_async_done_cb_t async_done_cb;
+    void *async_done_ctx;
+
     /* The descriptor this instance was started with (ILI9488_get_panel_desc()
      * or ST7796_get_panel_desc(), chosen in ILI9488_start() by
      * KILNCTL_DISPLAY_PANEL). Borrowed -- the descriptors are file-static
@@ -273,6 +313,61 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
 esp_err_t ILI9488_blit_end(ILI9488Class *disp);
 esp_err_t ILI9488_blit_abort(ILI9488Class *disp);  /* drop an open window without error */
 bool ILI9488_blit_active(ILI9488Class *disp);
+
+/* DISPLAY_ST7796_PLAN.md 9.6. Identical wire contract to
+ * ILI9488_blit_begin() + ILI9488_blit_data() + ILI9488_blit_end() for a
+ * single-shot flush (same window/overrun checks, same chunking, same RGB565
+ * decode), with two differences:
+ *
+ *   1. The LAST chunk is submitted through spi_owner_transfer_async()
+ *      instead of blocking -- every chunk before it stays fully
+ *      synchronous, which is what keeps disp->scratch (single-buffered)
+ *      safe: the memcpy for chunk N+1 never starts until chunk N's own
+ *      synchronous transfer has already completed, so only the FINAL chunk
+ *      is ever outstanding when this function returns.
+ *   2. The trailing NOP ILI9488_blit_end() normally sends to close the
+ *      RAMWR stream is deliberately NOT sent here. Sending it would require
+ *      either the calling task to block again (defeating the point) or the
+ *      async completion callback to issue a second SPI transaction from the
+ *      SPI owner task's own thread -- which would re-enter that same
+ *      owner's queue from inside its own processing loop, a self-enqueue
+ *      that either gets lucky on queue space or freezes the owner task for
+ *      SPI_OWNER_TRANSFER_TIMEOUT_MS and permanently wedges it (see
+ *      esp_spi_owner.c's timeout comment). It is safe to skip: the panel
+ *      spec says ANY new command terminates a live RAMWR stream, and the
+ *      very next real operation this driver could possibly issue -- another
+ *      ILI9488_blit_begin() (LVGL's next flush, or the UART path once it is
+ *      no longer refused by async_pending) -- always starts by sending a
+ *      fresh CASET/PASET/RAMWR, which terminates any leftover RAMWR state
+ *      on its own. The NOP's only other purpose (per ILI9488_blit_end()'s
+ *      own comment) was defending against some OTHER caller sending raw
+ *      data while a window was left open -- async_pending is exactly that
+ *      guard for the gap this function leaves open, so the NOP is genuinely
+ *      redundant here, not just skipped for convenience.
+ *
+ * `done_cb(cb_ctx, result)` is called EXACTLY ONCE for every call that
+ * returns with `done_cb` non-NULL, from whichever context actually finishes
+ * the flush: synchronously, on the CALLING task, before this function
+ * returns, for every validation/degenerate-flush/early-transfer-failure
+ * case (including CONFIG_KILNCTL_SPI_ASYNC_FLUSH being off, in which
+ * spi_owner_transfer_async() itself refuses and this function falls back to
+ * sending the last chunk synchronously right here) -- or asynchronously,
+ * from the SPI owner task's own thread (never an ISR), once the last
+ * chunk's transfer actually completes, in the normal case. Callers (only
+ * lvgl_port.c today) must be ready for either and must not assume the
+ * callback fires only after this function has returned. Passing `done_cb ==
+ * NULL` is a caller bug: the function still runs the same operation but has
+ * nothing to signal completion to, and returns ESP_ERR_INVALID_ARG
+ * immediately without touching the panel.
+ *
+ * `data` must remain valid (unwritten by the caller) until `done_cb` fires
+ * -- for the CONFIG_KILNCTL_DISPLAY_ZERO_COPY_FLUSH path this is the source
+ * of every chunk's DMA, not just a staging copy, which is exactly why
+ * deferring done_cb (and therefore lv_display_flush_ready()) until actual
+ * completion is required, not optional, when both Kconfig options are on
+ * together -- see this function's .c-file comment for the full reasoning. */
+esp_err_t ILI9488_blit_data_async(ILI9488Class *disp, const uint8_t *data, size_t len,
+                                   spi_owner_async_done_cb_t done_cb, void *cb_ctx);
 
 /* RDDID (04h): 24 bits of manufacturer / version / driver ID. Clocked on the
  * slow read device (see ILI9488_READ_CLOCK_HZ). Returns ESP_ERR_NOT_FOUND if

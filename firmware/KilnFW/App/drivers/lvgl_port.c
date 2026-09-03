@@ -147,6 +147,48 @@ void lvgl_port_get_flush_stats(uint32_t *last_us, uint32_t *max_us, uint32_t *co
     if (count) *count = s_flush_count;
 }
 
+#if KILNCTL_SPI_ASYNC_FLUSH
+/* DISPLAY_ST7796_PLAN.md 9.6, wired in. A single static instance, not a
+ * per-flush allocation: panel_spi.c's ILI9488_blit_data_async() guarantees
+ * at most one async flush outstanding at a time (LVGL will not call this
+ * flush callback again until lv_display_flush_ready() has fired for the
+ * current one, and that only happens from within
+ * ili9488_flush_async_done() below), so one struct is all this ever needs
+ * to carry across the gap between "chunk handed to the SPI owner" and "its
+ * completion callback runs". */
+typedef struct {
+    lv_display_t *lv_disp;
+    int64_t flush_start_us;
+} async_flush_ctx_t;
+static async_flush_ctx_t s_async_flush_ctx;
+
+/* Fires from the SPI owner task's own thread (never an ISR -- see
+ * spi_owner_async_done_cb_t's contract in esp_spi_owner.h and
+ * ili9488_blit_async_trampoline()'s comment in panel_spi.c), exactly once,
+ * after the last chunk of the flush that queued it has actually completed
+ * on the wire -- never after only the first chunk, and never twice. Finishes
+ * the same 9.1 stats bookkeeping the synchronous path below does, then
+ * calls lv_display_flush_ready(), which LVGL's own threading doc names
+ * (alongside lv_tick_inc()) as safe to call from any context. */
+static void ili9488_flush_async_done(void *ctx, esp_err_t result)
+{
+    async_flush_ctx_t *actx = (async_flush_ctx_t *)ctx;
+
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "async flush failed: %s", esp_err_to_name(result));
+    }
+
+    uint32_t flush_us = (uint32_t)(esp_timer_get_time() - actx->flush_start_us);
+    s_last_flush_us = flush_us;
+    if (flush_us > s_max_flush_us) {
+        s_max_flush_us = flush_us;
+    }
+    s_flush_count++;
+
+    lv_display_flush_ready(actx->lv_disp);
+}
+#endif /* KILNCTL_SPI_ASYNC_FLUSH */
+
 static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     lvgl_port_t *p = (lvgl_port_t *)lv_display_get_user_data(disp);
@@ -198,6 +240,49 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
          * single-writer stat. */
         int64_t flush_start_us = esp_timer_get_time();
 
+#if KILNCTL_SPI_ASYNC_FLUSH
+        /* DISPLAY_ST7796_PLAN.md 9.6. ILI9488_blit_begin() stays synchronous
+         * (it is a handful of tiny command transfers, not the bulk of flush
+         * time -- see 9.1's own measurement rationale); only the pixel
+         * payload's LAST chunk, dispatched inside
+         * ILI9488_blit_data_async(), is async. lv_display_flush_ready() is
+         * NOT called at the bottom of this function in this branch -- it is
+         * called exactly once, from ili9488_flush_async_done(), either
+         * synchronously (right now, from this task, if blit_data_async hits
+         * a validation/early-transfer error) or later from the SPI owner
+         * task once the last chunk truly completes. Either way this
+         * function must return without touching lv_display_flush_ready()
+         * itself, or LVGL sees two calls for one flush. */
+        esp_err_t err = ILI9488_blit_begin(p->display, x, y, w, h);
+        if (err == ESP_OK) {
+            size_t bytes_per_pixel = lv_color_format_get_size(lv_display_get_color_format(disp));
+            s_async_flush_ctx.lv_disp = disp;
+            s_async_flush_ctx.flush_start_us = flush_start_us;
+            err = ILI9488_blit_data_async(p->display, px_map, (size_t)w * (size_t)h * bytes_per_pixel,
+                                           ili9488_flush_async_done, &s_async_flush_ctx);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "flush [%u,%u %ux%u] failed: %s", x, y, w, h, esp_err_to_name(err));
+            }
+            /* ili9488_flush_async_done() -- called either just now,
+             * synchronously, or later from the owner task -- owns both the
+             * stats bookkeeping and lv_display_flush_ready() from here. */
+            return;
+        }
+
+        /* ILI9488_blit_begin() itself failed: ILI9488_blit_data_async() was
+         * never called, so nothing will invoke ili9488_flush_async_done()
+         * for this flush -- finish the bookkeeping and flush_ready here,
+         * exactly as the synchronous path below does on any failure. */
+        ESP_LOGW(TAG, "flush [%u,%u %ux%u] failed: %s", x, y, w, h, esp_err_to_name(err));
+        uint32_t flush_us = (uint32_t)(esp_timer_get_time() - flush_start_us);
+        s_last_flush_us = flush_us;
+        if (flush_us > s_max_flush_us) {
+            s_max_flush_us = flush_us;
+        }
+        s_flush_count++;
+        lv_display_flush_ready(disp);
+        return;
+#else
         esp_err_t err = ILI9488_blit_begin(p->display, x, y, w, h);
         if (err == ESP_OK) {
             /* Bytes/pixel from LVGL's own color format, not a hard-coded 2 --
@@ -222,6 +307,7 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
             s_max_flush_us = flush_us;
         }
         s_flush_count++;
+#endif /* KILNCTL_SPI_ASYNC_FLUSH */
     }
 
     lv_display_flush_ready(disp);
