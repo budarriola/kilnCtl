@@ -1,9 +1,11 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-02 (reconciled against
+> **Status:** planning · **Last reviewed:** 2026-09-03 (reconciled against
 > the five KilnFW plan docs; M11 closed; M12a opened
 > and closed the same day; M12/M13 in progress; `DISPLAY_ST7796_PLAN.md`
-> Phases 1/2/3/5 landed, Phases 4/6 in progress)
+> Phases 1/2/3/5 landed, Phases 4/6 in progress; ramp assist landed end to end
+> default OFF; board reflashed 2026-09-03 07:36:20 and a coupling-matrix A/B
+> is running on it now)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -287,6 +289,57 @@ an autotune result over the UART bridge re-entered the flash worker and hung
 it permanently, taking down every UART bridge, `safety_cfg_store`'s deferred
 NVS flush, and `adaptive_tune`'s persistence with it. All adaptive layers stay
 per-zone opt-in, default OFF.
+
+**Closed 2026-08-31/09-03, no longer open — ramp assist, landed end to end**
+(detail owned by `PID_EXPANSION_PLAN.md` §7, not duplicated here): a pyrometric
+cone table (`cone_table.c`/`.h`, Orton 022-14 incl. half-cones, Arrhenius
+heat-work weighting), sustained-lag detection and auto-stretch in the
+executor, and a dwell heat-work credit that shortens the following dwell when
+it was earned lagging — the SPEND is gated on `ramp_assist_enabled` so
+disabled behaviour is bit-identical to before this landed (`profile_executor_
+ramp_assist.c`'s accrual/report side is unconditional; only the spend checks
+the flag). Web banner, event log, and LCD lag notice all wired to the same
+richer sustained-lag fields. Control surface (`GET`/`POST /api/ramp_assist`,
+diagnostics-page toggle, persisted kiln-wide) is done and **defaults OFF** —
+it stays off until a real cone-temperature firing validates it (see GATED,
+below). A same-day defect sweep found and fixed a duplicated band-width
+formula, a band-cliff bug present in `cone_table.c` itself (not just its
+caller), and a dwell-credit crash, plus ten wrong cone temperatures in the
+Orton table (mirror test added so a future table edit can't repeat it).
+
+**Also closed in the same window, no longer open:**
+- Relay-autotune thermal guards 1/2 now use an amplitude discriminator
+  (`relay_min_swing_c`) in place of a directional test that could never fire
+  mid-limit-cycle — `df3b31b`.
+- A coupled-solve `use_measured_diag_k_dc` flag shipped, **default OFF**.
+- Measurement tooling: `noise_floor.py` gained a start-temperature covariate
+  and cooldown-sidecar refusal; `pid_ab_compare` now gates on a start-temp
+  confound instead of ignoring it.
+- `run_queue.py` hardening: capture opens before the start POST, a real
+  wait-until-actually-finished replaces the old "first idle sample = done"
+  logic (`0a0ccd7`; the once-proposed `docs/patches/run_queue_idle_stop_fix.*`
+  patch was superseded by this different fix and has been deleted), campaigns
+  are resumable via a durable state file, a clobber is refused rather than
+  silently overwritten, and a capability preflight fails a stale-firmware
+  preset before the campaign starts rather than mid-run.
+- Web UI: firing-flow profile feasibility warnings, a live flash partition
+  table on the diagnostics page, a new-profile segment preview graph, the
+  duty axis in percent with a rotated label, a falling-behind-schedule
+  banner, and RGA/status cells that no longer rely on colour alone (plus an
+  extended colour-only checker guard script).
+- `PID_EXPANSION_PLAN.md`'s fuzzy-layer hardware-run blocker (a
+  `zones_http_client` field-mapping bug) is resolved (`b1ea749d`) — the run
+  itself still has not happened, see GATED below.
+
+**What is currently GATED, and on what** (the short answer for planning):
+
+| Item | Gated on | Where |
+|---|---|---|
+| DRAM/PSRAM allocator-threshold work | A full soak (cold firing through cooldown) plus a Pico OTA relay-path measurement that has never been taken | `DRAM_PSRAM_PLAN.md` §5/§6/§9 |
+| Second LCD panel (ST7796/MSP4031) | The physical panel, and its pre-power STOP-block 5V I2C hazard check before the module ever touches J2 | `DISPLAY_ST7796_PLAN.md` §0/§4 |
+| Web UI palette/theme | Four open owner decisions: the `--fault-color`/`--bad` merge, whether to adopt `--neutral`, the section 7 palette, and LCD parity with the web tokens | `WEB_UI_RESPONSIVE_PLAN.md` |
+| Ramp assist default (OFF → ON) | A real firing at cone temperatures — everything measured so far is bench-range (0–80 °C), well below where the cone table's heat-work weighting matters | `PID_EXPANSION_PLAN.md` §7 |
+| Fuzzy-PID layer's first above-zero hardware run | Nothing named now — its last blocker (a field-mapping bug) is fixed and the run is available; it just hasn't been run yet | `PID_EXPANSION_PLAN.md` §3.6 |
 
 **What is done and should not be reopened:** the link itself, the wire
 contract and its two independent version numbers, the PC-link acknowledgement
