@@ -379,7 +379,16 @@ typedef struct {
      * accrual line leaves this one untouched, so the two diverge by
      * exactly the size of the regression -- see test_dwell_credit_audit_
      * tracks_real_accrual() (and its adversarial negative test) in
-     * test_profile_executor_prestart.c. Reset alongside dwell_credit_s. */
+     * test_profile_executor_prestart.c. Reset alongside dwell_credit_s.
+     *
+     * SCOPE (do not oversell this): it detects an ACCRUAL/SPEND
+     * IMPLEMENTATION SLIP between the two `+=` statements ONLY -- both
+     * share the same weight function, the same band, the same target and
+     * the same accrual gate, so it is blind to any error common to both
+     * (wrong Ea, wrong band width, wrong weight function). See the SCOPE
+     * comment on the `+=` in ramp_assist_dwell_credit_tick()
+     * (profile_executor_ramp_assist.c) for the two mutations that proved
+     * this on the ramp_assist.py original this ports. */
     float    dwell_credit_audit_s;
 } zone_runtime_t;
 

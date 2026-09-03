@@ -33,6 +33,38 @@ void run_test_cone_table(void)
         TEST_CHECK(st == CONE_TABLE_ERR_INVALID_INPUT, "unknown cone label -> INVALID_INPUT");
     }
 
+    /* The two half-cones Orton's self-supporting chart also publishes
+     * (05.5 and 5.5, labelled "05HALF"/"5HALF") -- previously missing from
+     * this table, which doubled the credit band at the two most common
+     * stoneware targets (cone 6 and cone 05). Pin their presence, their
+     * table position between the whole cones either side, and the overall
+     * count. */
+    {
+        float t = 0.0f;
+        cone_table_status_t st = cone_table_temp_c_for_cone("05HALF", &t);
+        TEST_CHECK(st == CONE_TABLE_OK, "cone '05HALF' lookup -> OK");
+        TEST_CHECK_NEAR(t, 1015.0f, 1e-3, "cone '05HALF' -> 1015.0 C");
+
+        st = cone_table_temp_c_for_cone("5HALF", &t);
+        TEST_CHECK(st == CONE_TABLE_OK, "cone '5HALF' lookup -> OK");
+        TEST_CHECK_NEAR(t, 1203.0f, 1e-3, "cone '5HALF' -> 1203.0 C");
+
+        TEST_CHECK(cone_table_count() == 38, "cone_table_count() == 38 (36 whole cones + 2 half-cones)");
+
+        /* 05HALF sits strictly between cone 06 (997.8) and cone 05
+         * (1031.1); 5HALF sits strictly between cone 5 (1186.1) and cone 6
+         * (1222.2) -- prove ordering, not just presence. */
+        float t_06, t_05half, t_05, t_5, t_5half, t_6;
+        cone_table_temp_c_for_cone("06", &t_06);
+        cone_table_temp_c_for_cone("05HALF", &t_05half);
+        cone_table_temp_c_for_cone("05", &t_05);
+        cone_table_temp_c_for_cone("5", &t_5);
+        cone_table_temp_c_for_cone("5HALF", &t_5half);
+        cone_table_temp_c_for_cone("6", &t_6);
+        TEST_CHECK(t_06 < t_05half && t_05half < t_05, "05HALF sits between cones 06 and 05");
+        TEST_CHECK(t_5 < t_5half && t_5half < t_6, "5HALF sits between cones 5 and 6");
+    }
+
     /* Non-uniform band width: the low-temperature end of the table is
      * packed much tighter than the high-temperature end, so the
      * half-cone-step band under a low cone must be narrower than under a
@@ -45,11 +77,15 @@ void run_test_cone_table(void)
         TEST_CHECK(st == CONE_TABLE_OK, "band bottom under cone 021 -> OK");
         float width_low = 600.0f - band_low_c;
 
-        /* cone 6 (1222.2) sits far from cone 5 (1186.1) -- 36.1 C apart. */
+        /* cone 14 (1365.0), top of the table, sits far from cone 13
+         * (1331.1) -- 33.9 C apart. (Cone 6 used to be the example here,
+         * but with the 5.5/05.5 half-cones now in the table cone 6 is
+         * bracketed by cone 5.5 (1203.0), only 19.2 C away -- no longer a
+         * "wide gap" example.) */
         float band_high_c;
-        st = cone_table_band_bottom_c(1222.2f, &band_high_c);
-        TEST_CHECK(st == CONE_TABLE_OK, "band bottom under cone 6 -> OK");
-        float width_high = 1222.2f - band_high_c;
+        st = cone_table_band_bottom_c(1365.0f, &band_high_c);
+        TEST_CHECK(st == CONE_TABLE_OK, "band bottom under cone 14 -> OK");
+        float width_high = 1365.0f - band_high_c;
 
         TEST_CHECK(fabsf(width_low - width_high) > 5.0f,
                    "band width differs meaningfully between a tightly-spaced low cone and a widely-spaced high cone");
@@ -62,12 +98,15 @@ void run_test_cone_table(void)
      * cone -- that was DEFECT 2 (see cone_table.h's comment on
      * cone_table_band_bottom_c()). */
     {
-        /* Between cone 06 (997.8) and cone 05 (1031.1); pick 1010.0. */
+        /* Between cone 06 (997.8) and cone 05HALF (1015.0); pick 1010.0.
+         * (Before the half-cones were added, 1010.0 was bracketed by cones
+         * 06 and 05 (1031.1) directly -- 05HALF now sits in between and
+         * narrows the bracket.) */
         float band_c;
         cone_table_status_t st = cone_table_band_bottom_c(1010.0f, &band_c);
         TEST_CHECK(st == CONE_TABLE_OK, "band bottom for target between cones -> OK");
-        float expected = 1010.0f - (1031.1f - 997.8f) / 2.0f;
-        TEST_CHECK_NEAR(band_c, expected, 1e-3, "between-cones band bottom == target minus half the LOCAL spacing between cones 06 and 05");
+        float expected = 1010.0f - (1015.0f - 997.8f) / 2.0f;
+        TEST_CHECK_NEAR(band_c, expected, 1e-3, "between-cones band bottom == target minus half the LOCAL spacing between cones 06 and 05HALF");
     }
 
     /* DEFECT 2 regression: band width must not collapse for a target a
@@ -76,7 +115,10 @@ void run_test_cone_table(void)
      * hundredth of a degree above cone 6's 1222.2 -- produced a ~0.005 C
      * band instead of the ~8.35 C the surrounding spacing (cone 6->cone 7
      * is 1222.2->1238.9) implies. Pin the corrected, non-cliff widths at
-     * three targets straddling cone 6. */
+     * three targets straddling cone 6. (The "just below" width used to be
+     * 18.05 C, half the cone 5->cone 6 spacing, before the 5.5 half-cone
+     * was added between them -- it is now bracketed by 5.5 (1203.0) and 6
+     * (1222.2), giving 9.60 C.) */
     {
         float band_below_c, band_just_above_c, band_further_above_c;
         cone_table_status_t st;
@@ -93,7 +135,7 @@ void run_test_cone_table(void)
         TEST_CHECK(st == CONE_TABLE_OK, "band bottom further above cone 6 -> OK");
         float width_further_above = 1223.00f - band_further_above_c;
 
-        TEST_CHECK_NEAR(width_below, 18.05f, 1e-2, "band width just below cone 6 == half the 5->6 spacing (18.05 C)");
+        TEST_CHECK_NEAR(width_below, 9.60f, 1e-2, "band width just below cone 6 == half the 5.5->6 spacing (9.60 C)");
         TEST_CHECK_NEAR(width_just_above, 8.35f, 1e-2, "band width just above cone 6 == half the 6->7 spacing (8.35 C), not a ~0.005 C cliff");
         TEST_CHECK_NEAR(width_further_above, 8.35f, 1e-2, "band width further above cone 6 == half the 6->7 spacing (8.35 C)");
         TEST_CHECK(width_just_above > 1.0f, "band width just above a tabulated cone is not collapsed to near-zero (the DEFECT 2 symptom)");

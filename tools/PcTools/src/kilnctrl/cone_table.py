@@ -45,22 +45,24 @@ ABS_ZERO_C = -273.15
 
 # Orton self-supporting cone equivalents at 108 F/hr (60 C/hr), converted to
 # Celsius -- verbatim transcription of cone_table.c's s_cones[] (cone 022
-# .. cone 14, CONE_TABLE_COUNT == 36). Spacing is intentionally non-uniform;
-# do not smooth or re-round these.
+# .. cone 14 plus the two half-cones 05.5 and 5.5, labelled "05HALF" and
+# "5HALF" to match the C table, CONE_TABLE_COUNT == 38). Spacing is
+# intentionally non-uniform; do not smooth or re-round these.
 CONE_TABLE: List[Tuple[str, float]] = [
     ("022", 586.1), ("021", 600.0), ("020", 626.1), ("019", 677.8),
     ("018", 715.0), ("017", 737.8), ("016", 772.2), ("015", 791.1),
     ("014", 807.2), ("013", 837.2), ("012", 861.1), ("011", 875.0),
     ("010", 902.8), ("09", 920.0), ("08", 942.2), ("07", 976.1),
-    ("06", 997.8), ("05", 1031.1), ("04", 1062.8), ("03", 1086.1),
-    ("02", 1102.2), ("01", 1118.9), ("1", 1137.2), ("2", 1142.2),
-    ("3", 1152.2), ("4", 1162.2), ("5", 1186.1), ("6", 1222.2),
-    ("7", 1238.9), ("8", 1248.9), ("9", 1260.0), ("10", 1285.0),
-    ("11", 1293.9), ("12", 1306.1), ("13", 1331.1), ("14", 1365.0),
+    ("06", 997.8), ("05HALF", 1015.0), ("05", 1031.1), ("04", 1062.8),
+    ("03", 1086.1), ("02", 1102.2), ("01", 1118.9), ("1", 1137.2),
+    ("2", 1142.2), ("3", 1152.2), ("4", 1162.2), ("5", 1186.1),
+    ("5HALF", 1203.0), ("6", 1222.2), ("7", 1238.9), ("8", 1248.9),
+    ("9", 1260.0), ("10", 1285.0), ("11", 1293.9), ("12", 1306.1),
+    ("13", 1331.1), ("14", 1365.0),
 ]
 
 CONE_TABLE_COUNT = len(CONE_TABLE)
-assert CONE_TABLE_COUNT == 36, "cone_table.c documents CONE_TABLE_COUNT == 36"
+assert CONE_TABLE_COUNT == 38, "cone_table.c documents CONE_TABLE_COUNT == 38"
 
 
 class ConeTableError(ValueError):

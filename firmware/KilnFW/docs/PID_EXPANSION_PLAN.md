@@ -2207,11 +2207,18 @@ per-cone-step rate change at this module's own min-max normalisation, NOT
 as consistent with the table's rate columns — inverting those columns
 gives apparent activation energies roughly 500-1000+ kJ/mol across the
 working range, and the min-max normalisation is currently absorbing most
-of that gap (≈7% over-credit at Ea=300 kJ/mol vs. a table-consistent Ea in
-the ~700 kJ/mol range). Ea was deliberately left unchanged in this pass;
-changing the normalisation to match the old (incorrect) header wording
-without also revisiting Ea would turn that 7% into roughly 2x. See
-`cone_table.h`'s top-of-file comment for the full corrected rationale.
+of that gap. (At the time of this pass the over-credit was estimated as a
+single ≈7% figure at Ea=300 kJ/mol vs. a table-consistent Ea in the
+~700 kJ/mol range; that single-figure framing was itself later found to be
+wrong -- the error scales with band width, which varies enormously across
+the table, so there is no one honest bound. The corrected range -- ~1%
+to ~32% at 700 kJ/mol, table-wide mean ~6.8%, worse against 1000 kJ/mol --
+is in `cone_table.h`'s top-of-file comment, current as of the half-cone
+addition in this same pass.) Ea was deliberately left unchanged in this
+pass; changing the normalisation to match the old (incorrect) header
+wording without also revisiting Ea would roughly double every figure in
+that range. See `cone_table.h`'s top-of-file comment for the full
+corrected rationale.
 
 ### 7.3.2 Band-width duplicate removed (2026-09-02)
 
@@ -2247,7 +2254,13 @@ ESP32-S3 executor, in `profile_executor_ramp_assist.c`'s two new functions
   heat_work_weight()` call, the firmware analogue of `ramp_assist.py`'s
   `credit_reference_heat_s` (the DEFECT 1 lesson above, ported so a future
   regression confined to the real accrual line is visible on the firmware
-  side too, not just caught in the simulator).
+  side too, not just caught in the simulator). Same scope limit as the
+  Python original, restated here because it is easy to oversell: both
+  accumulators share the same weight function, band and gate, so this
+  catches only an accrual/spend implementation slip between the two `+=`
+  statements -- a wrong Ea, band width or weight function moves both
+  together and this check stays silent. Neither is validated by it or by
+  any other metric in either module.
 
 - `ramp_assist_dwell_credit_spend(s_exec_state_t *ex, float nominal_dwell_s,
   bool assist_enabled)` -- spend, called once per dwell entry (both
@@ -2268,7 +2281,14 @@ ESP32-S3 executor, in `profile_executor_ramp_assist.c`'s two new functions
   never any zone's alone. Conservative direction (matches `cone_table.h`'s
   own documented under-credit-is-safe stance): no zone is ever credited
   for heat work it did not itself accrue, at the cost of one heavily-
-  lagging zone capping every other zone's payback for that dwell.
+  lagging zone capping every other zone's payback for that dwell. Because
+  this shared-timer/minimum-credit behaviour has no counterpart in
+  `ramp_assist.py` (which models independent per-zone dwell timers and so
+  never caps one zone's credit by another's), the simulator's validation
+  of the accrual/spend arithmetic does NOT transfer exactly to this
+  multi-zone capping behaviour -- it is only exercised by the firmware's
+  own host tests (mutation 3 below), not by anything run in the
+  simulator.
 
 GATING, exactly as required: `ramp_assist_dwell_credit_tick()`'s accrual
 (and its report-only fields) is unconditional; `ramp_assist_dwell_credit_

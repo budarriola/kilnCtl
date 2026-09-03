@@ -394,10 +394,13 @@ class BandWidthCliffTests(unittest.TestCase):
 
     def test_just_below_a_cone_gets_the_wide_local_spacing(self):
         # target 1222.19 is just BELOW cone 6 (1222.2) -- bracketed by
-        # cone 5 (1186.1) and cone 6 (1222.2), so half the local spacing is
-        # (1222.2-1186.1)/2 = 18.05.
+        # cone 5HALF (1203.0) and cone 6 (1222.2) now that the table
+        # carries the half-cones, so half the local spacing is
+        # (1222.2-1203.0)/2 = 9.60. (Before the half-cones were added this
+        # was bracketed by cone 5 (1186.1)/cone 6, giving 18.05 -- see
+        # cone_table.h's half-cone addition note.)
         width = 1222.19 - ct.band_bottom_c(1222.19)
-        self.assertAlmostEqual(width, 18.05, places=2)
+        self.assertAlmostEqual(width, 9.60, places=2)
 
     def test_just_above_a_cone_does_not_collapse(self):
         # target 1222.21 is one hundredth of a degree above cone 6

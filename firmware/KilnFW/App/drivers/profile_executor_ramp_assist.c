@@ -117,7 +117,21 @@ void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool lag
      * from `w`) so a regression confined to the real accrual does not also
      * corrupt this reference value. See this field's doc comment
      * (profile_executor_internal.h) and PID_EXPANSION_PLAN.md sec 7.3's
-     * "DEFECT 1" writeup for why that independence is the whole point. */
+     * "DEFECT 1" writeup for why that independence is the whole point.
+     *
+     * SCOPE: this catches an ACCRUAL/SPEND IMPLEMENTATION SLIP between the
+     * two `+=` statements above and nothing more -- both calls share the
+     * same cone_table_heat_work_weight() function, the same band
+     * (cone_table_band_bottom_c(segment_target_c, ...)), the same target,
+     * the same `ramping_now && lagging_now` gate, and the same tick. A
+     * wrong Ea, a wrong band width, or a wrong weight function moves both
+     * accumulators identically and the audit reads 0.0 regardless -- proven
+     * on the Python original this ports (tools/PcTools/src/kilnctrl/
+     * ramp_assist.py's credit_reference_heat_s / credit_audit_pct) by two
+     * mutations that left the audit at exactly 0.0% while credit_s itself
+     * moved -16% (Ea 300k -> 500k) and +307% (band half-width doubled).
+     * Neither Ea nor the band width is validated by this accumulator, or by
+     * any metric in this file or in cone_table.c/.h. */
     float w_audit;
     if (cone_table_heat_work_weight(z->actual_c, segment_target_c, &w_audit) == CONE_TABLE_OK) {
         z->dwell_credit_audit_s += w_audit * dt_s;

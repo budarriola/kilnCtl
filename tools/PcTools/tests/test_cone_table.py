@@ -4,12 +4,18 @@ cone_table.c`` (commit d01dfe9). See ``cone_table.py``'s module docstring
 for the float32-vs-float64 precision note.
 
 The expected values below are literal constants, independently computed
-(``band_bottom = target - (target - lower_cone)/2``, then the Arrhenius
-form ``exp(-Ea/(R*T_kelvin))`` normalised between band-bottom and target,
-Ea=300000 J/mol, R=8.314 J/(mol*K), T in Kelvin) rather than by calling into
-this module -- so a bug shared between the module and its own test cannot
-hide behind them. Values were computed by a standalone script reproducing
-only the documented formula, not by importing ``cone_table``.
+(``band_bottom = target - (upper_cone - lower_cone)/2`` -- half the LOCAL
+spacing between the bracketing pair, NOT ``target - (target - lower_cone)/2``;
+that older formula was DEFECT 2, the band-width cliff, and is discredited --
+then the Arrhenius form ``exp(-Ea/(R*T_kelvin))`` normalised between
+band-bottom and target, Ea=300000 J/mol, R=8.314 J/(mol*K), T in Kelvin)
+rather than by calling into this module -- so a bug shared between the
+module and its own test cannot hide behind them. Values were computed by a
+standalone script reproducing only the documented formula, not by importing
+``cone_table``. The pinned cases below all land exactly on a tabulated cone,
+where the two formulas happen to agree (target - lower_cone == upper_cone -
+lower_cone in that case), so the pins themselves were never wrong -- only
+this docstring's stated derivation was.
 """
 from __future__ import annotations
 
@@ -141,7 +147,7 @@ class ConeTableBandFormulaCrossLanguageTest(unittest.TestCase):
 
 class ConeTableValuesTests(unittest.TestCase):
     def test_table_size_and_endpoints(self):
-        self.assertEqual(ct.CONE_TABLE_COUNT, 36)
+        self.assertEqual(ct.CONE_TABLE_COUNT, 38)
         self.assertEqual(ct.CONE_TABLE[0], ("022", 586.1))
         self.assertEqual(ct.CONE_TABLE[-1], ("14", 1365.0))
 
@@ -156,8 +162,10 @@ class ConeTableValuesTests(unittest.TestCase):
         self.assertLess(low_gap, high_gap)
 
     def test_band_bottom_cone6(self):
-        # target = cone 6 (1222.2), lower cone = cone 5 (1186.1).
-        self.assertAlmostEqual(ct.band_bottom_c(1222.2), 1204.15, places=6)
+        # target = cone 6 (1222.2), lower cone = cone 5.5/"5HALF" (1203.0)
+        # now that the half-cones are in the table (used to be cone 5,
+        # 1186.1, before 5.5 was added between them).
+        self.assertAlmostEqual(ct.band_bottom_c(1222.2), 1212.6, places=6)
 
     def test_band_bottom_cone021(self):
         # target = cone 021 (600.0), lower cone = cone 022 (586.1).
@@ -175,12 +183,14 @@ class ConeTableValuesTests(unittest.TestCase):
         # pair's spacing instead, so both sides of cone 6 (and a target well
         # clear of any cone, 1223.00) get consistent, non-cliff widths.
         #
-        # cone 5 = 1186.1, cone 6 = 1222.2, cone 7 = 1238.9.
+        # cone 5.5/"5HALF" = 1203.0, cone 6 = 1222.2, cone 7 = 1238.9. (Before
+        # the half-cones were added, 1222.19 was bracketed by cone 5
+        # (1186.1)/cone 6, giving 18.05 -- 5.5 now sits in between.)
         width_below = 1222.19 - ct.band_bottom_c(1222.19)
         width_just_above = 1222.21 - ct.band_bottom_c(1222.21)
         width_further_above = 1223.00 - ct.band_bottom_c(1223.00)
 
-        self.assertAlmostEqual(width_below, 18.05, places=6)
+        self.assertAlmostEqual(width_below, 9.60, places=6)
         self.assertAlmostEqual(width_just_above, 8.35, places=6)
         self.assertAlmostEqual(width_further_above, 8.35, places=6)
 
@@ -194,11 +204,12 @@ class ConeTableValuesTests(unittest.TestCase):
         # last entry) is NOT averaged between its two neighbours -- the
         # search for "hottest entry strictly below target_c" skips the exact
         # match itself, so the matched cone becomes the UPPER bracket and
-        # the width is half the spacing BELOW it. cone 6 = 1222.2, cone 5 =
-        # 1186.1 -> half = (1222.2 - 1186.1)/2 = 18.05, same value as the
-        # pre-existing test_band_bottom_cone6 pin above (this is the same
-        # case, just asserted from the "width" angle for clarity).
-        self.assertAlmostEqual(1222.2 - ct.band_bottom_c(1222.2), 18.05, places=6)
+        # the width is half the spacing BELOW it. cone 6 = 1222.2, cone
+        # 5.5/"5HALF" = 1203.0 -> half = (1222.2 - 1203.0)/2 = 9.60, same
+        # value as the pre-existing test_band_bottom_cone6 pin above (this
+        # is the same case, just asserted from the "width" angle for
+        # clarity).
+        self.assertAlmostEqual(1222.2 - ct.band_bottom_c(1222.2), 9.60, places=6)
 
     def test_band_bottom_at_or_below_lowest_cone_raises(self):
         with self.assertRaises(ct.ConeTableError):
@@ -215,21 +226,25 @@ class ConeTableValuesTests(unittest.TestCase):
         self.assertEqual(ct.heat_work_weight(1300.0, 1222.2), 1.0)  # above target clamps
 
     def test_heat_work_weight_at_band_bottom_is_zero(self):
-        self.assertEqual(ct.heat_work_weight(1204.15, 1222.2), 0.0)
+        # band bottom for target=1222.2 (cone 6) is now 1212.6 (bracketed by
+        # cone 5.5/"5HALF" at 1203.0, not cone 5 at 1186.1 -- see
+        # test_band_bottom_cone6).
+        self.assertEqual(ct.heat_work_weight(1212.6, 1222.2), 0.0)
         self.assertEqual(ct.heat_work_weight(1100.0, 1222.2), 0.0)  # below band bottom clamps
 
     def test_heat_work_weight_midband_cone6_pinned(self):
-        # current = midpoint of [1204.15, 1222.2] = 1213.175.
-        w = ct.heat_work_weight(1213.175, 1222.2)
-        self.assertAlmostEqual(w, 0.46623880218944525, places=9)
+        # current = midpoint of [1212.6, 1222.2] = 1217.4.
+        w = ct.heat_work_weight(1217.4, 1222.2)
+        self.assertAlmostEqual(w, 0.48212893767968523, places=9)
 
     def test_heat_work_weight_near_target_cone6_pinned(self):
         w = ct.heat_work_weight(1217.2, 1222.2)
-        self.assertAlmostEqual(w, 0.6954470338245525, places=9)
+        self.assertAlmostEqual(w, 0.4613426708903377, places=9)
 
     def test_heat_work_weight_near_bottom_cone6_pinned(self):
-        w = ct.heat_work_weight(1205.15, 1222.2)
-        self.assertAlmostEqual(w, 0.04858494514726569, places=9)
+        # 1.0 C above the new band bottom (1212.6).
+        w = ct.heat_work_weight(1213.6, 1222.2)
+        self.assertAlmostEqual(w, 0.09760877821683264, places=9)
 
     def test_heat_work_weight_midband_cone021_pinned(self):
         # A second, independent target/cone pair (low-temperature end of
@@ -257,8 +272,8 @@ class ConeTableValuesTests(unittest.TestCase):
 
     def test_cone_for_temp_c(self):
         self.assertEqual(ct.cone_for_temp_c(586.1), 0)
-        self.assertEqual(ct.cone_for_temp_c(1365.0), 35)
-        self.assertEqual(ct.cone_for_temp_c(2000.0), 35)  # above highest clamps, not an error
+        self.assertEqual(ct.cone_for_temp_c(1365.0), 37)
+        self.assertEqual(ct.cone_for_temp_c(2000.0), 37)  # above highest clamps, not an error
         with self.assertRaises(ct.ConeTableError):
             ct.cone_for_temp_c(500.0)  # below lowest
 

@@ -86,19 +86,42 @@
 // was never fit against the table's actual rate data.
 //
 // The min-max normalisation above absorbs most of this discrepancy rather
-// than propagating it 1:1 into the weight: at Ea=300 kJ/mol the mean band
-// weight across representative bands is ~0.4775, versus ~0.4452 at a
-// table-consistent Ea in the 700 kJ/mol range -- roughly a 7% over-credit
-// at the chosen Ea, not the 2-3x the raw activation-energy gap would
-// suggest. That 7% is the honest error bound today. If the normalisation
-// is ever changed to the "divide by rate at target" form the old wording
-// described (see above -- do not do this without also revisiting Ea), the
-// two errors compound rather than cancel: the min-max rescale's
-// conservatism is what is currently absorbing most of the Ea mismatch, so
-// removing it without correcting Ea would turn today's ~7% over-credit
-// into roughly a 2x over-credit. This is a deliberately simple single-Ea
+// than propagating it 1:1 into the weight, but NOT to a single figure --
+// the error scales with band width, and band width is wildly non-uniform
+// across this table (see the non-uniform-spacing note above). Computed
+// per-band (integral-mean weight across each band, Ea=300 kJ/mol vs a
+// table-consistent reference) across all 37 bands in the table: against a
+// 700 kJ/mol reference the over-credit ranges from ~1.0% (cone 2, an
+// 8-degree-wide band) to ~32.0% (cone 019, a 51.5-degree-wide band),
+// table-wide mean ~6.8%; against the 1000 kJ/mol end of the same
+// reference range it ranges roughly 1.8%-62.7%, mean ~12.6%. The cone-6
+// band specifically (the one most often quoted as "the" figure) reads
+// ~3.7%/~6.6% at 700/1000 kJ/mol now that the 5.5 half-cone narrows it
+// (previously, before the half-cones were added to this table, cone 6's
+// wider band -- bracketed by cone 5 instead of cone 5.5 -- read ~7.27%/
+// ~13.3% at 700/1000 kJ/mol; that older, wider-band number is what earlier
+// revisions of this comment quoted as a single "~7%" bound). There is no
+// single honest error bound today -- report the range, not one number,
+// and note it will keep moving as bands are added or narrowed. If the
+// normalisation is ever changed to the "divide by rate at target" form
+// the old wording described (see above -- do not do this without also
+// revisiting Ea), the two errors compound rather than cancel: the min-max
+// rescale's conservatism is what is currently absorbing most of the Ea
+// mismatch, so removing it without correcting Ea would roughly double
+// every figure above. This is a deliberately simple single-Ea
 // approximation across the whole table; it is not fit against real
 // vitrification data and should not be treated as such.
+//
+// NOTE on the band-cliff fix (DEFECT 2, cone_table_band_bottom_c()) and Ea
+// sensitivity: bands that used to be degenerate at ~0 width under the old
+// (broken) "distance to lower cone" formula had ~0% Ea sensitivity too --
+// a near-zero-width band's weight is dominated by boundary clamping, not
+// by the Arrhenius shape, so the Ea error above barely showed up there.
+// Fixing the cliff widened exactly those bands back out to their real
+// local-spacing width, which is what now exposes their full Ea
+// sensitivity in the range above -- the fix repaired the band-width bug
+// and, as a side effect, raised how much this table's numbers actually
+// depend on the still-unvalidated Ea choice in that same region.
 #ifndef CONE_TABLE_H
 #define CONE_TABLE_H
 
@@ -108,8 +131,10 @@
 extern "C" {
 #endif
 
-// Number of cones in the static table (cone 022 .. cone 14 inclusive).
-#define CONE_TABLE_COUNT 36
+// Number of cones in the static table (cone 022 .. cone 14 inclusive, plus
+// the two half-cones 05.5 and 5.5 that Orton's self-supporting chart also
+// publishes -- labelled "05HALF" and "5HALF" in s_cones[], see cone_table.c).
+#define CONE_TABLE_COUNT 38
 
 // Result codes shared by every lookup/derived-value function in this
 // module. Deliberately explicit rather than a sentinel float (NAN, -1,

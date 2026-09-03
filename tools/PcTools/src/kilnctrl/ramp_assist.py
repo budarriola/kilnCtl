@@ -617,24 +617,43 @@ def dwell_credit_parity(schedule: Sequence[ScheduleStep], max_temp_c: float, **k
     replacements turned out to have different sensitivity in practice (see
     "note on iteration" below):
 
-    ``credit_audit_pct`` (the PRIMARY, decisive check) compares
-    ``credit_applied_s`` (the running total of credit actually spent off
-    dwells over the whole run -- what ``credit_s`` was really used for)
-    against ``credit_reference_heat_s`` -- an audit accumulator computed
-    at the SAME accrual gate (same tick, same ``lagging``/``in_band``
-    condition) but on its OWN separate ``+=`` statement, not derived from
-    ``credit_s`` in any way. In
-    correct code both statements compute the identical ``weight * dt`` and
-    the two totals are exactly equal (0.000% deviation, to float
-    precision) for ANY schedule -- but a regression confined to the real
-    accrual line (a wrong scale factor, or banking raw seconds instead of
-    weight-seconds) leaves the independent audit line untouched, so the
-    two totals diverge by EXACTLY the size of the regression. This is not
-    an identity in the way the old metric was: the old metric forced
-    ``credit_s + dwell_heat_work_assisted_s ~= dwell_heat_work_unassisted_s``
-    to hold for any value of ``credit_s`` by construction (both sides
+    ``credit_audit_pct`` compares ``credit_applied_s`` (the running total
+    of credit actually spent off dwells over the whole run -- what
+    ``credit_s`` was really used for) against ``credit_reference_heat_s``
+    -- an audit accumulator computed at the SAME accrual gate (same tick,
+    same ``lagging``/``in_band`` condition) but on its OWN separate ``+=``
+    statement, not derived from ``credit_s`` in any way. In correct code
+    both statements compute the identical ``weight * dt`` and the two
+    totals are exactly equal (0.000% deviation, to float precision) for
+    ANY schedule -- but a regression confined to the real accrual line (a
+    wrong scale factor, or banking raw seconds instead of weight-seconds)
+    leaves the independent audit line untouched, so the two totals diverge
+    by EXACTLY the size of the regression: scaling the real accrual line
+    by a factor S makes ``credit_audit_pct`` read exactly ``(S-1)*100%``,
+    confirmed empirically. This is not an identity in the way the old
+    metric was: the old metric forced ``credit_s +
+    dwell_heat_work_assisted_s ~= dwell_heat_work_unassisted_s`` to hold
+    for any value of ``credit_s`` by construction (both sides
     algebraically absorb it); here, a wrong ``credit_s`` has nothing
     canceling it on the other side of the comparison.
+
+    WHAT THIS DOES NOT PROVE: ``credit_audit_pct`` is a two-writer
+    consistency check on a SINGLE accrual statement -- both writers share
+    the same weight function, the same band (``cone_table.band_bottom_c``),
+    the same target, the same accrual gate, and the same tick loop. It
+    detects an ACCRUAL/SPEND IMPLEMENTATION SLIP (the two statements
+    disagreeing about how much was banked or spent) and nothing else. It
+    is BLIND to an error shared by both writers, because a shared error
+    moves both sides of the comparison together and cancels out of the
+    ratio. Confirmed by two independent mutations that left it unmoved:
+    doubling the credit band's half-width (``credit_s`` rose from 32.45 to
+    132.16, +307%, on this module's own reference schedule) and changing
+    Ea from 300 kJ/mol to 500 kJ/mol (``credit_s`` fell from 32.45 to
+    27.26, -16%) both left ``credit_audit_pct`` at exactly 0.0% on every
+    zone. The weight function, the activation energy, and the band width
+    are NOT validated by this check, and are not validated by any metric
+    in this module -- see ``cone_table.h``'s Ea-sensitivity note for the
+    current honest error range on the weight function's Ea choice.
 
     ``window_parity_pct`` (a secondary, physically-grounded signal) is
     computed from the ASSISTED run's ``window_actual_heat_s``/
