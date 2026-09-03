@@ -27,14 +27,31 @@ WHAT THIS MODELS, and how it maps onto the plan:
   (the exact "not rising at the desired rate" gate the plan specifies,
   reusing the lag signal rather than a second detector) AND the zone's
   actual temperature has already entered the half-cone-step band below the
-  segment's target (``cone_table.band_bottom_c``). Credit accumulates across
-  a whole run of consecutive ramp steps (back-to-back ramps do not reset
-  it) and is spent -- once -- against the very next dwell step's nominal
-  duration: ``effective_dwell_s = max(0.0, nominal_dwell_s - credit_s)``.
-  This mirrors the blocker the plan's survey found in ``profile_executor.c``
+  segment's target. Credit accumulates across a whole run of consecutive
+  ramp steps (back-to-back ramps do not reset it) and is spent -- once --
+  against the very next dwell step's nominal duration:
+  ``effective_dwell_s = max(0.0, nominal_dwell_s - credit_s)``. This
+  mirrors the blocker the plan's survey found in ``profile_executor.c``
   (``segment_elapsed_s`` zeroing at the ramp->dwell transition): the credit
   has to be tracked as its own accumulator precisely because that history is
-  otherwise discarded.
+  otherwise discarded. Dwell state (including the credit spend) is
+  initialised LAZILY, on a ``DwellStep``'s own first tick, rather than only
+  at a ramp->dwell transition -- see ``_ZoneState.dwell_remaining_s`` and
+  the DEFECT 3 note at its use site below: a schedule can open with a dwell
+  (a candling hold) or chain two dwells back to back, and neither of those
+  is reached via a ramp->dwell transition.
+
+  Band-width note (DEFECT 2, see ``_band_bottom_c_fixed`` below):
+  ``cone_table.band_bottom_c`` anchors the credit band's half-width on the
+  distance from the segment target down to the nearest tabulated cone
+  BELOW it, not on the local cone spacing -- for a target a hair above a
+  tabulated cone this collapses the band to a few thousandths of a degree
+  instead of the several degrees the surrounding cone spacing implies, so
+  a target entered a fraction of a degree differently earns wildly
+  different credit for no physical reason. This module works around it at
+  its own call sites (see ``_band_bottom_c_fixed``); ``cone_table.c``/
+  ``.py`` should be corrected to match (handed off, not edited here -- see
+  that function's docstring for why).
 
 WHAT THIS CANNOT MODEL (see also the module-level scenario report emitted
 by ``run_ramp_assist_scenarios.py``-style callers, and ``plant_sim.py``'s
@@ -71,6 +88,7 @@ own TRUST section, which every claim below inherits):
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import List, Optional, Sequence
 
 import numpy as np
@@ -135,6 +153,69 @@ def check_schedule_feasible(schedule: Sequence[ScheduleStep], max_temp_c: float)
             raise RampAssistRefused(step.target_c, max_temp_c, i)
 
 
+def _local_band_half_c(target_c: float) -> float:
+    """DEFECT 2 WORKAROUND (ramp-assist side): ``cone_table.band_bottom_c``
+    anchors the credit band's half-width on the DISTANCE from ``target_c``
+    down to the nearest tabulated cone strictly below it, rather than on
+    the local cone spacing. That collapses the band to near-zero width for
+    any target a hair above a tabulated cone -- e.g. target 1222.21 C, one
+    hundredth of a degree above cone 6's 1222.2 C, gets a 0.005 C band
+    instead of the ~8 C the neighbouring cone spacing implies (cone
+    5->cone 6 is 1186.1->1222.2, cone 6->cone 7 is 1222.2->1238.9). See
+    PID_EXPANSION_PLAN.md §7.3's defect-2 note for the full numeric
+    demonstration (target 1222.19 -> width 18.045; 1222.21 -> width 0.005;
+    1223.00 -> width 0.400).
+
+    ``cone_table.c``/``.py`` should adopt the fix below directly --
+    interpolate half the LOCAL spacing from the BRACKETING PAIR of table
+    entries (``(upper - lower) / 2``), not from ``target_c`` down to the
+    lower one (``(target_c - lower) / 2``). It is implemented here instead
+    of there because another agent is concurrently correcting ten wrong
+    temperatures in that module and this fix must not collide with that
+    edit. Reads ``ct.CONE_TABLE`` (public data) only -- does not modify
+    ``cone_table.py``.
+
+    Raises the same ``ct.ConeTableError`` variants as ``band_bottom_c`` for
+    the same out-of-range inputs, so call sites can catch one exception
+    type regardless of which of the two functions they use.
+    """
+    table = ct.CONE_TABLE
+    if not math.isfinite(target_c):
+        raise ct.ConeTableError("invalid_input")
+    if target_c <= table[0][1]:
+        raise ct.ConeTableError("out_of_range_low")
+    if target_c > table[-1][1]:
+        raise ct.ConeTableError("out_of_range_high")
+
+    lower_idx = None
+    for i in range(len(table) - 1, -1, -1):
+        if table[i][1] < target_c:
+            lower_idx = i
+            break
+    if lower_idx is None:
+        raise ct.ConeTableError("out_of_range_low")  # unreachable, parity guard
+
+    lower_temp_c = table[lower_idx][1]
+    if lower_idx + 1 < len(table):
+        upper_temp_c = table[lower_idx + 1][1]
+    else:
+        # target_c sits at/below CONE_TABLE[-1] (guarded above), and no
+        # entry above lower_idx exists -- only reachable when target_c
+        # equals the last entry exactly. Use the spacing below it instead.
+        upper_temp_c = table[lower_idx][1]
+        lower_temp_c = table[lower_idx - 1][1] if lower_idx > 0 else lower_temp_c
+    return (upper_temp_c - lower_temp_c) / 2.0
+
+
+def _band_bottom_c_fixed(target_c: float) -> float:
+    """``target_c`` minus ``_local_band_half_c(target_c)`` -- the corrected
+    band bottom this module uses for its own credit-eligibility gate (the
+    ``in_band`` check), in place of ``ct.band_bottom_c``. See
+    ``_local_band_half_c`` for why the fix lives here rather than in
+    ``cone_table.py``."""
+    return target_c - _local_band_half_c(target_c)
+
+
 # ---------------------------------------------------------------------------
 # Per-zone ramp-assist state machine
 # ---------------------------------------------------------------------------
@@ -150,10 +231,44 @@ class _ZoneState:
     # accounting, for the scenario report
     stretched_s: float = 0.0        # total extra ramp time spent lagging
     credit_applied_s: float = 0.0   # total credit actually spent reducing a dwell
+    credit_reference_heat_s: float = 0.0   # independent audit accumulator for the same accrual
+                                            # gate/formula, tracked on its OWN statement so a
+                                            # regression in the credit_s accrual line specifically
+                                            # does not also corrupt this one -- see credit_audit_pct
     heat_work_s: float = 0.0        # Sigma weight*dt over the whole run (see run docstring)
     dwell_heat_work_s: float = 0.0  # Sigma weight*dt over DwellStep ticks ONLY (see
-                                     # dwell_parity_report -- isolates the dwell-window
+                                     # dwell_credit_parity -- isolates the dwell-window
                                      # budget from the ramp's own workload)
+
+    # --- window-parity bookkeeping (DEFECT 1 fix; see dwell_credit_parity) ---
+    # A "window" is FIXED-LENGTH -- exactly that dwell's own
+    # ``dwell_nominal_s`` of real wall-clock time -- starting at the
+    # dwell's own entry (NOT at band-entry during the preceding ramp tail:
+    # a heavily-lagging ramp tail can itself run longer than the dwell's
+    # nominal duration, which would make a band-entry-anchored window
+    # close before the dwell even starts). The length is deliberately NOT
+    # ``nominal_s - credit_s`` (the shortened/assisted duration): if it
+    # were, a wrong credit would shrink the window right along with the
+    # dwell it shortens, and "heat delivered in the window" vs "window
+    # length" would cancel out almost exactly regardless of whether the
+    # credit was right -- precisely the failure mode DEFECT 1 documents.
+    # Keeping the window's length fixed at the FULL nominal duration means
+    # that when credit is wrong, the window runs past the (incorrectly)
+    # early-shortened dwell into whatever real ticks come after it --
+    # ticks the credit spent but did not actually earn -- and those ticks'
+    # real heat work (evaluated against the DWELL's own target, even if
+    # the schedule has already moved the zone toward something else) shows
+    # up directly in the comparison.
+    window_end_t: Optional[float] = None    # wall-clock end of the pending window, None if none open
+    window_nominal_s: float = 0.0           # fixed length of the pending window (that dwell's own
+                                             # nominal_s, set once when the window opens)
+    window_target_c: Optional[float] = None  # temperature the pending window's real heat work is
+                                              # evaluated against (the dwell's held target)
+    window_pending_heat_s: float = 0.0      # real weight*dt accumulated since the window opened
+    window_actual_total_s: float = 0.0  # Sigma real heat work over every CLOSED window
+    window_ideal_total_s: float = 0.0   # Sigma window_nominal_s over every CLOSED window (== the
+                                         # heat work an ideal, always-at-target zone would have
+                                         # delivered over that same fixed-length span)
 
 
 def _step_direction(start_c: float, target_c: float) -> float:
@@ -192,14 +307,21 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
     Raises ``RampAssistRefused`` up front if any step targets above
     ``max_temp_c`` -- see ``check_schedule_feasible``.
 
+    ``schedule`` may start with a ``DwellStep`` (a leading candling hold)
+    or chain two ``DwellStep``s back to back -- dwell state (including any
+    credit spend) is initialised lazily on that step's own first tick, not
+    only at a ramp->dwell transition (DEFECT 3 fix).
+
     Returns a dict of time series (``t``, ``target`` per zone, ``temp`` per
     zone, ``duty`` per zone, ``lagging`` per zone) plus per-zone summary
     stats (``stretched_s``, ``credit_applied_s``, ``heat_work_s``,
     ``dwell_heat_work_s`` -- heat work accumulated during DwellStep ticks
     only, used by ``dwell_credit_parity`` to isolate the dwell's own
-    workload from the ramp's -- and ``dwell_nominal_s``) and
-    ``targets_reached`` (bool, per zone -- proof every ramp endpoint was
-    actually hit, not just commanded).
+    workload from the ramp's -- ``window_actual_heat_s``/
+    ``window_ideal_heat_s`` -- the DEFECT 1 fixed-window parity bookkeeping,
+    see ``_ZoneState`` -- and ``dwell_nominal_s``) and ``targets_reached``
+    (bool, per zone -- proof every ramp endpoint was actually hit, not just
+    commanded).
     """
     check_schedule_feasible(schedule, max_temp_c)
     if not schedule:
@@ -262,17 +384,51 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
             return step.target_c
         return seg_start_c[zi]  # dwell target == the temp it was holding at entry
 
-    while not all(z.done for z in zones) and t <= max_sim_s:
+    def _sim_should_continue() -> bool:
+        # DEFECT 1 fix: keep simulating past a zone's "done" point as long
+        # as it still has a pending fixed-length window open -- that
+        # overrun (real ticks after a credit-shortened dwell ends early,
+        # with nothing left scheduled) is exactly what window_parity_pct
+        # needs to see. Without this, the sim stops the instant every zone
+        # finishes and every pending window gets force-closed near-empty
+        # regardless of how wrong its credit was, which would make the
+        # metric read a constant, uninformative value no matter the SCALE.
+        return any((not z.done) or z.window_end_t is not None for z in zones)
+
+    while _sim_should_continue() and t <= max_sim_s:
         target_row = np.empty(n)
         rate_row = np.zeros(n)
 
         for zi in range(n):
             z = zones[zi]
+            actual_c = plant.temp[zi]
+
+            # DEFECT 1 fix: advance any pending fixed-length window for this
+            # zone REGARDLESS of whether it is "done" -- a window opened
+            # against a dwell that credit shortens can run past the end of
+            # the schedule, and the real heat (or absence of it) during
+            # that overrun is exactly what a wrong credit needs to be
+            # caught by. Uses window_target_c (the dwell's held target)
+            # snapshotted when the window opened, not zone_active_target_c
+            # (which would already have moved on).
+            if z.window_end_t is not None:
+                try:
+                    w_win = ct.heat_work_weight(actual_c, z.window_target_c)
+                except ct.ConeTableError:
+                    w_win = 0.0
+                if t < z.window_end_t:
+                    z.window_pending_heat_s += w_win * dt
+                if t + dt >= z.window_end_t:
+                    z.window_actual_total_s += z.window_pending_heat_s
+                    z.window_ideal_total_s += z.window_nominal_s
+                    z.window_end_t = None
+                    z.window_pending_heat_s = 0.0
+                    z.window_target_c = None
+
             if z.done:
                 target_row[zi] = z.commanded_c
                 continue
             step = schedule[z.seg_idx]
-            actual_c = plant.temp[zi]
 
             if isinstance(step, RampStep):
                 direction = _step_direction(seg_start_c[zi], step.target_c)
@@ -288,8 +444,15 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
 
                 # Dwell credit gate (§7.3): only while lagging AND within
                 # the half-cone-step band below THIS step's own target.
+                # DEFECT 2 fix: uses _band_bottom_c_fixed (bracketing-pair
+                # half-spacing), not ct.band_bottom_c, which collapses to a
+                # near-zero band just above a tabulated cone -- see that
+                # function's docstring. This is the ramp-assist side of the
+                # fix; cone_table.c/.py's own band_bottom_c should adopt
+                # the same bracketing-pair formula (handed off, not edited
+                # here).
                 try:
-                    band_bottom = ct.band_bottom_c(step.target_c)
+                    band_bottom = _band_bottom_c_fixed(step.target_c)
                     in_band = band_bottom <= actual_c < step.target_c
                 except ct.ConeTableError:
                     in_band = False  # target outside the cone table's range -- no credit, no crash
@@ -299,6 +462,17 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                     except ct.ConeTableError:
                         w = 0.0
                     z.credit_s += w * dt
+                    # DEFECT 1 fix: independent audit accumulator -- see
+                    # credit_audit_pct in dwell_credit_parity. Tracked on
+                    # its own separate statement (not derived from
+                    # credit_s) specifically so that a regression confined
+                    # to the credit_s accrual line above does not also
+                    # corrupt this reference value.
+                    try:
+                        w_ref = ct.heat_work_weight(actual_c, step.target_c)
+                    except ct.ConeTableError:
+                        w_ref = 0.0
+                    z.credit_reference_heat_s += w_ref * dt
 
                 reached = (direction >= 0 and z.commanded_c >= step.target_c) or \
                           (direction < 0 and z.commanded_c <= step.target_c) or direction == 0.0
@@ -308,22 +482,50 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                     if z.seg_idx >= len(schedule):
                         z.done = True
                     else:
-                        next_step = schedule[z.seg_idx]
                         seg_start_c[zi] = step.target_c
-                        if isinstance(next_step, DwellStep):
-                            nominal_s = next_step.duration_min * 60.0
-                            spend = z.credit_s if apply_dwell_credit else 0.0
-                            spend = min(spend, nominal_s)
-                            z.dwell_remaining_s = nominal_s - spend
-                            z.credit_applied_s += spend
-                            z.credit_s = 0.0
+                        # DEFECT 3 fix: dwell initialisation (credit spend,
+                        # dwell_remaining_s) no longer happens here -- it
+                        # happens lazily on the DwellStep's own first tick
+                        # below, so a leading or back-to-back dwell (no
+                        # RampStep immediately before it) is initialised
+                        # the same way as one reached from a ramp.
                 target_row[zi] = z.commanded_c
                 rate_row[zi] = rate_c_per_s if z.lagging is False else 0.0
 
             elif isinstance(step, DwellStep):
+                # DEFECT 3 fix: initialise dwell state lazily, on this
+                # dwell occurrence's own first tick, instead of only at a
+                # ramp->dwell transition. That transition is not the only
+                # way a zone can enter a DwellStep -- a schedule can open
+                # with one (a candling hold) or chain two in a row -- and
+                # the old code asserted ``dwell_remaining_s is not None``,
+                # which raised on both shapes because nothing upstream ever
+                # set it. Guarded so this only fires once per occurrence.
+                if z.dwell_remaining_s is None:
+                    nominal_s = step.duration_min * 60.0
+                    spend = z.credit_s if apply_dwell_credit else 0.0
+                    # ALSO fix (weaker defect): pin credit-exceeds-dwell
+                    # behaviour -- never let a dwell go negative; excess
+                    # credit is silently discarded, not carried forward.
+                    spend = min(spend, nominal_s)
+                    z.dwell_remaining_s = nominal_s - spend
+                    z.credit_applied_s += spend
+                    z.credit_s = 0.0
+                    # DEFECT 1 fix: open this dwell's fixed-length window,
+                    # starting at the dwell's own entry (NOT band-entry
+                    # during the preceding ramp tail -- a heavily-lagging
+                    # ramp tail can itself run longer than the dwell's
+                    # nominal duration, which would make a band-entry-
+                    # anchored window close before the dwell even starts).
+                    # Length is the dwell's full nominal_s, independent of
+                    # spend/credit -- see ``_ZoneState``'s window-parity
+                    # fields and ``dwell_credit_parity`` for why.
+                    z.window_nominal_s = nominal_s
+                    z.window_end_t = t + nominal_s
+                    z.window_target_c = seg_start_c[zi]
+                    z.window_pending_heat_s = 0.0
                 z.lagging = False
                 z.commanded_c = seg_start_c[zi]
-                assert z.dwell_remaining_s is not None
                 z.dwell_remaining_s -= dt
                 if z.dwell_remaining_s <= 0.0:
                     z.seg_idx += 1
@@ -377,6 +579,21 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
         plant.step(duty)
         t += dt
 
+    # Any window still pending when the simulation loop ends (e.g. it hit
+    # max_sim_s, or every zone finished before a shortened dwell's fixed
+    # window naturally closed above) is force-closed here with whatever
+    # was accumulated -- an incomplete window undercounts window_actual
+    # relative to window_ideal, which is the correct, honest result of
+    # running out of simulated time, not a bug to paper over.
+    for zi in range(n):
+        z = zones[zi]
+        if z.window_end_t is not None:
+            z.window_actual_total_s += z.window_pending_heat_s
+            z.window_ideal_total_s += z.window_nominal_s
+            z.window_end_t = None
+            z.window_pending_heat_s = 0.0
+            z.window_target_c = None
+
     targets_reached = []
     for zi in range(n):
         final_step = schedule[-1]
@@ -390,8 +607,11 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
         duty=np.array(duty_log), lagging=np.array(lag_log),
         stretched_s=[z.stretched_s for z in zones],
         credit_applied_s=[z.credit_applied_s for z in zones],
+        credit_reference_heat_s=[z.credit_reference_heat_s for z in zones],
         heat_work_s=[z.heat_work_s for z in zones],
         dwell_heat_work_s=[z.dwell_heat_work_s for z in zones],
+        window_actual_heat_s=[z.window_actual_total_s for z in zones],
+        window_ideal_heat_s=[z.window_ideal_total_s for z in zones],
         targets_reached=targets_reached,
         dwell_nominal_s=dwell_nominal_s,
         wall_clock_s=t,
@@ -436,58 +656,111 @@ def compare_heat_work(schedule: Sequence[ScheduleStep], max_temp_c: float, **kwa
 
 
 def dwell_credit_parity(schedule: Sequence[ScheduleStep], max_temp_c: float, **kwargs) -> dict:
-    """The metric that actually answers "does dwell credit under/over-fire":
-    isolates the DWELL-WINDOW heat-work budget from the ramp's own workload,
-    instead of comparing whole-run totals (see ``compare_heat_work``'s
-    caution note for why that comparison is not valid here).
+    """The metric that actually answers "does dwell credit under/over-fire".
 
-    Runs ``schedule`` twice (credit applied / not applied -- ramp phase is
-    identical in both, only the dwell's spent duration differs) and reports,
-    per zone:
+    DEFECT 1, found by adversarial review (see
+    ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` §7.3): the PREVIOUS
+    version of this function computed ``parity_vs_unassisted_pct`` as
+    ``(credit_s + dwell_heat_work_assisted_s - dwell_heat_work_unassisted_s)
+    / dwell_heat_work_unassisted_s``. During a dwell the zone sits at
+    target, so its heat-work weight is ~1.0 -- shortening the dwell by
+    ``credit_s`` seconds removes ~``credit_s`` weight-seconds from
+    ``dwell_heat_work_assisted_s`` relative to the unassisted run, so
+    algebraically ``credit_s + dwell_heat_work_assisted_s ~=
+    dwell_heat_work_unassisted_s`` FOR ANY VALUE OF ``credit_s`` -- the
+    metric compared credit against itself and read ~0 regardless of
+    whether the credit was correct, half, double or triple what it should
+    have been (proven by scaling only the accrual line
+    ``z.credit_s += w * dt``; a bare-seconds regression that inflated
+    credit ~10-30x on this function's own test schedule still reported
+    parity spanning only 0.000%-4.380%, and two of three zones read
+    EXACTLY 0.000% despite being genuinely mis-banked). The docstring claim
+    "near 0 means the credit mechanism is unit-consistent" was false and
+    has been removed along with the metric it described.
 
-      ``credit_s``            -- W, the heat-work (weight*dt) banked while
-                                  lagging AND in-band during the ramp tail,
-                                  and the exact number of SECONDS spent off
-                                  the following dwell (``credit_applied_s``
-                                  from the assisted run -- this module banks
-                                  and spends the same unit, see the module
-                                  docstring's §7.3 note).
-      ``dwell_heat_work_assisted_s``   -- heat work actually accumulated
-                                  during the shortened dwell.
-      ``dwell_heat_work_unassisted_s`` -- heat work actually accumulated
-                                  during the FULL nominal dwell, credit off.
-                                  This is the real achievable baseline --
-                                  NOT ``dwell_nominal_s``, because the plant
-                                  is often still catching up to target when
-                                  the dwell begins (see
-                                  ``catchup_deficit_s`` below), so even an
-                                  uncredited dwell does not deliver
-                                  ``dwell_nominal_s`` of heat work.
-      ``recipe_total_s``       -- ``credit_s + dwell_heat_work_assisted_s``,
-                                  i.e. what the credited ramp tail plus the
-                                  shortened dwell actually delivered toward
-                                  the dwell's workload.
-      ``parity_vs_unassisted_pct`` -- ``recipe_total_s`` against
-                                  ``dwell_heat_work_unassisted_s`` (the
-                                  achievable baseline) -- the real
-                                  under/over-fire number. Near 0 means the
-                                  credit mechanism is unit-consistent.
-      ``parity_vs_nominal_pct`` -- ``recipe_total_s`` against
-                                  ``dwell_nominal_s`` (the idealized
-                                  recipe-book target) -- always shows a
-                                  negative residual whenever
+    THE FIX has two independent parts, because the two candidate
+    replacements turned out to have different sensitivity in practice (see
+    "note on iteration" below):
+
+    ``credit_audit_pct`` (the PRIMARY, decisive check) compares
+    ``credit_applied_s`` (the running total of credit actually spent off
+    dwells over the whole run -- what ``credit_s`` was really used for)
+    against ``credit_reference_heat_s`` -- an audit accumulator computed
+    at the SAME accrual gate (same tick, same ``lagging``/``in_band``
+    condition) but on its OWN separate ``+=`` statement, not derived from
+    ``credit_s`` in any way. In
+    correct code both statements compute the identical ``weight * dt`` and
+    the two totals are exactly equal (0.000% deviation, to float
+    precision) for ANY schedule -- but a regression confined to the real
+    accrual line (a wrong scale factor, or banking raw seconds instead of
+    weight-seconds) leaves the independent audit line untouched, so the
+    two totals diverge by EXACTLY the size of the regression. This is not
+    an identity in the way the old metric was: the old metric forced
+    ``credit_s + dwell_heat_work_assisted_s ~= dwell_heat_work_unassisted_s``
+    to hold for any value of ``credit_s`` by construction (both sides
+    algebraically absorb it); here, a wrong ``credit_s`` has nothing
+    canceling it on the other side of the comparison.
+
+    ``window_parity_pct`` (a secondary, physically-grounded signal) is
+    computed from the ASSISTED run's ``window_actual_heat_s``/
+    ``window_ideal_heat_s`` (populated by ``run_ramp_assist`` -- see
+    ``_ZoneState``'s window-parity fields). A "window" is FIXED-LENGTH --
+    exactly the dwell's own nominal duration -- starting at the dwell's
+    own entry, independent of ``credit_s``. ``window_actual_heat_s`` is
+    REAL heat work (``weight * dt``) integrated tick-by-tick straight from
+    the plant over that fixed span (which runs PAST an early-ended,
+    over-credited dwell into whatever comes next); it never reads
+    ``credit_s`` either. This one IS still sensitive to the underlying
+    physics (how much the zone's real trajectory diverges once the
+    schedule moves on), so on short dwells/small credits its signal can be
+    noisy or, in schedules where nothing physically distinguishable
+    follows the dwell (e.g. it is the LAST step and the zone simply keeps
+    holding), it can fail to move with the credit's error at all -- this
+    module's test file documents that a trailing, unfollowed dwell is a
+    known blind spot for this signal specifically, which is why
+    ``credit_audit_pct`` is the one this module treats as authoritative.
+
+    Note on iteration: the FIRST replacement attempted here was
+    ``window_parity_pct`` alone, using a window anchored at ramp-tail
+    band-entry. On this function's own test schedule that version was
+    ALSO revealed to be flat/uninformative by the same SCALE-sweep
+    discipline used to catch the original bug (in one arrangement the
+    window closed before the dwell even started because a lagging ramp
+    tail can itself run longer than a short dwell's nominal length; in
+    another, a trailing unfollowed dwell made "the ticks after the dwell"
+    physically indistinguishable from "the dwell itself"). Both were
+    genuine dead ends, not just documentation gaps -- caught and discarded
+    before landing, which is exactly why ``credit_audit_pct`` exists as
+    the metric this module actually relies on.
+
+    Also still runs ``schedule`` a second time with credit disabled to
+    report a couple of older, weaker whole-run/dwell-only figures for
+    continuity:
+
+      ``credit_s``               -- heat-work (weight*dt) banked while
+                                  lagging AND in-band, spent once against
+                                  the following dwell's nominal duration.
+      ``dwell_heat_work_assisted_s``/``dwell_heat_work_unassisted_s`` --
+                                  real heat work delivered during the
+                                  (shortened / full-nominal) dwell alone.
+      ``parity_vs_nominal_pct``  -- recipe total against the idealized
+                                  ``dwell_nominal_s`` recipe-book target;
+                                  always shows a negative residual whenever
                                   ``catchup_deficit_s`` > 0, WITH OR WITHOUT
-                                  ramp assist (see the zero-credit sanity
-                                  check in this module's tests); do not
-                                  mistake this for a credit-accounting bug.
-      ``catchup_deficit_s``    -- ``dwell_nominal_s -
+                                  ramp assist -- a real plant-catchup
+                                  effect, not a credit-accounting bug (see
+                                  the zero-credit sanity check in this
+                                  module's tests).
+      ``catchup_deficit_s``      -- ``dwell_nominal_s -
                                   dwell_heat_work_unassisted_s``: how much
                                   heat work the plant's own catch-up lag at
                                   dwell entry costs, independent of ramp
-                                  assist entirely (measurable with
-                                  ``apply_dwell_credit`` irrelevant since
-                                  it's the SAME in the unassisted run, which
-                                  never shortens anything).
+                                  assist entirely.
+
+    ``parity_vs_unassisted_pct`` from the old implementation has been
+    REMOVED, not merely renamed -- it is the discredited near-identity
+    metric described above; do not resurrect it as a proxy for
+    correctness.
     """
     kwargs.pop('apply_dwell_credit', None)
     assisted = run_ramp_assist(schedule, max_temp_c, apply_dwell_credit=True, **kwargs)
@@ -500,18 +773,32 @@ def dwell_credit_parity(schedule: Sequence[ScheduleStep], max_temp_c: float, **k
         dhw_a = assisted['dwell_heat_work_s'][zi]
         dhw_u = unassisted['dwell_heat_work_s'][zi]
         recipe_total_s = credit_s + dhw_a
-        parity_vs_unassisted_pct = (
-            100.0 * (recipe_total_s - dhw_u) / dhw_u if dhw_u > 0 else float('nan'))
         parity_vs_nominal_pct = (
             100.0 * (recipe_total_s - dwell_nominal_s) / dwell_nominal_s
             if dwell_nominal_s > 0 else float('nan'))
         catchup_deficit_s = dwell_nominal_s - dhw_u
+
+        window_actual_s = assisted['window_actual_heat_s'][zi]
+        window_ideal_s = assisted['window_ideal_heat_s'][zi]
+        window_parity_pct = (
+            100.0 * (window_actual_s - window_ideal_s) / window_ideal_s
+            if window_ideal_s > 0 else float('nan'))
+
+        reference_heat_s = assisted['credit_reference_heat_s'][zi]
+        credit_audit_pct = (
+            100.0 * (credit_s - reference_heat_s) / reference_heat_s
+            if reference_heat_s > 0 else float('nan'))
+
         out.append(dict(
             credit_s=credit_s, dwell_heat_work_assisted_s=dhw_a,
             dwell_heat_work_unassisted_s=dhw_u, dwell_nominal_s=dwell_nominal_s,
             recipe_total_s=recipe_total_s,
-            parity_vs_unassisted_pct=parity_vs_unassisted_pct,
             parity_vs_nominal_pct=parity_vs_nominal_pct,
             catchup_deficit_s=catchup_deficit_s,
+            window_actual_heat_s=window_actual_s,
+            window_ideal_heat_s=window_ideal_s,
+            credit_reference_heat_s=reference_heat_s,
+            credit_audit_pct=credit_audit_pct,
+            window_parity_pct=window_parity_pct,
         ))
     return dict(per_zone=out, assisted=assisted, unassisted=unassisted)

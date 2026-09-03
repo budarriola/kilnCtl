@@ -1983,7 +1983,7 @@ artifact, not a defect in the credit.
 Measured against the *actual* question — does `credit_s + (dwell heat work
 during the shortened dwell)` match what the dwell would have delivered on
 its own, uncredited (`dwell_credit_parity()`'s `parity_vs_unassisted_pct`)
-— the credit is correct to within simulator noise:
+— the credit *appeared* correct to within simulator noise:
 
 | scenario | zone | naive whole-run delta (misleading) | parity vs. achievable dwell baseline | parity vs. idealized nominal | catch-up deficit |
 |---|---|---:|---:|---:|---:|
@@ -1991,13 +1991,112 @@ its own, uncredited (`dwell_credit_parity()`'s `parity_vs_unassisted_pct`)
 | back-to-back (700→803.9 C, 10 min dwell) | 0/1/2 | −13.3% / −17.0% / −22.4% | **+0.075% / +0.088% / +0.149%** | −2.7% / −3.5% / −4.8% | 16.4 / 21.6 / 29.5 s |
 | physical_hard (900 C, 500 C/min, 30 min dwell) | 0/1/2 | 0.00% (zero credit earned) | 0.000% | −4.9% / −6.6% / −14.4% | 88.7 / 117.9 / 260.0 s |
 
-`parity_vs_unassisted_pct` (the correct metric) is ≤0.15% in every scenario
-that earns any credit at all — effectively exact, with the residual
-attributable to 1-second tick discretization, not a systematic bias.
-**Conclusion: no unit-mismatch bug exists in the credit's bank/spend
-arithmetic.** The naive whole-run comparison is kept (as `compare_heat_work`,
-now documented as such) because it is still useful bookkeeping, but it must
-not be read as an under/over-fire signal on its own.
+`parity_vs_unassisted_pct` was ≤0.15% in every scenario that earned any
+credit at all, which read as effectively exact. **That reading was wrong —
+`parity_vs_unassisted_pct` was retracted on 2026-09-02, see "DEFECT 1 —
+retraction" below. It is a near-identity, not a correctness check, and
+must not be read as evidence the credit's arithmetic is right.** The naive
+whole-run comparison is kept (as `compare_heat_work`, now documented as
+such) because it is still useful bookkeeping, but it must not be read as
+an under/over-fire signal on its own either.
+
+#### DEFECT 1 — retraction of the 0.15% parity claim (found 2026-09-02, adversarial review)
+
+The `parity_vs_unassisted_pct` figures in the table above (≤0.15% in every
+scenario that earned credit) are **retracted, not just superseded** —
+kept in this record deliberately, as the trap the next person should not
+fall back into. The metric was:
+
+```
+recipe_total_s = credit_s + dwell_heat_work_assisted_s
+parity_vs_unassisted_pct = 100 * (recipe_total_s - dwell_heat_work_unassisted_s)
+                                / dwell_heat_work_unassisted_s
+```
+
+During a dwell the zone sits at target, so its heat-work weight is ~1.0.
+Shortening the dwell by `credit_s` seconds therefore removes ~`credit_s`
+weight-seconds from `dwell_heat_work_assisted_s` relative to the
+unassisted run, so algebraically
+`credit_s + dwell_heat_work_assisted_s ≈ dwell_heat_work_unassisted_s`
+**for any value of `credit_s`** — the metric compared credit against
+itself and read ≈0 regardless of whether the credit banked was correct,
+half, double, or triple what it should have been. Proven by scaling
+*only* the accrual line `z.credit_s += w * dt` by a constant factor and
+re-running the back-to-back scenario from the table above
+(`tools/PcTools/tests/test_ramp_assist.py`'s
+`ScaleSweepDiscriminatesCreditErrorsTests` is this sweep, executed as a
+permanent regression test):
+
+| SCALE | zone 0 | zone 1 | zone 2 |
+|---|---:|---:|---:|
+| 0.5x | 0.038% | 0.131% | 0.162% |
+| 1.0x (real code) | 0.075% | 0.088% | 0.149% |
+| 2.0x | 0.151% | 0.004% | 0.123% |
+| 3.0x | 0.055% | 0.092% | 0.923% |
+
+A credit half, double, or triple the correct value all passed the
+`abs(...) < 1.0` threshold this module's tests used to pin the metric.
+Worse, the documented negative test for this metric (mutating the accrual
+from `w * dt` to bare `dt`, i.e. banking raw in-band-and-lagging seconds
+instead of heat-work seconds) gave parity 0.000% / 0.000% / 4.380% —
+**two of three zones, which were genuinely mis-banked by roughly
+10-30x, read EXACTLY ZERO.** It passed only by the luck of the third zone
+saturating its dwell.
+
+**Fix — `credit_audit_pct`** (replacing `parity_vs_unassisted_pct`,
+`ramp_assist.py`): compares `credit_s`, the credit actually spent, against
+`credit_reference_heat_s` — an audit accumulator computed at the identical
+accrual gate (same tick, same lagging/in-band condition) but on its own
+separate `+=` statement, never derived from `credit_s`. In correct code
+both statements compute the identical `weight * dt` and the two totals
+are equal to float precision for any schedule; a regression confined to
+the real accrual line leaves the independent line untouched, so the two
+diverge by exactly the size of the regression — nothing on the other side
+of the comparison can absorb it the way `dwell_heat_work_unassisted_s`
+absorbed `credit_s` in the retracted metric. Re-running the same SCALE
+sweep against `credit_audit_pct`:
+
+| SCALE | zone 0 | zone 1 | zone 2 |
+|---|---:|---:|---:|
+| 0.5x | −50.000% | −50.000% | −50.000% |
+| 1.0x (real code) | 0.000% | 0.000% | 0.000% |
+| 2.0x | 100.000% | 100.000% | 100.000% |
+| 3.0x | 200.000% | 200.000% | 200.000% |
+
+Exactly `(SCALE − 1) × 100%` for every zone — clean, monotonic,
+unambiguous discrimination between 0.5x/1.0x/2.0x/3.0x, which is what a
+correctness metric for this accumulator actually needs to provide. The
+raw-seconds regression (`w * dt` → `dt`) now reads ~3056%/3180%/3135%,
+not a suspicious exact zero.
+
+A physically-grounded alternative was also tried and rejected before
+`credit_audit_pct` was adopted: comparing real heat work integrated over
+a FIXED-length window (the dwell's own nominal duration, starting at the
+dwell's entry — long enough that an early-ended, over-credited dwell
+would visibly run into whatever comes next) against what an
+always-at-target zone would deliver over that same span
+(`window_parity_pct`, still reported by `dwell_credit_parity()` as a
+secondary diagnostic). The SAME SCALE-sweep discipline that caught the
+original bug caught this one too, before it landed as the fix: on a
+trailing dwell (the schedule's last step), the simulator correctly keeps
+holding the zone at the same target after the schedule finishes, so
+"the ticks after an early-ended dwell" and "the ticks of the dwell
+itself" are physically indistinguishable — the window's measured heat
+work came back bit-for-bit IDENTICAL across all four SCALE values. On a
+short dwell fed by a comparatively large credit, `window_parity_pct` also
+moved only a few points and non-monotonically, swamped by an unrelated,
+scale-independent catch-up-lag term. Both are documented as known,
+real blind spots of that signal (see `dwell_credit_parity()`'s
+docstring) — genuine dead ends caught by testing before shipping, which
+is why this module treats `credit_audit_pct` as authoritative and
+`window_parity_pct` as supplementary only.
+
+**Conclusion:** no unit-mismatch bug was found in the credit's bank/spend
+arithmetic either before or after this retraction — that underlying
+finding survives. What did not survive is the claim that
+`parity_vs_unassisted_pct` was capable of showing it either way; it could
+not, and the record above exists so nobody re-derives it as "the obvious
+metric" a second time.
 
 **Second-order effect (real, and separate from the credit):** even at ZERO
 credit (`physical_hard` row above — the ramp is fast enough that it never
