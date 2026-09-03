@@ -284,6 +284,19 @@
   .pid-popup .msg { margin-top: 0.6em; font-size: 0.9em; }
   .pid-popup .proposed { font-size: 0.85em; opacity: 0.85; margin-top: 0.6em; }
   .pid-popup .proposed button { font-size: 0.85em; margin-left: 0.4em; }
+  .pid-popup ul { margin: 0.4em 0; padding-left: 1.3em; }
+  .pid-popup .btnrow button.primary { background: var(--ok); color: #fff; border-color: var(--ok); }
+  /* Profile feasibility icon (2026-09-02): sits next to #profileSelect,
+     clickable (not hover-only -- the owner explicitly asked for click-for-
+     information), reuses the .pid-popup modal built for the PID popup above
+     rather than inventing a second dialog pattern. Two visual states so an
+     untuned zone ("not assessed") never reads as a confirmed problem: a red
+     warning triangle for a real too-fast/unreachable segment, a muted info
+     glyph when the only issue is an untuned zone. */
+  #profileFeasIcon { border: none; background: none; cursor: pointer; font-size: 1.3em;
+                      line-height: 1; padding: 0 0.2em; vertical-align: middle; }
+  #profileFeasIcon.feas-icon-warn { color: var(--bad); }
+  #profileFeasIcon.feas-icon-unknown { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -376,6 +389,7 @@
 <div id="runPicker">
   <label for="profileSelect">Firing profile</label>
   <select id="profileSelect"></select>
+  <button id="profileFeasIcon" type="button" hidden aria-label="Feasibility notice for this profile"></button>
   <button id="runBtn" type="button" class="run-btn primary">Start</button>
 </div>
 <!-- Kiln config: a named saved snapshot of the WHOLE zones configuration
@@ -441,6 +455,18 @@
      openPidPopup(). -->
 <div id="pidPopupOverlay" hidden>
   <div class="pid-popup" id="pidPopupBox" role="dialog" aria-modal="true"></div>
+</div>
+
+<!-- Profile feasibility popup (2026-09-02) -- second use of the .pid-popup
+     modal pattern above, kept as its own overlay/box (rather than sharing
+     pidPopupOverlay) so this popup and the PID popup can never stomp on each
+     other's open/close state. Used two ways: as a plain info dialog from the
+     click-for-details icon next to #profileSelect, and as an active
+     proceed/cancel gate from #runBtn when the selected profile has a
+     non-OK feasibility verdict. Content filled in by openFeasInfoPopup()/
+     openFeasStartPopup(). -->
+<div id="feasPopupOverlay" hidden>
+  <div class="pid-popup" id="feasPopupBox" role="dialog" aria-modal="true"></div>
 </div>
 
 <script>
@@ -1965,10 +1991,160 @@ function redirectToReadinessIfBlocked(errMsg) {
   }).catch(function () { alert(errMsg || 'failed to start'); });
 }
 
-document.getElementById('runBtn').addEventListener('click', function () {
-  const id = document.getElementById('profileSelect').value;
-  if (id === undefined || id === '') return;
-  const startName = profileTitleById[id] || ('profile ' + id);
+// -- Profile feasibility (2026-09-02) -------------------------------------
+//
+// profile_feasibility.c already computes a per-segment, per-zone verdict for
+// every profile (PROFILE_SEG_OK / TOO_FAST / UNREACHABLE / UNKNOWN); this
+// page does not recompute any of it, it just fetches GET /api/profile?id=
+// (the same endpoint the editor uses) and surfaces the rollup + per-segment
+// fields that response already carries. profiles_page.html's catalogue view
+// established the OK/too_fast/unreachable vocabulary and CSS idiom
+// (FZ_LABEL/FZ_WHY/fzMark) for the SAME verdict strings; this reuses that
+// wording rather than inventing new phrasing, but additionally surfaces
+// "unknown" (that page deliberately hides it) because the firing flow is a
+// worse place to stay silent about an untuned zone than a read-only
+// catalogue browse is.
+var profileFeasCache = {};
+function fetchProfileFeas(id) {
+  if (id === undefined || id === null || id === '') return Promise.resolve(null);
+  if (Object.prototype.hasOwnProperty.call(profileFeasCache, id)) return Promise.resolve(profileFeasCache[id]);
+  return fetch('/api/profile?id=' + id).then(function (r) {
+    if (!r.ok) throw 0;
+    return r.json();
+  }).then(function (data) {
+    profileFeasCache[id] = data;
+    return data;
+  }).catch(function () {
+    profileFeasCache[id] = null; // degrade like every other optional endpoint on this page: no icon, no gate
+    return null;
+  });
+}
+
+// Same two verdicts profiles_page.html marks, plus "unknown" -- see the
+// block comment above for why this page does not hide it. Text matches
+// FZ_WHY there for the two real failures so the two pages never disagree
+// about what "too fast"/"unreachable" mean.
+var FEAS_WHY = {
+  too_fast: 'commanded ramp exceeds what the zone can sustain (heating headroom, or -- on a falling ramp -- ' +
+            'the kiln’s natural cooling rate; there is no active cooling)',
+  unreachable: 'the kiln cannot reach this temperature at all with its tuned model',
+};
+
+// Splits a profile-detail response's segments into real problems (too_fast/
+// unreachable) and merely-unassessed ones (unknown -- untuned zone, not a
+// known failure). Returns null when there is nothing to say (no feasibility
+// field at all -- older firmware -- or every segment OK).
+function feasSummarize(data) {
+  if (!data || !data.feasibility) return null;
+  if (data.feasibility === 'ok') return null;
+  var problems = [];
+  var unknowns = [];
+  (data.segments || []).forEach(function (s, i) {
+    if (s.feasibility === 'too_fast' || s.feasibility === 'unreachable') {
+      problems.push({ n: i + 1, v: s.feasibility });
+    } else if (s.feasibility === 'unknown') {
+      unknowns.push(i + 1);
+    }
+  });
+  return { rollup: data.feasibility, problems: problems, unknowns: unknowns };
+}
+
+// Shared body for both the info popup and the start-confirmation popup, so
+// the two never drift apart on wording.
+function feasBodyHtml(summary) {
+  var html = '';
+  if (summary.problems.length) {
+    html += '<p class="warn">The tuned model says this profile is not achievable as written:</p><ul>';
+    summary.problems.forEach(function (p) {
+      var label = p.v === 'too_fast' ? 'too fast' : 'unreachable';
+      html += '<li>Segment ' + p.n + ': <b>' + label + '</b> — ' + FEAS_WHY[p.v] + '.</li>';
+    });
+    html += '</ul>';
+  }
+  if (summary.unknowns.length) {
+    var plural = summary.unknowns.length > 1;
+    html += '<p>Segment' + (plural ? 's ' : ' ') + summary.unknowns.join(', ') +
+      (plural ? ' use a zone' : ' uses a zone') + ' that has never been autotuned, so ' +
+      (plural ? 'their' : 'its') + ' achievability is <b>not assessed</b> — that is an open question, ' +
+      'not a predicted failure.</p>';
+  }
+  html += '<p>This assessment assumes an <b>empty kiln</b>, the same condition the PID was tuned under. A ' +
+          'loaded kiln has more thermal mass and heats more slowly, so a profile that is marginal empty may ' +
+          'not be achievable loaded.</p>';
+  html += '<p class="msg">The achievable-rate figure itself comes from a model fitted at low temperature and ' +
+          'extrapolated up to each segment’s target.</p>';
+  return html;
+}
+
+function closeFeasPopup() {
+  document.getElementById('feasPopupOverlay').setAttribute('hidden', '');
+}
+
+// Click-for-details icon next to #profileSelect. Plain "acknowledge and
+// close" -- nothing to gate here, the gate lives in the start-time popup
+// below.
+function openFeasInfoPopup() {
+  var id = document.getElementById('profileSelect').value;
+  var summary = feasSummarize(profileFeasCache[id]);
+  if (!summary) return;
+  var name = profileTitleById[id] || ('profile ' + id);
+  var box = document.getElementById('feasPopupBox');
+  box.innerHTML = '<h3>Feasibility notice — ' + name + '</h3>' + feasBodyHtml(summary) +
+    '<div class="btnrow"><button type="button" id="feasPopupCloseBtn">Close</button></div>';
+  document.getElementById('feasPopupOverlay').removeAttribute('hidden');
+  document.getElementById('feasPopupCloseBtn').addEventListener('click', closeFeasPopup);
+}
+
+// Start-time gate: shown instead of going straight to the existing confirm()
+// when the selected profile has a non-OK verdict. onProceed only runs if the
+// operator clicks "Start firing anyway" -- Cancel (or the popup's Close-
+// equivalent) leaves proceedToStart() uncalled, so no POST goes out.
+function openFeasStartPopup(name, summary, onProceed) {
+  var box = document.getElementById('feasPopupBox');
+  box.innerHTML = '<h3>Start "' + name + '" anyway?</h3>' + feasBodyHtml(summary) +
+    '<div class="btnrow"><button type="button" id="feasPopupCancelBtn">Cancel</button>' +
+    '<button type="button" id="feasPopupProceedBtn" class="primary">Start firing anyway</button></div>';
+  document.getElementById('feasPopupOverlay').removeAttribute('hidden');
+  document.getElementById('feasPopupCancelBtn').addEventListener('click', closeFeasPopup);
+  document.getElementById('feasPopupProceedBtn').addEventListener('click', function () {
+    closeFeasPopup();
+    onProceed();
+  });
+}
+
+document.getElementById('profileFeasIcon').addEventListener('click', openFeasInfoPopup);
+
+// Refreshes the icon for whatever's currently selected. Called on initial
+// list load and on every profileSelect change (see the change handler
+// below). Guards against a stale response landing after the selection
+// changed again while the fetch was in flight.
+function updateProfileFeasIcon() {
+  var id = document.getElementById('profileSelect').value;
+  var icon = document.getElementById('profileFeasIcon');
+  if (id === undefined || id === '') {
+    icon.hidden = true;
+    return;
+  }
+  fetchProfileFeas(id).then(function (data) {
+    if (document.getElementById('profileSelect').value !== id) return;
+    var summary = feasSummarize(data);
+    if (!summary) {
+      icon.hidden = true;
+      icon.classList.remove('feas-icon-warn', 'feas-icon-unknown');
+      return;
+    }
+    var hasProblem = summary.problems.length > 0;
+    icon.hidden = false;
+    icon.classList.toggle('feas-icon-warn', hasProblem);
+    icon.classList.toggle('feas-icon-unknown', !hasProblem);
+    icon.textContent = hasProblem ? '⚠' : 'ⓘ';
+    icon.title = hasProblem
+      ? 'Feasibility warning for this profile — click for details'
+      : 'Part of this profile has not been assessed — click for details';
+  });
+}
+
+function proceedToStart(id, startName) {
   if (!confirm('Start firing "' + startName + '" now? This energises the heaters and will run for hours.')) return;
   // Extra confirmation on top of the normal one above, only when the task-
   // watchdog panic is currently disabled (dev/bench mode).
@@ -1985,6 +2161,20 @@ document.getElementById('runBtn').addEventListener('click', function () {
     }
     pollExec();
   }).catch(pollExec);
+}
+
+document.getElementById('runBtn').addEventListener('click', function () {
+  const id = document.getElementById('profileSelect').value;
+  if (id === undefined || id === '') return;
+  const startName = profileTitleById[id] || ('profile ' + id);
+  fetchProfileFeas(id).then(function (data) {
+    var summary = feasSummarize(data);
+    if (summary) {
+      openFeasStartPopup(startName, summary, function () { proceedToStart(id, startName); });
+    } else {
+      proceedToStart(id, startName);
+    }
+  });
 });
 
 // 2026-09-01 (owner: "the duty cycle and all of the zones are not always
@@ -3141,12 +3331,14 @@ function poll() {
 // lastExecPlanId switch takes over and the preview label goes away with it.
 document.getElementById('profileSelect').addEventListener('change', function (e) {
   if (wasIdle) setActivePlanFor(e.target.value);
+  updateProfileFeasIcon();
 });
 
 loadZones().then(function () {
   loadProfileList().then(function () {
     var sel = document.getElementById('profileSelect');
     if (wasIdle && sel) setActivePlanFor(sel.value);
+    updateProfileFeasIcon();
   });
   loadKilnConfigs();
   poll();
