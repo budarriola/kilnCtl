@@ -181,24 +181,24 @@
   .chan .faults.timeout { color: var(--muted); font-style: italic; }
   .chan .subrow { font-size: 0.9em; color: var(--muted); }
   .chan .subrow .bad { color: var(--warn); }
-  /* Flash partition table -- same .chan card family as the thermocouple
-     channels above (left-border color as the at-a-glance signal), not the
-     plain .card/.row list the rest of this page uses: a partition's most
-     important fact (is this the slot actually running right now) is a
-     binary highlight, the same shape of question the thermocouple cards
-     already answer with their left border. Offset/size are monospaced,
-     tabular-nums like every other numeric .value on this page, in a row
-     that can never force the page wider than the viewport on a phone --
-     same overflow-wrap discipline as .row .value, not the .crash-bt
-     overflow-x:auto treatment, since a partition row is short and fixed-
-     width unlike a variable-length backtrace. */
-  .part-row { border-left: 4px solid var(--border); }
-  .part-row.running { border-left-color: var(--ok); }
-  .part-row .title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4em; }
-  .part-row .title .name { font-weight: bold; }
-  .part-row .running-badge { font-size: 0.75em; font-weight: bold; color: var(--ok);
-                              border: 1px solid var(--ok); border-radius: var(--ui-radius);
-                              padding: 0.05em 0.5em; }
+  /* Flash partition table -- restyled 2026-09-03 (owner: "match the memory
+     table on that same page") to the plain .card/.row idiom the Memory
+     section above uses, instead of the .chan card-per-channel family it
+     borrowed at introduction (153f09d). Each partition becomes three .row
+     lines under one .card, exactly like Memory's "Internal DRAM --
+     free now" / "-- largest free block" / "-- worst-case free" trio under
+     one label prefix -- same flex-wrap .row .label/.value rules already
+     handle not overflowing a narrow phone, so no .table-scroll wrapper is
+     needed here (there is none on Memory's table either). The one fact
+     that idiom has no natural slot for -- which partition is RUNNING -- is
+     carried two ways: that partition's rows get .row.headline (the same
+     bold/larger treatment Memory uses for the one number that page exists
+     to surface), and its name row additionally gets an explicit
+     .running-badge, kept from the old markup and now just an inline span
+     rather than something scoped to the retired .part-row card. */
+  .running-badge { font-size: 0.75em; font-weight: bold; color: var(--ok);
+                    border: 1px solid var(--ok); border-radius: var(--ui-radius);
+                    padding: 0.05em 0.5em; margin-left: 0.4em; }
 </style>
 </head>
 <body>
@@ -768,19 +768,31 @@ here:</p>
       el.innerHTML = '<p>No partitions reported.</p>';
       return;
     }
-    var html = '';
+    // Same .card/.row idiom as the Memory section above: one .card holding
+    // a .row per fact, label prefixed with the partition name (mirrors
+    // "Internal DRAM -- free now" etc). The running partition's rows get
+    // .row.headline (Memory's own bold/larger treatment for the number
+    // that page most wants seen) plus an explicit RUNNING badge on its
+    // name row, since "which slot is live" has no other natural home in a
+    // label/value pair.
+    var html = '<div class="card">';
     for (var i = 0; i < parts.length; i++) {
       var p = parts[i];
       var running = !!(resp.running && p.label === resp.running);
-      html += '<div class="chan part-row' + (running ? ' running' : '') + '">' +
-              '<div class="title"><span class="name">' + window.kcEscapeHtml(p.label) + '</span>' +
-              (running ? '<span class="running-badge">RUNNING</span>' : '') + '</div>' +
-              '<div class="subrow">' + window.kcEscapeHtml(partTypeName(p.type)) + ' / ' +
-              window.kcEscapeHtml(partSubtypeName(p.type, p.subtype)) +
-              (p.encrypted ? '  &middot;  <span class="bad">encrypted</span>' : '') + '</div>' +
-              '<div class="subrow">Offset: ' + fmtOffset(p.offset) + '  &middot;  Size: ' + fmtPartSize(p.size) + '</div>' +
-              '</div>';
+      var name = window.kcEscapeHtml(p.label);
+      var rowClass = 'row' + (running ? ' headline' : '');
+      var typeStr = window.kcEscapeHtml(partTypeName(p.type)) + ' / ' +
+                    window.kcEscapeHtml(partSubtypeName(p.type, p.subtype)) +
+                    (p.encrypted ? ' &middot; encrypted' : '');
+      html += '<div class="' + rowClass + '"><span class="label">' + name +
+              (running ? ' <span class="running-badge">RUNNING</span>' : '') +
+              ' &mdash; type</span><span class="value">' + typeStr + '</span></div>';
+      html += '<div class="' + rowClass + '"><span class="label">' + name +
+              ' &mdash; offset</span><span class="value">' + fmtOffset(p.offset) + '</span></div>';
+      html += '<div class="' + rowClass + '"><span class="label">' + name +
+              ' &mdash; size</span><span class="value">' + fmtPartSize(p.size) + '</span></div>';
     }
+    html += '</div>';
     el.innerHTML = html;
   }
   function pollPartitions() {
