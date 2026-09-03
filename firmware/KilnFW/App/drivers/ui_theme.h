@@ -81,7 +81,13 @@
 #define UI_THEME_ACCENT_2_HEX   0xa15fd6
 #define UI_THEME_ACCENT_2       lv_color_hex(UI_THEME_ACCENT_2_HEX)
 
-/* Accent 3: teal/cyan. */
+/* Accent 3: teal/cyan. WEB_UI_RESPONSIVE_PLAN.md sec 7 (2026-09-03): also
+ * designated the dominant/primary-action accent for the web UI's focus ring
+ * (theme.css's button:focus-visible), since it was the one accent carrying
+ * no existing safety meaning (accent-1 is pause, accent-5 is stop/danger).
+ * Same #3ec6c6 value, no repaint here -- if kiln_ui.c's still-placeholder
+ * screen grows real button chrome, its primary/confirm buttons should reach
+ * for this accent too, for parity with the web side. */
 #define UI_THEME_ACCENT_3_HEX   0x3ec6c6
 #define UI_THEME_ACCENT_3       lv_color_hex(UI_THEME_ACCENT_3_HEX)
 

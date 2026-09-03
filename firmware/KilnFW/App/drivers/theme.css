@@ -22,7 +22,25 @@
   --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
   --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
   --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
-  --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  --ui-radius: 10px; --ui-padding: var(--ui-space-2); --ui-touch: 72px; --ui-status-bar: 32px;
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 7.2 item 2, adopted 2026-09-03: a spacing
+     scale, additive alongside the existing --ui-padding (now an alias for
+     --ui-space-2 so nothing that already reads --ui-padding changes value).
+     Pages keep their existing ad hoc em spacing -- this gives NEW rules a
+     scale to reach for rather than forcing a rewrite of what already works;
+     see the plan doc sec 7 resolution for why a mass find/replace across all
+     13 pages was declined as out of scope for this pass. */
+  --ui-space-1: 4px; --ui-space-2: 8px; --ui-space-3: 12px; --ui-space-4: 20px;
+  --ui-space-5: 32px;
+  /* sec 7.2 item 3, adopted with one change from the proposal: plain
+     translucent-black shadows instead of `color-mix(in srgb, var(--ui-bg) …)`
+     -- --ui-bg is the dark palette's navy (#1a1f2b) even when the page is in
+     light mode (it's the LCD-parity token, not the light theme's --bg), so
+     mixing from it would have tinted light-mode shadows navy instead of
+     neutral. rgba(0,0,0,…) composites correctly over either theme's
+     background without needing a light/dark-specific rule. */
+  --ui-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.08);
+  --ui-shadow-2: 0 2px 6px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.1);
   /* WEB_UI_RESPONSIVE_PLAN.md sec 6 ("earn the width above the cap"): every
      substantial page used to hardcode its own fixed `body { max-width: Npx }`
      (420-620px depending on page -- sec 2.1's table), correct on a phone but
@@ -110,7 +128,7 @@ button { min-height: var(--ui-touch); }
 
 .kc-topbar { display: flex; align-items: center; justify-content: space-between;
              padding: 0.5em 1em; margin: 0 -1em 0.8em -1em; border-bottom: 1px solid var(--border);
-             background: var(--card-bg); }
+             background: var(--card-bg); box-shadow: var(--ui-shadow-2); }
 /* 2026-08-21 rework: the "kilnCtl" brand link that used to sit here is
    gone -- item 5 of the spec replaces it with the page's own name (see
    nav.js's pageTitle()/buildTopbar()), on the theory that "kilnCtl" told
@@ -269,7 +287,11 @@ button { min-height: var(--ui-touch); }
 /* Pause/Resume is the one non-destructive control on the bar -- kept off the
    Stop button's accent-5 (the "serious, aborts the run" colour) so it never
    reads as equally dangerous. */
-.kc-pause-btn { background: var(--ui-accent-1, #468); color: #fff; }
+/* sec 7.2 item 4: dropped the hand-picked `#468` fallback -- --ui-accent-1
+   is defined unconditionally in this file's own :root (line 22 above),
+   loaded before any page's inline <style>, so the fallback never actually
+   fired; it was a one-off hex that did not track its own token. */
+.kc-pause-btn { background: var(--ui-accent-1); color: #fff; }
 .kc-pause-btn[hidden] { display: none; }
 
 /* Connection-lost banner (UI_PLAN.md item 4). Not fixed -- it sits in-flow
@@ -342,8 +364,23 @@ a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch
    re-declared there, so this still applies) rather than adding a per-page
    copy, same "one copy, not seven" principle the rest of this file follows. */
 .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
-        padding: 0.7em 1em; margin-bottom: 0.5em;
+        padding: 0.7em 1em; margin-bottom: 0.5em; box-shadow: var(--ui-shadow-1);
         container-type: inline-size; container-name: kc-card; }
+/* sec 7.2 item 1, adopted narrowly: --ui-accent-3 (teal) is the one accent
+   with no existing safety meaning (accent-1 is pause, accent-5 is stop/
+   danger -- sec 7.1's own inventory), so it becomes the site-wide focus
+   indicator instead of the default UA outline. Declined the rest of item 1
+   (repainting every page's Save/Start/Connect button as a "primary" accent):
+   this is an appliance UI an operator reads mid-firing, not a marketing
+   surface, and there is no existing "primary button" convention to hang the
+   change on -- inventing one means touching markup on all 13 pages for a
+   look-and-feel change, which is exactly the kind of scope this plan's
+   conservatism clause exists to decline. A visible, on-brand focus ring is
+   the part of "one recognizable action colour" that is a genuine
+   accessibility improvement over the default outline, at zero markup cost. */
+button:focus-visible, a.button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--ui-accent-3); outline-offset: 2px;
+}
 /* Narrow-card reflow: a card whose OWN width has shrunk below 240px (e.g. a
    3-up grid on a ~760px viewport, or main_page.html's flex-row label/value
    card squeezed into a grid column) drops from a side-by-side row to a

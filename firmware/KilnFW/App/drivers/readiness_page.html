@@ -21,12 +21,14 @@
      while explicit light mode is untouched. */
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
-    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --bad: #b00; --cannot-yet: #888;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --bad: #b00;
     --warn: #a67c00;
-    /* WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2: --neutral introduced
-       alongside --cannot-yet with the identical value -- purely additive,
-       nothing repaints. --cannot-yet stays the token actually used until
-       the owner signs off on the rename. */
+    /* WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2, resolved 2026-09-03: --neutral
+       is now the token actually used (was --cannot-yet). Same value as before
+       the rename -- see the plan doc for the decision record. Note
+       `.status-cannot_yet` below is a JS-generated status-enum class name
+       (readiness_page.html's own `cannot_yet` status value), unrelated to
+       this CSS custom property name and intentionally left alone. */
     --neutral: #888;
   }
   @media (prefers-color-scheme: dark) {
@@ -34,7 +36,7 @@
       --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
       --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
       --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
-      --cannot-yet: var(--ui-text-secondary); --warn: var(--ui-accent-1);
+      --warn: var(--ui-accent-1);
       --neutral: var(--ui-text-secondary);
     }
   }
@@ -42,7 +44,7 @@
     --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
     --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
-    --cannot-yet: var(--ui-text-secondary); --warn: var(--ui-accent-1);
+    --warn: var(--ui-accent-1);
     --neutral: var(--ui-text-secondary);
   }
   /* box-sizing reset, page-local only. Fluid width via min() rather than a
@@ -84,7 +86,7 @@
                align-items: center; min-height: 32px; padding: 0 0.4em 0 0; }
   .item.status-ok .mark { color: var(--ok); }
   .item.status-not_done .mark { color: var(--bad); }
-  .item.status-cannot_yet .mark { color: var(--cannot-yet); }
+  .item.status-cannot_yet .mark { color: var(--neutral); }
   .item.status-deliberately_off .mark { color: var(--warn); }
   .item.status-cannot_yet { opacity: 0.75; }
   .legend { font-size: 0.8em; color: var(--muted); margin-bottom: 1em; }
@@ -107,7 +109,7 @@ firing; it is a checklist, not a gate.</p>
   <span>&#10003; ok</span>
   <span style="color:var(--bad)">&#10007; not done</span>
   <span style="color:var(--warn)">&#8212; deliberately off</span>
-  <span style="color:var(--cannot-yet)">&#8943; can't check yet</span>
+  <span style="color:var(--neutral)">&#8943; can't check yet</span>
 </div>
 <div id="items"><p class="empty">Loading&hellip;</p></div>
 

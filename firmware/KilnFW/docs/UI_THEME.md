@@ -25,7 +25,7 @@ and update both this table and `ui_theme.h` together if it needs correcting.
 | `UI_THEME_COLOR_TEXT_SECONDARY` | `#9aa0ae` | Secondary/dim text -- labels, units, less-important status text. |
 | `UI_THEME_ACCENT_1` | `#e8974e` | Accent 1 -- orange. Per-zone/per-metric color coding, assigned by 10.3, not fixed to a specific zone by this header. |
 | `UI_THEME_ACCENT_2` | `#a15fd6` | Accent 2 -- purple/magenta. |
-| `UI_THEME_ACCENT_3` | `#3ec6c6` | Accent 3 -- teal/cyan. |
+| `UI_THEME_ACCENT_3` | `#3ec6c6` | Accent 3 -- teal/cyan. Also the web UI's dominant/primary-action accent since WEB_UI_RESPONSIVE_PLAN.md sec 7 (2026-09-03) -- `theme.css`'s `button:focus-visible` ring. Same value, web-only usage change; if `kiln_ui.c`'s placeholder screen grows real button chrome, its primary/confirm buttons should reach for this accent too for parity. |
 | `UI_THEME_ACCENT_4` | `#5cc06e` | Accent 4 -- green. Matches the reference's nav-icon underline color. |
 | `UI_THEME_ACCENT_5` | `#d6555f` | Accent 5 -- red/amber. Held back for "attention" use (fault/alarm/stop) rather than a fifth ordinary zone color; the one accent here inferred rather than directly seen in the reference screenshots, so double-check it hardest once real hardware is available. |
 

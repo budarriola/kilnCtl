@@ -7,12 +7,11 @@ scope here (see section 8).
 Conventions, matching `PID_EXPANSION_PLAN.md`: **the code is truth, not the
 checkboxes.** Nothing is done until a commit is named.
 
-Status at time of writing (2026-09-02): **Phases 0, 1 and 2 (§4, §5, §6) are
-built and committed.** Phase 3 (§7) is owner-gated, not started -- §7 below is
-now a decision-ready proposal, not applied CSS. §3 items 2 and 4 (previously
-recorded as "does not reproduce under the sweep") are now covered; see §4.
-Two token-vocabulary questions are open for the owner, made decision-ready in
-§5.1. See the status notes at the top of each section below.
+Status at time of writing (2026-09-03): **Phases 0, 1, 2 and 3 (§4, §5, §6,
+§7) are built and committed.** The owner delegated the §5.1 and §7 colour
+decisions; both are now resolved -- see §5.1 and §7.5 for the decisions, the
+reasoning, and what was applied vs. declined. §3 items 2 and 4 (previously
+recorded as "does not reproduce under the sweep") are covered; see §4.
 
 Companions: `FLASH_BUDGET_PLAN.md`, `DRAM_PSRAM_PLAN.md`. All three are
 independent; none blocks another.
@@ -287,7 +286,47 @@ All 13 pages converted, one commit each where a page needed a change
 (`8e8db7f`, `a1364b4`, `369f593`, `a09bbfb`, `c27b43f`; the rest were already
 canonical).
 
-### 5.1 Two items need an owner decision — still open
+### 5.1 Two items needed an owner decision — RESOLVED 2026-09-03
+
+Delegated to this pass by the owner. Decisions below; the write-ups
+underneath are kept as the reasoning record.
+
+**Item 1 (`--fault-color`): decided AS-IS, no change.** The plan's own
+recommendation on file -- leave `safety_commissioning_page.html`'s
+`--fault-color` aliased to `--bad` -- is adopted. It is the majority pattern
+(`backup_page.html`, `settings_page.html` do the same), and the alternative
+(remapping to `--ui-accent-1`) would be a real repaint decision layered on
+top of an LCD-parity question, for a distinction (`--bad` = "this reading is
+wrong" vs. `--fault-color` = "this data cannot be trusted") that is already
+carried by non-colour cues at every site that uses it: `.risk-dangerous`/
+`.writewindow.ww-armed` are text-labelled badges, `body.kc-cfg-linkdown`
+degrades the whole page (not one swatch), and `.crc-mismatch` sits next to
+explanatory text. Nothing changed.
+
+**Item 2 (`--neutral`): decided YES, applied.** `main_page.html` renamed
+`--off-color` → `--neutral`; `readiness_page.html` renamed `--cannot-yet` →
+`--neutral`. Both pages' three `:root` blocks (light, `prefers-color-scheme:
+dark`, `[data-theme="dark"]`) now define only `--neutral`, same values as
+before (`#888` light / `var(--ui-text-secondary)` dark) -- a pure rename, no
+value changed. `readiness_page.html`'s `.status-cannot_yet` CSS class is
+**not** touched -- it names a JS status-enum value (`cannot_yet`, distinct
+from the `--cannot-yet` custom property that shared its spelling by
+coincidence), and renaming it would be an unrelated JS/CSS-selector change
+outside this decision's scope. Verified: `ui_status_color_check.mjs` passed
+after the rename (13 pages, 4 status tokens including `--neutral`, 3:1 floor)
+and `ui_responsive_sweep.mjs` stayed 99/99. Negative-tested by setting
+`readiness_page.html`'s `--neutral` to `#f5f5f5` (near the light card
+background) -- `ui_status_color_check.mjs` correctly failed with `--neutral
+(#f5f5f5) vs background (#f7f7f7) is 1.02:1, below the 3:1 floor`; reverted.
+
+**On the low pairwise contrast between `--ok`/`--warn`/`--bad` (§11):** this
+pass re-measured it (see §7.5's contrast table) and confirms the earlier
+finding still holds, unchanged by anything in §5.1 or §7 -- both items above
+are deliberately scoped to the `--fault-color`/`--neutral` *vocabulary*
+question, not the `--ok`/`--warn`/`--bad` *hex values*. Whether to change
+those hex values is addressed in §7.5, because it is provably impossible to
+fully solve within the LCD-parity constraint (dark near-black background) —
+see the math there.
 
 **1. `safety_commissioning_page.html`'s `--fault-color` and `--bad`.**
 Numerically identical today (both `#c0392b` light, both `var(--ui-accent-5)`
@@ -374,15 +413,8 @@ invisible unstyled colour, not as an error.
 Deliverable: `theme.css` becomes the single place a colour or size decision is
 made. Everything after this is cheap; nothing before it is.
 
-**2026-09-02 follow-up on item 2:** `--neutral` has been added to
-`main_page.html` and `readiness_page.html`'s three `:root` blocks each
-(light, `prefers-color-scheme: dark`, `[data-theme="dark"]`), set to the
-exact same values `--off-color`/`--cannot-yet` already hold on those pages.
-Nothing was switched over to it — `grep -rn "var(--neutral)"` across
-`App/drivers/` returns no hits, so no rendered color changed; the sweep
-(78/78) and `run_all_checks.ps1` (26/26) confirm this. This is prep only:
-the rename from `--off-color`/`--cannot-yet` to `--neutral` is still the
-owner's call, same as item 1.
+**2026-09-03: item 2 applied.** See the RESOLVED note at the top of this
+section for the final state and verification.
 
 ---
 
@@ -418,11 +450,12 @@ wants to be written once.
 `main_page.html` and `zones_page.html` benefit most — they are the dashboards,
 and they are the two pages with the tightest 480 px cap.
 
-## 7. Phase 3 — modern look (decision-ready proposal, NOT applied)
+## 7. Phase 3 — modern look — RESOLVED 2026-09-03 (partial adoption)
 
 Owner-gated per `UI_THEME.md`'s web/LCD parity rule (§3 item 7): any accent
-change is an LCD change too. Nothing below has been painted onto any page.
-This is the concrete proposal to sign off on or amend.
+change is an LCD change too. §7.1/§7.2 below are the original proposal,
+kept verbatim for reference; §7.5 records what was decided, applied, and
+declined.
 
 ### 7.1 What is actually there today
 
@@ -518,6 +551,106 @@ pass). No change to any `--ok`/`--warn`/`--bad`/`--neutral` mapping — that's
 wants an actual new brand color (a sixth accent, or a paint-over of an
 existing one), that is a bigger decision than this proposal makes and would
 need its own sign-off with its own LCD-side hex change.
+
+### 7.5 Decision — RESOLVED 2026-09-03: partial adoption
+
+Delegated to this pass by the owner, decided per-item. **No new hex values
+anywhere** — every change below reuses `ui_theme.h` values already shared
+with the LCD.
+
+**Adopted:**
+
+- **Item 1 (dominant accent), narrowed to a focus ring only.** `theme.css`
+  gained `button:focus-visible, a.button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--ui-accent-3); outline-offset: 2px; }`. **Declined**
+  the rest of item 1 — repainting every page's Save/Start/Connect button as a
+  "primary" accent. There is no existing "primary button" convention to hang
+  that on; inventing one means touching markup on all 13 pages for a
+  look-and-feel change on an appliance UI an operator reads mid-firing. A
+  focus ring is the part of "one recognizable action colour" that is a
+  genuine, low-risk accessibility improvement (keyboard/switch-access users
+  get a visible indicator where before they had the UA default) rather than
+  fashion, so it is the part adopted.
+- **Item 2 (spacing scale) — adopted as proposed.** `--ui-space-1..5`
+  (4/8/12/20/32px) added to `theme.css`'s `:root`; `--ui-padding` is now
+  `var(--ui-space-2)` (same 8px value, alias not a change). Purely additive —
+  no existing rule's computed value changed. Per-page ad hoc `em` spacing was
+  **not** mass-rewritten to use the new scale (that's a 13-page, purely
+  cosmetic pass with no correctness benefit); the scale exists for new rules
+  to reach for.
+- **Item 3 (shadows) — adopted, with one implementation change from the
+  proposal.** `--ui-shadow-1`/`--ui-shadow-2` added and applied to `.card`
+  and `.kc-topbar`. The proposal's `color-mix(in srgb, var(--ui-bg) 60%,
+  black 40%)` was **not** used: `--ui-bg` is the dark palette's navy
+  (`#1a1f2b`) regardless of which theme is active — it's the LCD-parity
+  token, not the page's own `--bg` — so mixing from it would have tinted
+  light-mode shadows navy instead of neutral. Plain `rgba(0,0,0,…)` shadows
+  were used instead; they composite correctly over either theme's background
+  with one rule, no light/dark split needed.
+- **Item 4 (`color-mix()` for hand-picked hex) — adopted, minimally.** The
+  only actual instance was `.kc-pause-btn`'s `var(--ui-accent-1, #468)`
+  fallback — `--ui-accent-1` is defined unconditionally in this file's own
+  shared `:root`, loaded before any page's inline `<style>`, so the fallback
+  never fired; it was dead and untracked. Changed to `var(--ui-accent-1)`.
+  No other hand-picked hex fallback or hover-darken value was found in
+  `theme.css` to convert.
+
+**Declined:**
+
+- **Item 5 (`light-dark()`).** This directly conflicts with this task's own
+  hard requirement to keep the existing `:root` / `prefers-color-scheme` /
+  `[data-theme]` three-block structure intact, and it is a mechanical,
+  purely-syntactic rewrite of that structure across all 13 pages with no
+  visual or functional benefit — real risk (13 files, three blocks each) for
+  zero payoff, the opposite of what "be conservative about scope" asks for.
+- **Item 6 (type scale), rewrite half declined.** `--ui-font-sm/base/lg/xl`
+  were **not** added, for the same reason the spacing scale's per-page
+  rewrite was declined but more so: unlike spacing, the ad hoc font-size
+  values it would replace are scattered per page with page-specific
+  reasoning already recorded in comments (touch-target math, wrap-point
+  tuning per §3) — collapsing them into a shared 4-step scale risks quietly
+  changing a size that was tuned for a specific overflow/wrap bug. Not
+  worth the risk for a purely cosmetic consolidation.
+
+**Contrast — measured, not fixed, with the reason why:** re-measuring §11's
+`--ok`/`--warn`/`--bad` pairwise luminance contrast against the shared dark
+palette (`--ui-accent-4`/`--ui-accent-1`/`--ui-accent-5`) confirms it is
+**unchanged** by this pass — before and after are identical, because nothing
+adopted above touches those three tokens:
+
+| pair | before (dark) | after (dark) |
+|---|---|---|
+| ok vs warn | 1.03:1 | 1.03:1 (unchanged) |
+| ok vs bad | 1.73:1 | 1.73:1 (unchanged) |
+| warn vs bad | 1.68:1 | 1.68:1 (unchanged) |
+
+This pass checked whether a repaint could actually clear this task's 3:1
+pairwise floor and found it is **mathematically impossible** within the
+existing LCD-parity constraint, not merely undesirable: every status colour
+must independently clear 3:1 against `--ui-bg` (`#1a1f2b`, relative luminance
+0.014, the dark-mode card/page background), which requires each colour's own
+luminance `L ≥ 3×0.014 + 0.1 = 0.142`. Chaining three colours pairwise 3:1
+apart from that floor requires `L₂ ≥ 3×L₁ + 0.1` and `L₃ ≥ 3×L₂ + 0.1`, i.e.
+`L₃ ≥ 9×0.142 + 0.4 ≈ 1.68` — above 1.0, the maximum possible luminance
+(pure white). No three same-family hues (green/amber/red) can simultaneously
+clear the against-background floor and the pairwise floor on this dark
+background; this is not a hex-picking failure, it is the geometry of a
+3:1-vs-near-black-background constraint applied three times in a chain.
+Because of that, and because §7's own scope excludes new status-colour hex
+(§7.4, independent of §5.1), this pass did not attempt a partial repaint —
+a half-measure would change long-standing, LCD-shared colours for a
+still-non-compliant result. **The correct mitigation is the one already
+shipped in §11**: colour is reinforced with text/glyphs everywhere it
+matters (`readiness_page.html`'s ✓/✗/—/⋯ marks, `zones_page.html`'s verdict
+text and RGA ✓/!/✗ glyphs, `safety_page.html`'s WARN/TRIPPED text suffixes,
+etc.) specifically because hue-only, low-luminance-contrast status colour
+cannot be relied on alone — which is exactly what
+`ui_status_color_check.mjs` (§11) verifies mechanically. If the owner wants
+full pairwise 3:1 in the future, it requires either a fourth visual channel
+(icon/border shape, already flagged in §11 as a design-language change) or
+accepting a background lighter than `--ui-bg` for status swatches
+specifically — both are new design decisions, not something this pass's
+"reuse existing hex" mandate can produce.
 
 ---
 
