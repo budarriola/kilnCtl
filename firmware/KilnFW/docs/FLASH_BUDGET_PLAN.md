@@ -505,6 +505,35 @@ history and are not hypothetical — each has already caused a problem here once
    if it is still the old one, work §7's checklist in order — archive the four
    NVS partitions first, reflash the table and bootloader, erase `otadata`,
    and do not touch `coredump` in the process.
+
+   **Read-back mechanism, now built** (`tools/PcTools/src/kilnctrl/
+   partition_table.py`): reads the raw partition-table bytes off the chip
+   over JTAG via `debug_probe.read_memory()` — the same OpenOCD substrate
+   `flash_firmware()` already uses, never esptool — parses them with the
+   standard ESP-IDF binary entry format (32 B/entry, magic 0xAA50, LE
+   type/subtype/offset/size/label/flags), and diffs them entry-by-entry
+   against `firmware/KilnFW/partitions.csv`. Exposed two ways:
+   - MCP tool: `kiln_call(name="debug_check_partition_table")` (optional
+     `peer`, `csv_path` args).
+   - CLI: `uv run --project tools/PcTools python
+     tools/PcTools/scripts/check_chip_partition_table.py`.
+
+   Reports `MATCH` or a `MISMATCH` naming exactly the partition(s) and
+   field(s) that differ (type/subtype/offset/size), or any partition present
+   on only one side. Unit-tested against synthetic blobs
+   (`tools/PcTools/tests/test_partition_table.py`, 23 tests, no board
+   required) — including a proof that a single mutated field (`coredump`
+   size changed 0x100000 -> 0x200000 in a scratch CSV copy) is reported as
+   exactly that one entry/field and nothing else, then the mutation was
+   reverted.
+
+   Read-only: halts the ESP core for the ~1-2 s the JTAG read takes and
+   resumes it immediately after, identical to any other `debug_read_memory`
+   call. Safe to run with the board idle and powered; do NOT run it while a
+   fire profile is active (briefly freezes relay control/telemetry, same as
+   every other `debug_*` JTAG tool). **Not yet run against the physical
+   board** — it was built and proven against synthetic data only; running it
+   for real is the next step, once the board is done cooling.
 4. Leave `coredump` (5.3) alone unless something forces the issue.
 5. ~~Revisit 5.4 only if 4.1 justifies it~~ — 4.1 does not justify it;
    decided not pursued.

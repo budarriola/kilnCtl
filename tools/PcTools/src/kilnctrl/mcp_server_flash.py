@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, partition_table, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -190,5 +190,52 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
         "USB power cycle of the board (not just a JTAG reset) has resolved a "
         "flash-write-protect-stuck state before."
     )
+
+
+# ---------------------------------------------------------------------------
+# On-chip partition-table confirmation -- FLASH_BUDGET_PLAN.md section 8 item
+# 3. flash_firmware() above reports "flashed and verified OK (bootloader +
+# partition table + app)" after a program(), but nothing readable over this
+# board's HTTP surface reports the on-chip partition table afterwards, and
+# check_flash_partition_map.ps1 only validates the REPO's partitions.csv --
+# neither one is independent confirmation of what actually ended up on the
+# chip. This tool reads the partition-table bytes back over JTAG (same
+# OpenOCD/debug_probe substrate as every other debug_* tool -- never
+# esptool) and diffs them against partitions.csv entry by entry. See
+# partition_table.py for the parsing/diff logic (unit-tested against
+# synthetic blobs, no board required).
+# ---------------------------------------------------------------------------
+@_srv._tool()
+def debug_check_partition_table(peer: str = "esp", csv_path: Optional[str] = None) -> str:
+    """Reads the on-chip partition table over JTAG (peer="esp" only makes
+    sense here -- the RP2040 has no partition table) and diffs it
+    entry-by-entry against `csv_path` (defaults to
+    firmware/KilnFW/partitions.csv). This is the only way to independently
+    confirm what partition table is actually written to the chip: neither
+    flash_firmware()'s own "verified OK" nor check_flash_partition_map.ps1
+    read anything off the board itself.
+
+    Read-only -- halts the ESP core briefly (OpenOCD requires this for any
+    memory read) and resumes it immediately after, same as debug_read_memory.
+    Safe to run while the board is idle and powered; do not run it while a
+    fire profile is in progress (the same brief-halt caveat as any other
+    debug_* JTAG operation -- it stops relay control and telemetry for the
+    ~1-2s of the read).
+
+    Reports MATCH if every partition's type/subtype/offset/size on the chip
+    agrees with the CSV, or a line-by-line MISMATCH otherwise (partitions
+    only on the chip, only in the CSV, or present in both with differing
+    fields)."""
+    try:
+        diff, chip_entries, csv_entries = partition_table.check_chip_partition_table(
+            peer=peer, csv_path=csv_path
+        )
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        return f"error: {exc}"
+    _srv._session_log.warning(
+        "debug_check_partition_table: peer=%s chip_entries=%d csv_entries=%d ok=%s",
+        peer, len(chip_entries), len(csv_entries), diff.ok,
+    )
+    return diff.report()
 
 

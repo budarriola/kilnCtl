@@ -69,6 +69,7 @@ GROUP_OVERRIDES = {
     "kill_openocd_sessions": "debug",
     "set_openocd_path": "debug",
     "get_openocd_status": "debug",
+    "debug_check_partition_table": "debug",
     # LVGL page interaction.
     "list_buttons": "ui",
     "press_button": "ui",
@@ -100,6 +101,8 @@ KEYWORDS = {
     "debug_read_symbol": ("variable", "global", "inspect", "elf", "nm"),
     "debug_read_registers": ("pc", "sp", "primask", "core", "cpu"),
     "flash_firmware": ("esp32", "jtag", "openocd", "program"),
+    "debug_check_partition_table": ("partitions.csv", "on-chip", "verify",
+                                    "confirm", "gen_esp32part", "flash layout"),
     "saleae_capture": ("logic", "analyzer", "trace", "waveform", "timing"),
     "touch_inject": ("tap", "press", "click", "simulate", "screen"),
     "press_button": ("lvgl", "ui", "tap", "screen", "page"),
