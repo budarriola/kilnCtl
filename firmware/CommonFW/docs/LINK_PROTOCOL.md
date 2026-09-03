@@ -542,9 +542,10 @@ the reason logged on the Pico side) if the relay is currently `ARMED`, or if
 `calibration_missing` — thermocouple commissioning and CT calibration are
 separate concerns.
 
-`gain`/`offset` must already be inverted the way
-`firmware/SimFW/tools/gen_ct_cal_table.py` inverts its fit before writing a
-compiled table: `firmware/SimFW/tools/ct_calibration/calibrate_ct.py` fits
+`gain`/`offset` must already be inverted the way SimFW's
+`tools/gen_ct_cal_table.py` used to invert its fit before writing a
+compiled table (SimFW was removed 2026-08-28, so this tooling is gone; the
+math it applied is recorded here for anyone rebuilding an equivalent):
 `measured_a = fit_gain * commanded + fit_offset` (`commanded` = the
 fixture's known true amps, `measured_a` = `SaftyFW`'s own reported
 `current_a`, read back via `SAFETY_CMD_GET_STATUS` over the existing
@@ -1074,9 +1075,9 @@ Pico's own `ct_amps_cal.c` never reads them for that channel) and must not
 be displayed or trusted as if they were a real correction. See
 `firmware/SaftyFW/src/config_store.h`'s header comment on
 `config_store_ct_channel_cal_t` for the full "uncalibrated is explicit, not
-zero" reasoning, and `firmware/SimFW/src/sim/ct_calibration.h`'s header
-comment for why the same discipline holds on the SimFW side of this exact
-problem.
+zero" reasoning. (SimFW's `src/sim/ct_calibration.h` used to carry the
+matching header comment for why the same discipline held on its side of
+this exact problem; SimFW was removed 2026-08-28.)
 
 ---
 
@@ -1145,7 +1146,8 @@ evidence that the safety processor is running.
 The mechanism already exists on the ESP and needs only to be pointed at the
 telemetry stream: `safety_link_set_fault_source(SAFETY_FAULT_SRC_SAFETY_LINK)`
 feeds `relay_authority_on_blocked()`, which every relay-on path already goes
-through — the UART bridge, the dashboard's `POST /api/relay`, and
+through — the UART bridge, the dashboard's `POST /api/diagnostics/danger/relay`
+(`/api/relay` before its 2026-08-27 removal), and
 `profile_executor` (`firmware/KilnFW/docs/SAFETY_MODEL.md` §1). So asserting that one bit
 blocks **every** heater-on event on the board, with no new gate to write.
 

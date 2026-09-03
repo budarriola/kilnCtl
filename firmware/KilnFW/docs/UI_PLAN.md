@@ -78,11 +78,13 @@ authorized yet.
 
 - **Open, no auth:** every page and every read endpoint (`GET /api/status`,
   `/api/profile_exec`, `/api/readiness`, `/api/history.csv`, `/api/zones`,
-  `/api/rules`, `/api/profiles`, `/status`, `/scan`).
-- **Gated once built:** every state-changing POST — `/api/relay`,
+  `/api/profiles`, `/status`, `/scan`).
+- **Gated once built:** every state-changing POST —
+  `/api/diagnostics/danger/relay` (`/api/relay` before its 2026-08-27
+  removal, see `docs/WEB_UI.md`),
   `/api/profile_exec/{start,stop,pause,resume,ack_last_run}`,
   `/api/profile`, `/api/profile/delete`, `/api/safety/clear_trip`,
-  `/api/zones`, `/api/rules`, `/api/control`, `/api/autotune/*`,
+  `/api/zones`, `/api/control`, `/api/autotune/*`,
   `/provision`, `/forget`, `/ip_config`, and the danger zone. OTA keeps its
   own existing per-request HMAC challenge (`App/drivers/ota_auth.{c,h}`)
   regardless — this session layer sits alongside it, never replaces it.

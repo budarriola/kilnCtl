@@ -642,7 +642,7 @@ used to require under the retired optocoupler pair), so the adapter should
 run at ordinary UART mark, standard polarity, on both legs.
 
 Then speak the same `uart_protocol` framing the PC tools already implement
-(`pc_tools/src/kilnctrl/protocol.py`), with `own_device = UART_PROTO_DEVICE_SAFETY`,
+(`tools/PcTools/src/kilnctrl/protocol.py`), with `own_device = UART_PROTO_DEVICE_SAFETY`,
 registering task 7, and answer each `GET_STATUS` with the 23-byte frame above.
 This is the closest thing to the real Pico and is the recommended way to
 develop the RP2040 firmware's protocol layer before there is any RP2040

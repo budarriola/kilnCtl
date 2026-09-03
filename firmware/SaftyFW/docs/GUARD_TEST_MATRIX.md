@@ -320,9 +320,11 @@ This was established two ways, cross-checked against each other:
    that compiles `safety_guards.c` and `relay_grace.c` **verbatim,
    unmodified**, ticks them against `firmware/SimFW`'s `virtual_simfw`
    fixture at the real 100 ms cadence, and records which guards actually
-   transition. Its full run against all 19 scenarios is in
-   `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md`, and its
-   own README's "Findings" section reaches the same verdicts below
+   transition. Its full run against all 19 scenarios was recorded in
+   `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md` — gone
+   along with the rest of SimFW's removal 2026-08-28, see the "Re-checking
+   this table" note in §6 below — and its
+   own README's "Findings" section reached the same verdicts below
    independently. **This is a software cross-check, not hardware
    verification** — no real SPI bus, no real relay coil, no real ESP link,
    no FreeRTOS jitter — see that tool's own README for exactly what it does
@@ -348,8 +350,9 @@ This was established two ways, cross-checked against each other:
 > are kept as history because they are what the `blocked_on:` annotations in
 > `firmware/SimFW/scenarios/*.yaml` were written against.
 >
-> The `virtual_dut` re-run confirming this is in
-> `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md`. Read its
+> The `virtual_dut` re-run confirming this was recorded in
+> `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md` (removed
+> with SimFW 2026-08-28, see the "Re-checking this table" note in §6). Read its
 > **"reachable" vs "provokable by this fixture"** distinction carefully: a
 > guard being reachable on the RP2040 does not mean `virtual_dut` can
 > currently drive it (the fixture has no setpoint producer for S2, no
@@ -437,9 +440,10 @@ present-day SaftyFW, not just a "should be reachable" source-level verdict.**
 S1 and S13 are commissioning gaps (deliberate, not fixable by a scenario or
 a fixture change). S6a is the one guard this harness cannot provoke at all,
 for the fixture-emulation reason given in its row above — bench hardware is
-the only way to exercise it. See
-`firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md` for the exact
-measured numbers behind every "provoked" claim above.
+the only way to exercise it. The exact measured numbers behind every
+"provoked" claim above were in
+`firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md`, removed
+with SimFW 2026-08-28 — see the "Re-checking this table" note just below.
 
 **Re-checking this table:** the `virtual_dut` host cross-check this table's
 "Yes"/"No" verdicts cite was part of the SimFW bench-fixture tooling, which

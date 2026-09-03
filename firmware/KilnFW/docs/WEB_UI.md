@@ -804,9 +804,10 @@ Where they differ, and it matters:
   transport level (it was delivered), no state changes, and like every other
   `SET_*` in that task there is no task-level reply either way. The only way
   to observe the refusal is that the next `READ`/auto-report still shows the
-  relay off. Over HTTP, `POST /api/relay` answers **403 `blocked by safety
-  fault`** — an explicit, immediate refusal. Same policy, same chokepoint,
-  very different observability.
+  relay off. Over HTTP, `POST /api/diagnostics/danger/relay` (the
+  `/api/relay` manual-override endpoint's replacement since 2026-08-27, see
+  above) answers **403 `blocked by safety fault`** — an explicit, immediate
+  refusal. Same policy, same chokepoint, very different observability.
 - **Push vs. poll.** The UART link pushes: THERMO/IO `SET_AUTO_REPORT`
   deliver unsolicited frames, and IO additionally pushes on every `~INT`
   edge. The web UI has no equivalent and polls at 2 s — the gap TODO.md

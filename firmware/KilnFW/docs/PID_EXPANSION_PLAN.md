@@ -2572,7 +2572,7 @@ needed. (2) `telemetry_log.c`'s `telemetry_log_task()` now attaches a
 the `EVENT_CODE_FIRING_DONE` flash event record when
 `ramp_dwell_credit_applied_s > 0.0f`, so a firing whose dwell was
 shortened leaves a permanent, post-hoc-readable artifact in the flash
-event log (`log_http.c`'s `/api/log` route) — not just a live JSON field
+event log (`log_http.c`'s `/api/logs/firing` route) — not just a live JSON field
 that resets to 0.0 at the next run's start
 (`profile_executor_run.c:355`). Not attached to `EVENT_CODE_FIRING_FAULTED`
 (the fault_guard already carried in `arg` is the more useful number at

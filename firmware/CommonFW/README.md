@@ -14,15 +14,17 @@ and linked into both.
 `include/benchproto/`, `src/benchproto_*.c`) — a hardened, addressed
 request/reply protocol (framing, CRC16, retry/dedup, task registration) for
 bench/instrument firmwares talking to a PC, extracted from
-`firmware/UnitTestFw`'s UART prototype for `SimFW`'s USB-CDC link (see
-`firmware/SimFW/docs/DESIGN_NOTES.md` sec 4.4/12). It shares no code with `kilnlink`
+`firmware/UnitTestFw`'s UART prototype for SimFW's USB-CDC link (SimFW
+was removed 2026-08-28, `UnitTestFw` restored in its place; the design
+rationale that lived in SimFW's `docs/DESIGN_NOTES.md` sec 4.4/12 went with
+it). It shares no code with `kilnlink`
 — see `docs/BENCHPROTO.md` sec 1 for why the two look alike but are kept
 apart — and is host-tested the same way (`test_benchproto_frame.c`,
 `test_benchproto_link.c`, both wired into this file's `CMakeLists.txt`).
 
 **Status: the framing layer exists and is host-tested.** `kilnlink_frame.{c,h}`
 + `kilnlink_crc.c` are written, byte-exact cross-checked against
-`pc_tools/src/kilnctrl/protocol.py` (the second, already-proven
+`tools/PcTools/src/kilnctrl/protocol.py` (the second, already-proven
 implementation of this exact envelope) via `test/vectors/frame_vectors.json`,
 consumed by both `test/test_frame.c` (built and passing with MSVC via CMake +
 Ninja, verified 2026-08-16) and `tools/PcTools/selfcheck.py`. **Framing is now
@@ -568,6 +570,6 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
   implementation, shared test vectors.
 - [`docs/BENCHPROTO.md`](docs/BENCHPROTO.md) — the separate `benchproto`
   protocol family's spec: framing, CRC, reliability, and task-registration,
-  hardware-agnostic. First consumer is `SimFW`
-  ([`../SimFW/docs/PLAN.md`](../SimFW/docs/PLAN.md)); shares no code with
+  hardware-agnostic. First (and, since SimFW's 2026-08-28 removal, only
+  historical) consumer was SimFW; shares no code with
   `kilnlink` (see that document's section 1 for why).

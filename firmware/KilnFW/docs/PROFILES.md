@@ -381,17 +381,25 @@ only ever asked for the buffer to gain a duty field, not to fan out per zone.
 second full-size buffer — see `docs/PID_CONTROL.md`'s closing section for the
 out-of-memory failure that lesson came from.
 
-## The relay rule DSL (`rules_http.c`)
+## The relay rule DSL (`rules_http.c`) — REMOVED 2026-08-27
 
-### Nothing evaluates these rules
+**`rules_http.c`/`rules_eval.c`/`rules_task.c` (the relay rule DSL editor,
+`/settings/relays`, `GET`/`POST /api/rules`) were deleted 2026-08-27** along
+with `rules_page.html`, per `docs/WEB_UI.md`'s removal notes. The rest of
+this section is kept as historical record of the DSL's grammar and
+validation rules — none of it is live. Manual relay control now goes through
+`diagnostics_http.c`'s Danger Zone (`POST /api/diagnostics/danger/relay`),
+documented in `docs/WEB_UI.md`.
 
-**There is no rule-evaluator task anywhere in this firmware.** TODO.md
+### Nothing evaluated these rules while they existed
+
+**There was no rule-evaluator task anywhere in this firmware.** TODO.md
 section 0 designed the rule engine and section 6 is where it would run;
-neither built it. A saved rule set is stored, validated and echoed back, and
-that is all it does — no relay is ever switched by it. `/settings/relays`
-says so on the page itself, `rules_http.h` says so in its header comment, and
-`rules_http_start()` logs `rules API up (config storage only -- no rule
-evaluator exists yet)` at boot. Manual relay control on the dashboard is
+neither built it. A saved rule set was stored, validated and echoed back, and
+that is all it did — no relay was ever switched by it. `/settings/relays`
+said so on the page itself, `rules_http.h` said so in its header comment, and
+`rules_http_start()` logged `rules API up (config storage only -- no rule
+evaluator exists yet)` at boot. Manual relay control on the dashboard was
 entirely unaffected by anything saved here.
 
 A relay's `DRIVEN` flag has the same status: it mirrors TODO.md's `RULE`
@@ -410,8 +418,9 @@ against a threshold, or another relay's *commanded* state.
 
 A hand-typed, line-based text format — the field-count explosion (4 relays ×
 3 rules × 3 conditions × ~4 fields) made a flat HTML form impractical.
-`GET /api/rules` regenerates this text from the stored config;
-`POST /api/rules` takes it back as the raw request body.
+`GET /api/rules` regenerated this text from the stored config;
+`POST /api/rules` took it back as the raw request body. (Both removed
+2026-08-27, see this section's header.)
 
 ```
 RELAY <n 1-4> DRIVEN <0|1>

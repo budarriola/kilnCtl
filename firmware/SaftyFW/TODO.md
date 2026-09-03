@@ -86,7 +86,7 @@ assumed from the commit log:
       retry the send until it succeeds, with the trip direction always winning
       a race against a superseding clear.
 - [x] ~~Guard windows count nominal ticks, not wall-clock.~~ Fixed:
-      `tick_dt_compute_s()` (`src/tick_timing.h`) measures real elapsed time
+      `tick_dt_compute_s()` (`src/tasks/tick_timing.h`) measures real elapsed time
       from successive `now_ms` deltas, clamped, and falls back to the nominal
       constant only when `clock_health` reports the clock stalled
       (`src/tasks/safety_core.c:685`).

@@ -39,9 +39,10 @@ differences from `kilnlink`:
   purpose: its reliability/dedup/task-registration logic **is** the shared,
   host-tested part (`benchproto_link.{c,h}`), because unlike the safety
   link, every side of a `benchproto` link is expected to run the same
-  request/reply discipline (see `firmware/UnitTestFw`'s extraction history
-  in `firmware/SimFW/docs/DESIGN_NOTES.md` sec 12 for why this extraction
-  exists at all).
+  request/reply discipline (see `firmware/UnitTestFw`'s extraction history,
+  originally recorded in SimFW's `docs/DESIGN_NOTES.md` sec 12 for why this
+  extraction exists at all — SimFW itself was removed 2026-08-28 and
+  `UnitTestFw` restored in its place, per that commit's message).
 - `kilnlink`'s frame envelope is a closed contract between two specific,
   already-shipping firmwares (`KILNLINK_PROTOCOL_VERSION`, currently 5,
   tracks `KilnFW`'s existing PC-link version because the two have not
@@ -215,11 +216,12 @@ small once a real firmware's task count grew past it — see
 - **Payload command layouts.** `UART_PROTOCOL.md`'s DAC/AD9833/OLED/PCF8575/
   INFO/LOG/SYSTEM payload sections do not have a `benchproto` equivalent
   here — those were `UnitTestFw`-specific device commands, out of scope for
-  a hardware-agnostic library. `SimFW`'s own `PROTOCOL.md`
-  (`firmware/SimFW/docs/PROTOCOL.md`, "written with the code" per DESIGN_NOTES.md
-  sec 9) is where its `SYS`/`MODEL`/`TC`/`CT`/`RELAY`/`IO`/`FAULT`/`EVT`
-  payload layouts belong, following this document's conventions (section 3's
-  endianness rule, section 6's task-registration model).
+  a hardware-agnostic library. (SimFW, the RP2040 bench-simulation firmware
+  this paragraph used to point at for its own `PROTOCOL.md`, was removed
+  2026-08-28; there is no current firmware defining `SYS`/`MODEL`/`TC`/
+  `CT`/`RELAY`/`IO`/`FAULT`/`EVT` payload layouts. A future `benchproto`
+  consumer's own protocol doc would follow this document's conventions —
+  section 3's endianness rule, section 6's task-registration model.)
 - **A second, independent implementation for cross-checking.** `kilnlink`'s
   test vectors (`test/vectors/*.json`) are checked against three
   implementations: the C library, `pc_tools`' Python codec, and each

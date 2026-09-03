@@ -541,10 +541,13 @@ the UART bridge, which is the reason to prefer the Debug Probe.
 > adapter serial number tells the safety processor's probe apart from
 > `SimFW`'s. Grabbing the wrong one and connecting OpenOCD will succeed
 > either way, since both targets are RP2040, so a successful connection
-> proves nothing about which board it reached. See
-> `firmware/SimFW/docs/BENCH_RUNBOOK.md` §1.4 for the two serials, which one
-> is safety-only, and why the OpenOCD build on this bench cannot select
-> between them by serial at all.
+> proves nothing about which board it reached. (SimFW's own
+> `docs/BENCH_RUNBOOK.md` §1.4, which used to carry the two serials and
+> which one is safety-only, was removed with SimFW 2026-08-28; the safety
+> probe's serial is pinned in `tools/PcTools/src/kilnctrl/debug_probe.py`'s
+> `adapter_serial` and its comment on `PeerConfig`.) See that file for why
+> the OpenOCD build on this bench cannot select between them by serial at
+> all.
 
 ### SWD — 3 wires
 

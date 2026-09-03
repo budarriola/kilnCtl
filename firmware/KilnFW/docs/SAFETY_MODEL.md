@@ -36,8 +36,10 @@ The check this section describes was extracted into
 caller shares one implementation instead of each reimplementing the same
 fault-source read; `uart_bridge.c`'s `io_relay_on_blocked()` is now a thin
 wrapper over it. Two more real callers exist beside the UART bridge:
-`dashboard_http.c`'s `POST /api/relay` (the web UI's manual relay control,
-TODO.md section 2) and `App/drivers/profile_executor.c` (the profile
+`diagnostics_http.c`'s `POST /api/diagnostics/danger/relay` (the web UI's
+manual relay control, TODO.md section 2 — `dashboard_http.c`'s old
+`POST /api/relay` was removed 2026-08-27, see `docs/WEB_UI.md`) and
+`App/drivers/profile_executor.c` (the profile
 execution engine, TODO.md section 6/6A) — both gate every relay-ON command
 through the same function, so the rule stated above ("the safety condition
 wins") holds identically for all three. `profile_executor.c` additionally

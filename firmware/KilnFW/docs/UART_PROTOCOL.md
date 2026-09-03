@@ -59,11 +59,11 @@ the panel if it's currently blanked — this is how `pc_tools`' MCP server can
 drive/test the UI ("send a touch as if from the screen") without physical
 hardware. Existing task_ids 1-12 and their payloads are unchanged.
 
-Rules (task `CONTROL` does **not** cover this — see the task table below)
-and full profile-execution history stay HTTP-only for the same reason: the
-rules DSL is free-form text with no fixed-size encoding, and history is a
-2880-sample ring buffer. `GET /api/rules`/`POST /api/rules` have no UART
-mirror in this pass.
+Full profile-execution history stays HTTP-only: it is a 2880-sample ring
+buffer with no fixed-size UART encoding. (The relay rule DSL this paragraph
+used to mention alongside it — `GET`/`POST /api/rules` — was removed
+2026-08-27 along with `rules_http.c`; see `docs/PROFILES.md` and
+`docs/WEB_UI.md`.)
 
 Source of truth:
 - Firmware: `App/drivers/espInterfaces/uart_protocol.h` / `.c`,
@@ -199,10 +199,11 @@ their own device (ESP task 1 and HOST task 1 are unrelated).
 
 The PC side registers the same numeric IDs for symmetry.
 
-Manual relay control (mirroring `POST /api/relay`) is **not** a CONTROL
-subcommand — use IO's `SET_RELAY`/`SET_RELAY_MASK` (task 2, above), which
-already gate through `relay_authority_on_blocked()`, the exact same check
-`/api/relay` uses.
+Manual relay control (mirroring `POST /api/diagnostics/danger/relay`,
+formerly `POST /api/relay` before its 2026-08-27 removal) is **not** a
+CONTROL subcommand — use IO's `SET_RELAY`/`SET_RELAY_MASK` (task 2, above),
+which already gate through `relay_authority_on_blocked()`, the exact same
+check that HTTP endpoint uses.
 
 ### Queries and unsolicited pushes
 

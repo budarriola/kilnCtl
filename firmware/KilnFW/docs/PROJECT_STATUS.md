@@ -38,7 +38,7 @@ an RP2040 safety processor (`firmware/SaftyFW`).
   and `BRINGUP_HAZARDS.md` for why it was off, why it was turned back on, and
   the two internal-SRAM crises that followed.
 - **PC-link UART baud: 921600** (was 115200), changed consistently across
-  firmware Kconfig/sdkconfig and `pc_tools/src/kilnctrl/protocol.py`. The
+  firmware Kconfig/sdkconfig and `tools/PcTools/src/kilnctrl/protocol.py`. The
   DISPLAY blit path is still stop-and-wait (one ACK round-trip per 128-byte
   frame), so per-frame round-trip latency, not bit rate, is likely still the
   dominant cost for a full blit; no RTS/CTS flow control is wired on this
@@ -354,8 +354,9 @@ green (921/921). Not yet exercised on real hardware — will fire the next
 time this board boots.
 
 **Not implemented, needs a bench measurement before it's safe to do**:
-shrinking `uart_owner`/`uart_protocol`/`rules_task`/`system_uart_bridge`'s
-stacks (see `feedback_negative_test_every_check`/prior `SimFW stack sizing`
+shrinking `uart_owner`/`uart_protocol`/`system_uart_bridge`'s
+stacks (`rules_task` was removed 2026-08-27 with the rule engine, see
+`docs/PROFILES.md`; see `feedback_negative_test_every_check`/prior `SimFW stack sizing`
 species note — must be backed by `uxTaskGetStackHighWaterMark()`, not a
 guess) or moving any of them to `MALLOC_CAP_SPIRAM` (each such task must be
 individually checked against the flash-cache-disabled hazard

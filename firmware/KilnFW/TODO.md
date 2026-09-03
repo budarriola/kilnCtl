@@ -509,7 +509,8 @@ Idle-state chart behavior: `docs/ARCHITECTURE_DECISIONS.md`, "Idle chart / pinne
 ## 3. Web UI — Settings page
 
 DONE — `/settings/zones` (`App/drivers/zones_http.{c,h}` + `zones_page.html`) and
-`/settings/relays` (`App/drivers/rules_http.{c,h}` + `rules_page.html`).
+`/settings/relays` (`App/drivers/rules_http.{c,h}` + `rules_page.html`, both
+removed 2026-08-27 along with the rule engine — see `docs/PROFILES.md`).
 Thermocouple calibration (offset, applied in firmware to every consumer including
 UART/MCP as of 2026-08-13), thermo/relay count config, named zones, PID tuning
 per zone (same page, per explicit request), and persistence are all built and
@@ -2092,7 +2093,9 @@ numbers in this entry alone:
   audit `uart_bridge_ext.c`'s header comment already did for the bridge
   tasks before this is safe.
 - `rules_task`/`rules_watchdog` (3072B/2048B, internal,
-  `App/drivers/rules_task.c`) and `system_uart_bridge` (3072B, internal,
+  `App/drivers/rules_task.c`) — removed 2026-08-27 with the rule engine,
+  see `docs/PROFILES.md`; no longer a candidate.
+- `system_uart_bridge` (3072B, internal,
   `App/drivers/uart_bridge.c`) — same two options, same caveat.
 - The ~14KB unattributed gap itself — worth a live coredump/heap-trace pass
   with real hardware rather than further static-analysis guessing.
