@@ -1,0 +1,91 @@
+A/B compare: A=logs/coupling/ab_old_2.jsonl  B=logs/coupling/ab_new_2.jsonl
+NOISE FLOOR: measured (tools/PcTools/config_presets/noise_floor.json, see noise_floor.py / PID_EXPANSION_PLAN.md SS3.3). A per-(zone, metric, segment) difference smaller than its measured floor is reported INDISTINGUISHABLE below, not PROVISIONAL -- it is not attributable to whatever this A/B comparison is testing. A key with no floor entry (never covered by the repeat campaign) still falls back to PROVISIONAL.
+START-TEMP UNIT NOTE: the per-zone deltas below (and the 1.0C confound gate) use each zone's own first-valid actual_c. noise_floor.py's separate 'like-for-like' check (same 1.0C threshold, LIKE_FOR_LIKE_THRESHOLD_C) uses a DIFFERENT quantity -- the mean across ALL status channels from the raw capture. Both measure start-temperature drift but are not interchangeable; do not read a pass/fail on one as a pass/fail on the other.
+
+zone 0: start_temp A=25.85C B=26.32C delta=0.47C
+zone 1: start_temp A=25.77C B=26.41C delta=0.64C
+zone 2: start_temp A=25.46C B=26.16C delta=0.70C
+
+MULTIPLICITY: 48 keys evaluated, 31 DISTINGUISHABLE, no correction applied to the per-key verdicts below.
+  per-key false-positive rate of the range floor (Monte Carlo): n=3: 30.5%, n=6: 12.0%
+  expected spurious DISTINGUISHABLE keys by chance alone: 5.93
+  P(>=1 spurious DISTINGUISHABLE), independence assumed (overstated): 99.8%
+  P(>=1 spurious DISTINGUISHABLE), effective family size 10-15 (correlation-adjusted): 72.0%-85.2%
+  CONSISTENT PATTERN(S) -- same metric, same direction, across multiple keys (potentially actionable):
+    iae_normalized_c               B better in 5 keys (zones [0, 1, 2], segments [0, 1])
+    dwell_steady_state_offset_c    B better in 5 keys (zones [0, 1, 2], segments [0, 1])
+    dwell_entry_overshoot_peak_c   B better in 4 keys (zones [0, 1], segments [0, 1])
+    ramp_mean_error_c              B better in 3 keys (zones [0, 1], segments [0, 1])
+    ramp_worst_error_c             B better in 3 keys (zones [0, 1, 2], segments [1])
+    dwell_entry_time_to_peak_s     A better in 3 keys (zones [0, 1], segments [0, 1])
+    settle_time_s                  B better in 3 keys (zones [0, 1, 2], segments [1])
+  48 (zone, metric, segment) keys evaluated, no multiplicity correction applied to the raw per-key verdicts above. The range floor's own per-key false-positive rate is NOT 5% -- it depends on n (see per_n_alpha) and is roughly 12% at n=6. A SINGLE DISTINGUISHABLE key in a report this size is close to the expected outcome under pure chance -- read it as PROVISIONAL AT BEST, not a finding. prob_at_least_one_independent assumes every key is an independent test and OVERSTATES the true risk (keys share zones, segments, and underlying physics); prob_at_least_one_effective_low/high use the review's estimated effective family size of 10-15 independent tests instead -- still approximate, since the correlation structure between keys is not itself measured. The one pattern treated as potentially actionable here: the SAME metric DISTINGUISHABLE in the SAME direction across >= 3 zones/segments -- see consistent_patterns.
+
+metric floor reliability (per-metric spread of the measured floor across zones/segments):
+  dwell_entry_overshoot_peak_c   floor 0.110-0.720C (ratio 6.5x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+  dwell_entry_time_to_peak_s     floor 11.000-52.000C (ratio 4.7x) -> reliable
+  dwell_steady_state_offset_c    floor 0.060-0.840C (ratio 14.0x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+  iae_normalized_c               floor 0.066-0.285C (ratio 4.3x) -> reliable
+  iae_normalized_whole_c         floor 0.077-0.147C (ratio 1.9x) -> reliable
+  ramp_mean_error_c              floor 0.094-0.514C (ratio 5.5x) -> reliable
+  ramp_worst_error_c             floor 0.230-0.590C (ratio 2.6x) -> reliable
+  settle_time_s                  floor 11.000-168.000C (ratio 15.3x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+
+
+  z0 whole-run  iae_normalized_whole_c         A=  +1.726 B=  +1.026  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.700 exceeds measured floor 0.116 -- not a confirmed result)
+      start-temp sensitivity (n=6, slope=-0.0094C/C, r=-0.13100053409283877): raw_delta=-0.700 predicted_from_start_delta=-0.004 residual=-0.696 -- residual is the part of the delta the fitted start-temp sensitivity does NOT explain; this does not change the verdict above
+      (OLS fit, n=6 points, over the observed start-temp range 27.09-29.08C only. n this small means the slope's own precision is not established -- read it as a rough magnitude, not a calibrated per-degree correction.)
+  z0 seg0       iae_normalized_c               A=  +1.350 B=  +1.107  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.243 exceeds measured floor 0.157 -- not a confirmed result)
+  z0 seg1       iae_normalized_c               A=  +2.159 B=  +0.944  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.215 exceeds measured floor 0.248 -- not a confirmed result)
+  z0 seg2       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z0 seg0       ramp_mean_error_c              A=  +1.105 B=  -1.657  PROVISIONAL: A lower-magnitude (DISTINGUISHABLE: |delta|=2.762 exceeds measured floor 0.201 -- not a confirmed result)
+  z0 seg1       ramp_mean_error_c              A=  +2.136 B=  -0.145  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=2.281 exceeds measured floor 0.514 -- not a confirmed result)
+  z0 seg0       ramp_worst_error_c             A=  +2.710 B=  +2.810  INDISTINGUISHABLE: |delta|=0.100 is below the measured noise floor 0.390 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z0 seg1       ramp_worst_error_c             A=  +4.340 B=  +2.420  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.920 exceeds measured floor 0.330 -- not a confirmed result)
+  z0 seg0       dwell_entry_overshoot_peak_c   A=  +2.450 B=  +0.570  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.880 exceeds measured floor 0.720 -- not a confirmed result)
+  z0 seg1       dwell_entry_overshoot_peak_c   A=  +3.530 B=  +2.270  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.260 exceeds measured floor 0.110 -- not a confirmed result)
+  z0 seg0       dwell_entry_time_to_peak_s     A= +37.000 B= +94.000  PROVISIONAL: A lower (DISTINGUISHABLE: |delta|=57.000 exceeds measured floor 52.000 -- not a confirmed result)
+  z0 seg1       dwell_entry_time_to_peak_s     A= +58.000 B= +89.000  PROVISIONAL: A lower (DISTINGUISHABLE: |delta|=31.000 exceeds measured floor 16.000 -- not a confirmed result)
+  z0 seg0       dwell_steady_state_offset_c    A=  +0.945 B=  -0.314  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.259 exceeds measured floor 0.238 -- not a confirmed result)
+  z0 seg1       dwell_steady_state_offset_c    A=  +1.951 B=  +0.632  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.318 exceeds measured floor 0.302 -- not a confirmed result)
+  z0 seg2       dwell_steady_state_offset_c    A=  +0.390 B=  -0.580  PROVISIONAL: A lower-magnitude (DISTINGUISHABLE: |delta|=0.970 exceeds measured floor 0.840 -- not a confirmed result)
+  z0 seg0       settle_time_s                  A=+162.000 B=+303.000  INDISTINGUISHABLE: |delta|=141.000 is below the measured noise floor 168.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z0 seg1       settle_time_s                  A=+434.000 B=+178.000  PROVISIONAL: B lower (DISTINGUISHABLE: |delta|=256.000 exceeds measured floor 48.000 -- not a confirmed result)
+  z1 whole-run  iae_normalized_whole_c         A=  +1.218 B=  +0.583  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.635 exceeds measured floor 0.077 -- not a confirmed result)
+      start-temp sensitivity (n=6, slope=+0.0189C/C, r=0.3941191921442112): raw_delta=-0.635 predicted_from_start_delta=+0.012 residual=-0.648 -- residual is the part of the delta the fitted start-temp sensitivity does NOT explain; this does not change the verdict above
+      (OLS fit, n=6 points, over the observed start-temp range 27.14-28.99C only. n this small means the slope's own precision is not established -- read it as a rough magnitude, not a calibrated per-degree correction.)
+  z1 seg0       iae_normalized_c               A=  +1.321 B=  +0.554  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.767 exceeds measured floor 0.066 -- not a confirmed result)
+  z1 seg1       iae_normalized_c               A=  +1.111 B=  +0.619  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.492 exceeds measured floor 0.114 -- not a confirmed result)
+  z1 seg2       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z1 seg0       ramp_mean_error_c              A=  +0.801 B=  -0.548  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.349 exceeds measured floor 0.193 -- not a confirmed result)
+  z1 seg1       ramp_mean_error_c              A=  +0.743 B=  -0.423  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.166 exceeds measured floor 0.094 -- not a confirmed result)
+  z1 seg0       ramp_worst_error_c             A=  +2.060 B=  +1.860  INDISTINGUISHABLE: |delta|=0.200 is below the measured noise floor 0.260 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z1 seg1       ramp_worst_error_c             A=  +2.250 B=  +1.590  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.660 exceeds measured floor 0.270 -- not a confirmed result)
+  z1 seg0       dwell_entry_overshoot_peak_c   A=  +2.240 B=  +1.420  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.820 exceeds measured floor 0.240 -- not a confirmed result)
+  z1 seg1       dwell_entry_overshoot_peak_c   A=  +1.800 B=  +1.450  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.350 exceeds measured floor 0.140 -- not a confirmed result)
+  z1 seg0       dwell_entry_time_to_peak_s     A= +58.000 B=+104.000  PROVISIONAL: A lower (DISTINGUISHABLE: |delta|=46.000 exceeds measured floor 22.000 -- not a confirmed result)
+  z1 seg1       dwell_entry_time_to_peak_s     A= +89.000 B=+110.000  INDISTINGUISHABLE: |delta|=21.000 is below the measured noise floor 26.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z1 seg0       dwell_steady_state_offset_c    A=  +1.180 B=  +0.528  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.652 exceeds measured floor 0.096 -- not a confirmed result)
+  z1 seg1       dwell_steady_state_offset_c    A=  +1.017 B=  +0.385  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.632 exceeds measured floor 0.098 -- not a confirmed result)
+  z1 seg2       dwell_steady_state_offset_c    A=  +0.120 B=  +0.160  INDISTINGUISHABLE: |delta|=0.040 is below the measured noise floor 0.210 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z1 seg0       settle_time_s                  A=+251.000 B=+157.000  INDISTINGUISHABLE: |delta|=94.000 is below the measured noise floor 105.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z1 seg1       settle_time_s                  A=+267.000 B=+178.000  PROVISIONAL: B lower (DISTINGUISHABLE: |delta|=89.000 exceeds measured floor 68.000 -- not a confirmed result)
+  z2 whole-run  iae_normalized_whole_c         A=  +0.959 B=  +0.815  INDISTINGUISHABLE: |delta|=0.144 is below the measured noise floor 0.147 for this (zone, metric, segment) -- not attributable to whatever is being compared
+      start-temp sensitivity (n=6, slope=-0.1333C/C, r=-0.6786296748151316): raw_delta=-0.144 predicted_from_start_delta=-0.093 residual=-0.051 -- residual is the part of the delta the fitted start-temp sensitivity does NOT explain; this does not change the verdict above
+      (OLS fit, n=6 points, over the observed start-temp range 28.01-28.79C only. n this small means the slope's own precision is not established -- read it as a rough magnitude, not a calibrated per-degree correction.)
+  z2 seg0       iae_normalized_c               A=  +1.008 B=  +0.905  INDISTINGUISHABLE: |delta|=0.103 is below the measured noise floor 0.285 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       iae_normalized_c               A=  +0.914 B=  +0.719  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.195 exceeds measured floor 0.067 -- not a confirmed result)
+  z2 seg2       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z2 seg0       ramp_mean_error_c              A=  +0.457 B=  +0.306  INDISTINGUISHABLE: |delta|=0.152 is below the measured noise floor 0.364 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       ramp_mean_error_c              A=  -0.058 B=  -0.154  INDISTINGUISHABLE: |delta|=0.096 is below the measured noise floor 0.110 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg0       ramp_worst_error_c             A=  +1.830 B=  +1.640  INDISTINGUISHABLE: |delta|=0.190 is below the measured noise floor 0.590 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       ramp_worst_error_c             A=  +2.070 B=  +1.550  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.520 exceeds measured floor 0.230 -- not a confirmed result)
+  z2 seg0       dwell_entry_overshoot_peak_c   A=  +2.050 B=  +2.110  INDISTINGUISHABLE: |delta|=0.060 is below the measured noise floor 0.190 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       dwell_entry_overshoot_peak_c   A=  +1.390 B=  +1.880  PROVISIONAL: A lower-magnitude (DISTINGUISHABLE: |delta|=0.490 exceeds measured floor 0.210 -- not a confirmed result)
+  z2 seg0       dwell_entry_time_to_peak_s     A= +95.000 B=+104.000  INDISTINGUISHABLE: |delta|=9.000 is below the measured noise floor 11.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       dwell_entry_time_to_peak_s     A=+141.000 B=+141.000  INDISTINGUISHABLE: |delta|=0.000 is below the measured noise floor 16.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg0       dwell_steady_state_offset_c    A=  +1.031 B=  +0.986  INDISTINGUISHABLE: |delta|=0.045 is below the measured noise floor 0.143 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       dwell_steady_state_offset_c    A=  +0.815 B=  +0.725  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.090 exceeds measured floor 0.060 -- not a confirmed result)
+  z2 seg2       dwell_steady_state_offset_c    A=  +0.260 B=  +0.460  INDISTINGUISHABLE: |delta|=0.200 is below the measured noise floor 0.270 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg0       settle_time_s                  A=+188.000 B=+193.000  INDISTINGUISHABLE: |delta|=5.000 is below the measured noise floor 32.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       settle_time_s                  A=+267.000 B=+220.000  PROVISIONAL: B lower (DISTINGUISHABLE: |delta|=47.000 exceeds measured floor 11.000 -- not a confirmed result)

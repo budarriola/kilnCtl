@@ -718,6 +718,36 @@ trustworthy answer would need either a purpose-built single-zone step
 capture at faster polling, or many more independent rested single-zone
 excitation repeats than the one-per-zone this repo has today.
 
+**Six-firing A/B campaign (old matrix `coupling_matrix_pre20260902` vs new
+matrix `coupling_matrix_20260831`) — COMPLETED 2026-08-31, 6/6
+(`ab_campaign_state.json`). Verdict: INDISTINGUISHABLE / INCONCLUSIVE,
+confidence LOW.** Full analysis, per-metric numbers, and the noise-floor
+comparison: `logs/coupling/ab_campaign_report.md` (raw tool output per pair
+in `logs/coupling/ab_compare_pair{1,2,3}.txt`). Compared with the existing,
+unmodified `pid_ab_compare.py compare`/`noise_floor.json` machinery — no
+decision-rule or floor-artifact change made for this result.
+
+The campaign did not deliver the replication it was designed for: of the
+three intended old/new pairs, **two (pair 1 and pair 3) are REFUSED
+outright** by the tool's own 1.0 C start-temperature confound gate — every
+zone in both pairs exceeds it (pair 1: 1.66/1.63/1.36 C; pair 3:
+1.20/1.20/1.35 C). Only pair 2 (0.47/0.64/0.70 C, all zones under
+threshold) is usable, leaving n=1 valid A/B firing instead of n=3. That one
+pair shows an internally consistent, same-direction pattern favoring the
+new matrix on `iae_normalized_c`, `dwell_steady_state_offset_c`,
+`ramp_worst_error_c`, and `settle_time_s` (all >=3 zones, per
+`CONSISTENT_PATTERN_MIN_KEYS`), and the opposite direction (old matrix
+better) on `dwell_entry_time_to_peak_s` at 2 zones. Whole-run
+`iae_normalized_whole_c` — the metric with the most reliable measured floor —
+clears DISTINGUISHABLE on z0/z1 but not z2, so it does not itself meet the
+>=3-zone bar. Because the >=3-zone rule and this project's multiplicity
+accounting were built to guard against per-key noise across REPLICATE
+pairs, and only one pair survived the confound gate, the pattern in pair 2
+is a lead for the next campaign, not a confirmed finding — it is reported
+here as PROVISIONAL, unreplicated. As always, this profile's ~70 C max
+target keeps the result silent on cone-range behaviour and on either
+matrix's behaviour past the coupled hold solve's ~62 C feasibility edge.
+
 ### 3.3 Adaptive tuning — the layers not built
 
 Shipped (`fcc1fc0`, `a772d78`): dwell harvesting, diagonal-only least-squares
