@@ -1225,6 +1225,61 @@ def _synthetic_ramp_dwell_rows():
     return rows
 
 
+def test_per_zone_gain_search_default_baseline_matches_live_board():
+    """PID_EXPANSION_PLAN.md sec 3.4's 2026-09-03 fidelity audit: the
+    per-zone gain search's default baseline must be what the live board
+    actually runs (BOARD_ZONE_KP/KI/KD, read via control_get_zones
+    2026-09-03), not the old scalar (kp=0.06, ki=0.0003, kd=0.0) carried
+    forward from before per-zone gains existed -- no zone ever ran that
+    scalar. The kd=0.0 half of that old default is the severe part: it
+    silently disabled the derivative term (PID.update's d_term = self.kd *
+    self.d_filtered) in every retune candidate this module has produced
+    before this fix, even though the mechanism itself was already a
+    faithful match to pid.c's derivative-on-measurement/low-pass/anti-
+    windup structure.
+
+    Proof this is not vacuous: temporarily reverted
+    per_zone_gain_grid_search's default back to the old scalar
+    (base_kp=0.06, base_ki=0.0003, base_kd=0.0). Captured red output:
+
+        FAILED tests/test_plant_sim.py::
+        test_per_zone_gain_search_default_baseline_matches_live_board
+        AssertionError: per_zone_gain_grid_search
+        assert (0.06, 0.06, 0.06) == approx((0.0318, 0.0485, 0.0631))
+        Mismatched elements: 3 / 3, max relative difference: 0.47
+
+    Reverted, suite green again before this test was kept.
+    """
+    assert ps.BOARD_ZONE_KP == pytest.approx((0.0318, 0.0485, 0.0631))
+    assert ps.BOARD_ZONE_KI == pytest.approx((0.00010, 0.00020, 0.00020))
+    assert ps.BOARD_ZONE_KD == pytest.approx((0.8401, 1.0548, 1.0690))
+
+    import inspect
+    grid_sig = inspect.signature(ps.per_zone_gain_grid_search)
+    holdout_sig = inspect.signature(ps.per_zone_gain_holdout_report)
+    for sig, fn_name in ((grid_sig, "per_zone_gain_grid_search"),
+                          (holdout_sig, "per_zone_gain_holdout_report")):
+        default_kp = tuple(ps._broadcast_zone_param(sig.parameters["base_kp"].default))
+        default_ki = tuple(ps._broadcast_zone_param(sig.parameters["base_ki"].default))
+        default_kd = tuple(ps._broadcast_zone_param(sig.parameters["base_kd"].default))
+        assert default_kp == pytest.approx(ps.BOARD_ZONE_KP), fn_name
+        assert default_ki == pytest.approx(ps.BOARD_ZONE_KI), fn_name
+        assert default_kd == pytest.approx(ps.BOARD_ZONE_KD), (
+            f"{fn_name}'s default baseline kd must be the live board's "
+            "nonzero per-zone kd, not the old inert scalar 0.0\n"
+            f"assert {tuple(default_kd)} == {ps.BOARD_ZONE_KD}"
+        )
+
+    # And exercise it end to end: a baseline run through the default kd
+    # must actually produce a nonzero derivative contribution -- proves the
+    # mechanism (already correct) is no longer being fed an inert gain.
+    rows = _synthetic_ramp_dwell_rows()
+    fit = ps.per_zone_gain_grid_search(rows, grid=(1.0,))
+    for zone in range(3):
+        assert fit[zone]["kd"] == pytest.approx(ps.BOARD_ZONE_KD[zone])
+        assert fit[zone]["kd"] != 0.0
+
+
 def test_broadcast_zone_param_scalar_and_vector():
     scalar = ps._broadcast_zone_param(0.06)
     assert scalar.shape == (3,)

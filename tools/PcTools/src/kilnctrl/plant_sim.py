@@ -1470,40 +1470,69 @@ def sim_whole_run_iae_normalized(result: dict, zone: int) -> float:
 # the zone under test's own whole-run IAE.
 # ---------------------------------------------------------------------------
 
-#: Multiplicative grid applied to the shared baseline kp/ki (run_profile's
-#: own defaults, 0.06 / 0.0003) independently per zone. Kept small and
-#: round-number rather than fine-grained: the discrimination-floor logic
-#: below is what decides whether any of this is worth reading, not grid
-#: resolution.
+#: Multiplicative grid applied to the per-zone baseline kp/ki independently
+#: per zone. Kept small and round-number rather than fine-grained: the
+#: discrimination-floor logic below is what decides whether any of this is
+#: worth reading, not grid resolution.
 PER_ZONE_GAIN_GRID_MULT = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
+
+#: The gains the live board actually runs today (read via ``control_get_
+#: zones`` 2026-09-03), per zone [z0, z1, z2]. This REPLACES the
+#: pre-2026-09-03 scalar defaults (kp=0.06, ki=0.0003, kd=0.0) that every
+#: caller in this module used to fall back on -- that scalar was never what
+#: any zone actually ran; it was carried forward from the single-zone-gain
+#: era before ``_broadcast_zone_param`` existed. Two divergences matter:
+#: kp/ki are each roughly 2-3x the old scalar guess (board kp is
+#: 0.032-0.063 vs the old 0.06; board ki is 0.0001-0.0002 vs the old
+#: 0.0003), and kd is **0.0 in the old default vs 0.84-1.07 on the real
+#: board** -- the old default exercised NO derivative action at all, which
+#: silently zeroed the ``d_term`` this module's own ``PID.update`` computes
+#: (see its docstring: the mechanism is a line-for-line match to
+#: ``pid.c``, only the *default gain* fed to it was stale). A retune
+#: candidate searched from the old scalar baseline was therefore searching
+#: from a controller that is not the one running on the kiln. See
+#: PID_EXPANSION_PLAN.md sec 3.4's 2026-09-03 addendum for the fidelity
+#: audit and the re-run gain search.
+BOARD_ZONE_KP = (0.0318, 0.0485, 0.0631)
+BOARD_ZONE_KI = (0.00010, 0.00020, 0.00020)
+BOARD_ZONE_KD = (0.8401, 1.0548, 1.0690)
 
 
 def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
-                               base_kp: float = 0.06, base_ki: float = 0.0003,
-                               base_kd: float = 0.0,
+                               base_kp=BOARD_ZONE_KP, base_ki=BOARD_ZONE_KI,
+                               base_kd=BOARD_ZONE_KD,
                                grid=PER_ZONE_GAIN_GRID_MULT,
                                climb_mode: str = 'coupled',
                                integral_floor: str = 'ff_hold') -> dict:
     """For each zone independently, grid-searches ``kp``/``ki`` multipliers
-    (kd left at ``base_kd`` -- the shared baseline already runs kd=0.0, and
-    no capture in this repo exercises a non-zero kd) that minimize THAT
-    zone's own whole-run normalized IAE on ``rows_fit``, holding the other
-    two zones at the shared baseline gains (see module-level comment
-    above). Returns the best per-zone ``(kp, ki)`` plus the fit-set IAE at
-    baseline and at the chosen gains, for every zone.
+    (``kd`` left at ``base_kd`` -- the board's own per-zone ``kd`` is held
+    fixed rather than swept, both because no capture in this repo was
+    fit/scored with a non-default ``kd`` sweep grid and to keep this
+    search's scope matched to sec 3.4's original method: only ``kp``/``ki``
+    are searched) that minimize THAT zone's own whole-run normalized IAE on
+    ``rows_fit``, holding the other two zones at the shared/per-zone
+    baseline gains (see module-level comment above). ``base_kp``/
+    ``base_ki``/``base_kd`` each accept a scalar (applied to all zones) or
+    a length-3 per-zone sequence -- default is ``BOARD_ZONE_KP``/``_KI``/
+    ``_KD``, what the live board actually runs, per zone. Returns the best
+    per-zone ``(kp, ki)`` plus the fit-set IAE at baseline and at the
+    chosen gains, for every zone.
     """
+    base_kp_arr = _broadcast_zone_param(base_kp)
+    base_ki_arr = _broadcast_zone_param(base_ki)
+    base_kd_arr = _broadcast_zone_param(base_kd)
     best = {}
     for zone in range(N_ZONES):
         best_iae = None
         best_mult = (1.0, 1.0)
         for kp_mult in grid:
             for ki_mult in grid:
-                kp_vec = [base_kp] * N_ZONES
-                ki_vec = [base_ki] * N_ZONES
-                kp_vec[zone] = base_kp * kp_mult
-                ki_vec[zone] = base_ki * ki_mult
+                kp_vec = list(base_kp_arr)
+                ki_vec = list(base_ki_arr)
+                kp_vec[zone] = base_kp_arr[zone] * kp_mult
+                ki_vec[zone] = base_ki_arr[zone] * ki_mult
                 result, _ = run_profile_from_capture(
-                    rows_fit, kp=kp_vec, ki=ki_vec, kd=base_kd,
+                    rows_fit, kp=kp_vec, ki=ki_vec, kd=list(base_kd_arr),
                     climb_mode=climb_mode, integral_floor=integral_floor,
                 )
                 iae = sim_whole_run_iae_normalized(result, zone)
@@ -1511,12 +1540,13 @@ def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
                     best_iae = iae
                     best_mult = (kp_mult, ki_mult)
         baseline_result, _ = run_profile_from_capture(
-            rows_fit, kp=base_kp, ki=base_ki, kd=base_kd,
+            rows_fit, kp=list(base_kp_arr), ki=list(base_ki_arr), kd=list(base_kd_arr),
             climb_mode=climb_mode, integral_floor=integral_floor,
         )
         baseline_iae = sim_whole_run_iae_normalized(baseline_result, zone)
         best[zone] = dict(
-            kp=base_kp * best_mult[0], ki=base_ki * best_mult[1], kd=base_kd,
+            kp=base_kp_arr[zone] * best_mult[0], ki=base_ki_arr[zone] * best_mult[1],
+            kd=base_kd_arr[zone],
             kp_mult=best_mult[0], ki_mult=best_mult[1],
             fit_iae_baseline=baseline_iae, fit_iae_tuned=best_iae,
         )
@@ -1525,8 +1555,8 @@ def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
 
 def per_zone_gain_holdout_report(rows_fit: Sequence[log_analysis.PollRow],
                                   rows_test: Sequence[log_analysis.PollRow],
-                                  base_kp: float = 0.06, base_ki: float = 0.0003,
-                                  base_kd: float = 0.0,
+                                  base_kp=BOARD_ZONE_KP, base_ki=BOARD_ZONE_KI,
+                                  base_kd=BOARD_ZONE_KD,
                                   grid=PER_ZONE_GAIN_GRID_MULT,
                                   climb_mode: str = 'coupled',
                                   integral_floor: str = 'ff_hold') -> dict:

@@ -1561,6 +1561,148 @@ No firmware change made here. Reproducible via
 `per_zone_gain_grid_search()`, pinned by
 `tests/test_plant_sim.py`'s per-zone-gain test group.
 
+**2026-09-03 addendum: the section above's baseline was never what the
+board runs — fidelity audit and corrected re-run.** `control_get_zones`
+read against the live (idle, ambient) board on 2026-09-03 showed
+`kp=0.0318/0.0485/0.0631`, `ki=0.00010/0.00020/0.00020`,
+`kd=0.8401/1.0548/1.0690` per zone — while every gain default in
+`plant_sim.py` (`run_profile`, `per_zone_gain_grid_search`,
+`per_zone_gain_holdout_report`, `render_sim_report`,
+`render_sim_vs_capture_report`) was a single shared scalar,
+`kp=0.06, ki=0.0003, kd=0.0`, carried forward from before per-zone gains
+existed (`_broadcast_zone_param`, this section, above). Two mismatches are
+cosmetic (kp/ki each off by roughly 2–3×) and one is severe: **`kd=0.0`
+means every retune candidate this section produced, including the "shared
+retune" recommendation above, was searched from a controller running NO
+derivative action at all**, against a board that runs `kd` an order of
+magnitude larger than `kp`.
+
+Full audit against `pid.c`/`profile_executor_run.c`, mechanism by
+mechanism — everything below is confirmed MATCHING except the default gain
+just described:
+
+  - **Derivative form**: on measurement, not error (`PID.update`'s
+    `raw_d = -(measurement - prev_measurement) / dt_s`) — matches
+    `pid_update_terms()`'s comment and code exactly, including the reason
+    (a profile's ramp steps the setpoint every tick; derivative-on-error
+    would spike on every step).
+  - **Derivative filter**: low-pass, `d_tau=30.0` s hardcoded in
+    `run_profile`'s `PID(...)` construction — matches
+    `PID_D_FILTER_TAU_S` (`profile_executor_internal.h`), also 30.0 s. Not
+    a divergence; was already right.
+  - **Setpoint weighting**: `b=1.0` hardcoded — matches
+    `PID_SETPOINT_WEIGHT_B`, also 1.0.
+  - **Integral windup**: conditional integration (freeze when the
+    unclamped output is already saturated *and* integrating would push it
+    further) plus a hard `ki*integral` clamp — `PID.update`'s
+    `would_push_further`/floor-clamp block is a line-for-line match to
+    `pid_update_terms()`'s `would_push_further_out` block.
+  - **Integral floor**: floors at `-ff_hold` (the steady-state hold
+    feedforward only, never the climb component or the whole
+    feedforward) — `integral_floor='ff_hold'` is `run_profile`'s own
+    default and matches the shipped firmware fix this section's earlier
+    `ifix`/`holdfix_clean` captures already validate.
+  - **PWM window**: NOT modeled, and this is a reasoned omission, not an
+    oversight — the module docstring states it explicitly ("PWM window
+    quantization (`heater_output.c`) — averages out under 10 s sampling
+    and is not implicated by any of the five captures' error shape").
+  - **Feedforward hold/climb**: `coupled_ff_hold_climb`'s joint
+    `K_full^-1` solve matches "the real coupled Gaussian solve, same math
+    the firmware ships" per this section's own earlier text; unaffected by
+    this addendum.
+
+So the mechanism was already correct — only the *default gain fed into
+it* was stale, and it happened to zero out an entire term.
+
+**Fix**: `plant_sim.py` gained `BOARD_ZONE_KP`/`BOARD_ZONE_KI`/
+`BOARD_ZONE_KD` (the per-zone values above) and
+`per_zone_gain_grid_search()`/`per_zone_gain_holdout_report()` now default
+to them instead of the old scalar (`run_profile`'s own default is left at
+the old scalar deliberately — it is what the `after`/`ifix`/
+`holdfix_clean`/`final` fixture captures this section's regression tests
+pin against actually ran at capture time; changing it would break fidelity
+to *those* historical builds, not improve it). Negative-tested:
+temporarily reverted the two functions' defaults back to the scalar,
+which produced `assert (0.06, 0.06, 0.06) == approx((0.0318, 0.0485,
+0.0631))` in the new pinning test
+(`test_per_zone_gain_search_default_baseline_matches_live_board`);
+reverted back, suite green (45 passed).
+
+**Re-run gain search from the corrected baseline** (same method as above:
+fit on `p7_oldmatrix_http.jsonl` run 0, score on `p7_newmatrix_http.jsonl`
+run 0, both directions, `climb_mode='coupled'`, `integral_floor='ff_hold'`,
+`PER_ZONE_GAIN_GRID_MULT` 0.5×–2.0×):
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| fit OLD → test NEW | −0.287 (mult 2.00×/0.50×) | −0.242 (mult 2.00×/2.00×) | −0.148 (mult 2.00×/2.00×) |
+| fit NEW → test OLD | −0.302 (mult 2.00×/2.00×) | −0.269 (mult 2.00×/2.00×) | −0.156 (mult 2.00×/2.00×) |
+| noise floor (§3.8) | 0.116 | 0.077 | 0.147 |
+
+Unlike the pre-fix table above, **all three zones now exceed their own
+noise floor in both directions with consistent sign** — including z2,
+whose sign previously flipped between directions (+0.019/+0.006) and now
+does not. This looks like real signal, but it does not survive the same
+"check further" discipline this section applied to the earlier apparent
+2-of-3 win, for a new reason: **every zone's `kp_mult` pins at the grid's
+own edge (2.00×), not an interior optimum.** Re-running with a much wider
+grid (0.25×–8.0×) to see where it settles:
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| fit OLD → test NEW | mult 6.00×/0.25×, Δ=−0.157 | mult 4.00×/4.00×, Δ=−0.130 | mult 3.00×/6.00×, Δ=**+0.058** (shared wins) |
+| fit NEW → test OLD | mult 6.00×/0.25×, Δ=−0.167 | mult 4.00×/4.00×, Δ=−0.144 | mult 3.00×/6.00×, Δ=**+0.046** (shared wins) |
+
+z0 and z1's chosen multiplier keeps climbing as the grid widens (2.00× →
+6.00×/4.00×) instead of converging to an interior point, and z2's sign
+flips from "per-zone better" at the narrow grid to "shared/baseline
+better" at the wide one. An optimum that keeps moving to whatever the
+grid's edge currently is is not a real optimum — it is the search finding
+that this simulator, run with no measurement noise/quantization model
+active (`measurement_noise_std_c=0.0`, `measurement_quantum_c=0.0`, both
+default-off per `run_profile`'s own docstring) and now driven by a large
+nonzero `kd`, never penalizes an ever-larger `kp`/`kd` combination with
+anything that looks like noise-amplified ringing, because there is no
+noise to amplify. This is the module's own documented TRUST-section limit
+("not calibration-grade... below the noise floor... a single 0–80 °C
+bench-rig dataset") showing up as a genuine failure mode once a nonzero
+`kd` is in play, not a new defect in this pass's fix.
+
+**Verdict: no retune candidate survives from the corrected baseline.**
+The pre-fix section's "no per-zone win, shared retune only, needs a
+hardware A/B" conclusion is superseded — it was reached from a controller
+model that never ran with derivative action live, so it cannot be
+transferred to the real board either. The corrected-baseline search does
+not converge to a specific, trustworthy `(kp, ki)` recommendation at any
+grid width tried: the answer keeps changing with the search range, which
+is disqualifying by this section's own repeated standard, not
+encouraging. **Do not run 6135ee1's `kp≈0.12, ki≈0.000075` hardware A/B
+recommendation** — it was derived against a `kd=0.0` model that is not the
+board.
+
+**Given the severity of the `kd` gap, five other findings in this section
+should be treated as UNCONFIRMED against the real board's control law**,
+not wrong, but never checked against a model with derivative action live:
+the dwell-entry overshoot reproduction (peaks 0.95–1.8 °C vs hardware's
+~2 °C — a live `kd` term changes both the model's peak time and magnitude
+directly), the shared-retune "2-of-3 win dissolves to a single shared
+gain" finding above (fit with `kd=0.0` throughout), the fuzzy-gain sweep
+(§3.9, whose `pid_fuzzy_adjust` reads `error_rate_c_per_s` from
+`d_filtered`, which was always being fed by a real filter but scaled by a
+`kd` term that was zero at every gain the fuzzy layer scaled), and the
+lag-compensated feedforward candidate comparison (climb-side only,
+independent of `kd`, but run through the same `kd=0.0` PID loop). None of
+these are known to be wrong — but none were re-checked with this fix
+before this addendum was written, and closing that gap is follow-up work,
+not done here. Before trusting any of them for a hardware decision,
+re-run with `kd=BOARD_ZONE_KD` and confirm the conclusion holds.
+
+No firmware change made here (constraint of this pass). Reproducible via
+`plant_sim.per_zone_gain_holdout_report(rows_fit, rows_test,
+grid=<wider tuple to check convergence>)`; pinned by
+`test_per_zone_gain_search_default_baseline_matches_live_board` in
+`tests/test_plant_sim.py`.
+
 ### 3.5 Documentation — CLOSED 2026-09-01 (`d382b06`)
 
 `PID_CONTROL.md` now carries the strength-scaling formula for the fuzzy layer,
