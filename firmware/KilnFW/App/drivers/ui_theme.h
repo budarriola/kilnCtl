@@ -61,6 +61,23 @@
 #define UI_THEME_COLOR_TEXT_SECONDARY_HEX  0x9aa0ae
 #define UI_THEME_COLOR_TEXT_SECONDARY      lv_color_hex(UI_THEME_COLOR_TEXT_SECONDARY_HEX)
 
+/* Dual-role alias, Phase 7 theme/style pass (TODO.md 1223-1225):
+ * WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2 (2026-09-03) renamed the web
+ * dashboard's neutral-status token to `--neutral` (`main_page.html`,
+ * `readiness_page.html`), and both pages define it as
+ * `var(--ui-text-secondary)` in dark mode -- i.e. "neutral status" and
+ * "secondary text" are already the same color on the web side, just reached
+ * through two different names for two different roles. This header had no
+ * name for the "neutral" role at all (the LCD side has never drawn a
+ * neutral/can't-check-yet status chip); UI_THEME_COLOR_NEUTRAL exists so a
+ * future LCD status widget reaches for the theme's own dual-role name
+ * instead of either inventing a new hex or reaching for
+ * UI_THEME_COLOR_TEXT_SECONDARY directly and losing the "this IS the neutral
+ * status color" intent at the call site. Same value, zero repaint -- see
+ * UI_THEME.md's "Web dashboard parity" section for the mirrored note. */
+#define UI_THEME_COLOR_NEUTRAL_HEX   UI_THEME_COLOR_TEXT_SECONDARY_HEX
+#define UI_THEME_COLOR_NEUTRAL       UI_THEME_COLOR_TEXT_SECONDARY
+
 /* ---- Accent colors -------------------------------------------------------
  * A small rotating palette used to color-code rows/zones/nav icons, the way
  * KlipperScreen's reference screenshots used a different accent bar color
@@ -123,14 +140,82 @@
  * as "rounded-rect" at this scale rather than "square with clipped corners". */
 #define UI_THEME_CORNER_RADIUS_PX      10
 
+/* Spacing scale, Phase 7 theme/style pass (TODO.md 1223-1225): mirrors
+ * theme.css's `--ui-space-1..5` (WEB_UI_RESPONSIVE_PLAN.md sec 7.2 item 2,
+ * 2026-09-03), same five pixel values, so a new LCD layout choosing a gap
+ * has the same named rungs the web side reaches for instead of a fresh
+ * literal. Additive only, like the web side's own adoption note: this does
+ * NOT go back and rewrite every existing `lv_obj_set_style_pad_*(x, N, 0)`
+ * call across the ui_page_*.c files to spell N as one of these -- most of
+ * those numbers (many are 0, 2, 3, 4) are load-bearing against the no-scroll
+ * budget (UI_THEME_PAGE_CONTENT_BUDGET_PX below), hand-fit to a specific
+ * page's arithmetic in its own comment, not spacing debt to clean up; a mass
+ * find/replace risks silently nudging a page's worst-case height past its
+ * _Static_assert with no compiler error to catch it (the assert only checks
+ * the constants IT was written against, not a rename of what the call sites
+ * pass). New spacing decisions should reach for these; existing ones stay as
+ * the page's own budget arithmetic already documents them.
+ * UI_THEME_PADDING_PX is kept as the existing name, redefined as an alias
+ * for UI_THEME_SPACE_2 so its value (8) and every pre-existing reference to
+ * it are unchanged -- same "rename not a rewrite" the web side's own
+ * `--ui-padding: var(--ui-space-2)` alias uses. */
+#define UI_THEME_SPACE_1                4
+#define UI_THEME_SPACE_2                8
+#define UI_THEME_SPACE_3                12
+#define UI_THEME_SPACE_4                20
+#define UI_THEME_SPACE_5                32
+
 /* Standard padding/gap between grouped elements (grid cells, card interior
- * padding), in pixels. */
-#define UI_THEME_PADDING_PX            8
+ * padding), in pixels. Alias for UI_THEME_SPACE_2 -- see the spacing-scale
+ * comment above. */
+#define UI_THEME_PADDING_PX            UI_THEME_SPACE_2
 
 /* Persistent top status bar height, in pixels. Sized to comfortably hold a
  * status icon row without eating too much of the 320px height budget the
  * rest of the page (10.3's content) needs. */
 #define UI_THEME_STATUS_BAR_HEIGHT_PX  32
+
+/* ---- Card shadow, Phase 7 theme/style pass (TODO.md 1223-1225) ----------
+ * theme.css adopted two translucent-black drop shadows, `--ui-shadow-1`/`-2`
+ * (WEB_UI_RESPONSIVE_PLAN.md sec 7.2 item 3, 2026-09-03):
+ *   --ui-shadow-1: 0 1px 2px rgba(0,0,0,.12), 0 1px 1px rgba(0,0,0,.08);
+ *   --ui-shadow-2: 0 2px 6px rgba(0,0,0,.18), 0 1px 2px rgba(0,0,0,.1);
+ * LVGL has no multi-layer box-shadow syntax to copy verbatim -- one
+ * lv_style shadow (color/width/spread/ofs_y/opa) is the closest single-layer
+ * analog, so this picks the STRONGER of each pair's two alpha figures
+ * (0.12 -> LV_OPA (12%), 0.18 -> ~46 LV_OPA (18%)) as that level's shadow
+ * opacity rather than trying to stack two lv_style shadows for one widget.
+ * Same intent as the web pair -- level 1 is a subtle resting lift for a
+ * static card, level 2 a slightly stronger lift -- not a byte-identical
+ * render, which is not achievable across the two rendering backends. Pure
+ * paint: lv_style shadow properties draw outside the widget's own box and do
+ * NOT participate in flex/grid layout sizing (LVGL, like CSS box-shadow,
+ * never reserves layout space for a shadow), so applying this to any
+ * existing card costs zero page-budget pixels -- see this file's own
+ * UI_THEME_PAGE_CONTENT_BUDGET_PX section below for why that budget is the
+ * one thing a Phase 7 change must never move. */
+#define UI_THEME_SHADOW_1_OPA   LV_OPA_10
+#define UI_THEME_SHADOW_2_OPA   LV_OPA_20
+#define UI_THEME_SHADOW_1_WIDTH_PX   4
+#define UI_THEME_SHADOW_2_WIDTH_PX   8
+#define UI_THEME_SHADOW_OFS_Y_PX     2
+
+/**
+ * Apply the Phase 7 card-shadow treatment (see the block comment above) to
+ * `card`. `level` selects UI_THEME_SHADOW_1_OPA/WIDTH_PX (level == 1, the
+ * common "resting card" case -- info cards, status cards, chart backgrounds)
+ * or UI_THEME_SHADOW_2_OPA/WIDTH_PX (level == 2, a slightly stronger lift for
+ * a card meant to read as raised above its neighbors, e.g. a modal/overlay
+ * surface). Any other `level` value is treated as 1. Pure lv_style_t
+ * property writes on `card`'s own LV_PART_MAIN/LV_STATE_DEFAULT selector --
+ * does not touch `card`'s size, position, or any other object, and does not
+ * allocate (no lv_style_t is created; this writes directly via
+ * lv_obj_set_style_shadow_*(), the same local-style pattern every other
+ * ui_page_*.c call site already uses for bg_color/radius/etc, so this is
+ * safe to call repeatedly, including from a build() function that also sets
+ * bg_color/radius on the same object in the usual order).
+ */
+void ui_theme_apply_card_shadow(lv_obj_t *card, int level);
 
 /* ---- No-scroll content budget -- TODO.md 10.3's hard rule ("every page
  * must fit its content height without scrolling; overflow is split into

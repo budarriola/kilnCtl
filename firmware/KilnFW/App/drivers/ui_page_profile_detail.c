@@ -450,6 +450,10 @@ lv_obj_t *ui_page_profile_detail_build(void)
     lv_obj_set_height(s_info_card, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(s_info_card, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(s_info_card, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Phase 7 theme/style pass (TODO.md 1223-1225): a resting-lift shadow,
+     * pure paint (see ui_theme.h's own comment) -- does not change this
+     * card's height, so the budget arithmetic below is unaffected. */
+    ui_theme_apply_card_shadow(s_info_card, 1);
     lv_obj_set_style_pad_all(s_info_card, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_set_flex_flow(s_info_card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(s_info_card, UI_THEME_PADDING_PX / 4, 0);

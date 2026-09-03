@@ -776,6 +776,9 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_height(status_card, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(status_card, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(status_card, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Phase 7 theme/style pass (TODO.md 1223-1225): pure-paint shadow, see
+     * ui_theme.h -- costs no page-budget height. */
+    ui_theme_apply_card_shadow(status_card, 1);
     lv_obj_set_style_pad_all(status_card, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_set_flex_flow(status_card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(status_card, UI_THEME_PADDING_PX / 4, 0);
@@ -907,6 +910,9 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_height(s_ap_section, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(s_ap_section, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(s_ap_section, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Phase 7 theme/style pass (TODO.md 1223-1225): pure-paint shadow, see
+     * ui_theme.h -- costs no page-budget height. */
+    ui_theme_apply_card_shadow(s_ap_section, 1);
     lv_obj_set_style_pad_all(s_ap_section, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_set_flex_flow(s_ap_section, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_ap_section, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);

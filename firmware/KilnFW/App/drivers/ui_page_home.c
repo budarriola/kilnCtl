@@ -1929,6 +1929,10 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_bg_opa(s_chart, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_chart, 0, 0);
     lv_obj_set_style_radius(s_chart, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Phase 7 theme/style pass (TODO.md 1223-1225): pure-paint shadow, see
+     * ui_theme.h -- costs no page-budget height (the flex_grow(1) chart
+     * still claims exactly the same residual space it did before). */
+    ui_theme_apply_card_shadow(s_chart, 1);
     lv_obj_set_style_pad_all(s_chart, 2, 0);
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
     /* Owner report 2026-08-22: "the LCD has 3 sections in the graph, it

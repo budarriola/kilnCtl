@@ -1324,7 +1324,23 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       bench sequence once it exists: confirm the chosen GPIO
       (`CONFIG_KILNCTL_BACKLIGHT_GPIO`, default 15) is genuinely free on the
       real DevKitC, then verify dim/off and touch-wake against real hardware.
-- [ ] Theme/style pass (TODO.md:1223-1225).
+- [x] Theme/style pass (TODO.md:1223-1225). **LANDED 2026-09-03.**
+      Styling-only, no-scroll budgets untouched (pure-paint additions only --
+      see `docs/UI_THEME.md`'s "Phase 7 theme/style pass" section for exactly
+      what landed): `ui_theme.h`/`.c` gained a spacing scale
+      (`UI_THEME_SPACE_1..5`, mirroring `theme.css`'s `--ui-space-1..5`), a
+      `UI_THEME_COLOR_NEUTRAL` alias (mirroring the web side's `--neutral`
+      dual-role rename), and `ui_theme_apply_card_shadow()` (mirroring
+      `--ui-shadow-1/-2`, pure paint -- LVGL shadows draw outside the box and
+      do not participate in layout sizing, so this costs zero
+      `UI_THEME_PAGE_CONTENT_BUDGET_PX` pixels). Applied to the real card
+      containers on `ui_page_home.c`, `ui_page_temperature.c`,
+      `ui_page_network.c`, `ui_page_profile_detail.c`, and
+      `ui_page_profile_builder_review.c`. Every page carrying a budget
+      `_Static_assert` was re-verified unchanged via `build_kilnfw`, and the
+      no-scroll guard itself was negative-tested (a deliberately overflowed
+      budget assert was made to fail, quoted, then reverted) rather than
+      trusted vacuously.
 
 ---
 

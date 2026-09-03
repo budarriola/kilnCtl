@@ -325,6 +325,9 @@ lv_obj_t *ui_page_profile_builder_review_build(void)
     lv_obj_set_height(s_summary_card, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(s_summary_card, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(s_summary_card, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Phase 7 theme/style pass (TODO.md 1223-1225): pure-paint shadow, see
+     * ui_theme.h -- costs no page-budget height. */
+    ui_theme_apply_card_shadow(s_summary_card, 1);
     lv_obj_set_style_pad_all(s_summary_card, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_set_flex_flow(s_summary_card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(s_summary_card, UI_THEME_PADDING_PX / 4, 0);

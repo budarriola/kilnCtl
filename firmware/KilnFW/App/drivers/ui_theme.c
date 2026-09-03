@@ -14,6 +14,25 @@
  * real touch target, nothing to size).
  */
 
+/* Phase 7 theme/style pass (TODO.md 1223-1225) -- see ui_theme.h's block
+ * comment above the declaration for what this mirrors (theme.css's
+ * --ui-shadow-1/-2) and why a single lv_style shadow layer is the closest
+ * LVGL analog to the web side's two-layer rgba() shadows. Pure paint: does
+ * not touch layout. */
+void ui_theme_apply_card_shadow(lv_obj_t *card, int level)
+{
+    if (!card) return;
+
+    lv_opa_t opa = (level == 2) ? UI_THEME_SHADOW_2_OPA : UI_THEME_SHADOW_1_OPA;
+    int32_t width = (level == 2) ? UI_THEME_SHADOW_2_WIDTH_PX : UI_THEME_SHADOW_1_WIDTH_PX;
+
+    lv_obj_set_style_shadow_color(card, lv_color_black(), 0);
+    lv_obj_set_style_shadow_opa(card, opa, 0);
+    lv_obj_set_style_shadow_width(card, width, 0);
+    lv_obj_set_style_shadow_spread(card, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(card, UI_THEME_SHADOW_OFS_Y_PX, 0);
+}
+
 void ui_theme_apply_touch_area(lv_obj_t *widget, bool compact_layout)
 {
     if (!widget) return;

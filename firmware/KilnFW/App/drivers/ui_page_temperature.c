@@ -429,6 +429,9 @@ static void build_relays_section(lv_obj_t *parent)
     lv_obj_set_style_bg_color(card, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(card, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Phase 7 theme/style pass (TODO.md 1223-1225): pure-paint shadow, see
+     * ui_theme.h -- costs no page-budget height. */
+    ui_theme_apply_card_shadow(card, 1);
     lv_obj_set_style_pad_all(card, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(card, UI_THEME_PADDING_PX / 4, 0);
