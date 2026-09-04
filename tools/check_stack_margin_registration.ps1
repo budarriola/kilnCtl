@@ -54,9 +54,23 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
 $driversDir = (Resolve-Path $driversDir).Path
-$mainFile = Join-Path $root "..\firmware\KilnFW\App\main.c"
-$mainFile = (Resolve-Path $mainFile).Path
+$appDir = Join-Path $root "..\firmware\KilnFW\App"
+$appDir = (Resolve-Path $appDir).Path
 $capFile = Join-Path $driversDir "stack_margin.h"
+
+# main.c itself was split into several main_*.c files (main_boot_early.c,
+# main_bridges_bringup.c, main_control_bringup.c, main_network_http.c) --
+# app_main()'s bring-up sequence is spread across them, and so is its
+# stack_margin_register() call sites (uart_owner_task/uart_owner_evt_task/
+# uart_proto_rx live in main_network_http.c, registered against the real
+# task handles right after uart_owner_init()/uart_protocol_init() create
+# them). This script used to look only at main.c and went blind to that
+# split: the three registrations were live at runtime the whole time, this
+# check just never saw them, and reported the tasks as unregistered. Glob
+# every top-level App/*.c file (non-recursive -- App/drivers is handled,
+# recursively, by $driversDir above) rather than naming main.c alone, so a
+# future split doesn't reopen the same blind spot.
+$mainFiles = @(Get-ChildItem -Path $appDir -Filter "*.c" -File)
 
 # Same comment-stripping helper as check_uri_handler_cap.ps1 /
 # check_bridge_reject_reason.ps1 / check_uart_version_independence.ps1
@@ -115,7 +129,7 @@ $requiredNames = @(
     "uart_owner_task", "uart_owner_evt_task", "uart_proto_rx"
 )
 
-$sourceFiles = @(Get-ChildItem -Path $driversDir -Filter "*.c" -Recurse -File) + @(Get-Item -Path $mainFile)
+$sourceFiles = @(Get-ChildItem -Path $driversDir -Filter "*.c" -Recurse -File) + $mainFiles
 if ($sourceFiles.Count -lt 5) {
     throw "check_stack_margin_registration.ps1: only $($sourceFiles.Count) .c file(s) found -- has the drivers directory moved? Update this script's target directory."
 }
@@ -138,7 +152,7 @@ $totalCalls = $registeredNames.Count
 # the function gets renamed, registration moves to a macro, etc. -- this
 # check must go loud rather than quietly start passing on an undercount.
 if ($totalCalls -lt 20) {
-    throw "check_stack_margin_registration.ps1: only found $totalCalls stack_margin_register(`"...`") call site(s) under $driversDir and $mainFile, which is implausibly low (25+ expected as of 2026-09-02) -- the registration style has probably changed and this script has gone blind. Update its pattern before trusting its result."
+    throw "check_stack_margin_registration.ps1: only found $totalCalls stack_margin_register(`"...`") call site(s) under $driversDir and $appDir, which is implausibly low (25+ expected as of 2026-09-02) -- the registration style has probably changed and this script has gone blind. Update its pattern before trusting its result."
 }
 
 Write-Host "Stack margin registration check: $totalCalls call site(s) found across $($sourceFiles.Count) file(s)."
@@ -149,7 +163,7 @@ if ($missing.Count -gt 0) {
     Write-Host "  The following task(s) are in this script's required-registration list" -ForegroundColor Red
     Write-Host "  (DRAM_PSRAM_PLAN.md section 7 / stack_margin.h's tracked set) but have" -ForegroundColor Red
     Write-Host "  NO stack_margin_register(`"<name>`", ...) call site anywhere under" -ForegroundColor Red
-    Write-Host "  $driversDir or $mainFile :" -ForegroundColor Red
+    Write-Host "  $driversDir or $appDir (App/*.c, non-recursive) :" -ForegroundColor Red
     foreach ($name in $missing) {
         Write-Host "    $name" -ForegroundColor Red
     }
@@ -175,7 +189,7 @@ $duplicateNames = @(
 if ($duplicateNames.Count -gt 0) {
     Write-Host "STACK MARGIN DUPLICATE NAME CHECK FAILED:" -ForegroundColor Red
     Write-Host "  The following name(s) are passed to stack_margin_register() by more" -ForegroundColor Red
-    Write-Host "  than one call site under $driversDir or $mainFile :" -ForegroundColor Red
+    Write-Host "  than one call site under $driversDir or $appDir (App/*.c, non-recursive) :" -ForegroundColor Red
     foreach ($name in $duplicateNames) {
         Write-Host "    $name" -ForegroundColor Red
     }
