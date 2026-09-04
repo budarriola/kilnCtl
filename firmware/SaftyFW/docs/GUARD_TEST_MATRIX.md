@@ -723,7 +723,10 @@ number in the first place):**
    reachable guards satisfy the host-test half; none has fresh hardware
    evidence (see the honest gap below).
 2. **(b) Reachable but never exercised on real hardware** — S6a is the clear
-   case (no fixture can drive its input at all any more). More broadly:
+   case: structurally reachable in source and on this board (§6a above), and
+   permanently unprovokable by any fixture (no fixture can drive its input
+   at all any more) — three separate facts, all true of S6a at once, none of
+   which is "hardware-verified." More broadly:
    *no* guard in this table has a post-2026-08-24-fix hardware trip on
    record — §3.4's hardware-trip rows predate both fixes and have not been
    re-run since (see the §3.4 note below). Source-reachable is not the same
@@ -816,7 +819,7 @@ pass (no hardware was touched); it is a now-open door, not a result.
 | S3 | Yes | **Yes**, given live current-sense + relay context | None on SaftyFW's side |
 | S4 | Yes | **Yes** (WARN only) | None |
 | S5 | — (was itself the masker) | **Yes** — now the graduated WARN→TRIP guard it was always designed to be, evaluated against a real reading instead of a permanent fault | None — this is the guard the hardware fit fixed directly |
-| S6a | Yes | Reachable on real hardware (wiring was already correct); still **not provokable through `virtual_dut`** (no I2C-expander/opto Fault-line emulation, §6 above) | A `SimFW` harness gap, unrelated to this fix |
+| S6a | Yes | Structurally reachable on real hardware (wiring was already correct) — **but, per §6c's later (b) category, not yet actually exercised there**: this row records that the code path is now capable of running on this board, not that anyone has shorted the mainFault line and watched it trip. Still **not provokable through `virtual_dut`** (no I2C-expander/opto Fault-line emulation, §6 above), permanently, since that fixture is now deleted | A `SimFW` harness gap, unrelated to this fix; the hardware-exercise itself is a separate, still-open bench step (§3.4) |
 | S6b | Yes | **Yes** | None |
 | S7 | Yes | **Yes** | None |
 | S9 | Yes | **Yes** | Only meaningful once some other guard trips and K4 is commanded open |

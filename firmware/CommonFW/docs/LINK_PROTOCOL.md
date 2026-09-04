@@ -341,7 +341,7 @@ ESP→Pico payloads today are `GET_STATUS` (1 byte) and `REQUEST_ENABLE`
 |---|---|---|
 | 0 | u8 | `0x07` |
 | 1 | u8 | flags — see below |
-| 2 | u8 | `boot_id` — increments on every ESP boot |
+| 2 | u8 | `boot_id` — a fresh random value generated per ESP boot, **not a monotonic counter** (`safety_link.c:358`, `esp_random()`). Randomness is deliberate: the Pico only needs to notice "this is a *different* boot than the last one I saw" to reset its correlation windows — it never needs to order boots relative to each other, so there is nothing an incrementing counter would buy that a random value doesn't, and a random value needs no persisted state to survive a crash-reboot. See section 9's `boot_id` checklist item for the full deviation note. |
 | 3..6 | u32 LE | `seq` — increments every frame, never resets except on boot |
 | 7..10 | u32 LE | `uptime_ms` |
 | 11 | u8 | `relay_now_mask` — bits 0–3, relays 1–4 **as actually commanded** (post-refusal) |
@@ -585,6 +585,44 @@ fall back to? — is entirely `SaftyFW`'s, in `bootloader/metadata.c`'s
 `bootloader_decide_rollback()`. This codec (`kilnlink_rollback.{c,h}`) only
 serializes the one-byte frame; it carries no opinion about whether a
 rollback should be allowed.
+
+### `SAFETY_CMD_ANNOUNCE_REBOOT` = `0x18` (ESP → Pico)
+
+One byte, no arguments — same shape as `SAFETY_CMD_ROLLBACK`/`SAFETY_CMD_GET_FW_VERSION`.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x18` |
+
+Fire-and-forget, never ACKed on the wire. Sent unsolicited by the ESP
+immediately before `esp_ota_mark_app_invalid_rollback_and_reboot()` for a
+**routine OTA self-update** — "I am about to go silent for a few seconds on
+purpose, this is not a crash." Introduced 2026-08-19
+(`5173539`); it does not gate on `KILNLINK_PROTOCOL_VERSION`/
+`KILNLINK_MIN_COMPATIBLE` at all (no bump accompanied it — an old Pico that
+does not recognize `0x18` simply drops it, the same as any other unknown
+cmd byte, and falls back to the pre-existing behavior of trusting S6b's
+ordinary link-dead timers).
+
+`SaftyFW`'s `link_task.c` (`link_task_handle_announce_reboot()`) records the
+Pico's own uptime at which the frame was decoded via `reboot_announce_mark()`
+(`reboot_announce.c`/`.h`). `safety_core.c` (`firmware/SaftyFW/src/tasks/
+safety_core.c:170`) is the only place that turns that timestamp into a fact:
+a fixed **`REBOOT_GRACE_WINDOW_MS` = 20000 (20 s)** window, computed fresh
+every tick as `now_ms - announced_at_ms < REBOOT_GRACE_WINDOW_MS`, exposed to
+`safety_guards.c` as the single bool `safety_guard_input_t::reboot_grace_active`.
+
+**What it suppresses, precisely.** Only S6b's (link-dead guard,
+`SAFETY_MODEL.md` section 4) own `trip()` calls, and only those — the
+elapsed-silence accumulator that S6b reads keeps incrementing regardless, so
+a genuinely dead ESP still trips on the very first tick after the window
+closes, with no accumulated advantage carried over. The underlying `link_up`
+fact is untouched, every other guard is untouched, and the frame has no path
+into `relay_owner`'s energize/ARM logic at all (`safety_guards.c` has no
+link/GPIO access, by this codebase's isolation rule — `check_isolation.ps1`).
+This is a courtesy notice, never a permission grant: if the reboot runs long
+and the link is still down when the window expires, S6b trips exactly as if
+the frame had never arrived.
 
 ### `SAFETY_CMD_ROLLBACK_RESULT` = `0x25` (Pico → ESP)
 
@@ -1368,7 +1406,13 @@ Two more, driven by the borrowed-thermocouple option:
       (`firmware/KilnFW/App/drivers/profile_executor.c:1201-1236`'s
       `safety_link_silent_30s`/`SAFETY_LINK_FIRING_ABORT_SILENCE_MS`, pinned
       by `firmware/KilnFW/App/test/test_safety_link.c:77-92`; 2026-09-04,
-      M15 C5 verification)
+      M15 C5 verification). **Evidence level: host-tested and CI-pinned
+      only, NOT hardware-verified** (`docs/SAFETY_CASE.md` section 4
+      classification) — the tick means the code exists and a host test
+      proves it fires at the coded threshold, not that anyone has held the
+      real link down on a running board with a stopwatch. `ROADMAP.md` M6
+      and its "Blocked on hardware that does not exist yet" table (row `S`)
+      track that bench step as still open.
 - [x] Before the first frame ever arrives, the link counts as down.
       **2026-09-04**: every caller that reads link state before the first
       exchange defaults `link_up = false` (`dashboard_http.c`,
