@@ -1,6 +1,10 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-04 (M15 CLOSED — all 22
+> **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep cleanup
+> pass — closed/struck-through narrative moved to `docs/COMPLETED_2026-09.md`
+> per this file's own "a finished item leaves this plan" rule (the "Software,
+> doable now" table, the "What is actually left" closeout paragraphs, and M12a
+> in full); no open item's text was changed. (Prior review: M15 CLOSED — all 22
 > architecture-review findings landed same day, full detail in
 > `docs/COMPLETED_2026-09.md`; §1 nuisance-rejection coverage (S3/S4/S6a/S7/S9/
 > S10) and payload-decoder fuzzing closed against `GUARD_TEST_MATRIX.md`;
@@ -87,11 +91,8 @@ What is still genuinely open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| ~~L~~ | ~~**The HTTP reset is not a heap failure**~~ **CLOSED 2026-09-04** — folded into the entry below; the real mechanism was neither the heap nor `max_open_sockets` | M10 |
-| ~~L~~ | ~~**HTTP connection resets under concurrency.**~~ **CLOSED 2026-09-04.** Root cause was `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` defaulting to 6 — lwIP aborts (RST) any handshake-completed connection that can't post into that fixed-size mailbox, independent of `backlog_conn`, `max_open_sockets`, and the OS socket table (all three chased and refuted across four prior passes). Raised 6 → 16; reset rate went from 22.5% to 0.0% at the same concurrency levels that were failing. See the dated entry in [What is actually left](#what-is-actually-left) for the full measurement | M10 |
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
-| L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Its predicted side effect arrived exactly as the ordering note warned — the bench, having no CT fitted, could not satisfy `ct_channel_map` and was locked out of heating. Resolved 2026-08-28 by making CTs **optional hardware** rather than by relaxing the gate: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off (`SaftyFW/docs/GUARD_TEST_MATRIX.md` §9). Verified on the live board: `commissioned: true`, heat permitted, relay commanded with `heat_blocked: false` | M12 |
-| ~~L~~ | ~~**Sustained heat is impossible on the bench: S6a fires within ~1 s of every firing start.**~~ **CLOSED 2026-08-29 (63cc741).** Root cause was not the wire, not the Pico, and not the consumer-cannot-keep-up shape this entry guessed at — nothing was ever dropped: 0 CRC errors, 0 resyncs, 0 discards throughout, the frames were only ever *late*. `KilnFW`'s `uart_protocol_rx_task` read with `uart_read_bytes(port, chunk, sizeof(chunk), 200 ms)` where `chunk` had been sized to the worst-case stuffed frame (528 B) by 3149393. That call re-blocks until `length` bytes arrive or the timeout expires, and on a link whose frames are ~40 B at ~10 frames/s, 528 B never arrive — so every read held its bytes the full 200 ms, against a ~345 ms reply budget. By the time it was characterised it was timing out on **100 %** of polls (42/42), not 20 %. Fixed by reading only what `uart_get_buffered_data_len()` reports with a zero timeout, and blocking for a single byte (bounded 100 ms) only when nothing is buffered. Measured after: **0 timeouts in 340+ polls**, request/reply back to 1:1, config fetch converging in 3 page requests instead of 25. A bounded firing run now holds `running` with no heat block for a full 60 s sweep (regression-asserted in `test_live_bench_tuning.py`). DMA was evaluated and rejected as the fix — see `LINK_PROTOCOL.md` §3 "Never wait on a receive buffer filling", which states the rule both ends must hold and leaves the mechanism open. ~~**Remaining bench limit is physical, not firmware: no heating element is fitted to the zone-0 relay, so PV does not move and autotune still cannot fit a response.**~~ **Wrong, corrected 2026-08-29.** Every zone has a real heater. PV did not move for two firmware reasons, both since fixed: K4 was never requested (`heat_enable.c`), and zone 0's 2 s time-proportioning window could not render any fractional duty against the 10 s minimum on-time. "It must be the hardware" was the third wrong diagnosis this one symptom attracted. | M6 |
+| L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
 
 ### Blocked on hardware that does not exist yet
 
@@ -343,134 +344,21 @@ now a short list, which is the point:
   exposes `safety_build_commit`/`safety_build_datetime`/`safety_build_dirty`
   and `ota_page.html` renders them
 
-**Closed 2026-08-27/28, no longer open:** the task stacks were re-read after a
-real firing and 4 kB of internal DRAM reclaimed; `rules_task`'s callees were
-audited (nothing writes flash — the real finding was a cache-disabling *read*
-via `dashboard_get_status()`) and its stack moved to PSRAM; the guard scripts
-now run from `tools/run_all_checks.ps1` and the `run_repo_checks` MCP tool.
-
-**Closed 2026-08-30, no longer open:** `PID_EXPANSION_PLAN.md` Phases 1-4 are
-landed — Cohen-Coon is a selectable, reachable tuning rule alongside SIMC, and
-the fuzzy-PID layer (`pid_fuzzy.c`) is wired into `profile_executor.c` and
-selectable from `zones_page.html`. SNTP/NTP time sync landed. The first
-autotune runs ever to complete on real hardware fitted all three zones, and
-the first full 3x3 cross-zone coupling matrix and RGA were measured — see that
-plan's §2 for the current numbers (that matrix has since been superseded). Proposed gains reviewed, not accepted.
-
-**PID/adaptive tuning, as of 2026-09-02** (detail owned by
-`PID_EXPANSION_PLAN.md`, not duplicated here): coupled identification and the
-diagonal model refine are built and hardened, but their hardware clearance was
-**withdrawn 2026-09-02** — the solve is sound, the harvest layer feeding it
-records non-steady duties as DC-gain observations (fired on 12 of 12 joint
-observations on the `coupid6` capture). Never yet run on the kiln. The Ki diagnosis layer is built with
-all code blockers closed — also never yet run on the kiln. Dynamics-from-ramps
-was tried and **shelved**: its two-point fit reduces analytically to
-`0.524·K·Δduty/ramp_rate`, an artifact of the commanded ramp rate with no plant
-content. A real board-wide deadlock was found and fixed — pressing Accept on
-an autotune result over the UART bridge re-entered the flash worker and hung
-it permanently, taking down every UART bridge, `safety_cfg_store`'s deferred
-NVS flush, and `adaptive_tune`'s persistence with it. All adaptive layers stay
-per-zone opt-in, default OFF.
-
-**Closed 2026-08-31/09-03, no longer open — ramp assist, landed end to end**
-(detail owned by `PID_EXPANSION_PLAN.md` §7, not duplicated here): a pyrometric
-cone table (`cone_table.c`/`.h`, Orton 022-14 incl. half-cones, Arrhenius
-heat-work weighting), sustained-lag detection and auto-stretch in the
-executor, and a dwell heat-work credit that shortens the following dwell when
-it was earned lagging — the SPEND is gated on `ramp_assist_enabled` so
-disabled behaviour is bit-identical to before this landed (`profile_executor_
-ramp_assist.c`'s accrual/report side is unconditional; only the spend checks
-the flag). Web banner, event log, and LCD lag notice all wired to the same
-richer sustained-lag fields. Control surface (`GET`/`POST /api/ramp_assist`,
-diagnostics-page toggle, persisted kiln-wide) is done and **defaults OFF** —
-it stays off until a real cone-temperature firing validates it (see GATED,
-below). A same-day defect sweep found and fixed a duplicated band-width
-formula, a band-cliff bug present in `cone_table.c` itself (not just its
-caller), and a dwell-credit crash, plus ten wrong cone temperatures in the
-Orton table (mirror test added so a future table edit can't repeat it).
-**Further hardening since, still pre-real-firing:** dwell credit was found
-**unreachable** — its gate was tied to the 25 °C ramp-lock band instead of
-schedule lag, so it could never fire — and fixed (`cf3763c`); accrual was
-then extended to keep crediting past the nominal ramp end (`0402ecb`,
-KilnFW + simulator). Separately, three ramp-lock/guard interaction bugs
-surfaced and were fixed: a hot-start stall (one-sided lock + a guard-4
-arming backstop, `8f12449`), a false guard-4 trip during autotune's
-SETTLING phase that the backstop itself introduced (`7911f26`), and guard 4
-mistaking autotune's synthetic setpoint for a real one (`1bfd5ee`). None of
-this changes the GATED verdict below — a real cone-temperature firing is
-still the only thing that flips ramp assist's default to ON — but it removes
-failure modes that would otherwise have surfaced mid-firing.
-
-**Also closed in the same window, no longer open:**
-- Relay-autotune thermal guards 1/2 now use an amplitude discriminator
-  (`relay_min_swing_c`) in place of a directional test that could never fire
-  mid-limit-cycle — `df3b31b`.
-- A coupled-solve `use_measured_diag_k_dc` flag shipped, **default OFF**.
-- Measurement tooling: `noise_floor.py` gained a start-temperature covariate
-  and cooldown-sidecar refusal; `pid_ab_compare` now gates on a start-temp
-  confound instead of ignoring it.
-- `run_queue.py` hardening: capture opens before the start POST, a real
-  wait-until-actually-finished replaces the old "first idle sample = done"
-  logic (`0a0ccd7`; the once-proposed `docs/patches/run_queue_idle_stop_fix.*`
-  patch was superseded by this different fix and has been deleted), campaigns
-  are resumable via a durable state file, a clobber is refused rather than
-  silently overwritten, and a capability preflight fails a stale-firmware
-  preset before the campaign starts rather than mid-run.
-- Web UI: firing-flow profile feasibility warnings, a live flash partition
-  table on the diagnostics page, a new-profile segment preview graph, the
-  duty axis in percent with a rotated label, a falling-behind-schedule
-  banner, and RGA/status cells that no longer rely on colour alone (plus an
-  extended colour-only checker guard script).
-- `PID_EXPANSION_PLAN.md`'s fuzzy-layer hardware-run blocker (a
-  `zones_http_client` field-mapping bug) is resolved (`b1ea749d`) — the run
-  itself still has not happened, see GATED below.
-
-**Closed 2026-09-04 — safety-case and guard-coverage hardening, no longer
-open** (full detail owned by `GUARD_TEST_MATRIX.md`, `SAFETY_MODEL.md` and
-`docs/SAFETY_CASE.md` — not duplicated here):
-- 27 previously-unfuzzed `kilnlink` payload decoders got seeded corpus+random
-  fuzz targets in `firmware/CommonFW/test/test_fuzz_payloads.c`, canary-guarded
-  and ASan-clean (`ccb23ac`), closing a `GUARD_TEST_MATRIX.md` item.
-- §1 nuisance-rejection coverage completed for S3/S4/S10 (`7e2dc1c`);
-  `discrete_task.c`'s debounce extracted into a pure `debounce_policy.c/.h`,
-  closing the S6a/S7 host gaps (`d506a54`); S9's decay behaviour, which
-  overturned a prior "hardware-only" verdict (`7e84534`). SaftyFW host checks
-  went 2077 → 2131.
-- Every `SAFETY_MODEL.md` summary-table row got a per-row verification state
-  (`ecdad62`); `SAFETY_CASE.md` was corrected the same day — it had
-  **understated** thermal_guard guards 1/2/4/5/7 as argued-only when they are
-  genuinely host-tested, and guard 9's "found on the bench 2026-08-25" claim
-  was retracted after a git-history search found nothing behind it (`a2df81a`).
-- Triage of 89 unchecked items across `UPDATE_PROTOCOL.md`/`LINK_PROTOCOL.md`/
-  `REPO_LAYOUT.md`: ~66 were already done and merely unticked, now cited
-  (`503ab3b`), plus four protocol/safety doc defects fixed, including
-  documenting `SAFETY_CMD_ANNOUNCE_REBOOT` (0x18) — implemented but entirely
-  absent from `LINK_PROTOCOL.md` (`54d13e3`).
-- New `tools/wire_protocol_fingerprint_check.py`: fails when a wire-relevant
-  declaration changes without a protocol version bump — two such bumps had
-  already shipped missing one (`bf401f4`).
-
-**The fuzzy-PID A/B campaign was found structurally inert, fixed, and is now
-LIVE on the kiln — do not touch the board while it runs.** Both presets had
-`control_mode: 2`, so the fuzzy layer (which only runs under mode 3) never
-engaged and the campaign was silently comparing PID against itself
-(`8906686`). Presets fixed and the campaign restarted as
-`fuzzy_ab_20260904c`, with live `bd_*` proof that effective gains now differ
-from base (`91c5d6d`). A separate audit of the *ease-off* A/B, run against the
-same inert-campaign bug class, confirmed it was **not** inert and its
-"indistinguishable" conclusion stands; it also added a standing pre-flight
-check (`PID_EXPANSION_PLAN.md` §3.6b) requiring live `bd_*` proof before any
-future control-law A/B (`51e3d59`). **Superseded 2026-09-04:** `778ad64`
-found the resulting `fuzzy_ab_20260904c` data itself never leaves the
-membership layer's centre rule cell (n=29 firings, 37,008 zone-samples,
-100.000% ZERO/STEADY) — the campaign ran cleanly but was measuring a fixed
-gain rescale, not fuzzy adaptation. The kiln is now idle and the campaign is
-stopped; see the owner-decision row above before restarting it in any form.
-Cross-campaign tracking was separately synthesized across all 27 usable
-coupling captures (not one more A/B): the coupling-matrix fix is confirmed
-(n=12 vs 5), z0's dwell-entry overshoot is the worst tracked case at
-2.18 °C, and no capture anywhere has yet exceeded 60 °C (`d5ae465`) — detail
-in `PID_EXPANSION_PLAN.md`, not restated here.
+**Closed 2026-08-27 through 2026-09-04, no longer open** — DRAM/stack
+reclamation, PID Cohen-Coon/fuzzy-layer landing, SNTP sync, the first
+hardware coupling-matrix/RGA measurements, the withdrawal of coupled/Ki
+adaptive-tuning hardware clearance (harvest-layer defect), the shelving of
+dynamics-from-ramps, ramp assist landing end to end (default OFF, gated on a
+real cone-temperature firing — see the GATED table below), a round of
+relay-autotune/measurement-tooling/web-UI hardening, and the fuzzy-PID A/B
+campaign's discovery-and-fix-and-second-discovery (`8906686` then `778ad64`,
+see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these)
+for the resulting owner decision) plus the 2026-09-04 safety-case/guard-
+coverage hardening pass (27 payload-decoder fuzz targets, S3/S4/S10/S9
+coverage, `SAFETY_CASE.md`/`SAFETY_MODEL.md` corrections, and
+`wire_protocol_fingerprint_check.py`). Full postmortem detail for all of the
+above:
+[`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#what-is-actually-left-closeout-narratives-moved-2026-09-04).
 
 **What is currently GATED, and on what** (the short answer for planning):
 
@@ -1290,96 +1178,17 @@ unused, and only a hardware flash caught it.
 
 ## M12a — The commissioning surface lied · *opened and closed 2026-08-28*
 
-Found by an opus audit on 2026-08-28, triggered by a routine attempt to set
-`abs_max_temp_c = 80` on the bench. **Three `POST /api/safety/commissioning`
-requests returned `{"ok":true}` and not one value changed**, including a control
-write to a harmless parameter. This is not a UI defect. It means the safety
-processor's commissioning surface reports success it has not earned, while
-displaying values that did not come from the safety processor.
-
-The decisive evidence, all live: `live_config_crc` never moved (a successful
-`config_store_write()` bumps `seq` and therefore the CRC, so **nothing was
-written**), while the Pico's own histogram read `commit_config_rejected=2` —
-it refused, it said so, and the ESP discarded the refusal.
-
-Four defects, each verified against source:
-
-1. **`ok` cannot fail.** `apply_pairs()` returns true when the send returns
-   `ESP_OK` (`safety_cfg_http.c:434/446/472`), but SET_PARAM and COMMIT_CONFIG
-   both go out as broadcasts (`safety_link.c:2944/3027`) and
-   `uart_protocol.c:795` returns `ESP_OK` for "the local UART accepted the
-   bytes" — its own comment says "No ack wait, no retry". The doc comment above
-   `safety_link_send_commit_config()` still claims `ESP_OK` means the Pico
-   ACKed; that has been untrue since the broadcast change.
-2. **The rejection is caught in a ~144 ms race and then thrown away.**
-   `safety_link.c:3045-3059` waits `SAFETY_LINK_REPLY_TIMEOUT_MS`; a late
-   REJECTED frame reaches `safety_drain_inbox_ex()` (`:1367-1373`) and is
-   counted and dropped. `CONFIG_PAGE`, two cases above (`:1353-1364`), stashes
-   an unclaimed frame — REJECTED has no stash. **Silence is currently defined
-   as acceptance** (`:3044`).
-3. **The GET is an ESP-local NVS cache presented as current.** Refreshed only
-   when the CRCs disagree (`safety_cfg_store.c:674-675`); they agree, so there
-   were zero fetches this boot (`cmd_config_page_count: 0`). `fetched_ms_ago`
-   is board uptime, not fetch age (`:441-443`) — it says "fetched 10 minutes
-   ago" about bytes read off flash, possibly written by a different Pico image
-   days earlier.
-4. **`"set": true` is unconditional** — the Pico emits every field without
-   consulting `rec.fields_set` and the ESP sets `set = 1` for every entry
-   received (`safety_cfg_store.c:609`). So `abs_max_temp_c {set:true,
-   value:0}` is the page asserting a *commissioned ceiling of 0 °C* for a field
-   the Pico has never had set, and 0 on that field means NEVER TRIP. This makes
-   `safety_cfg_http.c:136-139`'s deliberate "omit the value rather than print a
-   misleading zero" branch unreachable. **Fifth instance** of a report that
-   structurally cannot be false.
-
-- [x] Stash an unclaimed REJECTED frame the way CONFIG_PAGE is stashed
-- [x] **Confirm commits positively by reading `config_crc` back.** The audit was
-      right that a stash alone leaves `ok` meaning "no rejection seen"; the
-      read-back compares every submitted field against what the Pico returns
-- [x] Refetch after commit and report the CONFIRMED value, not the sent one
-- [x] Carry `fields_set` through the CONFIG_PAGE codec so `set` can be false —
-      protocol 7→8, floor held at 7, and the ESP now refuses to call anything
-      "set" when the peer is older than 8 **or its version is unknown**
-- [x] `fetched_ms_ago` reports real fetch age; an NVS load no longer stamps it
-- [x] Surface the ARMED/GRACE write window in the page itself
-
-**Closed 2026-08-28, verified on hardware (`ddbd024`, `3149393`).** The page now
-reports `abs_max_temp_c {set: false}` where it used to report a commissioned
-0 °C, `cached_config_crc == live_config_crc` with `stale: false`, and a refused
-write says so instead of returning `{"ok":true}`.
-
-**And fixing it immediately exposed an older defect it had been hiding.** With
-the read-back real for the first time, page 0 of the config fetch arrived and
-**page 1 timed out on every attempt** — so the processor still could not be
-commissioned. `cmd_config_page` had been **0** for the life of this project:
-the ESP had never once fetched a page, so a page-1 timeout had nothing to
-surface through. The cause was not the Pico, which answered in under 1 ms and
-dropped no frame: `uart_protocol_rx_task` read UART bytes 32 at a time, so a
-~157-253 byte CONFIG_PAGE needed 5-8 scheduler round trips against a ~145 ms
-budget while the small STATUS/DIAG/POWER frames that always worked needed 1-2.
-Fixed by reading a whole frame in one go and giving the reply 300 ms of margin
-— the 2000 ms multi-page ceiling is untouched, because growing *that* is what
-caused an earlier panic-reboot regression. Two more bugs surfaced in the same
-instrumentation: `link_task` polled its RX ring once per 100 ms (now 10), and
-the pre-send drain discarded a CONFIG_PAGE for the wrong index instead of
-stashing it, so a late page-1 reply could never be rescued.
-
-**`abs_max_temp_c = 80` is now committed and confirmed on the bench — S1's
-absolute ceiling is armed for the first time in this project.** The board still
-reports `commissioned: false`, honestly: `tc_source`, `borrowed_zone_index` and
-`tc_placement_mode` remain unset. The dangerous half is closed; the descriptive
-half is what M12's four-question flow collects.
-
-**And the constraint this uncovered, which shapes M12's whole design:** config
-writes are refused whenever the relay owner is `ARMED` (`config_store_flash.c:279`),
-and ARMED is the steady state ~60 s after boot. **The only write window is the
-boot GRACE period.** Commissioning today means resetting the Pico and
-committing within 60 seconds, and nothing in the UI, the API, or the error text
-says so. That is not a workflow an operator can be handed.
-
-**Net effect: S1's absolute overtemperature ceiling cannot be commissioned
-through the shipping web surface**, and every attempt outside the window
-reports success. The heating elements are physically connected to this bench.
+**CLOSED.** An opus audit found the safety commissioning page reported
+`{"ok":true}` on writes the Pico had actually rejected (four independent
+defects: an ACK that couldn't fail, a rejection race that got dropped, a
+stale NVS cache presented as current, and an unconditional `"set": true`).
+All fixed and hardware-verified the same day (`ddbd024`, `3149393`);
+`abs_max_temp_c = 80` is committed and confirmed on the bench, and fixing it
+exposed a second defect (config page 1 always timing out — the ESP had never
+once fetched a config page in the project's history), also fixed the same
+day. The write-window constraint this uncovered (config writes refused
+outside the ~60s boot GRACE period) shaped M12's design below. Full
+postmortem: [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m12a--the-commissioning-surface-lied-full-postmortem--opened-and-closed-2026-08-28).
 
 ## M12 — Commissioning the operator can actually do · *opened 2026-08-28*
 

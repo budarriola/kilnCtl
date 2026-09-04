@@ -896,3 +896,225 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       still-existing identifier (that class is `stub_signature_drift_check.py`
       and this check's own job description do not overlap there), so the
       identifier grep is still a manual step.
+
+## HTTP connection resets under concurrency — root cause and fix, 2026-09-04
+
+Moved from `ROADMAP.md`'s "Software, doable now" table on 2026-09-04, per the
+upkeep rule. Root cause was `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` defaulting to 6
+— lwIP aborts (RST) any handshake-completed connection that can't post into
+that fixed-size mailbox, independent of `backlog_conn`, `max_open_sockets`,
+and the OS socket table (all three chased and refuted across four prior
+passes, including an earlier "not a heap failure" finding that turned out to
+be a step toward this one, not a separate mechanism). Raised 6 → 16; reset
+rate went from 22.5% to 0.0% at the same concurrency levels that were
+failing.
+
+## Sustained heat impossible on the bench — S6a firing within ~1s — full diagnosis, 2026-08-29
+
+Moved from `ROADMAP.md`'s "Software, doable now" table on 2026-09-04
+(originally closed `63cc741`). Root cause was not the wire, not the Pico, and
+not a consumer-cannot-keep-up shape: nothing was ever dropped (0 CRC errors,
+0 resyncs, 0 discards throughout), the frames were only ever *late*.
+`KilnFW`'s `uart_protocol_rx_task` read with
+`uart_read_bytes(port, chunk, sizeof(chunk), 200 ms)` where `chunk` had been
+sized to the worst-case stuffed frame (528 B) by `3149393`. That call
+re-blocks until `length` bytes arrive or the timeout expires, and on a link
+whose frames are ~40 B at ~10 frames/s, 528 B never arrive — so every read
+held its bytes the full 200 ms, against a ~345 ms reply budget. By the time
+it was characterised it was timing out on **100%** of polls (42/42), not
+20%. Fixed by reading only what `uart_get_buffered_data_len()` reports with
+a zero timeout, blocking for a single byte (bounded 100 ms) only when
+nothing is buffered. Measured after: **0 timeouts in 340+ polls**,
+request/reply back to 1:1, config fetch converging in 3 page requests
+instead of 25. A bounded firing run held `running` with no heat block for a
+full 60 s sweep (regression-asserted in `test_live_bench_tuning.py`). DMA
+was evaluated and rejected as the fix — see `LINK_PROTOCOL.md` §3 "Never
+wait on a receive buffer filling."
+
+The apparent remaining bench limit ("no heating element fitted, PV does not
+move") was itself wrong, corrected 2026-08-29: every zone has a real heater.
+PV did not move for two firmware reasons, both since fixed: K4 was never
+requested (`heat_enable.c`), and zone 0's 2 s time-proportioning window could
+not render any fractional duty against the 10 s minimum on-time. "It must be
+the hardware" was the third wrong diagnosis this one symptom attracted.
+
+## "What is actually left" closeout narratives, moved 2026-09-04
+
+The paragraphs below were struck from `ROADMAP.md`'s "What is actually left"
+section per the upkeep rule; each is closed and carries no open action.
+
+**Closed 2026-08-27/28:** the task stacks were re-read after a real firing
+and 4 kB of internal DRAM reclaimed; `rules_task`'s callees were audited
+(nothing writes flash — the real finding was a cache-disabling *read* via
+`dashboard_get_status()`) and its stack moved to PSRAM; the guard scripts now
+run from `tools/run_all_checks.ps1` and the `run_repo_checks` MCP tool.
+
+**Closed 2026-08-30:** `PID_EXPANSION_PLAN.md` Phases 1-4 landed — Cohen-Coon
+is a selectable, reachable tuning rule alongside SIMC, and the fuzzy-PID
+layer (`pid_fuzzy.c`) is wired into `profile_executor.c` and selectable from
+`zones_page.html`. SNTP/NTP time sync landed. The first autotune runs ever to
+complete on real hardware fitted all three zones, and the first full 3x3
+cross-zone coupling matrix and RGA were measured — see
+`PID_EXPANSION_PLAN.md` §2 for the numbers (superseded since). Proposed gains
+reviewed, not accepted.
+
+**PID/adaptive tuning status as of 2026-09-02** (detail owned by
+`PID_EXPANSION_PLAN.md`): coupled identification and the diagonal model
+refine are built and hardened, but their hardware clearance was **withdrawn
+2026-09-02** — the solve is sound, but the harvest layer feeding it records
+non-steady duties as DC-gain observations (fired on 12 of 12 joint
+observations on the `coupid6` capture). Never yet run on the kiln. The Ki
+diagnosis layer is built with all code blockers closed — also never yet run
+on the kiln. Dynamics-from-ramps was tried and **shelved**: its two-point fit
+reduces analytically to `0.524·K·Δduty/ramp_rate`, an artifact of the
+commanded ramp rate with no plant content. A real board-wide deadlock was
+found and fixed — pressing Accept on an autotune result over the UART bridge
+re-entered the flash worker and hung it permanently, taking down every UART
+bridge, `safety_cfg_store`'s deferred NVS flush, and `adaptive_tune`'s
+persistence with it. All adaptive layers stay per-zone opt-in, default OFF.
+
+**Closed 2026-08-31/09-03 — ramp assist, landed end to end** (detail owned by
+`PID_EXPANSION_PLAN.md` §7): a pyrometric cone table (`cone_table.c`/`.h`,
+Orton 022-14 incl. half-cones, Arrhenius heat-work weighting), sustained-lag
+detection and auto-stretch in the executor, and a dwell heat-work credit that
+shortens the following dwell when it was earned lagging — the SPEND is gated
+on `ramp_assist_enabled` so disabled behaviour is bit-identical to before
+this landed. Web banner, event log, and LCD lag notice all wired to the same
+richer sustained-lag fields. Control surface is done and **defaults OFF** —
+gated on a real cone-temperature firing (see the GATED table in `ROADMAP.md`).
+A same-day defect sweep found and fixed a duplicated band-width formula, a
+band-cliff bug in `cone_table.c` itself, and a dwell-credit crash, plus ten
+wrong cone temperatures in the Orton table (mirror test added). Further
+hardening, still pre-real-firing: dwell credit was found **unreachable** —
+its gate was tied to the 25 °C ramp-lock band instead of schedule lag — and
+fixed (`cf3763c`); accrual was then extended to keep crediting past the
+nominal ramp end (`0402ecb`). Separately, three ramp-lock/guard interaction
+bugs surfaced and were fixed: a hot-start stall (one-sided lock + a guard-4
+arming backstop, `8f12449`), a false guard-4 trip during autotune's SETTLING
+phase that the backstop itself introduced (`7911f26`), and guard 4 mistaking
+autotune's synthetic setpoint for a real one (`1bfd5ee`).
+
+**Also closed in the same window:**
+- Relay-autotune thermal guards 1/2 now use an amplitude discriminator
+  (`relay_min_swing_c`) in place of a directional test that could never fire
+  mid-limit-cycle — `df3b31b`.
+- A coupled-solve `use_measured_diag_k_dc` flag shipped, **default OFF**.
+- Measurement tooling: `noise_floor.py` gained a start-temperature covariate
+  and cooldown-sidecar refusal; `pid_ab_compare` now gates on a start-temp
+  confound instead of ignoring it.
+- `run_queue.py` hardening: capture opens before the start POST, a real
+  wait-until-actually-finished replaces the old "first idle sample = done"
+  logic (`0a0ccd7`), campaigns are resumable via a durable state file, a
+  clobber is refused rather than silently overwritten, and a capability
+  preflight fails a stale-firmware preset before the campaign starts rather
+  than mid-run.
+- Web UI: firing-flow profile feasibility warnings, a live flash partition
+  table on the diagnostics page, a new-profile segment preview graph, the
+  duty axis in percent with a rotated label, a falling-behind-schedule
+  banner, and RGA/status cells that no longer rely on colour alone (plus an
+  extended colour-only checker guard script).
+- `PID_EXPANSION_PLAN.md`'s fuzzy-layer hardware-run blocker (a
+  `zones_http_client` field-mapping bug) resolved (`b1ea749d`).
+
+**Closed 2026-09-04 — safety-case and guard-coverage hardening** (full detail
+owned by `GUARD_TEST_MATRIX.md`, `SAFETY_MODEL.md` and `docs/SAFETY_CASE.md`):
+- 27 previously-unfuzzed `kilnlink` payload decoders got seeded corpus+random
+  fuzz targets in `firmware/CommonFW/test/test_fuzz_payloads.c`, canary-guarded
+  and ASan-clean (`ccb23ac`).
+- §1 nuisance-rejection coverage completed for S3/S4/S10 (`7e2dc1c`);
+  `discrete_task.c`'s debounce extracted into a pure `debounce_policy.c/.h`,
+  closing the S6a/S7 host gaps (`d506a54`); S9's decay behaviour, which
+  overturned a prior "hardware-only" verdict (`7e84534`). SaftyFW host checks
+  went 2077 → 2131.
+- Every `SAFETY_MODEL.md` summary-table row got a per-row verification state
+  (`ecdad62`); `SAFETY_CASE.md` was corrected the same day — it had
+  understated thermal_guard guards 1/2/4/5/7 as argued-only when they are
+  genuinely host-tested, and guard 9's "found on the bench 2026-08-25" claim
+  was retracted after a git-history search found nothing behind it (`a2df81a`).
+- Triage of 89 unchecked items across `UPDATE_PROTOCOL.md`/`LINK_PROTOCOL.md`/
+  `REPO_LAYOUT.md`: ~66 were already done and merely unticked, now cited
+  (`503ab3b`), plus four protocol/safety doc defects fixed, including
+  documenting `SAFETY_CMD_ANNOUNCE_REBOOT` (0x18).
+- New `tools/wire_protocol_fingerprint_check.py`: fails when a wire-relevant
+  declaration changes without a protocol version bump — two such bumps had
+  already shipped missing one (`bf401f4`).
+
+**The fuzzy-PID A/B campaign was found structurally inert, fixed, then found
+inert again for a different reason.** Both original presets had
+`control_mode: 2`, so the fuzzy layer (only runs under mode 3) never engaged
+and the campaign was silently comparing PID against itself (`8906686`).
+Presets fixed and the campaign restarted as `fuzzy_ab_20260904c`, with live
+`bd_*` proof effective gains now differed from base (`91c5d6c`). A separate
+audit of the *ease-off* A/B against the same inert-campaign bug class
+confirmed it was **not** inert and its "indistinguishable" conclusion stands;
+it also added a standing pre-flight check (`PID_EXPANSION_PLAN.md` §3.6b)
+requiring live `bd_*` proof before any future control-law A/B (`51e3d59`).
+**Superseded 2026-09-04:** `778ad64` found the resulting `fuzzy_ab_20260904c`
+data itself never leaves the membership layer's centre rule cell (n=29
+firings, 37,008 zone-samples, 100.000% ZERO/STEADY) — the campaign ran
+cleanly but was measuring a fixed gain rescale, not fuzzy adaptation. See
+`ROADMAP.md`'s "Blocked on you" table for the resulting owner decision.
+Cross-campaign tracking was separately synthesized across all 27 usable
+coupling captures: the coupling-matrix fix is confirmed (n=12 vs 5), z0's
+dwell-entry overshoot is the worst tracked case at 2.18 °C, and no capture
+anywhere has yet exceeded 60 °C (`d5ae465`) — detail in
+`PID_EXPANSION_PLAN.md`.
+
+## M12a — the commissioning surface lied, full postmortem — opened and closed 2026-08-28
+
+Moved from `ROADMAP.md` on 2026-09-04. Found by an opus audit on 2026-08-28,
+triggered by a routine attempt to set `abs_max_temp_c = 80` on the bench.
+**Three `POST /api/safety/commissioning` requests returned `{"ok":true}` and
+not one value changed**, including a control write to a harmless parameter.
+The decisive evidence, all live: `live_config_crc` never moved (a successful
+`config_store_write()` bumps `seq` and therefore the CRC), while the Pico's
+own histogram read `commit_config_rejected=2` — it refused, it said so, and
+the ESP discarded the refusal.
+
+Four defects, each verified against source:
+
+1. **`ok` cannot fail.** `apply_pairs()` returns true when the send returns
+   `ESP_OK` (`safety_cfg_http.c:434/446/472`), but SET_PARAM and COMMIT_CONFIG
+   both go out as broadcasts (`safety_link.c:2944/3027`) and
+   `uart_protocol.c:795` returns `ESP_OK` for "the local UART accepted the
+   bytes" — no ack wait, no retry.
+2. **The rejection is caught in a ~144 ms race and then thrown away.**
+   `safety_link.c:3045-3059` waits `SAFETY_LINK_REPLY_TIMEOUT_MS`; a late
+   REJECTED frame reaches `safety_drain_inbox_ex()` and is counted and
+   dropped, with no stash slot the way CONFIG_PAGE has one. Silence was
+   defined as acceptance.
+3. **The GET is an ESP-local NVS cache presented as current.** Refreshed only
+   when CRCs disagree; they agreed, so there were zero fetches this boot.
+   `fetched_ms_ago` was board uptime, not fetch age.
+4. **`"set": true` is unconditional** — the Pico emitted every field without
+   consulting `rec.fields_set` and the ESP set `set = 1` for every entry
+   received. So `abs_max_temp_c {set:true, value:0}` asserted a *commissioned
+   ceiling of 0 °C* (which means NEVER TRIP) for a field the Pico had never
+   had set.
+
+Fixed (`ddbd024`, `3149393`): stashed unclaimed REJECTED frames; commits
+confirmed by reading `config_crc` back rather than trusting the ACK; refetch
+after commit reports the CONFIRMED value; `fields_set` carried through the
+CONFIG_PAGE codec (protocol 7→8, floor held at 7) so `set` can be false;
+`fetched_ms_ago` reports real fetch age; the ARMED/GRACE write window is
+surfaced in the page itself.
+
+**Fixing it immediately exposed an older defect it had been hiding**: with
+the read-back real for the first time, page 1 of the config fetch timed out
+on every attempt. `cmd_config_page` had been **0** for the life of the
+project — the ESP had never once fetched a page. Cause: `uart_protocol_rx_task`
+read UART bytes 32 at a time, so a ~157-253 byte CONFIG_PAGE needed 5-8
+scheduler round trips against a ~145 ms budget while small STATUS/DIAG/POWER
+frames needed 1-2. Fixed by reading a whole frame in one go and giving the
+reply 300 ms of margin (the 2000 ms multi-page ceiling untouched, since
+growing that had caused an earlier panic-reboot regression). Two more bugs
+surfaced in the same instrumentation pass: `link_task` polled its RX ring
+once per 100 ms (now 10), and the pre-send drain discarded a CONFIG_PAGE for
+the wrong index instead of stashing it.
+
+**Net result:** `abs_max_temp_c = 80` is committed and confirmed on the
+bench — S1's absolute ceiling was armed for the first time in the project.
+**The constraint this uncovered, which shaped M12's whole design:** config
+writes are refused whenever the relay owner is `ARMED` (steady state ~60 s
+after boot), so the only write window is the boot GRACE period — nothing in
+the UI, API or error text said so before this was found.
