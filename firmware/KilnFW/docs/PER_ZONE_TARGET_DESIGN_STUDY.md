@@ -333,9 +333,11 @@ control-law change that does not touch `target_c` at all.
 tightens the segment's shared rate, with the shared `target_c` destination,
 segment-advance, and feasibility logic left untouched. It is the smallest
 change that reaches the actuator the mechanism report already validated
-(commanded approach rate, §X5 item 1-2), it leaves ramp-lock's existing
-one-line comparison and meaning completely intact (§2.1's resolution is
-satisfied by construction, not by redefinition), and it composes cleanly
+(commanded approach rate, §X5 item 1-2), it leaves ramp-lock's comparison
+*code* and meaning completely intact (§2.1's resolution is satisfied by
+construction, not by redefinition) — though, per §6 below, an aggressive
+enough cap can still trip that unchanged comparison group-wide, it just
+cannot redefine what it means to trip it — and it composes cleanly
 with the already-shipped per-zone `ease_off_window_mult` pattern the team
 has already reviewed and shipped once.
 
@@ -478,11 +480,27 @@ verified rather than assumed:
   own per-tick cap-update loop) still gets exactly today's behaviour with no
   test changes required — only a test that deliberately configures a
   non-zero cap needs to also seed `effective_target_c`.
-- **Ramp-lock, segment-advance, feasibility**: confirmed untouched by
-  inspection of the diff itself, not just intent — `profile_executor.c`'s
-  ramp-lock loop and the `s_exec.target_c == seg->target_c` segment-advance
-  check are byte-identical to before this pass; `profile_feasibility.c` was
-  not edited at all.
+- **Ramp-lock, segment-advance, feasibility — code untouched, behaviour is
+  NOT immune.** `profile_executor.c`'s ramp-lock loop and the
+  `s_exec.target_c == seg->target_c` segment-advance check are byte-identical
+  to before this pass, and `profile_feasibility.c` was not edited at all —
+  but "the code is unchanged" does not mean "a configured cap cannot
+  disturb what that code does," and an earlier draft of this study stated it
+  that way. Ramp-lock compares `actual_c` (never `effective_target_c`)
+  against the shared `target_c` with a 25 °C band
+  (`EXEC_RAMP_LOCK_BAND_C`); a cap slow enough to let a zone's `actual_c`
+  fall more than 25 °C behind the shared target trips `lock_ok = false` for
+  every zone, freezing the whole group's schedule until the capped zone
+  catches back up — self-limiting and deadlock-free, but a real, group-wide
+  consequence of a per-zone setting. Segment-advance keys on the shared
+  `target_c`, not `effective_target_c`, so a capped zone can still be short
+  of arrival when the group advances or enters a dwell (bounded by the same
+  25 °C band). And feeding `thermal_guard_input_t.setpoint_c` from
+  `effective_target_c` measurably reduces guard 1's sensitivity on a capped
+  zone (see `PROFILES.md`'s "Per-zone approach-rate cap" section for the
+  full mechanism and numbers). The accurate claim is "cannot disturb
+  ramp-lock for caps that keep the zone inside the 25 °C band," not
+  unconditional immunity.
 - **Migration**: unlike `ease_off_window_mult`'s v16→v17 hop, there was no
   prior global scalar to carry forward — every zone of every pre-v18 blob
   lands on the 0 (uncapped) sentinel via `convert_versioned_blob_to_current()`'s

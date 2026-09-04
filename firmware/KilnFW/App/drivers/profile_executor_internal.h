@@ -468,12 +468,16 @@ typedef struct {
      * field's own zone_cfg_t::approach_rate_cap_c_per_hr comment for the
      * full list of what this option deliberately leaves untouched.
      *
-     * NAN at zone activation (profile_executor_run.c, alongside s_exec.
-     * target_c's own initialization) is the "not yet seeded" sentinel this
-     * tick's update logic snaps from -- a zeroed 0.0f (this struct's own
-     * memset default) would otherwise make a freshly started, capped zone
-     * spend real firing time climbing from 0 degC before a cap could ever
-     * engage usefully. */
+     * NOT actually NAN in practice: profile_executor_run.c:728 seeds this
+     * to baseline_target_c (a real segment/warm-start temperature, never
+     * NAN) before the zone ever ticks, and this struct's own memset default
+     * is a finite 0.0f -- nothing in this codebase ever writes NAN here, so
+     * the `!isfinite(effective_target_c)` snap-from-unseeded branch in
+     * profile_executor.c (~line 863) is unreachable in current builds. It
+     * is kept as a defensive fallback (a future caller that skips the
+     * run.c seed step would otherwise climb a freshly started, capped zone
+     * from 0 degC before the cap could engage usefully), not because NAN is
+     * an actual sentinel value produced anywhere today. */
     float effective_target_c;
 
     /* Contact-cycle accounting (TODO.md 6A.1): heater_output counts relay

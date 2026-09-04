@@ -3137,8 +3137,17 @@ that zone's own effective_target_c) rather than the shared destination
 unconditionally — the §2.4 "fake setpoint" decision this document's own
 design study flagged as needing to be made deliberately, resolved in favor
 of not reproducing `project_autotune_feeds_fake_setpoint.md`'s bug class.
-Ramp-lock, segment-advance and `profile_feasibility.c` are untouched, exactly
-as the design study's option (b) promised; `SaftyFW/**` was re-read, not
+Ramp-lock, segment-advance and `profile_feasibility.c`'s *code* are
+untouched, exactly as the design study's option (b) promised — but a
+configured cap is not inert against ramp-lock's behaviour: ramp-lock
+compares `actual_c`, not `effective_target_c`, against the shared
+`target_c`, so a cap slow enough to put a zone's `actual_c` more than 25 °C
+behind the shared target still trips the (unchanged) lock and freezes the
+whole group's schedule until that zone catches up — self-limiting, not a
+hang, but a real cross-zone effect of a per-zone knob. Segment-advance and
+guard-1 sensitivity have analogous caveats; see `PROFILES.md`'s "Per-zone
+approach-rate cap" section and `PER_ZONE_TARGET_DESIGN_STUDY.md` §6 for the
+corrected, full accounting. `SaftyFW/**` was re-read, not
 edited — S2's `max()` reduction still needs no change since the wire's
 per-zone `setpoint_c` is still `pstat.target_c` (the shared destination) for
 every zone. Migration (v17→v18) needs no carried-forward global value (unlike

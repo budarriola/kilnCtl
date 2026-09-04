@@ -324,15 +324,49 @@ here rather than reproduced). An uncapped zone's guard-visible setpoint is
 therefore unchanged.
 
 Deliberately **untouched** by this option, by design: `target_c` itself (the
-shared destination), segment-advance (still `target_c == seg->target_c`),
-ramp-lock (still compares each zone's `actual_c` against the one shared
-`target_c`, exactly as above — a capped zone deliberately trailing is not a
-reason to redefine what "lagging" means), `profile_segment_feasibility()`
+shared destination), segment-advance's own code (still `target_c ==
+seg->target_c`), ramp-lock's own comparison code (still each zone's
+`actual_c` against the one shared `target_c`), `profile_segment_feasibility()`
 (never reads this field), and the wire protocol (`safety_link_frames.c` still
 sends `pstat.target_c`, the shared destination, per zone — SaftyFW's S2 guard
 already reduces per-zone setpoints with `max()` and needs no change either
 way, but this option does not even exercise that path since the wire value
 never becomes per-zone).
+
+Leaving that code untouched does **not** mean a configured cap is inert
+against it — the opposite is the more useful thing to know:
+
+- **Ramp-lock can still be tripped, group-wide, by a cap.** Ramp-lock
+  compares `actual_c` (never `effective_target_c`) against the shared
+  `target_c` (`profile_executor.c` ~line 482). A cap slow enough that a
+  zone's `actual_c` falls more than `EXEC_RAMP_LOCK_BAND_C` (25 °C) behind
+  the shared `target_c` sets `lock_ok = false` for the whole tick, which
+  freezes `target_c`/`segment_elapsed_s` for *every* zone, not only the
+  capped one — a per-zone slowdown becomes a global one. This is
+  self-limiting and deadlock-free: the frozen shared target lets the capped
+  zone's own setpoint (and, on the same rate limit, its actual reading)
+  catch up, then the lock releases and the firing continues throttled to
+  roughly the cap rather than hanging. The accurate claim is "cannot disturb
+  ramp-lock for caps that keep the zone inside the 25 °C band" — not
+  unconditional immunity.
+- **Segment advance does not wait for the capped zone.** Because
+  segment-advance keys on the *shared* `target_c == seg->target_c`, a capped
+  zone can still be short of its own `effective_target_c` when the group
+  advances (or enters a dwell). With a short `dwell_min`, the segment can
+  move on before the capped zone ever arrives at temperature — bounded by
+  ramp-lock's 25 °C band as above, but real within it.
+- **Guard 1's sensitivity to a dead element is reduced on a capped zone.**
+  Feeding `thermal_guard_input_t.setpoint_c` from `effective_target_c`
+  (rather than the shared `target_c`) means a capped zone tracks its own
+  setpoint closely, so it spends far more time in guard 2's branch (120 s
+  window, falling-while-heating test) than in guard 1's (which arms only
+  once the commanded setpoint has pulled `progress_band_c`, 3 °C by default,
+  ahead of `actual_c`). At a 20 °C/hr cap that is roughly 9 extra minutes of
+  latency before guard 1 can arm after an element dies; a smaller cap adds
+  more. This is intrinsic to any slow ramp (an equally slow profile segment
+  has the identical property today) and is an accepted trade-off, not a
+  regression — but it is a real reduction in guard-1 sensitivity and was
+  previously undocumented.
 
 A capped zone's own segment "reached" (its `effective_target_c` catching up
 to `seg->target_c`) can happen strictly *later* than the group's own
