@@ -72,12 +72,27 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
             json_escape(z->fault_reason, reason_escaped, sizeof(reason_escaped));
         }
         if (control_fields) {
+            /* ROADMAP.md M15 B4: the rest of the duty pipeline, alongside
+             * the pre-existing pid_p/pid_i/pid_d/pid_ff (TODO.md 6A.9). See
+             * zone_duty_breakdown_t's doc comment (profile_executor.h) for
+             * what each field means. bd_pre_clamp_total is DERIVED here
+             * (pid_p+pid_i+pid_d+pid_ff, pid.c's own `unclamped` local after
+             * the integral floor and before the final [0,1] clamp) rather
+             * than a separately-stored field -- see that struct's doc
+             * comment for why. */
+            const zone_duty_breakdown_t *bd = &z->duty_breakdown;
+            double pre_clamp_total = (double)z->pid_p + (double)z->pid_i + (double)z->pid_d + (double)z->pid_ff;
             n = snprintf(json + o, cap - o,
                         "%s{\"zone\":%u,\"control_mode\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,"
                         "\"duty\":%.3f,\"relay_on\":%s,\"pid_p\":%.4f,\"pid_i\":%.4f,\"pid_d\":%.4f,"
                         "\"pid_ff\":%.4f,\"cooling_limited\":%s,\"faulted\":%s,\"fault_guard\":%u,"
                         "\"heat_blocked\":%s,\"heat_blocked_sources\":%lu,\"ff_hold_used_matrix\":%s,"
-                        "\"ff_hold_infeasible\":%s,\"ff_membership_change_count\":%lu}",
+                        "\"ff_hold_infeasible\":%s,\"ff_membership_change_count\":%lu,"
+                        "\"bd_ff_hold\":%.4f,\"bd_ff_climb\":%.4f,\"bd_coupling_correction\":%.4f,"
+                        "\"bd_ff_rate_pretaper\":%.5f,\"bd_ff_rate_posttaper\":%.5f,"
+                        "\"bd_kp_effective\":%.5f,\"bd_ki_effective\":%.5f,\"bd_kd_effective\":%.5f,"
+                        "\"bd_pre_clamp_total\":%.4f,\"bd_post_clamp_total\":%.4f,"
+                        "\"bd_load_cap_boost\":%.4f,\"bd_final_commanded\":%.4f}",
                         first ? "" : ",", zi, z->control_mode, (double)(z->actual_valid ? z->actual_c : 0.0f),
                         z->actual_valid ? "true" : "false", (double)z->duty,
                         z->relay_commanded_on ? "true" : "false", (double)z->pid_p, (double)z->pid_i,
@@ -85,7 +100,12 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         z->faulted ? "true" : "false", z->fault_guard,
                         z->heat_blocked ? "true" : "false", (unsigned long)z->heat_blocked_sources,
                         z->ff_hold_used_matrix ? "true" : "false", z->ff_hold_infeasible ? "true" : "false",
-                        (unsigned long)z->ff_membership_change_count);
+                        (unsigned long)z->ff_membership_change_count,
+                        (double)bd->ff_hold, (double)bd->ff_climb, (double)bd->coupling_correction,
+                        (double)bd->ff_rate_pretaper_c_per_s, (double)bd->ff_rate_posttaper_c_per_s,
+                        (double)bd->kp_effective, (double)bd->ki_effective, (double)bd->kd_effective,
+                        pre_clamp_total, (double)bd->post_clamp_total,
+                        (double)bd->load_cap_boost, (double)bd->final_commanded);
         } else {
             /* firing_stats (PID_EXPANSION_PLAN.md Phase 7a dashboard wiring):
              * profile_exec_zone_status_t::firing_stats, live and still

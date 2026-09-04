@@ -301,6 +301,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->pid_i = z->last_pid_terms.i;
             zo->pid_d = z->last_pid_terms.d;
             zo->pid_ff = z->last_pid_terms.ff;
+            zo->duty_breakdown = z->duty_breakdown; /* ROADMAP.md M15 B4, whole-struct copy */
             zo->cooling_limited = z->cooling_limited;
             zo->heat_blocked = z->heat_blocked;
             zo->heat_blocked_sources = z->heat_blocked_sources;

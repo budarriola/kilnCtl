@@ -253,6 +253,13 @@ typedef struct {
     bool  relay_commanded_on;
     float duty;
     pid_terms_t last_pid_terms;
+    /* ROADMAP.md M15 B4: the rest of the duty pipeline -- see
+     * zone_duty_breakdown_t's doc comment (profile_executor.h) for the
+     * field list and profile_executor_feedforward.c/
+     * profile_executor_pid_tick.c for the write sites. Copied verbatim into
+     * profile_exec_zone_status_t by profile_executor_get_status() alongside
+     * last_pid_terms's own fields. */
+    zone_duty_breakdown_t duty_breakdown;
 
     /* Cross-zone coupling (PID_EXPANSION_PLAN.md 2c/Phase 3b): low-pass
      * filtered copy of actual_c, updated once per control tick (not once per

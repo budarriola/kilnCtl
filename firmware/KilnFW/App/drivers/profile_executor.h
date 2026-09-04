@@ -399,6 +399,71 @@ typedef struct {
 
 #define PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH 5
 
+/* ROADMAP.md M15 B4: one struct that accounts for the whole duty
+ * composition across all four assembly stages -- feedforward
+ * (profile_executor_feedforward.c), PID (pid.c's pid_update_terms()),
+ * load-cap boost (profile_executor_pid_tick.c), and what's actually handed
+ * to heater_output_duty(). Every historical interaction bug in this
+ * pipeline (PWM-chop guard disarm, dwell credit, the integral floor) lived
+ * at a boundary between two of these stages, and until now no single
+ * record captured all of them together -- pid_terms_t (pid.h) only ever
+ * saw p/i/d/ff, and the load-cap boost applied after pid.c's own clamp was
+ * invisible everywhere off-board.
+ *
+ * READ-ONLY instrumentation: every field here is either copied from a value
+ * the pipeline already computes, or (coupling_correction) a value broken
+ * out of an existing accumulator by ALSO accumulating it into a second,
+ * parallel float -- nothing here changes what duty is computed or how it
+ * is clamped. See the field-by-field write sites: zone_feedforward()
+ * (profile_executor_feedforward.c) for ff_hold/ff_climb/
+ * coupling_correction, pid_family_zone_tick() (profile_executor_pid_tick.c)
+ * for the rest.
+ *
+ * Deliberately NOT stored: p/i/d/ff duplicate profile_exec_zone_status_t's
+ * existing pid_p/pid_i/pid_d/pid_ff (TODO.md 6A.9) -- same values, already
+ * on the wire, so they are read from there rather than doubled here.
+ * pre_clamp_total is exactly pid_p+pid_i+pid_d+pid_ff (pid.c's `unclamped`
+ * local after the integral floor, before the final [0,1] clamp) and is
+ * likewise not a separately-written field -- the JSON layer derives it so
+ * there is exactly one place that could disagree with itself. */
+typedef struct {
+    /* Stage A -- feedforward (zone_feedforward()'s return, pre the
+     * function's own final [0,1] clamp on hold+climb). */
+    float ff_hold;               /* out_hold: hold term INCLUDING the cross-zone coupling
+                                  * correction below, EXCLUDING climb -- see zone_feedforward()'s
+                                  * own doc comment for why the two must stay split this way. */
+    float ff_climb;              /* climb term, computed from the POST-taper rate below */
+    float coupling_correction;   /* the Phase-3b cross-zone term folded into ff_hold above,
+                                  * broken out so an operator can see how much of ff_hold is
+                                  * "this zone's own hold" vs. "a neighbour running off-target" --
+                                  * 0.0f whenever no neighbour qualifies or every coupling_coeff
+                                  * row is 0 (the common, uncommissioned case). */
+    float ff_rate_pretaper_c_per_s;  /* s_exec.target_rate_c_per_s, before zone_taper_climb_rate() */
+    float ff_rate_posttaper_c_per_s; /* the rate actually fed to the climb solve -- equal to
+                                      * pretaper outside the terminal ease-off window, or while
+                                      * dwelling (taper is skipped entirely, see the call site) */
+    /* Stage B -- gains actually in force this tick (PID_FUZZY may have
+     * adjusted these from z->pid_cfg; plain PID mode reports z->pid_cfg's
+     * own values unchanged). p/i/d/ff themselves are NOT duplicated here --
+     * see this struct's own doc comment -- read pid_p/pid_i/pid_d/pid_ff. */
+    float kp_effective;
+    float ki_effective;
+    float kd_effective;
+    float post_clamp_total;      /* pid_update_terms()'s returned duty -- p+i+d+ff after pid.c's
+                                  * own [0,1] clamp, i.e. z->duty before the load-cap boost below */
+    /* Stage C -- load-cap deferred-credit boost (profile_executor_pid_tick.c),
+     * applied AFTER pid.c's clamp and therefore able to push the commanded
+     * duty above post_clamp_total -- exactly the term that used to be
+     * invisible in pid_terms_t. */
+    float load_cap_boost;        /* boosted_duty - post_clamp_total; 0.0f whenever no credit was
+                                  * available/consumed this tick */
+    float final_commanded;       /* boosted_duty -- what heater_output_duty() actually received.
+                                  * final_commanded == post_clamp_total + load_cap_boost by
+                                  * construction; Stage D (window quantization/floors) happens
+                                  * inside heater_output_duty() itself and is not duty, it is
+                                  * on-time -- out of scope for this struct. */
+} zone_duty_breakdown_t;
+
 /* Per-zone status within the current (or last) run. Only zones[i] with
  * .active == true participated in this run -- the rest are zeroed. */
 typedef struct {
@@ -467,6 +532,13 @@ typedef struct {
      * under ff with i small and steady, and a large i sitting under a
      * non-zero ff means the model is wrong, not that the loop is. */
     float    pid_ff;
+    /* ROADMAP.md M15 B4: the rest of the duty pipeline that pid_p/pid_i/
+     * pid_d/pid_ff alone never captured -- feedforward's hold/climb split,
+     * the cross-zone coupling term, the gains actually in force this tick,
+     * and the load-cap boost applied after pid.c's own clamp (previously
+     * invisible off-board entirely). See zone_duty_breakdown_t's own doc
+     * comment for the field-by-field meaning and write sites. */
+    zone_duty_breakdown_t duty_breakdown;
     /* TODO.md 6A.2's "Output clamp [0,1]... the controller should report
      * 'cannot follow, cooling-limited' rather than sit at u=0 looking
      * healthy while the actual curve diverges." True once this zone's PID

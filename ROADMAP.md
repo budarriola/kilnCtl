@@ -1776,14 +1776,30 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `kilnlink_version.h:20-24` documents this is a human judgement call, not
       a hash or a check. Add a synthetic-old-peer host test that asserts
       dispatch-table coverage per historical version. M
-- [ ] **Duty composition has no single breakdown struct.** Four stages —
+- [x] **Duty composition has no single breakdown struct.** Four stages —
       `profile_executor_feedforward.c:291-515`,
       `profile_executor_pid_tick.c` PID clamp then load-cap boost
       (~78-125, ~139-174, boost applied AFTER the clamp so duty can exceed
       1.0 invisibly to `pid_terms_t`, `pid.h:144-149`), and `heater_output.c`
       quantization — with nothing recording the breakdown. Add a
       `zone_duty_breakdown_t` populated through the pipeline and exposed on
-      `/api/control`. M
+      `/api/control`. M — **CLOSED 2026-09-04**: `zone_duty_breakdown_t`
+      (`profile_executor.h`) added with one field per real transform
+      (ff_hold/ff_climb/coupling_correction, pre/post-taper rate, effective
+      kp/ki/kd, post_clamp_total, load_cap_boost, final_commanded — p/i/d/ff
+      and pre_clamp_total deliberately not duplicated, already on
+      `pid_terms_t`/derivable from it). Populated read-only in
+      `profile_executor_feedforward.c` (`zone_feedforward()`) and
+      `profile_executor_pid_tick.c` (`pid_family_zone_tick()`) — no control
+      math changed. Wired onto `/api/control` in `dashboard_json.c`
+      (`append_zone_status_json()`, not `dashboard_http.c` — the actual
+      per-zone JSON now lives in the split-out file); `DASHBOARD_JSON_
+      CONTROL_BUF_SIZE` raised 448->900/zone with the byte math in
+      `dashboard_json.h`. Host tests: `test_dashboard_json.c`'s worst-case
+      render extended, plus a new internal-consistency test in
+      `test_profile_executor_prestart.c` with a negative-test mutation
+      proving the check has teeth. 21/21 host test executables and
+      `build_kilnfw` pass.
 - [ ] **Mode-state sprawl.** >=5 independent enums/booleans describe system
       mode; the dwelling/ramp-lock caveat is re-derived identically at
       `profile_executor_feedforward.c:243-244` and `:566-576`. Document a

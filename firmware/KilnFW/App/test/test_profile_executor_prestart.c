@@ -3048,6 +3048,95 @@ static void test_taper_gate_ignores_a_stray_nonzero_rate_during_dwelling(void)
               "equal the UNTAPERED feedforward at the stray rate, not a tapered one");
 }
 
+static void test_duty_breakdown_internal_consistency(void)
+{
+    TEST_SECTION("ROADMAP.md M15 B4 -- zone_duty_breakdown_t: pid_family_zone_tick() must populate "
+                 "a breakdown whose fields are internally consistent -- pre_clamp_total (derived from "
+                 "p+i+d+ff) matches pid.c's own unclamped sum, post_clamp_total equals clamp(pre_clamp_"
+                 "total, 0, 1), and final_commanded equals post_clamp_total plus load_cap_boost exactly");
+    reset_coupling_test_state();
+
+    /* zone_feedforward() writes ff_hold/ff_climb/coupling_correction to
+     * s_exec.zones[zi] specifically, never through the (possibly-local,
+     * possibly-const) z pointer it's handed -- see that function's own doc
+     * comment ("z is const here... not guaranteed to BE s_exec.zones[zi]").
+     * Every other diagnostic field it sets (ff_hold_used_matrix etc.) shares
+     * that same convention, and every production call site's z IS
+     * &s_exec.zones[zi] -- so this test uses that same zone directly rather
+     * than a disconnected local struct, exactly like production code does. */
+    const uint8_t zi = 0;
+    zone_runtime_t *z = &s_exec.zones[zi];
+    z->ff_enabled = true;
+    z->ff_k_dc = 40.0f;
+    z->ff_tau_s = 260.0f;
+    z->ff_dead_time_s = 50.0f;
+    z->pid_cfg = (pid_cfg_t){.kp = 0.05f, .ki = 0.0003f, .kd = 0.01f, .d_filter_tau_s = 30.0f, .b = 1.0f,
+                            .pid_range_c = 1000.0f};
+    pid_reset(&z->pid_state);
+    z->actual_c = 45.0f;
+    z->heater_cfg.window_ms = 10000;
+    z->heater_cfg.min_on_ms = 0;
+    /* Load-cap credit on the books, so load_cap_boost has something nonzero
+     * to actually exercise rather than trivially reading 0 every time. */
+    z->deferred_on_ms = 500.0f;
+    s_exec.ambient_c = 20.0f;
+    s_exec.target_c = 400.0f;   /* far from actual_c -- guarantees pid_p+ff saturate the clamp, so
+                                 * post_clamp_total != pre_clamp_total is actually exercised too */
+    s_exec.profile.segments[0].target_c = 400.0f;
+    s_exec.segment_index = 0;
+    s_exec.dwelling = false;
+    s_exec.target_rate_c_per_s = 0.01f;
+
+    bool want_relay_on = false;
+    (void)pid_family_zone_tick(z, zi, &z->pid_cfg, /*sensor_ok_zi=*/true, /*dt_s=*/1.0f, /*dt_ms=*/1000u,
+                               &want_relay_on);
+
+    const zone_duty_breakdown_t *bd = &z->duty_breakdown;
+    double pre_clamp_total = (double)z->last_pid_terms.p + (double)z->last_pid_terms.i
+                            + (double)z->last_pid_terms.d + (double)z->last_pid_terms.ff;
+    double expected_post_clamp = pre_clamp_total < 0.0 ? 0.0 : (pre_clamp_total > 1.0 ? 1.0 : pre_clamp_total);
+
+    TEST_CHECK(fabsf((float)expected_post_clamp - bd->post_clamp_total) < 1e-5f,
+              "post_clamp_total must equal clamp(p+i+d+ff, 0, 1) -- pid.c's own final clamp, applied "
+              "to the same p/i/d/ff the breakdown itself reports");
+    TEST_CHECK(fabsf((bd->post_clamp_total + bd->load_cap_boost) - bd->final_commanded) < 1e-5f,
+              "final_commanded must equal post_clamp_total + load_cap_boost exactly -- that's the "
+              "entire point of separating stage C out from stage B");
+    TEST_CHECK(bd->ff_hold + bd->ff_climb != 0.0f || z->last_pid_terms.ff == 0.0f,
+              "with ff_enabled and a real model, ff_hold+ff_climb (pre-clamp) and the clamped ff term "
+              "pid.c reports must not both silently read 0 -- a broken wiring would zero one but not "
+              "the other");
+    TEST_CHECK(bd->ff_rate_pretaper_c_per_s == 0.01f, "ff_rate_pretaper_c_per_s must be the raw "
+              "s_exec.target_rate_c_per_s, captured before any taper");
+    TEST_CHECK(bd->kp_effective == z->pid_cfg.kp && bd->ki_effective == z->pid_cfg.ki
+              && bd->kd_effective == z->pid_cfg.kd, "kp/ki/kd_effective must equal the cfg actually "
+              "passed to pid_update_terms() this tick (plain-PID mode: z.pid_cfg unchanged)");
+
+    /* NEGATIVE TEST: perturb one populated field's SOURCE (last_pid_terms.p,
+     * as if a future edit rewired the p_term write site without touching
+     * this breakdown's own derivation) and confirm the consistency check
+     * above actually fails -- proving the check has teeth, not just that it
+     * passes on an untouched pipeline. Restored immediately after. */
+    float real_p = z->last_pid_terms.p;
+    /* -1000, not a small nudge: pre_clamp_total here is already deep in
+     * clamp-saturated territory (target_c=400 vs. actual_c=45 pins it well
+     * above 1.0), so a small perturbation would still clamp to the SAME
+     * 1.0 and prove nothing -- the mutation has to be big enough to cross
+     * all the way to the OTHER clamp rail (0.0) to be a real behavioral
+     * difference the consistency check could actually notice. */
+    z->last_pid_terms.p -= 1000.0f; /* mutate the source the derived total reads from */
+    double mutated_pre_clamp_total = (double)z->last_pid_terms.p + (double)z->last_pid_terms.i
+                                    + (double)z->last_pid_terms.d + (double)z->last_pid_terms.ff;
+    double mutated_expected_post_clamp = mutated_pre_clamp_total < 0.0 ? 0.0
+                                        : (mutated_pre_clamp_total > 1.0 ? 1.0 : mutated_pre_clamp_total);
+    bool mutant_still_matches = fabsf((float)mutated_expected_post_clamp - bd->post_clamp_total) < 1e-5f;
+    TEST_CHECK(!mutant_still_matches, "NEGATIVE TEST: after perturbing last_pid_terms.p by -1000 without "
+              "re-running the tick, post_clamp_total (still the ORIGINAL, un-perturbed clamp) must no "
+              "longer match the recomputed clamp of the mutated p+i+d+ff -- if this passes, the "
+              "consistency check above is vacuous and would never catch a real wiring break");
+    z->last_pid_terms.p = real_p; /* restore */
+}
+
 static void test_taper_engages_end_to_end_through_pid_family_zone_tick(void)
 {
     TEST_SECTION("pid_family_zone_tick() -- with an active, nonzero-rate ramp INSIDE the taper window, "
@@ -6349,6 +6438,7 @@ void run_test_profile_executor_prestart(void)
     test_taper_asymmetric_dead_times_key_off_each_zones_own();
     test_taper_gated_on_dwelling_not_zero_rate();
     test_taper_gate_ignores_a_stray_nonzero_rate_during_dwelling();
+    test_duty_breakdown_internal_consistency();
     test_taper_engages_end_to_end_through_pid_family_zone_tick();
     test_taper_ramp_still_reaches_target_setpoint_untouched();
 

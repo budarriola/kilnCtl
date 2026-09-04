@@ -76,10 +76,20 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
          * "only while an active ramp is actually advancing" -- explicit
          * rather than implicit in one arm's arithmetic. */
         float ff_rate = s_exec.target_rate_c_per_s;
+        /* ROADMAP.md M15 B4: pretaper rate captured before the taper below
+         * can touch it -- read-only, see zone_duty_breakdown_t's comment. */
+        z->duty_breakdown.ff_rate_pretaper_c_per_s = ff_rate;
         if (!s_exec.dwelling && ff_rate != 0.0f) {
             const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index];
             ff_rate = zone_taper_climb_rate(z, s_exec.target_c, ff_rate, seg->target_c);
         }
+        z->duty_breakdown.ff_rate_posttaper_c_per_s = ff_rate;
+        /* Gains actually in force this tick -- cfg is z->pid_cfg unchanged
+         * for plain PID, or pid_fuzzy_prepare_gains()'s adjusted copy for
+         * PID_FUZZY (see this function's own top-of-file doc comment). */
+        z->duty_breakdown.kp_effective = cfg->kp;
+        z->duty_breakdown.ki_effective = cfg->ki;
+        z->duty_breakdown.kd_effective = cfg->kd;
         float ff_hold = 0.0f;
         float u_ff = zone_feedforward(z, zi, s_exec.target_c, ff_rate, &ff_hold);
         /* Opus review, blocker 2: the coupled system's MEMBERSHIP (which
@@ -124,6 +134,12 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
         duty = pid_update_terms(&z->pid_state, cfg, s_exec.target_c, z->actual_c, dt_s,
                                 u_ff, ff_hold, &z->last_pid_terms);
     }
+    /* ROADMAP.md M15 B4: Stage B of the duty breakdown -- read-only. duty
+     * already reflects both branches above (pid_update_terms()'s clamped
+     * result, or the 0.0f no-sensor fallback the `duty` local was
+     * initialized to), so this is accurate for either case without needing
+     * its own conditional. */
+    z->duty_breakdown.post_clamp_total = duty;
     /* TODO.md 6A.2's cooling-limited diagnostic. Checked against the RAW
      * duty pid_update_terms() just returned, before the load-cap boost
      * below can add anything to it -- a boosted duty is not "the loop asked
@@ -172,6 +188,11 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
         if (credit_ms < 0.0f) credit_ms = 0.0f;
         boosted_duty += credit_ms / window_ms_f;
     }
+    /* ROADMAP.md M15 B4: Stage C/final -- read-only. boosted_duty is fully
+     * settled at this point (nothing below changes it before it's handed to
+     * heater_output_duty()). */
+    z->duty_breakdown.load_cap_boost = boosted_duty - z->duty_breakdown.post_clamp_total;
+    z->duty_breakdown.final_commanded = boosted_duty;
     uint32_t elapsed_before = z->heater_state.window_elapsed_ms;
     bool was_started = z->heater_state.window_started;
     *out_want_relay_on = heater_output_duty(&z->heater_state, &z->heater_cfg, boosted_duty, dt_ms);

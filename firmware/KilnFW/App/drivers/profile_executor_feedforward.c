@@ -449,6 +449,11 @@ float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, fl
      * doc comment for the concrete failure this was producing. The
      * deviation itself is also low-pass filtered and bounded before it's
      * scaled -- see the two comments inside the loop below. */
+    /* ROADMAP.md M15 B4: the coupling correction folded into hold_total
+     * below, broken out into its own accumulator purely for reporting --
+     * mirrors hold_total's own accumulation term-for-term, never read by
+     * anything that affects control. */
+    float coupling_correction = 0.0f;
     float coupling_row[MAX31856_CHANNEL_COUNT];
     if (zones_config_get_coupling(zi, coupling_row)) {
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
@@ -495,8 +500,19 @@ float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, fl
                 if (dev > bound) dev = bound;
                 else if (dev < -bound) dev = -bound;
             }
-            hold_total -= (gd_ij / z->ff_k_dc) * dev;
+            float term = (gd_ij / z->ff_k_dc) * dev;
+            hold_total -= term;
+            coupling_correction -= term;
         }
+    }
+
+    /* ROADMAP.md M15 B4: Stage A of the duty breakdown -- read-only, see
+     * zone_duty_breakdown_t's doc comment. hold_total/climb here are the
+     * exact unclamped values *out_hold/u_ff below are built from. */
+    if (zi < MAX31856_CHANNEL_COUNT) {
+        s_exec.zones[zi].duty_breakdown.ff_hold = hold_total;
+        s_exec.zones[zi].duty_breakdown.ff_climb = climb;
+        s_exec.zones[zi].duty_breakdown.coupling_correction = coupling_correction;
     }
 
     float u_ff = hold_total + climb;

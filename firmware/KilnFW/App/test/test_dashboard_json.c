@@ -63,6 +63,20 @@ static void fill_worst_case_zone(profile_exec_zone_status_t *z, uint8_t zi)
     z->ff_hold_used_matrix = true;
     z->ff_hold_infeasible = true;
     z->ff_membership_change_count = 0xFFFFFFFFu; /* "%lu" worst case, same as heat_blocked_sources */
+    /* ROADMAP.md M15 B4: zone_duty_breakdown_t worst case -- every field at
+     * the same -1234.xxxx magnitude used throughout this helper, matching
+     * dashboard_json.h's DASHBOARD_JSON_CONTROL_BUF_SIZE sizing comment. */
+    z->duty_breakdown.ff_hold = -1234.5678f;
+    z->duty_breakdown.ff_climb = -1234.5678f;
+    z->duty_breakdown.coupling_correction = -1234.5678f;
+    z->duty_breakdown.ff_rate_pretaper_c_per_s = -1234.56789f;
+    z->duty_breakdown.ff_rate_posttaper_c_per_s = -1234.56789f;
+    z->duty_breakdown.kp_effective = -1234.56789f;
+    z->duty_breakdown.ki_effective = -1234.56789f;
+    z->duty_breakdown.kd_effective = -1234.56789f;
+    z->duty_breakdown.post_clamp_total = -1234.5678f;
+    z->duty_breakdown.load_cap_boost = -1234.5678f;
+    z->duty_breakdown.final_commanded = -1234.5678f;
     /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag reporting worst case. */
     z->ramp_lag_sustained = true;
     z->ramp_lag_held_s = -1234.56f;
@@ -164,6 +178,12 @@ static void test_control_status_json_is_complete_and_well_formed_at_3_zones(void
               "somewhere -- the whole point of wiring it through");
     TEST_CHECK(strstr(json, "\"ff_hold_infeasible\"") != NULL, "must contain ff_hold_infeasible");
     TEST_CHECK(strstr(json, "\"ff_membership_change_count\"") != NULL, "must contain ff_membership_change_count");
+    TEST_CHECK(strstr(json, "\"bd_ff_hold\"") != NULL, "must contain the M15 B4 duty breakdown's bd_ff_hold");
+    TEST_CHECK(strstr(json, "\"bd_coupling_correction\"") != NULL, "must contain bd_coupling_correction");
+    TEST_CHECK(strstr(json, "\"bd_pre_clamp_total\"") != NULL, "must contain the derived bd_pre_clamp_total");
+    TEST_CHECK(strstr(json, "\"bd_load_cap_boost\"") != NULL, "must contain bd_load_cap_boost -- previously "
+              "invisible off-board entirely");
+    TEST_CHECK(strstr(json, "\"bd_final_commanded\"") != NULL, "must contain bd_final_commanded");
     /* All 3 zones must actually be present, not just zone 0 before a bail. */
     int zone_objects = 0;
     for (const char *p = json; (p = strstr(p, "\"zone\":")) != NULL; p += 7) zone_objects++;

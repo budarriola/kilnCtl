@@ -69,7 +69,27 @@
  * test_dashboard_json.c's fill_worst_case_zone() for the exact widths this
  * measures against. */
 #define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (960 + MAX31856_CHANNEL_COUNT * 1024)
-#define DASHBOARD_JSON_CONTROL_BUF_SIZE      (256 + MAX31856_CHANNEL_COUNT * 448)
+
+/* ROADMAP.md M15 B4 (2026-09-04) raised the /api/control per-zone budget
+ * from 448 to 900 -- dashboard_http.c's control_status_get_handler() doc
+ * comment (its own call site) has the pre-existing 381B/zone measured
+ * worst case this budget already carried; this adds the zone_duty_
+ * breakdown_t fields (profile_executor.h) append_zone_status_json()
+ * (dashboard_json.c) now appends alongside pid_p/pid_i/pid_d/pid_ff.
+ * Twelve new keys, each "%s:%s" style key+colon+comma against a worst-case
+ * negative value: bd_ff_hold/bd_ff_climb (%.4f, "-1234.5678"=10B) 24B+25B,
+ * bd_coupling_correction (%.4f) 35B, bd_ff_rate_pretaper/bd_ff_rate_
+ * posttaper (%.5f, "-1234.56789"=11B) 34B+35B, bd_kp_effective/bd_ki_
+ * effective/bd_kd_effective (%.5f) 30B each = 90B, bd_pre_clamp_total
+ * (%.4f) 32B, bd_post_clamp_total (%.4f) 33B, bd_load_cap_boost (%.4f)
+ * 31B, bd_final_commanded (%.4f, no trailing comma but the closing `}`
+ * this budget already accounts for covers that) 31B. Sum: 24+25+35+34+35+
+ * 90+32+33+31+31 = 370B. 381+370 = 751B measured worst case; 900/zone
+ * leaves ~149B headroom. See test_dashboard_json.c's fill_worst_case_zone()
+ * for the exact widths this measures against -- it fills every new
+ * duty_breakdown field at the same -1234.xxxx worst-case magnitude used for
+ * every existing %.2f/%.4f field in that helper. */
+#define DASHBOARD_JSON_CONTROL_BUF_SIZE      (256 + MAX31856_CHANNEL_COUNT * 900)
 
 /* GET /api/status's own buffer (dashboard_http.c's status_get_handler()) --
  * NOT a per-zone allowance like the two macros above (this endpoint has no
