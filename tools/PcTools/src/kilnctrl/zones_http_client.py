@@ -606,13 +606,18 @@ def build_post_body(current: dict, preset: dict) -> str:
     """
     fields: "dict[str, str]" = {}
 
-    # ---- top-level scalars: echo current, let thermo_count/relay_count be
-    # overridden by the preset if it names them. ----
-    top_overrides: "dict[str, Any]" = {}
-    if "thermo_count" in preset:
-        top_overrides["thermo_count"] = preset["thermo_count"]
-    if "relay_count" in preset:
-        top_overrides["relay_count"] = preset["relay_count"]
+    # ---- top-level scalars: echo current, let the preset override ANY
+    # top-level field it names (not just thermo_count/relay_count -- that
+    # was the bug: a preset naming e.g. ease_off_window_mult validated,
+    # had a _TOP_FIELD_FORM_KEY mapping, and was still silently dropped
+    # here because top_overrides was hand-built for exactly two keys, so
+    # the GET-echoed current value went out unchanged and the preset value
+    # never reached the wire). Any key in _TOP_FIELD_FORM_KEY that the
+    # preset names is an override candidate; unknown preset keys are left
+    # alone here and handled by the "unknown field" checks below/elsewhere. ----
+    top_overrides: "dict[str, Any]" = {
+        key: preset[key] for key in _TOP_FIELD_FORM_KEY if key in preset
+    }
 
     seen_top_keys = set()
     for key, value in current.items():
@@ -727,12 +732,17 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
     re-read). Only checks fields the preset actually names, same set
     build_post_body() overlays -- this is not a full-config diff."""
     mismatches: "list[str]" = []
-    if "thermo_count" in preset and after.get("thermo_count") != preset["thermo_count"]:
-        mismatches.append(
-            f"thermo_count: expected {preset['thermo_count']}, board reports {after.get('thermo_count')}")
-    if "relay_count" in preset and after.get("relay_count") != preset["relay_count"]:
-        mismatches.append(
-            f"relay_count: expected {preset['relay_count']}, board reports {after.get('relay_count')}")
+    for key in _TOP_FIELD_FORM_KEY:
+        if key not in preset:
+            continue
+        expected = preset[key]
+        actual = after.get(key)
+        if isinstance(expected, float):
+            ok = actual is not None and _float_close(expected, actual)
+        else:
+            ok = actual == expected
+        if not ok:
+            mismatches.append(f"{key}: expected {expected!r}, board reports {actual!r}")
 
     after_zones_by_index = {z["index"]: z for z in after.get("zones", [])}
     for pz in preset.get("zones", []):

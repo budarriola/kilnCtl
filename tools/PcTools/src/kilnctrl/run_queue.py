@@ -688,6 +688,16 @@ class RunQueueConfig:
     start_confirm_timeout_s: float = DEFAULT_START_CONFIRM_TIMEOUT_S
     run_timeout_multiplier: float = DEFAULT_RUN_TIMEOUT_MULTIPLIER
     run_timeout_margin_s: float = DEFAULT_RUN_TIMEOUT_MARGIN_S
+    #: The stabilisation hold's setpoint (see ensure_stabilized_profile /
+    #: profile_stabilization.py). Defaulted from profile_stabilization.py's
+    #: own constant, not hardcoded here, so the two stay in sync -- but
+    #: overridable per-fixture/per-profile-set: a fixture with different
+    #: ambient headroom, or a campaign whose lowest scored profile opens
+    #: below this bench's 40C default, needs a different number, and the
+    #: refusal in prepend_stabilization_hold() (opening segment below the
+    #: hold target) is exactly the signal that this needs adjusting rather
+    #: than the profile being unusable.
+    stabilization_target_c: float = ps.DEFAULT_STABILIZATION_TARGET_C
     #: injectable for tests / non-realtime replay; defaults to wall time.
     sleep: Callable[[float], None] = time.sleep
     now: Callable[[], float] = time.time
@@ -1002,7 +1012,8 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     # escape hatch for a deliberate quick/unstabilised run.
     stabilized_applied = False
     if entry.stabilize:
-        stabilized_applied = ensure_stabilized_profile(cfg.host, entry.profile_id, cfg.http_timeout_s)
+        stabilized_applied = ensure_stabilized_profile(
+            cfg.host, entry.profile_id, cfg.http_timeout_s, target_c=cfg.stabilization_target_c)
     if apply_preset_fn is None:
         from kilnctrl import config_presets
         apply_preset_fn = config_presets.apply_preset if control is not None else _apply_preset_http_only
@@ -1917,12 +1928,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--skip-stabilization-hold", action="store_true",
         help="OWNER DECISION (2026-09-03): the stabilisation hold is prepended onto every "
-             "queued entry's profile by default (~51 min/arm: 5.6 min ramp to 48C + 45 min "
-             "dwell, replacing the paired-start wait) and pid_ab_compare.py is told to score "
-             "past it automatically. This is the DOCUMENTED ESCAPE HATCH for a deliberate "
-             "quick/unstabilised run -- pass it explicitly; it is never the accidental "
-             "default. Applies to every entry in this invocation (including --repeat and "
-             "--pair-consecutive expansions).")
+             "queued entry's profile by default (~51 min/arm: a few minutes' ramp to "
+             "--stabilization-target-c + 45 min dwell, replacing the paired-start wait) and "
+             "pid_ab_compare.py is told to score past it automatically. This is the "
+             "DOCUMENTED ESCAPE HATCH for a deliberate quick/unstabilised run -- pass it "
+             "explicitly; it is never the accidental default. Applies to every entry in this "
+             "invocation (including --repeat and --pair-consecutive expansions).")
+    parser.add_argument(
+        "--stabilization-target-c", type=float, default=ps.DEFAULT_STABILIZATION_TARGET_C,
+        help="setpoint (C) for the stabilisation hold prepended onto every entry's profile "
+             "(default from profile_stabilization.py: %(default)sC, chosen for THIS bench's "
+             "ambient range and profile set -- see that module's docstring for the margin "
+             "arithmetic). Override per fixture/campaign: it must clear ambient with real "
+             "margin AND sit below every scored profile's opening segment target, or "
+             "ensure_stabilized_profile()/prepend_stabilization_hold() refuses that entry "
+             "rather than silently reshaping the profile.")
     parser.add_argument("--poll-interval-s", type=float, default=DEFAULT_POLL_INTERVAL_S)
     parser.add_argument("--rested-tol-c", type=float, default=DEFAULT_RESTED_TOL_C)
     parser.add_argument("--rested-timeout-s", type=float, default=DEFAULT_RESTED_TIMEOUT_S)
@@ -1982,7 +2002,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cfg = RunQueueConfig(
         host=args.host, poll_interval_s=args.poll_interval_s, rested_tol_c=args.rested_tol_c,
         rested_timeout_s=args.rested_timeout_s, cooldown_s=args.cooldown_s,
-        pair_start_tol_c=args.pair_start_tol_c, pair_start_timeout_s=args.pair_start_timeout_s)
+        pair_start_tol_c=args.pair_start_tol_c, pair_start_timeout_s=args.pair_start_timeout_s,
+        stabilization_target_c=args.stabilization_target_c)
 
     control = None
     if args.serial_port:

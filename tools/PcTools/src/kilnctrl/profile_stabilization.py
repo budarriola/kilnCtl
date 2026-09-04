@@ -38,15 +38,51 @@ from .devices_profiles import ProfileSegment
 #: see that header if this ever needs bumping.
 PROFILE_MAX_SEGMENTS = 12
 
-#: Ambient on this bench has been measured 28-31C (PID_EXPANSION_PLAN.md's
-#: ambient-confound protocol note) and one firing raises the working ambient
+#: Ambient on this bench has been measured 26-31C (observed range as of the
+#: 2026-08-31 A/B campaign) and one firing raises the working ambient
 #: ~1.4-1.5C further -- so a worst-case room/enclosure start is comfortably
-#: under 33C. 48C sits well above that with margin, well below the coupled
-#: hold solve's ~60C validity ceiling (infeasible above ~62C -- see
-#: project_ff_hold_infeasible_above_62c), and far below profile 7's own
-#: ~70C top (this bench never fires above 70C; cone temperatures are
-#: simulator-only).
-DEFAULT_STABILIZATION_TARGET_C = 48.0
+#: under 33C. 48 C ORIGINALLY looked like a safe choice on that margin alone
+#: (well below the coupled hold solve's ~60C validity ceiling, far below
+#: profile 7's ~70C top) -- but it collides with this fixture's own
+#: lowest-temperature scored profile: profile 7's first segment targets 45C,
+#: BELOW the 48C hold, so prepend_stabilization_hold() correctly refuses it
+#: (a stabilisation hold hotter than the profile's own opening ramp would
+#: reshape the profile, not just its starting temperature -- see
+#: prepend_stabilization_hold()'s docstring). That made the bench's main
+#: multi-zone profile entirely unusable with the hold, forcing a fallback to
+#: profile 4 ('cpl_z0', single-zone) that cannot support the "same metric,
+#: same direction, on at least 3 zones" decision rule at all.
+#:
+#: 40C clears both constraints with real margin:
+#:   * above ambient: 40 - 31 (widest observed ambient) = 9C margin, or
+#:     40 - 32.5 (ambient + a firing's own ~1.5C rise) = 7.5C margin --
+#:     nearly double the ~5C worst-case ambient SPREAD this rig has shown
+#:     (pid_ab_compare.py's 2026-09-02f note), which is the number that
+#:     actually matters here (see the residual-confound arithmetic below).
+#:   * below every scored profile's opening segment: profile 7 opens at 45C
+#:     (5C of headroom), profile 4/cpl_z0 opens at 55C (15C of headroom) --
+#:     profile 7, the multi-zone profile the 3-zone decision rule needs, is
+#:     now usable WITH the hold.
+#:
+#: Residual-confound check (the 0.5C actionability bar from
+#: PID_EXPANSION_PLAN.md section 8): the hold's job is to convert each arm's
+#: scored start temperature from "whatever ambient happened to be" to
+#: "whatever the PID settled to at the end of the dwell" -- a quantity
+#: dominated by steady-state tracking precision, not by which fixed setpoint
+#: was chosen. Moving the target from 48C to 40C does not change that
+#: argument's shape, only its ambient margin (computed above, and still
+#: comfortably positive). Taking the same deliberately pessimistic residual
+#: spread used for 48C (up to 0.5C, i.e. assuming the hold does nothing to
+#: tighten things beyond ordinary dwell tracking) against the fitted
+#: sensitivity's own top end (0.133C of iae_normalized_whole_c per 1C of
+#: start delta):
+#:     0.133 C/C * 0.5 C residual spread = 0.0665 C predicted confound
+#: -- still over 7x under the 0.5C bar, unchanged by the target move.
+#:
+#: Still well inside the coupled hold solve's ~60C validity ceiling
+#: (infeasible above ~62C -- see project_ff_hold_infeasible_above_62c) and
+#: far below profile 7's own ~70C top.
+DEFAULT_STABILIZATION_TARGET_C = 40.0
 
 #: A conservative ramp rate for the stabilisation segment itself -- fast
 #: enough not to waste bench time, slow enough not to fight the same

@@ -58,11 +58,35 @@ def test_never_fires_above_70c_bench_limit():
         ps.build_stabilization_segment(target_c=70.0)
 
 
+def test_profile_7_real_opening_segment_usable_with_default_hold():
+    """DEFECT-2 regression: this is profile 7's REAL opening segment shape
+    (target_c=45.0, from a live capture -- tools/PcTools/logs/coupling/
+    p7_fuzzy0_20260903.jsonl's segment_index=0 target_c). The bench's main
+    multi-zone profile must be usable WITH the stabilisation hold at the
+    default target -- the 2026-08-31 A/B campaign incident was exactly this
+    combination refusing (48C hold vs profile 7's 45C opening), which forced
+    a fallback to profile 4 ('cpl_z0', single-zone) that cannot support the
+    "same metric, same direction, on at least 3 zones" decision rule. This
+    must NOT raise, and the hold must land ahead of the real segment,
+    unmodified."""
+    real_profile_7_opening = [
+        ProfileSegment(target_c=45.0, ramp_c_per_hr=0.0, dwell_min=8),
+        ProfileSegment(target_c=70.0, ramp_c_per_hr=120.0, dwell_min=30),
+    ]
+    out = ps.prepend_stabilization_hold(real_profile_7_opening)
+    assert len(out) == 3
+    assert out[0].target_c == pytest.approx(ps.DEFAULT_STABILIZATION_TARGET_C)
+    assert out[1:] == real_profile_7_opening
+    # And the default itself must actually be below 45C, or this whole test
+    # would be vacuous -- the refusal condition is target_c < stabilize.target_c.
+    assert ps.DEFAULT_STABILIZATION_TARGET_C < 45.0
+
+
 def test_prepend_refuses_when_first_segment_target_below_stabilization():
     # A profile whose own opening segment targets BELOW the stabilization
     # setpoint would have its scored shape changed, not just its start --
     # must refuse rather than silently produce a different profile.
-    low_open = [ProfileSegment(target_c=40.0, ramp_c_per_hr=100.0, dwell_min=10)]
+    low_open = [ProfileSegment(target_c=30.0, ramp_c_per_hr=100.0, dwell_min=10)]
     with pytest.raises(ValueError, match="below the stabilization"):
         ps.prepend_stabilization_hold(low_open)
 
@@ -152,8 +176,8 @@ def test_is_stabilization_segment_true_for_plain_namespace_from_json():
     # not a ProfileSegment -- SimpleNamespace(**dict) is exactly how it
     # adapts one, so this is the shape that actually matters.
     from types import SimpleNamespace
-    obj = SimpleNamespace(target_c=48.0, ramp_c_per_hr=300.0, dwell_min=45,
-                           seg_kind=0, io_target=0)  # extra keys ignored
+    obj = SimpleNamespace(target_c=ps.DEFAULT_STABILIZATION_TARGET_C, ramp_c_per_hr=300.0,
+                           dwell_min=45, seg_kind=0, io_target=0)  # extra keys ignored
     assert ps.is_stabilization_segment(obj) is True
 
 
@@ -167,7 +191,7 @@ def test_is_stabilization_segment_false_when_only_target_matches():
     # be mistaken for the same segment (this is the idempotency check that
     # keeps ensure_stabilized_profile from either re-stacking a hold OR
     # silently accepting a differently-shaped one as "already done").
-    seg = ProfileSegment(target_c=48.0, ramp_c_per_hr=300.0, dwell_min=10)
+    seg = ProfileSegment(target_c=ps.DEFAULT_STABILIZATION_TARGET_C, ramp_c_per_hr=300.0, dwell_min=10)
     assert ps.is_stabilization_segment(seg) is False
 
 
@@ -184,8 +208,8 @@ def test_mutation_is_stabilization_segment_dwell_check_is_load_bearing():
     # (not a stray always-true condition that would let ensure_stabilized_
     # profile treat ANY 48C-opening segment as "already stabilized" even
     # with the wrong hold duration).
-    matching = ProfileSegment(target_c=48.0, ramp_c_per_hr=300.0, dwell_min=45)
-    wrong_dwell = ProfileSegment(target_c=48.0, ramp_c_per_hr=300.0, dwell_min=5)
+    matching = ProfileSegment(target_c=ps.DEFAULT_STABILIZATION_TARGET_C, ramp_c_per_hr=300.0, dwell_min=45)
+    wrong_dwell = ProfileSegment(target_c=ps.DEFAULT_STABILIZATION_TARGET_C, ramp_c_per_hr=300.0, dwell_min=5)
     assert ps.is_stabilization_segment(matching) is True
     assert ps.is_stabilization_segment(wrong_dwell) is False
     # MUTATION: drop the dwell_min term from the comparison entirely --

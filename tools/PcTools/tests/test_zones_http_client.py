@@ -89,6 +89,7 @@ def _sample_get_response(n_zones: int = 3) -> dict:
     return {
         "thermo_count": n_zones, "relay_count": 4, "max_simultaneous_relays": 0,
         "continue_on_zone_trip": False, "safety_tc_type": 3, "pc_link_abort_silence_ms": 0.0,
+        "ease_off_window_mult": 2.0,
         "relay_zone_owned_mask": 0b0111,
         "safety_wiring": {"link_up": True, "tc_temp_valid": False, "tc_temp_c": 0.0,
                            "tc_fault": 0, "relay_energized": False},
@@ -798,6 +799,61 @@ class ApplyZonePresetTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(any("max_temp_c" in m for m in result.mismatches), result.mismatches)
         self.assertIn("FAILED" if False else "did NOT verify", result.describe())
+
+    def test_top_level_field_from_preset_lands_end_to_end(self):
+        """WHOLE-CHAIN test for the 2026-08-31 A/B campaign incident: a
+        preset naming a non-default top-level field (ease_off_window_mult,
+        3.0 vs the live board's 2.0) must actually be POSTed with the
+        preset's value AND the read-back-verified result must be ok. This
+        drives the real apply_zone_preset() GET->POST->GET cycle and
+        independently decodes the captured POST body -- so it fails if the
+        preset's value never reached build_post_body()'s output, even if a
+        (mocked) second GET were hand-crafted to look correct. Testing
+        build_post_body() in isolation (encoding only, no assertion on WHICH
+        value won) is exactly what let the original bug (top_overrides
+        hard-coded to thermo_count/relay_count only, so the GET-echoed
+        current value silently rode along instead of the preset's) slip
+        through."""
+        current = _sample_get_response()
+        self.assertEqual(current["ease_off_window_mult"], 2.0)
+        preset = {"name": "p", "zones": [], "ease_off_window_mult": 3.0}
+        after = _sample_get_response()
+        after["ease_off_window_mult"] = 3.0  # what a correctly-applied board would report
+        captured = {}
+
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(json.dumps(current).encode())
+            if calls["n"] == 2:
+                captured["body"] = req.data
+                return _fake_response(b"ok")
+            return _fake_response(json.dumps(after).encode())
+
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = zh.apply_zone_preset("kiln.local", preset)
+        self.assertTrue(result.ok, result.describe())
+        posted = urllib.parse.parse_qs(captured["body"].decode())
+        self.assertEqual(posted["ease_off_window_mult"], ["3.0"],
+                          "the POST body must carry the PRESET's value (3.0), not the "
+                          "GET-echoed current value (2.0) -- this is the exact defect")
+
+    def test_top_level_field_NOT_landing_is_caught(self):
+        """NEGATIVE TEST proving the write path is real: if the board's
+        read-back still shows the OLD ease_off_window_mult (exactly what the
+        broken code produced -- current.items() echoed the live GET value
+        right past the preset's override), apply_zone_preset() must report
+        ok=False with the specific mismatch, not a silent pass."""
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [], "ease_off_window_mult": 3.0}
+        after = _sample_get_response()  # still 2.0 -- write did not land
+        fake_urlopen, _ = self._mock_get_then_post_then_get(current, b"ok", after)
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = zh.apply_zone_preset("kiln.local", preset)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("ease_off_window_mult" in m for m in result.mismatches), result.mismatches)
 
     def test_non_ok_post_body_raises(self):
         current = _sample_get_response()
