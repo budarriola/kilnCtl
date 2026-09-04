@@ -13,8 +13,13 @@
 > and closed the same day; M12/M13 in progress; `DISPLAY_ST7796_PLAN.md`
 > Phases 1/2/3/5 landed, Phases 4/6 in progress; ramp assist landed end to end
 > default OFF; board reflashed 2026-09-03 07:36:20; the coupling-matrix A/B has
-> been superseded by the fuzzy-PID A/B `fuzzy_ab_20260904c`, LIVE and in a
-> cooling wait — do not flash, reset, or write config while it runs)
+> been superseded by the fuzzy-PID A/B `fuzzy_ab_20260904c`; the kiln is now
+> IDLE and that campaign is STOPPED — `778ad64` found all 37,008/37,008
+> samples across 29 firings never leave the fuzzy layer's centre rule cell on
+> this rig, so it was measuring a fixed gain rescale, not fuzzy adaptation;
+> see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these)
+> for the rescale-vs-relabel-vs-drop decision and the explicit recommendation
+> against a blind restart)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -67,6 +72,11 @@ What is still genuinely open is short:
 
 | Size | Item | Where |
 |---|---|---|
+| **XL** | **Fuzzy-PID membership bands, 2026-09-04.** `778ad64`: 37,008/37,008 samples across all 29 real firings never leave the fuzzy layer's centre rule cell — its error/rate bands (tuned for a much larger kiln) don't span this rig's measured envelope (~6–8 °C error, ~0.2–0.25 °C/s rate). On this rig the layer is a constant gain rescale, not the adaptive behaviour it was built for. Three ways forward, owner's call: (a) rescale the membership bands to the measured envelope and re-run; (b) keep the bands, relabel the experiment honestly as "fixed gain rescale" and judge it on that basis; (c) drop the fuzzy layer for this rig. **Recommendation: do not blind-restart the ~10 h `fuzzy_ab_20260904c` campaign under either (a) or (b) without a decision first** — a restart under the same bands repeats the same null result. | `PID_EXPANSION_PLAN.md` §3.6 |
+| **M** | **Tighten `abs_max_temp_c`, 2026-09-04.** Armed and committed at 80 °C (`5a4ddfc` — the earlier "value 0" report was stale), but 80 °C is also the ESP-side `max_temp_c` ceiling, so the "independent" safety ceiling currently enforces nothing the primary controller wasn't already enforcing. Recommend commissioning it down to roughly 70 °C so the Pico's ceiling is genuinely tighter than the ESP's. No capture to date has exceeded 60 °C (`d5ae465`, 27 captures), so 70 °C leaves headroom without narrowing the room firings actually use. | `SaftyFW/docs/COMMISSIONING.md`; `docs/SAFETY_CASE.md` |
+| **XL** | **Whether to fit CTs, 2026-09-04.** Topology is now written down (`9e3bd1f`, `9f9bf7c`, `docs/CONTACTOR_FEEDBACK_OPTIONS.md`): mains is staged contactor → SSRs, so a single relay weld is tolerated and only a *double* failure (contactor **and** its SSR) is dangerous — but nothing today detects a welded contactor, all five pilot relays are DPDT with the second pole unconnected, and `relay_owner_is_energized()` reports what was commanded, not what is sensed. Fitting CTs is the one check that would let either processor independently confirm actual current flow instead of trusting its own command; every other candidate (the second relay pole, wiring it up) was surveyed in `CONTACTOR_FEEDBACK_OPTIONS.md` and costs hardware anyway. Decide whether that check is worth ordering the parts (M5's Hammond 140QEX is already scoped) or whether the double-failure risk stays an accepted risk in `SAFETY_CASE.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5; `docs/SAFETY_CASE.md` |
+| **L** | **Approve or decline the high-temperature validation firing, 2026-09-04.** `4ec7387` scopes a ~4–5 h firing to exercise the coupled feedforward hold above ~62 °C, the one regime the matrix has never run in (infeasible ties to an offset, not a temperature — `68711df`) and that no capture has yet reached (max seen: 60 °C, `d5ae465`). Needs the owner's go-ahead before it's scheduled — it is the longest single firing proposed to date. | `PID_EXPANSION_PLAN.md` §3.6c |
+| **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Four separate: (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) touch corner accuracy (`KILNCTL_TOUCH_CAP_*` defaults untried on glass); (4) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken, gating the backlight flying-wire and any future harness work at J2. | `DISPLAY_ST7796_PLAN.md` §4 |
 | S | Physical zone arrangement — which element is where | [What is actually left](#what-is-actually-left) |
 | S | The deferred sanity rate for S8 — S8 gained a pure-module implementation and is integrated (2026-09-03, `safety_guards.c`/`safety_core.c`, `SaftyFW/docs/GUARD_TEST_MATRIX.md`), but ships deliberately off (`max_rate_c_per_min` defaults to 0, same "no default by design" shape as S1), so commissioning that field is what will enable it | M3 |
 | S | `hardware/UnitTestFixture/` — delete or keep | M7 |
@@ -450,7 +460,17 @@ from base (`91c5d6d`). A separate audit of the *ease-off* A/B, run against the
 same inert-campaign bug class, confirmed it was **not** inert and its
 "indistinguishable" conclusion stands; it also added a standing pre-flight
 check (`PID_EXPANSION_PLAN.md` §3.6b) requiring live `bd_*` proof before any
-future control-law A/B (`51e3d59`).
+future control-law A/B (`51e3d59`). **Superseded 2026-09-04:** `778ad64`
+found the resulting `fuzzy_ab_20260904c` data itself never leaves the
+membership layer's centre rule cell (n=29 firings, 37,008 zone-samples,
+100.000% ZERO/STEADY) — the campaign ran cleanly but was measuring a fixed
+gain rescale, not fuzzy adaptation. The kiln is now idle and the campaign is
+stopped; see the owner-decision row above before restarting it in any form.
+Cross-campaign tracking was separately synthesized across all 27 usable
+coupling captures (not one more A/B): the coupling-matrix fix is confirmed
+(n=12 vs 5), z0's dwell-entry overshoot is the worst tracked case at
+2.18 °C, and no capture anywhere has yet exceeded 60 °C (`d5ae465`) — detail
+in `PID_EXPANSION_PLAN.md`, not restated here.
 
 **What is currently GATED, and on what** (the short answer for planning):
 
@@ -459,7 +479,31 @@ future control-law A/B (`51e3d59`).
 | DRAM/PSRAM allocator-threshold work | A full soak (cold firing through cooldown) plus a Pico OTA relay-path measurement that has never been taken | `DRAM_PSRAM_PLAN.md` §5/§6/§9 |
 | Second LCD panel (ST7796/MSP4031) | The physical panel, and its pre-power STOP-block 5V I2C hazard check before the module ever touches J2 | `DISPLAY_ST7796_PLAN.md` §0/§4 |
 | Ramp assist default (OFF → ON) | A real firing at cone temperatures — everything measured so far is bench-range (0–80 °C), well below where the cone table's heat-work weighting matters | `PID_EXPANSION_PLAN.md` §7 |
-| Fuzzy-PID layer's first above-zero hardware run | **No longer gated — LIVE.** Fixed and restarted as `fuzzy_ab_20260904c`, currently in a cooling wait on the kiln | `PID_EXPANSION_PLAN.md` §3.6 |
+| Fuzzy-PID membership bands | Owner decision: rescale to this rig's measured envelope, relabel as a gain-rescale test, or drop it — see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these) | `PID_EXPANSION_PLAN.md` §3.6 |
+| High-temperature (>62 °C) coupled-hold validation | Owner approval of a ~4–5 h firing — never yet run, see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these) | `PID_EXPANSION_PLAN.md` §3.6c |
+
+**Two operational facts a future session must not miss (corrected against
+`d800a60` itself — see this sync's report for the discrepancy):**
+- **`approach_rate_cap_c_per_hr` (`ZONES_CFG_VERSION` 17→18, `d800a60`) is
+  built and host-tested only — NOT YET FLASHED to the live board.** `d800a60`
+  says so explicitly: it stayed unflashed while `fuzzy_ab_20260904d` ran, and
+  because 17→18 stacks on the still-unflashed 16→17 `ease_off_window_mult`
+  migration, the eventual flash needs the full v16→v17→v18 chain verified
+  against the board's real, non-default live config, not a fresh commission.
+  `load_config_preset`'s POST mapping for this field was ALSO fixed in the
+  same commit (`z%u_approachratecap` / `_PRESET_ZONE_OVERRIDE_FIELDS`,
+  `zones_http_client.py`) — a board flashed with the GET-emitting half but not
+  this fix would have had every preset load refused; that gap no longer
+  exists in the tree, but is exactly the trap the next flash must not walk
+  into by flashing an older commit.
+- **Two zone-config migrations exist in the tree but are chained, not yet
+  applied to the live board's real config.** `ZONES_CFG_VERSION` 16→17
+  (`7968650`) carries the one prior global `ease_off_window_mult` value
+  verbatim to every zone; 17→18 (`d800a60`) adds `approach_rate_cap_c_per_hr`
+  at 0/uncapped for every zone. Both are lossless, bit-identical-behaviour
+  migrations against synthetic/default configs — neither has been verified
+  against this board's actual non-default live config yet, which `d800a60`
+  flags as the remaining step before either reaches hardware.
 
 **What is done and should not be reopened:** the link itself, the wire
 contract and its two independent version numbers, the PC-link acknowledgement
