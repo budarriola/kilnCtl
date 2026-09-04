@@ -532,8 +532,16 @@ above: `config_store_default()` now ships `i_present_a = 2.0 A` (not `0`),
 and presence detection (`current_snapshot_t.present[n]`,
 `current_presence_policy.h`) no longer derives from `amps[n]`/`k_ct_v_per_a`
 at all, so the "phantom current from noise" mechanism this paragraph
-describes no longer applies to the guard-facing fact — it still applies,
-unchanged, to the reported `amps[n]`/power figures, which remain a display
-concern only. `calibrated` (current_sense_cal_t) is likewise no longer the
-gate on presence — see `current_task_reload_cal()`'s own comment
-(`src/tasks/current_task.c`) for what it gates instead.
+describes no longer reaches the S3/S4 presence fact. **It is not display-only,
+though**: `safety_guards.c`'s S14 (`in->amps[ch] > threshold_a`, a per-channel
+overcurrent WARN keyed off the commissioned `i_normal_a[ch]`) reads the same
+raw `amps[n]` directly, gated only by `i_normal_valid[ch]` and
+`relay_commanded_now_for_ct[ch]` — not by `current_snapshot_t.calibrated`. A
+board whose zero-current offset has never been calibrated
+(`calibrated == false`) but whose per-channel `i_normal_a[ch]` has already
+been recorded (a partial-commissioning ordering this doc does not forbid)
+can still feed the same noise-inflated `amps[ch]` into S14 and produce a
+spurious WARN — a guard effect, not merely a reported-figure one. `calibrated`
+(current_sense_cal_t) is likewise no longer the gate on presence — see
+`current_task_reload_cal()`'s own comment (`src/tasks/current_task.c`) for
+what it gates instead.
