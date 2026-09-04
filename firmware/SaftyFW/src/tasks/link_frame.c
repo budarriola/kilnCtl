@@ -103,20 +103,20 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
     if (tc_injected) {
         flags |= LINK_FLAG_TC_INJECTED;
     }
-    out[1] = flags;
+    out[KILNLINK_FRAME_A_OFF_FLAGS] = flags;
 
-    pack_f32_le(&out[2], safety_tc_c);
-    pack_f32_le(&out[6], cj_c);
-    out[10] = tc_fault_bits;
-    pack_f32_le(&out[11], amps1);
-    pack_f32_le(&out[15], amps2);
-    pack_f32_le(&out[19], amps3);
+    pack_f32_le(&out[KILNLINK_FRAME_A_OFF_TC_TEMP_C], safety_tc_c);
+    pack_f32_le(&out[KILNLINK_FRAME_A_OFF_CJ_TEMP_C], cj_c);
+    out[KILNLINK_FRAME_A_OFF_TC_FAULT] = tc_fault_bits;
+    pack_f32_le(&out[KILNLINK_FRAME_A_OFF_AMPS1], amps1);
+    pack_f32_le(&out[KILNLINK_FRAME_A_OFF_AMPS2], amps2);
+    pack_f32_le(&out[KILNLINK_FRAME_A_OFF_AMPS3], amps3);
 
     // See this function's own doc comment (link_frame.h) for the full
     // skew-safety argument -- the caller decides peer_supports_status_v2,
     // this function only ever acts on that verdict.
     if (peer_supports_status_v2) {
-        out[23] = tx_dropped_sat;
+        out[KILNLINK_FRAME_A_OFF_TX_DROPPED_SAT] = tx_dropped_sat;
         // Only ever considered once the V2 gate above has already passed --
         // see this function's own doc comment (link_frame.h) for why bytes
         // 24/25 must never be emitted at a peer not already confirmed for
@@ -126,8 +126,8 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
             if (is_borrowed) {
                 flags2 |= LINK_FLAG2_BORROWED;
             }
-            out[24] = flags2;
-            out[25] = borrowed_zone_index;
+            out[KILNLINK_FRAME_A_OFF_FLAGS2] = flags2;
+            out[KILNLINK_FRAME_A_OFF_BORROWED_ZONE_INDEX] = borrowed_zone_index;
             return LINK_FRAME_STATUS_LEN_V3;
         }
         return LINK_FRAME_STATUS_LEN_V2;

@@ -26,6 +26,9 @@
 #include "../config_store.h" // config_store_record_t -- pure, host-testable (its own header
                               // comment), same as this file; link_frame_apply_set_config()/
                               // link_frame_apply_set_ct_cal() below need the full record shape
+#include "kilnlink/kilnlink_frame_a_offsets.h" // KILNLINK_FRAME_A_* -- single source of truth for
+                                                // Frame A's byte offsets/lengths, ROADMAP.md M15
+                                                // "Frame A's field layout is hand-duplicated"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,7 +37,7 @@ extern "C" {
 // --- Frame A: SAFETY_CMD_GET_STATUS (0x01), 23 or 24 bytes ------------------
 // Byte-for-byte the layout firmware/KilnFW/App/drivers/safety_link.h already
 // parses -- see that file's header comment for the authoritative offsets.
-#define LINK_FRAME_STATUS_CMD 0x01u
+#define LINK_FRAME_STATUS_CMD KILNLINK_FRAME_A_CMD
 
 // V1 (original, bytes 0..22) and V2 (V1 + byte 23, tx_dropped_sat) lengths.
 // 2026-08-23: V2 added to surface uart_owner's TX-ring drop counter on a
@@ -44,8 +47,8 @@ extern "C" {
 // LINK_FRAME_STATUS_LEN kept as an alias of the V1 length: every existing
 // caller/test that names it wants "the original, always-valid prefix",
 // which is still true of a V2 frame's first 23 bytes too.
-#define LINK_FRAME_STATUS_LEN_V1 23u
-#define LINK_FRAME_STATUS_LEN_V2 24u
+#define LINK_FRAME_STATUS_LEN_V1 KILNLINK_FRAME_A_LEN_V1
+#define LINK_FRAME_STATUS_LEN_V2 KILNLINK_FRAME_A_LEN_V2
 // V3 (V2 + bytes 24/25, BORROWED status) -- 2026-09-03. Extends the frame
 // with a NEW byte, following the V1->V2 precedent this header cites, rather
 // than reassigning or overloading either of byte 1's two remaining bits
@@ -55,7 +58,7 @@ extern "C" {
 // defeating the point of a distinct flag. See link_frame_pack_status()'s own
 // doc comment for the byte 24/25 layout and the same skew-safety argument the
 // V1->V2 step made, applied here a second time.
-#define LINK_FRAME_STATUS_LEN_V3 26u
+#define LINK_FRAME_STATUS_LEN_V3 KILNLINK_FRAME_A_LEN_V3
 #define LINK_FRAME_STATUS_LEN    LINK_FRAME_STATUS_LEN_V1
 
 // Byte 23 (V2 only): uart_owner_get_tx_dropped(), saturating -- 254 is the

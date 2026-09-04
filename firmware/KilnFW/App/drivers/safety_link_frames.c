@@ -45,6 +45,9 @@
 #include "uart_task_ids.h"
 
 #include "kilnlink/kilnlink_announce.h"
+#include "kilnlink/kilnlink_frame_a_offsets.h" /* KILNLINK_FRAME_A_* -- single source of truth for
+                                                 * Frame A's byte offsets/lengths, ROADMAP.md M15
+                                                 * "Frame A's field layout is hand-duplicated" */
 #include "kilnlink/kilnlink_announce_reboot.h"
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h"
@@ -613,9 +616,9 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
     /* Bits 0/1 describe *our* view of the link and *our* fault output; they
      * are filled in at read time, so whatever the peer put there is dropped
      * rather than trusted (see safety_link.h). */
-    link->cached.flags = (uint8_t)(p[1] & ~(SAFETY_FLAG_LINK_UP | SAFETY_FLAG_FAULT));
-    link->cached.tc_temp_c = safety_read_f32_le(&p[2]);
-    link->cached.cj_temp_c = safety_read_f32_le(&p[6]);
+    link->cached.flags = (uint8_t)(p[KILNLINK_FRAME_A_OFF_FLAGS] & ~(SAFETY_FLAG_LINK_UP | SAFETY_FLAG_FAULT));
+    link->cached.tc_temp_c = safety_read_f32_le(&p[KILNLINK_FRAME_A_OFF_TC_TEMP_C]);
+    link->cached.cj_temp_c = safety_read_f32_le(&p[KILNLINK_FRAME_A_OFF_CJ_TEMP_C]);
     /* The contract says the Pico sends NaN when SAFETY_FLAG_TEMP_VALID is
      * clear, but a peer that sends 0.0 instead -- or a firmware that forgets --
      * must not have it forwarded to the PC as a real reading of a stone-cold
@@ -625,10 +628,10 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
         link->cached.tc_temp_c = NAN;
         link->cached.cj_temp_c = NAN;
     }
-    link->cached.tc_fault = p[10];
-    link->cached.current_a[0] = safety_read_f32_le(&p[11]);
-    link->cached.current_a[1] = safety_read_f32_le(&p[15]);
-    link->cached.current_a[2] = safety_read_f32_le(&p[19]);
+    link->cached.tc_fault = p[KILNLINK_FRAME_A_OFF_TC_FAULT];
+    link->cached.current_a[0] = safety_read_f32_le(&p[KILNLINK_FRAME_A_OFF_AMPS1]);
+    link->cached.current_a[1] = safety_read_f32_le(&p[KILNLINK_FRAME_A_OFF_AMPS2]);
+    link->cached.current_a[2] = safety_read_f32_le(&p[KILNLINK_FRAME_A_OFF_AMPS3]);
     /* Byte 23 -- only present on a V2-length frame (checked above, msg->length
      * already verified to be exactly V1 or V2 by this point, nothing else).
      * V1 leaves both fields at their prior cached value if not explicitly
@@ -638,7 +641,7 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * flag pointing at a now-meaningless stale byte. */
     if (msg->length == SAFETY_LINK_STATUS_FRAME_LEN_V2 || msg->length == SAFETY_LINK_STATUS_FRAME_LEN_V3) {
         link->cached.tx_dropped_known = true;
-        link->cached.tx_dropped_sat = p[23];
+        link->cached.tx_dropped_sat = p[KILNLINK_FRAME_A_OFF_TX_DROPPED_SAT];
     } else {
         link->cached.tx_dropped_known = false;
         link->cached.tx_dropped_sat = 0;
@@ -650,8 +653,8 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * stale borrowed_known=true pointing at a now-meaningless stale byte. */
     if (msg->length == SAFETY_LINK_STATUS_FRAME_LEN_V3) {
         link->cached.borrowed_known = true;
-        link->cached.borrowed = (p[24] & SAFETY_LINK_STATUS_FLAG2_BORROWED) != 0u;
-        link->cached.borrowed_zone_index = p[25];
+        link->cached.borrowed = (p[KILNLINK_FRAME_A_OFF_FLAGS2] & SAFETY_LINK_STATUS_FLAG2_BORROWED) != 0u;
+        link->cached.borrowed_zone_index = p[KILNLINK_FRAME_A_OFF_BORROWED_ZONE_INDEX];
     } else {
         link->cached.borrowed_known = false;
         link->cached.borrowed = false;

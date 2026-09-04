@@ -26,6 +26,13 @@
 #include "test_common.h"
 #include "../src/tasks/link_frame.h"
 #include "kilnlink/kilnlink_frame.h"
+#include "kilnlink/kilnlink_frame_a_offsets.h" // KILNLINK_FRAME_A_* -- single source of truth for
+                                                // Frame A's byte offsets/lengths (ROADMAP.md M15).
+                                                // Freestanding, no ESP-IDF-adjacent types, so unlike
+                                                // safety_link.h this one IS safe to #include directly
+                                                // rather than restate -- see this file's own header
+                                                // comment on SAFETY_LINK_STATUS_FRAME_LEN_V1_MIRROR
+                                                // etc. for why THOSE stay restated.
 
 // --- device/task ids link_task.c actually uses for this traffic (link_task.c
 // LINK_DEVICE_SAFETY/LINK_DEVICE_ESP/LINK_TASK_ID_SAFETY) -- only their
@@ -52,14 +59,16 @@
 #define MIRROR_SAFETY_FLAG_TC_INJECTED      0x80u
 #define MIRROR_SAFETY_FLAG2_BORROWED        0x01u
 
-// safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN_V1/_V2/_V3, restated here (not
-// #included -- that header pulls in ESP-IDF-adjacent types) since they must
-// equal LINK_FRAME_STATUS_LEN_V1/_V2/_V3 for the two sides to agree at all;
-// the very first assertions in test_status_frame_round_trip() below prove
-// that.
-#define SAFETY_LINK_STATUS_FRAME_LEN_V1_MIRROR 23u
-#define SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR 24u
-#define SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR 26u
+// safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN_V1/_V2/_V3 (KilnFW) and this
+// file's own LINK_FRAME_STATUS_LEN_V1/_V2/_V3 (link_frame.h, SaftyFW) now
+// both resolve to kilnlink_frame_a_offsets.h's KILNLINK_FRAME_A_LEN_V1/_V2/
+// _V3 -- ROADMAP.md M15. Aliased here (not restated as separate literals)
+// since they must equal that same shared value for the two firmwares to
+// agree at all; the very first assertions in test_status_frame_round_trip()
+// below prove that.
+#define SAFETY_LINK_STATUS_FRAME_LEN_V1_MIRROR KILNLINK_FRAME_A_LEN_V1
+#define SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR KILNLINK_FRAME_A_LEN_V2
+#define SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR KILNLINK_FRAME_A_LEN_V3
 
 typedef struct {
     bool ok;
@@ -104,29 +113,29 @@ static mirror_status_t mirror_apply_status(const uint8_t *payload, uint8_t lengt
     }
 
     const uint8_t *p = payload;
-    out.flags = (uint8_t)(p[1] & ~(MIRROR_SAFETY_FLAG_LINK_UP | MIRROR_SAFETY_FLAG_FAULT));
-    out.tc_temp_c = mirror_read_f32_le(&p[2]);
-    out.cj_temp_c = mirror_read_f32_le(&p[6]);
+    out.flags = (uint8_t)(p[KILNLINK_FRAME_A_OFF_FLAGS] & ~(MIRROR_SAFETY_FLAG_LINK_UP | MIRROR_SAFETY_FLAG_FAULT));
+    out.tc_temp_c = mirror_read_f32_le(&p[KILNLINK_FRAME_A_OFF_TC_TEMP_C]);
+    out.cj_temp_c = mirror_read_f32_le(&p[KILNLINK_FRAME_A_OFF_CJ_TEMP_C]);
     if (!(out.flags & MIRROR_SAFETY_FLAG_TEMP_VALID)) {
         out.tc_temp_c = NAN;
         out.cj_temp_c = NAN;
     }
-    out.tc_fault = p[10];
-    out.current_a[0] = mirror_read_f32_le(&p[11]);
-    out.current_a[1] = mirror_read_f32_le(&p[15]);
-    out.current_a[2] = mirror_read_f32_le(&p[19]);
+    out.tc_fault = p[KILNLINK_FRAME_A_OFF_TC_FAULT];
+    out.current_a[0] = mirror_read_f32_le(&p[KILNLINK_FRAME_A_OFF_AMPS1]);
+    out.current_a[1] = mirror_read_f32_le(&p[KILNLINK_FRAME_A_OFF_AMPS2]);
+    out.current_a[2] = mirror_read_f32_le(&p[KILNLINK_FRAME_A_OFF_AMPS3]);
     if (length == SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR ||
         length == SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR) {
         out.tx_dropped_known = true;
-        out.tx_dropped_sat = p[23];
+        out.tx_dropped_sat = p[KILNLINK_FRAME_A_OFF_TX_DROPPED_SAT];
     } else {
         out.tx_dropped_known = false;
         out.tx_dropped_sat = 0;
     }
     if (length == SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR) {
         out.borrowed_known = true;
-        out.borrowed = (p[24] & MIRROR_SAFETY_FLAG2_BORROWED) != 0u;
-        out.borrowed_zone_index = p[25];
+        out.borrowed = (p[KILNLINK_FRAME_A_OFF_FLAGS2] & MIRROR_SAFETY_FLAG2_BORROWED) != 0u;
+        out.borrowed_zone_index = p[KILNLINK_FRAME_A_OFF_BORROWED_ZONE_INDEX];
     } else {
         out.borrowed_known = false;
         out.borrowed = false;

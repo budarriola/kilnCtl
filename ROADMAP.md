@@ -1758,7 +1758,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       of the HTTP handler files and found no other plain `malloc` of a
       response/scratch buffer.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
-      ~~`wifi_prov.c` (2820)~~, `dashboard_http.c` (2572), `ota_http.c` (2508),
+      ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, `ota_http.c` (2508),
       `ui_page_home.c` (2279), `panel_spi.c` (2174), `profiles_http.c` (2097),
       `zones_config_json.c` (1867), `main.c` (1820), `backup_http.c` (1756),
       `uart_bridge_ext.c` (1727), `zones_http_handlers.c` (1598). Split
@@ -2061,14 +2061,34 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       (per this item's own request). Added `_mcpkit_vendored_copy_check()` --
       same byte-identical (line-ending normalized) comparison, skips cleanly
       when the `mykicadMcp` submodule isn't checked out.
-- [ ] **Frame A's field layout is hand-duplicated across firmwares.**
+- [x] **Frame A's field layout is hand-duplicated across firmwares.**
       `SaftyFW/src/tasks/link_frame.h:1-16` (pack side) says it is
       "byte-for-byte the layout `safety_link.h` already parses" against
       `KilnFW/App/drivers/safety_link_frames.c:600-641`'s independent
       hand-written offset table — an offset mismatch passes CRC and silently
       misdecodes temperatures. Lift the offsets into a shared CommonFW header,
       the way `kilnlink_rollback_result.h` already does for that result type.
-      M
+      M — **CLOSED 2026-09-04**: added `CommonFW/include/kilnlink/
+      kilnlink_frame_a_offsets.h` (header-only, `KILNLINK_FRAME_A_CMD`/
+      `_LEN_V1/_V2/_V3`/`_OFF_FLAGS`/`_OFF_TC_TEMP_C`/`_OFF_CJ_TEMP_C`/
+      `_OFF_TC_FAULT`/`_OFF_AMPS1-3`/`_OFF_TX_DROPPED_SAT`/`_OFF_FLAGS2`/
+      `_OFF_BORROWED_ZONE_INDEX`). All three sites now index through it
+      instead of a literal `p[N]`/`out[N]`: `SaftyFW/src/tasks/link_frame.c`'s
+      `link_frame_pack_status()`, `KilnFW/App/drivers/safety_link_frames.c`'s
+      `safety_apply_status()`, and `SaftyFW/test/test_link_frame_wire.c`'s
+      `mirror_apply_status()` — plus `safety_link.h`'s and `link_frame.h`'s
+      own `_LEN_V1/_V2/_V3` defines, which now alias the shared macro.
+      `App/test/frame_a_offset_drift_check.py` rewritten: it no longer diffs
+      three offset tables (there's only one left, and the C compiler already
+      enforces agreement) — it now regex-scans the same three functions for a
+      reintroduced bare literal `out[N]`/`p[N]`/`payload[N]` offset (N != 0)
+      and fails closed if any of the three target functions can no longer be
+      located at all. Negative-tested: changed one `out[KILNLINK_FRAME_A_OFF_
+      AMPS2]` back to `out[15]`, check failed naming the exact file/line/
+      literal, reverted, confirmed clean. SaftyFW host tests 2068/2068,
+      KilnFW host tests unaffected by this change (pre-existing, unrelated
+      `test_st7796_panel.c` failures untouched — out of this item's scope),
+      both `build_kilnfw`/`build_saftyfw` target builds pass.
 - [x] **The drift test for the item above is itself a third hand-copy.**
       `SaftyFW/test/test_link_frame_wire.c:93` `mirror_apply_status()` is a
       transcription of `safety_apply_status()`/`safety_parse_fw_version()`

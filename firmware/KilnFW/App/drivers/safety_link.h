@@ -161,6 +161,9 @@
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_param_value.h"
+#include "kilnlink/kilnlink_frame_a_offsets.h" /* KILNLINK_FRAME_A_* -- single source of truth for
+                                                 * Frame A's byte offsets/lengths, ROADMAP.md M15
+                                                 * "Frame A's field layout is hand-duplicated" */
 #include "uart_owner.h"
 #include "uart_protocol.h"
 
@@ -191,8 +194,8 @@ extern "C" {
  * via ANNOUNCE_VERSION, that the ESP peer is built against protocol_version
  * >= 6). SAFETY_LINK_STATUS_FRAME_LEN kept as an alias of the V1 length --
  * every existing reference wants "the original, always-valid prefix". */
-#define SAFETY_LINK_STATUS_FRAME_LEN_V1 23u
-#define SAFETY_LINK_STATUS_FRAME_LEN_V2 24u
+#define SAFETY_LINK_STATUS_FRAME_LEN_V1 KILNLINK_FRAME_A_LEN_V1
+#define SAFETY_LINK_STATUS_FRAME_LEN_V2 KILNLINK_FRAME_A_LEN_V2
 /* V3 (V2 + bytes 24/25, the BORROWED status flag -- 2026-09-03). Byte 24 is a
  * flags2 byte (bit0 SAFETY_LINK_STATUS_FLAG2_BORROWED), byte 25 is
  * borrowed_zone_index verbatim (SAFETY_LINK_BORROWED_ZONE_UNKNOWN (0xFF) =
@@ -218,7 +221,7 @@ extern "C" {
  * them apart. Every renderer of this field (safety_cfg_http.c) must check
  * borrowed_known first, exactly as tx_dropped_known already gates
  * tx_dropped_sat above. */
-#define SAFETY_LINK_STATUS_FRAME_LEN_V3 26u
+#define SAFETY_LINK_STATUS_FRAME_LEN_V3 KILNLINK_FRAME_A_LEN_V3
 #define SAFETY_LINK_STATUS_FRAME_LEN    SAFETY_LINK_STATUS_FRAME_LEN_V1
 
 /* flags2 byte (offset 24, V3 only) -- mirrors SaftyFW's link_frame.h
