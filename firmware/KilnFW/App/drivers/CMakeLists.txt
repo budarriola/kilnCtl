@@ -267,6 +267,11 @@ idf_component_register(SRCS "MAX31856.c"
                        "zones_current_sweep_engine.c"
                        "zones_current_sweep_task.c"
                        "zones_config_json.c"
+                       # zones_config_json.c split 2026-09-04 (ROADMAP.md M15,
+                       # the 1500-line rule) -- see zones_config_json_
+                       # internal.h's own doc comment for the file map.
+                       "zones_config_convert.c"
+                       "zones_config_migrate.c"
                        "kiln_cfg_store.c"
                        "kiln_cfg_http.c"
                        "safety_cfg_store.c"

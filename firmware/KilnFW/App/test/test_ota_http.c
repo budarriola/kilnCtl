@@ -121,6 +121,21 @@ static inline BaseType_t ota_http_test_xSemaphoreTake(SemaphoreHandle_t sem, Tic
 #define TAG OTA_HTTP_TAG_UNUSED
 #include "../drivers/ota_http.c"
 #undef TAG
+// ota_http.c split 2026-09-04 (ROADMAP.md M15 A3, "files over 1500 lines
+// should be broken up where it makes sense" -- ota_http.c had grown to 2508
+// lines) into ota_http.c/ota_http_esp.c/ota_http_pico.c/ota_http_recovery.c
+// -- see ota_http_internal.h's header comment for the file map. This test
+// reaches ota_pico_rollback_post_handler()/ota_pico_rollback_status_get_
+// handler() and the pico-rollback async state directly (both now defined
+// in ota_http_pico.c, see below), same "#include the .c directly" reasoning
+// as ota_http.c above -- no new TAG guard needed here, `TAG` itself was
+// renamed to the non-static `OTA_HTTP_TAG` by that split (ota_http_
+// internal.h), so the three files below only ever `extern` it, never
+// redefine it. Same wifi_prov.c split precedent as test_wifi_prov.c's own
+// header comment on its four #includes.
+#include "../drivers/ota_http_esp.c"
+#include "../drivers/ota_http_pico.c"
+#include "../drivers/ota_http_recovery.c"
 
 #define TAG FACTORY_RESET_TAG_UNUSED
 #include "../drivers/factory_reset.c"
@@ -234,7 +249,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
 // autotune_engine.h
 bool autotune_engine_is_active(void) { return false; }
 
-// safety_link.h -- never actually invoked by any test here (s_safety is
+// safety_link.h -- never actually invoked by any test here (ota_http_safety is
 // left NULL for every test -- ota_http_start()'s io_or_null/safety_or_null
 // arguments), but must resolve.
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
@@ -256,7 +271,7 @@ esp_err_t safety_link_send_rollback_ex(SafetyLinkClass *link, safety_link_rollba
     (void)link;
     (void)out_reason_code;
     // Never actually invoked by any test in this file -- ota_pico_rollback_
-    // post_handler() is not exercised here (s_safety stays NULL, same "must
+    // post_handler() is not exercised here (ota_http_safety stays NULL, same "must
     // resolve, never called" role as the safety_link_get_status() stub
     // above), so any fixed outcome is fine as a link-time stub.
     if (out_outcome) *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
@@ -851,8 +866,8 @@ static void test_pico_rollback_post_returns_pending_without_blocking(void)
     s_test_sweep_active = false;
     s_update_claim = OTA_UPDATE_NONE; // ensure no earlier test left the mutex claimed
     memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
-    s_safety = &s_rollback_test_safety;
-    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
+    ota_http_safety = &s_rollback_test_safety;
+    memset(&ota_http_pico_rollback_async, 0, sizeof(ota_http_pico_rollback_async));
 
     set_pico_rollback_headers_for(g_stub_ap_password);
     s_last_resp_status[0] = '\0';
@@ -862,7 +877,7 @@ static void test_pico_rollback_post_returns_pending_without_blocking(void)
     memset(&req, 0, sizeof(req));
     esp_err_t err = ota_pico_rollback_post_handler(&req);
 
-    s_safety = NULL; // restore -- every other test in this file expects s_safety == NULL
+    ota_http_safety = NULL; // restore -- every other test in this file expects ota_http_safety == NULL
 
     TEST_CHECK(err == ESP_OK, "the handler itself always returns ESP_OK");
     TEST_CHECK(strcmp(s_last_resp_status, "202 Accepted") == 0,
@@ -870,7 +885,7 @@ static void test_pico_rollback_post_returns_pending_without_blocking(void)
               "async processing, the outcome is not known yet");
     TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"pending\"") != NULL,
               "the immediate body reports 'pending', not a final outcome");
-    TEST_CHECK(s_pico_rollback_async.state == OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS,
+    TEST_CHECK(ota_http_pico_rollback_async.state == OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS,
               "the assertion that can fail: the handler marks the async state IN_PROGRESS and hands "
               "off to the background task BEFORE returning -- if it fell back to calling safety_link_"
               "send_rollback_ex() synchronously (the old blocking behavior) this would instead already "
@@ -892,8 +907,8 @@ static void test_pico_rollback_status_reports_idle_before_any_request(void)
 {
     TEST_SECTION("ota_pico_rollback_status_get_handler -- reports 'idle' before any rollback has "
                  "ever been requested this boot");
-    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
-    s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
+    memset(&ota_http_pico_rollback_async, 0, sizeof(ota_http_pico_rollback_async));
+    ota_http_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
     s_last_resp_body[0] = '\0';
 
     httpd_req_t req;
@@ -908,8 +923,8 @@ static void test_pico_rollback_status_reports_pending_while_in_progress(void)
 {
     TEST_SECTION("ota_pico_rollback_status_get_handler -- reports 'pending' while the background "
                  "task is still running");
-    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
-    s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS;
+    memset(&ota_http_pico_rollback_async, 0, sizeof(ota_http_pico_rollback_async));
+    ota_http_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS;
     s_last_resp_body[0] = '\0';
 
     httpd_req_t req;
@@ -945,10 +960,10 @@ static void test_pico_rollback_status_reports_all_four_outcomes_honestly(void)
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
-        s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE;
-        s_pico_rollback_async.outcome = cases[i].outcome;
-        s_pico_rollback_async.reason_code = cases[i].reason_code;
+        memset(&ota_http_pico_rollback_async, 0, sizeof(ota_http_pico_rollback_async));
+        ota_http_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE;
+        ota_http_pico_rollback_async.outcome = cases[i].outcome;
+        ota_http_pico_rollback_async.reason_code = cases[i].reason_code;
         s_last_resp_body[0] = '\0';
 
         httpd_req_t req;
@@ -964,9 +979,9 @@ static void test_pico_rollback_status_reports_all_four_outcomes_honestly(void)
     // UNKNOWN_TIMEOUT body must never contain the word this code uses for a
     // real success ("rebooting"), and an ACCEPTED body must not claim
     // "unknown" -- i.e. the two are not accidentally sharing one template.
-    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
-    s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE;
-    s_pico_rollback_async.outcome = SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT;
+    memset(&ota_http_pico_rollback_async, 0, sizeof(ota_http_pico_rollback_async));
+    ota_http_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE;
+    ota_http_pico_rollback_async.outcome = SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT;
     s_last_resp_body[0] = '\0';
     httpd_req_t req2;
     memset(&req2, 0, sizeof(req2));

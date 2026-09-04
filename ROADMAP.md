@@ -1758,7 +1758,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       of the HTTP handler files and found no other plain `malloc` of a
       response/scratch buffer.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
-      ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, `ota_http.c` (2508),
+      ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, ~~`ota_http.c` (2508)~~,
       `ui_page_home.c` (2279), `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
       `zones_config_json.c` (1867), `main.c` (1820), `backup_http.c` (1756),
       `uart_bridge_ext.c` (1727), `zones_http_handlers.c` (1598). Split
@@ -1880,7 +1880,44 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       task's own scope). All 21/21 host test executables pass;
       `test_profiles_http.c` unchanged except #including the two new files
       alongside `profiles_http.c`, same convention as `test_wifi_prov.c`/
-      `test_autotune_engine_prestart.c`.
+      `test_autotune_engine_prestart.c`. `ota_http.c` part — **CLOSED
+      2026-09-04**: move-only split into `ota_http.c` (1096 lines: HMAC/KDF
+      helper, nonce+lockout state, challenge issue/verify
+      `ota_http_verify_request()`, the update-claim mutex, the interlock
+      snapshot/refusal glue, `ota_http_authenticate_request()`, the shared
+      `ota_http_get_client_ip`/`ota_http_send_json_clamped`/`ota_http_set_
+      fail_reason` helpers, and `ota_http_start()`), `ota_http_esp.c` (714,
+      `POST /api/ota/esp` transfer/status/rollback), `ota_http_pico.c` (653,
+      `POST /api/ota/pico` stage/relay/status/rollback plus the pico-
+      rollback async state) and `ota_http_recovery.c` (226, boot-recovery
+      exit and the unauthenticated `GET /api/ota/interlock`), sharing state
+      via `ota_http_internal.h` on the `profile_executor_internal.h`/
+      `wifi_prov_internal.h` precedent (shared statics as `extern`, former
+      `static` helpers widened to file-scope-internal). Symbol audit:
+      grepped every widened symbol both ways (a clash with a non-static
+      definition elsewhere fails the link; a clash with a same-named
+      `static` elsewhere links silently and breaks later) across all of
+      `App/drivers/` before trusting the link — `TAG`, `s_safety`, `s_io`/
+      `s_thermo_bus`-style names, `now_ms`, `get_client_ip`,
+      `send_json_clamped`, `set_fail_reason` were the ones with real
+      same-named `static`s elsewhere (`ota_pico_relay.c`'s own `now_ms()`
+      and `set_fail_reason()` mention, `kiln_io_owner.c`'s own `s_io`/
+      `s_safety`, dozens of files' own `static const char *TAG`) and were
+      renamed `OTA_HTTP_TAG`/`ota_http_safety`/`ota_http_get_client_ip`/
+      `ota_http_send_json_clamped`/`ota_http_set_fail_reason`; `now_ms` and
+      `s_thermo_bus`/`s_io` turned out to be needed only inside
+      `ota_http.c` itself once the seams were drawn, so they stayed
+      `static`, unrenamed. The nine cross-file route handlers
+      (`ota_esp_post_handler` etc.) were widened too, purely so
+      `ota_http_start()`'s `httpd_uri_t` table can name them from the other
+      files; audited the same way, zero collisions found (only two
+      doc-comment mentions, in `ota_pico_relay.h`/`heat_interlock.h`, not
+      symbols). `build_kilnfw` compiles and links all four files clean.
+      All 21/21 host test executables pass; `test_ota_http.c` updated to
+      `#include` the three new files alongside `ota_http.c` (same
+      convention as `test_wifi_prov.c`) and to use the renamed
+      `ota_http_safety`/`ota_http_pico_rollback_async` at its own direct
+      call sites.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because

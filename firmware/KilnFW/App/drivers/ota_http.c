@@ -1,4 +1,5 @@
 #include "ota_http.h"
+#include "ota_http_internal.h"
 #include "ota_http_util.h"
 
 #include <stdarg.h>
@@ -45,7 +46,54 @@
 #include "wifi_provision_http.h"
 #include "zones_http.h"
 
-static const char *TAG = "ota_http";
+#include "ota_http.h"
+#include "ota_http_util.h"
+
+#include <stdarg.h>
+#include <string.h>
+
+#include "psa/crypto.h"
+
+#include "build_info.h" /* FW_GIT_COMMIT/FW_GIT_DIRTY/FW_BUILD_DATE/FW_BUILD_TIME -- TODO.md 9.6's
+                          * per-processor build-identity fields for the ESP side, same header
+                          * safety_link.c already includes for the ANNOUNCE_VERSION payload */
+#include "esp_app_desc.h"
+#include "esp_app_format.h" /* esp_image_header_t, ESP_IMAGE_HEADER_MAGIC -- section 3's pre-esp_ota_begin() check */
+#include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_random.h"
+#include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
+#include "esp_timer.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+#include "lwip/inet.h"
+#include "lwip/sockets.h"
+
+#include <math.h>
+
+#include "autotune_engine.h"
+#include "boot_button.h"
+#include "boot_guard.h"
+#include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
+#include "kiln_io.h"
+#include "MAX31856.h"
+#include "ota_auth.h"
+#include "ota_pico_relay.h"
+#include "ota_record.h"
+#include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
+#include "run_state.h"
+#include "stack_margin.h"
+#include "web_encoding.h"
+#include "sim_backend.h"
+#include "wifi_prov.h"
+#include "wifi_provision_http.h"
+#include "zones_http.h"
+
+const char *OTA_HTTP_TAG = "ota_http";
 
 // GET /ota page (TODO.md 9.6) -- gzipped at configure time by
 // App/drivers/CMakeLists.txt's KILNCTL_GZIP_ASSETS list, same
@@ -144,27 +192,10 @@ static ota_auth_lockout_state_t s_lockout_pico_rollback;
 // rollback/status (ota_pico_rollback_status_get_handler()) for the outcome,
 // the same poll-for-progress shape /api/ota/pico/status already establishes
 // for the plain update.
-typedef enum {
-    OTA_PICO_ROLLBACK_ASYNC_IDLE = 0,       // never attempted this boot, or a
-                                             // POST is still working through
-                                             // its synchronous auth/interlock
-                                             // checks (nothing async started yet)
-    OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS,    // the background task is running
-                                             // safety_link_send_rollback_ex()
-    OTA_PICO_ROLLBACK_ASYNC_DONE,           // outcome/reason_code below are
-                                             // valid; stays DONE (not reset to
-                                             // IDLE) until a NEW rollback is
-                                             // requested, so a page that polls
-                                             // a little late still sees the
-                                             // result rather than racing back
-                                             // to IDLE first
-} ota_pico_rollback_async_state_t;
-
-typedef struct {
-    ota_pico_rollback_async_state_t state;
-    safety_link_rollback_outcome_t outcome;
-    uint8_t reason_code;
-} ota_pico_rollback_async_t;
+//
+// ota_pico_rollback_async_state_t/ota_pico_rollback_async_t moved to
+// ota_http_internal.h -- ota_http_pico.c (the reader/writer of the state
+// below) needs the type too.
 
 // Guarded by its own small mutex, deliberately separate from s_ota_lock
 // (nonce/lockout bookkeeping) and from the update-claim mechanism
@@ -172,15 +203,15 @@ typedef struct {
 // this state is written by a background task while the handler that started
 // it may already have returned and moved on to a different request, so it
 // cannot share either of those locks' lifetimes.
-static SemaphoreHandle_t s_pico_rollback_async_lock;
-static ota_pico_rollback_async_t s_pico_rollback_async;
+SemaphoreHandle_t ota_http_pico_rollback_async_lock;
+ota_pico_rollback_async_t ota_http_pico_rollback_async;
 
 // The hardware pointers main.c hands to ota_http_start(), same pattern (and
 // same NULL-tolerant meaning) as dashboard_http.c's s_dash struct. Read-only
 // after ota_http_start(), so no lock needed to read them.
 static kiln_io_t *s_io;
 static MAX31856BusClass *s_thermo_bus;
-static SafetyLinkClass *s_safety;
+SafetyLinkClass *ota_http_safety;
 
 // --- Single cross-processor update mutex (ota_http.h) ---------------------
 // Guarded by s_ota_lock, same as the nonce/lockout state above -- this is
@@ -195,48 +226,17 @@ typedef enum {
 
 static ota_update_claim_t s_update_claim = OTA_UPDATE_NONE;
 
-// --- POST /api/ota/esp progress (ota_http.h's ota_http_get_esp_progress()) -
-// Single writer (ota_esp_post_handler(), one at a time -- s_update_claim
-// above already guarantees no second transfer overlaps it), arbitrarily
-// many readers -- `volatile` is enough here, no semaphore needed, per
-// ota_http.h's doc comment on why a torn read of a phase enum/percentage
-// isn't a correctness problem the way the nonce/lockout state would be.
-static volatile ota_http_esp_phase_t s_esp_phase = OTA_HTTP_ESP_PHASE_IDLE;
-static volatile uint8_t s_esp_progress_pct = 0;
-
-static void esp_progress_set(ota_http_esp_phase_t phase, uint8_t pct)
-{
-    s_esp_phase = phase;
-    s_esp_progress_pct = pct;
-}
-
-void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent_out)
-{
-    if (phase_out) {
-        *phase_out = s_esp_phase;
-    }
-    if (percent_out) {
-        *percent_out = s_esp_progress_pct;
-    }
-}
-
 static uint32_t now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
-
-// hex_encode()/hex_decode() moved to ota_http_util.c (ota_http_hex_encode()/
-// ota_http_hex_decode()) -- see that file's header comment. Local aliases
-// keep every call site below unchanged.
-#define hex_encode ota_http_hex_encode
-#define hex_decode ota_http_hex_decode
 
 // Client IP for the "log every attempt with the source IP" requirement
 // (UPDATE_PROTOCOL.md section 2). Standard ESP-IDF httpd pattern: the
 // underlying socket is IPv4-mapped-into-IPv6 by lwip regardless of which
 // family the client actually connected over, so this handles both without
 // the caller needing to know which.
-static void get_client_ip(httpd_req_t *req, char *out, size_t out_len)
+void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len)
 {
     int sockfd = httpd_req_to_sockfd(req);
     if (sockfd < 0) {
@@ -266,7 +266,7 @@ static void get_client_ip(httpd_req_t *req, char *out, size_t out_len)
 static esp_err_t ota_page_get_handler(httpd_req_t *req)
 {
     if (!web_client_accepts_gzip(req)) {
-        return web_send_gzip_not_acceptable(req, TAG, "ota_page.html");
+        return web_send_gzip_not_acceptable(req, OTA_HTTP_TAG, "ota_page.html");
     }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
@@ -289,16 +289,16 @@ static esp_err_t ota_page_get_handler(httpd_req_t *req)
  * a short one is still useful, and the caller has already decided the operation
  * succeeded. The log line is there so an undersized buffer surfaces rather than
  * silently shipping half a document forever. */
-static esp_err_t send_json_clamped(httpd_req_t *req, const char *buf, int n, size_t cap)
+esp_err_t ota_http_send_json_clamped(httpd_req_t *req, const char *buf, int n, size_t cap)
 {
     if (n < 0) {
-        ESP_LOGE(TAG, "response formatting failed");
+        ESP_LOGE(OTA_HTTP_TAG, "response formatting failed");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "response formatting failed");
         return ESP_OK;
     }
     size_t len = (size_t)n;
     if (len >= cap) {
-        ESP_LOGE(TAG, "response did not fit in %u bytes -- truncated, raise the buffer", (unsigned)cap);
+        ESP_LOGE(OTA_HTTP_TAG, "response did not fit in %u bytes -- truncated, raise the buffer", (unsigned)cap);
         len = cap - 1;
     }
     return httpd_resp_send(req, buf, len);
@@ -310,10 +310,10 @@ static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
     esp_fill_random(rand_bytes, sizeof(rand_bytes)); // hardware RNG, not a hand-rolled source
 
     char ip[46];
-    get_client_ip(req, ip, sizeof(ip));
+    ota_http_get_client_ip(req, ip, sizeof(ip));
 
     if (xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGW(TAG, "OTA challenge from %s: internal lock timeout, refused", ip);
+        ESP_LOGW(OTA_HTTP_TAG, "OTA challenge from %s: internal lock timeout, refused", ip);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "busy");
         return ESP_OK;
     }
@@ -330,10 +330,10 @@ static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
     char json[64];
     int n = snprintf(json, sizeof(json), "{\"nonce\":\"%s\"}", hex);
 
-    ESP_LOGI(TAG, "OTA challenge issued to %s", ip);
+    ESP_LOGI(OTA_HTTP_TAG, "OTA challenge issued to %s", ip);
 
     httpd_resp_set_type(req, "application/json");
-    send_json_clamped(req, json, n, sizeof(json));
+    ota_http_send_json_clamped(req, json, n, sizeof(json));
     return ESP_OK;
 }
 
@@ -364,7 +364,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
     // context and the source IP, same as every other auth decision in this
     // function.
     if (boot_button_ota_bypass_active()) {
-        ESP_LOGE(TAG, "OTA verify(%s) from %s: AUTHENTICATION BYPASSED by the BOOT-button recovery "
+        ESP_LOGE(OTA_HTTP_TAG, "OTA verify(%s) from %s: AUTHENTICATION BYPASSED by the BOOT-button recovery "
                       "window -- a long-press on GPIO0 opened this, %lu ms remain",
                  ctx_str, ip, (unsigned long)boot_button_bypass_remaining_ms());
         return OTA_HTTP_VERIFY_OK;
@@ -378,13 +378,13 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
         // caller-facing effect (refused) is the same, and returning
         // LOCKED_OUT here means the caller never treats an internal
         // contention failure as "the MAC was fine, go ahead."
-        ESP_LOGW(TAG, "OTA verify(%s) from %s: internal lock timeout, refused", ctx_str, ip);
+        ESP_LOGW(OTA_HTTP_TAG, "OTA verify(%s) from %s: internal lock timeout, refused", ctx_str, ip);
         return OTA_HTTP_VERIFY_LOCKED_OUT;
     }
 
     if (ota_auth_lockout_is_locked(lockout, t)) {
         xSemaphoreGive(s_ota_lock);
-        ESP_LOGW(TAG, "OTA verify(%s) from %s: refused, endpoint locked out", ctx_str, ip);
+        ESP_LOGW(OTA_HTTP_TAG, "OTA verify(%s) from %s: refused, endpoint locked out", ctx_str, ip);
         return OTA_HTTP_VERIFY_LOCKED_OUT;
     }
 
@@ -394,7 +394,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
     ota_auth_nonce_check_t nonce_check = ota_auth_nonce_check(&s_nonce, t);
     if (nonce_check != OTA_AUTH_NONCE_OK) {
         xSemaphoreGive(s_ota_lock);
-        ESP_LOGW(TAG, "OTA verify(%s) from %s: no valid nonce (code %d)", ctx_str, ip,
+        ESP_LOGW(OTA_HTTP_TAG, "OTA verify(%s) from %s: no valid nonce (code %d)", ctx_str, ip,
                  (int)nonce_check);
         return OTA_HTTP_VERIFY_NO_VALID_NONCE;
     }
@@ -424,7 +424,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
     // refusal) and does NOT record a lockout failure -- like a stale nonce,
     // this is the board's own configuration, not a wrong-password guess.
     if (pw_len == 0) {
-        ESP_LOGE(TAG, "OTA verify(%s) from %s: REFUSED -- this board's AP password is empty (open "
+        ESP_LOGE(OTA_HTTP_TAG, "OTA verify(%s) from %s: REFUSED -- this board's AP password is empty (open "
                       "AP), so OTA auth would reduce to nothing; set an AP password to update this "
                       "board over HTTP, or use the physical BOOT-button recovery window (hold BOOT "
                       "during boot) which does not depend on the AP password",
@@ -457,7 +457,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
     }
     if (hmac_rc != 0) {
         memset(key, 0, sizeof(key));
-        ESP_LOGE(TAG, "OTA verify(%s) from %s: mbedtls HMAC failed (%d)", ctx_str, ip, hmac_rc);
+        ESP_LOGE(OTA_HTTP_TAG, "OTA verify(%s) from %s: mbedtls HMAC failed (%d)", ctx_str, ip, hmac_rc);
         // Still invalidate the nonce below -- a crypto-library failure must
         // not leave a usable challenge sitting around for a retry to (maybe)
         // succeed against.
@@ -491,12 +491,12 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
         // than silently leave the nonce reusable. This is a defensive edge
         // case (the same short timeout already succeeded twice above in
         // this same call), not an expected path.
-        ESP_LOGE(TAG, "OTA verify(%s) from %s: lock timeout during invalidate/record -- nonce "
+        ESP_LOGE(OTA_HTTP_TAG, "OTA verify(%s) from %s: lock timeout during invalidate/record -- nonce "
                       "may remain reusable until it naturally expires",
                  ctx_str, ip);
     }
 
-    ESP_LOGI(TAG, "OTA verify(%s) from %s: %s", ctx_str, ip, match ? "OK" : "MAC mismatch");
+    ESP_LOGI(OTA_HTTP_TAG, "OTA verify(%s) from %s: %s", ctx_str, ip, match ? "OK" : "MAC mismatch");
     return match ? OTA_HTTP_VERIFY_OK : OTA_HTTP_VERIFY_BAD_MAC;
 }
 
@@ -508,7 +508,7 @@ bool ota_http_update_try_begin(ota_http_context_t ctx)
         // Cannot safely check/mutate the claim -- refuse rather than risk
         // two callers both believing they won it, same reasoning as
         // ota_http_verify_request()'s lock-timeout path above.
-        ESP_LOGW(TAG, "OTA update claim(%s): internal lock timeout, refused",
+        ESP_LOGW(OTA_HTTP_TAG, "OTA update claim(%s): internal lock timeout, refused",
                  ctx == OTA_HTTP_CONTEXT_ESP ? "esp" : "pico");
         return false;
     }
@@ -520,9 +520,9 @@ bool ota_http_update_try_begin(ota_http_context_t ctx)
     xSemaphoreGive(s_ota_lock);
 
     if (won) {
-        ESP_LOGI(TAG, "OTA update claim(%s): acquired", ctx == OTA_HTTP_CONTEXT_ESP ? "esp" : "pico");
+        ESP_LOGI(OTA_HTTP_TAG, "OTA update claim(%s): acquired", ctx == OTA_HTTP_CONTEXT_ESP ? "esp" : "pico");
     } else {
-        ESP_LOGW(TAG, "OTA update claim(%s): refused, an update is already in progress",
+        ESP_LOGW(OTA_HTTP_TAG, "OTA update claim(%s): refused, an update is already in progress",
                  ctx == OTA_HTTP_CONTEXT_ESP ? "esp" : "pico");
     }
     return won;
@@ -532,7 +532,7 @@ void ota_http_update_end(void)
 {
     if (xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
         if (s_update_claim != OTA_UPDATE_NONE) {
-            ESP_LOGI(TAG, "OTA update claim released");
+            ESP_LOGI(OTA_HTTP_TAG, "OTA update claim released");
         }
         s_update_claim = OTA_UPDATE_NONE;
         xSemaphoreGive(s_ota_lock);
@@ -540,7 +540,7 @@ void ota_http_update_end(void)
         // Defensive: could not take the lock to release. Logged loudly
         // because an unreleased claim permanently refuses every future
         // update until reboot -- this must never happen silently.
-        ESP_LOGE(TAG, "OTA update claim release: lock timeout -- claim may remain held");
+        ESP_LOGE(OTA_HTTP_TAG, "OTA update claim release: lock timeout -- claim may remain held");
     }
 }
 
@@ -564,7 +564,7 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx)
     // exists so a future caller that runs early degrades to "refuse" instead
     // of taking the board down.
     if (s_ota_lock == NULL) {
-        ESP_LOGW(TAG, "OTA update claim query before ota_http_start() -- reporting in-progress (fail-safe)");
+        ESP_LOGW(OTA_HTTP_TAG, "OTA update claim query before ota_http_start() -- reporting in-progress (fail-safe)");
         return true;
     }
 
@@ -575,7 +575,7 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx)
         // Cannot confirm the claim is free -- treat contention as "in
         // progress" rather than risk telling a caller it's safe to start a
         // second update when we simply couldn't check.
-        ESP_LOGW(TAG, "OTA update claim query: internal lock timeout, reporting in-progress");
+        ESP_LOGW(OTA_HTTP_TAG, "OTA update claim query: internal lock timeout, reporting in-progress");
         return true;
     }
 
@@ -675,9 +675,9 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
 
     // Safety link: NULL (no link this boot) is treated as down, same
     // fail-safe default as every other consumer of this pointer.
-    if (s_safety) {
+    if (ota_http_safety) {
         safety_link_status_t link_status;
-        snap.safety_link_up = (safety_link_get_status(s_safety, &link_status) == ESP_OK)
+        snap.safety_link_up = (safety_link_get_status(ota_http_safety, &link_status) == ESP_OK)
                                    ? link_status.link_up
                                    : false;
     } else {
@@ -834,26 +834,7 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 
 // --- POST /api/ota/esp (TODO.md 9.5, ota_http.h's doc comment) ------------
 
-static const char *OTA_MAC_HEADER = "X-Ota-Mac"; // shared by both /api/ota/esp and /api/ota/pico
-
-// Streamed in fixed-size chunks so the ~1.1-2 MB image never sits in RAM
-// whole (UPDATE_PROTOCOL.md section 3: "a full image will not fit in RAM").
-// 4 KB, matching the doc's own suggested size. This is `static`, NOT a
-// stack buffer -- wifi_provision_http.c's httpd config.stack_size is 8192,
-// already sized against the largest existing handler's *smaller* buffers
-// (zones_post_handler's 2561-byte body, see that file's comment on the hang/
-// reset it caused before being bumped); a 4 KB buffer on top of that same
-// stack would eat half of it just for this one variable. Safe as a single
-// shared buffer because it is only ever touched while s_update_claim (above)
-// is held by THIS transfer -- ota_http_update_try_begin() guarantees no
-// second ESP or Pico transfer can be in flight at the same time to race it.
-#define OTA_ESP_CHUNK_SIZE 4096
-static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
-
-// verify_result_str() moved to ota_http_util.c (ota_http_verify_result_str())
-// -- see that file's header comment. Local alias keeps every call site
-// below unchanged.
-#define verify_result_str ota_http_verify_result_str
+const char *OTA_MAC_HEADER = "X-Ota-Mac"; // shared by both /api/ota/esp and /api/ota/pico
 
 // See ota_http.h's doc comment above this function's declaration for the
 // full contract. Consolidates the "X-Ota-Mac header well-formed -> hex-decode
@@ -861,11 +842,11 @@ static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 // runs inline, for the first caller OUTSIDE this file (factory_reset.c).
 bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, char ip_out[46])
 {
-    get_client_ip(req, ip_out, 46);
+    ota_http_get_client_ip(req, ip_out, 46);
 
     size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
     if (mac_hex_len != 64) {
-        ESP_LOGW(TAG, "OTA authenticate(ctx=%d) from %s: missing or malformed X-Ota-Mac header "
+        ESP_LOGW(OTA_HTTP_TAG, "OTA authenticate(ctx=%d) from %s: missing or malformed X-Ota-Mac header "
                       "(len %u, want 64)",
                  (int)ctx, ip_out, (unsigned)mac_hex_len);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -879,7 +860,7 @@ bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, cha
     }
     uint8_t mac[32];
     if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(TAG, "OTA authenticate(ctx=%d) from %s: X-Ota-Mac is not valid hex", (int)ctx, ip_out);
+        ESP_LOGW(OTA_HTTP_TAG, "OTA authenticate(ctx=%d) from %s: X-Ota-Mac is not valid hex", (int)ctx, ip_out);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
         return false;
     }
@@ -908,7 +889,7 @@ bool ota_http_auth_disabled(void)
 // truncation (correctly) refuses to build. Formatting into `tmp` first,
 // which is sized generously enough that no realistic message here actually
 // truncates, sidesteps that without shortening the messages themselves.
-static void set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...)
+void ota_http_set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...)
 {
     char tmp[160];
     va_list ap;
@@ -919,1422 +900,12 @@ static void set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...)
     dst[dst_cap - 1] = '\0';
 }
 
-// Everything from "the mutex is held" to "the mutex is released" -- a
-// single function so ota_esp_post_handler() below has exactly one call site
-// for ota_http_update_end(), per TODO.md 9.5's "use a single cleanup path,
-// not duplicated calls at every return" requirement. Every exit -- success,
-// a refused/corrupt image, a mid-transfer read/write failure -- sets
-// `ok`/`fail_reason` and falls through to the one cleanup block at the
-// bottom, which appends the NVS record and updates the progress snapshot
-// exactly once regardless of which path got there.
-static void ota_esp_do_transfer(httpd_req_t *req, const char *ip)
-{
-    bool ok = false;
-    char fail_reason[OTA_RECORD_REASON_MAX] = "unknown failure";
-    char version_after[OTA_RECORD_VERSION_STR_MAX] = "";
-    esp_ota_handle_t handle = 0;
-    bool ota_began = false;
-    const esp_partition_t *target = NULL;
-
-    // Image SHA-256, computed over exactly the bytes esp_ota_write() is
-    // given (the 24-byte header first, then every streamed chunk) -- a
-    // record of what was actually written, not a gate (see ota_record.h's
-    // header comment: nothing compares this against an expected value).
-    // Best-effort: a PSA failure here logs and leaves the record's hash
-    // field empty rather than failing an otherwise-good transfer over it.
-    psa_hash_operation_t sha_op = psa_hash_operation_init();
-    bool sha_op_active = false;
-    char sha_hex[OTA_RECORD_SHA256_HEX_MAX] = "";
-
-    const esp_app_desc_t *running_desc = esp_app_get_description();
-    const char *version_before = (running_desc && running_desc->version[0]) ? running_desc->version : "";
-
-    size_t content_len = req->content_len;
-    if (content_len == 0) {
-        set_fail_reason(fail_reason, sizeof(fail_reason), "missing Content-Length / empty body");
-        ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
-        goto cleanup;
-    }
-
-    target = esp_ota_get_next_update_partition(NULL);
-    if (!target) {
-        set_fail_reason(fail_reason, sizeof(fail_reason), "no free OTA partition");
-        ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
-        goto cleanup;
-    }
-    if (content_len > target->size) {
-        set_fail_reason(fail_reason, sizeof(fail_reason), "image (%u B) larger than the OTA partition (%u B)",
-                 (unsigned)content_len, (unsigned)target->size);
-        ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
-        goto cleanup;
-    }
-
-    // Per-connection socket timeout, NOT the server-wide default (that
-    // stays whatever wifi_provision_http.c's config sets and applies to
-    // every other endpoint) -- see ota_http.h's doc comment for why a
-    // targeted setsockopt() here is the chosen fix over a global config
-    // bump. This is a PER-RECV timeout (how long to wait for the NEXT
-    // chunk to arrive), not a whole-transfer deadline -- TCP keeps
-    // delivering chunks well inside this window on any link that is
-    // actually making progress, so bounding each individual recv() call
-    // at 30 s is what "covers the whole transfer" means in practice: the
-    // total transfer can take minutes as long as no single gap between
-    // chunks exceeds 30 s. A dead connection still times out and is
-    // cleaned up; a slow-but-alive one is not punished for its aggregate
-    // duration.
-    {
-        int sockfd = httpd_req_to_sockfd(req);
-        if (sockfd >= 0) {
-            struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
-            if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
-                ESP_LOGW(TAG, "OTA esp update from %s: could not raise the socket receive timeout -- "
-                              "the server-wide default will apply instead",
-                         ip);
-            }
-        }
-    }
-
-    // Buffer just the image header (24 B) before esp_ota_begin() --
-    // UPDATE_PROTOCOL.md section 3: "ESP-IDF images already carry a magic
-    // byte and a chip ID; verify them before calling esp_ota_begin()."
-    esp_progress_set(OTA_HTTP_ESP_PHASE_VERIFYING, 0);
-    {
-        esp_image_header_t hdr;
-        size_t hdr_received = 0;
-        while (hdr_received < sizeof(hdr)) {
-            int ret = httpd_req_recv(req, ((char *)&hdr) + hdr_received, sizeof(hdr) - hdr_received);
-            if (ret <= 0) {
-                set_fail_reason(fail_reason, sizeof(fail_reason), "body read failed/closed while reading the image header (%d)", ret);
-                ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed while reading image header");
-                goto cleanup;
-            }
-            hdr_received += (size_t)ret;
-        }
-
-        if (hdr.magic != ESP_IMAGE_HEADER_MAGIC) {
-            set_fail_reason(fail_reason, sizeof(fail_reason), "not an ESP-IDF image (bad magic 0x%02X)", hdr.magic);
-            ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not a valid ESP-IDF image (bad magic)");
-            goto cleanup;
-        }
-        if (hdr.chip_id != ESP_CHIP_ID_ESP32S3) {
-            set_fail_reason(fail_reason, sizeof(fail_reason), "image is for chip id %u, this board is ESP32-S3 (%u)",
-                     (unsigned)hdr.chip_id, (unsigned)ESP_CHIP_ID_ESP32S3);
-            ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "image is built for a different chip");
-            goto cleanup;
-        }
-
-        esp_err_t rc = esp_ota_begin(target, content_len, &handle);
-        if (rc != ESP_OK) {
-            set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_begin failed: %s", esp_err_to_name(rc));
-            ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "esp_ota_begin failed");
-            goto cleanup;
-        }
-        ota_began = true;
-
-        psa_status_t hs = psa_hash_setup(&sha_op, PSA_ALG_SHA_256);
-        sha_op_active = (hs == PSA_SUCCESS);
-        if (!sha_op_active) {
-            ESP_LOGW(TAG, "OTA esp update from %s: psa_hash_setup failed (%d) -- record will have no "
-                          "image hash, transfer continues",
-                     ip, (int)hs);
-        }
-
-        rc = esp_ota_write(handle, &hdr, sizeof(hdr));
-        if (rc != ESP_OK) {
-            set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_write (header) failed: %s", esp_err_to_name(rc));
-            ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
-            goto cleanup;
-        }
-        if (sha_op_active) {
-            (void)psa_hash_update(&sha_op, (const uint8_t *)&hdr, sizeof(hdr));
-        }
-    }
-
-    // Stream the rest. Never read ahead of what esp_ota_write() has
-    // consumed -- each loop iteration reads one chunk and writes it before
-    // asking for the next, so TCP flow control (not a read-ahead buffer
-    // with nowhere to go) paces the transfer, per UPDATE_PROTOCOL.md's
-    // "do not read the request body faster than the link drains."
-    {
-        size_t written = sizeof(esp_image_header_t);
-        int last_logged_decile = 0;
-        esp_progress_set(OTA_HTTP_ESP_PHASE_WRITING, 0);
-        while (written < content_len) {
-            size_t want = content_len - written;
-            if (want > sizeof(s_ota_esp_chunk)) {
-                want = sizeof(s_ota_esp_chunk);
-            }
-            int ret = httpd_req_recv(req, (char *)s_ota_esp_chunk, want);
-            if (ret <= 0) {
-                set_fail_reason(fail_reason, sizeof(fail_reason), "body read failed/closed at %u/%u bytes (%d)",
-                         (unsigned)written, (unsigned)content_len, ret);
-                ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed mid-transfer");
-                goto cleanup;
-            }
-
-            esp_err_t rc = esp_ota_write(handle, s_ota_esp_chunk, (size_t)ret);
-            if (rc != ESP_OK) {
-                set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_write failed at %u bytes: %s",
-                         (unsigned)written, esp_err_to_name(rc));
-                ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
-                goto cleanup;
-            }
-            if (sha_op_active) {
-                (void)psa_hash_update(&sha_op, s_ota_esp_chunk, (size_t)ret);
-            }
-            written += (size_t)ret;
-
-            // Progress every ~10% (TODO.md 9.5: "progress pushed... at
-            // least every 2 s" -- decile logging on a multi-second/minute
-            // transfer satisfies that cadence without flooding the log on
-            // a fast LAN).
-            int decile = (int)((written * 10u) / content_len);
-            if (decile > last_logged_decile) {
-                last_logged_decile = decile;
-                uint8_t pct = (uint8_t)((written * 100u) / content_len);
-                esp_progress_set(OTA_HTTP_ESP_PHASE_WRITING, pct);
-                ESP_LOGI(TAG, "OTA esp update from %s: %u%% (%u/%u bytes)", ip, pct,
-                         (unsigned)written, (unsigned)content_len);
-            }
-        }
-    }
-
-    esp_progress_set(OTA_HTTP_ESP_PHASE_FINALIZING, 100);
-    {
-        esp_err_t rc = esp_ota_end(handle);
-        // esp_ota_end() frees the handle regardless of its result (see its
-        // own doc comment) -- ota_began must go false here either way so
-        // the cleanup block below never calls esp_ota_abort() on a handle
-        // that no longer exists.
-        ota_began = false;
-        if (rc != ESP_OK) {
-            set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_end failed: %s (image validation failed?)",
-                     esp_err_to_name(rc));
-            ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "esp_ota_end failed -- image rejected");
-            goto cleanup;
-        }
-
-        rc = esp_ota_set_boot_partition(target);
-        if (rc != ESP_OK) {
-            set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_set_boot_partition failed: %s", esp_err_to_name(rc));
-            ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not set boot partition -- "
-                                                                       "old image is still active");
-            goto cleanup;
-        }
-    }
-
-    // Real, not a placeholder: read back the app description from the
-    // partition that was just written, the same way esp_ota_get_partition_
-    // description() is documented to be used for an inactive slot's
-    // version. Best-effort -- a failure here does not undo a successful
-    // update, it just leaves version_after blank in the record.
-    {
-        esp_app_desc_t written_desc;
-        if (esp_ota_get_partition_description(target, &written_desc) == ESP_OK) {
-            strncpy(version_after, written_desc.version, sizeof(version_after) - 1);
-            version_after[sizeof(version_after) - 1] = '\0';
-        }
-    }
-
-    ok = true;
-    strncpy(fail_reason, "ok", sizeof(fail_reason));
-    ESP_LOGI(TAG, "OTA esp update from %s: complete, %u bytes written to '%s', now %s -- "
-                  "reboot required to run it (this image stays PENDING_VERIFY until "
-                  "ota_rollback_confirm_task() in main.c confirms it)",
-             ip, (unsigned)content_len, target->label, version_after[0] ? version_after : "(unknown version)");
-
-cleanup:
-    if (ota_began) {
-        // Any goto above that happens after esp_ota_begin() succeeded but
-        // before esp_ota_end() ran leaves ota_began true -- abort so the
-        // partial write can never be selected as a boot target.
-        esp_ota_abort(handle);
-    }
-
-    // Finish (on success -- the hash covers exactly the bytes that made it
-    // into the flash write path) or abort (on failure -- PSA requires every
-    // started operation to be finished or aborted, and a failed transfer's
-    // partial hash is not meaningful anyway) whatever hash operation was
-    // started above. sha_hex stays "" if no operation was ever started, or
-    // if psa_hash_finish() itself failed.
-    if (sha_op_active) {
-        if (ok) {
-            uint8_t digest[32];
-            size_t digest_len = 0;
-            psa_status_t hs = psa_hash_finish(&sha_op, digest, sizeof(digest), &digest_len);
-            if (hs == PSA_SUCCESS && digest_len == sizeof(digest)) {
-                hex_encode(digest, sizeof(digest), sha_hex);
-            } else {
-                ESP_LOGW(TAG, "OTA esp update from %s: psa_hash_finish failed (%d) -- record will "
-                              "have no image hash",
-                         ip, (int)hs);
-            }
-        } else {
-            (void)psa_hash_abort(&sha_op);
-        }
-    }
-
-    esp_progress_set(ok ? OTA_HTTP_ESP_PHASE_DONE : OTA_HTTP_ESP_PHASE_FAILED,
-                      ok ? 100 : s_esp_progress_pct);
-
-    {
-        ota_record_t rec;
-        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "esp", version_before,
-                         version_after, ok, fail_reason, sha_hex);
-        ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
-    }
-
-    if (ok) {
-        char body[128];
-        int n = snprintf(body, sizeof(body), "{\"ok\":true,\"bytes\":%u,\"partition\":\"%s\",\"version\":\"%s\"}",
-                          (unsigned)content_len, target->label, version_after);
-        httpd_resp_set_type(req, "application/json");
-        send_json_clamped(req, body, n, sizeof(body));
-    }
-    // On failure, the specific httpd_resp_send_err() call above (at
-    // whichever goto fired) has already sent the response -- nothing left
-    // to send here.
-
-    // Released exactly once, regardless of which path got here -- the
-    // single-cleanup-path requirement this whole function exists to
-    // satisfy. Idempotent even if something above went wrong before the
-    // claim was actually held, per ota_http_update_end()'s own doc comment.
-    ota_http_update_end();
-}
-
-static esp_err_t ota_esp_post_handler(httpd_req_t *req)
-{
-    char ip[46];
-    get_client_ip(req, ip, sizeof(ip));
-
-    // 1. X-Ota-Mac header present and exactly 64 hex chars -- refused
-    // before the body is touched at all, per ota_http.h's documented order.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(TAG, "OTA esp update from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(TAG, "OTA esp update from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    // 2. Auth -- refuse immediately (403) on anything but OK, still before
-    // the body is read.
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
-        return ESP_OK;
-    }
-
-    // 3. Interlocks -- run AFTER auth (see ota_http_check_interlocks()'s own
-    // doc comment for why: an unauthenticated interlock check would leak
-    // live kiln telemetry). esp_http_server's httpd_err_code_t has no 409
-    // entry, so the "409 Conflict" status TODO.md asks for ("409 or
-    // similar") is set directly via httpd_resp_set_status() rather than
-    // httpd_resp_send_err(), which only knows the enum's fixed set.
-    char reason[OTA_INTERLOCK_REASON_MAX];
-    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
-                                                            sizeof(reason));
-    if (gate != OTA_INTERLOCK_OK) {
-        ESP_LOGW(TAG, "OTA esp update from %s: refused by interlock: %s", ip, reason);
-        return ota_http_send_interlock_refusal(req, gate, reason);
-    }
-
-    // 4. Single update mutex -- claimed before any body byte is read, so a
-    // second concurrent attempt (another tab, an agent racing a human) is
-    // refused immediately rather than partway through a transfer.
-    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)) {
-        ESP_LOGW(TAG, "OTA esp update from %s: refused, an update is already in progress", ip);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-    }
-
-    // From here, the mutex is held and ota_esp_do_transfer() owns releasing
-    // it exactly once, on every exit path -- see that function's own doc
-    // comment.
-    ota_esp_do_transfer(req, ip);
-    return ESP_OK;
-}
-
-// --- POST /api/ota/pico, GET /api/ota/pico/status (TODO.md 9.5) -----------
-// See ota_http.h's header comment on this section for the full wire
-// contract and the mutex-ownership handoff to ota_pico_relay.c.
-
-// Same static-not-stack reasoning as OTA_ESP_CHUNK_SIZE/s_ota_esp_chunk
-// above. A SEPARATE buffer rather than reusing s_ota_esp_chunk: the two
-// could technically share one (the cross-processor update mutex guarantees
-// only one of the ESP or Pico transfer is ever in flight at a time), but
-// keeping them distinct keeps each transfer's code readable on its own
-// without a reader having to go verify that cross-file invariant first.
-#define OTA_PICO_CHUNK_SIZE 4096
-static uint8_t s_ota_pico_chunk[OTA_PICO_CHUNK_SIZE];
-
-// Streams the browser upload into `pico_img`, computing a running CRC32
-// alongside it (esp_rom_crc32_le() -- see ota_http.h's header comment for
-// why this, not a second hand-rolled CRC32, is used: it is the same
-// IEEE 802.3/zlib algorithm SaftyFW's bootloader/crc32.c implements,
-// confirmed by reading both this header's own doc comment and that file --
-// same poly 0xEDB88320 reflected, same init/final XOR 0xFFFFFFFF, reached
-// via esp_rom_crc32_le(0xFFFFFFFF, ...) chained across chunks then a final
-// XOR, per esp_rom_crc.h's own "add ~ at the beginning and the end" chaining
-// recipe). On success, hands off to ota_pico_relay_start() and returns
-// without releasing the update mutex (see ota_http.h's header comment for
-// why); on any failure, releases the mutex itself and responds with a
-// specific error.
-static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
-{
-    bool started_relay = false;
-    char fail_reason[256] = "unknown failure";
-    // Declared up here, not at first use, so every goto below (including
-    // the very first check) can jump straight to the single cleanup block
-    // without skipping past an initializer -- same discipline
-    // ota_esp_do_transfer() uses for handle/ota_began/target.
-    size_t content_len = 0;
-    const esp_partition_t *part = NULL;
-    uint32_t crc = 0xFFFFFFFFu; // esp_rom_crc.h's own chaining recipe -- see this function's doc comment
-    size_t written = 0;
-
-    // Image SHA-256 over every byte staged into pico_img -- same
-    // best-effort, record-not-gate reasoning as ota_esp_do_transfer()'s own
-    // copy of this pattern (see ota_record.h's header comment). The 32-byte
-    // digest (not the hex string) is handed to ota_pico_relay_start(),
-    // which owns turning it into the eventual ota_record_t for the Pico
-    // path -- this function's own job ends at "staged successfully, relay
-    // started."
-    psa_hash_operation_t sha_op = psa_hash_operation_init();
-    bool sha_op_active = false;
-    uint8_t sha_digest[32];
-    bool have_sha_digest = false;
-
-    if (!s_safety) {
-        snprintf(fail_reason, sizeof(fail_reason), "no safety link configured this boot -- nothing to relay to");
-        ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
-        goto cleanup;
-    }
-
-    content_len = req->content_len;
-    if (content_len == 0) {
-        snprintf(fail_reason, sizeof(fail_reason), "missing Content-Length / empty body");
-        ESP_LOGW(TAG, "OTA pico update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
-        goto cleanup;
-    }
-
-    part = ota_pico_img_partition();
-    if (!part) {
-        snprintf(fail_reason, sizeof(fail_reason), "pico_img staging partition not found");
-        ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
-        goto cleanup;
-    }
-    if (content_len > part->size) {
-        snprintf(fail_reason, sizeof(fail_reason), "image (%u B) larger than the pico_img partition (%u B)",
-                 (unsigned)content_len, (unsigned)part->size);
-        ESP_LOGW(TAG, "OTA pico update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
-        goto cleanup;
-    }
-
-    // Same per-connection socket timeout rationale as ota_esp_do_transfer()
-    // above -- a per-recv-call bound, not a whole-transfer deadline.
-    {
-        int sockfd = httpd_req_to_sockfd(req);
-        if (sockfd >= 0) {
-            struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
-            if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
-                ESP_LOGW(TAG, "OTA pico update from %s: could not raise the socket receive timeout", ip);
-            }
-        }
-    }
-
-    // Erase only what this upload needs, rounded up to the flash sector
-    // size esp_partition_write() requires already-erased -- not the whole
-    // 896K partition, which would cost real time for no benefit on a
-    // typical (much smaller) Pico image.
-    {
-        uint32_t sector = esp_partition_get_main_flash_sector_size();
-        size_t erase_len = ((content_len + sector - 1u) / sector) * sector;
-        esp_err_t erc = esp_partition_erase_range(part, 0, erase_len);
-        if (erc != ESP_OK) {
-            snprintf(fail_reason, sizeof(fail_reason), "pico_img erase failed: %s", esp_err_to_name(erc));
-            ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash erase failed");
-            goto cleanup;
-        }
-    }
-
-    {
-        psa_status_t hs = psa_hash_setup(&sha_op, PSA_ALG_SHA_256);
-        sha_op_active = (hs == PSA_SUCCESS);
-        if (!sha_op_active) {
-            ESP_LOGW(TAG, "OTA pico update from %s: psa_hash_setup failed (%d) -- record will have no "
-                          "image hash, staging continues",
-                     ip, (int)hs);
-        }
-    }
-
-    // Stream the body into pico_img, one httpd_req_recv() per
-    // esp_partition_write(), same "never read ahead of what has been
-    // consumed" discipline as ota_esp_do_transfer() -- and the same reason
-    // it matters here: UPDATE_PROTOCOL.md's "do not read the request body
-    // faster than the link drains" is about the SLOW isolated-link relay
-    // that happens after this handler returns, but reading the HTTP body
-    // no faster than it can be written to flash is the same principle
-    // applied to this (fast) staging step.
-    int last_logged_decile = 0;
-    while (written < content_len) {
-        size_t want = content_len - written;
-        if (want > sizeof(s_ota_pico_chunk)) {
-            want = sizeof(s_ota_pico_chunk);
-        }
-        int ret = httpd_req_recv(req, (char *)s_ota_pico_chunk, want);
-        if (ret <= 0) {
-            snprintf(fail_reason, sizeof(fail_reason), "body read failed/closed at %u/%u bytes (%d)",
-                     (unsigned)written, (unsigned)content_len, ret);
-            ESP_LOGW(TAG, "OTA pico update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed mid-transfer");
-            goto cleanup;
-        }
-
-        esp_err_t werr = esp_partition_write(part, written, s_ota_pico_chunk, (size_t)ret);
-        if (werr != ESP_OK) {
-            snprintf(fail_reason, sizeof(fail_reason), "pico_img write failed at %u bytes: %s",
-                     (unsigned)written, esp_err_to_name(werr));
-            ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
-            goto cleanup;
-        }
-        crc = esp_rom_crc32_le(crc, s_ota_pico_chunk, (uint32_t)ret);
-        if (sha_op_active) {
-            (void)psa_hash_update(&sha_op, s_ota_pico_chunk, (size_t)ret);
-        }
-        written += (size_t)ret;
-
-        int decile = (int)((written * 10u) / content_len);
-        if (decile > last_logged_decile) {
-            last_logged_decile = decile;
-            ESP_LOGI(TAG, "OTA pico update from %s: staged %u%% (%u/%u bytes)", ip,
-                     (unsigned)((written * 100u) / content_len), (unsigned)written, (unsigned)content_len);
-        }
-    }
-    crc ^= 0xFFFFFFFFu; // final XOR -- see this function's doc comment
-
-    if (sha_op_active) {
-        size_t digest_len = 0;
-        psa_status_t hs = psa_hash_finish(&sha_op, sha_digest, sizeof(sha_digest), &digest_len);
-        if (hs == PSA_SUCCESS && digest_len == sizeof(sha_digest)) {
-            have_sha_digest = true;
-        } else {
-            ESP_LOGW(TAG, "OTA pico update from %s: psa_hash_finish failed (%d) -- record will have no "
-                          "image hash",
-                     ip, (int)hs);
-        }
-        sha_op_active = false; // finished (or failed to finish) -- nothing left to abort in cleanup
-    }
-
-    ESP_LOGI(TAG, "OTA pico update from %s: staged %u bytes to pico_img, crc32=0x%08X -- starting relay",
-             ip, (unsigned)written, (unsigned)crc);
-
-    if (!ota_pico_relay_start(s_safety, (uint32_t)written, crc, NULL, have_sha_digest ? sha_digest : NULL)) {
-        snprintf(fail_reason, sizeof(fail_reason), "image staged, but the relay task could not be started");
-        ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
-        goto cleanup;
-    }
-    started_relay = true;
-
-    {
-        char body[160];
-        int n = snprintf(body, sizeof(body),
-                          "{\"ok\":true,\"status\":\"relay_started\",\"bytes\":%u,\"crc32\":\"0x%08X\"}",
-                          (unsigned)written, (unsigned)crc);
-        httpd_resp_set_status(req, "202 Accepted");
-        httpd_resp_set_type(req, "application/json");
-        send_json_clamped(req, body, n, sizeof(body));
-    }
-
-cleanup:
-    // Any goto above that fired while sha_op_active was still true left a
-    // PSA hash operation started-but-not-finished (a read/write failure
-    // mid-stream, staging failing before ota_pico_relay_start() -- the
-    // finish-or-fail-fast block above already turned sha_op_active back to
-    // false on every path that actually reached it). PSA requires every
-    // started operation to be finished or aborted; abort here rather than
-    // leak it, same "always release the resource this function borrowed"
-    // discipline as the ota_began/esp_ota_abort() cleanup in
-    // ota_esp_do_transfer().
-    if (sha_op_active) {
-        (void)psa_hash_abort(&sha_op);
-    }
-
-    // Ownership handoff: if the relay task was successfully started, IT now
-    // owns calling ota_http_update_end() (see ota_http.h's header comment
-    // and ota_pico_relay.h's own for the full reasoning) -- calling it here
-    // too would release a claim the relay task is still actively using.
-    // Every OTHER path above (staging never got far enough to start a
-    // relay) still owns cleanup itself, exactly like ota_esp_do_transfer()'s
-    // single cleanup block.
-    if (!started_relay) {
-        ota_http_update_end();
-    }
-}
-
-static esp_err_t ota_pico_post_handler(httpd_req_t *req)
-{
-    char ip[46];
-    get_client_ip(req, ip, sizeof(ip));
-
-    // Same four-step order as ota_esp_post_handler() -- see ota_http.h's
-    // documented order and that handler's own comments for why each step
-    // precedes the next.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(TAG, "OTA pico update from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(TAG, "OTA pico update from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
-        return ESP_OK;
-    }
-
-    char reason[OTA_INTERLOCK_REASON_MAX];
-    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
-                                                            sizeof(reason));
-    if (gate != OTA_INTERLOCK_OK) {
-        ESP_LOGW(TAG, "OTA pico update from %s: refused by interlock: %s", ip, reason);
-        return ota_http_send_interlock_refusal(req, gate, reason);
-    }
-
-    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
-        ESP_LOGW(TAG, "OTA pico update from %s: refused, an update is already in progress", ip);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-    }
-
-    // From here, ota_pico_do_stage() owns the mutex -- either it releases
-    // it itself (staging failure) or it starts the relay task, which then
-    // owns release. See that function's own doc comment.
-    ota_pico_do_stage(req, ip);
-    return ESP_OK;
-}
-
-// String form of ota_http_esp_phase_t, same "each getter's phase enum gets
-// exactly one string table, used only by its own status handler" precedent
-// ota_pico_relay_phase_str() sets for the Pico side -- no shared enum/string
-// mapping exists between the two processors' phases, and there is no reason
-// to invent one here.
-// esp_phase_str() moved to ota_http_util.c (ota_http_esp_phase_str()) -- see
-// that file's header comment. Local alias keeps every call site unchanged.
-#define esp_phase_str ota_http_esp_phase_str
-
-// GET /api/ota/esp/status -- see ota_http.h's doc comment above
-// ota_http_get_esp_progress() for the full field-by-field contract. Closes
-// the gap ota_http_client.py's module doc comment and mcp_server.py's
-// ota_status() doc comment both flagged: neither the ESP self-update's own
-// progress nor the persisted ota_record.h "last update" blob had an HTTP
-// route before this handler.
-static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
-{
-    ota_http_esp_phase_t phase;
-    uint8_t percent;
-    ota_http_get_esp_progress(&phase, &percent);
-
-    // ota_record_load() is null-tolerant on "no record yet" the same way
-    // safety_link_get_status() is null-tolerant on "no link this boot" --
-    // ESP_ERR_NVS_NOT_FOUND (or any other non-OK, e.g. NVS partition not
-    // yet initialized) means "nothing to report", not an error worth
-    // failing this GET over. last_update stays absent (JSON null) in
-    // exactly that case.
-    ota_record_t rec;
-    bool have_record = (ota_record_load(&rec) == ESP_OK);
-
-    // TODO.md 9.6: "running version, build commit, build date, dirty flag,
-    // active slot, and the version sitting in the inactive slot" -- none of
-    // this was on any existing HTTP route before this pass (dashboard_http.c's
-    // /api/status has no such fields; grepped for esp_app_get_description/
-    // FW_GIT_COMMIT/esp_ota_get_running_partition there and found nothing).
-    // Added directly to this already-existing status route rather than a new
-    // one, same "small, contained addition to an existing endpoint" the
-    // Pico-status handler below also gets for its own available fields.
-    const esp_app_desc_t *running_desc = esp_app_get_description();
-    const char *running_version = (running_desc && running_desc->version[0]) ? running_desc->version : "";
-    const esp_partition_t *running_part = esp_ota_get_running_partition();
-    const char *active_slot = running_part ? running_part->label : "unknown";
-
-    const esp_partition_t *inactive_part = esp_ota_get_next_update_partition(NULL);
-    const char *inactive_slot = inactive_part ? inactive_part->label : "unknown";
-    char inactive_version[33] = "";
-    if (inactive_part) {
-        esp_app_desc_t inactive_desc;
-        if (esp_ota_get_partition_description(inactive_part, &inactive_desc) == ESP_OK) {
-            strncpy(inactive_version, inactive_desc.version, sizeof(inactive_version) - 1);
-            inactive_version[sizeof(inactive_version) - 1] = '\0';
-        }
-        // Left blank (not "unknown") when the inactive slot has no readable
-        // app descriptor -- an erased/never-flashed factory or ota_1
-        // partition on a fresh board is a real, common state, not an error;
-        // the page renders an empty string as "(empty)" itself.
-    }
-
-    // rec.reason (ota_record_fill()'s callers, ota_esp_do_transfer() above)
-    // is always this codebase's own snprintf() output -- never copied
-    // verbatim from an external source -- so, same as
-    // ota_pico_status_get_handler()'s last_error field below, it cannot
-    // contain a raw '"' or '\' that would need JSON escaping here. version/
-    // active_slot/inactive_slot are equally safe: version comes from this
-    // firmware's own PROJECT_VER (esp_app_desc_t), the slot labels come from
-    // the partition table (esp_partition_t::label), and inactive_version
-    // comes from the SAME struct field on a partition this build itself
-    // wrote (or its factory-default) -- none of these are attacker-supplied.
-    // boot_guard.h / ROADMAP.md watchdog-recovery pass: surfaced here so the
-    // OTA page (and anyone polling this JSON) can show "this board is in
-    // recovery mode" without needing a separate route. recovery_mode is
-    // decided once, at boot, by boot_guard_is_recovery_mode() -- it does not
-    // change within a boot even after boot_guard_mark_healthy() clears the
-    // counter for the NEXT boot (see boot_guard.h's doc comment).
-    bool recovery_mode = boot_guard_is_recovery_mode();
-
-    char body[768];
-    int n;
-    if (have_record) {
-        n = snprintf(body, sizeof(body),
-                      "{\"phase\":\"%s\",\"percent\":%u,"
-                      "\"version\":\"%s\",\"commit\":\"%s\",\"dirty\":%s,\"build_date\":\"%s\","
-                      "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
-                      "\"recovery_mode\":%s,"
-                      "\"last_update\":"
-                      "{\"processor\":\"%s\",\"version_before\":\"%s\",\"version_after\":\"%s\","
-                      "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u,\"image_sha256\":\"%s\"}}",
-                      esp_phase_str(phase), (unsigned)percent,
-                      running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
-                      FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version,
-                      recovery_mode ? "true" : "false",
-                      rec.processor, rec.version_before,
-                      rec.version_after, rec.success ? "true" : "false", rec.reason,
-                      (unsigned)rec.uptime_s, rec.image_sha256_hex);
-    } else {
-        n = snprintf(body, sizeof(body),
-                      "{\"phase\":\"%s\",\"percent\":%u,"
-                      "\"version\":\"%s\",\"commit\":\"%s\",\"dirty\":%s,\"build_date\":\"%s\","
-                      "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
-                      "\"recovery_mode\":%s,"
-                      "\"last_update\":null}",
-                      esp_phase_str(phase), (unsigned)percent,
-                      running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
-                      FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version,
-                      recovery_mode ? "true" : "false");
-    }
-    httpd_resp_set_type(req, "application/json");
-    send_json_clamped(req, body, n, sizeof(body));
-    return ESP_OK;
-}
-
-// --- POST /api/ota/esp/rollback -- see ota_http.h's doc comment above this
-// section for the full contract. Runs on its own short-lived task (same
-// factory_reset.c reboot_task() pattern) so the JSON response already
-// queued by the handler has a chance to reach the client before the
-// connection is torn down by the reboot.
-static void ota_rollback_reboot_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    // KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP
-    // reboots" line: this call to esp_ota_mark_app_invalid_rollback_and_
-    // reboot() below is the one existing path in this file that actually
-    // calls esp_restart() (the plain OTA transfer path, ota_esp_do_
-    // transfer(), only sets the boot partition and does not itself reboot --
-    // see that function's own doc note -- so it has no reboot moment to hook
-    // yet; when it grows one, it must send this too). Best-effort: a failed
-    // send here does not block or abort the reboot -- worst case SaftyFW's
-    // S6b guard behaves exactly as it did before this feature existed, which
-    // is the same "no announcement" fallback the grace window itself
-    // degrades to on expiry.
-    esp_err_t announce_err = safety_link_send_announce_reboot(s_safety);
-    if (announce_err != ESP_OK) {
-        ESP_LOGW(TAG, "OTA rollback: safety_link_send_announce_reboot failed (%s) -- "
-                      "rebooting anyway, S6b may nuisance-trip on the safety processor",
-                 esp_err_to_name(announce_err));
-    }
-
-    ESP_LOGW(TAG, "OTA rollback: rebooting now into the previous image");
-    esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
-    // Only reached if the call itself failed to even start the reboot --
-    // on success this line never runs, the board is already restarting.
-    ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
-                  "board NOT rebooted, still running the current image",
-             esp_err_to_name(err));
-}
-
-// --- POST /api/ota/esp/recovery_exit -- boot_guard.h's "a way out of
-// recovery mode that does not require a successful OTA" requirement.
-//
-// Recovery mode is decided ONCE per boot (boot_guard_init(), very early in
-// app_main()) and cannot be un-decided for the boot that is currently
-// running -- see boot_guard.h's doc comment on boot_guard_is_recovery_mode().
-// What CAN happen immediately is clearing the counter that put the board
-// there, so the NEXT boot comes up normal; ota_rollback_confirm_task()
-// already does that automatically within OTA_CONFIRM_POLL_MS of every boot
-// (recovery-mode boots included, since Wi-Fi/dashboard/OTA HTTP all still
-// come up in recovery mode -- see boot_confirm_is_healthy()) -- so an
-// operator who lands here by accident is never actually stuck waiting on a
-// human to notice; the board self-clears and exits on its own next reboot.
-// This route exists for the impatient/uncertain case: reboot right now
-// instead of waiting for that to happen (or for the RTC/task watchdog to do
-// it for you) and land back in normal mode this run.
-//
-// AUTHENTICATED, same as every other mutating route in this file (esp/pico
-// update, esp rollback) -- this used to be the one deliberately
-// unauthenticated exception (the reasoning was "it does nothing an attacker
-// could not already do by power-cycling the board", plus the cost of adding
-// a fourth ota_http_context_t for a button whose only job is "reboot this
-// board"). The owner reviewed that tradeoff and chose authentication: a
-// forced, unauthenticated reboot reachable from anywhere on the LAN is a
-// nuisance-DoS vector worth closing even though the same effect is
-// physically achievable by other means, and OTA_HTTP_CONTEXT_RECOVERY_EXIT
-// (its own HMAC context string "recovery", its own lockout state, its own
-// client-side signing support in ota_page.html/ota_http_client.py/
-// mcp_server.py) turned out not to be disproportionate once the other three
-// contexts already existed as a template to follow. See ota_http.h's doc
-// comment on OTA_HTTP_CONTEXT_RECOVERY_EXIT for why it is its own context
-// rather than reusing OTA_HTTP_CONTEXT_ESP.
-//
-// Auth runs BEFORE the recovery-mode check, not after: ota_interlock.h's doc
-// comment on why POST /api/ota/esp's real ordering is (once it exists) "auth
-// first, then interlocks" applies here too -- letting an unauthenticated
-// caller learn whether this board is currently in recovery mode (via the 403
-// "board is not in recovery mode" vs. proceeding past that check) is the
-// same class of live-state leak as revealing a zone temperature to someone
-// who hasn't proven they hold the AP password. Checking auth first means a
-// caller who fails the challenge/HMAC/lockout gate learns nothing about
-// recovery-mode state at all -- same verify_result_str() 403 shape as every
-// other route in this file, before any board-state check runs.
-static void ota_recovery_exit_reboot_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(300));
-    ESP_LOGW(TAG, "recovery-mode exit requested over HTTP -- rebooting now");
-    esp_restart();
-}
-
-static esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
-{
-    char ip[46];
-    get_client_ip(req, ip, sizeof(ip));
-
-    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
-    // every other mutating handler in this file, before anything else is
-    // checked.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(TAG, "OTA recovery_exit from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(TAG, "OTA recovery_exit from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_RECOVERY_EXIT), see
-    // ota_http.h's doc comment on that enum value and the doc comment above
-    // this handler for why auth runs before the recovery-mode check below,
-    // not after.
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_RECOVERY_EXIT, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
-        return ESP_OK;
-    }
-
-    // 3. Only meaningful in recovery mode -- refuses (403) outside it so
-    // this is not just a general-purpose authenticated reboot button on a
-    // normal boot. Runs AFTER auth (see doc comment above) so a caller who
-    // never proves they hold the AP password cannot use this route's
-    // response to probe whether the board is currently in recovery mode.
-    if (!boot_guard_is_recovery_mode()) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "board is not in recovery mode");
-        return ESP_OK;
-    }
-    // boot_guard_mark_healthy() is very likely already a no-op here --
-    // ota_rollback_confirm_task() clears the counter automatically within
-    // OTA_CONFIRM_POLL_MS of boot whenever nvs/web/ota are all up, which they
-    // are in recovery mode too -- but calling it again is cheap and harmless
-    // (boot_guard_mark_healthy() no-ops once already cleared this boot), and
-    // removes any dependency on that background task's timing for this
-    // explicit, operator-requested exit.
-    boot_guard_mark_healthy();
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"rebooting\"}");
-    /* Plain xTaskCreate -- an INTERNAL-RAM stack, deliberately, exactly like
-     * ota_rollback_reboot_task() above. This task calls esp_restart(), which
-     * goes through spi_flash_disable_interrupts_caches_and_other_cpu(); a
-     * task whose stack lives in PSRAM cannot run with the flash cache
-     * disabled and trips esp_task_stack_is_sane_cache_disabled(). Putting
-     * this stack in PSRAM to save 2 KB of internal DRAM would mean the
-     * recovery-mode escape hatch panics the board instead of rebooting it.
-     * (Same trap that produced a real crash in profile_executor.c earlier
-     * the same day; see its task-creation comment.) */
-    static TaskHandle_t s_recovery_exit_reboot_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
-    if (xTaskCreate(ota_recovery_exit_reboot_task, "recovery_exit_reboot", 2048, NULL,
-                    tskIDLE_PRIORITY + 1, &s_recovery_exit_reboot_task) != pdPASS) {
-        ESP_LOGE(TAG, "recovery-mode exit: failed to start the reboot task -- board will NOT "
-                      "reboot; power-cycle it, the counter is already cleared");
-    }
-    /* Registered unconditionally, success or not -- stack_margin_register()
-     * reads *task_handle_slot fresh at report time, so a creation failure
-     * just reads back alive=false rather than needing a second branch here.
-     * 2048 must match the xTaskCreate() literal above. Label shortened to
-     * "recovery_exit" (not the full "recovery_exit_reboot" FreeRTOS task
-     * name, unchanged above) -- the full name is 20 chars and
-     * STACK_MARGIN_NAME_MAX (20) leaves only 19 usable, which would
-     * silently truncate it to "recovery_exit_rebo". */
-    stack_margin_register("recovery_exit", &s_recovery_exit_reboot_task, 2048);
-    return ESP_OK;
-}
-
-static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
-{
-    char ip[46];
-    get_client_ip(req, ip, sizeof(ip));
-
-    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
-    // ota_esp_post_handler(), before anything else is checked.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(TAG, "OTA esp rollback from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(TAG, "OTA esp rollback from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_ESP_ROLLBACK), see
-    // ota_http.h's doc comment on that enum value for why a rollback MAC is
-    // not interchangeable with a plain-update MAC.
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP_ROLLBACK, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
-        return ESP_OK;
-    }
-
-    // 3. Interlocks -- identical gate to POST /api/ota/esp: a rollback
-    // reboots into different code just like an update does, so it is
-    // exactly as disruptive and must be refused under the same conditions
-    // (kiln not idle/cool, safety link down, another update in progress, ...).
-    char reason[OTA_INTERLOCK_REASON_MAX];
-    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
-                                                            sizeof(reason));
-    if (gate != OTA_INTERLOCK_OK) {
-        ESP_LOGW(TAG, "OTA esp rollback from %s: refused by interlock: %s", ip, reason);
-        return ota_http_send_interlock_refusal(req, gate, reason);
-    }
-
-    // 4. Single update mutex -- claimed as OTA_HTTP_CONTEXT_ESP (not a
-    // separate rollback slot): a rollback is exactly as mutually exclusive
-    // with an in-flight ESP or Pico update as a second ESP update would be,
-    // there is still only one slot.
-    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)) {
-        ESP_LOGW(TAG, "OTA esp rollback from %s: refused, an update is already in progress", ip);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-    }
-
-    // 5. Is there actually a previous valid image to roll back to? Checked
-    // explicitly rather than calling esp_ota_mark_app_invalid_rollback_and_
-    // reboot() blind and letting it discover there is nothing -- refuses
-    // cleanly, naming the reason, same as every other interlock in this file.
-    if (!esp_ota_check_rollback_is_possible()) {
-        ESP_LOGW(TAG, "OTA esp rollback from %s: refused, no previous valid image to roll back to", ip);
-        ota_http_update_end();
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "no previous valid image to roll back to", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-    }
-
-    const esp_app_desc_t *running_desc = esp_app_get_description();
-    const char *version_before = (running_desc && running_desc->version[0]) ? running_desc->version : "";
-
-    {
-        ota_record_t rec;
-        // No image hash for a rollback record -- this action reverts to the
-        // PREVIOUS image (already written and hashed, if at all, by whatever
-        // update put it there), it does not write new bytes for this record
-        // to hash.
-        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "esp", version_before,
-                         "", true, "rollback requested", NULL);
-        ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
-    }
-
-    ESP_LOGW(TAG, "OTA esp rollback from %s: accepted, was running '%s' -- rebooting into the "
-                  "previous image", ip, version_before[0] ? version_before : "(unknown version)");
-
-    char body[96];
-    int n = snprintf(body, sizeof(body), "{\"ok\":true,\"status\":\"rebooting\",\"version_before\":\"%s\"}",
-                      version_before);
-    httpd_resp_set_type(req, "application/json");
-    send_json_clamped(req, body, n, sizeof(body));
-
-    // The mutex is intentionally left held across the reboot -- there is no
-    // "release it after the transfer" moment here the way ota_esp_do_
-    // transfer()'s cleanup path has, because the board is about to reboot
-    // out from under this claim entirely. A fresh boot starts with
-    // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
-    // is nothing left to release.
-    static TaskHandle_t s_ota_rollback_reboot_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
-    if (xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 3072, NULL,
-                     tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task) != pdPASS) {
-        ESP_LOGE(TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
-                      "board will NOT reboot, still running the current image", ip);
-        ota_http_update_end();
-    }
-    /* Registered unconditionally, success or not -- stack_margin_register()
-     * reads *task_handle_slot fresh at report time, so a creation failure
-     * just reads back alive=false rather than needing a second branch here.
-     * 3072 must match the xTaskCreate() literal above. */
-    stack_margin_register("ota_rollback_reboot", &s_ota_rollback_reboot_task, 3072);
-
-    return ESP_OK;
-}
-
-// ota_pico_rollback_reason_str()/ota_pico_rollback_format_body() moved to
-// ota_http_util.c (ota_http_pico_rollback_reason_str()/
-// ota_http_pico_rollback_format_body()) -- see that file's header comment.
-// Local aliases keep every call site below unchanged.
-#define ota_pico_rollback_reason_str ota_http_pico_rollback_reason_str
-#define ota_pico_rollback_format_body ota_http_pico_rollback_format_body
-
-// Background task for POST /api/ota/pico/rollback -- see that handler's own
-// doc comment (opus-review finding 3) for why this call moved off the httpd
-// worker task. Owns releasing the OTA_HTTP_CONTEXT_PICO update-claim mutex
-// the handler claimed before starting this task (same "task owns the
-// release" contract ota_pico_do_stage()'s relay task already uses for the
-// plain Pico update path), and owns writing the final outcome into
-// s_pico_rollback_async for ota_pico_rollback_status_get_handler() to read
-// back. No arg: reads the same s_safety this whole file already treats as
-// fixed for the boot (set once by ota_http_start()).
-static void ota_pico_rollback_task(void *arg)
-{
-    (void)arg;
-
-    safety_link_rollback_outcome_t outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
-    uint8_t reason_code = KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN;
-    (void)safety_link_send_rollback_ex(s_safety, &outcome, &reason_code);
-
-    if (xSemaphoreTake(s_pico_rollback_async_lock, portMAX_DELAY) == pdTRUE) {
-        s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE;
-        s_pico_rollback_async.outcome = outcome;
-        s_pico_rollback_async.reason_code = reason_code;
-        xSemaphoreGive(s_pico_rollback_async_lock);
-    }
-
-    ESP_LOGW(TAG, "OTA pico rollback: safety_link_send_rollback_ex outcome=%d reason=%u",
-             (int)outcome, (unsigned)reason_code);
-
-    // Released here, on EVERY outcome, now that the WHOLE rollback attempt
-    // (send-burst/reply-window leg AND the boot_id-reconnect watch) has run
-    // to completion on this task -- see ota_pico_rollback_post_handler()'s
-    // own doc comment for why the claim must stay held for that entire
-    // span, not just until the handler returns.
-    ota_http_update_end();
-    vTaskDelete(NULL);
-}
-
-// --- POST /api/ota/pico/rollback -------------------------------------------
-//
-// The Pico half of "roll back the firmware from the OTA page" -- the missing
-// piece a previous pass on this feature correctly stopped short of shipping,
-// because SAFETY_CMD_ROLLBACK used to be unable to tell the ESP whether the
-// safety processor had refused (relay ARMED, or the other bootloader slot
-// not VALID/PENDING_VERIFY) or accepted. kilnlink_rollback_result.h /
-// safety_link_send_rollback_ex() close that gap; this handler is the HTTP
-// surface on top of it.
-//
-// Auth: its own context, OTA_HTTP_CONTEXT_PICO_ROLLBACK ("pico-rollback") --
-// NOT a reuse of OTA_HTTP_CONTEXT_PICO (pushing a new Pico image) and NOT a
-// reuse of OTA_HTTP_CONTEXT_ESP_ROLLBACK (rolling the OTHER processor back)
-// -- see ota_http.h's doc comment on the enum value for why a MAC signed for
-// one action must never double as authorization for a different one.
-//
-// Heat interlock: a Pico rollback reboots the SAFETY processor mid-firing,
-// which this handler treats as AT LEAST as disruptive as a plain Pico
-// firmware update (heat_interlock.h already collapses any non-ESP update
-// context onto HEAT_INTERLOCK_UPDATE_PICO) -- so the single cross-processor
-// update mutex is claimed as OTA_HTTP_CONTEXT_PICO (the same slot a plain
-// Pico update claims, not a separate one), same precedent
-// ota_esp_rollback_post_handler() sets for the ESP side just above. Unlike
-// the ESP rollback path, this ESP does not itself reboot, so there is no
-// natural "claim survives until a fresh boot clears it" moment to lean on --
-// holding the claim indefinitely with no release path would eventually wedge
-// heat/updates for good if anything went wrong on the Pico side. Instead the
-// claim is held for exactly as long as safety_link_send_rollback_ex() takes
-// to run -- covering the send-burst/reply-window leg (SAFETY_LINK_REPLY_
-// TIMEOUT_MS-ish, the moment update_task_request_rollback() reads the ARMED/
-// relay-energized fact on the Pico, the actual race this mutex originally
-// existed to prevent) AND the boot_id-reconnect watch that follows it
-// (SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS, safety_link.c) when no refusal
-// arrives -- and released on every outcome. That second leg is exactly the
-// "cover the Pico's own reboot-and-reload time" gap a previous pass here
-// left open -- without it, ota_http_heat_blocked_by_update() (this claim's
-// read side) would have stopped blocking heat the moment the reply window
-// closed, while the safety processor could still be mid-reboot with no
-// safety link at all, guarded only by safety_link_get_status()'s own
-// up-to-1500ms-stale link_up. If the boot_id watch times out with no
-// evidence either way, the claim is still released (UNKNOWN_TIMEOUT is not
-// withheld forever) -- that residual window is bounded by link_up's own
-// staleness check, the same as any other "safety link went quiet" case this
-// driver already handles.
-//
-// Async since opus-review finding 3: safety_link_send_rollback_ex() blocks
-// for up to ~6.3s, and esp_http_server here has exactly one worker task
-// (wifi_provision_http.c), so running that call ON this handler's task used
-// to queue every other request -- including the dashboard's ~1Hz /api/
-// status poll -- behind a single rollback attempt. The call above ("held
-// for exactly as long as... takes to run") is now literally true of a
-// background task, ota_pico_rollback_task(), not of this handler: the
-// handler itself does steps 1-4 below, starts that task, and returns a 202
-// within normal request time. The claim is still held across the task's
-// entire run (the invariant this comment exists to document is unchanged),
-// it is just no longer this handler's own task doing the holding. Poll GET
-// /api/ota/pico/rollback/status (ota_pico_rollback_status_get_handler(),
-// defined right after this handler) for the eventual outcome.
-static esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
-{
-    char ip[46];
-    get_client_ip(req, ip, sizeof(ip));
-
-    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
-    // every other mutating OTA handler.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(TAG, "OTA pico rollback from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(TAG, "OTA pico rollback from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_PICO_ROLLBACK), see this
-    // handler's own doc comment above for why a rollback MAC is not
-    // interchangeable with a plain-pico-update or an esp-rollback MAC.
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
-        return ESP_OK;
-    }
-
-    // 3. Interlocks -- identical gate to POST /api/ota/esp/rollback: a Pico
-    // rollback is exactly as disruptive as pushing it a new image (kiln not
-    // idle/cool, safety link down, another update in progress, ...), and
-    // ota_http_check_interlocks() already refuses when the safety link
-    // itself is down, which a rollback request obviously cannot survive
-    // either.
-    char reason[OTA_INTERLOCK_REASON_MAX];
-    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
-                                                            sizeof(reason));
-    if (gate != OTA_INTERLOCK_OK) {
-        ESP_LOGW(TAG, "OTA pico rollback from %s: refused by interlock: %s", ip, reason);
-        return ota_http_send_interlock_refusal(req, gate, reason);
-    }
-
-    // 4. Single update mutex -- claimed as OTA_HTTP_CONTEXT_PICO (the same
-    // slot a plain Pico update claims), see this handler's own doc comment
-    // above for why this is deliberately not a distinct claim kind.
-    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
-        ESP_LOGW(TAG, "OTA pico rollback from %s: refused, an update is already in progress", ip);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-    }
-
-    if (!s_safety) {
-        ESP_LOGW(TAG, "OTA pico rollback from %s: refused, no safety link configured this boot", ip);
-        ota_http_update_end();
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "no safety link configured", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-    }
-
-    {
-        ota_record_t rec;
-        // No trustworthy version-before string for the Pico from this side
-        // -- same reasoning ota_pico_relay.c's own ota_record_fill() call
-        // already documents (this ESP-side code never reads the Pico's own
-        // running version back out). Left blank rather than guessed.
-        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "pico", "", "", true,
-                         "rollback requested", NULL);
-        ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
-    }
-
-    ESP_LOGW(TAG, "OTA pico rollback from %s: requesting the safety processor revert to its "
-                  "previous bootloader slot (async -- see GET /api/ota/pico/rollback/status)", ip);
-
-    // opus-review finding 3: hand the whole multi-second attempt off to its
-    // own task (ota_pico_rollback_task() above) rather than blocking this
-    // httpd worker for it -- see that task's own doc comment. Mark IN_
-    // PROGRESS before starting the task so a status poll that lands before
-    // the task's first scheduler slot still reports something better than a
-    // stale prior DONE.
-    if (xSemaphoreTake(s_pico_rollback_async_lock, portMAX_DELAY) == pdTRUE) {
-        s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS;
-        xSemaphoreGive(s_pico_rollback_async_lock);
-    }
-
-    static TaskHandle_t s_ota_pico_rollback_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
-    if (xTaskCreate(ota_pico_rollback_task, "ota_pico_rollback", 4096, NULL, tskIDLE_PRIORITY + 1,
-                     &s_ota_pico_rollback_task) !=
-        pdPASS) {
-        ESP_LOGE(TAG, "OTA pico rollback from %s: failed to start the rollback task -- "
-                      "the update claim was never released, this OTA layer is now wedged", ip);
-        // Failed before the task could ever run, so nothing else will
-        // release the claim this handler took at step 4 above -- release it
-        // here, the same "whoever fails to hand off owns cleanup" rule
-        // ota_pico_do_stage() follows for its own relay-task start failure.
-        if (xSemaphoreTake(s_pico_rollback_async_lock, portMAX_DELAY) == pdTRUE) {
-            s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
-            xSemaphoreGive(s_pico_rollback_async_lock);
-        }
-        ota_http_update_end();
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "failed to start the rollback task", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-    }
-    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
-     * only reached with a real handle since the failure branch above already
-     * returned. 4096 must match the xTaskCreate() literal above. */
-    stack_margin_register("ota_pico_rollback", &s_ota_pico_rollback_task, 4096);
-
-    // 202, not 200: the request has been accepted and IS being acted on,
-    // but the outcome is not known yet -- the page is expected to poll GET
-    // /api/ota/pico/rollback/status (ota_pico_rollback_status_get_handler()
-    // below) for it, same shape /api/ota/pico/status already establishes
-    // for the plain Pico update's phase/percent polling.
-    httpd_resp_set_status(req, "202 Accepted");
-    httpd_resp_set_type(req, "application/json");
-    static const char pending_body[] =
-        "{\"ok\":true,\"status\":\"pending\","
-        "\"detail\":\"rollback request sent; poll /api/ota/pico/rollback/status for the outcome\"}";
-    httpd_resp_send(req, pending_body, sizeof(pending_body) - 1);
-    return ESP_OK;
-}
-
-// --- GET /api/ota/pico/rollback/status --------------------------------------
-//
-// Poll target for the async POST above (opus-review finding 3) -- reports
-// whatever ota_pico_rollback_task() has (or has not yet) written into
-// s_pico_rollback_async. Always 200: unlike the old synchronous POST
-// response, the HTTP status code here describes "did this GET succeed",
-// not "what was the rollback outcome" -- that distinction now lives entirely
-// in the JSON body's "status" field, same convention ota_pico_status_get_
-// handler() already uses for the plain Pico update's phase field.
-static esp_err_t ota_pico_rollback_status_get_handler(httpd_req_t *req)
-{
-    ota_pico_rollback_async_state_t state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
-    safety_link_rollback_outcome_t outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
-    uint8_t reason_code = KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN;
-    if (xSemaphoreTake(s_pico_rollback_async_lock, portMAX_DELAY) == pdTRUE) {
-        state = s_pico_rollback_async.state;
-        outcome = s_pico_rollback_async.outcome;
-        reason_code = s_pico_rollback_async.reason_code;
-        xSemaphoreGive(s_pico_rollback_async_lock);
-    }
-
-    char body[256];
-    int n;
-    switch (state) {
-        case OTA_PICO_ROLLBACK_ASYNC_IDLE:
-            n = snprintf(body, sizeof(body),
-                         "{\"ok\":true,\"status\":\"idle\",\"detail\":\"no rollback requested this boot\"}");
-            break;
-        case OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS:
-            n = snprintf(body, sizeof(body),
-                         "{\"ok\":true,\"status\":\"pending\",\"detail\":\"rollback in progress\"}");
-            break;
-        case OTA_PICO_ROLLBACK_ASYNC_DONE:
-        default:
-            n = ota_pico_rollback_format_body(outcome, reason_code, body, sizeof(body));
-            break;
-    }
-    httpd_resp_set_type(req, "application/json");
-    send_json_clamped(req, body, n, sizeof(body));
-    return ESP_OK;
-}
-
-// ota_pico_rollback_format_body()/ota_pico_rollback_reason_str() moved to
-// ota_http_util.c -- see the #define aliases above and ota_http_util.h's
-// header comment.
-
-// GET /api/ota/interlock -- TODO.md 9.6: "interlock state shown BEFORE the
-// file picker, with the blocker named." ota_http_check_interlocks() itself
-// is only ever called from inside the authenticated POST /api/ota/{esp,pico}
-// handlers (see ota_http.h's doc comment above that function: an
-// unauthenticated caller would learn live kiln telemetry, e.g. "zone 2 is at
-// 340 C", folded into the refusal reason string). That reasoning is sound in
-// isolation, but this codebase's own GET /api/status (dashboard_http.c) is
-// ALREADY unauthenticated and already returns every zone's live temperature
-// directly -- so gating this endpoint behind the OTA challenge/HMAC dance
-// (which would force the web page to ask for the Wi-Fi AP password just to
-// show "kiln is running a profile" before the file picker even appears)
-// would not close any exposure that isn't already open on this same LAN.
-// Unauthenticated here, matching /api/status's existing exposure level, not
-// a new one. Returns {"ok":true} or {"ok":false,"reason":"<why>"}.
-static esp_err_t ota_interlock_get_handler(httpd_req_t *req)
-{
-    /* Asked WITHOUT the acknowledgement on purpose: this endpoint reports
-     * the board's actual state so the page can decide what to show, and
-     * passing the ack here would hide the very condition the page needs to
-     * warn about. `needs_ack` tells the page that this particular refusal
-     * is the overridable one, so it can offer the warning dialog instead of
-     * greying the control out. */
-    char reason[OTA_INTERLOCK_REASON_MAX];
-    ota_interlock_result_t r = ota_http_check_interlocks(false, reason, sizeof(reason));
-
-    char body[OTA_INTERLOCK_REASON_MAX + 64];
-    int n;
-    if (r == OTA_INTERLOCK_OK) {
-        n = snprintf(body, sizeof(body), "{\"ok\":true}");
-    } else {
-        n = snprintf(body, sizeof(body), "{\"ok\":false,\"reason\":\"%s\",\"needs_ack\":%s}", reason,
-                     r == OTA_INTERLOCK_REFUSED_NEEDS_ACK ? "true" : "false");
-    }
-    httpd_resp_set_type(req, "application/json");
-    send_json_clamped(req, body, n, sizeof(body));
-    return ESP_OK;
-}
-
-static esp_err_t ota_pico_status_get_handler(httpd_req_t *req)
-{
-    ota_pico_relay_status_t st;
-    ota_pico_relay_get_status(&st);
-
-    // TODO.md 9.6: the Pico half of "running version, build commit, build
-    // date, dirty flag, active slot, inactive slot" -- and here the honest
-    // answer is that most of it does NOT exist over this link. Per
-    // safety_link.h's own header comment (SAFETY_CMD_FW_VERSION) the Pico's
-    // reply carries protocol/min_compatible/dirty/commit/datetime/boot_id,
-    // but safety_apply_fw_version()/safety_parse_fw_version() (safety_link.c)
-    // only extract protocol/min_compatible/boot_id -- dirty/commit/datetime
-    // are parsed past (to find boot_id's offset) and then discarded, never
-    // stored in safety_link_status_t. There is also no concept of an
-    // "active/inactive slot" on the Pico side in this protocol at all (no
-    // A/B image slots the way the ESP has). What IS actually available is
-    // exposed here: the peer's protocol version, whether it's known/
-    // compatible with this ESP's build, and its boot_id -- via
-    // safety_link_get_peer_version_status(), the same accessor
-    // dashboard_http.c's peer_protocol_version fields already use.
-    bool version_known = false, version_compatible = false;
-    uint16_t peer_protocol = 0, peer_min_compatible = 0;
-    if (s_safety) {
-        (void)safety_link_get_peer_version_status(s_safety, &version_known, &version_compatible,
-                                                    &peer_protocol, &peer_min_compatible);
-    }
-
-    // last_error is always built by this codebase's own snprintf() calls
-    // (ota_pico_relay.c's relay_set_error()/format_update_error()) -- never
-    // copied verbatim from an external source -- so it cannot contain a
-    // raw '"' or '\' that would need JSON escaping here.
-    char body[384];
-    int n;
-    if (version_known) {
-        n = snprintf(body, sizeof(body),
-                      "{\"phase\":\"%s\",\"percent\":%u,\"last_error\":\"%s\","
-                      "\"protocol_version_known\":true,\"protocol_version\":%u,"
-                      "\"protocol_min_compatible\":%u,\"protocol_compatible\":%s}",
-                      ota_pico_relay_phase_str(st.phase), (unsigned)st.percent, st.last_error,
-                      (unsigned)peer_protocol, (unsigned)peer_min_compatible,
-                      version_compatible ? "true" : "false");
-    } else {
-        n = snprintf(body, sizeof(body),
-                      "{\"phase\":\"%s\",\"percent\":%u,\"last_error\":\"%s\","
-                      "\"protocol_version_known\":false}",
-                      ota_pico_relay_phase_str(st.phase), (unsigned)st.percent, st.last_error);
-    }
-    httpd_resp_set_type(req, "application/json");
-    send_json_clamped(req, body, n, sizeof(body));
-    return ESP_OK;
-}
-
 esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
                           SafetyLinkClass *safety_or_null)
 {
     s_io = io_or_null;
     s_thermo_bus = thermo_bus_or_null;
-    s_safety = safety_or_null;
+    ota_http_safety = safety_or_null;
 
     // Required once before any psa_*() call (hmac_sha256() above) --
     // idempotent per the PSA Crypto API spec, but this is the one place in
@@ -2342,7 +913,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     // scattered near every HMAC call site.
     psa_status_t psa_status = psa_crypto_init();
     if (psa_status != PSA_SUCCESS) {
-        ESP_LOGE(TAG, "psa_crypto_init failed: %d", (int)psa_status);
+        ESP_LOGE(OTA_HTTP_TAG, "psa_crypto_init failed: %d", (int)psa_status);
         return ESP_FAIL;
     }
 
@@ -2350,12 +921,12 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     if (!s_ota_lock) {
         return ESP_ERR_NO_MEM;
     }
-    s_pico_rollback_async_lock = xSemaphoreCreateMutex();
-    if (!s_pico_rollback_async_lock) {
+    ota_http_pico_rollback_async_lock = xSemaphoreCreateMutex();
+    if (!ota_http_pico_rollback_async_lock) {
         return ESP_ERR_NO_MEM;
     }
-    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
-    s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
+    memset(&ota_http_pico_rollback_async, 0, sizeof(ota_http_pico_rollback_async));
+    ota_http_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
     memset(&s_nonce, 0, sizeof(s_nonce));
     memset(&s_lockout_esp, 0, sizeof(s_lockout_esp));
     memset(&s_lockout_pico, 0, sizeof(s_lockout_pico));
@@ -2383,7 +954,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     esp_err_t err = httpd_register_uri_handler(server, &ota_page_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/ota) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/ota) failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -2392,7 +963,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &challenge_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/challenge) failed: %s",
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/challenge) failed: %s",
                  esp_err_to_name(err));
         return err;
     }
@@ -2404,7 +975,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &esp_update_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp) failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -2416,7 +987,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &pico_update_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/pico) failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -2425,7 +996,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &pico_status_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico/status) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/pico/status) failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -2437,7 +1008,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &interlock_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/interlock) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/interlock) failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -2449,7 +1020,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &esp_status_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/status) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/status) failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -2461,7 +1032,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &esp_rollback_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/rollback) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/rollback) failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -2474,7 +1045,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &pico_rollback_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico/rollback) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/pico/rollback) failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -2486,7 +1057,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &pico_rollback_status_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico/rollback/status) failed: %s",
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/pico/rollback/status) failed: %s",
                  esp_err_to_name(err));
         return err;
     }
@@ -2500,7 +1071,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     };
     err = httpd_register_uri_handler(server, &recovery_exit_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/recovery_exit) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/recovery_exit) failed: %s", esp_err_to_name(err));
         return err;
     }
 
