@@ -16,11 +16,12 @@
 #include "kiln_io.h"
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
-#include "web_encoding.h"
 #include "wifi_provision_http.h"
 #include "zones_http.h"
 
-static const char *TAG = "profiles_http";
+#include "profiles_http_internal.h"
+
+const char *PROFILES_TAG = "profiles_http";
 
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_USED "prof_used"
@@ -114,8 +115,6 @@ static const char *TAG = "profiles_http";
  * fixed-point encoding anywhere in the on-flash blob (decode_profile_blob()
  * copies it field-for-field across every PROFILE_VERSION), so raising this
  * bound cannot truncate a stored value -- no PROFILE_VERSION bump needed. */
-#define PROFILE_TARGET_C_MIN 0.0f
-#define PROFILE_TARGET_C_MAX 2015.0f
 
 /* Enforced at compile time rather than left to be kept equal by hand (the
  * failure mode both constants' own comments warn about): a profile target
@@ -127,31 +126,18 @@ static const char *TAG = "profiles_http";
 _Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
                "PROFILE_TARGET_C_MAX must not exceed ZONE_MAX_TEMP_C_MAX -- a profile target must "
                "stay representable against some legally configurable zone ceiling");
-#define PROFILE_RAMP_C_PER_HR_MIN 0.0f
-#define PROFILE_RAMP_C_PER_HR_MAX 1000.0f
-#define PROFILE_DWELL_MIN_MAX 1440u /* 24h */
 
 /* The 20%-margin warning rule, explicit in TODO.md section 5. */
-#define PROFILE_RAMP_WARN_FRACTION 0.8f
-
-/* TODO.md 10.6a: embedded pre-gzipped (CMakeLists.txt gzips it at configure
- * time before idf_component_register runs), hence the "_gz" in both the
- * filename and the symbol it generates. */
-extern const uint8_t profiles_page_html_gz_start[] asm("_binary_profiles_page_html_gz_start");
-extern const uint8_t profiles_page_html_gz_end[] asm("_binary_profiles_page_html_gz_end");
 
 /* All 8 slots kept resident -- each is well under 200 bytes, so loading all
  * 8 at boot (rather than lazily per-request) is simpler and cheap enough
  * that the "only load what's used" optimization the header docstring
  * mentions as a design choice isn't worth the extra code path. The
  * prof_used bitmap still exists in NVS/RAM so a listing never has to probe
- * 8 keys to find out which exist. */
-typedef struct {
-    profile_t profiles[PROFILES_MAX_COUNT];
-    uint8_t used_bitmap; /* bit N = slot N in use */
-} profiles_state_t;
-
-static profiles_state_t s_profiles;
+ * 8 keys to find out which exist. profiles_state_t itself now lives in
+ * profiles_http_internal.h -- profiles_catalog_http.c/profiles_edit_http.c
+ * need the type too. */
+profiles_state_t s_profiles;
 
 /* On-flash per-slot layout, one per "profN" key. version-prefixed so a slot
  * can be told apart from a stale/rolled-back/corrupt one at load time --
@@ -412,7 +398,6 @@ static profile_decode_result_t decode_profile_blob(const void *blob, size_t len,
  * seg_count, plus 3 fields per segment across up to 12 segments. Generous
  * headroom over a legitimate 12-segment submission, checked against
  * Content-Length before a single byte is read. */
-#define PROFILE_BODY_MAX 2048
 
 static void profile_nvs_key(uint8_t id, char *out, size_t out_cap)
 {
@@ -421,7 +406,7 @@ static void profile_nvs_key(uint8_t id, char *out, size_t out_cap)
 
 /* ---- NVS ---------------------------------------------------------------- */
 
-static esp_err_t nvs_save_slot(uint8_t id);
+esp_err_t nvs_save_slot(uint8_t id);
 
 /* Brings up one NVS partition, erasing ONLY that partition if its contents
  * are unusable. Copied/adapted from wifi_prov.c's nvs_partition_init() (see
@@ -434,7 +419,7 @@ static esp_err_t nvs_partition_init(const char *partition)
 {
     esp_err_t err = nvs_flash_init_partition(partition);
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
+        ESP_LOGW(PROFILES_TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
                  partition, esp_err_to_name(err));
         err = nvs_flash_erase_partition(partition);
         if (err == ESP_OK) {
@@ -491,7 +476,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         size_t len = sizeof(loaded);
         esp_err_t slot_err = nvs_get_blob(h, key, &loaded, &len);
         if (slot_err != ESP_OK) {
-            ESP_LOGW(TAG, "prof%u load from '%s' failed (%s) -- marking unused", id, partition,
+            ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' failed (%s) -- marking unused", id, partition,
                      esp_err_to_name(slot_err));
             out->used_bitmap &= ~(1u << id);
             continue;
@@ -518,12 +503,12 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             out->profiles[id] = decoded;
             break;
         case PROFILE_DECODE_NEWER:
-            ESP_LOGW(TAG, "prof%u load from '%s' refused: %s", id, partition, reason);
+            ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' refused: %s", id, partition, reason);
             out->used_bitmap &= ~(1u << id);
             continue;
         case PROFILE_DECODE_CORRUPT:
         default:
-            ESP_LOGW(TAG, "prof%u load from '%s' rejected: %s -- marking unused", id, partition, reason);
+            ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' rejected: %s -- marking unused", id, partition, reason);
             out->used_bitmap &= ~(1u << id);
             continue;
         }
@@ -549,10 +534,10 @@ static bool caller_stack_is_external(void)
     return esp_ptr_external_ram((void *)&stack_probe);
 }
 
-static esp_err_t nvs_save_slot(uint8_t id)
+esp_err_t nvs_save_slot(uint8_t id)
 {
     if (caller_stack_is_external()) {
-        ESP_LOGE(TAG, "nvs_save_slot: REFUSING -- calling task's stack is in external RAM "
+        ESP_LOGE(PROFILES_TAG, "nvs_save_slot: REFUSING -- calling task's stack is in external RAM "
                       "(PSRAM). A flash/NVS write from here would abort the whole board "
                       "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
                       "through a task with an internal-SRAM stack instead -- see "
@@ -593,10 +578,10 @@ static esp_err_t nvs_save_slot(uint8_t id)
  * handlers) run on httpd_worker, an internal-SRAM stack, so this cannot fire
  * the crash today; added so a future audit does not read this file as fully
  * covered when it was not. */
-static esp_err_t nvs_erase_slot(uint8_t id)
+esp_err_t nvs_erase_slot(uint8_t id)
 {
     if (caller_stack_is_external()) {
-        ESP_LOGE(TAG, "nvs_erase_slot: REFUSING -- calling task's stack is in external RAM "
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot: REFUSING -- calling task's stack is in external RAM "
                       "(PSRAM). See nvs_save_slot()'s guard comment in this file and "
                       "DRAM_PSRAM_PLAN.md section 7.2/9.");
         return ESP_ERR_INVALID_STATE;
@@ -654,7 +639,7 @@ static void migrate_from_default_partition(void)
         return; /* nothing recorded as used in the old location */
     }
 
-    ESP_LOGI(TAG, "migrating fire profiles from the default NVS partition to '%s'", PROFILES_NVS_PARTITION);
+    ESP_LOGI(PROFILES_TAG, "migrating fire profiles from the default NVS partition to '%s'", PROFILES_NVS_PARTITION);
 
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (!(old_bitmap & (1u << id))) {
@@ -669,7 +654,7 @@ static void migrate_from_default_partition(void)
         size_t len = sizeof(old_profile);
         esp_err_t slot_err = nvs_get_blob(old_h, key, &old_profile, &len);
         if (slot_err != ESP_OK || len != sizeof(old_profile)) {
-            ESP_LOGW(TAG,
+            ESP_LOGW(PROFILES_TAG,
                      "prof%u migration read failed or wrong size (%s) -- skipping this slot, others still "
                      "attempted",
                      id, esp_err_to_name(slot_err));
@@ -680,7 +665,7 @@ static void migrate_from_default_partition(void)
         s_profiles.used_bitmap |= (1u << id);
         esp_err_t save_err = nvs_save_slot(id);
         if (save_err != ESP_OK) {
-            ESP_LOGE(TAG,
+            ESP_LOGE(PROFILES_TAG,
                      "prof%u migration write to '%s' failed: %s -- running from the old copy this boot, will "
                      "retry",
                      id, PROFILES_NVS_PARTITION, esp_err_to_name(save_err));
@@ -796,7 +781,7 @@ static bool profile_relay_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_ind
  * relay_mask comment and rules_task.c's compute_heater_relay_mask() both
  * already document. Only meaningful for seg->seg_kind ==
  * PROFILE_SEG_KIND_RELAY_IO -- callers check the kind first. */
-static bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *err_msg, size_t err_cap)
+bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *err_msg, size_t err_cap)
 {
     uint8_t t = seg->io_target;
     bool is_relay = (t >= PROFILE_IO_TARGET_RELAY_BASE) && (t < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT);
@@ -860,7 +845,7 @@ static bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, c
  * to make the condition VISIBLE at save/list/edit time instead of silent
  * until a failed start. A zone with max_temp_c == 0 (never commissioned) is
  * skipped -- it has no real ceiling to compare against yet. */
-static bool profile_exceeds_zone_ceiling(const profile_t *p, char *note, size_t note_cap)
+bool profile_exceeds_zone_ceiling(const profile_t *p, char *note, size_t note_cap)
 {
     for (uint8_t i = 0; i < p->segment_count; i++) {
         if (p->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
@@ -1014,7 +999,7 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     s_profiles.used_bitmap |= (1u << target_id);
     esp_err_t err = nvs_save_slot(target_id);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
+        ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
         /* Still applied -- same convention as profile_post_handler(). */
     }
@@ -1042,7 +1027,7 @@ bool profiles_http_delete(uint8_t id)
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot((uint8_t)id);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_erase_slot(%u) failed: %s -- deleted live but may reappear after reboot", id,
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- deleted live but may reappear after reboot", id,
                  esp_err_to_name(err));
     }
     return true;
@@ -1059,937 +1044,6 @@ void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
     if (out_dwell_min_max) *out_dwell_min_max = PROFILE_DWELL_MIN_MAX;
 }
 
-/* ---- HTML page ------------------------------------------------------------ */
-
-/* TODO.md 10.6a: content negotiation lives in web_encoding.h's shared
- * web_client_accepts_gzip() -- absent Accept-Encoding is legal and served
- * gzip (RFC 9110 s12.5.3); a header that explicitly excludes gzip gets an
- * uncompressed 406 rather than a body it cannot decode. */
-static esp_err_t page_get_handler(httpd_req_t *req)
-{
-    if (!web_client_accepts_gzip(req)) {
-        return web_send_gzip_not_acceptable(req, TAG, "profiles_page.html");
-    }
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-    web_set_asset_cache_headers(req);
-    return httpd_resp_send(req, (const char *)profiles_page_html_gz_start,
-                           (size_t)(profiles_page_html_gz_end - profiles_page_html_gz_start));
-}
-
-/* ---- JSON ------------------------------------------------------------------ */
-
-static void json_escape(const char *src, char *out, size_t out_cap)
-{
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
-}
-
-/* ---- Builtin catalogue JSON ------------------------------------------------
- *
- * RESPONSE-SIZE FINDING, which is why the catalogue gets its own endpoint
- * rather than being appended to GET /api/profile's detail object:
- *   - The UART CONTROL bridge caps a reply at BRIDGE_REPLY_MAX, which is
- *     UART_PROTO_MAX_PAYLOAD (uart_bridge.c) -- a few hundred bytes. Nothing
- *     resembling a catalogue fits through it, so the catalogue is HTTP-only
- *     and the UART profile commands are left alone entirely.
- *   - Every existing JSON handler in this file builds into ONE stack buffer
- *     and snprintf-truncates on overflow (see the APPEND macros). The
- *     catalogue is 28 entries x up to 12 segments plus a title and slug --
- *     roughly 25 KB. That is far past any sane stack buffer on this target,
- *     so this endpoint is the one place in the file that streams with
- *     httpd_resp_send_chunk() and reuses a single ~1 KB per-entry buffer.
- *     Building the whole thing in one buffer would have silently truncated
- *     the tail of the catalogue, which is the failure mode most likely to go
- *     unnoticed until a schedule is missing on the page.
- *
- * GET /api/profiles keeps its existing single-buffer shape but is likewise
- * chunked now, because it lists the catalogue's summaries alongside the user
- * slots.
- */
-
-/* Escapes into a caller buffer and returns it, for use inline in a printf
- * argument list. */
-static const char *esc(const char *src, char *buf, size_t cap)
-{
-    json_escape(src, buf, cap);
-    return buf;
-}
-
-/* Sends one snprintf'd chunk, honouring the one thing snprintf's return value
- * is easy to get wrong: on truncation it reports the length it WOULD have
- * written, which is larger than the buffer. Passing that straight to
- * httpd_resp_send_chunk() reads past the end of the buffer. The worst-case
- * field widths in the builtin JSON below (fixed text + escaped code + a
- * 127-char title + two copies of the slug) add up to more than the 384-byte
- * chunk buffer, so this is reachable the day someone adds a longer title --
- * and the table those titles live in is generated, so that is a plausible
- * edit rather than a theoretical one.
- *
- * Truncation also means the JSON is malformed, which a clamp alone would hide,
- * so it is logged rather than silently shortened. */
-static esp_err_t send_chunk_checked(httpd_req_t *req, const char *buf, int n, size_t cap, const char *what)
-{
-    if (n < 0) {
-        return ESP_OK; /* encoding error -- skip this fragment, keep the response alive */
-    }
-    if ((size_t)n >= cap) {
-        ESP_LOGW(TAG, "%s JSON truncated at %u bytes -- response will be malformed", what,
-                 (unsigned)cap);
-        n = (int)(cap - 1);
-    }
-    return httpd_resp_send_chunk(req, buf, (size_t)n);
-}
-
-/* Appends one builtin entry's summary (no segments) to a chunked response. */
-static esp_err_t send_builtin_summary(httpd_req_t *req, uint8_t id, const builtin_profile_t *b, bool first)
-{
-    profile_t p;
-    profile_seg_verdict_t rollup = PROFILE_SEG_UNKNOWN;
-    if (profiles_builtin_get(id, &p)) {
-        rollup = profile_feasibility_profile_mask(0, &p, NULL, 0);
-    }
-
-    char code_e[PROFILE_NAME_MAX_LEN * 2 + 1];
-    char title_e[128];
-    char slug_e[64];
-    char chunk[384];
-    int n = snprintf(chunk, sizeof(chunk),
-                     "%s{\"id\":%u,\"builtin\":true,\"name\":\"%s\",\"code\":\"%s\",\"title\":\"%s\","
-                     "\"slug\":\"%s\",\"url\":\"https://digitalfire.com/schedule/%s\",\"hidden\":%s,"
-                     "\"zone_mask\":0,\"segment_count\":%u,\"feasibility\":\"%s\"}",
-                     first ? "" : ",", id, esc(b->code, code_e, sizeof(code_e)),
-                     esc(b->code, code_e, sizeof(code_e)), esc(b->title, title_e, sizeof(title_e)),
-                     esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
-                     profiles_builtin_is_hidden(id) ? "true" : "false", b->segment_count,
-                     profile_feasibility_verdict_str(rollup));
-    return send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin summary");
-}
-
-/* Full builtin entry: summary fields + every segment with its own verdict. */
-static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_profile_t *b, bool first)
-{
-    profile_t p;
-    profile_seg_verdict_t per_seg[PROFILE_MAX_SEGMENTS];
-    profile_seg_verdict_t rollup = PROFILE_SEG_UNKNOWN;
-    for (size_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
-        per_seg[i] = PROFILE_SEG_UNKNOWN;
-    }
-    if (profiles_builtin_get(id, &p)) {
-        rollup = profile_feasibility_profile_mask(0, &p, per_seg, PROFILE_MAX_SEGMENTS);
-    }
-
-    char code_e[PROFILE_NAME_MAX_LEN * 2 + 1];
-    char title_e[128];
-    char slug_e[64];
-    char chunk[384];
-    int n = snprintf(chunk, sizeof(chunk),
-                     "%s{\"id\":%u,\"builtin\":true,\"read_only\":true,\"name\":\"%s\",\"code\":\"%s\","
-                     "\"title\":\"%s\",\"slug\":\"%s\",\"url\":\"https://digitalfire.com/schedule/%s\","
-                     "\"hidden\":%s,\"zone_mask\":0,\"segment_count\":%u,\"feasibility\":\"%s\","
-                     "\"segments\":[",
-                     first ? "" : ",", id, esc(b->code, code_e, sizeof(code_e)),
-                     esc(b->code, code_e, sizeof(code_e)), esc(b->title, title_e, sizeof(title_e)),
-                     esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
-                     profiles_builtin_is_hidden(id) ? "true" : "false", b->segment_count,
-                     profile_feasibility_verdict_str(rollup));
-    esp_err_t err = send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin header");
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    for (uint8_t i = 0; i < b->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
-        n = snprintf(chunk, sizeof(chunk),
-                     "%s{\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,\"feasibility\":\"%s\"}",
-                     i == 0 ? "" : ",", (double)b->segments[i].target_c,
-                     (double)b->segments[i].ramp_c_per_hr, (unsigned long)b->segments[i].dwell_min,
-                     profile_feasibility_verdict_str(per_seg[i]));
-        err = send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin segment");
-        if (err != ESP_OK) {
-            return err;
-        }
-    }
-    return httpd_resp_send_chunk(req, "]}", 2);
-}
-
-/* GET /api/profiles/builtin -- the whole catalogue, segments and verdicts
- * included. ?all=1 includes hidden entries (the "restore" UI needs to show
- * what it would restore); the default omits them. */
-static esp_err_t builtin_list_get_handler(httpd_req_t *req)
-{
-    bool include_hidden = false;
-    char query[48];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        char val[8];
-        if (httpd_query_key_value(query, "all", val, sizeof(val)) == ESP_OK && val[0] == '1') {
-            include_hidden = true;
-        }
-    }
-
-    httpd_resp_set_type(req, "application/json");
-    esp_err_t err = httpd_resp_send_chunk(req, "[", 1);
-    bool first = true;
-    for (size_t i = 0; i < g_builtin_profile_count && err == ESP_OK; i++) {
-        uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
-        if (!include_hidden && profiles_builtin_is_hidden(id)) {
-            continue;
-        }
-        err = send_builtin_full(req, id, &g_builtin_profiles[i], first);
-        first = false;
-    }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, "]", 1);
-    }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, NULL, 0); /* terminate the chunked response */
-    }
-    return err;
-}
-
-/* Worst-case size of one user-slot entry's JSON, sized against a name that
- * FULLY escapes -- the TODO.md bug this replaces: the old 96-byte-per-slot
- * budget was sized off PROFILE_NAME_MAX_LEN's raw 15 chars, but
- * json_escape() can double every one of them (a `"` or `\` costs two output
- * bytes), and the fixed text around the name is not free either. Counted
- * literally: `,{"id":255,"builtin":false,"name":"` (36) + up to
- * PROFILE_NAME_MAX_LEN*2 (30) escaped name bytes + `","zone_mask":255,`
- * `"segment_count":12}` (37) = 103; rounded up with slack for the format
- * rather than re-deriving the exact count if a field ever widens. */
-#define PROFILE_LIST_ENTRY_MAX 190 /* +30 (2026-09-02) for the ",\"exceeds_ceiling\":false" marker */
-
-/* Bytes reserved at the tail of `json` that no per-slot APPEND is ever
- * allowed to write into -- so the fallback "listing truncated" notice below
- * always has guaranteed room to land, and the array's own close (sent as a
- * separate chunk, never through this buffer) is never the thing at risk.
- * Same discipline as readiness_http.c's append_item() reserve. */
-#define PROFILE_LIST_CLOSE_RESERVE 96
-
-static esp_err_t profiles_list_get_handler(httpd_req_t *req)
-{
-    char json[PROFILES_MAX_COUNT * PROFILE_LIST_ENTRY_MAX + PROFILE_LIST_CLOSE_RESERVE + 16];
-    size_t o = 0;
-    int n;
-    bool dropped = false; /* an item didn't fit even the enlarged budget -- report it, don't hide it */
-
-    /* Never writes past sizeof(json) - PROFILE_LIST_CLOSE_RESERVE -- `avail`
-     * is clamped to 0 once `o` reaches that line, so a would-be write past it
-     * is treated exactly like any other overflow (dropped, not truncated
-     * into the reserve). */
-#define APPEND(...)                                                                              \
-    do {                                                                                          \
-        size_t avail = (o + PROFILE_LIST_CLOSE_RESERVE < sizeof(json))                             \
-                           ? sizeof(json) - PROFILE_LIST_CLOSE_RESERVE - o                          \
-                           : 0;                                                                     \
-        n = snprintf(json + o, avail, __VA_ARGS__);                                               \
-        if (n < 0 || (size_t)n >= avail) {                                                         \
-            dropped = true;                                                                        \
-            goto list_done;                                                                        \
-        }                                                                                          \
-        o += (size_t)n;                                                                            \
-    } while (0)
-
-    json[o++] = '[';
-    bool first = true;
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        if (!(s_profiles.used_bitmap & (1u << id))) {
-            continue;
-        }
-        const profile_t *p = &s_profiles.profiles[id];
-        char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
-        json_escape(p->name, name_escaped, sizeof(name_escaped));
-        /* exceeds_ceiling (2026-09-02 owner correction): computed live against
-         * each zone's CURRENT max_temp_c, not stored -- a profile that was
-         * fine to save can start exceeding the ceiling later if the zone's
-         * limit is lowered, and vice versa, so this must always reflect the
-         * present configuration, not a snapshot from save time. Advisory
-         * only; see profile_exceeds_zone_ceiling()'s own comment for why
-         * this never blocks the save/list, only the actual run start. */
-        bool exceeds = profile_exceeds_zone_ceiling(p, NULL, 0);
-        APPEND("%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,"
-               "\"exceeds_ceiling\":%s}",
-               first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count,
-               exceeds ? "true" : "false");
-        first = false;
-    }
-
-#undef APPEND
-
-list_done:
-    if (dropped) {
-        /* Guaranteed to fit: PROFILE_LIST_CLOSE_RESERVE bytes at json+o were
-         * never touched by any APPEND above. Reported AS an item -- a
-         * silently shortened list looks exactly like a pass, which is the
-         * failure mode this exists to prevent (same rule readiness_http.c's
-         * append_item() dropped-item notice follows). */
-        int n2 = snprintf(json + o, sizeof(json) - o,
-                          "%s{\"id\":null,\"builtin\":false,\"error\":\"one or more profiles omitted -- "
-                          "listing too large\"}",
-                          first ? "" : ",");
-        if (n2 > 0 && (size_t)n2 < sizeof(json) - o) {
-            o += (size_t)n2;
-            first = false;
-        } else {
-            ESP_LOGE(TAG, "profiles listing: dropped-item notice itself didn't fit -- "
-                         "PROFILE_LIST_CLOSE_RESERVE is too small");
-        }
-    }
-
-    /* Chunked, because the visible builtin summaries appended after the user
-     * slots would not fit alongside them in one stack buffer -- see the
-     * response-size note above builtin_list_get_handler(). Segments are
-     * deliberately NOT included here; a listing does not need 136 of them,
-     * and GET /api/profile?id=<builtin> / GET /api/profiles/builtin serve
-     * them when something actually does. */
-    httpd_resp_set_type(req, "application/json");
-    esp_err_t err = httpd_resp_send_chunk(req, json, o);
-    for (size_t i = 0; i < g_builtin_profile_count && err == ESP_OK; i++) {
-        uint8_t bid = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
-        if (profiles_builtin_is_hidden(bid)) {
-            continue; /* "removed by the user" -- see /api/profiles/builtin?all=1 */
-        }
-        err = send_builtin_summary(req, bid, &g_builtin_profiles[i], first);
-        first = false;
-    }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, "]", 1);
-    }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, NULL, 0);
-    }
-    return err;
-}
-
-static esp_err_t profile_detail_get_handler(httpd_req_t *req)
-{
-    char query[32];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing");
-        return ESP_OK;
-    }
-    char id_str[8];
-    if (httpd_query_key_value(query, "id", id_str, sizeof(id_str)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing");
-        return ESP_OK;
-    }
-    char *end = NULL;
-    long id = strtol(id_str, &end, 10);
-    if (end == id_str || id < 0 || id > 255) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
-        return ESP_OK;
-    }
-
-    /* Builtin catalogue entry: served read-only, hidden or not (hiding is a
-     * listing preference, so a direct reference must still resolve). */
-    if (profiles_builtin_id_valid((uint8_t)id)) {
-        const builtin_profile_t *b = profiles_builtin_entry((uint8_t)id);
-        httpd_resp_set_type(req, "application/json");
-        esp_err_t berr = send_builtin_full(req, (uint8_t)id, b, true);
-        if (berr == ESP_OK) {
-            berr = httpd_resp_send_chunk(req, NULL, 0);
-        }
-        return berr;
-    }
-
-    if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
-        return ESP_OK;
-    }
-
-    const profile_t *p = &s_profiles.profiles[id];
-    /* Sized for the per-segment "feasibility":"unreachable" field plus the
-     * seg_kind/io_target/io_state/io_blocking/io_leave_on_at_end fields added
-     * below (relay/IO segment support) -- worst case measured at 170 bytes
-     * per segment, rounded up. 224 -> 624 (2026-09-02) for the new
-     * exceeds_ceiling/ceiling_note fields -- ceiling_note_escaped is up to
-     * sizeof(ceiling_note)*2 = 512 bytes worst case (every byte escaped;
-     * ceiling_note itself widened 160 -> 256 to satisfy -Werror=format-
-     * truncation's conservative worst-case-float-width analysis). */
-    char json[816 + PROFILE_MAX_SEGMENTS * 192];
-    size_t o = 0;
-    int n;
-
-#define APPEND(...)                                                                              \
-    do {                                                                                          \
-        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
-            goto send;                                                                            \
-        }                                                                                          \
-        o += (size_t)n;                                                                            \
-    } while (0)
-
-    /* Same model-based feasibility the catalogue entries carry -- a user's own
-     * profile deserves the identical answer, and the UI can then colour both
-     * kinds with one rule. */
-    profile_seg_verdict_t per_seg[PROFILE_MAX_SEGMENTS];
-    for (size_t si = 0; si < PROFILE_MAX_SEGMENTS; si++) {
-        per_seg[si] = PROFILE_SEG_UNKNOWN;
-    }
-    profile_seg_verdict_t rollup =
-        profile_feasibility_profile_mask(p->zone_mask, p, per_seg, PROFILE_MAX_SEGMENTS);
-
-    char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
-    json_escape(p->name, name_escaped, sizeof(name_escaped));
-    /* exceeds_ceiling/ceiling_note (2026-09-02 owner correction): same live
-     * check the list endpoint runs -- see profile_exceeds_zone_ceiling()'s
-     * own comment. ceiling_note is "" when exceeds_ceiling is false. */
-    char ceiling_note[256];
-    bool exceeds_ceiling = profile_exceeds_zone_ceiling(p, ceiling_note, sizeof(ceiling_note));
-    char ceiling_note_escaped[sizeof(ceiling_note) * 2];
-    json_escape(ceiling_note, ceiling_note_escaped, sizeof(ceiling_note_escaped));
-    APPEND("{\"id\":%ld,\"builtin\":false,\"read_only\":false,\"name\":\"%s\",\"zone_mask\":%u,"
-           "\"segment_count\":%u,\"feasibility\":\"%s\",\"exceeds_ceiling\":%s,"
-           "\"ceiling_note\":\"%s\",\"segments\":[",
-           id, name_escaped, p->zone_mask, p->segment_count,
-           profile_feasibility_verdict_str(rollup), exceeds_ceiling ? "true" : "false",
-           ceiling_note_escaped);
-    for (uint8_t i = 0; i < p->segment_count; i++) {
-        const profile_segment_t *s = &p->segments[i];
-        /* Genuine firmware defect found while wiring the editor UI to this
-         * endpoint (owner's relay/IO segment request, profiles_http.h's
-         * profile_seg_kind_t comment): this response used to emit only the
-         * three ZONE_RAMP fields, so GETting a profile that has a RELAY_IO
-         * segment silently dropped seg_kind/io_target/io_state/io_blocking/
-         * io_leave_on_at_end -- editProfile() in profiles_page.html loads a
-         * profile through exactly this call and repopulates the editor from
-         * it, so without these fields every "Edit" of a saved relay segment
-         * would reload it as target_c 0 / ramp 0 / dwell <whatever dwell_min
-         * held>, i.e. a bogus ZONE_RAMP row, discarding the relay config on
-         * the very next save. Added rather than routed around client-side. */
-        APPEND("%s{\"seg_kind\":%u,\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,"
-               "\"io_target\":%u,\"io_state\":%u,\"io_blocking\":%u,\"io_leave_on_at_end\":%u,"
-               "\"feasibility\":\"%s\"}",
-               i == 0 ? "" : ",", s->seg_kind, (double)s->target_c, (double)s->ramp_c_per_hr,
-               (unsigned long)s->dwell_min, s->io_target, s->io_state, s->io_blocking,
-               s->io_leave_on_at_end, profile_feasibility_verdict_str(per_seg[i]));
-    }
-    APPEND("]}");
-
-#undef APPEND
-
-send:
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
-}
-
-/* ---- POST /api/profile ----------------------------------------------------
- * Validates into a scratch profile_t before touching s_profiles/NVS. Runs
- * the TODO.md section 5 feasibility check against zones_http.c's
- * user-entered per-zone ramp ceiling (zones_config_get_max_ramp()): a
- * segment whose ramp rate exceeds the ceiling rejects the whole submission;
- * one within 20% of it (PROFILE_RAMP_WARN_FRACTION) is accepted with a
- * warning, per TODO.md's explicit "warn, don't block" rule at that margin.
- * This is the creation-time half of that check -- TODO.md also calls for
- * re-checking at profile-*start* time, which belongs to the profile
- * executor, not this page, and profile_executor.c does exactly that against
- * every participating zone's ceiling as it stands at start. */
-
-static bool parse_profile_fields(const char *body, profile_t *p, char *err_msg, size_t err_cap)
-{
-    char name[PROFILE_NAME_MAX_LEN + 1];
-    int name_len = http_form_find_field(body, "name", name, sizeof(name));
-    if (name_len == -2) {
-        snprintf(err_msg, err_cap, "name too long");
-        return false;
-    }
-    if (name_len <= 0) {
-        snprintf(err_msg, err_cap, "name missing");
-        return false;
-    }
-    strncpy(p->name, name, PROFILE_NAME_MAX_LEN);
-    p->name[PROFILE_NAME_MAX_LEN] = '\0';
-
-    char zone_val[8];
-    int zone_len = http_form_find_field(body, "zone_mask", zone_val, sizeof(zone_val));
-    if (zone_len <= 0) {
-        snprintf(err_msg, err_cap, "zone_mask missing");
-        return false;
-    }
-    char *end = NULL;
-    long zone_mask = strtol(zone_val, &end, 10);
-    uint8_t thermo_count = zones_config_get_thermo_count();
-    uint8_t valid_bits = thermo_count >= 8 ? 0xFF : (uint8_t)((1u << thermo_count) - 1u);
-    if (end == zone_val || zone_mask <= 0 || zone_mask > 0xFF || ((uint8_t)zone_mask & ~valid_bits) != 0) {
-        snprintf(err_msg, err_cap,
-                "zone_mask must select at least one configured zone (check Thermocouples & Zones settings)");
-        return false;
-    }
-    p->zone_mask = (uint8_t)zone_mask;
-
-    char seg_count_val[8];
-    int seg_count_len = http_form_find_field(body, "seg_count", seg_count_val, sizeof(seg_count_val));
-    if (seg_count_len <= 0) {
-        snprintf(err_msg, err_cap, "seg_count missing");
-        return false;
-    }
-    end = NULL;
-    long seg_count = strtol(seg_count_val, &end, 10);
-    if (end == seg_count_val || seg_count < 1 || seg_count > PROFILE_MAX_SEGMENTS) {
-        snprintf(err_msg, err_cap, "seg_count out of range (1-12)");
-        return false;
-    }
-    p->segment_count = (uint8_t)seg_count;
-
-    for (uint8_t i = 0; i < p->segment_count; i++) {
-        /* 24, not 16. The longest key built here is "seg%u_io_blocking", and
-         * at the last segment index that is "seg11_io_blocking" -- 17
-         * characters plus the terminator, which does not fit 16. The MSVC
-         * host build does not run -Wformat-truncation, so this compiled and
-         * passed every host test; only the target build (-Werror=format-
-         * truncation) caught it. A truncated key would not have failed
-         * loudly either: http_form_find_field() would simply not find
-         * "seg11_io_blockin", and the field would silently read as absent,
-         * taking its default. 2026-08-28. */
-        char key[24];
-        profile_segment_t *seg = &p->segments[i];
-        memset(seg, 0, sizeof(*seg));
-
-        /* seg%u_kind is OPTIONAL and defaults to PROFILE_SEG_KIND_ZONE_RAMP
-         * (0) when absent -- every existing caller of this endpoint (the
-         * profiles_page.html editor as it stands today, and any UART/scripted
-         * submission written before this pass) never sends it and must keep
-         * producing exactly the temperature-ramp segment it always has. */
-        snprintf(key, sizeof(key), "seg%u_kind", i);
-        char val[24];
-        int len = http_form_find_field(body, key, val, sizeof(val));
-        char *fend = NULL;
-        long kind = len > 0 ? strtol(val, &fend, 10) : PROFILE_SEG_KIND_ZONE_RAMP;
-        if (len > 0 && fend == val) {
-            kind = PROFILE_SEG_KIND_ZONE_RAMP;
-        }
-        if (kind != PROFILE_SEG_KIND_ZONE_RAMP && kind != PROFILE_SEG_KIND_RELAY_IO) {
-            snprintf(err_msg, err_cap, "segment %u: unknown segment kind %ld", i + 1, kind);
-            return false;
-        }
-        seg->seg_kind = (uint8_t)kind;
-
-        if (seg->seg_kind == PROFILE_SEG_KIND_RELAY_IO) {
-            snprintf(key, sizeof(key), "seg%u_io_target", i);
-            len = http_form_find_field(body, key, val, sizeof(val));
-            end = NULL;
-            long io_target = len > 0 ? strtol(val, &end, 10) : -1;
-            if (len <= 0 || end == val || io_target < 0 || io_target > 255) {
-                snprintf(err_msg, err_cap, "segment %u: io_target missing or out of range", i + 1);
-                return false;
-            }
-            seg->io_target = (uint8_t)io_target;
-
-            snprintf(key, sizeof(key), "seg%u_io_state", i);
-            len = http_form_find_field(body, key, val, sizeof(val));
-            seg->io_state = (len > 0 && val[0] != '0') ? 1 : 0;
-
-            snprintf(key, sizeof(key), "seg%u_io_blocking", i);
-            len = http_form_find_field(body, key, val, sizeof(val));
-            /* Missing defaults to BLOCKING (1) -- the safer of the two: a
-             * segment nobody said was non-blocking should still hold up the
-             * schedule and get an explicit force-off at its own end, rather
-             * than silently running loose in the background. */
-            seg->io_blocking = (len <= 0 || val[0] != '0') ? 1 : 0;
-
-            snprintf(key, sizeof(key), "seg%u_io_leave_on", i);
-            len = http_form_find_field(body, key, val, sizeof(val));
-            /* Owner's explicit instruction: "Default must be OFF (force it
-             * off)". Missing, empty, or "0" all mean off -- only an explicit
-             * nonzero value turns this on. */
-            seg->io_leave_on_at_end = (len > 0 && val[0] != '0') ? 1 : 0;
-
-            snprintf(key, sizeof(key), "seg%u_dwell", i);
-            len = http_form_find_field(body, key, val, sizeof(val));
-            end = NULL;
-            long dwell = len > 0 ? strtol(val, &end, 10) : 0; /* missing = 0, same as "no hold" */
-            if (len > 0 && (end == val || dwell < 0 || dwell > (long)PROFILE_DWELL_MIN_MAX)) {
-                snprintf(err_msg, err_cap, "segment %u: dwell_min out of range (0-1440)", i + 1);
-                return false;
-            }
-            seg->dwell_min = (uint32_t)(dwell < 0 ? 0 : dwell);
-
-            if (!validate_io_segment(seg, (uint8_t)(i + 1), err_msg, err_cap)) {
-                return false;
-            }
-            continue;
-        }
-
-        snprintf(key, sizeof(key), "seg%u_target", i);
-        len = http_form_find_field(body, key, val, sizeof(val));
-        fend = NULL;
-        float target = len > 0 ? strtof(val, &fend) : NAN;
-        if (len <= 0 || fend == val || isnan(target) || target < PROFILE_TARGET_C_MIN ||
-            target > PROFILE_TARGET_C_MAX) {
-            snprintf(err_msg, err_cap, "segment %u: target_c missing or out of range (%.0f-%.0f)", i + 1,
-                     (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX);
-            return false;
-        }
-        seg->target_c = target;
-
-        snprintf(key, sizeof(key), "seg%u_ramp", i);
-        len = http_form_find_field(body, key, val, sizeof(val));
-        fend = NULL;
-        float ramp = len > 0 ? strtof(val, &fend) : NAN;
-        if (len <= 0 || fend == val || isnan(ramp) || ramp < PROFILE_RAMP_C_PER_HR_MIN ||
-            ramp > PROFILE_RAMP_C_PER_HR_MAX) {
-            snprintf(err_msg, err_cap, "segment %u: ramp_c_per_hr missing or out of range (0-1000)", i + 1);
-            return false;
-        }
-        seg->ramp_c_per_hr = ramp;
-
-        snprintf(key, sizeof(key), "seg%u_dwell", i);
-        len = http_form_find_field(body, key, val, sizeof(val));
-        end = NULL;
-        long dwell = len > 0 ? strtol(val, &end, 10) : -1;
-        if (len <= 0 || end == val || dwell < 0 || dwell > (long)PROFILE_DWELL_MIN_MAX) {
-            snprintf(err_msg, err_cap, "segment %u: dwell_min missing or out of range (0-1440)", i + 1);
-            return false;
-        }
-        seg->dwell_min = (uint32_t)dwell;
-    }
-    return true;
-}
-
-/* Appends a JSON string element for warnings[]; returns false (and leaves
- * *o unchanged) if it wouldn't fit, matching every other APPEND-macro
- * handler's "stop rather than overrun" convention. */
-static bool append_warning(char *json, size_t cap, size_t *o, bool *first, const char *text)
-{
-    int n = snprintf(json + *o, cap - *o, "%s\"%s\"", *first ? "" : ",", text);
-    if (n < 0 || (size_t)n >= cap - *o) {
-        return false;
-    }
-    *o += (size_t)n;
-    *first = false;
-    return true;
-}
-
-static esp_err_t profile_post_handler(httpd_req_t *req)
-{
-    if (req->content_len <= 0 || req->content_len > PROFILE_BODY_MAX) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
-        return ESP_OK;
-    }
-
-    /* HEAP (PSRAM), not stack, and freed the moment parse_profile_fields()
-     * is done with it, BEFORE warn_json below is even allocated -- this used
-     * to be the biggest of three buffers (2049B) that all lived on the
-     * stack simultaneously for the whole function (body + warn_json[1168] +
-     * the final json[1424] = 4641B in one frame, coordinator review,
-     * 2026-08-31 httpd_worker stack-overflow audit). `body` is never
-     * referenced again after the parse_profile_fields() call a few lines
-     * down (the id_val lookup and that one call are its only two uses), so
-     * it does not genuinely need to overlap with warn_json/json at all --
-     * sequencing it out drops this function's peak transient allocation
-     * from 4641B to ~2592B (warn_json+json, which DO need to coexist since
-     * the final response embeds warn_json's text via %s). */
-    char *body = heap_caps_malloc(PROFILE_BODY_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (body == NULL) {
-        ESP_LOGE(TAG, "POST /api/profile: malloc(%u) failed for the request body buffer",
-                 (unsigned)(PROFILE_BODY_MAX + 1));
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req,
-                                  "{\"ok\":false,\"error\":\"out of memory reading the request body\"}");
-    }
-    size_t received = 0;
-    while (received < (size_t)req->content_len) {
-        int ret = httpd_req_recv(req, body + received, req->content_len - received);
-        if (ret <= 0) {
-            ESP_LOGW(TAG, "profile body read failed/short: %d", ret);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
-            free(body);
-            return ESP_OK;
-        }
-        received += (size_t)ret;
-    }
-    body[received] = '\0';
-
-    /* id: empty or "-1" creates in the first free slot; a valid existing id
-     * overwrites that slot. Any other value in 0..7 also targets that exact
-     * slot (create-or-overwrite), so a client that already knows its id can
-     * address it directly rather than relying on "first free". */
-    char id_val[8];
-    int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    long requested_id = (id_len > 0) ? strtol(id_val, NULL, 10) : -1;
-
-    uint8_t target_id;
-    if (requested_id >= 0 && requested_id < PROFILES_MAX_COUNT) {
-        target_id = (uint8_t)requested_id;
-    } else {
-        int free_slot = -1;
-        for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!(s_profiles.used_bitmap & (1u << i))) {
-                free_slot = i;
-                break;
-            }
-        }
-        if (free_slot < 0) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "profile storage full");
-            free(body);
-            return ESP_OK;
-        }
-        target_id = (uint8_t)free_slot;
-    }
-
-    profile_t tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    char err_msg[128];
-    bool parse_ok = parse_profile_fields(body, &tmp, err_msg, sizeof(err_msg));
-    /* Last use of `body` in this function either way -- free it here, before
-     * warn_json is allocated below, rather than holding it until the
-     * function returns. */
-    free(body);
-    body = NULL;
-    if (!parse_ok) {
-        char json[192];
-        int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_msg);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
-    }
-
-    /* Feasibility check (TODO.md section 5): a segment with ramp_c_per_hr ==
-     * 0 has no ramp-rate constraint at all (dwell/hold segment) and is
-     * exempt. For a segment that does specify a rate, no ceiling on record
-     * for the zone (zones_config_get_max_ramp returning a ceiling of 0.0,
-     * which is also its "never configured" default) makes every nonzero
-     * rate infeasible -- correct, since there is nothing to feasibility
-     * check against until the zone's max ramp rate is set on the
-     * Thermocouples & Zones page.
-     *
-     * HEAP (PSRAM): `body` above is already freed by the time this is
-     * allocated, so this and the final `json` below (which embeds this
-     * buffer's text) are the only two transient buffers actually coexisting
-     * in this function -- see this function's own opening comment for the
-     * peak-size accounting. Freed on every return path below (both the
-     * feasibility-rejection 400 and the final 200). */
-    const size_t warn_json_cap = PROFILE_MAX_SEGMENTS * 96 + 16;
-    char *warn_json = heap_caps_malloc(warn_json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (warn_json == NULL) {
-        ESP_LOGE(TAG, "POST /api/profile: malloc(%u) failed for the warnings buffer",
-                 (unsigned)warn_json_cap);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req,
-                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
-    }
-    size_t warn_o = 0;
-    bool warn_first = true;
-    warn_json[warn_o++] = '[';
-    /* Multi-zone (TODO.md 6A.5): check every participating zone's ceiling
-     * against every ramped segment -- a profile is only feasible if ALL of
-     * its zones can sustain the requested rate, since ramp-lock will hold
-     * the shared setpoint back to whichever zone is slowest anyway; a
-     * profile that's infeasible for even one zone would just always be
-     * ramp-locked against that zone forever. */
-    for (uint8_t i = 0; i < tmp.segment_count; i++) {
-        if (tmp.segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
-            continue; /* a relay/IO segment has no ramp rate to check against a zone's ceiling */
-        }
-        float rate = tmp.segments[i].ramp_c_per_hr;
-        if (rate <= 0.0f) {
-            continue;
-        }
-        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-            if (!(tmp.zone_mask & (1u << zi))) {
-                continue;
-            }
-            float ceiling = 0.0f;
-            zones_config_get_max_ramp(zi, &ceiling); /* zone already validated < thermo_count */
-            if (rate > ceiling) {
-                char json[224];
-                int n = snprintf(json, sizeof(json),
-                                 "{\"ok\":false,\"error\":\"segment %u: ramp rate %.1f C/hr exceeds zone %u's "
-                                 "%.1f C/hr ceiling\"}",
-                                 i + 1, (double)rate, zi, (double)ceiling);
-                httpd_resp_set_status(req, "400 Bad Request");
-                httpd_resp_set_type(req, "application/json");
-                esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
-                free(warn_json);
-                return ret;
-            }
-            if (rate > PROFILE_RAMP_WARN_FRACTION * ceiling) {
-                char text[96];
-                snprintf(text, sizeof(text),
-                        "segment %u: ramp rate %.1f C/hr is within 20%% of zone %u's %.1f C/hr ceiling",
-                        i + 1, (double)rate, zi, (double)ceiling);
-                append_warning(warn_json, warn_json_cap, &warn_o, &warn_first, text);
-            }
-        }
-    }
-    /* OWNER CORRECTION (2026-09-02): a target exceeding the zone's CURRENT
-     * max_temp_c is no longer a save-time refusal (profiles are portable
-     * between kilns -- see profile_exceeds_zone_ceiling()'s own comment).
-     * Surfaced here as a warning instead, so the web editor's response makes
-     * the condition visible immediately rather than leaving the user to
-     * discover it only when a run is refused hours later. Enforcement stays
-     * profile_executor_run.c's run-start re-check. */
-    {
-        char ceiling_note[256];
-        if (profile_exceeds_zone_ceiling(&tmp, ceiling_note, sizeof(ceiling_note))) {
-            append_warning(warn_json, warn_json_cap, &warn_o, &warn_first, ceiling_note);
-        }
-    }
-    if (warn_o + 1 < warn_json_cap) {
-        warn_json[warn_o++] = ']';
-    }
-    warn_json[warn_o < warn_json_cap ? warn_o : warn_json_cap - 1] = '\0';
-
-    s_profiles.profiles[target_id] = tmp;
-    s_profiles.used_bitmap |= (1u << target_id);
-    esp_err_t err = nvs_save_slot(target_id);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
-                 target_id, esp_err_to_name(err));
-    }
-
-    /* HEAP (PSRAM), same reasoning as warn_json above -- embeds warn_json's
-     * text via %s, so the two DO need to coexist for this one snprintf
-     * call; warn_json is freed immediately after, before this buffer is
-     * sent, rather than both living until the function returns. */
-    const size_t json_cap = 256 + warn_json_cap;
-    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (json == NULL) {
-        ESP_LOGE(TAG, "POST /api/profile: malloc(%u) failed for the response buffer", (unsigned)json_cap);
-        free(warn_json);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req,
-                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
-    }
-    int n = snprintf(json, json_cap, "{\"ok\":true,\"id\":%u,\"warnings\":%s}", target_id, warn_json);
-    free(warn_json);
-    httpd_resp_set_type(req, "application/json");
-    esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
-    free(json);
-    return ret;
-}
-
-static esp_err_t profile_delete_post_handler(httpd_req_t *req)
-{
-    if (req->content_len <= 0 || req->content_len > 64) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
-        return ESP_OK;
-    }
-    char body[65];
-    size_t received = 0;
-    while (received < (size_t)req->content_len) {
-        int ret = httpd_req_recv(req, body + received, req->content_len - received);
-        if (ret <= 0) {
-            ESP_LOGW(TAG, "profile delete body read failed/short: %d", ret);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
-            return ESP_OK;
-        }
-        received += (size_t)ret;
-    }
-    body[received] = '\0';
-
-    char id_val[8];
-    int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    char *end = NULL;
-    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
-    if (id_len > 0 && end != id_val && id >= 0 && id <= 255 && profiles_builtin_id_valid((uint8_t)id)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "built-in schedules are read-only and cannot be deleted -- "
-                            "hide it instead (POST /api/profile/builtin/hide)");
-        return ESP_OK;
-    }
-    if (id_len <= 0 || end == id_val || id < 0 || id >= PROFILES_MAX_COUNT) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
-        return ESP_OK;
-    }
-    if (!(s_profiles.used_bitmap & (1u << id))) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
-        return ESP_OK;
-    }
-
-    s_profiles.used_bitmap &= ~(1u << id);
-    memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
-    esp_err_t err = nvs_erase_slot((uint8_t)id);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_erase_slot(%ld) failed: %s -- deleted live but may reappear after reboot", id,
-                 esp_err_to_name(err));
-    }
-    return httpd_resp_sendstr(req, "ok");
-}
-
-/* ---- Builtin hide / unhide / restore ---------------------------------------
- *
- * "Remove this shipped schedule" cannot be a delete -- the catalogue is a
- * const table in flash -- so it is a persisted hide, and unhiding is
- * therefore always possible. See profiles_builtin.h.
- *
- * POST /api/profile/builtin/hide     body: id=<128..>&hidden=0|1
- * POST /api/profile/builtin/restore  body: (none) -- unhides everything
- */
-
-static bool read_small_body(httpd_req_t *req, char *buf, size_t cap)
-{
-    if ((size_t)req->content_len >= cap) {
-        return false;
-    }
-    size_t received = 0;
-    while (received < (size_t)req->content_len) {
-        int ret = httpd_req_recv(req, buf + received, req->content_len - received);
-        if (ret <= 0) {
-            return false;
-        }
-        received += (size_t)ret;
-    }
-    buf[received] = '\0';
-    return true;
-}
-
-static esp_err_t builtin_hide_post_handler(httpd_req_t *req)
-{
-    char body[65];
-    if (!read_small_body(req, body, sizeof(body))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
-        return ESP_OK;
-    }
-
-    char id_val[8];
-    int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    char *end = NULL;
-    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
-    if (id_len <= 0 || end == id_val || id < 0 || id > 255 || !profiles_builtin_id_valid((uint8_t)id)) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such built-in schedule");
-        return ESP_OK;
-    }
-
-    /* Missing "hidden" defaults to 1: the endpoint is named "hide", so the
-     * request with no qualifier means hide. Unhiding takes an explicit
-     * hidden=0. */
-    char hid_val[8];
-    int hid_len = http_form_find_field(body, "hidden", hid_val, sizeof(hid_val));
-    bool hidden = (hid_len <= 0) || (hid_val[0] != '0');
-
-    esp_err_t err = profiles_builtin_set_hidden((uint8_t)id, hidden);
-    char json[128];
-    int n = snprintf(json, sizeof(json), "{\"ok\":%s,\"id\":%ld,\"hidden\":%s,\"persisted\":%s}",
-                     "true", id, hidden ? "true" : "false", err == ESP_OK ? "true" : "false");
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
-}
-
-static esp_err_t builtin_restore_post_handler(httpd_req_t *req)
-{
-    char body[65];
-    if (req->content_len > 0 && !read_small_body(req, body, sizeof(body))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large or read failed");
-        return ESP_OK;
-    }
-    esp_err_t err = profiles_builtin_restore_all();
-    char json[96];
-    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"persisted\":%s}", err == ESP_OK ? "true" : "false");
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
-}
-
 esp_err_t profiles_http_start(void)
 {
     /* profiles_nvs is used only by this module, but nvs_flash_init_partition()
@@ -1998,7 +1052,7 @@ esp_err_t profiles_http_start(void)
      * module did it) is safe either way. */
     esp_err_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
     if (part_err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- profiles will not persist", PROFILES_NVS_PARTITION,
+        ESP_LOGE(PROFILES_TAG, "NVS init for '%s' failed: %s -- profiles will not persist", PROFILES_NVS_PARTITION,
                  esp_err_to_name(part_err));
     }
 
@@ -2014,18 +1068,18 @@ esp_err_t profiles_http_start(void)
         }
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "profile NVS load failed: %s -- starting with no saved profiles", esp_err_to_name(err));
+        ESP_LOGW(PROFILES_TAG, "profile NVS load failed: %s -- starting with no saved profiles", esp_err_to_name(err));
         memset(&s_profiles, 0, sizeof(s_profiles));
     }
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {
-        ESP_LOGE(TAG, "no HTTP server -- wifi_provision_http_start() must run first");
+        ESP_LOGE(PROFILES_TAG, "no HTTP server -- wifi_provision_http_start() must run first");
         return ESP_ERR_INVALID_STATE;
     }
 
     static const httpd_uri_t page_uri = {
-        .uri = "/profiles", .method = HTTP_GET, .handler = page_get_handler,
+        .uri = "/profiles", .method = HTTP_GET, .handler = profiles_page_get_handler,
     };
     static const httpd_uri_t list_uri = {
         .uri = "/api/profiles", .method = HTTP_GET, .handler = profiles_list_get_handler,
@@ -2050,48 +1104,48 @@ esp_err_t profiles_http_start(void)
     };
     err = httpd_register_uri_handler(server, &page_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/profiles) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(/profiles) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &list_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/profiles) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(GET /api/profiles) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &detail_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/profile) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(GET /api/profile) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &post_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/profile) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &delete_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/profile/delete) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile/delete) failed: %s", esp_err_to_name(err));
         return err;
     }
 
     err = httpd_register_uri_handler(server, &builtin_list_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/profiles/builtin) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(GET /api/profiles/builtin) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &builtin_hide_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/profile/builtin/hide) failed: %s",
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile/builtin/hide) failed: %s",
                  esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &builtin_restore_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/profile/builtin/restore) failed: %s",
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile/builtin/restore) failed: %s",
                  esp_err_to_name(err));
         return err;
     }
 
-    ESP_LOGI(TAG, "profiles API up (storage/validation; execution runs in profile_executor.c)");
+    ESP_LOGI(PROFILES_TAG, "profiles API up (storage/validation; execution runs in profile_executor.c)");
     return ESP_OK;
 }

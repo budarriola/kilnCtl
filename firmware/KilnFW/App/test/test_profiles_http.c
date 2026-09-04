@@ -227,6 +227,11 @@ static esp_err_t nvs_erase_key(nvs_handle_t h, const char *key)
 #define asm(x)
 
 #include "../drivers/profiles_http.c"
+// profiles_http.c split 2026-09-04 (ROADMAP.md M15, the 1500-line rule) --
+// #include the sibling files alongside it, same convention
+// test_wifi_prov.c/test_autotune_engine_prestart.c use for their own splits.
+#include "../drivers/profiles_catalog_http.c"
+#include "../drivers/profiles_edit_http.c"
 
 #undef asm
 #undef TEST_STUB_NVS_H

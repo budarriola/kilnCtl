@@ -239,6 +239,9 @@ idf_component_register(SRCS "MAX31856.c"
                        "heat_interlock.c"
                        "ota_record.c"
                        "ota_http.c"
+                       "ota_http_esp.c"
+                       "ota_http_pico.c"
+                       "ota_http_recovery.c"
                        "ota_http_util.c"
                        "ota_pico_relay.c"
                        "wifi_prov.c"
@@ -276,6 +279,11 @@ idf_component_register(SRCS "MAX31856.c"
                        # RELAY_OWNER_RULE comment for why that enumerator is
                        # still here even though nothing claims it any more.
                        "profiles_http.c"
+                       # profiles_http.c split 2026-09-04 (ROADMAP.md M15, the
+                       # 1500-line rule) -- see profiles_http_internal.h's own
+                       # doc comment for the file map.
+                       "profiles_catalog_http.c"
+                       "profiles_edit_http.c"
                        # profiles_builtin.c is hand-written and #includes the
                        # machine-generated profiles_builtin_table.inc, which is
                        # NOT listed here (it is not a translation unit).

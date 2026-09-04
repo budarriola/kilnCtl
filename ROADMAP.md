@@ -1759,7 +1759,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       response/scratch buffer.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
       ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, `ota_http.c` (2508),
-      `ui_page_home.c` (2279), `panel_spi.c` (2174), `profiles_http.c` (2097),
+      `ui_page_home.c` (2279), `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
       `zones_config_json.c` (1867), `main.c` (1820), `backup_http.c` (1756),
       `uart_bridge_ext.c` (1727), `zones_http_handlers.c` (1598). Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
@@ -1844,7 +1844,43 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       (its `lvgl_port.h` include drags in a GCC-only attribute MSVC's host
       toolchain rejects, per `build_host_tests.ps1`'s own comment), so no
       test file needed updating; all 21/21 host test executables still
-      build and pass.
+      build and pass. `profiles_http.c` part — **CLOSED 2026-09-04**:
+      move-only split into `profiles_http.c` (1151 lines, `s_profiles`
+      storage, on-flash blob versioning/decode, NVS load/save/erase/
+      migrate, `PROFILES_TAG`, the plain-C API
+      `profiles_http_get/save/delete/get_bounds()` `profile_executor.c`/
+      `uart_bridge_ext.c` call directly, and `profiles_http_start()` which
+      registers every handler defined in the other two files),
+      `profiles_catalog_http.c` (438, read side: `GET /profiles` page,
+      `GET /api/profiles`, `GET /api/profile`, `GET /api/profiles/builtin`)
+      and `profiles_edit_http.c` (526, write side: `POST /api/profile`,
+      `POST /api/profile/delete`, `POST /api/profile/builtin/{hide,
+      restore}`), sharing state via `profiles_http_internal.h` on the same
+      `profile_executor_internal.h` precedent (shared statics as `extern`,
+      former `static` helpers widened to file-scope-internal). Symbol
+      audit: grepped every widened symbol (`s_profiles`, `nvs_save_slot`,
+      `nvs_erase_slot`, `profile_exceeds_zone_ceiling`,
+      `validate_io_segment`, `profiles_list_get_handler`,
+      `profile_detail_get_handler`, `builtin_list_get_handler`,
+      `profile_post_handler`, `profile_delete_post_handler`,
+      `builtin_hide_post_handler`, `builtin_restore_post_handler`) for
+      exactly one non-static definition and any same-named `static` one
+      repo-wide before trusting the link — one real, already-live
+      collision found: `page_get_handler` (bare widening would have hit
+      `zones_http_handlers.c`'s own non-static `page_get_handler`, an
+      immediate multiple-definition error, not a latent one) — renamed
+      `profiles_page_get_handler`. `TAG` renamed `PROFILES_TAG` per the
+      `DASH_TAG` precedent regardless of collision (every driver file in
+      App/drivers has its own `static const char *TAG`). `build_kilnfw`
+      compiles `profiles_http.c`/`profiles_catalog_http.c`/
+      `profiles_edit_http.c` clean (confirmed by their absence from two
+      consecutive `build_kilnfw` failure logs, both of which stopped only
+      on `ota_http_esp.c`/`ota_http_pico.c` — `autotune_engine.c`'s sibling
+      `ota_http.c` split, open under this same item, left alone per this
+      task's own scope). All 21/21 host test executables pass;
+      `test_profiles_http.c` unchanged except #including the two new files
+      alongside `profiles_http.c`, same convention as `test_wifi_prov.c`/
+      `test_autotune_engine_prestart.c`.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
