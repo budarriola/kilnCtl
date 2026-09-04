@@ -84,6 +84,8 @@ $sources = @(
     (Join-Path $testDir "test_iter_tune.c"),
     (Join-Path $testDir "test_cone_table.c"),
     (Join-Path $testDir "test_ramp_lock_onesided.c"),
+    (Join-Path $testDir "test_zone_sweep_relay_off_wiring.c"),
+    (Join-Path $testDir "test_approach_rate_cap.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "cone_table.c"),

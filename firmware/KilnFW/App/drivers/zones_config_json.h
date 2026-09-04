@@ -59,7 +59,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 17
+#define ZONES_CFG_VERSION 18
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -104,6 +104,42 @@ extern "C" {
  * behaviour is identical on every board until an operator deliberately
  * changes it. Also what the 0 sentinel above resolves to. */
 #define ZONE_EASE_OFF_WINDOW_MULT_DEFAULT 2.0f
+
+/* Bounds for zone_cfg_t::approach_rate_cap_c_per_hr (ZONES_CFG_VERSION 17->18,
+ * 2026-09-04, PID_EXPANSION_PLAN.md sec 3.6d, PER_ZONE_TARGET_DESIGN_STUDY.md
+ * option (b)): a per-zone ceiling on how fast THIS zone's own commanded PID/
+ * feedforward setpoint (profile_executor_internal.h's zone_runtime_t::
+ * effective_target_c) may approach the shared, board-wide ramp destination
+ * s_exec.target_c. The destination itself, segment-advance, ramp-lock, and
+ * feasibility are ALL untouched by this field -- see this field's own
+ * "no wire-protocol/ramp-lock change" note below.
+ *
+ * 0.0f is a SEPARATE, always-legal sentinel meaning "uncapped" -- NOT the
+ * same convention as ease_off_window_mult's 0 (which substitutes a firmware
+ * DEFAULT cap value). There is no sensible non-zero default rate to
+ * substitute here: the correct "no cap" behaviour is for effective_target_c
+ * to track s_exec.target_c exactly, every tick, with no rate limit at all --
+ * precisely today's behaviour, unchanged. zones_config_get_approach_rate_cap()
+ * reports this sentinel back verbatim (0 means "off"), it does not resolve it
+ * into some other in-range number the way zones_config_get_ease_off_window_
+ * mult() resolves its own 0 into 2.0.
+ *
+ * MIN 1.0f (C/hr): anything smaller effectively never reaches the segment's
+ * own target within any realistic firing duration (at 0.5 C/hr, closing even
+ * a 5C gap takes 10 hours) -- a value that low is functionally "never dwell,"
+ * not a deliberately slow approach, and is far more likely to be a units
+ * mistake (C/min instead of C/hr) than an intentional choice. Refused, never
+ * clamped, same discipline as every other setter in this codebase.
+ *
+ * MAX matches ZONE_MAX_RAMP_C_PER_HR_MAX -- a cap can only ever TIGHTEN a
+ * segment's ramp rate (see this field's own "never loosens" guarantee just
+ * below), so it can never usefully exceed the fastest ramp a segment could
+ * ever command in the first place; anything above that ceiling is a no-op
+ * indistinguishable from uncapped and is refused as almost certainly a typo
+ * (an operator meaning to type a cap and instead entering, e.g., a
+ * temperature). */
+#define ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN 1.0f
+#define ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX ZONE_MAX_RAMP_C_PER_HR_MAX
 
 
 /* MAX31856 CR1.TC[3:0] nibble values 0x00-0x07 name a real thermocouple type
@@ -474,7 +510,135 @@ typedef struct {
      * on-flash zone_cfg_v16_t layout (frozen below) stays an exact byte-
      * for-byte prefix of this shape, not a reinterpretation of it. */
     float ease_off_window_mult;
+    /* ---- ZONES_CFG_VERSION 17->18 (2026-09-04, PID_EXPANSION_PLAN.md
+     * sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option (b): "a per-zone
+     * approach-rate CAP that can only ever TIGHTEN the shared segment ramp
+     * rate"). z0's dwell-entry overshoot correlates near 1:1 with ramp rate
+     * into the transition; the design study found the shared `target_c`
+     * scalar itself does not need to move (which would have redefined
+     * ramp-lock/segment-advance/feasibility, PER_ZONE_TARGET_DESIGN_STUDY.md
+     * section 2) -- only each zone's own RATE of approach toward that shared
+     * destination needs to be individually clampable.
+     *
+     * 0.0f = uncapped, i.e. this zone's effective setpoint tracks
+     * s_exec.target_c exactly, every tick, with zero rate limit -- BIT-
+     * IDENTICAL to every firing before this field existed. This is the only
+     * legal value below ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN; see that
+     * macro's own comment for why 0 is a sentinel here, not merely the
+     * bottom of the valid range (unlike ease_off_window_mult's 0, this one
+     * does NOT resolve to a substituted default -- "no cap" has no other
+     * value that means the same thing).
+     *
+     * A non-zero value is a ceiling, degC/hr, on how fast
+     * zone_runtime_t::effective_target_c (profile_executor_internal.h) may
+     * move toward the shared s_exec.target_c -- it can only ever make this
+     * zone's own commanded approach SLOWER than the segment's programmed
+     * ramp_c_per_hr, never faster: profile_executor.c rate-limits
+     * effective_target_c's per-tick step to min(|s_exec.target_c -
+     * effective_target_c| implied by one tick, cap * dt_s/3600), so a cap
+     * numerically looser than the segment's own commanded rate is a
+     * mathematical no-op (effective_target_c already tracks s_exec.target_c
+     * at the segment's own, slower rate, and the cap's wider ceiling is
+     * never the binding constraint) -- there is no code path by which this
+     * field can make a zone approach FASTER than the segment says.
+     *
+     * Reaches the control loop as this zone's OWN commanded setpoint for its
+     * feedforward and PID terms (profile_executor_pid_tick.c) and, per the
+     * design study's section 2.4 resolution of the "fake setpoint" bug class
+     * (project_autotune_feeds_fake_setpoint.md), also as the value fed to
+     * thermal_guard_input_t.setpoint_c for this zone -- an uncapped zone's
+     * guard-visible setpoint is therefore unchanged (still s_exec.target_c,
+     * since effective_target_c == s_exec.target_c whenever the cap is 0),
+     * and a capped zone's guard now sees what it is ACTUALLY being asked to
+     * do this tick, not the group's eventual destination.
+     *
+     * Deliberately untouched by this field, all per the design study's
+     * section 4.1: s_exec.target_c itself (the shared destination),
+     * segment-advance (still keyed off s_exec.target_c == seg->target_c),
+     * ramp-lock (still compares each zone's actual_c against the one shared
+     * s_exec.target_c, exactly as before), profile_segment_feasibility()
+     * (never reads this field), and safety_link_frames.c's wire setpoint
+     * (still `pstat.target_c`, the shared destination -- SaftyFW's S2 guard
+     * already reduces per-zone setpoints with max() and needs no change
+     * either way, but this option does not even exercise that path since
+     * the wire value never becomes per-zone).
+     *
+     * Bounded by [ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN,
+     * ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX] or exactly 0.0f -- refused, never
+     * clamped, same discipline as ease_off_window_mult and every other
+     * setter in this codebase. Appended at zone_cfg_t's own true tail, the
+     * same safe-growth spot ease_off_window_mult used at v16->v17 just
+     * above -- so a v17 board's on-flash zone_cfg_v17_t layout (frozen
+     * below) stays an exact byte-for-byte prefix of this shape. */
+    float approach_rate_cap_c_per_hr;
 } zone_cfg_t;
+
+/* Frozen v17 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 17->18), per-zone ease_off_window_mult and
+ * all, predating approach_rate_cap_c_per_hr. Same discipline as
+ * zone_cfg_v16_t just above it in this file: field order hand-copied from
+ * v17's actual shape, never derived from the live struct -- critically,
+ * NEVER the bare `zone_cfg_t` name for this purpose, since that name now
+ * refers to the v18 (bigger) shape. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+} zone_cfg_v17_t;
+
+/* 196 = 192 (zone_cfg_v16_t's own byte-for-byte size, per that struct's
+ * assert comment) + 4 (ease_off_window_mult, already 4-byte aligned so no
+ * further tail padding). Hand-computed, same discipline as every other
+ * frozen zone_cfg_vN_t assert in this file -- never sizeof(zone_cfg_t),
+ * which by the time this pass lands is already the v18 shape, not v17's. */
+_Static_assert(sizeof(zone_cfg_v17_t) == 196,
+               "zone_cfg_v17_t must match the on-flash v17 layout byte-for-byte (196 bytes)"); /* v17 -- predates per-zone approach_rate_cap_c_per_hr */
 
 /* Frozen v16 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 16->17), coupling_diag_k_dc and all,
@@ -1451,6 +1615,31 @@ typedef struct {
                      * pass; predates the per-zone ease_off_window_mult move and
                      * still carries the global scalar this pass removes. */
 
+/* Frozen v17 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 17->18): zones[] is the per-zone shape that
+ * predates this pass's approach_rate_cap_c_per_hr addition (zone_cfg_v17_t,
+ * frozen above). Unlike v16, there is no wrapper-level scalar being removed
+ * here -- ease_off_window_mult was already fully per-zone by v17, so this
+ * wrapper's shape is otherwise identical to the CURRENT zones_cfg_t, just
+ * with zones[] pinned to the smaller, historical per-zone type. This is what
+ * a LIVE, already-commissioned v17 board looks like on flash right now --
+ * the exact blob a v17->v18 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v17_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v17_t; /* v17 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates the per-zone approach_rate_cap_c_per_hr
+                     * addition. */
+
 
 
 typedef enum {
@@ -1566,6 +1755,31 @@ bool zones_config_json_parse_timing_profile_fields(const char *body, uint8_t p, 
  * experiment without telling anyone. */
 bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult);
 bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult);
+
+/* Runtime accessor pair for zone_cfg_t::approach_rate_cap_c_per_hr
+ * (ZONES_CFG_VERSION 17->18, PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_
+ * TARGET_DESIGN_STUDY.md option (b)) -- same declaration placement/rationale
+ * as the ease_off_window_mult pair just above (this pass's touched-files
+ * list does not include zones_http.h either). `zone_index` bounds-checked
+ * against MAX31856_CHANNEL_COUNT, same as every other per-zone accessor.
+ *
+ * UNLIKE zones_config_get_ease_off_window_mult(), the getter here does NOT
+ * resolve 0 into some other in-range value -- 0 IS the answer "uncapped,"
+ * and profile_executor.c's caller must treat it that way (see the field's
+ * own doc comment for why there is no sensible default cap to substitute).
+ * A stored value that is finite but outside [MIN, MAX] and not exactly 0
+ * (only reachable via direct NVS tampering or a rollback from newer
+ * firmware with a wider range) is defensively treated as uncapped too --
+ * same "never hand the caller a raw value it cannot safely act on" rule
+ * zones_config_get_ease_off_window_mult() follows, just resolving to the
+ * OTHER safe answer (off, not a substituted default) for this field.
+ *
+ * zones_config_set_approach_rate_cap_c_per_hr() rejects (false, no write, no
+ * NVS save) a non-finite value or one outside {0.0f} union
+ * [ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN, ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX]
+ * -- refused, never clamped, same discipline as every setter in this file. */
+bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_cap_c_per_hr);
+bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr);
 
 #ifdef __cplusplus
 }

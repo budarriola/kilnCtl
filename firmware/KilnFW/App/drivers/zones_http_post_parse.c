@@ -624,6 +624,33 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
             z->ease_off_window_mult = current_z->ease_off_window_mult;
         }
     }
+    /* ZONES_CFG_VERSION 17->18 (PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_
+     * TARGET_DESIGN_STUDY.md option (b)): the per-zone approach-rate cap.
+     * Same OPTIONAL/omit-PRESERVES convention as z%u_easeoffmult just above
+     * (an A/B campaign toggling one zone's cap need not resubmit the whole
+     * form, and a client that predates this field must not silently clear
+     * whichever cap is currently running on THIS zone just by saving the
+     * zones page).
+     *
+     * Parsed against [0, MAX] first -- 0 is the legal "uncapped" sentinel --
+     * then the (0, MIN) sliver zones_config_json_parse_float_field()'s
+     * single contiguous range cannot express on its own is rejected here.
+     * Same effective bound as the accessor setter/zones_config_json_
+     * validate()'s per-zone check, split the same way z%u_easeoffmult's is. */
+    snprintf(key, sizeof(key), "z%u_approachratecap", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX,
+                                   &z->approach_rate_cap_c_per_hr) ||
+                (z->approach_rate_cap_c_per_hr != 0.0f &&
+                 z->approach_rate_cap_c_per_hr < ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN)) {
+                *err_reason = "zone approach_rate_cap_c_per_hr out of range (0 = uncapped)";
+                return false;
+            }
+        } else {
+            z->approach_rate_cap_c_per_hr = current_z->approach_rate_cap_c_per_hr;
+        }
+    }
     /* 2026-08-30 (ZONES_CFG_VERSION 10->11): one indexed key per cell,
      * z%u_coupling_c%u -- e.g. z1_coupling_c0 is zone 1's measured response
      * to zone 0's heater. Same per-cell "omit preserves the currently-stored

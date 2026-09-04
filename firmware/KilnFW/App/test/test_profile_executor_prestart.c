@@ -609,6 +609,25 @@ bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult)
     return true;
 }
 
+/* ZONES_CFG_VERSION 17->18 (PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_
+ * TARGET_DESIGN_STUDY.md option (b)): profile_executor.c's per-tick cap
+ * update reads the per-zone approach-rate cap through this getter. 0 (the
+ * array's own zero-init default) means "uncapped" -- UNLIKE
+ * g_stub_ease_off_window_mult above, this is returned VERBATIM, never
+ * resolved into a substituted default, matching the real accessor's own
+ * "0 IS the answer" contract. Every pre-existing test in this file that
+ * predates this field sees every zone uncapped, i.e. bit-identical to
+ * before this field existed; a test that specifically wants to prove the
+ * cap actually slows a zone's own commanded setpoint sets one slot via
+ * g_stub_approach_rate_cap_c_per_hr[]. */
+static float g_stub_approach_rate_cap_c_per_hr[MAX31856_CHANNEL_COUNT];
+bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_cap_c_per_hr)
+{
+    if (!out_cap_c_per_hr || zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    *out_cap_c_per_hr = g_stub_approach_rate_cap_c_per_hr[zone_index];
+    return true;
+}
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     (void)zone_index;

@@ -260,6 +260,23 @@ _ZONE_FIELD_FORM_KEY = {
     # POST preserves the current per-zone value (same convention as
     # coupling_diag_k_dc just above).
     "ease_off_window_mult": "easeoffmult",
+    # ZONES_CFG_VERSION 17->18 (PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_
+    # TARGET_DESIGN_STUDY.md option (b), 2026-09-04): the per-zone approach-
+    # rate cap -- a per-zone ceiling on how fast this zone's own commanded
+    # setpoint may approach the shared segment target, which can only ever
+    # TIGHTEN the segment's own ramp_c_per_hr, never loosen it. 0.0 = "this
+    # zone reports its own actual commanded rate as a ceiling to no one" --
+    # unlike ease_off_window_mult's 0 (substitutes a firmware DEFAULT), this
+    # 0 means uncapped outright, with no other value substituted (see
+    # zone_cfg_t::approach_rate_cap_c_per_hr's own doc comment,
+    # zones_config_json.h). zones_http_post_parse.c:
+    # snprintf(key, ..., "z%u_approachratecap", i) -- same JSON key on the
+    # GET side (zones_http_get.c), a shorter form-key suffix on POST, same
+    # split as ease_off_window_mult's own "easeoffmult" just above (both
+    # comfortably inside char key[24]: "z0_approachratecap" is 18 chars + a
+    # NUL). Omitted-on-POST preserves the current per-zone value, same
+    # convention as ease_off_window_mult/coupling_diag_k_dc above.
+    "approach_rate_cap_c_per_hr": "approachratecap",
 }
 #: Integer-valued zone fields -- posted as a plain int string (parse_u8_field()
 #: on the firmware side), never a float repr like "2.0".
@@ -530,6 +547,15 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # "ease_off_window_mult" scalar still apply too (to every zone that does
     # not name its own override here).
     "ease_off_window_mult",
+    # ZONES_CFG_VERSION 17->18 (PID_EXPANSION_PLAN.md sec 3.6d, 2026-09-04):
+    # approach_rate_cap_c_per_hr, same scalar-override class as
+    # ease_off_window_mult just above -- a preset zone entry naming this
+    # sets THAT zone's own rate cap for an A/B arm (e.g. a z0-only cap while
+    # z1/z2 stay uncapped at 0). No legacy top-level equivalent exists for
+    # this field (unlike ease_off_window_mult's now-removed board-wide
+    # scalar) -- it was per-zone from the day it was introduced, so there is
+    # no _apply_legacy_top_level_*() counterpart needed here.
+    "approach_rate_cap_c_per_hr",
 }
 
 #: coupling_coeff is handled OUTSIDE _PRESET_ZONE_OVERRIDE_FIELDS on purpose:

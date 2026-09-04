@@ -286,6 +286,70 @@ A zone that has already tripped its own per-zone guard is excluded from the
 check: that is guards 1/2/4/7's problem, not a reason to hold the whole
 firing hostage forever.
 
+### Per-zone approach-rate cap (PID_EXPANSION_PLAN.md sec 3.6d,
+### PER_ZONE_TARGET_DESIGN_STUDY.md option (b))
+
+The shared `target_c` above is one scalar every active zone reads — there is
+still only one commanded *destination* per tick, and ramp-lock/segment-advance/
+feasibility all key off that one value, completely unchanged by what follows.
+What a zone *can* have of its own is a ceiling on how fast **its own**
+commanded setpoint approaches that shared value: `zone_cfg_t::
+approach_rate_cap_c_per_hr` (0 = uncapped, the default and every zone's only
+behaviour before this field existed).
+
+Each tick, after `target_c` is stepped, every active zone's own
+`effective_target_c` (`zone_runtime_t`) is updated:
+
+- **Uncapped** (`approach_rate_cap_c_per_hr` reads 0): `effective_target_c` is
+  set to `target_c` outright, every tick — bit-identical to reading
+  `s_exec.target_c` directly, which is exactly what every consumer of this
+  value did before this field existed.
+- **Capped**: `effective_target_c` moves toward `target_c` by at most
+  `cap_c_per_hr * dt_s/3600` this tick, in whichever direction closes the gap.
+  If the cap is numerically looser than the rate `target_c` is actually
+  moving at (a segment ramping at 30 °C/hr with an 1000 °C/hr cap configured,
+  say), `effective_target_c` tracks `target_c` exactly and the cap is a
+  mathematical no-op — **this option can only ever tighten a segment's own
+  ramp rate, never loosen it.**
+
+`effective_target_c`, not the shared `target_c`, is what a zone's own
+feedforward (`zone_taper_climb_rate()`/`zone_feedforward()`), PID error term
+(`pid_update_terms()`), BANGBANG hysteresis compare, and the "cooling
+limited" diagnostic are all driven from — and it is also what is fed to
+`thermal_guard_input_t.setpoint_c` for that zone, **not** `s_exec.target_c`
+unconditionally, so a capped zone's guard sees what it is actually being
+asked to do this tick rather than the group's eventual destination (the
+`project_autotune_feeds_fake_setpoint.md` bug class, deliberately avoided
+here rather than reproduced). An uncapped zone's guard-visible setpoint is
+therefore unchanged.
+
+Deliberately **untouched** by this option, by design: `target_c` itself (the
+shared destination), segment-advance (still `target_c == seg->target_c`),
+ramp-lock (still compares each zone's `actual_c` against the one shared
+`target_c`, exactly as above — a capped zone deliberately trailing is not a
+reason to redefine what "lagging" means), `profile_segment_feasibility()`
+(never reads this field), and the wire protocol (`safety_link_frames.c` still
+sends `pstat.target_c`, the shared destination, per zone — SaftyFW's S2 guard
+already reduces per-zone setpoints with `max()` and needs no change either
+way, but this option does not even exercise that path since the wire value
+never becomes per-zone).
+
+A capped zone's own segment "reached" (its `effective_target_c` catching up
+to `seg->target_c`) can happen strictly *later* than the group's own
+segment-advance/dwell-entry — the capped zone keeps closing the gap on later
+ticks even after the shared schedule has already entered a dwell. This is
+the intended shape of the option, not a bug: the destination and the
+schedule's own timing are shared; only the capped zone's own rate of arrival
+is not.
+
+`zones_config_get_approach_rate_cap_c_per_hr()`/`..._set_...()`
+(`zones_config_json.h`) are the accessor pair; `GET`/`POST /api/zones` expose
+it as `approach_rate_cap_c_per_hr` / `z<i>_approachratecap`, same per-zone
+convention `ease_off_window_mult` uses (ZONES_CFG_VERSION 16→17). Bounds:
+[`ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN` (1.0 °C/hr), `..._MAX`
+(`ZONE_MAX_RAMP_C_PER_HR_MAX`, 1000.0 °C/hr)] or exactly 0 — refused, never
+clamped.
+
 ### Load cap (TODO.md 6A.5, load staggering)
 
 `zones_config_get_max_simultaneous_relays()` (0 = unlimited, the default) is

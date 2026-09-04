@@ -63,6 +63,12 @@ def _sample_zone(index: int, **overrides) -> dict:
         # top-level zones_cfg_t field (see _sample_get_response()'s own
         # history) applied board-wide.
         "ease_off_window_mult": 2.0,
+        # ZONES_CFG_VERSION 17->18 (PID_EXPANSION_PLAN.md sec 3.6d /
+        # PER_ZONE_TARGET_DESIGN_STUDY.md option (b)): the per-zone
+        # approach-rate cap, always emitted alongside ease_off_window_mult
+        # above. 0.0 = uncapped, the board default for every zone until an
+        # operator opts one in.
+        "approach_rate_cap_c_per_hr": 0.0,
         # Coupling row: MAX31856_CHANNEL_COUNT (3, uart_task_ids.h's
         # THERMO_CHANNEL_COUNT) cells, diagonal (j == index) always 0 --
         # zones_http.c always emits the full row for every zone regardless
@@ -861,6 +867,66 @@ class ApplyZonePresetTest(unittest.TestCase):
             result = zh.apply_zone_preset("kiln.local", preset)
         self.assertFalse(result.ok)
         self.assertTrue(any("ease_off_window_mult" in m for m in result.mismatches), result.mismatches)
+
+    def test_approach_rate_cap_preset_lands_on_named_zone_only_end_to_end(self):
+        """WHOLE-CHAIN test for the per-zone approach-rate cap (PID_
+        EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option
+        (b)): a preset naming z0's own approach_rate_cap_c_per_hr override
+        must POST z0's cap as the PRESET's value, while z1/z2 -- not named
+        by the preset -- still echo their own CURRENT (board-reported)
+        value, same as every other scalar field build_post_body() always
+        posts for every zone regardless of which one a preset overrides.
+        Unlike ease_off_window_mult, there is no legacy top-level scalar
+        form to also translate, since this field was per-zone from the day
+        it was introduced."""
+        current = _sample_get_response()
+        for z in current["zones"]:
+            self.assertEqual(z["approach_rate_cap_c_per_hr"], 0.0)
+        preset = {"name": "p", "zones": [{"index": 0, "approach_rate_cap_c_per_hr": 30.0}]}
+        after = _sample_get_response()
+        after["zones"][0]["approach_rate_cap_c_per_hr"] = 30.0  # what a correctly-applied board would report
+        captured = {}
+
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(json.dumps(current).encode())
+            if calls["n"] == 2:
+                captured["body"] = req.data
+                return _fake_response(b"ok")
+            return _fake_response(json.dumps(after).encode())
+
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = zh.apply_zone_preset("kiln.local", preset)
+        self.assertTrue(result.ok, result.describe())
+        posted = urllib.parse.parse_qs(captured["body"].decode())
+        self.assertEqual(posted["z0_approachratecap"], ["30.0"],
+                          "zone 0: the POST body must carry the preset's own cap value")
+        self.assertEqual(posted["z1_approachratecap"], ["0.0"],
+                          "zone 1 was not named by the preset -- it must echo its CURRENT "
+                          "(board-reported) value, uncapped, not silently drop the field or "
+                          "inherit zone 0's cap")
+        self.assertEqual(posted["z2_approachratecap"], ["0.0"],
+                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
+
+    def test_approach_rate_cap_NOT_landing_is_caught(self):
+        """NEGATIVE TEST proving the write path is real: if the board's
+        read-back still shows the cap uncapped on the zone the preset named
+        (exactly what a broken translation -- e.g. the field silently
+        dropped as 'unknown' -- would produce), apply_zone_preset() must
+        report ok=False naming that field, not a silent pass. This is
+        exactly the failure mode the coordinator's incident report
+        described: 'has no known POST mapping in zones_http_client.py'."""
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{"index": 0, "approach_rate_cap_c_per_hr": 30.0}]}
+        after = _sample_get_response()  # still 0.0 on zone 0 -- write did not land
+        fake_urlopen, _ = self._mock_get_then_post_then_get(current, b"ok", after)
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = zh.apply_zone_preset("kiln.local", preset)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("approach_rate_cap_c_per_hr" in m for m in result.mismatches), result.mismatches)
 
     def test_non_ok_post_body_raises(self):
         current = _sample_get_response()

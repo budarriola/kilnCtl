@@ -491,6 +491,18 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone ease_off_window_mult out of range";
             return false;
         }
+        /* ZONES_CFG_VERSION 17->18 (PID_EXPANSION_PLAN.md sec 3.6d): 0 is
+         * "uncapped" -- NOT the same sentinel meaning as ease_off_window_
+         * mult's 0 just above (which substitutes a firmware default) -- see
+         * ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN's own comment. Everything else
+         * must fall within [MIN, MAX]. */
+        if (!isfinite(z->approach_rate_cap_c_per_hr) ||
+            (z->approach_rate_cap_c_per_hr != 0.0f &&
+             (z->approach_rate_cap_c_per_hr < ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN ||
+              z->approach_rate_cap_c_per_hr > ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX))) {
+            *err_reason = "zone approach_rate_cap_c_per_hr out of range";
+            return false;
+        }
         /* settings_source: either the CUSTOM sentinel, or a real zone index --
          * never checked against thermo_count (the dropdown offers every
          * *configured* zone at save time, a page-level decision, not a

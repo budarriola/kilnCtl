@@ -443,6 +443,39 @@ typedef struct {
     float actual_c;    /* calibration-corrected; NAN if invalid */
     bool  actual_valid;
 
+    /* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md
+     * option (b): this zone's OWN commanded setpoint, rate-limited toward
+     * the shared s_exec.target_c by zone_cfg_t::approach_rate_cap_c_per_hr
+     * (0 = uncapped). Computed once per tick, in profile_executor.c, right
+     * before the per-zone control-mode pass -- see that update site's own
+     * comment for the exact clamp arithmetic. This is the value the
+     * feedforward/PID terms (profile_executor_pid_tick.c) and thermal_
+     * guard_input_t.setpoint_c are fed FROM, instead of s_exec.target_c
+     * directly, so a capped zone's guard sees what it is actually being
+     * asked to do this tick rather than the group's eventual destination
+     * (PER_ZONE_TARGET_DESIGN_STUDY.md section 2.4's "fake setpoint" bug
+     * class, project_autotune_feeds_fake_setpoint.md).
+     *
+     * UNCAPPED (the default, and every zone before this field existed):
+     * effective_target_c is set to s_exec.target_c on every tick with no
+     * rate limit at all, so it is always EXACTLY s_exec.target_c -- every
+     * consumer of this field behaves bit-for-bit as if it still read
+     * s_exec.target_c directly.
+     *
+     * Deliberately NOT consulted by ramp-lock (profile_executor.c's
+     * lock_ok loop, still actual_c vs the shared s_exec.target_c) or
+     * segment-advance (still s_exec.target_c == seg->target_c) -- see this
+     * field's own zone_cfg_t::approach_rate_cap_c_per_hr comment for the
+     * full list of what this option deliberately leaves untouched.
+     *
+     * NAN at zone activation (profile_executor_run.c, alongside s_exec.
+     * target_c's own initialization) is the "not yet seeded" sentinel this
+     * tick's update logic snaps from -- a zeroed 0.0f (this struct's own
+     * memset default) would otherwise make a freshly started, capped zone
+     * spend real firing time climbing from 0 degC before a cap could ever
+     * engage usefully. */
+    float effective_target_c;
+
     /* Contact-cycle accounting (TODO.md 6A.1): heater_output counts relay
      * transitions per zone in RAM; this is how much of that count has
      * already been handed to relay_cycles.c, so each tick only reports the
@@ -869,6 +902,20 @@ float exec_threshold(uint8_t zone_index, int which);
 float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
                            bool sensor_ok_zi, float dt_s, uint32_t dt_ms,
                            bool *out_want_relay_on);
+
+/* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option
+ * (b), defined in profile_executor_pid_tick.c: resolves this zone's own
+ * commanded setpoint for this tick -- s_exec.target_c when uncapped
+ * (approach_rate_cap_c_per_hr reads 0, the default), z->effective_target_c
+ * when capped. See that definition's own doc comment for why this
+ * re-checks the cap itself rather than trusting z->effective_target_c
+ * unconditionally (every existing host test that builds a zone_runtime_t by
+ * hand and calls pid_family_zone_tick()/zone_feedforward() directly, never
+ * running profile_executor.c's own per-tick cap-update loop, still gets
+ * exactly today's behaviour with no test changes needed). Used by
+ * profile_executor.c's BANGBANG branch and thermal_guard_input_t.setpoint_c
+ * feed, and internally by pid_family_zone_tick()/pid_fuzzy_prepare_gains(). */
+float zone_commanded_setpoint_c(const zone_runtime_t *z, uint8_t zi);
 void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg);
 
 /* ---- ramp assist: sustained-lag detection + auto-stretch instrumentation

@@ -338,6 +338,17 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * read-back-and-repost reasoning as coupling_diag_k_dc/model_k_dc
          * above. */
         APPEND("\"ease_off_window_mult\":%.3f,", (double)z->ease_off_window_mult);
+        /* ZONES_CFG_VERSION 17->18 (PID_EXPANSION_PLAN.md sec 3.6d /
+         * PER_ZONE_TARGET_DESIGN_STUDY.md option (b)): the per-zone
+         * approach-rate cap -- z%u_approachratecap on the POST side
+         * (parse_zone_fields()). Emits the RAW stored value (0 = uncapped,
+         * the legal sentinel), same "the page shows what is actually
+         * stored" convention ease_off_window_mult above uses -- there is no
+         * resolved/default value to show instead for this field (see
+         * zones_config_get_approach_rate_cap_c_per_hr()'s own comment for
+         * why 0 is answered verbatim, not substituted). Always emitted, same
+         * always-emit/read-back-and-repost reasoning as every field above. */
+        APPEND("\"approach_rate_cap_c_per_hr\":%.3f,", (double)z->approach_rate_cap_c_per_hr);
         /* 2026-08-30 (ZONES_CFG_VERSION 10->11): the coupling row, one
          * indexed key per cell (z%u_coupling_c%u is the matching POST-side
          * wire name -- see parse_zone_fields()) rather than a JSON array, so

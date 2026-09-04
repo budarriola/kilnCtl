@@ -716,6 +716,18 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.run_start_c = baseline_target_c;
     s_exec.total_elapsed_s = 0;
 
+    /* PID_EXPANSION_PLAN.md sec 3.6d: seed every zone's own capped setpoint
+     * at the same value s_exec.target_c starts this run/warm-start from --
+     * NOT left at the memset(s_exec.zones, ...) 0.0f default a few lines up,
+     * which would otherwise make a freshly (re)started, capped zone spend
+     * real firing time climbing its OWN commanded setpoint from 0 degC
+     * before the cap could ever engage usefully. An uncapped zone is
+     * unaffected either way -- profile_executor.c's per-tick update always
+     * overwrites this with s_exec.target_c directly when uncapped. */
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        s_exec.zones[zi].effective_target_c = baseline_target_c;
+    }
+
     /* One line per firing recording what feedforward will run on, because it
      * is the difference between two firings of the same profile behaving
      * differently and there is no other record of it: which zones have a model

@@ -14,6 +14,35 @@
 #include "pid_fuzzy.h"
 #include "zones_http.h"
 
+/* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option
+ * (b): declared locally, same convention profile_executor_feedforward.c
+ * already uses for zones_config_get_ease_off_window_mult() -- this pass's
+ * touched-files list does not include zones_http.h, and the real
+ * declaration lives in zones_config_json.h (keep this in sync with it). */
+bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_cap_c_per_hr);
+
+/* Resolves what THIS zone's control loop should treat as its own commanded
+ * setpoint this tick: the shared s_exec.target_c when uncapped (this zone's
+ * approach_rate_cap_c_per_hr reads 0 -- the default, and every zone before
+ * this field existed), or z->effective_target_c (profile_executor.c's
+ * per-tick rate-limited value, computed once per tick ahead of the control-
+ * mode pass) when capped. Re-checking the cap here rather than trusting
+ * z->effective_target_c unconditionally means a caller that never runs
+ * profile_executor.c's own per-tick cap-update loop (every existing
+ * host test that calls pid_family_zone_tick()/zone_feedforward() directly
+ * with a hand-built zone_runtime_t, effective_target_c left at its
+ * zero-initialized default) still gets EXACTLY today's behaviour for the
+ * overwhelmingly common uncapped case, with no test changes required --
+ * only a test that deliberately configures a non-zero cap needs to also
+ * seed effective_target_c, which is exactly the scenario a new cap-specific
+ * test does deliberately. */
+float zone_commanded_setpoint_c(const zone_runtime_t *z, uint8_t zi)
+{
+    float cap_c_per_hr = 0.0f;
+    (void)zones_config_get_approach_rate_cap_c_per_hr(zi, &cap_c_per_hr);
+    return (cap_c_per_hr > 0.0f) ? z->effective_target_c : s_exec.target_c;
+}
+
 float exec_threshold(uint8_t zone_index, int which)
 {
     float bb = 0.0f, cool_margin = 0.0f, cool_hold = 0.0f, ramp_lock = 0.0f;
@@ -81,7 +110,11 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
         z->duty_breakdown.ff_rate_pretaper_c_per_s = ff_rate;
         if (!s_exec.dwelling && ff_rate != 0.0f) {
             const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index];
-            ff_rate = zone_taper_climb_rate(z, zi, s_exec.target_c, ff_rate, seg->target_c);
+            /* PID_EXPANSION_PLAN.md sec 3.6d: this zone's own (possibly
+             * rate-capped) commanded setpoint, not s_exec.target_c
+             * unconditionally -- see zone_commanded_setpoint_c()'s own doc
+             * comment. Uncapped, bit-identical to before. */
+            ff_rate = zone_taper_climb_rate(z, zi, zone_commanded_setpoint_c(z, zi), ff_rate, seg->target_c);
         }
         z->duty_breakdown.ff_rate_posttaper_c_per_s = ff_rate;
         /* Gains actually in force this tick -- cfg is z->pid_cfg unchanged
@@ -91,7 +124,11 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
         z->duty_breakdown.ki_effective = cfg->ki;
         z->duty_breakdown.kd_effective = cfg->kd;
         float ff_hold = 0.0f;
-        float u_ff = zone_feedforward(z, zi, s_exec.target_c, ff_rate, &ff_hold);
+        /* PID_EXPANSION_PLAN.md sec 3.6d: same swap as zone_taper_climb_
+         * rate() just above -- the feedforward's hold term is computed
+         * against THIS zone's own commanded setpoint, not the shared
+         * destination every zone used to share unconditionally. */
+        float u_ff = zone_feedforward(z, zi, zone_commanded_setpoint_c(z, zi), ff_rate, &ff_hold);
         /* Opus review, blocker 2: the coupled system's MEMBERSHIP (which
          * zones are in it, or whether this zone qualifies at all) can change
          * every tick -- heat_blocked alone is refreshed unconditionally each
@@ -131,7 +168,13 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
              * no-op it's supposed to be. */
             z->fuzzy_prev_effective_ki = z->pid_cfg.ki;
         }
-        duty = pid_update_terms(&z->pid_state, cfg, s_exec.target_c, z->actual_c, dt_s,
+        /* PID_EXPANSION_PLAN.md sec 3.6d: the PID error term is driven from
+         * this zone's own commanded setpoint too, so a capped zone's own
+         * loop chases its own (slower) commanded setpoint rather than the
+         * shared, faster-moving destination -- otherwise the P/I/D terms
+         * would fight the feedforward's own deliberately tapered rate
+         * above. Uncapped, this is bit-identical to s_exec.target_c. */
+        duty = pid_update_terms(&z->pid_state, cfg, zone_commanded_setpoint_c(z, zi), z->actual_c, dt_s,
                                 u_ff, ff_hold, &z->last_pid_terms);
     }
     /* ROADMAP.md M15 B4: Stage B of the duty breakdown -- read-only. duty
@@ -145,8 +188,13 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
      * below can add anything to it -- a boosted duty is not "the loop asked
      * for heat," it is "another zone's deferred credit landed here," and
      * boost only ever makes duty larger, never masks a genuine 0. */
+    /* PID_EXPANSION_PLAN.md sec 3.6d: this zone's own commanded setpoint,
+     * not the shared s_exec.target_c unconditionally -- a capped zone
+     * intentionally trailing the shared destination is not "cooling
+     * limited" relative to a target it was never asked to be at yet.
+     * Uncapped, bit-identical to before. */
     if (sensor_ok_zi && duty <= 0.0f &&
-        z->actual_c > s_exec.target_c + EXEC_COOLING_MARGIN_C(zi)) {
+        z->actual_c > zone_commanded_setpoint_c(z, zi) + EXEC_COOLING_MARGIN_C(zi)) {
         z->cooling_limited_hold_s += dt_s;
     } else {
         z->cooling_limited_hold_s = 0.0f;
@@ -263,6 +311,16 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
 {
     *out_cfg = z->pid_cfg; /* d_filter_tau_s/b/pid_range_c untouched -- only kp/ki/kd move */
 
+    /* PID_EXPANSION_PLAN.md sec 3.6d note: deliberately NOT swapped to
+     * z->effective_target_c here, unlike pid_family_zone_tick()'s
+     * pid_update_terms()/zone_feedforward() calls -- this error feeds only
+     * the fuzzy gain-scheduling table (which Kp/Ki/Kd cell applies this
+     * tick), not the control loop's own feedback term, and the design study
+     * this field implements never asked for the gain-scheduling axis itself
+     * to move with a per-zone cap. Left as s_exec.target_c, the shared
+     * destination, to keep this pass's behavioural surface exactly what
+     * PER_ZONE_TARGET_DESIGN_STUDY.md option (b) specifies -- unaffected for
+     * every zone, capped or not. */
     float error_c = s_exec.target_c - z->actual_c;
     float error_rate_c_per_s = z->pid_state.d_filtered; /* hazard 1, see comment above */
 

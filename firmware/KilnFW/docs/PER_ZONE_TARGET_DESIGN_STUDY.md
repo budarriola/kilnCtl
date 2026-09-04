@@ -1,4 +1,4 @@
-# Per-zone target_c: design study (no implementation) (2026-09-04)
+# Per-zone target_c: design study (2026-09-04; option (b) IMPLEMENTED 2026-09-04)
 
 Gates `PID_EXPANSION_PLAN.md` §3.6d shortlist item 1 (slow z0's own commanded
 approach to a dwell — the ranked #1 fix for z0's 2.2 °C dwell-entry
@@ -445,6 +445,69 @@ this same investigation's earlier false starts:
   does not preclude adding (a)'s general per-zone offset later, since (b) is
   a strict subset of the state (b) would need anyway (a per-zone value next
   to the shared scalar).
+
+## 6. Implementation status (2026-09-04)
+
+**Option (b), as recommended in section 4, is IMPLEMENTED** —
+`zone_cfg_t::approach_rate_cap_c_per_hr` (ZONES_CFG_VERSION 17→18), a
+per-zone cap on how fast `zone_runtime_t::effective_target_c` may approach
+the shared `s_exec.target_c`, computed once per tick in `profile_executor.c`
+immediately before the per-zone control-mode pass. 0 (uncapped, the default)
+makes every consumer bit-identical to reading `s_exec.target_c` directly, for
+every zone, exactly as this section anticipated. See `PROFILES.md`'s new
+"Per-zone approach-rate cap" subsection for the full mechanism, and
+`PID_EXPANSION_PLAN.md` sec 3.6d for the landing note.
+
+What this pass confirmed against the plan above, each independently
+verified rather than assumed:
+
+- **§1.6/§2.5 (SaftyFW S2 needs no change)**: confirmed by re-reading
+  `snapshots.h:144-193`/`safety_guards.c:190-194,825-831` — `SaftyFW/**` was
+  not touched, and does not need to be: the wire's `setpoint_c` per zone is
+  still `pstat.target_c` (the shared destination) for every zone, since (b)
+  never makes the wire value per-zone. S2's `max()` reduction was never
+  exercised differently by this change.
+- **§2.4 (`thermal_guard` "fake setpoint" decision, made deliberately)**: a
+  capped zone's `thermal_guard_input_t.setpoint_c` is fed
+  `zone_commanded_setpoint_c(z, zi)` — `effective_target_c` when capped,
+  `s_exec.target_c` when not — not `s_exec.target_c` unconditionally. This
+  re-checks the cap at the guard-feed site itself (rather than trusting a
+  field some caller may not have populated) specifically so every existing
+  host test that calls `pid_family_zone_tick()`/`zone_feedforward()` directly
+  with a hand-built `zone_runtime_t` (never running `profile_executor.c`'s
+  own per-tick cap-update loop) still gets exactly today's behaviour with no
+  test changes required — only a test that deliberately configures a
+  non-zero cap needs to also seed `effective_target_c`.
+- **Ramp-lock, segment-advance, feasibility**: confirmed untouched by
+  inspection of the diff itself, not just intent — `profile_executor.c`'s
+  ramp-lock loop and the `s_exec.target_c == seg->target_c` segment-advance
+  check are byte-identical to before this pass; `profile_feasibility.c` was
+  not edited at all.
+- **Migration**: unlike `ease_off_window_mult`'s v16→v17 hop, there was no
+  prior global scalar to carry forward — every zone of every pre-v18 blob
+  lands on the 0 (uncapped) sentinel via `convert_versioned_blob_to_current()`'s
+  own entry `memset`, verified by a dedicated v17→v18 migration test
+  (`test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped`,
+  `test_zones_http.c`) that also pins a REAL, non-default per-zone
+  `ease_off_window_mult` A/B arm surviving the same hop unchanged.
+- **Default is behaviour-identical**: proven, not assumed — every consumer
+  (`zone_taper_climb_rate()`, `zone_feedforward()`, `pid_update_terms()`, the
+  BANGBANG hysteresis compare, the cooling-limited diagnostic, the guard feed)
+  resolves to `s_exec.target_c` verbatim whenever a zone's cap reads 0, via
+  the shared `zone_commanded_setpoint_c()` helper — there is exactly one
+  place this resolution happens, not one per call site that could drift.
+
+**What still needs a flash and a kiln A/B** (unchanged from section 4.2's
+plan, not run by this pass): the live reachability proof (does a capped z0's
+measured `actual_c` slope actually drop under a configured cap), the 2-arm
+A/B on stock profile 7, and the decision rule against z1/z2 as pre-registered
+negative controls. **Not flashed** — a live A/B campaign
+(`fuzzy_ab_20260904d`) was running at the time this landed, and the
+ZONES_CFG_VERSION 17→18 bump (stacked on top of `ease_off_window_mult`'s own
+still-unflashed 16→17 migration) means the eventual flash must run the real
+migration chain against that board's actual, non-default live config, not a
+fresh commission — deliberately deferred to after the campaign rather than
+verified during it.
 
 ## Files
 

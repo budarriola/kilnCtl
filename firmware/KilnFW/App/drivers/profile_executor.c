@@ -42,6 +42,15 @@
 #include "zone_coupling_solve.h"
 #include "zones_http.h"
 
+/* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option
+ * (b): declared here rather than pulled in via zones_config_json.h (this
+ * pass's touched-files list does not include this file's own header chain
+ * gaining a new #include), same local-forward-declaration convention
+ * profile_executor_feedforward.c already uses for zones_config_get_ease_
+ * off_window_mult() -- see that file's own comment. Keep this in sync with
+ * zones_config_json.h's own declaration. */
+bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_cap_c_per_hr);
+
 const char *PE_TAG = "profile_executor";
 
 /* Guard 9: control-tick liveness (TODO.md 6A.3/6A.7). A second, independent
@@ -813,6 +822,63 @@ void executor_task_entry(void *arg)
                                      s_exec.ramp_lock_held, dt_s);
         }
 
+        /* --- Per-zone approach-rate cap (PID_EXPANSION_PLAN.md sec 3.6d /
+         * PER_ZONE_TARGET_DESIGN_STUDY.md option (b)): update each active
+         * zone's own effective_target_c toward the shared s_exec.target_c,
+         * before the control-mode pass below reads it. Deliberately runs
+         * AFTER segment-stepping (s_exec.target_c is this tick's final
+         * value) and BEFORE the per-zone pass (feedforward/PID/guard all
+         * need the freshly updated value, not last tick's).
+         *
+         * Uncapped (zones_config_get_approach_rate_cap_c_per_hr() answers
+         * 0, the default and every zone before this field existed):
+         * effective_target_c is simply set to s_exec.target_c, unconditionally
+         * -- no rate limit, no stored state carried between ticks, bit-
+         * identical to reading s_exec.target_c directly.
+         *
+         * Capped: effective_target_c moves toward s_exec.target_c by at most
+         * cap_c_per_hr * dt_s/3600 this tick, in whichever direction closes
+         * the gap -- this is what makes the cap ONLY EVER TIGHTEN the
+         * segment's own commanded rate: if cap_c_per_hr is numerically >=
+         * the rate s_exec.target_c is actually moving at this tick,
+         * max_step >= the gap every tick, so effective_target_c tracks
+         * s_exec.target_c exactly and the cap is a no-op, exactly as
+         * PER_ZONE_TARGET_DESIGN_STUDY.md's option (b) requires ("can only
+         * ever tighten... never loosen"). Only when the segment's own rate
+         * (or a step-segment's instant jump, or a dwell's already-arrived
+         * target) would require a larger single-tick move than the cap
+         * allows does effective_target_c lag behind, continuing to close
+         * the gap on later ticks even after the shared schedule has moved on
+         * to a dwell -- "reached... just reached later for the capped zone,"
+         * per the design study's own description of this option. */
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
+            zone_runtime_t *z = &s_exec.zones[zi];
+            float cap_c_per_hr = 0.0f;
+            (void)zones_config_get_approach_rate_cap_c_per_hr(zi, &cap_c_per_hr);
+            if (cap_c_per_hr <= 0.0f) {
+                z->effective_target_c = s_exec.target_c;
+                continue;
+            }
+            if (!isfinite(z->effective_target_c)) {
+                /* First tick this zone has ever been active under a cap
+                 * (freshly activated mid-run, or a stale NAN somehow
+                 * survived -- defensive) -- snap rather than climb from an
+                 * undefined starting point. profile_executor_run.c already
+                 * seeds this at run start for the normal case. */
+                z->effective_target_c = s_exec.target_c;
+                continue;
+            }
+            float max_step_c = cap_c_per_hr * (dt_s / 3600.0f);
+            float delta_c = s_exec.target_c - z->effective_target_c;
+            if (delta_c > max_step_c) {
+                delta_c = max_step_c;
+            } else if (delta_c < -max_step_c) {
+                delta_c = -max_step_c;
+            }
+            z->effective_target_c += delta_c;
+        }
+
         /* --- Control mode, per active zone (pass 1: decide, don't apply yet)
          * -------------------------------------------------------------------
          * Split from the apply+guard pass below so the load cap (TODO.md
@@ -851,9 +917,17 @@ void executor_task_entry(void *arg)
             case ZONE_CONTROL_MODE_BANGBANG: {
                 bool want_raw = z->relay_commanded_on;
                 if (sensor_ok[zi]) {
-                    if (z->actual_c < s_exec.target_c - EXEC_BANGBANG_HYSTERESIS_C(zi)) {
+                    /* PID_EXPANSION_PLAN.md sec 3.6d: z->effective_target_c,
+                     * this zone's own (possibly rate-capped) commanded
+                     * setpoint, control-mode-agnostic same as the PID path
+                     * above -- a capped BANGBANG zone stops calling for heat
+                     * once it reaches its OWN capped setpoint rather than the
+                     * shared destination every other zone may already be
+                     * dwelling at. Uncapped, bit-identical to s_exec.target_c. */
+                    float setpoint_c = zone_commanded_setpoint_c(z, zi);
+                    if (z->actual_c < setpoint_c - EXEC_BANGBANG_HYSTERESIS_C(zi)) {
                         want_raw = true;
-                    } else if (z->actual_c > s_exec.target_c + EXEC_BANGBANG_HYSTERESIS_C(zi)) {
+                    } else if (z->actual_c > setpoint_c + EXEC_BANGBANG_HYSTERESIS_C(zi)) {
                         want_raw = false;
                     }
                 } else {
@@ -1042,7 +1116,20 @@ void executor_task_entry(void *arg)
             thermal_guard_input_t gin = {
                 .sensor_ok = sensor_ok[zi],
                 .measurement_c = raw_c[zi], /* RAW -- a calibration offset must not hide an out-of-range sensor */
-                .setpoint_c = s_exec.target_c,
+                /* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_
+                 * STUDY.md section 2.4: this zone's OWN commanded setpoint
+                 * (rate-limited toward the shared s_exec.target_c by this
+                 * zone's approach_rate_cap_c_per_hr, computed a few hundred
+                 * lines up), not the shared destination directly -- an
+                 * uncapped zone (the default) has effective_target_c ==
+                 * s_exec.target_c always, so this is bit-identical to the
+                 * previous `.setpoint_c = s_exec.target_c` for every zone
+                 * before this field existed. A capped zone's guard now sees
+                 * what it is actually being asked to do THIS tick, avoiding
+                 * this repo's own "fake setpoint" bug class
+                 * (project_autotune_feeds_fake_setpoint.md) rather than
+                 * reproducing it for the new mechanism. */
+                .setpoint_c = zone_commanded_setpoint_c(z, zi),
                 .commanded_duty = commanded_duty_for_guards,
                 .dt_s = dt_s,
                 /* Guard 8 (TODO.md 6A.3/6A.5): this tick's whole-bus snapshot,

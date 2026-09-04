@@ -3117,6 +3117,51 @@ destination), which leaves the shared `target_c` and every other guarantee
 untouched. No implementation done — awaiting owner sign-off per that
 document's §5.
 
+**Option (b) implemented, 2026-09-04 (unflashed).** `zone_cfg_t::
+approach_rate_cap_c_per_hr` (`ZONES_CFG_VERSION` 17→18, same per-zone
+precedent `ease_off_window_mult` set at 16→17): a per-zone cap, 0 =
+uncapped (every zone's default, and every zone's ONLY behaviour before this
+field existed), on how fast `zone_runtime_t::effective_target_c` may
+approach the shared `s_exec.target_c` — computed once per tick in
+`profile_executor.c`, immediately ahead of the per-zone control-mode pass.
+Uncapped, `effective_target_c` is set to `s_exec.target_c` outright every
+tick, so every consumer (feedforward, PID, BANGBANG hysteresis, the
+cooling-limited diagnostic, and `thermal_guard_input_t.setpoint_c`) is
+bit-identical to before. Capped, the step is clamped to `cap_c_per_hr *
+dt_s/3600` per tick — mathematically a no-op whenever the cap is numerically
+looser than the segment's own commanded rate, satisfying the "only ever
+tightens, never loosens" requirement by construction rather than by a
+separate check. `thermal_guard`'s `setpoint_c` feed is deliberately switched
+to each zone's own resolved setpoint (uncapped: identical to today; capped:
+that zone's own effective_target_c) rather than the shared destination
+unconditionally — the §2.4 "fake setpoint" decision this document's own
+design study flagged as needing to be made deliberately, resolved in favor
+of not reproducing `project_autotune_feeds_fake_setpoint.md`'s bug class.
+Ramp-lock, segment-advance and `profile_feasibility.c` are untouched, exactly
+as the design study's option (b) promised; `SaftyFW/**` was re-read, not
+edited — S2's `max()` reduction still needs no change since the wire's
+per-zone `setpoint_c` is still `pstat.target_c` (the shared destination) for
+every zone. Migration (v17→v18) needs no carried-forward global value (unlike
+`ease_off_window_mult`'s own v16→v17 hop) since this is a brand-new
+mechanism — every zone of every pre-v18 blob lands on the 0 sentinel via the
+existing entry-`memset` convention every other single-field addition in this
+file's migration chain already relies on. Host-tested via a hand-written
+mirror of the per-tick cap-update loop (`test_approach_rate_cap.c`, same
+technique `test_ramp_lock_onesided.c` uses for the FreeRTOS-task-loop code it
+cannot call directly) plus real accessor/migration tests
+(`test_zones_http.c`). Two injected-then-reverted bugs verified the mirror
+tests actually catch what they claim (an inverted clamp letting the cap
+loosen a zone's approach; the wrong zone's cap being read), both caught by
+name and both clean after revert. **Build/host-tests only** — unflashed while
+`fuzzy_ab_20260904d` (arm B1) runs on the board, and because the
+`ZONES_CFG_VERSION` bump stacks on top of `ease_off_window_mult`'s own
+still-unflashed 16→17 migration: the eventual flash needs the full v16→v17→
+v18 chain verified against that board's real, non-default live config, not a
+fresh commission — deliberately deferred to after the campaign. Full detail:
+`PER_ZONE_TARGET_DESIGN_STUDY.md` §6. What remains: the live reachability
+proof and the 2-arm kiln A/B on stock profile 7 from that document's §4.2,
+neither run by this pass.
+
 ### 3.6b addendum: first in-data reachability proof, `fuzzy_ab_20260904d` (2026-09-04)
 
 The standing pre-flight check above asked for `bd_*` fields on the *next*

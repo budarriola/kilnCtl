@@ -28,7 +28,16 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
      * migration, below) needs an explicit per-zone assignment, since that is
      * the one version that stored a real, possibly non-default, opinion
      * (the global scalar) that must be carried forward verbatim rather than
-     * defaulted. */
+     * defaulted.
+     *
+     * ZONES_CFG_VERSION 17->18: approach_rate_cap_c_per_hr is a BRAND NEW
+     * mechanism (PID_EXPANSION_PLAN.md sec 3.6d option (b)) -- unlike
+     * ease_off_window_mult, no prior version ever stored an equivalent
+     * global scalar to carry forward, so EVERY case below (1 through 17
+     * inclusive) needs nothing extra: this function's entry memset already
+     * zeroes the field, and 0 is this field's own "uncapped" sentinel (see
+     * ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN's own comment) -- exactly today's
+     * behaviour, unchanged, for every zone of every upgrading board. */
     switch (version) {
     case 1: {
         zones_cfg_v1_t src;
@@ -453,6 +462,41 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         }
         /* src.crc32 deliberately NOT carried over -- it covered the v16
          * shape; nvs_save() stamps a fresh one over the current (v17)
+         * struct. */
+        return true;
+    }
+    case 17: {
+        /* v17 -> v18 (THIS pass, PID_EXPANSION_PLAN.md sec 3.6d /
+         * PER_ZONE_TARGET_DESIGN_STUDY.md option (b)): approach_rate_cap_
+         * c_per_hr is brand new -- see this function's own top-of-function
+         * comment for why every zone simply lands on the 0 (uncapped)
+         * sentinel via the entry memset, with no explicit per-zone
+         * assignment needed the way case 16 needed one for its own
+         * (carried-forward, non-zero-capable) global scalar. zone_cfg_v17_t
+         * (frozen in zones_config_json.h) is byte-for-byte identical to
+         * what zone_cfg_t was at v17, so a per-element memcpy of that
+         * prefix is exactly equivalent to a whole-array memcpy, just typed
+         * against the smaller historical shape -- same technique case 15
+         * uses against zone_cfg_v16_t. */
+        zones_cfg_v17_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v17 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].approach_rate_cap_c_per_hr already 0 (uncapped)
+             * from this function's entry memset -- brand-new mechanism, no
+             * prior global opinion to carry forward, unlike
+             * ease_off_window_mult's v16->v17 migration just above. */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v17
+         * shape; nvs_save() stamps a fresh one over the current (v18)
          * struct. */
         return true;
     }

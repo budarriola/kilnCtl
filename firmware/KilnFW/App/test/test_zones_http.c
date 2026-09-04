@@ -4530,6 +4530,190 @@ static void test_ease_off_window_mult_accessor_get_set_and_range(void)
     nvs_test_clear();
 }
 
+// THE migration this pass exists for (PID_EXPANSION_PLAN.md sec 3.6d /
+// PER_ZONE_TARGET_DESIGN_STUDY.md option (b)): a v17 board loading its own
+// real, already-commissioned config (PID gains, plant models, coupling rows,
+// a per-zone ease_off_window_mult override) must come up with every zone's
+// BRAND NEW approach_rate_cap_c_per_hr at the 0 (uncapped) sentinel -- unlike
+// ease_off_window_mult's v16->v17 migration, there is no prior global scalar
+// to carry forward, so this is a pure "does the new field survive as the
+// safe default, not garbage from the memset boundary" proof, alongside every
+// pre-existing v17 field surviving completely unchanged.
+static void test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped(void)
+{
+    TEST_SECTION("nvs_load_from -- a v17 blob upconverts to v18: every zone's new "
+                 "approach_rate_cap_c_per_hr lands on the 0 (uncapped) sentinel -- behaviour UNCHANGED -- "
+                 "while ease_off_window_mult/coupling_diag_k_dc/model_k_dc/etc survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v17_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 17;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].model_k_dc = 20.969f;
+    src.zones[0].model_tau_s = 640.0f;
+    src.zones[0].model_dead_time_s = 45.0f;
+    src.zones[0].coupling_coeff[1] = 10.887f;
+    src.zones[0].coupling_diag_k_dc = 19.4f;
+    src.zones[0].ease_off_window_mult = 3.5f; /* a REAL, already-running A/B arm -- must survive */
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].ease_off_window_mult = 2.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v17's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v17 blob must migrate to a valid current (v18) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // THE thing this test is really about: approach_rate_cap_c_per_hr must
+    // land at the legal 0 (uncapped) sentinel on EVERY zone -- v17 never
+    // stored it, at any level, and unlike ease_off_window_mult there is no
+    // global scalar this migration needs to carry forward instead.
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        TEST_CHECK_NEAR(out_cfg.zones[j].approach_rate_cap_c_per_hr, 0.0f, 1e-9,
+                        "v17 has no approach_rate_cap_c_per_hr -- lands on the 0 (uncapped) sentinel");
+        float got = -1.0f;
+        s_zones.cfg = out_cfg;
+        TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(j, &got) && got == 0.0f,
+                  "the accessor reports every migrated zone uncapped -- not resolved to any other value");
+    }
+
+    // Pre-existing v17 fields -- including a REAL, non-default per-zone
+    // ease_off_window_mult A/B arm -- must survive the upgrade completely
+    // unchanged.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 19.4f, 1e-6, "zones[0].coupling_diag_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].ease_off_window_mult, 3.5f, 1e-6,
+                    "zones[0]'s REAL, non-default ease_off_window_mult A/B arm survives the v17->v18 hop");
+    TEST_CHECK_NEAR(out_cfg.zones[1].ease_off_window_mult, 2.0f, 1e-6, "zones[1].ease_off_window_mult survives");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source is carried through verbatim");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Accessor pair for zone_cfg_t::approach_rate_cap_c_per_hr (PID_EXPANSION_
+// PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option (b)) -- same
+// shape as test_ease_off_window_mult_accessor_get_set_and_range() just
+// above, with the one deliberate semantic difference: 0 here means
+// "uncapped," reported VERBATIM by the getter, never resolved into some
+// other substituted default the way ease_off_window_mult's 0 resolves to
+// 2.0 (there is no sensible non-zero default rate to substitute for "no
+// cap" -- see ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN's own comment).
+static void test_approach_rate_cap_accessor_get_set_and_range(void)
+{
+    TEST_SECTION("zones_config_get/set_approach_rate_cap_c_per_hr() -- round trip, per-zone isolation, "
+                 "refuse-don't-clamp bounds, and the 0 'uncapped' sentinel reported verbatim (NOT resolved "
+                 "to a substituted default, unlike ease_off_window_mult's own 0)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.relay_count = 2;
+    s_zones.cfg.zones[0].relay_mask = 0x01;
+    s_zones.cfg.zones[0].thermo_mask = 0x01;
+    s_zones.cfg.zones[0].max_temp_c = 1300.0f;
+    s_zones.cfg.zones[1].relay_mask = 0x02;
+    s_zones.cfg.zones[1].thermo_mask = 0x02;
+    s_zones.cfg.zones[1].max_temp_c = 1300.0f;
+    s_zones.cfg.timing_profile_count = 1;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(nvs_save() == ESP_OK, "initial save must succeed");
+
+    // A freshly-loaded/uncommissioned zone reads 0 (uncapped), the default.
+    float got = -1.0f;
+    TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(0, &got) && got == 0.0f,
+              "zone 0's cap defaults to 0.0 (uncapped) -- bit-identical to every zone before this field existed");
+
+    // An invalid zone index is refused outright, same discipline as every
+    // other per-zone accessor in this file.
+    float ignored = -1.0f;
+    TEST_CHECK(!zones_config_get_approach_rate_cap_c_per_hr(MAX31856_CHANNEL_COUNT, &ignored),
+              "get() with an out-of-range zone index is refused");
+    TEST_CHECK(!zones_config_set_approach_rate_cap_c_per_hr(MAX31856_CHANNEL_COUNT, 30.0f),
+              "set() with an out-of-range zone index is refused");
+
+    // A real, in-range A/B value persists and reads back -- set on zone 0 ONLY.
+    TEST_CHECK(zones_config_set_approach_rate_cap_c_per_hr(0, 30.0f), "set(zone 0, 30.0 C/hr) succeeds");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(0, &got) && fabsf(got - 30.0f) < 1e-6,
+              "get(zone 0) reads back exactly the value just set, from LIVE state");
+    // THE per-zone isolation proof: zone 1 must NOT have moved. This is the
+    // exact bug class a transposed index (or a stray single shared field)
+    // would produce.
+    float got_z1 = -1.0f;
+    TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(1, &got_z1) && got_z1 == 0.0f,
+              "zone 1's approach_rate_cap_c_per_hr is UNTOUCHED by zone 0's set() -- still 0.0 (uncapped), "
+              "not zone 0's 30.0");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg)); // wipe the live struct, force a real reload
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "reload after set() must succeed");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(0, &got) && fabsf(got - 30.0f) < 1e-6,
+              "30.0 survives a genuine NVS round trip, not just an in-RAM poke");
+    got_z1 = -1.0f;
+    TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(1, &got_z1) && got_z1 == 0.0f,
+              "zone 1 still reads 0.0 (uncapped) after the reload -- isolation survives a real NVS round trip");
+
+    // Refuse, never clamp -- ceiling, the (0, MIN) sliver, and NaN, none of
+    // which may silently become a different number or corrupt the live value.
+    TEST_CHECK(!zones_config_set_approach_rate_cap_c_per_hr(0, ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX + 1.0f),
+              "set() above the ceiling is refused");
+    TEST_CHECK(!zones_config_set_approach_rate_cap_c_per_hr(0, ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN / 2.0f),
+              "set() below the floor (but nonzero) is refused");
+    TEST_CHECK(!zones_config_set_approach_rate_cap_c_per_hr(0, -1.0f), "set() of a negative value is refused");
+    TEST_CHECK(!zones_config_set_approach_rate_cap_c_per_hr(0, NAN), "set() of NaN is refused");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(0, &got) && fabsf(got - 30.0f) < 1e-6,
+              "every refused set() above left the live value at 30.0, untouched -- refuse, not clamp");
+
+    // The 0 sentinel: legal to SET (an A/B campaign ending an arm), reported
+    // VERBATIM by the getter -- UNLIKE ease_off_window_mult's 0, this is NOT
+    // resolved into any other substituted value.
+    TEST_CHECK(zones_config_set_approach_rate_cap_c_per_hr(0, 0.0f), "set(zone 0, 0.0) -- uncap -- succeeds");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(0, &got) && got == 0.0f,
+              "the getter reports the stored 0 sentinel VERBATIM -- 'uncapped' IS the answer, not a "
+              "substituted default the way ease_off_window_mult's 0 resolves to 2.0");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // ---------------------------------------------------------------------------
 // PID_EXPANSION_PLAN.md line ~864's three negative tests for zone settings
 // inheritance. The feature itself (self-reference refused at the door) was
@@ -7273,6 +7457,8 @@ void run_test_zones_http(void)
     test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default();
     test_nvs_load_from_v16_blob_carries_global_ease_off_mult_to_every_zone();
     test_ease_off_window_mult_accessor_get_set_and_range();
+    test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped();
+    test_approach_rate_cap_accessor_get_set_and_range();
     test_settings_source_save_reload_inheritance_round_trip();
     test_settings_source_two_and_three_zone_cycles_are_refused();
     test_tc_type_write_is_identity_independent_of_settings_source();

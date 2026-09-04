@@ -987,6 +987,51 @@ bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult)
     return nvs_save() == ESP_OK;
 }
 
+/* ZONES_CFG_VERSION 17->18 (PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_
+ * TARGET_DESIGN_STUDY.md option (b)): per-zone approach-rate cap. Gated on
+ * MAX31856_CHANNEL_COUNT, same reasoning as zones_config_get_ease_off_
+ * window_mult() just above.
+ *
+ * UNLIKE that getter, 0 is returned VERBATIM here, not resolved into some
+ * other in-range value -- 0 IS "uncapped," the field's own documented
+ * meaning (see ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN's own comment for why
+ * there is no sensible default cap to substitute the way ease_off_window_
+ * mult substitutes 2.0). A stored value that is finite, nonzero, and
+ * outside [MIN, MAX] -- only reachable via direct NVS tampering or a
+ * rollback from firmware with a wider range -- is defensively treated as
+ * uncapped (0), the safe answer for THIS field, rather than clamped into
+ * range (which would silently narrow the shared ramp for a value nobody
+ * actually configured). */
+bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_cap_c_per_hr)
+{
+    if (!out_cap_c_per_hr || zone_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    float v = s_zones.cfg.zones[zone_index].approach_rate_cap_c_per_hr;
+    if (v != 0.0f && (!isfinite(v) || v < ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN ||
+                       v > ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX)) {
+        v = 0.0f; /* defensive: not a value that should ever be on flash -- treat as uncapped */
+    }
+    *out_cap_c_per_hr = v;
+    return true;
+}
+
+/* Writer for the getter above. Refused, never clamped, matching every other
+ * setter in this file. 0 is accepted as an explicit "remove this zone's cap"
+ * -- an A/B campaign ending an arm should be able to ask for that directly.
+ * Setting one zone's value never touches any other zone's. */
+bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(cap_c_per_hr) ||
+        (cap_c_per_hr != 0.0f && (cap_c_per_hr < ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN ||
+                                   cap_c_per_hr > ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX))) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].approach_rate_cap_c_per_hr = cap_c_per_hr;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 /* Bundled setter, same "reject nothing half-written" discipline as every
  * bundled setter above. Each of the 8 fields checked against its own
  * independent bound (matching which ceiling parse_zone_fields() applies to
