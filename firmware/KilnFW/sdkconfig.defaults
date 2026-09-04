@@ -185,6 +185,36 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # oldest session instead of wedging until external load happens to subside.
 CONFIG_LWIP_MAX_SOCKETS=18
 
+# CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE: 6 -> 16, 2026-09-04, ROADMAP.md's
+# "HTTP connection resets under concurrency" item. This is a mailbox
+# entirely separate from wifi_provision_http.c's `config.backlog_conn`
+# (that one is lwIP's SYN/pending-accept queue depth, checked in
+# tcp_listen_input() against `pcb->accepts_pending`; this one is the
+# fixed-size queue between a *completed* handshake and the application
+# actually calling accept()/netconn_accept() -- see lwip's
+# src/api/api_msg.c accept_function(): when sys_mbox_trypost() into
+# conn->acceptmbox fails because it's full, the new pcb is aborted (an
+# RST), not queued or retried. Left at ESP-IDF's Kconfig default (6,
+# components/lwip/Kconfig) until this pass, undiscovered because every
+# prior pass in this item's history was looking at httpd's session-pool
+# cap (13) and the OS socket table (18), not at this mailbox. Confirmed
+# live: raising backlog_conn 10 -> 32 alone (no other change) did NOT
+# reduce the reset rate -- it raised it, 22.5% -> 45.0%, because a wider
+# SYN-stage backlog let MORE handshakes complete only to be aborted
+# post-handshake by this same fixed mailbox instead of being refused
+# earlier at the SYN stage. The smoking gun: at every concurrency level
+# from 8 through 16, exactly 6 of N concurrent requests succeeded per
+# burst, every single time -- the mailbox size, not the client count,
+# was setting the ceiling. Range is 1-64 without window scaling
+# (LWIP_WND_SCALE, not enabled in this build) per the Kconfig entry;
+# 16 gives real headroom over the reproducer's failing range (8-16
+# concurrent) without chasing it needlessly high -- same "headroom, not
+# exact-fit" reasoning as every other socket-budget number in this file.
+# Fixed per-mailbox cost, not a heap pool (mbox slots are pointer-sized
+# entries in a small fixed array) -- see ROADMAP.md for the before/after
+# measurement this justifies.
+CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE=16
+
 # CONFIG_LWIP_STATS: on, 2026-08-28, for ROADMAP.md M10's open item -- an
 # 8-parallel-fetch /app.js burst resets one connection, and two mechanisms
 # (heap exhaustion, socket-timeout) are already ruled out by measurement.

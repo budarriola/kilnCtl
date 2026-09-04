@@ -823,6 +823,16 @@ esp_err_t wifi_provision_http_start(void)
      * still the number proven necessary against the 10-connection burst
      * above. */
     config.max_open_sockets = 13;
+    /* 2026-09-04: tested raising this 10 -> 32 alone, on the strength of
+     * ROADMAP.md's "HTTP connection resets under concurrency" previous
+     * pass, which flagged it as the untested next lead. RESULT: refuted,
+     * and in the wrong direction -- reset rate got WORSE (22.5% -> 45.0%
+     * at the same concurrency levels), because a deeper SYN-stage queue
+     * let more handshakes complete only to be aborted just past that
+     * point by CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE's fixed accept mailbox
+     * (see sdkconfig.defaults' comment at that setting, added this same
+     * pass, for the actual mechanism and its own fix). Reverted to 10 --
+     * see ROADMAP.md for the full before/after numbers. */
     config.backlog_conn = 10;
     /* Same burst: sockets sitting idle-but-stuck (e.g. a client that opened
      * a connection but is slow to send/read) held their slot for the full
