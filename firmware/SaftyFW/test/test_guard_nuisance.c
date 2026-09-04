@@ -62,13 +62,23 @@
 //    the only avenue in GUARD_TEST_MATRIX.md's own S6a hardware row ("the
 //    one guard virtual_dut/SimFW never could exercise"). Left unchecked.
 //
-//  - S9 ("current decays with the 1s peak-hold time constant"): the matrix
-//    itself already documents this as hardware-only --
-//    any_current_present is a real analog CT reading behind a physical
-//    peak-hold circuit, and "SimFW/kilnsim (the only software path that
-//    ever synthesized this input) were deleted 2026-08-28" (section 3.4's
-//    S9 row). No software decay model exists to drive a host test with.
-//    Left unchecked, per that same row's guidance.
+//  - S9 ("current decays with the 1s peak-hold time constant"): 2026-09-04
+//    audit found the "hardware-only" verdict above (and in
+//    GUARD_TEST_MATRIX.md's own §3.4/checklist text) imprecise, the same
+//    way two other claims turned out to be imprecise the same day. The
+//    physical AD8542 + R77||C57 decay waveform genuinely needs hardware to
+//    produce -- but safety_guards_tick()'s S9 branch (safety_guards.c,
+//    the trip_ineffective block under `if (state->is_tripped)`) never
+//    touches raw ADC counts at all: it consumes only
+//    in->any_current_present (a bool), in->relay_deenergized,
+//    in->context_valid and in->current_sensing_commissioned. That decision
+//    is exactly the kind of physics-to-bool translation this file already
+//    drives synthetically for S3/S4 above (current_decay_s, modelling the
+//    same tau=1s peak-hold). test_s9_current_decay_after_normal_trip()
+//    below reuses that technique with a real exponential (CURRENT_SENSE.md
+//    section 3's own tau=1s / 37%-at-1s / 5%-at-3s / 1%-at-4.6s), proving
+//    a genuinely healthy post-trip decay never escalates S9, with a
+//    welded-contactor positive control proving S9 still can and does fire.
 //
 // S6b's "one dropped telemetry frame; three dropped frames with no current"
 // row was audited too: link_task_link_up() (firmware/SaftyFW/src/tasks/
@@ -290,8 +300,120 @@ static void test_s10_150c_stratification_whole_firing(void)
     }
 }
 
+// -----------------------------------------------------------------------
+// S9 -- "a normal trip where current decays with the 1s peak-hold time
+// constant" (GUARD_TEST_MATRIX.md section 1's own row). See this file's
+// header comment for why the earlier "hardware-only" verdict was
+// imprecise: safety_guards_tick()'s S9 branch consumes only
+// in->any_current_present (bool) plus relay_deenergized/context_valid/
+// current_sensing_commissioned -- none of which requires the physical CT.
+//
+// amps(t)/i_present_a = initial_ratio * exp(-t/tau), tau = 1.0s, per
+// CURRENT_SENSE.md section 3 ("Exponential decay, tau = 1s. 37% at 1s, 5%
+// at 3s, 1% at 4.6s"). "Present" iff still above the i_present_a threshold
+// (ratio > 1). initial_ratio models how many multiples of i_present_a
+// (default 2.0A) the running current was before the relay opened.
+static bool current_present_after_decay(float elapsed_s, float initial_ratio)
+{
+    if (elapsed_s < 0.0f) {
+        return true;
+    }
+    float ratio = initial_ratio * expf(-elapsed_s / 1.0f);
+    return ratio > 1.0f;
+}
+
+static void test_s9_current_decay_after_normal_trip(void)
+{
+    TEST_SECTION("S9 -- current decays with the 1s peak-hold time constant after a normal trip "
+                  "(GUARD_TEST_MATRIX.md section 1's own S9 row)");
+
+    /* Nuisance: a genuinely healthy shutdown. Trip via S7 (E-stop), K4
+     * reports de-energized from the same tick on (the realistic case), and
+     * the CT reading decays exponentially from a representative running
+     * current. initial_ratio=15 models a ~30A element against the default
+     * i_present_a=2.0A threshold: current crosses back under the threshold
+     * at tau*ln(15) ~= 2.7s, nowhere near trip_verify_s's 10s. Run well
+     * past trip_verify_s plus the streak debounce to prove it never
+     * escalates across the whole window, not just at one sampled instant. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = nuisance_base_cfg();
+
+        safety_guard_input_t estop = nuisance_base_input();
+        estop.estop_pressed = true;
+        bool tripped_now = safety_guards_tick(&s, &cfg, &estop);
+        TEST_CHECK(tripped_now && s.is_tripped, "sanity: tripped via S7 (E-stop)");
+
+        const float dt = 0.1f;
+        const float run_s = 20.0f; /* comfortably > trip_verify_s(10s) + decay tail */
+        bool escalated = false;
+        bool any_current_present_seen = false;
+        bool verify_window_progressed_past_trip_verify_s = false;
+        for (float t = 0.0f; t < run_s && !escalated; t += dt) {
+            safety_guard_input_t in = nuisance_base_input();
+            in.context_valid = true;
+            in.current_sensing_commissioned = true;
+            in.relay_deenergized = true; /* K4 verifiably open from t=0 */
+            in.dt_s = dt;
+            in.any_current_present = current_present_after_decay(t, 15.0f);
+            if (in.any_current_present) {
+                any_current_present_seen = true;
+            }
+            escalated = safety_guards_tick(&s, &cfg, &in);
+            if (s.s9_verify_elapsed_s >= 10.0f) {
+                verify_window_progressed_past_trip_verify_s = true;
+            }
+        }
+        TEST_CHECK(!escalated, "a normal tau=1s current decay after K4 opens never escalates S9");
+        TEST_CHECK(!s.trip_ineffective, "trip_ineffective stays false through the whole decay + long tail");
+        TEST_CHECK(any_current_present_seen,
+                   "S9 was LIVE for this run: any_current_present was true for part of it (proves the guard "
+                   "actually had something to reject, not an inert always-false input)");
+        TEST_CHECK(verify_window_progressed_past_trip_verify_s,
+                   "S9's own verify window (trip_verify_s) was actually reached during the run -- the guard "
+                   "was armed and watching, not skipped");
+    }
+
+    /* Positive control: the welded-contactor case, using the SAME
+     * decay-model helper but with current that never decays below the
+     * threshold (a stuck/shorted reading) -- current genuinely persists
+     * past trip_verify_s, and S9 MUST escalate. Without this, "never
+     * escalated" above would be indistinguishable from S9 being unable to
+     * fire at all in this configuration -- the inert-guard trap
+     * GUARD_TEST_MATRIX.md itself warns about. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = nuisance_base_cfg();
+
+        safety_guard_input_t estop = nuisance_base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+        TEST_CHECK(s.is_tripped, "sanity: tripped via S7 (E-stop)");
+
+        const float dt = 0.1f;
+        const float run_s = 20.0f;
+        bool escalated = false;
+        for (float t = 0.0f; t < run_s && !escalated; t += dt) {
+            safety_guard_input_t in = nuisance_base_input();
+            in.context_valid = true;
+            in.current_sensing_commissioned = true;
+            in.relay_deenergized = true;
+            in.dt_s = dt;
+            in.any_current_present = true; /* welded contactor: never decays */
+            escalated = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(escalated, "current that genuinely persists (welded contactor) DOES escalate S9 -- proves "
+                               "the nuisance test above was not passing because S9 can never fire");
+        TEST_CHECK(s.trip_ineffective, "trip_ineffective latches on the welded-contactor control");
+        TEST_CHECK(s.reason == SAFETY_TRIP_INEFFECTIVE, "reason escalates to SAFETY_TRIP_INEFFECTIVE");
+    }
+}
+
 void run_test_guard_nuisance(void)
 {
     test_s3_s4_hour_at_various_duties();
     test_s10_150c_stratification_whole_firing();
+    test_s9_current_decay_after_normal_trip();
 }

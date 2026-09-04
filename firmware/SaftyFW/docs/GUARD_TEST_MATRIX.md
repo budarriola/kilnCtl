@@ -34,7 +34,7 @@ So for every guard, the **first** test written is the one that must *not* trip:
 | S6b | One dropped telemetry frame; three dropped frames with no current flowing |
 | S7 | 30 ms of contact bounce on both edges — covered on host 2026-09-04, `test/test_debounce_nuisance.c`'s `test_s7_30ms_estop_bounce_does_not_trip()`, against the same extracted debounce, plus its positive control `test_s7_sustained_estop_press_is_detected()` (60 ms sustained IS detected) |
 | S8 | A legitimate full-power ramp at the measured maximum rate |
-| S9 | A normal trip where current decays with the 1 s peak-hold time constant |
+| S9 | A normal trip where current decays with the 1 s peak-hold time constant — covered on host 2026-09-04, `test/test_guard_nuisance.c`'s `test_s9_current_decay_after_normal_trip()`, against the real `safety_guards_tick()`, plus its positive control (a genuinely persistent post-trip current IS escalated to `TRIP_INEFFECTIVE`) |
 | S10 | A 150 °C stratification held for a whole firing (`CHAMBER_AGREED`) |
 | S10 | **Any** disagreement at all, in `EXTERNAL_OVERHEAT` — the guard must be off |
 | S11 | A cold idle kiln reading a constant value for six hours with no heat |
@@ -215,7 +215,7 @@ write, both of which end that run.
 | S6a | None — always active, no commissioning gate | Momentarily short the mainFault opto output (SaftyFW GPIO10, active low, R8 pull-up) to ground, simulating the ESP asserting its own fault line | Trip (`SAFETY_TRIP_MAIN_FAULT`) within ~200 ms (debounce + one tick), K4 drops immediately; **not** software-clearable without the short first being removed | This is the one guard `virtual_dut`/`SimFW` never could exercise (no I2C-expander/opto emulation) — real hardware is the only way to observe it at all, per §6/§6a. Confirm the short is fully removed before `CLEAR_TRIP` |
 | S6b | None for the hard backstop; the soft (current-gated) tier additionally needs `ct_installed = yes` | Unplug the ESP mid-firing | Soft tier: trip (`SAFETY_TRIP_LINK_DEAD`) once link silence exceeds `link_timeout_s` (default 10 s) **with current present**; hard backstop: unconditional trip at `link_dead_hard_s` (default 120 s) regardless of current | Reconnect the ESP only after confirming K4 dropped — reconnecting early can mask whether the guard actually fired |
 | S7 | None | Press the E-stop | Immediate trip (`SAFETY_TRIP_ESTOP`), no debounce beyond the existing 50 ms | Release the E-stop before `CLEAR_TRIP` — same immediate-recheck shape as S3 |
-| S9 | `ct_installed = yes`, current sensing **commissioned** (`current_sensing_commissioned` true — real calibration loaded, not just CT fitted), and some other guard already tripped so K4 has been commanded open | **Bypass the contactor** so current continues after K4 opens | `SAFETY_TRIP_INEFFECTIVE` once `trip_verify_s` (default 10 s) has elapsed **and** 3 consecutive ticks (~300 ms) of `any_current_present` are seen — **never operator-clearable**, refused unconditionally by both `safety_guards_try_clear()` and `link_frame_decide_clear_trip()`; confirm the GUI/log renders this distinctly from every other trip code | **This is the guard the task brief flagged as a known hard case, and it holds on inspection**: `any_current_present` is a real analog CT reading gated behind `context_valid`, `!current_sensing_disabled` and `current_sensing_commissioned` (`safety_guards.c:363-389`) — it cannot be faked digitally, and SimFW/kilnsim (the only software path that ever synthesized this input) were deleted 2026-08-28. **Provoking this on the bench needs a jig that injects real AC current through the CT loop while independently confirming K4's coil drive line is de-energized** (e.g. an ammeter or scope probe on the K4 coil itself, not just on the software status) — the bypass step already implies exactly this jig, since "bypass the contactor" means routing mains current around the open K4 contacts on purpose. Treat the bypass wiring as live mains for the whole test: de-energize and remove the bypass jumper immediately after the observable is recorded, before any restore step below, and before touching the breaker |
+| S9 | `ct_installed = yes`, current sensing **commissioned** (`current_sensing_commissioned` true — real calibration loaded, not just CT fitted), and some other guard already tripped so K4 has been commanded open | **Bypass the contactor** so current continues after K4 opens | `SAFETY_TRIP_INEFFECTIVE` once `trip_verify_s` (default 10 s) has elapsed **and** 3 consecutive ticks (~300 ms) of `any_current_present` are seen — **never operator-clearable**, refused unconditionally by both `safety_guards_try_clear()` and `link_frame_decide_clear_trip()`; confirm the GUI/log renders this distinctly from every other trip code | **This is the guard the task brief flagged as a known hard case; it holds on inspection for the wiring, but the 2026-09-04 audit narrowed exactly what "hard case" means**: the *decision* — `trip_verify_s` elapsing, the `S9_CURRENT_PRESENT_STREAK_TO_TRIP`-tick debounce, the `context_valid`/`current_sensing_commissioned` gates (`safety_guards.c:363-389`) — consumes only `in->any_current_present` as a bool and is fully host-tested against the real `safety_guards_tick()` (`test/test_guard_nuisance.c`'s `test_s9_current_decay_after_normal_trip()`, both the healthy-decay nuisance case and a persistent-current positive control). What genuinely cannot be faked digitally is the **analog signal** feeding that bool — the real CT + AD8542 rectifier + peak-hold producing a trustworthy `any_current_present` at all — and SimFW/kilnsim (the only software path that ever synthesized *that* signal) were deleted 2026-08-28. **Provoking this end-to-end on the bench still needs a jig that injects real AC current through the CT loop while independently confirming K4's coil drive line is de-energized** (e.g. an ammeter or scope probe on the K4 coil itself, not just on the software status) — the bypass step already implies exactly this jig, since "bypass the contactor" means routing mains current around the open K4 contacts on purpose. Treat the bypass wiring as live mains for the whole test: de-energize and remove the bypass jumper immediately after the observable is recorded, before any restore step below, and before touching the breaker |
 | S10 | `tc_placement_mode = CHAMBER_AGREED`, a live KilnFW context with `zone_count > 0` | Physically decouple the safety thermocouple from the chamber — e.g. clamp its junction to an external, independently-heated mass (heat gun on the junction alone, away from the elements) so it disagrees with the nearest zone's chamber reading by more than `tc_disagreement_c` (default 200 °C) | **WARN only** — `s10_warn` sets after `tc_disagreement_time_s` (default 300 s) of sustained disagreement; there is no `SAFETY_TRIP_*` for S10, so K4 is never affected and nothing needs clearing | Safe by construction (WARN-only, no relay effect). Return the safety TC to its normal chamber position afterwards and confirm the WARN clears on its own — it is non-latching |
 | S11 | `ct_installed = yes` and current sensing commissioned, so `heat_commanded` (= `any_current_present`) can go true for real | Physically isolate the safety thermocouple's junction in a large ambient thermal mass (wrapped away from the elements, or clamped in an unheated metal block) so it reports a genuinely constant, valid reading while a normal firing runs and current actually flows | Trip (`SAFETY_TRIP_FROZEN_SENSOR`) once the identical reading persists for `frozen_window_s` (default 600 s = 10 min) with heat commanded throughout; **do not** try to provoke this by stalling the MAX31856's conversions (halting `~CS`/`DRDY`) — that reads as `spi_failed`/stale and trips S5 first, never reaching S11's own condition | Requires a genuine ~10 minute hold with heat on — budget bench time accordingly. Remove the thermal isolation and confirm the reading tracks the chamber again before `CLEAR_TRIP`; the clear is refused (`guard_condition_still_immediate()`) while the reading is still frozen at the value it tripped on |
 | S13 | **Commissioning gap, must be armed first**: `tc_source` set to `SAFETY_TC_SOURCE_BORROWED_ZONE` (or `BOTH`) and `borrowed_zone_index` set to the specific KilnFW zone (0..2) under test — both default off (`OWN_J7`, category (d) in §6c) | Stall or unplug **that specific zone's** thermocouple on the main board (same physical technique as §3.2's "Stopped converting" row), while the link and every other zone stay healthy so `context_valid` stays true | Graduated like S5: `s13_warn` at `borrowed_stale_s` (default 10 s), trip (`SAFETY_TRIP_BORROWED_STALE`) at `borrowed_stale_trip_s` (default 60 s) once KilnFW's own `sample_counter` for that zone stops incrementing (`safety_link_frames.c`: increments only when a fresh, non-stale conversion is consumed) | Reconnect/unstall only the one zone's thermocouple used for the test. Restore `tc_source` and `borrowed_zone_index` to their prior (or intended production) values afterwards and confirm via the config CRC in telemetry, same as any other temporarily-changed commissioning field |
@@ -264,7 +264,7 @@ should say so rather than being listed as coverage.
 ## Completion checklist
 
 **Host**
-- [ ] Nuisance-rejection tests written **before** trip tests, all of §1.
+- [x] Nuisance-rejection tests written **before** trip tests, all of §1.
       Audited row by row against `test/test_safety_guards.c` (2026-09-04).
       Twelve of §1's fourteen rows were already covered, several of them
       exactly (S1, S2's 40C/overshoot_margin_c-implied-by-90s-decay case
@@ -371,17 +371,59 @@ should say so rather than being listed as coverage.
       this pass -- 21 added checks), plus the SaftyFW target build
       (`build_saftyfw`) still succeeds for all three link outputs
       (`SaftyFW.elf`/`SaftyFW_slotA.elf`/`SaftyFW_slotB.elf`).
-      **The one row this checklist item still cannot check off is S9**
-      ("current decays with the 1s peak-hold time constant"), for the
-      reason already given two paragraphs up and unchanged by this pass:
-      it is hardware-only by this document's own §3.4 S9 row --
-      `any_current_present` is a real analog CT reading behind a physical
-      peak-hold circuit, and the only software path that ever synthesized
-      it (SimFW/kilnsim) was deleted 2026-08-28, so there is no decay model
-      left to host-test against. With S6a and S7 now closed, S9 is the
-      single remaining item blocking this checkbox -- not "the same reason
-      repeated," a specific, individually-verified one, and this box stays
-      unchecked on that basis alone.
+      **2026-09-04, later the same day: the "S9 is hardware-only" verdict
+      above was re-audited and found imprecise**, the same way two other
+      claims turned out to be imprecise earlier that day. `safety_guards_
+      tick()`'s S9 branch (the `trip_ineffective` block under `if
+      (state->is_tripped)`, `safety_guards.c:343-431`) never touches raw
+      ADC counts or the physical peak-hold circuit at all -- it consumes
+      only `in->any_current_present` (a bool), `in->relay_deenergized`,
+      `in->context_valid` and `in->current_sensing_commissioned`. That
+      decision is exactly the kind of physics-to-bool translation this
+      same pass's S3/S4 harness already builds (`current_decay_s`,
+      modelling the identical tau=1s peak-hold) -- what was actually true
+      is narrower than "hardware-only": the *analog decay waveform* needs
+      hardware to produce (SimFW/kilnsim, deleted 2026-08-28, was the only
+      software path that ever synthesized it), but the *guard's decision*
+      over a sequence of such samples does not, and follows the same
+      extraction precedent as `discrete_pin_policy.c`, `max31856_fault_
+      pin_policy.c`, `current_presence_policy.c` and the same day's
+      `debounce_policy.c` -- except here no extraction was even needed,
+      since `safety_guards_tick()` already takes the bool directly.
+      `test/test_guard_nuisance.c`'s `test_s9_current_decay_after_normal_
+      trip()` drives the real, unmodified `safety_guards_tick()` (`safety_
+      guards.c/.h` and `test_safety_guards.c` still untouched, per the
+      concurrent session holding those) with a real exponential decay --
+      `amps(t)/i_present_a = initial_ratio * exp(-t/tau)`, tau=1.0s, per
+      `CURRENT_SENSE.md` section 3's own measured curve (37% at 1s, 5% at
+      3s, 1% at 4.6s) -- starting at 15x the default `i_present_a`
+      threshold (representative of a real heating element), and asserts
+      `trip_ineffective` never latches across a 20s run (well past
+      `trip_verify_s`'s 10s plus the 3-tick streak debounce), while also
+      asserting the run was actually LIVE: `any_current_present` was true
+      for part of it, and `s9_verify_elapsed_s` genuinely reached
+      `trip_verify_s` during the run -- ruling out the inert-guard trap
+      this document itself warns about. A positive control in the same
+      test, same setup, but with `any_current_present` held true forever
+      (a welded contactor that never decays) DOES escalate to
+      `SAFETY_TRIP_INEFFECTIVE`, proving the nuisance case above passes
+      because S9 correctly stays quiet, not because S9 can never fire.
+      Negative-tested per `feedback_negative_test_every_check.md`: with
+      `current_present_after_decay()` forced to always return `true`
+      (simulating a broken/regressed decision that can no longer tell a
+      decaying current from a persistent one), both nuisance checks failed
+      loud -- `FAIL test_guard_nuisance.c:369: a normal tau=1s current
+      decay after K4 opens never escalates S9` and `FAIL test_guard_
+      nuisance.c:370: trip_ineffective stays false through the whole decay
+      + long tail`. Reverted, suite clean again: 2131/2131 (up from
+      2122/2122 before this pass -- the 9 added checks are this test's
+      own), payload-fuzz binary unaffected and still separately reporting
+      ALL PASS. `build_saftyfw` (kilnctrl MCP, HTTP :8767) still succeeds
+      for all three link outputs.
+      With S6a, S7, and now S9 closed, every row of §1 is genuinely
+      covered on host or has a concrete hardware procedure recorded (§3.4
+      S9's bypass-jig row, for the end-to-end wiring/analog check this
+      host test does not and cannot replace) -- this checkbox is ticked.
 - [x] §2's full provocation table implemented and passing, for every row that
       is a pure function of `safety_guard_input_t`/`safety_guard_cfg_t`
       (2026-08-19). Audited `test/test_safety_guards.c` row by row against
