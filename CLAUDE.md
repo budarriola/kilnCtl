@@ -81,6 +81,14 @@ trip that latches right after an OTA reboot can be the SX1509 I/O expander
 failing its post-reset init, not a firmware defect — a second `debug_reset`
 clears it.
 
+`tools/PcTools/scripts/capture_lcd.ps1` grabs one frame from the bench webcam
+aimed at the board's LCD, cropped to the panel (`-Full` for an uncropped frame
+if the camera moved and the crop needs re-measuring) — display rendering can
+be checked without a human at the bench. Judge colors by **numeric pixel
+sampling**, never by eye or by matching theme source constants:
+`ffmpeg -i img.jpg -vf "crop=W:H:X:Y,scale=1:1" -f rawvideo -pix_fmt rgb24 - | od -An -tu1`.
+Always sample an off-screen bezel region too, as a neutral reference.
+
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
 ## Project Structure
@@ -115,8 +123,7 @@ board, so a fix found in one project's copy often applies to the other's too.
 - **hardware/mainBoard/kiln.kicad_sch** — Main schematic file; top-level hierarchy
 - **hardware/mainBoard/MainControler.kicad_sch** — ESP32-S3-DevKitC main processor
 - **hardware/mainBoard/Thermocouple.kicad_sch** — MAX31856 thermocouple interface (5 channels)
-- **hardware/mainBoard/Power.kicad_sch** — Input power conditioning and protection
-- **hardware/mainBoard/Regulators.kicad_sch** — 5V and 3.3V LDO regulators
+- **hardware/mainBoard/Regulators.kicad_sch** — Input power conditioning/protection and 5V/3.3V LDO regulators
 - **hardware/mainBoard/5V_Regulator.kicad_sch** — Dedicated 5V regulation block
 - **hardware/mainBoard/CurrentSense.kicad_sch** — Current monitoring circuitry
 - **hardware/mainBoard/SSD.kicad_sch** — Seven-segment display interface
@@ -127,7 +134,6 @@ board, so a fix found in one project's copy often applies to the other's too.
 - **hardware/mainBoard/kiln.kicad_prl** — KiCad project settings and layers configuration
 
 ### Component Data
-- **hardware/mainBoard/kiln.csv** — Bill of Materials (BOM) with part numbers, values, datasheets, and footprints
 - **hardware/mainBoard/parts/SamacSys_Parts.pretty/** — Component footprints
 - **hardware/mainBoard/parts/SamacSys_Parts.3dshapes/** — 3D models for visualization and export
 - **hardware/mainBoard/fp-lib-table** — Footprint library table
@@ -194,6 +200,24 @@ replicates routing already drawn on one instance of a repeated block onto its si
 - Configure MCP in your editor using the server path: `python tools\mykicadMcp\kicad_mcp_server.py`
 - Example tools: "List the components on the PCB", "Show me component R1 and its connections", "Provide details for net /MainControler/CLK"
 
+## Firmware gotchas
+
+After splitting an oversized firmware file: grep `tools/`, `firmware/*/tools/`
+and `tools/PcTools/tests/` for the old filename *and* any renamed identifiers,
+then re-run every `check_*.ps1` and lint script — not just the build and host
+tests. Nine of twelve 2026-09-04 splits broke a check/test silently this way
+(one hardcoded-path guard was `if not path.is_file(): skipTest(...)`, so it
+reported green with zero coverage), and separately, prefix-rename every symbol
+widened from `static` even when the grep is clean — a same-named global can
+collide silently with an unrelated `static` elsewhere. See `b9a5112` for a
+worked example of both.
+
+KilnFW's `boot_guard.h` RECOVERY MODE deliberately skips starting subsystems
+(`profile_executor`, `autotune_engine`). A task started unconditionally in
+`main_boot_early.c` that calls into a skipped subsystem will deadlock and trip
+the watchdog — this bricked the bench board twice (`e7b8efc` and again on
+2026-08-22). New consumers there must gate on `boot_guard_is_recovery_mode()`.
+
 ## Key Architecture Notes
 
 ### Hierarchical Schematic Design
@@ -208,7 +232,7 @@ Three voltage rails:
 - **5V** (main logic and relay coils)
 - **3.3V** (microcontroller I/O and sensors)
 
-Input protection uses TVS diodes (SMAJ24CA) and current-limiting resistors. See hardware/mainBoard/Power.kicad_sch and hardware/mainBoard/Regulators.kicad_sch.
+Input protection uses TVS diodes (SMAJ24CA) and current-limiting resistors. See hardware/mainBoard/Regulators.kicad_sch.
 
 ### Safety Processor
 A separate safety processor monitors critical parameters and can disable the main controller if needed. Isolated communication via relay feedback circuits.
@@ -249,14 +273,16 @@ python tools\mykicadMcp\kicad_pcb_tool.py
 ```
 
 ### Update the BOM
-Edit hardware/mainBoard/kiln.csv. This file is exported from KiCad's built-in BOM generator and includes part numbers, values, footprints, and Mouser links.
+No BOM CSV is checked into the repo currently. Regenerate one via KiCad's built-in BOM generator
+(part numbers, values, footprints, Mouser links) or query components live through
+`kicad_call(name="list_kicad_components", ...)`.
 
 ### Check Design Rule Violations
-In KiCad: **Tools → Design Rule Checker** or press `Shift+I`. Refer to hardware/mainBoard/JLCPCB.kicad_dru.txt for manufacturing rules if fabricating at JLCPCB.
+In KiCad: **Tools → Design Rule Checker** or press `Shift+I`. Refer to hardware/mainBoard/JLCPCB.kicad_dru for manufacturing rules if fabricating at JLCPCB.
 
 ## Notes for AI Assistants
 
 - The schematic files (`.kicad_sch`) are large text-based files; use Python tools to query data rather than reading raw files.
-- Component designators (R1, U1, etc.) in hardware/mainBoard/kiln.csv match those on the schematic and PCB.
+- Component designators (R1, U1, etc.) in a regenerated BOM match those on the schematic and PCB.
 - Footprints are organized in `hardware/mainBoard/parts/SamacSys_Parts.pretty/`; do not modify these directly unless sourcing new parts.
 - The MCP server is useful for scripting or integration with other tools; most editing should happen in KiCad GUI.
