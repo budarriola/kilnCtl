@@ -6,7 +6,16 @@ FILE SHAPE. One JSON object per line, no wall-clock text prefix (unlike
 
     {"t": <unix float>,
      "exec": {<verbatim GET /api/profile_exec response body>},
-     "status": {<verbatim GET /api/status response body>}}
+     "status": {<verbatim GET /api/status response body>},
+     "control": {<verbatim GET /api/control response body>}}   # optional, see below
+
+``"control"`` is present only when the capture was made with
+``run_queue.RunQueueConfig.capture_control_bd=True`` (the CLI default since
+PID_EXPANSION_PLAN.md sec 3.6b) -- older captures, or ones made with the
+``--no-capture-control-bd`` opt-out, have no such key and ``HttpPollRow.
+control`` is ``None`` for them. Its per-zone ``bd_*`` fields are the
+sec 3.6b pre-flight evidence: see ``BD_FIELDS``/``bd_fields_by_zone`` below
+and ``bd_reachability_check.py``, which consumes them.
 
 ``exec`` is the same shape ``log_analysis.parse_profile_exec_jsonl`` already
 parses out of a poll-capture line -- it is handed straight to
@@ -45,15 +54,55 @@ from kilnctrl import log_analysis as la
 from kilnctrl.jsonl_util import iter_jsonl
 
 
+#: The twelve bd_* keys dashboard_json.c renders per zone on GET /api/control
+#: (zone_duty_breakdown_t, profile_executor.h) -- kept as one list so every
+#: consumer (bd_reachability_check.py, any future one) enumerates the same
+#: set rather than each hand-rolling its own subset.
+BD_FIELDS = (
+    "bd_ff_hold", "bd_ff_climb", "bd_coupling_correction",
+    "bd_ff_rate_pretaper", "bd_ff_rate_posttaper",
+    "bd_kp_effective", "bd_ki_effective", "bd_kd_effective",
+    "bd_pre_clamp_total", "bd_post_clamp_total",
+    "bd_load_cap_boost", "bd_final_commanded",
+)
+
+
 @dataclasses.dataclass
 class HttpPollRow:
     """One line of an HTTP-capture poll: the parsed ``PollRow`` plus the raw
     ``status`` body it was captured alongside, and the original unix
     timestamp (``PollRow.wall_time`` is a rendered string, not sortable
-    back to a float without reparsing)."""
+    back to a float without reparsing). ``control`` is the raw
+    ``GET /api/control`` body (``run_queue.py``'s optional ``"control"``
+    capture key, PID_EXPANSION_PLAN.md sec 3.6b) -- ``None`` for any capture
+    made with ``RunQueueConfig.capture_control_bd=False`` (or predating this
+    key entirely)."""
     t: float
     poll: la.PollRow
     status: Optional[dict]
+    control: Optional[dict] = None
+
+
+def bd_fields_by_zone(control_body: Optional[dict]) -> dict:
+    """``{zone_index: {bd_field: value, ...}, ...}`` from a raw
+    ``GET /api/control`` body, or ``{}`` if ``control_body`` is ``None`` or
+    has no ``"zones"`` list (a capture predating the "control" key, or a
+    malformed/short line)."""
+    if not isinstance(control_body, dict):
+        return {}
+    zones = control_body.get("zones")
+    if not isinstance(zones, list):
+        return {}
+    out = {}
+    for z in zones:
+        if not isinstance(z, dict) or "zone" not in z:
+            continue
+        try:
+            idx = int(z["zone"])
+        except (TypeError, ValueError):
+            continue
+        out[idx] = {f: z[f] for f in BD_FIELDS if f in z}
+    return out
 
 
 def _wall_time(t: float) -> str:
@@ -76,7 +125,7 @@ def parse_http_capture_jsonl(path: str) -> list[HttpPollRow]:
         except (TypeError, ValueError):
             continue
         poll = la.poll_row_from_exec_body(_wall_time(t), body)
-        rows.append(HttpPollRow(t=t, poll=poll, status=obj.get("status")))
+        rows.append(HttpPollRow(t=t, poll=poll, status=obj.get("status"), control=obj.get("control")))
     return rows
 
 

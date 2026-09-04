@@ -2617,6 +2617,27 @@ fact (as `ease_off_window_mult`'s could not, above) should capture the
 relevant `bd_*` fields going forward so the proof survives in the log, not
 only in a pre-flight check that happened once and was not recorded.
 
+**Tooling that makes this checkable, not just describable (2026-09-04).**
+`run_queue.py` now polls `GET /api/control` on every capture line and stores
+its per-zone `bd_*` fields under a `"control"` key (`RunQueueConfig.
+capture_control_bd`, CLI default **on** — pass `--no-capture-control-bd` to
+opt out of a campaign that genuinely does not need it; costs ~371B/zone per
+poll, so it is not unconditional). Once both arms of a campaign are captured
+this way, run the after-the-fact form of this check directly against the
+captures instead of re-deriving it from source each time:
+
+    python -m kilnctrl.bd_reachability_check ARM_A.jsonl ARM_B.jsonl \
+        --field bd_kp_effective --field bd_ki_effective --field bd_kd_effective
+
+It reports, per zone/field, whether the two arms' sampled values are
+EXACTLY bit-identical (the fuzzy-PID inert signature: exit 1, "INERT") or
+genuinely differ (exit 0, "REACHABLE") — and refuses (exit 2) rather than
+guessing when a capture predates `capture_control_bd` or was made with the
+opt-out, exactly the gap `ease_off_window_mult`'s captures had. See
+`tools/PcTools/src/kilnctrl/bd_reachability_check.py`'s module docstring for
+the full mechanics and `tools/PcTools/tests/test_bd_reachability_check.py`
+for worked examples of both verdicts.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer

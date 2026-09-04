@@ -23,6 +23,29 @@ mocked in tests, no real socket, no live board), against
     {"t": <unix float>, "exec": <verbatim GET /api/profile_exec body>,
      "status": <verbatim GET /api/status body>}
 
+CONTROL/BD CAPTURE (PID_EXPANSION_PLAN.md sec 3.6b's standing pre-flight
+check -- ``docs/kilnctrl/bd_reachability_check.py``'s own module docstring
+has the full story). When ``RunQueueConfig.capture_control_bd`` is True, a
+third key is appended to every capture line:
+
+    "control": <verbatim GET /api/control body, including each zone's
+                twelve bd_* duty_breakdown fields (dashboard_json.c) -- see
+                zone_duty_breakdown_t in profile_executor.h>
+
+This is what lets ``bd_reachability_check.py`` answer sec 3.6b's question
+("did the varied field actually reach the control law and differ between
+arms?") FROM THE CAPTURE, after the fact -- the ease-off campaign's captures
+(pre-2026-09-04) could not, per sec 3.6b's own note. ``GET /api/control`` is
+measured at ~371B/zone just for the bd_* keys (dashboard_exec_http.c's own
+sizing comment) -- not free over an hours-long campaign at a few-second poll
+interval, so this is opt-out (default True; ``--no-capture-control-bd`` on
+the CLI), not silently unconditional. ``RunQueueConfig`` itself defaults
+this OFF (``capture_control_bd: bool = False``) so every existing
+programmatic caller/test that constructs a bare ``RunQueueConfig()`` and
+never mocks ``get_control`` stays byte-identical; ``main()``'s CLI --
+the entry point that actually launches a control-law A/B campaign -- is what
+flips the default to True.
+
 Applying a preset is the one step this module does NOT reinvent: it calls
 ``config_presets.apply_preset(control, preset, zones_host=...)``, the
 existing sanctioned path (PID gains over the UART CONTROL task,
@@ -433,6 +456,15 @@ def get_exec(host: str, timeout: float = DEFAULT_HTTP_TIMEOUT_S) -> dict:
     return _get_json(host, "/api/profile_exec", timeout)
 
 
+def get_control(host: str, timeout: float = DEFAULT_HTTP_TIMEOUT_S) -> dict:
+    """``GET /api/control`` -- per-zone tuning-focused status, including
+    each zone's ``duty_breakdown`` (zone_duty_breakdown_t) rendered as the
+    twelve ``bd_*`` keys (dashboard_json.c). Only polled when
+    ``RunQueueConfig.capture_control_bd`` is True -- see this module's own
+    docstring for the size/opt-out rationale."""
+    return _get_json(host, "/api/control", timeout)
+
+
 def get_zones(host: str, timeout: float = DEFAULT_HTTP_TIMEOUT_S) -> dict:
     return _get_json(host, "/api/zones", timeout)
 
@@ -698,6 +730,17 @@ class RunQueueConfig:
     #: hold target) is exactly the signal that this needs adjusting rather
     #: than the profile being unusable.
     stabilization_target_c: float = ps.DEFAULT_STABILIZATION_TARGET_C
+    #: When True, every capture line also polls ``GET /api/control`` and
+    #: stores its body under the ``"control"`` key, alongside the existing
+    #: ``exec``/``status`` -- see this module's own docstring
+    #: ("CONTROL/BD CAPTURE") for what that buys (sec 3.6b's pre-flight
+    #: check, answerable after the fact from the capture) and its cost
+    #: (~371B/zone just for the bd_* keys, per poll). Defaults OFF here so
+    #: a bare ``RunQueueConfig()`` -- every existing programmatic caller and
+    #: test fixture that does not mock ``get_control`` -- is unaffected;
+    #: ``main()``'s CLI flips this default to True, since a real
+    #: control-law A/B campaign is exactly the case sec 3.6b is about.
+    capture_control_bd: bool = False
     #: injectable for tests / non-realtime replay; defaults to wall time.
     sleep: Callable[[float], None] = time.sleep
     now: Callable[[], float] = time.time
@@ -757,8 +800,12 @@ def wait_until_paired_start(cfg: RunQueueConfig, reference_status: dict,
         cfg.sleep(cfg.poll_interval_s)
 
 
-def _capture_line(t: float, exec_body: dict, status_body: dict) -> str:
-    return json.dumps({"t": t, "exec": exec_body, "status": status_body})
+def _capture_line(t: float, exec_body: dict, status_body: dict,
+                   control_body: Optional[dict] = None) -> str:
+    line = {"t": t, "exec": exec_body, "status": status_body}
+    if control_body is not None:
+        line["control"] = control_body
+    return json.dumps(line)
 
 
 def _poll_capture_until(cfg: RunQueueConfig, fh, stop_predicate: Callable[[dict, dict], bool],
@@ -780,9 +827,10 @@ def _poll_capture_until(cfg: RunQueueConfig, fh, stop_predicate: Callable[[dict,
     while True:
         exec_body = get_exec(cfg.host, cfg.http_timeout_s)
         status_body = get_status(cfg.host, cfg.http_timeout_s)
+        control_body = get_control(cfg.host, cfg.http_timeout_s) if cfg.capture_control_bd else None
         check_no_fault(exec_body)
         check_not_faulted(exec_body)
-        fh.write(_capture_line(cfg.now(), exec_body, status_body) + "\n")
+        fh.write(_capture_line(cfg.now(), exec_body, status_body, control_body) + "\n")
         fh.flush()
         if stop_predicate(exec_body, status_body):
             return
@@ -2173,6 +2221,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "confirmed idle. Defaults to the LAST --run entry's own preset -- name this "
              "explicitly when the last queued entry is not the state the board should be "
              "left in on an abort.")
+    parser.add_argument(
+        "--no-capture-control-bd", dest="capture_control_bd", action="store_false", default=True,
+        help="PID_EXPANSION_PLAN.md sec 3.6b: by default every capture poll also fetches "
+             "GET /api/control and stores its per-zone bd_* duty_breakdown fields under the "
+             "capture line's \"control\" key, so a future A/B's reachability can be checked "
+             "from the capture itself (see bd_reachability_check.py) rather than needing a "
+             "one-off manual proof that is never recorded. Costs ~371B/zone per poll "
+             "(dashboard_exec_http.c's own sizing comment) -- pass this flag to opt out for a "
+             "campaign that is not a control-law A/B and does not need it.")
     parser.add_argument("--poll-interval-s", type=float, default=DEFAULT_POLL_INTERVAL_S)
     parser.add_argument("--rested-tol-c", type=float, default=DEFAULT_RESTED_TOL_C)
     parser.add_argument("--rested-timeout-s", type=float, default=DEFAULT_RESTED_TIMEOUT_S)
@@ -2233,7 +2290,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         host=args.host, poll_interval_s=args.poll_interval_s, rested_tol_c=args.rested_tol_c,
         rested_timeout_s=args.rested_timeout_s, cooldown_s=args.cooldown_s,
         pair_start_tol_c=args.pair_start_tol_c, pair_start_timeout_s=args.pair_start_timeout_s,
-        stabilization_target_c=args.stabilization_target_c)
+        stabilization_target_c=args.stabilization_target_c,
+        capture_control_bd=args.capture_control_bd)
 
     control = None
     if args.serial_port:
