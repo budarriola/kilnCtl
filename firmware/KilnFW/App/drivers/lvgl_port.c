@@ -190,33 +190,31 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
 {
     lvgl_port_t *p = (lvgl_port_t *)lv_display_get_user_data(disp);
 
+    /* 2026-09-04 bench crash (task-watchdog reset, task='lvgl', garbage
+     * exc_cause/pc/addr in the captured crash record -- the same "corrupted
+     * beyond a trustworthy backtrace" signature as e7b8efc's stack-overflow
+     * bug earlier today): this callback used to detect the off->on wake edge
+     * ITSELF and invalidate the active screen right here, forcing a redraw.
+     * flush_cb runs from INSIDE lv_timer_handler()'s active refresh (LVGL is
+     * partway through walking/consuming the invalid-area list when it calls
+     * this to blit one of them) -- invalidating an object from there
+     * reenters that same refresh machinery mid-walk, which LVGL does not
+     * support from a flush callback. Two clean reproductions on an IDLE,
+     * non-firing board (touch_inject after a timeout-driven blank, no
+     * profile/autotune running, nothing else changed) landed the identical
+     * signature both times, immediately after the "screen woke -- forcing a
+     * full redraw" log line -- see UI_PLAN.md's Display power section. The
+     * fix: the wake edge is now detected and invalidated from
+     * lvgl_port_service_idle_wake(), called from lvgl_port_task's own loop
+     * BEFORE lv_timer_handler() runs (see below) -- same "outside any active
+     * refresh" footing lvgl_port_service_idle_blank()'s ILI9488_clear() call
+     * already had. This callback now only reads screen_on to decide whether
+     * to skip the blit; it must never again call an lv_* mutator. */
     bool screen_on = true;
     if (p->idle) {
         uint32_t idle_ms = 0;
         if (screen_idle_get_state(p->idle, &screen_on, &idle_ms) != ESP_OK) {
             screen_on = true; /* fail open: draw rather than go permanently dark */
-        }
-        /* Only the wake (off->on) edge is this callback's to own -- see the
-         * block comment above. The off transition belongs entirely to
-         * lvgl_port_service_idle_blank() below, including its own retry when
-         * ILI9488_clear() fails: that function deliberately leaves
-         * last_screen_on TRUE on a failed clear so the next loop iteration
-         * retries. Flushing still runs while blanked (this callback just
-         * skips the blit), so if this branch unconditionally wrote
-         * `p->last_screen_on = screen_on` on every call -- including while
-         * screen_on is already false -- it would stomp that retry latch to
-         * false itself before service_idle_blank ever got a second attempt,
-         * permanently defeating the retry the failure path's own comment
-         * promises (opus review, commit f3a1600, G4). Leaving
-         * last_screen_on untouched here while screen_on is false costs
-         * nothing: the wake edge this function cares about can only ever be
-         * observed while last_screen_on is still true. */
-        if (screen_on) {
-            if (!p->last_screen_on) {
-                ESP_LOGI(TAG, "screen woke -- forcing a full redraw");
-                lv_obj_invalidate(lv_screen_active());
-            }
-            p->last_screen_on = true;
         }
     }
 
@@ -756,11 +754,37 @@ static void lvgl_port_service_idle_blank(void)
     }
 }
 
+/* The other half of the on->off handoff above, and the fix for the
+ * 2026-09-04 bench task-watchdog crash documented in ili9488_flush_cb()'s
+ * comment: the off->on wake edge used to be detected AND invalidated from
+ * inside the flush callback, which reenters LVGL's refresh machinery
+ * mid-walk. Detecting it here instead -- called from lvgl_port_task's loop
+ * before lv_timer_handler() runs, i.e. with no refresh in progress -- is the
+ * same safe footing lvgl_port_service_idle_blank()'s ILI9488_clear() call
+ * already stood on. last_screen_on is this function's and
+ * lvgl_port_service_idle_blank()'s alone to write now; ili9488_flush_cb()
+ * only ever reads screen_on. */
+static void lvgl_port_service_idle_wake(void)
+{
+    if (!s_port.idle) return;
+
+    bool screen_on = true;
+    uint32_t idle_ms = 0;
+    if (screen_idle_get_state(s_port.idle, &screen_on, &idle_ms) != ESP_OK) return;
+
+    if (screen_on && !s_port.last_screen_on) {
+        ESP_LOGI(TAG, "screen woke -- forcing a full redraw");
+        lv_obj_invalidate(lv_screen_active());
+        s_port.last_screen_on = true;
+    }
+}
+
 static void lvgl_port_task(void *arg)
 {
     (void)arg;
     while (true) {
         lvgl_port_service_idle_blank();
+        lvgl_port_service_idle_wake();
         s_timer_handler_calls++;
         uint32_t sleep_ms = lv_timer_handler();
         if (sleep_ms == LV_NO_TIMER_READY) sleep_ms = 50;

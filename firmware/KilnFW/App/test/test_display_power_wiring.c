@@ -580,6 +580,97 @@ static void run_section5_screen_idle_stack_sized_for_dashboard(void)
     free(text);
 }
 
+static void run_section6_wake_invalidate_not_in_flush_cb(void)
+{
+    TEST_SECTION("the off->on wake edge's lv_obj_invalidate() call does NOT live inside "
+                 "ili9488_flush_cb() -- 2026-09-04 bench task-watchdog crash: two clean "
+                 "reproductions on an IDLE, non-firing board (timeout-driven blank, then a "
+                 "single injected touch) both reset with reset_reason=TASK_WDT, "
+                 "exc_task='lvgl', and a garbage exc_cause/pc/addr in the captured crash "
+                 "record (the same 'corrupted beyond a trustworthy backtrace' signature as "
+                 "e7b8efc's stack-overflow bug earlier the same day). ili9488_flush_cb() runs "
+                 "from INSIDE lv_timer_handler()'s active refresh; calling lv_obj_invalidate() "
+                 "from there reenters LVGL's own invalid-area walk mid-iteration, which LVGL "
+                 "does not support from a flush callback. The fix moves wake detection to "
+                 "lvgl_port_service_idle_wake(), called from lvgl_port_task's loop BEFORE "
+                 "lv_timer_handler() runs -- see UI_PLAN.md's Display power section.");
+
+    char *text = read_file_any(LVGL_PORT_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/lvgl_port.c");
+        return;
+    }
+
+    size_t flush_len = 0;
+    const char *flush_body = find_function_body(text, "static void ili9488_flush_cb(", &flush_len);
+    if (!flush_body) {
+        TEST_CHECK(false, "could not find ili9488_flush_cb()'s function body in lvgl_port.c -- "
+                           "update this test if it was renamed/restructured.");
+        free(text);
+        return;
+    }
+    char *flush_fn = dup_range(flush_body, flush_len);
+    TEST_CHECK(flush_fn != NULL, "malloc for the extracted flush function body succeeded");
+    if (!flush_fn) {
+        free(text);
+        return;
+    }
+    TEST_CHECK(strstr(flush_fn, "lv_obj_invalidate(") == NULL,
+               "ili9488_flush_cb() must NEVER call lv_obj_invalidate() (or any other lv_* "
+               "mutator) -- it runs from inside LVGL's own active refresh, and reentering the "
+               "invalid-area list from there is exactly what produced the reproducible "
+               "task-watchdog crash this test pins. If a wake-redraw call belongs anywhere, "
+               "it is lvgl_port_service_idle_wake(), not here.");
+    free(flush_fn);
+
+    size_t wake_len = 0;
+    const char *wake_body =
+        find_function_body(text, "static void lvgl_port_service_idle_wake(", &wake_len);
+    if (!wake_body) {
+        TEST_CHECK(false, "could not find lvgl_port_service_idle_wake()'s function body in "
+                           "lvgl_port.c -- if this function is gone, the wake-edge redraw is "
+                           "either missing entirely or moved back into ili9488_flush_cb().");
+        free(text);
+        return;
+    }
+    char *wake_fn = dup_range(wake_body, wake_len);
+    TEST_CHECK(wake_fn != NULL, "malloc for the extracted wake function body succeeded");
+    if (wake_fn) {
+        TEST_CHECK(strstr(wake_fn, "lv_obj_invalidate(lv_screen_active())") != NULL,
+                   "lvgl_port_service_idle_wake() must call lv_obj_invalidate(lv_screen_"
+                   "active()) on the off->on edge -- otherwise the screen never redraws after "
+                   "waking (the ORIGINAL bug this whole feature fixed, before it was moved to "
+                   "the wrong call site).");
+        free(wake_fn);
+    }
+
+    size_t task_len = 0;
+    const char *task_body = find_function_body(text, "static void lvgl_port_task(", &task_len);
+    if (!task_body) {
+        TEST_CHECK(false, "could not find lvgl_port_task()'s function body in lvgl_port.c -- "
+                           "update this test if it was renamed/restructured.");
+        free(text);
+        return;
+    }
+    char *task_fn = dup_range(task_body, task_len);
+    TEST_CHECK(task_fn != NULL, "malloc for the extracted task function body succeeded");
+    if (task_fn) {
+        const char *wake_call = strstr(task_fn, "lvgl_port_service_idle_wake()");
+        const char *timer_call = strstr(task_fn, "lv_timer_handler()");
+        TEST_CHECK(wake_call != NULL,
+                   "lvgl_port_task() must call lvgl_port_service_idle_wake() -- without it "
+                   "nothing ever detects the wake edge and the screen stays blank/stale "
+                   "forever after a touch wakes it.");
+        TEST_CHECK(wake_call != NULL && timer_call != NULL && wake_call < timer_call,
+                   "lvgl_port_service_idle_wake() must run BEFORE lv_timer_handler() in the "
+                   "task loop -- calling it after (or from within) an active refresh reopens "
+                   "the exact reentrancy this section exists to prevent.");
+        free(task_fn);
+    }
+
+    free(text);
+}
+
 void run_test_display_power_wiring(void)
 {
     run_section1_screen_idle_calls_policy();
@@ -588,4 +679,5 @@ void run_test_display_power_wiring(void)
     run_section3b_refresh_called_off_lock();
     run_section4_screen_idle_init_takes_recovery_mode();
     run_section5_screen_idle_stack_sized_for_dashboard();
+    run_section6_wake_invalidate_not_in_flush_cb();
 }

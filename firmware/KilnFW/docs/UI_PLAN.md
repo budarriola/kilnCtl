@@ -280,6 +280,80 @@ error-hold/touch-swallow behaviour has not been confirmed with an actual
 finger on the glass. Brightness stays inert pending the backlight flying-wire
 bodge, as before.
 
+**2026-09-04, later the same day: hardware-verified, then a task-watchdog
+reset mid-firing, root-caused and fixed.** An agent flashed this pass and, on
+a LIVE firing (`fuzzy_ab_20260904d`, arm B1, profile 7, segment 2/3),
+exercised the override case first: `POST /api/settings/display_power` with
+`timeout=1min` (`DISPLAY_TIMEOUT_1_MIN`) + `keep_on_while_firing=1`, waited
+>100 s, confirmed via `touch_get_state()` and numeric pixel sampling that the
+screen correctly stayed ON through the timeout. Then set
+`keep_on_while_firing=0`, waited 15 s, confirmed the screen correctly
+BLANKED with the executor still `RUNNING`. **Both results stand as real
+hardware verification of the override and its control case** — that evidence
+is not in question and is not what follows.
+
+Restoring the original settings and injecting a wake touch immediately reset
+the board: `reset_reason: "task watchdog"`, executor gone from `RUNNING` to
+`IDLE`, the firing lost. `get_device_log()` (kilnctrl MCP) recovered the
+crash record `crash_report.c` captured on the next boot: `task='lvgl'`,
+`cause=892351539`/`pc=0xfffffffd`/`addr=0x20293632` (values with no valid
+Xtensa EXCCAUSE/PC meaning — the coredump's exception-info fields are simply
+not meaningful for a task-watchdog stall, not evidence of a second, separate
+corruption). Reproduced twice more, deliberately, on an **idle, non-firing**
+board (timeout=1 min, let it blank, inject one touch) — same signature both
+times, always landing immediately after the `"screen woke -- forcing a full
+redraw"` log line, ruling out both the live firing and the concurrent
+campaign/agent HTTP polling as the cause.
+
+Root cause: `ili9488_flush_cb()` (`lvgl_port.c`) detected the off→on wake
+edge and called `lv_obj_invalidate(lv_screen_active())` **from inside the
+flush callback itself** — but that callback runs from inside
+`lv_timer_handler()`'s own active refresh (it is called *to blit* one of the
+areas that refresh is already iterating). Invalidating an object there
+reenters LVGL's invalid-area bookkeeping mid-walk, which LVGL does not
+support from a flush callback; the `lvgl` task never yielded long enough for
+FreeRTOS's idle task to run, and `CONFIG_ESP_TASK_WDT_TIMEOUT_S` (5 s) fired
+on it. Landed today in `7fc17cc`, same day as `e7b8efc`'s stack-overflow fix
+and `7a8594d`'s SPI-under-lock fix — the third bug in this file in one day,
+and the least-tested path (blank→wake plus a touch) of the three.
+
+**Fix:** the wake-edge detection and its `lv_obj_invalidate()` call moved out
+of `ili9488_flush_cb()` into a new `lvgl_port_service_idle_wake()`, called
+from `lvgl_port_task()`'s own loop **before** `lv_timer_handler()` runs —
+the same "outside any active refresh" footing `lvgl_port_service_idle_blank()`
+already stood on for the on→off edge's `ILI9488_clear()` call.
+`ili9488_flush_cb()` now only reads `screen_on` to decide whether to skip the
+blit; it must never call an `lv_*` mutator again. Verified: rebuilt,
+`flash_firmware(verify=True)` confirmed the new build/commit is the one
+running, then the idle-board repro sequence was run twice more against the
+fixed firmware (blank on a 1-minute timeout, inject touch; a second
+back-to-back blank/wake cycle with two rapid touches) with zero resets and
+`get_fw_version()` reporting the same unchanged commit/build time throughout
+— the crash no longer reproduces.
+
+**Regression test:** `App/test/test_display_power_wiring.c` section 6
+(`run_section6_wake_invalidate_not_in_flush_cb`) — source-text-scans
+`ili9488_flush_cb()` to prove it contains no `lv_obj_invalidate(` call, that
+`lvgl_port_service_idle_wake()` exists and calls
+`lv_obj_invalidate(lv_screen_active())`, and that `lvgl_port_task()` calls
+`lvgl_port_service_idle_wake()` before `lv_timer_handler()` in source order.
+Negative-tested by hand: reintroducing the bug (calling
+`lv_obj_invalidate(lv_screen_active())` back inside `ili9488_flush_cb()`)
+makes this check fail with exactly:
+`FAIL test_display_power_wiring.c:623: ili9488_flush_cb() must NEVER call
+lv_obj_invalidate() (or any other lv_* mutator) -- it runs from inside
+LVGL's own active refresh, and reentering the invalid-area list from there
+is exactly what produced the reproducible task-watchdog crash this test
+pins. If a wake-redraw call belongs anywhere, it is
+lvgl_port_service_idle_wake(), not here.` — reverting the mutation returns
+the full host-test suite to green (`Built: 21/21 executables`, no failures).
+
+**Separate, unrelated observation (not this task's to fix):** the campaign
+runner's restore-on-exit did not run when it died with the board, so the
+board's live zone config may not currently match the
+`fuzzy_ab_baseline_20260903` preset — flagged for whoever is handling that
+recovery, not touched here.
+
 ## Open, explicitly deferred by the owner: TLS for web UI and OTA
 
 Requested explicitly: *"i also want tls for both ota and this. for now plan

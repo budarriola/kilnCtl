@@ -214,6 +214,39 @@ sections above, but move anything with lasting design value out to
 `ARCHITECTURE.md`/`ARCHITECTURE_DECISIONS.md`/`BRINGUP_HAZARDS.md` once it
 lands, rather than letting it grow indefinitely.
 
+### 2026-09-04 — Display-power hardware verification, then a task-watchdog reset mid-firing; root-caused and fixed
+
+An agent hardware-verified `docs/UI_PLAN.md`'s Display power feature on a
+LIVE firing (`fuzzy_ab_20260904d`, arm B1, profile 7, segment 2/3): `POST
+/api/settings/display_power` with `timeout=1min` + `keep_on_while_firing=1`
+kept the screen ON through the timeout (>100 s, confirmed via
+`touch_get_state()`/pixel sampling), and `keep_on_while_firing=0` correctly
+BLANKED it 15 s later with the executor still `RUNNING`. **Both results are
+real, standing hardware verification** — not affected by what follows.
+
+Restoring settings and injecting a wake touch immediately reset the board:
+`reset_reason: task watchdog`, executor `RUNNING` → `IDLE`, firing lost.
+Reproduced twice more on an **idle, non-firing** board (ruling out the live
+firing and concurrent HTTP polling as the cause): `ili9488_flush_cb()`
+(`lvgl_port.c`) was calling `lv_obj_invalidate(lv_screen_active())` on the
+wake edge **from inside LVGL's own active-refresh flush callback** —
+unsupported reentry into LVGL's invalid-area walk, starving the idle task
+until `CONFIG_ESP_TASK_WDT_TIMEOUT_S` (5 s) fired on the `lvgl` task. Third
+distinct bug in this file the same day (after `e7b8efc`'s stack overflow and
+`7a8594d`'s SPI-under-lock fix), on the least-tested path of the three.
+Fixed by moving the wake-edge detection/invalidate into a new
+`lvgl_port_service_idle_wake()`, called from `lvgl_port_task()`'s loop before
+`lv_timer_handler()` runs — outside any active refresh, same footing the
+existing on→off blank handler already had. Verified clean on hardware
+(rebuilt, flashed, two more blank/wake cycles, zero resets); regression test
+`test_display_power_wiring.c` section 6 added, negative-tested by hand. Full
+writeup: `docs/UI_PLAN.md`'s Display power section.
+
+Separate, unrelated: the campaign runner's restore-on-exit did not run when
+it died with the board, so the board's live zone config may not currently
+match `fuzzy_ab_baseline_20260903` — flagged for whoever is handling that
+recovery.
+
 ### 2026-08-24 — Stack high-water-mark reporting added (the section 13 blocker's measurement, not its fix)
 
 Follow-up to the entry immediately below. That investigation named six
