@@ -264,7 +264,69 @@ should say so rather than being listed as coverage.
 ## Completion checklist
 
 **Host**
-- [ ] Nuisance-rejection tests written **before** trip tests, all of §1
+- [ ] Nuisance-rejection tests written **before** trip tests, all of §1.
+      Audited row by row against `test/test_safety_guards.c` (2026-09-04).
+      Twelve of §1's fourteen rows were already covered, several of them
+      exactly (S1, S2's 40C/overshoot_margin_c-implied-by-90s-decay case
+      via the "worst case is the sustained value" argument, S5's five
+      sub-cases verbatim, S6b's soft/hard backstops, S8's legitimate-ramp
+      case, S9's post-trip nuisance case, S11, S12, S13's implied stability).
+      Two genuine gaps were found and closed, in a new file --
+      `test/test_guard_nuisance.c` (registered in `test_main.c` and
+      `build_host_tests.ps1`, `safety_guards.c/.h` and
+      `test_safety_guards.c` untouched, per a concurrent session holding
+      those): S3/S4's "a 60s heater window at 15% duty, for an hour" --
+      this document's own words for "the single most important nuisance
+      test in the suite" -- run verbatim as a real 3,600s tick-by-tick
+      simulation (dt_s=0.1s) with a genuine 60s on/off cycle, a
+      current-decay tail (CURRENT_SENSE.md section 5's tau~=1s), and a
+      correlation-window computation matching LINK_PROTOCOL.md section 4's
+      own description, swept across every duty from 5-95%; and S10's
+      stated 150C magnitude (the existing test used 50C) held for a
+      simulated 8-hour firing, in both `CHAMBER_AGREED` and
+      `EXTERNAL_OVERHEAT`. Negative-tested per
+      `feedback_negative_test_every_check.md`: with the S3/S4 harness's
+      recency computation deliberately forced to `false` (simulating the
+      real regression class -- a dropped or inverted `relay_commanded_
+      recently` computation) it failed loud, naming the guard:
+      `FAIL test_guard_nuisance.c:298: INTENTIONALLY-BROKEN recency
+      (relay_commanded_recently forced false) must still be reported as a
+      failure by this check, not silently pass`; with S10's threshold
+      dropped from 200C to 100C (so the 150C stratification legitimately
+      clears it) it also failed loud: `FAIL test_guard_nuisance.c:272: 150C
+      is still under tc_disagreement_c(200C) -- no WARN either`. Both
+      injections reverted, suite clean again (2101/2101, up from 2077/2077
+      before this pass -- the 24 added checks are `test_guard_nuisance.c`'s
+      own; the payload-fuzz binary added the same day is unaffected and
+      still separately reported ALL PASS).
+      **Left unchecked, deliberately, because three rows remain genuinely
+      uncovered on host, not vacuously "passing":** S6a ("mainFault
+      glitching for 100ms") and S7 ("30ms of contact bounce on both
+      edges") both need to exercise real glitch/bounce rejection, but
+      `safety_guards_tick()` only ever receives an *already-debounced*
+      level for both (`test_s6()`/`test_s7()`'s own comments say so). The
+      actual debounce is `discrete_task.c`'s `static bool
+      debounce_update(...)` (200ms window for mainFault, 50ms for E-stop) --
+      `static`, called only from `discrete_task_fn()` which is gated on
+      FreeRTOS + RP2040 GPIO headers, not declared in any header, and not
+      referenced from anywhere under `test/`. There is no host-reachable
+      entry point for it at all; giving it one is a real (and reasonable)
+      refactor of `discrete_task.c`'s public surface -- the same treatment
+      `relay_grace.c`/`link_frame.c` already got -- but it is a
+      behavior-preserving change to a file nothing in this pass otherwise
+      touches, not a side effect of a test-only pass, so it is left as a
+      named follow-up rather than done implicitly here. S9 ("current
+      decays with the 1s peak-hold time constant") is hardware-only by
+      this document's own §3.4 S9 row: `any_current_present` is a real
+      analog CT reading behind a physical peak-hold circuit, and the only
+      software path that ever synthesized it (SimFW/kilnsim) was deleted
+      2026-08-28 -- there is no decay model left to host-test against.
+      S6b's "one dropped telemetry frame; three dropped frames with no
+      current" row was also audited: `link_task_link_up()` is a pure
+      elapsed-time check, not a frame-count check, so a few dropped frames
+      are indistinguishable at `safety_guards_tick()`'s boundary from
+      "link quiet for under a second" -- already covered by the existing
+      115s-quiet-link case, no new test needed for that row.
 - [x] §2's full provocation table implemented and passing, for every row that
       is a pure function of `safety_guard_input_t`/`safety_guard_cfg_t`
       (2026-08-19). Audited `test/test_safety_guards.c` row by row against

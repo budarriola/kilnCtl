@@ -41,10 +41,12 @@ void run_test_commissioning_gate(void);
 void run_test_safety_core_s8_wiring(void);
 void run_test_safety_core_polarity_wiring(void);
 void run_test_update_task_relay_wiring(void);
+void run_test_guard_nuisance(void);
 
 int main(void)
 {
     run_test_safety_guards();
+    run_test_guard_nuisance();
     run_test_link_frame();
     run_test_link_frame_wire();
     run_test_bootloader_metadata();

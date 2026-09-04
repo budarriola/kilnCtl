@@ -30,6 +30,7 @@ $exe = Join-Path $outDir "saftyfw_host_tests.exe"
 $sources = @(
     (Join-Path $testDir "test_main.c"),
     (Join-Path $testDir "test_safety_guards.c"),
+    (Join-Path $testDir "test_guard_nuisance.c"),
     (Join-Path $testDir "test_link_frame.c"),
     (Join-Path $testDir "test_link_frame_wire.c"),
     (Join-Path $testDir "test_bootloader_metadata.c"),
