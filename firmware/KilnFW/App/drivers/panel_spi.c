@@ -569,7 +569,7 @@ static const uint8_t ili9488_madctl_by_rotation[4] = {
 
 static esp_err_t ili9488_apply_rotation(ILI9488Class *disp, uint8_t rotation)
 {
-    uint8_t madctl = panel_codec_madctl(disp->panel->madctl, rotation, ILI9488_MADCTL_COLOR_ORDER);
+    uint8_t madctl = panel_codec_madctl(disp->panel->madctl, rotation, disp->panel->color_order_bit);
     esp_err_t err = ili9488_write_cmd(disp, ILI9488_CMD_MADCTL, &madctl, 1);
     if (err != ESP_OK) return err;
 
@@ -2167,6 +2167,9 @@ static const panel_desc_t ili9488_panel_desc = {
     .init_len = sizeof(ili9488_init_bytes),
     .madctl = { ili9488_madctl_by_rotation[0], ili9488_madctl_by_rotation[1],
                 ili9488_madctl_by_rotation[2], ili9488_madctl_by_rotation[3] },
+    .color_order_bit = ILI9488_MADCTL_COLOR_ORDER, /* BGR -- unchanged, this
+                                                       * panel has always
+                                                       * rendered correctly */
     .id_matches = NULL,
     .blank_via_power_off = false, /* today's ILI9488_clear() fills black over
                                     * RAMWR; it does not touch DISPOFF/power. */

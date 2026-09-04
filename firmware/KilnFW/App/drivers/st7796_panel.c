@@ -159,6 +159,14 @@ static const panel_desc_t st7796_panel_desc = {
      * tiebreak is the only signal that still functions on this board's
      * wiring -- RDDID cannot distinguish either panel here. Stays NULL,
      * same reasoning as ili9488_panel_desc.id_matches above. */
+    /* 2026-09-04, bench report on commit 16fe9ed: blue rendered as purple
+     * on the real MSP4031 -- the wrong MADCTL color-filter-order bit for
+     * this panel's glass. This module's glass is RGB, not the ILI9488's
+     * BGR -- 0x00 (bit clear) instead of ILI9488_MADCTL_COLOR_ORDER (BGR,
+     * 0x08). Panel_codec.h's color_order_bit field comment has the full
+     * writeup on why this had to move off the old shared constant. Awaiting
+     * owner visual confirmation on real hardware. */
+    .color_order_bit = 0x00,
     .id_matches = NULL,
     .blank_via_power_off = false, /* safe default; NEEDS BENCH CONFIRMATION, see above */
     /* FT6336U's OWN bench-tuned Kconfig knobs (settings.h) -- deliberately

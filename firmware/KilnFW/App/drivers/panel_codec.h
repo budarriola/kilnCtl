@@ -159,6 +159,20 @@ typedef struct {
     uint8_t  madctl[4];                   /* per rotation, 0-3 -- BEFORE the
                                             * color-order bit is ORed in; see
                                             * panel_codec_madctl() */
+
+    /* The color_order_bit argument panel_codec_madctl() ORs into madctl[]
+     * above (MADCTL D3, BGR on the ILI9488) -- 2026-09-04, bench report on
+     * commit 16fe9ed: blue rendered as purple on the real MSP4031, the
+     * classic symptom of the wrong color-filter-order bit for THIS panel's
+     * glass (a property of the glass, not the controller -- the datasheet
+     * cannot say). Previously a single file-scope constant
+     * (ILI9488_MADCTL_COLOR_ORDER, panel_spi.c) shared by both panels, which
+     * is exactly the kind of one-value-for-two-different-things bug this
+     * plan has hit before (see the touch_swap_xy fields above) -- moved
+     * per-descriptor so a fix for one panel's glass cannot silently detune
+     * the other's, which has been running correctly with BGR set. */
+    uint8_t  color_order_bit;
+
     bool (*id_matches)(const uint8_t id[3]);
     bool blank_via_power_off;             /* see the DISPOFF question in Sec.4 */
 
