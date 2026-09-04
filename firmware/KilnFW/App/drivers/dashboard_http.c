@@ -1654,7 +1654,11 @@ static esp_err_t control_status_get_handler(httpd_req_t *req)
      * the sources mask) and pushed 3 zones to 1054B against 800 -- still
      * wrong, just more visibly so. round 3, item 3's ff_membership_change_
      * count field added another ~34B/zone worst case (381B/zone total).
-     * 448/zone leaves real slack over that 381B measured worst case; 256
+     * 448/zone left real slack over that 381B measured worst case. ROADMAP
+     * M15 B4 then added zone_duty_breakdown_t's twelve bd_* keys (~371B/zone
+     * worst case) and raised the budget to 900/zone -- ~728B/zone measured
+     * against 900, ~172B headroom; dashboard_json.h's
+     * DASHBOARD_JSON_CONTROL_BUF_SIZE carries the per-key arithmetic. 256
      * fixed covers the state/zone_mask/target_c/ramp_lock header (~100B
      * worst case) with matching headroom. See
      * test_control_status_json_is_complete_and_well_formed_at_3_zones() --
