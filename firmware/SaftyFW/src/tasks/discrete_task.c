@@ -15,6 +15,7 @@
 #include "hardware/gpio.h"
 
 #include "board_pins.h"
+#include "debounce_policy.h"
 #include "discrete_pin_policy.h"
 #include "task_priorities.h"
 #include "watchdog_task.h"
@@ -35,30 +36,17 @@ static TaskHandle_t s_task_handle = NULL;
 static volatile bool s_estop_pressed = false;
 static volatile bool s_main_fault = false;
 
-// Standard consecutive-sample debounce: a new raw value is only published
-// once it has been seen `n_samples` times in a row. Any disagreement resets
-// the streak against the new value, so a single noisy sample cannot
-// "borrow" progress from an unrelated earlier streak.
-typedef struct {
-    bool     candidate;
-    uint32_t streak;
-    bool     published;
-} debounce_state_t;
-
-static bool debounce_update(debounce_state_t *db, bool raw, uint32_t n_samples)
-{
-    if (db->streak == 0u || raw != db->candidate) {
-        db->candidate = raw;
-        db->streak = 1u;
-    } else if (db->streak < n_samples) {
-        db->streak++;
-    }
-
-    if (db->streak >= n_samples) {
-        db->published = db->candidate;
-    }
-    return db->published;
-}
+// The consecutive-sample debounce itself now lives in debounce_policy.h/.c
+// (a pure, host-tested module -- test/test_debounce_policy.c and
+// test/test_guard_nuisance.c), pulled out for exactly the reason discrete_
+// pin_policy.h/.c was: it is not reachable from a host test as a static
+// function gated behind this file's FreeRTOS/RP2040-GPIO includes, and
+// GUARD_TEST_MATRIX.md section 1's S6a/S7 nuisance rows need to drive the
+// real debounce logic, not a description of it. debounce_policy_state_t /
+// debounce_policy_update() below are aliased so the rest of this function
+// reads unchanged.
+typedef debounce_policy_state_t debounce_state_t;
+#define debounce_update debounce_policy_update
 
 static void discrete_task_fn(void *arg)
 {

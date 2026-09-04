@@ -110,6 +110,10 @@ set(SAFTYFW_APP_SOURCES
     # out of discrete_task.c so it is host-testable (test/test_discrete_pin_
     # policy.c) with no hardware/gpio.h stub -- see discrete_pin_policy.h.
     src/discrete_pin_policy.c
+    # Pure consecutive-sample debounce, split out of discrete_task.c's
+    # static debounce_update() so it is host-testable (test/test_debounce_
+    # policy.c, test/test_debounce_nuisance.c) -- see debounce_policy.h.
+    src/debounce_policy.c
     src/tasks/discrete_task.c
     src/tasks/thermo_task.c
     src/tasks/current_task.c

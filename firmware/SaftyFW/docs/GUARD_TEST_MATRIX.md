@@ -30,9 +30,9 @@ So for every guard, the **first** test written is the one that must *not* trip:
 | S3 | **A 60 s heater window at 15 % duty, for an hour** — the single most important nuisance test in the suite |
 | S4 | The same, plus every duty from 5 % to 95 % |
 | S5 | A 900 ms sensor dropout; a single failed SPI transfer; three non-consecutive bad reads; any reading inside the plausibility band that applies given commissioning status (2026-08-24, see note below); a `max31856_configure()` CR1 readback that confirms the intended type (2026-08-24, see note below) |
-| S6a | `mainFault` glitching for 100 ms |
+| S6a | `mainFault` glitching for 100 ms — covered on host 2026-09-04, `test/test_debounce_nuisance.c`'s `test_s6a_100ms_main_fault_glitch_does_not_trip()`, against the real extracted debounce (`src/debounce_policy.c`), plus its positive control `test_s6a_sustained_main_fault_is_detected()` (210 ms sustained IS detected) |
 | S6b | One dropped telemetry frame; three dropped frames with no current flowing |
-| S7 | 30 ms of contact bounce on both edges |
+| S7 | 30 ms of contact bounce on both edges — covered on host 2026-09-04, `test/test_debounce_nuisance.c`'s `test_s7_30ms_estop_bounce_does_not_trip()`, against the same extracted debounce, plus its positive control `test_s7_sustained_estop_press_is_detected()` (60 ms sustained IS detected) |
 | S8 | A legitimate full-power ramp at the measured maximum rate |
 | S9 | A normal trip where current decays with the 1 s peak-hold time constant |
 | S10 | A 150 °C stratification held for a whole firing (`CHAMBER_AGREED`) |
@@ -327,6 +327,61 @@ should say so rather than being listed as coverage.
       are indistinguishable at `safety_guards_tick()`'s boundary from
       "link quiet for under a second" -- already covered by the existing
       115s-quiet-link case, no new test needed for that row.
+      **2026-09-04: the S6a/S7 follow-up named above is now done, closing
+      two of the three rows left open.** `discrete_task.c`'s `static bool
+      debounce_update(...)` was extracted verbatim (no semantic change) into
+      a new pure module, `src/debounce_policy.c`/`.h`
+      (`debounce_policy_update()`), the same treatment `discrete_pin_
+      policy.c` already got for this file's polarity half -- no FreeRTOS, no
+      GPIO, state passed in/out explicitly. `discrete_task.c` now calls the
+      extracted function (aliased via a local `typedef`/`#define` so its own
+      body is otherwise unchanged) and was added to `CMakeLists.txt`'s
+      SaftyFW source list so both slots still link. Two new host files
+      exercise it: `test/test_debounce_policy.c` (the generic mechanism --
+      glitch-shorter-than-window, streak reset on disagreement, published
+      value holding through a short opposite streak, and a positive control
+      that a full-window streak does publish) and
+      `test/test_debounce_nuisance.c` (the two named GUARD_TEST_MATRIX.md
+      scenarios specifically, using `discrete_task.c`'s own real window/
+      period constants: `test_s6a_100ms_main_fault_glitch_does_not_trip()` --
+      a 100ms glitch, 10 of the 20 samples the 200ms/10ms-period window
+      requires, never publishes asserted -- with positive control
+      `test_s6a_sustained_main_fault_is_detected()` (210ms sustained IS
+      detected); `test_s7_30ms_estop_bounce_does_not_trip()` -- a 30ms
+      bounce, 3 of the 5 samples the 50ms window requires, never publishes
+      asserted -- with positive control
+      `test_s7_sustained_estop_press_is_detected()` (60ms sustained IS
+      detected). Both registered in `test_main.c` and
+      `build_host_tests.ps1`. Negative-tested per
+      `feedback_negative_test_every_check.md`, two ways, both reverted
+      before commit: (a) breaking the debounce window itself (publish after
+      1 sample instead of `n_samples`) made the glitch tests fail loud --
+      `FAIL test_debounce_nuisance.c:69: a 100ms mainFault glitch (10 of the
+      20 required samples) must never reach 'published asserted' at any
+      point during the episode` (and the same for S7's line 99, plus four
+      `test_debounce_policy.c` checks); (b) breaking the positive path
+      (`debounce_policy_update()` forced to always `return false`) made the
+      positive-control tests fail loud -- `FAIL
+      test_debounce_nuisance.c:85: a mainFault held for 210ms (more than the
+      200ms window) must be detected -- a debounce that never asserts at all
+      would wrongly pass the glitch-rejection test above, so this control
+      must fail loud if the debounce is broken that way` (and the same for
+      S7's line 111, plus two more `test_debounce_policy.c` checks). Suite
+      clean again after both reverts: 2122/2122 (up from 2101/2101 before
+      this pass -- 21 added checks), plus the SaftyFW target build
+      (`build_saftyfw`) still succeeds for all three link outputs
+      (`SaftyFW.elf`/`SaftyFW_slotA.elf`/`SaftyFW_slotB.elf`).
+      **The one row this checklist item still cannot check off is S9**
+      ("current decays with the 1s peak-hold time constant"), for the
+      reason already given two paragraphs up and unchanged by this pass:
+      it is hardware-only by this document's own §3.4 S9 row --
+      `any_current_present` is a real analog CT reading behind a physical
+      peak-hold circuit, and the only software path that ever synthesized
+      it (SimFW/kilnsim) was deleted 2026-08-28, so there is no decay model
+      left to host-test against. With S6a and S7 now closed, S9 is the
+      single remaining item blocking this checkbox -- not "the same reason
+      repeated," a specific, individually-verified one, and this box stays
+      unchecked on that basis alone.
 - [x] §2's full provocation table implemented and passing, for every row that
       is a pure function of `safety_guard_input_t`/`safety_guard_cfg_t`
       (2026-08-19). Audited `test/test_safety_guards.c` row by row against
