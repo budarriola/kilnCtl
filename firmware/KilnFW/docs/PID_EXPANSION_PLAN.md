@@ -2316,6 +2316,62 @@ same document's own 2026-08-29/30 bench sections contradict.
       0.49 °C / z2 0.90 °C; dwell-entry overshoot z0 +0.41 °C@449s, z1
       +1.15 °C@90s, z2 +2.02 °C@90s. `fuzzy=50` has not run yet.
 
+      **STOP — 2026-09-04, arm B1 of `fuzzy_ab_20260904b` is structurally
+      inert, campaign should be halted.** Checked live from the running
+      board mid-arm-B1 (`fuzzy_ab_strength50_20260903` applied,
+      `fuzzy_strength_pct=50` confirmed via `GET /api/zones`), using
+      exactly the `bd_kp_effective`/`bd_ki_effective`/`bd_kd_effective`
+      instrumentation `zone_duty_breakdown_t` exists for
+      (`profile_executor.h` ~line 445, published on `GET /api/control`,
+      written at `profile_executor_pid_tick.c:90-92`). Six samples over
+      ~2 minutes while `target_c` held near 40 °C and each zone's error
+      swung from ~+6 °C (undershoot) through zero to ~-4.6 °C (overshoot)
+      — exactly the error-varying stretch a fuzzy layer should react to —
+      show `bd_kp_effective`/`bd_ki_effective`/`bd_kd_effective` bit-for-bit
+      identical to the zones' configured base `pid_kp`/`pid_ki`/`pid_kd`
+      (z0 0.0318/0.0001/0.8401, z1 0.0485/0.0002/1.0548, z2
+      0.0631/0.0002/1.0690) on every sample, for every zone, through the
+      error sign crossing. That is precisely `pid_fuzzy_adjust()`'s
+      `strength_pct==0` short-circuit signature (`pid_fuzzy.c:161-166`) —
+      not "a small nonzero nudge," an exact bit-for-bit match, which the
+      fuzzy math cannot produce by chance once error crosses zero.
+
+      Root cause found in `profile_executor.c`'s per-zone dispatch
+      (~line 827-847): `pid_fuzzy_prepare_gains()` — the only call site of
+      `pid_fuzzy_adjust()` — is reached exclusively from the
+      `case ZONE_CONTROL_MODE_PID_FUZZY:` arm; `case ZONE_CONTROL_MODE_PID:`
+      calls `pid_family_zone_tick()` with `&z->pid_cfg` unchanged and never
+      looks at `fuzzy_strength_pct` at all. The live board's `GET
+      /api/zones` reports `control_mode:2` (`ZONE_CONTROL_MODE_PID`) on
+      all three zones, not `3` (`ZONE_CONTROL_MODE_PID_FUZZY`,
+      `zones_http.h:849-852`) — and both campaign presets,
+      `tools/PcTools/config_presets/fuzzy_ab_strength50_20260903.json` and
+      `..._baseline_20260903.json`, set `"control_mode": 2` for every zone.
+      The strength-50 preset's own description ("applying this preset
+      changes `fuzzy_strength_pct` only") is the bug: `fuzzy_strength_pct`
+      is a value with no reachable consumer, because the mode switch that
+      gates the only code path that reads it was never part of either
+      preset. This is the repo's "config value set, mode gate left off"
+      inert-feature shape — the campaign's B arm and A arm run the
+      byte-identical control path (plain `ZONE_CONTROL_MODE_PID`); the
+      only thing that differs between them is a struct field nothing
+      reads.
+
+      **Recommendation: halt `fuzzy_ab_20260904b` now.** Ten hours across
+      6 arms would produce a confident "no difference" verdict comparing
+      plain PID against itself — arm B1's own duty/gain telemetry already
+      proves this, no further sampling needed, well before hitting the
+      documented per-zone noise floors (z0 0.116 °C, z1 0.077 °C, z2
+      0.147 °C) or the ≥3-zone-agreement decision rule; a genuinely-off
+      fuzzy layer was never going to clear either bar in the first place
+      here, because it isn't engaged at all. To actually exercise the
+      fuzzy layer on hardware, both presets need `"control_mode": 3` added
+      alongside `fuzzy_strength_pct` (50 for B, 0 for A — note
+      `strength_pct=0` in `PID_FUZZY` mode still exercises the mode-switch
+      and bump-transfer machinery, just not the rule table, so it remains
+      a fair baseline arm), and the presets/campaign runner should be
+      re-verified live the same way before committing kiln time again.
+
       **Audited 2026-09-02: correct-but-unhelpful, not defective.** The
       monotonic strength-vs-tracking result above raised an obvious
       suspicion — an inverted error sign or a transposed rule table would
