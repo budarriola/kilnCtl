@@ -313,3 +313,136 @@ z1 0.077, z2 0.147 °C):
   above (ramp→dwell transition = first `dwelling: False→True` in the final
   segment; ramp rate = slope over the 90 s preceding it; peak = max
   `actual_c - target_c` within 400 s after it).
+
+---
+
+# Independent verification and corrections (2026-09-04, second pass)
+
+All §1/§2 numbers recomputed from the raw captures with an independently
+written transition-finder (same stated definitions: first `dwelling`
+False→True in the final segment; ramp rate = z0 slope over the preceding
+90 s; peak = max `actual_c − target_c` within 400 s after).
+
+## W1. Reproduced exactly
+
+§1's table comes back **identical to two decimals** — ramp rates
+1.607/1.564/1.957/1.869, peaks 2.21/2.27/2.32/2.55, times to peak
++94/+89/+100/+107 s. §2a's fit reproduces to three decimals:
+
+```
+peak_overshoot_c = 0.434 + 1.006 × ramp_rate      n=10, r = 0.760
+```
+
+§2f's residuals reproduce exactly: mult 2.0 pool **+0.096 °C** (n=7),
+mult 3.0 **−0.224 °C** (n=3). §2c's model figures match the preset. §2b's
+row sums (49.04 / 36.45 / 20.75) and the synthesis's column sums (22.63 /
+39.74 / 43.87) are both arithmetically correct off the same live matrix, and
+**this report's row-sum framing is the correct one for this question** —
+confirmed against `adaptive_tune_model.c:187`, `rise_obs[i] = Σ_j
+coupling_coeff[i][j]·duty[j]`, so row = affected zone (heat received),
+column = stepped zone (influence exerted).
+
+## W2. Leverage and confound analysis of the r=0.76 fit
+
+**The correlation is solid. The coefficients are not.**
+
+- **Leave-one-out (10 refits):** r stays in **0.732–0.803** — no single
+  capture drives it. Permutation test (200k shuffles): **two-sided
+  p = 0.013**.
+- **Ambient is not the confound.** corr(overshoot, ambient) = −0.07;
+  corr(ramp rate, ambient) = +0.37; **partial corr(overshoot, ramp rate |
+  ambient) = +0.85** — controlling for ambient *strengthens* it.
+- **Campaign/profile variant is not the confound either**, despite the
+  stock-p7 captures clustering high on both axes and the stabilised-p7
+  ease-off captures low. Re-fitting on arm-mean-centred data (campaign
+  effect removed entirely) gives **r = 0.768, slope 0.876** — essentially
+  unchanged.
+- **Target temperature is not a confound**: all ten points are 60 °C.
+- **But slope and intercept are fragile.** Dropping the single lowest and
+  single highest ramp rate (n=8) moves the fit to **slope 1.57, intercept
+  −0.50**; dropping two at each end (n=6) gives **slope 0.79, intercept
+  +0.88, r = 0.46**. Across those trims slope ranges **0.47–1.77** and
+  intercept **−0.99 to +1.77**. **§2a's "near-1:1 slope" and the implied
+  0.44 °C floor carry no weight and should not be quoted as mechanism
+  evidence** — only the sign and the existence of the relationship survive.
+- **Partly kinematic, which cuts both ways.** A slope of ~1 °C per °C/min is
+  ~1.0 min of coasting, and z0's identified dead time is 52.8 s. A plant
+  arriving with stored rate *must* show roughly this slope; the fit is
+  therefore close to a restatement of §2c's dead time rather than
+  independent evidence for a control-side remedy.
+
+## W3. THE DESIGN OBJECTION — intervention 1 should not be run as written
+
+Three problems, in descending order of seriousness.
+
+1. **The one direct test of the proposed actuator is null.** Intervention 1
+   assumes a longer ease-off window reduces the rate z0 arrives with. The
+   dataset already contains that test: the 3.0× arm's mean pre-transition
+   ramp rate is **1.580 °C/min** versus the 2.0× arm's **1.459 °C/min** —
+   *higher*, not lower. Whatever the taper does, it did not lower arrival
+   rate when it was lengthened by 50%. **Proposing 3.5× is extrapolating a
+   null result one step further.** Either add a mechanism check that the
+   window actually changes arrival rate, or drop the ramp-rate rationale and
+   justify 3.5× on the (weaker, already-INDISTINGUISHABLE) residual in §2f.
+2. **The power arithmetic mixes two profiles.** Within-config run-to-run SD
+   of z0's final-segment overshoot is strongly profile-dependent:
+   **0.055 (stock p7, `ab_new` n=3), 0.035 (stock p7, `noise_floor_p7d`
+   n=3), 0.290 (stock p7, `ab_old` n=3)** versus **0.337 (`easeoff` 2.0×)
+   and 0.535 (`easeoff` 3.0×)** on the stabilised variant. Pooled SD across
+   all five triplets = **0.312 °C**. At that SD, **2 arms × 3 runs has ≈47%
+   power** to detect the proposed 0.7 °C change at α=0.05 — a coin flip.
+   Worse, the expected effect "2.2 → 1.4–1.6" takes its **baseline from the
+   stock-p7 captures (2.18–2.25)** while the proposed campaign copies the
+   **ease-off campaign's stabilised profile, whose 2.0× baseline is 1.93**;
+   as designed the arms would be chasing a ~0.4 °C gap, not 0.7.
+   **Fix: run both arms on the stock profile 7** (`ab_new` configuration,
+   SD 0.04–0.06 — n=3/arm then gives >99% power), **or keep the stabilised
+   profile and raise to n=5 per arm.** Do not run 3×3 on the stabilised
+   profile.
+3. **The mandatory pre-flight probe, as specified, will not prove
+   anything.** Checked against the live `fuzzy_ab_20260904d_s50_run1.jsonl`
+   capture (the first with `bd_*` fields): `bd_ff_rate_pretaper` and
+   `bd_ff_rate_posttaper` are **equal on 96.5% of zone-samples** (1393 of
+   1443) and both zero on 95%; they differ on only **50 samples**, in the
+   short taper window at the end of a ramp. "Sample it a few times live once
+   the final ramp segment is under way" will almost certainly land where
+   pre == post and prove nothing either way. **Rewrite the proof as: capture
+   continuously (`--capture-control-bd`), then compare the *onset time* of
+   the first pre≠post sample relative to dwell entry between arms** — the
+   3.5× arm must show it starting ~79 s earlier.
+
+## W4. The ≥3-zone rule question is a misreading — the rule does apply
+
+The proposal (and the high-temperature proposal) treat the confidence bar as
+"≥3 zones must move the same direction," which a z0-only intervention could
+never satisfy. **`CONSISTENT_PATTERN_MIN_KEYS = 3` in `pid_ab_compare.py`
+counts distinguishable *keys*, where a key is (zone, metric, segment) — not
+zones** (the docstring's rationale is only "so a two-zone coincidence cannot
+pass as a pattern"). A z0-only change can and should clear it inside zone 0
+alone: overshoot, offset and normalised IAE at the final segment are three
+keys. **Correct decision rule for this campaign: z0's own ≥3 same-direction
+keys as the primary endpoint, with z1 and z2 as pre-registered negative
+controls that must NOT move** — which is a strictly stronger design than the
+three-zone reading, because a change leaking into untreated zones would
+falsify reachability.
+
+## W5. Intervention 2 is already satisfied
+
+§4.2 asks for `bd_coupling_correction` / `bd_ff_hold` on the next firing.
+**The live `fuzzy_ab_20260904d_s50_run1.jsonl` already carries all twelve
+`bd_*` fields per zone**, `bd_coupling_correction` populated on 479/479
+control rows (z0 range −0.161…+0.279). Hypothesis (b) becomes answerable
+from that campaign's completed captures at zero additional kiln time —
+**re-scope §4.2 from "capture next time" to "analyse `fuzzy_ab_20260904d`
+when it completes."**
+
+## W6. Verdict
+
+**Mechanism (a) is real** — the correlation survives leverage deletion,
+ambient, and campaign-variant controls, at p=0.013. **The proposed A/B is
+worth kiln time, but NOT as designed.** Before it runs: switch to the stock
+profile 7 (or n=5/arm), rewrite the pre-flight proof as a taper-onset
+comparison, adopt the key-based (not zone-based) decision rule with z1/z2 as
+negative controls, and either justify 3.5× against the null arrival-rate
+result in W3.1 or state plainly that the mechanism link is assumed, not
+shown. §4.3 and §4.4's "do not run" verdicts are sound as written.

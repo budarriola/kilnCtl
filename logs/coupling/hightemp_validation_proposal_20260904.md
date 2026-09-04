@@ -337,3 +337,141 @@ blocker.
 `fuzzy_ab_20260904d` was live on the board. It commands nothing, changes no
 configuration, and is not scheduled work — see PID_EXPANSION_PLAN.md's link
 to this file for the owner go-ahead this needs before any of it runs.*
+
+---
+
+# Independent verification and corrections (2026-09-04, second pass)
+
+The feasibility premise was recomputed directly from
+`coupled_hold_feasibility_sweep()` on the hybrid matrix that actually runs,
+and the predicted telemetry signatures were checked against the flags that
+**are already in every existing capture**. **The proposal is worth its
+~4-5 kiln-hours — but three of its statements are wrong and one of its two
+predictions is likely to fail for a reason that would be misread as
+"the math is wrong".**
+
+## X1. The boundary is `ambient + 38.0 °C`, not "~62 °C"
+
+Sweep re-run with the live diagonal (`model_k_dc` 39.246 / 31.967 / 31.681)
+and the measured off-diagonals:
+
+| ambient | first infeasible (current hybrid) | first infeasible (old matrix) |
+|---|---|---|
+| 20.0 °C | 58.5 °C | 56.5 °C |
+| 24.5 °C | **63.0 °C** | 61.0 °C |
+| 30.0 °C | 68.5 °C | 66.5 °C |
+
+The offset is **exactly +38.0 °C above ambient** at every ambient (old
+matrix: +36.0). The captures' own ambient runs **24.3–28.8 °C**, so for this
+rig as operated the boundary sits at **62–67 °C, not a fixed 62 °C**.
+§0/§2's absolute framing (inherited from PID_EXPANSION_PLAN §3.2) should be
+restated as an ambient offset — it is the single most misleading number in
+the chain.
+
+**Does 70 °C cross it? Yes, comfortably** — it would take an ambient above
+**32 °C** for a 70 °C dwell to remain feasible. The proposal's headline
+choice of target is **correct as designed.** 65 °C would have been marginal
+(needs ambient < 27 °C); 70 °C is the right call.
+
+## X2. It is z2 that goes infeasible — name it
+
+At the boundary the solved duty vector is **u = [0.103, 0.460, 1.008]**:
+**z2 saturates first and alone; z0 sits at 0.10 and never saturates.** §2's
+"at least one zone" and §4's "whichever zone(s)" should be sharpened to a
+named, pre-registered prediction: **zone 2.** If z0 or z1 is the one that
+flips, the matrix is wrong in a way the sweep does not anticipate — a much
+more interesting result than a vague hit.
+
+## X3. Existing captures already carry the flags — the negative half is proven
+
+§0 says the >62 °C claim "has no tracking capture behind it". True for
+tracking *error*, but **`ff_hold_infeasible` and `ff_hold_used_matrix` are
+per-zone fields in all 30 parseable captures in this directory.**
+`ff_hold_infeasible` is **false in every sample of every capture**;
+`ff_hold_used_matrix` is **true throughout**. So the LOW arm's flag data is
+already in hand, n=27, and consistent with a boundary above 60 °C. The LOW
+arm still earns its place as a same-day tracking baseline — but it should be
+costed as that, not as flag evidence.
+
+Also: `bd_ff_hold`, `bd_ff_climb` and `bd_coupling_correction` are already
+being captured (all twelve `bd_*` fields, 479/479 control rows in the live
+`fuzzy_ab_20260904d_s50_run1.jsonl`), so §4's instrumentation list needs no
+new work — it is the current CLI default.
+
+## X4. The two predictions must be separated — the second is likely to fail
+
+§2 bundles them into one sentence. They have very different value.
+
+**(i) The flag prediction** — `ff_hold_infeasible` flips true,
+`ff_hold_used_matrix` flips false, on z2, at ambient+38 °C. This is a pure
+restatement of arithmetic the board performs on a matrix already in NVS.
+**It is near-certain and computable offline; it tests that the firmware
+implements the sweep, nothing about the plant.** Low information for
+4-5 kiln-hours.
+
+**(ii) The consequence prediction** — z2's duty pins at 1.0 and fails to
+settle. **This one is predicted here to FAIL, and for a reason that has
+nothing to do with the sweep's arithmetic.** Comparing the matrix's
+predicted steady-state duties against measured dwell duty at the 60 °C
+dwell:
+
+| capture | ambient | predicted u (z0/z1/z2) | measured dwell duty |
+|---|---|---|---|
+| `ab_new_1` | 24.3 °C | 0.096 / 0.431 / **0.945** | 0.161 / 0.415 / **0.728** |
+| `ab_new_2` | 26.3 °C | 0.090 / 0.400 / **0.876** | 0.159 / 0.400 / **0.689** |
+| `ab_new_3` | 28.7 °C | 0.083 / 0.371 / **0.812** | 0.161 / 0.383 / **0.643** |
+
+z1 is predicted almost perfectly. **z2 — the zone that determines the
+boundary — is over-predicted by 20–25% every time.** Extrapolating from the
+measured z2 duty (0.728 at ΔT = 35.7 °C) puts the **physical** saturation
+point near **ΔT ≈ 49 °C, i.e. ~73 °C at 24 °C ambient — roughly 10 °C above
+where the solver declares infeasibility.** So the most likely outcome of the
+HIGH arm is: **the flag flips at ~63 °C, the fallback engages, and the kiln
+then tracks 70 °C perfectly well on ~0.9 duty.**
+
+That is a genuinely useful result — it would say the solver's feasibility
+gate is **conservative by ~10 °C** because the matrix over-states z2's own
+gain requirement, and that the gate, not the plant, is what will limit
+cone-range firing. But §2's closing sentence ("if none of that happens up to
+80 °C, the feasibility-sweep math is wrong") would then be **misread**: the
+sweep's arithmetic would be right and its *input matrix* wrong. **Restate
+the falsification criteria as three separate outcomes:**
+
+- flag flips near ambient+38 °C **and** tracking degrades → sweep validated
+  end to end;
+- flag flips near ambient+38 °C **and** tracking stays clean → **the
+  expected outcome**; the gate is conservative, the z2 row of the matrix is
+  over-estimated, and the actionable follow-up is re-identifying z2's
+  diagonal (`coupling_diag_k_dc`, currently 0/never measured on all three
+  zones) rather than anything about the profile;
+- flag does not flip by 70 °C → the matrix or the diagonal fallback in NVS
+  is not what this analysis believes is loaded; stop and re-read the config
+  before drawing any plant conclusion.
+
+## X5. The ≥3-zone rule reference in §3 is a misreading (same as §3.6d's)
+
+`CONSISTENT_PATTERN_MIN_KEYS = 3` counts distinguishable **(zone, metric,
+segment) keys**, not zones. §3's reasoning about the rule not fitting a
+"single new regime" question reaches the right conclusion (an exploratory
+pair is the right first step) by the wrong route — the rule would in fact be
+satisfiable here; it is simply not the question the first firing asks.
+
+## X6. Safety review — unchanged and correct
+
+§1's code reading was spot-checked and stands: `max_temp_c = 80` on all
+three zones, `profile_executor_run.c`'s per-segment ceiling check refuses
+rather than clamps, and the `abs_max_temp_c = 0` flag on the safety
+processor is the correct top item. **That recommendation is not weakened by
+anything above** — if anything X4 strengthens it, since the expected outcome
+involves z2 running at ~0.9 duty for a 45-60 min dwell.
+
+## X7. Verdict
+
+**RUN the exploratory pair, with the corrections above applied:** boundary
+quoted as ambient+38 °C, z2 named as the predicted zone, the three-way
+falsification criteria replacing the single bundled prediction, and the LOW
+arm costed as a tracking baseline rather than flag evidence. **Do NOT
+commit the 12-15 hour confirmatory campaign on a flag transition alone** —
+per X4 the flag will almost certainly flip whether or not anything
+physically interesting happens, so "the exploratory pair showed something"
+must mean the *tracking* half moved, not the flag half.

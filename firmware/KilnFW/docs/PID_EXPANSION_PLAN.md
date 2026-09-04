@@ -2617,6 +2617,27 @@ re-confirmation first, and states a falsifiable prediction
 band) plus a proposed profile, kiln-hour cost, and go/no-go risk list.
 Awaiting owner go-ahead — nothing in it is scheduled work.
 
+**Verification pass, 2026-09-04 (appended to both reports):** every §3
+number in the synthesis reproduces from the raw captures to two decimals,
+and the n=12-vs-n=5 result is **robust to dropping all seven unattributed
+`noise_floor_p7*`/`floor_run1` captures** (old-era z0 offset 2.00 without
+them vs 1.99 with) — the circular-attribution caveat is checked and
+immaterial. Corrections: `p7_oldmatrix_http` **run 1 is a current-matrix
+run**, not old-era (the §3 numbers already exclude it; only the membership
+list is wrong); current-matrix z0 offset is 0.66 not 0.62; the §3 closing
+inference uses the *column* sum where the *row* sum is the relevant
+quantity (row = heat received — confirmed against
+`adaptive_tune_model.c:187`, `coupling_coeff[affected][stepped]`), so
+§3.6d's framing is the correct one; and two statements about the >62 °C gap
+are too strong — **`ff_hold_infeasible`/`ff_hold_used_matrix` ARE captured
+in all 30 files** (uniformly false/true, a real one-sided hardware result),
+and the boundary is **`ambient + 38.0 °C` exactly**, i.e. 62-67 °C over the
+24-29 °C ambients these captures ran at, not a fixed 62 °C. Quote it as an
+ambient offset everywhere. z0-is-worst is a *paired* contrast holding in
+16 of 16 captures and is not a multiplicity artifact; z2's +0.33 °C is
+statistically clean but sub-bar — the "do not chase" verdict stands, on
+magnitude alone.
+
 **Other paired-run conclusions that changed a setting or closed an item**
 (§3.2's coupling-matrix six-firing A/B, §3.9's tuning-method campaign) were
 spot-checked for a `control_mode`-shaped gate on their own varied field
@@ -2776,6 +2797,32 @@ question above. Not proposed: a standalone z0 model-mismatch campaign
 (nothing to firmware-fix cheaper than intervention 1) or a matched-ramp-rate/
 varied-peer-duty coupling campaign (bigger, more novel kiln-time ask; revisit
 only if intervention 1 underperforms).
+
+**Verification pass, 2026-09-04: mechanism confirmed, campaign NOT to be
+run as designed.** §1's table and the r=0.76 fit reproduce exactly
+(slope 1.006, intercept 0.434). The correlation is solid — leave-one-out
+r stays 0.73-0.80, permutation p=0.013, partial r **rises** to 0.85 when
+ambient is controlled, and arm-mean-centring (campaign effect removed)
+leaves r=0.77. But **slope and intercept are fragile** (0.47-1.77 and
+-0.99 to +1.77 under trimming of extreme ramp rates), so "near-1:1" carries
+no mechanistic weight — and a ~1 min slope is close to z0's own 52.8 s dead
+time, making the fit partly a restatement of §2c. Three blocking design
+problems: (1) **the one direct test of the proposed actuator is null** —
+lengthening the window 2.0x→3.0x did not lower arrival ramp rate
+(1.459 → 1.580 °C/min), so 3.5x extrapolates a null; (2) **2 arms × 3 runs
+has ≈47% power** at the pooled within-config SD of 0.312 °C, and the
+expected-effect arithmetic mixes a stock-p7 baseline (2.2) with a
+stabilised-p7 campaign whose 2.0x baseline is 1.93 — run both arms on
+**stock profile 7** (SD 0.04-0.06, >99% power at n=3) or use n=5/arm;
+(3) the mandatory pre-flight probe as written cannot work —
+`bd_ff_rate_pretaper`/`posttaper` are **equal on 96.5% of samples**, so
+compare **taper onset time** from the continuous capture, not spot samples.
+Also: `CONSISTENT_PATTERN_MIN_KEYS = 3` counts **(zone, metric, segment)
+keys, not zones** — a z0-only intervention clears it inside z0, with z1/z2
+as pre-registered negative controls. And §4.2 is already satisfied:
+`fuzzy_ab_20260904d_s50_run1` carries all twelve `bd_*` fields with
+`bd_coupling_correction` on 479/479 control rows, so re-scope it to
+"analyse that campaign", not "capture next time".
 
 ### 3.6b addendum: first in-data reachability proof, `fuzzy_ab_20260904d` (2026-09-04)
 

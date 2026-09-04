@@ -234,3 +234,127 @@ of which `ease_off_window_mult` arm is used, i.e. that knob does not change
   temp scratchpad outside the repo and are not checked in (the existing
   `pid_ab_compare.py run --json` command reproduces every number above
   directly, per file/run given in §1's table).
+
+---
+
+# Independent verification and corrections (2026-09-04, second pass)
+
+Every number in §3 was recomputed from the raw `logs/coupling/*.jsonl`
+captures with `pid_ab_compare.compute_zone_metrics`, independently of this
+report's own scratch scripts. **The headline conclusions hold. Six numbers
+and two pieces of reasoning need correcting.**
+
+## V1. Reproduced exactly
+
+| §3 claim | this report | recomputed | verdict |
+|---|---|---|---|
+| z0 dwell offset, old era n=12 | 1.97 | **1.990** | ✔ |
+| z1 dwell offset, old era n=12 | 1.04 | **1.054** | ✔ |
+| z2 dwell offset, old era n=12 | 0.78 | **0.780** | ✔ |
+| z0 overshoot, old era n=12 | 3.76 | **3.758** | ✔ |
+| z1 overshoot, old era n=12 | 1.95 | **1.968** | ✔ |
+| z2 overshoot, old era n=12 | 1.58 | **1.579** | ✔ |
+| z1 offset, current n=5 | 0.40 | **0.408** | ✔ |
+| z2 offset, current n=5 | 0.79 | **0.784** | ✔ |
+| z0/z1/z2 overshoot, current n=4 | 2.18 / 1.45 / 1.91 | **2.178 / 1.445 / 1.905** | ✔ |
+| `p7_oldmatrix_runA` == `p7_oldmatrix_http` run 0 | byte-identical dup | metrics identical to 1e-12 | ✔ |
+| no capture commands `target_c` > 60.0 | true | **true** (max 60.0 across all 30 parseable files) | ✔ |
+
+## V2. The circular-attribution worry is unfounded — checked directly
+
+The seven captures with no recorded preset (`noise_floor_p7{,b,c,d_run1,d_run2,d_run3}`,
+`floor_run1`) were assigned to the old-matrix era because their numbers
+matched. **Excluding all seven, the old-era group (n=5: `ab_old_{1,2,3}`,
+`p7_oldmatrix_http` run 0, `p7_oldmatrix_runC` run 0) gives z0 dwell offset
+= 2.000** versus 1.990 with them included. The seven do not drive the
+result; they tighten it. Same for every other cell. **The n=12 vs n=5
+conclusion is robust to the attribution gap — this caveat can be downgraded
+from "honest gap" to "checked, immaterial."**
+
+## V3. CORRECTIONS
+
+1. **Group membership is misstated.** §1's table lists `p7_oldmatrix_http`
+   "run0+run1" in the old-matrix group. Run 1's metrics (z0 offset 0.52,
+   overshoot 1.93; z1 0.42/1.43; z2 0.89/2.02) sit squarely in the
+   *current*-matrix cluster and nowhere near the old one — it is a
+   new-matrix run captured into the same file. §3's stated old-era range
+   (1.71–2.30) and every old-era mean already exclude it, so the numbers are
+   right and the membership list is wrong. Read the old group as **n=12 =
+   `ab_old_{1,2,3}` + the six `noise_floor_p7*` + `floor_run1` +
+   `p7_oldmatrix_http` run 0 + `p7_oldmatrix_runC` run 0.** (Had run 1 been
+   included, "no captures anywhere disagree with the direction" would be
+   false — it is the only capture that does.)
+2. **Current-matrix z0 offset is 0.66, not 0.62.** The five current-matrix
+   values are 0.649, 0.632, 0.688, **0.773** (`p7_newmatrix_http`), 0.551 —
+   mean 0.658. §3's quoted range "0.55 to 0.69" silently drops the 0.773.
+   Change is −1.33 °C, not −1.35. Conclusion unaffected.
+3. **Current-matrix overshoot at full n=5** is z0 2.25 / z1 1.50 / z2 1.95
+   (adding `p7_newmatrix_http`'s 2.55 / 1.71 / 2.14, which §3 omits as "not
+   separately re-pulled" — it is available and was pulled here). z0 stays
+   the worst zone either way; the z2 wrong-direction move grows to +0.37.
+4. **The z2 overshoot regression is statistically clean, not statistically
+   marginal.** §3 and §6.2 discount it partly on "n=4 vs n=12" grounds. The
+   12 old-era values span 1.39–1.80; the 4 current values span 1.74–2.02 —
+   they barely overlap, and the separation is far outside either group's
+   spread. The reason not to chase it is **magnitude alone**: +0.33 °C is
+   below the owner's 0.5 °C bar. **Recommendation §6.2 stands; delete the
+   small-n hedging from its justification, which understates a real effect
+   for the wrong reason.**
+5. **§3's column-sum inference is the wrong framing and should be struck.**
+   Verified against the code: `adaptive_tune_model.c:187` defines
+   `rise_obs[i] = Σ_j coupling_coeff[i][j] · duty[j]`, i.e.
+   `coupling_coeff[affected][stepped]` — **row = heat received, column =
+   influence exerted.** Both this report's column sums (z2 43.87, z1 39.74,
+   z0 22.63) and the z0 mechanism report's row sums (z0 49.04, z1 36.45,
+   z2 20.75) are arithmetically correct off the same live matrix. But §3's
+   closing sentence uses the *column* sum ("z0 exerts the least influence…
+   consistent with z0 needing an external fix") to reason about what
+   *happens to* z0. The quantity relevant to z0's own overshoot is its
+   **row** sum, which is the **largest** of the three: z0 receives the most
+   coupled heat. §3.6d's framing is the correct one for this question.
+   z0-is-worst does not depend on either sum, so no conclusion moves.
+6. **§2 overstates the evidential gap.** "The >62 °C regime has zero
+   hardware data behind it" is true for *tracking error* but false for the
+   infeasibility mechanism itself: **`ff_hold_infeasible` and
+   `ff_hold_used_matrix` are captured per zone in all 30 parseable files.**
+   `ff_hold_infeasible` is **false in every sample of every capture** and
+   `ff_hold_used_matrix` **true throughout** — a real, one-sided hardware
+   result: the coupled solve has never gone infeasible up to a 60 °C dwell
+   on this rig. That is consistent with, not silent on, the sweep's math.
+7. **The boundary is ambient-relative, not an absolute temperature.**
+   Re-running `coupled_hold_feasibility_sweep()` on the hybrid matrix that
+   actually runs (measured off-diagonals, `model_k_dc` diagonal
+   39.246/31.967/31.681) gives **first-infeasible = ambient + 38.0 °C
+   exactly**, at every ambient: 58.5 °C at 20 °C ambient, **63.0 °C at
+   24.5 °C**, 68.5 °C at 30 °C. The captures' own ambient ranges 24–29 °C,
+   so "~62 °C" is really **62–67 °C for this rig as operated**. The
+   old matrix gives ambient + 36.0 °C. Quoting the boundary as a bare
+   absolute number (here and in §3.2) is the thing most likely to mislead a
+   future reader.
+8. **Inventory omission (minor).** `cooldown_after_newmatrix.jsonl`,
+   `cooldown_after_oldmatrix.jsonl` and `cooldown_before_runC.jsonl` are
+   plain `.jsonl` (not `.cooldown.jsonl`) and each contains one or more
+   *complete* three-zone profile-7 runs. They are overlapping re-captures of
+   firings already in the pool (metrics match `p7_oldmatrix_http` runs 0/1
+   to <0.1 °C), so excluding them is correct — but §1 does not mention them
+   at all, which reads as if they were never looked at.
+
+## V4. Multiplicity
+
+The §3 table is 6 cells. Only two are load-bearing:
+
+- **"z0 is worse than z1 on overshoot" is not a multiplicity artifact.** It
+  is a *paired* within-capture contrast: z0−z1 = +0.68, +0.82, +0.86, +0.57
+  on the four current-matrix captures and +2.04…+1.87 on all twelve old-era
+  ones — **16 of 16 captures, same sign, mean gap 0.73 °C (current era)**,
+  an order of magnitude above z0's noise floor. No correction for
+  multiplicity can touch this.
+- **z2's +0.33 °C** is one cell out of six; at the project's documented
+  ~30.5% per-key range-floor false-positive rate a single sub-bar cell is
+  exactly what one would expect by chance. Its own separation is clean
+  (V3.4), but the report is right not to act on it, and right to record it
+  as a watch item rather than a finding.
+
+Everything else in §3–§6 is confirmed. **§6's ranking (1 investigate z0
+overshoot / 2 do not chase z2 / 3 do not re-run ease-off / 4 cone-range
+must be measured) is sound as written.**
