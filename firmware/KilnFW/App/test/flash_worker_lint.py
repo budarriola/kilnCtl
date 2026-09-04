@@ -74,6 +74,12 @@ ALLOWLIST = {
     # esp_partition_erase_range()/esp_partition_write() calls run from the
     # single-threaded OTA apply sequence, not a PSRAM-stacked handler task.
     "ota_http.c",
+    # Same call sites as ota_http.c above -- ota_pico_do_stage() (and its
+    # esp_partition_erase_range()/esp_partition_write() calls) moved here
+    # verbatim in the 2026-09-04 ota_http.c split (a6ab73b); still called
+    # only from ota_pico_post_handler()'s single-threaded httpd handler, not
+    # a PSRAM-stacked task.
+    "ota_http_pico.c",
     # Pattern 3 (init-time only): ota_record_save() runs once from
     # app_main's boot-time OTA-verify sequence.
     "ota_record.c",
@@ -117,6 +123,20 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): wifi_prov_start() deliberately stays a
     # plain call from app_main's own task -- see this file's own comment.
     "wifi_prov.c",
+    # NOT actually init-time-only, unlike the entry above: nvs_save_*()
+    # here (nvs_save_saved_nets()/nvs_save_mode()/nvs_save_ap_ssid()/
+    # nvs_save_ap_password()/nvs_save_ip_config()) run from command
+    # handlers in wifi_prov_api.c, on every add/forget-network, mode, AP-
+    # identity and IP-mode change -- moved verbatim from wifi_prov.c's own
+    # command handlers in the 2026-09-04 split (f9341e9), where they
+    # already worked the same way. Safe because every one of them, and
+    # every caller in wifi_prov_api.c/wifi_prov_link.c, runs exclusively on
+    # owner_task() (see wifi_prov.c's DEADLOCK RULE comment and
+    # wifi_prov.c:399's xTaskCreatePinnedToCore(owner_task, ...) -- a
+    # plain, non-WithCaps create, so its stack is internal SRAM, never
+    # PSRAM), which is wifi_prov's single serializing writer task, not a
+    # PSRAM-stacked httpd/handler task.
+    "wifi_prov_nvs.c",
     # Pattern 3 (init-time only): zones/relay-name/zone-normals config
     # loads/saves run from the settings HTTP handler's own
     # internal-SRAM-stack httpd task.
