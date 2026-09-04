@@ -2731,6 +2731,52 @@ the full reconciliation rules and
 `tools/PcTools/tests/test_fuzzy_ab_analyze.py`'s `TruncatedArmNegativeTest`
 for the mandatory negative test.
 
+### 3.6d Z0 dwell-entry overshoot: mechanism investigation (2026-09-04, offline)
+
+`logs/coupling/z0_dwell_overshoot_mechanism_20260904_report.md` follows up
+§3.6c's finding directly: z0's own duty is already crashed to near-zero
+(0.05-0.10) by the time its temperature peaks 89-107 s after the ramp→dwell
+boundary (n=4, current matrix), so z0 is not over-driving itself at
+overshoot — matching §3.1's original "arrives with stored rate" diagnosis.
+**Strongest finding: peak overshoot correlates with the ramp rate into the
+transition at r=0.76 (n=10, current matrix, target 60 °C, ease-off already
+active in every row), fit `peak_overshoot_c ≈ 0.44 + 1.00 × ramp_rate_c_per_min`**
+— a near-1:1 residual left over after the existing fixed-window taper.
+Coupling injection from below is consistent across eras/targets (z0 receives
+more heat from its neighbours than they receive from it or each other —
+row sums 49.04/z0 vs 36.45/z1 vs 20.75/z2, the same matrix's off-diagonals
+read the other way from §3.6c's column-sum framing) but does not explain the
+run-to-run variance within one era (peer duty barely moves, weak/wrong-sign
+correlation) — flagged as a plausible floor effect the data cannot isolate,
+not ruled out. z0's identified model (`model_k_dc` 39.25 vs 31.7-32.0,
+`model_dead_time_s` 52.8 vs 33.9-43.5) is a real, ~23%-higher-gain,
+longest-dead-time outlier consistent with amplifying whichever disturbance
+arrives, not a standalone measurable mechanism of its own. The
+already-reverted climb-decay approach (§4) and the integral floor (§4/§1637)
+are both re-examined and not implicated — z0's duty trajectory shows neither
+signature. The already-closed `ease_off_window_mult` 2.0-vs-3.0 verdict
+(§3.6b) is corroborated, not reopened, by a small (~0.32 °C, n=3 vs 7,
+noise-dominated) ramp-rate-adjusted residual in the expected direction.
+
+**Top ranked proposal: a z0-only ease-off window override (3.5×
+`model_dead_time_s`, i.e. 184.8 s vs the current 105.6 s), z1/z2 left at the
+board default 2.0×** — a different, narrower knob than the closed global
+campaign, since z1/z2 are not the problem. 2 arms, 3 runs each, matching the
+existing ease-off campaign's own discipline. Expected effect: overshoot
+~2.2 °C → ~1.4-1.6 °C, at/below z1's 1.45 °C, clearing the 0.5 °C bar with
+wide margin. **Mandatory pre-flight reachability proof (§3.6b): sample
+zone 0's `bd_ff_rate_pretaper`/`bd_ff_rate_posttaper` live across both arms
+before any kiln time** — a genuine window-size change must show tapering
+starting later into the ramp under the 3.5× arm, not just a different
+preset value on readback. Second-ranked, no campaign of its own: capture
+`bd_coupling_correction`/`bd_ff_hold` for zone 0 on the next firing of this
+profile regardless of cause, since no existing capture carries these fields
+and that is the only gap blocking a real answer on the coupling-floor
+question above. Not proposed: a standalone z0 model-mismatch campaign
+(nothing to firmware-fix cheaper than intervention 1) or a matched-ramp-rate/
+varied-peer-duty coupling campaign (bigger, more novel kiln-time ask; revisit
+only if intervention 1 underperforms).
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
