@@ -674,7 +674,7 @@ void main_boot_early(main_boot_ctx_t *ctx)
         // sole NS2009 reader and forwards real presses into
         // screen_idle_inject_touch() -- screen_idle must not also poll touch
         // itself, or the two would race the same I2C device.
-        esp_err_t idle_err = screen_idle_init(&ctx->screen_idle, &ctx->display, NULL);
+        esp_err_t idle_err = screen_idle_init(&ctx->screen_idle, &ctx->display, NULL, ctx->recovery_mode);
         if (idle_err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "screen_idle_init failed: %s -- no auto-blank this boot",
                      esp_err_to_name(idle_err));

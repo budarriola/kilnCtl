@@ -89,11 +89,40 @@ typedef struct {
      * edge is computed exactly once per real transition regardless of
      * which caller happens to observe it first. */
     bool error_prev_active;
+
+    /* boot_guard.h RECOVERY MODE, captured once at screen_idle_init() and
+     * never changed for the life of the boot (matches boot_guard_is_
+     * recovery_mode()'s own "stable for the life of the boot" contract).
+     * When true, screen_idle_run_policy_locked() (screen_idle.c) does NOT
+     * call profile_executor_get_status()/autotune_engine_is_active()/
+     * dashboard_get_status() at all -- recovery mode is main_control_
+     * bringup.c's own promise that profile_executor_start()/autotune_
+     * engine_start() were skipped this boot, and this module is started
+     * UNCONDITIONALLY, before that skip decision even runs (main_boot_
+     * early.c), on every poll tick for the life of the boot. Those three
+     * accessors are already individually guarded against being called
+     * before their subsystem's _start() (profile_executor_status.c,
+     * autotune_engine.c's s_at.lock==NULL checks) -- this is a second,
+     * belt-and-suspenders gate at the CALLER, following the exact
+     * boot_guard.h precedent (2026-08-22, "the fix was not a list of call
+     * sites to gate but making those modules safe to call before their
+     * _start()") one 2026-09-04 bench crash later: this module now blocks
+     * indefinitely on the bench, every boot, in recovery mode, at exactly
+     * this call chain (screen_idle_task -> screen_idle_run_policy_locked
+     * -> the producer reads), and gating here removes screen_idle from
+     * the set of consumers recovery mode has to keep individually safe.
+     * firing_active/error_active read as false while this is true -- the
+     * correct, honest answer: recovery mode truly runs nothing that could
+     * make either true. */
+    bool recovery_mode;
 } screen_idle_t;
 
 /* `display` must already be up (ILI9488_start succeeded); `touch` may be
- * NULL. Does not start the task -- see screen_idle_start. */
-esp_err_t screen_idle_init(screen_idle_t *idle, ILI9488Class *display, NS2009Class *touch);
+ * NULL. `recovery_mode` is boot_guard_is_recovery_mode()'s answer for THIS
+ * boot -- see the struct field's own comment for why screen_idle must know
+ * it. Does not start the task -- see screen_idle_start. */
+esp_err_t screen_idle_init(screen_idle_t *idle, ILI9488Class *display, NS2009Class *touch,
+                           bool recovery_mode);
 
 /* Starts screen_idle_task, which polls `touch` (if not NULL) roughly every
  * NS2009 conversion's worth of time, wakes the screen on any press edge or

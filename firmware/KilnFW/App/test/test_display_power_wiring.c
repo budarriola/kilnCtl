@@ -294,8 +294,170 @@ static void run_section2_touch_swallow_wired(void)
     free(text);
 }
 
+static void run_section3_recovery_mode_gated(void)
+{
+    TEST_SECTION("screen_idle_run_policy_locked() does not call into subsystems "
+                 "boot_guard.h RECOVERY MODE skips -- 2026-09-04 bench crash: "
+                 "screen_idle_start() runs UNCONDITIONALLY (main_boot_early.c, before "
+                 "main_control_bringup.c's recovery-mode skip of profile_executor_start()/"
+                 "autotune_engine_start() even runs), so every poll tick called into those "
+                 "un-started subsystems and the board interrupt-watchdog-panicked "
+                 "(screen_idle_task -> screen_idle_unlock -> xQueueGenericSend, hardware-"
+                 "confirmed via COM3/addr2line) forever, never confirming a healthy boot -- "
+                 "495+ consecutive recovery-mode boots on the bench before this fix.");
+
+    char *text = read_file_any(SCREEN_IDLE_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/screen_idle.c from the host test's "
+                           "working directory -- update the candidate paths in this test if "
+                           "the build layout moved");
+        return;
+    }
+
+    size_t body_len = 0;
+    const char *body =
+        find_function_body(text, "static bool screen_idle_run_policy_locked(", &body_len);
+    if (!body) {
+        TEST_CHECK(false, "could not find screen_idle_run_policy_locked()'s function body in "
+                           "screen_idle.c -- update this test if it was renamed/restructured.");
+        free(text);
+        return;
+    }
+    char *fn = dup_range(body, body_len);
+    TEST_CHECK(fn != NULL, "malloc for the extracted function body succeeded");
+    if (!fn) {
+        free(text);
+        return;
+    }
+
+    const char *gate = strstr(fn, "idle->recovery_mode");
+    TEST_CHECK(gate != NULL,
+               "screen_idle_run_policy_locked() must check idle->recovery_mode -- if this "
+               "fails, the recovery-mode gate was deleted and the board bricks itself in "
+               "recovery mode again the next time this module gains a new dependency on a "
+               "subsystem recovery mode skips.");
+
+    const char *pe_call = strstr(fn, "profile_executor_get_status(&pst)");
+    const char *dash_call = strstr(fn, "dashboard_get_status(&ds)");
+    const char *at_call = strstr(fn, "autotune_engine_is_active();");
+    TEST_CHECK(gate != NULL && pe_call != NULL && dash_call != NULL && at_call != NULL &&
+                   gate < pe_call && gate < dash_call && gate < at_call,
+               "the idle->recovery_mode check must appear BEFORE the profile_executor_get_"
+               "status()/dashboard_get_status()/autotune_engine_is_active() calls in this "
+               "function's source order, with a path that returns without falling through to "
+               "them -- otherwise recovery mode still reaches the calls that bricked the "
+               "board and the gate is decorative. This does not execute the function (see "
+               "this file's own top comment on why screen_idle.c is not host-compilable); it "
+               "proves the source ORDER a real recovery-mode boot would take.");
+
+    free(fn);
+    free(text);
+}
+
+static void run_section4_screen_idle_init_takes_recovery_mode(void)
+{
+    TEST_SECTION("screen_idle_init()'s signature carries a recovery_mode parameter, and "
+                 "main_boot_early.c's call site actually passes ctx->recovery_mode -- not a "
+                 "hardcoded false, which would silently defeat section 3's gate on every "
+                 "real recovery-mode boot while still passing it.");
+
+    char *text = read_file_any(SCREEN_IDLE_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/screen_idle.c");
+        return;
+    }
+    TEST_CHECK(strstr(text, "bool recovery_mode)") != NULL,
+               "screen_idle_init() must take a recovery_mode parameter -- if this fails, "
+               "screen_idle has no way to know boot_guard_is_recovery_mode()'s answer and "
+               "section 3's idle->recovery_mode field can only ever be its zero-init value.");
+    TEST_CHECK(strstr(text, "idle->recovery_mode = recovery_mode;") != NULL,
+               "screen_idle_init() must store its recovery_mode argument into idle->"
+               "recovery_mode -- if this fails, the parameter is accepted but discarded and "
+               "the struct field never reflects the real boot state.");
+    free(text);
+
+    static const char *MAIN_BOOT_EARLY_CANDIDATES[] = {
+        "../main_boot_early.c",
+        "App/main_boot_early.c",
+        "firmware/KilnFW/App/main_boot_early.c",
+    };
+    char *main_text = read_file_any(MAIN_BOOT_EARLY_CANDIDATES, 3);
+    if (!main_text) {
+        TEST_CHECK(false, "could not locate App/main_boot_early.c from the host test's "
+                           "working directory -- update the candidate paths in this test if "
+                           "the build layout moved");
+        return;
+    }
+    TEST_CHECK(strstr(main_text, "screen_idle_init(&ctx->screen_idle, &ctx->display, NULL, "
+                                  "ctx->recovery_mode)") != NULL,
+               "main_boot_early.c must call screen_idle_init() with ctx->recovery_mode (set "
+               "from boot_guard_is_recovery_mode() earlier in the same bring-up) -- passing "
+               "a hardcoded false/true here would make section 3's source-order gate exist "
+               "but never actually engage (or always engage) on real hardware.");
+    free(main_text);
+}
+
+static void run_section5_screen_idle_stack_sized_for_dashboard(void)
+{
+    TEST_SECTION("screen_idle_task's stack is sized big enough for the deep call chain its "
+                 "poll tick now makes -- 2026-09-04 bench crash: a normal (non-recovery) boot "
+                 "corrupted the internal DRAM heap and panicked (LoadProhibited) inside "
+                 "dashboard_get_status()'s heap_caps_get_largest_free_block() call, backtrace "
+                 "screen_idle_task -> screen_idle_run_policy_locked -> dashboard_get_status -> "
+                 "heap_caps_get_largest_free_block -> tlsf_walk_pool, on a heap block sitting "
+                 "immediately past this task's own (undersized, 3072 B) stack.");
+
+    char *text = read_file_any(SCREEN_IDLE_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/screen_idle.c");
+        return;
+    }
+
+    TEST_CHECK(strstr(text, "\"screen_idle\", 3072,") == NULL,
+               "screen_idle_task must not still be created with the old 3072-byte stack -- "
+               "that size was never re-measured after profile_executor_get_status()/"
+               "dashboard_get_status()/autotune_engine_is_active() were added to its poll "
+               "tick's non-recovery-mode path, and it corrupted the heap on real hardware. "
+               "Every OTHER dashboard_get_status() caller in this codebase runs on a task "
+               "sized for it (lvgl_port.c's own task asks for 8192).");
+
+    const char *create = strstr(text, "xTaskCreatePinnedToCore(screen_idle_task, \"screen_idle\", ");
+    TEST_CHECK(create != NULL,
+               "could not find screen_idle_task's xTaskCreatePinnedToCore() call -- update "
+               "this test if it was renamed/restructured.");
+    long stack_words = 0;
+    if (create) {
+        const char *num = create + strlen("xTaskCreatePinnedToCore(screen_idle_task, \"screen_idle\", ");
+        stack_words = strtol(num, NULL, 10);
+    }
+    TEST_CHECK(stack_words >= 6144,
+               "screen_idle_task's stack must be at least 6144 bytes (the deliberately "
+               "generous doubling this fix landed with) -- if this fails, someone shrank it "
+               "back toward the old, hardware-proven-too-small 3072 without a get_stack_"
+               "margin() measurement backing the smaller number.");
+
+    const char *reg = strstr(text, "stack_margin_register(\"screen_idle\", &s_task_handle, ");
+    TEST_CHECK(reg != NULL, "could not find screen_idle's stack_margin_register() call.");
+    long reg_words = 0;
+    if (reg) {
+        const char *num = reg + strlen("stack_margin_register(\"screen_idle\", &s_task_handle, ");
+        reg_words = strtol(num, NULL, 10);
+    }
+    TEST_CHECK(reg != NULL && create != NULL && reg_words == stack_words,
+               "stack_margin_register()'s size argument must match xTaskCreatePinnedToCore()'s "
+               "-- a mismatch here makes get_stack_margin()'s headroom report wrong (comparing "
+               "the real high-water mark against a size the task was not actually created "
+               "with), silently hiding exactly the kind of undersized-stack bug this fix is "
+               "for.");
+
+    free(text);
+}
+
 void run_test_display_power_wiring(void)
 {
     run_section1_screen_idle_calls_policy();
     run_section2_touch_swallow_wired();
+    run_section3_recovery_mode_gated();
+    run_section4_screen_idle_init_takes_recovery_mode();
+    run_section5_screen_idle_stack_sized_for_dashboard();
 }
