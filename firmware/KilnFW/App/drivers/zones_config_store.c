@@ -25,7 +25,7 @@ esp_err_t nvs_partition_init(const char *partition)
 {
     esp_err_t err = nvs_flash_init_partition(partition);
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
+        ESP_LOGW(ZONES_HTTP_TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
                  partition, esp_err_to_name(err));
         err = nvs_flash_erase_partition(partition);
         if (err == ESP_OK) {
@@ -90,7 +90,7 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
         return ESP_OK;
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "zones_cfg blob read from '%s' failed (%s) -- treating as unreadable",
+        ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg blob read from '%s' failed (%s) -- treating as unreadable",
                  partition, esp_err_to_name(err));
         return ESP_OK;
     }
@@ -111,7 +111,7 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
         if (out_valid) {
             *out_valid = true;
         }
-        ESP_LOGI(TAG, "zones_cfg from '%s' loaded (on-disk version %u) as v%u", partition,
+        ESP_LOGI(ZONES_HTTP_TAG, "zones_cfg from '%s' loaded (on-disk version %u) as v%u", partition,
                  (unsigned)raw[0], (unsigned)ZONES_CFG_VERSION);
         return ESP_OK;
     case ZONES_DECODE_NEWER:
@@ -120,7 +120,7 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
          * this is real, deliberately-protected data (kiln_nvs genuinely has
          * something), so migrate_from_default_partition() must not treat it
          * as "nothing here" and overwrite it with a stale pre-split copy. */
-        ESP_LOGW(TAG, "zones_cfg from '%s' is version %u, newer than this firmware's %u -- "
+        ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg from '%s' is version %u, newer than this firmware's %u -- "
                       "refusing to load, flash data left untouched",
                  partition, (unsigned)raw[0], (unsigned)ZONES_CFG_VERSION);
         if (out_found) {
@@ -135,7 +135,7 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
          * naming the on-disk version and the specific rejection reason.
          * Nothing worth protecting was found here, so a caller (the
          * legacy-partition migration) is free to look elsewhere. */
-        ESP_LOGW(TAG, "zones_cfg blob from '%s' (on-disk version %u, %u bytes) REJECTED: %s -- "
+        ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg blob from '%s' (on-disk version %u, %u bytes) REJECTED: %s -- "
                       "falling back to defaults, NOT adopting this config",
                  partition, (unsigned)raw[0], (unsigned)len, reason);
         return ESP_OK;
@@ -173,12 +173,12 @@ void migrate_from_default_partition(void)
          * overwritten in kiln_nvs, it must not be blindly migrated out of
          * the default partition either. Leave both partitions as they are;
          * this runs again next boot with no data lost either way. */
-        ESP_LOGW(TAG, "zones_cfg in the default NVS partition exists but nvs_load_from() refused it -- "
+        ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg in the default NVS partition exists but nvs_load_from() refused it -- "
                       "not migrating it to '%s'", KILN_NVS_PARTITION);
         return;
     }
 
-    ESP_LOGI(TAG, "migrating zones_cfg from the default NVS partition to '%s'", KILN_NVS_PARTITION);
+    ESP_LOGI(ZONES_HTTP_TAG, "migrating zones_cfg from the default NVS partition to '%s'", KILN_NVS_PARTITION);
 
     s_zones.cfg = from_default;
     /* Reaching here means valid_in_default was true -- nvs_load_from()
@@ -188,7 +188,7 @@ void migrate_from_default_partition(void)
     s_zones_config_valid = valid_in_default;
     esp_err_t save_err = nvs_save();
     if (save_err != ESP_OK) {
-        ESP_LOGE(TAG, "migration write to '%s' failed: %s -- running from the old copy this boot, will retry",
+        ESP_LOGE(ZONES_HTTP_TAG, "migration write to '%s' failed: %s -- running from the old copy this boot, will retry",
                  KILN_NVS_PARTITION, esp_err_to_name(save_err));
     }
 }
@@ -333,20 +333,20 @@ void relay_names_load(void)
         return; /* ESP_ERR_NVS_NOT_FOUND (never saved) or a real error -- blank is safe either way */
     }
     if (len != sizeof(relay_names_cfg_t)) {
-        ESP_LOGE(TAG, "relay_names blob is %u bytes, expected %u -- discarding, names reset to blank",
+        ESP_LOGE(ZONES_HTTP_TAG, "relay_names blob is %u bytes, expected %u -- discarding, names reset to blank",
                  (unsigned)len, (unsigned)sizeof(relay_names_cfg_t));
         return;
     }
     relay_names_cfg_t cand;
     memcpy(&cand, raw, sizeof(cand));
     if (cand.version != RELAY_NAMES_CFG_VERSION) {
-        ESP_LOGE(TAG, "relay_names blob version %u is not %u -- discarding, names reset to blank",
+        ESP_LOGE(ZONES_HTTP_TAG, "relay_names blob version %u is not %u -- discarding, names reset to blank",
                  cand.version, RELAY_NAMES_CFG_VERSION);
         return;
     }
     uint32_t computed = compute_relay_names_crc(&cand);
     if (computed != cand.crc32) {
-        ESP_LOGE(TAG, "relay_names blob CRC mismatch (stored 0x%08lx, computed 0x%08lx) -- discarding, "
+        ESP_LOGE(ZONES_HTTP_TAG, "relay_names blob CRC mismatch (stored 0x%08lx, computed 0x%08lx) -- discarding, "
                       "names reset to blank",
                  (unsigned long)cand.crc32, (unsigned long)computed);
         return;
@@ -460,20 +460,20 @@ void zone_normals_load(void)
         return; /* never saved, or a read error -- blank is safe either way */
     }
     if (len != sizeof(zone_normals_cfg_t)) {
-        ESP_LOGE(TAG, "zone_normals blob is %u bytes, expected %u -- discarding",
+        ESP_LOGE(ZONES_HTTP_TAG, "zone_normals blob is %u bytes, expected %u -- discarding",
                  (unsigned)len, (unsigned)sizeof(zone_normals_cfg_t));
         return;
     }
     zone_normals_cfg_t cand;
     memcpy(&cand, raw, sizeof(cand));
     if (cand.version != ZONE_NORMALS_CFG_VERSION) {
-        ESP_LOGE(TAG, "zone_normals blob version %u is not %u -- discarding", cand.version,
+        ESP_LOGE(ZONES_HTTP_TAG, "zone_normals blob version %u is not %u -- discarding", cand.version,
                  ZONE_NORMALS_CFG_VERSION);
         return;
     }
     uint32_t computed = compute_zone_normals_crc(&cand);
     if (computed != cand.crc32) {
-        ESP_LOGE(TAG, "zone_normals blob CRC mismatch -- discarding");
+        ESP_LOGE(ZONES_HTTP_TAG, "zone_normals blob CRC mismatch -- discarding");
         return;
     }
     s_zone_normals.cfg = cand;

@@ -42,7 +42,7 @@ extern const uint8_t safety_config_page_html_gz_end[] asm("_binary_safety_config
 esp_err_t page_get_handler(httpd_req_t *req)
 {
     if (!web_client_accepts_gzip(req)) {
-        return web_send_gzip_not_acceptable(req, TAG, "zones_page.html");
+        return web_send_gzip_not_acceptable(req, ZONES_HTTP_TAG, "zones_page.html");
     }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
@@ -74,7 +74,7 @@ void zones_json_escape(const char *src, char *out, size_t out_cap)
 esp_err_t safety_config_page_get_handler(httpd_req_t *req)
 {
     if (!web_client_accepts_gzip(req)) {
-        return web_send_gzip_not_acceptable(req, TAG, "safety_config_page.html");
+        return web_send_gzip_not_acceptable(req, ZONES_HTTP_TAG, "safety_config_page.html");
     }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
@@ -164,7 +164,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                       * one small integer key is nowhere near what's left. */
     char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
-        ESP_LOGE(TAG, "GET /api/zones: malloc(%u) failed for the response buffer", (unsigned)json_cap);
+        ESP_LOGE(ZONES_HTTP_TAG, "GET /api/zones: malloc(%u) failed for the response buffer", (unsigned)json_cap);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req,
@@ -392,7 +392,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
      * what happened. Sizing `json` is the actual fix; this is the guard that
      * makes an undersized buffer visible instead of silent. */
 truncated:
-    ESP_LOGE(TAG, "GET /api/zones did not fit in %u bytes -- raise the buffer", (unsigned)json_cap);
+    ESP_LOGE(ZONES_HTTP_TAG, "GET /api/zones did not fit in %u bytes -- raise the buffer", (unsigned)json_cap);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
     {
@@ -1101,7 +1101,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
     ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req),
                                                             interlock_reason, sizeof(interlock_reason));
     if (gate != OTA_INTERLOCK_OK) {
-        ESP_LOGW(TAG, "POST /api/zones refused by interlock: %s", interlock_reason);
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by interlock: %s", interlock_reason);
         return ota_http_send_interlock_refusal(req, gate, interlock_reason);
     }
 
@@ -1120,7 +1120,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
      * heap-converted handler in this pass. */
     char *body = heap_caps_malloc(ZONES_BODY_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (body == NULL) {
-        ESP_LOGE(TAG, "POST /api/zones: malloc(%u) failed for the request body buffer",
+        ESP_LOGE(ZONES_HTTP_TAG, "POST /api/zones: malloc(%u) failed for the request body buffer",
                  (unsigned)(ZONES_BODY_MAX + 1));
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
@@ -1131,7 +1131,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, req->content_len - received);
         if (ret <= 0) {
-            ESP_LOGW(TAG, "zones body read failed/short: %d", ret);
+            ESP_LOGW(ZONES_HTTP_TAG, "zones body read failed/short: %d", ret);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
             free(body);
             return ESP_OK;
@@ -1442,7 +1442,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
     s_config_generation++;
     esp_err_t err = nvs_save();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_save failed: %s -- config applied live but will not survive a reboot",
+        ESP_LOGE(ZONES_HTTP_TAG, "nvs_save failed: %s -- config applied live but will not survive a reboot",
                  esp_err_to_name(err));
         /* Still applied above -- the operator asked for this right now,
          * whether or not it persists past a reboot, same convention as
@@ -1450,7 +1450,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
     }
     esp_err_t names_err = relay_names_save();
     if (names_err != ESP_OK) {
-        ESP_LOGE(TAG, "relay_names_save failed: %s -- names applied live but will not survive a reboot",
+        ESP_LOGE(ZONES_HTTP_TAG, "relay_names_save failed: %s -- names applied live but will not survive a reboot",
                  esp_err_to_name(names_err));
         /* Same "applied now either way" convention as nvs_save() above --
          * cosmetic data that failed to persist is not worth refusing a
@@ -1548,7 +1548,7 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, req->content_len - received);
         if (ret <= 0) {
-            ESP_LOGW(TAG, "zones/pid body read failed/short: %d", ret);
+            ESP_LOGW(ZONES_HTTP_TAG, "zones/pid body read failed/short: %d", ret);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
             return ESP_OK;
         }
@@ -1590,7 +1590,7 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to apply/persist PID gains\"}");
     }
-    ESP_LOGI(TAG, "POST /api/zones/pid: zone %u gains -> kp=%.6g ki=%.6g kd=%.6g", zone_index, (double)kp,
+    ESP_LOGI(ZONES_HTTP_TAG, "POST /api/zones/pid: zone %u gains -> kp=%.6g ki=%.6g kd=%.6g", zone_index, (double)kp,
              (double)ki, (double)kd);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");

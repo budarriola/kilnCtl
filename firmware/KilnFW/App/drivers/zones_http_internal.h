@@ -51,8 +51,15 @@
  * translation unit -- see that test's header comment -- and six independent
  * `static const char *TAG = ...` definitions in one TU is a redefinition
  * error there. Defined once, non-static, in zones_http.c; every other file
- * only declares it. */
-extern const char *TAG;
+ * only declares it.
+ *
+ * Named `ZONES_HTTP_TAG`, not plain `TAG` (renamed 2026-09-04, same hygiene
+ * as commit 42288a2): every other internal header in this split family uses
+ * a prefixed tag (`AT_TAG`, `OTA_HTTP_TAG`, `WIFI_PROV_TAG`, `ZONES_CFG_TAG`)
+ * precisely because a global `TAG` clashes the moment another split's own
+ * globalized tag ends up in the same link -- an unprefixed one here was the
+ * lone holdout. */
+extern const char *ZONES_HTTP_TAG;
 
 /* Moved here (unchanged) from the top of the original zones_http.c --
  * zones_config_store.c (which now owns nvs_partition_init()/nvs_load()/

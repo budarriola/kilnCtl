@@ -56,7 +56,7 @@
                                           * calls the identical algorithm from here instead of
                                           * a hand-maintained re-implementation. */
 
-const char *TAG = "zones_http";
+const char *ZONES_HTTP_TAG = "zones_http";
 
 /* NVS_NAMESPACE/NVS_KEY_ZONES/KILN_NVS_PARTITION moved to
  * zones_http_internal.h -- zones_config_store.c (which now owns
@@ -590,7 +590,7 @@ esp_err_t zones_http_start(void)
      * partition is a harmless no-op (ESP_OK), so this is safe to repeat. */
     esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
     if (part_err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- zones will not persist",
+        ESP_LOGE(ZONES_HTTP_TAG, "NVS init for '%s' failed: %s -- zones will not persist",
                  KILN_NVS_PARTITION, esp_err_to_name(part_err));
     }
 
@@ -638,12 +638,12 @@ esp_err_t zones_http_start(void)
         s_zones_config_valid = false; /* partition itself didn't come up */
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "zones_cfg NVS load failed: %s -- starting unconfigured", esp_err_to_name(err));
+        ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg NVS load failed: %s -- starting unconfigured", esp_err_to_name(err));
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         s_zones_config_valid = false;
     }
     if (!s_zones_config_valid) {
-        ESP_LOGW(TAG, "zones config did NOT load cleanly -- zone commanding is refused until a valid "
+        ESP_LOGW(ZONES_HTTP_TAG, "zones config did NOT load cleanly -- zone commanding is refused until a valid "
                       "config is loaded or saved (TODO.md 8.2 'Tie it to the guards')");
     }
     /* A load replaces the whole config, not one field, so it counts as a
@@ -691,7 +691,7 @@ esp_err_t zones_http_start(void)
                  * leaving this channel at whatever MAX31856_start_all()
                  * already configured (Type K) rather than writing a
                  * voltage-input mode into a thermocouple channel's register. */
-                ESP_LOGE(TAG, "ch%u: stored tc_type=%u is not a real thermocouple type -- leaving "
+                ESP_LOGE(ZONES_HTTP_TAG, "ch%u: stored tc_type=%u is not a real thermocouple type -- leaving "
                               "this channel's hardware config unchanged",
                          i, (unsigned)tc_type);
                 continue;
@@ -704,10 +704,10 @@ esp_err_t zones_http_start(void)
                  * of MAX31856_CHANNEL_COUNT fitted) -- logged at the same
                  * WARN level as MAX31856_start_all()'s own per-channel
                  * bring-up failures, not ERROR, for the same reason. */
-                ESP_LOGW(TAG, "ch%u: could not apply persisted tc_type=%u at boot: %s", i,
+                ESP_LOGW(ZONES_HTTP_TAG, "ch%u: could not apply persisted tc_type=%u at boot: %s", i,
                          (unsigned)tc_type, esp_err_to_name(tc_err));
             } else {
-                ESP_LOGI(TAG, "ch%u: applied persisted thermocouple type %u from NVS", i,
+                ESP_LOGI(ZONES_HTTP_TAG, "ch%u: applied persisted thermocouple type %u from NVS", i,
                          (unsigned)tc_type);
             }
         }
@@ -715,7 +715,7 @@ esp_err_t zones_http_start(void)
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {
-        ESP_LOGE(TAG, "no HTTP server -- wifi_provision_http_start() must run first");
+        ESP_LOGE(ZONES_HTTP_TAG, "no HTTP server -- wifi_provision_http_start() must run first");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -751,56 +751,56 @@ esp_err_t zones_http_start(void)
     };
     err = httpd_register_uri_handler(server, &page_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/zones) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(/settings/zones) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &safety_page_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/safety) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(/settings/safety) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &get_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/zones) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET /api/zones) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &post_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/zones) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(POST /api/zones) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &pid_post_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/zones/pid) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(POST /api/zones/pid) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &sweep_start_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST current_sweep/start) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(POST current_sweep/start) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &sweep_abort_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST current_sweep/abort) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(POST current_sweep/abort) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &sweep_status_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(GET current_sweep/status) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET current_sweep/status) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &ct_map_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(GET ct_channel_map) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET ct_channel_map) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &tuning_rec_uri);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(GET tuning_recommendations) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET tuning_recommendations) failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    ESP_LOGI(TAG, "zones API up (thermo_count=%u, relay_count=%u)", s_zones.cfg.thermo_count,
+    ESP_LOGI(ZONES_HTTP_TAG, "zones API up (thermo_count=%u, relay_count=%u)", s_zones.cfg.thermo_count,
              s_zones.cfg.relay_count);
     return ESP_OK;
 }

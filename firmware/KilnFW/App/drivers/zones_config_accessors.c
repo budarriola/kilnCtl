@@ -1246,7 +1246,7 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
     s_config_generation++;
     esp_err_t err = nvs_save();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_save after kiln-config apply failed: %s -- config applied live but "
+        ESP_LOGE(ZONES_HTTP_TAG, "nvs_save after kiln-config apply failed: %s -- config applied live but "
                       "will not survive a reboot",
                  esp_err_to_name(err));
     }
