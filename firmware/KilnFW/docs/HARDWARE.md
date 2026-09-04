@@ -253,6 +253,15 @@ fed by the J13/J15/J17 3.5 mm current-transformer jacks.
 **BIGTREETECH TFT35 SPI V2.1** (3.5", 480x320, **ILI9488**, 3.3 V logic / 5 V
 supply, backlight apparently hardwired on with no control pin).
 
+> **Replacement panel.** The MSP4031 (ST7796, 4.0") is the intended successor to
+> the TFT35 described here. Its connection to J2 needs a custom harness with two
+> crossovers, two flying wires to the DevKit header (backlight, touch reset), and
+> **removal of R4 and R6 on the module** before touch may share this board's I2C
+> bus. All of that is specified in
+> [`DISPLAY_ST7796_WIRING.md`](DISPLAY_ST7796_WIRING.md); the design rationale is
+> in [`DISPLAY_ST7796_PLAN.md`](DISPLAY_ST7796_PLAN.md). Nothing below changes
+> until that panel is fitted.
+
 **Two unresolved discrepancies — check both against the physical connector
 before powering the panel.** Published pinouts for this module (single-source,
 community-maintained, and labelled V2.2) give the 10 pins as: 1 IORQ (touch

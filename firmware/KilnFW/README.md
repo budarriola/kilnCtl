@@ -80,6 +80,7 @@ run on hardware. See [`docs/PID_CONTROL.md`](docs/PID_CONTROL.md) and
 | [`docs/UART_PROTOCOL.md`](docs/UART_PROTOCOL.md) | The wire protocol (version 2): framing, CRC, reliability/retry/dedup, task registration, and every command payload |
 | [`docs/MAX31856.md`](docs/MAX31856.md) | Thermocouple driver: wiring, registers and conversions, API, THERMO subcommands |
 | [`docs/SX1509.md`](docs/SX1509.md) | Expander and `kiln_io` board layer: pin map, relay/K numbering, boot order, API, IO subcommands |
+| [`docs/DISPLAY_ST7796_WIRING.md`](docs/DISPLAY_ST7796_WIRING.md) | Bench wiring sheet for the MSP4031/ST7796 panel: the J2 harness pin by pin, the two crossovers, the backlight and touch-reset flying wires, and the R4/R6 removal the touch bus requires |
 | [`docs/ILI9488.md`](docs/ILI9488.md) | Display driver: the D/C-vs-reset ambiguity, RGB666 over SPI, API, DISPLAY subcommands |
 | [`docs/SAFETY_LINK.md`](docs/SAFETY_LINK.md) | The isolated link to the RP2040, the contract its firmware must implement, and the fault line |
 | [`docs/SAFETY_MODEL.md`](docs/SAFETY_MODEL.md) | The safety-wins policy: what actually blocks a relay from energizing today, and what still doesn't |
