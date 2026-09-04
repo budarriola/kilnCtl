@@ -52,14 +52,16 @@ _UART_BRIDGE_EXT_AUTOTUNE_C = (
 )
 
 # Fixed-size wire writers this function uses, and how many bytes each
-# advances `o` by. Mirrors bx_put_*_le()'s own definitions (uart_bridge_ext.c)
-# -- a NEW writer helper introduced later that isn't listed here makes
-# _parse_build_status_layout() raise instead of silently mis-measuring it.
+# advances `o` by. Mirrors uart_bridge_ext_put_*_le()'s own definitions
+# (uart_bridge_ext.c) -- renamed from the old bx_put_*_le() spelling by the
+# 2026-09-04 uart_bridge_ext.c split's widening rename. A NEW writer helper
+# introduced later that isn't listed here makes _parse_build_status_layout()
+# raise instead of silently mis-measuring it.
 _FIELD_WIDTHS = {
     "out[o++]": 1,
-    "bx_put_u16_le": 2,
-    "bx_put_u32_le": 4,
-    "bx_put_f32_le": 4,
+    "uart_bridge_ext_put_u16_le": 2,
+    "uart_bridge_ext_put_u32_le": 4,
+    "uart_bridge_ext_put_f32_le": 4,
 }
 
 
@@ -101,14 +103,14 @@ def _parse_build_status_layout(body: str) -> "list[tuple[str, int | None]]":
         line = line.strip()
         if not line:
             continue
-        if "bx_put_lstring" in line:
+        if "uart_bridge_ext_put_lstring" in line:
             entries.append(("abort_reason (lstring)", None))
             continue
         m = re.match(r"out\[o\+\+\]\s*=\s*(.+?);", line)
         if m:
             entries.append((m.group(1), _FIELD_WIDTHS["out[o++]"]))
             continue
-        m = re.match(r"(bx_put_\w+_le)\(&out\[o\],\s*(.+?)\);\s*o\s*\+=\s*(\d+);", line)
+        m = re.match(r"(uart_bridge_ext_put_\w+_le)\(&out\[o\],\s*(.+?)\);\s*o\s*\+=\s*(\d+);", line)
         if m:
             fn, arg, width = m.group(1), m.group(2), int(m.group(3))
             assert fn in _FIELD_WIDTHS, f"unrecognized wire writer {fn!r} -- add it to _FIELD_WIDTHS"
