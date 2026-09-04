@@ -3229,6 +3229,39 @@ above zero on hardware" (§3.6b's own inert-campaign finding, 89066869) —
 the rule base does what its own documentation says. The A/B tracking
 question stays exactly as open as before.
 
+### 3.6g Fuzzy bands vs. this rig's measured envelope (2026-09-04)
+
+§3.6f's single arm never left the ZERO/STEADY cell. Verified independently
+here (`error_c`/`error_rate_c_per_s` recomputed from the raw capture, not
+taken on faith) and widened to **every** usable three-zone profile-7
+capture in `logs/coupling/`: **n=29 runs, n=37,008 zone-samples, 100.000%
+in ZERO/STEADY.** Max recorded error 5.72 °C of a ±20 °C band (28.6%); max
+recorded rate 0.165 °C/s of a ±0.5 °C/s band (33%). This rig has never been
+recorded leaving the center cell under any captured profile-7 firing —
+across ramps and dwell-entries, not just steady dwells. The bands
+(`ERROR_BAND_C=20`, `RATE_BAND_C_PER_S=0.5`, `pid_fuzzy.c`) trace to a
+"mid-size kiln" heuristic and a ramp-*capability* rescale
+(0.05→0.5, 2026-08-30, to stop an ordinary ramp reading as a disturbance),
+never to this rig's own measured tracking error/rate — and turn out to have
+roughly 3-4x more headroom than this bench-scale (0-80 °C) rig ever uses.
+
+**Consequence for the queued campaign:** `fuzzy_ab_20260904d`, as designed
+and with the current bands, cannot measure fuzzy adaptation on this
+hardware — 7 of 9 rule cells are structurally unreachable at this rig's
+operating envelope, so an A/B measures "PID with kp/kd cut ~22-25%, ki
+raised ~20-25%, held constant," not "adaptive fuzzy." Recommendation: do
+**not** blind-restart the campaign as originally scoped. Either (a) rescale
+the bands to this rig's measured envelope (candidate: `ERROR_BAND_C`
+~6-8 °C, `RATE_BAND_C_PER_S` ~0.2-0.25 °C/s — an owner decision, since it
+changes shipped controller behavior; not applied by this report) and then
+run the campaign as a genuine adaptive-fuzzy test, or (b) run it under the
+current bands but relabel it honestly as the fixed-gain-rescale question it
+actually is. In parallel, at zero kiln-time cost: exercise
+`pid_fuzzy_adjust()` directly with synthetic large-error/large-rate inputs
+to check the untested outer 8 rule cells before spending hardware time
+trying to reach them. Full analysis, quantile tables, and the ranked
+option list: `logs/coupling/fuzzy_bands_envelope_20260904e_report.md`.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
