@@ -233,26 +233,52 @@ than by decision.
 
 ## Summary table
 
-| Failure | Detected? | Relay-on blocked? | Existing relays dropped? |
-|---|---|---|---|
-| PC link lost (cable, crash, USB) | Yes, 5 s | Only if `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT` (default off) | Yes, automatically |
-| Expander fails at boot | Yes | Yes (`APP`) | N/A — nothing to drop yet |
-| SPI bus / all thermo channels fail at boot | Yes | Yes (`THERMO`) | No — only blocks new "on" |
-| One thermo channel faults during operation, **a profile is actively running that zone** | **Yes** — `thermal_guard.c` guard 6, 3-read debounce | **Yes** (`THERMO`, live-broadened) | Yes — `profile_executor.c` retries the drop every tick |
-| One thermo channel faults during operation, **no profile running that zone** (raw UART/MCP `THERMO_CMD_READ`, dashboard status view) | Reported on `READ`, not acted on | **No** | **No** |
-| Zone heating but not progressing (guard 1) — disconnected/fallen-out TC | **Yes**, while a profile runs that zone | Yes, per-zone (`relay_authority_zone_blocked()`) | Yes, that zone only |
-| Zone temperature moving the wrong direction (guard 2) — miswired/swapped TC | **Yes**, while a profile runs that zone | Yes, per-zone | Yes, that zone only |
-| Relay welded on / shorted SSR, heat reads off but rising (guard 3) | **Yes**, while a profile runs that zone | Yes (`THERMAL_SANITY`, global) | Yes, every zone |
-| Zone drifted from setpoint and stayed drifted (guard 4) | **Yes**, while a profile runs that zone | Yes, per-zone | Yes, that zone only |
-| Zone reading exceeds configured `max_temp_c`/`min_temp_c` (guard 5) | **Yes**, while a profile runs that zone | Yes (`THERMAL_SANITY`, global) | Yes, every zone |
-| Frozen/stuck sensor reading while duty > 0 (guard 7) | **Yes**, while a profile runs that zone | Yes, per-zone | Yes, that zone only |
-| Cross-zone plausibility (guard 8) | No — needs concurrent multi-zone execution (TODO.md 6A.5), unbuilt | **No** | **No** |
-| Profile-executor control task itself stalls (guard 9) | Yes — independent `profile_exec_wdt` task, 10 s staleness | Yes (`APP`) | Yes, every zone |
-| Safety processor link down | Yes (once Pico firmware exists) | Yes (`SAFETY_LINK`) | No — only blocks new "on" |
-| Safety processor reports E-stop/fault | Surfaced in `GET_STATUS`, not acted on | **No** | **No** |
-| Manual assert via `SET_FAULT_OUT` | Yes | Yes (`MANUAL`) | No — only blocks new "on" |
-| Raw `SX_WRITE_REG`/`SX_SET_DIR` at a relay pin | N/A | Yes (per-pin guard, 2026-08-11) | N/A |
-| Malformed/truncated frame | Yes | Rejected outright | N/A |
+Verification-state vocabulary, shared with `docs/SAFETY_CASE.md` §4 and
+`firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §4: **argued** (code inspection
+only), **host-tested** (a specific host test exercises the real function, not
+a stub), **hardware-verified** (exercised on real silicon; commit/date
+given). **inert/dormant** marks a guard that is real but cannot fire in the
+shipped default configuration (a threshold defaulting to "never trip", an
+input nothing produces). A row may carry more than one state when different
+aspects differ — e.g. detection host-tested but the relay-drop side never
+exercised on hardware.
+
+| Failure | Detected? | Relay-on blocked? | Existing relays dropped? | Verification state |
+|---|---|---|---|---|
+| PC link lost (cable, crash, USB) | Yes, 5 s | Only if `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT` (default off) | Yes, automatically | **inert/dormant** for the fault-assert side (default off — see "3. Link-loss watchdog" above); **host-tested** for the underlying staleness/fault logic (`test_safety_watchdog.c::test_pc_link_sustained_loss_faults_running`, `test_pc_link_brief_loss_does_not_fault`, `test_pc_link_already_faulted_retries_relay_off`); the unconditional relay-drop itself is **argued only** — no bench record of a real cable pull found in `PROJECT_STATUS.md` or `GUARD_TEST_MATRIX.md` |
+| Expander fails at boot | Yes | Yes (`APP`) | N/A — nothing to drop yet | **argued only** — `App/main.c`'s early-return path is code-reviewed; no host test or bench record of a real failed-SX1509 boot found |
+| SPI bus / all thermo channels fail at boot | Yes | Yes (`THERMO`) | No — only blocks new "on" | **argued only** — same as above, no test/bench record found for this specific boot-time path |
+| One thermo channel faults during operation, **a profile is actively running that zone** | **Yes** — `thermal_guard.c` guard 6, 3-read debounce | **Yes** (`THERMO`, live-broadened) | Yes — `profile_executor.c` retries the drop every tick | **hardware-verified**, 2026-08-11 — real board, no TC attached, trip fired after exactly 3 bad reads, relay stayed off throughout, `profile_executor_halt()` the only way to clear (this doc, above, and `docs/PROJECT_STATUS.md`); also **host-tested** against the real `thermal_guard_tick()` function, not a stub (`App/test/test_thermal_guard.c` "Guard 6" cases, e.g. `"3rd consecutive bad read trips guard 6"`) |
+| One thermo channel faults during operation, **no profile running that zone** (raw UART/MCP `THERMO_CMD_READ`, dashboard status view) | Reported on `READ`, not acted on | **No** | **No** | **not a guard — open gap.** No mechanism exists to cite; this is the general case `SAFETY_MODEL.md` itself still leaves open (see "What does NOT enforce it yet" above) |
+| Zone heating but not progressing (guard 1) — disconnected/fallen-out TC | **Yes**, while a profile runs that zone | Yes, per-zone (`relay_authority_zone_blocked()`) | Yes, that zone only | **host-tested** against the real `thermal_guard_tick()` (`App/test/test_thermal_guard.c`, e.g. `"guard 1 trips when commanded heat produces far less than sanity_rate_c_per_min"`, plus the `progress_rise_check_relaxed`/`progress_duty_min`/`progress_window_s`/`progress_band_c` override cases); **not hardware-verified** — no bench provocation of guard 1 on record (`docs/SAFETY_CASE.md` §4 lists it "argued + code-reviewed only, not yet live-tested", which understates the host-test coverage that exists — see disagreement note below) |
+| Zone temperature moving the wrong direction (guard 2) — miswired/swapped TC | **Yes**, while a profile runs that zone | Yes, per-zone | Yes, that zone only | **host-tested** (`App/test/test_thermal_guard.c`, `"guard 2 trips when heating commanded but temperature falls fast at/above setpoint"`, and the scope check proving guard 1's relaxation does not leak into guard 2); **not hardware-verified** |
+| Relay welded on / shorted SSR, heat reads off but rising (guard 3) | **Yes**, while a profile runs that zone | Yes (`THERMAL_SANITY`, global) | Yes, every zone | **host-tested**, including a named hardware-motivated regression case (`App/test/test_thermal_guard.c`, `"guard 3 tolerates a slow 0.2C/min drift at duty 0"`, comment: "found on hardware 2026-08-12 against the simulated…"); the trip case itself and the `runaway_margin_c` override are also host-tested; **not hardware-verified** against a genuine welded contact — the only hardware contact this guard has had is the false-positive it was tuned against, not a positive trip |
+| Zone drifted from setpoint and stayed drifted (guard 4) | **Yes**, while a profile runs that zone | Yes, per-zone | Yes, that zone only | **host-tested**, including the 2026-09-03 hot-start arming fix and the `no_setpoint` two-producer contract case (`App/test/test_thermal_guard.c`, `"guard 4 trips on a sustained excursion after having settled"`, `"guard 4 eventually trips a zone that starts hot and never settles, once armed by run duration"`); **not hardware-verified** |
+| Zone reading exceeds configured `max_temp_c`/`min_temp_c` (guard 5) | **Yes**, while a profile runs that zone | Yes (`THERMAL_SANITY`, global) | Yes, every zone | **host-tested** (`App/test/test_thermal_guard.c`, `"guard 5 max_temp trips on the very first over-limit tick"`, `"guard 5 min_temp trips"`); **also inert/dormant per-zone whenever that zone's `max_temp_c`/`min_temp_c` is left at its 0 default** — same test file proves it explicitly (`"max_temp_c==0 disables guard 5's ceiling"`) — an uncommissioned zone has no ceiling in force, the KilnFW-side twin of `SaftyFW`'s S1; **not hardware-verified** |
+| Frozen/stuck sensor reading while duty > 0 (guard 7) | **Yes**, while a profile runs that zone | Yes, per-zone | Yes, that zone only | **host-tested**, including the `frozen_window_s` override (`App/test/test_thermal_guard.c`, `"guard 7 trips when the reading never changes while duty > 0"`, `"frozen_window_s override=20 trips guard 7 well before the 600s default would"`); **not hardware-verified** |
+| Cross-zone plausibility (guard 8) | No — needs concurrent multi-zone execution (TODO.md 6A.5), unbuilt | **No** | **No** | **not built** — no code exists to argue, host-test, or hardware-verify |
+| Profile-executor control task itself stalls (guard 9) | Yes — independent `profile_exec_wdt` task, 10 s staleness | Yes (`APP`) | Yes, every zone | **host-tested** — the tick-stale fault path and its priority over other reasons are real-function tests, not stubs (`App/test/test_safety_watchdog.c::test_tick_stale_still_faults_running_and_takes_priority`); the fault-clearing defect above ("`SAFETY_FAULT_SRC_APP` latches forever…") was found by code inspection of the trigger path, **not** by deliberately stalling the control task on real hardware (see disagreement note below re: that section's own "found on the bench" wording) — treat guard 9's trigger mechanism as **host-tested + argued**, not hardware-verified, until a real stall is provoked on the bench |
+| Safety processor link down | Yes (once Pico firmware exists) | Yes (`SAFETY_LINK`) | No — only blocks new "on" | **host-tested** for the staleness/liveness logic itself (`firmware/CommonFW/docs/LINK_PROTOCOL.md` §8, `test/test_safety_link.c:77-92`, pinned 2026-09-04); the link genuinely exists and has carried real traffic (`docs/SAFETY_LINK.md`, 2026-08-23) but **nobody has held the link down on the bench and watched the fault assert with a stopwatch** — `docs/SAFETY_CASE.md` §4/§2 and `ROADMAP.md` both say so explicitly; do not read "Yes (once Pico firmware exists)" as hardware-verified |
+| Safety processor reports E-stop/fault | Surfaced in `GET_STATUS`, not acted on | **No** | **No** | **not a guard — open gap**, one-directional link (see "Nothing on the main board reacts…" above); nothing to cite beyond that design gap |
+| Manual assert via `SET_FAULT_OUT` | Yes | Yes (`MANUAL`) | No — only blocks new "on" | **argued only** — mask-OR logic is simple and code-reviewed; no host test or bench record specifically provoking `SET_FAULT_OUT` was found |
+| Raw `SX_WRITE_REG`/`SX_SET_DIR` at a relay pin | N/A | Yes (per-pin guard, 2026-08-11) | N/A | **argued only** — `sx_write_reg_touches_relay_on()`/`sx_set_dir_touches_relay()` are code-reviewed (see "closed (2026-08-11)" above); no host test or bench record found exercising the refusal path itself |
+| Malformed/truncated frame | Yes | Rejected outright | N/A | **argued + host-tested** — length/range checks are simple and code-reviewed (`docs/UART_PROTOCOL.md`); the broader `kilnlink` payload-decoder fuzz pass (`ccb23ac`) covers framing-layer malformed input, though not this file's specific per-subcommand range checks by name |
+
+**Disagreement found while adding this column (2026-09-04), reported rather
+than silently harmonised:** `docs/SAFETY_CASE.md` §4 lists KilnFW's
+`thermal_guard` guards 1, 2, 4, 5, 7 as "**argued + code-reviewed only** …
+implemented and code-reviewed but not yet live-tested (no thermocouple/relay
+hardware attached to provoke them)", quoting this very document's own
+2026-08-11 update note below. That quote is about *hardware* verification and
+is still accurate on that narrower point — but `App/test/test_thermal_guard.c`
+demonstrably host-tests all five of those guards (and guards 3, 5, 6) against
+the real `thermal_guard_tick()` function, including override/arming/regression
+cases, not a stub. "Not yet live-tested" was read by `SAFETY_CASE.md` as "not
+tested at all" for these rows; the table above corrects that to **host-tested,
+not hardware-verified**, which is the precise and stronger-than-"argued"
+state these guards are actually in. `SAFETY_CASE.md` should be corrected to
+match (out of scope for this pass — its own edit lane belongs to a different
+task today).
 
 Rows marked **No** in bold are the open work. **Updated 2026-08-11**: the
 "one thermo channel faults during operation" row is now split in two — it

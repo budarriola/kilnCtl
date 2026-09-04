@@ -576,7 +576,16 @@ should say so rather than being listed as coverage.
 
 **Records**
 - [ ] Date, commit, config CRC and outcome recorded per guard
-- [ ] `SAFETY_MODEL.md`'s summary table updated with per-row verification state
+- [x] `SAFETY_MODEL.md`'s summary table updated with per-row verification
+      state (2026-09-04) — every row now carries argued / host-tested /
+      hardware-verified / inert-dormant / not-a-guard, per
+      `docs/SAFETY_CASE.md` §4's vocabulary, each with a citation. Found one
+      real discrepancy while doing it: `SAFETY_CASE.md` §4 undersells
+      `thermal_guard` guards 1/2/4/5/7 as "argued + code-reviewed only" when
+      `App/test/test_thermal_guard.c` demonstrably host-tests all of them
+      (and 3, 5, 6) against the real `thermal_guard_tick()` function — noted
+      in `SAFETY_MODEL.md`'s table rather than silently fixed in
+      `SAFETY_CASE.md`, which is a different task's edit lane today.
 
 ---
 
