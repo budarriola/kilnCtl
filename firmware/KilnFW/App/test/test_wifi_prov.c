@@ -71,6 +71,17 @@ int g_stub_time_sync_notify_got_ip_calls = 0;
 void time_sync_notify_got_ip(void) { g_stub_time_sync_notify_got_ip_calls++; }
 
 #include "../drivers/wifi_prov.c"
+// wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3, "files over 1500 lines
+// should be broken up where it makes sense") -- the new wifi_prov_*.c pieces
+// are NOT added as separate compile units in build_host_tests.ps1; this file
+// #includes all of them directly, same convention as
+// test_profile_executor_prestart.c's own multi-#include block, so this file
+// keeps reaching every split-out module's `static`/file-scope internals
+// (do_ev_got_ip()/do_confirm_static_reachable() among them) the same way it
+// did when this was all one translation unit.
+#include "../drivers/wifi_prov_nvs.c"
+#include "../drivers/wifi_prov_link.c"
+#include "../drivers/wifi_prov_api.c"
 
 // ---- Test scaffolding ----------------------------------------------------
 

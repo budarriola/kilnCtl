@@ -1,0 +1,246 @@
+#ifndef WIFI_PROV_INTERNAL_H
+#define WIFI_PROV_INTERNAL_H
+
+/* Internal seams for the wifi_prov.c split (2026-09-04, ROADMAP.md M15 A3:
+ * "files over 1500 lines should be broken up where it makes sense" --
+ * wifi_prov.c had grown to 2820 lines). This header is NOT public API --
+ * wifi_prov.h stays that -- it exists purely so pieces that used to be one
+ * translation unit (and could reach each other's `static` state and helpers
+ * for free) can still do so now that they are four. Same shape as
+ * profile_executor.c's 2026-09-01 split (see profile_executor_internal.h):
+ * every symbol declared below was `static` in the original single file and
+ * is widened to file-scope-internal linkage ONLY because a sibling .c file
+ * in this split now calls or reads it directly.
+ *
+ *   wifi_prov.c        -- command-queue infra (post_and_wait/post_event),
+ *                          wifi_prov_start() bring-up, owner_task() itself,
+ *                          and the handful of trivial state getters used
+ *                          from inside wifi_prov_start()'s own log lines
+ *   wifi_prov_nvs.c     -- WIFI_NVS_PARTITION / default-partition load,
+ *                          save, one-time migration and saved-networks-list
+ *                          persistence
+ *   wifi_prov_link.c    -- Wi-Fi driver config application, the Wi-Fi/IP
+ *                          event handlers, the AP-fallback and rescan
+ *                          timers, ground-truth reconciliation, and the
+ *                          captive-portal DNS hijack task
+ *   wifi_prov_api.c     -- the do_*() bodies and public wifi_prov_*()
+ *                          producers for network/mode/AP-identity/IP-mode
+ *                          management plus the blocking scan
+ *
+ * THIS IS A MOVE-ONLY REFACTOR: no logic, ordering, naming or visibility
+ * change beyond what moving requires. s_wifi (the module's single piece of
+ * shared state, guarded by the "owner_task() is its only writer" rule
+ * documented at length in wifi_prov.c) moved here unchanged so all four
+ * files see the identical layout; the original anonymous
+ * `static struct wifi_prov_state s_wifi;` is now defined (non-static) in
+ * wifi_prov.c and `extern`-declared here. Same treatment for s_cmd_queue,
+ * s_scan_stage and TAG. */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+
+#include "esp_err.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+
+#include "wifi_prov.h"
+
+/* ---- shared log tag ------------------------------------------------------
+ * Defined (non-static) in wifi_prov.c; every split file logs under the same
+ * "wifi_prov" tag the single file used to, unchanged. */
+extern const char *WIFI_PROV_TAG;
+
+/* Dedicated NVS partition for Wi-Fi credentials -- see wifi_prov_nvs.c's
+ * doc comment (moved there from the top of the original single file) for
+ * the full rationale. Needed here too: wifi_prov.c's wifi_prov_start()
+ * calls wifi_prov_nvs_partition_init()/nvs_load_from() on it directly. */
+#define WIFI_NVS_PARTITION "wifi_nvs"
+
+/* TODO.md 8.4: a bounded list of saved networks. WIFI_PROV_MAX_SAVED_NETWORKS
+ * and SAVED_NETS_VERSION are needed here (not just in wifi_prov_nvs.c) because
+ * saved_nets_blob_t -- a member of struct wifi_prov_state below -- is sized by
+ * the former, and wifi_prov_api.c's do_add_network()/do_get_saved_networks()
+ * both read the latter. */
+#define WIFI_PROV_MAX_SAVED_NETWORKS 8
+#define SAVED_NETS_VERSION 1
+
+typedef struct {
+    char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    char password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+} saved_net_t;
+
+typedef struct {
+    uint8_t version; /* SAVED_NETS_VERSION at save time */
+    uint8_t count;
+    saved_net_t nets[WIFI_PROV_MAX_SAVED_NETWORKS];
+} saved_nets_blob_t;
+
+/* ---- module state ---------------------------------------------------------
+ * See wifi_prov.c's own top-of-file comment (moved there unchanged) for the
+ * full field-by-field rationale -- this is a straight relocation of the
+ * original `static struct wifi_prov_state s_wifi` definition, now `extern`
+ * here and defined (non-static) in wifi_prov.c. */
+struct wifi_prov_state {
+    bool started;
+    esp_netif_t *ap_netif;
+    esp_netif_t *sta_netif;
+    esp_timer_handle_t ap_fallback_timer;
+    esp_timer_handle_t rescan_timer;
+
+    saved_nets_blob_t saved_nets;
+    char active_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    wifi_prov_mode_t mode;
+
+    char ap_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    bool has_ap_ssid_override;
+    char ap_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+    bool has_ap_password_override;
+
+    wifi_prov_ip_mode_t ip_mode;
+    char static_ip[WIFI_PROV_IPV4_STR_MAX];
+    char static_netmask[WIFI_PROV_IPV4_STR_MAX];
+    char static_gateway[WIFI_PROV_IPV4_STR_MAX];
+
+    bool static_ip_confirmed;
+
+    char active_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+
+    wifi_prov_state_t state;
+    int8_t sta_rssi;
+};
+
+extern struct wifi_prov_state s_wifi;
+
+/* ---- owning task + command queue (2026-08-19, TODO.md 10.14 Phase 4) -----
+ * See wifi_prov.c's own top-of-file comment for the full rationale --
+ * unchanged by this split, only relocated/declared extern here. */
+
+typedef enum {
+    CMD_ADD_NETWORK,
+    CMD_FORGET_NETWORK,
+    CMD_GET_SAVED_NETWORKS,
+    CMD_SET_MODE,
+    CMD_SET_AP_SSID,
+    CMD_SET_AP_PASSWORD,
+    CMD_GET_STA_IP,
+    CMD_SCAN,
+    CMD_SET_DHCP,
+    CMD_SET_STATIC_IP,
+
+    CMD_EV_STA_START,
+    CMD_EV_STA_DISCONNECTED,
+    CMD_EV_GOT_IP,
+    CMD_TMR_AP_FALLBACK,
+    CMD_TMR_RESCAN,
+    CMD_CONFIRM_STATIC_REACHABLE,
+} wifi_cmd_type_t;
+
+typedef struct {
+    esp_err_t err;
+    wifi_prov_saved_network_t saved[WIFI_PROV_MAX_SAVED_NETWORKS];
+    size_t saved_count;
+    char sta_ip[16];
+    size_t scan_count;
+} wifi_result_t;
+
+typedef struct {
+    wifi_cmd_type_t type;
+    wifi_result_t *result;
+    SemaphoreHandle_t done;
+    union {
+        struct {
+            char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+            char password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+        } add_network;
+        struct { char ssid[WIFI_PROV_SSID_MAX_LEN + 1]; } forget_network;
+        struct { size_t max_results; } get_saved_networks;
+        struct { wifi_prov_mode_t mode; } set_mode;
+        struct { char ssid[WIFI_PROV_SSID_MAX_LEN + 1]; } set_ap_ssid;
+        struct { char password[WIFI_PROV_PASSWORD_MAX_LEN + 1]; } set_ap_password;
+        struct { size_t out_cap; } get_sta_ip;
+        struct { size_t max_results; } scan;
+        struct {
+            char ip[WIFI_PROV_IPV4_STR_MAX];
+            char netmask[WIFI_PROV_IPV4_STR_MAX];
+            char gateway[WIFI_PROV_IPV4_STR_MAX];
+        } set_static_ip;
+    } args;
+} wifi_cmd_t;
+
+extern QueueHandle_t s_cmd_queue;
+
+/* Scan results staging -- defined (non-static) in wifi_prov_api.c (do_scan()
+ * writes it, wifi_prov_scan() copies out of it), but wifi_prov.c's
+ * owner_task() also passes it straight to do_scan() for the CMD_SCAN case,
+ * so both need to see it. */
+#define WIFI_OWNER_SCAN_STAGE_MAX 20
+extern wifi_prov_scan_result_t s_scan_stage[WIFI_OWNER_SCAN_STAGE_MAX];
+
+/* ---- queue producer/consumer helpers (wifi_prov.c) ------------------------
+ * post_and_wait() is used by every producer in wifi_prov_api.c;
+ * post_event() is used by every event handler/timer callback in
+ * wifi_prov_link.c. */
+bool post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms);
+void post_event(wifi_cmd_type_t type);
+
+/* ---- NVS load/save/migration (wifi_prov_nvs.c) ---------------------------- */
+esp_err_t wifi_prov_nvs_partition_init(const char *partition);
+esp_err_t nvs_load_from(const char *partition, bool *out_found);
+void nvs_load_legacy_single(const char *partition, saved_net_t *out_net, bool *out_has);
+void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs);
+void nvs_load_saved_nets(void);
+esp_err_t nvs_save_saved_nets(void);
+esp_err_t nvs_save_mode(void);
+esp_err_t nvs_save_ap_ssid(void);
+esp_err_t nvs_save_ap_password(void);
+esp_err_t nvs_save_ip_config(void);
+
+/* Winning legacy single-network credential, set by
+ * wifi_prov_migrate_from_default_partition() and consumed by nvs_load_saved_nets() --
+ * both in wifi_prov_nvs.c, but wifi_prov.c's wifi_prov_start() also sets it
+ * directly on the no-cross-partition-migration path. */
+struct wifi_prov_legacy_single {
+    bool has;
+    saved_net_t net;
+};
+extern struct wifi_prov_legacy_single s_legacy_single;
+
+/* ---- Wi-Fi driver config / event handlers / timers (wifi_prov_link.c) ---- */
+void apply_ap_config(void);
+bool parse_ipv4(const char *s, esp_ip4_addr_t *out);
+void apply_sta_config(void);
+void cancel_ap_fallback_timer(void);
+bool reconcile_sta_state(void);
+void do_ap_fallback_tick(void);
+void ap_fallback_timer_cb(void *arg);
+void do_rescan_tick(void);
+void rescan_timer_cb(void *arg);
+void start_ap_fallback_timer(void);
+void start_sta_join(void);
+void do_ev_sta_start(void);
+void do_ev_sta_disconnected(void);
+void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data);
+void do_ev_got_ip(void);
+void do_confirm_static_reachable(void);
+void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data);
+void start_dns_hijack_task(void);
+
+/* ---- network/mode/AP/IP-mode command bodies + blocking scan
+ * (wifi_prov_api.c) --------------------------------------------------------- */
+esp_err_t do_add_network(const char *new_ssid, const char *password);
+esp_err_t do_forget_network(const char *target);
+esp_err_t do_get_saved_networks(size_t max_results, wifi_result_t *r);
+esp_err_t do_set_mode(wifi_prov_mode_t mode);
+esp_err_t do_set_ap_ssid(const char *ssid);
+esp_err_t do_set_ap_password(const char *password);
+esp_err_t do_set_dhcp(void);
+esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gateway);
+esp_err_t do_get_sta_ip(size_t out_cap, wifi_result_t *r);
+esp_err_t do_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *out_count);
+
+#endif /* WIFI_PROV_INTERNAL_H */

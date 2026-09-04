@@ -1758,13 +1758,34 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       of the HTTP handler files and found no other plain `malloc` of a
       response/scratch buffer.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
-      `wifi_prov.c` (2820), `dashboard_http.c` (2572), `ota_http.c` (2508),
+      ~~`wifi_prov.c` (2820)~~, `dashboard_http.c` (2572), `ota_http.c` (2508),
       `ui_page_home.c` (2279), `panel_spi.c` (2174), `profiles_http.c` (2097),
       `zones_config_json.c` (1867), `main.c` (1820), `backup_http.c` (1756),
       `uart_bridge_ext.c` (1727), `zones_http_handlers.c` (1598). Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
       `ARCHITECTURE.md`, and autotune has four separable concerns, on the
-      `profile_executor` 8-file split's precedent. M-L
+      `profile_executor` 8-file split's precedent. M-L — **`wifi_prov.c` part
+      CLOSED 2026-09-04**: move-only split into `wifi_prov.c` (559 lines,
+      command-queue infra/bring-up/owner_task), `wifi_prov_nvs.c` (591,
+      NVS load/save/migration), `wifi_prov_link.c` (802, driver config/event
+      handlers/timers/DNS hijack) and `wifi_prov_api.c` (748, network/mode/
+      AP/IP-mode command bodies + blocking scan), sharing state via
+      `wifi_prov_internal.h` on the `profile_executor_internal.h` precedent
+      (shared statics as `extern`, former `static` helpers widened to
+      file-scope-internal). Symbol audit: grepped every widened symbol for
+      exactly one non-static definition repo-wide before trusting the link;
+      caught and fixed two real collisions the widening exposed
+      (`nvs_partition_init`/`migrate_from_default_partition` clashing with
+      `zones_config_store.c`'s own same-named statics-turned-would-be-globals
+      once no longer `static` — renamed to `wifi_prov_nvs_partition_init`/
+      `wifi_prov_migrate_from_default_partition`). `build_kilnfw` compiles
+      and links all four wifi_prov files clean (the build's only remaining
+      failure is `autotune_engine.c`'s own in-progress, unrelated split —
+      left open per this item). All 21/21 host test executables pass,
+      `test_wifi_prov.c` unchanged except #including the three new files
+      alongside `wifi_prov.c`, same convention as
+      `test_profile_executor_prestart.c`. `autotune_engine.c` part still
+      open.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
