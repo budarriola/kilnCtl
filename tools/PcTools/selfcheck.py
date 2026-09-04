@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pathlib
 import re
 import struct
@@ -28,6 +29,7 @@ import threading
 import time
 
 from kilnctrl import devices, pin_overlay
+from mcpkit.registry import check_staleness, take_snapshot
 from kilnctrl.protocol import (
     FRAME_DELIM,
     FRAME_ESC,
@@ -93,7 +95,41 @@ def _firmware_uart_protocol_version() -> int:
     return int(m.group(1))
 
 
+def _mcpkit_staleness_checks() -> None:
+    """mcpkit.registry's stale-server detection (see docs/MCP_SERVERS.md),
+    exercised against a real temp directory rather than mocked file objects
+    -- everything else in this module's staleness logic (mtime provider
+    injection) is covered directly by tools/PcTools/tests/
+    test_mcpkit_freshness.py; this is a smoke test that the two halves
+    (take_snapshot's directory walk, check_staleness's re-stat) still agree
+    when wired together against real files on disk."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "mod.py")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        snap = take_snapshot(tmp)
+        stale, changed = check_staleness(snap)
+        check("fresh snapshot reports no changed files", (stale, changed), (False, 0))
+
+        # mtimes have whole-second resolution on some filesystems -- bump the
+        # written mtime explicitly rather than sleeping, so this is fast and
+        # not flaky under load.
+        newer = os.path.getmtime(src) + 5.0
+        os.utime(src, (newer, newer))
+        stale, changed = check_staleness(snap)
+        check("edited file after snapshot is detected as stale", (stale, changed), (True, 1))
+
+        os.remove(src)
+        stale, changed = check_staleness(snap)
+        check("deleted file after snapshot is detected as stale", (stale, changed), (True, 1))
+
+
 def main() -> int:
+    print("== mcpkit stale-server detection ==")
+    _mcpkit_staleness_checks()
+
     print("== CRC-16/CCITT-FALSE ==")
     # The canonical check value for this variant.
     check("crc('123456789') == 0x29B1", hex(crc16_ccitt_false(b"123456789")), hex(0x29B1))

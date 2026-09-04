@@ -428,6 +428,10 @@ registry = collapse(
     synonyms=mcp_facade.SYNONYMS,
     keep=mcp_facade.KEEP,
     recipes=mcp_facade.RECIPES,
+    # tools/PcTools/src -- covers this package and mcpkit itself, so an edit
+    # to either shows up as staleness. See mcpkit/registry.py's "staleness /
+    # freshness" section: kiln_help() surfaces this once at startup.
+    source_root=os.path.normpath(os.path.join(os.path.dirname(__file__), "..")),
 )
 
 
@@ -445,7 +449,8 @@ def _close() -> None:
 
 def main() -> int:
     """Sync entry point for the ``kilnctrl-mcp-server`` console script."""
-    return serve(mcp, name="kilnctrl", default_port=mcp_facade.DEFAULT_PORT, on_close=_close)
+    return serve(mcp, name="kilnctrl", default_port=mcp_facade.DEFAULT_PORT, on_close=_close,
+                freshness=registry.freshness)
 
 
 if __name__ == "__main__":

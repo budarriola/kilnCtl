@@ -69,6 +69,21 @@ function Show-Status($entry) {
     Write-Host ("  {0,-9} UP     http://127.0.0.1:{1}{2}  pid {3}  publishes: {4}" -f `
         $entry.Name, $entry.Port, $health.endpoint, $health.pid, ($health.published_tools -join ", ")) `
         -ForegroundColor Green
+    # "fresh" is populated by the server itself (mcpkit.registry.SourceSnapshot,
+    # re-checked on every /health call) when it was started with a
+    # source_root -- both PcTools servers are. Reusing /health here, rather
+    # than re-deriving staleness from the source tree in PowerShell, keeps the
+    # mtime-scanning logic in one place and avoids a second, possibly
+    # disagreeing implementation.
+    if ($null -ne $health.fresh) {
+        if ($health.fresh) {
+            Write-Host ("             fresh  started {0}  commit {1}" -f `
+                $health.started_at, $health.commit) -ForegroundColor DarkGray
+        } else {
+            Write-Host ("             STALE  {0} file(s) changed since started {1} (commit {2}) -- restart to pick up the change" -f `
+                $health.changed_files, $health.started_at, $health.commit) -ForegroundColor Red
+        }
+    }
     return $true
 }
 

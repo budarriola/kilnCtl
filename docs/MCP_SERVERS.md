@@ -61,16 +61,40 @@ Stopping through `/shutdown` rather than killing the process matters: a COM port
 left open by a dead process stays unusable on Windows until the device is
 replugged.
 
-`kilnctrl` is long-running, so it keeps serving whatever code it started with —
-a source fix landed after the server came up is invisible to it. Symptom: an
-MCP call reports a defect ("field not in the allowlist", say) that the current
-source plainly does not have. Before chasing a bug that isn't there, compare
-the server's start time against the commit that fixed it —
-`Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select CreationDate`
-(pid from `/health`) — then restart it: `kiln_call(name="close_server")`
-followed by `.\tools\PcTools\scripts\mcp_servers.ps1 start`. The start command
-can exceed a 120s tool timeout and finish in the background; re-check with
-`status` rather than assuming it failed.
+### Stale-server self-announcing
+
+Both `kilnctrl` and `kicad` are long-running, so each keeps serving whatever
+code it started with — a source fix landed after the server came up is
+invisible to it until a restart. That has twice sent debugging down the wrong
+path: an MCP call reported a defect ("field not in the allowlist", say) that
+the current source plainly did not have, because the process answering was
+serving a build from before the fix landed.
+
+Each server now knows this about itself and says so instead of leaving it to
+be discovered by accident. At startup it snapshots the mtime of every source
+file under its own package tree (`mcpkit.registry.take_snapshot`, kept out of
+the hot path — the file list is walked once, then only re-stat'd) along with
+the `git rev-parse` commit it started at. From then on:
+
+* **`kiln_help()` / `kicad_help()`** prepend one line to their output. Fresh,
+  it is quiet — `server code fresh: started <time>, at commit <hash>` — so
+  freshness is checkable at a glance. Stale, it is loud:
+  `SERVER CODE IS STALE: N files changed since this process started (started
+  <time>, at commit <hash>). Restart via mcp_servers.ps1 restart.`
+* **`mcp_servers.ps1 status`** shows the same fresh/stale line per server,
+  read off `/health` (which now carries `fresh`, `changed_files`,
+  `started_at`, and `commit` whenever the server was started with a
+  `source_root`) rather than re-deriving it in PowerShell.
+* **`tools/PcTools/selfcheck.py`** exercises `take_snapshot`/`check_staleness`
+  against a real temp directory as a smoke test that the two halves still
+  agree when wired together; `tools/PcTools/tests/test_mcpkit_freshness.py`
+  covers the comparison logic itself against an injected fake clock.
+
+If either `help()` or `status` reports stale, restart:
+`.\tools\PcTools\scripts\mcp_servers.ps1 restart` (or `kiln_call(name=
+"close_server")` followed by `... start` for `kilnctrl` specifically). The
+start command can exceed a 120s tool timeout and finish in the background;
+re-check with `status` rather than assuming it failed.
 
 ### Decision 1 — HTTP instead of stdio
 

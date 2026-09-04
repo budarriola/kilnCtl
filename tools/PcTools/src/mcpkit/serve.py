@@ -61,8 +61,16 @@ def build_parser(name: str, default_port: int) -> argparse.ArgumentParser:
 
 
 def _add_control_routes(mcp: Any, name: str, port: int, path: str,
-                        stopper: "Callable[[], None]") -> None:
-    """``/health`` and ``/shutdown``, registered before the ASGI app is built."""
+                        stopper: "Callable[[], None]",
+                        freshness: "Optional[Any]" = None) -> None:
+    """``/health`` and ``/shutdown``, registered before the ASGI app is built.
+
+    ``freshness`` -- a ``mcpkit.registry.SourceSnapshot`` taken at startup, if
+    the caller's ``collapse()``/``collapse_table()`` call was given a
+    ``source_root``. When present, ``/health`` is re-checked against it on
+    every call so ``mcp_servers.ps1 status`` can report stale/fresh without a
+    second HTTP round trip or its own copy of the mtime-scanning logic.
+    """
     from starlette.requests import Request
     from starlette.responses import JSONResponse
 
@@ -70,14 +78,22 @@ def _add_control_routes(mcp: Any, name: str, port: int, path: str,
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:  # noqa: ARG001 - starlette signature
-        return JSONResponse({
+        payload = {
             "ok": True,
             "server": name,
             "pid": os.getpid(),
             "port": port,
             "endpoint": path,
             "published_tools": published,
-        })
+        }
+        if freshness is not None:
+            from mcpkit.registry import check_staleness
+            stale, changed = check_staleness(freshness)
+            payload["fresh"] = not stale
+            payload["changed_files"] = changed
+            payload["started_at"] = freshness.started_at_human()
+            payload["commit"] = freshness.commit
+        return JSONResponse(payload)
 
     @mcp.custom_route("/shutdown", methods=["POST"])
     async def shutdown(_request: Request) -> JSONResponse:  # noqa: ARG001
@@ -88,7 +104,8 @@ def _add_control_routes(mcp: Any, name: str, port: int, path: str,
         return JSONResponse({"ok": True, "server": name, "pid": os.getpid(), "stopping": True})
 
 
-async def _run_http(mcp: Any, name: str, host: str, port: int, path: str, log_level: str) -> None:
+async def _run_http(mcp: Any, name: str, host: str, port: int, path: str, log_level: str,
+                    freshness: "Optional[Any]" = None) -> None:
     """Serve over streamable HTTP with our own uvicorn.Server.
 
     ``MCPServer.run_streamable_http_async`` builds its uvicorn server inline and
@@ -103,7 +120,7 @@ async def _run_http(mcp: Any, name: str, host: str, port: int, path: str, log_le
         if server is not None:
             server.should_exit = True
 
-    _add_control_routes(mcp, name, port, path, stop)
+    _add_control_routes(mcp, name, port, path, stop, freshness=freshness)
     app = mcp.streamable_http_app(streamable_http_path=path, host=host)
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level=log_level.lower()))
     log.info("%s MCP server on http://%s:%d%s (health: /health, stop: POST /shutdown)",
@@ -112,12 +129,16 @@ async def _run_http(mcp: Any, name: str, host: str, port: int, path: str, log_le
 
 
 def serve(mcp: Any, *, name: str, default_port: int, argv: "Optional[list[str]]" = None,
-          on_close: "Optional[Callable[[], None]]" = None) -> int:
+          on_close: "Optional[Callable[[], None]]" = None,
+          freshness: "Optional[Any]" = None) -> int:
     """Parse argv, run the chosen transport, and always run ``on_close``.
 
     ``on_close`` is where a server releases its hardware clients. It runs on a
     clean exit, on Ctrl-C, and after ``POST /shutdown`` -- never skipped, since
     a serial port left open outlives the process that opened it on Windows.
+
+    ``freshness`` -- forwarded to ``/health`` (HTTP transport only); see
+    ``_add_control_routes``.
     """
     args = build_parser(name, default_port).parse_args(argv)
     logging.basicConfig(
@@ -129,7 +150,8 @@ def serve(mcp: Any, *, name: str, default_port: int, argv: "Optional[list[str]]"
         if args.transport == "stdio":
             asyncio.run(mcp.run_stdio_async())
         else:
-            asyncio.run(_run_http(mcp, name, args.host, args.port, args.path, args.log_level))
+            asyncio.run(_run_http(mcp, name, args.host, args.port, args.path, args.log_level,
+                                  freshness=freshness))
     except KeyboardInterrupt:
         pass
     except OSError as exc:
