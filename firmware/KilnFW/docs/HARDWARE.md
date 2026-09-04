@@ -119,6 +119,35 @@ these two horizontal parts — every signal lines up:
 The board carries three MAX31856s (U2/U3/U4) on `CS0`/`CS1`/`CS2`, each with its
 own `~DRDY`/`~FAULT` pair, and an LT1962-3.3 analog regulator.
 
+### Physical zone arrangement (test kiln)
+
+The three heating elements are **stacked vertically** as rings up the chamber
+wall, and **zone 2 is the BOTTOM element, zone 0 the TOP** (zone 1 middle).
+Owner-confirmed 2026-09-03.
+
+This had never been written down anywhere in the repo, which mattered more than
+it looks: the identified zone coupling matrix is asymmetric, and until the
+physical order was known there was no way to tell whether that asymmetry was
+real thermal transport or a fit artifact/transposed table. With the order
+confirmed it checks out. Summing each zone's column in the live matrix
+(`coupling_coeff[affected][stepped]`, so a column is the influence that zone
+exerts on the others):
+
+| Zone | Position | Influence exerted on the other two |
+|---|---|---|
+| z2 | bottom | 43.87 |
+| z1 | middle | 39.74 |
+| z0 | top    | 22.63 |
+
+Heat rises, so the bottom element should dominate and the top should be the
+weakest influencer -- which is exactly the ordering measured. Note this runs
+opposite to the intuition that zone 0 is the bottom.
+
+**Use this as a sanity check on any future re-identification.** A matrix whose
+column sums put z0 above z2 is asserting that the top element heats the bottom
+of the kiln more than the reverse; treat that as a transposed table until
+proven otherwise, not as a new measurement.
+
 ## Safety thermocouple board (J7 -> J1)
 
 Main board **J7** (2x06, 1.27 mm) to safety board **J1** (2x06), straight
