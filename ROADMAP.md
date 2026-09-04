@@ -119,6 +119,7 @@ What is still genuinely open is short:
 | [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md) | The RP2040 bootloader, flash layout and recovery mode |
 | [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
 | [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13 | M10's instrumentation: HTTP route-table cap, internal-DRAM low-water alarm, task-stack high-water reporting |
+| [`docs/SAFETY_CASE.md`](docs/SAFETY_CASE.md) | The cross-processor safety argument: hazard list, guard/measure/accepted-risk mapping, residual risks, evidence classification (argued/host-tested/hardware-verified). Written 2026-09-04, still thin on hardware evidence — see its own §5 |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
 
@@ -242,9 +243,26 @@ now a short list, which is the point:
   `firmware/KilnFW/docs/UI_PLAN.md`'s "Display power" section for the full
   writeup. Pure decision core + persisted settings + HTTP API + settings-page
   UI are built and host-tested; brightness is inert until
-  `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE`'s flying-wire bodge is verified, and
-  the actual `screen_idle.c`/`lvgl_port.c` touch-swallow/timeout hookup is
-  left as a documented seam for whoever owns that hardware pass next.
+  `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE`'s flying-wire bodge is verified.
+  The `screen_idle.c`/`lvgl_port.c` touch-swallow/timeout hookup landed the
+  same day (`7fc17cc`), bound to real producers — the executor for
+  `firing_active`, the RP2040 DIAG trip for `error_active`. Review then found
+  both producers too narrow (`192eb7d`): keep-on-while-firing blanked the
+  screen mid-autotune, since autotune holds relay authority with the executor
+  IDLE, and display-on-error missed the ESP's own guard aborts, which never
+  touch the RP2040's `diag_state`. Both widened. The 1-minute timeout is
+  hardware-verified via `touch_get_state()` ("screen on" → "screen blanked"),
+  as is NVS persistence across a reboot. **"Off" blanks the panel to black
+  under a lit backlight — it cannot cut the backlight**, so it hides the UI
+  and saves nothing until the §3.4.1 flying wire lands. Wake-on-touch,
+  first-touch-swallow and error dismissal all still need the owner's finger.
+- **`screen_idle` held its own lock across the producer reads, 2026-09-04
+  (`7a8594d`).** The policy tick called `dashboard_get_status()` (five
+  MAX31856 SPI bursts), `kiln_io_owner_command_read()` (blocks up to 200 ms on
+  another task) and four interrupts-disabled heap walks at 20 Hz, all under a
+  lock the LVGL task takes on every tick and touch — against the module's own
+  documented invariant. Reads moved outside the lock and throttled to 1 Hz,
+  policy now reads a cached snapshot; five mutation tests, all red.
 - ~~**The LCD back buttons do not work**~~ **CLOSED (`1982ed6`).** Root cause
   was the topbar's z-order-first-match hit test: icons are built left-to-right
   (Back, Home, Prev, Next, Gear) so every icon except the last in a row was
@@ -636,9 +654,39 @@ soldering session.
       compiled-in but default-OFF behind their own Kconfig symbols; 9.1's
       instrumentation landed (`flush_last_us`/`flush_max_us`/`flush_count` on
       `GET /api/status`) though 9.1b's number is not yet recorded live; 9.8
-      needed no code. Phase 0's blocking hardware measurements (STOP-block 5V
-      I2C hazard, ST7796 RDDID bytes) are still open, and the module has not
-      yet touched J2. The only hardware change required remains a custom
+      needed no code. **The owner connected the module to J2 on 2026-09-04 and
+      it is now the panel in service** — the "has not yet touched J2" caveat
+      above is superseded for everything except the STOP-block 5V I2C hazard
+      measurement, which was never taken. Bring-up that day:
+      `KILNCTL_DISPLAY_PANEL` was still pinned to ILI9488, so the board ran the
+      wrong init table against real ST7796 silicon; and `main.c` only ever
+      constructed an `NS2009Class`, so the fully written, host-tested FT6336U
+      driver was never instantiated — a textbook consumer-without-producer.
+      Both fixed (`16fe9ed`); touch answers at I2C 0x38. The real colour bug
+      was neither inversion nor MADCTL: `panel_codec.c`/`panel_spi.c` sent
+      LVGL's RGB565 little-endian where MIPI-DCS RAMWR wants MSB-first, and the
+      code's own comment had the wire order backwards (`8174db5`). Every
+      INVON/BGR experiment run before that fix was confounded and is not
+      evidence. With byte order correct, MADCTL was re-measured and set to RGB
+      `0x00` (`f493bf8`) and INVON is deliberately absent (vendor
+      transcription, guarded by `test_st7796_panel.c`). Touch axis mapping now
+      lives on `touch_dev_t`, so panel and touch controller select
+      independently (`KILNCTL_TOUCH_FT6336U`). ST7796 RDDID reads `0x00 0x00
+      0x00` like the ILI9488 — MISO undriven — so `id_matches` stays NULL
+      permanently on both and Phase 4 is inert by design, not by omission.
+      **Still open:** a residual blue bias, with every firmware cause
+      eliminated by measurement (camera response refuted by a neutral
+      off-screen bezel sample; RGB565 field boundaries unit-tested against
+      known values; LVGL double-swap ruled out; blit paths compiled out; SPI
+      clock swept 20/15/10 MHz with the blue *fraction* flat at 0.62/0.61/0.58
+      — `07cad60`, table in `DISPLAY_ST7796_PLAN.md` §4). Treat as a module
+      characteristic needing the owner's eye, a colorimeter or a second unit,
+      not more firmware. Also open: touch corner accuracy
+      (`KILNCTL_TOUCH_CAP_*` defaults untried on glass) and the 5V I2C hazard
+      measurement. Rendering can now be checked without a person at the bench
+      via `tools/PcTools/scripts/capture_lcd.ps1` (`5fd9761`) — sample pixels
+      numerically, never by eye, and always include an off-screen reference.
+      The only hardware change required remains a custom
       harness; the main board itself needs no modification
 - [ ] **HW change: relay status LEDs** for K1–K4, S9
 - [ ] **HW change: distinct connector types** for the thermocouple daughterboards
@@ -1642,6 +1690,24 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       (`info_uart_bridge`, `system_uart_bridge`, `telemetry_log`) predate
       this feature and are out of scope. No code changed this pass — the
       margin didn't need it.
+- [x] **2026-09-04: the stack-margin check went blind when `main.c` split.**
+      `check_stack_margin_registration.ps1` reported `uart_owner_task`,
+      `uart_owner_evt_task` and `uart_proto_rx` unregistered. They were
+      registered correctly all along, in `main_network_http.c` — the checker
+      scanned `App/drivers/**` plus `App/main.c` *by name*, so the split hid
+      that whole file from it. Now globs `App/*.c` (`ead4123`). This is the
+      tenth instance of the day's dominant failure class: a check keyed to a
+      path, silently blinded by a split, while the build stayed green — see
+      the `source_path_drift_check` item. Measured on hardware afterwards,
+      idle and under combined HTTP + PC-link load: `uart_owner_task` 70.7%,
+      `uart_owner_evt_task` 76.0%, `uart_proto_rx` 48.3% headroom — all
+      healthy. Of the three standing `[LOW]` tasks, `info_uart_bridge` is
+      thinnest at 15.2–19.4% (596 B idle → 468 B under load, of 3072), but the
+      drop was small and non-progressive and its stack is dominated by a
+      fixed-size `BRIDGE_REPLY_MAX` local, so **no stack was resized** —
+      raising them all would spend the DRAM margin measured above for comfort
+      rather than evidence. Worth a focused follow-up to find which INFO
+      subcommand sequence produces `info_uart_bridge`'s worst case
 - [x] **First real task-stack measurement this project has ever taken**, and
       it found `rules_task` — the rule evaluator that gates heating — at 336
       bytes of 3072, 10.9% headroom, on an idle board. Raised to 4096.
