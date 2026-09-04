@@ -601,6 +601,45 @@ any DMA/flush work in Phase 6, still need the real numbers below.)*
       budget estimate's order of magnitude; the handful of samples in the
       19-38 ms range line up with heavier-content redraws (graph/page
       transitions) rather than a fixed per-flush cost.
+- [x] **Write-clock overclock ruled out as the cause of the blue-channel
+      bias, measured 2026-09-04.** Background: RGB565 endianness was fixed
+      and MADCTL set to RGB (commit f493bf8); rendering is now correct except
+      that the blue channel reads proportionally elevated everywhere on
+      screen. Camera-response and RGB565-arithmetic causes were already ruled
+      out (see commit history); the last firmware-testable lead was the
+      20 MHz write clock against this module's ~15.15 MHz rated write clock
+      (`CONFIG_KILNCTL_DISPLAY_SPI_CLOCK_HZ`, `Kconfig:384`, default
+      20000000). Swept 20 MHz (current) / 15000000 (in spec) / 10000000
+      (comfortably in spec), one `build_kilnfw` + `flash_firmware()` per
+      setting, captured with `capture_lcd.ps1 -Full` and sampled numerically
+      (`ffmpeg ... -f rawvideo -pix_fmt rgb24 - | od -An -tu1`) over the same
+      three 1280×720 camera-frame crops each time: a screen background patch,
+      an off-screen black bezel patch (near-neutral reference), and an
+      off-screen wall patch (bright neutral reference). Ambient light drifted
+      across the three captures (the bezel/wall readings brighten
+      monotonically run to run), so the comparison that matters is each
+      channel's *fraction of R+G+B on the screen patch*, not the raw values:
+
+      | clock | screen R,G,B | bezel R,G,B | wall R,G,B | screen blue fraction |
+      |---|---|---|---|---|
+      | 20 MHz (baseline) | 9, 37, 75 | 32, 31, 34 | 89, 81, 88 | 0.620 |
+      | 15 MHz (in spec) | 9, 61, 107 | 44, 44, 47 | 116, 102, 109 | 0.605 |
+      | 10 MHz (comfortably in spec) | 16, 78, 127 | 61, 57, 62 | 143, 127, 133 | 0.575 |
+
+      The blue fraction is essentially flat (0.62 → 0.61 → 0.58, well inside
+      what the ambient-light drift visible in the bezel/wall columns could
+      itself explain) across a 2x clock range that spans from 33% over the
+      rated write clock down to 34% under it. **The overclock hypothesis is
+      refuted**: if marginal signal integrity at 20 MHz were biasing a
+      channel, dropping to half that clock should have shrunk or removed the
+      bias, and it did not. Restored `CONFIG_KILNCTL_DISPLAY_SPI_CLOCK_HZ` to
+      20000000 (no measured benefit to running slower, and 20 MHz is the
+      already-shipped, already-characterized setting) and reflashed. The blue
+      bias is therefore not a firmware-testable lead any more; treat it as a
+      characteristic of the physical module/panel (color-order/gamma
+      variance between the vendor's ST7796 units, or a genuine module
+      defect) that needs a colorimeter or a second physical unit to take
+      further, not another firmware change made blind.
 
 ---
 
