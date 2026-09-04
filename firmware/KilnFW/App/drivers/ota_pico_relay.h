@@ -55,8 +55,13 @@
 //   ota_http.c's job (streaming write + running CRC32 as the body arrives).
 //   This module only ever READS pico_img, via esp_partition_read(), never
 //   holding the whole image in RAM.
-// - Does not implement SAFETY_CMD_ANNOUNCE_REBOOT -- out of scope this pass
-//   (TODO.md 9.5, does not exist anywhere in CommonFW/SaftyFW yet).
+// - Does not itself send SAFETY_CMD_ANNOUNCE_REBOOT -- that frame is sent
+//   before the ESP's OWN routine reboot (ota_http_esp.c, TODO.md 9.5, DONE),
+//   not before a Pico reboot this module drives. SAFETY_CMD_ANNOUNCE_REBOOT
+//   itself is fully implemented (SaftyFW's safety_core.c and
+//   tasks/link_task.c's link_task_handle_announce_reboot(), CommonFW's
+//   kilnlink_announce_reboot.h codec) -- it is not out of scope or missing,
+//   this module just isn't the caller of it.
 // - Does not push progress over a WebSocket/SSE channel -- a poller reads
 //   ota_pico_relay_get_status() back, mirroring ota_http.h's
 //   ota_http_get_esp_progress() for the ESP path.
