@@ -494,7 +494,30 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       `kilnlink_unstuff` -- asserts only "did not crash or hang", passing.
       Not coverage-guided (no libFuzzer/AFL) -- good enough to catch an
       out-of-bounds read or infinite loop, not a substitute for one if this
-      code ever needs deeper scrutiny
+      code ever needs deeper scrutiny.
+      Extended 2026-09-04 (`test/test_fuzz_payloads.c`) to the other 27
+      decoders -- every payload codec one layer above the framing pair
+      above (context/status/power/announce/diag/trip/ceiling/clear_trip/
+      set_config/rollback/get_fw_version/set_clock/announce_reboot/
+      set_ct_cal/get_ct_cal/ct_cal/set_log_level/set_param/commit_config/
+      commit_config_rejected/inject_tc/get_param/param/get_config_page/
+      config_page/rollback_result/fw_version). Same fixed-seed-xorshift32
+      determinism, plus a real fixed corpus per decoder (built from that
+      decoder's own `_encode()`/`_pack()`: a valid frame bit-flipped at
+      every byte, truncated at every offset, and padded with unaccounted
+      trailing bytes) and an assertion stronger than "did not crash": a
+      truncated or length-lied-about copy of a valid frame must never
+      decode OK. Sanitizers confirmed available on this MSVC install
+      (`/fsanitize=address` via `test/run_fuzz_payloads_asan.ps1`, opt-in,
+      ASan-clean) though not the CI default; canary-guarded output structs
+      stand in as the explicit-bounds-assertion fallback for the default
+      `cl` build. Negative-tested by deliberately dropping
+      `kilnlink_announce_decode()`'s final length check -- the harness
+      failed loud, named the decoder, and named the exact truncation that
+      broke it; reverted clean. Wired into
+      `firmware/SaftyFW/test/build_host_tests.ps1` as CI. Full writeup:
+      `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s "Fuzz over every
+      decoder" row.
 
 **Migration**
 - [x] `KilnFW`'s `uart_protocol.c` delegating framing/CRC to `kilnlink_frame`

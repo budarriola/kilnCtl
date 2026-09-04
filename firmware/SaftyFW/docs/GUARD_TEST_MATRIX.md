@@ -330,7 +330,76 @@ should say so rather than being listed as coverage.
       (huge setpoint disagreement, current with nothing commanded, stalled
       sample counter) are confirmed to never trip/warn S2/S3/S4/S10/S13.
       409/409 host checks pass; RP2040 target build clean.
-- [ ] Fuzz over every decoder (`firmware/CommonFW/test`)
+- [x] Fuzz over every decoder (`firmware/CommonFW/test`). Done 2026-09-04:
+      `test_fuzz.c` (2026-08-16) already covered the two framing-layer
+      decoders (`kilnlink_frame_decode`, `kilnlink_unstuff`); this pass adds
+      `test_fuzz_payloads.c`, covering the other 27 -- every
+      `kilnlink_*_decode` in `firmware/CommonFW/include/kilnlink/`
+      (context/status/power/announce/diag/trip/ceiling/clear_trip/
+      set_config/rollback/get_fw_version/set_clock/announce_reboot/
+      set_ct_cal/get_ct_cal/ct_cal/set_log_level/set_param/commit_config/
+      commit_config_rejected/inject_tc/get_param/param/get_config_page/
+      config_page/rollback_result/fw_version). "Every decoder" is now
+      actually every decoder, not just the framing layer underneath them.
+      Per decoder: a fixed corpus (empty, 1 byte, min/max length -1/exactly/
+      +1, all-zero and all-0xFF at several lengths, a real valid frame built
+      with the matching `_encode()`/`_pack()` with every byte individually
+      bit-flipped, that same frame truncated at every offset, and that frame
+      plus 8 trailing garbage bytes) plus randomized bytes (uniform and
+      structurally-biased) at every length from 0 through past the longest
+      legal frame. Deterministic: fixed-seed xorshift32 (independent from
+      test_fuzz.c's own state), seed printed every run and overridable via
+      `KILNLINK_FUZZ_SEED`, iteration count via `KILNLINK_FUZZ_ITERS` for a
+      longer soak. 14,483 calls across 27 decoders, ~0.4s.
+      **Property asserted, not just "didn't crash":** every truncated or
+      length-lied-about copy of a real valid frame must be REJECTED, never
+      decoded OK -- this is the actual documented hazard ("an offset
+      mismatch silently misdecodes temperatures"), and a decoder that
+      crashes is a much smaller risk than one that returns success on data
+      it never fully validated. Output structs are canary-guarded (64
+      sentinel bytes before/after, poisoned before each call, checked after)
+      as an explicit-bounds-assertion fallback, since the default `cl` build
+      here has no sanitizer flag (matching every other host test binary in
+      this repo).
+      **Sanitizers: available and used, not just a documented gap.** This
+      MSVC Build Tools install (VS "18") does ship clang-cl's `/fsanitize=
+      address` -- confirmed by a real build+run (`firmware/CommonFW/test/
+      run_fuzz_payloads_asan.ps1`, a separate opt-in script, ASan-clean
+      across the same 14,483 calls). Not wired into the default CI build:
+      that would require copying `clang_rt.asan_dynamic-x86_64.dll` next to
+      a monolithic multi-file binary that also links plenty of SaftyFW/
+      KilnFW code never built with `/fsanitize` elsewhere, for a benefit the
+      canary-guard fallback above already delivers for this specific
+      "decoder writes past its output struct" property. Run the ASan script
+      by hand after touching any `kilnlink_*.c` for the deeper check.
+      **Negative test (mandatory, per feedback_negative_test_every_check.md):**
+      removed the final `len != announce_wire_len(commit_len, datetime_len)`
+      guard from `kilnlink_announce_decode()` (`kilnlink_announce.c`) --
+      exactly the documented hazard class, an offset/length check silently
+      dropped. First attempt at a truncation assertion false-positived on
+      `kilnlink_status_decode` (both its V1 23-byte and V2 24-byte lengths
+      are independently legitimate, so "truncated by exactly 1 byte" isn't
+      always a real defect there -- fixed the harness's `build_valid_status`
+      to encode the V1-length frame so its own truncation corpus can't
+      collide with a second valid length). With the fix in place and the
+      defect still injected, the harness failed loud and named the right
+      decoder:
+      `FUZZ FAIL: kilnlink_announce_decode reported OK for a frame truncated
+      to 15 of its real 24 bytes -- it decoded past the end of what actually
+      arrived, exactly the silent-misdecode hazard this harness exists to
+      catch`. Reverted (`git diff` on `kilnlink_announce.c` empty); rerun
+      clean, 2077/2077 SaftyFW host checks plus the fuzz binary both pass.
+      **No real defect found** in the shipping 27 decoders themselves --
+      the only bug this pass produced was the deliberately-injected one
+      above, reverted before commit.
+      **Wired into CI**: `firmware/SaftyFW/test/build_host_tests.ps1` builds
+      and runs `test_fuzz_payloads.c` (linked against every `kilnlink_*.c`)
+      as a second, separately-labeled binary after the main 2077-check
+      suite -- a fuzz failure throws with the seed needed to reproduce it,
+      distinct from the main check count so it can never be silently folded
+      into (or silently absent from) that number. KilnFW's own host build
+      and `build_kilnfw` unaffected (no shared file touched besides the two
+      new/edited files above).
 
 **Hardware — safe state first**
 - [ ] §3.1 all five rows passed

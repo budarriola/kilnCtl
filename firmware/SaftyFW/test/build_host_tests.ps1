@@ -118,4 +118,44 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $exe
-exit $LASTEXITCODE
+$mainExit = $LASTEXITCODE
+
+# GUARD_TEST_MATRIX.md "Fuzz over every decoder": firmware/CommonFW/test/
+# test_fuzz_payloads.c drives every kilnlink payload decoder (context/
+# status/power/announce/diag/trip/ceiling/clear_trip/set_config/rollback/
+# get_fw_version/set_clock/announce_reboot/set_ct_cal/get_ct_cal/ct_cal/
+# set_log_level/set_param/commit_config/commit_config_rejected/inject_tc/
+# get_param/param/get_config_page/config_page/rollback_result/fw_version) --
+# a separate standalone binary (own `main()`, own deterministic seed/exit
+# code) rather than folded into $sources above, because that file follows
+# CommonFW/test's convention (own executable per ctest target, see
+# firmware/CommonFW/CMakeLists.txt) rather than test_main.c's TEST_CHECK/
+# g_test_count convention, and it needs to link every kilnlink_*.c file --
+# several of which ($sources above only wires the subset the commissioning
+# family actually calls) have no other consumer in this build yet. Built
+# and run as its own step so a fuzz failure is a distinct, clearly-labeled
+# CI failure rather than silently folded into (or invisibly absent from)
+# the $exe check count above.
+$fuzzExe = Join-Path $outDir "kilnlink_fuzz_payloads.exe"
+$fuzzObjDir = Join-Path $outDir "fuzz_obj"
+New-Item -ItemType Directory -Force -Path $fuzzObjDir | Out-Null
+$fuzzSources = @((Join-Path $commonSrcDir "..\test\test_fuzz_payloads.c")) +
+    (Get-ChildItem -Path $commonSrcDir -Filter "kilnlink_*.c" | ForEach-Object { $_.FullName })
+$fuzzSourceArgs = ($fuzzSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+$fuzzCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 /I `"$commonIncDir`" " +
+    "/Fo:`"$fuzzObjDir\\`" /Fe:`"$fuzzExe`" $fuzzSourceArgs"
+cmd.exe /c $fuzzCmd
+if ($LASTEXITCODE -ne 0) {
+    throw "kilnlink payload fuzz build failed"
+}
+& $fuzzExe
+$fuzzExit = $LASTEXITCODE
+
+if ($fuzzExit -ne 0) {
+    throw "kilnlink payload fuzz FAILED (exit $fuzzExit) -- see output above for which decoder and case; rerun with KILNLINK_FUZZ_SEED set to the seed printed above to reproduce"
+}
+
+if ($mainExit -ne 0) {
+    exit $mainExit
+}
+exit $fuzzExit
