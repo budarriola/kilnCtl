@@ -1617,6 +1617,31 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       `uart_bridges_1` figure everyone had been quoting, and it sits *below*
       the one documented real failure (free=11903, largest=8704 — `/app.js`
       truncated, pages stuck on "Loading..."). `8d1b015`
+- [x] **2026-09-04: display-power feature's ~3.25 kB DRAM cost checked
+      against the cliff, under load, not just at idle.** `6ba8ae8`/`7fc17cc`/
+      `192eb7d`/`e7b8efc` added a flat ~3.25 kB of internal-DRAM use from the
+      `display+touch` boot checkpoint onward (part of it the deliberate
+      `screen_idle_task` 3072→6144 stack fix for a real overflow — not
+      reverted, not in scope here). Measured live against the idle board
+      (192.168.1.156, healthy, no firing started): `get_heap_status()` showed
+      `heap_internal` free=36263 B, **min_free (low-water since boot)
+      =23195 B**, largest_free_block=15360 B. Then drove
+      `http_concurrency_reproducer.py --concurrency 8,16,24,28 --bursts 5`
+      against `/app.js` (380 requests, 0 resets/timeouts/other — the
+      separate socket-reset item above is fixed on this build) while polling
+      `/api/status`; `heap_internal.free` never moved off 36263 across any
+      burst, and a post-run `get_heap_status()` re-check still showed the
+      same min_free=23195, confirming the load did not create a new trough
+      below whatever boot already produced. **Verdict: comfortable, not
+      thin.** 23195 B low-water vs. the documented 11903 B failure floor is
+      ~11.3 kB of margin (net ~2x the cliff), and the largest free block
+      (15360 B) stays well clear of the failure case's fragmented 8704 B
+      too. `get_stack_margin()` checked in passing: `screen_idle` sits at
+      38.7% headroom (2376 B free of 6144 B) — not over-provisioned enough
+      to be worth trimming, and the three tasks flagged `[LOW]`
+      (`info_uart_bridge`, `system_uart_bridge`, `telemetry_log`) predate
+      this feature and are out of scope. No code changed this pass — the
+      margin didn't need it.
 - [x] **First real task-stack measurement this project has ever taken**, and
       it found `rules_task` — the rule evaluator that gates heating — at 336
       bytes of 3072, 10.9% headroom, on an idle board. Raised to 4096.
