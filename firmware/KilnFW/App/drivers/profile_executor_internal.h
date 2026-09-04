@@ -823,7 +823,7 @@ uint8_t count_qualifying_coupling_neighbors(uint8_t zi);
 float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float rate_c_per_s,
                        float *out_hold);
 void seed_bumpless_with_ff(zone_runtime_t *z, uint8_t zi, float u_desired);
-float zone_taper_climb_rate(const zone_runtime_t *z, float target_c, float rate_c_per_s,
+float zone_taper_climb_rate(const zone_runtime_t *z, uint8_t zi, float target_c, float rate_c_per_s,
                             float segment_target_c);
 
 /* ---- firing-statistics accounting / reboot breadcrumb

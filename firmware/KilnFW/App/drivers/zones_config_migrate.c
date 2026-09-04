@@ -14,22 +14,21 @@
 static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out)
 {
     memset(out, 0, sizeof(*out));
-    /* ZONES_CFG_VERSION 15->16: set here, ONCE, ahead of the per-version
-     * switch below, rather than repeated in each of the 15 cases the way
-     * pc_link_abort_silence_ms's "0 = firmware default" carry-through is --
-     * every version older than v16 gets EXACTLY this (2.0, matching the
-     * removed PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT #define), so a v15->v16
-     * upgrade (or a v1->v16 chain) produces the real, documented default
-     * rather than the memset's raw 0 -- see zones_cfg_t::ease_off_window_
-     * mult's own comment: 0 IS a separately-legal sentinel for "use the
-     * firmware default" everywhere else this field is read, but a
-     * migration should still land on the concrete value that sentinel
-     * resolves to, not lean on the sentinel to paper over a version that
-     * genuinely never stored an opinion. case 15 (the actual v15->v16
-     * migration) re-asserts this same value explicitly for its own
-     * documentation's sake; every earlier case's blob predates it too and
-     * relies on this line. */
-    out->ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT;
+    /* ZONES_CFG_VERSION 16->17: ease_off_window_mult is now PER-ZONE
+     * (zone_cfg_t::ease_off_window_mult), not a single field set once here
+     * ahead of the switch the way the removed global scalar's default used
+     * to be. Every convert_zone_v*() helper below already memset()s its
+     * destination zone_cfg_t to 0 before filling in the fields its source
+     * layout actually has, and 0 IS this field's documented "use the
+     * firmware default" sentinel (see ZONE_EASE_OFF_WINDOW_MULT_MIN/MAX/
+     * DEFAULT's own comment) -- so every zone of every pre-v16 blob lands on
+     * the sentinel automatically, which zones_config_get_ease_off_window_
+     * mult() resolves to the real 2.0 default, EXACTLY the value the old
+     * removed #define always was. Only case 16 (the actual v16->v17
+     * migration, below) needs an explicit per-zone assignment, since that is
+     * the one version that stored a real, possibly non-default, opinion
+     * (the global scalar) that must be carried forward verbatim rather than
+     * defaulted. */
     switch (version) {
     case 1: {
         zones_cfg_v1_t src;
@@ -392,24 +391,19 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         return true;
     }
     case 15: {
-        /* v15 -> v16 (this pass): field-for-field carry-through. zone_cfg_t
-         * itself is UNCHANGED by this pass (see zones_cfg_t::ease_off_
-         * window_mult's own comment: it is a top-level field, not a
-         * per-zone one), so the zones array is copied directly rather than
-         * through a per-zone convert_zone_v15() -- there is no per-zone
-         * shape difference for one to convert. The only real migration is
-         * out->ease_off_window_mult, which v15 never stored at all: it gets
-         * ZONE_EASE_OFF_WINDOW_MULT_DEFAULT (2.0), NOT the memset(out, 0, ...)
-         * at this function's entry -- unlike coupling_diag_k_dc's "0 means
-         * not measured" convention the v14->v15 migration could rely on, 0
-         * is not a legal value for this field (see zone_taper_climb_rate()'s
-         * own comment on why a non-positive window cannot be tolerated), so
-         * the migration must land on the real firmware default explicitly
-         * or every upgrading board's ease-off would break on its very next
-         * tick instead of merely reverting to compile-time behaviour. This
-         * is what makes a v15->v16 upgrade produce EXACTLY today's
-         * behaviour: PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT was 2.0f, and
-         * ZONE_EASE_OFF_WINDOW_MULT_DEFAULT is the same 2.0f. */
+        /* v15 -> v17 (chained through the now-removed v16 shape): zone_cfg_t
+         * at v15 predates BOTH the v16 global scalar and this pass's v17
+         * per-zone field, so every zone lands on the 0 sentinel (via the
+         * per-element copy's implicit zero-fill below, matching every other
+         * pre-v16 case) -- which zones_config_get_ease_off_window_mult()
+         * resolves to the real 2.0 default, exactly the old compile-time
+         * PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT behaviour. zone_cfg_v16_t
+         * (frozen in zones_config_json.h) is byte-for-byte identical to what
+         * zone_cfg_t was at v15, so a per-element memcpy of that prefix is
+         * exactly equivalent to the old "zone_cfg_t is byte-for-byte
+         * identical" whole-array memcpy -- it just cannot be a single
+         * whole-array memcpy any more now that the current zone_cfg_t has
+         * grown one more tail field the v15 shape does not have. */
         zones_cfg_v15_t src;
         memcpy(&src, blob, sizeof(src));
         out->thermo_count = src.thermo_count;
@@ -418,23 +412,47 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         out->continue_on_zone_trip = src.continue_on_zone_trip;
         out->safety_tc_type = src.safety_tc_type;
         out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v15 value */
-        /* v15 has no such field. ZONE_EASE_OFF_WINDOW_MULT_DEFAULT (2.0), not
-         * the memset(out, 0, ...) at this function's entry -- both are
-         * legal per validate_zones_cfg() (0 is the sentinel "use the
-         * firmware default"), but landing on the REAL value here rather
-         * than the sentinel keeps this migration symmetric with every
-         * other one above (out->pc_link_abort_silence_ms above uses 0
-         * itself, since 0 there resolves to the SAME "use the firmware
-         * default" behaviour either way -- this field's getter does the
-         * identical substitution for 0, so writing the resolved value
-         * directly is equivalent, just more explicit about what a v15
-         * board's ease-off behaviour actually was). */
-        out->ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT;
         out->timing_profile_count = src.timing_profile_count;
         memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
-        memcpy(out->zones, src.zones, sizeof(out->zones)); /* zone_cfg_t is byte-for-byte identical in v15 and v16 */
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].ease_off_window_mult already 0 from this
+             * function's entry memset -- the sentinel, same as every
+             * pre-v16 case. */
+        }
         /* src.crc32 deliberately NOT carried over -- it covered the v15
-         * shape; nvs_save() stamps a fresh one over the current (v16)
+         * shape; nvs_save() stamps a fresh one over the current (v17)
+         * struct. */
+        return true;
+    }
+    case 16: {
+        /* v16 -> v17 (THIS pass, PID_EXPANSION_PLAN.md sec 3.6d): the single
+         * board-wide ease_off_window_mult scalar becomes per-zone -- see
+         * zone_cfg_t::ease_off_window_mult's own ZONES_CFG_VERSION 16->17
+         * comment for why. Every zone gets EXACTLY the v16 board's one
+         * global value carried forward VERBATIM, including the 0 sentinel
+         * unchanged -- not re-defaulted, not re-resolved -- so an upgrading
+         * board's ease-off behaviour is byte-for-byte identical on every
+         * zone until an operator deliberately changes one zone's value.
+         * This is what makes a v16->v17 upgrade produce EXACTLY today's
+         * behaviour, the same guarantee every other single-field-added
+         * migration in this switch documents for its own field. */
+        zones_cfg_v16_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v16 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            out->zones[i].ease_off_window_mult = src.ease_off_window_mult; /* the v16 global, carried verbatim */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v16
+         * shape; nvs_save() stamps a fresh one over the current (v17)
          * struct. */
         return true;
     }

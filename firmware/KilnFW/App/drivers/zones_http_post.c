@@ -276,48 +276,11 @@ esp_err_t zones_post_handler(httpd_req_t *req)
         }
     }
 
-    /* ZONES_CFG_VERSION 15->16: the terminal ease-off taper window
-     * multiplier -- another global v8-override-style field, same OPTIONAL/
-     * omit-preserves convention as safety_tc_type/pc_link_abort_silence_ms
-     * just above (an A/B campaign toggling arms need not resubmit the whole
-     * form, and a client that predates this field must not silently reset
-     * whichever arm is currently running just by saving the zones page).
-     *
-     * Falls back through zones_config_get_ease_off_window_mult(), NOT a raw
-     * `s_zones.cfg.ease_off_window_mult` read the way pc_link_abort_
-     * silence_ms does -- unlike that field, 0 is not a legal value here (see
-     * zones_cfg_t::ease_off_window_mult's own comment), and a fresh,
-     * never-configured board's s_zones.cfg reads exactly 0 in this field.
-     * The getter already defends against that (falls back to
-     * ZONE_EASE_OFF_WINDOW_MULT_DEFAULT), so omitting this field on a
-     * board's very first save still produces a legal tmp that
-     * zones_config_json_validate() accepts, instead of carrying forward an
-     * illegal 0 that would reject the whole submission. */
-    {
-        char val[16];
-        int len = http_form_find_field(body, "ease_off_window_mult", val, sizeof(val));
-        if (len > 0) {
-            /* Parsed against [0, MAX] first -- 0 is the legal "reset to the
-             * firmware default" sentinel (same convention as
-             * pc_link_abort_silence_ms), matching zones_config_json_
-             * validate()'s own [0] union [MIN,MAX] rule -- then the (0, MIN)
-             * sliver zones_config_json_parse_float_field()'s single
-             * contiguous range cannot express on its own is rejected here.
-             * Same effective bound as the accessor setter/validate_zones_
-             * cfg(), just split across two checks because the parser only
-             * takes one [min, max] pair. */
-            if (!zones_config_json_parse_float_field(body, "ease_off_window_mult",
-                                   0.0f, ZONE_EASE_OFF_WINDOW_MULT_MAX, &tmp.ease_off_window_mult) ||
-                (tmp.ease_off_window_mult != 0.0f && tmp.ease_off_window_mult < ZONE_EASE_OFF_WINDOW_MULT_MIN)) {
-                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                    "ease_off_window_mult out of range (0 = firmware default)");
-                free(body);
-                return ESP_OK;
-            }
-        } else {
-            zones_config_get_ease_off_window_mult(&tmp.ease_off_window_mult);
-        }
-    }
+    /* ZONES_CFG_VERSION 16->17: ease_off_window_mult moved per-zone -- see
+     * zone_cfg_t::ease_off_window_mult's own comment. Parsed per zone as
+     * z%u_easeoffmult inside zones_http_parse_zone_fields()
+     * (zones_http_post_parse.c), not here alongside the whole-board globals
+     * any more. */
 
     /* 2026-08-27+1 (owner request: name relays not assigned to any zone).
      * relay<N>_name (N = 1..KILN_IO_RELAY_COUNT, matching relay_mask's wire

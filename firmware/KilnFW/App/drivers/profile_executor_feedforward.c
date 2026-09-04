@@ -30,7 +30,7 @@
  * header's own #define -- see this field's ZONES_CFG_VERSION 15->16 doc
  * comment there for why. */
 #define ZONE_EASE_OFF_WINDOW_MULT_DEFAULT 2.0f
-bool zones_config_get_ease_off_window_mult(float *out_mult);
+bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult);
 
 /* Terminal ease-off taper window, as a multiple of a zone's own identified
  * dead time -- see zone_taper_climb_rate()'s doc comment. Was a compile-time
@@ -244,7 +244,7 @@ static float solve_climb_for_zone(const zone_runtime_t *z, uint8_t zi, float rat
  * this function's callers for the dwelling/nonzero-rate gate) returns 0
  * unconditionally: multiplying zero by any taper factor is still zero, but
  * skipping the division avoids a 0/0 on a segment with zero distance left. */
-float zone_taper_climb_rate(const zone_runtime_t *z, float target_c, float rate_c_per_s,
+float zone_taper_climb_rate(const zone_runtime_t *z, uint8_t zi, float target_c, float rate_c_per_s,
                             float segment_target_c)
 {
     if (rate_c_per_s == 0.0f) return 0.0f;
@@ -252,13 +252,15 @@ float zone_taper_climb_rate(const zone_runtime_t *z, float target_c, float rate_
 
     float dist_c = fabsf(segment_target_c - target_c);
     float dist_s = dist_c / fabsf(rate_c_per_s);
-    /* Runtime multiplier -- see this file's top-of-file comment on why this
-     * reads through the accessor every call rather than caching it, and
-     * zones_config_get_ease_off_window_mult()'s own comment for why it
-     * always returns a legal, safe-to-multiply-by value even against a
-     * zeroed/unconfigured zones_cfg_t. */
+    /* Runtime, PER-ZONE multiplier (ZONES_CFG_VERSION 16->17) -- see this
+     * file's top-of-file comment on why this reads through the accessor
+     * every call rather than caching it, and zones_config_get_ease_off_
+     * window_mult()'s own comment for why it always returns a legal,
+     * safe-to-multiply-by value even against a zeroed/unconfigured
+     * zones_cfg_t. Zone `zi`'s own value only -- this is what makes a
+     * z0-only override possible without touching z1/z2's. */
     float mult = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT;
-    zones_config_get_ease_off_window_mult(&mult);
+    zones_config_get_ease_off_window_mult(zi, &mult);
     float window_s = mult * z->ff_dead_time_s;
 
     if (dist_s >= window_s) return rate_c_per_s;
@@ -591,7 +593,7 @@ void seed_bumpless_with_ff(zone_runtime_t *z, uint8_t zi, float u_desired)
     float rate_c_per_s = s_exec.target_rate_c_per_s;
     if (!s_exec.dwelling && rate_c_per_s != 0.0f) {
         const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index];
-        rate_c_per_s = zone_taper_climb_rate(z, s_exec.target_c, rate_c_per_s, seg->target_c);
+        rate_c_per_s = zone_taper_climb_rate(z, zi, s_exec.target_c, rate_c_per_s, seg->target_c);
     }
     float ff_hold = 0.0f;
     float u_ff = zone_feedforward(z, zi, s_exec.target_c, rate_c_per_s, &ff_hold);

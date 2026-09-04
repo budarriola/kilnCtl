@@ -249,6 +249,17 @@ _ZONE_FIELD_FORM_KEY = {
     # the current value -- same convention as fuzzy_strength_pct/coupling_c%u
     # above). Same JSON key and form-key suffix, no name translation needed.
     "coupling_diag_k_dc": "coupling_diag_k_dc",
+    # ZONES_CFG_VERSION 16->17 (PID_EXPANSION_PLAN.md sec 3.6d, 2026-09-04):
+    # the terminal ease-off taper window multiplier, moved PER-ZONE -- was a
+    # single top-level "ease_off_window_mult" scalar (see the now-removed
+    # _TOP_FIELD_FORM_KEY entry's own history) applied board-wide, which
+    # could not give z0 alone a wider window without moving z1/z2's too.
+    # zones_http_post_parse.c: snprintf(key, ..., "z%u_easeoffmult", i) --
+    # same JSON key on the GET side, different (shorter) form-key suffix on
+    # POST, same as fuzzy_strength_pct's own name split above. Omitted-on-
+    # POST preserves the current per-zone value (same convention as
+    # coupling_diag_k_dc just above).
+    "ease_off_window_mult": "easeoffmult",
 }
 #: Integer-valued zone fields -- posted as a plain int string (parse_u8_field()
 #: on the firmware side), never a float repr like "2.0".
@@ -331,12 +342,13 @@ _TOP_FIELD_FORM_KEY = {
     "continue_on_zone_trip": "continue_on_zone_trip",
     "safety_tc_type": "safety_tc_type",
     "pc_link_abort_silence_ms": "pc_link_abort_silence_ms",
-    # ZONES_CFG_VERSION 15->16: the terminal ease-off taper window
-    # multiplier, formerly firmware's compile-time PROFILE_EXECUTOR_EASE_
-    # OFF_WINDOW_MULT #define -- see firmware/KilnFW/App/drivers/
-    # profile_executor_feedforward.c's top-of-file comment. A float field,
-    # not in _TOP_INT_FIELDS, same as pc_link_abort_silence_ms.
-    "ease_off_window_mult": "ease_off_window_mult",
+    # ease_off_window_mult was HERE (ZONES_CFG_VERSION 15->16) -- REMOVED at
+    # 16->17 (2026-09-04): the field moved per-zone (see _ZONE_FIELD_FORM_KEY's
+    # own entry). A GET no longer emits a top-level "ease_off_window_mult" at
+    # all, so this module never sees one in `current`; see
+    # _LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY below for the backward-compat path
+    # that still lets an OLD preset using this now-removed top-level scalar
+    # apply -- to every zone, not silently dropped.
 }
 _TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays", "safety_tc_type"}
 #: Top-level keys GET emits that this module deliberately never echoes back:
@@ -509,6 +521,15 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     "guard_wrong_dir_window_s", "guard_wrong_dir_rate_c_per_min", "guard_off_settle_s",
     "guard_runaway_rate_c_per_min", "guard_runaway_margin_c", "guard_drift_period_s",
     "guard_sensor_fault_debounce_ticks", "guard_frozen_window_s",
+    # ZONES_CFG_VERSION 16->17 (PID_EXPANSION_PLAN.md sec 3.6d, 2026-09-04):
+    # ease_off_window_mult, now per-zone -- same scalar-override class as
+    # coupling_diag_k_dc above. A preset zone entry naming this sets THAT
+    # zone's own A/B arm (e.g. a z0-only 3.5x override); see
+    # _apply_legacy_top_level_ease_off_mult() below for the separate,
+    # backward-compat path that lets an OLD preset's now-removed top-level
+    # "ease_off_window_mult" scalar still apply too (to every zone that does
+    # not name its own override here).
+    "ease_off_window_mult",
 }
 
 #: coupling_coeff is handled OUTSIDE _PRESET_ZONE_OVERRIDE_FIELDS on purpose:
@@ -589,6 +610,61 @@ _PRESET_ZONE_KNOWN_IGNORED_FIELDS = {
 }
 
 
+#: ZONES_CFG_VERSION 16->17 backward compatibility (PID_EXPANSION_PLAN.md
+#: sec 3.6d): the top-level "ease_off_window_mult" key config_presets.json
+#: presets carried before this pass (e.g. easeoff_ab_2p0_20260903.json/
+#: easeoff_ab_3p0_20260903.json) named a board-wide scalar that no longer has
+#: anywhere to land -- GET /api/zones stopped emitting it, and the firmware's
+#: POST handler stopped reading it as a top-level field the same day this
+#: field moved onto zone_cfg_t. Without this function, an old preset still
+#: naming it would simply have the key ignored (it is not in
+#: _TOP_FIELD_FORM_KEY any more) -- exactly the "preset value never reaches
+#: the wire" failure mode this module's own build_post_body() docstring
+#: warns about for an unmapped field, except silent instead of a raised
+#: ZonesHttpUnknownFieldError, because the key is still a perfectly
+#: recognized (just legacy) preset field name.
+LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY = "ease_off_window_mult"
+
+
+def _apply_legacy_top_level_ease_off_mult(current: dict, preset: dict) -> dict:
+    """Returns a shallow-ish copy of `preset` with a legacy top-level
+    "ease_off_window_mult" scalar (if present) expanded into a per-zone
+    "ease_off_window_mult" override on EVERY zone `current` reports (not
+    just the zones `preset` already happens to mention -- a preset that
+    names this legacy scalar with an empty/partial "zones" list, the most
+    common real shape: a pure "just change the board-wide ease-off arm"
+    preset, must still reach every zone) that does not already carry its
+    own per-zone value -- i.e. the old "one number for every zone" board-
+    wide behaviour, reproduced through the new per-zone mechanism, so an
+    old preset still applies with EXACTLY its old effect. A zone that
+    already names its own "ease_off_window_mult" (the new per-zone preset
+    form) is left alone -- the more specific, explicitly-authored override
+    wins over the legacy board-wide one, never the other way around.
+
+    `current` is only consulted for its zone INDEX set (current["zones"][*]
+    ["index"]) -- never for any other field -- so this needs no more than a
+    fresh GET /api/zones response, the same object every caller already has
+    in hand at this point in the GET-merge-POST cycle.
+
+    A no-op (returns `preset` unchanged) when the legacy key is absent --
+    the overwhelmingly common case for every preset written after this
+    pass.
+    """
+    if LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY not in preset:
+        return preset
+    legacy_value = preset[LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY]
+    new_preset = dict(preset)
+    del new_preset[LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY]
+    zones_by_index = {z["index"]: dict(z) for z in preset.get("zones", [])}
+    for cz in current.get("zones", []):
+        idx = cz["index"]
+        zone = zones_by_index.setdefault(idx, {"index": idx})
+        if LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY not in zone:
+            zone[LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY] = legacy_value
+    new_preset["zones"] = list(zones_by_index.values())
+    return new_preset
+
+
 def build_post_body(current: dict, preset: dict) -> str:
     """GET-merge-POST, per the module docstring: `current` is a freshly
     GET /api/zones'd dict; `preset` is a config_presets.py preset (or any
@@ -604,6 +680,7 @@ def build_post_body(current: dict, preset: dict) -> str:
     field (which POST would then treat as "set to zero" for most zone
     fields).
     """
+    preset = _apply_legacy_top_level_ease_off_mult(current, preset)
     fields: "dict[str, str]" = {}
 
     # ---- top-level scalars: echo current, let the preset override ANY
@@ -782,6 +859,17 @@ def apply_zone_preset(host: str, preset: dict, timeout: float = ZONES_HTTP_TIMEO
     that the board ACKed but a read-back then contradicted.
     """
     current = get_zones(host, timeout)
+    # Expand a legacy top-level "ease_off_window_mult" scalar (a preset
+    # written before ZONES_CFG_VERSION 16->17) into per-zone overrides ONCE,
+    # here -- build_post_body() does its own equivalent expansion internally
+    # on ITS OWN copy of `preset` (a no-op the second time, since the legacy
+    # key is already gone), but _verify_against_preset() below needs to see
+    # the SAME expanded, per-zone-keyed preset, or the read-back
+    # verification this function exists to provide would simply never look
+    # at the field a legacy preset asked to change (it is not in
+    # _TOP_FIELD_FORM_KEY any more) and silently report ok=True regardless
+    # of whether the value actually landed.
+    preset = _apply_legacy_top_level_ease_off_mult(current, preset)
     body = build_post_body(current, preset)
     response_text = post_zones(host, body, timeout)
     if response_text.strip() != "ok":

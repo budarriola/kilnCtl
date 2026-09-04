@@ -929,31 +929,34 @@ bool zones_config_get_pc_link_abort_silence_ms(float *out_ms)
     return true;
 }
 
-/* ZONES_CFG_VERSION 15->16: another global, not gated on thermo_count --
- * same reasoning as pc_link_abort_silence_ms's own comment just above, the
- * ease-off window multiplier applies to whichever zones happen to be
- * configured, not to a specific count of them.
+/* ZONES_CFG_VERSION 16->17: PER-ZONE as of this pass (was a single global
+ * scalar at 15->16 -- see zone_cfg_t::ease_off_window_mult's own comment for
+ * why z0 needed its own reach). Gated on MAX31856_CHANNEL_COUNT, not
+ * thermo_count -- same reasoning as zones_config_get_executor_thresholds()
+ * above: a caller with a valid zone index should get an answer even for a
+ * zone past the currently-configured count, and every other per-zone
+ * accessor in this file already follows that rule.
  *
- * Unlike every other getter in this file, this one is defensive rather than
- * a bare field read: s_zones.cfg.ease_off_window_mult reads 0.0f in the
- * zeroed, not-yet-configured s_zones.cfg (first boot, corrupt NVS, a
- * refused newer-than-firmware blob -- see zones_http.c's own zeroing on
- * load failure) -- 0 IS a legal, validated value (the same "use the
- * firmware default" sentinel pc_link_abort_silence_ms uses, see ZONE_EASE_
- * OFF_WINDOW_MULT_MIN/MAX/DEFAULT's own comment), but it is not a value
- * profile_executor_feedforward.c's zone_taper_climb_rate() can safely
- * divide by -- THIS is where the sentinel actually gets resolved into the
- * real 2.0 default, not at storage time. Falling back to the default for
- * anything else outside [MIN, MAX] too (not just exactly 0) covers a
- * hypothetical stored value from before this range was enforced -- always
- * answer with a value zone_taper_climb_rate() can safely use, never with
- * whatever raw bytes happen to be sitting in s_zones.cfg. */
-bool zones_config_get_ease_off_window_mult(float *out_mult)
+ * Unlike a bare field read, this one is defensive: s_zones.cfg.zones[zone_
+ * index].ease_off_window_mult reads 0.0f in the zeroed, not-yet-configured
+ * s_zones.cfg (first boot, corrupt NVS, a refused newer-than-firmware blob --
+ * see zones_http.c's own zeroing on load failure) -- 0 IS a legal, validated
+ * value (the same "use the firmware default" sentinel pc_link_abort_
+ * silence_ms uses, see ZONE_EASE_OFF_WINDOW_MULT_MIN/MAX/DEFAULT's own
+ * comment), but it is not a value profile_executor_feedforward.c's
+ * zone_taper_climb_rate() can safely divide by -- THIS is where the sentinel
+ * actually gets resolved into the real 2.0 default, not at storage time.
+ * Falling back to the default for anything else outside [MIN, MAX] too (not
+ * just exactly 0) covers a hypothetical stored value from before this range
+ * was enforced -- always answer with a value zone_taper_climb_rate() can
+ * safely use, never with whatever raw bytes happen to be sitting in
+ * s_zones.cfg. */
+bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult)
 {
-    if (!out_mult) {
+    if (!out_mult || zone_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
-    float v = s_zones.cfg.ease_off_window_mult;
+    float v = s_zones.cfg.zones[zone_index].ease_off_window_mult;
     if (v == 0.0f) {
         v = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT; /* the sentinel */
     } else if (!isfinite(v) || v < ZONE_EASE_OFF_WINDOW_MULT_MIN || v > ZONE_EASE_OFF_WINDOW_MULT_MAX) {
@@ -970,14 +973,16 @@ bool zones_config_get_ease_off_window_mult(float *out_mult)
  * substituted for it. 0 is accepted (same sentinel zones_config_json_
  * validate() allows) as an explicit "reset to the firmware default" -- an
  * A/B campaign ending an arm should be able to ask for that directly rather
- * than having to know and pass 2.0 by hand. */
-bool zones_config_set_ease_off_window_mult(float mult)
+ * than having to know and pass 2.0 by hand. Setting one zone's value never
+ * touches any other zone's -- that independence is the entire point of this
+ * pass. */
+bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult)
 {
-    if (!isfinite(mult) ||
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(mult) ||
         (mult != 0.0f && (mult < ZONE_EASE_OFF_WINDOW_MULT_MIN || mult > ZONE_EASE_OFF_WINDOW_MULT_MAX))) {
         return false;
     }
-    s_zones.cfg.ease_off_window_mult = mult;
+    s_zones.cfg.zones[zone_index].ease_off_window_mult = mult;
     s_config_generation++;
     return nvs_save() == ESP_OK;
 }

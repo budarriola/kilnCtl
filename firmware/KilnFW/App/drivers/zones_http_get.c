@@ -196,7 +196,6 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
            "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,"
            "\"pc_link_abort_silence_ms\":%.0f,"
-           "\"ease_off_window_mult\":%.3f,"
            /* 2026-08-27+1 (owner request: name relays that are NOT in any
             * zone): relay_zone_owned_mask lets the page tell, without its
             * own recompute, which of relay_names[] below it should render
@@ -220,7 +219,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            "\"relay_names\":[",
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
            s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type,
-           (double)s_zones.cfg.pc_link_abort_silence_ms, (double)s_zones.cfg.ease_off_window_mult,
+           (double)s_zones.cfg.pc_link_abort_silence_ms,
            zone_owned_relay_mask(&s_zones.cfg),
            safety_wiring.link_up ? "true" : "false", safety_wiring.tc_temp_valid ? "true" : "false",
            (double)safety_wiring.tc_temp_c, safety_wiring.tc_fault, safety_wiring.relay_energized ? "true" : "false",
@@ -325,6 +324,20 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * coupling_c%u above. %.4f matches model_k_dc's own precision -- same
          * unit, same small-gain-zone concern. */
         APPEND("\"coupling_diag_k_dc\":%.4f,", (double)z->coupling_diag_k_dc);
+        /* ZONES_CFG_VERSION 16->17 (PID_EXPANSION_PLAN.md sec 3.6d): the
+         * terminal ease-off taper window multiplier, now per-zone -- was a
+         * single top-level "ease_off_window_mult" key applied to every zone
+         * (see zone_cfg_t::ease_off_window_mult's own comment for why one
+         * number could not give z0 alone a wider window). z%u_easeoffmult on
+         * the POST side (parse_zone_fields()) is the matching wire name.
+         * Emits the RAW stored value (including the legal 0 sentinel), not
+         * the resolved-to-2.0 value zones_config_get_ease_off_window_mult()
+         * would answer with -- same "the page shows what is actually stored,
+         * not the default it resolves to" convention pc_link_abort_
+         * silence_ms's own 0 uses above. Always emitted, same always-emit/
+         * read-back-and-repost reasoning as coupling_diag_k_dc/model_k_dc
+         * above. */
+        APPEND("\"ease_off_window_mult\":%.3f,", (double)z->ease_off_window_mult);
         /* 2026-08-30 (ZONES_CFG_VERSION 10->11): the coupling row, one
          * indexed key per cell (z%u_coupling_c%u is the matching POST-side
          * wire name -- see parse_zone_fields()) rather than a JSON array, so

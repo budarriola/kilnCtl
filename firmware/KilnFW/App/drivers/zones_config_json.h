@@ -59,7 +59,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 16
+#define ZONES_CFG_VERSION 17
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -452,7 +452,101 @@ typedef struct {
      * fit, so it has no reason to need a different order-of-magnitude
      * ceiling. */
     float coupling_diag_k_dc;
+    /* ---- ZONES_CFG_VERSION 16->17 (2026-09-04, PID_EXPANSION_PLAN.md
+     * sec 3.6d follow-up: "an A/B override needs per-zone reach"). Was
+     * zones_cfg_t's own single global scalar (see this field's own
+     * z0_dwell_overshoot_mechanism_20260904_report.md-driven move below) --
+     * z0's dwell-entry overshoot (~2.2 degC, the largest remaining tracking
+     * error on this board) correlates near 1:1 with ramp rate into the
+     * transition while z0's own duty is already near zero at the overshoot
+     * peak, and z0 carries the longest identified dead time and the
+     * heaviest incoming cross-zone coupling of the three zones -- a single
+     * board-wide multiplier cannot give z0 a wider taper window without
+     * moving z1/z2's too, confounding any A/B run across zones that do not
+     * need the same answer.
+     *
+     * Same "0 = use the firmware default" sentinel convention the removed
+     * global field had -- see ZONE_EASE_OFF_WINDOW_MULT_MIN/MAX/DEFAULT's
+     * own comment, unchanged by this move: 0 is still always legal, and
+     * zone_taper_climb_rate() still never sees a non-positive window.
+     * Appended at zone_cfg_t's own true tail, the same safe-growth spot
+     * coupling_diag_k_dc used at v14->v15 just above -- so a v16 board's
+     * on-flash zone_cfg_v16_t layout (frozen below) stays an exact byte-
+     * for-byte prefix of this shape, not a reinterpretation of it. */
+    float ease_off_window_mult;
 } zone_cfg_t;
+
+/* Frozen v16 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 16->17), coupling_diag_k_dc and all,
+ * predating the per-zone ease_off_window_mult above. Same discipline as
+ * zone_cfg_v14_t just above it in this file: field order hand-copied from
+ * v16's actual shape, never derived from the live struct -- critically,
+ * NEVER the bare `zone_cfg_t` name for this purpose, since that name now
+ * refers to the v17 (bigger) shape; zones_cfg_v15_t below this struct is
+ * repointed at this frozen type for exactly that reason (it used to reuse
+ * zone_cfg_t verbatim, back when doing so was still correct). */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+} zone_cfg_v16_t;
+
+/* 196 = 188 (zone_cfg_v14_t's own byte-for-byte size, per that struct's
+ * assert comment) + 4 (coupling_diag_k_dc, already 4-byte aligned so no
+ * further tail padding) = 192, itself already a multiple of 4. zone_cfg_t
+ * was UNCHANGED by ZONES_CFG_VERSION 15->16 (that pass's new field was
+ * zones_cfg_t's own top-level scalar, not a per-zone one -- see the removed
+ * global field's comment, git history), so this is also exactly what a v16
+ * board's zone_cfg_t looked like. Hand-computed the same way as every
+ * other frozen zone_cfg_vN_t assert in this file -- never sizeof(zone_cfg_t),
+ * which by the time this pass lands is already the v17 shape, not v16's. */
+_Static_assert(sizeof(zone_cfg_v16_t) == 192,
+               "zone_cfg_v16_t must match the on-flash v16 layout byte-for-byte (192 bytes)"); /* v16 -- predates per-zone ease_off_window_mult */
 
 
 /* A named, reusable bundle of the nine thermal-timing numbers that used to be
@@ -539,31 +633,16 @@ typedef struct {
      * round-trips exactly, and every parse/emit helper in this file is
      * float-shaped. */
     float pc_link_abort_silence_ms;
-    /* ZONES_CFG_VERSION 15->16 (2026-09-03): the terminal ease-off taper
-     * window multiplier -- formerly profile_executor_feedforward.c's
-     * compile-time PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT #define, now a
-     * runtime A/B knob (see ZONE_EASE_OFF_WINDOW_MULT_MIN/MAX/DEFAULT's own
-     * comment above for why and the bounds chosen). Global, not per-zone --
-     * same reasoning as pc_link_abort_silence_ms/max_simultaneous_relays
-     * just above: this is ONE multiplier applied against each zone's own
-     * ff_dead_time_s (zone_taper_climb_rate() already varies the resulting
-     * window per zone from that), not a separate per-zone knob, which would
-     * confound an A/B run across zones with different dead times instead of
-     * testing the one number the campaign cares about. Appended at the true
-     * tail, alongside pc_link_abort_silence_ms, ahead of crc32 -- the one
-     * safe place to grow this struct (see crc32's own comment below).
-     *
-     * 0 IS "use the firmware default" here, same convention as pc_link_
-     * abort_silence_ms just above (see ZONE_EASE_OFF_WINDOW_MULT_MIN/MAX/
-     * DEFAULT's own comment for the exact sentinel semantics) -- a fresh,
-     * never-configured s_zones.cfg (memset to 0) is therefore already a
-     * LEGAL value for this field, same as every other 0-means-unconfigured
-     * field in this struct, not a special case validate_zones_cfg() has to
-     * carve out. zones_config_get_ease_off_window_mult() is what turns that
-     * 0 into the real ZONE_EASE_OFF_WINDOW_MULT_DEFAULT (2.0) before
-     * zone_taper_climb_rate() ever divides by it -- see that getter's own
-     * comment. */
-    float ease_off_window_mult;
+    /* ZONES_CFG_VERSION 15->16 (2026-09-03) added a global
+     * ease_off_window_mult scalar here -- REMOVED at 16->17 (2026-09-04,
+     * PID_EXPANSION_PLAN.md sec 3.6d): a single board-wide multiplier could
+     * not give z0 alone a wider terminal ease-off taper window without
+     * moving z1/z2's too, and z0_dwell_overshoot_mechanism_20260904_report.md
+     * found z0's dwell-entry overshoot needs exactly that kind of isolated
+     * change to A/B test. The multiplier now lives per-zone, at zone_cfg_t's
+     * own tail (see zone_cfg_t::ease_off_window_mult) -- zones_cfg_v16_t
+     * above is the frozen historical layout that still carries this global
+     * scalar, for decoding a v16 board's real on-flash blob. */
     /* 2026-08-27 (ZONES_CFG_VERSION 6->7): CRC32 over this whole struct with
      * this field itself zeroed, stamped by nvs_save() (see compute_zones_crc())
      * and checked by decode_zones_blob() on every load of a CURRENT-version
@@ -1320,12 +1399,15 @@ typedef struct {
 
 /* Frozen v15 layout -- what zones_cfg_t looked like immediately before THIS
  * pass (ZONES_CFG_VERSION 15->16), coupling_diag_k_dc and all, predating
- * ease_off_window_mult. zone_cfg_t ITSELF is unchanged by this pass (the new
- * field is a top-level zones_cfg_t field, not a per-zone one -- see
- * zones_cfg_t::ease_off_window_mult's own comment), so this snapshot reuses
- * zone_cfg_t verbatim rather than freezing a new zone_cfg_v15_t, the same way
- * v9-v14 above reused zone_timing_profile_t verbatim whenever it did not
- * change. */
+ * ease_off_window_mult. zone_cfg_t ITSELF was unchanged by that pass (the new
+ * field was a top-level zones_cfg_t field, not a per-zone one), so this
+ * snapshot originally reused zone_cfg_t verbatim, the same way v9-v14 above
+ * reused zone_timing_profile_t verbatim whenever it did not change --
+ * REPOINTED at zone_cfg_v16_t by ZONES_CFG_VERSION 16->17 (this pass), since
+ * the bare name `zone_cfg_t` now refers to the v17 shape and would silently
+ * stop describing a real v15 board's on-flash bytes otherwise (zone_cfg_v16_t
+ * is byte-for-byte identical to what zone_cfg_t was at v15/v16, per that
+ * struct's own comment). */
 typedef struct {
     uint8_t version;
     uint8_t thermo_count;
@@ -1333,15 +1415,41 @@ typedef struct {
     uint8_t max_simultaneous_relays;
     uint8_t continue_on_zone_trip;
     uint8_t safety_tc_type;
-    zone_cfg_t zones[MAX31856_CHANNEL_COUNT];
+    zone_cfg_v16_t zones[MAX31856_CHANNEL_COUNT];
     uint8_t timing_profile_count;
     zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
     float pc_link_abort_silence_ms;
     uint32_t crc32;
 } zones_cfg_v15_t; /* v15 -- what zones_cfg_t looked like immediately before THIS
-                     * pass; predates ease_off_window_mult. zone_cfg_t and
-                     * zone_timing_profile_t both unchanged by this pass, reused
-                     * verbatim same as v9-v14's own comment. */
+                     * pass; predates ease_off_window_mult. zone_timing_profile_t
+                     * unchanged by this pass, reused verbatim same as v9-v14's own
+                     * comment; zones[] now typed zone_cfg_v16_t (see above) rather
+                     * than the bare, now-stale `zone_cfg_t` name. */
+
+/* Frozen v16 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 16->17): the single global ease_off_window_mult
+ * scalar, appended at the true tail ahead of crc32, and zones[] still the
+ * per-zone shape that predates this pass's per-zone override (zone_cfg_v16_t,
+ * frozen above). This is what a LIVE, already-commissioned board looks like
+ * on flash right now -- the exact blob a v16->v17 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v16_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    float ease_off_window_mult; /* v16's global scalar -- removed at v17; see
+                                 * zone_cfg_t::ease_off_window_mult's own
+                                 * ZONES_CFG_VERSION 16->17 comment */
+    uint32_t crc32;
+} zones_cfg_v16_t; /* v16 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates the per-zone ease_off_window_mult move and
+                     * still carries the global scalar this pass removes. */
 
 
 
@@ -1433,26 +1541,31 @@ bool zones_config_json_field_present(const char *body, const char *key);
 bool zones_config_json_parse_timing_profile_fields(const char *body, uint8_t p, zone_timing_profile_t *tp,
                                                     const char **err_reason);
 
-/* Runtime accessor pair for zones_cfg_t::ease_off_window_mult (ZONES_CFG_
- * VERSION 15->16) -- declared here rather than zones_http.h alongside this
- * struct's other public getters/setters purely because this pass's touched-
- * files list does not include zones_http.h; every caller that needs these
- * (profile_executor_feedforward.c, zones_http_handlers.c,
- * zones_config_accessors.c's own definition) already includes or can include
- * this header. Same "false means cannot answer / reject" convention as every
- * other zones_config_get_.../set_...() pair in this codebase.
+/* Runtime accessor pair for zone_cfg_t::ease_off_window_mult (ZONES_CFG_
+ * VERSION 16->17, PER-ZONE as of this pass -- was a single global scalar at
+ * 15->16, see that field's own comment for the move) -- declared here rather
+ * than zones_http.h alongside this struct's other public getters/setters
+ * purely because this pass's touched-files list does not include
+ * zones_http.h; every caller that needs these (profile_executor_feedforward.c,
+ * zones_http_get.c/zones_http_post.c, zones_config_accessors.c's own
+ * definition) already includes or can include this header. Same "false means
+ * cannot answer / reject" convention as every other zones_config_get_.../
+ * set_...() pair in this codebase; `zone_index` is bounds-checked against
+ * MAX31856_CHANNEL_COUNT the same way every other per-zone accessor in this
+ * file is (e.g. zones_config_get_executor_thresholds()).
  *
  * zones_config_get_ease_off_window_mult() cannot fail on a normally-loaded
- * board (the field is always a legal, currently-in-effect value -- see the
- * field's own doc comment) but still reports success/failure like its
- * siblings for a uniform call convention. zones_config_set_ease_off_window_
- * mult() rejects (false, no write, no NVS save) a non-finite value or one
- * outside [ZONE_EASE_OFF_WINDOW_MULT_MIN, ZONE_EASE_OFF_WINDOW_MULT_MAX] --
- * same refuse-don't-clamp discipline zones_config_set_coupling_diag_k_dc()
- * documents, since silently clamping an A/B campaign's requested value to a
- * different one would corrupt the experiment without telling anyone. */
-bool zones_config_get_ease_off_window_mult(float *out_mult);
-bool zones_config_set_ease_off_window_mult(float mult);
+ * board for an in-range zone_index (the field is always a legal, currently-
+ * in-effect value -- see the field's own doc comment) but still reports
+ * success/failure like its siblings for a uniform call convention.
+ * zones_config_set_ease_off_window_mult() rejects (false, no write, no NVS
+ * save) a non-finite value or one outside [ZONE_EASE_OFF_WINDOW_MULT_MIN,
+ * ZONE_EASE_OFF_WINDOW_MULT_MAX] -- same refuse-don't-clamp discipline
+ * zones_config_set_coupling_diag_k_dc() documents, since silently clamping an
+ * A/B campaign's requested value to a different one would corrupt the
+ * experiment without telling anyone. */
+bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult);
+bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult);
 
 #ifdef __cplusplus
 }

@@ -2851,6 +2851,26 @@ current profile; then the deferred coupling-floor campaign; then a
 firmware-level k_dc/dead-time-scaled feedforward compensation) in the
 report's "Third pass" section.
 
+**Per-zone `ease_off_window_mult` mechanism shipped, 2026-09-04 (unflashed).**
+`ease_off_window_mult` moved from a single `zones_cfg_t` scalar (ZONES_CFG_
+VERSION 15->16) to a per-zone `zone_cfg_t` field (16->17,
+`firmware/KilnFW/App/drivers/zones_config_json.h`), with a matching NVS
+migration (a v16 board's one global value carries verbatim to every zone --
+`zones_config_migrate.c` case 16), `GET`/`POST /api/zones` wire changes
+(per-zone JSON key, `z<i>_easeoffmult` form field), and PC-tools backward
+compatibility for a preset still naming the old top-level scalar
+(`zones_http_client.py`'s `_apply_legacy_top_level_ease_off_mult()`). Every
+zone still defaults to 2.0, unchanged, per the Third-pass finding just above
+that the knob does not move arrival ramp rate (the quantity that actually
+matters) -- this pass makes a z0-only override POSSIBLE to configure, it
+does not reopen or re-recommend running one. Build/host-tests only;
+**not flashed** -- see this file's own top-level task notes for why (a live
+fuzzy-AB campaign was running on the board at the time), and note the
+ZONES_CFG_VERSION bump means the eventual flash must go through the normal
+v16->v17 migration path rather than a fresh commission, since the running
+campaign's board holds live, real (non-default) zone config that must
+survive the upgrade.
+
 **Shortlist item 2 answered, 2026-09-04, zero kiln time: the ramp rate is
 NOT zone-specific, and item 1's cost is revised up.** `profile_segment_t`
 carries one `ramp_c_per_hr` for the whole `zone_mask` (`docs/PROFILES.md`

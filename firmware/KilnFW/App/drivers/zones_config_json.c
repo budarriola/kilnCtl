@@ -195,18 +195,6 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
         *err_reason = "pc_link_abort_silence_ms out of range";
         return false;
     }
-    /* ZONES_CFG_VERSION 15->16: same "0 = use the firmware default" sentinel
-     * convention as pc_link_abort_silence_ms just above -- see ZONE_EASE_
-     * OFF_WINDOW_MULT_MIN/MAX/DEFAULT's own comment. 0 is explicitly legal
-     * here (a fresh/migrated config's memset(0) default), everything else
-     * must fall within [MIN, MAX]. */
-    if (!isfinite(cand->ease_off_window_mult) ||
-        (cand->ease_off_window_mult != 0.0f &&
-         (cand->ease_off_window_mult < ZONE_EASE_OFF_WINDOW_MULT_MIN ||
-          cand->ease_off_window_mult > ZONE_EASE_OFF_WINDOW_MULT_MAX))) {
-        *err_reason = "ease_off_window_mult out of range";
-        return false;
-    }
     /* 2026-08-27 (ZONES_CFG_VERSION 8->9): timing_profile_count must be at
      * least 1 -- every zone_cfg_t::timing_profile, including a freshly
      * zero-initialized zone's 0, must resolve to a real profile -- and at
@@ -488,6 +476,19 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
         if (!isfinite(z->coupling_diag_k_dc) || z->coupling_diag_k_dc < 0.0f ||
             z->coupling_diag_k_dc > ZONE_MODEL_K_MAX) {
             *err_reason = "zone coupling_diag_k_dc out of range";
+            return false;
+        }
+        /* ZONES_CFG_VERSION 16->17: same "0 = use the firmware default"
+         * sentinel convention the removed global scalar had -- see ZONE_
+         * EASE_OFF_WINDOW_MULT_MIN/MAX/DEFAULT's own comment. 0 is explicitly
+         * legal here (a fresh/migrated zone's memset(0) default), everything
+         * else must fall within [MIN, MAX]. Per-zone now, checked inside this
+         * per-zone loop rather than once at the top of this function. */
+        if (!isfinite(z->ease_off_window_mult) ||
+            (z->ease_off_window_mult != 0.0f &&
+             (z->ease_off_window_mult < ZONE_EASE_OFF_WINDOW_MULT_MIN ||
+              z->ease_off_window_mult > ZONE_EASE_OFF_WINDOW_MULT_MAX))) {
+            *err_reason = "zone ease_off_window_mult out of range";
             return false;
         }
         /* settings_source: either the CUSTOM sentinel, or a real zone index --

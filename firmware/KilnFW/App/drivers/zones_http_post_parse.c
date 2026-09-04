@@ -595,6 +595,35 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
             z->coupling_diag_k_dc = current_z->coupling_diag_k_dc;
         }
     }
+    /* ZONES_CFG_VERSION 16->17 (PID_EXPANSION_PLAN.md sec 3.6d): the
+     * terminal ease-off taper window multiplier, now per-zone -- was a
+     * single whole-board z%u-less field (see zone_cfg_t::ease_off_window_
+     * mult's own comment for why z0 needed its own reach). Same OPTIONAL/
+     * omit-PRESERVES convention as z%u_coupling_diag_k_dc just above (an A/B
+     * campaign toggling one zone's arm need not resubmit the whole form, and
+     * a client that predates this field must not silently reset whichever
+     * arm is currently running on THIS zone just by saving the zones page).
+     *
+     * Parsed against [0, MAX] first -- 0 is the legal "reset to the firmware
+     * default" sentinel (same convention as pc_link_abort_silence_ms) --
+     * then the (0, MIN) sliver zones_config_json_parse_float_field()'s
+     * single contiguous range cannot express on its own is rejected here.
+     * Same effective bound as the accessor setter/zones_config_json_
+     * validate()'s per-zone check, just split across two tests because the
+     * parser only takes one [min, max] pair. */
+    snprintf(key, sizeof(key), "z%u_easeoffmult", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_EASE_OFF_WINDOW_MULT_MAX,
+                                   &z->ease_off_window_mult) ||
+                (z->ease_off_window_mult != 0.0f && z->ease_off_window_mult < ZONE_EASE_OFF_WINDOW_MULT_MIN)) {
+                *err_reason = "zone ease_off_window_mult out of range (0 = firmware default)";
+                return false;
+            }
+        } else {
+            z->ease_off_window_mult = current_z->ease_off_window_mult;
+        }
+    }
     /* 2026-08-30 (ZONES_CFG_VERSION 10->11): one indexed key per cell,
      * z%u_coupling_c%u -- e.g. z1_coupling_c0 is zone 1's measured response
      * to zone 0's heater. Same per-cell "omit preserves the currently-stored

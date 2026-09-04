@@ -583,20 +583,29 @@ uint8_t zones_config_get_max_simultaneous_relays(void)
     return 0;
 }
 
-/* ZONES_CFG_VERSION 15->16: profile_executor_feedforward.c's zone_taper_
- * climb_rate() now reads the ease-off window multiplier through this getter
- * instead of the old PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT compile-time
- * #define. Settable (not hardcoded), defaulting to 2.0 -- the exact value
- * the removed #define held -- so every pre-existing test in this file that
- * exercises the taper keeps seeing exactly the same window it always has,
- * and a test that specifically wants to prove the runtime knob actually
- * moves the window (the "config set -> persisted -> read -> window
- * different" chain) can override it via g_stub_ease_off_window_mult. */
-static float g_stub_ease_off_window_mult = 2.0f;
-bool zones_config_get_ease_off_window_mult(float *out_mult)
+/* ZONES_CFG_VERSION 16->17: profile_executor_feedforward.c's zone_taper_
+ * climb_rate() now reads the ease-off window multiplier through this getter,
+ * PER ZONE (was a single board-wide scalar at 15->16, itself a replacement
+ * for the old PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT compile-time #define).
+ * Settable per zone (not hardcoded), every slot defaulting to 2.0 -- the
+ * exact value the removed #define held -- so every pre-existing test in this
+ * file that exercises the taper keeps seeing exactly the same window it
+ * always has regardless of which zone index it passes, and a test that
+ * specifically wants to prove the runtime knob actually moves the window
+ * (the "config set -> persisted -> read -> window different" chain), or that
+ * one zone's override does NOT leak onto another zone's, can override one
+ * slot via g_stub_ease_off_window_mult[]. */
+/* 0 (the array's own zero-init default) means "use 2.0" -- the same 0-is-
+ * the-firmware-default-sentinel convention the real getter/field use, so a
+ * slot no test has ever touched behaves exactly like the pre-existing global
+ * default did, with no per-element initializer to keep in sync with
+ * MAX31856_CHANNEL_COUNT. */
+static float g_stub_ease_off_window_mult[MAX31856_CHANNEL_COUNT];
+bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult)
 {
-    if (!out_mult) return false;
-    *out_mult = g_stub_ease_off_window_mult;
+    if (!out_mult || zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    float v = g_stub_ease_off_window_mult[zone_index];
+    *out_mult = (v == 0.0f) ? 2.0f : v;
     return true;
 }
 
@@ -2855,7 +2864,7 @@ static void test_taper_outside_window_is_bit_identical_to_no_taper(void)
     float target_c = 20.0f;
     float segment_target_c = 20.0f + rate_c_per_s * 500.0f; /* 500s of ramp left -- far outside the 100s window */
 
-    float tapered = zone_taper_climb_rate(&z, target_c, rate_c_per_s, segment_target_c);
+    float tapered = zone_taper_climb_rate(&z, 0, target_c, rate_c_per_s, segment_target_c);
     TEST_CHECK(tapered == rate_c_per_s, "outside the window the taper must be bit-for-bit inert, not "
               "merely close");
 }
@@ -2873,7 +2882,7 @@ static void test_taper_inside_window_reduces_rate_by_linear_factor(void)
     float dist_to_end_s = 20.0f; /* well inside the 80s window */
     float segment_target_c = target_c + rate_c_per_s * dist_to_end_s;
 
-    float tapered = zone_taper_climb_rate(&z, target_c, rate_c_per_s, segment_target_c);
+    float tapered = zone_taper_climb_rate(&z, 0, target_c, rate_c_per_s, segment_target_c);
     float expect = rate_c_per_s * (dist_to_end_s / 80.0f);
     TEST_CHECK_NEAR(tapered, expect, 1e-6, "must match the documented linear taper exactly, not just "
                     "trend in the right direction");
@@ -2912,15 +2921,15 @@ static void test_taper_runtime_multiplier_actually_changes_the_window(void)
     float dist_to_end_s = 60.0f;
     float segment_target_c = target_c + rate_c_per_s * dist_to_end_s;
 
-    g_stub_ease_off_window_mult = 2.0f; /* firmware default -- window = 80s, 60s is INSIDE it */
-    float tapered_at_2x = zone_taper_climb_rate(&z, target_c, rate_c_per_s, segment_target_c);
+    g_stub_ease_off_window_mult[0] = 2.0f; /* firmware default -- window = 80s, 60s is INSIDE it */
+    float tapered_at_2x = zone_taper_climb_rate(&z, 0, target_c, rate_c_per_s, segment_target_c);
     TEST_CHECK(tapered_at_2x < rate_c_per_s,
               "at 2.0x (window=80s > 60s distance), the rate IS tapered -- inside the window");
     float expect_at_2x = rate_c_per_s * (dist_to_end_s / 80.0f);
     TEST_CHECK_NEAR(tapered_at_2x, expect_at_2x, 1e-6, "2.0x arm matches the documented linear taper exactly");
 
-    g_stub_ease_off_window_mult = 1.0f; /* a different A/B arm -- window = 40s, 60s is OUTSIDE it */
-    float tapered_at_1x = zone_taper_climb_rate(&z, target_c, rate_c_per_s, segment_target_c);
+    g_stub_ease_off_window_mult[0] = 1.0f; /* a different A/B arm -- window = 40s, 60s is OUTSIDE it */
+    float tapered_at_1x = zone_taper_climb_rate(&z, 0, target_c, rate_c_per_s, segment_target_c);
     TEST_CHECK(tapered_at_1x == rate_c_per_s,
               "at 1.0x (window=40s < 60s distance), the SAME distance is now OUTSIDE the window -- no "
               "taper at all, the rate passes through unchanged");
@@ -2933,7 +2942,57 @@ static void test_taper_runtime_multiplier_actually_changes_the_window(void)
               "the two A/B arms produce genuinely DIFFERENT feedforward rates for the identical zone "
               "state -- the runtime multiplier is actually wired end-to-end, not read-and-ignored");
 
-    g_stub_ease_off_window_mult = 2.0f; /* restore -- every other test in this file assumes the default */
+    g_stub_ease_off_window_mult[0] = 0.0f; /* restore to the sentinel -- every other test in this file assumes the default */
+}
+
+// ZONES_CFG_VERSION 16->17 (PID_EXPANSION_PLAN.md sec 3.6d): the whole point
+// of moving this field per-zone is a z0-ONLY override that must NOT touch
+// z1/z2 -- this is the test that actually proves that isolation, not just
+// that a single zone's value is readable (the test above already covers
+// that). Two zones, IDENTICAL ff_dead_time_s/distance/rate, different
+// per-zone multiplier: if zone_taper_climb_rate() ever read the wrong
+// zone's slot (e.g. always zone 0's, or the caller's zi swapped with a
+// neighbor's), this test would see the two windows collapse to the same
+// value even though the stub clearly holds two different numbers.
+static void test_taper_per_zone_multiplier_is_independent_per_zone(void)
+{
+    TEST_SECTION("zone_taper_climb_rate() -- a per-zone ease_off_window_mult override on ONE zone "
+                 "(e.g. z0's A/B arm) must not change ANOTHER zone's taper window -- the entire reason "
+                 "this field moved off zones_cfg_t and onto zone_cfg_t");
+    zone_runtime_t z0, z1;
+    memset(&z0, 0, sizeof(z0));
+    memset(&z1, 0, sizeof(z1));
+    z0.ff_dead_time_s = 50.0f; /* SAME dead time on both zones, deliberately -- isolates the */
+    z1.ff_dead_time_s = 50.0f; /* multiplier as the only thing that can differ between them */
+
+    float rate_c_per_s = 0.05f;
+    float target_c = 300.0f;
+    float dist_to_end_s = 120.0f; /* inside a 3.5x window (175s) but outside a 2.0x window (100s) --
+                                   * exactly the z0-experiment shape from z0_dwell_overshoot_
+                                   * mechanism_20260904_report.md (3.5x vs the 2.0x baseline) */
+    float segment_target_c = target_c + rate_c_per_s * dist_to_end_s;
+
+    g_stub_ease_off_window_mult[0] = 3.5f; /* zone 0's own A/B arm */
+    g_stub_ease_off_window_mult[1] = 0.0f; /* zone 1 untouched -- stays at the sentinel/2.0x baseline */
+
+    float tapered_z0 = zone_taper_climb_rate(&z0, 0, target_c, rate_c_per_s, segment_target_c);
+    float tapered_z1 = zone_taper_climb_rate(&z1, 1, target_c, rate_c_per_s, segment_target_c);
+
+    TEST_CHECK(tapered_z0 < rate_c_per_s,
+              "zone 0 at its own 3.5x window (175s > 120s distance) IS tapered");
+    TEST_CHECK(tapered_z1 == rate_c_per_s,
+              "zone 1, at the SAME distance/rate/dead-time but its own untouched 2.0x window "
+              "(100s < 120s distance), is OUTSIDE its window -- must see the untapered rate");
+    TEST_CHECK(tapered_z0 != tapered_z1,
+              "zone 0's override must produce a DIFFERENT result than zone 1's default -- if this "
+              "were still one board-wide scalar (or zone_taper_climb_rate() read the wrong zone's "
+              "slot), the two would be equal here");
+
+    float expect_z0 = rate_c_per_s * (dist_to_end_s / (3.5f * z0.ff_dead_time_s));
+    TEST_CHECK_NEAR(tapered_z0, expect_z0, 1e-6, "zone 0's tapered rate matches its OWN 3.5x window exactly");
+
+    g_stub_ease_off_window_mult[0] = 0.0f; /* restore both to the sentinel */
+    g_stub_ease_off_window_mult[1] = 0.0f;
 }
 
 static void test_taper_at_target_returns_zero_not_nan(void)
@@ -2943,7 +3002,7 @@ static void test_taper_at_target_returns_zero_not_nan(void)
     zone_runtime_t z;
     memset(&z, 0, sizeof(z));
     z.ff_dead_time_s = 30.0f;
-    float tapered = zone_taper_climb_rate(&z, 55.0f, 0.02f, 55.0f);
+    float tapered = zone_taper_climb_rate(&z, 0, 55.0f, 0.02f, 55.0f);
     TEST_CHECK(tapered == 0.0f, "distance-to-target of exactly 0 must taper to exactly 0");
 }
 
@@ -2957,7 +3016,7 @@ static void test_taper_no_identified_dead_time_is_inert(void)
     memset(&z, 0, sizeof(z));
     z.ff_dead_time_s = 0.0f;
     float rate_c_per_s = 0.04f;
-    float tapered = zone_taper_climb_rate(&z, 10.0f, rate_c_per_s, 10.0f + rate_c_per_s * 5.0f);
+    float tapered = zone_taper_climb_rate(&z, 0, 10.0f, rate_c_per_s, 10.0f + rate_c_per_s * 5.0f);
     TEST_CHECK(tapered == rate_c_per_s, "no model -> no taper, byte for byte");
 }
 
@@ -2980,8 +3039,8 @@ static void test_taper_asymmetric_dead_times_key_off_each_zones_own(void)
                                   * fixture the task calls for */
     float segment_target_c = target_c + rate_c_per_s * dist_to_end_s;
 
-    float tapered_short = zone_taper_climb_rate(&z_short_dead_time, target_c, rate_c_per_s, segment_target_c);
-    float tapered_long = zone_taper_climb_rate(&z_long_dead_time, target_c, rate_c_per_s, segment_target_c);
+    float tapered_short = zone_taper_climb_rate(&z_short_dead_time, 0, target_c, rate_c_per_s, segment_target_c);
+    float tapered_long = zone_taper_climb_rate(&z_long_dead_time, 1, target_c, rate_c_per_s, segment_target_c);
 
     TEST_CHECK(tapered_short == rate_c_per_s, "the SHORT-dead-time zone is already outside its own "
               "(narrower) window at this distance -- must see the untapered rate");
@@ -3255,7 +3314,7 @@ static void test_taper_ramp_still_reaches_target_setpoint_untouched(void)
                                              * the function's signature (float return, float-by-value
                                              * target_c) makes a setpoint mutation structurally
                                              * impossible, not merely untested. */
-    (void)zone_taper_climb_rate(&z, target_c_probe, rate_c_per_s, segment_target_c);
+    (void)zone_taper_climb_rate(&z, 0, target_c_probe, rate_c_per_s, segment_target_c);
     TEST_CHECK(target_c_probe == target_c_before, "target_c must be bit-identical before/after -- the "
               "taper has no path to the setpoint schedule");
 }
@@ -6723,6 +6782,7 @@ void run_test_profile_executor_prestart(void)
     test_taper_outside_window_is_bit_identical_to_no_taper();
     test_taper_inside_window_reduces_rate_by_linear_factor();
     test_taper_runtime_multiplier_actually_changes_the_window();
+    test_taper_per_zone_multiplier_is_independent_per_zone();
     test_taper_at_target_returns_zero_not_nan();
     test_taper_no_identified_dead_time_is_inert();
     test_taper_asymmetric_dead_times_key_off_each_zones_own();

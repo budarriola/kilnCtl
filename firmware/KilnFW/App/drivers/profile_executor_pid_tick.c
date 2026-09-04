@@ -81,7 +81,7 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
         z->duty_breakdown.ff_rate_pretaper_c_per_s = ff_rate;
         if (!s_exec.dwelling && ff_rate != 0.0f) {
             const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index];
-            ff_rate = zone_taper_climb_rate(z, s_exec.target_c, ff_rate, seg->target_c);
+            ff_rate = zone_taper_climb_rate(z, zi, s_exec.target_c, ff_rate, seg->target_c);
         }
         z->duty_breakdown.ff_rate_posttaper_c_per_s = ff_rate;
         /* Gains actually in force this tick -- cfg is z->pid_cfg unchanged
