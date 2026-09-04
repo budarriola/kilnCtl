@@ -1018,11 +1018,32 @@ path. Two facts set the shape of this milestone:
       lockout (2026-08-17)
 - [x] Both update paths refused unless idle and cool, with the specific
       blocker named (2026-08-17)
-- [ ] Link-loss heating block **not** bypassed during a Pico update — correct
-      by code inspection on both sides (`relay_authority.c` untouched since
-      2026-08-13; `update_task.c` only reads output/thermo status to gate
-      `UPDATE_BEGIN`, never writes relay/GPIO state), but not yet exercised on
-      real hardware
+- [ ] Link-loss heating block **not** bypassed during a Pico update — now
+      pinned in CI on both sides (2026-09-04), still OPEN as a
+      hardware-exercise item (a test suite is not a substitute for running a
+      real update on a real board):
+      - KilnFW side: `firmware/KilnFW/App/test/test_safety_link_compile.c`
+        now links the REAL `relay_authority_on_blocked()` (App/drivers/
+        relay_authority.c — previously stubbed everywhere else in the host
+        suite) against a real `SafetyLinkClass`, and proves
+        `safety_link_set_update_in_progress()` (the call `ota_pico_relay.c`'s
+        relay task makes around a Pico relay) does not relax an asserted
+        `SAFETY_FAULT_SRC_SAFETY_LINK` fault, and that a link going stale
+        mid-update still denies heat. Negative-tested: temporarily made
+        `safety_link_set_update_in_progress(true)` clear `fault_sources`,
+        confirmed 4 checks fail by name, reverted.
+      - SaftyFW side: `firmware/SaftyFW/test/test_update_task_relay_wiring.c`
+        source-scans the real, non-host-compilable `update_task.c` (same
+        precedent as `test_safety_core_s8_wiring.c`/
+        `test_safety_core_polarity_wiring.c`) and fails closed if it cannot
+        locate either file or `relay_owner_command_energize()`'s real
+        signature; pins that `update_task.c` calls no relay_owner_* mutator
+        and touches no relay GPIO. Negative-tested: added a call to
+        `relay_owner_command_energize()` into `update_task.c`, confirmed the
+        scan fails by name, reverted.
+      - Still needed: an actual Pico OTA exercised on real hardware with the
+        link deliberately dropped mid-update, confirming no relay ever
+        energizes and the fault stays latched after the update ends.
 - [x] Four MCP tools for OTA (challenge, ESP update, Pico update, status),
       plus explicit ESP and Pico rollback and a web `/ota` page — built and
       unit-tested against mocked HTTP (2026-08-18–19); not yet exercised

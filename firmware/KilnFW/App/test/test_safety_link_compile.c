@@ -223,6 +223,22 @@ static inline BaseType_t safety_link_test_xSemaphoreTake(SemaphoreHandle_t sem, 
 
 #undef xSemaphoreTake
 
+// relay_authority.c -- the REAL, compiled chokepoint (not a stub -- no other
+// host test in this suite links the real relay_authority_on_blocked(),
+// every other caller of it fakes its own body instead, see e.g.
+// test_autotune_engine_prestart.c). Included here, alongside the real,
+// already-linked safety_link.c above, specifically for ROADMAP.md's
+// 2026-09-04 link-loss-heating-block-during-a-Pico-update item: the property
+// under test is that safety_link_set_update_in_progress() (which ota_pico_
+// relay.c's relay task calls around a Pico update) does NOT relax what
+// relay_authority_on_blocked() decides -- and that claim is worthless if
+// on_blocked() is a hand-written stand-in rather than the function that
+// actually ships. Needs freertos/portmacro.h's portMUX_TYPE/portENTER_
+// CRITICAL stand-ins (App/test/stubs/freertos/portmacro.h, added alongside
+// this) for its heat-claim spinlock -- host tests are single-threaded, so
+// those expand to nothing.
+#include "../drivers/relay_authority.c"
+
 // ---------------------------------------------------------------------
 
 static void set_status_frame(uint8_t *p, uint8_t flags, float tc_c, float cj_c,
@@ -1015,6 +1031,95 @@ static void test_frames_gated_above_a_version_are_not_expected_from_that_peer(vo
                "the oldest peer this build still talks to is never expected to send it");
 }
 
+// ---------------------------------------------------------------------
+// ROADMAP.md (2026-09-04) -- "Link-loss heating block not bypassed during a
+// Pico update". These call the REAL, compiled relay_authority_on_blocked()
+// against a REAL SafetyLinkClass whose fault_sources this test drives
+// through safety_link.c's own public safety_link_set_fault_source()/
+// safety_link_set_update_in_progress() setters -- not a re-implementation of
+// either function's rule (this repo has shipped that mistake before; see
+// the durable memory's negative-test-every-check note). The property:
+// update_in_progress_quiet (safety_link.h's own doc comment on that field)
+// is documented to affect ONLY which log line safety_update_health() emits
+// for an already-down link, never fault_sources itself -- these tests pin
+// that in the one place that actually decides whether a relay may turn ON.
+
+static void test_update_in_progress_does_not_relax_link_loss_block(void)
+{
+    TEST_SECTION("relay_authority_on_blocked() -- a link-loss fault stays blocked "
+                 "while a Pico update is in progress (ROADMAP.md 2026-09-04): "
+                 "safety_link_set_update_in_progress() must not relax it");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    // No fault yet, no update in progress: heat is not blocked by this path.
+    uint32_t sources = 0xFFFFFFFFu; // poisoned, so a no-op setter is visible below
+    TEST_CHECK(relay_authority_on_blocked(&link, &sources) == false,
+               "sanity: a freshly-initialized link with no asserted fault source is not blocked");
+    TEST_CHECK(sources == 0u, "out_sources reads back 0 when nothing is asserted");
+
+    // Simulate link loss the same way safety_update_health() actually does
+    // on a real stale link: assert SAFETY_FAULT_SRC_SAFETY_LINK through the
+    // real public setter, not by poking link.fault_sources directly.
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_SAFETY_LINK, true) == ESP_OK,
+               "asserting the link-loss fault source succeeds");
+    TEST_CHECK(relay_authority_on_blocked(&link, NULL) == true,
+               "link-loss fault source alone already blocks relay-ON, before any update starts");
+
+    // This is the exact call ota_pico_relay.c's relay task makes right
+    // before the link legitimately goes quiet for a Pico update.
+    TEST_CHECK(safety_link_set_update_in_progress(&link, true) == ESP_OK,
+               "safety_link_set_update_in_progress(true) succeeds");
+
+    uint32_t sources_during_update = 0;
+    TEST_CHECK(relay_authority_on_blocked(&link, &sources_during_update) == true,
+               "REGRESSION PIN: a link-loss fault STILL blocks relay-ON while an update is "
+               "in progress -- an update must never become a path that relaxes the link-loss "
+               "heating block");
+    TEST_CHECK((sources_during_update & SAFETY_FAULT_SRC_SAFETY_LINK) != 0u,
+               "the fault-source bitmask itself is untouched by update_in_progress -- "
+               "update_in_progress_quiet is documented to affect log text only");
+    TEST_CHECK(safety_link_get_fault_sources(&link) == SAFETY_FAULT_SRC_SAFETY_LINK,
+               "safety_link_get_fault_sources() reports exactly the same fault source "
+               "during the update as it did before -- set_update_in_progress changed nothing here");
+
+    // Ending the update (the relay task's `done:` label, success or
+    // failure alike) must not silently clear the still-asserted fault
+    // either -- only an actual link recovery should do that.
+    TEST_CHECK(safety_link_set_update_in_progress(&link, false) == ESP_OK,
+               "safety_link_set_update_in_progress(false) succeeds");
+    TEST_CHECK(relay_authority_on_blocked(&link, NULL) == true,
+               "still blocked after the update ends -- the underlying fault was never actually "
+               "cleared, only the update flag was");
+}
+
+static void test_link_loss_during_update_denies_heat_end_to_end(void)
+{
+    TEST_SECTION("relay_authority_on_blocked() -- a link that goes stale WHILE an update is "
+                 "already in progress is denied heat exactly the same as any other link-loss, "
+                 "not treated specially because an update happens to be running");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    // Update starts on a healthy link: not blocked yet.
+    TEST_CHECK(safety_link_set_update_in_progress(&link, true) == ESP_OK, "update begins");
+    TEST_CHECK(relay_authority_on_blocked(&link, NULL) == false,
+               "update-in-progress alone, with no fault asserted, does not spuriously block "
+               "heat -- this flag really is inert outside the fault-source path");
+
+    // The link then genuinely goes stale mid-update (UPDATE_PROTOCOL.md's
+    // "the Pico update deliberately trips the liveness rule").
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_SAFETY_LINK, true) == ESP_OK,
+               "link-loss fault asserts mid-update");
+    uint32_t sources = 0;
+    TEST_CHECK(relay_authority_on_blocked(&link, &sources) == true,
+               "heat is denied the moment the link goes stale, update in progress or not");
+    TEST_CHECK(sources == SAFETY_FAULT_SRC_SAFETY_LINK,
+               "the reported source is exactly the link-loss bit, not something update-specific");
+}
+
 int g_test_failures = 0;
 int g_test_count = 0;
 
@@ -1040,6 +1145,8 @@ int main(void)
     test_stale_reset_then_reapply_recovers_after_reconnect();
     test_dispatch_has_a_case_for_every_frame_each_compatible_version_can_send();
     test_frames_gated_above_a_version_are_not_expected_from_that_peer();
+    test_update_in_progress_does_not_relax_link_loss_block();
+    test_link_loss_during_update_denies_heat_end_to_end();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
