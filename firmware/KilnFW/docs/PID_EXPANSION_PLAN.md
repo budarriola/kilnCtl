@@ -2638,6 +2638,34 @@ opt-out, exactly the gap `ease_off_window_mult`'s captures had. See
 the full mechanics and `tools/PcTools/tests/test_bd_reachability_check.py`
 for worked examples of both verdicts.
 
+**One command for the whole conclusion (2026-09-04).** Running
+`bd_reachability_check` and `pid_ab_compare` by hand, in the right order,
+with the right fields, is exactly the kind of improvisation that let two
+fuzzy-PID campaigns ship inert without anyone noticing until a third,
+unrelated audit caught it. `tools/PcTools/scripts/fuzzy_ab_analyze.py` is
+the single entry point for a paired-run campaign's conclusion: it runs
+`bd_reachability_check` FIRST per pair (gating -- an INERT pair voids that
+pair's tracking-error numbers before they are even computed), then
+`pid_ab_compare` per reachable pair (including its own start-temp confound
+report), then applies the project's `>=3`-zone same-direction decision rule
+across whatever complete pairs exist. For the live `fuzzy_ab_20260904d`
+campaign:
+
+    python tools/PcTools/scripts/fuzzy_ab_analyze.py \
+        --log-dir logs/coupling --prefix fuzzy_ab_20260904d --pairs 3
+
+It is safe to run against a campaign that has not finished: a pair with a
+missing arm file is reported `not yet available` and skipped rather than
+erroring, the overall verdict is `INCOMPLETE` (exit 3) until at least one
+complete, reachable pair exists, and a pair whose fuzzy term turns out
+bit-identical is reported `VOID` (exit 1) and excluded from the campaign
+verdict rather than silently folded into it. See the script's own module
+docstring for the exit-code contract and
+`tools/PcTools/tests/test_fuzzy_ab_analyze.py` for the mandatory
+negative test (two arms built from identical source data -- confirms the
+tool reports VOID/INERT and refuses to proceed to a tracking-error
+conclusion, rather than reporting a false REACHABLE).
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
