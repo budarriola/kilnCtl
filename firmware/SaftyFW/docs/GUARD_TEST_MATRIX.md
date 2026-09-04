@@ -1,6 +1,6 @@
 # Guard Test Matrix
 
-> **Status:** planning · **Last reviewed:** 2026-08-21
+> **Status:** planning · **Last reviewed:** 2026-09-04
 > **Keep this file current.** Add a row whenever a guard is added or a threshold
 > moves, and record results as they are obtained — this file is the evidence
 > that the safety case is real. Checklist at the bottom.
@@ -1100,6 +1100,7 @@ reachable.
 | S9 `TRIP_INEFFECTIVE` | TRIP (unclearable) | **Inert, and distinctly so.** Already gated by `current_sensing_commissioned`, but that gate reports `s9_uncommissioned_warn` — *"finish commissioning and this comes back"* — which is a lie on a board with no sensor to commission. The disabled flag takes precedence and suppresses that warn. |
 | S14 over-current | WARN | **Inert per channel.** Accumulator held at zero. |
 | S6b `LINK_DEAD` | TRIP | **Degraded, deliberately.** The soft, current-keyed tier (`link_timeout_s`) becomes unreachable; the unconditional `link_dead_hard_s` backstop still fires. **This is the known, accepted cost of running without CTs.** The only local substitute for "is heat on" that does not need the (by definition dead) link is SaftyFW's own K4 energization state, and re-keying a TRIP-class guard onto a different input changes what S6b *means* — a `SAFETY_MODEL.md` §4 decision, not this pass's. |
+| S11 `FROZEN_SENSOR` | TRIP | **Inert — found missing from this table 2026-09-04, not a new condition.** `safety_guards.c:657`'s gate is `in->tc_valid && in->heat_commanded`, and `safety_core_build_input()` wires `.heat_commanded = any_current_present` (`safety_core.c:1090`) — the *same* `any_current_present` this section already forces to `false` when CTs are declared absent (`safety_core.c:1020-1024`). So on a `ct_installed = no` board `heat_commanded` is never true, `state->s11_elapsed_s` never accumulates (`safety_guards.c:657-664`), and S11 cannot trip regardless of how long a reading sits frozen. This was not previously listed in this table's per-guard breakdown, and `docs/SAFETY_CASE.md`'s H2 row read "reachable in source... not yet hardware-verified" — true of the *code path*, but it understates today's live state: with `ct_installed = 0` confirmed on the bench (`safety_get_status`, 2026-09-04), S11 is not merely unverified, it structurally cannot fire right now. Corrected in both docs the same day this was found. |
 | everything else | — | Unchanged. S7 (E-stop) is the check that would notice a flag accidentally wired into the shared context block, since it sits before it. |
 
 **Inactive is reported, never silent.** `safety_guard_state_t::ct_guards_disabled`

@@ -49,8 +49,8 @@ mitigates it beyond operator diligence).
 | Hazard | Guard(s) / measure | Residual risk |
 |---|---|---|
 | H1 overheat | **G:** S1 (`abs_max_temp_c` ceiling), S2 (overshoot-sustained), S8 (rate-of-rise). **KilnFW:** thermal_guard guards 1,2,4,5,7 (per-zone, only while `profile_executor` runs that zone) | **Verified live 2026-09-04 (`GET /api/safety/commissioning`, read-only): S1 is ARMED, `abs_max_temp_c`=80, `set:true`, `commissioned:true` on the current bench board — this has changed since the 2026-08-28 note below and in `firmware/KilnFW/TODO.md`, which described `abs_max_temp_c`=0 (never-trip).** S8 (`max_rate_c_per_min`) remains at 0 = disabled, deliberately, pending a measured full-power ramp (see §3.2). With S1 armed, a runaway is independently backstopped: `safety_guards.c` (`SAFETY_TRIP_OVERTEMP`, ~line 603) computes `ceiling = min(abs_max_temp_c, firing_max_c + firing_margin_c)` and trips on the 3rd consecutive over-ceiling reading (~300ms), which de-energizes K4 on the RP2040 side — independent of the ESP32-S3 regardless of what the ESP keeps commanding. Today that ceiling (80°C) equals, not undercuts, the ESP-side zones' own `max_temp_c` (also 80), so S1 is real protection against a runaway but not a *tighter* independent limit — see the owner-decision recommendation in §3.1. KilnFW's per-zone guards only run while a profile is actively driving that zone — a direct `THERMO_CMD_READ`/dashboard-only session outside a running profile gets no thermal protection from KilnFW at all (`SAFETY_MODEL.md`, "What does NOT enforce it yet"). |
-| H2 dry-fire / disconnected sensor | **G:** S5 (sensor validity, graduated WARN→TRIP), S11 (frozen sensor + heat commanded). **KilnFW:** thermal_guard guard 6 (per-zone, profile-running only) | S5/S11 need `ct_installed`/current sensing wired for S11's `heat_commanded` input; both are reachable in source (§6c below) but **not yet hardware-verified post-fix**. KilnFW's guard 6 only covers the profile-running window, same gap as H1. |
-| H3 welded contactor | **G:** S9 (`TRIP_INEFFECTIVE`, unconditional, never operator-clearable) | S9 is gated on `current_sensing_commissioned` — inert on a CT-less board (§9 of the matrix). **Never provoked with a genuinely welded contactor on real hardware** — ROADMAP.md M4 flags this as blocked on a hardware jig that injects real AC current through the CT loop; no such jig exists in this repo. Argued and host-tested only. |
+| H2 dry-fire / disconnected sensor | **G:** S5 (sensor validity, graduated WARN→TRIP), S11 (frozen sensor + heat commanded). **KilnFW:** thermal_guard guard 6 (per-zone, profile-running only) | **Corrected 2026-09-04 — S11 is currently INERT, not merely unverified.** `safety_guards.c:657`'s gate is `in->tc_valid && in->heat_commanded`, and `heat_commanded` is wired straight from `any_current_present` (`safety_core.c:1090`), which `safety_core.c:1020-1024` forces to `false` whenever `ct_installed = no`. **Live-confirmed the same day** (`safety_get_status`, `dc39b09`): `ct_installed = 0`, all three channels reading `0.00 A`. So on the bench rig **today**, S11's elapsed-time accumulator never starts, regardless of how long a reading sits frozen — this is not "reachable in source, awaiting a hardware pass," it structurally cannot fire while CTs are absent. S5 is unaffected by this (its gate is `tc_valid`/read-freshness only, no current dependency) and remains armed. KilnFW's guard 6 only covers the profile-running window, same gap as H1. See `GUARD_TEST_MATRIX.md` §9's now-added S11 row for the full trace. |
+| H3 welded contactor | **G:** S9 (`TRIP_INEFFECTIVE`, unconditional, never operator-clearable) | **No active detection today.** S9 is gated on `current_sensing_disabled`/`current_sensing_commissioned` (`safety_guards.c:405-416`) — inert on a CT-less board (§9 of the matrix), and **live-confirmed inert on the bench rig 2026-09-04**: `safety_get_status` reports `ct_installed = 0`, currents `0.00 A, 0.00 A, 0.00 A`. `safety_core.c:1020-1024` forces `any_current_present` false, so S9's block at `safety_guards.c:403-416` takes the `current_sensing_disabled` branch every tick — streak held at 0, no warn, no path to `TRIP_INEFFECTIVE`, ever, until CTs are fitted and commissioned. No other guard substitutes for it (S3/S4/S14 are equally CT-gated; nothing else observes contactor state), and KilnFW provides no independent check — its own `current_a[]` (`safety_link_frames.c:632-634`) is decoded from the *same* RP2040 CT telemetry over the link, not a separate ESP-side sense path (no ESP-side current ADC exists; `hardware/mainBoard/CurrentSense.kicad_sch`'s ADC0/1/2 feed the RP2040's `current_task.c`, not the ESP32-S3). **Plainly: if K4 welds closed today, nothing in this system will notice.** Also **never provoked with a genuinely welded contactor on real hardware** even when armed — ROADMAP.md M4 flags this as blocked on a hardware jig that injects real AC current through the CT loop; no such jig exists in this repo. Argued and host-tested only. |
 | H4 shock during service | **P:** physical isolation, TVS/current-limiting on input rails (`hardware/mainBoard/Power.kicad_sch`), K4 mechanical contactor | Standard practice, not re-verified as part of this pass — hardware review, out of scope here. Accepted as adequately covered by physical design, not by firmware. |
 | H5 both processors agree falsely | **G:** dual-processor design itself — KilnFW's relay-authority gate (`relay_authority_on_blocked()`) and SaftyFW's independent guard set are separate codebases reading separate sensors | **A (accepted risk).** No cross-check exists that either processor's "healthy" verdict is *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire (H9). Not designed against; documented, not solved. |
 | H6 link loss unnoticed | **R:** KilnFW's link-loss watchdog drops relays and asserts `SAFETY_FAULT_SRC_PC_LINK` (opt-in, default OFF for the PC link; unconditional relay-drop). **CommonFW link protocol:** SaftyFW's own liveness split — soft trip at 1.5s (blocks new heat-on), hard 30s firing-abort (`LINK_PROTOCOL.md` §8, wired 2026-09-04, `profile_executor.c:1201-1236`, pinned by `test_safety_link.c:77-92`) | The 30s firing-abort is **host-test-pinned but not hardware-verified** — nobody has held the link down on the bench and watched it with a stopwatch (ROADMAP.md, "Blocked on hardware that does not exist yet": "Time the link-staleness ceiling... Code is flashed; nobody has held the link down"). SaftyFW cannot react to a *live* E-stop/fault report from the Pico either way — that path is one-directional today (`SAFETY_MODEL.md`, "Nothing on the main board reacts to a safety-processor-reported E-stop or fault"). |
@@ -122,10 +122,41 @@ here; none is copied from an unverified summary.
 4. **Current sensing can be disabled entirely** (`ct_installed = no`), a
    first-class, ASKED commissioning state (`GUARD_TEST_MATRIX.md` §9). On a
    CT-less board, S3 (load-stuck-on), S4 (load-inactive WARN), S9
-   (trip-ineffective), and S14 (overcurrent) are all **structurally inert**,
+   (trip-ineffective), S11 (frozen-sensor — added to this list 2026-09-04,
+   see below), and S14 (overcurrent) are all **structurally inert**,
    and S6b's soft current-gated tier degrades to the unconditional 120s
-   backstop only. This is a deliberate, reported-as-such state, not a silent
-   gap — but it is a real reduction in coverage that an operator can select.
+   backstop only. Four of these five (S3, S4, S9, S14) are deliberately
+   held inert, reported as such via `ct_guards_disabled`, with the reasoning
+   recorded at `GUARD_TEST_MATRIX.md` §9. **S11 is different: it is a real
+   side effect (`heat_commanded` is wired from the same `any_current_present`
+   these guards share, `safety_core.c:1090`), not a decision anyone recorded
+   — until this pass it was not even listed here or in §9's table, and H2's
+   row above described it as merely "not yet hardware-verified" rather than
+   "cannot fire in the current configuration." That gap in the documentation,
+   not the underlying behavior, is the unintentionally-dormant finding.**
+   **Live-confirmed 2026-09-04** (`safety_get_status`, `dc39b09`):
+   `ct_installed = 0`, currents `0.00 A, 0.00 A, 0.00 A` on the bench rig
+   right now — every guard in this paragraph is inert today, not
+   hypothetically. This is a real reduction in coverage that an operator can
+   select, and on this rig it is currently selected.
+
+   **The practical consequence, stated plainly: with no CTs fitted, nothing
+   in this system detects a welded contactor today.** S9 is the guard H3's
+   hazard row rests on, and it cannot fire while `current_sensing_disabled`
+   is set. KilnFW provides no independent backstop — its `current_a[]` is
+   relayed RP2040 CT telemetry, not a second sensor (`safety_link_frames.c:632-634`;
+   `hardware/mainBoard/CurrentSense.kicad_sch`'s ADC feeds the RP2040 via
+   `current_task.c`, not the ESP32-S3). **Owner decision, not acted on here:**
+   arming S3/S4/S9/S11/S14 requires (a) physically fitting CTs per
+   `hardware/mainBoard/CurrentSense.kicad_sch`/`CURRENT_SENSE.md`, (b) running
+   the one-relay-at-a-time channel mapping check (`CURRENT_SENSE.md` §5 step
+   2 — the gate `GUARD_TEST_MATRIX.md` §3.3 already documents), and (c)
+   commissioning: setting `ct_installed = 1`, a valid `ct_channel_map`, and
+   loading a real per-channel calibration via `safety_set_ct_cal` (the
+   read-only counterpart, `safety_get_ct_cal`, and the calibration record
+   itself, `config_store.h`'s CT-cal fields, already exist as the intended
+   commissioning path — neither was called or written as part of this
+   verification pass, per this task's own read-only constraint).
 
 5. **S9's welded-contactor escalation has never been provoked with a
    genuinely welded contactor.** It is argued from code inspection
