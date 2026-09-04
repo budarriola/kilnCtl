@@ -181,6 +181,26 @@ static void run_section1_screen_idle_calls_policy(void)
                "otherwise the settings page's POSTed values would have no effect on the "
                "actual on-device behaviour.");
 
+    // 2026-09-04 opus review: BOTH producers, on both inputs. The executor
+    // alone does not know an autotune run is heating (autotune_engine drives
+    // relays with the executor at PROFILE_EXEC_IDLE), and the safety link's
+    // diag_state alone does not know the ESP's own global thermal-guard
+    // abort happened (PROFILE_EXEC_FAULTED). Reading only one of each pair
+    // is this codebase's documented "consumer reading a different producer
+    // than the one that actually gets written" bug class.
+    TEST_CHECK(strstr(fn, "autotune_engine_is_active();") != NULL,
+               "firing_active must ALSO be true during an autotune run "
+               "(autotune_engine_is_active()) -- otherwise 'keep display on while firing' "
+               "blanks the panel mid-autotune, because autotune holds relay authority with "
+               "profile_executor still at PROFILE_EXEC_IDLE.");
+
+    TEST_CHECK(strstr(fn, "pst.state == PROFILE_EXEC_FAULTED") != NULL,
+               "error_active must ALSO cover the ESP's own global thermal-guard abort "
+               "(profile_executor's PROFILE_EXEC_FAULTED) -- the safety link's diag_state is "
+               "the RP2040's own trip and is never set by an ESP-side guard fault, so keying "
+               "'error' on it alone misses an entire class of error the owner expects to "
+               "raise the display.");
+
     TEST_CHECK(strstr(fn, ".error_entered_this_tick = error_entered_this_tick") != NULL &&
                    strstr(fn, "error_active && !idle->error_prev_active") != NULL,
                "error_entered_this_tick must be computed as a real false->true EDGE against "

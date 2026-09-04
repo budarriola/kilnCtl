@@ -24,6 +24,7 @@
 #include "display_power_cfg.h"
 #include "profile_executor.h"
 #include "dashboard_http.h"
+#include "autotune_engine.h"
 
 static const char *TAG = "screen_idle";
 
@@ -76,7 +77,19 @@ static bool screen_idle_run_policy_locked(screen_idle_t *idle, uint32_t now_ms, 
 {
     profile_exec_status_t pst;
     profile_executor_get_status(&pst);
-    bool firing_active = (pst.state == PROFILE_EXEC_RUNNING || pst.state == PROFILE_EXEC_PAUSED);
+    // 2026-09-04 opus review: profile_executor is NOT the only producer that
+    // means "the kiln is heating and the owner needs to see the screen".
+    // autotune_engine drives relays on its own for hours with the executor
+    // sitting at PROFILE_EXEC_IDLE (autotune_engine.h: "Both methods hold the
+    // zone's relay authority for exactly as long as this is true") -- reading
+    // only the executor is precisely this codebase's "consumer reading a
+    // different producer than the one that actually gets written" bug class
+    // (project_autotune_feeds_fake_setpoint: "guard rules reading setpoint_c
+    // break autotune while the executor stays green; check BOTH producers").
+    // Without this OR, "keep display on while firing" blanks the panel in the
+    // middle of an autotune run.
+    bool firing_active = (pst.state == PROFILE_EXEC_RUNNING || pst.state == PROFILE_EXEC_PAUSED) ||
+                         autotune_engine_is_active();
 
     dashboard_status_t ds;
     dashboard_get_status(&ds);
@@ -85,8 +98,17 @@ static bool screen_idle_run_policy_locked(screen_idle_t *idle, uint32_t now_ms, 
     // a live trip") -- this module must raise the display for exactly the
     // condition the LCD already paints red, not a differently-gated
     // "error" of its own invention.
-    bool error_active = ds.diag_ever_received && ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
-                         ds.diag_age_ms < SAFETY_LINK_STALE_MS;
+    bool safety_tripped = ds.diag_ever_received &&
+                          ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                          ds.diag_age_ms < SAFETY_LINK_STALE_MS;
+    // 2026-09-04 opus review: the safety-link trip is the RP2040's OWN trip.
+    // The ESP's own global thermal-guard abort (PROFILE_EXEC_FAULTED --
+    // profile_executor.h: "a GLOBAL thermal guard tripped (or every active
+    // zone individually)", carrying fault_reason/fault_guard) never touches
+    // diag_state, so keying "error" on the safety link alone silently missed
+    // an entire class of error the owner would absolutely expect to raise the
+    // display: their firing just aborted. Both producers, not one.
+    bool error_active = safety_tripped || pst.state == PROFILE_EXEC_FAULTED;
     bool error_entered_this_tick = error_active && !idle->error_prev_active;
     idle->error_prev_active = error_active;
 
