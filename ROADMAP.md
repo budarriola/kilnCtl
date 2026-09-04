@@ -2100,6 +2100,10 @@ tests) for every item below lives in
 - [x] No stub-vs-real-IDF signature check —
       `stub_signature_drift_check.py` added, 26/26 stub headers clean.
       **CLOSED 2026-09-04.**
+- [x] Nine checks/tests broke silently on the 1500-line-rule splits above
+      (hardcoded source-file paths a split moved/renamed, incl. a skip-guard
+      that turned into a silent zero-coverage pass) — `source_path_drift_
+      check.py` added, wired into `run_all_checks.ps1`. **CLOSED 2026-09-04.**
 - [x] Campaign runner has no board-config restore on abnormal exit —
       `run_queue()` wrapped in `try/except BaseException` with a restore
       hook plus an arms-differ preflight. **CLOSED 2026-09-04.**

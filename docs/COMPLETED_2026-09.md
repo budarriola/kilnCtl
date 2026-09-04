@@ -848,3 +848,51 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       updated: TRIP_EVENT, DIAG, POWER, and the 30 s firing-abort line items
       ticked with file:line citations; the two still-genuinely-open liveness
       items (pre-first-frame-down, bench-escape doc) left unchecked.
+- [x] **Nine checks/tests broke silently on the 2026-09-04 file splits above
+      (source-file path drift).** All twelve splits above (`profile_executor`,
+      `autotune_engine`, `wifi_prov.c`, `dashboard_http.c`,
+      `zones_config_json.c`, `uart_bridge_ext.c`, `zones_http.c`,
+      `ui_page_home.c`, `main.c`, etc.) were clean moves, but nine separate
+      guard scripts and host tests kept a hardcoded reference to a source
+      file PATH or a pre-rename IDENTIFIER that a split moved, and none of
+      them failed — build and host tests stayed green throughout. Found one
+      at a time, by accident: `flash_worker_lint.py`'s allowlist,
+      `check_link_impl_isolation.ps1`'s allowlist (`zones_config_json.c`
+      after `compute_crc()` moved to `zones_config_migrate.c`),
+      `check_heat_enable_wiring.ps1`'s singular `autotune_engine.c` glob
+      (function moved to `autotune_engine_guard.c`),
+      `test_autotune_wire_layout.py` (hardcoded `uart_bridge_ext.c` path AND
+      pre-rename `bx_put_*` identifiers), `test_autotune_rules_drift_guard.py`
+      (hardcoded `dashboard_http.c`), and the worst case,
+      `test_selfcheck_zones_fields.py`, which guarded its hardcoded path
+      with `if not path.is_file(): skipTest(...)` — the split turned it into
+      a silently-skipping green test with zero real coverage — plus a stale
+      `.obj` for a deleted source tripping a duplicate-symbol check. S —
+      **CLOSED 2026-09-04**: all nine fixed (globs instead of single
+      filenames where a family of siblings now exists, updated single paths
+      where a file moved outright, updated identifiers to their post-rename
+      spelling). New standing guard added:
+      `firmware/KilnFW/App/test/source_path_drift_check.py` (wrapped by
+      `check_source_path_drift.ps1`, auto-discovered by
+      `tools/run_all_checks.ps1`'s `check_*.ps1` glob) scans
+      `tools/*.ps1`, `firmware/*/tools/*.ps1`,
+      `firmware/KilnFW/App/test/*.py`, and `tools/PcTools/tests/*.py` for
+      hardcoded source-file path references (PowerShell `Join-Path` calls,
+      Python `/`-joined path chains, and flash_worker_lint-style bare
+      filename allowlist entries) and fails naming file:line and the
+      missing path whenever the referenced file no longer exists; it also
+      flags the `test_selfcheck_zones_fields.py` skip-guard pattern
+      specifically (a missing hardcoded path guarded by `skipTest`/
+      `pytest.skip`/`if not ...is_file()` instead of failing). Fails closed
+      if its own extraction regexes stop matching (a floor on total
+      references found, not just zero problems). Negative-tested both
+      variants (a missing `Join-Path` literal, and the reproduced skip-guard
+      case), each reverted clean afterward.
+      **GUIDANCE FOR THE NEXT SPLIT**: after splitting any file, grep
+      `tools/` and `tools/PcTools/tests/` for the OLD filename and for any
+      identifier that moved or was renamed in the split — do not rely on
+      build/host-test green alone. `source_path_drift_check.py` now catches
+      the path half of this automatically; it does not catch a moved-but-
+      still-existing identifier (that class is `stub_signature_drift_check.py`
+      and this check's own job description do not overlap there), so the
+      identifier grep is still a manual step.
