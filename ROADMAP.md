@@ -1801,7 +1801,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, ~~`ota_http.c` (2508)~~,
       `ui_page_home.c` (2279), `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
       ~~`zones_config_json.c` (1867)~~, `main.c` (1820), ~~`backup_http.c` (1756)~~,
-      `uart_bridge_ext.c` (1727), `zones_http_handlers.c` (1598). Split
+      ~~`uart_bridge_ext.c` (1727)~~, `zones_http_handlers.c` (1598). Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
       `ARCHITECTURE.md`, and autotune has four separable concerns, on the
       `profile_executor` 8-file split's precedent. M-L — **`wifi_prov.c` part
@@ -2028,7 +2028,42 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       test executables pass; `test_backup_import.c` (the file this split's
       brief called out to keep green) updated to `#include` all four split
       files instead of the one original, same convention as
-      `test_profiles_http.c`/`test_zones_http.c` above.
+      `test_profiles_http.c`/`test_zones_http.c` above. `uart_bridge_ext.c`
+      part — **CLOSED 2026-09-04**: move-only split into `uart_bridge_ext.c`
+      (539 lines, file banner, `uart_bridge_ext_retry_task_create_pinned()`,
+      the flash-safe executor — `bx_worker_task`, `uart_bridge_ext_worker_
+      ensure_started()`, `uart_bridge_ext_start_flash_worker()`,
+      `bx_run_on_internal_stack()`, `uart_bridge_ext_run_on_flash_worker()`,
+      `uart_bridge_ext_is_on_flash_worker()` — and the shared little-endian/
+      reply-framing helpers), `uart_bridge_ext_control.c` (600, CONTROL task 8
+      + PROFILES task 9), `uart_bridge_ext_autotune.c` (246, AUTOTUNE task 10)
+      and `uart_bridge_ext_wifi.c` (410, WIFI task 11 — the one task family
+      that never touches the flash-safe worker), sharing state via
+      `uart_bridge_ext_internal.h` on the `ota_http_internal.h` precedent
+      (shared statics as `extern`, former `static` helpers widened to
+      file-scope-internal, widened symbols renamed with a `uart_bridge_ext_`
+      prefix). `uart_bridge_ext_start_flash_worker()`/`_run_on_flash_worker()`/
+      `_is_on_flash_worker()` were already public via `uart_bridge.h` and
+      needed no further widening. Symbol audit: grepped every widened symbol
+      (`TAG`, `retry_task_create_pinned`, `bx_worker_ensure_started`,
+      `bx_put_u16_le`/`bx_u32_le`/`bx_put_u32_le`/`bx_f32_le`/`bx_put_f32_le`,
+      `bx_args_ok`, `bx_put_lstring`, `bx_reply`, `bx_reply_ok_err`) across all
+      of `App/drivers/` for both a non-static definition and a same-named
+      `static` — `TAG` collides with every other file's own `static const
+      char *TAG` as expected; `bx_put_lstring`/`bx_reply_ok_err`/
+      `retry_task_create_pinned` turned up only in *comments* in
+      `uart_bridge.c`/`uart_bridge_internal.h`/`gpio_probe.c` referencing this
+      file's functions by name, not real definitions — renamed to the
+      `uart_bridge_ext_` prefix anyway per the audit rule (rename even when
+      currently clean). `control_task`/`profiles_task`/`autotune_task`'s calls
+      to the file-local `bx_run_on_internal_stack()` were changed to go
+      through the existing public `uart_bridge_ext_run_on_flash_worker()`
+      wrapper instead (identical signature and behavior), avoiding the need to
+      widen that one too. `build_kilnfw` compiles and links clean. All 21/21
+      host test executables pass; `uart_bridge_ext.c` itself is pulled into no
+      host-test translation unit (see its own S4 comment — its includes reach
+      too much hardware-driving surface for a host stub set), so no test file
+      needed updating.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
