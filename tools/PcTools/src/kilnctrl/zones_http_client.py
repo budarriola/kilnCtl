@@ -331,6 +331,12 @@ _TOP_FIELD_FORM_KEY = {
     "continue_on_zone_trip": "continue_on_zone_trip",
     "safety_tc_type": "safety_tc_type",
     "pc_link_abort_silence_ms": "pc_link_abort_silence_ms",
+    # ZONES_CFG_VERSION 15->16: the terminal ease-off taper window
+    # multiplier, formerly firmware's compile-time PROFILE_EXECUTOR_EASE_
+    # OFF_WINDOW_MULT #define -- see firmware/KilnFW/App/drivers/
+    # profile_executor_feedforward.c's top-of-file comment. A float field,
+    # not in _TOP_INT_FIELDS, same as pc_link_abort_silence_ms.
+    "ease_off_window_mult": "ease_off_window_mult",
 }
 _TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays", "safety_tc_type"}
 #: Top-level keys GET emits that this module deliberately never echoes back:

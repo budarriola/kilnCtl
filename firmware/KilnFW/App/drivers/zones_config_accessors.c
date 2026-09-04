@@ -929,6 +929,59 @@ bool zones_config_get_pc_link_abort_silence_ms(float *out_ms)
     return true;
 }
 
+/* ZONES_CFG_VERSION 15->16: another global, not gated on thermo_count --
+ * same reasoning as pc_link_abort_silence_ms's own comment just above, the
+ * ease-off window multiplier applies to whichever zones happen to be
+ * configured, not to a specific count of them.
+ *
+ * Unlike every other getter in this file, this one is defensive rather than
+ * a bare field read: s_zones.cfg.ease_off_window_mult reads 0.0f in the
+ * zeroed, not-yet-configured s_zones.cfg (first boot, corrupt NVS, a
+ * refused newer-than-firmware blob -- see zones_http.c's own zeroing on
+ * load failure) -- 0 IS a legal, validated value (the same "use the
+ * firmware default" sentinel pc_link_abort_silence_ms uses, see ZONE_EASE_
+ * OFF_WINDOW_MULT_MIN/MAX/DEFAULT's own comment), but it is not a value
+ * profile_executor_feedforward.c's zone_taper_climb_rate() can safely
+ * divide by -- THIS is where the sentinel actually gets resolved into the
+ * real 2.0 default, not at storage time. Falling back to the default for
+ * anything else outside [MIN, MAX] too (not just exactly 0) covers a
+ * hypothetical stored value from before this range was enforced -- always
+ * answer with a value zone_taper_climb_rate() can safely use, never with
+ * whatever raw bytes happen to be sitting in s_zones.cfg. */
+bool zones_config_get_ease_off_window_mult(float *out_mult)
+{
+    if (!out_mult) {
+        return false;
+    }
+    float v = s_zones.cfg.ease_off_window_mult;
+    if (v == 0.0f) {
+        v = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT; /* the sentinel */
+    } else if (!isfinite(v) || v < ZONE_EASE_OFF_WINDOW_MULT_MIN || v > ZONE_EASE_OFF_WINDOW_MULT_MAX) {
+        v = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT; /* defensive: not a value that should ever be on flash */
+    }
+    *out_mult = v;
+    return true;
+}
+
+/* Writer for the getter above. Refused, never clamped, matching every other
+ * setter in this file (e.g. zones_config_set_coupling_diag_k_dc() just
+ * below) -- an A/B campaign that asks for an out-of-range multiplier needs
+ * to find out its request was rejected, not silently get a different number
+ * substituted for it. 0 is accepted (same sentinel zones_config_json_
+ * validate() allows) as an explicit "reset to the firmware default" -- an
+ * A/B campaign ending an arm should be able to ask for that directly rather
+ * than having to know and pass 2.0 by hand. */
+bool zones_config_set_ease_off_window_mult(float mult)
+{
+    if (!isfinite(mult) ||
+        (mult != 0.0f && (mult < ZONE_EASE_OFF_WINDOW_MULT_MIN || mult > ZONE_EASE_OFF_WINDOW_MULT_MAX))) {
+        return false;
+    }
+    s_zones.cfg.ease_off_window_mult = mult;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 /* Bundled setter, same "reject nothing half-written" discipline as every
  * bundled setter above. Each of the 8 fields checked against its own
  * independent bound (matching which ceiling parse_zone_fields() applies to

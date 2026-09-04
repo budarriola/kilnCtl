@@ -47,6 +47,7 @@ static size_t expected_len_for_version(uint8_t version)
     case 12: return sizeof(zones_cfg_v12_t);
     case 13: return sizeof(zones_cfg_v13_t);
     case 14: return sizeof(zones_cfg_v14_t);
+    case 15: return sizeof(zones_cfg_v15_t);
     case ZONES_CFG_VERSION: return sizeof(zones_cfg_t);
     default: return 0;
     }
@@ -649,6 +650,22 @@ static void set_default_timing_profile(zones_cfg_t *out)
 static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out)
 {
     memset(out, 0, sizeof(*out));
+    /* ZONES_CFG_VERSION 15->16: set here, ONCE, ahead of the per-version
+     * switch below, rather than repeated in each of the 15 cases the way
+     * pc_link_abort_silence_ms's "0 = firmware default" carry-through is --
+     * every version older than v16 gets EXACTLY this (2.0, matching the
+     * removed PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT #define), so a v15->v16
+     * upgrade (or a v1->v16 chain) produces the real, documented default
+     * rather than the memset's raw 0 -- see zones_cfg_t::ease_off_window_
+     * mult's own comment: 0 IS a separately-legal sentinel for "use the
+     * firmware default" everywhere else this field is read, but a
+     * migration should still land on the concrete value that sentinel
+     * resolves to, not lean on the sentinel to paper over a version that
+     * genuinely never stored an opinion. case 15 (the actual v15->v16
+     * migration) re-asserts this same value explicitly for its own
+     * documentation's sake; every earlier case's blob predates it too and
+     * relies on this line. */
+    out->ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT;
     switch (version) {
     case 1: {
         zones_cfg_v1_t src;
@@ -1010,6 +1027,53 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * struct. */
         return true;
     }
+    case 15: {
+        /* v15 -> v16 (this pass): field-for-field carry-through. zone_cfg_t
+         * itself is UNCHANGED by this pass (see zones_cfg_t::ease_off_
+         * window_mult's own comment: it is a top-level field, not a
+         * per-zone one), so the zones array is copied directly rather than
+         * through a per-zone convert_zone_v15() -- there is no per-zone
+         * shape difference for one to convert. The only real migration is
+         * out->ease_off_window_mult, which v15 never stored at all: it gets
+         * ZONE_EASE_OFF_WINDOW_MULT_DEFAULT (2.0), NOT the memset(out, 0, ...)
+         * at this function's entry -- unlike coupling_diag_k_dc's "0 means
+         * not measured" convention the v14->v15 migration could rely on, 0
+         * is not a legal value for this field (see zone_taper_climb_rate()'s
+         * own comment on why a non-positive window cannot be tolerated), so
+         * the migration must land on the real firmware default explicitly
+         * or every upgrading board's ease-off would break on its very next
+         * tick instead of merely reverting to compile-time behaviour. This
+         * is what makes a v15->v16 upgrade produce EXACTLY today's
+         * behaviour: PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT was 2.0f, and
+         * ZONE_EASE_OFF_WINDOW_MULT_DEFAULT is the same 2.0f. */
+        zones_cfg_v15_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v15 value */
+        /* v15 has no such field. ZONE_EASE_OFF_WINDOW_MULT_DEFAULT (2.0), not
+         * the memset(out, 0, ...) at this function's entry -- both are
+         * legal per validate_zones_cfg() (0 is the sentinel "use the
+         * firmware default"), but landing on the REAL value here rather
+         * than the sentinel keeps this migration symmetric with every
+         * other one above (out->pc_link_abort_silence_ms above uses 0
+         * itself, since 0 there resolves to the SAME "use the firmware
+         * default" behaviour either way -- this field's getter does the
+         * identical substitution for 0, so writing the resolved value
+         * directly is equivalent, just more explicit about what a v15
+         * board's ease-off behaviour actually was). */
+        out->ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT;
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        memcpy(out->zones, src.zones, sizeof(out->zones)); /* zone_cfg_t is byte-for-byte identical in v15 and v16 */
+        /* src.crc32 deliberately NOT carried over -- it covered the v15
+         * shape; nvs_save() stamps a fresh one over the current (v16)
+         * struct. */
+        return true;
+    }
     default:
         /* No known historical (or current) layout for this version --
          * expected_len_for_version() already returned 0 for it and
@@ -1322,6 +1386,18 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
     if (!isfinite(cand->pc_link_abort_silence_ms) || cand->pc_link_abort_silence_ms < 0.0f ||
         cand->pc_link_abort_silence_ms > ZONE_PC_LINK_SILENCE_MS_MAX) {
         *err_reason = "pc_link_abort_silence_ms out of range";
+        return false;
+    }
+    /* ZONES_CFG_VERSION 15->16: same "0 = use the firmware default" sentinel
+     * convention as pc_link_abort_silence_ms just above -- see ZONE_EASE_
+     * OFF_WINDOW_MULT_MIN/MAX/DEFAULT's own comment. 0 is explicitly legal
+     * here (a fresh/migrated config's memset(0) default), everything else
+     * must fall within [MIN, MAX]. */
+    if (!isfinite(cand->ease_off_window_mult) ||
+        (cand->ease_off_window_mult != 0.0f &&
+         (cand->ease_off_window_mult < ZONE_EASE_OFF_WINDOW_MULT_MIN ||
+          cand->ease_off_window_mult > ZONE_EASE_OFF_WINDOW_MULT_MAX))) {
+        *err_reason = "ease_off_window_mult out of range";
         return false;
     }
     /* 2026-08-27 (ZONES_CFG_VERSION 8->9): timing_profile_count must be at

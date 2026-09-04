@@ -2088,6 +2088,12 @@ static void make_minimal_valid_cfg(zones_cfg_t *cfg)
      * see zones_cfg_t::timing_profile_count's own comment. */
     cfg->timing_profile_count = 1;
     strncpy(cfg->timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    /* ZONES_CFG_VERSION 15->16: unlike every other field left at the memset's
+     * 0 above, ease_off_window_mult's 0 is NOT legal -- see its own doc
+     * comment -- so a "minimal but valid" cfg must set it explicitly, or
+     * every test built on top of this helper would start failing
+     * zones_config_json_validate() the moment that check exists. */
+    cfg->ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT;
 }
 
 static void test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields(void)
@@ -2394,6 +2400,59 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
         cfg.pc_link_abort_silence_ms = ZONE_PC_LINK_SILENCE_MS_MAX + 1.0f;
         const char *reason = NULL;
         TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "pc_link_abort_silence_ms past its ceiling is rejected");
+    }
+    /* ZONES_CFG_VERSION 15->16: ease_off_window_mult's range check --
+     * NEGATIVE tests on both ceiling and floor (a zero-or-negative window
+     * multiplier would disable or invert the taper -- see this field's own
+     * doc comment), plus the two sentinel/boundary values that MUST stay
+     * legal so the check does not accidentally reject real, in-range A/B
+     * values or the "reset to default" sentinel. */
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_MAX + 1.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "ease_off_window_mult past its ceiling is rejected");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        /* Between 0 (the legal sentinel) and MIN (the legal floor) -- a real,
+         * nonzero-but-too-small window, not the "use the default" sentinel.
+         * Proves the check is a genuine [MIN,MAX]-or-0 union, not just
+         * `value <= MAX` with the floor forgotten. */
+        cfg.ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_MIN / 2.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason),
+                  "a nonzero ease_off_window_mult below its floor is rejected (not the 0 sentinel)");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.ease_off_window_mult = -1.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "a negative ease_off_window_mult is rejected");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.ease_off_window_mult = NAN;
+        const char *reason = NULL;
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "a NaN ease_off_window_mult is rejected");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.ease_off_window_mult = 0.0f; /* the "use the firmware default" sentinel */
+        const char *reason = NULL;
+        TEST_CHECK(zones_config_json_validate(&cfg, &reason), "0 stays legal for ease_off_window_mult (the default sentinel)");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_MAX; /* the ceiling itself -- inclusive */
+        const char *reason = NULL;
+        TEST_CHECK(zones_config_json_validate(&cfg, &reason), "ease_off_window_mult exactly at its ceiling is accepted");
     }
     /* 0 must stay legal on every one of them -- it is the "use the firmware
      * default" value, not a missing setting. */
@@ -2886,9 +2945,9 @@ static void test_nvs_load_from_v6_blob_upconverts_fields_correctly(void)
 // way -- so this asserts real, non-default, non-zero values for fields that
 // have existed since v1 (name, pid_kp, max_temp_c, model_tau_s) all still
 // read back correctly out of the fully-migrated v15 struct.
-static void test_nvs_load_from_v1_blob_chains_end_to_end_to_v15_preserving_real_values(void)
+static void test_nvs_load_from_v1_blob_chains_end_to_end_to_v16_preserving_real_values(void)
 {
-    TEST_SECTION("nvs_load_from -- a v1 blob migrates end-to-end to the current (v15) config: "
+    TEST_SECTION("nvs_load_from -- a v1 blob migrates end-to-end to the current (v16) config: "
                  "real v1 field values (not just new-field defaults) survive every hop");
     nvs_test_enable(true);
     nvs_test_clear();
@@ -2923,8 +2982,8 @@ static void test_nvs_load_from_v1_blob_chains_end_to_end_to_v15_preserving_real_
     esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a v1 blob must migrate end-to-end to a valid current (v15) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v15) version");
+    TEST_CHECK(found && valid, "a v1 blob must migrate end-to-end to a valid current (v16) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v16) version");
 
     // Real values that existed at v1 and must have survived every hop to v15.
     TEST_CHECK(strcmp(out_cfg.zones[0].name, "OldestZone") == 0,
@@ -2948,6 +3007,18 @@ static void test_nvs_load_from_v1_blob_chains_end_to_end_to_v15_preserving_real_
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 0.0f, 1e-6, "v1 has no coupling_diag_k_dc -- 0 (unset)");
     TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 0, "v1 has no adaptive_tune_enabled -- documented default 0");
     TEST_CHECK(out_cfg.zones[0].tuning_valid == 0, "v1 has no tuning-quality record -- documented default 0 (not valid)");
+    // ease_off_window_mult: introduced at v16 (ZONES_CFG_VERSION 15->16).
+    // UNLIKE every other field checked above, its documented default is NOT
+    // 0 -- 0 is not a legal window multiplier (see zones_cfg_t::ease_off_
+    // window_mult's own comment) -- it is ZONE_EASE_OFF_WINDOW_MULT_DEFAULT
+    // (2.0), the exact value the removed PROFILE_EXECUTOR_EASE_OFF_WINDOW_
+    // MULT #define held. This is the "a v15 blob (and, transitively, a v1
+    // blob with nothing to say about it at all) upgrades with behaviour
+    // UNCHANGED" proof: 2.0 is what a board running today's firmware already
+    // uses, migrated or not.
+    TEST_CHECK_NEAR(out_cfg.ease_off_window_mult, ZONE_EASE_OFF_WINDOW_MULT_DEFAULT, 1e-6,
+                    "v1 (and every pre-v16 version) has no ease_off_window_mult -- defaults to 2.0, "
+                    "matching the removed compile-time #define exactly");
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -4158,6 +4229,166 @@ static void test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero(void
               "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
     TEST_CHECK(out_cfg.zones[1].adaptive_tune_enabled == 0,
               "zones[1].adaptive_tune_enabled stays 0 (never opted in)");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// The A/B-campaign task's own migration proof: a v15 blob (the version
+// immediately before ease_off_window_mult existed) must upconvert to v16
+// with the new field defaulted to EXACTLY ZONE_EASE_OFF_WINDOW_MULT_DEFAULT
+// (2.0) -- the same value the removed compile-time
+// PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT #define held -- so a v15->v16
+// upgrade changes NOTHING about how any existing board's firing behaves,
+// while every other real v15 value (including coupling_diag_k_dc, the
+// field the previous migration test above proves survives its own hop)
+// keeps surviving through this one too. Same shape as
+// test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero() just
+// above, one version later.
+static void test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default(void)
+{
+    TEST_SECTION("nvs_load_from -- a v15 blob upconverts to v16: ease_off_window_mult defaults to "
+                 "2.0 (matching the removed compile-time #define exactly -- behaviour UNCHANGED), while "
+                 "coupling_diag_k_dc/model_k_dc/pc_link_abort_silence_ms/etc survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v15_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 15;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].model_k_dc = 20.969f;
+    src.zones[0].model_tau_s = 640.0f;
+    src.zones[0].model_dead_time_s = 45.0f;
+    src.zones[0].coupling_coeff[1] = 10.887f;
+    src.zones[0].coupling_diag_k_dc = 19.4f; /* a REAL, already-measured v15 value -- must survive */
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    src.zones[0].adaptive_tune_enabled = 1;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v15's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v15 blob must migrate to a valid current (v16) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // THE thing this test is really about: ease_off_window_mult must land at
+    // its documented, behaviour-preserving default -- NOT 0.0 (illegal for
+    // this field, unlike every other 0-means-unconfigured field in this
+    // struct) and not some other number.
+    TEST_CHECK_NEAR(out_cfg.ease_off_window_mult, ZONE_EASE_OFF_WINDOW_MULT_DEFAULT, 1e-6,
+                    "ease_off_window_mult defaults to 2.0 (v15 never stored it) -- behaviour UNCHANGED "
+                    "from the removed compile-time #define");
+
+    // Pre-existing v15 fields -- including a REAL, non-default
+    // coupling_diag_k_dc -- must survive the upgrade completely unchanged.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 19.4f, 1e-6,
+                    "zones[0].coupling_diag_k_dc (a real v15 measurement) survives the v15->v16 hop");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source is carried through verbatim");
+    TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 1,
+              "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// zones_config_get/set_ease_off_window_mult() -- the accessor pair
+// profile_executor_feedforward.c's zone_taper_climb_rate() actually calls
+// every tick (via a locally forward-declared prototype -- see that file's
+// own comment on why it does not #include zones_config_json.h directly).
+// Covers: round-trip through a real NVS save (not just an in-RAM field
+// poke), the refuse-don't-clamp discipline on both the ceiling and floor,
+// NaN refusal, and the 0 "reset to default" sentinel actually resolving to
+// ZONE_EASE_OFF_WINDOW_MULT_DEFAULT through the GETTER (not merely stored
+// as literal 0) -- the same distinction zone_taper_climb_rate() itself
+// depends on to never divide by an effectively-zero window.
+static void test_ease_off_window_mult_accessor_get_set_and_range(void)
+{
+    TEST_SECTION("zones_config_get/set_ease_off_window_mult() -- round-trips through NVS, refuses "
+                 "out-of-range (ceiling AND floor) and NaN, and resolves the 0 sentinel to the "
+                 "real default through the getter");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.relay_count = 1;
+    s_zones.cfg.zones[0].relay_mask = 0x01;
+    s_zones.cfg.zones[0].thermo_mask = 0x01;
+    s_zones.cfg.zones[0].max_temp_c = 1300.0f;
+    s_zones.cfg.timing_profile_count = 1;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    s_zones.cfg.ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT;
+    TEST_CHECK(nvs_save() == ESP_OK, "initial save must succeed");
+
+    // A real, in-range A/B value actually persists and reads back through
+    // the accessor -- the "config set -> persisted -> read" leg of the
+    // full chain this task cares about most.
+    TEST_CHECK(zones_config_set_ease_off_window_mult(0.75f), "set(0.75) -- a real in-range A/B value -- succeeds");
+    float got = -1.0f;
+    TEST_CHECK(zones_config_get_ease_off_window_mult(&got) && fabsf(got - 0.75f) < 1e-6,
+              "get() reads back exactly the value just set, from LIVE state");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg)); // wipe the live struct, force a real reload
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "reload after set() must succeed");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_ease_off_window_mult(&got) && fabsf(got - 0.75f) < 1e-6,
+              "0.75 survives a genuine NVS round trip, not just an in-RAM poke");
+
+    // Refuse, never clamp -- ceiling, floor, and NaN, none of which may
+    // silently become a different number or corrupt the live value.
+    TEST_CHECK(!zones_config_set_ease_off_window_mult(ZONE_EASE_OFF_WINDOW_MULT_MAX + 1.0f),
+              "set() above the ceiling is refused");
+    TEST_CHECK(!zones_config_set_ease_off_window_mult(ZONE_EASE_OFF_WINDOW_MULT_MIN / 2.0f),
+              "set() below the floor (but nonzero) is refused");
+    TEST_CHECK(!zones_config_set_ease_off_window_mult(-1.0f), "set() of a negative value is refused");
+    TEST_CHECK(!zones_config_set_ease_off_window_mult(NAN), "set() of NaN is refused");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_ease_off_window_mult(&got) && fabsf(got - 0.75f) < 1e-6,
+              "every refused set() above left the live value at 0.75, untouched -- refuse, not clamp");
+
+    // The 0 sentinel: legal to SET (an A/B campaign resetting an arm),
+    // resolves through the GETTER to the real default -- not literal 0,
+    // which zone_taper_climb_rate() could not safely divide by.
+    TEST_CHECK(zones_config_set_ease_off_window_mult(0.0f), "set(0.0) -- the reset-to-default sentinel -- succeeds");
+    TEST_CHECK_NEAR(s_zones.cfg.ease_off_window_mult, 0.0f, 1e-9, "the sentinel is stored as literal 0, not resolved eagerly");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_ease_off_window_mult(&got) && fabsf(got - ZONE_EASE_OFF_WINDOW_MULT_DEFAULT) < 1e-6,
+              "the getter resolves the stored 0 sentinel to ZONE_EASE_OFF_WINDOW_MULT_DEFAULT (2.0)");
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -6871,7 +7102,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_v4_blob_upconverts_thermo_mask_correctly();
     test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly();
     test_nvs_load_from_v6_blob_upconverts_fields_correctly();
-    test_nvs_load_from_v1_blob_chains_end_to_end_to_v15_preserving_real_values();
+    test_nvs_load_from_v1_blob_chains_end_to_end_to_v16_preserving_real_values();
     test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields();
     test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly();
     test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile();
@@ -6903,6 +7134,8 @@ void run_test_zones_http(void)
     test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown();
     test_nvs_load_from_v13_blob_defaults_adaptive_tune_enabled_to_zero();
     test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero();
+    test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default();
+    test_ease_off_window_mult_accessor_get_set_and_range();
     test_settings_source_save_reload_inheritance_round_trip();
     test_settings_source_two_and_three_zone_cycles_are_refused();
     test_tc_type_write_is_identity_independent_of_settings_source();

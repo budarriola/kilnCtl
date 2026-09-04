@@ -199,6 +199,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
            "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,"
            "\"pc_link_abort_silence_ms\":%.0f,"
+           "\"ease_off_window_mult\":%.3f,"
            /* 2026-08-27+1 (owner request: name relays that are NOT in any
             * zone): relay_zone_owned_mask lets the page tell, without its
             * own recompute, which of relay_names[] below it should render
@@ -222,7 +223,8 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            "\"relay_names\":[",
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
            s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type,
-           (double)s_zones.cfg.pc_link_abort_silence_ms, zone_owned_relay_mask(&s_zones.cfg),
+           (double)s_zones.cfg.pc_link_abort_silence_ms, (double)s_zones.cfg.ease_off_window_mult,
+           zone_owned_relay_mask(&s_zones.cfg),
            safety_wiring.link_up ? "true" : "false", safety_wiring.tc_temp_valid ? "true" : "false",
            (double)safety_wiring.tc_temp_c, safety_wiring.tc_fault, safety_wiring.relay_energized ? "true" : "false",
            ct_warn_mask);
@@ -1329,6 +1331,49 @@ esp_err_t zones_post_handler(httpd_req_t *req)
             }
         } else {
             tmp.pc_link_abort_silence_ms = s_zones.cfg.pc_link_abort_silence_ms;
+        }
+    }
+
+    /* ZONES_CFG_VERSION 15->16: the terminal ease-off taper window
+     * multiplier -- another global v8-override-style field, same OPTIONAL/
+     * omit-preserves convention as safety_tc_type/pc_link_abort_silence_ms
+     * just above (an A/B campaign toggling arms need not resubmit the whole
+     * form, and a client that predates this field must not silently reset
+     * whichever arm is currently running just by saving the zones page).
+     *
+     * Falls back through zones_config_get_ease_off_window_mult(), NOT a raw
+     * `s_zones.cfg.ease_off_window_mult` read the way pc_link_abort_
+     * silence_ms does -- unlike that field, 0 is not a legal value here (see
+     * zones_cfg_t::ease_off_window_mult's own comment), and a fresh,
+     * never-configured board's s_zones.cfg reads exactly 0 in this field.
+     * The getter already defends against that (falls back to
+     * ZONE_EASE_OFF_WINDOW_MULT_DEFAULT), so omitting this field on a
+     * board's very first save still produces a legal tmp that
+     * zones_config_json_validate() accepts, instead of carrying forward an
+     * illegal 0 that would reject the whole submission. */
+    {
+        char val[16];
+        int len = http_form_find_field(body, "ease_off_window_mult", val, sizeof(val));
+        if (len > 0) {
+            /* Parsed against [0, MAX] first -- 0 is the legal "reset to the
+             * firmware default" sentinel (same convention as
+             * pc_link_abort_silence_ms), matching zones_config_json_
+             * validate()'s own [0] union [MIN,MAX] rule -- then the (0, MIN)
+             * sliver zones_config_json_parse_float_field()'s single
+             * contiguous range cannot express on its own is rejected here.
+             * Same effective bound as the accessor setter/validate_zones_
+             * cfg(), just split across two checks because the parser only
+             * takes one [min, max] pair. */
+            if (!zones_config_json_parse_float_field(body, "ease_off_window_mult",
+                                   0.0f, ZONE_EASE_OFF_WINDOW_MULT_MAX, &tmp.ease_off_window_mult) ||
+                (tmp.ease_off_window_mult != 0.0f && tmp.ease_off_window_mult < ZONE_EASE_OFF_WINDOW_MULT_MIN)) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "ease_off_window_mult out of range (0 = firmware default)");
+                free(body);
+                return ESP_OK;
+            }
+        } else {
+            zones_config_get_ease_off_window_mult(&tmp.ease_off_window_mult);
         }
     }
 

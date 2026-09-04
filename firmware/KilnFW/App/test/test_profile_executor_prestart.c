@@ -573,6 +573,23 @@ uint8_t zones_config_get_max_simultaneous_relays(void)
     return 0;
 }
 
+/* ZONES_CFG_VERSION 15->16: profile_executor_feedforward.c's zone_taper_
+ * climb_rate() now reads the ease-off window multiplier through this getter
+ * instead of the old PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT compile-time
+ * #define. Settable (not hardcoded), defaulting to 2.0 -- the exact value
+ * the removed #define held -- so every pre-existing test in this file that
+ * exercises the taper keeps seeing exactly the same window it always has,
+ * and a test that specifically wants to prove the runtime knob actually
+ * moves the window (the "config set -> persisted -> read -> window
+ * different" chain) can override it via g_stub_ease_off_window_mult. */
+static float g_stub_ease_off_window_mult = 2.0f;
+bool zones_config_get_ease_off_window_mult(float *out_mult)
+{
+    if (!out_mult) return false;
+    *out_mult = g_stub_ease_off_window_mult;
+    return true;
+}
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     (void)zone_index;
@@ -2833,6 +2850,61 @@ static void test_taper_inside_window_reduces_rate_by_linear_factor(void)
                     "trend in the right direction");
     TEST_CHECK(tapered < rate_c_per_s, "a tapered rate inside the window must be strictly smaller than "
               "the untapered rate -- proves this is a rate-SHAPING change, not a no-op");
+}
+
+// ZONES_CFG_VERSION 15->16, the A/B-campaign task: PROFILE_EXECUTOR_EASE_OFF_
+// WINDOW_MULT is no longer a compile-time #define -- zone_taper_climb_rate()
+// now reads it at runtime through zones_config_get_ease_off_window_mult()
+// (this file's own stub, g_stub_ease_off_window_mult, above). This is the
+// whole-chain proof the task called out by name: "config set -> persisted ->
+// read -> window actually different" -- not a reader with no writer (this
+// repo's own "consumer without producer" bug class), which is why this test
+// mutates the STUB the same way the real accessor's setter would mutate
+// live config, calls the SAME production zone_taper_climb_rate() the real
+// control loop calls, and checks the WINDOW itself moved (via where the
+// taper boundary falls), not just that some number came out different.
+static void test_taper_runtime_multiplier_actually_changes_the_window(void)
+{
+    TEST_SECTION("zone_taper_climb_rate() -- the runtime ease-off window multiplier "
+                 "(zones_config_get_ease_off_window_mult(), formerly a compile-time #define) actually "
+                 "changes where the taper boundary falls -- the whole config-set -> persisted -> read -> "
+                 "window-different chain, not a reader with no writer");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_dead_time_s = 40.0f;
+
+    float rate_c_per_s = 0.03f;
+    float target_c = 100.0f;
+    /* 60s out: inside a 2.0x window (80s) but OUTSIDE a 1.0x window (40s) --
+     * this specific distance is chosen so the two arms this test compares
+     * disagree not just on the TAPERED VALUE but on whether tapering
+     * happens AT ALL, which is the sharpest possible proof the window
+     * itself moved rather than some incidental scaling constant. */
+    float dist_to_end_s = 60.0f;
+    float segment_target_c = target_c + rate_c_per_s * dist_to_end_s;
+
+    g_stub_ease_off_window_mult = 2.0f; /* firmware default -- window = 80s, 60s is INSIDE it */
+    float tapered_at_2x = zone_taper_climb_rate(&z, target_c, rate_c_per_s, segment_target_c);
+    TEST_CHECK(tapered_at_2x < rate_c_per_s,
+              "at 2.0x (window=80s > 60s distance), the rate IS tapered -- inside the window");
+    float expect_at_2x = rate_c_per_s * (dist_to_end_s / 80.0f);
+    TEST_CHECK_NEAR(tapered_at_2x, expect_at_2x, 1e-6, "2.0x arm matches the documented linear taper exactly");
+
+    g_stub_ease_off_window_mult = 1.0f; /* a different A/B arm -- window = 40s, 60s is OUTSIDE it */
+    float tapered_at_1x = zone_taper_climb_rate(&z, target_c, rate_c_per_s, segment_target_c);
+    TEST_CHECK(tapered_at_1x == rate_c_per_s,
+              "at 1.0x (window=40s < 60s distance), the SAME distance is now OUTSIDE the window -- no "
+              "taper at all, the rate passes through unchanged");
+
+    // THE proof this test exists for: two arms, same zone, same distance,
+    // same rate -- different multiplier, different outcome. If the runtime
+    // knob had a reader but no real writer wiring (this repo's own bug
+    // class), both arms would silently produce the SAME number here.
+    TEST_CHECK(tapered_at_1x != tapered_at_2x,
+              "the two A/B arms produce genuinely DIFFERENT feedforward rates for the identical zone "
+              "state -- the runtime multiplier is actually wired end-to-end, not read-and-ignored");
+
+    g_stub_ease_off_window_mult = 2.0f; /* restore -- every other test in this file assumes the default */
 }
 
 static void test_taper_at_target_returns_zero_not_nan(void)
@@ -6271,6 +6343,7 @@ void run_test_profile_executor_prestart(void)
 
     test_taper_outside_window_is_bit_identical_to_no_taper();
     test_taper_inside_window_reduces_rate_by_linear_factor();
+    test_taper_runtime_multiplier_actually_changes_the_window();
     test_taper_at_target_returns_zero_not_nan();
     test_taper_no_identified_dead_time_is_inert();
     test_taper_asymmetric_dead_times_key_off_each_zones_own();

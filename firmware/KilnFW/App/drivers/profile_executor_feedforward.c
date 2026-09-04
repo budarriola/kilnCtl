@@ -14,13 +14,37 @@
 
 #include "zones_http.h"
 
+/* zones_config_get_ease_off_window_mult() (zones_config_json.h/
+ * zones_config_accessors.c) and its ZONE_EASE_OFF_WINDOW_MULT_DEFAULT
+ * fallback constant -- forward-declared here rather than #include
+ * "zones_config_json.h" deliberately: that header pulls in zones_cfg_t and
+ * its _Static_assert()-guarded historical layouts (zone_cfg_v9_t..v14_t),
+ * which test_profile_executor_prestart.c's host-test translation unit
+ * compiles WITHOUT /std:c11 (unlike test_zones_http.c's own build, which
+ * does) -- MSVC's default (pre-C11) mode does not recognize _Static_assert
+ * as a keyword there, and every one of those asserts breaks the build. A
+ * bare prototype and one small constant is a far smaller seam to duplicate
+ * than moving a compiler-standard flag around a shared test script. Keep
+ * this in sync with zones_config_json.h's own declaration/definition;
+ * ZONE_EASE_OFF_WINDOW_MULT_DEFAULT's value (2.0f) must keep matching that
+ * header's own #define -- see this field's ZONES_CFG_VERSION 15->16 doc
+ * comment there for why. */
+#define ZONE_EASE_OFF_WINDOW_MULT_DEFAULT 2.0f
+bool zones_config_get_ease_off_window_mult(float *out_mult);
+
 /* Terminal ease-off taper window, as a multiple of a zone's own identified
- * dead time -- see zone_taper_climb_rate()'s doc comment. 2.0, per
- * sim_calibration.md sec 5: the calibrated sim measured 2.0x outperforming
- * 1.0x on every zone's dwell-entry overshoot with linear and cosine shapes
- * statistically equivalent, so this is the configuration it actually
- * validated, not a guess at a wider number. */
-#define PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT 2.0f
+ * dead time -- see zone_taper_climb_rate()'s doc comment. Was a compile-time
+ * #define (2.0f, per sim_calibration.md sec 5: the calibrated sim measured
+ * 2.0x outperforming 1.0x on every zone's dwell-entry overshoot with linear
+ * and cosine shapes statistically equivalent), now a runtime knob
+ * (zones_cfg_t::ease_off_window_mult, ZONES_CFG_VERSION 15->16) so the 2.0x
+ * sizing -- chosen against a simulator later found to undershoot dwell-entry
+ * overshoot -- can be A/B tested on real hardware without a reflash between
+ * arms. zone_taper_climb_rate() below reads the live value through
+ * zones_config_get_ease_off_window_mult() every call rather than caching it,
+ * so a config change taking effect mid-run (the whole point of an A/B swap
+ * that must not require a reflash) is not a special case -- it is simply
+ * what happens on the very next tick. */
 
 /* ---- feedforward from the identified plant model (TODO.md 6A.2) ------------
  *
@@ -228,7 +252,14 @@ float zone_taper_climb_rate(const zone_runtime_t *z, float target_c, float rate_
 
     float dist_c = fabsf(segment_target_c - target_c);
     float dist_s = dist_c / fabsf(rate_c_per_s);
-    float window_s = PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT * z->ff_dead_time_s;
+    /* Runtime multiplier -- see this file's top-of-file comment on why this
+     * reads through the accessor every call rather than caching it, and
+     * zones_config_get_ease_off_window_mult()'s own comment for why it
+     * always returns a legal, safe-to-multiply-by value even against a
+     * zeroed/unconfigured zones_cfg_t. */
+    float mult = ZONE_EASE_OFF_WINDOW_MULT_DEFAULT;
+    zones_config_get_ease_off_window_mult(&mult);
+    float window_s = mult * z->ff_dead_time_s;
 
     if (dist_s >= window_s) return rate_c_per_s;
     if (dist_s <= 0.0f) return 0.0f;
