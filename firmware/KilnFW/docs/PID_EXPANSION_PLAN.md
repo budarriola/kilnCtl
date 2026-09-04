@@ -1103,6 +1103,135 @@ HTTP endpoint and zones-page UI.
       since that capture's absolute swing (0.0076) is an order of magnitude
       below the measured floor. All four negative-test mutations confirmed
       by hand (drop the `max()` term back to relative-only) before landing.
+
+      **Floor provenance and re-derivation, verified 2026-09-04.** The three
+      published per-zone `iae_normalized_whole_c` floors quoted everywhere in
+      this project (ease-off report, tracking synthesis, z0 mechanism report,
+      high-temp proposal, `AB_EXPERIMENT_CHECKLIST.md`) — z0 **0.1157**, z1
+      **0.0771**, z2 **0.1473** °C (rounded to 0.116/0.077/0.147) — trace to
+      exactly one place: `tools/PcTools/config_presets/noise_floor.json`,
+      built by `python -m kilnctrl.noise_floor build
+      logs/coupling/noise_floor_p7{,_b,_c,_d}_run{1,2,3}.jsonl` (6 captures,
+      recorded 2026-09-02/03). Method: `noise_floor.py`'s `compute_repeat_
+      spread` — the observed RANGE (max−min) of `pid_ab_compare.compute_run_
+      metrics`'s `iae_normalized_whole_c` across the 6 files, not a standard
+      deviation. **Reproduced exactly** — recomputing from those six files
+      today gives 0.11565/0.07709/0.14730, matching the artifact and every
+      quoted figure to the published precision.
+
+      **Currency problem: all 6 captures are old-matrix-era.**
+      `tracking_synthesis_20260904_report.md`'s membership table (line 50)
+      places all six `noise_floor_p7*_run*` files in the **pre-2026-08-31
+      coupling-matrix** group (`coupling_matrix_pre20260902`), confirmed (not
+      merely inferred) by that report's §5 robustness check. The coupling
+      matrix that has been live and re-verified since is a different,
+      asymmetric matrix (`coupling_matrix_20260831`) — the published floor
+      has never been measured on the matrix this project now runs.
+
+      **Circularity, checked.** The synthesis report's own caveat is that
+      these six files' *preset name* was never recorded and their old-matrix
+      membership was inferred from their metrics resembling the other
+      old-matrix captures — the same metrics the floor is a spread over. That
+      is untidy, but it does not appear to contaminate the floor NUMBER
+      itself: `compute_repeat_spread` does not use group membership as an
+      input, only the raw per-run metrics, and the synthesis report's §5
+      sensitivity check (dropping these 7 files moves the old-era group's z0
+      offset by 0.01, 2.00→1.99) shows the six files' metrics are not
+      outliers relative to their assigned group — i.e. the resemblance-based
+      attribution is not obviously wrong, and even if it were, the floor
+      computation would be unaffected, since it never conditions on the
+      label. Untidy provenance, not demonstrated contamination.
+
+      **Re-derived on current-matrix data.** No current-matrix run set is
+      documented anywhere as an explicit repeat-of-one-config noise-floor
+      campaign (`noise_floor.py build` has only ever been pointed at the six
+      old-matrix files above). Two independent n=3 current-matrix sets exist
+      that are same-configuration repeats (`ab_new_{1,2,3}.jsonl`: stock
+      profile 7, current matrix; `easeoff_ab_20260904_2p0_run{1,2,3}.jsonl`:
+      current matrix, `ease_off_window_mult=2.0`, the board default —
+      i.e. the same nominal configuration as `ab_new`), computed here with
+      the same `noise_floor.py compute_repeat_spread` method:
+
+      | zone | ab_new (n=3) | easeoff 2.0× (n=3) | published floor (n=6, old matrix) |
+      |---|---|---|---|
+      | z0 | 0.060 | 0.064 | 0.1157 |
+      | z1 | 0.056 | 0.034 | 0.0771 |
+      | z2 | 0.036 | 0.065 | 0.1473 |
+
+      Both current-matrix triplets are individually **NOT like-for-like** on
+      start temperature (4.41 °C and 3.09 °C spread respectively, both worse
+      than the six-file set's 1.29 °C), yet both give a *smaller* range than
+      the published floor on every zone — the opposite of what a worse
+      like-for-like violation would predict if start-temp drift were the
+      dominant driver of the published number. The two n=3 estimates agree
+      with each other to within a factor of ~2 (consistent with n=3 range
+      statistics being noisy, not with a hidden config difference dominating
+      either set) but **pooling them into one n=6 set is not valid**: the
+      pooled range jumps to 0.246/0.247/0.141 °C — far above either
+      individual triplet — meaning the two triplets' central tendencies
+      differ by more than either one's own internal spread, i.e. they are
+      not interchangeable repeats of one population even though both are
+      "current matrix, stock ease-off." (Consistent with an independent
+      re-derivation already in `z0_dwell_overshoot_mechanism_20260904_
+      report.md` §W3.2, which separately measured within-triplet SD of
+      0.055 for `ab_new` and 0.035 for a `noise_floor_p7d` sub-triplet on a
+      *different* metric (z0 dwell-entry overshoot), same order of magnitude
+      as found here.) **Conclusion: n=3 is not enough to certify a new floor
+      artifact** — a proper current-matrix noise-floor campaign (6+ genuinely
+      rested, same-preset repeats, `noise_floor.py build`, same as the
+      original) has not been run and should be, before the published
+      0.116/0.077/0.147 figures are retired. Until then, treat the published
+      floor as **directionally conservative (loose, not tight)** for
+      today's board: every current-matrix same-config repeat measured is
+      smaller than it, on every zone, in both available samples.
+
+      **What "noise floor" actually measures.** It is whole-firing
+      run-to-run repeatability of the `iae_normalized_whole_c` metric
+      (controller + plant + start-condition variation across nominally
+      identical firings) — **not** raw thermocouple sensor noise. The two
+      are already kept distinct elsewhere in this document: the per-tick
+      residual-std sensor noise figure (~1 °C bench-identification floor,
+      §3.6c/pinned by `test_measured_thermo_noise_std_is_same_order_as_iae_
+      noise_floor`) is explicitly cross-checked against, and found the
+      expected ratio *larger* than (1.99×/1.22×/1.62×), this run-to-run
+      figure — confirming they are different quantities of different
+      magnitude, correctly not conflated. Run-to-run repeatability, which is
+      what is published and what every A/B verdict in this project actually
+      compares against, **is** the right comparator for "is this A/B effect
+      real"; no evidence found of the wrong one being substituted.
+
+      **Consequence check — does any conclusion flip?** No.
+      - **Ease-off `INDISTINGUISHABLE` verdict** (`easeoff_ab_20260904_
+        report.md`, re-validated `51e3d59`): survives. Its verdict rests on
+        the 0.5 °C actionable bar and cross-pair direction reversal (pair 2
+        says B better, pair 3 says A better, on the same two zones), not
+        narrowly on the published floor; the largest observed delta (0.313 °C,
+        pair 2 z0) stays below 0.5 °C and the direction still flips under
+        either floor.
+      - **z2's 0.33 °C "wrong direction"** (tracking synthesis): survives.
+        0.33 °C clears both the published `dwell_entry_overshoot_peak_c`
+        floor (~0.19–0.21 °C, six-file set) and the current-matrix range
+        found here (0.040/0.240 °C, `ab_new` seg 0/1) either way; the
+        "real but sub-0.5 °C-bar, do not chase" verdict is set by the
+        actionable bar, not the floor.
+      - **z0's ~1.7 °C worse-than-z1 dwell-entry-overshoot gap**: survives by
+        a wide margin — 1.7 °C is 7–40× any floor value in this section,
+        published or re-derived.
+      - **Withdrawn z0 ease-off-window intervention**
+        (`z0_dwell_overshoot_mechanism_20260904_report.md` §X3): survives,
+        and was never dependent on the single published triple in the first
+        place — its own power analysis (§W3.2) already used per-configuration
+        SDs re-derived from the same current-matrix captures used here
+        (`ab_new` SD 0.055) rather than the campaign-wide 0.116/0.077/0.147,
+        making it the one existing analysis in this project that already met
+        the standard this section is asking for.
+
+      **Net effect of this pass:** provenance confirmed and reproduced
+      exactly; the six-capture floor is real but stale (pre-fix matrix) and,
+      where checkable, appears loose rather than tight for today's board; no
+      quoted conclusion moves; the open action item is a proper ≥6-repeat
+      current-matrix noise-floor campaign to replace `noise_floor.json`,
+      not a correction to any existing verdict.
 - [x] **One-click revert** to the last accepted gain set (`5b44403`). Snapshots
       Kp/Ki/Kd, K_dc/tau/dead_time and `ki_baseline` before each commit point and
       restores them exactly, `ki_baseline` included — restoring gains while
