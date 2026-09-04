@@ -2902,6 +2902,19 @@ it is a general, independently useful capability (isolating z0's taper from
 z1/z2's) whose one motivating experiment turned out not to need it, not a
 capability that was a mistake.
 
+**Design study for shortlist item 1's real blocker (2026-09-04):** before
+costing a campaign or code for a per-zone `target_c`, a dedicated study
+answers whether that change breaks ramp-lock, segment-advance, feasibility,
+the guards reading `setpoint_c`, or SaftyFW's S2 guard.
+`firmware/KilnFW/docs/PER_ZONE_TARGET_DESIGN_STUDY.md` — headline: SaftyFW's
+S2 already reduces per-zone `setpoint_c` via `max()` and needs no change;
+ramp-lock's protection survives under a redefinition to "each zone vs. its
+own target"; recommended shape is a per-zone rate *cap* that only ever
+tightens the shared segment rate (never an independent per-zone
+destination), which leaves the shared `target_c` and every other guarantee
+untouched. No implementation done — awaiting owner sign-off per that
+document's §5.
+
 ### 3.6b addendum: first in-data reachability proof, `fuzzy_ab_20260904d` (2026-09-04)
 
 The standing pre-flight check above asked for `bd_*` fields on the *next*
