@@ -162,6 +162,56 @@ float profile_executor_guard_commanded_duty(bool heat_blocked, float intended_du
  * (returned unchanged), not capped to zero, so a lagging DWELL still has to
  * catch up at the zone's full configured rate; the cap only ever narrows
  * the requirement while a ramp is genuinely still moving. */
+/* THIS ZONE's own commanded setpoint rate, for feeding into profile_executor_
+ * guard_sanity_rate() above -- the fix for a real gap opened by the per-zone
+ * approach-rate cap (ZONES_CFG_VERSION 17->18, d800a60, PER_ZONE_TARGET_
+ * DESIGN_STUDY.md option (b)).
+ *
+ * That pass made thermal_guard_input_t.setpoint_c per-zone (zone_commanded_
+ * setpoint_c(), i.e. z->effective_target_c when this zone has a cap) but left
+ * guard 1's paired rate requirement keyed off the SHARED s_exec.target_rate_
+ * c_per_s. The two must describe the same setpoint: guard 1's whole reason
+ * for capping the expected rise at the commanded ramp rate (see profile_
+ * executor_guard_sanity_rate()'s own comment, and test_profile_executor_
+ * prestart.c's test_healthy_ramp_lag_does_not_false_trip_guard1) is "never
+ * demand that a zone outrun the setpoint it is chasing." A zone capped at
+ * 20 C/hr under a segment ramping at 100 C/hr is asked to climb 0.33 C/min
+ * while guard 1, reading the shared 1.67 C/min, would fall back to the bare
+ * 0.5 C/min default and demand half again more rise than the zone's OWN
+ * setpoint moves -- exactly the false trip that helper exists to prevent,
+ * and precisely the numbers test_healthy_ramp_lag_still_trips_without_the_
+ * rate_cap() already proves do trip.
+ *
+ * cap_c_per_hr is this zone's zone_cfg_t::approach_rate_cap_c_per_hr, 0 =
+ * uncapped: the shared rate is returned VERBATIM in that case, so every zone
+ * that has never set a cap (the default, and every zone before the field
+ * existed) is bit-identical to before this function existed.
+ *
+ * still_approaching is (z->effective_target_c != s_exec.target_c) -- a capped
+ * zone whose own setpoint has not yet arrived at the shared destination is
+ * genuinely still moving at the cap, INCLUDING while the shared schedule has
+ * already reached its target and started dwelling (target_rate_c_per_s is
+ * 0.0f then). Reporting 0 there would hand profile_executor_guard_sanity_
+ * rate() the dwell case and demand the full configured rate from a zone whose
+ * setpoint is, in fact, still climbing at the cap. Once the capped zone HAS
+ * arrived, the shared rate governs again (min() with the cap, since a cap can
+ * only ever tighten) and a stationary shared setpoint correctly yields 0 --
+ * the "a lagging dwell must still catch up at the full configured rate"
+ * behaviour, unchanged. */
+float profile_executor_guard_zone_ramp_rate(float shared_rate_c_per_s, float cap_c_per_hr,
+                                            bool still_approaching)
+{
+    if (!(cap_c_per_hr > 0.0f)) {
+        return shared_rate_c_per_s; /* uncapped -- verbatim, bit-identical */
+    }
+    float cap_c_per_s = cap_c_per_hr / 3600.0f;
+    if (still_approaching) {
+        return cap_c_per_s;
+    }
+    float shared_abs = fabsf(shared_rate_c_per_s);
+    return (shared_abs < cap_c_per_s) ? shared_abs : cap_c_per_s;
+}
+
 float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float target_rate_c_per_s)
 {
     float configured = (configured_rate_c_per_min > 0.0f) ? configured_rate_c_per_min : 0.5f;

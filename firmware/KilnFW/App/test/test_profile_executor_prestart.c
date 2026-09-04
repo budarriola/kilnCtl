@@ -2372,7 +2372,7 @@ static void test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly(void)
     pid_fuzzy_prepare_gains(&z, 0, &out);
 
     float expect_kp, expect_ki, expect_kd;
-    pid_fuzzy_adjust(300.0f, 0.0f, 1.0f, 0.02f, 2.0f, 100, &expect_kp, &expect_ki, &expect_kd);
+    pid_fuzzy_adjust(300.0f, 0.0f, 20.0f, 0.5f, 1.0f, 0.02f, 2.0f, 100, &expect_kp, &expect_ki, &expect_kd);
 
     TEST_CHECK(out.kp == expect_kp, "kp must equal a direct pid_fuzzy_adjust() call with the same inputs");
     TEST_CHECK(out.ki == expect_ki, "ki must equal a direct pid_fuzzy_adjust() call with the same inputs");
@@ -5135,6 +5135,116 @@ static void test_dwell_lag_still_requires_the_full_configured_rate(void)
                                         "cap it to zero");
 }
 
+// REGRESSION (review of d800a60, the per-zone approach-rate cap): that pass
+// made thermal_guard_input_t.setpoint_c per-zone (a capped zone's own
+// effective_target_c) but left guard 1's paired rate requirement keyed off the
+// SHARED s_exec.target_rate_c_per_s. The two must describe the same setpoint.
+// A zone capped at 20 C/hr under a segment ramping at 100 C/hr climbs its own
+// setpoint at 0.33 C/min while the shared rate says 1.67 C/min -- above the
+// bare 0.5 C/min default, so profile_executor_guard_sanity_rate() would leave
+// the requirement at 0.5 and demand the zone outrun its own command. Those are
+// exactly the numbers test_healthy_ramp_lag_still_trips_without_the_rate_cap()
+// already proves DO trip guard 1.
+static void test_capped_zone_guard1_rate_follows_its_own_cap_not_the_shared_ramp(void)
+{
+    TEST_SECTION("REGRESSION (d800a60 review): guard 1's expected-rate cap must follow a capped zone's OWN "
+                 "approach rate, not the shared segment ramp -- otherwise a per-zone cap re-opens the very "
+                 "false trip profile_executor_guard_sanity_rate() exists to prevent");
+
+    const float shared_rate_c_per_s = 100.0f / 3600.0f; /* segment ramping at 100 C/hr */
+    const float cap_c_per_hr = 20.0f;                   /* this zone capped at 20 C/hr */
+
+    // 1. Uncapped (0) -- the shared rate must come back VERBATIM, so every
+    //    zone that has never set a cap is bit-identical to before this fix.
+    TEST_CHECK(profile_executor_guard_zone_ramp_rate(shared_rate_c_per_s, 0.0f, false) == shared_rate_c_per_s,
+               "uncapped zone (cap 0): the shared rate is returned verbatim -- bit-identical to before");
+    TEST_CHECK(profile_executor_guard_zone_ramp_rate(shared_rate_c_per_s, 0.0f, true) == shared_rate_c_per_s,
+               "uncapped zone: still_approaching is irrelevant -- an uncapped setpoint IS the shared one");
+    TEST_CHECK(profile_executor_guard_zone_ramp_rate(0.0f, 0.0f, false) == 0.0f,
+               "uncapped zone in a dwell: 0 returned verbatim, so the dwell's full-rate catch-up rule stands");
+
+    // 2. Capped and still approaching -- the rate reported is the cap, and it
+    //    must actually narrow guard 1's requirement below the bare default.
+    float rate = profile_executor_guard_zone_ramp_rate(shared_rate_c_per_s, cap_c_per_hr, true);
+    TEST_CHECK_NEAR(rate, cap_c_per_hr / 3600.0f, 1e-9f,
+                    "capped zone still approaching: the reported rate is the CAP (20 C/hr), not the shared "
+                    "100 C/hr");
+    float sanity = profile_executor_guard_sanity_rate(/*configured_rate_c_per_min=*/0.5f, rate);
+    TEST_CHECK_NEAR(sanity, cap_c_per_hr / 60.0f, 1e-4f,
+                    "and guard 1's expected rate is therefore capped at 0.333 C/min, the zone's own command");
+    // The defect, stated as an assertion: the OLD (shared-rate) input leaves
+    // the requirement at the bare 0.5 C/min default -- strictly more rise than
+    // the zone is asked to make.
+    float sanity_old = profile_executor_guard_sanity_rate(0.5f, shared_rate_c_per_s);
+    TEST_CHECK(sanity_old > sanity,
+               "the pre-fix input (shared 100 C/hr) demanded strictly MORE rise (0.5 C/min) than the capped "
+               "zone's own setpoint moves (0.333 C/min) -- the defect this test pins");
+
+    // 3. The whole-guard proof: a healthy capped zone, 5C behind its OWN
+    //    setpoint (> PROGRESS_BAND_C) at duty 0.6, tracking that setpoint at
+    //    the cap, must not trip guard 1 in 600s.
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    cfg.sanity_rate_c_per_min = sanity;
+    thermal_guard_state_t gs;
+    thermal_guard_reset(&gs);
+    const float step_c_per_s = cap_c_per_hr / 3600.0f;
+    float measurement_c = 495.0f;
+    float setpoint_c = 500.0f; /* the zone's OWN capped setpoint, moving at the cap */
+    bool tripped = false;
+    for (int i = 0; i < 600 && !tripped; i++) {
+        measurement_c += step_c_per_s * 1.1f;
+        setpoint_c += step_c_per_s;
+        thermal_guard_input_t gin = {
+            .sensor_ok = true,
+            .measurement_c = measurement_c,
+            .setpoint_c = setpoint_c,
+            .commanded_duty = 0.6f,
+            .dt_s = 1.0f,
+        };
+        if (thermal_guard_tick(&gs, &cfg, &gin)) tripped = true;
+    }
+    TEST_CHECK(!tripped, "a healthy zone tracking its own 20 C/hr CAPPED setpoint must not trip guard 1");
+
+    // 4. And the same run with the PRE-FIX requirement DOES trip -- proving
+    //    the fix is load-bearing, not decorative.
+    thermal_guard_cfg_t cfg_old = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                   .sanity_rate_c_per_min = sanity_old};
+    thermal_guard_reset(&gs);
+    measurement_c = 495.0f;
+    setpoint_c = 500.0f;
+    bool tripped_old = false;
+    for (int i = 0; i < 600 && !tripped_old; i++) {
+        measurement_c += step_c_per_s * 1.1f;
+        setpoint_c += step_c_per_s;
+        thermal_guard_input_t gin = {
+            .sensor_ok = true,
+            .measurement_c = measurement_c,
+            .setpoint_c = setpoint_c,
+            .commanded_duty = 0.6f,
+            .dt_s = 1.0f,
+        };
+        if (thermal_guard_tick(&gs, &cfg_old, &gin)) tripped_old = true;
+    }
+    TEST_CHECK(tripped_old,
+               "NEGATIVE CONTROL: the same healthy capped zone DOES false-trip guard 1 under the pre-fix "
+               "shared-rate requirement -- this is the bug, reproduced");
+
+    // 5. Shared dwell while a capped zone is still climbing: the zone's own
+    //    setpoint is genuinely still moving at the cap, so the cap -- not the
+    //    dwell's "no relaxation" rule -- governs. Once it HAS arrived, the
+    //    dwell rule is restored exactly.
+    TEST_CHECK_NEAR(profile_executor_guard_zone_ramp_rate(0.0f, cap_c_per_hr, true), cap_c_per_hr / 3600.0f,
+                    1e-9f, "shared schedule dwelling but the capped zone still approaching: rate is the cap");
+    TEST_CHECK(profile_executor_guard_zone_ramp_rate(0.0f, cap_c_per_hr, false) == 0.0f,
+               "capped zone that has ARRIVED during a shared dwell: rate 0, so a lagging dwell still has to "
+               "catch up at the full configured rate -- unchanged");
+
+    // 6. A cap LOOSER than the shared ramp can only ever be a no-op -- the
+    //    shared rate still governs once arrived, never a widened requirement.
+    TEST_CHECK_NEAR(profile_executor_guard_zone_ramp_rate(20.0f / 3600.0f, 100.0f, false), 20.0f / 3600.0f,
+                    1e-9f, "a cap looser than the segment's own rate is a no-op -- the shared rate governs");
+}
+
 static void test_guard7_does_not_false_trip_on_a_healthy_dwell_with_realistic_dither(void)
 {
     TEST_SECTION("guard 7 (frozen sensor) does not false-trip on a healthy dwell with realistic sensor "
@@ -6870,6 +6980,7 @@ void run_test_profile_executor_prestart(void)
     test_healthy_ramp_lag_does_not_false_trip_guard1();
     test_healthy_ramp_lag_still_trips_without_the_rate_cap();
     test_dwell_lag_still_requires_the_full_configured_rate();
+    test_capped_zone_guard1_rate_follows_its_own_cap_not_the_shared_ramp();
     test_guard7_does_not_false_trip_on_a_healthy_dwell_with_realistic_dither();
 
     // PID_EXPANSION_PLAN.md Phase 7a firing-quality-stats accumulator --

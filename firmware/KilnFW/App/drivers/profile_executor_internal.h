@@ -875,6 +875,13 @@ void capture_run_snapshot(run_snapshot_buf_t *b);
 void apply_relay(uint8_t zi, bool want_on);
 float profile_executor_guard_commanded_duty(bool heat_blocked, float intended_duty);
 float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float target_rate_c_per_s);
+/* This zone's OWN commanded setpoint rate, to be passed to profile_executor_
+ * guard_sanity_rate() in place of the shared s_exec.target_rate_c_per_s --
+ * see that function's definition (profile_executor_relay_io.c) for why the
+ * per-zone approach-rate cap made the shared rate the wrong input, and why
+ * an uncapped zone (cap_c_per_hr == 0) is bit-identical to before. */
+float profile_executor_guard_zone_ramp_rate(float shared_rate_c_per_s, float cap_c_per_hr,
+                                            bool still_approaching);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 void release_profile_relay_claim(void);

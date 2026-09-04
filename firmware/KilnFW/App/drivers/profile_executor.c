@@ -1110,8 +1110,23 @@ void executor_task_entry(void *arg)
              * zone's own stored guard_cfg.sanity_rate_c_per_min (read
              * elsewhere) is never mutated. */
             thermal_guard_cfg_t guard_cfg_this_tick = z->guard_cfg;
+            /* Review fix (2026-09-04) on top of d800a60's per-zone approach-
+             * rate cap: the rate handed to profile_executor_guard_sanity_
+             * rate() must describe the SAME setpoint that .setpoint_c below
+             * carries (zone_commanded_setpoint_c(), this zone's own capped
+             * value), not the shared schedule's rate -- otherwise guard 1
+             * demands a rise faster than this zone's own setpoint moves,
+             * exactly the false trip that cap was written to prevent. An
+             * uncapped zone reads a 0 cap and gets s_exec.target_rate_c_per_s
+             * verbatim, bit-identical to before. See profile_executor_guard_
+             * zone_ramp_rate()'s own doc comment. */
+            float guard_cap_c_per_hr = 0.0f;
+            (void)zones_config_get_approach_rate_cap_c_per_hr(zi, &guard_cap_c_per_hr);
+            float guard_zone_rate_c_per_s = profile_executor_guard_zone_ramp_rate(
+                s_exec.target_rate_c_per_s, guard_cap_c_per_hr,
+                z->effective_target_c != s_exec.target_c);
             guard_cfg_this_tick.sanity_rate_c_per_min =
-                profile_executor_guard_sanity_rate(z->guard_cfg.sanity_rate_c_per_min, s_exec.target_rate_c_per_s);
+                profile_executor_guard_sanity_rate(z->guard_cfg.sanity_rate_c_per_min, guard_zone_rate_c_per_s);
 
             thermal_guard_input_t gin = {
                 .sensor_ok = sensor_ok[zi],
