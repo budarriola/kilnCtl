@@ -1847,12 +1847,31 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       itself (the by-design injection seam for the whole
       `safety_guard_input_t` contract) is owned by another concurrent session
       and was not touched.
-- [ ] **`safety_link.h` hand-mirrors CommonFW frame constants.** POWER/DIAG/
+- [x] **`safety_link.h` hand-mirrors CommonFW frame constants.** POWER/DIAG/
       UPDATE_STATUS flag blocks (`safety_link.h:243-249,257-280,632-654`, 9
       "mirrored here" comments) duplicate `kilnlink_power.h`/`kilnlink_diag.h`
       by hand because KilnFW cannot `#include` SaftyFW's headers. Either call
       the CommonFW codecs directly or add a CI diff against the source-of-
-      truth headers. M
+      truth headers. M — **CLOSED 2026-09-04**: calling the codecs directly
+      was judged not low-risk here — `kilnlink_power.c`/`kilnlink_diag.c`
+      aren't compiled into KilnFW's ESP-IDF component today
+      (`components/kilnlink/CMakeLists.txt`), so wiring them in means both a
+      build-system change and rewriting `safety_apply_power()`/
+      `safety_apply_diag()` in `safety_link_frames.c` — safety-adjacent frame
+      parsing — for a payoff this static check already covers. Added
+      `App/test/power_diag_flag_mirror_drift_check.py` (+
+      `check_power_diag_flag_mirror_drift.ps1`, picked up by
+      `run_all_checks.ps1`'s glob, same pattern as
+      `frame_a_offset_drift_check.py`): extracts the 18 mirrored POWER/DIAG
+      constants (frame lengths, channel count, flag/boot/state bytes, the
+      context-age sentinel) from both sides and fails naming the exact
+      constant and both values on any diff; fails closed (treated as a
+      failure, not a skip) if a regex stops matching either side. UPDATE_STATUS
+      is unchanged — SaftyFW's `update_task.c` is its own source of truth with
+      no CommonFW header to diff against (see that block's own comment).
+      Negative-tested: perturbed `SAFETY_LINK_POWER_FLAG_ANY_CHANNEL_CLIPPED`
+      from `0x02u` to `0x03u`, confirmed the check fails naming that exact
+      constant and both values, reverted, confirmed clean.
 - [x] **No shared bounded-wait/unknown-outcome helper.** The discipline behind
       `safety_link_rollback_boot_id_changed()`'s rollback path (`safety_link.c`
       ~262, "a rollback that fully succeeded into a permanent
