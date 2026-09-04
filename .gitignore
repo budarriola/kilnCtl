@@ -90,3 +90,19 @@ log_store_test_*/
 
 # Host-test scratch build dir
 build_agent/
+
+# Raw bench captures from the tuning/coupling campaigns (85 MB and growing).
+# The convention this repo already follows: the ANALYSIS lives in git --
+# logs/coupling/*.md and the pid_ab_compare *.txt reports are all tracked --
+# while the multi-megabyte per-tick JSONL the analysis was computed from is
+# not. A capture is also frequently still being appended to while a run is in
+# flight, so committing one races the writer.
+logs/**/*.jsonl
+logs/**/*.jsonl.aborted
+logs/**/*_state.json
+logs/**/*_campaign_state.json
+logs/**/*_run_queue.log
+logs/**/*.aborted
+
+# idf.py menuconfig writes these next to the (already-ignored) sdkconfig.
+firmware/KilnFW/sdkconfig.bak_*
