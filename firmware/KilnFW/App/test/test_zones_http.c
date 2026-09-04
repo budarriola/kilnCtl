@@ -1,10 +1,10 @@
-// Host test for App/drivers/zones_http.c's parse_zone_fields(), added
+// Host test for App/drivers/zones_http.c's zones_http_parse_zone_fields(), added
 // 2026-08-21 for the whole-page-zone-save data-loss defect found by
 // black-box testing against the live board: a POST to /api/zones that
 // carries fields only for zones 0..thermo_count-1 used to silently ZERO
 // relay_mask/thermo_mask/every other per-zone field for any zone index at
 // or past thermo_count, because zones_post_handler() memset(0)s its
-// candidate config before parsing and parse_zone_fields() returned early
+// candidate config before parsing and zones_http_parse_zone_fields() returned early
 // (before touching any of those fields) for i >= thermo_count. Reproduced
 // live: with thermo_count=1, an ordinary whole-page save that only replayed
 // what GET had just reported zeroed zone 1 and zone 2's thermo_mask, with a
@@ -12,8 +12,11 @@
 //
 // This is its own SEPARATE host-test executable (own main(), not merged into
 // test_main.c/kilnctl_host_tests.exe) -- see build_host_tests.ps1's second
-// build+run step. Reason: parse_zone_fields() is `static`, so the only way
-// to reach it directly is to #include zones_http.c itself (same convention
+// build+run step. Reason: zones_http_parse_zone_fields() is file-scope-
+// internal (was `static` before the 2026-09-04 split widened it so a
+// sibling .c file could call it -- see zones_http_internal.h), not part of
+// zones_http.h's public API, so the only way to reach it directly is to
+// #include zones_http.c itself (same convention
 // test_backup_import.c/test_kiln_cfg_store.c use for backup_http.c/
 // kiln_cfg_store.c). But zones_http.c DEFINES the real, non-static
 // zones_config_get_*()/set_*() functions declared in zones_http.h, and
@@ -24,12 +27,12 @@
 // a second, independent executable sidesteps that entirely: nothing here is
 // ever linked alongside test_backup_import.c's stubs.
 //
-// Stub surface below is wider than parse_zone_fields() itself touches, for
+// Stub surface below is wider than zones_http_parse_zone_fields() itself touches, for
 // the same reason test_backup_import.c's is wider than backup_import_apply()
 // needs: the whole of zones_http.c (page GET, JSON GET, the POST wrapper,
 // zones_http_start()'s hardware bring-up) is compiled into this one
 // translation unit and must link, even though these tests call
-// parse_zone_fields() directly and never invoke any of the real handlers.
+// zones_http_parse_zone_fields() directly and never invoke any of the real handlers.
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -55,9 +58,12 @@ int g_test_count = 0;
 // zones_http.c split 2026-09-01 into six files along its natural seams (it
 // had grown to 5628 lines, the largest file in the firmware -- see
 // ../drivers/zones_http_internal.h's header comment for the seam
-// rationale). parse_zone_fields() -- the whole reason this test reaches for
-// source inclusion instead of linking -- now lives in
-// zones_http_handlers.c, but the pattern this file's own header comment
+// rationale). One of those six, zones_http_handlers.c, was itself split
+// again 2026-09-04 (ROADMAP.md M15's 1500-line item, it had grown to 1598
+// lines) into zones_http_get.c/zones_http_post_parse.c/zones_http_post.c/
+// zones_http_pid.c. zones_http_parse_zone_fields() -- the whole reason this
+// test reaches for source inclusion instead of linking -- now lives in
+// zones_http_post_parse.c. The pattern this file's own header comment
 // describes is unchanged: #include every one of the split's .c files into
 // this ONE translation unit so their (now cross-file) `static`/non-static
 // mix still resolves exactly the way it does in the real, separately-
@@ -66,7 +72,10 @@ int g_test_count = 0;
 #include "../drivers/zones_http.c"
 #include "../drivers/zones_config_store.c"
 #include "../drivers/zones_config_accessors.c"
-#include "../drivers/zones_http_handlers.c"
+#include "../drivers/zones_http_get.c"
+#include "../drivers/zones_http_post_parse.c"
+#include "../drivers/zones_http_post.c"
+#include "../drivers/zones_http_pid.c"
 #include "../drivers/zones_current_sweep_engine.c"
 #include "../drivers/zones_current_sweep_task.c"
 
@@ -93,7 +102,7 @@ const uint8_t tuning_recommendations_json_end[1] = { 0 };
 // zones_http.c's POST handler now refuses to rewrite zone config while a
 // firing is running, through the same ota_http_check_interlocks() gate
 // kiln_cfg_http and backup_http use. None of these is reachable from the
-// tests here (only parse_zone_fields()/the NVS decode path is called
+// tests here (only zones_http_parse_zone_fields()/the NVS decode path is called
 // directly), but every symbol the file references must resolve at link time.
 // Returns OK so that if a future test ever does drive the handler, it is the
 // handler's own logic under test rather than this stand-in refusing first.
@@ -122,7 +131,7 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 
 
 // ---- esp_http_server.h stub bodies -----------------------------------------
-// None of these is ever invoked by this file's tests (only parse_zone_fields()
+// None of these is ever invoked by this file's tests (only zones_http_parse_zone_fields()
 // is called directly), but every symbol zones_http.c references anywhere in
 // the file must resolve at link time.
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
@@ -153,7 +162,7 @@ void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
 /* PID_EXPANSION_PLAN.md Phase 4 round-trip test support: captures the last
  * body httpd_resp_send() was asked to send, so a test can inspect what
  * zones_get_handler() actually emitted -- every prior test in this file only
- * ever calls parse_zone_fields()/zones_post_handler(), never
+ * ever calls zones_http_parse_zone_fields()/zones_post_handler(), never
  * zones_get_handler(), so this capture is inert for them. */
 static char s_last_resp_body[8192];
 static size_t s_last_resp_len;
@@ -182,7 +191,7 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
  * (the two inline strtol sites -- max_simultaneous_relays/safety_tc_type --
  * have no seam of their own to call directly, unlike zones_config_json_parse_u8_field()/
  * zones_config_json_parse_float_field()). NULL/false by default so every pre-existing test in
- * this file, which only calls parse_zone_fields() directly and never
+ * this file, which only calls zones_http_parse_zone_fields() directly and never
  * zones_post_handler(), is completely unaffected -- same opt-in convention
  * stubs/nvs.h's nvs_test_enable() uses. */
 static const char *s_test_post_body = NULL;
@@ -603,7 +612,7 @@ static zone_cfg_t make_stored_zone(void)
     return z;
 }
 
-// The defect, reproduced directly against parse_zone_fields(): a body that
+// The defect, reproduced directly against zones_http_parse_zone_fields(): a body that
 // carries NO fields at all for zone index i (exactly what zones_page.html
 // sends when i >= thermo_count -- it never renders that zone's block) must
 // leave every field of the currently-stored zone_cfg_t intact, not zero it.
@@ -627,7 +636,7 @@ static void test_out_of_range_zone_preserves_stored_fields(void)
     const uint8_t timing_profile_count = 1; // zone 1 is past thermo_count -- the early-return
                                             // preserve path never reaches z1_timingprofile's parse
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, /*i=*/1, thermo_count, relay_count, timing_profile_count,
+    bool ok = zones_http_parse_zone_fields(body, /*i=*/1, thermo_count, relay_count, timing_profile_count,
                                 &current, &out, &err_reason);
 
     TEST_CHECK(ok, "a body silent on zone 1 (past thermo_count) must still be accepted, not refused");
@@ -659,7 +668,7 @@ static void test_out_of_range_zone_preserves_stored_fields(void)
 }
 
 // ZONES_CFG_VERSION 12->13: the whole-page POST /api/zones path is a SECOND
-// gain-writing path (parse_zone_fields() writes z->pid_kp/ki/kd directly,
+// gain-writing path (zones_http_parse_zone_fields() writes z->pid_kp/ki/kd directly,
 // never through zones_config_set_pid()'s choke point -- see this function's
 // own comment on why the invalidation had to be duplicated here) -- exactly
 // the kind of second path this repo's reset-one-side bug class keeps
@@ -686,7 +695,7 @@ static void test_whole_page_post_invalidates_tuning_quality_only_when_gains_actu
                             "z0_cal=1.5&z0_kp=3.5&z0_ki=0.3&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
                             "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
         const char *err_reason = "unset";
-        bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+        bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
                                     /*timing_profile_count=*/1, &current, &out, &err_reason);
         TEST_CHECK(ok, "a well-formed submission with a changed kp is accepted");
         TEST_CHECK_NEAR(out.pid_kp, 3.5f, 1e-6, "sanity: kp really did change in the parsed result");
@@ -705,7 +714,7 @@ static void test_whole_page_post_invalidates_tuning_quality_only_when_gains_actu
                             "z0_cal=1.5&z0_kp=2.0&z0_ki=0.3&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
                             "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
         const char *err_reason = "unset";
-        bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+        bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
                                     /*timing_profile_count=*/1, &current, &out, &err_reason);
         TEST_CHECK(ok, "a well-formed submission with unchanged gains is accepted");
         TEST_CHECK_NEAR(out.pid_kp, current.pid_kp, 1e-6, "sanity: kp is unchanged");
@@ -732,7 +741,7 @@ static void test_in_range_zone_thermo_mask_legacy_fallback_unchanged(void)
                         "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=0&"
                         "z0_maxtemp=1300&z0_mintemp=-20&z0_window=60000&z0_minon=0&z0_minoff=0";
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/2, /*relay_count=*/4,
+    bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/2, /*relay_count=*/4,
                                 /*timing_profile_count=*/1, &current, &out, &err_reason);
 
     TEST_CHECK(ok, "in-range zone with every REQUIRED field present must still be accepted");
@@ -745,7 +754,7 @@ static void test_in_range_zone_thermo_mask_legacy_fallback_unchanged(void)
 // zero-initialized `out` untouched) this same test would fail. Demonstrated
 // here by calling a copy of the buggy logic inline rather than editing
 // zones_http.c back and forth -- see the header comment on why: this file
-// asserts against the CURRENT (fixed) parse_zone_fields(); the bug's old
+// asserts against the CURRENT (fixed) zones_http_parse_zone_fields(); the bug's old
 // shape is reproduced here as its own tiny function so the contrast is
 // checked mechanically, not just asserted in prose.
 static bool old_buggy_early_return_zeroed_it(uint8_t i, uint8_t thermo_count, uint8_t out_thermo_mask)
@@ -827,7 +836,7 @@ static void test_parse_float_field_accepts_clean_value(void)
 // zones_post_handler() end-to-end, for the two inline strtol sites that have
 // no standalone function to call directly. thermo_count=0/relay_count=0
 // keeps the body minimal -- every zone block is then past thermo_count, so
-// parse_zone_fields() treats all its fields as optional/preserve-existing
+// zones_http_parse_zone_fields() treats all its fields as optional/preserve-existing
 // (see test_out_of_range_zone_preserves_stored_fields() above), and no
 // z%u_* fields are required at all.
 static void run_zones_post(const char *body)
@@ -881,7 +890,7 @@ static void test_zones_post_accepts_clean_minimal_body(void)
 }
 
 // A single per-zone body block, shared by the whole-page cross-zone cycle
-// test below -- every field parse_zone_fields() requires for an in-range
+// test below -- every field zones_http_parse_zone_fields() requires for an in-range
 // zone (thermo_count covers both zone 0 and zone 1 in that test).
 #define TWO_ZONE_MINIMAL_BODY(SRC0, SRC1) \
     "thermo_count=2&relay_count=4&" MINIMAL_TIMING_PROFILE_BODY "&" \
@@ -919,7 +928,7 @@ static void seed_two_zone_pid_baseline(void)
 {
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     /* "255" == ZONE_SETTINGS_SOURCE_CUSTOM (zones_http.h) on both zones --
-     * "0" would make zone 0 self-reference (parse_zone_fields() refuses
+     * "0" would make zone 0 self-reference (zones_http_parse_zone_fields() refuses
      * that as a degenerate cycle), which is what the very first version of
      * this seed used and every test in this group failed at this line
      * because of it. */
@@ -1003,7 +1012,7 @@ static void test_zones_pid_post_rejects_zone_out_of_range(void)
 // ONLY zone/kp/ki/kd, so an attacker-controlled extra key in the same POST
 // body is simply never looked at). Each test posts a clean, ACCEPTED PID
 // change alongside an attempted edit of one forbidden field (using the SAME
-// key parse_zone_fields()/the whole-page path would recognise), then proves
+// key zones_http_parse_zone_fields()/the whole-page path would recognise), then proves
 // that field's live value is exactly the seeded baseline -- not the smuggled
 // value.
 static void test_zones_pid_post_ignores_relay_mask(void)
@@ -1128,7 +1137,7 @@ static void test_zones_pid_post_ignores_safety_tc_type(void)
               "safety_tc_type must remain the seeded value (0) -- safety_tc_type=5 must be ignored");
 }
 
-// parse_zone_fields()'s own per-zone chain-walk only ever checks the zone
+// zones_http_parse_zone_fields()'s own per-zone chain-walk only ever checks the zone
 // being written against every OTHER zone's LIVE stored value -- it cannot
 // see a SECOND zone changing in the very same whole-page POST. z0's own
 // entry (z0_settings_source=1) is not a cycle against the pre-POST live
@@ -1138,7 +1147,7 @@ static void test_zones_pid_post_ignores_safety_tc_type(void)
 // (z1_settings_source=0) checked in isolation -- only TOGETHER, once both
 // are assembled into tmp.zones[], do they close 0 -> 1 -> 0. This is exactly
 // what zones_post_handler()'s own post-loop re-walk (right after the
-// per-zone parse_zone_fields() loop, before the commit point) exists to
+// per-zone zones_http_parse_zone_fields() loop, before the commit point) exists to
 // catch.
 static void test_post_whole_page_cross_zone_cycle_refused(void)
 {
@@ -1147,7 +1156,7 @@ static void test_post_whole_page_cross_zone_cycle_refused(void)
                  "are refused, before either is committed");
     /* Explicit clean slate (Custom/Custom) -- run_zones_post() does not
      * reset s_zones.cfg, and this door's per-zone cross-check (inside
-     * parse_zone_fields(), for the single-zone case) also consults the live
+     * zones_http_parse_zone_fields(), for the single-zone case) also consults the live
      * config for every OTHER zone, so a leftover raw-zero from an earlier
      * test (or this file's own zero-initialized BSS default) must not leak
      * in as an accidental link -- see zones_config_json_settings_source_chain_has_cycle()'s
@@ -1195,7 +1204,7 @@ static void test_post_whole_page_cross_zone_legal_chain_accepted(void)
 // FIX 1 -- a found-but-refused newer-version zones blob must not look like
 // "nothing found" to the legacy-migration decision, and must never be
 // overwritten by it. nvs_load_from() is `static`; reached directly, same
-// convention as parse_zone_fields() above. Uses stubs/nvs.h's opt-in
+// convention as zones_http_parse_zone_fields() above. Uses stubs/nvs.h's opt-in
 // single-blob-slot NVS stub (nvs_test_enable()/nvs_test_clear()) -- off by
 // default, so every test above this section (which never touches NVS) is
 // unaffected.
@@ -3118,7 +3127,7 @@ static void test_post_mode_pid_fuzzy_accepted_by_parser(void)
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body3, 0, 1, 4, 1, &current, &out, &err_reason);
+    bool ok = zones_http_parse_zone_fields(body3, 0, 1, 4, 1, &current, &out, &err_reason);
     TEST_CHECK(ok, "z0_mode=3 (PID_FUZZY) must be accepted");
     TEST_CHECK(out.control_mode == (uint8_t)ZONE_CONTROL_MODE_PID_FUZZY, "the parsed mode is PID_FUZZY");
 
@@ -3130,7 +3139,7 @@ static void test_post_mode_pid_fuzzy_accepted_by_parser(void)
              "z0_timingprofile=0");
     memset(&out, 0, sizeof(out));
     err_reason = "unset";
-    ok = parse_zone_fields(body4, 0, 1, 4, 1, &current, &out, &err_reason);
+    ok = zones_http_parse_zone_fields(body4, 0, 1, 4, 1, &current, &out, &err_reason);
     TEST_CHECK(!ok, "z0_mode=4 must still be refused -- appending PID_FUZZY did not widen the ceiling further");
     TEST_CHECK(err_reason && strstr(err_reason, "control_mode") != NULL, "the refusal names the field");
 }
@@ -3150,7 +3159,7 @@ static bool post_body_with_fuzzy_strength(const char *literal, const char **err_
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+    bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
     if (err_reason_out) {
         *err_reason_out = err_reason;
     }
@@ -3199,14 +3208,14 @@ static bool post_body_with_extra(const char *extra_kv, const char **err_reason_o
     memset(&out, 0, sizeof(out));
     const char *err_reason = "unset";
     /* thermo_count = MAX31856_CHANNEL_COUNT, not 1: settings_source's
-     * cross-zone chain-walk (parse_zone_fields()'s own comment on it) is
+     * cross-zone chain-walk (zones_http_parse_zone_fields()'s own comment on it) is
      * bounded by thermo_count -- the same "unused trailing slot" discipline
      * used everywhere else in this file -- so a thermo_count of 1 would make
      * every OTHER zone index invisible to that check and silently defeat
      * the cycle tests that exercise this door. Every other field this
      * helper posts only ever touches zone 0, so widening thermo_count here
      * does not change what any of those checks accept or reject. */
-    bool ok = parse_zone_fields(body, 0, MAX31856_CHANNEL_COUNT, 4, 1, &current, &out, &err_reason);
+    bool ok = zones_http_parse_zone_fields(body, 0, MAX31856_CHANNEL_COUNT, 4, 1, &current, &out, &err_reason);
     if (err_reason_out) *err_reason_out = err_reason;
     if (out_zone) *out_zone = out;
     return ok;
@@ -3273,7 +3282,7 @@ static void test_post_settings_source_self_reference_refused(void)
     const char *reason = "unset";
     zone_cfg_t out;
 
-    /* parse_zone_fields()'s settings_source cross-zone chain-walk consults
+    /* zones_http_parse_zone_fields()'s settings_source cross-zone chain-walk consults
      * the LIVE s_zones.cfg for every zone other than the one being posted
      * (post_body_with_extra()'s own `current` argument only ever covers
      * zone 0's OTHER fields, not this cross-zone check) -- so this test
@@ -3333,7 +3342,7 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+    bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
 
     TEST_CHECK(ok, "a POST omitting all five new fields must still succeed (optionality)");
     TEST_CHECK_NEAR(out.fuzzy_strength_pct, 42.0f, 1e-6,
@@ -3504,7 +3513,7 @@ static void test_zones_get_handler_succeeds_when_malloc_does_not_fail(void)
 // ---------------------------------------------------------------------------
 // zones_config_set_fuzzy_strength_pct / zones_config_get/set_coupling /
 // zones_config_get/set_settings_source -- new accessors backup_http.c's
-// import needs, added because parse_zone_fields() previously was the only
+// import needs, added because zones_http_parse_zone_fields() previously was the only
 // door onto these four fields. Same nvs_test_enable discipline as every other
 // setter test in this file: the setter writes RAM immediately either way, but
 // its return value (and thus TEST_CHECK) depends on nvs_save() succeeding.
@@ -4460,7 +4469,7 @@ static void test_settings_source_save_reload_inheritance_round_trip(void)
 //
 // PID_EXPANSION_PLAN.md line ~864 requires that a configuration forming an
 // inheritance cycle "must not be storable or must collapse safely". The
-// storage layer (zones_config_set_settings_source(), and parse_zone_fields()'s
+// storage layer (zones_config_set_settings_source(), and zones_http_parse_zone_fields()'s
 // identical z%u_settings_source door) used to refuse only SELF-reference
 // (settings_source == zone_index) -- see both functions' own comments -- and
 // never checked the TARGET zone's own settings_source, so a genuine 2-zone
@@ -4478,7 +4487,7 @@ static void test_settings_source_save_reload_inheritance_round_trip(void)
 // storable) as a positive proof of the then-open defect; it now asserts the
 // fix: the SAME sequence of calls is refused at the second link, for both
 // the 2-cycle and the 3-cycle, through both doors (the direct setter and
-// parse_zone_fields()), and a legal (acyclic) chain is still storable so
+// zones_http_parse_zone_fields()), and a legal (acyclic) chain is still storable so
 // this isn't a blanket refusal.
 static void test_settings_source_two_and_three_zone_cycles_are_refused(void)
 {
@@ -4547,10 +4556,10 @@ static void test_settings_source_two_and_three_zone_cycles_are_refused(void)
               "the legal 0 -> 1 -> 2 chain is fully storable -- the guard does not over-reject a chain "
               "that never revisits a zone");
 
-    // ---- The same guard through parse_zone_fields() (the POST/import door) ----
+    // ---- The same guard through zones_http_parse_zone_fields() (the POST/import door) ----
     // Current live state: zone 0 -> 1 -> 2 -> Custom (set directly above).
     // Free zone 0 back to Custom, then point zone 1 at zone 0 directly (a
-    // fresh, legal link: 1 -> 0 -> Custom) so a SUBSEQUENT parse_zone_fields()
+    // fresh, legal link: 1 -> 0 -> Custom) so a SUBSEQUENT zones_http_parse_zone_fields()
     // call closing zone 0 back onto zone 1 is a genuine 2-cycle, not a
     // freshly-created one.
     TEST_CHECK(zones_config_set_settings_source(0, ZONE_SETTINGS_SOURCE_CUSTOM),
@@ -4561,7 +4570,7 @@ static void test_settings_source_two_and_three_zone_cycles_are_refused(void)
     zone_cfg_t out0;
     const char *reason = "unset";
     TEST_CHECK(!post_body_with_extra("z0_settings_source=1", &reason, &out0),
-              "parse_zone_fields() (the POST/import door) REFUSES the identical 2-cycle a whole-page POST "
+              "zones_http_parse_zone_fields() (the POST/import door) REFUSES the identical 2-cycle a whole-page POST "
               "or backup_http.c's importer would create: zone 1 already points at zone 0 live, so posting "
               "z0_settings_source=1 (zone 0 -> zone 1) would close 0 -> 1 -> 0 -- refused through this "
               "door too, not just the direct setter");
@@ -4585,7 +4594,7 @@ static void test_settings_source_two_and_three_zone_cycles_are_refused(void)
 // exactly as if they had been typed"). There is no fan-out, and no
 // settings_source-conditioned override, anywhere in zones_http.c's storage
 // layer -- confirmed by grep: tc_type is written by exactly one path
-// (parse_zone_fields()'s z%u_tctype handling / zones_config_set_tc_type()),
+// (zones_http_parse_zone_fields()'s z%u_tctype handling / zones_config_set_tc_type()),
 // keyed ONLY on the zone/channel index the caller names, never touched by
 // settings_source or thermo_mask.
 //
@@ -6651,7 +6660,7 @@ static void test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero(v
 // The floor is enforced in four places; this block covers three of them (the
 // fourth, heater_output_duty()'s own quantization + running hold, is
 // test_heater_output.c's and stays there as defense in depth):
-//   1. parse_zone_fields()  -- the POST /api/zones door an operator types at;
+//   1. zones_http_parse_zone_fields()  -- the POST /api/zones door an operator types at;
 //   2. zones_config_json_validate() -- every stored or imported blob;
 //   3. raise_heater_timing_to_floors(), via zones_config_json_decode_blob() -- a pre-floor stored
 //      value is raised on load, so a GET can never report a number the very
@@ -6685,7 +6694,7 @@ static bool post_body_with_minon(const char *minon_literal, const char **err_rea
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+    bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
                                 /*timing_profile_count=*/1, &current, &out, &err_reason);
     if (err_reason_out) {
         *err_reason_out = err_reason;
@@ -6826,7 +6835,7 @@ static bool post_body_with_window(const char *window_literal, const char *minon_
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+    bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
                                 /*timing_profile_count=*/1, &current, &out, &err_reason);
     if (err_reason_out) {
         *err_reason_out = err_reason;
@@ -6979,7 +6988,7 @@ static bool post_body_with_sanity(const char *sanity_literal, const char **err_r
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+    bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
                                 /*timing_profile_count=*/1, &current, &out, &err_reason);
     if (err_reason_out) {
         *err_reason_out = err_reason;

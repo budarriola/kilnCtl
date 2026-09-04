@@ -12,7 +12,15 @@
  *   zones_config_store.c         -- NVS load/save, relay_names, zone_normals,
  *                                    CT-map/K_CT storage (state OWNER)
  *   zones_config_accessors.c     -- zones_config_get_.../set_...() public API
- *   zones_http_handlers.c        -- GET/POST /api/zones, field parse/validate
+ *   zones_http_get.c             -- GET /api/zones + the two static pages
+ *   zones_http_post_parse.c      -- per-zone POST field parse/validate
+ *   zones_http_post.c            -- POST /api/zones (whole-page submit)
+ *   zones_http_pid.c             -- POST /api/zones/pid (narrow PID-only)
+ *                                    (zones_http_get.c/_post_parse.c/_post.c/
+ *                                    _pid.c were one file, zones_http_
+ *                                    handlers.c, until it was itself split
+ *                                    2026-09-04, ROADMAP.md M15's 1500-line
+ *                                    item -- see the section below.)
  *   zones_current_sweep_engine.c -- Task 1 sweep mechanics (derive/refuse/
  *                                    ceiling/run-one-zone/hw callbacks)
  *   zones_current_sweep_task.c   -- the sweep task driver + CT/K_CT commit +
@@ -154,14 +162,33 @@ bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a);
 
 uint8_t zone_owned_relay_mask(const zones_cfg_t *cfg);
 
-/* ---- zones_http_handlers.c: shared with zones_http.c's sweep-status
- * handler (zones_json_escape() itself is otherwise only used inside
- * zones_http_handlers.c -- widened for that one cross-file caller), and the
- * page/GET/POST handlers zones_http_start() registers by function pointer. */
+/* ---- zones_http_get.c / zones_http_post_parse.c / zones_http_post.c /
+ * zones_http_pid.c (the former zones_http_handlers.c, split 2026-09-04,
+ * ROADMAP.md M15's 1500-line item -- zones_http_handlers.c had grown to
+ * 1598 lines):
+ *
+ *   zones_http_get.c        -- page_get_handler/safety_config_page_get_
+ *                               handler/zones_get_handler (GET side) plus
+ *                               zones_json_escape(), shared with zones_http.c's
+ *                               sweep-status handler (its only other caller).
+ *   zones_http_post_parse.c -- zones_http_parse_zone_fields() (was `static
+ *                               parse_zone_fields`; renamed with this split's
+ *                               prefix, no collision found, per this repo's
+ *                               "rename every symbol widened out of `static`
+ *                               regardless" rule), the per-zone POST field
+ *                               validator zones_http_post.c calls.
+ *   zones_http_post.c       -- zones_post_handler(), POST /api/zones.
+ *   zones_http_pid.c        -- zones_pid_post_handler(), POST /api/zones/pid.
+ *
+ * All four still register by function pointer from zones_http_start() in
+ * zones_http.c, unchanged. */
 void zones_json_escape(const char *src, char *out, size_t out_cap);
 esp_err_t page_get_handler(httpd_req_t *req);
 esp_err_t safety_config_page_get_handler(httpd_req_t *req);
 esp_err_t zones_get_handler(httpd_req_t *req);
+bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count, uint8_t relay_count,
+                                  uint8_t timing_profile_count, const zone_cfg_t *current_z, zone_cfg_t *z,
+                                  const char **err_reason);
 esp_err_t zones_post_handler(httpd_req_t *req);
 esp_err_t zones_pid_post_handler(httpd_req_t *req);
 

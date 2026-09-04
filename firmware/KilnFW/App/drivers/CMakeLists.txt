@@ -272,7 +272,14 @@ idf_component_register(SRCS "MAX31856.c"
                        # the small sweep HTTP wrappers.
                        "zones_config_store.c"
                        "zones_config_accessors.c"
-                       "zones_http_handlers.c"
+                       "zones_http_get.c"
+                       "zones_http_post_parse.c"
+                       "zones_http_post.c"
+                       "zones_http_pid.c"
+                       # zones_http_handlers.c split 2026-09-04 (ROADMAP.md
+                       # M15, the 1500-line rule) -- see
+                       # zones_http_internal.h's own doc comment for the file
+                       # map.
                        "zones_current_sweep_engine.c"
                        "zones_current_sweep_task.c"
                        "zones_config_json.c"

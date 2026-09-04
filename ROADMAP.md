@@ -1881,7 +1881,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, ~~`ota_http.c` (2508)~~,
       `ui_page_home.c` (2279), `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
       ~~`zones_config_json.c` (1867)~~, `main.c` (1820), ~~`backup_http.c` (1756)~~,
-      ~~`uart_bridge_ext.c` (1727)~~, `zones_http_handlers.c` (1598). Split
+      ~~`uart_bridge_ext.c` (1727)~~, ~~`zones_http_handlers.c` (1598)~~. Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
       `ARCHITECTURE.md`, and autotune has four separable concerns, on the
       `profile_executor` 8-file split's precedent. M-L — **`wifi_prov.c` part
@@ -2143,7 +2143,33 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       host test executables pass; `uart_bridge_ext.c` itself is pulled into no
       host-test translation unit (see its own S4 comment — its includes reach
       too much hardware-driving surface for a host stub set), so no test file
-      needed updating.
+      needed updating. `zones_http_handlers.c` part — **CLOSED 2026-09-04**:
+      move-only split into `zones_http_get.c` (402 lines, `page_get_handler`/
+      `zones_json_escape`/`safety_config_page_get_handler`/
+      `zones_get_handler` — the two static pages plus GET /api/zones),
+      `zones_http_post_parse.c` (692, the per-zone POST field parser, was
+      `static bool parse_zone_fields()`), `zones_http_post.c` (403,
+      `zones_post_handler()`, POST /api/zones's whole-page-submit body) and
+      `zones_http_pid.c` (147, `zones_pid_post_handler()`, the narrow
+      PID-only POST /api/zones/pid endpoint that stays legal while a firing
+      is running), sharing state via the existing `zones_http_internal.h`
+      (already the shared seam header for this file's siblings since the
+      2026-09-01 `zones_http.c` split — reused rather than duplicated, per
+      this task's own instruction). Symbol audit: grepped for both a
+      non-static definition and a same-named `static` across all of
+      `App/drivers/` before trusting the link — only one symbol needed
+      widening out of `static`, `parse_zone_fields()` (every other function
+      moved was already non-static from the 2026-09-01 split and stayed
+      that way); the audit found zero collisions of any kind for that name
+      repo-wide, but it was renamed to `zones_http_parse_zone_fields()`
+      anyway per the "rename even when currently clean" rule this pass's
+      brief restates. `build_kilnfw` compiles and links clean. All 21/21
+      host test executables pass; `test_zones_http.c` (its own separate
+      executable, `#include`s `zones_http.c`'s split family directly)
+      updated to `#include` the four new files instead of the one original
+      and to call `zones_http_parse_zone_fields()` at its ~43 direct call
+      sites, same convention as `test_profiles_http.c`/
+      `test_backup_import.c` above.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
