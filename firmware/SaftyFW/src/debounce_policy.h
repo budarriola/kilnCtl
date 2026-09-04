@@ -43,6 +43,23 @@ typedef struct {
     bool     published;
 } debounce_policy_state_t;
 
+// Real S6a/S7 debounce window constants (SAFETY_MODEL.md section 4) -- the
+// single source of truth. Moved here 2026-09-04 alongside the extraction
+// above so a host test can #include the real values directly instead of
+// hand-copying them into its own #defines, which is exactly the drift class
+// this file's own header comment warns about ("a change ... will silently
+// desync unless kept in sync by hand"). discrete_task.c includes this header
+// and uses these two directly -- do not redefine them anywhere else.
+#define SAFTYFW_ESTOP_DEBOUNCE_MS       50u  // S7
+#define SAFTYFW_MAIN_FAULT_DEBOUNCE_MS  200u // S6a
+
+// Ceiling divide: N = ceil(window_ms / period_ms), always >= 1 for a
+// non-zero window. period_ms is taken as an explicit argument (rather than
+// assumed from task_priorities.h) so this header stays free of any
+// FreeRTOS/hardware dependency and stays host-includable.
+#define SAFTYFW_DEBOUNCE_SAMPLES(window_ms, period_ms) \
+    (((window_ms) + (period_ms) - 1u) / (period_ms))
+
 // Advances the debounce by one sample. `raw` is the newest raw reading;
 // `n_samples` is the number of consecutive agreeing samples required before
 // `published` changes (computed by the caller, e.g.

@@ -22,15 +22,14 @@
 
 #define DISCRETE_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
 
-#define SAFTYFW_ESTOP_DEBOUNCE_MS       50u  // SAFETY_MODEL.md section 4, S7
-#define SAFTYFW_MAIN_FAULT_DEBOUNCE_MS  200u // SAFETY_MODEL.md section 4, S6a
-
-// Ceiling divide: N = ceil(window_ms / period_ms), always >= 1 for a
-// non-zero window. Evaluated at compile time from task_priorities.h's
-// period constant, so a period change (e.g. a faster discrete_task) widens
-// or narrows N automatically instead of silently under- or over-debouncing.
-#define SAFTYFW_DEBOUNCE_SAMPLES(window_ms) \
-    (((window_ms) + SAFTYFW_PERIOD_DISCRETE_TASK_MS - 1u) / SAFTYFW_PERIOD_DISCRETE_TASK_MS)
+// SAFTYFW_ESTOP_DEBOUNCE_MS / SAFTYFW_MAIN_FAULT_DEBOUNCE_MS /
+// SAFTYFW_DEBOUNCE_SAMPLES() now live in debounce_policy.h (2026-09-04) so
+// the host tests that exercise the real debounce (test/test_debounce_
+// nuisance.c) can #include the same source of truth this file uses instead
+// of hand-copying it. SAFTYFW_DEBOUNCE_SAMPLES() here takes the period
+// explicitly -- evaluated at compile time from task_priorities.h's period
+// constant below, so a period change (e.g. a faster discrete_task) widens or
+// narrows N automatically instead of silently under- or over-debouncing.
 
 static TaskHandle_t s_task_handle = NULL;
 static volatile bool s_estop_pressed = false;
@@ -62,8 +61,8 @@ static void discrete_task_fn(void *arg)
     static debounce_state_t estop_db = { .published = false };
     static debounce_state_t main_fault_db = { .published = false };
 
-    const uint32_t estop_n = SAFTYFW_DEBOUNCE_SAMPLES(SAFTYFW_ESTOP_DEBOUNCE_MS);
-    const uint32_t main_fault_n = SAFTYFW_DEBOUNCE_SAMPLES(SAFTYFW_MAIN_FAULT_DEBOUNCE_MS);
+    const uint32_t estop_n = SAFTYFW_DEBOUNCE_SAMPLES(SAFTYFW_ESTOP_DEBOUNCE_MS, SAFTYFW_PERIOD_DISCRETE_TASK_MS);
+    const uint32_t main_fault_n = SAFTYFW_DEBOUNCE_SAMPLES(SAFTYFW_MAIN_FAULT_DEBOUNCE_MS, SAFTYFW_PERIOD_DISCRETE_TASK_MS);
 
     TickType_t last_wake = xTaskGetTickCount();
 

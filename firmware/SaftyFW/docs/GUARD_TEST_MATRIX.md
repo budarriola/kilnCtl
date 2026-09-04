@@ -105,7 +105,7 @@ Pure `safety_guards.c`, MSVC, no SDK, no hardware — same setup as
 | S6b | Link dead 121 s, no current | **TRIP** — the unconditional backstop |
 | S8 | Rate above threshold with `max_rate_c_per_min` = 0 | **No trip** — disabled means disabled. Host-tested 2026-09-03 (`test_s8()`, `test/test_safety_guards.c`) |
 | S9 | Trip, then current persists 11 s | `TRIP_INEFFECTIVE` |
-| S9 | Trip, current decays with τ=1 s | No escalation |
+| S9 | Trip, current decays with τ=1 s | No escalation |[^s9-decay-margin]
 | S10 | Disagreement in `EXTERNAL_OVERHEAT` | Guard inactive |
 | S11 | Constant reading 601 s **with heat** | Trip |
 | S11 | Constant reading 601 s **with no heat** | **No trip** |
@@ -114,6 +114,54 @@ Pure `safety_guards.c`, MSVC, no SDK, no hardware — same setup as
 | All | `CLEAR_TRIP` while condition is still true | **Refused** |
 | All | `CLEAR_TRIP` with a mismatched `trip_mask` | **Refused** |
 | All | Guard verdicts with the TX path stubbed out | **Bit-identical** to a live-TX run |
+
+[^s9-decay-margin]: **This verdict is rate-sensitive, not decay-shape-sensitive — read it as
+    "τ=1 s does not nuisance-trip", not "decay does not nuisance-trip".**
+    `test/test_guard_nuisance.c`'s `test_s9_current_decay_after_normal_trip()`
+    feeds an exponential `amps(t) = initial_ratio * exp(-t/tau)` with τ=1 s,
+    the real circuit's measured time constant
+    (`firmware/SaftyFW/docs/CURRENT_SENSE.md` §3: "Exponential decay, τ = 1 s.
+    37 % at 1 s, 5 % at 3 s, 1 % at 4.6 s"), and shows `any_current_present`
+    (hence S9) correctly clears well inside `trip_verify_s`'s 10 s window at
+    the test's 15× initial-ratio starting point. That margin is not
+    unlimited: at the same 15× ratio, `any_current_present`'s own
+    presence threshold is crossed when the decaying signal falls back
+    through it, i.e. when `exp(-t/tau) = 1/15` — solving for the crossing
+    time as a function of τ, a τ above roughly 3.7 s would keep
+    `any_current_present` true past the same 10 s `trip_verify_s` window
+    and DOES escalate to `TRIP_INEFFECTIVE` even on a perfectly healthy
+    decay with no weld. 3.7 s is not a hard product spec anywhere; it falls
+    out of solving `trip_verify_s / tau = ln(15)` at the values this test
+    happens to use. The test's real load-bearing claim is narrower than "S9
+    tolerates normal decay" — it is "S9 tolerates *this circuit's* measured
+    τ=1 s decay with roughly 3.7x of margin before the window itself would
+    need to change." A different CT/rectifier/peak-hold combination with a
+    materially slower decay would need this margin re-derived, not assumed.
+
+    **A related, deliberate-looking asymmetry, found reading `safety_guards.c`
+    while auditing this (2026-09-04, read-only — that file is owned by
+    another concurrent session)**: S9's `TRIP_INEFFECTIVE` branch checks
+    `in->current_sensing_disabled` first (an uncalibrated/no-CT board's
+    `any_current_present` is the op-amp offset floor, not evidence of a weld
+    — the streak is held at 0 and no warn is raised) and *then*
+    `in->current_sensing_commissioned` (commissioned progresses the
+    unclearable latch; uncommissioned-but-not-disabled raises the
+    non-latching `s9_uncommissioned_warn` instead). S3
+    (`SAFETY_TRIP_LOAD_STUCK_ON`) only checks `current_sensing_disabled` — it
+    has no `current_sensing_commissioned` branch at all, so an uncommissioned
+    (but not explicitly disabled) board runs S3's full stuck-on logic against
+    an uncalibrated signal. Framed the way the task that found this framed
+    it — "does S9 consult `current_sensing_disabled`, unlike S3" — the
+    premise inverts: **S9 is the more careful guard here**, gating on both
+    flags with a distinct WARN for the partially-commissioned case; S3 gates
+    on only one. This reads as deliberate given the comment trail at
+    `safety_guards.c:370-402` (S9's block explicitly reasons about why
+    `current_sensing_commissioned` alone is not "trustworthy enough" for an
+    unclearable latch, a bar S3's WARN-free, always-armed design never
+    claims to clear) rather than an oversight — but it is still worth naming
+    plainly: S3 will run its stuck-on timer against an uncommissioned,
+    uncalibrated current reading, and nothing here should be read as
+    proposing to "fix" that either way.
 
 Drive the thermal ones from `firmware/KilnFW/App/test/sim_plant.c` — it already models
 element lag, sensor transport delay and radiative loss, so the traces are
