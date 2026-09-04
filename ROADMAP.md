@@ -59,7 +59,7 @@ What is still genuinely open is short:
 | Size | Item | Where |
 |---|---|---|
 | S | Physical zone arrangement — which element is where | [What is actually left](#what-is-actually-left) |
-| S | The deferred sanity rate for S8 — and note S8 is **not implemented**, so commissioning that field today enables nothing | M3 |
+| S | The deferred sanity rate for S8 — S8 gained a pure-module implementation and is integrated (2026-09-03, `safety_guards.c`/`safety_core.c`, `SaftyFW/docs/GUARD_TEST_MATRIX.md`), but ships deliberately off (`max_rate_c_per_min` defaults to 0, same "no default by design" shape as S1), so commissioning that field is what will enable it | M3 |
 | S | `hardware/UnitTestFixture/` — delete or keep | M7 |
 
 ### Software, doable now — no hardware, no decisions
@@ -195,7 +195,9 @@ Still genuinely unanswerable by the code:
 
 1. Physical zone arrangement (which element is where).
 2. The deferred sanity rate (S8's rate-of-rise ships disabled until a real
-   kiln's ramp is measured — and note S8 is not implemented at all).
+   kiln's ramp is measured — S8 itself gained a pure-module implementation
+   and integration on 2026-09-03, so this is now a commissioning gap, the
+   same class as S1's `abs_max_temp_c`, not a missing guard).
 3. `hardware/UnitTestFixture/` — delete it or keep it. `firmware/UnitTestFw`
    went on 2026-08-23; its embedded KiCad project was out of that change's
    scope. Board files are off-limits without your say-so.
@@ -590,18 +592,21 @@ soldering session.
 - [x] Per-processor console capture + interleaved log file
       (`kilnctrl-console-capture`) — host-verified only; the SAFETY log-relay
       wire path is still unimplemented in firmware
-- [ ] **HW change: LCD backlight control.** No GPIO/PWM path exists on the
-      current panel. `DISPLAY_ST7796_PLAN.md` §3.4.1 scopes the fix as one
-      flying wire (GPIO15 or GPIO16 to module pin 8) riding along with the
-      second-panel harness, buying dim/off on idle plus PWM brightness — the
-      wire itself is still **not fitted**, and gated on the STOP-block 5V I2C
-      hazard measurement in that plan's §4 before any harness is connected.
-      The firmware side (`App/drivers/backlight_pwm.c/.h`, LEDC PWM driven
-      off `screen_idle_get_state()`) landed 2026-09-03, host-tested, behind
-      default-OFF `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE` — same
-      anticipatory/default-off posture as `DISPLAY_ST7796_PLAN.md`'s
-      9.3/9.4/9.6/9.7. Not flash-verified; there is no flying wire on the
-      bench board yet.
+- [ ] **HW change: LCD backlight control.** The firmware side landed
+      2026-09-03 (commit `ad35720`): `App/drivers/backlight_pwm.c/.h`, an
+      LEDC PWM driver polling `screen_idle_get_state()` and mapping
+      screen-on/idle to duty, wired into `App/main.c`, host-tested
+      (`App/test/test_backlight_pwm.c`), behind default-OFF
+      `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE` — same anticipatory/default-off
+      posture as `DISPLAY_ST7796_PLAN.md`'s 9.3/9.4/9.6/9.7. What remains is
+      purely hardware: the flying wire (GPIO15 or GPIO16 to module pin 8),
+      scoped in `DISPLAY_ST7796_PLAN.md` §3.4.1 to ride along with the
+      second-panel harness, is still **not fitted**, and stays gated on the
+      STOP-block 5V I2C hazard measurement in that plan's §4 before any
+      harness is connected. Pin-by-pin wiring sheet, plus the R4/R6 module
+      rework touch requires: `firmware/KilnFW/docs/DISPLAY_ST7796_WIRING.md`.
+      Firmware is **not flash-verified** — it was written ahead of the
+      hardware, so first enable must confirm the panel actually dims.
 - [~] **Second LCD panel (ST7796/MSP4031), auto-detection, display SPI
       async/DMA.** `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`, sequenced
       Phase 0 (bench facts/hazard measurement) through Phase 7 (UI). Phases 1
@@ -699,17 +704,17 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       **Still open**: there is no LCD/web commissioning surface yet, and the
       four no-default section-1 fields remain unset, which is what keeps
       `commissioned: false` and leaves S1's ceiling disabled
-- [x] 12 of 13 guards (`SAFETY_MODEL.md` §4) implemented as pure functions and
-      host-tested against synthetic inputs (320+/320+ checks). **S8
-      (rate-of-rise) is NOT IMPLEMENTED — not merely disabled.** Verified
-      2026-08-24: `safety_guards.c` contains zero references to `S8` or to
-      `max_rate_c_per_min`. The earlier wording here, "intentionally ships
-      disabled until a real kiln's ramp rate is measured", implied the code
-      exists behind a config flag; it does not, so **commissioning
-      `max_rate_c_per_min` would enable nothing**. Whoever writes the
-      commissioning surface needs to know that before an operator is given a
-      field that looks like protection and is not. The 12-of-13 count above
-      is correct; only the reason S8 is absent was mis-stated. **Input wiring now complete (2026-08-24):**
+- [x] 13 of 13 guards (`SAFETY_MODEL.md` §4) implemented as pure functions and
+      host-tested against synthetic inputs. **S8 (rate-of-rise), the last
+      holdout, gained its pure-module implementation and integration on
+      2026-09-03** (`safety_guards.c`'s S8 block, `safety_core_load_guard_cfg()`
+      wiring gated on `CONFIG_STORE_SET_MAX_RATE_C_PER_MIN`, `test_s8()` +
+      `test_safety_core_s8_wiring.c`, `SaftyFW/docs/GUARD_TEST_MATRIX.md`).
+      It ships deliberately off — `max_rate_c_per_min` defaults to 0.0f,
+      the same "no default by design" shape S1 uses for `abs_max_temp_c` —
+      so **commissioning `max_rate_c_per_min` is now what enables it**,
+      superseding the earlier finding here that the field would enable
+      nothing. **Input wiring now complete (2026-08-24):**
       `safety_core_build_input()` populates every field the guards read —
       `context_valid`, `any_current_present`, `relay_commanded_recently`/
       `_continuously`, `zone_count`, the setpoint/measured reductions,
@@ -726,9 +731,12 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       `GUARD_TEST_MATRIX.md` predates both fixes; re-establish it rather than
       trusting the old number.~~ **Re-established 2026-09-03**
       (`GUARD_TEST_MATRIX.md` §6c): old count was 6 of 13 structurally
-      reachable (computed before either fix); current count, verified fresh
-      against today's `src/`, is 11 of 14 (S8 still unimplemented, excluded
-      from both; S14 is new since 2026-08-28 and tracked separately). S3,
+      reachable (computed before either fix and before S8 existed); S8
+      itself gained its implementation and integration on 2026-09-03 and is
+      now the same class as S1/S13 — implemented and integrated but
+      deliberately configured off pending commissioning, not unreachable.
+      See `SaftyFW/docs/GUARD_TEST_MATRIX.md` for the current reachable-count
+      recomputation (S14 is new since 2026-08-28 and tracked separately). S3,
       S6a, S7, S9 and S11 moved from blocked to reachable — S6a's own
       `main_fault_asserted` wiring is a third fix in the same window, beyond
       the two named above. S1, S13 and S14 remain deliberately blocked by
