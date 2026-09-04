@@ -109,12 +109,25 @@ static bool send_enable(const char *why)
     he_unlock(taken);
 
     if (orphaned) {
-        (void)safety_link_request_enable(s_he.safety, false);
+        esp_err_t rel_err = safety_link_request_enable(s_he.safety, false);
         bool t2 = he_lock();
         s_he.release_sends++;
         he_unlock(t2);
-        ESP_LOGW(TAG, "heat-enable request (%s) landed after its last claimant let go -- released again",
-                 why);
+        if (rel_err != ESP_OK) {
+            /* This was a fire-and-forget (void) cast that logged the same
+             * "released again" line unconditionally -- exactly the shape
+             * danger_mode.c's seed bug had. The relay is already off by this
+             * point (heat_enable.h's ordering rule), but the safety
+             * processor's own enable line can still be standing if this send
+             * failed, so name the failure rather than asserting it landed. */
+            ESP_LOGE(TAG, "heat-enable request (%s) landed after its last claimant let go -- "
+                          "release FAILED: %s -- the safety processor may still believe heating "
+                          "is permitted",
+                     why, esp_err_to_name(rel_err));
+        } else {
+            ESP_LOGW(TAG, "heat-enable request (%s) landed after its last claimant let go -- released again",
+                     why);
+        }
         return false;
     }
     if (err != ESP_OK) {
@@ -178,15 +191,26 @@ void heat_enable_release(heat_enable_claimant_t who)
         return;
     }
 
-    /* Unconditional and result-ignored, exactly like danger_mode_stop()'s:
-     * enable=false is the fail-safe direction and safety_link.c attempts it
-     * whether or not the link looks up. The relays are already off by the
-     * time any caller reaches here -- see heat_enable.h's ordering rule. */
-    (void)safety_link_request_enable(s_he.safety, false);
+    /* Unconditional attempt, exactly like danger_mode_stop()'s: enable=false
+     * is the fail-safe direction and safety_link.c attempts it whether or
+     * not the link looks up. The relays are already off by the time any
+     * caller reaches here -- see heat_enable.h's ordering rule -- but this
+     * used to cast the result to (void) and print "released" regardless,
+     * which is the exact seed bug (danger_mode.c, commit 2bcdc2d): an
+     * owner-queue/link failure looked identical in the log to a confirmed
+     * release. Surface the disagreement instead. */
+    esp_err_t rel_err = safety_link_request_enable(s_he.safety, false);
     bool t2 = he_lock();
     s_he.release_sends++;
     he_unlock(t2);
-    ESP_LOGW(TAG, "heat-enable released: safety processor asked to drop heating (K4)");
+    if (rel_err != ESP_OK) {
+        ESP_LOGE(TAG, "heat-enable release FAILED: %s -- the safety processor may still believe "
+                      "heating is permitted (K4); relays are already off, but do not assume the "
+                      "enable line dropped",
+                 esp_err_to_name(rel_err));
+    } else {
+        ESP_LOGW(TAG, "heat-enable released: safety processor asked to drop heating (K4)");
+    }
 }
 
 bool heat_enable_is_held(heat_enable_claimant_t who)

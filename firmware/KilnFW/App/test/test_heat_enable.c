@@ -44,6 +44,11 @@ static bool g_link_up = true;       // whether enable=true is accepted
 static int  g_enable_true_calls = 0;  // attempted (including refused ones)
 static int  g_enable_false_calls = 0;
 static bool g_last_enable_value = false;
+// Forces the enable=false (release) direction to fail -- used to prove the
+// 2026-09 fix actually checks safety_link_request_enable()'s result on
+// release rather than casting it to (void) and logging success regardless
+// (the exact seed-bug shape from danger_mode.c, commit 2bcdc2d).
+static bool g_release_should_fail = false;
 
 esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
 {
@@ -56,7 +61,7 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
     }
     // safety_link.c: the fail-safe direction is always attempted.
     g_enable_false_calls++;
-    return ESP_OK;
+    return g_release_should_fail ? ESP_ERR_TIMEOUT : ESP_OK;
 }
 
 // Fresh module state for each test. heat_enable_init() resets everything
@@ -70,6 +75,7 @@ static void reset_all(bool link_up)
     g_link_up = link_up;
     g_enable_true_calls = 0;
     g_enable_false_calls = 0;
+    g_release_should_fail = false;
     heat_enable_init((SafetyLinkClass *)0x1);
     g_base_enable_sends = heat_enable_enable_send_count();
     g_base_release_sends = heat_enable_release_send_count();
@@ -209,6 +215,110 @@ static void test_release_after_failed_request_still_sends(void)
     TEST_CHECK(g_enable_true_calls == 1, "reconcile does not resurrect a released claim");
 }
 
+// g_esp_loge_calls (stubs/esp_log.h) is a per-TU `static` counter -- it
+// cannot see ESP_LOGE calls made inside heat_enable.c, which this suite
+// links as a separately-compiled object rather than #including into this
+// test file the way test_dashboard_json.c does with dashboard_json.c. So the
+// "was a failure actually reported" half of this fix is pinned by a
+// source-text scan of the real, compiled heat_enable.c instead -- same
+// precedent as test_display_power_wiring.c / test_zone_sweep_relay_off_
+// wiring.c -- while the behavioral half (the send is still attempted, the
+// return value affects nothing about the state machine) is proved live,
+// below.
+#include <stdio.h>
+#include <stdlib.h>
+
+static char *heat_enable_read_source(void)
+{
+    static const char *const candidates[] = {
+        "../drivers/heat_enable.c",
+        "App/drivers/heat_enable.c",
+        "firmware/KilnFW/App/drivers/heat_enable.c",
+    };
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        FILE *f = fopen(candidates[i], "rb");
+        if (!f) {
+            continue;
+        }
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        if (len < 0) {
+            fclose(f);
+            continue;
+        }
+        rewind(f);
+        char *buf = (char *)malloc((size_t)len + 1);
+        if (!buf) {
+            fclose(f);
+            return NULL;
+        }
+        size_t got = fread(buf, 1, (size_t)len, f);
+        fclose(f);
+        buf[got] = '\0';
+        return buf;
+    }
+    return NULL;
+}
+
+static void test_release_failure_is_checked_and_logged(void)
+{
+    TEST_SECTION("heat_enable -- a release send that FAILS is still attempted (behavioral), and "
+                 "the fix's result-checking is present in the compiled source (source-text scan) "
+                 "-- not the fire-and-forget (void) cast that used to print a success line "
+                 "regardless of the result (seed bug: danger_mode.c, commit 2bcdc2d)");
+
+    // Behavioral: the release attempt itself is unconditional and unaffected
+    // by whether it is going to fail -- the fix must not turn this into a
+    // refusal to even try.
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    g_release_should_fail = true;
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(release_sends() == 1, "the release is still attempted even though it will fail");
+    TEST_CHECK(g_last_enable_value == false, "the attempted send was still enable=false");
+
+    // Structural: heat_enable.c must actually capture and check both
+    // fire-and-forget release sends this fix touched, not just call the
+    // function and drop the result the way it used to.
+    char *text = heat_enable_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/heat_enable.c from the host test's working "
+                           "directory -- update the candidate paths in this test if the build "
+                           "layout moved");
+        return;
+    }
+
+    TEST_CHECK(strstr(text, "(void)safety_link_request_enable(") == NULL,
+               "heat_enable.c must not cast any safety_link_request_enable() result to (void) "
+               "any more -- if this matches, one of the two release sites this fix touched went "
+               "back to fire-and-forget.");
+
+    int rel_err_assigns = 0;
+    const char *p = text;
+    while ((p = strstr(p, "esp_err_t rel_err = safety_link_request_enable(")) != NULL) {
+        rel_err_assigns++;
+        p += 1;
+    }
+    TEST_CHECK(rel_err_assigns == 2,
+               "expected exactly 2 checked release sends (heat_enable_release()'s normal path "
+               "and send_enable()'s orphaned-request corrective release) -- found a different "
+               "count, meaning one of the two sites was not converted or a third, unreviewed "
+               "site was added without also being checked.");
+
+    int rel_err_checks = 0;
+    p = text;
+    while ((p = strstr(p, "if (rel_err != ESP_OK)")) != NULL) {
+        rel_err_checks++;
+        p += 1;
+    }
+    TEST_CHECK(rel_err_checks == 2,
+               "each captured rel_err must actually be inspected (if (rel_err != ESP_OK)) -- a "
+               "count below 2 means a result is captured into a variable nobody reads, the same "
+               "silent-drop bug wearing a variable name.");
+
+    free(text);
+}
+
 static void test_bad_claimant(void)
 {
     TEST_SECTION("heat_enable -- an out-of-range claimant is refused, not indexed");
@@ -227,5 +337,6 @@ void run_test_heat_enable(void)
     test_link_down_at_start_is_honest();
     test_reconcile_retries_then_stops();
     test_release_after_failed_request_still_sends();
+    test_release_failure_is_checked_and_logged();
     test_bad_claimant();
 }

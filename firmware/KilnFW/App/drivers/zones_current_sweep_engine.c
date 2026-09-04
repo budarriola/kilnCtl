@@ -16,6 +16,8 @@
 #include "thermo_combine.h"
 #include "thermo_owner.h"
 
+static const char *TAG = "zone_sweep";
+
 /* ---- Task 1: per-zone normal-current measurement sweep -------------------
  *
  * How long to hold one zone's relay(s) on while measuring, and why:
@@ -383,7 +385,20 @@ zone_sweep_ctx_t s_sweep = {
 void zone_sweep_force_relays_off(void)
 {
     if (s_hw_io) {
-        kiln_io_owner_command_all_relays_off();
+        /* This is the single choke point the module header comment above
+         * names -- every exit path (abort, ceiling hit, link loss, ordinary
+         * completion) funnels through here to make sure relays end up off.
+         * The call used to be fire-and-forget: an owner-queue timeout
+         * (ESP_ERR_TIMEOUT, the same real, reachable failure danger_mode.c's
+         * post_and_wait() call can hit) would leave a relay closed with
+         * nothing in the log to say so, while every caller of this function
+         * moves on as though the coil had actually opened. Name the failure
+         * loudly instead of asserting nothing. */
+        esp_err_t err = kiln_io_owner_command_all_relays_off();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "zone_sweep_force_relays_off: kiln_io_owner_command_all_relays_off "
+                          "FAILED (%s) -- do not assume a relay is open", esp_err_to_name(err));
+        }
     }
 }
 
