@@ -139,7 +139,24 @@ typedef struct {
 
 static void test_st7796_init_table_transcription(void)
 {
-    TEST_SECTION("ST7796 init table: exact transcription of ST7796_Init.txt");
+    TEST_SECTION("ST7796 init table: vendor transcription PLUS one deliberate deviation (INVON)");
+
+    /* DEVIATION FROM BYTE-FOR-BYTE, confirmed 2026-09-04 by camera capture
+     * (tools/PcTools/scripts/capture_lcd.ps1), not a transcription slip:
+     * the vendor's own LCD_Init() never sends INVON/INVOFF (0x21/0x20) at
+     * all, leaving the panel on its power-on-reset inversion default. On
+     * this physical MSP4031 unit that default renders the whole UI
+     * INVERTED (a near-black theme showed as a near-white/pale screen --
+     * background, top bar, graph field and Start button all wrong in the
+     * same direction, the signature of inversion rather than a channel/hue
+     * problem). Sending an explicit INVON (0x21, no params) right before
+     * the vendor's own trailing NORON/SLPOUT/DISPON fixed it: the SAME
+     * camera capture, same board, after this one change, showed the
+     * background genuinely dark again. This test now asserts the
+     * WITH-INVON table (23 steps) as the real, deliberately-deviated-from
+     * source, not the raw vendor dump (22 steps) -- see
+     * DISPLAY_ST7796_PLAN.md's 2026-09-04 entries for the full bisect log
+     * and both captures. */
 
     static const uint8_t e0_params[] = { 0xF0, 0x09, 0x13, 0x12, 0x12, 0x2B, 0x3C, 0x44,
                                           0x4B, 0x1B, 0x18, 0x17, 0x1D, 0x21 };
@@ -164,14 +181,16 @@ static void test_st7796_init_table_transcription(void)
         { 0xB4, 1, NULL }, { 0xB7, 1, NULL }, { 0xC5, 1, NULL }, { 0xE4, 1, NULL },
         { 0xE8, 8, e8_params }, { 0xC2, 0, NULL }, { 0xA7, 0, NULL },
         { 0xE0, 14, e0_params }, { 0xE1, 14, e1_params },
-        { 0xF0, 1, NULL }, { 0xF0, 1, NULL }, { 0x13, 0, NULL }, { 0x11, 0, NULL }, { 0x29, 0, NULL },
+        { 0xF0, 1, NULL }, { 0xF0, 1, NULL },
+        { 0x21, 0, NULL }, /* INVON -- the deliberate deviation, see above */
+        { 0x13, 0, NULL }, { 0x11, 0, NULL }, { 0x29, 0, NULL },
     };
     /* The single-byte params, in the same order as `expected` above (index
      * -1 for multi-byte/zero-byte steps, where this array's entry is
      * unused). */
     const uint8_t single_byte_params[] = {
         0xC3, 0x96, 0x48, 0x05, 0x80, 0, 0, 0, 0x00, 0xC6, 0x1C, 0x31,
-        0, 0, 0, 0, 0, 0x3C, 0x69, 0, 0, 0,
+        0, 0, 0, 0, 0, 0x3C, 0x69, 0, 0, 0, 0,
     };
     (void)one;
 
@@ -211,55 +230,73 @@ static void test_st7796_init_table_transcription(void)
         }
     }
     TEST_CHECK(offset == panel->init_len,
-               "ST7796 init table: decoder consumes every byte -- exactly 22 steps, nothing left over");
+               "ST7796 init table: decoder consumes every byte -- exactly 23 steps (22 vendor + "
+               "1 deliberate INVON), nothing left over");
 
     /* NEGATIVE TEST: proves the step count above is a real assertion, not
-     * vacuous -- decoding must NOT succeed for a 23rd step past the real
+     * vacuous -- decoding must NOT succeed for a 24th step past the real
      * table's end. */
     {
         uint8_t cmd, plen;
         const uint8_t *params;
         TEST_CHECK(panel_codec_init_step(panel->init_seq, panel->init_len, &offset,
                                           &cmd, &params, &plen) == false,
-                   "ST7796 init table NEGATIVE: no 23rd step exists past the transcribed 22");
+                   "ST7796 init table NEGATIVE: no 24th step exists past the transcribed 23");
     }
 }
 
-/* --- Fast-path justification: passthrough == raw copy --------------------- */
+/* --- Fast-path justification: passthrough == byte-swapped copy ------------ */
 static void test_st7796_fast_path_equivalence(void)
 {
-    TEST_SECTION("ST7796 fast path: passthrough encode == raw memcpy");
+    TEST_SECTION("ST7796 fast path: passthrough encode == byte-swapped copy");
 
-    /* panel_spi.c's blit fast path (bytes_per_pixel == 2) replaces a
-     * per-pixel panel_codec_rgb565_passthrough() loop with one memcpy of the
-     * whole chunk, on the reasoning that COLMOD 0x55's RAMWR stream is
-     * byte-identical to the incoming RGB565 wire data. This is the host-
-     * testable half of that claim: encoding every pixel of an arbitrary
-     * buffer one at a time via the codec function produces EXACTLY the same
-     * bytes as copying the input verbatim -- so panel_spi.c's memcpy is not
-     * a shortcut that happens to look right, it is provably the same
-     * output. (panel_spi.c's own use of memcpy instead of the loop is not
-     * itself host-testable -- it lives in the ESP-IDF-dependent driver --
-     * this test is what can be proven from here.) */
+    /* REVISED 2026-09-04: this test used to prove panel_spi.c's blit fast
+     * path could replace a per-pixel panel_codec_rgb565_passthrough() loop
+     * with a straight memcpy() of the whole chunk, on the (wrong) assumption
+     * that COLMOD 0x55's RAMWR stream is byte-identical to LVGL's own
+     * little-endian in-memory RGB565 bytes. A real ST7796 module's colors
+     * (camera-verified, DISPLAY_ST7796_PLAN.md 2026-09-04 bisect) proved
+     * that assumption false: the wire wants MSB-first per pixel. Both
+     * panel_codec_rgb565_passthrough() and panel_spi.c's fast-path loop were
+     * fixed the same day to swap bytes instead of copying verbatim -- this
+     * test now proves the SAME thing the old one did (per-pixel encode via
+     * the codec function matches what panel_spi.c's fast-path loop computes)
+     * against the NEW, correct byte order, so panel_spi.c's own loop is
+     * still provably not a shortcut that merely looks right. */
     static const uint8_t wire[] = {
         0x00, 0x00, 0xFF, 0xFF, 0x34, 0x12, 0xAB, 0xCD, 0x00, 0xF8, 0x1F, 0x00,
     };
     size_t pixels = sizeof(wire) / 2;
     uint8_t looped[sizeof(wire)];
+    uint8_t byte_swapped[sizeof(wire)];
     for (size_t i = 0; i < pixels; ++i) {
         uint16_t color = (uint16_t)(wire[i * 2] | ((uint16_t)wire[i * 2 + 1] << 8));
         panel_codec_rgb565_passthrough(color, &looped[i * 2]);
+        /* What panel_spi.c's fast-path loop computes directly (swap the
+         * pair), independent of the codec function -- proves the two
+         * independent implementations agree, not that one merely calls
+         * the other under the hood. */
+        byte_swapped[i * 2] = wire[i * 2 + 1];
+        byte_swapped[i * 2 + 1] = wire[i * 2];
     }
-    TEST_CHECK(memcmp(looped, wire, sizeof(wire)) == 0,
-               "fast path: per-pixel passthrough encode reproduces the input buffer exactly, "
-               "byte for byte -- proves a whole-chunk memcpy is equivalent, not just plausible");
+    TEST_CHECK(memcmp(looped, byte_swapped, sizeof(wire)) == 0,
+               "fast path: per-pixel passthrough encode matches an independently computed "
+               "byte swap of the input, byte for byte");
 
-    /* NEGATIVE TEST: proves the equivalence check above can actually fail --
-     * corrupt one output byte the way a real widening bug (e.g. accidentally
-     * routing ST7796 through the RGB666 widener) would, and confirm the
-     * comparison catches it. */
+    /* NEGATIVE TEST 1: the check above must fail against the UNSWAPPED
+     * input (the old, buggy memcpy-equivalence claim) -- proves this test
+     * really would catch a regression back to the old behavior, not just
+     * that it currently passes. */
+    TEST_CHECK(memcmp(looped, wire, sizeof(wire)) != 0,
+               "fast path NEGATIVE: passthrough output does NOT equal the raw (unswapped) "
+               "input -- proves the old memcpy-equivalence claim is dead, not silently revived");
+
+    /* NEGATIVE TEST 2: corrupt one output byte the way an unrelated encoding
+     * bug (e.g. accidentally routing ST7796 through the RGB666 widener)
+     * would, and confirm the comparison against the correct byte-swapped
+     * reference still catches it. */
     uint8_t corrupted[sizeof(wire)];
-    memcpy(corrupted, wire, sizeof(wire));
+    memcpy(corrupted, byte_swapped, sizeof(wire));
     corrupted[2] ^= 0xFF;
     TEST_CHECK(memcmp(looped, corrupted, sizeof(wire)) != 0,
                "fast path NEGATIVE: a single corrupted byte is detected (proves the check above is live)");

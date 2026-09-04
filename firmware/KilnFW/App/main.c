@@ -959,16 +959,18 @@ void app_main(void)
 
     // --- Touch controller (same J2 panel as the display above) -------------
     // Shares the I2C bus with the SX1509 expander -- see docs/HARDWARE.md.
-    // Which physical controller is on the bus follows the same
-    // KILNCTL_DISPLAY_PANEL choice that selects the panel driver above: the
-    // BIGTREETECH TFT35 (ILI9488) carries the resistive NS2009, the
-    // LCDWIKI/Elecrow MSP4031 (ST7796) carries the capacitive FT6336U
-    // (DISPLAY_ST7796_PLAN.md section 7). *_start() logs and returns an
-    // error rather than failing app_main if the chip doesn't answer;
-    // screen_idle below works fine with touch_ready = false, using only
-    // injected (UART/MCP) touches. touch_dev wraps whichever one came up so
-    // lvgl_port_start() below never has to know which controller it is.
-#if CONFIG_KILNCTL_DISPLAY_PANEL_ST7796
+    // Which physical controller is on the bus is KILNCTL_TOUCH_FT6336U, a
+    // Kconfig symbol DELIBERATELY INDEPENDENT of KILNCTL_DISPLAY_PANEL
+    // (2026-09-04, split apart mid color-regression bisect -- see that
+    // symbol's own Kconfig help for why one choice used to drive both and
+    // why that broke). *_start() logs and returns an error rather than
+    // failing app_main if the chip doesn't answer; screen_idle below works
+    // fine with touch_ready = false, using only injected (UART/MCP)
+    // touches. touch_dev wraps whichever one came up, INCLUDING its
+    // swap/invert mapping (touch_dev.h), so lvgl_port_start() below never
+    // has to know which controller it is or reach into a display
+    // descriptor to find its mapping.
+#if CONFIG_KILNCTL_TOUCH_FT6336U
     static FT6336UClass ft6336u_touch;
 #else
     static NS2009Class touch;
@@ -976,13 +978,16 @@ void app_main(void)
     bool touch_ready = false;
     touch_dev_t touch_dev = {0};
     if (i2c_bus) {
-#if CONFIG_KILNCTL_DISPLAY_PANEL_ST7796
+#if CONFIG_KILNCTL_TOUCH_FT6336U
         esp_err_t touch_err = FT6336U_start(&ft6336u_touch, i2c_bus);
         touch_ready = (touch_err == ESP_OK);
         if (touch_ready) {
             touch_dev.ctx = &ft6336u_touch;
             touch_dev.read = FT6336U_touch_dev_read;
             touch_dev.self_calibrating = true;
+            touch_dev.swap_xy = TOUCH_CAP_SWAP_XY;
+            touch_dev.invert_x = TOUCH_CAP_INVERT_X;
+            touch_dev.invert_y = TOUCH_CAP_INVERT_Y;
         } else {
             ESP_LOGW(TAG, "FT6336U bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",
@@ -995,6 +1000,9 @@ void app_main(void)
             touch_dev.ctx = &touch;
             touch_dev.read = NS2009_touch_dev_read;
             touch_dev.self_calibrating = false;
+            touch_dev.swap_xy = TOUCH_CAL_SWAP_XY;
+            touch_dev.invert_x = TOUCH_CAL_INVERT_X;
+            touch_dev.invert_y = TOUCH_CAL_INVERT_Y;
         } else {
             ESP_LOGW(TAG, "NS2009 bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",

@@ -176,25 +176,16 @@ typedef struct {
     bool (*id_matches)(const uint8_t id[3]);
     bool blank_via_power_off;             /* see the DISPOFF question in Sec.4 */
 
-    /* Touch axis mapping for whichever controller THIS panel ships with
-     * (NS2009 on the ILI9488/TFT35, FT6336U on the ST7796/MSP4031) --
-     * 2026-09-04, DISPLAY_ST7796_PLAN.md section 7. Deliberately live here,
-     * not as one global Kconfig knob shared by both controllers: the two
-     * controllers' raw-axis conventions relative to their own panel's
-     * mounting are independent silicon/wiring facts, and a single shared
-     * knob detunes whichever controller was calibrated second (exactly what
-     * happened bringing up the FT6336U -- it silently inherited the
-     * NS2009-tuned value and landed touches in the wrong place). Values are
-     * still sourced from per-controller Kconfig bench knobs
-     * (TOUCH_CAL_SWAP_XY/INVERT_X/INVERT_Y for NS2009,
-     * TOUCH_CAP_SWAP_XY/INVERT_X/INVERT_Y for FT6336U, settings.h) -- these
-     * fields exist so panel_detect_choose()'s resolved panel_desc_t is the
-     * SINGLE place lvgl_port.c reads the mapping from, so auto-detect
-     * switching panels switches the touch mapping with it, with no separate
-     * self_calibrating branch to keep in sync by hand. */
-    bool touch_swap_xy;
-    bool touch_invert_x;
-    bool touch_invert_y;
+    /* NOTE 2026-09-04: touch axis mapping (swap_xy/invert_x/invert_y) used
+     * to live here, keyed by whichever panel this descriptor belongs to.
+     * REMOVED the same day -- it broke the moment panel and touch
+     * controller became independently selectable (this board's own
+     * color-regression bisect ran the ILI9488 driver for pixels while the
+     * MSP4031's FT6336U stayed the only touch chip physically wired up, so
+     * a panel-keyed mapping would have silently applied the NS2009-tuned
+     * values to the FT6336U). Now lives on touch_dev_t (touch_dev.h)
+     * instead, keyed by the actual controller, set by main.c when it
+     * builds that struct. */
 } panel_desc_t;
 
 #ifdef __cplusplus

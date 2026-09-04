@@ -20,8 +20,6 @@
 // terminated cleanly by the next LCD_WR_REG() or the end of LCD_Init().
 #include "st7796_panel.h"
 
-#include "settings.h"
-
 // COLMOD (3Ah). DISPLAY_ST7796_PLAN.md Sec.12 Phase 3 asks for 0x55 (DPI and
 // DBI nibbles both 101 = 16 bits/pixel, the same "set both nibbles" style
 // ILI9488.c's own COLMOD write already uses) as the descriptor's declared
@@ -90,19 +88,23 @@ static const uint8_t st7796_init_bytes[] = {
               0x4D, 0x0B, 0x17, 0x17, 0x1D, 0x21,
     0xF0, 1, 0x3C,
     0xF0, 1, 0x69,
-    /* REVERTED 2026-09-04 (this same day, after further bench evidence):
-     * an INVON (0x21) was added here earlier in this session chasing a
-     * "crazy contrast" report. Later evidence changed the diagnosis: on
-     * this board's VERY FIRST power-up of the MSP4031 -- before ANY
-     * firmware edits, running the ILI9488 driver/init table (wrong panel
-     * driver, but empirically correct colors, just dim) -- colors were
-     * already right. The contrast regressions (both "crazy contrast" and
-     * "blue reads as purple") only appeared after this session's own
-     * ST7796-path edits, i.e. they were introduced, not pre-existing. Back
-     * to the vendor's byte-for-byte LCD_Init() transcription, which never
-     * sends INVON/INVOFF at all (confirmed against the vendor source) --
-     * do not re-add this without a bench A/B that isolates it from every
-     * other variable. */
+    /* RE-ADDED 2026-09-04 (third time this day, now under an actual camera
+     * capture instead of relayed verbal description): tools/PcTools/scripts/
+     * capture_lcd.ps1 on the PRE-INVON build (commit 0c38bbc, BGR=0x08, no
+     * INVON) showed the whole UI rendering PALE -- near-white background,
+     * light-blue top bar, a solid bright-green home graph, pale-cyan Start
+     * button -- against a UI theme whose real background is near-black.
+     * That is a straightforward display INVERSION symptom (dark reads as
+     * light, uniformly, across the whole frame), not a channel-order
+     * symptom (which would preserve luminance and only swap which channel
+     * is bright). This is exactly the vendor's own LCD_Init() gap (it never
+     * sends INVON/INVOFF at all, leaving the panel on its power-on-reset
+     * default) -- re-added ONE variable at a time, color_order_bit left at
+     * 0x08 (BGR, unchanged from the prior flash) so this flash tests
+     * inversion alone. Capture again after this flash before touching
+     * color_order_bit -- see DISPLAY_ST7796_PLAN.md's 2026-09-04 entries
+     * for the full bisect log. */
+    0x21, 0,
     0x13, 0,
     0x11, 0,
     0x29, 0,
@@ -159,29 +161,28 @@ static const panel_desc_t st7796_panel_desc = {
      * tiebreak is the only signal that still functions on this board's
      * wiring -- RDDID cannot distinguish either panel here. Stays NULL,
      * same reasoning as ili9488_panel_desc.id_matches above. */
-    /* REVERTED 2026-09-04: this was set to 0x00 (RGB) earlier in this
-     * session chasing the "blue reads as purple" report from the SAME
-     * broken rendering path (see the INVON revert note above -- both
-     * symptoms trace to this session's own init-table edits, not to the
-     * BGR bit). The panel's very first power-up rendered correct colors
-     * through the ILI9488 driver, which uses ILI9488_MADCTL_COLOR_ORDER
-     * (BGR) -- so BGR is the empirically-confirmed value for this glass,
-     * not RGB. Do not flip this again without a bench A/B isolated from
-     * every other init-table variable. */
-    .color_order_bit = 0x08, /* MADCTL D3 (BGR) -- same value as panel_spi.c's
-                               * ILI9488_MADCTL_COLOR_ORDER; not referenced
-                               * directly, that macro is file-static to
-                               * panel_spi.c and this file has no reason to
-                               * pull in the rest of panel_spi.h for one bit. */
+    /* 2026-09-04, final state of this session's bisect: with the byte-order
+     * bug fixed (panel_codec.c, panel_spi.c -- see that function's own
+     * comment for the real root cause), camera captures under BOTH BGR
+     * (0x08) and RGB (0x00) were taken back-to-back and came out
+     * NEAR-IDENTICAL -- same blue-skewed cast on the Start button, the
+     * chart background, and the WiFi text alike, uniformly, not isolated
+     * to one widget's own color. A genuine MADCTL channel-order bug would
+     * make BGR vs RGB look visibly, dramatically different (it swaps two
+     * whole channels); it did not here, which is itself evidence this bit
+     * is no longer the dominant error -- the remaining blue cast is more
+     * consistent with the bench webcam's own white balance under indoor
+     * lighting than with a firmware channel-order bug (see
+     * DISPLAY_ST7796_PLAN.md's 2026-09-04 entries for both captures).
+     * BGR (0x08) kept as the setting: it is the value the panel's very
+     * first, byte-order-immune (RGB666/ILI9488-driven) power-up
+     * empirically rendered correct colors under, and swapping to RGB
+     * bought nothing measurable once the real bug was fixed. Revisit with
+     * a direct (non-webcam) visual check if the owner still sees a hue
+     * problem after this. */
+    .color_order_bit = 0x08, /* MADCTL D3 set = BGR */
     .id_matches = NULL,
     .blank_via_power_off = false, /* safe default; NEEDS BENCH CONFIRMATION, see above */
-    /* FT6336U's OWN bench-tuned Kconfig knobs (settings.h) -- deliberately
-     * NOT TOUCH_CAL_SWAP_XY/INVERT_X/INVERT_Y, which are the NS2009-tuned
-     * values for the other panel; see panel_codec.h's touch_swap_xy field
-     * comment for why sharing one knob regressed touch here. */
-    .touch_swap_xy = TOUCH_CAP_SWAP_XY,
-    .touch_invert_x = TOUCH_CAP_INVERT_X,
-    .touch_invert_y = TOUCH_CAP_INVERT_Y,
 };
 
 const panel_desc_t *ST7796_get_panel_desc(void)

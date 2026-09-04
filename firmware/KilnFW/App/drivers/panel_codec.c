@@ -13,12 +13,25 @@ void panel_codec_rgb565_to_rgb666(uint16_t color, uint8_t out[3])
 
 void panel_codec_rgb565_passthrough(uint16_t color, uint8_t out[2])
 {
-    /* Same byte order ILI9488_blit_data reads its input in: u16
-     * little-endian on the wire (src[0] | src[1] << 8). Kept as an explicit
-     * split rather than a memcpy so the "no transformation happens here" is
-     * visible at the call site, not merely true by accident of layout. */
-    out[0] = (uint8_t)(color & 0xFF);
-    out[1] = (uint8_t)(color >> 8);
+    /* FIXED 2026-09-04: this used to write LSB-first ("u16 little-endian on
+     * the wire"), matching how ILI9488_blit_data's callers reconstruct a
+     * uint16_t FROM LVGL's own in-memory buffer (LVGL's px_map bytes really
+     * are little-endian on this little-endian CPU -- that reconstruction
+     * step is correct and unrelated to this bug). But the byte order a
+     * MIPI-DCS panel's RAMWR (2Ch) wants for a 16-bit-per-pixel SPI
+     * interface is the wire convention, not the CPU's in-memory
+     * convention: MSB (high byte, bits 15:8) first, then LSB -- the same
+     * big-endian-on-the-wire convention every other MIPI panel driver
+     * (Adafruit_GFX, TFT_eSPI, esp_lcd's own RGB565 panels) uses, and which
+     * this codebase's comment had backwards, never bench-verified until a
+     * real ST7796 module's colors proved it wrong (2026-09-04 camera
+     * capture bisect, DISPLAY_ST7796_PLAN.md: neither BGR nor RGB matched
+     * expected colors -- MADCTL was never the bug). "passthrough" now means
+     * "no channel/gamma transformation", not "identical byte layout to
+     * LVGL's buffer" -- the name still fits, RGB565 in is still RGB565 out,
+     * just correctly byte-ordered for the wire this panel actually reads. */
+    out[0] = (uint8_t)(color >> 8);
+    out[1] = (uint8_t)(color & 0xFF);
 }
 
 void panel_codec_build_caset(uint16_t x, uint16_t w, uint8_t out[4])

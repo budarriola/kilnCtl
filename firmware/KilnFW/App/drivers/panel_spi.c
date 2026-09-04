@@ -1739,6 +1739,16 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
              * so this is scoped bench-tuning behind an explicit opt-in, not
              * something safe to turn on unconditionally for every caller of
              * this shared function. */
+            /* KNOWN BROKEN as of 2026-09-04 -- DO NOT ENABLE alongside a bpp==2
+             * panel until this is reworked: `data` is DMA'd verbatim in
+             * LVGL's own little-endian byte order, but the byte-swap fix in
+             * this function's non-zero-copy sibling branch (below) proved the
+             * wire wants MSB-first -- a real fix here needs either a real copy
+             * (defeating the point of this option) or the panel's byte order
+             * reconciled some other way. Left compiling (still default OFF,
+             * see the Kconfig help) rather than deleted, since it is a real
+             * TODO, not dead code, but it will send visibly wrong colors if
+             * turned on today. */
             err = ili9488_tx(disp, &data[sent * 2], n * 2);
             sent += n;
             if (err != ESP_OK) {
@@ -1751,13 +1761,20 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
         }
 
         if (bpp == 2) {
-            /* Phase 3 fast path: at COLMOD 0x55 (ST7796) the wire's RGB565
-             * u16-LE IS the RAMWR byte stream -- panel_codec's "null
-             * conversion" -- so there is nothing to compute per pixel. One
-             * memcpy of the whole chunk replaces the per-pixel loop below,
-             * which is what actually avoids widening rather than just
-             * calling a no-op conversion function once per pixel. */
-            memcpy(disp->scratch, &data[sent * 2], n * 2);
+            /* FIXED 2026-09-04: this used to be a straight memcpy() on the
+             * assumption LVGL's own in-memory (little-endian) byte order
+             * IS the RAMWR wire order for a bpp==2 (ST7796) panel -- wrong,
+             * see panel_codec_rgb565_passthrough()'s comment for the full
+             * story (a real ST7796 module's colors, camera-verified, proved
+             * it). Still no per-pixel COMPUTATION (no channel math, no
+             * widening), just a mandatory byte swap -- one loop, not a
+             * memcpy, but still the cheap bpp==2 path relative to the
+             * RGB666 widening in the `else` branch below. */
+            for (size_t i = 0; i < n; ++i) {
+                const uint8_t *src = &data[(sent + i) * 2];
+                disp->scratch[i * 2] = src[1];
+                disp->scratch[i * 2 + 1] = src[0];
+            }
         } else {
             for (size_t i = 0; i < n; ++i) {
                 const uint8_t *src = &data[(sent + i) * 2];
@@ -1933,9 +1950,17 @@ esp_err_t ILI9488_blit_data_async(ILI9488Class *disp, const uint8_t *data, size_
              * SPI owner's completion callback actually fires,
              * both-flags-on is SAFE: the buffer's lifetime is guaranteed to
              * outlive the transfer by construction, not by luck. */
+/* KNOWN BROKEN as of 2026-09-04 -- same wrong-byte-order issue as the
+             * sync zero-copy branch above; see that comment. */
             tx_ptr = &data[sent * 2];
         } else if (bpp == 2) {
-            memcpy(disp->scratch, &data[sent * 2], n * 2);
+            /* Same 2026-09-04 byte-swap fix as ILI9488_blit_data()'s sync
+             * path above -- was a straight memcpy(), wrong wire order. */
+            for (size_t i = 0; i < n; ++i) {
+                const uint8_t *src = &data[(sent + i) * 2];
+                disp->scratch[i * 2] = src[1];
+                disp->scratch[i * 2 + 1] = src[0];
+            }
             tx_ptr = disp->scratch;
         } else {
             for (size_t i = 0; i < n; ++i) {
@@ -2173,12 +2198,6 @@ static const panel_desc_t ili9488_panel_desc = {
     .id_matches = NULL,
     .blank_via_power_off = false, /* today's ILI9488_clear() fills black over
                                     * RAMWR; it does not touch DISPOFF/power. */
-    /* NS2009's own bench-tuned Kconfig knobs (settings.h) -- unchanged by
-     * the FT6336U's arrival, see panel_codec.h's touch_swap_xy field
-     * comment. */
-    .touch_swap_xy = TOUCH_CAL_SWAP_XY,
-    .touch_invert_x = TOUCH_CAL_INVERT_X,
-    .touch_invert_y = TOUCH_CAL_INVERT_Y,
 };
 
 const panel_desc_t *ILI9488_get_panel_desc(void)

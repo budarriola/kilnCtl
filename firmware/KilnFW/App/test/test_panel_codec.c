@@ -69,17 +69,26 @@ void run_test_panel_codec(void)
                    "rgb565->666: green-only input leaves R and B at 0x00");
     }
 
-    /* --- RGB565 passthrough (ST7796 "null conversion") -- unused today, --- */
-    /* --- host-tested ahead of Phase 3.                                  --- */
+    /* --- RGB565 passthrough (ST7796 fast path), MSB-first on the wire --- */
+    /* --- FIXED 2026-09-04: was LSB-first ("u16 LE"), which is LVGL's own --- */
+    /* --- in-memory byte order, not the MIPI-DCS RAMWR wire order a real --- */
+    /* --- ST7796 module actually reads (see panel_codec.c's comment) --- */
+    /* --- for the full story and the camera-verified bench evidence.   --- */
     {
         uint8_t out[2];
         panel_codec_rgb565_passthrough(0x1234, out);
-        TEST_CHECK(out[0] == 0x34 && out[1] == 0x12,
-                   "rgb565 passthrough: u16 LE split, no widening (0x1234 -> 34,12)");
+        TEST_CHECK(out[0] == 0x12 && out[1] == 0x34,
+                   "rgb565 passthrough: MSB first on the wire, no widening (0x1234 -> 12,34)");
         panel_codec_rgb565_passthrough(0xFFFF, out);
         TEST_CHECK(out[0] == 0xFF && out[1] == 0xFF, "rgb565 passthrough: 0xFFFF -> FF,FF");
         panel_codec_rgb565_passthrough(0x0000, out);
         TEST_CHECK(out[0] == 0x00 && out[1] == 0x00, "rgb565 passthrough: 0x0000 -> 00,00");
+        /* Negative test, inline: a byte-swapped triple that would pass the
+           OLD (buggy) LE assertion must fail this one -- proves this check
+           can actually catch the regression it exists to catch. */
+        panel_codec_rgb565_passthrough(0x1234, out);
+        TEST_CHECK(!(out[0] == 0x34 && out[1] == 0x12),
+                   "rgb565 passthrough: does NOT reproduce the old LE-on-the-wire bug");
     }
 
     /* --- CASET / PASET byte generation -------------------------------------

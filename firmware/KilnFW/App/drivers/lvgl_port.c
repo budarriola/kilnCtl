@@ -599,21 +599,20 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
          *     assignment itself is pulled out into touch_dev_uncalibrated_max()
          *     so it is host-testable rather than living only in this
          *     ESP-IDF-dependent function -- see test_touch_dev.c. */
-        /* Per-panel touch mapping (panel_codec.h's panel_desc_t.touch_swap_xy
-         * et al, DISPLAY_ST7796_PLAN.md section 7, 2026-09-04): the ACTIVE
-         * display's own descriptor carries the swap/invert values for
-         * whichever controller ships with it (NS2009 on the ILI9488,
-         * FT6336U on the ST7796), so switching panels (including via
-         * panel_detect_choose()'s auto-detect) switches the touch mapping
-         * with it -- no separate self_calibrating branch to keep in sync by
-         * hand, and no risk of one controller's bench tuning silently
-         * leaking onto the other's (2026-09-04 bench finding: touches landed
-         * in the wrong place on the MSP4031 while this used to reuse the
-         * NS2009-tuned TOUCH_CAL_SWAP_XY unconditionally). */
-        const panel_desc_t *active_panel = p->display ? p->display->panel : NULL;
-        bool swap_xy = active_panel ? active_panel->touch_swap_xy : TOUCH_CAL_SWAP_XY;
-        bool invert_x = active_panel ? active_panel->touch_invert_x : TOUCH_CAL_INVERT_X;
-        bool invert_y = active_panel ? active_panel->touch_invert_y : TOUCH_CAL_INVERT_Y;
+        /* Per-CONTROLLER touch mapping (touch_dev.h's touch_dev_t.swap_xy et
+         * al, DISPLAY_ST7796_PLAN.md section 7, 2026-09-04). REVISED
+         * 2026-09-04, same day: this used to live on panel_desc_t instead,
+         * keyed by whichever display panel was selected -- broken the
+         * moment panel and touch controller became independently
+         * selectable (ILI9488 driver for pixels, FT6336U still the only
+         * touch chip physically wired up, during this session's own
+         * color-regression bisect). Sourced from main.c, which sets it from
+         * the matching per-controller Kconfig knobs (TOUCH_CAL_* for
+         * NS2009, TOUCH_CAP_* for FT6336U) when it builds the touch_dev_t
+         * -- so it now tracks the actual controller, not the panel. */
+        bool swap_xy = p->touch_dev.swap_xy;
+        bool invert_x = p->touch_dev.invert_x;
+        bool invert_y = p->touch_dev.invert_y;
 
         uint16_t raw_x_max = 0, raw_y_max = 0;
         touch_dev_uncalibrated_max(p->touch_dev.self_calibrating, swap_xy, width, height,

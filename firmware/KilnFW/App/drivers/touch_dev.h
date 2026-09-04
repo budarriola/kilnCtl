@@ -63,6 +63,24 @@ typedef struct {
      * the same rotation/axis-swap mapping as a known-inaccurate bootstrap
      * guess before that fit exists. */
     bool self_calibrating;
+
+    /* Rotation/axis-swap mapping for THIS controller (2026-09-04,
+     * DISPLAY_ST7796_PLAN.md section 7) -- deliberately a property of the
+     * CONTROLLER, not of whichever display panel driver happens to be
+     * selected: panel pixel rendering (panel_desc_t, panel_codec.h) and the
+     * physical touch chip are independent choices on this board (the
+     * ILI9488 driver can be selected for pixels while the MSP4031's real
+     * FT6336U is still the only touch chip actually wired up), and this
+     * field used to live on panel_desc_t until that exact scenario proved
+     * it wrong -- reverting the panel selection back to ILI9488 while
+     * FT6336U stayed physically attached would have silently pulled in the
+     * NS2009-tuned mapping for a controller that was never NS2009. The
+     * caller building this struct (main.c) sets these from the matching
+     * per-controller Kconfig bench knobs (TOUCH_CAL_* for NS2009,
+     * TOUCH_CAP_* for FT6336U, settings.h). */
+    bool swap_xy;
+    bool invert_x;
+    bool invert_y;
 } touch_dev_t;
 
 /* A capacitive controller (FT6336U) has no analog pressure channel -- Z1 is

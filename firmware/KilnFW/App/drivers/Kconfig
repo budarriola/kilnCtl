@@ -322,13 +322,29 @@ menu "KilnCtrl Hardware Configuration"
             prompt "Panel driven by panel_spi.c"
             default KILNCTL_DISPLAY_PANEL_ST7796
             help
-                2026-09-04: the bench board now has the LCDWIKI/Elecrow
-                MSP4031 (ST7796S + FT6336U) wired to J2 in place of the
+                2026-09-04: the bench board's J2 now physically carries the
+                LCDWIKI/Elecrow MSP4031 (ST7796S + FT6336U) in place of the
                 BIGTREETECH TFT35 (ILI9488) -- the default follows the
-                physically attached hardware. main.c's touch bring-up is
-                gated on this same choice (CONFIG_KILNCTL_DISPLAY_PANEL_ST7796):
-                ST7796 selects the FT6336U capacitive touch driver, anything
-                else keeps the NS2009 resistive one.
+                physically attached hardware. Which INIT SEQUENCE this
+                choice selects is independent of KILNCTL_TOUCH_FT6336U below
+                (which controls the touch driver) -- see that symbol's help
+                for why they were split into two choices this same day.
+
+                2026-09-04 postscript, after the ST7796 path was actually
+                debugged rather than abandoned: colors initially looked
+                wrong on this real module under EVERY MADCTL bit combination
+                tried, which briefly (and wrongly) pointed at "the ILI9488
+                sequence just suits this glass better". The real bug was
+                unrelated to the panel choice or MADCTL at all --
+                panel_codec_rgb565_passthrough() and panel_spi.c's ST7796
+                fast path were sending RGB565 pixels in the CPU's native
+                little-endian byte order instead of the MIPI-DCS wire's
+                MSB-first order (now fixed, see that function's comment) --
+                plus one missing INVON (st7796_panel.c). With both fixed,
+                ST7796 (COLMOD 0x55, real RGB565, two-thirds the bytes of
+                ILI9488's RGB666 widening) is the correct, working choice
+                for this hardware, camera-verified (DISPLAY_ST7796_PLAN.md
+                2026-09-04 entries have every capture).
 
                 DISPLAY_ST7796_PLAN.md Sec.6 Step 3 / Sec.12 Phase 4: the
                 detection MECHANISM (panel_detect.c) exists, but its ID
@@ -502,6 +518,41 @@ menu "KilnCtrl Hardware Configuration"
                 elapsed with no real or injected touch. 0 is a genuine
                 backlight-off, unlike screen_idle.c's paint-it-black
                 fallback -- the actual point of fitting the flying wire.
+    endmenu
+
+    menu "Touch controller selection (independent of the display panel choice)"
+        config KILNCTL_TOUCH_FT6336U
+            bool "Touch controller is the FT6336U (MSP4031), not the NS2009 (TFT35)"
+            default y
+            help
+                2026-09-04: split off KILNCTL_DISPLAY_PANEL on purpose,
+                same day, mid color-regression bisect on this board. The
+                two used to be one choice (ST7796 selected -> FT6336U
+                touch, anything else -> NS2009) until the bisect needed the
+                ILI9488 init table (pixels) running against the real
+                ST7796/MSP4031 hardware while FT6336U stayed the only touch
+                chip actually wired up -- panel driver and touch controller
+                are independent facts about this board's firmware
+                configuration, not one fact with two names.
+
+                Defaults to y because FT6336U is the physical chip on this
+                board's actual J2 hardware regardless of which panel init
+                table is driving the glass -- main.c's touch bring-up reads
+                THIS symbol, not KILNCTL_DISPLAY_PANEL, precisely so that
+                bringing up the display and touch controller can be
+                debugged/bisected independently, which is exactly what this
+                split let this session's own color bug get isolated and
+                fixed (a byte-order bug in panel_codec.c/panel_spi.c, not a
+                panel-choice problem -- see KILNCTL_DISPLAY_PANEL's own help
+                for the postscript, and DISPLAY_ST7796_PLAN.md's 2026-09-04
+                entries for the full bisect log with camera captures).
+
+                On: main.c constructs an FT6336UClass and builds its
+                touch_dev_t from FT6336U_touch_dev_read() (self_calibrating
+                = true) plus the KILNCTL_TOUCH_CAP_* swap/invert knobs
+                below. Off (only correct on the BIGTREETECH TFT35 board):
+                constructs an NS2009Class instead, self_calibrating = false,
+                KILNCTL_TOUCH_CAL_* knobs.
     endmenu
 
     menu "NS2009 Touch Controller (on the TFT35 SPI panel, J2)"
