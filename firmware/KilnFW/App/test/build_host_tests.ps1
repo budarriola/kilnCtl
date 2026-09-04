@@ -186,12 +186,20 @@ Invoke-HostTestExe -Name "main" -ExePath $exe -BuildCmd $cmd
 # instead of defining those functions itself, so this executable's link needs
 # zones_config_json.c compiled in alongside it, the same way $sources lists
 # every other driver .c a test executable actually calls into.
+#
+# zones_config_json.c split 2026-09-04 (ROADMAP.md M15, the 1500-line rule)
+# into three files -- see zones_config_json_internal.h's own doc comment for
+# the map. All three compile in here, same convention as test_profiles_http.c
+# picking up profiles_catalog_http.c/profiles_edit_http.c alongside
+# profiles_http.c.
 $exe2 = Join-Path $outDir "kilnctl_host_tests_zones.exe"
 $exe2ObjDir = Join-Path $outDir "zones_obj\"
 if (-not (Test-Path $exe2ObjDir)) { New-Item -ItemType Directory -Path $exe2ObjDir | Out-Null }
 $cmd2 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
-        "`"$(Join-Path $driversDir 'zones_config_json.c')`""
+        "`"$(Join-Path $driversDir 'zones_config_json.c')`" " +
+        "`"$(Join-Path $driversDir 'zones_config_convert.c')`" " +
+        "`"$(Join-Path $driversDir 'zones_config_migrate.c')`""
 
 Invoke-HostTestExe -Name "zones_http" -ExePath $exe2 -BuildCmd $cmd2
 

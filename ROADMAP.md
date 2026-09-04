@@ -1760,7 +1760,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
       ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, ~~`ota_http.c` (2508)~~,
       `ui_page_home.c` (2279), `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
-      `zones_config_json.c` (1867), `main.c` (1820), `backup_http.c` (1756),
+      ~~`zones_config_json.c` (1867)~~, `main.c` (1820), `backup_http.c` (1756),
       `uart_bridge_ext.c` (1727), `zones_http_handlers.c` (1598). Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
       `ARCHITECTURE.md`, and autotune has four separable concerns, on the
@@ -1917,7 +1917,45 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `#include` the three new files alongside `ota_http.c` (same
       convention as `test_wifi_prov.c`) and to use the renamed
       `ota_http_safety`/`ota_http_pico_rollback_async` at its own direct
-      call sites.
+      call sites. `zones_config_json.c` part — **CLOSED 2026-09-04**:
+      move-only split into `zones_config_convert.c` (633 lines,
+      `convert_zone_v1()`..`convert_zone_v14()` per-historical-layout field
+      converters, `zones_cfg_expected_len_for_version()`,
+      `set_default_timing_profile()` — no public entry point of its own,
+      called only from the next file), `zones_config_migrate.c` (589,
+      the per-version dispatch switch `convert_versioned_blob_to_current()`,
+      `zones_config_json_compute_crc()`, `raise_heater_timing_to_floors()`,
+      and the public decode entry point `zones_config_json_decode_blob()`)
+      and `zones_config_json.c` (674, kept: the settings_source chain-walk
+      wrapper/normalizer, `zones_config_json_validate()`, and the HTTP-free
+      field parsers), sharing state via `zones_config_json_internal.h` on
+      the `profiles_http_internal.h` precedent (shared statics as `extern`,
+      former `static` helpers widened to file-scope-internal). Symbol audit:
+      grepped every widened symbol both ways (a clash with a non-static
+      definition elsewhere fails the link; a clash with a same-named
+      `static` elsewhere links silently and breaks later) across all of
+      `App/drivers/` before trusting the link — `convert_zone_v1()`..
+      `convert_zone_v14()` and `set_default_timing_profile()` came back
+      clean (kept their names); `expected_len_for_version` already has its
+      own `static` definition with the identical signature in
+      `profiles_http.c` — not an immediate link error since both stayed
+      `static` from each other's point of view, but exactly the latent-
+      collision shape the `page_get_handler`/`nvs_partition_init` precedents
+      warn about, so renamed on sight to `zones_cfg_expected_len_for_
+      version()`. `TAG` renamed `ZONES_CFG_TAG` per the `DASH_TAG`/
+      `PROFILES_TAG`/`OTA_HTTP_TAG` precedent regardless of collision (every
+      driver file in `App/drivers` has its own `static const char *TAG`).
+      `convert_versioned_blob_to_current()` and `raise_heater_timing_to_
+      floors()` stayed `static` — each is called only from its own file's
+      `zones_config_json_decode_blob()`, no widening needed.
+      `build_kilnfw` compiles and links clean. All 21/21 host test
+      executables pass; `test_zones_http.c`'s existing separate-executable
+      build (it `#include`s `zones_http.c` directly) updated to compile
+      `zones_config_convert.c`/`zones_config_migrate.c` in alongside
+      `zones_config_json.c`, same convention as `test_profiles_http.c`
+      picking up `profiles_catalog_http.c`/`profiles_edit_http.c`. The
+      run's one failure (`test_st7796_panel.c`, in the `main` executable)
+      is unrelated display-file territory, out of this item's scope.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
