@@ -140,5 +140,44 @@ class CompareBdReachabilityTest(unittest.TestCase):
         self.assertEqual(brc.main([path_c, path_d, "--field", "bd_kp_effective", "--zone", "0"]), 1)
 
 
+class PerZoneReachabilityTest(unittest.TestCase):
+    """``overall_reachable`` must be an AND across zones, matching this
+    module's own documented exit-code contract ("0 = at least one checked
+    field reached and differed in EVERY zone checked"). It used to be an OR
+    over the flat verdict list, so one differing zone made a pair with two
+    provably-inert zones look fully REACHABLE."""
+
+    def _verdicts(self, pairs):
+        """pairs: [(zone, bit_identical), ...] -> FieldVerdict list."""
+        def summ():
+            return brc.ArmSummary(min=0.0, max=1.0, mean=0.5, n=3)
+        return [brc.FieldVerdict(zone=z, field="bd_kp_effective", a=summ(), b=summ(),
+                                  bit_identical=bi)
+                for z, bi in pairs]
+
+    def test_partially_inert_is_not_overall_reachable(self):
+        v = self._verdicts([(0, False), (1, True), (2, True)])
+        self.assertEqual(brc.reachable_zones(v), [0])
+        self.assertEqual(brc.inert_zones(v), [1, 2])
+        self.assertFalse(brc.overall_reachable(v))
+
+    def test_one_field_differing_makes_its_zone_reachable(self):
+        v = self._verdicts([(0, True), (0, False), (1, False)])
+        self.assertEqual(brc.reachable_zones(v), [0, 1])
+        self.assertEqual(brc.inert_zones(v), [])
+        self.assertTrue(brc.overall_reachable(v))
+
+    def test_all_inert_and_empty_are_not_reachable(self):
+        self.assertFalse(brc.overall_reachable(self._verdicts([(0, True), (1, True)])))
+        self.assertFalse(brc.overall_reachable([]))
+
+    def test_report_names_the_partially_inert_zones(self):
+        text = brc.format_report("a.jsonl", "b.jsonl",
+                                  self._verdicts([(0, False), (1, True), (2, True)]))
+        self.assertIn("PARTIALLY INERT", text)
+        self.assertIn("[1, 2]", text)
+        self.assertIn("EXCLUDED", text)
+
+
 if __name__ == "__main__":
     unittest.main()

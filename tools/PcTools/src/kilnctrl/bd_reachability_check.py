@@ -160,12 +160,50 @@ def compare_bd_reachability(
     return verdicts
 
 
+def reachable_zones(verdicts: Sequence[FieldVerdict]) -> list:
+    """Sorted zones in which AT LEAST ONE checked field differed between the
+    arms -- i.e. the varied preset field demonstrably reached the control law
+    *in that zone*."""
+    zones = {v.zone for v in verdicts}
+    return sorted(z for z in zones
+                  if any(not v.bit_identical for v in verdicts if v.zone == z))
+
+
+def inert_zones(verdicts: Sequence[FieldVerdict]) -> list:
+    """Sorted zones in which EVERY checked field was bit-identical between
+    the arms -- the inert signature, *per zone*.
+
+    2026-09-04 -- WHY THIS EXISTS, AND WHY ``overall_reachable`` IS AN "AND"
+    ACROSS ZONES RATHER THAN AN "OR". This module originally answered
+    reachability with ``any(not v.bit_identical ...)`` over the flat verdict
+    list: one differing (zone, field) anywhere made the whole pair
+    REACHABLE. That contradicted this module's own documented exit-code
+    contract ("0 = at least one checked field reached and differed in EVERY
+    zone checked"), and it is unsound for the consumer that matters: the
+    campaign decision rule is "same metric, same direction, >= 3 zones", so
+    a pair in which the fuzzy layer demonstrably acted in zone 0 but was
+    bit-identical -- provably inert -- in zones 1 and 2 would still have all
+    three zones counted toward that rule. Two of the three "votes" would
+    then come from zones where the treatment provably never acted: a
+    confident verdict from data that cannot support it, which is the exact
+    failure class this tooling exists to prevent. Reachability is therefore
+    judged PER ZONE, and the consumer excludes inert zones from the decision
+    rule rather than voiding or silently including them."""
+    zones = {v.zone for v in verdicts}
+    reach = set(reachable_zones(verdicts))
+    return sorted(z for z in zones if z not in reach)
+
+
 def overall_reachable(verdicts: Sequence[FieldVerdict]) -> bool:
-    """True iff at least one (zone, field) verdict differed between arms --
-    i.e. the varied preset field demonstrably reached the control law
-    SOMEWHERE. False (INERT) only when every single checked (zone, field)
-    combination was bit-identical -- the loud failure signature."""
-    return any(not v.bit_identical for v in verdicts)
+    """True iff EVERY checked zone had at least one field differ between
+    arms -- matching this module's documented exit-code contract. False
+    (INERT, exit 1) when any checked zone was entirely bit-identical; see
+    :func:`inert_zones` for why this is an "and" across zones. Callers that
+    need the finer picture (which zones are usable) should use
+    :func:`reachable_zones` / :func:`inert_zones` directly."""
+    if not verdicts:
+        return False
+    return not inert_zones(verdicts)
 
 
 def format_report(path_a: str, path_b: str, verdicts: Sequence[FieldVerdict]) -> str:
@@ -179,6 +217,15 @@ def format_report(path_a: str, path_b: str, verdicts: Sequence[FieldVerdict]) ->
             f"mean={v.a.mean:.6g} n={v.a.n}]  B[min={v.b.min:.6g} max={v.b.max:.6g} "
             f"mean={v.b.mean:.6g} n={v.b.n}]  -> {tag}")
     lines.append("")
+    inert_z = inert_zones(verdicts)
+    reach_z = reachable_zones(verdicts)
+    if differing and inert_z:
+        lines.append(
+            f"PARTIALLY INERT: zone(s) {inert_z} were EXACTLY bit-identical across every "
+            f"checked field, while zone(s) {reach_z} differed. The varied field reached the "
+            "control law in some zones but provably NOT in "
+            f"{inert_z} -- those zones must be EXCLUDED from any >=3-zone decision rule; "
+            "counting them would draw a conclusion from zones the treatment never acted on.")
     if not differing:
         lines.append(
             "VERDICT: INERT -- every checked (zone, field) was EXACTLY bit-identical between "

@@ -121,8 +121,18 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
         report["verdict"] = "INCOMPLETE -- no complete pairs yet"
         return report
 
+    # Bound early: the two early-return paths below call the verdict-note
+    # helpers before stage 3 has run, and a NameError there would crash the
+    # one command this campaign's conclusion depends on.
+    decision_rule_met = False
+    n_analyzed = 0
     any_inert = False
+    any_partially_inert = False
     any_truncated = False
+    #: pair index -> zones whose fuzzy term was bit-identical (provably
+    #: inert) in that pair. Those (pair, zone) votes are dropped from the
+    #: >=3-zone decision rule below.
+    pair_inert_zones: dict[int, list] = {}
     per_pair_zone_directions: dict[str, list[tuple[int, str]]] = {}
     # zone -> list of (pair_index, "A"/"B"/None) for whole-run iae_normalized_whole_c
 
@@ -132,16 +142,27 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
         # Stage 1: reachability, FIRST and gating.
         try:
             verdicts = bdrc.compare_bd_reachability(a_path, b_path, fields=FUZZY_BD_FIELDS)
-            reachable = bdrc.overall_reachable(verdicts)
+            # PER-ZONE reachability, not a single pair-wide boolean. The
+            # decision rule below counts ZONES, so a zone whose fuzzy term
+            # was bit-identical between arms must not be allowed to cast a
+            # vote -- the treatment provably never acted there. See
+            # bd_reachability_check.inert_zones' own note.
+            reach_zones = bdrc.reachable_zones(verdicts)
+            dead_zones = bdrc.inert_zones(verdicts)
             pair_report["reachability"] = {
-                "reachable": reachable,
+                "reachable": bool(reach_zones),
+                "reachable_zones": reach_zones,
+                "inert_zones": dead_zones,
                 "report": bdrc.format_report(a_path, b_path, verdicts),
             }
-            if not reachable:
+            if not reach_zones:
                 any_inert = True
                 pair_report["status"] = "VOID (fuzzy term INERT -- bit-identical bd_* between arms)"
                 report["pairs"].append(pair_report)
                 continue
+            if dead_zones:
+                any_partially_inert = True
+                pair_inert_zones[i] = dead_zones
         except bdrc.ReachabilityCheckError as exc:
             pair_report["reachability"] = {"error": str(exc)}
             pair_report["status"] = "CANNOT CHECK REACHABILITY -- refusing to proceed to a verdict for this pair"
@@ -183,13 +204,51 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
             if comparison.segment is not None or comparison.metric != "iae_normalized_whole_c":
                 continue
             zone = comparison.zone
+            if zone in pair_inert_zones.get(i, ()):  # provably inert here -- no vote
+                continue
             direction = comparison.better if comparison.distinguishable else None
             per_pair_zone_directions.setdefault(str(zone), []).append((i, direction))
 
     report["any_pair_inert"] = any_inert
+    report["any_pair_partially_inert"] = any_partially_inert
+    report["pair_inert_zones"] = {str(k): v for k, v in pair_inert_zones.items()}
     report["any_pair_truncated"] = any_truncated
 
+    def _with_inert_zone_note(verdict: str) -> str:
+        if not any_partially_inert:
+            return verdict
+        return verdict + (
+            " (NOTE: PARTIALLY INERT -- the fuzzy term was bit-identical between arms in "
+            f"{report['pair_inert_zones']} (pair -> zones); those zones were EXCLUDED from the "
+            ">=3-zone decision rule, since the treatment provably never acted in them. The "
+            "rule was therefore evaluated over FEWER zones than the campaign planned -- "
+            "treat any DISTINGUISHABLE call here as provisional and re-check the wiring.)")
+
+    # REPLICATION / MULTIPLICITY CAVEAT. The >=3-zone rule counts ZONES, and
+    # three zones of one kiln in ONE pair are not three independent
+    # experiments -- pid_ab_compare.summarize_multiplicity puts the per-key
+    # false-positive rate of the range floor at ~30.5% at n=3 and ~12% at
+    # n=6, with no correction applied. A rule satisfied by a single pair is
+    # therefore an unreplicated finding, and the verdict must say so rather
+    # than reading as a campaign-wide result. (Each pair's own multiplicity
+    # block is printed above with its compare_text; this is the campaign-
+    # level statement of the same problem.)
+
+    def _with_replication_note(verdict: str) -> str:
+        if not decision_rule_met:
+            return verdict
+        if n_analyzed >= 2:
+            return verdict
+        return verdict + (
+            f" (CAVEAT: the decision rule is satisfied by {n_analyzed} analyzed pair -- "
+            "UNREPLICATED. The three zones of one firing are not three independent "
+            "experiments, and no multiplicity correction is applied to the per-key verdicts "
+            "(the range floor's own per-key false-positive rate is ~30.5% at n=3, ~12% at "
+            "n=6 -- see each pair's MULTIPLICITY block above). Do not act on this until a "
+            "second pair reproduces it in the same direction.)")
+
     def _with_truncated_note(verdict: str) -> str:
+        verdict = _with_replication_note(_with_inert_zone_note(verdict))
         if not any_truncated:
             return verdict
         return verdict + (
@@ -198,6 +257,7 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
             "pair's data was never averaged in.)")
 
     complete_analyzed = [p for p in report["pairs"] if p.get("status") == "analyzed"]
+    n_analyzed = len(complete_analyzed)
     if not complete_analyzed and any_inert:
         report["verdict"] = _with_truncated_note(
             "VOID -- at least one complete pair's fuzzy term was bit-identical between arms "
@@ -217,7 +277,9 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
     report["whole_run_iae_directions_by_zone"] = per_pair_zone_directions
 
     n_zones_seen = len({z for z in per_pair_zone_directions})
+    report["zones_voting"] = n_zones_seen
     decision_rule_met = (len(consistent_zones_b) >= 3) or (len(consistent_zones_a) >= 3)
+
 
     if any_inert:
         report["verdict"] = (
@@ -253,6 +315,11 @@ def format_text(report: dict) -> str:
     lines = [f"fuzzy A/B campaign analysis: {report['prefix']} ({report['log_dir']})", ""]
     for p in report["pairs"]:
         lines.append(f"=== pair {p['pair']}: {p['status']} ===")
+        if p.get("reachability", {}).get("inert_zones"):
+            lines.append(
+                f"  PARTIALLY INERT: zones {p['reachability']['inert_zones']} bit-identical "
+                f"between arms -- EXCLUDED from the decision rule (reachable zones: "
+                f"{p['reachability'].get('reachable_zones')})")
         if "missing" in p:
             for m in p["missing"]:
                 lines.append(f"  missing: {m}")
