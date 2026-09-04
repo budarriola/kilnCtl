@@ -150,13 +150,18 @@ class RealFirmwareSmokeTest(unittest.TestCase):
     def test_real_firmware_file_extracts_known_keys(self):
         import pathlib
 
-        path = (
+        drivers_dir = (
             pathlib.Path(__file__).resolve().parents[3]
-            / "firmware" / "KilnFW" / "App" / "drivers" / "zones_http_handlers.c"
+            / "firmware" / "KilnFW" / "App" / "drivers"
         )
-        if not path.is_file():
-            self.skipTest(f"firmware source not found at {path}")
-        text = path.read_text(encoding="utf-8")
+        # zones_http_handlers.c was split into zones_http_get.c /
+        # zones_http_post.c (and possibly further siblings later) -- glob
+        # for the family instead of hardcoding one filename so the next
+        # split doesn't break this test again.
+        paths = sorted(drivers_dir.glob("zones_http_*.c"))
+        if not paths:
+            self.skipTest(f"firmware source not found under {drivers_dir}")
+        text = "\n".join(p.read_text(encoding="utf-8") for p in paths)
         get_keys = _extract_get_top_level_keys(text)
         post_keys = _extract_post_top_level_keys(text)
         self.assertIn("thermo_count", get_keys)
