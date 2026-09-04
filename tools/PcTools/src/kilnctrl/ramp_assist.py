@@ -811,11 +811,15 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
             z.window_pending_heat_s = 0.0
             z.window_target_c = None
 
-    targets_reached = []
-    for zi in range(n):
-        final_step = schedule[-1]
-        final_target = final_step.target_c if isinstance(final_step, RampStep) else seg_start_c[zi]
-        targets_reached.append(bool(zones[zi].done))
+    # NOTE: "reached" means the zone's commanded schedule fully advanced
+    # (z.done), not that the actual/measured temperature hit the final
+    # step's target within tolerance -- that accuracy question is answered
+    # separately by dwell_overshoot/ramp_rms elsewhere. An earlier version
+    # of this loop computed the final step's target_c here too, but never
+    # used it; it was dead from this function's introduction (never
+    # touched since, per `git log -S`), so it has been dropped rather than
+    # wired into a comparison nobody asked for.
+    targets_reached = [bool(z.done) for z in zones]
 
     dwell_nominal_s = [s.duration_min * 60.0 for s in schedule if isinstance(s, DwellStep)]
 

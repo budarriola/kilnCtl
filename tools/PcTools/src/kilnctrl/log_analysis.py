@@ -1079,10 +1079,11 @@ def sanity_check_autotune(rows: Sequence[AutotuneRow], trace: Optional[tuple[lis
     if not done:
         return warnings
     r = done[-1]
-    if r.final_c < r.baseline_c + r.rise_inf_c - 0.5 and r.rise_inf_c > 0:
-        # fitted asymptote should be >= what was actually measured, modulo
-        # the small extrapolation correction already applied
-        pass  # final_c is itself the last measurement; nothing to flag here
+    # NOTE: comparing r.final_c against r.baseline_c + r.rise_inf_c here would be
+    # tautological -- final_c IS the sample the firmware fit rise_inf_c from, so
+    # this can never disagree with itself. The real cross-check (fitted asymptote
+    # vs. the independently-loaded trace's own samples) is the `trace is not None`
+    # block below; there is no meaningful check to do without a trace.
     if trace is not None:
         t, y = trace
         if y:

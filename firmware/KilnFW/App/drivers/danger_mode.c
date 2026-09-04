@@ -273,11 +273,22 @@ void danger_mode_stop(const char *source)
          * refuse to close it, so nothing on the normal path ever opens it
          * again either. Exiting the window has to leave the board in the
          * state it would be in had the window never opened. */
-        (void)kiln_io_owner_command_all_relays_off();
-        (void)safety_link_request_enable(s_dm.safety, false);
-        ESP_LOGW(TAG, "danger mode stopped (%s) -- relays dropped, relay gate restored, "
-                      "heat-enable released, no reboot",
-                 src);
+        esp_err_t relay_err = kiln_io_owner_command_all_relays_off();
+        esp_err_t enable_err = safety_link_request_enable(s_dm.safety, false);
+        if (relay_err != ESP_OK || enable_err != ESP_OK) {
+            /* Both calls used to be cast to (void) and this message printed
+             * unconditionally -- so an owner-queue timeout (ESP_ERR_TIMEOUT,
+             * the busy/backed-up case, not hypothetical) looked identical in
+             * the log to relays actually dropping. Surface the disagreement;
+             * the attempt itself is unchanged. */
+            ESP_LOGE(TAG, "danger mode stopped (%s) -- relay/enable release FAILED "
+                          "(relays=%s enable=%s); do not assume the coil is open",
+                     src, esp_err_to_name(relay_err), esp_err_to_name(enable_err));
+        } else {
+            ESP_LOGW(TAG, "danger mode stopped (%s) -- relays dropped, relay gate restored, "
+                          "heat-enable released, no reboot",
+                     src);
+        }
     }
 }
 
@@ -310,11 +321,18 @@ static void danger_mode_task(void *arg)
              * in for had ended, no reboot. */
             /* Same reason as danger_mode_stop()'s -- and more pressing here,
              * since a timeout means nobody is watching the page. */
-            (void)kiln_io_owner_command_all_relays_off();
-            (void)safety_link_request_enable(s_dm.safety, false);
-            ESP_LOGW(TAG, "danger mode timed out (%lu ms idle) -- relays dropped, heat-enable "
-                          "released, relay gate restored, no reboot",
-                     (unsigned long)DANGER_MODE_WINDOW_MS);
+            esp_err_t relay_err = kiln_io_owner_command_all_relays_off();
+            esp_err_t enable_err = safety_link_request_enable(s_dm.safety, false);
+            if (relay_err != ESP_OK || enable_err != ESP_OK) {
+                ESP_LOGE(TAG, "danger mode timed out (%lu ms idle) -- relay/enable release "
+                              "FAILED (relays=%s enable=%s); do not assume the coil is open",
+                         (unsigned long)DANGER_MODE_WINDOW_MS,
+                         esp_err_to_name(relay_err), esp_err_to_name(enable_err));
+            } else {
+                ESP_LOGW(TAG, "danger mode timed out (%lu ms idle) -- relays dropped, heat-enable "
+                              "released, relay gate restored, no reboot",
+                         (unsigned long)DANGER_MODE_WINDOW_MS);
+            }
         }
     }
 }
