@@ -68,7 +68,7 @@ What is still genuinely open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
-| L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
+| L | **HTTP connection resets under concurrency.** Reproducible (~20-30% at concurrency 8-16). LRU-purge-at-13, httpd's session pool, and now OS-socket-table exhaustion (both close()-latency and accept() ENFILE, checked directly) are all refuted by live measurement. Not root-caused — next lead is `backlog_conn=10`'s pending-accept queue, unconfirmed | M10 |
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Its predicted side effect arrived exactly as the ordering note warned — the bench, having no CT fitted, could not satisfy `ct_channel_map` and was locked out of heating. Resolved 2026-08-28 by making CTs **optional hardware** rather than by relaxing the gate: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off (`SaftyFW/docs/GUARD_TEST_MATRIX.md` §9). Verified on the live board: `commissioned: true`, heat permitted, relay commanded with `heat_blocked: false` | M12 |
 | ~~L~~ | ~~**Sustained heat is impossible on the bench: S6a fires within ~1 s of every firing start.**~~ **CLOSED 2026-08-29 (63cc741).** Root cause was not the wire, not the Pico, and not the consumer-cannot-keep-up shape this entry guessed at — nothing was ever dropped: 0 CRC errors, 0 resyncs, 0 discards throughout, the frames were only ever *late*. `KilnFW`'s `uart_protocol_rx_task` read with `uart_read_bytes(port, chunk, sizeof(chunk), 200 ms)` where `chunk` had been sized to the worst-case stuffed frame (528 B) by 3149393. That call re-blocks until `length` bytes arrive or the timeout expires, and on a link whose frames are ~40 B at ~10 frames/s, 528 B never arrive — so every read held its bytes the full 200 ms, against a ~345 ms reply budget. By the time it was characterised it was timing out on **100 %** of polls (42/42), not 20 %. Fixed by reading only what `uart_get_buffered_data_len()` reports with a zero timeout, and blocking for a single byte (bounded 100 ms) only when nothing is buffered. Measured after: **0 timeouts in 340+ polls**, request/reply back to 1:1, config fetch converging in 3 page requests instead of 25. A bounded firing run now holds `running` with no heat block for a full 60 s sweep (regression-asserted in `test_live_bench_tuning.py`). DMA was evaluated and rejected as the fix — see `LINK_PROTOCOL.md` §3 "Never wait on a receive buffer filling", which states the rule both ends must hold and leaves the mechanism open. ~~**Remaining bench limit is physical, not firmware: no heating element is fitted to the zone-0 relay, so PV does not move and autotune still cannot fit a response.**~~ **Wrong, corrected 2026-08-29.** Every zone has a real heater. PV did not move for two firmware reasons, both since fixed: K4 was never requested (`heat_enable.c`), and zone 0's 2 s time-proportioning window could not render any fractional duty against the 10 s minimum on-time. "It must be the hardware" was the third wrong diagnosis this one symptom attracted. | M6 |
@@ -1815,6 +1815,76 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       is untested). `wifi_provision_http.c`'s `open_fn`/`close_fn`
       instrumentation is now permanently in place in the shipped firmware
       for whoever picks this up next to extend.
+      2026-09-04: **both remaining leads refuted by direct measurement --
+      root cause still open.** This pass's job was exactly the close()-
+      latency hypothesis the previous pass left untested, plus the sibling
+      question (does `lwip_accept()` ever actually return `ENFILE`). Two
+      things instrumented: (1) a second atomic counter,
+      `s_lwip_table_occupied`, that increments in `open_fn` (same moment as
+      before) but decrements only AFTER `close(sockfd)` *returns* inside
+      `close_fn` -- not on hook entry like `s_httpd_open_sockets` -- so it
+      measures actual `sockets[]` table occupancy instead of inferring it
+      from session-pool hook timing; logged as `httpd socket open: ...
+      table=N` and a new `httpd socket table-free: fd=%d table=N/%d` line
+      bracketing the real close. (2) confirmed (by reading
+      `$IDF_PATH/components/esp_http_server/src/httpd_main.c`) that
+      `httpd_accept_conn()` already logs `ESP_LOGE(TAG, "error in accept
+      (%d)", errno)` on every `accept()` failure, at ERROR level (always
+      compiled in under this build's `CONFIG_LOG_MAXIMUM_LEVEL=3`), and
+      that `uart_log_bridge.c` captures every `ESP_LOGx` call globally via
+      `esp_log_set_vprintf()` regardless of tag -- so this line was already
+      reaching `get_device_log()` without needing new code, just needed to
+      be watched for. Built (`build_kilnfw` exit 0 against HEAD `712bec1`,
+      after rebasing past another session's concurrent commit), flashed via
+      `flash_firmware()` (verify=True, confirmed running), re-ran
+      `http_concurrency_reproducer.py --concurrency 4,8,12,16 --bursts 3`
+      against the live idle board (192.168.1.156): **same failure shape
+      again** -- 120 requests, 27 resets (22.5%), 0/12 at 4, 3/8 (12.5%
+      per-burst average) at 8, 12/12 (33%, all four each burst) at 12,
+      12/12 (25%) at 16, all client-side `WinError 10054`. Captured the
+      full device log from boot through the entire sweep (timestamps
+      7665-45575ms, one continuous `get_device_log` pull, nothing missed).
+      **Neither lead survived**: `table` never exceeded `active` by more
+      than one log line's worth of scheduling jitter (0-30ms between the
+      `active=N` decrement and the paired `table=N` decrement in every
+      single close observed) and both peaked at the identical worst-case
+      value, 5 -- against caps of 13 and 18 respectively -- during the
+      12- and 16-way bursts that were actively producing resets at that
+      exact moment. There is no lingering-close effect large enough to
+      matter: the OS socket table was never meaningfully more occupied than
+      the session-pool counter already showed, which itself never got
+      close to either cap. And the accept-errno line never appeared once
+      in the entire captured window, across all four concurrency levels
+      including the ones that reset a third of their requests -- `accept()`
+      is not failing. **Conclusion: OS-socket-table exhaustion
+      (`lwip_accept()`'s `alloc_socket()` returning `ENFILE`) is refuted,
+      the same as httpd's own session-pool cap was refuted last pass.**
+      Both candidate resource-exhaustion mechanisms this item has now
+      chased -- httpd's `max_open_sockets` pool and lwIP's `sockets[]`
+      table -- are confirmed clear at the moment resets happen, at every
+      concurrency level tested, with the actual peak occupancy (5) not even
+      a third of either configured cap. Whatever is generating these RSTs
+      is not counting against a socket resource this instrumentation can
+      see. **Not closing this item; not bumping `max_open_sockets` or
+      `CONFIG_LWIP_MAX_SOCKETS` -- there is now direct evidence against
+      both of the mechanisms that recommendation would be defending
+      against.** Next lead, not yet investigated: `config.backlog_conn = 10`
+      (this file, `wifi_provision_http_start()`) is the kernel/lwIP-level
+      pending-accept queue depth, set *below* this reproducer's own
+      concurrency levels of 12 and 16 -- a SYN that completes the 3-way
+      handshake while the accept backlog is already full is a documented
+      lwIP path to an RST that happens entirely before `netconn_accept()`
+      is ever called, which would explain resets that never reach
+      `open_fn`, never touch `alloc_socket()`, and never log an accept
+      errno, all consistent with every measurement taken so far (this
+      pass's and the prior two). Not confirmed: no instrumentation of the
+      TCP listen backlog / SYN queue was attempted this pass -- lwIP does
+      not expose an equivalent hook the way `open_fn`/`close_fn` did for
+      the session pool, so confirming this would need either reading
+      `tcp_listen_backlogged` accounting in `$IDF_PATH`'s lwIP source (not
+      vendored) to find a countable field, or a packet capture to see the
+      handshake complete and RST for a request that never reached this
+      file's own hooks at all.
 - [x] **Wire the guard scripts into something that runs them.** Done
       2026-08-27: `tools/run_all_checks.ps1`, plus a `run_repo_checks` tool on
       both MCP servers. Discovery is by glob rather than a list, because a list

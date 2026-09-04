@@ -735,14 +735,33 @@ static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t e
  *
  * close_fn REPLACES the server's default close behavior (a plain close()) --
  * skipping the close() call here would leak the fd, so this wrapper must
- * call it itself. */
+ * call it itself.
+ *
+ * 2026-09-04 follow-up: the counter above (s_httpd_open_sockets) is
+ * decremented on ENTRY to this hook, before close(sockfd) is called --
+ * meaning it reads "closed" the instant httpd hands the fd back, not when
+ * the OS-level socket-table slot (lwIP's sockets[], CONFIG_LWIP_MAX_SOCKETS
+ * entries) actually becomes free. netconn_delete() (what close() drives
+ * down into) is an async round trip to lwIP's tcpip thread, not instant, so
+ * a session that's slow to actually release its slot would read as "closed"
+ * here while still occupying sockets[]. s_lwip_table_occupied below instead
+ * brackets the real close() return -- incremented in on_open (same moment
+ * a slot is known taken, right after accept() handed it to httpd) and
+ * decremented only AFTER close() returns, so it measures table occupancy
+ * rather than inferring it from the session-pool hook timing. If this
+ * counter runs higher than s_httpd_open_sockets during a burst, that's
+ * direct evidence of lingering close() latency holding sockets[] slots the
+ * session-pool counter has already released. */
 static _Atomic int s_httpd_open_sockets;
+static _Atomic int s_lwip_table_occupied;
 
 static esp_err_t wifi_provision_http_on_open(httpd_handle_t hd, int sockfd)
 {
     (void)hd;
     int now = atomic_fetch_add(&s_httpd_open_sockets, 1) + 1;
-    ESP_LOGI(TAG, "httpd socket open: fd=%d active=%d/%d", sockfd, now, /*max_open_sockets=*/13);
+    int table_now = atomic_fetch_add(&s_lwip_table_occupied, 1) + 1;
+    ESP_LOGI(TAG, "httpd socket open: fd=%d active=%d/%d table=%d", sockfd, now,
+             /*max_open_sockets=*/13, table_now);
     return ESP_OK;
 }
 
@@ -751,7 +770,13 @@ static void wifi_provision_http_on_close(httpd_handle_t hd, int sockfd)
     (void)hd;
     int now = atomic_fetch_sub(&s_httpd_open_sockets, 1) - 1;
     ESP_LOGI(TAG, "httpd socket close: fd=%d active=%d/%d", sockfd, now, /*max_open_sockets=*/13);
+    /* Bracket the actual close() return -- this is the line the 2026-09-04
+     * follow-up above exists to measure. Do not decrement s_lwip_table_occupied
+     * before this call returns. */
     close(sockfd);
+    int table_now = atomic_fetch_sub(&s_lwip_table_occupied, 1) - 1;
+    ESP_LOGI(TAG, "httpd socket table-free: fd=%d table=%d/%d", sockfd, table_now,
+             CONFIG_LWIP_MAX_SOCKETS);
 }
 
 esp_err_t wifi_provision_http_start(void)
