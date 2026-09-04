@@ -1,4 +1,5 @@
 #include "autotune_engine_internal.h"
+#include "heat_enable.h"
 
 /* Task/lifecycle, the shared tick state machine, run setup and the plain
  * lifecycle/status API. See autotune_engine_internal.h's top comment for the

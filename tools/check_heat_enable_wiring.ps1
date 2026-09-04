@@ -72,12 +72,18 @@ $violations = @()
 
 # ---- checks 1-3: the heat-commanding modules ------------------------------
 # Each entry is a module name paired with the glob that resolves its file
-# set. profile_executor uses a glob (see the 2026-09-01 split note above);
-# autotune_engine is still one file, expressed the same way so the loop body
-# does not need to special-case it.
+# set. profile_executor uses a glob (see the 2026-09-01 split note above).
+# autotune_engine.c (also 1500+ lines) was split the same way on 2026-09-04
+# into autotune_engine.c plus autotune_engine_coupling.c/_guard.c/_relay.c/
+# _step_identify.c; heat_enable_release() moved to autotune_engine_guard.c
+# while heat_enable_acquire() stayed in autotune_engine.c. Scanning only
+# autotune_engine.c after that split would still find the acquire call and
+# report green while missing that the release call left the file -- the same
+# blindness this script's header already documents for profile_executor's
+# split, so autotune_engine gets the same glob treatment now.
 $heatModules = @(
     @{ Name = "profile_executor"; Glob = "profile_executor*.c"; MinFiles = 2 },
-    @{ Name = "autotune_engine";  Glob = "autotune_engine.c";   MinFiles = 1 }
+    @{ Name = "autotune_engine";  Glob = "autotune_engine*.c";  MinFiles = 2 }
 )
 foreach ($mod in $heatModules) {
     $name = $mod.Name

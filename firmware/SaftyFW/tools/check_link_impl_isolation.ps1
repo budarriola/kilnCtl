@@ -186,6 +186,13 @@ $allowlistPaths = @(
     # its old entry is replaced rather than kept alongside these.
     (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_json.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_json.h"),
+    # zones_config_json.c (1867 lines) was itself split on 2026-09-04 under
+    # ROADMAP.md's 1500-line rule; zones_config_json_compute_crc() -- same
+    # esp_crc32_le() NVS-record-integrity function as above, just relocated
+    # again -- landed in zones_config_migrate.c. Same reasoning, replaced
+    # rather than kept alongside since zones_config_json.c no longer defines
+    # it.
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_migrate.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_store.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety_cfg_store.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety_cfg_store.h"),

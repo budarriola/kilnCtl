@@ -41,6 +41,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _UART_BRIDGE_EXT_C = (
     _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "uart_bridge_ext.c"
 )
+# uart_bridge_ext.c (2026-09-04, ROADMAP.md's 1500-line rule) was split into
+# uart_bridge_ext.c plus three siblings; autotune_build_status() -- the exact
+# function this file exists to regression-test -- moved into
+# uart_bridge_ext_autotune.c. A path still pointed at uart_bridge_ext.c alone
+# would silently find nothing (see _load_layout()'s own assert) rather than
+# comparing against the function's real, current text.
+_UART_BRIDGE_EXT_AUTOTUNE_C = (
+    _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "uart_bridge_ext_autotune.c"
+)
 
 # Fixed-size wire writers this function uses, and how many bytes each
 # advances `o` by. Mirrors bx_put_*_le()'s own definitions (uart_bridge_ext.c)
@@ -129,7 +138,7 @@ def _offsets_after(entries: "list[tuple[str, int | None]]") -> "dict[str, int]":
 
 
 def _load_layout() -> "list[tuple[str, int | None]]":
-    code = _strip_comments(_UART_BRIDGE_EXT_C.read_text(encoding="utf-8"))
+    code = _strip_comments(_UART_BRIDGE_EXT_AUTOTUNE_C.read_text(encoding="utf-8"))
     body = _extract_function_body(code, "autotune_build_status")
     entries = _parse_build_status_layout(body)
     assert entries, "parsed zero write statements out of autotune_build_status() -- parser regex is stale"

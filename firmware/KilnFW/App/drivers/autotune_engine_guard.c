@@ -1,4 +1,5 @@
 #include "autotune_engine_internal.h"
+#include "heat_enable.h"
 
 /* Shared low-level plumbing (relay apply/release, escalate/abort, threshold
  * scaling, trace unpack, "is a run in progress") plus the two persistence

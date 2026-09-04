@@ -26,7 +26,11 @@ from kilnctrl.protocol import AUTOTUNE_RULES
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PID_AUTOTUNE_H = _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "pid_autotune.h"
-_DASHBOARD_HTTP_C = _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "dashboard_http.c"
+# dashboard_http.c (2026-09-04, ROADMAP.md M15's 1500-line rule) was split
+# into dashboard_http.c plus siblings; autotune_start_post_handler() and its
+# "rule must be ..." refusal messages -- the exact text this guard reads --
+# moved into dashboard_autotune_http.c.
+_DASHBOARD_HTTP_C = _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "dashboard_autotune_http.c"
 
 #: The ONLY place a firmware C enum member name is translated to this
 #: module's short rule-name spelling. If pid_autotune.h grows a fifth
