@@ -472,12 +472,17 @@ menu "KilnCtrl Hardware Configuration"
             range 0 48
             depends on KILNCTL_BACKLIGHT_PWM_ENABLE
             help
-                Where the flying wire from 3.4.1 actually lands. The plan
-                prefers GPIO15 or GPIO16 as "likely free" on the DevKitC,
-                pending confirmation against the real module's octal-PSRAM
-                pin allocation (DISPLAY_ST7796_PLAN.md section 4's open
-                decision item) -- confirm before wiring, this default is a
-                starting guess, not a verified-free pin.
+                Where the flying wire from 3.4.1 actually lands.
+                GPIO15 is now VERIFIED free, not a guess: U4 pad 8 reads
+                unconnected-(U4-GPIO15...-Pad8) in kiln.kicad_pcb's
+                pad-to-net map, it is not a strapping pin (0/3/45/46) and
+                not one of the octal-PSRAM pins (35-37), and J6 carries no
+                GPIO15 at all -- which is why this must be a flying wire to
+                the DevKitC header rather than a J2 harness circuit. Checked
+                2026-09-03; see docs/MSP4031_WIRING.md, "Why GPIO15 is the
+                backlight pin", for the full pad-by-pad derivation.
+                GPIO16 (pad 9) is free by the same check and is the
+                fallback if GPIO15 is awkward to reach.
 
         config KILNCTL_BACKLIGHT_ON_PERCENT
             int "Backlight duty while the screen is on (%)"
