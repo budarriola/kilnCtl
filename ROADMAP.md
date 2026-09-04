@@ -623,7 +623,8 @@ soldering session.
       3 (`panel_spi`/`st7796_panel` split, Kconfig-selectable) and 5 (FT6336U
       touch abstraction, unvalidated on hardware) landed 2026-09-01/02.
       Phase 4 (auto-detection) is done ahead of hardware: the detection logic
-      is host-tested and wired into `panel_spi.c`, and is correctly inert
+      is host-tested and wired into `panel_spi_blit.c` (`panel_spi.c`'s
+      2026-09-04 split, see the 1500-line-rule item below), and is correctly inert
       today because both descriptors' `id_matches` stay NULL — the ILI9488's
       Sec.4 RDDID bytes were captured 2026-09-03 (`0x00 0x00 0x00`, MISO
       undriven, i.e. permanently unmatchable) and the ST7796's have never
@@ -2053,7 +2054,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       response/scratch buffer.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
       ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, ~~`ota_http.c` (2508)~~,
-      ~~`ui_page_home.c` (2279)~~, `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
+      ~~`ui_page_home.c` (2279)~~, ~~`panel_spi.c` (2174)~~, ~~`profiles_http.c` (2097)~~,
       ~~`zones_config_json.c` (1867)~~, `main.c` (1820), ~~`backup_http.c` (1756)~~,
       ~~`uart_bridge_ext.c` (1727)~~, ~~`zones_http_handlers.c` (1598)~~. Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
@@ -2385,9 +2386,67 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       file needed updating; 20/21 host test executables build and pass
       (the one non-build, `main`, fails on a concurrent, unrelated session's
       new `test_display_power_wiring.c`, an untracked file this pass never
-      touched). Still open under this item: `autotune_engine.c` and
+      touched). `panel_spi.c` part — **CLOSED 2026-09-04**: move-only split
+      into `panel_spi.c` (536 lines, bus/device setup, the D/C-batched/
+      chunked-SPI transport primitives, the bounds/blit-state guards, the
+      5x7 font and vendor init-byte tables, and — moved here rather than
+      with the rest of bring-up, since a static initializer needs its
+      table's actual values in the same translation unit — the MADCTL-by-
+      rotation table and the `panel_desc_t` descriptor/`ILI9488_get_panel_
+      desc()`), `panel_spi_bringup.c` (663, init-table execution via
+      `panel_codec_init_step()`, rotation/MADCTL application, hard/soft
+      reset, and `ILI9488_init/start/deinit/reset`/`set_power`/
+      `set_rotation`/`set_invert`/`get_dimensions`), `panel_spi_draw.c`
+      (442, rect/pixel/line drawing and the text renderer) and
+      `panel_spi_blit.c` (589, the streaming-blit protocol, sync + async
+      flush, and RDDID read-back), sharing state via a new `panel_spi_
+      internal.h` on the `zones_http_internal.h`/`profile_executor_
+      internal.h` precedent (shared statics as `extern`, former `static`
+      helpers widened to file-scope-internal — command opcodes/COLMOD/
+      MADCTL-bit/reset-timing `#define`s also moved there since three of
+      the four files need them, though a macro has no linkage to audit).
+      Symbol audit: grepped every widened symbol (`TAG`→`PANEL_SPI_TAG`,
+      `panel_spi_ready`, `panel_spi_chunk`, `panel_spi_chunk_pixels`,
+      `panel_spi_lock`, `panel_spi_unlock`, `panel_spi_set_dc`,
+      `panel_spi_tx`, `panel_spi_write_cmd`, `panel_spi_begin_ram_write`,
+      `panel_spi_push_color_run`, `panel_spi_rect_in_bounds`, `panel_spi_
+      blit_clear_state`, `panel_spi_reject_if_blitting`, `panel_spi_
+      font5x7`) for both a non-static definition and a same-named `static`
+      across all of `App/drivers/` before trusting the link — the audit
+      came back clean for all fifteen (no prior use of any `panel_spi_`
+      name anywhere in the tree), so every one was still renamed with the
+      `panel_spi_` prefix per the "rename even when currently clean" rule.
+      Two symbols initially widened were walked back instead: `ili9488_
+      init_bytes[]`/`ili9488_madctl_by_rotation[]` looked like they needed
+      `extern` for the descriptor in another file, but an extern array's
+      element values (unlike its `sizeof`) are not a compile-time constant,
+      so a static-initializer descriptor built from them cannot live in a
+      different translation unit than the tables themselves — both tables
+      and the descriptor were kept together in `panel_spi.c` instead, and
+      both stayed `static` (caught by two real `build_kilnfw` failures,
+      "initializer element is not constant", not by the symbol-collision
+      audit). The one `static inline` (`panel_spi_encode_pixel()`, the
+      RGB565->wire encoder) moved into the shared header verbatim: each
+      including file gets its own internal-linkage copy, so it was never a
+      linkage-widening question. Byte order, MADCTL color order (0x00,
+      f493bf8), INVON's deliberate absence and the 20 MHz write clock
+      (07cad60) are all unchanged — moved, not touched; the async-flush/
+      zero-copy-flush KNOWN BROKEN branches moved into `panel_spi_blit.c`
+      with their warning comments intact. `flash_worker_lint.py` stayed
+      clean before and after (180 driver files scanned, 22 allowlisted --
+      no new filename needed adding). `build_kilnfw` compiles and links
+      clean (a stale CMake cache from before this pass's `CMakeLists.txt`
+      edit needed one explicit `build_kilnfw(target="reconfigure")` to pick
+      up the three new source files; plain rebuilds before that reconfigure
+      failed with undefined references to every symbol this split moved,
+      which is what surfaced the missing reconfigure rather than a real
+      code defect). All 21/21 host test executables pass; `panel_spi.c` and
+      its new siblings are never pulled into a host-test translation unit
+      (`test_st7796_panel.c`/`test_panel_codec.c` exercise `st7796_panel.c`/
+      `panel_codec.c` directly, not this driver), so no test file needed
+      updating. Still open under this item: `autotune_engine.c` and
       `ota_http.c`'s own remaining pieces (each already has an in-progress
-      split noted above), `panel_spi.c` (2174) and `main.c` (1820).
+      split noted above) and `main.c` (1820).
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
