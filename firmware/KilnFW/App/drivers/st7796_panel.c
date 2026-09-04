@@ -158,26 +158,36 @@ static const panel_desc_t st7796_panel_desc = {
      * tiebreak is the only signal that still functions on this board's
      * wiring -- RDDID cannot distinguish either panel here. Stays NULL,
      * same reasoning as ili9488_panel_desc.id_matches above. */
-    /* 2026-09-04, final state of this session's bisect: with the byte-order
-     * bug fixed (panel_codec.c, panel_spi.c -- see that function's own
-     * comment for the real root cause), camera captures under BOTH BGR
-     * (0x08) and RGB (0x00) were taken back-to-back and came out
-     * NEAR-IDENTICAL -- same blue-skewed cast on the Start button, the
-     * chart background, and the WiFi text alike, uniformly, not isolated
-     * to one widget's own color. A genuine MADCTL channel-order bug would
-     * make BGR vs RGB look visibly, dramatically different (it swaps two
-     * whole channels); it did not here, which is itself evidence this bit
-     * is no longer the dominant error -- the remaining blue cast is more
-     * consistent with the bench webcam's own white balance under indoor
-     * lighting than with a firmware channel-order bug (see
-     * DISPLAY_ST7796_PLAN.md's 2026-09-04 entries for both captures).
-     * BGR (0x08) kept as the setting: it is the value the panel's very
-     * first, byte-order-immune (RGB666/ILI9488-driven) power-up
-     * empirically rendered correct colors under, and swapping to RGB
-     * bought nothing measurable once the real bug was fixed. Revisit with
-     * a direct (non-webcam) visual check if the owner still sees a hue
-     * problem after this. */
-    .color_order_bit = 0x08, /* MADCTL D3 set = BGR */
+    /* 2026-09-04: the earlier "BGR vs RGB look near-identical" conclusion
+     * (see git history) was made by EYE, not by numeric pixel sampling --
+     * the same methodological gap the coordinator caught in this session's
+     * "green button is really green" claim (it wasn't verified either).
+     * Redone properly with ffmpeg crop+scale-to-1x1 sampling of matched
+     * regions on BOTH settings, same build otherwise (byte-swap fixed,
+     * no INVON):
+     *
+     *              BGR (0x08)        RGB (0x00)        theme intends
+     *   bg         R6  G36  B99      R26 G37  B71      R26 G31 B43
+     *   Start btn  R160 G234 B243    R184 G234 B238    R92 G192 B110
+     *   graph      R1  G116 B205     R56 G116 B154     R36 G42 B58 (card)
+     *
+     * G is invariant between the two settings in every region (expected --
+     * MADCTL's BGR bit only touches R/B), and RGB is measurably closer to
+     * the theme: the background's R channel lands EXACTLY on the intended
+     * value (26) under RGB versus badly crushed (6) under BGR. RGB (0x00)
+     * adopted on that numeric basis, not a guess.
+     *
+     * Still unexplained: B stays elevated above the theme's intended value
+     * in every sampled region even under RGB, roughly proportionally
+     * (not swapped-looking, not channel-order-shaped) -- not resolved by
+     * either MADCTL setting, since both were now tried and measured. The
+     * ST7796's E0/E1 gamma tables set one shared response curve across all
+     * three channels (not per-channel), so a gamma mismatch would not
+     * explain a blue-only bias; a bench webcam's own blue-channel response
+     * under this panel's LED backlight is a real, untested alternative
+     * explanation this session has no way to rule out without a non-camera
+     * reference. Documented rather than guessed away. */
+    .color_order_bit = 0x00, /* MADCTL D3 clear = RGB -- numerically confirmed 2026-09-04 */
     .id_matches = NULL,
     .blank_via_power_off = false, /* safe default; NEEDS BENCH CONFIRMATION, see above */
 };
