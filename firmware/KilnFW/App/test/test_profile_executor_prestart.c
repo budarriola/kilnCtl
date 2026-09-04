@@ -3088,8 +3088,17 @@ static void test_duty_breakdown_internal_consistency(void)
     s_exec.target_rate_c_per_s = 0.01f;
 
     bool want_relay_on = false;
-    (void)pid_family_zone_tick(z, zi, &z->pid_cfg, /*sensor_ok_zi=*/true, /*dt_s=*/1.0f, /*dt_ms=*/1000u,
-                               &want_relay_on);
+    /* Capture the tick's own return value -- pid_family_zone_tick() hands
+     * this straight back to profile_executor.c's executor_task_entry(),
+     * which stores it verbatim as z->duty (the value that IS "the duty
+     * actually commanded" this tick, before the load-cap boost stage). This
+     * test calls pid_family_zone_tick() directly rather than going through
+     * the executor loop, so capturing the return here is what stands in for
+     * z->duty -- an independent read of the same quantity the breakdown's
+     * own post_clamp_total field claims to report, taken from OUTSIDE the
+     * bd struct rather than re-deriving it from bd's own inputs. */
+    float tick_duty = pid_family_zone_tick(z, zi, &z->pid_cfg, /*sensor_ok_zi=*/true, /*dt_s=*/1.0f,
+                                           /*dt_ms=*/1000u, &want_relay_on);
 
     const zone_duty_breakdown_t *bd = &z->duty_breakdown;
     double pre_clamp_total = (double)z->last_pid_terms.p + (double)z->last_pid_terms.i
@@ -3099,9 +3108,26 @@ static void test_duty_breakdown_internal_consistency(void)
     TEST_CHECK(fabsf((float)expected_post_clamp - bd->post_clamp_total) < 1e-5f,
               "post_clamp_total must equal clamp(p+i+d+ff, 0, 1) -- pid.c's own final clamp, applied "
               "to the same p/i/d/ff the breakdown itself reports");
+    TEST_CHECK(fabsf(tick_duty - bd->post_clamp_total) < 1e-5f,
+              "post_clamp_total must equal the tick's own return value (what profile_executor.c stores "
+              "as z->duty, the duty actually commanded pre-boost) -- an independent source outside bd, "
+              "not just bd's own fields checked against each other");
     TEST_CHECK(fabsf((bd->post_clamp_total + bd->load_cap_boost) - bd->final_commanded) < 1e-5f,
               "final_commanded must equal post_clamp_total + load_cap_boost exactly -- that's the "
               "entire point of separating stage C out from stage B");
+    /* target_c=400 vs actual_c=45 saturates p+ff well above 1.0 (see the
+     * comment above), so post_clamp_total is already pinned at the clamp's
+     * upper rail -- max_credit_ms in pid_family_zone_tick() collapses to
+     * (1-1.0)*window == 0 regardless of the deferred_on_ms credit on the
+     * books, so load_cap_boost must read exactly 0 and final_commanded must
+     * equal the pre-boost duty exactly, not just to within the fabsf
+     * tolerance the identity checks above use. */
+    TEST_CHECK(bd->load_cap_boost == 0.0f, "load_cap_boost must be exactly 0 once post_clamp_total is "
+              "already pinned at the 1.0 clamp rail -- there is no boost headroom left to spend the "
+              "deferred_on_ms credit into");
+    TEST_CHECK(bd->final_commanded == tick_duty, "with load_cap_boost pinned at 0, final_commanded must "
+              "equal the tick's own return value exactly -- the duty this test scenario actually "
+              "commands has no boost stage to diverge through");
     TEST_CHECK(bd->ff_hold + bd->ff_climb != 0.0f || z->last_pid_terms.ff == 0.0f,
               "with ff_enabled and a real model, ff_hold+ff_climb (pre-clamp) and the clamped ff term "
               "pid.c reports must not both silently read 0 -- a broken wiring would zero one but not "

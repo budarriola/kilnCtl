@@ -12,7 +12,21 @@
 
 #include "esp_log.h"
 
+#include <math.h>
+
 static const char *TAG = "dashboard_json";
+
+/* profile_executor_feedforward.c captures bd_ff_hold/bd_ff_climb/
+ * bd_coupling_correction (and the other bd_* breakdown fields) BEFORE the
+ * control path's own isfinite(u_ff) bail, so inf/NaN can reach here. %.4f on
+ * a non-finite double emits bare `inf`/`nan`, which is not valid JSON and
+ * breaks the whole /api/control response for the caller. Sanitize at this
+ * emit site rather than the control path -- these fields are diagnostics,
+ * not control inputs. */
+static inline double bd_finite_or_zero(double v)
+{
+    return isfinite(v) ? v : 0.0;
+}
 
 size_t json_append_clamped(char *json, size_t cap, size_t o, const char *fmt, ...)
 {
@@ -101,11 +115,15 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         z->heat_blocked ? "true" : "false", (unsigned long)z->heat_blocked_sources,
                         z->ff_hold_used_matrix ? "true" : "false", z->ff_hold_infeasible ? "true" : "false",
                         (unsigned long)z->ff_membership_change_count,
-                        (double)bd->ff_hold, (double)bd->ff_climb, (double)bd->coupling_correction,
-                        (double)bd->ff_rate_pretaper_c_per_s, (double)bd->ff_rate_posttaper_c_per_s,
-                        (double)bd->kp_effective, (double)bd->ki_effective, (double)bd->kd_effective,
-                        pre_clamp_total, (double)bd->post_clamp_total,
-                        (double)bd->load_cap_boost, (double)bd->final_commanded);
+                        bd_finite_or_zero((double)bd->ff_hold), bd_finite_or_zero((double)bd->ff_climb),
+                        bd_finite_or_zero((double)bd->coupling_correction),
+                        bd_finite_or_zero((double)bd->ff_rate_pretaper_c_per_s),
+                        bd_finite_or_zero((double)bd->ff_rate_posttaper_c_per_s),
+                        bd_finite_or_zero((double)bd->kp_effective), bd_finite_or_zero((double)bd->ki_effective),
+                        bd_finite_or_zero((double)bd->kd_effective),
+                        bd_finite_or_zero(pre_clamp_total), bd_finite_or_zero((double)bd->post_clamp_total),
+                        bd_finite_or_zero((double)bd->load_cap_boost),
+                        bd_finite_or_zero((double)bd->final_commanded));
         } else {
             /* firing_stats (PID_EXPANSION_PLAN.md Phase 7a dashboard wiring):
              * profile_exec_zone_status_t::firing_stats, live and still
