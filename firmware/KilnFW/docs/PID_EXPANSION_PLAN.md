@@ -2777,6 +2777,40 @@ question above. Not proposed: a standalone z0 model-mismatch campaign
 varied-peer-duty coupling campaign (bigger, more novel kiln-time ask; revisit
 only if intervention 1 underperforms).
 
+### 3.6b addendum: first in-data reachability proof, `fuzzy_ab_20260904d` (2026-09-04)
+
+The standing pre-flight check above asked for `bd_*` fields on the *next*
+capture; `fuzzy_ab_20260904d` (arm B1, `s50_run1`, launched 91c5d6d after
+control_mode 2 vs 3 was fixed, `bd_*` capture added a62e14e) is that capture,
+read mid-firing (353-364 lines at read time, run still in progress). Method:
+within-arm comparison of each sample's `control.zones[].bd_kp_effective` /
+`bd_ki_effective` / `bd_kd_effective` against that zone's base `pid_kp` /
+`pid_ki` / `pid_kd` from `fuzzy_ab_strength50_20260903.json` — `bd_reachability_check`
+compares two arms and only one arm exists so far, so this within-arm check
+against base is the relevant substitute.
+
+The capture does carry the `control`/`bd_*` block per sample (it lives under
+`control.zones[]`, not `exec.zones[]` — the two look similar and are easy to
+conflate). All 363 usable samples per zone (last line excluded as a partial
+in-progress write, expected) show a distinct effective-gain triple — zero
+bit-identical-to-base rows in any zone, across an error swing from about
+-5.0 °C to +5.6 °C (ramp start through approach-to-dwell, not steady state):
+
+- **zone 0** (base kp 0.0318 / kd 0.8401): effective kp/kd sit 21-25% below
+  base through most of the ramp, shrinking to -13.8%/-15.1% at the largest
+  negative error sampled (-4.48 °C) — modulated by error, not fixed.
+- **zone 1** (base kp 0.0485 / kd 1.0548): same pattern, -21% to -25% typical,
+  -14.2%/-14.7% at -4.30 °C error.
+- **zone 2** (base kp 0.0631 / kd 1.069): same pattern, -21% to -25% typical,
+  -12.6%/-14.6% at -4.97 °C error.
+
+Verdict: **engaging in all three zones**, not just one — the fuzzy term
+measurably deviates from base gain and that deviation tracks error magnitude,
+the healthy signature this check exists to distinguish from the inert one
+(bit-identical effective gains across an error sign crossing, as seen in the
+two now-fixed control_mode-2 campaigns). No inert zone found; no basis to
+recommend halting `fuzzy_ab_20260904d` on reachability grounds.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
