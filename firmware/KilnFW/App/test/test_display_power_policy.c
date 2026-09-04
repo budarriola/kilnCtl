@@ -248,6 +248,81 @@ static void test_never_timeout_plus_error_still_forces_hold(void)
     TEST_CHECK(out.state == DISPLAY_POWER_ERROR_HOLD, "Never + error: still forced to ERROR_HOLD (distinct state)");
 }
 
+// 2026-09-04 opus review, regression for a real defect: the error-entering
+// tick used to FALL THROUGH into the ERROR_HOLD dismissal branch, so a touch
+// press edge arriving on the same call that first observed the error
+// dismissed the hold it had just created. Reachable in normal operation --
+// screen_idle.c runs display_power_policy_step() from two different tasks
+// (the 20 Hz poll tick and lvgl_port.c's touch_read_cb press edge), so which
+// one first sees a newly-cached error is a race, not a corner.
+static void test_error_entering_with_same_tick_touch_still_engages_hold(void)
+{
+    display_power_input_t in = base_input();
+    in.current_state = DISPLAY_POWER_ON;
+    in.display_on_error = true;
+    in.error_active = true;
+    in.error_entered_this_tick = true;
+    in.touch_event = true; // a press edge on the very tick the error arrives
+    display_power_result_t out = display_power_policy_step(&in);
+    TEST_CHECK(out.state == DISPLAY_POWER_ERROR_HOLD,
+               "error entering with a same-tick touch: the hold must still ENGAGE, not be "
+               "dismissed by the touch that merely arrived alongside it");
+    TEST_CHECK(out.swallow_touch,
+               "error entering with a same-tick touch: that touch is swallowed (the display "
+               "state changed under the finger), it must not act on the UI beneath it");
+}
+
+// The other half of the same defect: having engaged, the hold must survive
+// until a LATER press edge dismisses it. Before the fix the hold never
+// existed to be dismissed, so this sequence ended ON and then blanked on the
+// ordinary idle timeout with the error still active.
+static void test_hold_engaged_by_same_tick_touch_is_dismissed_only_by_a_later_touch(void)
+{
+    display_power_input_t in = base_input();
+    in.current_state = DISPLAY_POWER_ON;
+    in.display_on_error = true;
+    in.error_active = true;
+    in.error_entered_this_tick = true;
+    in.touch_event = true;
+    display_power_result_t out = display_power_policy_step(&in);
+    TEST_CHECK(out.state == DISPLAY_POWER_ERROR_HOLD, "tick 1: hold engaged");
+
+    // Tick 2: no new error edge, no touch, and the idle timeout long past --
+    // the hold must still be in force.
+    in.current_state = out.state;
+    in.error_entered_this_tick = false;
+    in.touch_event = false;
+    in.now_ms = 100u * 3600u * 1000u;
+    in.timeout_setting = DISPLAY_TIMEOUT_1_MIN;
+    out = display_power_policy_step(&in);
+    TEST_CHECK(out.state == DISPLAY_POWER_ERROR_HOLD,
+               "tick 2: hold survives the idle timeout -- it was never dismissed");
+
+    // Tick 3: the next real press edge is the dismissal.
+    in.current_state = out.state;
+    in.touch_event = true;
+    out = display_power_policy_step(&in);
+    TEST_CHECK(out.state == DISPLAY_POWER_ON, "tick 3: a LATER touch dismisses the hold");
+    TEST_CHECK(out.swallow_touch, "tick 3: the dismissing touch is swallowed");
+}
+
+// Negative-direction guard on the same branch: with the display-on-error
+// switch OFF, a same-tick touch must behave exactly as it always did (wake
+// from OFF, swallowed) and must NOT be diverted into the error path.
+static void test_switch_off_same_tick_touch_still_takes_the_normal_wake_path(void)
+{
+    display_power_input_t in = base_input();
+    in.current_state = DISPLAY_POWER_OFF;
+    in.display_on_error = false; // switch OFF
+    in.error_active = true;
+    in.error_entered_this_tick = true;
+    in.touch_event = true;
+    display_power_result_t out = display_power_policy_step(&in);
+    TEST_CHECK(out.state == DISPLAY_POWER_ON,
+               "switch off + same-tick touch while OFF: ordinary rule-4 wake, no error hold");
+    TEST_CHECK(out.swallow_touch, "switch off + same-tick touch while OFF: wake touch swallowed");
+}
+
 static void test_display_on_error_switch_off_error_does_not_force_hold(void)
 {
     // If the owner has left the "display on error" switch off, an error
@@ -282,5 +357,8 @@ void run_test_display_power_policy(void)
     test_touch_during_error_hold_resumes_and_is_swallowed();
     test_touch_after_dismissal_resumes_normal_timeout_behaviour();
     test_never_timeout_plus_error_still_forces_hold();
+    test_error_entering_with_same_tick_touch_still_engages_hold();
+    test_hold_engaged_by_same_tick_touch_is_dismissed_only_by_a_later_touch();
+    test_switch_off_same_tick_touch_still_takes_the_normal_wake_path();
     test_display_on_error_switch_off_error_does_not_force_hold();
 }

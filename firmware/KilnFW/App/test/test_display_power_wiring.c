@@ -104,6 +104,41 @@ static char *dup_range(const char *start, size_t len)
     return buf;
 }
 
+/* Comment-stripped copy of `src`, for any check that must match real CODE
+ * rather than prose. 2026-09-04, found by negative-testing this file's own
+ * new lv_layer_top() check: the check passed with the fix DELETED, because
+ * the fix's explanatory comment inside the same function body still
+ * contained the literal "lv_layer_top()" the strstr was looking for. A
+ * source-scan assertion that a well-written comment can satisfy is
+ * vacuous -- and this repo has shipped that failure mode before
+ * (feedback: "negative-test every check"). Everything between the comment
+ * markers becomes a single space so adjacent tokens cannot be glued into
+ * an accidental match. Handles /* ... *[/] and // ... newline; string
+ * literals are not tracked, which is fine for the C sources this file
+ * scans (none of them embed a comment opener inside a literal). */
+static char *strip_c_comments(const char *src)
+{
+    size_t n = strlen(src);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n;) {
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            i = (i + 1 < n) ? i + 2 : n;
+            out[o++] = ' ';
+        } else if (src[i] == '/' && i + 1 < n && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') i++;
+            out[o++] = ' ';
+        } else {
+            out[o++] = src[i++];
+        }
+    }
+    out[o] = '\0';
+    return out;
+}
+
 static const char *SCREEN_IDLE_C_CANDIDATES[] = {
     "../drivers/screen_idle.c",
     "App/drivers/screen_idle.c",
@@ -641,6 +676,40 @@ static void run_section6_wake_invalidate_not_in_flush_cb(void)
                    "active()) on the off->on edge -- otherwise the screen never redraws after "
                    "waking (the ORIGINAL bug this whole feature fixed, before it was moved to "
                    "the wrong call site).");
+        // 2026-09-04 opus review, second real defect in the same wake edge:
+        // the blank is an ILI9488_clear() straight to panel GRAM, so it
+        // erases EVERY pixel on the glass -- including LVGL's
+        // screen-independent overlay layers. Every modal this UI puts up
+        // (ui_confirm.c's lv_msgbox_create(NULL), ui_num_pad.c's keypad,
+        // ui_page_network.c's connect modal) lives on lv_layer_top(), not
+        // under the active screen -- kiln_ui.c's log_all_tap_targets()
+        // documents exactly that and walks all three roots for the same
+        // reason. Invalidating only lv_screen_active() repainted the page
+        // and left an open dialog missing from the glass while LVGL still
+        // had it focused and swallowing input.
+        // Matched against a COMMENT-STRIPPED copy on purpose -- see
+        // strip_c_comments()'s own comment: the first version of these two
+        // checks passed with the fix deleted, because the fix's explanatory
+        // comment inside this same function body still mentioned
+        // lv_layer_top().
+        char *wake_code = strip_c_comments(wake_fn);
+        TEST_CHECK(wake_code != NULL, "malloc for the comment-stripped wake body succeeded");
+        if (wake_code) {
+            TEST_CHECK(strstr(wake_code, "lv_layer_top()") != NULL,
+                       "lvgl_port_service_idle_wake() must also invalidate lv_layer_top() -- "
+                       "the blank cleared the whole panel, and every modal in this UI "
+                       "(ui_confirm.c, ui_num_pad.c, ui_page_network.c's connect modal) is "
+                       "parented there, not under the active screen. Without it, waking with "
+                       "a dialog open repaints the page WITHOUT the dialog, while LVGL still "
+                       "has the invisible dialog focused and swallowing input.");
+            TEST_CHECK(strstr(wake_code, "lv_layer_sys()") != NULL,
+                       "lvgl_port_service_idle_wake() must also invalidate lv_layer_sys() -- "
+                       "same screen-independent-root reasoning kiln_ui.c's "
+                       "log_all_tap_targets() records for including it, so a future "
+                       "toast/system overlay is covered by construction rather than by the "
+                       "next bench crash.");
+            free(wake_code);
+        }
         free(wake_fn);
     }
 

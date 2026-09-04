@@ -231,6 +231,49 @@ for whoever verifies that hardware.
   `pressed`) now also notifies `screen_idle_touch_swallow(..., false, ...)`,
   clearing the edge tracker so the *next* separate press is evaluated fresh.
 
+### Context rules for the display path — 2026-09-04 opus review
+
+Four defects landed in `screen_idle.c`/`lvgl_port.c`/`display_power_policy.c`
+in a single day (`e7b8efc` stack overflow, `7a8594d` lock held across SPI, a
+queue wait and a heap walk, `51e1ef5` `lv_obj_invalidate()` from inside
+`ili9488_flush_cb()`, and this review's same-tick error/touch fall-through).
+None was a logic error in the ordinary sense: each was correct code running
+in a context that did not permit it. The shared cause is that this path has
+**five different execution contexts that all look like ordinary C**, and
+nothing at the call site says which one you are in. These are the rules; a
+change that breaks one is a defect even if it "works" on the bench.
+
+| Context | Entered from | May NOT do |
+| --- | --- | --- |
+| `ili9488_flush_cb()` | inside `lv_timer_handler()`'s **active refresh** | any `lv_*` **mutator** — `lv_obj_invalidate`, `lv_obj_del`, `lv_screen_load`, `lv_refr_now`. Reads only. (`51e1ef5`) |
+| `touch_read_cb()` | inside `lv_timer_handler()`'s indev read | block. Everything it calls (`screen_idle_touch_swallow`, `touch_dev_read`) must be bounded and short |
+| `lv_timer` page-refresh callbacks (`ui_page_*.c`) | inside `lv_timer_handler()` | block for long. **Violated today**: `ui_page_diagnostics.c` (2 s) and `ui_page_temperature.c` (1 s) call `dashboard_get_status()` — five MAX31856 SPI reads, a `kiln_io_owner` round trip that can block 200 ms, and interrupts-disabled heap walks — on the `lvgl` task, which `get_stack_margin()` reports at 24.7% headroom (LOW) |
+| `lvgl_port_task` loop, **before** `lv_timer_handler()` | own task | nothing special — this is the ONLY safe place for wake/blank `lv_*` mutators (`lvgl_port_service_idle_blank/_wake`) |
+| `screen_idle_task` | own task | call the expensive producers **under `idle->lock`** — that lock is taken by the LVGL task every tick and every touch (`7a8594d`). Producer reads go in `screen_idle_refresh_inputs()`, off-lock |
+
+**The invariant, stated once:** *`idle->lock` may only ever be held across
+pure computation and plain struct field access — never across SPI, I2C, a
+queue wait, a heap walk, an NVS access, or any `lv_*` call.* Everything the
+policy needs from another subsystem enters as a pre-taken snapshot
+(`idle->cached_*`), never as a call made under the lock. `display_power_cfg`'s
+four accessors are safe under it only because they are plain static reads —
+if one ever grows a lock or an NVS touch, it must move out to the snapshot
+too.
+
+**Why "read the comment" is not the mechanism.** Both fixed bugs had a
+correct comment sitting next to the wrong code. `ili9488_flush_cb()`'s own
+header described it as running inside the refresh while it invalidated an
+object; the same-tick error branch this review fixed carried a comment saying
+"the hold must still engage" directly above code that dismissed the hold, and
+a second comment that contradicted itself within four lines ("only on a LATER
+tick" … "in the same call"). The mechanism that actually holds is
+`test_display_power_wiring.c`'s source scans, which fail the build. Extend
+that file, not this table, when adding a rule — and **negative-test the scan
+against a comment-only match**: the `lv_layer_top()` check added in this pass
+passed with the fix deleted, because the fix's own comment contained the
+string it searched for. `strip_c_comments()` in that file exists for that
+reason.
+
 **"Display off" mechanism — exactly what it physically does, and why:**
 This board has **no backlight control line today**
 (`CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE` is off by default — `backlight_pwm.h`:

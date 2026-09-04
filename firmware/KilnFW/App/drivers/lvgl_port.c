@@ -774,7 +774,34 @@ static void lvgl_port_service_idle_wake(void)
 
     if (screen_on && !s_port.last_screen_on) {
         ESP_LOGI(TAG, "screen woke -- forcing a full redraw");
+        /* All THREE roots, not just the active screen. The blank is an
+         * ILI9488_clear() straight to panel GRAM (lvgl_port_service_idle_
+         * blank() above) -- it erases every pixel on the glass, including
+         * whatever is drawn on LVGL's screen-independent overlay layers.
+         * But every modal this UI puts up lives on lv_layer_top(), NOT
+         * under the active screen: ui_confirm.c's lv_msgbox_create(NULL),
+         * ui_num_pad.c's keypad and ui_page_network.c's connect modal --
+         * kiln_ui.c's log_all_tap_targets() documents exactly this and
+         * walks all three roots for the same reason. Invalidating only
+         * lv_screen_active() therefore redrew the page underneath and left
+         * the open dialog missing from the glass until something else
+         * happened to dirty it: a blank-then-wake with a confirm dialog up
+         * repainted the page WITHOUT the dialog, while LVGL still had the
+         * dialog focused and swallowing input -- a UI that looks idle but
+         * does not respond to the page beneath it. lv_layer_sys() is
+         * included for the same "nothing uses it yet, but it is the same
+         * kind of root" reason kiln_ui.c gives.
+         *
+         * Same context rule as the rest of this function: it runs from
+         * lvgl_port_task's loop BEFORE lv_timer_handler(), i.e. with no
+         * refresh in progress -- these are still lv_* MUTATORS and must
+         * never migrate back into ili9488_flush_cb() (see that function's
+         * 2026-09-04 crash comment). */
         lv_obj_invalidate(lv_screen_active());
+        lv_obj_t *top = lv_layer_top();
+        if (top) lv_obj_invalidate(top);
+        lv_obj_t *sys = lv_layer_sys();
+        if (sys) lv_obj_invalidate(sys);
         s_port.last_screen_on = true;
     }
 }

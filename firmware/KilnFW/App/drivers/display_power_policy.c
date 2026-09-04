@@ -32,13 +32,33 @@ display_power_result_t display_power_policy_step(const display_power_input_t *in
     // arrived first -- the hold must still engage.
     if (in->error_entered_this_tick && in->display_on_error) {
         out.state = DISPLAY_POWER_ERROR_HOLD;
-        // Deliberately not consuming touch_event here: if a touch also
-        // landed this same tick, it is still eligible to be swallowed by the
-        // ERROR_HOLD touch-dismissal branch below -- but only on a LATER
-        // tick, since this function only sees one edge at a time and this
-        // tick's touch_event (if any) has not been evaluated against the
-        // new state yet. Falling through (not `return`) lets that happen in
-        // the same call when both are true.
+        // RETURNS here -- it must not fall through. 2026-09-04 opus review:
+        // this used to fall through into the ERROR_HOLD dismissal branch
+        // below, which meant a touch edge landing on the SAME call that
+        // first observed the error immediately dismissed the hold it had
+        // just created -- state came back DISPLAY_POWER_ON with
+        // swallow_touch=true, and the display then blanked on the ordinary
+        // idle timeout while the error was still active. That directly
+        // contradicts this branch's own rule above ("the hold must still
+        // engage") and the header's rule 5, and it is reachable in normal
+        // operation, not a corner: screen_idle.c computes
+        // error_entered_this_tick inside screen_idle_run_policy_locked(),
+        // which is called from BOTH the 20 Hz poll tick (screen_idle_task)
+        // and every touch press edge (lvgl_port.c's touch_read_cb, a
+        // different task) -- so whether the tick that first sees a new
+        // error is a poll tick or a touch tick is a plain race between two
+        // tasks. The old fall-through comment argued the dismissal could
+        // only happen "on a LATER tick" while the code it was attached to
+        // made it happen in the same call; the code, not the comment, is
+        // what ran.
+        //
+        // A touch on this tick is swallowed rather than passed through: the
+        // display state changed underneath the finger on this very call
+        // (forced on, or held on), so acting on whatever widget is beneath
+        // it is exactly the hazard rule 4 exists to prevent. The NEXT press
+        // edge is the dismissal, via the branch below.
+        out.swallow_touch = in->touch_event;
+        return out;
     }
 
     if (out.state == DISPLAY_POWER_ERROR_HOLD) {
