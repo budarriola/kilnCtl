@@ -252,6 +252,54 @@ static void test_s3_s4_hour_at_various_duties(void)
     }
 }
 
+static void test_s3_s4_positive_controls(void)
+{
+    TEST_SECTION("S3/S4 -- POSITIVE CONTROLS: the duty harness above can actually register a trip/WARN");
+
+    /* Without this, every "never trips" assertion in
+     * test_s3_s4_hour_at_various_duties() is indistinguishable from S3
+     * being structurally inert in this harness's configuration -- and it
+     * nearly is: current_present tracks the commanded relay closely, so
+     * S3's (current present AND nothing commanded recently) conjunction is
+     * never satisfied there. force_recency_bug is exactly the regression
+     * those tests exist to catch (a correlation window that stops covering
+     * the OFF span, so relay_commanded_recently lapses while current is
+     * still flowing); drive it deliberately and S3 MUST trip. 50% duty
+     * gives a 30s ON phase, past stuck_on_time_s's 20s default. */
+    {
+        bool tripped = run_duty_window_ex(50.0f, 60.0f, 1200.0f, 150.0f, 1.5f, true, NULL);
+        TEST_CHECK(tripped, "with relay_commanded_recently wrongly false, current during the ON phase "
+                             "DOES trip S3 -- proves the nuisance runs above were rejecting something "
+                             "the harness can genuinely produce, not passing on an inert guard");
+    }
+    {
+        /* Same duty, recency computed correctly: must not trip. The pair
+         * differs in exactly one input, so the passing case cannot be
+         * explained by anything but the guard's own decision. */
+        bool tripped = run_duty_window_ex(50.0f, 60.0f, 1200.0f, 150.0f, 1.5f, false, NULL);
+        TEST_CHECK(!tripped, "the same run with a correct recency computation does not trip");
+    }
+
+    /* S4's WARN can never be reached by a 60s-window duty cycle (the ON
+     * phase caps at 57s, far short of the 150s correlation window), which
+     * is why every duty above asserts !s4_warned. That makes those
+     * assertions vacuous on their own -- so prove separately that s4_warn
+     * is reachable at all with these same inputs. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = nuisance_base_cfg();
+        safety_guard_input_t in = nuisance_base_input();
+        in.context_valid = true;
+        in.relay_commanded_continuously = true;
+        in.any_current_present = false; /* dead element */
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s4_warn, "commanded continuously with no current DOES raise S4's WARN -- so the "
+                               "!s4_warned assertions above are rejecting a reachable state");
+        TEST_CHECK(!tripped, "and S4 warns without ever tripping, by design");
+    }
+}
+
 static void test_s10_150c_stratification_whole_firing(void)
 {
     TEST_SECTION("S10 -- a 150C stratification held for a whole firing "
@@ -298,6 +346,34 @@ static void test_s10_150c_stratification_whole_firing(void)
         for (int i = 0; i < 480; i++) safety_guards_tick(&s, &cfg, &in);
         TEST_CHECK(!s.s10_warn, "150C disagreement in EXTERNAL_OVERHEAT: S10 stays off for the full 8h firing");
     }
+}
+
+static void test_s10_positive_control(void)
+{
+    TEST_SECTION("S10 -- POSITIVE CONTROL: a disagreement past tc_disagreement_c DOES raise the WARN");
+
+    /* The 150C cases above assert only "no WARN". Identical setup with the
+     * offset pushed past tc_disagreement_c's 200C default must warn, or
+     * "no WARN at 150C" would be equally true of an S10 that can never
+     * warn at all in this configuration (wrong placement mode, zone_count
+     * ignored, nearest_zone_measured_c never read). */
+    safety_guard_state_t s;
+    safety_guards_reset(&s);
+    safety_guard_cfg_t cfg = nuisance_base_cfg();
+    cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+    safety_guard_input_t in = nuisance_base_input();
+    in.context_valid = true;
+    in.zone_count = 1;
+    in.tc_c = 900.0f;
+    in.max_zone_setpoint_c = 900.0f; /* keep S2 out of this test */
+    in.nearest_zone_measured_c = 650.0f; /* 250C off -- past the 200C default */
+    in.dt_s = 60.0f;
+    bool tripped = false;
+    for (int i = 0; i < 10 && !tripped; i++) { /* 600s > tc_disagreement_time_s (300s) */
+        tripped = safety_guards_tick(&s, &cfg, &in);
+    }
+    TEST_CHECK(s.s10_warn, "250C sustained past tc_disagreement_time_s raises S10's WARN");
+    TEST_CHECK(!tripped, "S10 is WARN-only and still never trips");
 }
 
 // -----------------------------------------------------------------------
@@ -414,6 +490,8 @@ static void test_s9_current_decay_after_normal_trip(void)
 void run_test_guard_nuisance(void)
 {
     test_s3_s4_hour_at_various_duties();
+    test_s3_s4_positive_controls();
     test_s10_150c_stratification_whole_firing();
+    test_s10_positive_control();
     test_s9_current_decay_after_normal_trip();
 }

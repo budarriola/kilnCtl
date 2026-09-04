@@ -140,6 +140,33 @@ $mainExit = $LASTEXITCODE
 # and run as its own step so a fuzz failure is a distinct, clearly-labeled
 # CI failure rather than silently folded into (or invisibly absent from)
 # the $exe check count above.
+# Fail-closed decoder-registration check. test_fuzz_payloads.c's k_cases[]
+# is a hand-maintained list: a payload decoder added to CommonFW and not
+# registered there would silently drop out of fuzz coverage with nothing
+# failing -- "27 decoders fuzzed" would stay printed and stay true, just no
+# longer complete. Enumerate every *_decode symbol declared in the kilnlink
+# headers, subtract the two that are deliberately not in k_cases[], and
+# require the rest to be registered by name.
+#
+#   kilnlink_frame_decode      -- framing layer, fuzzed by CommonFW/test/test_fuzz.c
+#   kilnlink_param_value_decode-- not a payload decoder: (type, in, off, value)
+#                                 with the caller owning the bounds check, so it
+#                                 has no (payload, len, out) contract to fuzz.
+$fuzzSrc = Join-Path $commonSrcDir "..\test\test_fuzz_payloads.c"
+$declared = Get-ChildItem -Path (Join-Path $commonIncDir "kilnlink") -Filter "*.h" |
+    Select-String -Pattern "kilnlink_[a-z0-9_]*_decode" -AllMatches |
+    ForEach-Object { $_.Matches } | ForEach-Object { $_.Value } | Sort-Object -Unique
+$registered = Select-String -Path $fuzzSrc -Pattern '"(kilnlink_[a-z0-9_]*_decode)"' -AllMatches |
+    ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+$fuzzExempt = @("kilnlink_frame_decode", "kilnlink_param_value_decode")
+$unregistered = $declared | Where-Object { ($fuzzExempt -notcontains $_) -and ($registered -notcontains $_) }
+if ($unregistered) {
+    throw ("kilnlink payload decoder(s) declared but NOT registered in test_fuzz_payloads.c's k_cases[]: " +
+        ($unregistered -join ", ") +
+        " -- add an adapter + k_cases[] entry (or, if it is genuinely not a (payload,len,out) decoder, " +
+        "add it to `$fuzzExempt in this script with the reason).")
+}
+
 $fuzzExe = Join-Path $outDir "kilnlink_fuzz_payloads.exe"
 $fuzzObjDir = Join-Path $outDir "fuzz_obj"
 New-Item -ItemType Directory -Force -Path $fuzzObjDir | Out-Null

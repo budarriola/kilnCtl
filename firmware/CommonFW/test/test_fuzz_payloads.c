@@ -775,8 +775,22 @@ static void run_length(const decoder_case_t *c, uint8_t *buf, size_t len, unsign
 
 static void run_corpus(const decoder_case_t *c, uint8_t *buf)
 {
-    /* Empty, 1 byte, all-zero / all-0xFF at a few interesting lengths. */
-    c->decode(buf, 0);
+    /* Empty, 1 byte, all-zero / all-0xFF at a few interesting lengths.
+     * The zero-length case is ASSERTED, not merely called: no payload
+     * decoder may report OK for a frame that carried no bytes at all. This
+     * is the one truncation assertion that applies to EVERY decoder,
+     * including the fixed 1-byte "cmd only" ones whose build_valid()
+     * returns 0 and so never reach the truncate corpus below -- without it
+     * those five decoders (rollback/get_fw_version/announce_reboot/
+     * get_ct_cal/commit_config) would be swept for crashes only, with
+     * their decode STATUS never checked anywhere in this harness. */
+    if (c->decode(buf, 0) == 0) {
+        fprintf(stderr,
+                "FUZZ FAIL: %s reported OK for a zero-length payload -- a frame that carried no "
+                "bytes cannot have decoded to anything\n",
+                c->name);
+        exit(1);
+    }
     g_total_calls++;
 
     buf[0] = 0x00;
