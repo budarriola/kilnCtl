@@ -49,6 +49,18 @@ genuinely welded contactor raises a warning and nothing more.** That was an
 acceptable trade while nothing could get warm. It is a real gap now, and
 commissioning the CT channels is what closes it.
 
+**UPDATE 2026-09-04, read live from the board (`GET /api/safety/commissioning`
+while `fuzzy_ab_20260904d` was firing):** `abs_max_temp_c` is now `set: true,
+value: 80`, and `commissioned` reports `true` — S1 is armed at the fixture's
+80 C cap. The Pico-side ceiling this section says was "awaiting the owner's
+number" has been supplied and committed; the "S1 is disabled"/"only
+KilnFW's guard 5 is in force" state described above is no longer current. CT
+channels (`ct_installed`, `ct_cal[*].calibrated`) remain unset/false, so the
+S9 welded-contactor gap described in the paragraph above is still real. No
+`fields_set`/sentinel-value contradiction remains for `abs_max_temp_c` either
+(80 is not the 0-sentinel), so the "Secondary finding" further below in this
+file is also resolved and can be treated as historical.
+
 ---
 
 ## Audit 2026-08-27 — open items
