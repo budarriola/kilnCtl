@@ -774,6 +774,17 @@ n=3 the campaign originally targeted. As always, this profile's ~70 C max
 target keeps the result silent on cone-range behaviour and on either
 matrix's behaviour past the coupled hold solve's ~62 C feasibility edge.
 
+**LIVE-BOARD CHECK, 2026-09-03: the new matrix is what is actually running.**
+`GET /api/zones` against the bench board (192.168.1.156, idle, all relays
+off) reports per-zone `coupling_c0/c1/c2` — the persisted
+`coupling_coeff[affected][stepped]` row, diagonal contractually 0 — of
+`z0 [0, 27.32, 21.72]`, `z1 [14.30, 0, 22.15]`, `z2 [8.33, 12.42, 0]`,
+matching `coupling_matrix_20260831` exactly on all nine cells and matching
+`coupling_matrix_pre20260902` (`z0 [0, 12.06, 6.00]`, `z1 [5.77, 0, 6.77]`,
+`z2 [2.41, 4.11, 0]`) on none. No preset write was made — the board already
+carries the matrix the A/B above favors, so this check confirms an already-
+correct decision rather than changing anything.
+
 ### 3.3 Adaptive tuning — the layers not built
 
 Shipped (`fcc1fc0`, `a772d78`): dwell harvesting, diagonal-only least-squares
@@ -4592,3 +4603,128 @@ testable function). See `firmware/KilnFW/App/test/test_ramp_lock_onesided.c`
 (new file, mirror + reproduction) and the guard-4 arming tests added to
 `firmware/KilnFW/App/test/test_thermal_guard.c`. The hot-start regime this
 fix targets remains unexercised on real hardware.
+
+## 8. A/B campaign ambient-confound protocol (2026-09-03)
+
+Owner's binding constraint: **no cooling fan** will be added, and experiments
+must be designed so ambient temperature is not a large factor. Differences
+below 0.5C are not actionable — no experiment should be designed whose whole
+effect size is sub-0.5C.
+
+**The problem.** Profile 7 starts from room/enclosure ambient and its first
+ramp is scored from there, so the score is directly exposed to ambient
+drift. Passive cooling asymptotes rather than returning to a fixed start (a
+firing raises working ambient ~1.4-1.5C; measured 29.83/29.95/29.99C at
+16:30 vs 29.88/29.96/30.04C at 16:58 — no progress in 28 minutes, cold
+junctions rising). Consequence measured on this rig: a six-firing campaign
+yielded n=1 usable pair, and a paired A/B stalled 75 minutes still unable to
+match. `fit_start_temp_sensitivity` (§ above, `pid_ab_compare.py`) puts the
+per-zone sensitivity of `iae_normalized_whole_c` to start temperature at
+0.009-0.133C per 1C of start-temperature drift, fit against the checked-in
+6-run repeat set.
+
+**Recommended design: prepend a stabilisation hold, then score only after
+it.** Ramp to a fixed setpoint (48C — comfortably above the ~28-31C ambient
+this bench has shown, plus the ~1.4-1.5C a firing itself adds; well inside
+the coupled hold solve's ~60C validity ceiling, infeasible above ~62C; far
+below profile 7's ~70C top), hold until settled, and score only the
+segments after that hold. Implemented as:
+
+  * `tools/PcTools/src/kilnctrl/profile_stabilization.py` —
+    `prepend_stabilization_hold(segments, ...)` inserts one ZONE_RAMP
+    segment (target_c=48, ramp_c_per_hr=300, dwell_min=45 by default) ahead
+    of an arm's existing segments, unmodified otherwise. **No firmware
+    change of any kind is needed**: `profile_segment_t`
+    (`profiles_http.h`) already expresses "ramp to a target, hold N
+    minutes" — a stabilisation hold IS an ordinary ZONE_RAMP segment, so
+    this is a profile-definition change, not new executor machinery. (The
+    one thing the executor genuinely lacks is a *settle-to-tolerance* dwell
+    — `dwell_min` is a fixed duration, not a criterion — so the 45-minute
+    default is a deliberately generous upper bound, to be tightened once
+    real stabilised captures exist; see that module's docstring.)
+  * `tools/PcTools/src/kilnctrl/pid_ab_compare.py` — `min_segment_index`
+    added to `compute_zone_metrics` / `compute_run_metrics` /
+    `fit_start_temp_sensitivity` / `compare_runs` (default 0, existing
+    behaviour unchanged). Passing `STABILIZATION_SEGMENT_INDEX` (1) excludes
+    the prepended hold from every metric — the "whole" window, all
+    per-segment dicts, ramp-to-dwell transitions — and reports
+    `start_temp_c` as the temperature AT THE START OF THE SCORED WINDOW
+    (the stabilised ~48C), not the room-ambient temperature the run
+    physically began at.
+
+**Residual-confound arithmetic (the 0.5C bar).** The stabilisation hold
+converts each arm's scored start temperature from "whatever room ambient
+happened to be" (measured spread up to ~3.9C across captures on hand, and
+the rig cannot repeat a start within a session) to "whatever the PID
+settled to at the end of a 45-minute hold at a fixed 48C setpoint" — a
+quantity dominated by steady-state tracking precision, not ambient. This
+rig's own dwell-window steady-state offsets (§3.1, closed) run a few tenths
+of a degree; take a deliberately pessimistic residual spread of up to 0.5C
+between two stabilised arms (i.e. assume the hold does *nothing* to tighten
+things beyond ordinary dwell tracking). Applying the fitted sensitivity's
+own top end (0.133C of `iae_normalized_whole_c` per 1C of start delta):
+
+    0.133 C/C * 0.5 C residual spread = 0.0665 C predicted confound
+
+well under the 0.5C actionability bar — over 7x margin even under the
+pessimistic assumption. Under a more realistic residual (a few hundredths
+to a tenth of a degree, typical of a 45-minute PID-held dwell), the
+predicted confound is in the 0.001-0.013C range. Either way the design
+clears the bar with room to spare.
+
+**Cost per arm.** Ramp 20C -> 48C at 300C/hr ≈ 5.6 minutes, plus the 45
+minute dwell ≈ **51 minutes added per arm**. This REPLACES, not adds to, the
+hour-long paired-start wait: `run_queue.py`'s `--pair-consecutive` matching
+(`DEFAULT_RESTED_TIMEOUT_S` = 3600s, and the 75-minute stall this task's
+brief cites) exists only because two arms currently have to coincidentally
+start at the same uncontrolled ambient — once a stabilisation hold gives
+every arm the same *controlled* start regardless of when it fires, arms no
+longer need to wait for each other, they can fire back-to-back. Net effect:
+~51 minutes of hold time per arm, in exchange for removing an open-ended
+(up to 75+ minute, sometimes never-succeeding) wait — a net throughput win,
+not just a wash.
+
+**Alternatives considered:**
+
+  * *Scored-window restriction alone, no profile change.* Cheaper (a metric
+    change only) and IS shipped here as `min_segment_index` — but on its
+    own, without a prepended hold, there is no later segment boundary in
+    profile 7 to redirect scoring to that is actually decoupled from the
+    ambient-exposed opening ramp: that ramp's own thermal transient (lag,
+    integrator state) still conditions everything measured after it, and
+    this rig has no capture of a run through a *later* segment to fit a
+    reduced sensitivity against — extending the honesty requirement already
+    enforced elsewhere in this module (never claim a number this rig hasn't
+    measured). It is necessary infrastructure for the recommended design
+    (the hold needs somewhere to redirect scoring to) but not, on its own,
+    shown to clear the 0.5C bar. **Verdict: use it, but only in combination
+    with the stabilisation hold, not as a standalone fix.**
+  * *Randomising/blocking arm order.* Averages drift out over MANY pairs,
+    not within one — doesn't help a campaign that (as measured) struggles
+    to complete even one usable pair. Complementary to the recommended
+    design for a multi-pair campaign, not a substitute for it.
+  * *Start temperature as a regression covariate.* Already shipped
+    (`fit_start_temp_sensitivity` / `_start_temp_adjustment`, 2026-09-02f)
+    and deliberately never allowed to flip a verdict — it explains a delta
+    after the fact, it does not prevent the delta from dominating the
+    measurement in the first place. Keep it: report the covariate
+    adjustment on stabilised-protocol runs too (using
+    `min_segment_index=STABILIZATION_SEGMENT_INDEX` throughout, never mixed
+    with `min_segment_index=0` data — see that parameter's docstring), as a
+    second line of defense, not the primary fix.
+
+**Protocol for future campaigns:**
+  1. Build each arm's profile via `profile_stabilization.prepend_stabilization_hold`.
+  2. Fire with `run_queue.py` as before — `--pair-consecutive` and the
+     rested-tolerance gate remain useful (still refuse to start on a
+     genuinely faulted zone) but no longer need to hold arms hostage to
+     matching each other's ambient.
+  3. Analyse every stabilised-protocol capture with
+     `pid_ab_compare.compare_runs(..., min_segment_index=ab.STABILIZATION_SEGMENT_INDEX)`,
+     and fit any sensitivity set used alongside it with the same
+     `min_segment_index`.
+  4. Do not mix stabilised-protocol runs (segment 0 = hold) with legacy
+     runs (segment 0 = the real opening ramp) in one comparison or one
+     sensitivity fit — the segment-index convention differs and neither
+     `compare_runs` nor `fit_start_temp_sensitivity` can detect the
+     mismatch for you.
