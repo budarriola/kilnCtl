@@ -1789,11 +1789,21 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `profile_executor_feedforward.c:243-244` and `:566-576`. Document a
       legal-state table or add a runtime assertion — not a forced single enum.
       M
-- [ ] **No lint against flash/NVS writes outside the flash worker.** Direct
+- [x] **No lint against flash/NVS writes outside the flash worker.** Direct
       writes bypassing `kiln_cfg_store.c`'s worker dispatch (`nvs_set_blob` at
       `kiln_cfg_store.c:356`, `kiln_cfg_store_apply()` at `:681`) have panicked
       hardware 3x and host tests cannot see the hazard (no lock in the stub).
-      Add a grep-based CI lint to the host-test script. S
+      Add a grep-based CI lint to the host-test script. S — **CLOSED
+      2026-09-04**: `App/test/flash_worker_lint.py` greps `drivers/*.c` for
+      `nvs_set_*`/`nvs_commit`/`esp_partition_write`/`esp_partition_erase_range`
+      outside a 19-file allowlist (each entry justified inline against one of
+      three sanctioned patterns: worker dispatch, local
+      `caller_stack_is_external()` guard, or init-time-only from `app_main`
+      before the scheduler starts). `check_flash_worker_lint.ps1` wires it
+      into `tools/run_all_checks.ps1`'s `check_*.ps1` discovery glob.
+      Negative-tested: added a bare `nvs_set_u8()` call to `MAX31856.c` (not
+      allowlisted), lint failed naming `drivers\MAX31856.c:1374`; reverted,
+      confirmed clean again.
 - [ ] **`zones_http_client.py` hand-types its field table instead of reading
       it live.** `zones_http_client.py:320-350`'s `_TOP_FIELD_FORM_KEY` /
       `_TOP_INT_FIELDS` maps drift from firmware JSON keys by hand;
@@ -1802,9 +1812,20 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       that pattern, or extend `selfcheck.py` (already parses
       `UART_PROTOCOL_VERSION` from firmware headers, `selfcheck.py:74-89`) to
       diff the dict against `zones_http_handlers.c` literals. S-M
-- [ ] **No stub-vs-real-IDF signature check.** `App/test/stubs/*.h` can drift
+- [x] **No stub-vs-real-IDF signature check.** `App/test/stubs/*.h` can drift
       from the real ESP-IDF headers they stand in for with nothing catching
-      it. Add a signature-diff script. M
+      it. Add a signature-diff script. M — **CLOSED 2026-09-04**:
+      `App/test/stub_signature_drift_check.py` extracts name+arity for every
+      stub prototype, matches each stub header to its real counterpart under
+      the configured IDF root (`--idf-root`, else `$IDF_PATH`, else
+      `build/project_description.json`'s `idf_path`, else common install
+      paths — SKIPS gracefully, exit 0, when none resolve), and reports any
+      arity mismatch as stub-file:line. 2026-09-04 audit: 26/26 stub headers
+      matched, tree clean, so `check_stub_signature_drift.ps1` (wired into
+      `tools/run_all_checks.ps1` the same way) passes `--fatal-on-clean`.
+      Negative-tested: added a bogus second argument to `stubs/driver/ledc.h`'s
+      `ledc_timer_config()`, check failed naming
+      `stubs/driver/ledc.h:43`; reverted, confirmed clean again.
 - [ ] **Campaign runner has no board-config restore on abnormal exit.**
       `run_queue.py` has atomic state and resume, but the `finally` path
       (~1203-1213) only closes the capture file and removes a stray empty
