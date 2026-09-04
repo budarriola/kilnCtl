@@ -67,6 +67,23 @@ bool reload_zone_config(uint8_t zi)
         z->control_mode = mode;
         pid_reset(&z->pid_state);
         z->fuzzy_prev_effective_ki = 0.0f; /* no bump-transfer history to carry into a cold start */
+        /* cooling_limited is a PID/PID_FUZZY-only diagnostic (see its field
+         * comment, and profile_executor_internal.h's legal-state rule 2) --
+         * a mode change away from PID must retire it here, at the moment
+         * control_mode moves.
+         *
+         * The tick's own non-PID branches already clear it, but they only
+         * run for zones that are `active && !faulted`, while THIS function
+         * runs for every ACTIVE zone, faulted or not. So a zone that took a
+         * per-zone guard trip with continue_on_zone_trip enabled -- active,
+         * faulted, still carrying cooling_limited=true from its PID period --
+         * and is then switched to BANGBANG/OFF by the operator would keep a
+         * stale true against a non-PID control_mode forever: exactly rule 2's
+         * illegal combination, which exec_mode_state_check() asserts on every
+         * tick. Clearing it at the mode change closes that regardless of
+         * whether the tick's switch will ever visit this zone again. */
+        z->cooling_limited_hold_s = 0.0f;
+        z->cooling_limited = false;
         changed = true;
     }
 

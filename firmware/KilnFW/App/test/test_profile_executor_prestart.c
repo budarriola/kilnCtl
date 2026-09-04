@@ -465,13 +465,23 @@ bool zones_config_get_continue_on_zone_trip(void)
  * existed (this stub used to unconditionally return OFF). */
 static zone_control_mode_t g_stub_control_mode[MAX31856_CHANNEL_COUNT];
 
+/* This stub has always returned FALSE, which every pre-existing test in this
+ * file depends on (profile_zones_have_ceiling_* treats a failed read as OFF,
+ * and reload_zone_config() treats it as "this zone is no longer configured"
+ * and returns early). That early return means reload_zone_config()'s actual
+ * body had no host coverage here at all. Opt-in, defaulted off, so a test
+ * that specifically needs the getter to SUCCEED can have it without moving
+ * any existing test's ground: see test_mode_state_check_rule2_no_false_
+ * positive_on_faulted_zone_mode_switch(). */
+static bool g_stub_control_mode_read_ok = false;
+
 bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_mode)
 {
     if (out_mode) {
         *out_mode = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_control_mode[zone_index]
                                                             : ZONE_CONTROL_MODE_OFF;
     }
-    return false;
+    return g_stub_control_mode_read_ok;
 }
 
 /* PID_EXPANSION_PLAN.md Phase 3 wiring: profile_executor.c's
@@ -6502,6 +6512,59 @@ static void test_mode_state_check_rule2_cooling_limited_outside_pid(void)
     TEST_CHECK(strstr(msg, "rule 2") != NULL, "violation message names rule 2");
 }
 
+/* Rule 2 is asserted on EVERY control tick on target, where assert() is
+ * compiled in (CONFIG_COMPILER_OPTIMIZATION_ASSERTION_LEVEL=2), so a rule-2
+ * false positive is a firmware panic in the middle of a live firing -- not a
+ * log line. One combination could actually reach it:
+ *
+ *   zone takes a per-zone guard trip with continue_on_zone_trip enabled
+ *     -> active==true, faulted==true, state stays RUNNING
+ *   it was in PID and had cooling_limited latched true
+ *   operator switches that zone to BANGBANG mid-firing
+ *     -> reload_zone_config() runs (it gates on active only, NOT on faulted)
+ *        and moves control_mode to BANGBANG
+ *   the tick's control switch, which is where the non-PID branches clear
+ *     cooling_limited, gates on `active && !faulted` -- so it never visits
+ *     this zone and the stale true survives against a non-PID mode.
+ *
+ * That is rule 2's illegal combination reached by a legal, documented
+ * operator action. reload_zone_config() now retires cooling_limited at the
+ * moment control_mode moves; this test drives that real path (not a
+ * hand-poked struct) and asserts the check stays quiet. */
+static void test_mode_state_check_rule2_no_false_positive_on_faulted_zone_mode_switch(void)
+{
+    TEST_SECTION("exec_mode_state_check -- rule 2 must NOT fire when an operator switches a "
+                 "faulted-but-active PID zone (cooling_limited latched) to BANGBANG mid-firing");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].faulted = true; /* per-zone trip, continue_on_zone_trip on */
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    s_exec.zones[0].cooling_limited = true;
+    s_exec.zones[0].cooling_limited_hold_s = 42.0f;
+
+    /* The operator's edit: this zone is now BANGBANG in the live config. */
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_BANGBANG;
+    g_stub_control_mode_read_ok = true; /* the read must SUCCEED, or reload_zone_config() early-returns */
+
+    (void)reload_zone_config(0);
+
+    g_stub_control_mode_read_ok = false; /* restore this file's default for every later test */
+
+    TEST_CHECK(s_exec.zones[0].control_mode == ZONE_CONTROL_MODE_BANGBANG,
+               "the mode change actually landed (otherwise this test proves nothing)");
+    TEST_CHECK(!s_exec.zones[0].cooling_limited,
+               "cooling_limited was retired by the mode change, not left stale on a faulted zone");
+    TEST_CHECK(s_exec.zones[0].cooling_limited_hold_s == 0.0f,
+               "its accumulator was cleared alongside it");
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "no violation -- the per-tick assert() would not panic a live firing here");
+}
+
 static void test_mode_state_check_rule3_faulted_zone_relay_commanded(void)
 {
     TEST_SECTION("exec_mode_state_check -- rule 3: a faulted zone's relay must never read commanded "
@@ -6595,6 +6658,7 @@ static void run_test_exec_mode_state_check(void)
     test_mode_state_check_rule5_dwelling_while_done();
     test_mode_state_check_rule1_autotune_and_profile_same_zone();
     test_mode_state_check_rule2_cooling_limited_outside_pid();
+    test_mode_state_check_rule2_no_false_positive_on_faulted_zone_mode_switch();
     test_mode_state_check_rule3_faulted_zone_relay_commanded();
     test_mode_state_check_legal_ramp_lock_stall_without_dwelling();
     test_mode_state_check_legal_autotune_settling_no_setpoint();
