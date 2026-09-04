@@ -237,6 +237,28 @@
 #define TOUCH_CAL_INVERT_Y 0
 #endif
 
+/* Same normalize-to-0/1 reasoning as the three above, for the FT6336U
+ * (capacitive, self_calibrating) mapping -- kept as its own knob set
+ * (Kconfig's own comment explains why) rather than reusing
+ * TOUCH_CAL_SWAP_XY/INVERT_X/INVERT_Y, which stay the NS2009-tuned values. */
+#if CONFIG_KILNCTL_TOUCH_CAP_SWAP_XY
+#define TOUCH_CAP_SWAP_XY 1
+#else
+#define TOUCH_CAP_SWAP_XY 0
+#endif
+
+#if CONFIG_KILNCTL_TOUCH_CAP_INVERT_X
+#define TOUCH_CAP_INVERT_X 1
+#else
+#define TOUCH_CAP_INVERT_X 0
+#endif
+
+#if CONFIG_KILNCTL_TOUCH_CAP_INVERT_Y
+#define TOUCH_CAP_INVERT_Y 1
+#else
+#define TOUCH_CAP_INVERT_Y 0
+#endif
+
 /* --- PC link UART ---
  * GPIO43/44 are the ESP32-S3-DevKitC's own UART0 pins, wired to the module's
  * USB-UART bridge and its "UART" USB-C port -- distinct from the native

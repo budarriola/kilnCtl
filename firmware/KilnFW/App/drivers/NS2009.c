@@ -237,3 +237,9 @@ esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16
     *out_y = y;
     return ESP_OK;
 }
+
+esp_err_t NS2009_touch_dev_read(void *ctx, bool *out_pressed, uint16_t *out_x, uint16_t *out_y,
+                                 uint16_t *out_z1)
+{
+    return NS2009_read((NS2009Class *)ctx, out_pressed, out_x, out_y, out_z1);
+}

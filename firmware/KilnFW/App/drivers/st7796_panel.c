@@ -20,6 +20,8 @@
 // terminated cleanly by the next LCD_WR_REG() or the end of LCD_Init().
 #include "st7796_panel.h"
 
+#include "settings.h"
+
 // COLMOD (3Ah). DISPLAY_ST7796_PLAN.md Sec.12 Phase 3 asks for 0x55 (DPI and
 // DBI nibbles both 101 = 16 bits/pixel, the same "set both nibbles" style
 // ILI9488.c's own COLMOD write already uses) as the descriptor's declared
@@ -88,6 +90,19 @@ static const uint8_t st7796_init_bytes[] = {
               0x4D, 0x0B, 0x17, 0x17, 0x1D, 0x21,
     0xF0, 1, 0x3C,
     0xF0, 1, 0x69,
+    /* DEVIATION from the byte-for-byte vendor transcription above, added
+     * 2026-09-04 after real bench hardware: the vendor's LCD_Init() never
+     * sends INVON/INVOFF (0x21/0x20) at all, leaving the panel on its
+     * power-on-reset inversion default -- and on this physical MSP4031 unit
+     * that default renders as garish, wrong-contrast color (bench report:
+     * "crazy contrast", not merely off-hue), the same failure mode
+     * TFT_eSPI/Adafruit-style ST7796 drivers work around by explicitly
+     * calling invertDisplay(true) (INVON, 0x21) during init -- this is a
+     * known per-batch ST7796 clone quirk, not something the vendor's own
+     * demo file would show if their sample unit happened to reset into the
+     * other state. INVON takes no parameters. If a future panel batch needs
+     * the opposite, this is the first thing to flip back to 0x20/omit. */
+    0x21, 0,
     0x13, 0,
     0x11, 0,
     0x29, 0,
@@ -134,8 +149,25 @@ static const panel_desc_t st7796_panel_desc = {
      * extension, but the values must match st7796_madctl_by_rotation[]
      * above exactly (checked by test_st7796_panel.c). */
     .madctl = { 0x40, 0x20, 0x80, 0x80 | 0x40 | 0x20 },
-    .id_matches = NULL, /* blocked on Sec.4's bench-recorded RDDID bytes -- Phase 4 */
+    /* RDDID captured 2026-09-04 (MSP4031 wired to J2, AUTO-fragment
+     * bootstrap procedure, DISPLAY_ST7796_PLAN.md Sec.4): 0x00 0x00 0x00,
+     * the same MISO-not-driven read the ILI9488 row already hit -- not a
+     * usable ID (panel_detect_id_equals() already refuses to match
+     * all-0x00/all-0xFF for exactly this reason). Touch-address
+     * corroboration during that same boot DID work (FT6336U answered at
+     * 0x38, NS2009 absent at 0x48/0x49), so panel_detect_choose()'s touch
+     * tiebreak is the only signal that still functions on this board's
+     * wiring -- RDDID cannot distinguish either panel here. Stays NULL,
+     * same reasoning as ili9488_panel_desc.id_matches above. */
+    .id_matches = NULL,
     .blank_via_power_off = false, /* safe default; NEEDS BENCH CONFIRMATION, see above */
+    /* FT6336U's OWN bench-tuned Kconfig knobs (settings.h) -- deliberately
+     * NOT TOUCH_CAL_SWAP_XY/INVERT_X/INVERT_Y, which are the NS2009-tuned
+     * values for the other panel; see panel_codec.h's touch_swap_xy field
+     * comment for why sharing one knob regressed touch here. */
+    .touch_swap_xy = TOUCH_CAP_SWAP_XY,
+    .touch_invert_x = TOUCH_CAP_INVERT_X,
+    .touch_invert_y = TOUCH_CAP_INVERT_Y,
 };
 
 const panel_desc_t *ST7796_get_panel_desc(void)

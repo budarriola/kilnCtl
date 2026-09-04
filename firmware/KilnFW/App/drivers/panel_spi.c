@@ -2170,6 +2170,12 @@ static const panel_desc_t ili9488_panel_desc = {
     .id_matches = NULL,
     .blank_via_power_off = false, /* today's ILI9488_clear() fills black over
                                     * RAMWR; it does not touch DISPOFF/power. */
+    /* NS2009's own bench-tuned Kconfig knobs (settings.h) -- unchanged by
+     * the FT6336U's arrival, see panel_codec.h's touch_swap_xy field
+     * comment. */
+    .touch_swap_xy = TOUCH_CAL_SWAP_XY,
+    .touch_invert_x = TOUCH_CAL_INVERT_X,
+    .touch_invert_y = TOUCH_CAL_INVERT_Y,
 };
 
 const panel_desc_t *ILI9488_get_panel_desc(void)

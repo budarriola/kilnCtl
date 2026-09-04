@@ -36,6 +36,8 @@
 #include "lvgl_port.h"
 #include "MAX31856.h"
 #include "NS2009.h"
+#include "FT6336U.h"
+#include "touch_dev.h"
 /* ROADMAP.md M15 A1: main.c's I2C bring-up is one of the SX1509 write/config
  * owners (SX1509_start()) -- see SX1509_internal.h's top comment. */
 #define SX1509_OWNER_BUILD
@@ -955,24 +957,50 @@ void app_main(void)
                           : "expander unavailable (D/C and/or ~RESET still routed through it)");
     }
 
-    // --- NS2009 touch controller (same J2 panel as the display above) ------
-    // Shares the I2C bus with the SX1509 expander -- see docs/HARDWARE.md,
-    // which also has the two still-open pinout questions (D/C-vs-touch-IRQ
-    // on pin 1, and a possible SDA/SCL swap on pins 2/3) that leave whether
-    // this chip answers at all unsettled on this board revision. NS2009_start
-    // logs and returns ESP_ERR_NOT_FOUND rather than failing app_main if it
-    // doesn't; screen_idle below works fine with touch_ready = false, using
-    // only injected (UART/MCP) touches.
+    // --- Touch controller (same J2 panel as the display above) -------------
+    // Shares the I2C bus with the SX1509 expander -- see docs/HARDWARE.md.
+    // Which physical controller is on the bus follows the same
+    // KILNCTL_DISPLAY_PANEL choice that selects the panel driver above: the
+    // BIGTREETECH TFT35 (ILI9488) carries the resistive NS2009, the
+    // LCDWIKI/Elecrow MSP4031 (ST7796) carries the capacitive FT6336U
+    // (DISPLAY_ST7796_PLAN.md section 7). *_start() logs and returns an
+    // error rather than failing app_main if the chip doesn't answer;
+    // screen_idle below works fine with touch_ready = false, using only
+    // injected (UART/MCP) touches. touch_dev wraps whichever one came up so
+    // lvgl_port_start() below never has to know which controller it is.
+#if CONFIG_KILNCTL_DISPLAY_PANEL_ST7796
+    static FT6336UClass ft6336u_touch;
+#else
     static NS2009Class touch;
+#endif
     bool touch_ready = false;
+    touch_dev_t touch_dev = {0};
     if (i2c_bus) {
+#if CONFIG_KILNCTL_DISPLAY_PANEL_ST7796
+        esp_err_t touch_err = FT6336U_start(&ft6336u_touch, i2c_bus);
+        touch_ready = (touch_err == ESP_OK);
+        if (touch_ready) {
+            touch_dev.ctx = &ft6336u_touch;
+            touch_dev.read = FT6336U_touch_dev_read;
+            touch_dev.self_calibrating = true;
+        } else {
+            ESP_LOGW(TAG, "FT6336U bring-up failed: %s -- touch input unavailable, synthetic "
+                          "injection over the UART bridge still works",
+                     esp_err_to_name(touch_err));
+        }
+#else
         esp_err_t touch_err = NS2009_start(&touch, i2c_bus);
         touch_ready = (touch_err == ESP_OK);
-        if (!touch_ready) {
+        if (touch_ready) {
+            touch_dev.ctx = &touch;
+            touch_dev.read = NS2009_touch_dev_read;
+            touch_dev.self_calibrating = false;
+        } else {
             ESP_LOGW(TAG, "NS2009 bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",
                      esp_err_to_name(touch_err));
         }
+#endif
     }
 
     // --- Screen idle/blank state machine ------------------------------------
@@ -1699,7 +1727,7 @@ void app_main(void)
                       "recover over Wi-Fi (GET /ota) or POST /api/ota/esp/recovery_exit to reboot "
                       "back into normal mode");
     } else if (display_ready &&
-               lvgl_port_start(&display, touch_ready ? &touch : NULL,
+               lvgl_port_start(&display, touch_ready ? &touch_dev : NULL,
                                screen_idle_ready ? &screen_idle : NULL) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start LVGL display task");
     }

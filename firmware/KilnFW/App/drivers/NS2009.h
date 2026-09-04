@@ -112,6 +112,12 @@ esp_err_t NS2009_read_axis(NS2009Class *t, uint8_t cmd, uint16_t *out_value);
 esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16_t *out_y,
                        uint16_t *out_z1);
 
+/* touch_dev_read_fn-shaped adapter over NS2009_read() (touch_dev.h), so
+ * main.c can build a touch_dev_t around an NS2009Class* the same way it does
+ * for FT6336U -- see FT6336U.h's FT6336U_touch_dev_read(). */
+esp_err_t NS2009_touch_dev_read(void *ctx, bool *out_pressed, uint16_t *out_x, uint16_t *out_y,
+                                 uint16_t *out_z1);
+
 #ifdef __cplusplus
 }
 #endif

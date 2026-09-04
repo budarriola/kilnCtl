@@ -3,12 +3,37 @@
 Status: **Phases 1, 2, 3 and 5 landed 2026-09-01/02** (§12). Phase 4's
 detection *logic* (`panel_detect.c`, host-tested, wired into `panel_spi.c`)
 is also landed — it is correctly inert today because both descriptors'
-`id_matches` stay `NULL`, and stay that way permanently for the ILI9488 row:
-the bench RDDID bytes were captured 2026-09-03 (§4) and came back
-`0x00 0x00 0x00`, i.e. "MISO not driven," not a usable ID. Auto-detection
-therefore always falls back to the Kconfig default and changes nothing
-observable, on this board, by construction rather than by an unfinished
-checklist item.
+`id_matches` stay `NULL` permanently: the bench RDDID bytes were captured
+for the ILI9488 2026-09-03 and for the ST7796/MSP4031 2026-09-04 (§4), and
+both came back `0x00 0x00 0x00`, i.e. "MISO not driven," not a usable ID.
+Auto-detection therefore always falls back to the Kconfig default and
+changes nothing observable, on this board, by construction rather than by
+an unfinished checklist item — the touch-controller I2C address
+(NS2009 vs FT6336U) is the only signal `panel_detect_choose()` has that
+still works on this board's wiring.
+
+**2026-09-04: the bench board's J2 now carries the MSP4031 (ST7796S +
+FT6336U)** in place of the BIGTREETECH TFT35 (ILI9488 + NS2009) — see §4 for
+the RDDID capture and §12 Phase 4/7 for what changed. Two firmware bugs were
+found and fixed operating this board for the first time: (1)
+`KILNCTL_DISPLAY_PANEL` was still pinned to `ILI9488` in the checked-in
+`sdkconfig` — explicit panel selection means the ILI9488 init/gamma table
+was being run against real ST7796 silicon (dim, wrong contrast), fixed by
+selecting `KILNCTL_DISPLAY_PANEL_ST7796`. (2) `main.c` only ever constructed
+an `NS2009Class` and `lvgl_port_start()` only ever accepted one — the
+FT6336U driver (`FT6336U.c/.h`) existed fully host-tested but was never
+instantiated by anything (a "consumer without producer" case), so touch
+could never have worked regardless of wiring. Fixed by changing
+`lvgl_port_start()`'s signature to take a `const touch_dev_t *` built by the
+caller, and gating `main.c`'s touch bring-up on
+`CONFIG_KILNCTL_DISPLAY_PANEL_ST7796` to construct an `FT6336UClass` +
+`FT6336U_touch_dev_read()` instead of the `NS2009Class` path. Separately, on
+first flashing the real ST7796 init table to this physical module the panel
+came up with garish/inverted-looking contrast; the vendor's own `LCD_Init()`
+never sends INVON/INVOFF at all (transcribed byte-for-byte, confirmed
+against the vendor source), so `st7796_panel.c`'s init table now includes an
+explicit `INVON` (`0x21`) before `SLPOUT`/`DISPON` — a documented deviation
+from the byte-for-byte transcription, not a transcription error.
 Phase 6 (SPI DMA/async): 9.2 (`max_transfer_sz` raised to 32768,
 `KILNCTL_SPI_MAX_TRANSFER_SZ`), 9.5 (MAX31856 on `spi_device_polling_transmit`
 via `esp_spi_owner.c`'s `use_polling` flag) and 9.9 (bounded owner-transfer
@@ -491,12 +516,23 @@ any DMA/flush work in Phase 6, still need the real numbers below.)*
       immediately. Worth remembering next time this AUTO-fragment procedure
       is used on a board that has ever been OTA'd: check `running partition`
       in the boot log BEFORE trusting a "the WARN just isn't logging" theory.
-- [ ] **RDDID (`0x04`) bytes from the ST7796** on this wiring, recorded here.
-      If ambiguous, also try `0xD3` (RDID4). All-`0x00`/all-`0xFF` means MISO
-      undriven, i.e. "no panel", not "panel 1" (`ILI9488.c:1641`). Not
-      attempted this pass — the ST7796/MSP4031 is not the panel currently
-      wired up, and per this task's own instructions, guessing its ID would
-      be worse than leaving it unset.
+- [x] **RDDID (`0x04`) bytes from the ST7796** on this wiring, captured
+      2026-09-04 (kiln idle, MSP4031 now wired to J2) via the AUTO-fragment
+      procedure described just below: **`0x00 0x00 0x00`** — the same
+      MISO-not-driven read the ILI9488 row hit on 2026-09-03. Boot log:
+      `ILI9488: RDDID returned 00 00 00 -- MISO is probably not driven`,
+      `panel auto-detect: RDDID read failed (ESP_ERR_NOT_FOUND); treating as
+      no match`, `panel auto-detect: SPI ID and touch-address signals
+      disagree -- RDDID read 0x00 0x00 0x00, touch NS2009=0 FT6336=1,
+      resolved ILI9488 (fallback)`. Touch-address corroboration DID work in
+      the same boot — FT6336U answered at 0x38, NS2009 correctly absent at
+      0x48/0x49 — confirming `panel_detect_choose()`'s touch tiebreak is the
+      only signal this board's wiring can still use; RDDID cannot
+      distinguish either panel here, for whatever board-side reason (same
+      open question as the ILI9488 row: read-path/timing/wiring). Per
+      `st7796_panel.c`'s `st7796_panel_desc.id_matches`, this stays `NULL`
+      permanently, same reasoning as the ILI9488 row — a matcher against an
+      all-zero triple is unreachable dead code, not a pending TODO.
 
   **How to actually read these bytes (2026-09-02):** the previous version of
   this checklist, and a comment in `panel_detect.h`, both said "boot the

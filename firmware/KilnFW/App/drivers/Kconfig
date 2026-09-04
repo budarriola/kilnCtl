@@ -320,21 +320,23 @@ menu "KilnCtrl Hardware Configuration"
     menu "ILI9488 Display (BIGTREETECH TFT35 SPI V2.1, J2)"
         choice KILNCTL_DISPLAY_PANEL
             prompt "Panel driven by panel_spi.c"
-            default KILNCTL_DISPLAY_PANEL_ILI9488
+            default KILNCTL_DISPLAY_PANEL_ST7796
             help
+                2026-09-04: the bench board now has the LCDWIKI/Elecrow
+                MSP4031 (ST7796S + FT6336U) wired to J2 in place of the
+                BIGTREETECH TFT35 (ILI9488) -- the default follows the
+                physically attached hardware. main.c's touch bring-up is
+                gated on this same choice (CONFIG_KILNCTL_DISPLAY_PANEL_ST7796):
+                ST7796 selects the FT6336U capacitive touch driver, anything
+                else keeps the NS2009 resistive one.
+
                 DISPLAY_ST7796_PLAN.md Sec.6 Step 3 / Sec.12 Phase 4: the
-                detection MECHANISM (panel_detect.c) now exists, but its ID
+                detection MECHANISM (panel_detect.c) exists, but its ID
                 table is still EMPTY -- Sec.4's bench-recorded RDDID bytes
-                for either panel, on this wiring, do not exist yet. ILI9488
-                (the BIGTREETECH TFT35 actually wired to J2 today) stays the
-                DEFAULT, deliberately NOT "auto", until those bytes are
-                recorded and a real id_matches() is written against them --
-                see the TODO block above panel_detect_choose() in
-                panel_detect.h for exactly which two measurements that is.
-                Picking ST7796 explicitly selects the LCDWIKI/Elecrow MSP4031
-                driver, which has NEVER RUN ON HARDWARE -- see the STOP block
-                at the top of the plan doc before that module goes anywhere
-                near J2.
+                for either panel, on this wiring, do not exist yet, so
+                "auto" cannot yet distinguish the two panels and is not the
+                default. See the TODO block above panel_detect_choose() in
+                panel_detect.h for exactly which measurement that is.
 
                 "auto" probes RDDID (0x04) and corroborates with the I2C
                 touch address, then falls back to whichever of ILI9488/
@@ -587,6 +589,41 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_TOUCH_CAL_INVERT_Y
             bool "Touch: invert raw Y axis"
+            default n
+
+        config KILNCTL_TOUCH_CAP_SWAP_XY
+            bool "Capacitive touch (FT6336U): swap raw X/Y axes before mapping to pixels"
+            default n
+            help
+                Separate from KILNCTL_TOUCH_CAL_SWAP_XY above on purpose: the
+                FT6336U (MSP4031) reports coordinates already in panel space
+                (touch_dev.h's self_calibrating=true path,
+                touch_dev_map_uncalibrated()), and its raw axis convention
+                relative to this panel's mounting has nothing to do with the
+                NS2009's ADC wiring on the other board -- reusing one knob for
+                both would detune whichever controller was tuned second.
+                2026-09-04 bench note: before these dedicated knobs existed,
+                the FT6336U path was (by omission) reusing
+                KILNCTL_TOUCH_CAL_SWAP_XY, which on this board's sdkconfig is
+                =y (tuned for the NS2009 on the OTHER panel) -- that
+                combination (swap=true, invert_x=false, invert_y=false)
+                landed touches in the wrong place on the MSP4031. These new
+                CAP_* knobs default all-off (swap=false), an untried
+                combination, as the starting point for the next bench pass.
+                If still wrong, iterate in order: flip one of
+                INVERT_X/INVERT_Y first (a mirrored axis reads as "landed
+                near the right place but flipped along one edge"), then
+                SWAP_XY (a wrong axis pairing reads as "rotated 90 degrees
+                from where pressed"). Verify with all four corners plus
+                center -- a single point can look correct by coincidence on
+                a symmetric layout.
+
+        config KILNCTL_TOUCH_CAP_INVERT_X
+            bool "Capacitive touch (FT6336U): invert raw X axis"
+            default n
+
+        config KILNCTL_TOUCH_CAP_INVERT_Y
+            bool "Capacitive touch (FT6336U): invert raw Y axis"
             default n
     endmenu
 

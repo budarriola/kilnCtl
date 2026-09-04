@@ -37,27 +37,31 @@
 #include "esp_err.h"
 
 #include "panel_spi.h"
-#include "NS2009.h"
 #include "screen_idle.h"
+#include "touch_dev.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* `display` must already be up (ILI9488_start succeeded) -- this is the only
- * hard requirement. `touch` may be NULL (no touch hardware; the UI is then
- * view-only until something injects touches some other way). `idle` may be
- * NULL (no auto-blank integration -- LVGL just draws continuously); when
- * non-NULL it must already be screen_idle_init'd with touch = NULL, since
- * this module becomes the sole NS2009 reader and feeds it through
- * screen_idle_inject_touch() instead.
+ * hard requirement. `touch_dev` may be NULL (no touch hardware; the UI is
+ * then view-only until something injects touches some other way) -- when
+ * non-NULL it must already be built and its underlying controller started
+ * (NS2009_start()/FT6336U_start()) by the caller; this module only reads
+ * through it, never constructs it, so the same lvgl_port_start() works for
+ * either controller (touch_dev.h's whole point -- see its header comment).
+ * `idle` may be NULL (no auto-blank integration -- LVGL just draws
+ * continuously); when non-NULL it must already be screen_idle_init'd with
+ * touch = NULL, since this module becomes the sole touch-controller reader
+ * and feeds it through screen_idle_inject_touch() instead.
  *
  * Brings up lv_init(), the display driver (partial-redraw, PSRAM buffers),
- * the pointer input device (if `touch`), a 1ms lv_tick source, builds a
+ * the pointer input device (if `touch_dev`), a 1ms lv_tick source, builds a
  * placeholder boot screen, and starts the task that drives
  * lv_timer_handler(). Everything after this call happens on that one task --
  * LVGL is not thread-safe and nothing else may call an lv_* function. */
-esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle_t *idle);
+esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, screen_idle_t *idle);
 
 /* Raw NS2009 reading (pre swap/invert transform) behind the press that most
  * recently drove an LVGL event -- ui_page_touch_cal.c's whole point is
