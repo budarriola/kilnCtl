@@ -116,9 +116,22 @@ idf.py -C firmware/KilnFW build
 uv run --project tools/PcTools python tools/PcTools/selfcheck.py
 ```
 
-`selfcheck.py` currently reports **16 failing checks**. They fail identically on
-the pre-reorganisation source, so they are pre-existing and unrelated to setup —
-see `docs/REPO_LAYOUT.md`. Treat a count other than 16 as the signal.
+`selfcheck.py` should report **all checks passed**. Treat ANY failure as a real
+signal worth investigating.
+
+This replaces a long-standing "16 failing checks are expected" caveat, corrected
+2026-09-03. That caveat had stopped being true, and worse, it normalised a real
+defect: the count was actually 10, and all ten came from two stale hardcoded
+protocol-version literals — `selfcheck.py`'s own `== 5` assertion, and a
+`_FW_VERSION_REPLY` fixture in `selfcheck_info.py` that packed `bytes([5, 0])`
+under a comment claiming it matched `devices.UART_PROTOCOL_VERSION` (it did
+not; the real value is 10). That single fixture fed three modules and produced
+nine of the ten failures, making the tool useless as a health signal. Both
+literals now derive from the real values — the check parses
+`#define UART_PROTOCOL_VERSION` out of
+`firmware/KilnFW/App/drivers/uart_task_ids.h` and asserts PC-vs-firmware
+agreement rather than either against a constant, so it cannot go stale on the
+next protocol bump. Fixed in `8536227`.
 
 Then open the KiCad projects. `hardware/mainBoard` is the one worth opening
 first: its library tables use `${KIPRJMOD}/../lib`, and a broken library path
