@@ -1,7 +1,9 @@
 #include "wifi_provision_http.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #include "esp_log.h"
 #include "esp_http_server.h"
@@ -715,6 +717,43 @@ static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t e
     return ESP_OK;
 }
 
+/* ROADMAP.md "HTTP connection resets under concurrency", 2026-09-04 pass:
+ * the previous pass's reproducer (tools/PcTools/scripts/
+ * http_concurrency_reproducer.py) measured resets starting at concurrency 8
+ * against a configured max_open_sockets of 13 -- a gap the previous pass
+ * flagged but could not explain without either vendoring esp_http_server's
+ * source (not in this repo) or instrumenting this file, which it didn't own
+ * yet. httpd_sess.c's own LRU-purge decision (httpd_is_sess_available()
+ * comparing hd->hd_sd_active_count against config.max_open_sockets, both
+ * private to esp_http_server) can't be read from outside, but
+ * httpd_config_t exposes exactly the pair of hooks that make the same fact
+ * observable from here: open_fn/close_fn fire on every socket admitted to
+ * and evicted from httpd's session pool (including LRU-purge evictions --
+ * they go through the same close path). Counting them gives the real
+ * concurrent-session count at the moment a request starts failing, without
+ * needing hd_sd_active_count itself.
+ *
+ * close_fn REPLACES the server's default close behavior (a plain close()) --
+ * skipping the close() call here would leak the fd, so this wrapper must
+ * call it itself. */
+static _Atomic int s_httpd_open_sockets;
+
+static esp_err_t wifi_provision_http_on_open(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+    int now = atomic_fetch_add(&s_httpd_open_sockets, 1) + 1;
+    ESP_LOGI(TAG, "httpd socket open: fd=%d active=%d/%d", sockfd, now, /*max_open_sockets=*/13);
+    return ESP_OK;
+}
+
+static void wifi_provision_http_on_close(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+    int now = atomic_fetch_sub(&s_httpd_open_sockets, 1) - 1;
+    ESP_LOGI(TAG, "httpd socket close: fd=%d active=%d/%d", sockfd, now, /*max_open_sockets=*/13);
+    close(sockfd);
+}
+
 esp_err_t wifi_provision_http_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -918,6 +957,13 @@ esp_err_t wifi_provision_http_start(void)
      * quietly instead of tripping an assert) -- see docs/PROJECT_STATUS.md
      * for the date/context. */
     config.stack_size = 8192;
+
+    /* See wifi_provision_http_on_open()/_on_close() above -- makes the
+     * effective concurrent-session count observable at the exact moment a
+     * request starts failing, instead of only inferred from
+     * max_open_sockets. */
+    config.open_fn = wifi_provision_http_on_open;
+    config.close_fn = wifi_provision_http_on_close;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {

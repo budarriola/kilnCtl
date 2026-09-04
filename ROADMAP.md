@@ -1734,7 +1734,87 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       directly; not done here since it requires editing/flashing a file this
       pass does not own. The exact numbers above are this driver's own
       run — re-run before trusting them again, load conditions on the board
-      (Wi-Fi clients, other pollers) were not otherwise controlled for
+      (Wi-Fi clients, other pollers) were not otherwise controlled for.
+      2026-09-04: **the LRU-purge-at-13 hypothesis is refuted by direct
+      measurement, root cause still open.** `wifi_provision_http.c` is in
+      scope for this pass. Confirmed first that the accounting is not stale:
+      `CONFIG_LWIP_MAX_SOCKETS=18` (this build's `sdkconfig.cmake`, matching
+      `sdkconfig.defaults`), `max_open_sockets=13`, `httpd_socket_budget.h`'s
+      `_Static_assert` holds (13 + 3 internal + 1 `dns_hijack_task` = 17 ≤
+      18, one spare) — that math is fine. Instrumented the thing that was
+      actually unmeasured: `config.open_fn`/`close_fn` (ESP-IDF's supported
+      per-session hooks, not a source-vendoring exercise) now log
+      `httpd socket open/close: fd=%d active=%d/13` on every session
+      admitted to and evicted from httpd's own pool, atomically counted
+      (`s_httpd_open_sockets`). Built (`build_kilnfw` exit 0), flashed via
+      `flash_firmware()` (verify=True, confirmed running), re-ran
+      `http_concurrency_reproducer.py --concurrency 4,8,12,16 --bursts 3`
+      against the live board: **same failure shape as before** (0/12 resets
+      at 4, 1/7 (12.5%) at 8, 4/12 (33%) at each burst at 12, 3-4/16 (19-25%)
+      at 16 — 120 requests, 25 resets, 20.8% overall, all `WinError 10054`).
+      `get_device_log()` captured the instrumentation live across that exact
+      window (timestamps 8875-36045ms bracket the whole sweep). **The
+      logged `active` count never exceeded 6 of the configured 13** —
+      typically 1, briefly 4-5 during the 12/16-concurrency bursts, once 6 —
+      even in bursts that produced multiple resets in the same few hundred
+      ms. httpd's own session pool was nowhere near its cap when connections
+      were being reset, which directly rules out the LRU-purge-at-13
+      mechanism this item spent two passes chasing: `httpd_is_sess_available()`
+      /`httpd_accept_conn()` (esp_http_server, read from `$IDF_PATH` for
+      this pass, still not vendored into this repo) only purges when its
+      own `hd_sd_active_count` reaches `max_open_sockets` — it never got
+      close. Read further into `$IDF_PATH/components/lwip/lwip/src/api/
+      sockets.c`'s `lwip_accept()`: on `alloc_socket()` returning -1 (the
+      OS-level `sockets[]` table, sized by `CONFIG_LWIP_MAX_SOCKETS`, full),
+      it calls `netconn_delete(newconn)` on an already-three-way-handshake-
+      completed connection and returns `ENFILE` to httpd — a path that (a)
+      does not touch the `lwip_stats.tcp` MIB counters this item's earlier
+      pass checked (consistent with drop/memerr/err never moving), (b) can
+      produce an abrupt reset from unread/unacked data rather than an
+      orderly FIN (consistent with the client-side `WinError 10054`
+      symptom), and (c) never reaches `open_fn` at all (consistent with the
+      counter staying low) -- so this pass's own instrumentation is
+      consistent with, but does NOT prove, an OS-socket-table (not
+      httpd-session-pool) exhaustion mechanism. Checked for another
+      uncounted permanent consumer, the shape of this item's own 2026-09-01
+      precedent: grepped the whole `App/` tree for `socket(` call sites --
+      only `wifi_prov_link.c`'s `dns_hijack_task()` (already budgeted) and
+      `wifi_prov.c` remain; `mdns_init()` (`main.c`) and SNTP
+      (`time_sync.c`) both confirmed, by reading their linked
+      implementations, to use raw lwIP PCBs (`udp_new()`/`udp_new_ip_type()`
+      in `mdns_networking_lwip.c` -- `CONFIG_MDNS_NETWORKING_SOCKET` is
+      unset in this build, so the BSD-socket mdns backend isn't even
+      compiled in -- and `sntp.c`), which do not consume a `sockets[]`
+      slot. No new uncounted permanent consumer found. Leading remaining
+      candidate, not yet confirmed: this pass's own `close_fn` decrements
+      the `active` counter *before* calling `close(sockfd)`, so a session
+      that is slow to actually release its OS-level socket resource
+      (`netconn_delete()` on close is itself an async round-trip to lwIP's
+      tcpip thread, not instant) would read as "closed" here while still
+      occupying a `sockets[]` slot -- which would explain resets happening
+      while the logged count stays low without contradicting any
+      measurement taken so far. Not confirmed because it would need a
+      *second* counter instrumenting `close()`'s actual return, not
+      attempted this pass.
+      **Recommendation: do not bump `max_open_sockets` or
+      `CONFIG_LWIP_MAX_SOCKETS` on the strength of this item alone.** The
+      2026-09-01 rationale for the current values (13 / 18) was sized
+      against a real 10-connection wedge and remains valid for that case;
+      this pass's own measurement is now direct evidence AGAINST the
+      max_open_sockets=13 pool being what's saturating under this specific
+      reproducer's load (it topped out at 6), so widening it would spend
+      internal-DRAM budget (documented tight, ~11.9 kB failure floor, see
+      the DRAM exhaustion item) chasing a mechanism the data says isn't the
+      session pool. If OS-socket-table exhaustion is confirmed by the
+      close()-latency follow-up above, the fix that data would point to is
+      shortening how long a closing session holds its slot (e.g. `SO_LINGER`
+      tuning) or accepting fewer concurrent opens via `backlog_conn`, not a
+      bigger pool. **Not closing this item**: root cause is narrowed
+      (ruled out: LRU purge, lwIP TCP-stat-visible drops, mDNS/SNTP as
+      uncounted consumers) but not confirmed (the close()-latency hypothesis
+      is untested). `wifi_provision_http.c`'s `open_fn`/`close_fn`
+      instrumentation is now permanently in place in the shipped firmware
+      for whoever picks this up next to extend.
 - [x] **Wire the guard scripts into something that runs them.** Done
       2026-08-27: `tools/run_all_checks.ps1`, plus a `run_repo_checks` tool on
       both MCP servers. Discovery is by glob rather than a list, because a list
