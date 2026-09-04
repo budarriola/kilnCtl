@@ -2849,7 +2849,32 @@ rate on approach — cheapest, best-evidenced, recommended first; then a
 zero-kiln-time check of whether the ramp rate is even zone-specific in the
 current profile; then the deferred coupling-floor campaign; then a
 firmware-level k_dc/dead-time-scaled feedforward compensation) in the
-report's "Third pass" section. The taper-onset-time pre-flight metric and
+report's "Third pass" section.
+
+**Shortlist item 2 answered, 2026-09-04, zero kiln time: the ramp rate is
+NOT zone-specific, and item 1's cost is revised up.** `profile_segment_t`
+carries one `ramp_c_per_hr` for the whole `zone_mask` (`docs/PROFILES.md`
+32-36, 159-176), and the executor drives every active zone off a single
+shared `s_exec.target_c` scalar (`profile_executor_internal.h:598,256`,
+"one ramp across every zone in a run") — ramp-lock explicitly compares
+each zone's reading against that one shared setpoint. The only existing
+per-zone differentiation is `zone_taper_climb_rate()`'s feedforward taper,
+which by its own doc comment never touches `s_exec.target_c`
+(`profile_executor_pid_tick.c:62-64`) and is the mechanism §3.6d already
+withdrew. So z0's commanded trajectory is genuinely identical to its
+peers' today; item 1 is a firmware change (splitting the executor's
+single `target_c` into a per-zone value, plus profile-format and
+feasibility-check plumbing of similar shape to the already-shipped
+per-zone `ease_off_window_mult`), not a profile/config edit. Using the
+fragile-but-direction-robust fit (`peak_overshoot_c ≈ 0.44 + 1.00 ×
+ramp_rate_c_per_min`, slope 0.47-1.77 under trimming), a ~1 °C/min cut to
+z0's approach rate is estimated to reduce peak overshoot by roughly
+**0.5-1.8 °C** (central estimate ~1.0 °C, from ~2.2-2.5 °C toward
+~1.2-1.5 °C) — well above z0's 0.116 °C noise floor either way, but the
+exact number needs its own campaign. Full detail:
+`logs/coupling/z0_dwell_overshoot_mechanism_20260904_report.md` §X5 item 2.
+
+The taper-onset-time pre-flight metric and
 the n/power figures for both profile choices are kept as reference — reused
 if this knob is ever pointed at something the taper mechanism actually
 reaches. **The per-zone override itself (`ZONES_CFG_VERSION` 16→17) stays**:

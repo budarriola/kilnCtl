@@ -580,7 +580,23 @@ needed for the top two):
    design already costed above (~4-6 hours), because the actuator here is
    the ramp-rate *input* itself, which is trivially and verifiably
    controllable, unlike the taper window. Best-supported, cheapest,
-   least novel. Recommended first.
+   least novel. Recommended first. **Revised cost, 2026-09-04 (item 2
+   below run):** NOT a one-line config change — see item 2's finding. The
+   ramp rate is a single scalar shared by every zone in the segment's
+   `zone_mask`; there is no per-zone rate field to edit. Delivering a
+   z0-only ramp rate requires firmware work of the same rough shape as
+   the (already-shipped) `ease_off_window_mult` per-zone override:
+   extend `profile_segment_t` (or add a per-zone multiplier next to it),
+   thread it through `profiles_http.c`/`profiles_edit_http.c` JSON and
+   `profile_feasibility.c`'s ceiling check, and — the larger piece —
+   split the executor's single `s_exec.target_c` scalar into a per-zone
+   value, since ramp-lock (`PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`, 25 °C)
+   currently compares every zone against that one shared setpoint
+   (`profile_executor_internal.h:598`, `:922-933`). Cost: a firmware
+   change touching the executor's core data model, not a preset edit —
+   plan for it as new capability, not a quick win, and validate the
+   *design* (does per-zone target_c break ramp-lock's "slowest zone sets
+   the pace" semantics?) before costing a campaign.
 2. **Zero-kiln-time check: does the profile even need to approach z0's dwell
    at the rate it currently does, or is the rate an artifact of a
    shared/unzoned ramp-rate parameter?** Before spending kiln time on (1),
@@ -588,6 +604,49 @@ needed for the top two):
    z1/z2's for no physical reason (e.g. one shared `ramp_rate_c_per_min`
    across all zones) — if so, (1) may be a one-line profile change rather
    than new tooling. This is a documentation/config read, not a campaign.
+
+   **Answered, 2026-09-04, zero kiln time spent — the premise is TRUE and
+   item (1) is NOT a config change.** `profile_segment_t` (`docs/PROFILES.md`
+   lines 32-36, mirrored in `firmware/KilnFW/App/drivers/profiles_http.h`)
+   carries exactly one `ramp_c_per_hr` per segment, applied against
+   "every zone in `zone_mask`" (`PROFILES.md:159-176`) — there is no
+   per-zone rate array in the format. The executor confirms this is not
+   just a format gap but the run-time model too: `s_exec.target_c` is a
+   single `float`, documented in-line as "shared setpoint, stepped
+   incrementally each tick" and "one ramp across every zone in a run,
+   TODO.md 6A.5" (`profile_executor_internal.h:598,256`). Every active
+   zone's PID setpoint is this one value each tick
+   (`new_target = target_c ± ramp_c_per_hr * dt_s/3600`, `PROFILES.md:247`),
+   and ramp-lock explicitly compares each zone's own reading against that
+   *same* shared setpoint (`PROFILES.md:274-279`, "the slowest zone sets
+   the pace"). The only per-zone differentiation that exists today is
+   `zone_taper_climb_rate()`'s feedforward taper (§X6 above) — and that
+   taper is scoped, by its own doc comment, to the feedforward term only,
+   "never `s_exec.target_c`" (`profile_executor_pid_tick.c:62-64`); it does
+   not touch the commanded setpoint trajectory this shortlist item is
+   about, and it is the mechanism already shown (§X2-X3) not to reach
+   arrival ramp rate. So z0's effective commanded trajectory is
+   genuinely identical to its peers' — nothing today lets a profile or
+   the executor give z0 a slower approach without a code change. Item
+   (1)'s cost is revised above.
+
+   **Overshoot reduction estimate for a slower z0 approach (range, not a
+   point).** Using the working fit `peak_overshoot_c ≈ 0.44 + 1.00 ×
+   ramp_rate_c_per_min` with z0's observed 1.56-2.32 °C/min approach
+   rates (§1) and the W2 finding that slope/intercept are fragile
+   (0.47-1.77 slope, -0.99 to +1.77 intercept under trimming) while the
+   *direction* is robust: cutting the commanded approach rate by roughly
+   1 °C/min (e.g. ~1.9 → ~0.9 °C/min, a plausible profile edit) predicts,
+   at the central fit, an overshoot drop of ~1.0 °C (from ~2.2-2.5 °C
+   toward ~1.2-1.5 °C) — clearing the 0.5 °C bar with margin similar to
+   the withdrawn taper proposal's target. Under the fragile slope bounds
+   alone, the same 1 °C/min cut spans roughly **0.5-1.8 °C** of reduction;
+   either end is far above z0's 0.116 °C noise floor, so the effect
+   direction and rough magnitude are trustworthy even though the exact
+   number is not. A campaign is still needed to pin the real slope on
+   this actuator (unlike the taper knob, this one is a direct, verifiable
+   input — no reachability question), matching item (1)'s already-costed
+   ~4-6 hour design.
 3. **Coupling-floor campaign (matched ramp rate, deliberately varied peer
    duty)** — §2b's original open question, previously ranked #4 as "bigger,
    more novel kiln-time ask." Still true, and still worth deferring:
