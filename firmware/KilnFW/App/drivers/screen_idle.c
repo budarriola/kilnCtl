@@ -40,6 +40,19 @@ static TaskHandle_t s_task_handle;
  * that a touch feels immediate against a 60s timeout. */
 #define SCREEN_IDLE_POLL_MS 50u
 
+/* How often screen_idle_task re-reads the EXPENSIVE policy inputs
+ * (profile_executor_get_status()/autotune_engine_is_active()/
+ * dashboard_get_status()) -- see screen_idle.h's cached_firing_active
+ * comment. Deliberately NOT the 50 ms touch cadence: dashboard_get_status()
+ * costs five MAX31856 SPI burst reads on the panel's own SPI host, a
+ * kiln_io_owner queue round trip (up to 200 ms), and two interrupts-
+ * disabled heap walks; its own doc comment sizes that against "a browser's
+ * poll cadence" and ui_page_diagnostics.c's 2 s LCD tick. 1 s is well
+ * inside every decision it feeds (the shortest display timeout setting is
+ * tens of seconds, and a 1 s delay before an error raises the panel is
+ * imperceptible next to a firing that just aborted). */
+#define SCREEN_IDLE_INPUT_POLL_MS 1000u
+
 /* How long a caller waits for the lock. Only ever held for a few variable
  * reads/writes, never across I2C or SPI traffic -- generous on purpose. */
 #define SCREEN_IDLE_LOCK_TIMEOUT_MS 1000u
@@ -65,56 +78,91 @@ static uint32_t screen_idle_now_ms(void)
  * touch_held/touch_held_swallow) are never computed two different ways.
  * MUST be called with idle->lock already held; never takes/releases it
  * itself (same "caller's discipline" convention profile_executor_wd_
- * decide()'s doc comment describes for its own pure-step neighbor). Reads
- * profile_executor_get_status()/dashboard_get_status() while holding this
- * module's own lock -- safe: neither of those modules ever calls back into
- * screen_idle, so there is no lock-order cycle, only a leaf read.
+ * decide()'s doc comment describes for its own pure-step neighbor). Makes
+ * NO calls into profile_executor/autotune_engine/dashboard_http -- those
+ * reads happen in screen_idle_refresh_inputs(), off this lock, and reach
+ * here only as the idle->cached_* snapshot. That is deliberate and load-
+ * bearing: it is what keeps this lock (which lvgl_port.c's and
+ * backlight_pwm.c's tasks both take) honest about the "never held across
+ * I2C or SPI traffic" invariant SCREEN_IDLE_LOCK_TIMEOUT_MS's comment
+ * above states, and it keeps the s_exec.lock/s_at.lock acquisitions those
+ * accessors make out of this lock's nesting entirely.
  *
  * Returns the policy's swallow_touch (meaningful only when touch_event is
  * true); always updates idle->policy_state/screen_on/last_activity_tick/
  * error_prev_active as a side effect. */
 static bool screen_idle_run_policy_locked(screen_idle_t *idle, uint32_t now_ms, bool touch_event)
 {
-    // 2026-09-04 bench crash (boot_guard.h RECOVERY MODE, bricked the board
-    // for 495+ consecutive boots): recovery mode starts THIS task
-    // unconditionally (main_boot_early.c, well before main_control_
-    // bringup.c's recovery-mode skip of profile_executor_start()/
-    // autotune_engine_start()) and every poll tick blocked here forever --
-    // see screen_idle.h's idle->recovery_mode field comment for the exact
-    // hardware-confirmed backtrace and why this caller-side gate exists
-    // alongside (not instead of) those subsystems' own not-started guards.
-    // Recovery mode genuinely never runs anything that could make either
-    // condition true, so "false" is the honest answer, not a stand-in.
+    // Inputs come from idle->cached_firing_active/cached_error_active, the
+    // snapshot screen_idle_refresh_inputs() takes WITHOUT this lock held --
+    // see screen_idle.h's cached_firing_active comment for why the producer
+    // reads must not happen here (20 Hz of SPI + a 200 ms-capable
+    // kiln_io_owner round trip + interrupts-disabled heap walks, under a
+    // lock the LVGL and backlight tasks both take), and why a snapshot is
+    // the correct answer rather than a stale one. In RECOVERY MODE
+    // (boot_guard.h) the refresh never runs at all, so both read false --
+    // the honest answer: recovery mode starts neither profile_executor nor
+    // autotune_engine, so nothing this boot can make either true.
+    bool firing_active = idle->cached_firing_active;
+    bool error_active = idle->cached_error_active;
+    bool error_entered_this_tick = error_active && !idle->error_prev_active;
+    idle->error_prev_active = error_active;
+
+    display_power_input_t in = {
+        .now_ms = now_ms,
+        .last_touch_ms = (uint32_t)(idle->last_activity_tick * portTICK_PERIOD_MS),
+        .timeout_setting = display_power_cfg_timeout_setting(),
+        .firing_active = firing_active,
+        .keep_on_while_firing = display_power_cfg_keep_on_while_firing(),
+        .error_active = error_active,
+        .error_entered_this_tick = error_entered_this_tick,
+        .display_on_error = display_power_cfg_display_on_error(),
+        .current_state = idle->policy_state,
+        .touch_event = touch_event,
+    };
+    display_power_result_t out = display_power_policy_step(&in);
+
+    if (out.state != idle->policy_state) {
+        ESP_LOGI(TAG, "display power: state %d -> %d (firing=%d error=%d touch=%d recovery=%d)",
+                 (int)idle->policy_state, (int)out.state, (int)firing_active, (int)error_active,
+                 (int)touch_event, (int)idle->recovery_mode);
+    }
+    idle->policy_state = out.state;
+    idle->screen_on = (out.state != DISPLAY_POWER_OFF);
+    // Header contract: "the caller must still update ITS OWN last-activity
+    // timestamp to now_ms" whenever a touch is swallowed OR passed through.
+    // Not gated on touch_event: the poll tick must NOT keep stamping
+    // activity every 50ms (that would defeat the idle timeout entirely) --
+    // see the caller below, which only lets this land on a genuine touch
+    // edge.
+    if (touch_event) {
+        idle->last_activity_tick = xTaskGetTickCount();
+    }
+    return out.swallow_touch;
+}
+
+/* Refreshes idle->cached_firing_active/cached_error_active. MUST be called
+ * with idle->lock NOT held, from screen_idle_task ONLY -- every call below
+ * is expensive and/or blocking (see screen_idle.h's cached_firing_active
+ * comment for the full accounting), which is exactly why none of them may
+ * run under this module's lock or on the LVGL task.
+ *
+ * 2026-09-04 bench crash (boot_guard.h RECOVERY MODE, 495+ consecutive
+ * unconfirmed-healthy boots): screen_idle_start() runs unconditionally
+ * (main_boot_early.c), well before main_control_bringup.c's recovery-mode
+ * skip of profile_executor_start()/autotune_engine_start() even runs, so
+ * this poll tick reaches into subsystems recovery mode never started. All
+ * three accessors below are individually hardened to answer cleanly
+ * pre-start (profile_executor_status.c's s_exec.lock == NULL guard,
+ * autotune_engine.c's s_at.lock == NULL guards, dashboard_get_status()'s
+ * NULL s_dash.* handling) -- this caller-side gate is the second,
+ * belt-and-suspenders layer boot_guard.h's own 2026-08-22 precedent
+ * describes, and it also keeps recovery mode's poll tick down to the pure
+ * policy step, which is all a board waiting to be reflashed needs. */
+static void screen_idle_refresh_inputs(screen_idle_t *idle)
+{
     if (idle->recovery_mode) {
-        bool firing_active = false;
-        bool error_active = false;
-        bool error_entered_this_tick = false;
-        idle->error_prev_active = false;
-
-        display_power_input_t in = {
-            .now_ms = now_ms,
-            .last_touch_ms = (uint32_t)(idle->last_activity_tick * portTICK_PERIOD_MS),
-            .timeout_setting = display_power_cfg_timeout_setting(),
-            .firing_active = firing_active,
-            .keep_on_while_firing = display_power_cfg_keep_on_while_firing(),
-            .error_active = error_active,
-            .error_entered_this_tick = error_entered_this_tick,
-            .display_on_error = display_power_cfg_display_on_error(),
-            .current_state = idle->policy_state,
-            .touch_event = touch_event,
-        };
-        display_power_result_t out = display_power_policy_step(&in);
-
-        if (out.state != idle->policy_state) {
-            ESP_LOGI(TAG, "display power: state %d -> %d (recovery mode, touch=%d)",
-                     (int)idle->policy_state, (int)out.state, (int)touch_event);
-        }
-        idle->policy_state = out.state;
-        idle->screen_on = (out.state != DISPLAY_POWER_OFF);
-        if (touch_event) {
-            idle->last_activity_tick = xTaskGetTickCount();
-        }
-        return out.swallow_touch;
+        return; /* leaves cached_* at their false/false init -- see above */
     }
 
     profile_exec_status_t pst;
@@ -151,42 +199,17 @@ static bool screen_idle_run_policy_locked(screen_idle_t *idle, uint32_t now_ms, 
     // an entire class of error the owner would absolutely expect to raise the
     // display: their firing just aborted. Both producers, not one.
     bool error_active = safety_tripped || pst.state == PROFILE_EXEC_FAULTED;
-    bool error_entered_this_tick = error_active && !idle->error_prev_active;
-    idle->error_prev_active = error_active;
 
-    display_power_input_t in = {
-        .now_ms = now_ms,
-        .last_touch_ms = (uint32_t)(idle->last_activity_tick * portTICK_PERIOD_MS),
-        .timeout_setting = display_power_cfg_timeout_setting(),
-        .firing_active = firing_active,
-        .keep_on_while_firing = display_power_cfg_keep_on_while_firing(),
-        .error_active = error_active,
-        .error_entered_this_tick = error_entered_this_tick,
-        .display_on_error = display_power_cfg_display_on_error(),
-        .current_state = idle->policy_state,
-        .touch_event = touch_event,
-    };
-    display_power_result_t out = display_power_policy_step(&in);
-
-    if (out.state != idle->policy_state) {
-        ESP_LOGI(TAG, "display power: state %d -> %d (firing=%d error=%d touch=%d)",
-                 (int)idle->policy_state, (int)out.state, (int)firing_active, (int)error_active,
-                 (int)touch_event);
-    }
-    idle->policy_state = out.state;
-    idle->screen_on = (out.state != DISPLAY_POWER_OFF);
-    // Header contract: "the caller must still update ITS OWN last-activity
-    // timestamp to now_ms" whenever a touch is swallowed OR passed through
-    // -- and every poll tick this function is called from is itself real
-    // activity-adjacent bookkeeping (mirrors the old screen_idle_mark_
-    // active()'s unconditional stamp). Not gated on touch_event: the poll
-    // tick must NOT keep stamping activity every 50ms (that would defeat
-    // the idle timeout entirely) -- see the caller below, which only lets
-    // this land on a genuine touch edge.
-    if (touch_event) {
-        idle->last_activity_tick = xTaskGetTickCount();
-    }
-    return out.swallow_touch;
+    /* Publish under the lock the policy runs under, so a concurrent touch
+     * edge on the LVGL task can never read one of these updated and the
+     * other not. A failure to take it just leaves the previous snapshot in
+     * place for another SCREEN_IDLE_INPUT_POLL_MS -- never a torn pair. */
+    if (!screen_idle_lock(idle)) return;
+    idle->cached_firing_active = firing_active;
+    idle->cached_error_active = error_active;
+    idle->inputs_valid = true;
+    idle->last_input_ms = screen_idle_now_ms();
+    screen_idle_unlock(idle);
 }
 
 static void screen_idle_task(void *arg)
@@ -216,6 +239,17 @@ static void screen_idle_task(void *arg)
                 // timer / display-power state machine still runs when no
                 // on-device UI is driving touch at all.
             }
+        }
+
+        // Producer snapshot refresh, throttled to SCREEN_IDLE_INPUT_POLL_MS
+        // and taken with the lock NOT held. last_input_ms/inputs_valid are
+        // written and read only here, on this one task, so reading them
+        // unlocked is safe (screen_idle.h's field comment). The very first
+        // tick refreshes immediately (!inputs_valid).
+        uint32_t now_ms = screen_idle_now_ms();
+        if (!idle->inputs_valid ||
+            (uint32_t)(now_ms - idle->last_input_ms) >= SCREEN_IDLE_INPUT_POLL_MS) {
+            screen_idle_refresh_inputs(idle);
         }
 
         // Idle-timeout / keep-on-while-firing / display-on-error poll tick
@@ -277,7 +311,9 @@ esp_err_t screen_idle_start(screen_idle_t *idle)
      * stack ends -- addr2line on the COM3 console backtrace named screen_
      * idle_task -> screen_idle_run_policy_locked -> dashboard_get_status ->
      * heap_caps_get_largest_free_block -> tlsf_walk_pool exactly. Recovery
-     * mode's early-return path (this file's idle->recovery_mode branch)
+     * mode's early return (screen_idle_refresh_inputs()'s idle->recovery_
+     * mode branch -- the gate moved there with the 2026-09-04 opus review's
+     * off-lock refresh, it did not go away)
      * never reaches that deep call chain, which is why recovery mode alone
      * did not reproduce this second bug even though it shares the same
      * task. 6144 is a deliberately generous doubling, not a measured

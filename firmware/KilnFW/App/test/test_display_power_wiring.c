@@ -153,9 +153,40 @@ static void run_section1_screen_idle_calls_policy(void)
                "exists to wire in. If this fails, the call was deleted and screen_idle is "
                "back to driving screen_on some other way (or not at all).");
 
-    TEST_CHECK(strstr(fn, "profile_executor_get_status(&pst)") != NULL &&
-                   strstr(fn, "PROFILE_EXEC_RUNNING") != NULL &&
-                   strstr(fn, "PROFILE_EXEC_PAUSED") != NULL,
+    // 2026-09-04 opus review: the producer reads moved OUT of screen_idle_run_
+    // policy_locked() (which runs with idle->lock held) into screen_idle_
+    // refresh_inputs(), which screen_idle_task calls with the lock NOT held --
+    // see section 3b for why. They are still REAL producer reads and still
+    // pinned here, just in the function that now performs them; extract that
+    // body and hold it to the same standard.
+    size_t refresh_len = 0;
+    const char *refresh_body =
+        find_function_body(text, "static void screen_idle_refresh_inputs(", &refresh_len);
+    if (!refresh_body) {
+        TEST_CHECK(false, "could not find screen_idle_refresh_inputs()'s function body in "
+                           "screen_idle.c -- that is where the firing/error producer reads "
+                           "live; if it is gone, this module is no longer reading them at all.");
+        free(fn);
+        free(text);
+        return;
+    }
+    char *refresh_fn = dup_range(refresh_body, refresh_len);
+    TEST_CHECK(refresh_fn != NULL, "malloc for the extracted refresh function body succeeded");
+    if (!refresh_fn) {
+        free(fn);
+        free(text);
+        return;
+    }
+
+    TEST_CHECK(strstr(fn, "idle->cached_firing_active") != NULL &&
+                   strstr(fn, "idle->cached_error_active") != NULL,
+               "screen_idle_run_policy_locked() must feed the policy from the idle->cached_* "
+               "snapshot screen_idle_refresh_inputs() writes -- if this fails the policy is "
+               "being fed from somewhere else entirely.");
+
+    TEST_CHECK(strstr(refresh_fn, "profile_executor_get_status(&pst)") != NULL &&
+                   strstr(refresh_fn, "PROFILE_EXEC_RUNNING") != NULL &&
+                   strstr(refresh_fn, "PROFILE_EXEC_PAUSED") != NULL,
                "firing_active must be read from profile_executor_get_status()'s REAL state "
                "(RUNNING or PAUSED) -- the same accessor boot_button.c/danger_mode.c/"
                "gpio_probe.c already use for this exact question. If this fails, either the "
@@ -163,9 +194,9 @@ static void run_section1_screen_idle_calls_policy(void)
                "else (a stub, a hardcoded value) -- the 'consumer without producer' bug class "
                "this test exists to catch.");
 
-    TEST_CHECK(strstr(fn, "dashboard_get_status(&ds)") != NULL &&
-                   strstr(fn, "SAFETY_LINK_DIAG_STATE_TRIPPED") != NULL &&
-                   strstr(fn, "diag_ever_received") != NULL && strstr(fn, "diag_age_ms") != NULL,
+    TEST_CHECK(strstr(refresh_fn, "dashboard_get_status(&ds)") != NULL &&
+                   strstr(refresh_fn, "SAFETY_LINK_DIAG_STATE_TRIPPED") != NULL &&
+                   strstr(refresh_fn, "diag_ever_received") != NULL && strstr(refresh_fn, "diag_age_ms") != NULL,
                "error_active must be read from dashboard_get_status()'s REAL diag_ever_"
                "received/diag_state/diag_age_ms fields, gated the identical way ui_page_"
                "home.c's own safety-trip strip is -- not a placeholder or a differently-gated "
@@ -188,13 +219,13 @@ static void run_section1_screen_idle_calls_policy(void)
     // abort happened (PROFILE_EXEC_FAULTED). Reading only one of each pair
     // is this codebase's documented "consumer reading a different producer
     // than the one that actually gets written" bug class.
-    TEST_CHECK(strstr(fn, "autotune_engine_is_active();") != NULL,
+    TEST_CHECK(strstr(refresh_fn, "autotune_engine_is_active();") != NULL,
                "firing_active must ALSO be true during an autotune run "
                "(autotune_engine_is_active()) -- otherwise 'keep display on while firing' "
                "blanks the panel mid-autotune, because autotune holds relay authority with "
                "profile_executor still at PROFILE_EXEC_IDLE.");
 
-    TEST_CHECK(strstr(fn, "pst.state == PROFILE_EXEC_FAULTED") != NULL,
+    TEST_CHECK(strstr(refresh_fn, "pst.state == PROFILE_EXEC_FAULTED") != NULL,
                "error_active must ALSO cover the ESP's own global thermal-guard abort "
                "(profile_executor's PROFILE_EXEC_FAULTED) -- the safety link's diag_state is "
                "the RP2040's own trip and is never set by an ESP-side guard fault, so keying "
@@ -210,6 +241,7 @@ static void run_section1_screen_idle_calls_policy(void)
                "dismissing touch'. This is exactly the kind of subtle edge-vs-level bug this "
                "codebase has shipped before.");
 
+    free(refresh_fn);
     free(fn);
     free(text);
 }
@@ -296,7 +328,7 @@ static void run_section2_touch_swallow_wired(void)
 
 static void run_section3_recovery_mode_gated(void)
 {
-    TEST_SECTION("screen_idle_run_policy_locked() does not call into subsystems "
+    TEST_SECTION("screen_idle does not call into subsystems "
                  "boot_guard.h RECOVERY MODE skips -- 2026-09-04 bench crash: "
                  "screen_idle_start() runs UNCONDITIONALLY (main_boot_early.c, before "
                  "main_control_bringup.c's recovery-mode skip of profile_executor_start()/"
@@ -314,12 +346,41 @@ static void run_section3_recovery_mode_gated(void)
         return;
     }
 
-    size_t body_len = 0;
-    const char *body =
-        find_function_body(text, "static bool screen_idle_run_policy_locked(", &body_len);
-    if (!body) {
+    // 2026-09-04 opus review: screen_idle_run_policy_locked() no longer makes
+    // these calls at all -- they moved to screen_idle_refresh_inputs(), which
+    // runs with idle->lock NOT held (section 3b). Pin BOTH halves: the locked
+    // function must be free of them, and the gate must sit ahead of them where
+    // they actually live.
+    size_t policy_len = 0;
+    const char *policy_body =
+        find_function_body(text, "static bool screen_idle_run_policy_locked(", &policy_len);
+    if (!policy_body) {
         TEST_CHECK(false, "could not find screen_idle_run_policy_locked()'s function body in "
                            "screen_idle.c -- update this test if it was renamed/restructured.");
+        free(text);
+        return;
+    }
+    char *policy_fn = dup_range(policy_body, policy_len);
+    TEST_CHECK(policy_fn != NULL, "malloc for the extracted policy function body succeeded");
+    if (!policy_fn) {
+        free(text);
+        return;
+    }
+    TEST_CHECK(strstr(policy_fn, "profile_executor_get_status(") == NULL &&
+                   strstr(policy_fn, "dashboard_get_status(") == NULL &&
+                   strstr(policy_fn, "autotune_engine_is_active(") == NULL,
+               "screen_idle_run_policy_locked() runs with idle->lock HELD and must NOT make "
+               "the producer calls itself -- see section 3b. If they come back here, both "
+               "the recovery-mode gate below and the off-lock guarantee are gone at once.");
+    free(policy_fn);
+
+    size_t body_len = 0;
+    const char *body =
+        find_function_body(text, "static void screen_idle_refresh_inputs(", &body_len);
+    if (!body) {
+        TEST_CHECK(false, "could not find screen_idle_refresh_inputs()'s function body in "
+                           "screen_idle.c -- this is THE recovery-mode gate site for the "
+                           "2026-09-04 brick; update this test only if it genuinely moved.");
         free(text);
         return;
     }
@@ -332,7 +393,7 @@ static void run_section3_recovery_mode_gated(void)
 
     const char *gate = strstr(fn, "idle->recovery_mode");
     TEST_CHECK(gate != NULL,
-               "screen_idle_run_policy_locked() must check idle->recovery_mode -- if this "
+               "screen_idle_refresh_inputs() must check idle->recovery_mode -- if this "
                "fails, the recovery-mode gate was deleted and the board bricks itself in "
                "recovery mode again the next time this module gains a new dependency on a "
                "subsystem recovery mode skips.");
@@ -340,6 +401,14 @@ static void run_section3_recovery_mode_gated(void)
     const char *pe_call = strstr(fn, "profile_executor_get_status(&pst)");
     const char *dash_call = strstr(fn, "dashboard_get_status(&ds)");
     const char *at_call = strstr(fn, "autotune_engine_is_active();");
+    TEST_CHECK(pe_call != NULL && dash_call != NULL && at_call != NULL,
+               "all three producer reads must live in screen_idle_refresh_inputs() -- a "
+               "missing one means the input it feeds is no longer read at all, or moved back "
+               "under the lock.");
+    const char *gate_return = gate ? strstr(gate, "return;") : NULL;
+    TEST_CHECK(gate_return != NULL && pe_call != NULL && gate_return < pe_call,
+               "the idle->recovery_mode branch must RETURN before the producer calls, not "
+               "merely mention the flag -- a gate that falls through is decorative.");
     TEST_CHECK(gate != NULL && pe_call != NULL && dash_call != NULL && at_call != NULL &&
                    gate < pe_call && gate < dash_call && gate < at_call,
                "the idle->recovery_mode check must appear BEFORE the profile_executor_get_"
@@ -350,6 +419,64 @@ static void run_section3_recovery_mode_gated(void)
                "this file's own top comment on why screen_idle.c is not host-compilable); it "
                "proves the source ORDER a real recovery-mode boot would take.");
 
+    free(fn);
+    free(text);
+}
+
+static void run_section3b_refresh_called_off_lock(void)
+{
+    TEST_SECTION("screen_idle_task refreshes the producer snapshot OUTSIDE idle->lock, and "
+                 "throttles it -- 2026-09-04 opus review of the recovery-mode/stack fix: the "
+                 "producer reads used to run inline inside screen_idle_run_policy_locked(), "
+                 "i.e. with the lock HELD, on every 50 ms tick. That is 20 Hz of five "
+                 "MAX31856 SPI burst reads on the panel's own SPI host, a kiln_io_owner_"
+                 "command_read() round trip that can block 200 ms, and two interrupts-"
+                 "disabled heap walks -- all under a lock lvgl_port.c's task (screen_idle_"
+                 "get_state(), every LVGL tick and every touch) and backlight_pwm.c's task "
+                 "both take, and directly against screen_idle.c's own documented invariant "
+                 "that the lock is 'never held across I2C or SPI traffic'.");
+
+    char *text = read_file_any(SCREEN_IDLE_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/screen_idle.c");
+        return;
+    }
+    size_t body_len = 0;
+    const char *body = find_function_body(text, "static void screen_idle_task(", &body_len);
+    if (!body) {
+        TEST_CHECK(false, "could not find screen_idle_task()'s function body in screen_idle.c "
+                           "-- update this test only if it was genuinely renamed.");
+        free(text);
+        return;
+    }
+    char *fn = dup_range(body, body_len);
+    TEST_CHECK(fn != NULL, "malloc for the extracted task body succeeded");
+    if (!fn) {
+        free(text);
+        return;
+    }
+    const char *refresh = strstr(fn, "screen_idle_refresh_inputs(idle)");
+    const char *lock = strstr(fn, "screen_idle_lock(idle)");
+    TEST_CHECK(refresh != NULL,
+               "screen_idle_task must call screen_idle_refresh_inputs() -- without it the "
+               "cached snapshot the policy reads is never written and firing/error would be "
+               "permanently false: a consumer with no producer, the exact class this file "
+               "exists to catch.");
+    TEST_CHECK(lock != NULL,
+               "could not find screen_idle_lock(idle) in screen_idle_task() -- update this "
+               "test if the poll tick's locking was restructured.");
+    TEST_CHECK(refresh != NULL && lock != NULL && refresh < lock,
+               "screen_idle_refresh_inputs() must be called BEFORE screen_idle_lock() in the "
+               "poll tick -- calling it inside the locked region is exactly the blocking-"
+               "under-lock defect this section pins.");
+    // ">= SCREEN_IDLE_INPUT_POLL_MS", not just the bare token: the token also
+    // appears in this loop's own explanatory comment, so matching it alone
+    // stayed green under a mutation that deleted the real comparison (proved
+    // by hand, 2026-09-04 -- negative-test-every-check).
+    TEST_CHECK(strstr(fn, ">= SCREEN_IDLE_INPUT_POLL_MS") != NULL,
+               "the refresh must be throttled by SCREEN_IDLE_INPUT_POLL_MS, not run on every "
+               "SCREEN_IDLE_POLL_MS touch tick -- dashboard_get_status()'s own doc comment "
+               "sizes its cost against a browser poll / the 2 s LCD tick, not 20 Hz forever.");
     free(fn);
     free(text);
 }
@@ -458,6 +585,7 @@ void run_test_display_power_wiring(void)
     run_section1_screen_idle_calls_policy();
     run_section2_touch_swallow_wired();
     run_section3_recovery_mode_gated();
+    run_section3b_refresh_called_off_lock();
     run_section4_screen_idle_init_takes_recovery_mode();
     run_section5_screen_idle_stack_sized_for_dashboard();
 }

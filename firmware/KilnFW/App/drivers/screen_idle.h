@@ -115,6 +115,48 @@ typedef struct {
      * correct, honest answer: recovery mode truly runs nothing that could
      * make either true. */
     bool recovery_mode;
+
+    /* Snapshot of the two EXPENSIVE producer reads (firing_active from
+     * profile_executor_get_status()+autotune_engine_is_active(),
+     * error_active from dashboard_get_status()+PROFILE_EXEC_FAULTED),
+     * refreshed by screen_idle_task ONLY, with this module's lock NOT
+     * held, at most once every SCREEN_IDLE_INPUT_POLL_MS (screen_idle.c).
+     *
+     * 2026-09-04 opus review of the recovery-mode/stack fix: the policy's
+     * inputs used to be read inline inside screen_idle_run_policy_locked(),
+     * i.e. with idle->lock HELD, on every 50 ms poll tick. That is 20 Hz of
+     * (a) five real MAX31856 SPI burst reads on the same SPI host the panel
+     * flushes over, (b) a kiln_io_owner_command_read() round trip that
+     * blocks up to KILN_IO_OWNER_WAIT_MS (200 ms) on another task's queue,
+     * and (c) heap_caps_get_free_size()/_largest_free_block() TLSF pool
+     * walks, which run with interrupts disabled -- all while holding a lock
+     * that lvgl_port.c's task (screen_idle_get_state(), every LVGL tick and
+     * every touch) and backlight_pwm.c's task both take, with a 1000 ms
+     * timeout. It also directly contradicted this module's own documented
+     * invariant ("Only ever held for a few variable reads/writes, never
+     * across I2C or SPI traffic", screen_idle.c). dashboard_get_status()'s
+     * own comment sizes that cost against "a browser's poll cadence" and
+     * ui_page_diagnostics.c's 2 s LCD tick -- not 20 Hz forever.
+     *
+     * Correctness of the snapshot: every consumer of these is a
+     * multi-second display timeout or a "raise the screen" decision, so a
+     * value at most SCREEN_IDLE_INPUT_POLL_MS old is indistinguishable from
+     * a fresh one to a human looking at the panel. The touch-edge path
+     * (screen_idle_touch_swallow(), called from the LVGL task) reads the
+     * snapshot rather than doing those reads itself -- which is also what
+     * keeps the LVGL task off SPI/heap-walk work it never asked for.
+     *
+     * In RECOVERY MODE these are never refreshed at all, so they keep their
+     * memset(0) false/false -- the honest answer (recovery mode starts
+     * neither profile_executor nor autotune_engine) and the whole reason
+     * the recovery gate lives at the refresh site. */
+    bool cached_firing_active;
+    bool cached_error_active;
+    /* Written and read ONLY by screen_idle_task (see screen_idle.c's
+     * refresh site) -- no other task touches them, so they need no lock of
+     * their own; the cached_* values above are published under idle->lock. */
+    uint32_t last_input_ms;
+    bool inputs_valid;
 } screen_idle_t;
 
 /* `display` must already be up (ILI9488_start succeeded); `touch` may be
