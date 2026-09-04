@@ -1708,7 +1708,43 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       raising them all would spend the DRAM margin measured above for comfort
       rather than evidence. Worth a focused follow-up to find which INFO
       subcommand sequence produces `info_uart_bridge`'s worst case
-- [x] **First real task-stack measurement this project has ever taken**, and
+- [x] **2026-09-04: `info_uart_bridge`'s worst-case INFO subcommand found,
+      measured, and fixed** (follow-up to the `ead4123` item above).
+      `uart_bridge_info.c`'s INFO task services 4 subcommands
+      (`GET_PIN_CONFIG`, `GET_FW_VERSION`, `GET_WIFI_STATUS`,
+      `GET_STACK_MARGIN`); its stack is PSRAM-backed
+      (`MALLOC_CAP_SPIRAM`, since 2026-08-22), so an overflow here would hit
+      the PSRAM heap, not the internal-DRAM cliff the `6ba8ae8` item above
+      measured. Methodology: `debug_reset(peer="esp")` before each
+      candidate to keep HWM readings attributable (monotonic since boot),
+      then drove each subcommand individually via `kiln_call`/`kiln_batch`,
+      then all four interleaved, then repeated under
+      `http_concurrency_reproducer.py --concurrency 8,16,24,28 --bursts 5`
+      against the live board (192.168.1.156, idle, no firing started).
+      `GET_PIN_CONFIG`/`GET_FW_VERSION`/`GET_WIFI_STATUS` never pushed the
+      HWM past what a single `GET_STACK_MARGIN` call already set.
+      `GET_STACK_MARGIN` is the worst case because its own reply is *always*
+      truncated at today's 25 registered tasks (entries don't fit
+      `BRIDGE_REPLY_MAX`=253 B), so every call takes the `ESP_LOGW`
+      truncation-warning branch (`build_stack_margin_reply()`), and that
+      branch measured deeper again under concurrent HTTP load — repeatable
+      worst case **476 B free of 3072 (15.5%)**, matching the `ead4123`
+      item's 468 B almost exactly, and stable/non-progressive across
+      repeated adversarial bursts (confirmed by hammering it — no slow
+      leak). That's only ~34 B above the 15% `CRITICAL` cutoff, thin enough
+      given it's a real, reproducible worst case (not a hypothetical) to
+      resize rather than leave alone. Since the stack is PSRAM, the fix
+      doesn't touch the scarce internal-DRAM 23195 B low-water budget from
+      the item above. Bumped `info_uart_bridge` 3072→3584 B (+512 B PSRAM,
+      `uart_bridge_info.c`), rebuilt, reflashed
+      (`flash_firmware(verify=True)`, confirmed running build
+      `68e8d6e`/19:49:41Z), and re-measured with the identical worst-case
+      sequence: **988 B free of 3584 (27.6%), `[OK]` band** (was 476 B/3072,
+      15.5%, `[LOW]`) — the full +512 B landed as headroom, confirming
+      nothing else in that path is progressively eating stack. No defect
+      found (no path came close to overflow); this was margin thinness, not
+      a bug. `system_uart_bridge` and `telemetry_log` remain `[LOW]` and are
+      out of scope for this pass. and
       it found `rules_task` — the rule evaluator that gates heating — at 336
       bytes of 3072, 10.9% headroom, on an idle board. Raised to 4096.
       It was invisible because the instrumentation had inherited vanilla

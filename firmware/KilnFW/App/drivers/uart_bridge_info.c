@@ -319,9 +319,22 @@ esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto)
     }
 
     /* 2026-08-22: PSRAM stack -- info_bridge_task only reports version/
-     * uptime/reset-reason state, no flash/NVS access, no hardware ownership. */
+     * uptime/reset-reason state, no flash/NVS access, no hardware ownership.
+     *
+     * 2026-09-04 (stack-headroom follow-up to commit ead4123): measured worst
+     * case is GET_STACK_MARGIN itself -- its reply is always truncated (25
+     * registered tasks don't fit BRIDGE_REPLY_MAX=253), so every call takes
+     * the ESP_LOGW formatting path, and that path measured deeper again
+     * (476 B free of 3072, 15.5%) under concurrent HTTP load, where
+     * uart_protocol_send()'s retry/backoff under link contention adds its
+     * own frames on top. Non-progressive across repeated adversarial bursts
+     * (confirmed by hammering it), but only ~34 B above the 15% CRITICAL
+     * cutoff -- thin enough, and cheap enough given this stack is PSRAM (not
+     * the scarce internal-DRAM budget the ~11.9 kB cliff applies to), to
+     * warrant the extra 512 B rather than leaving it this close to the line.
+     * See ROADMAP.md's ead4123 entry for the before/after re-measurement. */
     static TaskHandle_t s_info_bridge_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(info_bridge_task, "info_uart_bridge", 3072, &ctx, 5,
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(info_bridge_task, "info_uart_bridge", 3584, &ctx, 5,
                                                          &s_info_bridge_task, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
@@ -329,9 +342,9 @@ esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto)
         return ESP_ERR_NO_MEM;
     }
     /* Registration only, no size change -- only reached with a real handle
-     * since the failure branch above already returned. 3072 must match the
+     * since the failure branch above already returned. 3584 must match the
      * xTaskCreatePinnedToCoreWithCaps() literal above. */
-    stack_margin_register("info_uart_bridge", &s_info_bridge_task, 3072);
+    stack_margin_register("info_uart_bridge", &s_info_bridge_task, 3584);
 
     /* Best-effort unsolicited push so a GUI already connected at boot shows
      * the version immediately, without polling. If nothing is listening
