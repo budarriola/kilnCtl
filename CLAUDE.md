@@ -213,10 +213,21 @@ collide silently with an unrelated `static` elsewhere. See `b9a5112` for a
 worked example of both.
 
 KilnFW's `boot_guard.h` RECOVERY MODE deliberately skips starting subsystems
-(`profile_executor`, `autotune_engine`). A task started unconditionally in
-`main_boot_early.c` that calls into a skipped subsystem will deadlock and trip
-the watchdog — this bricked the bench board twice (`e7b8efc` and again on
-2026-08-22). New consumers there must gate on `boot_guard_is_recovery_mode()`.
+(`profile_executor`, `autotune_engine`), so a task started unconditionally in
+`main_boot_early.c` must gate on `boot_guard_is_recovery_mode()` before calling
+into one. Today's accessors are prestart-hardened (they check their lock for
+NULL), so the gate is defence in depth rather than the only thing standing
+between you and a hang — but the board has been bricked into a permanent
+recovery loop twice from this area (`e7b8efc`, and 2026-08-22).
+
+Both times the real fault was a task stack, not the missing gate: a 700-byte
+overflow corrupted the heap, and the pool walk then looped inside a critical
+section until the interrupt watchdog fired. **Register every new task for
+stack-margin reporting and measure it** — `check_stack_margin_registration.ps1`
+enforces this. Equally, never hold a module lock across the producer calls a
+policy tick makes (`dashboard_get_status()` alone does five MAX31856 SPI reads,
+a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
+snapshot outside the lock instead (`7a8594d`).
 
 ## Key Architecture Notes
 
