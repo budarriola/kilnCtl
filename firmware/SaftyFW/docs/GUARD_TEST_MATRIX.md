@@ -841,3 +841,66 @@ and is not in the host-test build, the same coverage boundary every other
 `safety_core` producer already sits behind. The redundant branch inside
 `safety_guards.c` is what makes that gap non-fatal rather than merely
 unmeasured.
+
+## 10. `virtual_dut` above-the-polarity-layer audit (ROADMAP.md M15 A4, 2026-09-04)
+
+No file or module named `virtual_dut` exists in this repo (`SimFW`/`kilnsim`,
+which the term is probably inherited from, were deleted 2026-08-28 — see
+durable memory `project_simfw_and_kilnsim_removed`). The term names a
+**pattern**, not a component: `discrete_task.c`'s own comment on the shipped
+S7 bug —  *"virtual_dut synthesizes `estop_pressed` directly and never
+exercises a GPIO read"* — describes any host test that hands
+`safety_guard_input_t` (or another already-reduced value) straight to the
+code under test, bypassing whatever raw-hardware decode/polarity/scaling
+layer a real board would have gone through first. This section is the
+requested audit of every synthesized input against that pattern.
+
+**Method.** For each input `safety_guard_input_t` carries (its own field-by-
+field header comment in `src/safety_guards.h` already documents that the
+struct's contract IS pre-reduced scalars — that is not itself the bug), trace
+backward from the field to its real producer and ask: does a pure,
+host-tested decode/policy function sit between the raw hardware value and
+this field, or does some test synthesize the field directly with nothing
+underneath it?
+
+| Input | Real decode/policy layer | Host-tested? | Injection point audited | Bug class invisible if skipped | Severity | Status |
+|---|---|---|---|---|---|---|
+| `estop_pressed` (S7) | `discrete_pin_policy_estop_asserted()` | Yes — `test/test_discrete_pin_policy.c` | `test_safety_guards.c` sets the field directly (post-decode, by struct contract); `safety_core_build_input()`'s one-line, unnegated assignment had no coverage | GPIO polarity inversion at the decode call site — **this is the exact bug that shipped** (S7, fixed 2026-08-24) | Was **critical** (shipped); residual risk was the un-tested wiring line | **Fixed historically** (policy extraction + test); **wiring line now covered** — added `test/test_safety_core_polarity_wiring.c` §below |
+| `main_fault_asserted` (S6a) | `discrete_pin_policy_main_fault_asserted()` | Yes — `test/test_discrete_pin_policy.c` | Same shape as `estop_pressed`: pure layer tested, `safety_core_build_input()`'s unnegated assignment previously untested | Same class as S7, opposite guard | Was **high** (S6a was found unwired in §6c, fixed 2026-08-24); residual wiring-line risk | **Wiring line now covered** — same new test |
+| `tc_valid`/`tc_c`/`cj_c`/`fault_bits`/`spi_failed` (S5) | `max31856_read()` (raw SPI + register decode) → `max31856_tc_range_policy.c`, `max31856_tc_type_policy.c`, `max31856_fault_pin_policy.c` | Policy layers yes (`test_max31856_tc_range_policy.c`, `test_max31856_tc_type_policy.c`, `test_max31856_fault_pin_policy.c`, `test_max31856_decode.c`); the raw SPI/register decode inside `max31856.c` itself is not host-testable (needs the SPI peripheral) | `test_safety_guards.c` synthesizes these fields directly (contract-correct); `thermo_task.c` wires the real functions | Fault-pin/CR1 polarity bug inside `max31856.c` | High if present | **Not touched** — `max31856.c` is currently being edited by another agent (fault-pin polarity extraction); documented only per this task's own instruction, not relocated |
+| `any_current_present`, `amps[]`, `amps_valid[]` (S3/S4/S9/S14) | `current_presence_policy.c`, `ct_amps_cal.c` | Yes — `test/test_current_presence_policy.c`, `test/test_ct_amps_cal.c` call the real pure functions | `test_safety_guards.c` synthesizes the reduced fields (contract-correct); `safety_core.c`'s forcing of these to the no-info state when `current_sensing_disabled` is true is RTOS-only | Uncalibrated/disabled-CT forcing silently dropped | Documented as an accepted, known gap already (§9, "One gap, recorded honestly") | **Already documented** — no new work needed |
+| `link_up`, context fields (S2/S6b/S10/S13) | `kilnlink_*_decode()` wire codecs, `snapshots.c`'s `context_reduce_zones()`/`current_any_present()` | Yes — `test_link_frame.c`, `test_link_frame_wire.c`, `test_kilnlink_power.c`, `test_kilnlink_inject_tc.c`, `test_snapshots.c` | `test_safety_guards.c` synthesizes the reduced fields (contract-correct) | Wire decode / frame CRC bug | Low residual — codecs are directly host-tested | **Already fixed historically** — no action |
+| `relay_deenergized` (S9) | `relay_owner_is_energized()`, negated once at the `safety_core_build_input()` call site | No pure layer exists (a one-line negation of a hardware-owned getter) — **and no test exercised the negation before this pass** | `test_safety_guards.c` synthesizes the field directly (contract-correct); the negation itself was untested | A dropped or doubled `!` makes S9 (the one guard whose entire job is "prove the trip actually worked", unclearable except at the breaker) trust a contactor that never opened | **High** — same "single bare `!`, zero coverage" shape as the shipped S7 bug | **Relocated** — added a source-text scan (`test/test_safety_core_polarity_wiring.c`), negative-tested below |
+| `sample_counter_advancing` (S13) | `snapshots.c` (pure, no raw layer needed — it's a plain counter comparison) | Yes — `test/test_snapshots.c` | contract-correct | n/a | Low | No action needed |
+| The whole `safety_guard_input_t` struct itself | — | — | `test/test_safety_guards.c` is the canonical injection point for every field above, **by design** (the struct's own header comment: pre-reduced scalars are its documented contract, the same "already reduced by the caller" split every guard in this file relies on) | None on its own — this is the intended seam. The risk lives entirely in whether each field's OWN producer is covered (rows above), not in this file existing | n/a | **Out of scope for this task** — `test/test_safety_guards.c` and `src/safety_guards.*` are owned by another concurrent session per this task's own instructions; left untouched |
+
+**Relocation done this pass.** One new file,
+`test/test_safety_core_polarity_wiring.c` (wired into `test/test_main.c` and
+`test/build_host_tests.ps1`, same source-text-scan technique
+`test/test_safety_core_s8_wiring.c` established for S8, since
+`safety_core.c` itself cannot be linked into a host test — FreeRTOS/pico-sdk).
+It pins the exact text of three one-line assignments inside
+`safety_core_build_input()`:
+
+```c
+.estop_pressed       = discrete_task_estop_pressed()   // must NOT be negated
+.main_fault_asserted = discrete_task_main_fault()       // must NOT be negated
+.relay_deenergized   = !relay_owner_is_energized()      // must be negated, exactly once
+```
+
+**Negative-tested.** Each of the three lines was mutated one at a time
+(drop/add a `!`) and the corresponding new check failed as expected before
+the line was restored: flipping `.estop_pressed` or `.main_fault_asserted`'s
+negation each dropped the suite to 2067/2068 with the matching `FAIL` line
+naming the guard and the consequence; flipping `.relay_deenergized`'s
+negation did the same for S9. All three were restored and the suite returned
+to green.
+
+**Not relocated, documented instead.** The S5 (thermocouple) raw-decode layer
+inside `max31856.c` — this task was explicitly told another agent is
+currently extracting that file's fault-pin polarity, so it was left alone
+per this task's own instruction rather than risking a collision. The
+`current_sensing_disabled` forcing gap was already recorded honestly in §9
+before this pass and needed no new documentation. `test/test_safety_guards.c`
+itself is the by-design injection seam for the whole `safety_guard_input_t`
+contract and is owned by another session; not touched.
