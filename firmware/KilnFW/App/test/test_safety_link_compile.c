@@ -865,6 +865,156 @@ static void test_stale_reset_then_reapply_recovers_after_reconnect(void)
     TEST_CHECK(link.peer_build_known == true, "step 2: peer_build_known repopulated too");
 }
 
+// --------------------------------------------------------------------------
+// ROADMAP.md M15 TASK B3 -- synthetic-old-peer compatibility test. The
+// prose judgement kilnlink_version.h's own comments re-argue at every bump
+// ("does an old peer break loudly or silently?") is made build-checkable
+// here: for every protocol version from KILNLINK_MIN_COMPATIBLE to the
+// current KILNLINK_PROTOCOL_VERSION, this table enumerates which Pico->ESP
+// frames a peer built at that version can actually send (derived from
+// kilnlink_version.h's own per-bump history comments, cited per row below),
+// and proves safety_drain_inbox_ex()'s real dispatch switch
+// (safety_link_inbox.c) has an explicit case for every one of them -- a
+// frame that would be silently dropped (payload[0] falls through to the
+// switch's `default:` and increments stats.unmatched_cmd_count, see that
+// branch's own comment) fails this test instead of merely reading as a
+// hung link on the bench.
+//
+// Scope: this is the KilnFW (ESP) side ONLY -- the dispatch table that
+// decides what happens to a frame the Pico sends. The mirror question (does
+// SaftyFW's link_task.c dispatch have a case for every frame the ESP can
+// send it) cannot be answered the same way from THIS tree: SaftyFW is a
+// separate Pico-target firmware (firmware/SaftyFW), its link_task.c pulls
+// in real RP2040 hardware/pico-sdk headers, and no host-test harness in
+// this repo #includes it off-target the way test_safety_link_compile.c
+// does for safety_link.c (see this file's own top-of-file header comment
+// for the "compiles and links off-target" precedent this file follows --
+// nothing equivalent has been built for the Pico side). Enumerating ITS
+// dispatch table without linking real hardware code is therefore out of
+// reach from here; closing that gap is a SaftyFW-side task, not this one.
+//
+// How each row was derived (kilnlink_version.h history, this file's own
+// #include of kilnlink_version.h via safety_link.c above):
+//   - GET_STATUS/FW_VERSION/UPDATE_STATUS/POWER/DIAG/TRIP_EVENT/CT_CAL/
+//     CONFIG_PAGE/COMMIT_CONFIG_REJECTED all predate KILNLINK_MIN_COMPATIBLE
+//     itself (7) -- none of their version-history entries describe them as
+//     NEWLY introduced at 7 or later; the 6->7 bump only renumbered the
+//     REQUEST ids (0x22/0x23/0x24, ESP->Pico, not part of this Pico->ESP
+//     dispatch table) and left the reply ids (0x1A/0x1E/0x1F) unchanged,
+//     and the 7->8 bump only added a bit WITHIN the existing 0x1F payload.
+//     So every one of these is sendable by a peer at MIN_COMPATIBLE (7).
+//   - ROLLBACK_RESULT (0x25): "8 -> 9 (2026-08-30): new Pico -> ESP frame,
+//     SAFETY_CMD_ROLLBACK_RESULT (0x25) ... An ESP still on protocol 8 or
+//     older simply never sees this frame" -- introduced at protocol 9,
+//     gated by KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL (kilnlink_rollback_
+//     result.h). KILNLINK_MIN_COMPATIBLE is explicitly NOT raised alongside
+//     this bump (kilnlink_version.h: "NOT bumped alongside the 8 -> 9 step
+//     above ... a peer built against 7 or 8 remains fully compatible"), so
+//     a MIN_COMPATIBLE(7) peer genuinely may never send this frame -- this
+//     is the one row where "gated above a version" has to hold.
+//   - The 9 -> 10 bump (BORROWED status bytes) grew an EXISTING frame
+//     (GET_STATUS) rather than introducing a new dispatched frame id, so it
+//     adds no new row here -- safety_apply_status()'s own V1/V2/V3 length
+//     handling (already covered by test_apply_status_v3_borrowed() above)
+//     is the build-checkable half of THAT bump.
+struct kilnlink_compat_frame {
+    const char *name;
+    uint8_t cmd;
+    uint16_t min_version; /* first KILNLINK_PROTOCOL_VERSION this frame is sendable at */
+    const char *citation;
+};
+
+static const struct kilnlink_compat_frame s_compat_frames[] = {
+    {"GET_STATUS (Frame A)", SAFETY_CMD_GET_STATUS, 7, "predates MIN_COMPATIBLE=7"},
+    {"FW_VERSION (Frame C)", SAFETY_CMD_FW_VERSION, 7, "predates MIN_COMPATIBLE=7"},
+    {"UPDATE_STATUS", SAFETY_CMD_UPDATE_STATUS, 7, "predates MIN_COMPATIBLE=7"},
+    {"POWER (Frame E)", SAFETY_CMD_POWER, 7, "predates MIN_COMPATIBLE=7"},
+    {"DIAG (Frame B)", SAFETY_CMD_DIAG, 7, "predates MIN_COMPATIBLE=7"},
+    {"TRIP_EVENT (Frame D)", SAFETY_CMD_TRIP_EVENT, 7, "predates MIN_COMPATIBLE=7"},
+    {"CT_CAL reply (0x1A)", KILNLINK_CT_CAL_CMD, 7,
+     "6->7: only the GET_* REQUEST id moved (0x22); the 0x1A reply id is unchanged"},
+    {"CONFIG_PAGE reply (0x1F)", KILNLINK_CONFIG_PAGE_CMD, 7,
+     "6->7: only the GET_* REQUEST id moved (0x24); the 0x1F reply id is unchanged "
+     "(7->8 added the `set` bit inside the same 0x1F payload, no new id)"},
+    {"COMMIT_CONFIG_REJECTED (0x20)", KILNLINK_COMMIT_CONFIG_REJECTED_CMD, 7, "predates MIN_COMPATIBLE=7"},
+    {"ROLLBACK_RESULT (0x25)", KILNLINK_ROLLBACK_RESULT_CMD, KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL,
+     "8->9: \"new Pico -> ESP frame, SAFETY_CMD_ROLLBACK_RESULT (0x25)\" -- "
+     "KILNLINK_MIN_COMPATIBLE NOT raised alongside this bump"},
+};
+#define COMPAT_FRAME_COUNT (sizeof(s_compat_frames) / sizeof(s_compat_frames[0]))
+
+// Sends one frame with the given cmd byte through the REAL dispatch
+// (safety_drain_inbox_ex(), safety_link_inbox.c) and returns true if it hit
+// an explicit case (stats.unmatched_cmd_count did not move), false if it
+// fell through to the switch's default: branch -- i.e. would be silently
+// dropped on real hardware.
+static bool compat_frame_has_dispatch_case(uint8_t cmd)
+{
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.payload[0] = cmd;
+    msg.length = 1; // enough to enter the switch; decode success is not what this proves
+
+    fake_inbox_reset();
+    fake_inbox_push(&msg);
+
+    uint32_t before = link.stats.unmatched_cmd_count;
+    (void)safety_drain_inbox_ex(&link, 0, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    return link.stats.unmatched_cmd_count == before;
+}
+
+static void test_dispatch_has_a_case_for_every_frame_each_compatible_version_can_send(void)
+{
+    TEST_SECTION("safety_drain_inbox_ex dispatch -- every frame a peer at any version from "
+                 "KILNLINK_MIN_COMPATIBLE to KILNLINK_PROTOCOL_VERSION can send has an explicit "
+                 "dispatch case (positive direction: nothing a compatible peer sends is silently dropped)");
+
+    for (uint16_t version = KILNLINK_MIN_COMPATIBLE; version <= KILNLINK_PROTOCOL_VERSION; version++) {
+        for (size_t i = 0; i < COMPAT_FRAME_COUNT; i++) {
+            const struct kilnlink_compat_frame *f = &s_compat_frames[i];
+            if (version < f->min_version) {
+                continue; // this peer version predates the frame -- covered by the reverse test below
+            }
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "protocol %u peer can send %s (introduced at %u, %s) -- current dispatch must "
+                     "have an explicit case for cmd 0x%02X",
+                     (unsigned)version, f->name, (unsigned)f->min_version, f->citation, (unsigned)f->cmd);
+            TEST_CHECK(compat_frame_has_dispatch_case(f->cmd), msg);
+        }
+    }
+}
+
+static void test_frames_gated_above_a_version_are_not_expected_from_that_peer(void)
+{
+    TEST_SECTION("reverse direction -- a frame gated to protocol >= min_version must NOT be "
+                 "counted as something an older peer (below that gate) can send, even though "
+                 "the current build's dispatch happens to have a case for it (additive-safe)");
+
+    for (size_t i = 0; i < COMPAT_FRAME_COUNT; i++) {
+        const struct kilnlink_compat_frame *f = &s_compat_frames[i];
+        for (uint16_t version = KILNLINK_MIN_COMPATIBLE; version < f->min_version; version++) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "protocol %u peer predates %s (introduced at %u, %s) -- must NOT be in that "
+                     "version's expected-frame set",
+                     (unsigned)version, f->name, (unsigned)f->min_version, f->citation);
+            TEST_CHECK(version < f->min_version, msg); // table-construction tautology made explicit/checkable
+        }
+    }
+
+    // The one real row this closes: ROLLBACK_RESULT's gate must sit STRICTLY
+    // above KILNLINK_MIN_COMPATIBLE, or a "MIN_COMPATIBLE peer never sends
+    // this" claim above would be false for the oldest peer this build still
+    // accepts at all.
+    TEST_CHECK(KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL > KILNLINK_MIN_COMPATIBLE,
+               "ROLLBACK_RESULT's MIN_PROTOCOL gate (9) sits strictly above KILNLINK_MIN_COMPATIBLE (7) -- "
+               "the oldest peer this build still talks to is never expected to send it");
+}
+
 int g_test_failures = 0;
 int g_test_count = 0;
 
@@ -888,6 +1038,8 @@ int main(void)
     test_stale_reset_clears_flags_once_link_is_observed_down();
     test_stale_reset_never_received_is_also_down();
     test_stale_reset_then_reapply_recovers_after_reconnect();
+    test_dispatch_has_a_case_for_every_frame_each_compatible_version_can_send();
+    test_frames_gated_above_a_version_are_not_expected_from_that_peer();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

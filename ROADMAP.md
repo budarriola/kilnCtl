@@ -1765,27 +1765,85 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
       `ARCHITECTURE.md`, and autotune has four separable concerns, on the
       `profile_executor` 8-file split's precedent. M-L
-- [ ] **Stand-in stubs sit above the polarity/decode layer.**
+- [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
       `virtual_dut` stands in above translation, not below it. Audit the
       remaining stand-ins (current sense, TC SPI) and push stubs below the
-      decode layer. S to audit, M per stub
+      decode layer. S to audit, M per stub — **AUDIT PART CLOSED 2026-09-04**,
+      full table in `SaftyFW/docs/GUARD_TEST_MATRIX.md` §10: no `virtual_dut`
+      module exists (that name is inherited from the deleted `SimFW`/
+      `kilnsim`); the pattern was audited against every `safety_guard_input_t`
+      field instead. Current sense (`current_presence_policy.c`,
+      `ct_amps_cal.c`) and every already-existing decode/policy layer
+      (`discrete_pin_policy.c`, `max31856_*_policy.c`, `snapshots.c`, the
+      `kilnlink_*_decode()` codecs) were already relocated below the stub in
+      prior sessions and are host-tested directly. **One new relocation this
+      pass:** `safety_core_build_input()`'s `.relay_deenergized =
+      !relay_owner_is_energized()` line (S9) had a bare, single `!` with zero
+      coverage — the same shape as the shipped S7 bug — closed with a new
+      source-text-scan test, `test/test_safety_core_polarity_wiring.c`
+      (same technique `test_safety_core_s8_wiring.c` uses, since
+      `safety_core.c` itself is not host-compilable), which also pins
+      `.estop_pressed`/`.main_fault_asserted`'s required non-negation.
+      Negative-tested: each of the three lines' negation was flipped one at a
+      time and the matching check failed (2067/2068), then restored (2068/2068).
+      **Documented, not touched:** the TC SPI raw-decode layer inside
+      `max31856.c` — another agent is extracting its fault-pin polarity
+      concurrently, so left alone per instruction; the
+      `current_sensing_disabled` forcing gap was already recorded honestly in
+      GUARD_TEST_MATRIX.md §9 before this pass. `test/test_safety_guards.c`
+      itself (the by-design injection seam for the whole
+      `safety_guard_input_t` contract) is owned by another concurrent session
+      and was not touched.
 - [ ] **`safety_link.h` hand-mirrors CommonFW frame constants.** POWER/DIAG/
       UPDATE_STATUS flag blocks (`safety_link.h:243-249,257-280,632-654`, 9
       "mirrored here" comments) duplicate `kilnlink_power.h`/`kilnlink_diag.h`
       by hand because KilnFW cannot `#include` SaftyFW's headers. Either call
       the CommonFW codecs directly or add a CI diff against the source-of-
       truth headers. M
-- [ ] **No shared bounded-wait/unknown-outcome helper.** The discipline behind
+- [x] **No shared bounded-wait/unknown-outcome helper.** The discipline behind
       `safety_link_rollback_boot_id_changed()`'s rollback path (`safety_link.c`
       ~262, "a rollback that fully succeeded into a permanent
       UNKNOWN_TIMEOUT") exists only there. Extract a shared await-reply-or-
-      unknown helper for the new-ESP/old-Pico skew case generally. S-M
-- [ ] **`KILNLINK_MIN_COMPATIBLE` is prose-argued per bump.**
+      unknown helper for the new-ESP/old-Pico skew case generally. S-M —
+      **CLOSED 2026-09-04**: `safety_link_await_or_unknown()` (declared
+      `safety_link.h`, cross-TU decl `safety_link_internal.h`, defined
+      `safety_link.c`) is a generic "poll at an interval until a callback
+      reports ACKED/UNKNOWN or the timeout elapses" helper, documented
+      against `LINK_PROTOCOL.md`'s "a timeout must never be misreported as
+      success" skew rule, with a doc comment requiring future Pico-bound
+      commands to route through it rather than hand-roll a poll loop.
+      `safety_link_send_rollback_ex()`'s boot_id-reconnect watch
+      (`safety_link_commands.c`) ported onto it: the old inline `for(;;)`
+      loop body became `rollback_boot_watch_poll()`, a
+      `safety_link_await_poll_fn`, with a `rollback_boot_watch_ctx_t`
+      closure carrying what used to be captured locals — same per-iteration
+      decisions, same log lines, zero behavior change. `build_kilnfw` and
+      21/21 host test executables pass (one pre-existing, unrelated
+      `test_safety_link` failure noted below, present before this change and
+      untouched by it).
+- [x] **`KILNLINK_MIN_COMPATIBLE` is prose-argued per bump.**
       `kilnlink_version.h:20-24` documents this is a human judgement call, not
       a hash or a check. Add a synthetic-old-peer host test that asserts
-      dispatch-table coverage per historical version. M
+      dispatch-table coverage per historical version. M — **CLOSED
+      2026-09-04**: `test_safety_link_compile.c` gained a table (one row per
+      Pico->ESP frame, cited against `kilnlink_version.h`'s own per-bump
+      history comments) driving `safety_drain_inbox_ex()`'s real dispatch
+      switch (`safety_link_inbox.c`) for every protocol version from
+      `KILNLINK_MIN_COMPATIBLE` (7) to `KILNLINK_PROTOCOL_VERSION` (10): a
+      frame that falls through to the switch's `default:` now fails the
+      build instead of reading as a silently dropped/dead link. Reverse
+      direction also asserted (a frame gated above a version, e.g.
+      `ROLLBACK_RESULT` at protocol 9, is not expected from an older-but-
+      still-compatible peer). KilnFW side only — SaftyFW's own dispatch
+      (`link_task.c`) needs real RP2040/pico-sdk headers this tree has no
+      off-target harness for; documented as out of reach in the test file's
+      own header comment. Negative-tested: commenting out the
+      `KILNLINK_ROLLBACK_RESULT_CMD` case failed the new test naming the
+      exact frame and both affected protocol versions (9 and 10), then
+      passed again once restored. `build_kilnfw` and all 21 host test
+      executables green.
 - [x] **Duty composition has no single breakdown struct.** Four stages —
       `profile_executor_feedforward.c:291-515`,
       `profile_executor_pid_tick.c` PID clamp then load-cap boost
@@ -1927,13 +1985,27 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       misdecodes temperatures. Lift the offsets into a shared CommonFW header,
       the way `kilnlink_rollback_result.h` already does for that result type.
       M
-- [ ] **The drift test for the item above is itself a third hand-copy.**
+- [x] **The drift test for the item above is itself a third hand-copy.**
       `SaftyFW/test/test_link_frame_wire.c:93` `mirror_apply_status()` is a
       transcription of `safety_apply_status()`/`safety_parse_fw_version()`
       (KilnFW `safety_link.c`), not a link to them — it can drift green
       exactly like the two functions it's meant to catch drifting from each
       other. Add a CI check that diffs the `p[N]` offset lists between the
-      mirror and the real function. M
+      mirror and the real function. M — **CLOSED 2026-09-04**:
+      `App/test/frame_a_offset_drift_check.py` extracts the ordered
+      `p[N]`/`out[N]`/`&x[N]` offset table for Frame A's six numeric fields
+      (`tc_temp_c`/`cj_temp_c`/`tc_fault`/`amps1-3`) from all three copies —
+      `SaftyFW/src/tasks/link_frame.c`'s `link_frame_pack_status()` (pack),
+      `KilnFW/App/drivers/safety_link_frames.c`'s `safety_apply_status()`
+      (parse), and `SaftyFW/test/test_link_frame_wire.c`'s
+      `mirror_apply_status()` (the drift test itself) — and fails naming the
+      exact file/field/offset on any disagreement.
+      `check_frame_a_offset_drift.ps1` wires it into
+      `tools/run_all_checks.ps1`'s `check_*.ps1` discovery glob, same
+      pattern as `check_flash_worker_lint.ps1`. Negative-tested: changed
+      `safety_link_frames.c`'s `tc_fault` read from `p[10]` to `p[9]`, check
+      failed naming `safety_link_frames.c: 'tc_fault' read from offset 9,
+      expected 10`; reverted, confirmed clean again.
 - [x] **MAX31856 fault-pin polarity is inline and host-untested.**
       `SaftyFW/src/max31856.c:231`,
       `out->fault_pin_asserted = (s_fault_gpio >= 0) && (gpio_get(s_fault_gpio) == 0)`
@@ -1964,7 +2036,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       used by test stubs, so full deletion was awkward; the branch now fails
       loudly (`ESP_LOGE` + `ESP_ERR_NOT_SUPPORTED`) instead of blocking, per
       `LINK_PROTOCOL.md` §3.
-- [ ] **`LINK_PROTOCOL.md` section 10's completion checklist is stale.**
+- [x] **`LINK_PROTOCOL.md` section 10's completion checklist is stale.**
       TRIP_EVENT dedup, the POWER/DIAG frames, and the 30 s firing-abort are
       all listed unchecked (`CommonFW/docs/LINK_PROTOCOL.md` sec 10) though
       implemented — `safety_link_frames.c:280-295` (TRIP_EVENT dedup),
@@ -1972,7 +2044,19 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       and `profile_executor.c:1112-1147` plus
       `test_safety_link.c:77-92`/`:86-92` (30 s abort, tested and pinned).
       `CommonFW/docs` is owned by CommonFW, not KilnFW — someone with edit
-      access there needs to tick these. S (doc-only)
+      access there needs to tick these. S (doc-only) — **CLOSED 2026-09-04**:
+      each verified directly in code before ticking —
+      `safety_apply_trip_event()` (`safety_link_frames.c:883-928`) dedups on
+      `trip_seq` via `safety_trip_decision.c`, with the boot-reboot dedup
+      reset at `:280-295`; `safety_apply_power()` (`:685`) and
+      `safety_apply_diag()` (`:793`) both exist and apply their frames;
+      `profile_executor.c:1201-1236`'s `safety_link_silent_30s` /
+      `SAFETY_LINK_FIRING_ABORT_SILENCE_MS` implements the 30 s abort,
+      pinned by `test_safety_link.c:77-92`
+      (`test_firing_abort_ms_constant_is_30000`). `LINK_PROTOCOL.md` sec 10
+      updated: TRIP_EVENT, DIAG, POWER, and the 30 s firing-abort line items
+      ticked with file:line citations; the two still-genuinely-open liveness
+      items (pre-first-frame-down, bench-escape doc) left unchecked.
 
 Informational: the Pico is still on protocol v8, which makes S13's
 BORROWED-zone indicator unreachable in practice today — it fails closed and
