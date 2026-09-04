@@ -1,14 +1,20 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-04 (M15 opened: architecture
-> review findings; M15's closed items' full detail moved to
-> `docs/COMPLETED_2026-09.md` per the roadmap-upkeep checklist) (reconciled
+> **Status:** planning · **Last reviewed:** 2026-09-04 (M15 CLOSED — all 22
+> architecture-review findings landed same day, full detail in
+> `docs/COMPLETED_2026-09.md`; §1 nuisance-rejection coverage (S3/S4/S6a/S7/S9/
+> S10) and payload-decoder fuzzing closed against `GUARD_TEST_MATRIX.md`;
+> `SAFETY_CASE.md` written and then corrected the same day — see its two
+> ACCEPTED RISKS and evidence rollup in
+> [What is actually left](#what-is-actually-left); `SYSTEM_ARCHITECTURE.md`
+> written) (reconciled
 > against
 > the five KilnFW plan docs; M11 closed; M12a opened
 > and closed the same day; M12/M13 in progress; `DISPLAY_ST7796_PLAN.md`
 > Phases 1/2/3/5 landed, Phases 4/6 in progress; ramp assist landed end to end
-> default OFF; board reflashed 2026-09-03 07:36:20 and a coupling-matrix A/B
-> is running on it now)
+> default OFF; board reflashed 2026-09-03 07:36:20; the coupling-matrix A/B has
+> been superseded by the fuzzy-PID A/B `fuzzy_ab_20260904c`, LIVE and in a
+> cooling wait — do not flash, reset, or write config while it runs)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -64,6 +70,8 @@ What is still genuinely open is short:
 | S | Physical zone arrangement — which element is where | [What is actually left](#what-is-actually-left) |
 | S | The deferred sanity rate for S8 — S8 gained a pure-module implementation and is integrated (2026-09-03, `safety_guards.c`/`safety_core.c`, `SaftyFW/docs/GUARD_TEST_MATRIX.md`), but ships deliberately off (`max_rate_c_per_min` defaults to 0, same "no default by design" shape as S1), so commissioning that field is what will enable it | M3 |
 | S | `hardware/UnitTestFixture/` — delete or keep | M7 |
+| XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
+| — | **Guard evidence is mostly host-tested, not hardware-verified.** Of ~20 tracked guard-level claims, 19 are host-tested and only **3** are hardware-verified (S5's sensor fit/masking finding, KilnFW thermal_guard guard 6, the E-stop polarity fix) — everything else, including all of S1–S4/S6–S14's trip logic and KilnFW guards 1/2/3/4/5/7/9, has never been provoked on real silicon | `docs/SAFETY_CASE.md` §4 rollup; `GUARD_TEST_MATRIX.md` §3 |
 
 ### Software, doable now — no hardware, no decisions
 
@@ -407,6 +415,43 @@ failure modes that would otherwise have surfaced mid-firing.
   `zones_http_client` field-mapping bug) is resolved (`b1ea749d`) — the run
   itself still has not happened, see GATED below.
 
+**Closed 2026-09-04 — safety-case and guard-coverage hardening, no longer
+open** (full detail owned by `GUARD_TEST_MATRIX.md`, `SAFETY_MODEL.md` and
+`docs/SAFETY_CASE.md` — not duplicated here):
+- 27 previously-unfuzzed `kilnlink` payload decoders got seeded corpus+random
+  fuzz targets in `firmware/CommonFW/test/test_fuzz_payloads.c`, canary-guarded
+  and ASan-clean (`ccb23ac`), closing a `GUARD_TEST_MATRIX.md` item.
+- §1 nuisance-rejection coverage completed for S3/S4/S10 (`7e2dc1c`);
+  `discrete_task.c`'s debounce extracted into a pure `debounce_policy.c/.h`,
+  closing the S6a/S7 host gaps (`d506a54`); S9's decay behaviour, which
+  overturned a prior "hardware-only" verdict (`7e84534`). SaftyFW host checks
+  went 2077 → 2131.
+- Every `SAFETY_MODEL.md` summary-table row got a per-row verification state
+  (`ecdad62`); `SAFETY_CASE.md` was corrected the same day — it had
+  **understated** thermal_guard guards 1/2/4/5/7 as argued-only when they are
+  genuinely host-tested, and guard 9's "found on the bench 2026-08-25" claim
+  was retracted after a git-history search found nothing behind it (`a2df81a`).
+- Triage of 89 unchecked items across `UPDATE_PROTOCOL.md`/`LINK_PROTOCOL.md`/
+  `REPO_LAYOUT.md`: ~66 were already done and merely unticked, now cited
+  (`503ab3b`), plus four protocol/safety doc defects fixed, including
+  documenting `SAFETY_CMD_ANNOUNCE_REBOOT` (0x18) — implemented but entirely
+  absent from `LINK_PROTOCOL.md` (`54d13e3`).
+- New `tools/wire_protocol_fingerprint_check.py`: fails when a wire-relevant
+  declaration changes without a protocol version bump — two such bumps had
+  already shipped missing one (`bf401f4`).
+
+**The fuzzy-PID A/B campaign was found structurally inert, fixed, and is now
+LIVE on the kiln — do not touch the board while it runs.** Both presets had
+`control_mode: 2`, so the fuzzy layer (which only runs under mode 3) never
+engaged and the campaign was silently comparing PID against itself
+(`8906686`). Presets fixed and the campaign restarted as
+`fuzzy_ab_20260904c`, with live `bd_*` proof that effective gains now differ
+from base (`91c5d6d`). A separate audit of the *ease-off* A/B, run against the
+same inert-campaign bug class, confirmed it was **not** inert and its
+"indistinguishable" conclusion stands; it also added a standing pre-flight
+check (`PID_EXPANSION_PLAN.md` §3.6b) requiring live `bd_*` proof before any
+future control-law A/B (`51e3d59`).
+
 **What is currently GATED, and on what** (the short answer for planning):
 
 | Item | Gated on | Where |
@@ -414,7 +459,7 @@ failure modes that would otherwise have surfaced mid-firing.
 | DRAM/PSRAM allocator-threshold work | A full soak (cold firing through cooldown) plus a Pico OTA relay-path measurement that has never been taken | `DRAM_PSRAM_PLAN.md` §5/§6/§9 |
 | Second LCD panel (ST7796/MSP4031) | The physical panel, and its pre-power STOP-block 5V I2C hazard check before the module ever touches J2 | `DISPLAY_ST7796_PLAN.md` §0/§4 |
 | Ramp assist default (OFF → ON) | A real firing at cone temperatures — everything measured so far is bench-range (0–80 °C), well below where the cone table's heat-work weighting matters | `PID_EXPANSION_PLAN.md` §7 |
-| Fuzzy-PID layer's first above-zero hardware run | Nothing named now — its last blocker (a field-mapping bug) is fixed and the run is available; it just hasn't been run yet | `PID_EXPANSION_PLAN.md` §3.6 |
+| Fuzzy-PID layer's first above-zero hardware run | **No longer gated — LIVE.** Fixed and restarted as `fuzzy_ab_20260904c`, currently in a cooling wait on the kiln | `PID_EXPANSION_PLAN.md` §3.6 |
 
 **What is done and should not be reopened:** the link itself, the wire
 contract and its two independent version numbers, the PC-link acknowledgement
@@ -2186,98 +2231,17 @@ actively dangerous: a string-literal fix to `check_isolation.ps1` that blinded
 its own `#include` rule while still printing "Isolation check passed". A check
 nobody has watched fail is not evidence.
 
-## M15 — Architecture hardening · *opened 2026-09-04*
+## M15 — Architecture hardening · *opened and CLOSED 2026-09-04*
 
-Findings from a four-agent architecture review, coordinator spot-verified.
-Owner: unassigned. Full closeout detail (file maps, symbol audits, negative
-tests) for every item below lives in
+**CLOSED.** All 22 findings from the four-agent architecture review landed
+the same day (12 files over the 1500-line rule split move-only, five new CI
+drift/lint checks added, the SX1509/DRAM/duty-struct/mode-state/JSONL/
+quantize/mcpkit/frame-A findings all fixed) — `build_kilnfw` + 21/21 host
+tests green throughout. Informational carry-forward: the Pico is still on
+protocol v8, which makes S13's BORROWED-zone indicator unreachable in
+practice (fails closed and visibly, not a defect). Full per-item detail,
+file maps and the "patterns worth copying" list:
 [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m15-architecture-hardening-findings-full-detail).
-
-- [x] `SX1509.h` public by accident — write/config API moved to
-      `SX1509_internal.h`, gated behind `SX1509_OWNER_BUILD`. **CLOSED 2026-09-04.**
-- [x] `GET /api/status` allocates from internal DRAM — converted to
-      `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)` in `dashboard_http.c`/
-      `backup_http.c`. **CLOSED 2026-09-04.**
-- [x] **12 files exceed the 1500-line rule.** All twelve closed 2026-09-04:
-      `wifi_prov.c`, `autotune_engine.c`, `dashboard_http.c`, `profiles_http.c`,
-      `ota_http.c`, `zones_config_json.c`, `backup_http.c`, `uart_bridge_ext.c`,
-      `zones_http_handlers.c` (now split across `zones_http_get.c`/
-      `_post.c`/`_post_parse.c`/`_pid.c`), `ui_page_home.c`, `panel_spi.c`,
-      `main.c` — each split move-only, symbol-audited for collisions,
-      `build_kilnfw` + 21/21 host tests green after each. Full per-file split
-      map in
-      [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m15-architecture-hardening-findings-full-detail).
-      **Verified against measured `wc -l` 2026-09-04**: `autotune_engine.c`
-      1462, `wifi_prov.c` 561, `dashboard_http.c` 774, `ota_http.c` 1079,
-      `ui_page_home.c` 1024, `panel_spi.c` 551, `profiles_http.c` 1151,
-      `zones_config_json.c` 674, `backup_http.c` 96, `uart_bridge_ext.c` 539,
-      `main.c` 218 (split into `main_boot_early.c` 704, `main_control_
-      bringup.c` 218, `main_network_http.c` 644, `main_bridges_bringup.c`
-      228, `main_internal.h` 126) — all under 1500. **CLOSED 2026-09-04.**
-- [x] Stand-in stubs sit above the polarity/decode layer — audited against
-      every `safety_guard_input_t` field; one new relocation (S9's
-      `.relay_deenergized` negation). **CLOSED 2026-09-04** (audit part).
-- [x] `safety_link.h` hand-mirrors CommonFW frame constants — added a CI
-      drift check (`power_diag_flag_mirror_drift_check.py`) rather than
-      rewiring the codecs. **CLOSED 2026-09-04.**
-- [x] No shared bounded-wait/unknown-outcome helper —
-      `safety_link_await_or_unknown()` extracted, rollback path ported onto
-      it. **CLOSED 2026-09-04.**
-- [x] `KILNLINK_MIN_COMPATIBLE` is prose-argued per bump — added a
-      synthetic-old-peer dispatch-coverage host test. **CLOSED 2026-09-04.**
-- [x] Duty composition has no single breakdown struct — `zone_duty_
-      breakdown_t` added, populated read-only, exposed on `/api/control`.
-      **CLOSED 2026-09-04.**
-- [x] Mode-state sprawl — legal/illegal-state table documented,
-      `exec_mode_state_check()` asserts it every tick. **CLOSED 2026-09-04.**
-- [x] No lint against flash/NVS writes outside the flash worker —
-      `flash_worker_lint.py` added, wired into `run_all_checks.ps1`.
-      **CLOSED 2026-09-04.**
-- [x] `zones_http_client.py` hand-types its field table —
-      `selfcheck_zones_fields.py` diffs it against firmware source live.
-      **CLOSED 2026-09-04.**
-- [x] No stub-vs-real-IDF signature check —
-      `stub_signature_drift_check.py` added, 26/26 stub headers clean.
-      **CLOSED 2026-09-04.**
-- [x] Nine checks/tests broke silently on the 1500-line-rule splits above
-      (hardcoded source-file paths a split moved/renamed, incl. a skip-guard
-      that turned into a silent zero-coverage pass) — `source_path_drift_
-      check.py` added, wired into `run_all_checks.ps1`. **CLOSED 2026-09-04.**
-- [x] Campaign runner has no board-config restore on abnormal exit —
-      `run_queue()` wrapped in `try/except BaseException` with a restore
-      hook plus an arms-differ preflight. **CLOSED 2026-09-04.**
-- [x] Four hand-rolled JSONL parse loops disagree on malformed-line
-      handling — factored into `kilnctrl/jsonl_util.py`'s `iter_jsonl()`.
-      **CLOSED 2026-09-04.**
-- [x] `tuning_campaign.py`'s `make_plant` generates continuous floats —
-      `_quantize()` helper added, on by default. **CLOSED 2026-09-04.**
-- [x] Vendored `mcpkit_registry.py` has no drift guard — added to
-      `selfcheck.py`. **CLOSED 2026-09-04.**
-- [x] Frame A's field layout is hand-duplicated across firmwares — lifted
-      into `CommonFW/include/kilnlink/kilnlink_frame_a_offsets.h`, all three
-      sites index through it. **CLOSED 2026-09-04.**
-- [x] The drift test for the item above is itself a hand-copy —
-      `frame_a_offset_drift_check.py` diffs all three copies' offset tables.
-      **CLOSED 2026-09-04.**
-- [x] MAX31856 fault-pin polarity is inline and host-untested — extracted to
-      `max31856_fault_pin_policy.h/.c`, host-tested both directions.
-      **CLOSED 2026-09-04.**
-- [x] Dead blocking fixed-length `uart_read_bytes` branch stays loaded —
-      now fails loudly instead of blocking. **CLOSED 2026-09-04.**
-- [x] `LINK_PROTOCOL.md` section 10's completion checklist is stale — TRIP_EVENT/
-      POWER/DIAG/30s-abort verified against code and ticked. **CLOSED 2026-09-04.**
-
-Informational: the Pico is still on protocol v8, which makes S13's
-BORROWED-zone indicator unreachable in practice today — it fails closed and
-visibly, so not a defect, but a concrete reason to prioritize bringing the
-Pico build current.
-
-**Patterns worth copying, not just avoiding:** `thermal_guard_tick`'s explicit
-input-struct interface; `kiln_cfg_store`'s interlock kept inside the module
-that owns the write path; `safety_cfg_http_client`'s live-lookup field table
-(the fix for the zones item above); and `kilnlink_version.h`'s deliberate
-independence of the two version constants — documented reasoning, do **not**
-propose re-tying them.
 
 
 ---
