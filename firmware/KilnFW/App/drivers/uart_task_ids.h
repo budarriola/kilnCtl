@@ -85,8 +85,8 @@
  * UART_PROTOCOL_VERSION is therefore back to being its OWN,
  * independently-maintained literal, exactly as it was before 2026-08-17 --
  * it must never again be defined in terms of KILNLINK_PROTOCOL_VERSION or
- * any other kilnlink_version.h symbol. Frozen at 7, not reset to some
- * smaller number: the PC link's own contract genuinely did change in the
+ * any other kilnlink_version.h symbol. Set to 7 at that point, not reset to
+ * some smaller number: the PC link's own contract genuinely did change in the
  * same commit that pushed kilnlink to 7 (GET_CT_CAL/GET_PARAM/
  * GET_CONFIG_PAGE are mirrored PC->ESP on this same UART_TASK_ID_SAFETY task
  * -- see SAFETY_CMD_GET_CT_CAL's doc comment below -- and their ids moved on
@@ -96,7 +96,8 @@
  * advertise compatibility with a PC build that predates the CONTROL/
  * PROFILES/AUTOTUNE/WIFI/TOUCH task ids and the GET_CT_CAL/GET_PARAM/
  * GET_CONFIG_PAGE id split -- a real regression dressed up as a version
- * reset.
+ * reset. (It has since moved on, independently, from that 7: see Versions
+ * 8/9/10 below -- the constant currently reads 10, not 7.)
  *
  * From here on the two numbers move INDEPENDENTLY, each bumped only when
  * ITS OWN link's contract changes:

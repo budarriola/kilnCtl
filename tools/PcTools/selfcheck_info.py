@@ -63,8 +63,13 @@ _PIN_CONFIG_REPLY = bytes([len(_PIN_CONFIG_ENTRIES)]) + b"".join(
 
 #: A GET_FW_VERSION reply as build_fw_version_reply() emits it: protocol
 #: version (u16 LE) first at a fixed offset, then dirty/commit/datetime.
+#: Built from devices.UART_PROTOCOL_VERSION itself, not a hand-copied
+#: literal -- a hardcoded byte pair here (previously bytes([5, 0]), stale
+#: against a UART_PROTOCOL_VERSION that had already moved to 10) is exactly
+#: what silently turned this "compatible" fixture into an "INCOMPATIBLE"
+#: one and cascaded failures through every check downstream of it.
 _FW_VERSION_REPLY = (
-    bytes([5, 0])  # UART_PROTOCOL_VERSION = 5, matches devices.UART_PROTOCOL_VERSION
+    struct.pack("<H", devices.UART_PROTOCOL_VERSION)
     + bytes([1, 7])
     + b"a1b2c3d"
     + bytes([20])
@@ -113,7 +118,11 @@ def info_checks() -> None:
     check("every reported gpio is on the diagram", pin_overlay.unmapped_gpios(entries), [])
 
     version = devices.parse_fw_version_response(_FW_VERSION_REPLY)
-    check("fw version protocol_version", version.protocol_version, 5)
+    check(
+        "fw version protocol_version",
+        version.protocol_version,
+        devices.UART_PROTOCOL_VERSION,
+    )
     check("fw version compatible", version.compatible, True)
     check("fw version dirty flag", version.dirty, True)
     check("fw version commit", version.commit, "a1b2c3d")

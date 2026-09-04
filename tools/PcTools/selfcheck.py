@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import pathlib
+import re
 import struct
 import sys
 import threading
@@ -62,6 +63,34 @@ from selfcheck_link_hub import link_hub_checks  # noqa: F401
 from selfcheck_actions import actions_checks  # noqa: F401
 from selfcheck_commonfw import commonfw_vector_checks, commonfw_payload_vector_checks  # noqa: F401
 from selfcheck_hardening import hardening_checks  # noqa: F401
+
+# Same cross-language-pin idiom as tests/test_ramp_assist.py's
+# RampAssistLagBandCrossLanguageTest: parse the firmware header's #define
+# directly rather than hand-copying its value into a literal here. A
+# hardcoded literal is exactly what went stale before (this check sat at
+# "== 5" long after uart_task_ids.h moved to 10, silently failing ten
+# downstream checks that depend on FirmwareVersion.compatible) -- asserting
+# devices.UART_PROTOCOL_VERSION against uart_task_ids.h's own #define turns
+# "someone forgot to update selfcheck" into "PC and firmware disagree",
+# which is the failure actually worth detecting.
+_UART_TASK_IDS_H_PATH = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "firmware" / "KilnFW" / "App" / "drivers" / "uart_task_ids.h"
+)
+_UART_PROTOCOL_VERSION_RE = re.compile(
+    r"#define\s+UART_PROTOCOL_VERSION\s+\(\(uint16_t\)\s*([0-9]+)\)"
+)
+
+
+def _firmware_uart_protocol_version() -> int:
+    text = _UART_TASK_IDS_H_PATH.read_text(encoding="utf-8")
+    m = _UART_PROTOCOL_VERSION_RE.search(text)
+    if m is None:
+        raise AssertionError(
+            "UART_PROTOCOL_VERSION #define not found in "
+            f"{_UART_TASK_IDS_H_PATH} -- parser or macro spelling is broken"
+        )
+    return int(m.group(1))
 
 
 def main() -> int:
@@ -132,7 +161,11 @@ def main() -> int:
         check("short frame raises", True, True)
 
     print("\n== task ids and protocol version (uart_task_ids.h) ==")
-    check("protocol version == 5", devices.UART_PROTOCOL_VERSION, 5)
+    check(
+        "protocol version matches uart_task_ids.h's #define",
+        devices.UART_PROTOCOL_VERSION,
+        _firmware_uart_protocol_version(),
+    )
     check("task id THERMO == 1", devices.UART_TASK_ID_THERMO, 1)
     check("task id IO == 2", devices.UART_TASK_ID_IO, 2)
     check("task id INFO == 3", devices.UART_TASK_ID_INFO, 3)
