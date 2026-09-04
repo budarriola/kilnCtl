@@ -61,6 +61,17 @@ Stopping through `/shutdown` rather than killing the process matters: a COM port
 left open by a dead process stays unusable on Windows until the device is
 replugged.
 
+`kilnctrl` is long-running, so it keeps serving whatever code it started with —
+a source fix landed after the server came up is invisible to it. Symptom: an
+MCP call reports a defect ("field not in the allowlist", say) that the current
+source plainly does not have. Before chasing a bug that isn't there, compare
+the server's start time against the commit that fixed it —
+`Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select CreationDate`
+(pid from `/health`) — then restart it: `kiln_call(name="close_server")`
+followed by `.\tools\PcTools\scripts\mcp_servers.ps1 start`. The start command
+can exceed a 120s tool timeout and finish in the background; re-check with
+`status` rather than assuming it failed.
+
 ### Decision 1 — HTTP instead of stdio
 
 A stdio server is spawned by, and dies with, whichever client launched it. For a
@@ -78,7 +89,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 134 tools and `kicad` 86. Published as MCP
+`kilnctrl` registers 140 tools and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
 *every* context window before the model has read a word of the request.
 
@@ -102,7 +113,7 @@ Measured manifest cost:
 
 | server | before | after | saved |
 |--------|--------|-------|-------|
-| `kilnctrl` | ~20,160 tokens | ~697 | 96.5% |
+| `kilnctrl` | ~21,000 tokens | ~697 | 96.7% |
 | `kicad` | ~20,237 tokens | ~799 | 96.1% |
 
 The obvious risk of a dispatcher is that indirection costs reliability — a model

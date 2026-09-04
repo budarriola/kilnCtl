@@ -22,7 +22,7 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes about six tools and keeps the
-rest behind a search facade (127 tools for `kilnctrl`, 86 for `kicad`).
+rest behind a search facade (140 tools for `kilnctrl`, 86 for `kicad`).
 
 ```
 kiln_help()                      # kilnctrl: main board (ESP32-S3) + RP2040 safety processor
@@ -52,6 +52,20 @@ the toolchain invocations do not have to be rediscovered. Flashing is
 instead — `debug_program(peer="esp")` reliably fails flash-bank detection/verify on
 this board (confirmed repeatedly); `flash_firmware()` is the sanctioned working path,
 still OpenOCD, never esptool.
+
+`flash_firmware()` writes the **`factory`** partition only — it does not touch
+`otadata`. If an OTA has ever pointed the boot target at `ota_0`/`ota_1`, the
+bootloader keeps booting that image and every later `flash_firmware()` reports
+success while the board keeps running the OLD code (a change you added — a log
+line, say — looks like it "vanished"). Fix: `ota_rollback_esp()` to restore the
+factory boot target. To spot it before chasing a phantom firmware bug: check
+the running partition (`/api/partitions`'s RUNNING marker, or the boot log's
+`running partition: '<name>'`) and confirm it says `factory`.
+
+Also: `debug_reset` does not power-cycle external I2C peripherals. A safety
+trip that latches right after an OTA reboot can be the SX1509 I/O expander
+failing its post-reset init, not a firmware defect — a second `debug_reset`
+clears it.
 
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
