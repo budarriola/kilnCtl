@@ -2583,6 +2583,28 @@ taper fraction itself could not be read back byte-for-byte from these logs —
 addressed by the standing pre-flight check below, which asks for exactly
 that field, live, before the fact rather than after.
 
+### 3.6c Cross-campaign tracking synthesis (2026-09-04)
+
+`logs/coupling/tracking_synthesis_20260904_report.md` pools every
+attributable complete firing capture across the coupling-matrix, noise-floor,
+ease-off and (inert-fuzzy) campaigns — 27 usable captures out of 41 candidate
+`.jsonl` files, all profile 7 — to answer per-zone tracking quality directly
+rather than one more A/B question. Headline: the coupling-matrix fix (§3.6b
+above) is confirmed on a much larger pool (12 old-era vs 5 current-matrix
+captures, not just the formal n=2 pairs) and z0 remains the worst-tracking
+zone today — not on offset/lag (now its best-behaved number) but on
+dwell-entry overshoot (~2.2 °C, still ~1.7 °C above z1's). z2's offset is
+confirmed unaffected by the matrix as claimed, but its overshoot moved
+~0.33 °C in the wrong direction (sub-bar, n=4, not a retraction of the
+"indistinguishable" verdict but a sharper version of it). **No capture in
+the entire 64-file `logs/coupling/` set ever commands a target above
+60 °C** — the >62 °C coupled-hold-infeasible regime this project cares about
+for cone-range firing has zero tracking data behind it; the infeasibility
+claim rests entirely on §3.2's feasibility-sweep math, unvalidated against
+real tracking error. See the report for full per-zone numbers and the
+ranked recommendation (z0 overshoot investigation clears the 0.5 °C bar; the
+z2 overshoot regression and a re-run of the ease-off campaign do not).
+
 **Other paired-run conclusions that changed a setting or closed an item**
 (§3.2's coupling-matrix six-firing A/B, §3.9's tuning-method campaign) were
 spot-checked for a `control_mode`-shaped gate on their own varied field
