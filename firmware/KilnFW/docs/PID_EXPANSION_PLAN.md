@@ -720,31 +720,57 @@ excitation repeats than the one-per-zone this repo has today.
 
 **Six-firing A/B campaign (old matrix `coupling_matrix_pre20260902` vs new
 matrix `coupling_matrix_20260831`) — COMPLETED 2026-08-31, 6/6
-(`ab_campaign_state.json`). Verdict: INDISTINGUISHABLE / INCONCLUSIVE,
-confidence LOW.** Full analysis, per-metric numbers, and the noise-floor
-comparison: `logs/coupling/ab_campaign_report.md` (raw tool output per pair
-in `logs/coupling/ab_compare_pair{1,2,3}.txt`). Compared with the existing,
-unmodified `pid_ab_compare.py compare`/`noise_floor.json` machinery — no
-decision-rule or floor-artifact change made for this result.
+(`ab_campaign_state.json`). RE-ANALYSED 2026-09-03 under the revised 1.5 C
+confound tolerance (`a2fa7ac`). Verdict: two of three pairs now admitted
+(n=2, up from n=1); both agree in direction on z0/z1 whole-run IAE
+(~0.6 C, new matrix lower, clears the 0.5 C actionable bar); z2
+indistinguishable in both. Confidence LOW-MODERATE — real cross-pair
+agreement, but still not a confirmed result at n=2.** Full analysis,
+per-zone numbers, the noise-floor comparison, and the side-by-side
+confound/result table: `logs/coupling/ab_campaign_report.md` (raw tool
+output per pair in `logs/coupling/ab_compare_pair{1,2,3}_revised.txt`).
+Compared with the existing, unmodified `pid_ab_compare.py compare`/
+`noise_floor.json` machinery — no decision-rule or floor-artifact change
+made for this re-analysis; only the already-landed `a2fa7ac` tolerance
+change (1.0 C -> 1.5 C, derived from the rig's measured passive-cooldown
+floor) was applied to the same six captures.
 
-The campaign did not deliver the replication it was designed for: of the
-three intended old/new pairs, **two (pair 1 and pair 3) are REFUSED
-outright** by the tool's own 1.0 C start-temperature confound gate — every
-zone in both pairs exceeds it (pair 1: 1.66/1.63/1.36 C; pair 3:
-1.20/1.20/1.35 C). Only pair 2 (0.47/0.64/0.70 C, all zones under
-threshold) is usable, leaving n=1 valid A/B firing instead of n=3. That one
-pair shows an internally consistent, same-direction pattern favoring the
-new matrix on `iae_normalized_c`, `dwell_steady_state_offset_c`,
-`ramp_worst_error_c`, and `settle_time_s` (all >=3 zones, per
-`CONSISTENT_PATTERN_MIN_KEYS`), and the opposite direction (old matrix
-better) on `dwell_entry_time_to_peak_s` at 2 zones. Whole-run
-`iae_normalized_whole_c` — the metric with the most reliable measured floor —
-clears DISTINGUISHABLE on z0/z1 but not z2, so it does not itself meet the
->=3-zone bar. Because the >=3-zone rule and this project's multiplicity
-accounting were built to guard against per-key noise across REPLICATE
-pairs, and only one pair survived the confound gate, the pattern in pair 2
-is a lead for the next campaign, not a confirmed finding — it is reported
-here as PROVISIONAL, unreplicated. As always, this profile's ~70 C max
+**Original 2026-08-31 finding, SUPERSEDED below, kept for history:** of the
+three intended old/new pairs, two (pair 1 and pair 3) were REFUSED outright
+by the tool's then-1.0 C start-temperature confound gate — every zone in
+both pairs exceeded it (pair 1: 1.66/1.63/1.36 C; pair 3: 1.20/1.20/1.35 C).
+Only pair 2 (0.47/0.64/0.70 C) was usable, leaving n=1.
+
+**Under the revised 1.5 C gate, pair 3 (1.20/1.20/1.35 C, all now under
+threshold) is admitted; pair 1 (1.66/1.63 C on z0/z1) is still refused.**
+The admission was checked, not assumed: pair 3's fitted start-temp
+sensitivity for `iae_normalized_whole_c` is -0.0094 to -0.1333 C of
+predicted delta per 1 C of drift (OLS, n=6, the checked-in noise-floor
+repeat set), which at pair 3's worst zone (z2, 1.35 C) predicts at most
+~0.18 C of confound — below the 0.5 C actionable bar and comparable to the
+measured noise floors (0.077-0.147 C on this metric). The residual (raw
+delta minus predicted-from-confound) is 92-114% of the raw delta on every
+DISTINGUISHABLE z0/z1 key in pair 3 — the confound explains essentially
+none of the measured difference.
+
+With both pairs admitted, **the same pattern replicates independently**:
+new matrix (B) lower whole-run `iae_normalized_whole_c` on z0 and z1 by
+0.57-0.70 C in both pairs (clearing both the 4-8x noise floor and the
+0.5 C actionable bar), z2 indistinguishable in both. At the (zone, metric,
+segment) level, `iae_normalized_c`, `dwell_steady_state_offset_c`,
+`dwell_entry_overshoot_peak_c`, and `ramp_mean_error_c` all clear the
+>=3-zone `CONSISTENT_PATTERN_MIN_KEYS` bar favoring the new matrix in BOTH
+pairs; `dwell_entry_time_to_peak_s` clears it favoring the OLD matrix in
+BOTH pairs. No metric flips direction between the two pairs. This is
+meaningfully stronger than the original n=1 finding — two independent,
+differently-confounded pairs landing on the same metrics and directions is
+the kind of cross-pair agreement the >=3-zone rule was built to build
+confidence from — but n=2 is still two points, not a distribution; this is
+reported as a lead with cross-pair support, not a confirmed finding. Pair 1
+remains unexamined; a corrected re-run of it (or a replacement pair) under
+`run_queue.py`'s `--pair-consecutive` mode, which now enforces the same
+1.5 C gate before a second arm is allowed to start, would take this to the
+n=3 the campaign originally targeted. As always, this profile's ~70 C max
 target keeps the result silent on cone-range behaviour and on either
 matrix's behaviour past the coupled hold solve's ~62 C feasibility edge.
 
