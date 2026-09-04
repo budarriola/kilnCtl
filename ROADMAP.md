@@ -1760,7 +1760,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
       ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, ~~`ota_http.c` (2508)~~,
       `ui_page_home.c` (2279), `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
-      ~~`zones_config_json.c` (1867)~~, `main.c` (1820), `backup_http.c` (1756),
+      ~~`zones_config_json.c` (1867)~~, `main.c` (1820), ~~`backup_http.c` (1756)~~,
       `uart_bridge_ext.c` (1727), `zones_http_handlers.c` (1598). Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
       `ARCHITECTURE.md`, and autotune has four separable concerns, on the
@@ -1956,6 +1956,39 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       picking up `profiles_catalog_http.c`/`profiles_edit_http.c`. The
       run's one failure (`test_st7796_panel.c`, in the `main` executable)
       is unrelated display-file territory, out of this item's scope.
+      `backup_http.c` part — **CLOSED 2026-09-04**: move-only split into
+      `backup_http.c` (96 lines, `BACKUP_TAG` + `backup_http_start()` route
+      registration only), `backup_json.c` (198, the generic hand-rolled JSON
+      reader — `backup_json_skip_ws`/`_value`, `_obj_find`, `_arr_first`/
+      `_next`, `_field_num`/`_opt_num`/`_str`), `backup_export.c` (350, GET
+      `/settings/backup` page + GET `/api/backup/export` streamed writer,
+      `json_escape` kept `static`) and `backup_import.c` (1118,
+      `backup_import_apply()`'s two-pass validate-then-commit parser + POST
+      `/api/backup/import`'s upload handler), sharing state via
+      `backup_http_internal.h` on the `ota_http_internal.h`/
+      `zones_config_json_internal.h` precedent (shared statics as `extern`,
+      former `static` helpers widened to file-scope-internal, every widened
+      symbol renamed with a `backup_`/`BACKUP_` prefix). Symbol audit:
+      grepped every widened symbol (`BACKUP_TAG`, `backup_page_get_handler`,
+      `backup_export_get_handler`, `backup_import_post_handler`, and the
+      eight `backup_json_*` reader functions) across all of `App/drivers/`
+      for both a non-static definition and a same-named `static` — none
+      found, all clean under their new prefix. One deliberate
+      **non-widening**: `json_escape` was left `static` in `backup_export.c`
+      rather than promoted, because `dashboard_json.c` already defines a
+      non-static global `json_escape()` — widening this file's copy would
+      have been an immediate link error (the exact collision class this
+      audit exists to catch), and since the import side never calls it,
+      keeping it file-local costs nothing. First pass missed that
+      `backup_import_post_handler()` still carried its original `static`
+      keyword after the move, which failed the ESP-IDF build with "static
+      declaration follows non-static declaration" against its
+      `backup_http_internal.h` prototype; fixed by dropping the leftover
+      `static`. `build_kilnfw` compiles and links clean. All 21/21 host
+      test executables pass; `test_backup_import.c` (the file this split's
+      brief called out to keep green) updated to `#include` all four split
+      files instead of the one original, same convention as
+      `test_profiles_http.c`/`test_zones_http.c` above.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because

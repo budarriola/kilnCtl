@@ -64,6 +64,15 @@
 void test_stub_zones_set_thermo_count(uint8_t n);
 void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_hr);
 
+// backup_http.c split into four files 2026-09-04 (ROADMAP.md M15's
+// 1500-line item) -- backup_json.c/backup_export.c/backup_import.c/
+// backup_http.c, see backup_http_internal.h for the map. All four are still
+// pulled in here, same convention as before the split (backup_import_apply()
+// is `static` with no public seam, and the other three still have to
+// compile and link even though these tests only ever call it).
+#include "../drivers/backup_json.c"
+#include "../drivers/backup_export.c"
+#include "../drivers/backup_import.c"
 #include "../drivers/backup_http.c"
 
 #undef asm

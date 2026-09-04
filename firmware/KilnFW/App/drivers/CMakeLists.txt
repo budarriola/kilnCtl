@@ -234,6 +234,12 @@ idf_component_register(SRCS "MAX31856.c"
                        "time_sync.c"
                        "time_sync_tz.c"
                        "backup_http.c"
+                       "backup_json.c"
+                       "backup_export.c"
+                       "backup_import.c"
+                       # backup_http.c split 2026-09-04 (ROADMAP.md M15's
+                       # 1500-line item) -- see backup_http_internal.h's own
+                       # doc comment for the file map.
                        "ota_auth.c"
                        "ota_interlock.c"
                        "heat_interlock.c"
