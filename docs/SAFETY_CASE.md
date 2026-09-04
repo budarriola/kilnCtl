@@ -1,6 +1,6 @@
 # Safety Case — the argument that this kiln controller is safe enough
 
-> **Status:** first pass, synthesized from existing docs · **Last reviewed:** 2026-09-04
+> **Status:** first pass, synthesized from existing docs · **Last reviewed:** 2026-09-04 (topology/H3 pass)
 > **Keep this file current.** A safety case that lags the code is worse than no
 > safety case, because it invites trust it has not earned. If this file cannot
 > be kept honest, delete it rather than let it drift.
@@ -50,13 +50,13 @@ mitigates it beyond operator diligence).
 |---|---|---|
 | H1 overheat | **G:** S1 (`abs_max_temp_c` ceiling), S2 (overshoot-sustained), S8 (rate-of-rise). **KilnFW:** thermal_guard guards 1,2,4,5,7 (per-zone, only while `profile_executor` runs that zone) | **Verified live 2026-09-04 (`GET /api/safety/commissioning`, read-only): S1 is ARMED, `abs_max_temp_c`=80, `set:true`, `commissioned:true` on the current bench board — this has changed since the 2026-08-28 note below and in `firmware/KilnFW/TODO.md`, which described `abs_max_temp_c`=0 (never-trip).** S8 (`max_rate_c_per_min`) remains at 0 = disabled, deliberately, pending a measured full-power ramp (see §3.2). With S1 armed, a runaway is independently backstopped: `safety_guards.c` (`SAFETY_TRIP_OVERTEMP`, ~line 603) computes `ceiling = min(abs_max_temp_c, firing_max_c + firing_margin_c)` and trips on the 3rd consecutive over-ceiling reading (~300ms), which de-energizes K4 on the RP2040 side — independent of the ESP32-S3 regardless of what the ESP keeps commanding. Today that ceiling (80°C) equals, not undercuts, the ESP-side zones' own `max_temp_c` (also 80), so S1 is real protection against a runaway but not a *tighter* independent limit — see the owner-decision recommendation in §3.1. KilnFW's per-zone guards only run while a profile is actively driving that zone — a direct `THERMO_CMD_READ`/dashboard-only session outside a running profile gets no thermal protection from KilnFW at all (`SAFETY_MODEL.md`, "What does NOT enforce it yet"). |
 | H2 dry-fire / disconnected sensor | **G:** S5 (sensor validity, graduated WARN→TRIP), S11 (frozen sensor + heat commanded). **KilnFW:** thermal_guard guard 6 (per-zone, profile-running only) | **Corrected 2026-09-04 — S11 is currently INERT, not merely unverified.** `safety_guards.c:657`'s gate is `in->tc_valid && in->heat_commanded`, and `heat_commanded` is wired straight from `any_current_present` (`safety_core.c:1090`), which `safety_core.c:1020-1024` forces to `false` whenever `ct_installed = no`. **Live-confirmed the same day** (`safety_get_status`, `dc39b09`): `ct_installed = 0`, all three channels reading `0.00 A`. So on the bench rig **today**, S11's elapsed-time accumulator never starts, regardless of how long a reading sits frozen — this is not "reachable in source, awaiting a hardware pass," it structurally cannot fire while CTs are absent. S5 is unaffected by this (its gate is `tc_valid`/read-freshness only, no current dependency) and remains armed. KilnFW's guard 6 only covers the profile-running window, same gap as H1. See `GUARD_TEST_MATRIX.md` §9's now-added S11 row for the full trace. |
-| H3 welded contactor | **G:** S9 (`TRIP_INEFFECTIVE`, unconditional, never operator-clearable) | **No active detection today.** S9 is gated on `current_sensing_disabled`/`current_sensing_commissioned` (`safety_guards.c:405-416`) — inert on a CT-less board (§9 of the matrix), and **live-confirmed inert on the bench rig 2026-09-04**: `safety_get_status` reports `ct_installed = 0`, currents `0.00 A, 0.00 A, 0.00 A`. `safety_core.c:1020-1024` forces `any_current_present` false, so S9's block at `safety_guards.c:403-416` takes the `current_sensing_disabled` branch every tick — streak held at 0, no warn, no path to `TRIP_INEFFECTIVE`, ever, until CTs are fitted and commissioned. No other guard substitutes for it (S3/S4/S14 are equally CT-gated; nothing else observes contactor state), and KilnFW provides no independent check — its own `current_a[]` (`safety_link_frames.c:632-634`) is decoded from the *same* RP2040 CT telemetry over the link, not a separate ESP-side sense path (no ESP-side current ADC exists; `hardware/mainBoard/CurrentSense.kicad_sch`'s ADC0/1/2 feed the RP2040's `current_task.c`, not the ESP32-S3). **Plainly: if K4 welds closed today, nothing in this system will notice.** Also **never provoked with a genuinely welded contactor on real hardware** even when armed — ROADMAP.md M4 flags this as blocked on a hardware jig that injects real AC current through the CT loop; no such jig exists in this repo. Argued and host-tested only. |
+| H3 welded contactor | **G:** S9 (`TRIP_INEFFECTIVE`, unconditional, never operator-clearable). **Topology:** the line contactor sits electrically upstream of the per-zone SSRs (`mains → line contactor → SSRs → elements`), so K4 (RP2040) and K1/K2/K3/K5 (ESP) gate two *different, staged* points rather than one shared point — see §3 item 4a for the full topology finding | **No active detection today, but the topology tolerates a single weld of the wrong device.** S9 is gated on `current_sensing_disabled`/`current_sensing_commissioned` (`safety_guards.c:405-416`) — inert on a CT-less board (§9 of the matrix), and **live-confirmed inert on the bench rig 2026-09-04**: `safety_get_status` reports `ct_installed = 0`, currents `0.00 A, 0.00 A, 0.00 A`. `safety_core.c:1020-1024` forces `any_current_present` false, so S9's block at `safety_guards.c:403-416` takes the `current_sensing_disabled` branch every tick — streak held at 0, no warn, no path to `TRIP_INEFFECTIVE`, ever, until CTs are fitted and commissioned. No other guard substitutes for it (S3/S4/S14 are equally CT-gated; nothing else observes contactor state), and KilnFW provides no independent check — its own `current_a[]` (`safety_link_frames.c:632-634`) is decoded from the *same* RP2040 CT telemetry over the link, not a separate ESP-side sense path (no ESP-side current ADC exists; `hardware/mainBoard/CurrentSense.kicad_sch`'s ADC0/1/2 feed the RP2040's `current_task.c`, not the ESP32-S3). **But this hazard row's title is narrower than the real finding.** A welded *contactor* alone does not, by itself, put current through an element — the per-zone SSRs (ESP-driven) still individually gate each element downstream of it, so heat only flows if an SSR is also on. What a welded contactor actually does — silently — is disable the *entire* independent RP2040 veto: every SaftyFW guard (S1 overtemp, S2, S6a/b link/main-fault, S7 e-stop, all of them) acts by de-energizing K4, and K4 dropping only opens the contactor; if the contactor's own contacts are welded, dropping K4 achieves nothing. See §3 item 4a for the full single-failure table. **Plainly, in order of how bad it actually is:** (1) if K4 (the pilot relay) welds, or the contactor coil path sticks, the contactor stays closed regardless of firmware — SaftyFW's entire trip-actuation path becomes cosmetic (still logs/reports, stops nothing) until an operator notices or a second failure (a stuck SSR, a runaway the ESP itself doesn't catch) turns that into real heat with zero independent backstop; (2) nothing today detects either half of that on this CT-less rig. Also **never provoked with a genuinely welded contactor on real hardware** even when armed — ROADMAP.md M4 flags this as blocked on a hardware jig that injects real AC current through the CT loop; no such jig exists in this repo. Argued (schematic + `firmware/SaftyFW/docs/HARDWARE.md` §3, itself schematic-traced 2026-08-16) and host-tested only; the topology claim was cross-checked against `hardware/mainBoard/kiln.kicad_pro` via the KiCad MCP server this pass (`get_kicad_component_connections` on K1/K4) but the live netlist returned no populated nets for either reference (likely a stale/unbuilt netlist, not evidence against the schematic-documented topology) — so the topology claim rests on the cited schematic-derived documentation, not on a netlist this pass independently re-derived. |
 | H4 shock during service | **P:** physical isolation, TVS/current-limiting on input rails (`hardware/mainBoard/Power.kicad_sch`), K4 mechanical contactor | Standard practice, not re-verified as part of this pass — hardware review, out of scope here. Accepted as adequately covered by physical design, not by firmware. |
 | H5 both processors agree falsely | **G:** dual-processor design itself — KilnFW's relay-authority gate (`relay_authority_on_blocked()`) and SaftyFW's independent guard set are separate codebases reading separate sensors | **A (accepted risk).** No cross-check exists that either processor's "healthy" verdict is *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire (H9). Not designed against; documented, not solved. |
 | H6 link loss unnoticed | **R:** KilnFW's link-loss watchdog drops relays and asserts `SAFETY_FAULT_SRC_PC_LINK` (opt-in, default OFF for the PC link; unconditional relay-drop). **CommonFW link protocol:** SaftyFW's own liveness split — soft trip at 1.5s (blocks new heat-on), hard 30s firing-abort (`LINK_PROTOCOL.md` §8, wired 2026-09-04, `profile_executor.c:1201-1236`, pinned by `test_safety_link.c:77-92`) | The 30s firing-abort is **host-test-pinned but not hardware-verified** — nobody has held the link down on the bench and watched it with a stopwatch (ROADMAP.md, "Blocked on hardware that does not exist yet": "Time the link-staleness ceiling... Code is flashed; nobody has held the link down"). SaftyFW cannot react to a *live* E-stop/fault report from the Pico either way — that path is one-directional today (`SAFETY_MODEL.md`, "Nothing on the main board reacts to a safety-processor-reported E-stop or fault"). |
 | H7 E-stop unreachable | **G:** S7, GPIO9 debounced 50ms, normally-closed wiring (cut cable/pulled connector/press all read as stop) | **Disagreement resolved in code, not yet in wiring**: the E-stop *polarity* bug (S7 inverted, shipped and fixed 2026-08-24, `discrete_pin_policy.c`) is closed and negative-tested. But **no physical E-stop button or deliberate jumper is fitted on a freshly-built board** (`HARDWARE.md` §5: "no jumper is currently fitted anywhere on the estop net in the schematic"). The bench board today reads GPIO9 **low** (healthy/closed) only because *something* is bridging the net physically — not because a button or documented jumper is present. **This means the E-stop input on the bench is not actually being exercised by a physical stop action**; it is present-and-quiet, not tested-and-quiet. |
 | H8 bad OTA leaves unsafe state | **R:** both update paths refused unless idle and cool (`SAFETY_MODEL.md`-adjacent update interlocks); `flash_firmware()`'s post-flash verify (tooling, not firmware) | The specific item "link-loss heating block **not** bypassed during a Pico update" is **pinned in CI (2026-09-04) but still OPEN as a hardware-exercise item** — "a test suite is not a substitute for running a real update while heat is nominally blocked and confirming it stays blocked" (ROADMAP.md M8/M13). Argued + host-tested only, not hardware-verified. |
-| H9 downstream-of-both-relays SPOF | none identified as closed | **A (accepted risk).** Both `SAFETY_CASE.md`'s own charter and `SAFETY_MODEL.md` name this as the interesting failure class (a thermocouple both processors read through the same broken wire, a mechanical failure downstream of K4). No specific mitigation beyond K4 itself is documented. |
+| H9 downstream-of-both-relays SPOF | none identified as closed | **A (accepted risk) — now concretized (§3 item 4a).** The relay stages are not literally one shared point; they are staged in series (contactor, then per-zone SSRs) and each is genuinely single-point for a different reason. The line contactor is the single point whose failure disables K4's *entire* real-world effect (every SaftyFW guard trip becomes cosmetic, not just S9's), while each per-zone SSR is the single point downstream of *both* authorities for that zone's element specifically (a stuck SSR keeps that element hot regardless of the ESP's own command, and is normally still caught by K4/contactor dropping — unless the contactor has *also* welded). Neither failure alone routinely causes uncontrolled heat; a welded contactor plus a welded/stuck SSR (or an ESP-side command left on with no independent overtemp backstop) does. No specific mitigation beyond K4 itself is documented, and this system's evidence for K4→contactor actually being wired as documented is schematic-derived, not bench-proven (§3 item 4a). |
 | H10 guard masked / unreachable | **Process, not a guard:** `GUARD_TEST_MATRIX.md` §6/§6a/§6c/§10 — an explicit, repeatedly-recomputed reachability audit | This is the one hazard with strong process evidence: as of §6c (2026-09-03), 11 of 14 implemented guards are structurally reachable; S1/S13/S14 are deliberately configured off (not bugs); S8 exists but is excluded from the denominator pending a measured ramp. S6a is reachable in source but **cannot be provoked by any current host fixture** (`virtual_dut`/SimFW were both removed 2026-08-28) — bench hardware is the only way to exercise it. See §5 below for the full evidence table. |
 
 ---
@@ -157,6 +157,86 @@ here; none is copied from an unverified summary.
    itself, `config_store.h`'s CT-cal fields, already exist as the intended
    commissioning path — neither was called or written as part of this
    verification pass, per this task's own read-only constraint).
+
+   **Owner decision, framed against the topology, not fear:** the case for
+   fitting CTs should not rest on "an undetected weld exists" alone — item 4a
+   below shows the series topology already tolerates a *single* weld of
+   either device without immediate uncontrolled heat. What CTs concretely add
+   is (a) S9 — direct detection of "K4 was just dropped and current is still
+   flowing," which is exactly the residual case the topology admits it cannot
+   defend against (a welded contactor), and (b) S3 — detection of a stuck SSR
+   with no heat commanded, closing the *other* half of the double-failure
+   pair before it becomes double. That is a precise, load-bearing addition,
+   not a hedge against an unquantified fear — it is the one check this board
+   structurally cannot perform any other way, because nothing on either
+   processor can otherwise tell "the relay/contactor did what I asked" from
+   "it didn't."
+
+4a. **Topology finding, added this pass (2026-09-04): the two relay
+   authorities gate two different, staged points, not one shared point** —
+   `firmware/SaftyFW/docs/HARDWARE.md` §3 (schematic-traced 2026-08-16,
+   `SSD.kicad_sch`, cross-checked this pass against
+   `hardware/mainBoard/kiln.kicad_pro` via the KiCad MCP's
+   `get_kicad_component_connections`; that live query returned no populated
+   nets for K1 or K4, so it neither confirms nor contradicts the documented
+   topology — the netlist appears stale/unbuilt, not evidence of anything).
+   Every relay on the board (K1, K2, K3, K5 on the ESP; K4 on the RP2040) is
+   a **pilot relay only** — none carries element current:
+
+   ```
+   mains ──> [ line contactor ] ──> [ SSRs, one per zone ] ──> heating elements
+                    ^                        ^
+                    │ coil                   │ control
+              K4 (RP2040, pilot)      K1/K2/K3/K5 (ESP, pilot, one per SSR)
+   ```
+
+   K4 energized = contactor coil energized = contactor closed; K4 dropping is
+   *supposed to* open the contactor and kill power to the entire SSR stage,
+   independent of what the ESP is commanding. The ESP's K1–K3 separately gate
+   each zone's own SSR downstream of the contactor. **Single-failure table**
+   (argued from this schematic-derived topology, not bench-proven):
+
+   | Failure | Does heat flow? | What (if anything) stops it | Detected today? |
+   |---|---|---|---|
+   | K1 (or K2/K3) welds closed, K4/contactor healthy | Only if that zone's SSR also conducts, same as normal commanded-on operation | **Yes** — SaftyFW cannot see K1's coil state, but it *can* see the downstream effect (overtemp via its own thermocouple → S1; or current-with-no-context via S3 if CTs were fitted) and drop K4, which cuts power to the whole SSR stage including the stuck channel. This is the series protection working as designed. | Overtemp path yes (S1, CT-independent); S3's more specific signature is CT-gated, currently inert |
+   | K4 welds closed (or its coil-drive path sticks), contactor coil stuck energized, SSRs healthy | Not by itself — SSRs still individually gate their elements | **Nothing.** SaftyFW's every guard trip (S1, S2, S6a/b, S7, all of them) still computes and still commands K4 off, but that command no longer has any real-world effect once the contactor is welded. This is the finding that matters most: it is not "S9 doesn't fire," it is "the entire independent veto authority is silently disabled while every other guard keeps reporting as if it still worked." | **No** — no guard checks that a K4-off command actually opened the contactor; that check *is* S9, and S9 is CT-gated |
+   | Line contactor's own mains contacts weld (the contactor itself, not K4) | Same as the K4-welds row — contactor stuck closed regardless of K4's state | Same as above — nothing, until a second failure (a stuck SSR, or the ESP alone running past its own limits) turns it into real uncontrolled heat with zero independent backstop | **No** — same gap; this and the K4-weld row are operationally indistinguishable from SaftyFW's point of view |
+   | A per-zone SSR welds/shorts closed, contactor healthy | Yes, for that zone, regardless of ESP command | **Yes** — K4/contactor dropping cuts input power to the whole SSR stage; this is explicitly why the contactor sits upstream of the SSRs (`HARDWARE.md` §3: "It does defeat a welded/shorted SSR... the reason guard S3 exists") | S1 overtemp path yes; S3's specific "current with no heat commanded" signature is CT-gated, currently inert |
+   | Contactor welded **and** a per-zone SSR also welded/stuck (or ESP commands heat with no independent ceiling) | **Yes, uncontrolled** | **Nothing independent of the ESP.** This is the true double failure the series topology is meant to make rare — one authority alone failing is tolerated, both failing (or one failing plus the surviving authority never being asked to intervene) is not | **No** on this rig — S9/S3 (the guards that would catch exactly this) are both CT-gated and inert |
+   | Safety link lost (UART/isolator failure) | No new heat commanded; a running firing continues until ESP-side 1.5s/30s timers act (H6) | K4 defaults to whatever SaftyFW's own guards decide independently — link loss does not by itself change K4/contactor state, it changes whether the ESP will *ask* for more heat | Covered by H6, not a new SPOF for H3 |
+
+   **The corrected headline:** "nothing detects a welded contactor" (established
+   `8955763`) is true and unchanged. It is also incomplete on its own — a
+   welded contactor in isolation does not immediately cause uncontrolled
+   heat, because the SSR stage downstream still individually gates each
+   element. What it *does* do is quietly convert this board from a
+   dual-authority system into a single-authority (ESP-only) one for every
+   hazard SaftyFW's guards address — S1 overtemp, S2, S6a/b, S7 included —
+   because their only real-world effect runs through the contactor. The
+   genuinely single-point failure is therefore twofold, not one thing: the
+   **line contactor's own contacts** (whose failure disables the *entire*
+   RP2040 veto, not just H3's guard) and **each zone's own SSR** (whose
+   failure is normally still caught by that same veto, unless the contactor
+   has independently failed too). A fire requires the double failure, not
+   the single one — but today, on this CT-less rig, there is no independent
+   signal that the first half of that pair has already happened, so an
+   operator has no way to know they are one failure away from the double
+   case rather than two.
+
+   **What this pass verified versus inferred:** the topology (contactor
+   upstream of SSRs, all relays pilot-only) is read from
+   `firmware/SaftyFW/docs/HARDWARE.md` §3, which cites its own schematic
+   trace (`SSD.kicad_sch`, 2026-08-16) and includes the schematic's own
+   "not rated for use with heaters" annotation on K4 as corroboration. This
+   pass did not independently re-derive the mains-side wiring from the
+   netlist (the KiCad MCP query above came back empty) and, per this task's
+   constraints, did not and could not touch a real contactor or SSR to
+   confirm the failure modes above on hardware. **Open question for the
+   owner, not answered by any document in this repo:** what contactor and
+   SSR model numbers are actually wired at J8/J3/J4/J11/J10 on this specific
+   physical rig, and has either ever been inspected for contact condition?
+   Nothing in the schematic or firmware can answer that — it is a fact about
+   the owner's own external wiring.
 
 5. **S9's welded-contactor escalation has never been provoked with a
    genuinely welded contactor.** It is argued from code inspection
