@@ -579,7 +579,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * that macro's own doc comment) -- this local name is kept so every
      * other reference in this function below did not need touching. */
 #define DASHBOARD_STATUS_JSON_BUF_SIZE DASHBOARD_JSON_STATUS_BUF_SIZE
-    char *json = malloc(DASHBOARD_STATUS_JSON_BUF_SIZE);
+    char *json = heap_caps_malloc(DASHBOARD_STATUS_JSON_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
         ESP_LOGE(TAG, "GET /api/status: malloc(%u) failed for the response buffer",
                  (unsigned)DASHBOARD_STATUS_JSON_BUF_SIZE);

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "MAX31856.h"
@@ -175,7 +176,13 @@ static void json_escape(const char *src, char *out, size_t out_cap)
 
 static esp_err_t backup_export_get_handler(httpd_req_t *req)
 {
-    char *buf = malloc(BACKUP_STREAM_BUF);
+    /* HEAP in PSRAM, not internal DRAM: same fix, same reasoning as
+     * dashboard_http.c's GET /api/status buffer -- this handler's own
+     * response chunking already keeps this small (256B), but every response
+     * buffer moved off internal DRAM is one less contributor to the httpd
+     * worker's DRAM pressure this file's siblings document elsewhere. Freed
+     * on every return path below. */
+    char *buf = heap_caps_malloc(BACKUP_STREAM_BUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;
@@ -1676,7 +1683,12 @@ static esp_err_t backup_import_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char *body = malloc((size_t)req->content_len + 1);
+    /* HEAP in PSRAM, not internal DRAM: same fix, same reasoning as this
+     * file's export-side buffer above -- up to BACKUP_BODY_MAX (16384) bytes,
+     * far too large to belong in internal DRAM alongside every other
+     * handler's own locals on the shared httpd_worker stack/heap. Freed on
+     * every return path below. */
+    char *body = heap_caps_malloc((size_t)req->content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!body) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;

@@ -1724,10 +1724,14 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `INCLUDE_DIRS "."` exposes it to all 8 `uart_bridge*.c` files instead of
       just the owner module. Split the header, move the rest to
       `PRIV_INCLUDE_DIRS`. M
-- [ ] **`GET /api/status` allocates from internal DRAM.** `dashboard_http.c:582`
+- [x] **`GET /api/status` allocates from internal DRAM.** `dashboard_http.c:582`
       uses plain `malloc` while sibling handlers in the same file use
       `heap_caps_malloc` SPIRAM; same gap in `backup_http.c:178`. This is the
-      most-polled handler against the tightest heap. S
+      most-polled handler against the tightest heap. S — **CLOSED 2026-09-04**:
+      both converted to `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`
+      (`dashboard_http.c:582`, `backup_http.c:178` and `:1679`); swept the rest
+      of the HTTP handler files and found no other plain `malloc` of a
+      response/scratch buffer.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
       `wifi_prov.c` (2820), `dashboard_http.c` (2572), `ota_http.c` (2508),
       `ui_page_home.c` (2279), `panel_spi.c` (2174), `profiles_http.c` (2097),
@@ -1827,13 +1831,18 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `discrete_pin_policy_*_asserted()` helpers
       (`discrete_task.c:98-100`). Extract the same pattern for the MAX31856
       fault pin and host-test it; feeds S5. M
-- [ ] **Dead blocking fixed-length `uart_read_bytes` branch stays loaded.**
+- [x] **Dead blocking fixed-length `uart_read_bytes` branch stays loaded.**
       `KilnFW/App/drivers/espInterfaces/uart_owner.c:139`'s `rx_buffer`/
       `rx_length` branch is the exact pattern behind the 100%-timeout
       incident. No current caller passes `rx_buffer` (grep across
       `App/drivers/*.c` turns up nothing), so it's dead today, but nothing
       stops a future caller reintroducing the hazard. Delete the branch, or
-      assert it unreachable once a `uart_protocol_t` is attached. S
+      assert it unreachable once a `uart_protocol_t` is attached. S —
+      **CLOSED 2026-09-04**: the struct's `rx_buffer`/`rx_length`/
+      `rx_length_out` fields and public `uart_owner_transfer()` signature are
+      used by test stubs, so full deletion was awkward; the branch now fails
+      loudly (`ESP_LOGE` + `ESP_ERR_NOT_SUPPORTED`) instead of blocking, per
+      `LINK_PROTOCOL.md` §3.
 - [ ] **`LINK_PROTOCOL.md` section 10's completion checklist is stale.**
       TRIP_EVENT dedup, the POWER/DIAG frames, and the 30 s firing-abort are
       all listed unchecked (`CommonFW/docs/LINK_PROTOCOL.md` sec 10) though

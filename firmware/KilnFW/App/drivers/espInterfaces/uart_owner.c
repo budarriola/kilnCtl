@@ -130,24 +130,28 @@ static void uart_owner_task(void *arg)
         }
 
         if (result == ESP_OK && request.rx_buffer && request.rx_length > 0) {
-            /* Only flush ahead of a reply we're about to wait for, i.e. a
-             * query we just transmitted -- an RX-only call (no TX phase) is
-             * a plain listen and must not discard bytes already queued. */
-            if (request.tx_buffer && request.tx_length > 0) {
-                uart_flush_input(owner->port);
-            }
-            int read = uart_read_bytes(owner->port, request.rx_buffer, request.rx_length,
-                                        pdMS_TO_TICKS(request.timeout_ms));
-            if (read < 0) {
-                result = ESP_FAIL;
-            } else {
-                if (request.rx_length_out) {
-                    *request.rx_length_out = (size_t)read;
-                }
-                if ((size_t)read == 0) {
-                    result = ESP_ERR_TIMEOUT;
-                }
-            }
+            /* This used to be a fixed-length blocking uart_read_bytes() --
+             * the exact pattern behind a past 100%-timeout incident (that
+             * blocking read stalls this task, and this task is the sole
+             * server of EVERY uart_owner_transfer() caller on the port, so
+             * one stuck RX-only request wedges every other bridge sharing
+             * the owner). uart_protocol.h:34-37 already documents that once
+             * a uart_protocol_t is attached to a uart_owner_t (true for
+             * every port this firmware brings up), that owner's RX path
+             * "should no longer be used directly" -- uart_protocol_rx_task()
+             * is the sole consumer of incoming bytes, and LINK_PROTOCOL.md
+             * sec 3 states the same rule for the wire protocol itself: reads
+             * happen only in that dedicated RX task, which never blocks
+             * fixed-length (it polls what's already buffered). No caller
+             * passes rx_buffer/rx_length today (uart_protocol.c's own
+             * uart_owner_transfer() call passes NULL, 0 -- grep confirms it
+             * is the only caller), so this is now a defined, loud failure
+             * instead of a silent trap for the next caller who reaches for
+             * it. Fail fast rather than resurrect the blocking read. */
+            ESP_LOGE(TAG, "uart%d: rejecting direct RX request -- read the owning uart_protocol_t's "
+                          "RX task instead (see uart_protocol.h and LINK_PROTOCOL.md sec 3)",
+                     owner->port);
+            result = ESP_ERR_NOT_SUPPORTED;
         }
 
         if (!request.tx_buffer && !request.rx_buffer) {
