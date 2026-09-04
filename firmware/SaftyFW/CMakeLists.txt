@@ -65,6 +65,10 @@ set(SAFTYFW_APP_SOURCES
     # host-testable (test/test_max31856_tc_type_policy.c) with no SPI/GPIO
     # stubs -- see max31856_tc_type_policy.h.
     src/max31856_tc_type_policy.c
+    # Pure ~FAULT-pin raw-GPIO-level-to-asserted-bool predicate, split out of
+    # max31856.c for the same host-testing reason -- see max31856_fault_pin_
+    # policy.h. Feeds S5 (thermocouple fault).
+    src/max31856_fault_pin_policy.c
     # Pure CJ/TC fixed-point decode math, split out of max31856.c for the same
     # host-testing reason -- see max31856_decode.h.
     src/max31856_decode.c

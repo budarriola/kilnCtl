@@ -11,6 +11,7 @@
 #include "hardware/gpio.h"
 
 #include "max31856_decode.h"
+#include "max31856_fault_pin_policy.h" // max31856_fault_pin_asserted() -- ~FAULT pin polarity
 #include "max31856_tc_range_policy.h" // max31856_cr1_readback_check() -- Part B CR1 readback verification
 #include "max31856_tc_type_policy.h"
 #include "spi_owner.h"
@@ -228,7 +229,8 @@ bool max31856_read(max31856_reading_t *out)
         return false;
     }
 
-    out->fault_pin_asserted = (s_fault_gpio >= 0) && (gpio_get(s_fault_gpio) == 0);
+    out->fault_pin_asserted =
+        (s_fault_gpio >= 0) && max31856_fault_pin_asserted(gpio_get(s_fault_gpio) != 0);
 
     // One transaction, six registers: CJTH, CJTL, LTCBH, LTCBM, LTCBL, SR.
     // Reading this burst is what releases ~DRDY back high (THERMOCOUPLE.md

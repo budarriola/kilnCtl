@@ -33,6 +33,7 @@ void run_test_log_task_stack_budget(void);
 void run_test_max31856_tc_type_policy(void);
 void run_test_max31856_decode(void);
 void run_test_max31856_tc_range_policy(void);
+void run_test_max31856_fault_pin_policy(void);
 void run_test_link_diag_flags(void);
 void run_test_current_presence_policy(void);
 void run_test_discrete_pin_policy(void);
@@ -66,6 +67,7 @@ int main(void)
     run_test_max31856_tc_type_policy();
     run_test_max31856_decode();
     run_test_max31856_tc_range_policy();
+    run_test_max31856_fault_pin_policy();
     run_test_link_diag_flags();
     run_test_current_presence_policy();
     run_test_discrete_pin_policy();

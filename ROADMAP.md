@@ -1924,14 +1924,24 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       exactly like the two functions it's meant to catch drifting from each
       other. Add a CI check that diffs the `p[N]` offset lists between the
       mirror and the real function. M
-- [ ] **MAX31856 fault-pin polarity is inline and host-untested.**
+- [x] **MAX31856 fault-pin polarity is inline and host-untested.**
       `SaftyFW/src/max31856.c:231`,
       `out->fault_pin_asserted = (s_fault_gpio >= 0) && (gpio_get(s_fault_gpio) == 0)`
       — same class as the shipped S7 e-stop polarity bug. `discrete_task.c`
       already shows the fixed pattern: pure, host-tested
       `discrete_pin_policy_*_asserted()` helpers
       (`discrete_task.c:98-100`). Extract the same pattern for the MAX31856
-      fault pin and host-test it; feeds S5. M
+      fault pin and host-test it; feeds S5. M — **CLOSED 2026-09-04**: split
+      into `max31856_fault_pin_policy.h/.c`
+      (`max31856_fault_pin_asserted(fault_gpio_high)`), same convention as
+      `max31856_tc_type_policy.h`/`max31856_tc_range_policy.h`; `max31856.c:231`
+      now calls it instead of the inline `== 0` check. Confirmed asserted-low
+      against KilnFW's `MAX31856.c:531`/`MAX31856.h:482` ~FAULT comments
+      (open-drain, active-low). Added `test_max31856_fault_pin_policy.c`
+      pinning both directions, feeding S5. Negative-tested: inverted the
+      predicate, 2/2064 host checks failed (exactly the two new ones), then
+      reverted. Zero behaviour change; full SaftyFW host suite 2064/2064
+      green.
 - [x] **Dead blocking fixed-length `uart_read_bytes` branch stays loaded.**
       `KilnFW/App/drivers/espInterfaces/uart_owner.c:139`'s `rx_buffer`/
       `rx_length` branch is the exact pattern behind the 100%-timeout
