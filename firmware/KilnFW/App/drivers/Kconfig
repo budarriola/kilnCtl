@@ -644,7 +644,7 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_TOUCH_CAP_SWAP_XY
             bool "Capacitive touch (FT6336U): swap raw X/Y axes before mapping to pixels"
-            default n
+            default y
             help
                 Separate from KILNCTL_TOUCH_CAL_SWAP_XY above on purpose: the
                 FT6336U (MSP4031) reports coordinates already in panel space
@@ -653,21 +653,30 @@ menu "KilnCtrl Hardware Configuration"
                 relative to this panel's mounting has nothing to do with the
                 NS2009's ADC wiring on the other board -- reusing one knob for
                 both would detune whichever controller was tuned second.
-                2026-09-04 bench note: before these dedicated knobs existed,
-                the FT6336U path was (by omission) reusing
-                KILNCTL_TOUCH_CAL_SWAP_XY, which on this board's sdkconfig is
-                =y (tuned for the NS2009 on the OTHER panel) -- that
-                combination (swap=true, invert_x=false, invert_y=false)
-                landed touches in the wrong place on the MSP4031. These new
-                CAP_* knobs default all-off (swap=false), an untried
-                combination, as the starting point for the next bench pass.
-                If still wrong, iterate in order: flip one of
-                INVERT_X/INVERT_Y first (a mirrored axis reads as "landed
-                near the right place but flipped along one edge"), then
-                SWAP_XY (a wrong axis pairing reads as "rotated 90 degrees
-                from where pressed"). Verify with all four corners plus
-                center -- a single point can look correct by coincidence on
-                a symmetric layout.
+
+                Default derived from arithmetic, not yet confirmed by a real
+                finger (2026-09-04): the vendor's own reference driver for
+                this exact module (Datasheets/..._Keep/Demo_ESP32/
+                FT6336-arduino/FT6336.cpp, readPoint()) reports raw X/Y in
+                the touch panel's NATIVE (unrotated, 320x480 portrait)
+                frame and always swaps the axes for any 90-degree-class
+                rotation (its ROTATION_LEFT/ROTATION_RIGHT cases both swap;
+                only ROTATION_NORMAL/INVERTED, 0/180 degrees, pass X/Y
+                straight through). This board's KILNCTL_DISPLAY_ROTATION is
+                1 (a 90-degree-class landscape rotation, panel_spi.c), so
+                swap_xy=y is the arithmetically-motivated starting point --
+                not the default-off "untried combination" an earlier
+                revision of this help text described (that revision's claim
+                that swap=true "landed touches in the wrong place" predates
+                any of this session's other fixes and was never confirmed
+                against a real physical press; treat it as unverified, not
+                as evidence against this default). INVERT_X/INVERT_Y below
+                still need a real bench pass to pick the sign for whichever
+                physical mounting direction this module was wired in
+                (LEFT vs RIGHT in the vendor's own terms) -- verify with all
+                four corners plus center once a finger is available; a
+                single point can look correct by coincidence on a symmetric
+                layout.
 
         config KILNCTL_TOUCH_CAP_INVERT_X
             bool "Capacitive touch (FT6336U): invert raw X axis"
