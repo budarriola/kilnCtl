@@ -266,6 +266,13 @@ $cmd5 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
 # only, no size change), and this executable #includes autotune_engine.c
 # directly (same as test_profile_executor_prestart.c's cmd4 above, which
 # already linked stack_margin.c for the same reason).
+#
+# autotune_engine.c split 2026-09-04 (ROADMAP.md M15 A3, same "files over
+# 1500 lines" reasoning as profile_executor.c's split above) into
+# autotune_engine.c/_guard.c/_step_identify.c/_relay.c/_coupling.c -- the four
+# new pieces are NOT added as separate compile units here either, same
+# reasoning as profile_executor's own split just above: test_autotune_engine_
+# prestart.c #includes all five directly.
 
 Invoke-HostTestExe -Name "autotune_engine_prestart" -ExePath $exe5 -BuildCmd $cmd5
 

@@ -1784,8 +1784,38 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       left open per this item). All 21/21 host test executables pass,
       `test_wifi_prov.c` unchanged except #including the three new files
       alongside `wifi_prov.c`, same convention as
-      `test_profile_executor_prestart.c`. `autotune_engine.c` part still
-      open.
+      `test_profile_executor_prestart.c`. `autotune_engine.c` part —
+      **CLOSED 2026-09-04**: move-only split into `autotune_engine.c` (1462
+      lines, task/lifecycle, the shared tick state machine, run setup,
+      plain lifecycle/status API), `autotune_engine_guard.c` (515, shared
+      relay-apply/escalate/abort plumbing plus the two persistence entry
+      points `autotune_engine_abort()`/`accept()`), `autotune_engine_step_
+      identify.c` (1067, STEP method settle/onset detection, the FOPDT fit
+      and its guards, target-mode probe handling, pre-start thermal
+      readiness), `autotune_engine_relay.c` (281, RELAY method bang-bang
+      law/fit/`run_relay()`) and `autotune_engine_coupling.c` (74,
+      coupling-matrix persistence job + getter + RGA), sharing state via
+      `autotune_engine_internal.h` on the same precedent (shared statics as
+      `extern`, former `static` helpers widened to file-scope-internal).
+      Symbol audit: grepped every widened symbol for exactly one non-static
+      definition repo-wide before trusting the link; caught and fixed real
+      collisions the widening exposed the same way the wifi_prov split
+      did — `TAG`, `apply_relay`, `ticks_to_s`/`ticks_to_ms`,
+      `escalate_and_abort`, `unpack_zone_trace`, `finalize_fit` and
+      `begin_run_locked` all clashed with same-named statics-turned-would-be-
+      globals elsewhere in the tree (`profile_executor*.c`, `zones_http.c`,
+      `safety_link.c`, `pid_autotune.c`, every other file's own `static
+      const char *TAG`) — renamed to `AT_TAG`, `autotune_apply_relay`,
+      `at_ticks_to_s`/`at_ticks_to_ms`, `autotune_escalate_and_abort`,
+      `autotune_unpack_zone_trace`, `autotune_finalize_fit`,
+      `autotune_begin_run_locked`. `build_kilnfw` compiles and links clean
+      (first attempt caught the collisions above via `ld`'s "multiple
+      definition" — real bugs, not tooling noise). All 21/21 host test
+      executables pass; `test_autotune_engine_prestart.c` unchanged except
+      #including the four new files alongside `autotune_engine.c` and
+      following the same renames at its own direct call sites, same
+      convention as `test_wifi_prov.c`. Both parts of this bullet now
+      closed.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
