@@ -749,6 +749,26 @@ class RunQueueConfig:
     #: ``main()``'s CLI flips this default to True, since a real
     #: control-law A/B campaign is exactly the case sec 3.6b is about.
     capture_control_bd: bool = False
+    #: PENDING RESTORE (2026-09-04 incident): how many EXTRA idle-probe
+    #: attempts to make, beyond the first, when the probe itself raises
+    #: (a timeout, a connection error -- NOT a definitive "still
+    #: running/paused" answer) before giving up and recording the restore as
+    #: pending. The incident this exists for was a task-watchdog reset: the
+    #: STOP POST timed out, the very next idle GET also timed out (the board
+    #: was mid-reboot), restore-on-exit gave up permanently, and the board
+    #: sat on the wrong preset until a human checked by hand. The board was
+    #: healthy again within seconds -- a couple of retries would have seen
+    #: that and completed the restore cleanly the same run. See
+    #: :func:`_board_is_idle_with_retries`. Deliberately bounded, and
+    #: deliberately does NOT retry a DEFINITIVE "board reports
+    #: running/paused" answer -- that is a real refusal, not a transient
+    #: error, and retrying it would risk eventually racing a firing that
+    #: genuinely never stopped. See requirement 6 in the ROADMAP note: this
+    #: must never turn into a way to eventually restore against an unknown
+    #: or active board.
+    restore_idle_retries: int = 2
+    #: wall-clock delay between retry attempts above.
+    restore_retry_delay_s: float = 5.0
     #: injectable for tests / non-realtime replay; defaults to wall time.
     sleep: Callable[[float], None] = time.sleep
     now: Callable[[], float] = time.time
@@ -1743,6 +1763,37 @@ def _board_is_idle(cfg: RunQueueConfig) -> bool:
     return str(exec_body.get("state", "")).lower() not in _ACTIVE_STATES
 
 
+def _board_is_idle_with_retries(cfg: RunQueueConfig) -> bool:
+    """Like :func:`_board_is_idle`, but a probe that RAISES (timeout,
+    connection error -- the board simply did not answer, not "it answered
+    and said running/paused") gets ``cfg.restore_idle_retries`` extra
+    attempts, ``cfg.restore_retry_delay_s`` apart, before the exception is
+    allowed to propagate. Added after the 2026-09-04 task-watchdog incident:
+    a mid-reboot board fails the FIRST idle probe almost by definition, and
+    the old single-shot check treated that exactly like "cannot ever know" a
+    intentional refusal, when in this case the board came back within
+    seconds and would have measured idle=True the very next try.
+
+    A probe that returns a definitive answer -- True OR False -- is
+    returned immediately, first try, no retry: a "still running/paused"
+    result is a real, current fact about the board and retrying it would
+    only ever be a way to eventually paper over an active firing. Only the
+    "could not tell" case is retried."""
+    attempts = cfg.restore_idle_retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return _board_is_idle(cfg)
+        except Exception:  # noqa: BLE001 -- re-raised verbatim on the last try
+            if attempt >= attempts:
+                raise
+            log.warning(
+                "restore: idle probe failed on attempt %d/%d -- retrying in %.0fs "
+                "(transient failures, e.g. a reboot in progress, should not permanently "
+                "abandon a pending restore)", attempt, attempts, cfg.restore_retry_delay_s)
+            cfg.sleep(cfg.restore_retry_delay_s)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _restore_baseline_preset(baseline_preset_ref, cfg: RunQueueConfig, control,
                               apply_preset_fn) -> None:
     """Re-apply the campaign's baseline preset through the exact same apply
@@ -1762,20 +1813,119 @@ def _restore_baseline_preset(baseline_preset_ref, cfg: RunQueueConfig, control,
     apply_fn(control, preset, zones_host=cfg.host)
 
 
-def _record_restore(state: Optional[dict], state_path: Optional[str], restore_record: dict) -> None:
+def _record_restore(state: Optional[dict], state_path: Optional[str], restore_record: dict,
+                     baseline_preset_ref=None) -> None:
     """Persist ``restore_record`` into the campaign state file, if one is in
     use. Best-effort: a failure to WRITE the record must not mask whatever
     the restore attempt itself did or did not do -- that is already fully
-    logged by the caller before this is reached."""
+    logged by the caller before this is reached.
+
+    PENDING RESTORE (2026-09-04 incident): also maintains
+    ``state["pending_restore"]`` -- the machine-readable "this campaign
+    OWES the board a baseline restore" marker. Before this existed, a
+    skipped/failed restore left only ``state["restore"]`` (an audit record
+    of the last attempt) and log lines: nothing a later invocation, a human,
+    or an MCP tool could check for programmatically without re-deriving
+    "was the last attempt a success?" from that record by hand every time.
+    Set to a dict describing the outstanding obligation whenever
+    ``restore_record["succeeded"]`` is False; cleared (``None``) the moment
+    a restore actually succeeds -- including a later, separate completion
+    via :func:`complete_pending_restore`, which calls this same function.
+
+    ``baseline_preset_ref`` is the RAW value :func:`_restore_baseline_preset`
+    needs to actually re-apply the preset later -- a preset NAME in every
+    real invocation, but (in this suite's tests only) sometimes a raw dict
+    handed straight to an injected ``apply_preset_fn``. ``restore_record``'s
+    own ``baseline_preset`` field is already ``str()``-ed for the
+    long-standing human-readable audit log (see the existing RestoreOnExit
+    tests, which assert exactly that), so it is NOT reusable as the value a
+    later :func:`complete_pending_restore` would actually resolve/apply --
+    doing so would try to look up a preset named after a dict's ``repr()``.
+    Defaults to ``restore_record["baseline_preset"]`` (the stringified form)
+    when omitted, which is correct for the common real-name case since
+    ``str()`` of a string is that string unchanged."""
     if state is None:
         return
     state["restore"] = restore_record
+    if restore_record["succeeded"]:
+        state["pending_restore"] = None
+    else:
+        state["pending_restore"] = {
+            "baseline_preset": (baseline_preset_ref if baseline_preset_ref is not None
+                                 else restore_record["baseline_preset"]),
+            "reason": restore_record["error"] or "restore not attempted",
+            "at": restore_record["at"],
+        }
     try:
         save_campaign_state(state_path, state)
     except RunQueueError:
         log.exception(
             "restore-on-exit: could not persist the restore record to the state file %r -- "
             "see the log lines above for what the restore itself actually did", state_path)
+
+
+def check_pending_restore(state_path: str) -> Optional[dict]:
+    """Standalone check (requirement 4): load ``state_path`` and return its
+    ``pending_restore`` marker (a dict naming ``baseline_preset``,
+    ``reason``, ``at``), or ``None`` if the campaign owes nothing. Read-only
+    -- never touches the board. Meant to be callable from a human's shell,
+    a script, or an MCP tool wrapper without starting a campaign."""
+    state = load_campaign_state(state_path)
+    return state.get("pending_restore")
+
+
+def complete_pending_restore(state_path: str, cfg: RunQueueConfig, control=None,
+                              apply_preset_fn=None) -> dict:
+    """Standalone completion (requirement 4): if ``state_path`` has an
+    outstanding ``pending_restore``, apply it now -- but ONLY after
+    confirming (with the same bounded-retry idle probe restore-on-exit
+    uses, :func:`_board_is_idle_with_retries`) that the board is genuinely
+    idle. Raises :class:`RunQueueError` and leaves the marker in place,
+    never applying anything, if the board reports itself actively
+    running/paused or if the idle probe cannot get a definitive answer even
+    after retrying -- this is the same never-write-during-a-firing rule as
+    restore-on-exit and resume's own pending-restore check, not a relaxed
+    version of it: this function contains no path that writes a preset
+    without first getting ``idle is True`` from the probe.
+
+    Returns a dict describing what happened:
+    ``{"pending": False}`` if there was nothing to do,
+    ``{"pending": True, "completed": True, "baseline_preset": ...}`` on
+    success, and raises (never returns a "completed": False) on refusal or
+    failure -- the caller (CLI or MCP layer) should treat any exception here
+    exactly like it would a same-run restore failure."""
+    state = load_campaign_state(state_path)
+    pending = state.get("pending_restore")
+    if not pending:
+        return {"pending": False}
+
+    baseline_preset_ref = pending["baseline_preset"]
+    idle = _board_is_idle_with_retries(cfg)
+    if not idle:
+        raise RunQueueError(
+            f"refusing to complete pending restore of {baseline_preset_ref!r}: "
+            "profile_exec reports the board is still running/paused. Wait for it to reach "
+            "done/faulted (or stop it by hand) and try again -- never overwrite config while "
+            "a firing may still be in progress.")
+
+    log.error("completing pending restore: re-applying baseline preset %r (was pending since "
+               "%s: %s)", baseline_preset_ref, pending.get("at"), pending.get("reason"))
+    restore_record = {
+        "attempted": True, "succeeded": False,
+        "baseline_preset": str(baseline_preset_ref), "error": None, "at": cfg.now(),
+    }
+    try:
+        _restore_baseline_preset(baseline_preset_ref, cfg, control, apply_preset_fn)
+    except Exception as restore_exc:  # noqa: BLE001
+        restore_record["error"] = str(restore_exc)
+        _record_restore(state, state_path, restore_record, baseline_preset_ref=baseline_preset_ref)
+        raise RunQueueError(
+            f"pending restore of {baseline_preset_ref!r} failed: {restore_exc}") from restore_exc
+
+    restore_record["succeeded"] = True
+    _record_restore(state, state_path, restore_record)
+    log.error("pending restore of %r completed successfully", baseline_preset_ref)
+    return {"pending": True, "completed": True, "baseline_preset": str(baseline_preset_ref)}
 
 
 def _handle_abnormal_exit(board_touched: bool, baseline_preset_ref, cfg: RunQueueConfig,
@@ -1814,7 +1964,7 @@ def _handle_abnormal_exit(board_touched: bool, baseline_preset_ref, cfg: RunQueu
     }
 
     try:
-        idle = _board_is_idle(cfg)
+        idle = _board_is_idle_with_retries(cfg)
     except Exception as probe_exc:  # noqa: BLE001
         log.error(
             "restore-on-exit: could not confirm the board is idle before restoring (%s) -- "
@@ -1823,7 +1973,7 @@ def _handle_abnormal_exit(board_touched: bool, baseline_preset_ref, cfg: RunQueu
             "ease-off / max_temp_c / relay_mask / pid_kp,ki,kd / coupling_coeff against that "
             "preset file.", probe_exc, baseline_preset_ref)
         restore_record["error"] = f"could not confirm board idle: {probe_exc}"
-        _record_restore(state, state_path, restore_record)
+        _record_restore(state, state_path, restore_record, baseline_preset_ref=baseline_preset_ref)
         return
 
     if not idle:
@@ -1833,7 +1983,7 @@ def _handle_abnormal_exit(board_touched: bool, baseline_preset_ref, cfg: RunQueu
             "done/faulted, re-apply baseline preset %r by hand if the board still needs it.",
             baseline_preset_ref)
         restore_record["error"] = "skipped: board still actively firing"
-        _record_restore(state, state_path, restore_record)
+        _record_restore(state, state_path, restore_record, baseline_preset_ref=baseline_preset_ref)
         return
 
     restore_record["attempted"] = True
@@ -1855,7 +2005,7 @@ def _handle_abnormal_exit(board_touched: bool, baseline_preset_ref, cfg: RunQueu
             "pid_kp,ki,kd / coupling_coeff fields actually match the board's current config "
             "before trusting it. Underlying error: %s", baseline_preset_ref, restore_exc)
         log.error("!" * 70)
-        _record_restore(state, state_path, restore_record)
+        _record_restore(state, state_path, restore_record, baseline_preset_ref=baseline_preset_ref)
         return
 
     restore_record["succeeded"] = True
@@ -1932,6 +2082,29 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
             state = load_campaign_state(state_path)
             _validate_resume_entries(state, entries)
             check_board_not_running_for_resume(cfg.host, cfg.http_timeout_s)
+            # PENDING RESTORE (2026-09-04 incident, requirement 3): this
+            # campaign's own state file may still be carrying an unresolved
+            # restore obligation from a PREVIOUS abnormal exit (skipped
+            # because the board's idle-ness could not be confirmed, or
+            # because it was genuinely still firing at the time). Complete
+            # it now, before this resume touches any of ITS OWN entries --
+            # otherwise the next preset applied would land on top of
+            # whatever the aborted run left behind, and the incomplete
+            # restore would be silently forgotten the moment this state
+            # file's "pending_restore" key gets overwritten by ordinary
+            # progress. complete_pending_restore() re-runs the exact same
+            # idle probe (with the same bounded retry and the same refusal
+            # if the board is not idle) that restore-on-exit uses -- it does
+            # NOT force anything: a genuine "still firing" answer here
+            # raises RunQueueError and this resume goes no further.
+            if state.get("pending_restore"):
+                log.warning(
+                    "resume: %r has an unresolved restore pending from a previous abnormal "
+                    "exit (%s) -- completing it before this campaign's own entries run",
+                    state_path, state["pending_restore"].get("reason"))
+                complete_pending_restore(state_path, cfg, control=control,
+                                          apply_preset_fn=apply_preset_fn)
+                state = load_campaign_state(state_path)
             changed = False
             for i, entry in enumerate(entries):
                 if state["entries"][i]["status"] == "in_progress":
@@ -2223,6 +2396,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "ensure_stabilized_profile()/prepend_stabilization_hold() refuses that entry "
              "rather than silently reshaping the profile.")
     parser.add_argument(
+        "--check-pending-restore", action="store_true",
+        help="standalone check (no campaign started): report whether --state-file has an "
+             "unresolved RESTORE-ON-EXIT obligation from a previous abnormal exit, then exit. "
+             "Read-only -- never touches the board.")
+    parser.add_argument(
+        "--complete-pending-restore", action="store_true",
+        help="standalone completion (no campaign started): if --state-file has an unresolved "
+             "restore, apply it now -- but ONLY after confirming the board is genuinely idle "
+             "(same idle probe, same bounded retry, same refusal restore-on-exit itself uses). "
+             "Refuses (nonzero exit) rather than forcing it if the board reports itself still "
+             "running/paused, or if idle-ness cannot be confirmed even after retrying.")
+    parser.add_argument(
         "--baseline-preset", default=None, metavar="NAME",
         help="RESTORE-ON-EXIT (B9): the preset re-applied if the queue aborts mid-campaign "
              "(exception or Ctrl-C) after the board has been touched, once the board is "
@@ -2256,6 +2441,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    if args.check_pending_restore or args.complete_pending_restore:
+        if not args.state_file:
+            parser.error("--check-pending-restore/--complete-pending-restore require "
+                         "--state-file")
+        if args.check_pending_restore and args.complete_pending_restore:
+            parser.error("pass only one of --check-pending-restore / --complete-pending-restore")
+        if args.check_pending_restore:
+            pending = check_pending_restore(args.state_file)
+            if pending is None:
+                log.info("no pending restore recorded in %s", args.state_file)
+            else:
+                log.warning("pending restore in %s: baseline_preset=%r reason=%r at=%s",
+                            args.state_file, pending["baseline_preset"], pending["reason"],
+                            pending["at"])
+            return 0
+        # --complete-pending-restore
+        cfg = RunQueueConfig(host=args.host, http_timeout_s=DEFAULT_HTTP_TIMEOUT_S)
+        control = None
+        if args.serial_port:
+            from kilnctrl.serial_link import UartLink
+            from kilnctrl.control import ControlClient
+            control = ControlClient(UartLink(args.serial_port))
+        try:
+            result = complete_pending_restore(args.state_file, cfg, control=control)
+        except RunQueueError as exc:
+            log.error("could not complete pending restore: %s", exc)
+            return 1
+        finally:
+            if control is not None:
+                control.close()
+        if not result["pending"]:
+            log.info("no pending restore recorded in %s", args.state_file)
+        else:
+            log.warning("pending restore of %r completed successfully",
+                        result["baseline_preset"])
+        return 0
 
     if args.resume:
         if not args.state_file:
