@@ -1804,6 +1804,50 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       byte-identical to `tools/PcTools/src/mcpkit/registry.py`, the source of
       truth it's vendored from — add a one-line diff check to `selfcheck.py`
       so it stays that way. S
+- [ ] **Frame A's field layout is hand-duplicated across firmwares.**
+      `SaftyFW/src/tasks/link_frame.h:1-16` (pack side) says it is
+      "byte-for-byte the layout `safety_link.h` already parses" against
+      `KilnFW/App/drivers/safety_link_frames.c:600-641`'s independent
+      hand-written offset table — an offset mismatch passes CRC and silently
+      misdecodes temperatures. Lift the offsets into a shared CommonFW header,
+      the way `kilnlink_rollback_result.h` already does for that result type.
+      M
+- [ ] **The drift test for the item above is itself a third hand-copy.**
+      `SaftyFW/test/test_link_frame_wire.c:93` `mirror_apply_status()` is a
+      transcription of `safety_apply_status()`/`safety_parse_fw_version()`
+      (KilnFW `safety_link.c`), not a link to them — it can drift green
+      exactly like the two functions it's meant to catch drifting from each
+      other. Add a CI check that diffs the `p[N]` offset lists between the
+      mirror and the real function. M
+- [ ] **MAX31856 fault-pin polarity is inline and host-untested.**
+      `SaftyFW/src/max31856.c:231`,
+      `out->fault_pin_asserted = (s_fault_gpio >= 0) && (gpio_get(s_fault_gpio) == 0)`
+      — same class as the shipped S7 e-stop polarity bug. `discrete_task.c`
+      already shows the fixed pattern: pure, host-tested
+      `discrete_pin_policy_*_asserted()` helpers
+      (`discrete_task.c:98-100`). Extract the same pattern for the MAX31856
+      fault pin and host-test it; feeds S5. M
+- [ ] **Dead blocking fixed-length `uart_read_bytes` branch stays loaded.**
+      `KilnFW/App/drivers/espInterfaces/uart_owner.c:139`'s `rx_buffer`/
+      `rx_length` branch is the exact pattern behind the 100%-timeout
+      incident. No current caller passes `rx_buffer` (grep across
+      `App/drivers/*.c` turns up nothing), so it's dead today, but nothing
+      stops a future caller reintroducing the hazard. Delete the branch, or
+      assert it unreachable once a `uart_protocol_t` is attached. S
+- [ ] **`LINK_PROTOCOL.md` section 10's completion checklist is stale.**
+      TRIP_EVENT dedup, the POWER/DIAG frames, and the 30 s firing-abort are
+      all listed unchecked (`CommonFW/docs/LINK_PROTOCOL.md` sec 10) though
+      implemented — `safety_link_frames.c:280-295` (TRIP_EVENT dedup),
+      `safety_apply_power()`/`safety_apply_diag()` (same file, POWER/DIAG),
+      and `profile_executor.c:1112-1147` plus
+      `test_safety_link.c:77-92`/`:86-92` (30 s abort, tested and pinned).
+      `CommonFW/docs` is owned by CommonFW, not KilnFW — someone with edit
+      access there needs to tick these. S (doc-only)
+
+Informational: the Pico is still on protocol v8, which makes S13's
+BORROWED-zone indicator unreachable in practice today — it fails closed and
+visibly, so not a defect, but a concrete reason to prioritize bringing the
+Pico build current.
 
 **Patterns worth copying, not just avoiding:** `thermal_guard_tick`'s explicit
 input-struct interface; `kiln_cfg_store`'s interlock kept inside the module
