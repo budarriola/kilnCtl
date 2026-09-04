@@ -13,6 +13,7 @@ Run with: python -m pytest tools/PcTools/tests/test_selfcheck_zones_fields.py
 from __future__ import annotations
 
 import os
+import pathlib
 import sys
 import unittest
 
@@ -85,19 +86,19 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
 
 class FunctionBodySlicingTests(unittest.TestCase):
     def test_slices_only_the_named_function(self):
-        body = _function_body(_SYNTHETIC_GET, "zones_post_handler")
+        body = _function_body(_SYNTHETIC_GET, "zones_post_handler", pathlib.Path("<synthetic>"))
         self.assertIn('"thermo_count"', body)
         self.assertNotIn('"zone"', body)  # that's zones_pid_post_handler's field
         self.assertNotIn("zones_get_handler", body)
 
     def test_missing_function_raises(self):
         with self.assertRaises(AssertionError):
-            _function_body(_SYNTHETIC_GET, "no_such_handler")
+            _function_body(_SYNTHETIC_GET, "no_such_handler", pathlib.Path("<synthetic>"))
 
 
 class ExtractGetTopLevelKeysTests(unittest.TestCase):
     def test_finds_scalar_and_structural_top_level_keys(self):
-        keys = _extract_get_top_level_keys(_SYNTHETIC_GET)
+        keys = _extract_get_top_level_keys(_SYNTHETIC_GET, pathlib.Path("<synthetic>"))
         self.assertEqual(
             keys,
             {
@@ -108,12 +109,12 @@ class ExtractGetTopLevelKeysTests(unittest.TestCase):
         )
 
     def test_nested_object_keys_excluded(self):
-        keys = _extract_get_top_level_keys(_SYNTHETIC_GET)
+        keys = _extract_get_top_level_keys(_SYNTHETIC_GET, pathlib.Path("<synthetic>"))
         self.assertNotIn("link_up", keys)
         self.assertNotIn("tc_fault", keys)
 
     def test_per_element_array_keys_excluded(self):
-        keys = _extract_get_top_level_keys(_SYNTHETIC_GET)
+        keys = _extract_get_top_level_keys(_SYNTHETIC_GET, pathlib.Path("<synthetic>"))
         self.assertNotIn("index", keys)
         self.assertNotIn("name", keys)
         self.assertNotIn("pid_kp", keys)
@@ -121,22 +122,22 @@ class ExtractGetTopLevelKeysTests(unittest.TestCase):
     def test_comment_between_fragments_does_not_truncate_capture(self):
         # If the comment DID truncate the capture, relay_zone_owned_mask
         # (and everything after it) would be missing.
-        keys = _extract_get_top_level_keys(_SYNTHETIC_GET)
+        keys = _extract_get_top_level_keys(_SYNTHETIC_GET, pathlib.Path("<synthetic>"))
         self.assertIn("relay_zone_owned_mask", keys)
         self.assertIn("zones", keys)
 
 
 class ExtractPostTopLevelKeysTests(unittest.TestCase):
     def test_finds_literal_top_level_fields(self):
-        keys = _extract_post_top_level_keys(_SYNTHETIC_GET)
+        keys = _extract_post_top_level_keys(_SYNTHETIC_GET, pathlib.Path("<synthetic>"))
         self.assertEqual(keys, {"thermo_count", "relay_count", "safety_tc_type"})
 
     def test_dynamic_per_zone_key_excluded(self):
-        keys = _extract_post_top_level_keys(_SYNTHETIC_GET)
+        keys = _extract_post_top_level_keys(_SYNTHETIC_GET, pathlib.Path("<synthetic>"))
         self.assertNotIn("pid_kp", keys)
 
     def test_other_handlers_fields_excluded(self):
-        keys = _extract_post_top_level_keys(_SYNTHETIC_GET)
+        keys = _extract_post_top_level_keys(_SYNTHETIC_GET, pathlib.Path("<synthetic>"))
         self.assertNotIn("zone", keys)
         self.assertNotIn("kp", keys)
 
@@ -162,8 +163,8 @@ class RealFirmwareSmokeTest(unittest.TestCase):
         if not paths:
             self.skipTest(f"firmware source not found under {drivers_dir}")
         text = "\n".join(p.read_text(encoding="utf-8") for p in paths)
-        get_keys = _extract_get_top_level_keys(text)
-        post_keys = _extract_post_top_level_keys(text)
+        get_keys = _extract_get_top_level_keys(text, paths[0])
+        post_keys = _extract_post_top_level_keys(text, paths[0])
         self.assertIn("thermo_count", get_keys)
         self.assertIn("safety_wiring", get_keys)
         self.assertIn("zones", get_keys)
