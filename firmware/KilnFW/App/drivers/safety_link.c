@@ -212,6 +212,27 @@ uint32_t safety_elapsed_ms(TickType_t since)
     return (uint32_t)delta * portTICK_PERIOD_MS;
 }
 
+/* See safety_link.h's doc comment on safety_link_await_poll_fn/
+ * safety_link_await_result_t for the full contract. This is the whole
+ * extraction: a plain "poll until PENDING stops, or time runs out" loop,
+ * with zero domain knowledge -- every "what does ACKED/UNKNOWN mean here"
+ * decision lives in the caller's poll_fn, not here. */
+safety_link_await_result_t safety_link_await_or_unknown(uint32_t timeout_ms, uint32_t poll_interval_ms,
+                                                          safety_link_await_poll_fn poll_fn, void *ctx)
+{
+    TickType_t start = xTaskGetTickCount();
+    for (;;) {
+        safety_link_await_poll_t verdict = poll_fn(ctx);
+        if (verdict != SAFETY_LINK_AWAIT_PENDING) {
+            return verdict;
+        }
+        if (safety_elapsed_ms(start) >= timeout_ms) {
+            return SAFETY_LINK_AWAIT_UNKNOWN;
+        }
+        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
+    }
+}
+
 /* ------------------------------------------------------------------------ */
 /* Cache / staleness                                                        */
 /* ------------------------------------------------------------------------ */

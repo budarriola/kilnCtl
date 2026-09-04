@@ -62,6 +62,13 @@ uint16_t safety_age_ms_locked(const SafetyLinkClass *link);
 bool     safety_link_up_locked(const SafetyLinkClass *link);
 void     safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link);
 
+/* Shared bounded-wait/unknown-outcome helper (M15 B2) -- declared here
+ * (public type/doc lives in safety_link.h) so every safety_link_*.c file can
+ * reach it without an extra include. See safety_link.h for the full
+ * contract. */
+safety_link_await_result_t safety_link_await_or_unknown(uint32_t timeout_ms, uint32_t poll_interval_ms,
+                                                          safety_link_await_poll_fn poll_fn, void *ctx);
+
 /* --- safety_link_frames.c (frame decode/apply, outbound builders) ------- */
 
 void safety_link_send_announce_version_burst(SafetyLinkClass *link);

@@ -1286,18 +1286,27 @@ Two more, driven by the borrowed-thermocouple option:
 **Pico → ESP**
 - [x] 23-byte status frame, byte-identical to the existing layout, at 500 ms
       (`firmware/SaftyFW/src/tasks/link_task.c`, `link_frame.c`)
-- [ ] `DIAG` (0x08) — not this pass, explicitly lower priority than Frame A
+- [x] `DIAG` (0x08) — `firmware/KilnFW/App/drivers/safety_link_frames.c`'s
+      `safety_apply_diag()` (2026-09-04, M15 C5 verification)
 - [x] `FW_VERSION` (0x0B) on request **and** unsolicited at boot, with config CRC
       (CRC field present and transmitted; value is honestly 0 — no
       `config_store` yet, Phase 9)
-- [ ] `TRIP_EVENT` (0x0D) pushed immediately, repeated, deduped on `trip_seq`
-- [ ] `POWER` (0x0E)
+- [x] `TRIP_EVENT` (0x0D) pushed immediately, repeated, deduped on `trip_seq`
+      (`firmware/KilnFW/App/drivers/safety_link_frames.c:883-928`'s
+      `safety_apply_trip_event()`, backed by `safety_trip_decision.c` and
+      `test_safety_trip_decision.c`; 2026-09-04, M15 C5 verification)
+- [x] `POWER` (0x0E) — `firmware/KilnFW/App/drivers/safety_link_frames.c`'s
+      `safety_apply_power()` (2026-09-04, M15 C5 verification)
 - [x] Non-blocking TX ring: drops on full, counts, never blocks
       (`firmware/SaftyFW/src/tasks/uart_owner.c`)
 
 **Liveness (§8)**
 - [ ] `SAFETY_FAULT_SRC_SAFETY_LINK` redefined as "no telemetry within 1.5 s"
-- [ ] 30 s firing-abort wired into `profile_executor`
+- [x] 30 s firing-abort wired into `profile_executor`
+      (`firmware/KilnFW/App/drivers/profile_executor.c:1201-1236`'s
+      `safety_link_silent_30s`/`SAFETY_LINK_FIRING_ABORT_SILENCE_MS`, pinned
+      by `firmware/KilnFW/App/test/test_safety_link.c:77-92`; 2026-09-04,
+      M15 C5 verification)
 - [ ] Before the first frame ever arrives, the link counts as down
 - [ ] Bench-escape documented: `safety_link_fault_on_link_loss(link, false)`
 

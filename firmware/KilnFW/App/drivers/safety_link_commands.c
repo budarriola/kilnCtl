@@ -312,6 +312,99 @@ esp_err_t safety_link_send_rollback(SafetyLinkClass *link)
  * tick. Cheap: each iteration is two short state_lock sections, no I/O. */
 #define SAFETY_LINK_ROLLBACK_BOOT_WATCH_POLL_MS 200u
 
+/* Closure for rollback_boot_watch_poll() below -- everything the old
+ * hand-rolled watch loop closed over as ordinary locals, now passed through
+ * safety_link_await_or_unknown()'s void *ctx instead. commit_before/
+ * datetime_before are borrowed pointers into safety_link_send_rollback_ex()'s
+ * own stack buffers, valid for the lifetime of that call (the only caller). */
+typedef struct {
+    SafetyLinkClass *link;
+    bool had_boot_id;
+    uint8_t boot_id_before;
+    bool had_build;
+    const uint8_t *commit_before;
+    uint8_t commit_len_before;
+    const uint8_t *datetime_before;
+    uint8_t datetime_len_before;
+    bool logged_boot_id_without_build; /* dedup for the "looks like an unrelated reboot" log */
+    bool stopped_early; /* true once this poll_fn itself has returned a non-PENDING verdict */
+    safety_link_rollback_outcome_t *out_outcome;
+    uint8_t *out_reason_code;
+} rollback_boot_watch_ctx_t;
+
+/* M15 B2: safety_link_await_poll_fn for safety_link_send_rollback_ex()'s
+ * boot_id-reconnect watch. Byte-for-byte the same decisions the old inline
+ * loop body made each iteration -- see that loop's original comments,
+ * preserved below at each branch. Returns ACKED for every path that used to
+ * `return ESP_OK` early (a stashed late reply, or a confirmed reboot);
+ * PENDING for every path that used to fall through to the next iteration.
+ * Never returns UNKNOWN itself -- that verdict belongs to the timeout case,
+ * which safety_link_await_or_unknown() reports on its own once poll_fn has
+ * had no terminal verdict for the full watch window. */
+static safety_link_await_poll_t rollback_boot_watch_poll(void *ctx_v)
+{
+    rollback_boot_watch_ctx_t *ctx = (rollback_boot_watch_ctx_t *)ctx_v;
+    SafetyLinkClass *link = ctx->link;
+
+    uart_proto_message_t stashed;
+    if (safety_take_stashed_rollback_result(link, &stashed)) {
+        kilnlink_rollback_result_t late_result = {0};
+        bool late_ok = (kilnlink_rollback_result_decode(stashed.payload, stashed.length, &late_result) ==
+                        KILNLINK_ROLLBACK_RESULT_OK);
+        *ctx->out_outcome = safety_link_rollback_infer_outcome(true, late_ok, false);
+        if (*ctx->out_outcome == SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED) {
+            if (ctx->out_reason_code) {
+                *ctx->out_reason_code = late_result.reason;
+            }
+            ESP_LOGW(TAG, "rollback: a refusal arrived AFTER the reply window closed but was stashed and "
+                          "found by the boot_id watch -- REFUSED (reason=%u), not the ACCEPTED this driver "
+                          "used to infer from silence", (unsigned)late_result.reason);
+        } else {
+            ESP_LOGE(TAG, "rollback: a stashed ROLLBACK_RESULT-shaped frame failed to decode");
+        }
+        ctx->stopped_early = true;
+        return SAFETY_LINK_AWAIT_ACKED;
+    }
+
+    bool boot_id_changed_now = false;
+    bool build_changed_now = false;
+    if (safety_lock(link)) {
+        boot_id_changed_now = safety_link_rollback_boot_id_changed(ctx->had_boot_id, ctx->boot_id_before,
+                                                                    link->pico_boot_id_known, link->pico_boot_id);
+        build_changed_now = safety_link_rollback_build_identity_changed(
+            ctx->had_build, ctx->commit_len_before, ctx->commit_before, ctx->datetime_len_before,
+            ctx->datetime_before, link->peer_build_known, link->peer_build_commit_len, link->peer_build_commit,
+            link->peer_build_datetime_len, link->peer_build_datetime);
+        safety_unlock(link);
+    }
+    if (safety_link_rollback_reboot_confirmed(boot_id_changed_now, build_changed_now)) {
+        *ctx->out_outcome = safety_link_rollback_infer_outcome(false, false, true);
+        ESP_LOGW(TAG, "rollback: no refusal, and the peer's boot_id AND build identity both changed "
+                      "within the %ums watch -- ACCEPTED (reboot into a different image observed, not "
+                      "inferred from silence or from a boot_id change alone)",
+                 (unsigned)SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS);
+        ctx->stopped_early = true;
+        return SAFETY_LINK_AWAIT_ACKED;
+    } else if (boot_id_changed_now && !ctx->logged_boot_id_without_build) {
+        /* Evidence this driver deliberately does NOT accept (opus-review
+         * finding 2): the boot_id moved but the build identity did not
+         * (or could not be compared), which is exactly what an
+         * unrelated crash/watchdog/power-glitch reboot inside this
+         * watch window looks like. Logged once (this condition is now
+         * true for every remaining iteration of the watch, since the
+         * boot_id does not un-change), not reported -- the watch keeps
+         * running rather than returning here, since a genuine rollback
+         * reboot could still complete and its own FW_VERSION (carrying
+         * the new build identity) arrive before the window closes. */
+        ctx->logged_boot_id_without_build = true;
+        ESP_LOGW(TAG, "rollback: the peer's boot_id changed within the watch but its build identity did "
+                      "not (or is not yet known) -- NOT reporting ACCEPTED, this looks like an unrelated "
+                      "reboot rather than a rollback; continuing to watch");
+    }
+
+    return SAFETY_LINK_AWAIT_PENDING;
+}
+
 /* See safety_link.h's doc comment on safety_link_send_rollback_ex() and
  * safety_link_rollback_outcome_t for the full design. Structured like
  * safety_link_send_commit_config() above (own xact_lock hold, drain-then-
@@ -494,74 +587,39 @@ esp_err_t safety_link_send_rollback_ex(SafetyLinkClass *link, safety_link_rollba
     // must never be misreported as success (kilnlink_rollback_result.h,
     // CommonFW/docs/LINK_PROTOCOL.md sec 4) -- see safety_link_rollback_
     // infer_outcome()'s fallthrough to UNKNOWN_TIMEOUT below.
-    TickType_t watch_start = xTaskGetTickCount();
-    bool logged_boot_id_without_build = false; /* dedup for the "looks like an unrelated reboot" log below */
-    for (;;) {
-        uart_proto_message_t stashed;
-        if (safety_take_stashed_rollback_result(link, &stashed)) {
-            kilnlink_rollback_result_t late_result = {0};
-            bool late_ok = (kilnlink_rollback_result_decode(stashed.payload, stashed.length, &late_result) ==
-                            KILNLINK_ROLLBACK_RESULT_OK);
-            *out_outcome = safety_link_rollback_infer_outcome(true, late_ok, false);
-            if (*out_outcome == SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED) {
-                if (out_reason_code) {
-                    *out_reason_code = late_result.reason;
-                }
-                ESP_LOGW(TAG, "rollback: a refusal arrived AFTER the reply window closed but was stashed and "
-                              "found by the boot_id watch -- REFUSED (reason=%u), not the ACCEPTED this driver "
-                              "used to infer from silence", (unsigned)late_result.reason);
-            } else {
-                ESP_LOGE(TAG, "rollback: a stashed ROLLBACK_RESULT-shaped frame failed to decode");
-            }
-            return ESP_OK;
-        }
-
-        bool boot_id_changed_now = false;
-        bool build_changed_now = false;
-        if (safety_lock(link)) {
-            boot_id_changed_now = safety_link_rollback_boot_id_changed(had_boot_id, boot_id_before,
-                                                                        link->pico_boot_id_known,
-                                                                        link->pico_boot_id);
-            build_changed_now = safety_link_rollback_build_identity_changed(
-                had_build, commit_len_before, commit_before, datetime_len_before, datetime_before,
-                link->peer_build_known, link->peer_build_commit_len, link->peer_build_commit,
-                link->peer_build_datetime_len, link->peer_build_datetime);
-            safety_unlock(link);
-        }
-        if (safety_link_rollback_reboot_confirmed(boot_id_changed_now, build_changed_now)) {
-            *out_outcome = safety_link_rollback_infer_outcome(false, false, true);
-            ESP_LOGW(TAG, "rollback: no refusal, and the peer's boot_id AND build identity both changed "
-                          "within the %ums watch -- ACCEPTED (reboot into a different image observed, not "
-                          "inferred from silence or from a boot_id change alone)",
-                     (unsigned)SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS);
-            return ESP_OK;
-        } else if (boot_id_changed_now && !logged_boot_id_without_build) {
-            /* Evidence this driver deliberately does NOT accept (opus-review
-             * finding 2): the boot_id moved but the build identity did not
-             * (or could not be compared), which is exactly what an
-             * unrelated crash/watchdog/power-glitch reboot inside this
-             * watch window looks like. Logged once (this condition is now
-             * true for every remaining iteration of the watch, since the
-             * boot_id does not un-change), not reported -- the watch keeps
-             * running rather than returning here, since a genuine rollback
-             * reboot could still complete and its own FW_VERSION (carrying
-             * the new build identity) arrive before the window closes. */
-            logged_boot_id_without_build = true;
-            ESP_LOGW(TAG, "rollback: the peer's boot_id changed within the watch but its build identity did "
-                          "not (or is not yet known) -- NOT reporting ACCEPTED, this looks like an unrelated "
-                          "reboot rather than a rollback; continuing to watch");
-        }
-
-        if (safety_elapsed_ms(watch_start) >= SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(SAFETY_LINK_ROLLBACK_BOOT_WATCH_POLL_MS));
+    rollback_boot_watch_ctx_t watch_ctx = {
+        .link = link,
+        .had_boot_id = had_boot_id,
+        .boot_id_before = boot_id_before,
+        .had_build = had_build,
+        .commit_before = commit_before,
+        .commit_len_before = commit_len_before,
+        .datetime_before = datetime_before,
+        .datetime_len_before = datetime_len_before,
+        .logged_boot_id_without_build = false,
+        .out_outcome = out_outcome,
+        .out_reason_code = out_reason_code,
+    };
+    /* M15 B2: this used to be a hand-rolled poll loop, the ONLY place this
+     * driver's "never infer success from silence" discipline existed before
+     * safety_link_await_or_unknown() (safety_link.h/.c) extracted it into a
+     * shared helper. rollback_boot_watch_poll() below is byte-for-byte the
+     * same per-iteration logic that used to live directly in this loop --
+     * only where the "keep polling vs. stop" decision is made moved. */
+    safety_link_await_result_t watch_result = safety_link_await_or_unknown(
+        SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS, SAFETY_LINK_ROLLBACK_BOOT_WATCH_POLL_MS, rollback_boot_watch_poll,
+        &watch_ctx);
+    if (watch_result == SAFETY_LINK_AWAIT_UNKNOWN && !watch_ctx.stopped_early) {
+        /* Only reached via a plain timeout -- rollback_boot_watch_poll()
+         * never returns SAFETY_LINK_AWAIT_UNKNOWN itself (every terminal
+         * path it takes is ACKED; PENDING just keeps the watch going), so
+         * this is exactly the "budget exhausted, no verdict" case the old
+         * loop's fallthrough covered. */
+        *out_outcome = safety_link_rollback_infer_outcome(false, false, false);
+        ESP_LOGW(TAG, "rollback: no refusal and no boot_id change within the %ums send-burst/reply window plus "
+                      "%ums boot_id watch -- outcome UNKNOWN, never reported as accepted",
+                 (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS, (unsigned)SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS);
     }
-
-    *out_outcome = safety_link_rollback_infer_outcome(false, false, false);
-    ESP_LOGW(TAG, "rollback: no refusal and no boot_id change within the %ums send-burst/reply window plus "
-                  "%ums boot_id watch -- outcome UNKNOWN, never reported as accepted",
-             (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS, (unsigned)SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS);
     return ESP_OK;
 }
 

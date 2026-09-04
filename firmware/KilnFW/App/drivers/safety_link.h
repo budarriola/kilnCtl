@@ -1558,6 +1558,48 @@ esp_err_t safety_link_send_set_log_level(SafetyLinkClass *link, uint8_t level);
  * Safe to call from any task, same as safety_link_send_clear_trip(). */
 esp_err_t safety_link_send_rollback(SafetyLinkClass *link);
 
+/* Shared bounded-wait/unknown-outcome helper (M15 ROADMAP item "No shared
+ * bounded-wait/unknown-outcome helper"). Extracted from safety_link_send_
+ * rollback_ex()'s boot_id-reconnect watch, the ONLY place this discipline
+ * existed before this helper: poll for positive/negative evidence up to a
+ * timeout, and if the timeout elapses with neither, report UNKNOWN --
+ * NEVER infer success from silence. This is CommonFW/docs/LINK_PROTOCOL.md's
+ * skew rule made reusable: on this link a new ESP can be talking to an old
+ * Pico (or vice versa) that never sends the reply a newer peer would, so
+ * "no reply" is a routine, expected outcome, not evidence of anything --
+ * see LINK_PROTOCOL.md sec 4, "a timeout must never be misreported as
+ * success."
+ *
+ * ANY new command whose only feedback is "did something happen, or did the
+ * peer just stay silent" (as opposed to an ordinary safety_exchange() with
+ * a single well-defined reply frame) MUST route through this rather than
+ * hand-rolling its own poll loop -- a second hand-rolled copy is exactly
+ * the drift this extraction exists to prevent.
+ *
+ * poll_fn is called at poll_interval_ms intervals (immediately on entry,
+ * then after each delay) until it returns something other than
+ * SAFETY_LINK_AWAIT_PENDING, or until timeout_ms has elapsed since entry --
+ * whichever comes first. It receives ctx unchanged; use it to close over
+ * whatever the specific command needs to inspect (an inbox stash, a cached
+ * peer field, ...) and to do its own outcome-specific logging/output-param
+ * writes BEFORE returning ACKED or UNKNOWN -- this helper itself carries no
+ * domain knowledge of what "acked" means for a given command, only the
+ * wait/poll/timeout shape. Runs on the calling task; callers must not hold
+ * a lock their own poll_fn (or the evidence poll_fn is watching for) needs
+ * released to make progress -- see safety_link_send_rollback_ex()'s
+ * xact_lock release, taken BEFORE this helper is ever called, for exactly
+ * that reason. */
+typedef enum {
+    SAFETY_LINK_AWAIT_PENDING = 0, /* poll_fn: no verdict yet, keep waiting */
+    SAFETY_LINK_AWAIT_ACKED,       /* poll_fn: positive evidence observed, stop now */
+    SAFETY_LINK_AWAIT_UNKNOWN,     /* poll_fn: terminal negative/inconclusive evidence
+                                     * observed, stop now -- also the ONLY value this
+                                     * helper itself returns on a plain timeout */
+} safety_link_await_poll_t;
+
+typedef safety_link_await_poll_t (*safety_link_await_poll_fn)(void *ctx);
+typedef safety_link_await_poll_t safety_link_await_result_t; /* PENDING never returned by the helper itself */
+
 /* The honest outcome of safety_link_send_rollback_ex() below -- see that
  * function's own doc comment for the full reasoning. Five states, not a
  * bool, because "no reply" is ambiguous on this link and this driver must
