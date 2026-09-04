@@ -374,6 +374,19 @@ class ArmsDifferPreflightTest(_Harness):
         rq._check_arms_differ({"A": a, "C": c})  # must not raise
         rq._check_arms_differ({"A": a})  # single entry -- must not raise
 
+    def test_prose_metadata_does_not_mask_identical_arms(self):
+        """REGRESSION: excluding only "name" was not enough. Every real A/B
+        pair in config_presets/ also carries a per-arm "description", so when
+        the substantive field went missing -- exactly the failure this check
+        exists to catch -- the two payloads still differed on that prose and
+        the check stayed silent. Prose/bookkeeping keys must all be excluded."""
+        a = {"name": "arm_a", "description": "ease-off 2.0 arm",
+             "zones": [{"index": 0, "pid_kp": 1.0}]}
+        b = {"name": "arm_b", "description": "ease-off 3.0 arm (field was dropped)",
+             "zones": [{"index": 0, "pid_kp": 1.0}]}
+        with self.assertRaises(rq.RunQueueError):
+            rq._check_arms_differ({"A": a, "B": b})
+
 
 if __name__ == "__main__":
     unittest.main()

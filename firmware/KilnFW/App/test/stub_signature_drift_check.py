@@ -118,6 +118,39 @@ def strip_comments(text: str) -> str:
     return text
 
 
+# Real ESP-IDF headers routinely break a prototype across several physical
+# lines (`esp_err_t esp_partition_write(const esp_partition_t* partition,\n
+# size_t dst_offset, ...)`) and decorate it with `__attribute__((...))` after
+# the closing paren (`void esp_restart(void) __attribute__((__noreturn__));`).
+# PROTO_RE is line-oriented and anchors the end of the line right after the
+# argument list, so BOTH shapes yielded no prototype at all for the real
+# header -- and a stub function missing from the real side is silently
+# skipped (`if name not in real_protos: continue`), which quietly dropped
+# esp_partition_write / esp_partition_erase_range / esp_restart /
+# esp_timer_create / httpd_register_uri_handler out of the comparison
+# entirely. Joining continuation lines and stripping attributes before
+# extraction puts them back: 83 -> 89 of 99 stub prototypes actually
+# compared, with no new mismatches.
+_ATTRIBUTE_RE = re.compile(r"__attribute__\s*\(\(.*?\)\)")
+
+
+def join_continuations(text: str) -> str:
+    """Collapse each declaration spanning multiple physical lines onto one
+    logical line, by carrying a line forward while its parentheses are still
+    unbalanced."""
+    out = []
+    buf = ""
+    for line in text.splitlines():
+        buf = (buf + " " + line.strip()).strip() if buf else line.rstrip()
+        if buf.count("(") - buf.count(")") > 0:
+            continue
+        out.append(buf)
+        buf = ""
+    if buf:
+        out.append(buf)
+    return "\n".join(out)
+
+
 def count_args(arg_str: str) -> int:
     arg_str = arg_str.strip()
     if arg_str == "" or arg_str == "void":
@@ -133,7 +166,7 @@ def extract_prototypes(text: str):
     like NAME(args); can produce a false entry, which is why CONTROL_
     KEYWORDS is filtered and callers should treat this as a heuristic, not
     a parser."""
-    text = strip_comments(text)
+    text = join_continuations(_ATTRIBUTE_RE.sub(" ", strip_comments(text)))
     out = {}
     for line in text.splitlines():
         stripped = line.strip()

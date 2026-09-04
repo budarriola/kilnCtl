@@ -920,6 +920,19 @@ def _resolve_preset(entry: QueueEntry, apply_preset_fn) -> dict:
     return entry.preset_name
 
 
+#: Preset keys that are PROSE/BOOKKEEPING, never board configuration: they
+#: are sent nowhere and describe the file, not the kiln. They must all be
+#: excluded from the arms-differ comparison, not just "name". Every real A/B
+#: pair in config_presets/ (easeoff_ab_2p0 vs 3p0, fuzzy_ab_baseline vs
+#: fuzzy_ab_strength50) carries a per-arm "description" as well as a per-arm
+#: "name" -- so with only "name" excluded, the exact failure this check
+#: exists to catch (the substantive field silently dropped/renamed, leaving
+#: two arms that configure the board IDENTICALLY) still left the two payloads
+#: unequal on "description" and the check stayed silent. Verified against
+#: both pairs on disk.
+_PRESET_METADATA_KEYS = frozenset({"name", "description", "note", "notes", "comment"})
+
+
 def _check_arms_differ(presets_by_name: dict) -> None:
     """B9 ARMS-DIFFER PREFLIGHT. Raise :class:`RunQueueError` if any two of
     ``presets_by_name`` (distinct preset NAME -> resolved payload dict, the
@@ -951,7 +964,8 @@ def _check_arms_differ(presets_by_name: dict) -> None:
     # would make every pair trivially "different" and defeat the entire
     # point -- what has to differ is the actual config the board receives
     # (zones/pid/coupling/ramp_assist/...), not which file it came from.
-    payloads = {name: {k: v for k, v in presets_by_name[name].items() if k != "name"}
+    payloads = {name: {k: v for k, v in presets_by_name[name].items()
+                       if k not in _PRESET_METADATA_KEYS}
                 for name in names}
     for a, b in itertools.combinations(names, 2):
         if payloads[a] == payloads[b]:

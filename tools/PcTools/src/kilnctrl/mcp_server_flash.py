@@ -147,7 +147,19 @@ def _verify_flash_landed(host: Optional[str], bin_path: str) -> str:
     except (OSError, esp_app_desc.AppDescError) as exc:
         return f"WARNING: post-flash verification skipped -- could not parse app descriptor from {bin_path}: {exc}"
 
-    resolved_host = host or partition_http_client.PARTITION_AP_DEFAULT_HOST
+    # Use the SAME host resolution every other board-HTTP tool in this
+    # package uses (explicit host, else the board's current STA IP via
+    # wifi_get_status(), else the fallback-AP address) -- not a bare
+    # PARTITION_AP_DEFAULT_HOST. A board on home Wi-Fi does not answer at
+    # 192.168.4.1, so defaulting to the AP address made the normal
+    # `flash_firmware()` call (no host argument -- the form CLAUDE.md
+    # documents) poll an address nothing is listening on, time out, and
+    # return the "could not reach the board" WARNING every single time:
+    # the verification would never actually run on the very failure mode it
+    # was added to catch. Local import mirrors debug_check_partition_table()
+    # below -- it avoids a circular import with mcp_server_ota.py.
+    from .mcp_server_ota import _ota_resolve_host
+    resolved_host = _ota_resolve_host(host)
 
     last_exc: Optional[Exception] = None
     partitions_data: Optional[dict] = None
@@ -263,10 +275,11 @@ def flash_firmware(
     caller knows verification did not happen and why, distinct from an
     actual wrong-partition/wrong-build failure which always raises.
 
-    `host`: board IP/hostname for the verification HTTP calls (same
-    resolution as the ota_*/debug_check_partition_table tools otherwise --
-    defaults to the fallback AP address 192.168.4.1 if not given, since a
-    board fresh off a factory flash may not yet be on home Wi-Fi)."""
+    `host`: board IP/hostname for the verification HTTP calls. Resolved
+    exactly like every ota_*/debug_check_partition_table tool
+    (`_ota_resolve_host`): the explicit argument if given, else the board's
+    current station IP from wifi_get_status(), else the fallback-AP address
+    192.168.4.1 for a board that is not on home Wi-Fi yet."""
     openocd_exe = _find_openocd_exe()
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"

@@ -183,6 +183,42 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self.assertFalse(result.startswith("error:"))
         self.assertIn("WARNING: board unreachable", result)
 
+class DefaultHostResolutionTest(unittest.TestCase):
+    """REGRESSION: every test above passes an EXPLICIT host, so none of them
+    exercised the default (host=None) path -- the one every documented
+    `flash_firmware()` call actually takes. That path used to resolve
+    straight to PARTITION_AP_DEFAULT_HOST (192.168.4.1), an address a board
+    on home Wi-Fi does not answer, so verification always timed out into the
+    "could not reach the board" WARNING and never once ran on the failure it
+    exists to catch. It must use the package-wide _ota_resolve_host() (STA IP
+    first), the same resolution debug_check_partition_table() uses."""
+
+    def setUp(self):
+        self.bin_path = _write_bin()
+        self.addCleanup(os.unlink, self.bin_path)
+
+    def test_default_host_uses_sta_ip_not_the_ap_fallback(self):
+        from kilnctrl import mcp_server_ota
+
+        seen = []
+
+        def fake_get_partitions(host, timeout=None):
+            seen.append(host)
+            return {"running": "factory", "partitions": []}
+
+        with unittest.mock.patch.object(
+            mcp_server_ota, "_ota_resolve_host", return_value="192.168.1.77"
+        ), unittest.mock.patch.object(
+            partition_http_client, "get_partitions", side_effect=fake_get_partitions
+        ), unittest.mock.patch.object(
+            capability_preflight, "get_board_info",
+            return_value=capability_preflight.BoardInfo(reachable=True, fw_build="Sep  3 2026 20:13:41"),
+        ):
+            result = mf._verify_flash_landed(None, self.bin_path)
+        self.assertEqual(result, "")
+        self.assertEqual(seen, ["192.168.1.77"])
+        self.assertNotIn(partition_http_client.PARTITION_AP_DEFAULT_HOST, seen)
+
 
 if __name__ == "__main__":
     unittest.main()
