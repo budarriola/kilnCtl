@@ -36,7 +36,10 @@
 #include "lvgl_port.h"
 #include "MAX31856.h"
 #include "NS2009.h"
-#include "SX1509.h"
+/* ROADMAP.md M15 A1: main.c's I2C bring-up is one of the SX1509 write/config
+ * owners (SX1509_start()) -- see SX1509_internal.h's top comment. */
+#define SX1509_OWNER_BUILD
+#include "SX1509_internal.h"
 #include "screen_idle.h"
 #include "backlight_pwm.h"
 #include "autotune_engine.h"

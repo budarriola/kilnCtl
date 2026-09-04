@@ -1,5 +1,10 @@
 #include "kiln_io.h"
 
+/* ROADMAP.md M15 A1: kiln_io.c is one of the SX1509 write/config owners --
+ * see SX1509_internal.h's top comment. */
+#define SX1509_OWNER_BUILD
+#include "SX1509_internal.h"
+
 #include <string.h>
 
 #include "esp_log.h"

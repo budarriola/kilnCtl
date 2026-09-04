@@ -1,4 +1,8 @@
-#include "SX1509.h"
+/* ROADMAP.md M15 A1: SX1509.c is the driver itself -- it defines every
+ * write/config function, so it needs their declarations too. See
+ * SX1509_internal.h's top comment. */
+#define SX1509_OWNER_BUILD
+#include "SX1509_internal.h"
 
 #include <string.h>
 

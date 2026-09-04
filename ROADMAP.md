@@ -1720,10 +1720,25 @@ nobody has watched fail is not evidence.
 Findings from a four-agent architecture review, coordinator spot-verified.
 Owner: unassigned. Everything below is an open suggestion, nothing is done.
 
-- [ ] **`SX1509.h` is public by accident.** `App/drivers/CMakeLists.txt:316`'s
+- [x] **`SX1509.h` is public by accident.** `App/drivers/CMakeLists.txt:316`'s
       `INCLUDE_DIRS "."` exposes it to all 8 `uart_bridge*.c` files instead of
       just the owner module. Split the header, move the rest to
-      `PRIV_INCLUDE_DIRS`. M
+      `PRIV_INCLUDE_DIRS`. M — **CLOSED 2026-09-04**: `PRIV_INCLUDE_DIRS`
+      can't fence sibling `.c` files in a flat single-component directory
+      (quote-`#include` always searches the including file's own directory
+      first), so the write/config API moved to `SX1509_internal.h`, gated by
+      a `#error` unless the including file `#define`s `SX1509_OWNER_BUILD`
+      first — only `kiln_io.c`/`kiln_io_owner.c`/`SX1509.c`/`main.c`'s bring-up
+      do. `SX1509.h` now carries only the struct, constants, and read/status
+      calls. All 8 `uart_bridge*.c` files turned out to need none of it
+      directly (their `#include "SX1509.h"` was dead — verified by grepping
+      each for `SX1509_` symbol use) and had it removed; `uart_bridge_io.c`
+      keeps `kiln_io.h` for `SX1509_PIN_COUNT`/`SX1509_SENSE_FOR_PIN`.
+      Negative-tested: added `#include "SX1509_internal.h"` to
+      `uart_bridge_thermo.c` and confirmed `build_kilnfw` fails on the
+      `#error`, then reverted. Runtime behavior unchanged — declarations
+      moved, nothing rewritten. `build_kilnfw` and all 21/21 host test
+      executables pass.
 - [x] **`GET /api/status` allocates from internal DRAM.** `dashboard_http.c:582`
       uses plain `malloc` while sibling handlers in the same file use
       `heap_caps_malloc` SPIRAM; same gap in `backup_http.c:178`. This is the
