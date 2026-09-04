@@ -673,7 +673,12 @@ class WifiFiringMixin:
         if state == "idle":
             self.firing_profile_var.set("Idle -- no profile running.")
             return
-        mode_names = {0: "OFF", 1: "BANGBANG", 2: "PID"}
+        # Mirrors zone_control_mode_t (firmware/KilnFW/App/drivers/zones_http.h)
+        # -- no shared Python source exists for this enum (devices_control.py
+        # only carries the raw int; the web dashboard's MODE_NAMES lives in
+        # zones_page.html, a different language). Kept as a local dict rather
+        # than adding a fourth hand-maintained copy in a new module.
+        mode_names = {0: "OFF", 1: "BANGBANG", 2: "PID", 3: "PID_FUZZY"}
         lines = [
             f"State: {state}   Zones: {data.get('zone_mask', 0):#04x}   "
             f"Profile: {data.get('profile_name', '')!r} (id {data.get('profile_id', '?')})",
