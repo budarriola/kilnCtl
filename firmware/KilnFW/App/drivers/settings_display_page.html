@@ -46,6 +46,17 @@
          background: var(--bg); color: var(--fg); }
   h1 { font-size: 1.2em; }
   p { color: var(--muted); }
+  h2 { font-size: 1em; margin-top: 1.6em; }
+  .kc-dp-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px;
+                padding: 0.8em 1em; margin: 0.6em 0; }
+  .kc-dp-row { display: flex; align-items: center; justify-content: space-between; gap: 1em;
+               padding: 0.5em 0; }
+  .kc-dp-row label { flex: 1 1 auto; }
+  .kc-dp-row input[type="range"] { flex: 1 1 auto; }
+  .kc-dp-row select { padding: 0.3em; }
+  .kc-dp-note { font-size: 0.85em; color: var(--muted); margin: 0.3em 0 0.8em; }
+  .kc-dp-save { margin-top: 0.5em; }
+  .kc-dp-status { font-size: 0.85em; margin-left: 0.6em; }
 </style>
 </head>
 <body>
@@ -60,6 +71,105 @@
 <p>Temperature units are stored on the board, so this also changes what the
 LCD and every other browser shows. The dark/light theme is remembered by this
 browser only.</p>
+
+<!-- Display power: brightness/idle-timeout/keep-on-while-firing/display-on-
+     error, owner request 2026-09-04. Stored on the board (kc-dp-*), same
+     "device is the source of truth" reasoning as Units above -- these
+     settings drive the LCD's own on/off behaviour, so a phone changing them
+     must not disagree with what the board next to the kiln does. -->
+<h2>Display power</h2>
+<div class="kc-dp-card">
+  <div class="kc-dp-row">
+    <label for="kcDpBrightness">Brightness</label>
+    <input type="range" id="kcDpBrightness" min="10" max="100" step="5" value="100">
+    <span id="kcDpBrightnessVal">100%</span>
+  </div>
+  <p class="kc-dp-note" id="kcDpBrightnessNote">Inert on this board today: the backlight has no
+    hardware control line fitted yet (see docs/UI_PLAN.md). The setting is saved and will take
+    effect once that hardware is verified.</p>
+
+  <div class="kc-dp-row">
+    <label for="kcDpTimeout">Turn off after</label>
+    <select id="kcDpTimeout">
+      <option value="0">1 minute</option>
+      <option value="1">5 minutes</option>
+      <option value="2">10 minutes</option>
+      <option value="3">15 minutes</option>
+      <option value="4">60 minutes</option>
+      <option value="5" selected>Never</option>
+    </select>
+  </div>
+
+  <div class="kc-dp-row">
+    <label for="kcDpKeepOnFiring">Keep display on while firing</label>
+    <input type="checkbox" id="kcDpKeepOnFiring">
+  </div>
+  <div class="kc-dp-row">
+    <label for="kcDpOnError">Turn display on when an error occurs</label>
+    <input type="checkbox" id="kcDpOnError">
+  </div>
+
+  <button type="button" id="kcDpSave" class="kc-dp-save">Save</button>
+  <span id="kcDpStatus" class="kc-dp-status"></span>
+</div>
+
+<script>
+(function () {
+  // Same "one form, four fields, one POST" shape as the tz save elsewhere in
+  // this app -- see settings_http.c's settings_display_power_post_handler()
+  // header comment: all four fields are always posted together and either
+  // all apply or none do.
+  var brightness = document.getElementById('kcDpBrightness');
+  var brightnessVal = document.getElementById('kcDpBrightnessVal');
+  var timeout = document.getElementById('kcDpTimeout');
+  var keepOnFiring = document.getElementById('kcDpKeepOnFiring');
+  var onError = document.getElementById('kcDpOnError');
+  var saveBtn = document.getElementById('kcDpSave');
+  var status = document.getElementById('kcDpStatus');
+
+  brightness.addEventListener('input', function () {
+    brightnessVal.textContent = brightness.value + '%';
+  });
+
+  function loadCurrent() {
+    fetch('/api/settings/display_power')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        brightness.value = d.brightness_percent;
+        brightnessVal.textContent = d.brightness_percent + '%';
+        timeout.value = String(d.timeout_setting);
+        keepOnFiring.checked = !!d.keep_on_while_firing;
+        onError.checked = !!d.display_on_error;
+      })
+      .catch(function () {
+        // Best-effort, same convention as app.js's initial kcUnit fetch --
+        // leaves the form at its markup defaults (100%/Never/both off) if
+        // the board can't be reached yet.
+        status.textContent = '(could not load current settings)';
+      });
+  }
+  loadCurrent();
+
+  saveBtn.addEventListener('click', function () {
+    status.textContent = 'Saving...';
+    var body = 'brightness=' + encodeURIComponent(brightness.value) +
+               '&timeout=' + encodeURIComponent(timeout.value) +
+               '&keep_on_while_firing=' + (keepOnFiring.checked ? '1' : '0') +
+               '&display_on_error=' + (onError.checked ? '1' : '0');
+    fetch('/api/settings/display_power', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body,
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('save failed');
+        return r.json();
+      })
+      .then(function () { status.textContent = 'Saved.'; })
+      .catch(function () { status.textContent = 'Save failed -- try again.'; });
+  });
+})();
+</script>
 
 <script>
 (function () {

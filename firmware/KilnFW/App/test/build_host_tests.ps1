@@ -59,6 +59,8 @@ $sources = @(
     (Join-Path $testDir "test_boot_guard.c"),
     (Join-Path $testDir "test_boot_button.c"),
     (Join-Path $testDir "test_backlight_pwm.c"),
+    (Join-Path $testDir "test_display_power_policy.c"),
+    (Join-Path $testDir "test_display_power_cfg.c"),
     (Join-Path $testDir "test_crash_report.c"),
     (Join-Path $testDir "test_watchdog_cfg.c"),
     (Join-Path $testDir "test_ramp_assist_cfg.c"),

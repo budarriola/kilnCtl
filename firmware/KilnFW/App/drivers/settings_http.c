@@ -1,9 +1,12 @@
 #include "settings_http.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "esp_log.h"
 
+#include "display_power_cfg.h"
+#include "display_power_policy.h"
 #include "http_form.h"
 #include "time_sync.h"
 #include "web_encoding.h"
@@ -124,6 +127,118 @@ static esp_err_t settings_tz_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+/* GET /api/settings/display_power -- current brightness/idle-timeout/
+ * keep-on-while-firing/display-on-error settings, owner request 2026-09-04.
+ * Read side only: this settings page's JS fetches this once on load to
+ * populate the form, same "one-time initial read" shape as app.js's own
+ * GET /api/status fetch for kcUnit. brightness_percent is round-tripped
+ * here even though nothing yet acts on it on real hardware -- see
+ * display_power_cfg.h's BRIGHTNESS IS CURRENTLY INERT note: brightness_pwm
+ * (CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE) is off by default pending the
+ * backlight flying-wire bodge and its own hardware verification. */
+static esp_err_t settings_display_power_get_handler(httpd_req_t *req)
+{
+    char json[160];
+    int n = snprintf(json, sizeof(json),
+                     "{\"brightness_percent\":%u,\"timeout_setting\":%u,\"keep_on_while_firing\":%s,"
+                     "\"display_on_error\":%s,\"brightness_inert\":true}",
+                     (unsigned)display_power_cfg_brightness_percent(),
+                     (unsigned)display_power_cfg_timeout_setting(),
+                     display_power_cfg_keep_on_while_firing() ? "true" : "false",
+                     display_power_cfg_display_on_error() ? "true" : "false");
+    if (n < 0 || (size_t)n >= sizeof(json)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "response too large");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+/* POST /api/settings/display_power -- form body
+ * "brightness=<0-100>&timeout=<0-5>&keep_on_while_firing=<0|1>&display_on_error=<0|1>",
+ * same bounded-body-then-validate-then-commit shape as settings_tz_post_
+ * handler above (and zones_http.c's zones_post_handler). All four fields
+ * are posted together every time (the settings page's one form) and either
+ * all apply or none do -- see display_power_cfg_set()'s "reject invalid
+ * outright, never partially apply" contract. `timeout` is the raw
+ * display_timeout_setting_t ordinal (0=1min .. 5=Never), not milliseconds --
+ * the page's <select> posts the same ordinal display_power_policy.h defines,
+ * so there is exactly one place (that header) that has to agree with the
+ * dropdown's option order. */
+#define DISPLAY_POWER_BODY_MAX 128
+
+static esp_err_t settings_display_power_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > DISPLAY_POWER_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[DISPLAY_POWER_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char field[16];
+    if (http_form_find_field(body, "brightness", field, sizeof(field)) <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "brightness field missing or invalid");
+        return ESP_OK;
+    }
+    long brightness_raw = strtol(field, NULL, 10);
+
+    if (http_form_find_field(body, "timeout", field, sizeof(field)) <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "timeout field missing or invalid");
+        return ESP_OK;
+    }
+    long timeout_raw = strtol(field, NULL, 10);
+
+    if (http_form_find_field(body, "keep_on_while_firing", field, sizeof(field)) <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "keep_on_while_firing field missing or invalid");
+        return ESP_OK;
+    }
+    bool keep_on_while_firing = (field[0] == '1');
+
+    if (http_form_find_field(body, "display_on_error", field, sizeof(field)) <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "display_on_error field missing or invalid");
+        return ESP_OK;
+    }
+    bool display_on_error = (field[0] == '1');
+
+    /* Refuse, never clamp -- same discipline as settings_tz_post_handler.
+     * display_power_cfg_set() re-validates independently (defense in
+     * depth); these bounds checks exist only to give a clear 400 before
+     * ever calling into it. */
+    if (brightness_raw < 0 || brightness_raw > 100) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "brightness must be 0-100");
+        return ESP_OK;
+    }
+    if (timeout_raw < 0 || timeout_raw >= DISPLAY_TIMEOUT_COUNT) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "timeout must be 0-5 (1/5/10/15/60 min or Never)");
+        return ESP_OK;
+    }
+
+    esp_err_t err = display_power_cfg_set((uint8_t)brightness_raw, (display_timeout_setting_t)timeout_raw,
+                                          keep_on_while_firing, display_on_error);
+    if (err != ESP_OK) {
+        /* display_power_cfg_set() applies live before attempting to persist
+         * (see its own comment) -- a non-OK here means the values took
+         * effect for the rest of this boot but a save failed, same
+         * "consistent but not-yet-persisted" reporting as the tz handler. */
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "applied live but could not be saved");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
 esp_err_t settings_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -131,6 +246,19 @@ esp_err_t settings_http_start(void)
         ESP_LOGE(TAG, "no HTTP server -- wifi_provision_http_start() must run first");
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* Loaded here rather than added as a new call in main.c: this module
+     * already owns the one call site (this function) app_main invokes for
+     * every other piece of settings-page state, and settings_http_start()
+     * itself still runs from app_main's own task before the scheduler has
+     * started any other task -- same "init-time only" call-site reasoning
+     * flash_worker_lint.py's allowlist records for display_power_cfg.c
+     * (this call doesn't write flash, only reads it, but keeping the start()
+     * call next to display_power_cfg_set()'s only caller keeps the whole
+     * module's lifecycle in one file). Non-fatal on failure, same as every
+     * other *_cfg_start() in this codebase -- logs internally and leaves the
+     * safe defaults in place. */
+    display_power_cfg_start();
 
     static const httpd_uri_t settings_uri = {
         .uri = "/settings", .method = HTTP_GET, .handler = settings_page_get_handler,
@@ -140,6 +268,12 @@ esp_err_t settings_http_start(void)
     };
     static const httpd_uri_t tz_uri = {
         .uri = "/api/settings/tz", .method = HTTP_POST, .handler = settings_tz_post_handler,
+    };
+    static const httpd_uri_t display_power_get_uri = {
+        .uri = "/api/settings/display_power", .method = HTTP_GET, .handler = settings_display_power_get_handler,
+    };
+    static const httpd_uri_t display_power_post_uri = {
+        .uri = "/api/settings/display_power", .method = HTTP_POST, .handler = settings_display_power_post_handler,
     };
 
     esp_err_t err = httpd_register_uri_handler(server, &settings_uri);
@@ -155,6 +289,18 @@ esp_err_t settings_http_start(void)
     err = httpd_register_uri_handler(server, &tz_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/settings/tz) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &display_power_get_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/settings/display_power) failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &display_power_post_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/settings/display_power) failed: %s",
+                 esp_err_to_name(err));
         return err;
     }
 

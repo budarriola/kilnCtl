@@ -129,6 +129,85 @@ long-term credential, or whether a separate "web password" should be
 settable. Reusing the AP password ships first — already provisioned,
 already the OTA credential, no new stored secret.
 
+## Display power: brightness/timeout/keep-on-while-firing/display-on-error — 2026-09-04
+
+Owner request: a brightness control on the display settings page; a
+selectable auto-off idle timeout (1/5/10/15/60 minutes, or Never); a "keep
+display on while firing" switch that overrides that timeout during an active
+firing; the first touch after the display is off only wakes it, never acts
+on the UI underneath; and a "display on error" switch next to keep-on-while-
+firing that forces the display on when an error occurs and holds it until a
+touch dismisses it (which is itself swallowed, same as any other wake touch),
+then resumes normal timeout behaviour.
+
+**Implemented this pass:**
+- `App/drivers/display_power_policy.h/.c` — the pure decision core (no LVGL/
+  NVS/FreeRTOS), same split as SaftyFW's `max31856_fault_pin_policy.c`/
+  `discrete_pin_policy.c` and this codebase's own `backlight_pwm.h`'s
+  `backlight_duty_percent_for_state()`. `display_power_policy_step()` takes
+  `(now_ms, last_touch_ms, timeout_setting, firing_active,
+  keep_on_while_firing, error_active, error_entered_this_tick,
+  display_on_error, current_state, touch_event)` and returns the next
+  `display_power_state_t` (ON / OFF / ERROR_HOLD) plus `swallow_touch`.
+  Host-tested in `App/test/test_display_power_policy.c` (18 cases), including
+  the rule 3/4/5 interactions the owner specifically asked to be covered:
+  error arriving while firing, touch during error-hold resuming normal
+  timeout behaviour, "Never" plus error, and a timeout expiring on the exact
+  same tick as a touch.
+- `App/drivers/display_power_cfg.h/.c` — persisted settings (brightness
+  0-100%, the six-way timeout enum, both switches) in one versioned NVS blob,
+  same `kiln_nvs`/`kiln_cfg` pattern as `unit_pref.c`/`ramp_assist_cfg.c`.
+  Every failure path (missing key, wrong size/version, an out-of-range field
+  inside an otherwise well-formed blob) falls back to the safe defaults
+  (100% brightness, Never timeout, both switches off — i.e. today's shipped
+  behaviour, unchanged for any board that never opens this settings page).
+  Host-tested in `App/test/test_display_power_cfg.c` (6 cases). NVS writes
+  run from `settings_http.c`'s own httpd handler task (Pattern 3 in
+  `App/test/flash_worker_lint.py`'s allowlist, same as `unit_pref.c`) — not
+  dispatched to the flash worker and not PSRAM-stacked, so neither of the
+  two hazards that allowlist exists to catch applies here; negative-tested by
+  temporarily removing the allowlist entry and confirming the lint fails
+  naming `drivers\display_power_cfg.c:178`/`:180` exactly, then restoring it.
+- `App/drivers/settings_http.c` — `GET`/`POST /api/settings/display_power`,
+  same bounded-body / refuse-don't-clamp shape as the existing
+  `/api/settings/tz` handler. `display_power_cfg_start()` is called from
+  `settings_http_start()` (this module's own existing app_main call site,
+  see that function's comment) rather than adding a new call in `main.c`.
+- `App/drivers/settings_display_page.html` — a new "Display power" card:
+  brightness slider, timeout `<select>`, and the two switches, following the
+  existing page's card/row markup and dark/light theme tokens. Loads current
+  values on page load, POSTs all four fields together on Save.
+
+**Inert pending hardware, by design:** brightness is fully built (setting,
+persistence, API, UI) but does nothing on real hardware today —
+`CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE` is off by default (`backlight_pwm.h`:
+no flying wire fitted from a spare ESP32 GPIO to the backlight LED input yet;
+another agent is mid-investigation on that bodge). `display_power_cfg.c`'s
+header comment says this explicitly; the settings page shows an inline note
+next to the slider saying the same thing to the owner. Wiring
+`display_power_cfg_brightness_percent()` into `backlight_pwm.c`'s on/idle
+duty (replacing its current Kconfig-constant percentages) is follow-up work
+for whoever verifies that hardware.
+
+**NOT wired into the running display stack this pass, and why:** the actual
+touch-swallow behaviour and the idle-timeout/error-hold state machine are
+not yet hooked up to `screen_idle.c`'s poll task or `lvgl_port.c`'s
+`touch_read_cb()` — those files, and the board's flash, are owned by another
+agent mid-work on the panel driver this same day, and this pass was scoped
+to stop short of them to avoid collision. `display_power_policy.h`'s header
+comment states the exact calling contract (call once per touch edge and once
+per idle-poll tick, who owns `last_touch_ms`, what `error_entered_this_tick`
+means and why it must be an edge not a level) so that hookup is a
+self-contained, already-tested seam rather than new design work. Also still
+open: an "error is currently active" signal to feed `error_active`/
+`error_entered_this_tick` — this pass did not audit every fault/error source
+in the firmware to find the one authoritative "is there an active error"
+query; whoever wires the consumer needs to pick that source (event_log?
+profile_executor fault state? a new aggregate?) as part of the hookup.
+**Needs a flash plus the owner's finger to verify** once wired: the actual
+on-screen timeout/wake/error-hold behaviour, and (separately, once the
+backlight bodge is fitted) brightness.
+
 ## Open, explicitly deferred by the owner: TLS for web UI and OTA
 
 Requested explicitly: *"i also want tls for both ota and this. for now plan

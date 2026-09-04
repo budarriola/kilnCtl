@@ -68,6 +68,11 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): crash_report_save() runs from the panic/
     # boot path, before normal task concurrency exists.
     "crash_report.c",
+    # Pattern 3 (init-time only): display_power_cfg_set() runs from
+    # settings_http.c's POST /api/settings/display_power handler, on that
+    # handler's own internal-SRAM-stack httpd task -- same story as
+    # unit_pref.c/zones_config_store.c's identical entries below.
+    "display_power_cfg.c",
     # Pattern 2 (local caller_stack_is_external() guard): nvs_save_store().
     "kiln_cfg_store.c",
     # Pattern 3 (init-time / recovery path): ota_http.c's pico-firmware

@@ -235,6 +235,14 @@ now a short list, which is the point:
   (temperature-page relay toggle, diagnostics/safety/thermocouple-fault
   paging, planned-profile preview) also landed and are checked off in
   [M11](#m11--the-ui-the-owner-actually-asked-for--opened-2026-08-28) itself.
+- **Display power (brightness/idle-timeout/keep-on-while-firing/display-on-
+  error), 2026-09-04.** New feature, not an M11 reopen — see
+  `firmware/KilnFW/docs/UI_PLAN.md`'s "Display power" section for the full
+  writeup. Pure decision core + persisted settings + HTTP API + settings-page
+  UI are built and host-tested; brightness is inert until
+  `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE`'s flying-wire bodge is verified, and
+  the actual `screen_idle.c`/`lvgl_port.c` touch-swallow/timeout hookup is
+  left as a documented seam for whoever owns that hardware pass next.
 - ~~**The LCD back buttons do not work**~~ **CLOSED (`1982ed6`).** Root cause
   was the topbar's z-order-first-match hit test: icons are built left-to-right
   (Back, Home, Prev, Next, Gear) so every icon except the last in a row was
@@ -1906,6 +1914,81 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       vendored) to find a countable field, or a packet capture to see the
       handshake complete and RST for a request that never reached this
       file's own hooks at all.
+      2026-09-04: **root-caused and fixed. `backlog_conn` refuted (made it
+      worse); the real mechanism is `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE`,
+      confirmed by direct measurement and now raised 6 -> 16 — reset rate
+      dropped from 22.5% to 0.0% at the previously-failing concurrency
+      levels.** Tested the assigned prediction first: `wifi_provision_http.c`'s
+      `config.backlog_conn` 10 -> 32, nothing else changed, built
+      (`build_kilnfw` exit 0), flashed (`flash_firmware()`, verify=True,
+      confirmed running), re-ran `http_concurrency_reproducer.py
+      --concurrency 4,8,12,16 --bursts 3` against the idle board
+      (192.168.1.156). **Before** (previous pass, same config baseline,
+      backlog_conn=10): 120 requests, 27 resets, 22.5% (0/12 @4, ~12.5% @8,
+      33% @12, 25% @16). **After** (backlog_conn=32 alone): 120 requests,
+      **54 resets, 45.0%** (0/12 @4, 2/6=33% @8, 6/12=50% @12, 10/16=62.5%
+      @16) — the rate did not just fail to improve, it roughly doubled.
+      Backlog is refuted, and in a way that resolves the onset-at-8-vs-
+      backlog-10 tension directly: at every concurrency from 8 through 16,
+      **exactly 6 of N requests per burst succeeded, every single burst,
+      regardless of N** — the failure count wasn't set by how many clients
+      showed up, it was `N - 6`. That flat ceiling of 6 pointed straight at
+      `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE`, which defaults to 6
+      (`$IDF_PATH/components/lwip/Kconfig` line 723-728, range 1-64 without
+      `LWIP_WND_SCALE`, not vendored, read directly) and was never touched
+      by this build — a Kconfig option entirely separate from
+      `backlog_conn`, confirmed by reading
+      `$IDF_PATH/components/lwip/lwip/src/api/api_msg.c`'s
+      `accept_function()`: lwIP posts each newly-ESTABLISHED connection into
+      `conn->acceptmbox` (a fixed-size mailbox, sized by this Kconfig value
+      at `sys_mbox_new(&msg->conn->acceptmbox, DEFAULT_ACCEPTMBOX_SIZE)` in
+      the same file) for the application to drain via `accept()`/
+      `netconn_accept()`; when `sys_mbox_trypost()` finds it full, the
+      handler's own comment says it plainly — "the pcb is aborted in
+      tcp_process()" — an RST, sent from inside lwIP's TCP callback, entirely
+      independent of `backlog_conn` (that one only gates SYN-stage entry,
+      checked against `pcb->accepts_pending` in `tcp_listen_input()`,
+      `tcp_in.c`), independent of httpd's session pool (never reached —
+      `accept()` is never called on an aborted pcb), independent of the OS
+      `sockets[]` table (`alloc_socket()` is never reached either), and
+      producing exactly the client-side symptom (`WinError 10054`/
+      `ECONNRESET`) every pass of this item has measured. This also explains
+      why raising `backlog_conn` made things *worse*: a deeper SYN queue let
+      more handshakes complete, only to pile into the same 6-slot mailbox and
+      get aborted post-handshake instead of never getting that far. Reverted
+      `backlog_conn` to 10 (`wifi_provision_http.c`, comment updated in
+      place with this result) and instead raised
+      `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` 6 -> 16 (`sdkconfig.defaults`, with
+      the mechanism and the measurement recorded in that file's own
+      comment — the gitignored `sdkconfig` had to be hand-edited too and a
+      full `build_kilnfw` re-run, since an incremental build does not
+      re-merge `sdkconfig.defaults` into the machine-local `sdkconfig`; the
+      generated `sdkconfig.cmake` was checked directly to confirm the new
+      value actually took before flashing — see this file's own prior
+      "gitignored config hides mismatch" precedent). Built, flashed
+      (verify=True, confirmed running), re-ran the same
+      `--concurrency 4,8,12,16 --bursts 3` sweep: **120/120 requests ok, 0
+      resets, 0.0%** — full clear at every level that was previously
+      failing. Extended the sweep to `--concurrency 20,24,28,32 --bursts 3`
+      to look for a new, higher onset: **clean through 28-way concurrency**
+      (240/240 ok), and at 32-way the only failures were **5 client-side
+      timeouts at the 5 s cap (`other`, not `reset`)** out of 96 requests —
+      the server queuing under real load and answering slowly, not an RST —
+      a qualitatively different and far more benign failure mode than the
+      one this item has chased since 2026-08-28. Host tests re-run clean
+      after both firmware changes (21/21 host test executables). Packet
+      capture (the fallback this pass was authorized to reach for if
+      backlog were refuted) turned out unnecessary — the `ok` count pinned
+      at exactly 6 per burst was a strong enough direct signal, and the
+      before/after measurement against the fix confirms it. **Closing this
+      item**: root cause confirmed by mechanism (lwIP source read) and by
+      two independent live measurements (the flat-6 signature, and the
+      fix's before/after). Next lead, if it resurfaces: 16 was chosen for
+      headroom over the 8-16 concurrency this reproducer exercises, not
+      tuned to a proven worst case — a workload with sustained concurrency
+      above ~28 (this reproducer's new, much milder failure floor) would be
+      the next thing to characterize, and `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE`
+      can go as high as 64 without `LWIP_WND_SCALE` if it does.
 - [x] **Wire the guard scripts into something that runs them.** Done
       2026-08-27: `tools/run_all_checks.ps1`, plus a `run_repo_checks` tool on
       both MCP servers. Discovery is by glob rather than a list, because a list
