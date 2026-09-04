@@ -87,20 +87,42 @@ DEFAULT_COOLDOWN_S = 600.0
 #: can -- and, live, did -- alternate old/new arms across a monotonically
 #: warming baseline and call every arm "rested".
 #:
-#: 0.8C is chosen from the live campaign's own three pairs, not picked in
-#: the abstract: pair 2 (the one that DID clear pid_ab_compare.py's 1.0C
-#: gate) differed by 0.47/0.64/0.70C per zone -- 0.8C clears all three with
-#: a real margin (0.10-0.33C of headroom) rather than sitting right on
-#: pair 2's own worst zone. Pairs 1 and 3 (both REFUSED live) differed by
-#: 1.20-1.66C per zone -- every one of those is still comfortably over 0.8C,
-#: so this tolerance would have caught both live failures too. It also
-#: leaves a clear 0.2C margin under the 1.0C wall itself, so ordinary poll
-#: jitter/thermocouple noise cannot land a "passed" pair right on
-#: pid_ab_compare.py's own refusal boundary. (A stricter value like 0.5C
-#: looks appealing on paper but is NOT achievable from the real data: it
-#: would have refused pair 2 as well, i.e. it would have failed the campaign
-#: 3-for-3 instead of fixing the 2-for-3 confound this exists to fix.)
-DEFAULT_PAIR_START_TOL_C = 0.8
+#: 2026-09-03 REVISED to 1.5C (was 0.8C). The 0.8C value above was picked to
+#: clear three LIVE pairs with margin, but never checked against what this
+#: rig can physically deliver -- and live use found the gap: a paired arm B
+#: held for 75 minutes against a 0.8C gate and still could not match. The
+#: real constraint is passive cooling itself, not thermocouple noise: a
+#: profile-7 cooldown was tracked to its own asymptote and it does not
+#: approach the PREVIOUS session's start temperature at all -- it flattens
+#: 1.4-1.5C above it and stays there (measured 16:30 vs 16:58, chamber
+#: 29.83/29.95/29.99C -> 29.88/29.96/30.04C, i.e. <0.1C of further progress
+#: in 28 minutes, while the cold junctions kept climbing 30.56->30.91 /
+#: 30.75->31.05 / 30.88->31.19C). Approach to ambient is exponential, and an
+#: early-phase rate extrapolated linearly is what made 0.8C look achievable
+#: in the first place. A tolerance below the rig's own asymptotic floor is
+#: not "tighter", it is unmeetable -- :func:`wait_until_paired_start` would
+#: exhaust DEFAULT_PAIR_START_TIMEOUT_S on every single pair.
+#:
+#: 1.5C is the top of that measured 1.4-1.5C floor (not the bottom -- the
+#: floor itself is a moving target across firings/ambient, so this sits at
+#: its worse-observed edge rather than assuming the better one). Checked
+#: against the owner's actual bar ("i dont care about sub 0.5C noise"), not
+#: just against feasibility: this rig's own fitted start-temp sensitivity
+#: (pid_ab_compare.fit_start_temp_sensitivity on the checked-in 6-run repeat
+#: set, roughly 0.009-0.133C of iae_normalized_whole_c per 1C of start
+#: delta -- see pid_ab_compare.py's CONFOUND_THRESHOLD_C derivation) predicts
+#: that a pair sitting right at this 1.5C tolerance carries at most
+#: 1.5 * 0.133 = 0.20C of confound in the most sensitive zone -- comfortably
+#: under the 0.5C the owner has said is not actionable, and on the same
+#: order as this rig's own measured whole-run IAE noise floors (z0 0.116 /
+#: z1 0.077 / z2 0.147C). So 1.5C is simultaneously the loosest tolerance
+#: this rig can actually achieve AND tight enough that the confound it
+#: admits stays below both the actionable threshold and the noise floor --
+#: it is not "give up and let anything through". See pid_ab_compare.py's
+#: CONFOUND_THRESHOLD_C, which is now DERIVED FROM this constant (not a
+#: separately-chosen 1.0C) specifically so a pair this gate accepts is never
+#: turned around and refused by pid_ab_compare's own confound gate.
+DEFAULT_PAIR_START_TOL_C = 1.5
 
 #: how long wait_until_paired_start() will keep polling (beyond the normal
 #: rested wait) for the second arm to cool down TO WITHIN
@@ -264,6 +286,29 @@ def is_paired_start_matched(status_body: dict, reference_status: dict,
         if abs(float(cur_t) - float(ref_t)) > tol_c:
             return False
     return saw_any
+
+
+def per_zone_start_deltas(status_body: dict, reference_status: dict) -> dict:
+    """Per-channel-index ``abs(temp_c - reference temp_c)``, positional (same
+    zip-over-channels convention as :func:`is_paired_start_matched`) -- the
+    REPORTED counterpart to that gate. A channel invalid in either body, or
+    missing ``temp_c``, is skipped (same "one dead channel does not block
+    everything" stance used throughout this module). Deliberately never
+    raises and never gates anything -- this exists so the actual per-zone
+    drift is visible to a reader ALONGSIDE whatever :func:`is_paired_start_matched`
+    decided, not only as a pass/fail behind ``pair_start_tol_c``."""
+    ref_channels = reference_status.get("channels") or []
+    cur_channels = status_body.get("channels") or []
+    out: dict = {}
+    for i, (ref_ch, cur_ch) in enumerate(zip(ref_channels, cur_channels)):
+        if not ref_ch.get("valid", False) or not cur_ch.get("valid", False):
+            continue
+        ref_t = ref_ch.get("temp_c")
+        cur_t = cur_ch.get("temp_c")
+        if ref_t is None or cur_t is None:
+            continue
+        out[i] = abs(float(cur_t) - float(ref_t))
+    return out
 
 
 def check_no_fault(exec_body: dict) -> None:
@@ -863,6 +908,13 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
         status = wait_until_paired_start(
             cfg, pair_reference_status, tol_c=cfg.pair_start_tol_c,
             deadline_s=cfg.pair_start_timeout_s)
+        # REPORT the actual per-zone start delta, matched or not, right next
+        # to the gate that just passed -- the drift itself is a covariate a
+        # reader should see (compared against pid_ab_compare.py's own
+        # per-zone deltas later), not just a threshold this arm cleared.
+        deltas = per_zone_start_deltas(status, pair_reference_status)
+        log.info("[%s] paired-start matched -- per-zone start delta vs the first arm: %s",
+                  entry.label, {i: round(d, 2) for i, d in deltas.items()})
 
     # Open (and thereby validate) the capture file BEFORE anything energizes
     # the kiln. Tonight's incident: the start POST landed, the heaters came
@@ -1031,7 +1083,19 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
 # removed before run_entry ever sees it again.
 # --------------------------------------------------------------------------
 
-CAMPAIGN_STATE_VERSION = 1
+#: v2 (was 1): added each entry's ``pair_start_status`` field, so a paired
+#: entry's OWN recorded start reading survives a ``--resume`` -- v1 kept
+#: ``pair_start_status`` (the module-level dict in :func:`run_queue`) purely
+#: in-process, so a resumed campaign silently lost every pairing mid-way and
+#: ran the next arm with NO start-temperature matching at all (found on the
+#: bench, not in a review -- see :func:`_rebuild_pair_start_status`). Bumped
+#: rather than adding the field with a ``.get(..., None)`` fallback on a
+#: still-v1 file: a v1 state file predates this fix entirely, so guessing at
+#: which of its completed entries were first arms would be exactly the kind
+#: of silent reconstruction this fix exists to stop being silent about --
+#: refusing to resume a v1 file is consistent with this module's existing
+#: "refuse rather than guess" stance on an unknown version.
+CAMPAIGN_STATE_VERSION = 2
 
 #: per-process counter mixed into _atomic_write_json's temp filename so two
 #: campaigns writing the same --state-file path never share one temp file.
@@ -1104,6 +1168,14 @@ def new_campaign_state(entries: Sequence[QueueEntry], meta: Optional[dict] = Non
                 "log_path": e.log_path,
                 "status": "pending",  # pending | in_progress | completed
                 "completed_at": None,
+                #: this entry's OWN recorded ``GET /api/status`` body, set
+                #: only when this entry is the FIRST arm of a
+                #: ``QueueEntry.pair_key`` pair and has completed -- see
+                #: :func:`_rebuild_pair_start_status`. ``None`` for every
+                #: unpaired entry, every not-yet-completed entry, and every
+                #: SECOND arm (a second arm consumes the reference, it does
+                #: not produce one).
+                "pair_start_status": None,
             }
             for i, e in enumerate(entries)
         ],
@@ -1247,6 +1319,85 @@ def _capture_run_reached_terminal_state(log_path: str) -> bool:
     return state in _TERMINAL_STATES
 
 
+def _first_capture_status(log_path: str) -> Optional[dict]:
+    """Best-effort recovery of a capture's OWN first recorded ``status``
+    body (``_capture_line``'s ``"status"`` field, first non-empty JSONL
+    line) -- used ONLY when a resumed campaign is promoting an
+    ``in_progress`` entry straight to ``completed`` (see
+    :func:`_capture_run_reached_terminal_state`) and that entry never got a
+    chance to persist its own ``pair_start_status`` before the process died
+    (the crash landed between the run finishing and the state-file write
+    that would have recorded it). The first capture line is polled
+    immediately after the start POST, so it is a very close proxy for the
+    actual start reading -- not byte-identical to what :func:`run_entry`
+    would have recorded, but the same physical moment to within one poll
+    interval. Returns ``None`` (never raises) for a missing, empty, or
+    unparseable file/line -- absence of proof is not proof, and the caller
+    (:func:`_rebuild_pair_start_status`) already refuses loudly rather than
+    guess when this comes back empty and a later arm actually needs it."""
+    try:
+        with open(log_path, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                stripped = raw_line.strip()
+                if stripped:
+                    try:
+                        record = json.loads(stripped)
+                    except ValueError:
+                        return None
+                    status = record.get("status")
+                    return status if isinstance(status, dict) else None
+    except OSError:
+        return None
+    return None
+
+
+def _rebuild_pair_start_status(state: dict, entries: Sequence[QueueEntry]) -> dict:
+    """Reconstruct the in-process ``pair_start_status`` dict (see
+    :func:`run_queue`'s PAIRING comment) from a resumed state file's
+    completed entries, replaying the exact same push-on-first-arm /
+    pop-on-second-arm sequence :func:`run_queue`'s live loop uses -- so a
+    ``--resume`` mid-campaign does not silently lose a pairing the way v1
+    state files did (found on the bench: the second arm of a resumed pair
+    started with NO start-temperature matching at all, and produced data
+    that looked identical to a matched pair).
+
+    Raises :class:`RunQueueError` if a completed FIRST arm's own start
+    reading was never recorded (a v1-era gap this function cannot fully
+    close, or a hand-edited state file) -- refusing to resume rather than
+    silently letting a later arm of that pair run unpaired. This is the
+    loud-refusal half of the fix: a wrong tolerance costs an hour, a
+    silently-unpaired arm costs a firing that looks fine and is not."""
+    pair_start_status: dict = {}
+    for i, entry in enumerate(entries):
+        if entry.pair_key is None:
+            continue
+        st_entry = state["entries"][i]
+        if st_entry["status"] != "completed":
+            continue
+        if entry.pair_key in pair_start_status:
+            # This entry is the SECOND arm -- consume/drop the reference,
+            # mirroring run_queue()'s live pop-on-match behaviour so a
+            # THIRD entry reusing this key starts a fresh pair.
+            pair_start_status.pop(entry.pair_key, None)
+        else:
+            # This entry is the FIRST arm. Its own recorded start reading
+            # must be recoverable, or a later (not-yet-run) second arm
+            # would silently start with no pairing at all.
+            saved_status = st_entry.get("pair_start_status")
+            if saved_status is None:
+                raise RunQueueError(
+                    f"--resume: entry {i} ({entry.label or entry.preset_name!r}) is a "
+                    f"completed first arm of pair {entry.pair_key!r} but its start "
+                    "reading was not recorded in the state file (a v1-era state file, "
+                    "or one hand-edited since) -- refusing to resume: a later arm of "
+                    "this pair would silently start with NO start-temperature matching "
+                    "at all, which fails silently and looks identical to a matched "
+                    "pair in the resulting data. Start this pair over from scratch "
+                    "(fresh --run, fresh log paths) instead.")
+            pair_start_status[entry.pair_key] = saved_status
+    return pair_start_status
+
+
 def _discard_partial_capture(entry: QueueEntry) -> None:
     """Remove ``entry``'s capture file and its cooldown sibling, if either
     exists -- used only for an entry whose state-file status was
@@ -1314,16 +1465,16 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
     # reading once it has started; the key is POPPED the moment the second
     # arm consumes it (wait_until_paired_start matches it in run_entry), so
     # a third entry re-using the same key is treated as a fresh first arm
-    # rather than silently matched against a stale reading. On --resume,
-    # this dict starts empty every time -- a completed first arm's start
-    # status is not persisted in the state file (only the entries below
-    # need it, and skipped/completed entries never call run_entry again),
-    # so resuming a campaign mid-pair means the second arm re-matches
-    # against nothing and runs as if it were a first arm. That is a known,
-    # deliberate limitation: --resume is for crash recovery, not designed
-    # around here, and this queue already refuses (RunQueueClobberError) to
-    # silently overwrite a first arm's completed capture, so the worst case
-    # is an unpaired second arm, not data loss.
+    # rather than silently matched against a stale reading. When a state
+    # file is in use, every first arm's own recorded reading is ALSO
+    # persisted into ``state["entries"][i]["pair_start_status"]`` (see
+    # new_campaign_state) the moment it completes, and on --resume this
+    # in-process dict is rebuilt from that persisted data
+    # (:func:`_rebuild_pair_start_status`) rather than starting empty --
+    # found on the bench: a v1 state file never persisted this, so a
+    # resumed campaign silently lost every pairing mid-way and the next arm
+    # started with NO start-temperature matching at all, indistinguishable
+    # from a matched pair in the resulting data.
     pair_start_status: dict = {}
 
     state = None
@@ -1345,12 +1496,30 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
                         state["entries"][i]["status"] = "completed"
                         if state["entries"][i].get("completed_at") is None:
                             state["entries"][i]["completed_at"] = time.time()
+                        # This entry never got to persist its own
+                        # pair_start_status (the crash landed before that
+                        # write) -- best-effort recover it from the
+                        # capture's own first line so a later arm of its
+                        # pair does not need to refuse. See
+                        # _first_capture_status for why this is a close
+                        # proxy, not the byte-identical reading.
+                        if (entry.pair_key is not None
+                                and state["entries"][i].get("pair_start_status") is None):
+                            recovered = _first_capture_status(entry.log_path)
+                            if recovered is not None:
+                                log.info(
+                                    "[%s] resume: recovered pair_start_status from the "
+                                    "capture's own first line (state-file write was "
+                                    "interrupted before it recorded one)",
+                                    entry.label or entry.preset_name)
+                                state["entries"][i]["pair_start_status"] = recovered
                     else:
                         _discard_partial_capture(entry)
                         state["entries"][i]["status"] = "pending"
                     changed = True
             if changed:
                 save_campaign_state(state_path, state)
+            pair_start_status = _rebuild_pair_start_status(state, entries)
         else:
             if os.path.exists(state_path):
                 raise RunQueueError(
@@ -1379,8 +1548,14 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
         if entry.pair_key is not None:
             if pair_reference_status is None:
                 # First arm of this pair -- remember its start reading for
-                # whichever later entry shares this key.
+                # whichever later entry shares this key. Also persisted into
+                # the state file below (if one is in use) so a --resume
+                # after this point can rebuild pair_start_status instead of
+                # silently losing the pairing -- see
+                # _rebuild_pair_start_status.
                 pair_start_status[entry.pair_key] = start_status
+                if state is not None:
+                    state["entries"][i]["pair_start_status"] = start_status
             else:
                 # Second arm consumed the reference -- drop it so a THIRD
                 # entry reusing this key starts a fresh pair instead of

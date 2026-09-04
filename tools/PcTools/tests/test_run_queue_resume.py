@@ -391,6 +391,177 @@ class ResumeTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# Paired-start reference must survive --resume (found on the bench: a v1
+# state file never persisted a completed first arm's own start reading, so
+# a resumed campaign silently lost every pairing mid-way and the second arm
+# started with NO start-temperature matching at all -- indistinguishable
+# from a matched pair in the resulting data).
+# --------------------------------------------------------------------------
+
+def _pair_entry(h, name, pair_key, profile_id=7, label=None):
+    return rq.QueueEntry(preset_name={"name": "fake"}, profile_id=profile_id,
+                          log_path=h.path(name), label=label or name, pair_key=pair_key)
+
+
+class PairedResumeTest(unittest.TestCase):
+    def _write_state_with_pair_status(self, path, entries, statuses, pair_start_statuses):
+        """Like ResumeTest._write_state, plus sets entries[i]['pair_start_status']
+        from pair_start_statuses[i] (None for entries that don't have one)."""
+        state = rq.new_campaign_state(entries)
+        for se, status, pss in zip(state["entries"], statuses, pair_start_statuses):
+            se["status"] = status
+            se["pair_start_status"] = pss
+            if status == "completed":
+                se["completed_at"] = 123.0
+        rq.save_campaign_state(path, state)
+        return state
+
+    def test_resume_restores_pair_reference_for_second_arm(self):
+        # THE FIX, exercised the way the coordinator specified: write a real
+        # state file (not just call the helper function directly), resume
+        # from it, and prove the pairing still applies to the second arm.
+        h = _Harness.__new__(_Harness)
+        h.__init__(entries=[], exec_scripts=[])
+        e1 = _pair_entry(h, "arm_a.jsonl", pair_key="p1")
+        e2 = _pair_entry(h, "arm_b.jsonl", pair_key="p1")
+        h.entries = [e1, e2]
+        state_path = h.path("state.json")
+
+        first_arm_status = _status([_channel(30.0, 29.0)])
+        self._write_state_with_pair_status(
+            state_path, [e1, e2], ["completed", "pending"], [first_arm_status, None])
+        with open(e1.log_path, "w") as fh:
+            fh.write('{"t": 1, "exec": {"state": "done"}, "status": %s}\n'
+                      % json.dumps(first_arm_status))
+
+        h.transport.board_state_for_resume_check = "idle"
+        # e2's own status polls read close enough to first_arm_status (0.2C,
+        # well inside DEFAULT_PAIR_START_TOL_C) that wait_until_paired_start
+        # matches it immediately if -- and only if -- it actually receives
+        # the persisted reference.
+        h.transport._status_body = _status([_channel(30.2, 29.2)])
+        h.transport._exec_sequences = [
+            [_exec([0], state="running"), _exec([0], state="done")],  # e2 only
+        ]
+
+        captured = {}
+        orig_run_entry = rq.run_entry
+
+        def capturing_run_entry(entry, cfg, control=None, apply_preset_fn=None,
+                                 pair_reference_status=None):
+            if entry.log_path == e2.log_path:
+                captured["pair_reference_status"] = pair_reference_status
+            result = orig_run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn,
+                                     pair_reference_status=pair_reference_status)
+            if h.transport._exec_sequences:
+                h.transport._exec_sequences.pop(0)
+            return result
+
+        with unittest.mock.patch.object(rq, "get_status", h.transport.get_status), \
+             unittest.mock.patch.object(rq, "get_exec", h.transport.get_exec), \
+             unittest.mock.patch.object(rq, "get_zones", h.transport.get_zones), \
+             unittest.mock.patch.object(rq, "get_profile_plan", h.transport.get_profile_plan), \
+             unittest.mock.patch.object(rq, "start_profile", h.transport.start_profile), \
+             unittest.mock.patch.object(rq, "stop_profile", h.transport.stop_profile), \
+             unittest.mock.patch.object(rq, "run_entry", capturing_run_entry):
+            rq.run_queue(h.entries, h.cfg, control=None, apply_preset_fn=_fake_apply_preset,
+                         state_path=state_path, resume=True, preflight_fn=_fake_preflight_fn)
+
+        self.assertIsNotNone(
+            captured.get("pair_reference_status"),
+            "resumed second arm ran with pair_reference_status=None -- the pairing was "
+            "silently lost across --resume, exactly the bug this test exists to catch")
+        self.assertEqual(captured["pair_reference_status"], first_arm_status)
+
+    def test_resume_refuses_loudly_when_first_arms_reading_was_not_persisted(self):
+        # A state file whose completed first arm never recorded its own
+        # start reading (a v1-era gap, or a hand-edited file) must REFUSE
+        # to resume, not silently let the second arm run unpaired.
+        h = _Harness.__new__(_Harness)
+        h.__init__(entries=[], exec_scripts=[])
+        e1 = _pair_entry(h, "arm_a.jsonl", pair_key="p1")
+        e2 = _pair_entry(h, "arm_b.jsonl", pair_key="p1")
+        h.entries = [e1, e2]
+        state_path = h.path("state.json")
+        self._write_state_with_pair_status(
+            state_path, [e1, e2], ["completed", "pending"], [None, None])
+        with open(e1.log_path, "w") as fh:
+            fh.write('{"t": 1, "exec": {"state": "done"}}\n')
+
+        h.transport.board_state_for_resume_check = "idle"
+
+        with self.assertRaises(rq.RunQueueError) as ctx:
+            h.run(state_path=state_path, resume=True)
+        msg = str(ctx.exception)
+        # Real, quoted failure output -- not just "an exception happened".
+        self.assertIn("completed first arm of pair 'p1'", msg)
+        self.assertIn("was not recorded in the state file", msg)
+        self.assertIn("NO start-temperature matching", msg)
+
+    def test_mutation_dropping_persisted_reference_reproduces_the_silent_bug(self):
+        # NEGATIVE TEST for the fix itself: mutate run_queue.py back to the
+        # v1 behaviour (pair_start_status never rebuilt from the state
+        # file), run the exact same resume scenario as the positive test
+        # above, and prove the second arm now DOES start with
+        # pair_reference_status=None -- the silent failure the coordinator
+        # found on the bench. Restored automatically when the `with` block
+        # exits (unittest.mock.patch is its own restore).
+        h = _Harness.__new__(_Harness)
+        h.__init__(entries=[], exec_scripts=[])
+        e1 = _pair_entry(h, "arm_a.jsonl", pair_key="p1")
+        e2 = _pair_entry(h, "arm_b.jsonl", pair_key="p1")
+        h.entries = [e1, e2]
+        state_path = h.path("state.json")
+
+        first_arm_status = _status([_channel(30.0, 29.0)])
+        self._write_state_with_pair_status(
+            state_path, [e1, e2], ["completed", "pending"], [first_arm_status, None])
+        with open(e1.log_path, "w") as fh:
+            fh.write('{"t": 1, "exec": {"state": "done"}, "status": %s}\n'
+                      % json.dumps(first_arm_status))
+
+        h.transport.board_state_for_resume_check = "idle"
+        h.transport._status_body = _status([_channel(30.2, 29.2)])
+        h.transport._exec_sequences = [
+            [_exec([0], state="running"), _exec([0], state="done")],
+        ]
+
+        captured = {}
+        orig_run_entry = rq.run_entry
+
+        def capturing_run_entry(entry, cfg, control=None, apply_preset_fn=None,
+                                 pair_reference_status=None):
+            if entry.log_path == e2.log_path:
+                captured["pair_reference_status"] = pair_reference_status
+            result = orig_run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn,
+                                     pair_reference_status=pair_reference_status)
+            if h.transport._exec_sequences:
+                h.transport._exec_sequences.pop(0)
+            return result
+
+        with unittest.mock.patch.object(rq, "get_status", h.transport.get_status), \
+             unittest.mock.patch.object(rq, "get_exec", h.transport.get_exec), \
+             unittest.mock.patch.object(rq, "get_zones", h.transport.get_zones), \
+             unittest.mock.patch.object(rq, "get_profile_plan", h.transport.get_profile_plan), \
+             unittest.mock.patch.object(rq, "start_profile", h.transport.start_profile), \
+             unittest.mock.patch.object(rq, "stop_profile", h.transport.stop_profile), \
+             unittest.mock.patch.object(rq, "run_entry", capturing_run_entry), \
+             unittest.mock.patch.object(rq, "_rebuild_pair_start_status", return_value={}):
+            # MUTATION: _rebuild_pair_start_status always returns {} here --
+            # exactly what the pre-fix code did (pair_start_status started
+            # empty on every --resume, unconditionally).
+            rq.run_queue(h.entries, h.cfg, control=None, apply_preset_fn=_fake_apply_preset,
+                         state_path=state_path, resume=True, preflight_fn=_fake_preflight_fn)
+
+        # THE REAL FAILURE, quoted: with the fix mutated away, the second
+        # arm silently ran with no pairing reference at all.
+        self.assertIsNone(
+            captured.get("pair_reference_status"),
+            f"expected the mutated (pre-fix) code to reproduce the silent bug, but got "
+            f"pair_reference_status={captured.get('pair_reference_status')!r}")
+
+
+# --------------------------------------------------------------------------
 # Already-running-board refusal on resume.
 # --------------------------------------------------------------------------
 

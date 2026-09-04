@@ -20,6 +20,8 @@ import tempfile
 import unittest
 import unittest.mock
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl import run_queue as rq  # noqa: E402
@@ -104,10 +106,21 @@ class IsPairedStartMatchedTest(unittest.TestCase):
     each), not synthetic numbers -- see run_queue.py's DEFAULT_PAIR_START_TOL_C
     docstring and logs/coupling/ab_campaign_report.md sec 3 for the deltas
     this reproduces (1.66/1.63/1.36C for pair 1, 0.47/0.64/0.70C for pair 2,
-    1.20/1.20/1.35C for pair 3, all against the tool's own 1.0C confound
-    gate). The gate here uses DEFAULT_PAIR_START_TOL_C=0.8C, so pair 2 --
-    which passed pid_ab_compare.py's 1.0C gate live -- must also pass this
-    one; pairs 1 and 3, which FAILED live, must fail here too."""
+    1.20/1.20/1.35C for pair 3).
+
+    DEFAULT_PAIR_START_TOL_C was revised 0.8C -> 1.5C on 2026-09-03 (see its
+    own docstring): the rig's own passive-cooling floor sits at 1.4-1.5C, so
+    a tolerance below that is not "stricter", it is physically unmeetable --
+    confirmed live when a paired arm held for 75 minutes against the old
+    0.8C gate and still could not match. Under the REVISED 1.5C tolerance:
+    pair 1's worst zone (1.71C, z0) still exceeds it and must still be
+    REFUSED -- proving the gate still catches a pair genuinely worse than
+    the new tolerance, not just a looser rubber stamp. Pair 3's worst zone
+    (1.34C) is now UNDER 1.5C and must be ACCEPTED -- this is the intended
+    effect of the revision, not a regression: pair 3 was refused under the
+    old, physically-unachievable 0.8C tolerance, not because its drift was
+    actually too large to compare. Pair 2 (max 0.70C) stays accepted either
+    way."""
 
     # (old_start, new_start) per zone, z0/z1/z2, read verbatim from each
     # ab_old_N.jsonl / ab_new_N.jsonl's first capture line.
@@ -122,15 +135,24 @@ class IsPairedStartMatchedTest(unittest.TestCase):
     def _status_from_temps(temps):
         return _status([_channel(t, t - 1.0) for t in temps])  # cj_c irrelevant here
 
-    def test_pair1_real_start_temps_refused(self):
+    def test_pair1_real_start_temps_still_refused_above_revised_tolerance(self):
+        # NEGATIVE TEST for the revised 1.5C tolerance: pair 1's worst zone
+        # (z0, 24.48-22.77=1.71C) is worse than 1.5C, so the gate must still
+        # refuse it -- proves relaxing the tolerance did not remove the gate.
         ref = self._status_from_temps(self.PAIR1_OLD)
         cur = self._status_from_temps(self.PAIR1_NEW)
         self.assertFalse(rq.is_paired_start_matched(cur, ref, tol_c=rq.DEFAULT_PAIR_START_TOL_C))
 
-    def test_pair3_real_start_temps_refused(self):
+    def test_pair3_real_start_temps_now_accepted_under_achievable_tolerance(self):
+        # Pair 3's worst zone (z2, 28.65-27.31=1.34C) sits inside the rig's
+        # own 1.4-1.5C measured cooling floor -- under the revised, actually
+        # achievable 1.5C tolerance this must now be ACCEPTED. (It was
+        # refused under the old 0.8C tolerance only because that tolerance
+        # was tighter than the rig can physically deliver, not because this
+        # drift is too large to compare.)
         ref = self._status_from_temps(self.PAIR3_OLD)
         cur = self._status_from_temps(self.PAIR3_NEW)
-        self.assertFalse(rq.is_paired_start_matched(cur, ref, tol_c=rq.DEFAULT_PAIR_START_TOL_C))
+        self.assertTrue(rq.is_paired_start_matched(cur, ref, tol_c=rq.DEFAULT_PAIR_START_TOL_C))
 
     def test_pair2_real_start_temps_accepted(self):
         ref = self._status_from_temps(self.PAIR2_OLD)
@@ -146,6 +168,38 @@ class IsPairedStartMatchedTest(unittest.TestCase):
         ref = _status([_channel(99.0, 24.0, valid=False)])
         cur = _status([_channel(25.2, 24.0, valid=False)])
         self.assertFalse(rq.is_paired_start_matched(cur, ref, tol_c=0.5))
+
+
+class PerZoneStartDeltasTest(unittest.TestCase):
+    """per_zone_start_deltas is the REPORTED counterpart to
+    is_paired_start_matched -- it must return the actual per-zone drift
+    regardless of whether the pair passed or failed the gate, so a reader
+    can judge the confound themselves rather than seeing only a pass/fail."""
+
+    def test_reports_real_pair1_deltas_even_though_refused(self):
+        ref = IsPairedStartMatchedTest._status_from_temps(IsPairedStartMatchedTest.PAIR1_OLD)
+        cur = IsPairedStartMatchedTest._status_from_temps(IsPairedStartMatchedTest.PAIR1_NEW)
+        deltas = rq.per_zone_start_deltas(cur, ref)
+        self.assertEqual(deltas, {0: pytest.approx(1.71), 1: pytest.approx(1.58), 2: pytest.approx(1.36)})
+        # confirm this pair really is refused by the gate at the current
+        # tolerance -- the delta report above must be visible either way.
+        self.assertFalse(rq.is_paired_start_matched(cur, ref, tol_c=rq.DEFAULT_PAIR_START_TOL_C))
+
+    def test_reports_real_pair2_deltas_when_accepted(self):
+        ref = IsPairedStartMatchedTest._status_from_temps(IsPairedStartMatchedTest.PAIR2_OLD)
+        cur = IsPairedStartMatchedTest._status_from_temps(IsPairedStartMatchedTest.PAIR2_NEW)
+        deltas = rq.per_zone_start_deltas(cur, ref)
+        self.assertEqual(deltas, {0: pytest.approx(0.45), 1: pytest.approx(0.59), 2: pytest.approx(0.64)})
+
+    def test_invalid_channel_skipped_from_report(self):
+        ref = _status([_channel(25.0, 24.0), _channel(99.0, 24.0, valid=False)])
+        cur = _status([_channel(25.2, 24.0), _channel(40.0, 24.0, valid=False)])
+        self.assertEqual(rq.per_zone_start_deltas(cur, ref), {0: pytest.approx(0.2)})
+
+    def test_no_comparable_channels_reports_empty_not_a_crash(self):
+        ref = _status([_channel(99.0, 24.0, valid=False)])
+        cur = _status([_channel(25.2, 24.0, valid=False)])
+        self.assertEqual(rq.per_zone_start_deltas(cur, ref), {})
 
 
 class WaitUntilPairedStartTest(unittest.TestCase):

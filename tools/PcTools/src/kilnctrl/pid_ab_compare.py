@@ -145,6 +145,22 @@ pretend it isn't there. Two additions, both deliberately conservative:
      re-measured against it -- see ``FLOOR_RELIABILITY_RATIO`` below for the
      retuned reliability threshold, and the plan doc for the refreshed
      ratio table.
+
+2026-09-03b -- ``CONFOUND_THRESHOLD_C`` RAISED TO 1.5C AND TIED TO
+run_queue.py. A live paired A/B run held arm B against run_queue.py's
+pairing gate for 75 minutes and still could not match; the root cause
+turned out to be that this rig's passive cooling asymptotes 1.4-1.5C above
+the previous session's start and FLATLINES there (measured directly --
+see run_queue.DEFAULT_PAIR_START_TOL_C's docstring), so a tolerance below
+that floor is not achievable at all, not just strict. Fixing run_queue.py's
+tolerance without also moving this module's own (then-1.0C) gate would have
+reopened the ORIGINAL PROBLEM 3 mismatch in the other direction -- a pair
+the queue now accepts as paired could still get REFUSED here for exceeding
+a stricter, independently-chosen number. ``CONFOUND_THRESHOLD_C`` is now
+``= run_queue.DEFAULT_PAIR_START_TOL_C`` (imported, not duplicated) so the
+two gates cannot drift apart again. See that constant's own docstring for
+the full derivation, including the check against the owner's stated
+"sub-0.5C noise is not actionable" bar.
 """
 from __future__ import annotations
 
@@ -159,31 +175,60 @@ from typing import Optional, Sequence
 from kilnctrl import log_analysis as la
 from kilnctrl import http_capture_log as hc
 from kilnctrl import noise_floor as nf
+from kilnctrl import run_queue as rq
 
-#: Deliberately tight -- see PROBLEM 4 in the module docstring for why this
-#: value (not just "some threshold exists") is justified: the fitted
-#: start-temp sensitivities (roughly 0.009-0.133 C/C on the checked-in 6-run
-#: set) times this threshold predict a confound contribution that falls
-#: inside this rig's measured whole-run IAE floor range (0.077-0.147 C) --
-#: i.e. 1.0 C is roughly where the confound's own predicted effect reaches
-#: the noise floor, not an anecdote-derived round number.
-CONFOUND_THRESHOLD_C = 1.0
+#: 2026-09-03 REVISED to 1.5C (was 1.0C), and DERIVED FROM
+#: run_queue.DEFAULT_PAIR_START_TOL_C rather than chosen independently.
+#:
+#: PROBLEM: this module's own 1.0C gate and run_queue.py's (then-)0.8C
+#: pairing tolerance told two different stories about the same rig -- a
+#: pair the run queue would accept as "paired" could still land above this
+#: module's refusal boundary, and vice versa. Found while re-deriving
+#: run_queue's tolerance from measured cooldown data: this rig's passive
+#: cooling asymptotes 1.4-1.5C above the previous session's start and then
+#: FLATLINES (see run_queue.DEFAULT_PAIR_START_TOL_C's docstring for the
+#: measured numbers) -- a hard physical floor, not a noise artifact. A
+#: 1.0C confound gate sitting BELOW that floor would refuse essentially
+#: every real pair this rig can produce, which is exactly the failure this
+#: whole revision exists to fix: a paired arm held for 75 minutes against a
+#: too-tight gate and still could not match.
+#:
+#: So the two thresholds are now the SAME constant, imported rather than
+#: independently chosen, so they cannot drift apart again: a pair
+#: run_queue.py accepts as paired is, by construction, never refused here
+#: for exceeding a DIFFERENT number.
+#:
+#: Justified against the owner's actual bar ("i dont care about sub 0.5C
+#: noise"), not just against feasibility: the fitted start-temp
+#: sensitivities (roughly 0.009-0.133 C/C on the checked-in 6-run repeat
+#: set -- see fit_start_temp_sensitivity) times 1.5C predict a confound
+#: contribution of at most 1.5 * 0.133 = 0.20C in the most sensitive zone --
+#: comfortably under the 0.5C the owner has said is not actionable, and on
+#: the same order as this rig's own measured whole-run IAE noise floors
+#: (z0 0.116 / z1 0.077 / z2 0.147C). 1.5C is therefore the loosest
+#: threshold this rig can actually produce pairs under AND still admits
+#: only a sub-actionable, near-noise-floor confound -- not "give up and let
+#: anything through".
+CONFOUND_THRESHOLD_C = rq.DEFAULT_PAIR_START_TOL_C
 
 #: PROBLEM 3 (module docstring): this module's confound gate compares each
 #: zone's PER-ZONE first-valid ``actual_c`` against CONFOUND_THRESHOLD_C.
-#: noise_floor.py's own LIKE_FOR_LIKE_THRESHOLD_C (also 1.0 C, out of scope
-#: to change here) instead gates the MEAN across ALL status channels
-#: (noise_floor.extract_start_conditions). Both are "1.0 C" and both are
-#: about start-temperature drift, but they are not the same measurement --
-#: printed on every text report so a reader does not conflate them.
+#: noise_floor.py's own LIKE_FOR_LIKE_THRESHOLD_C (1.0 C, out of scope to
+#: change here -- and no longer the same number as CONFOUND_THRESHOLD_C
+#: since the 2026-09-03 revision to 1.5C) instead gates the MEAN across ALL
+#: status channels (noise_floor.extract_start_conditions). Both are about
+#: start-temperature drift, but they are neither the same measurement NOR
+#: (any more) the same threshold -- printed on every text report so a
+#: reader does not conflate them.
 START_TEMP_METRIC_NOTE = (
     "START-TEMP UNIT NOTE: the per-zone deltas below (and the "
     f"{CONFOUND_THRESHOLD_C:.1f}C confound gate) use each zone's own "
     "first-valid actual_c. noise_floor.py's separate 'like-for-like' check "
-    "(same 1.0C threshold, LIKE_FOR_LIKE_THRESHOLD_C) uses a DIFFERENT "
-    "quantity -- the mean across ALL status channels from the raw capture. "
-    "Both measure start-temperature drift but are not interchangeable; do "
-    "not read a pass/fail on one as a pass/fail on the other."
+    "(a DIFFERENT threshold, LIKE_FOR_LIKE_THRESHOLD_C=1.0C) uses a "
+    "DIFFERENT quantity too -- the mean across ALL status channels from the "
+    "raw capture. Neither the threshold nor the quantity are interchangeable "
+    "between the two checks; do not read a pass/fail on one as a pass/fail "
+    "on the other."
 )
 
 NOISE_FLOOR_NOTE = (
