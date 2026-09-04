@@ -1694,7 +1694,47 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       the mechanism is gone or was ever confirmed; the original 9/80 rate
       was measured before that DRAM work, and there is no green run of the
       *original* reproducer script to compare against directly. If it
-      resurfaces, `/api/debug/lwip_stats` is now in place to catch it live
+      resurfaces, `/api/debug/lwip_stats` is now in place to catch it live.
+      2026-09-04: **reproduced and root-caused, not fixed** (fix lands in a
+      file this pass doesn't own). Built a repeatable driver,
+      `tools/PcTools/scripts/http_concurrency_reproducer.py`
+      (`--host 192.168.1.156 --concurrency 4,8,...,32 --bursts N`), which
+      first had to get past a false positive of its own: every request came
+      back `HTTP 406` at *any* concurrency including 1, because `urllib`
+      sends no `Accept-Encoding` header and this server's gzip-only pages
+      (`web_encoding.c`) correctly refuse a client that doesn't advertise
+      gzip support — not a concurrency bug, fixed by adding
+      `Accept-Encoding: gzip` to the driver's request. With that fixed, live
+      against the board (idle, 192.168.1.156): **0/21 resets at concurrency
+      1/2/4**, resets start at **concurrency 8 (1/8, 12.5%)** and climb
+      smoothly with load — **12.5% at 8, ~30% at 12–16, ~25% at 20–24, ~30%
+      at 28, ~40% at 32** (420 requests total, 98 resets, 2 timeouts at the
+      5 s cap, 0 HTTP-level errors) — all `WinError 10054` /
+      `ECONNRESET`-equivalent on the client side. Across every burst at
+      every level, `lwip_stats.tcp.drop`/`memerr`/`err` **did not move once**
+      — only `xmit`/`recv` climbed with traffic — which rules the TCP-layer
+      drop/memerr mechanism this instrumentation was built to catch back
+      *out*: whatever is closing these connections isn't lwIP running out of
+      a resource, it's something above it doing it on purpose. That points
+      straight at `wifi_provision_http.c`'s `wifi_provision_http_start()`
+      (the only `httpd_start()` call site, per that file's own comment at
+      line 54): `config.lru_purge_enable = true` with
+      `config.max_open_sockets = 13` is exactly esp_http_server's documented
+      behavior for going over that cap — the server LRU-closes (RST) the
+      oldest open connection to admit a new one rather than refusing it —
+      and 8–13 concurrent clients is exactly the range where this reproducer
+      starts seeing resets. Not fully closed as a root cause because this
+      pass didn't confirm the mechanism *inside* esp_http_server's source
+      (not vendored into this repo to grep) and because `wifi_provision_http.c`
+      is out of scope for this pass to edit or instrument further — flagged,
+      not touched. **Next step for whoever owns that file**: a log line at
+      the LRU-purge call site (or bumping `max_open_sockets`/
+      `CONFIG_LWIP_MAX_SOCKETS` again, same accounting as the 2026-08-20 and
+      2026-09-01 comments already there) would confirm or refute this
+      directly; not done here since it requires editing/flashing a file this
+      pass does not own. The exact numbers above are this driver's own
+      run — re-run before trusting them again, load conditions on the board
+      (Wi-Fi clients, other pollers) were not otherwise controlled for
 - [x] **Wire the guard scripts into something that runs them.** Done
       2026-08-27: `tools/run_all_checks.ps1`, plus a `run_repo_checks` tool on
       both MCP servers. Discovery is by glob rather than a list, because a list
