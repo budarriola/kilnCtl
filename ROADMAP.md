@@ -1,6 +1,7 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-03 (reconciled against
+> **Status:** planning · **Last reviewed:** 2026-09-04 (M15 opened: architecture
+> review findings) (reconciled against
 > the five KilnFW plan docs; M11 closed; M12a opened
 > and closed the same day; M12/M13 in progress; `DISPLAY_ST7796_PLAN.md`
 > Phases 1/2/3/5 landed, Phases 4/6 in progress; ramp assist landed end to end
@@ -1713,6 +1714,103 @@ and a Python test that could never fail on a C regression — and one that was
 actively dangerous: a string-literal fix to `check_isolation.ps1` that blinded
 its own `#include` rule while still printing "Isolation check passed". A check
 nobody has watched fail is not evidence.
+
+## M15 — Architecture hardening · *opened 2026-09-04*
+
+Findings from a four-agent architecture review, coordinator spot-verified.
+Owner: unassigned. Everything below is an open suggestion, nothing is done.
+
+- [ ] **`SX1509.h` is public by accident.** `App/drivers/CMakeLists.txt:316`'s
+      `INCLUDE_DIRS "."` exposes it to all 8 `uart_bridge*.c` files instead of
+      just the owner module. Split the header, move the rest to
+      `PRIV_INCLUDE_DIRS`. M
+- [ ] **`GET /api/status` allocates from internal DRAM.** `dashboard_http.c:582`
+      uses plain `malloc` while sibling handlers in the same file use
+      `heap_caps_malloc` SPIRAM; same gap in `backup_http.c:178`. This is the
+      most-polled handler against the tightest heap. S
+- [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
+      `wifi_prov.c` (2820), `dashboard_http.c` (2572), `ota_http.c` (2508),
+      `ui_page_home.c` (2279), `panel_spi.c` (2174), `profiles_http.c` (2097),
+      `zones_config_json.c` (1867), `main.c` (1820), `backup_http.c` (1756),
+      `uart_bridge_ext.c` (1727), `zones_http_handlers.c` (1598). Split
+      `wifi_prov.c` and `autotune_engine.c` first — riskiest per
+      `ARCHITECTURE.md`, and autotune has four separable concerns, on the
+      `profile_executor` 8-file split's precedent. M-L
+- [ ] **Stand-in stubs sit above the polarity/decode layer.**
+      `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
+      polarity bug that 378/378 host checks could not see because
+      `virtual_dut` stands in above translation, not below it. Audit the
+      remaining stand-ins (current sense, TC SPI) and push stubs below the
+      decode layer. S to audit, M per stub
+- [ ] **`safety_link.h` hand-mirrors CommonFW frame constants.** POWER/DIAG/
+      UPDATE_STATUS flag blocks (`safety_link.h:243-249,257-280,632-654`, 9
+      "mirrored here" comments) duplicate `kilnlink_power.h`/`kilnlink_diag.h`
+      by hand because KilnFW cannot `#include` SaftyFW's headers. Either call
+      the CommonFW codecs directly or add a CI diff against the source-of-
+      truth headers. M
+- [ ] **No shared bounded-wait/unknown-outcome helper.** The discipline behind
+      `safety_link_rollback_boot_id_changed()`'s rollback path (`safety_link.c`
+      ~262, "a rollback that fully succeeded into a permanent
+      UNKNOWN_TIMEOUT") exists only there. Extract a shared await-reply-or-
+      unknown helper for the new-ESP/old-Pico skew case generally. S-M
+- [ ] **`KILNLINK_MIN_COMPATIBLE` is prose-argued per bump.**
+      `kilnlink_version.h:20-24` documents this is a human judgement call, not
+      a hash or a check. Add a synthetic-old-peer host test that asserts
+      dispatch-table coverage per historical version. M
+- [ ] **Duty composition has no single breakdown struct.** Four stages —
+      `profile_executor_feedforward.c:291-515`,
+      `profile_executor_pid_tick.c` PID clamp then load-cap boost
+      (~78-125, ~139-174, boost applied AFTER the clamp so duty can exceed
+      1.0 invisibly to `pid_terms_t`, `pid.h:144-149`), and `heater_output.c`
+      quantization — with nothing recording the breakdown. Add a
+      `zone_duty_breakdown_t` populated through the pipeline and exposed on
+      `/api/control`. M
+- [ ] **Mode-state sprawl.** >=5 independent enums/booleans describe system
+      mode; the dwelling/ramp-lock caveat is re-derived identically at
+      `profile_executor_feedforward.c:243-244` and `:566-576`. Document a
+      legal-state table or add a runtime assertion — not a forced single enum.
+      M
+- [ ] **No lint against flash/NVS writes outside the flash worker.** Direct
+      writes bypassing `kiln_cfg_store.c`'s worker dispatch (`nvs_set_blob` at
+      `kiln_cfg_store.c:356`, `kiln_cfg_store_apply()` at `:681`) have panicked
+      hardware 3x and host tests cannot see the hazard (no lock in the stub).
+      Add a grep-based CI lint to the host-test script. S
+- [ ] **`zones_http_client.py` hand-types its field table instead of reading
+      it live.** `zones_http_client.py:320-350`'s `_TOP_FIELD_FORM_KEY` /
+      `_TOP_INT_FIELDS` maps drift from firmware JSON keys by hand;
+      `safety_cfg_http_client.py:136-213`'s `params_by_name()` +
+      `build_post_body()` already use a live-GET lookup instead. Port zones to
+      that pattern, or extend `selfcheck.py` (already parses
+      `UART_PROTOCOL_VERSION` from firmware headers, `selfcheck.py:74-89`) to
+      diff the dict against `zones_http_handlers.c` literals. S-M
+- [ ] **No stub-vs-real-IDF signature check.** `App/test/stubs/*.h` can drift
+      from the real ESP-IDF headers they stand in for with nothing catching
+      it. Add a signature-diff script. M
+- [ ] **Campaign runner has no board-config restore on abnormal exit.**
+      `run_queue.py` has atomic state and resume, but the `finally` path
+      (~1203-1213) only closes the capture file and removes a stray empty
+      log — it never re-applies a safe preset via `_apply_preset_http_only`
+      (~836). Add a restore-on-exit hook plus a verify-arms-differ preflight
+      as built-ins. M
+- [ ] **Four hand-rolled JSONL parse loops disagree on malformed-line
+      handling.** `coupling_pair_log.py:187-192,239-245`,
+      `http_capture_log.py:67-72`, `link_hub.py:197-202,588-595`,
+      `relay_ku_tu_check.py:97-101`. Factor a shared `iter_jsonl` helper. S
+- [ ] **`tuning_campaign.py`'s `make_plant` generates continuous floats.**
+      (~126-268) No MAX31856 0.0078125 C quantization, unlike the real
+      sensor path. Add a quantize pass, or document explicitly why continuous
+      is intentional. S
+- [ ] **Vendored `mcpkit_registry.py` has no drift guard.** Currently
+      byte-identical to `tools/PcTools/src/mcpkit/registry.py`, the source of
+      truth it's vendored from — add a one-line diff check to `selfcheck.py`
+      so it stays that way. S
+
+**Patterns worth copying, not just avoiding:** `thermal_guard_tick`'s explicit
+input-struct interface; `kiln_cfg_store`'s interlock kept inside the module
+that owns the write path; `safety_cfg_http_client`'s live-lookup field table
+(the fix for the zones item above); and `kilnlink_version.h`'s deliberate
+independence of the two version constants — documented reasoning, do **not**
+propose re-tying them.
 
 ---
 
