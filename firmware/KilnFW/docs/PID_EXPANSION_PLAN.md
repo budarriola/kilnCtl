@@ -2824,6 +2824,32 @@ as pre-registered negative controls. And §4.2 is already satisfied:
 `bd_coupling_correction` on 479/479 control rows, so re-scope it to
 "analyse that campaign", not "capture next time".
 
+**Third pass, 2026-09-04: the z0-only ease-off A/B is WITHDRAWN, not
+redesigned.** Per-run recomputation (not just the two arm means) confirms
+the 2.0×→3.0× arm-mean ramp-rate gap (+0.16-0.18 °C/min, wrong sign) is
+smaller than the 2.0× arm's own within-arm SD (0.52) — no slicing of this
+n=3/arm data shows the knob lowering arrival rate. Reading
+`zone_taper_climb_rate()` (`profile_executor_feedforward.c:247-271`) shows
+why: `ease_off_window_mult` scales only the feedforward climb-rate command,
+never the PID terms, the coupling-correction term, or the plant's actual
+thermal state — and by the time the measured window is sampled, z0's own
+duty (feedforward included) has already crashed to 0.05-0.10 (§3.6d
+original, §1), leaving little climb term for a wider window to remove. The
+knob was never wired to reach the quantity (arrival ramp rate) the
+intervention needed it to move. **Withdrawn**, full detail and the
+resulting ranked shortlist for z0's overshoot (slow z0's own profile ramp
+rate on approach — cheapest, best-evidenced, recommended first; then a
+zero-kiln-time check of whether the ramp rate is even zone-specific in the
+current profile; then the deferred coupling-floor campaign; then a
+firmware-level k_dc/dead-time-scaled feedforward compensation) in the
+report's "Third pass" section. The taper-onset-time pre-flight metric and
+the n/power figures for both profile choices are kept as reference — reused
+if this knob is ever pointed at something the taper mechanism actually
+reaches. **The per-zone override itself (`ZONES_CFG_VERSION` 16→17) stays**:
+it is a general, independently useful capability (isolating z0's taper from
+z1/z2's) whose one motivating experiment turned out not to need it, not a
+capability that was a mistake.
+
 ### 3.6b addendum: first in-data reachability proof, `fuzzy_ab_20260904d` (2026-09-04)
 
 The standing pre-flight check above asked for `bd_*` fields on the *next*

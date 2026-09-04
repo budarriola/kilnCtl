@@ -446,3 +446,171 @@ comparison, adopt the key-based (not zone-based) decision rule with z1/z2 as
 negative controls, and either justify 3.5× against the null arrival-rate
 result in W3.1 or state plainly that the mechanism link is assumed, not
 shown. §4.3 and §4.4's "do not run" verdicts are sound as written.
+
+---
+
+# Third pass: intervention 1 WITHDRAWN, not merely redesigned (2026-09-04)
+
+W3.1 flagged the null actuator result but W6 still called the A/B "worth
+kiln time... NOT as designed," leaving open whether a corrected design would
+be worth running. This pass re-checks the actuator test directly against
+the raw captures (not just the two arm means) and reads the taper
+implementation to see whether the null result is noise or mechanism — the
+distinction that decides withdrawal vs. redesign.
+
+## X1. The null is not a fluke of the two-mean comparison
+
+Recomputed ramp rate and peak overshoot per run, independently of the §2a/W1
+pooled fit, from `easeoff_ab_20260904_2p0_run{1,2,3}.jsonl` and
+`_3p0_run{1,2,3}.jsonl` directly:
+
+| arm | run1 | run2 | run3 | mean | within-arm SD |
+|---|---|---|---|---|---|
+| 2.0× ramp rate (°C/min) | 0.88 | 1.77 | 1.78 | 1.48 | **0.52** |
+| 3.0× ramp rate (°C/min) | 1.58 | 1.44 | 1.89 | 1.64 | **0.23** |
+
+(Matches W3.1's arm means, 1.459/1.580, to within rounding from a
+independently-chosen 90 s baseline sample.) **The 2.0×→3.0× arm-mean gap
+(+0.16 to +0.18 °C/min, wrong sign) is smaller than the 2.0× arm's own
+within-arm SD (0.52)** — run1 alone (0.88) spans nearly the entire gap
+between the two arm means by itself. There is no reading of this n=3-per-arm
+data, however it's sliced, that shows 3.0× lowering arrival ramp rate; the
+noise on one arm is larger than the effect being chased on either.
+
+## X2. Why the null is mechanistic, not just underpowered
+
+`profile_executor_feedforward.c:247-271` (`zone_taper_climb_rate()`) shows
+what `ease_off_window_mult` actually does: it scales the **feedforward
+climb-rate command** (`rate_c_per_s`, the term derived from the segment's
+programmed °C/s and used to size `ff_climb`) down linearly once the
+remaining distance-to-target falls inside `mult × ff_dead_time_s`. It does
+**not** touch the PID P/I/D terms, the coupling-correction term, or the
+plant's actual thermal state — it only pre-emptively backs off *one input*
+to the total commanded duty, earlier, the larger `mult` is.
+
+§1 already established that z0's own **duty** (not just its feedforward
+component) has crashed to 0.05–0.10 by the time the overshoot peaks, and is
+already down to 0.23–0.27 at the transition itself. By the point the
+"90 s-before-transition" window used to measure "ramp rate" is being
+sampled, the feedforward climb term the taper acts on is already a small
+fraction of a duty that is itself small and falling — there is little climb
+duty left standing for a wider window to remove. The measured plant
+temperature slope over that interval is dominated by stored heat and
+neighbour-coupling injection (§2b: z2 duty 0.56–0.91 at the same instant),
+neither of which `zone_taper_climb_rate()` touches at all. **A longer
+`ease_off_window_mult` widens *when* the FF term starts tapering; it was
+never mechanistically wired to reduce the arrival rate the plant actually
+exhibits**, which is set by dynamics the knob doesn't reach. X1's null
+result is therefore the expected outcome of reading the code, not an
+underpowered fluke that a bigger n would flip.
+
+## X3. Verdict: WITHDRAWN
+
+**§3.6d's z0-only ease-off-window A/B (2.0× vs 3.5×) is withdrawn, not
+redesigned.** The premise — "a wider taper window lowers z0's arrival ramp
+rate, which lowers its overshoot" — fails at the first link: the knob does
+not act on any of the quantities that set arrival rate (stored plant heat,
+coupling injection, PID feedback), only on a feedforward term already mostly
+spent by the time it would matter. Blockers 2 and 3 (power, pre-flight
+probe) are moot for this specific campaign — there is nothing to power a
+test of, since the one thing the campaign would need to show (a rate
+reduction) has no mechanism to produce it. They are, however, kept below as
+reference for the taper-onset metric and n/power figures, because both are
+reusable for other work on this same knob (see the firmware note).
+
+Because this was reached from a code-level read of the actuator plus
+direct-per-run data, not from the pooled n=10 fit, it holds regardless of
+which of W2's fragile slope/intercept readings of the ramp-rate↔overshoot
+correlation is used — even a strong, well-powered version of that
+correlation does not help an intervention that cannot move the independent
+variable.
+
+## X4. Blockers 2 and 3, resolved for the record (not being spent on this campaign)
+
+**Power (blocker 2).** At the pooled within-config SD of 0.312 °C (stock and
+stabilised p7 combined) and a two-sided α=0.05 test for a 0.7 °C shift:
+n=3/arm ≈ 47% power (as W3.2 found); solving for 80% power at that SD needs
+**n ≈ 6/arm** (two-sample t-test, δ=0.7, SD=0.312 → n≈4/arm at 80%, but the
+review's own quoted 47%-at-n=3 implies the effective ratio is worse than a
+clean two-sample calc — using the conservative reading, budget **n=5–6/arm**
+at the stabilised-profile SD). At the stock-p7 SD (0.04–0.06), n=3/arm is
+already >99% power. Kiln-hours: each z0 dwell-entry run in this pool takes
+~35–45 min of firing time end-to-end (ramp segments + final dwell +
+cooldown observation, per the existing `easeoff_ab_20260904` queue log); two
+arms × 3 runs stock-p7 ≈ **3.5–4.5 hours total**; two arms × 5–6 runs
+stabilised-p7 ≈ **12–18 hours total**. Stock p7 is cheaper AND better
+powered — the review's preferred fix — but moot here since there's no
+detectable ramp-rate delta for a well-powered n to detect.
+
+**Reachability probe (blocker 3).** Correct metric: **taper onset time**,
+defined as the first sample (per zone, per ramp segment approaching a
+target) where `bd_ff_rate_pretaper != bd_ff_rate_posttaper` (float
+inequality, not an epsilon — the firmware taper is off, i.e. `posttaper ==
+pretaper` bit-for-bit, until `dist_s < window_s`), reported as elapsed time
+into that segment. Verified computable from a real, on-disk capture:
+`fuzzy_ab_20260904d_s50_run1.jsonl` (571 samples with `control.zones[]`
+populated) shows zone 0's first pre≠post sample at **t=21.0 s** into segment
+0 (`bd_ff_rate_pretaper=0.08333`, `bd_ff_rate_posttaper=0.07965`) — the
+fields exist, differ when expected, and are cleanly diffable. **Comparison
+between arms:** for a matched ramp segment (same target, same programmed
+rate) run under each `ease_off_window_mult`, onset time should occur at
+`segment_duration − window_s` where `window_s = mult × ff_dead_time_s`
+(105.6 s for z0 at 2.0×, 184.8 s at 3.5×) — i.e. the 3.5× arm's onset should
+land **79.2 s earlier** in the segment than the 2.0×arm's, a large,
+easy-to-see difference against typical segment lengths of several hundred
+seconds. This is a real, mechanistically-grounded pre-flight check (unlike
+the rejected pretaper/posttaper *value* comparison) — reusable if the
+per-zone `ease_off_window_mult` knob is ever used for something the taper
+mechanism actually reaches.
+
+## X5. Given the lever is dead, what's next for z0's overshoot — ranked shortlist
+
+Working from the mechanism evidence already in hand (§1–§2, no new firings
+needed for the top two):
+
+1. **Slow z0's own commanded ramp rate on approach to a dwell — a
+   profile-level fix, not a controller fix.** §2a's correlation, sign-robust
+   under every control checked in W2 (ambient, leave-one-out, campaign
+   centring; only the slope/intercept are fragile), says overshoot tracks
+   the rate z0 is asked to arrive at. Unlike the taper knob, a slower
+   profile ramp segment for z0's last approach to target directly reduces
+   the quantity the correlation is about, with no dependency on any
+   feedforward mechanism reaching it. Cost: a profile edit (no firmware
+   change) plus a validation campaign — likely the same stock-p7, n=3-5/arm
+   design already costed above (~4-6 hours), because the actuator here is
+   the ramp-rate *input* itself, which is trivially and verifiably
+   controllable, unlike the taper window. Best-supported, cheapest,
+   least novel. Recommended first.
+2. **Zero-kiln-time check: does the profile even need to approach z0's dwell
+   at the rate it currently does, or is the rate an artifact of a
+   shared/unzoned ramp-rate parameter?** Before spending kiln time on (1),
+   check whether the current profile already ties z0's ramp rate to
+   z1/z2's for no physical reason (e.g. one shared `ramp_rate_c_per_min`
+   across all zones) — if so, (1) may be a one-line profile change rather
+   than new tooling. This is a documentation/config read, not a campaign.
+3. **Coupling-floor campaign (matched ramp rate, deliberately varied peer
+   duty)** — §2b's original open question, previously ranked #4 as "bigger,
+   more novel kiln-time ask." Still true, and still worth deferring:
+   revisit only if (1) under-delivers, since (1) is cheaper and already
+   evidenced.
+4. **Firmware-level per-zone feedforward compensation scaled by z0's own
+   `model_k_dc`/`model_dead_time_s`** (§2c) — architecture-level, requires a
+   firmware change (not a preset), and no firing would validate the
+   *design* before it exists in code. Lowest priority; a note in the plan
+   doc, not kiln time, until (1) and (3) are exhausted.
+
+## X6. Is the per-zone `ease_off_window_mult` firmware work still worth keeping?
+
+**Yes, as a general capability — its motivating experiment is withdrawn, not
+the mechanism it implements.** The per-zone override (`ZONES_CFG_VERSION`
+16→17, `zone_taper_climb_rate()` reading zone `zi`'s own value) is a clean,
+narrowly-scoped piece of config plumbing that does exactly what it says:
+lets one zone's taper window differ from its siblings'. That's independently
+useful — e.g. shortlist item 1 above still benefits from being able to tune
+z0 in isolation without touching z1/z2, and any future work on z0's dead
+time/gain outlier status (§2c) will want the same isolation. What's
+withdrawn is only the specific claim that *this* knob, at *this* window
+size, fixes dwell-entry overshoot by lowering arrival rate — X2 shows the
+knob was never wired to reach that quantity. The owner should know the
+capability shipped for an experiment that turned out not to need it, not
+that the capability itself was a mistake.
