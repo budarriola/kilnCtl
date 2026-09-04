@@ -92,15 +92,15 @@ static void reset_state(void)
 {
     memset(&s_wifi, 0, sizeof(s_wifi));
     s_wifi.sta_rssi = -127;
-    // post_event()/post_and_wait() both refuse (silently, by design -- see
-    // wifi_prov.c's owner-task comment) when s_cmd_queue is NULL, which it is
+    // post_event()/wifi_prov_post_and_wait() both refuse (silently, by design -- see
+    // wifi_prov.c's owner-task comment) when s_wifi_cmd_queue is NULL, which it is
     // until wifi_prov_start() runs (never called by these tests). Point it
     // at any non-NULL value so post_event() actually reaches xQueueSend(),
     // which is what g_stub_queue_send_calls counts -- the queue is never
     // really drained (xQueueSend always "fails" in the stub, see
     // freertos/queue.h), only whether wifi_prov.c DECIDED to post matters
     // here.
-    s_cmd_queue = (QueueHandle_t)1;
+    s_wifi_cmd_queue = (QueueHandle_t)1;
     g_stub_wifi_mode = WIFI_MODE_APSTA; // "AP is up alongside the join" -- the pre-GOT_IP state
     g_stub_wifi_set_mode_calls = 0;
     g_stub_ap_info_result = ESP_OK;

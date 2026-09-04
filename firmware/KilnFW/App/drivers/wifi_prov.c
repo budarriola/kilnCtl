@@ -111,25 +111,25 @@ const char *WIFI_PROV_TAG = "wifi_prov";
 
 struct wifi_prov_state s_wifi;
 
-QueueHandle_t s_cmd_queue;
+QueueHandle_t s_wifi_cmd_queue;
 
 /* Producer half of the request/response pair -- identical in shape to
  * kiln_io_owner.c's and thermo_owner.c's helper of the same name, including
  * the fail-closed default. Returns false if the owner task isn't up, the post
  * was refused (full queue), or the wait timed out; *result is meaningful only
  * when it returns true. */
-bool post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms)
+bool wifi_prov_post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms)
 {
     memset(result, 0, sizeof(*result));
     result->err = ESP_ERR_INVALID_STATE; /* fail closed if the owner never answers */
 
-    if (!s_cmd_queue) {
+    if (!s_wifi_cmd_queue) {
         return false;
     }
 
     /* Static, stack-resident semaphore -- same fix as uart_owner_transfer()
      * and i2c_owner_transfer() (2026-08-20). Not a hot loop itself, but kept
-     * consistent with every other owner's post_and_wait() now that the
+     * consistent with every other owner's wifi_prov_post_and_wait() now that the
      * pattern is known to matter under load. */
     StaticSemaphore_t done_storage;
     SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&done_storage);
@@ -141,7 +141,7 @@ bool post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms)
     cmd->done = done;
 
     bool ok = false;
-    if (xQueueSend(s_cmd_queue, cmd, 0) == pdTRUE) {
+    if (xQueueSend(s_wifi_cmd_queue, cmd, 0) == pdTRUE) {
         ok = xSemaphoreTake(done, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
         if (!ok) {
             ESP_LOGW(WIFI_PROV_TAG, "owner task did not answer command %d within %ums -- failing closed",
@@ -162,7 +162,7 @@ bool post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms)
  * why discarding is the correct answer to a full queue here. */
 void post_event(wifi_cmd_type_t type)
 {
-    if (!s_cmd_queue) {
+    if (!s_wifi_cmd_queue) {
         /* Between esp_event_handler_instance_register() and the owner task
          * existing there is no queue yet -- see wifi_prov_start() below,
          * which creates the task BEFORE esp_wifi_start() precisely to keep
@@ -171,7 +171,7 @@ void post_event(wifi_cmd_type_t type)
         return;
     }
     wifi_cmd_t cmd = { .type = type, .result = NULL, .done = NULL };
-    if (xQueueSend(s_cmd_queue, &cmd, 0) != pdTRUE) {
+    if (xQueueSend(s_wifi_cmd_queue, &cmd, 0) != pdTRUE) {
         ESP_LOGW(WIFI_PROV_TAG, "command queue full -- dropping Wi-Fi event %d (self-heals: see this file's "
                       "owner-task comment)", (int)type);
     }
@@ -224,7 +224,7 @@ esp_err_t wifi_prov_start(void)
 
     bool found_in_wifi_nvs = false;
     if (err == ESP_OK) {
-        err = nvs_load_from(WIFI_NVS_PARTITION, &found_in_wifi_nvs);
+        err = wifi_prov_nvs_load_from(WIFI_NVS_PARTITION, &found_in_wifi_nvs);
         if (err != ESP_OK) {
             ESP_LOGW(WIFI_PROV_TAG, "wifi_cfg load from '%s' failed: %s -- starting unprovisioned",
                      WIFI_NVS_PARTITION, esp_err_to_name(err));
@@ -377,7 +377,7 @@ esp_err_t wifi_prov_start(void)
      * Not later (e.g. after esp_wifi_start()): esp_wifi_start() is what makes
      * the driver start emitting WIFI_EVENT_STA_START and friends. Creating
      * the task after it would open a window where on_wifi_event() fires,
-     * finds s_cmd_queue still NULL, and silently drops a STA_START -- costing
+     * finds s_wifi_cmd_queue still NULL, and silently drops a STA_START -- costing
      * the first join attempt of every boot. Creating it here means the queue
      * exists before the radio can produce a single event.
      *
@@ -390,8 +390,8 @@ esp_err_t wifi_prov_start(void)
      * refuses until it is set. If the task fails to create, this returns the
      * error and `started` is never set, so every producer fails closed rather
      * than running unserialized. */
-    s_cmd_queue = xQueueCreate(WIFI_OWNER_QUEUE_LEN, sizeof(wifi_cmd_t));
-    if (!s_cmd_queue) {
+    s_wifi_cmd_queue = xQueueCreate(WIFI_OWNER_QUEUE_LEN, sizeof(wifi_cmd_t));
+    if (!s_wifi_cmd_queue) {
         ESP_LOGE(WIFI_PROV_TAG, "xQueueCreate(wifi_owner) failed");
         return ESP_ERR_NO_MEM;
     }
@@ -399,8 +399,8 @@ esp_err_t wifi_prov_start(void)
         xTaskCreatePinnedToCore(owner_task, "wifi_prov_owner", 4096, NULL, 5, NULL, tskNO_AFFINITY);
     if (task_created != pdPASS) {
         ESP_LOGE(WIFI_PROV_TAG, "xTaskCreatePinnedToCore(wifi_prov_owner) failed");
-        vQueueDelete(s_cmd_queue);
-        s_cmd_queue = NULL;
+        vQueueDelete(s_wifi_cmd_queue);
+        s_wifi_cmd_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -483,7 +483,7 @@ static void owner_task(void *arg)
 
     for (;;) {
         wifi_cmd_t cmd;
-        if (xQueueReceive(s_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_wifi_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 

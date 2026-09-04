@@ -1,6 +1,6 @@
 // Host-test stub -- see stubs/esp_err.h for why these exist. Added 2026-08-21
 // for wifi_prov.c's host tests. No-ops: the tests call wifi_prov.c's do_*()
-// bodies directly, never post_and_wait()/post_event()/owner_task(), so the
+// bodies directly, never wifi_prov_post_and_wait()/post_event()/owner_task(), so the
 // real queue is never exercised -- these only need to compile and link.
 #ifndef TEST_STUB_FREERTOS_QUEUE_H
 #define TEST_STUB_FREERTOS_QUEUE_H

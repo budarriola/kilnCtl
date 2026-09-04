@@ -12,7 +12,7 @@
  * is widened to file-scope-internal linkage ONLY because a sibling .c file
  * in this split now calls or reads it directly.
  *
- *   wifi_prov.c        -- command-queue infra (post_and_wait/post_event),
+ *   wifi_prov.c        -- command-queue infra (wifi_prov_post_and_wait/post_event),
  *                          wifi_prov_start() bring-up, owner_task() itself,
  *                          and the handful of trivial state getters used
  *                          from inside wifi_prov_start()'s own log lines
@@ -33,7 +33,7 @@
  * documented at length in wifi_prov.c) moved here unchanged so all four
  * files see the identical layout; the original anonymous
  * `static struct wifi_prov_state s_wifi;` is now defined (non-static) in
- * wifi_prov.c and `extern`-declared here. Same treatment for s_cmd_queue,
+ * wifi_prov.c and `extern`-declared here. Same treatment for s_wifi_cmd_queue,
  * s_scan_stage and TAG. */
 
 #include <stdbool.h>
@@ -58,7 +58,7 @@ extern const char *WIFI_PROV_TAG;
 /* Dedicated NVS partition for Wi-Fi credentials -- see wifi_prov_nvs.c's
  * doc comment (moved there from the top of the original single file) for
  * the full rationale. Needed here too: wifi_prov.c's wifi_prov_start()
- * calls wifi_prov_nvs_partition_init()/nvs_load_from() on it directly. */
+ * calls wifi_prov_nvs_partition_init()/wifi_prov_nvs_load_from() on it directly. */
 #define WIFI_NVS_PARTITION "wifi_nvs"
 
 /* TODO.md 8.4: a bounded list of saved networks. WIFI_PROV_MAX_SAVED_NETWORKS
@@ -172,7 +172,7 @@ typedef struct {
     } args;
 } wifi_cmd_t;
 
-extern QueueHandle_t s_cmd_queue;
+extern QueueHandle_t s_wifi_cmd_queue;
 
 /* Scan results staging -- defined (non-static) in wifi_prov_api.c (do_scan()
  * writes it, wifi_prov_scan() copies out of it), but wifi_prov.c's
@@ -182,15 +182,15 @@ extern QueueHandle_t s_cmd_queue;
 extern wifi_prov_scan_result_t s_scan_stage[WIFI_OWNER_SCAN_STAGE_MAX];
 
 /* ---- queue producer/consumer helpers (wifi_prov.c) ------------------------
- * post_and_wait() is used by every producer in wifi_prov_api.c;
+ * wifi_prov_post_and_wait() is used by every producer in wifi_prov_api.c;
  * post_event() is used by every event handler/timer callback in
  * wifi_prov_link.c. */
-bool post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms);
+bool wifi_prov_post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms);
 void post_event(wifi_cmd_type_t type);
 
 /* ---- NVS load/save/migration (wifi_prov_nvs.c) ---------------------------- */
 esp_err_t wifi_prov_nvs_partition_init(const char *partition);
-esp_err_t nvs_load_from(const char *partition, bool *out_found);
+esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found);
 void nvs_load_legacy_single(const char *partition, saved_net_t *out_net, bool *out_has);
 void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs);
 void nvs_load_saved_nets(void);

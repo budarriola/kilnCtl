@@ -6,7 +6,7 @@
 
 typedef struct semaphore_s *SemaphoreHandle_t;
 
-/* 2026-08-21: added for wifi_prov.c's host tests. post_and_wait() (never
+/* 2026-08-21: added for wifi_prov.c's host tests. wifi_prov_post_and_wait() (never
  * called by the tests -- they call do_*() bodies directly) is the only
  * caller of these; they exist purely so the file compiles and links. */
 typedef struct {

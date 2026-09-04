@@ -119,7 +119,7 @@ struct wifi_prov_legacy_single s_legacy_single;
  * *out_found reports whether the namespace existed at all, which is what the
  * migration keys off: an absent namespace means "nothing was ever saved here",
  * which is distinct from "saved, but with has_creds == 0". */
-esp_err_t nvs_load_from(const char *partition, bool *out_found)
+esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
 {
     if (out_found) {
         *out_found = false;
@@ -238,7 +238,7 @@ esp_err_t nvs_load_from(const char *partition, bool *out_found)
 
 /* Reads the legacy single-network keys (NVS_KEY_SSID/NVS_KEY_PASS/
  * NVS_KEY_HAS_CREDS) out of `partition`, with the same has_creds-missing
- * inference the pre-8.4 nvs_load_from() used to apply in place: if the flag
+ * inference the pre-8.4 wifi_prov_nvs_load_from() used to apply in place: if the flag
  * key is genuinely absent, trust the presence of a non-empty ssid rather than
  * silently reporting "nothing saved" (covers a partial write that landed
  * ssid/pass but not the flag). This is read-only and exists purely to feed
@@ -479,13 +479,13 @@ esp_err_t wifi_prov_nvs_partition_init(const char *partition)
  * cheap, and strictly safer than the alternative. */
 void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs)
 {
-    /* Snapshot first: nvs_load_from() writes straight into s_wifi, so the
+    /* Snapshot first: wifi_prov_nvs_load_from() writes straight into s_wifi, so the
      * speculative read of the old copy below would otherwise clobber a
      * perfectly good new-partition config if the old namespace turns out to
      * hold nothing useful. */
     struct wifi_prov_state from_wifi_nvs = s_wifi;
 
-    /* Legacy single-network credentials, read directly -- nvs_load_from()
+    /* Legacy single-network credentials, read directly -- wifi_prov_nvs_load_from()
      * itself no longer touches NVS_KEY_SSID/PASS/HAS_CREDS (see
      * nvs_load_saved_nets_from() for the current, list-based loader). These
      * are needed only to decide which side's legacy credentials should feed
@@ -497,7 +497,7 @@ void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs)
     nvs_load_legacy_single(WIFI_NVS_PARTITION, &wifi_nvs_legacy_net, &wifi_nvs_has_legacy);
 
     bool found_in_default = false;
-    esp_err_t err = nvs_load_from(NVS_DEFAULT_PART_NAME, &found_in_default);
+    esp_err_t err = wifi_prov_nvs_load_from(NVS_DEFAULT_PART_NAME, &found_in_default);
     if (err != ESP_OK || !found_in_default) {
         s_wifi = from_wifi_nvs;
         s_legacy_single.has = wifi_nvs_has_legacy;

@@ -130,7 +130,7 @@ esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *p
      * blocking scan -- before it returns. This producer's caller is either an
      * HTTP handler or ui_page_network.c's connect_job_t worker task, both of
      * which already blocked for exactly this work before Phase 4. */
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
@@ -192,7 +192,7 @@ esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len)
     cmd.args.forget_network.ssid[ssid_len] = '\0';
 
     wifi_result_t r;
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
@@ -233,7 +233,7 @@ esp_err_t wifi_prov_get_saved_networks(wifi_prov_saved_network_t *out, size_t ma
     wifi_cmd_t cmd = { .type = CMD_GET_SAVED_NETWORKS,
                        .args.get_saved_networks = { .max_results = max_results } };
     wifi_result_t r;
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     if (r.err == ESP_OK) {
@@ -286,7 +286,7 @@ esp_err_t wifi_prov_set_mode(wifi_prov_mode_t mode)
     wifi_result_t r;
     /* Scan-length wait: the HOME branch of do_set_mode() calls
      * start_sta_join(), which scans. */
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
@@ -341,7 +341,7 @@ esp_err_t wifi_prov_set_ap_ssid(const char *ssid, size_t ssid_len)
     cmd.args.set_ap_ssid.ssid[ssid_len] = '\0';
 
     wifi_result_t r;
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
@@ -403,7 +403,7 @@ esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len)
     cmd.args.set_ap_password.password[password_len] = '\0';
 
     wifi_result_t r;
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
@@ -483,7 +483,7 @@ esp_err_t wifi_prov_set_dhcp(void)
     }
     wifi_cmd_t cmd = { .type = CMD_SET_DHCP };
     wifi_result_t r;
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
@@ -551,7 +551,7 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
     strncpy(cmd.args.set_static_ip.gateway, gateway, sizeof(cmd.args.set_static_ip.gateway) - 1);
 
     wifi_result_t r;
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
@@ -607,7 +607,7 @@ esp_err_t wifi_prov_get_sta_ip(char *out, size_t out_cap)
      * wifi_prov.h. */
     wifi_cmd_t cmd = { .type = CMD_GET_STA_IP, .args.get_sta_ip = { .out_cap = out_cap } };
     wifi_result_t r;
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     if (r.err == ESP_OK) {
@@ -705,7 +705,7 @@ esp_err_t wifi_prov_scan(wifi_prov_scan_result_t *results, size_t max_results, s
 
     wifi_cmd_t cmd = { .type = CMD_SCAN, .args.scan = { .max_results = max_results } };
     wifi_result_t r;
-    if (!post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     if (r.err == ESP_OK && r.scan_count > 0) {
