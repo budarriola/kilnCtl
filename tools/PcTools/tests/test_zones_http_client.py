@@ -893,6 +893,49 @@ class CapturedLiveGetFixtureTest(unittest.TestCase):
         for i in range(len(current["zones"])):
             self.assertEqual(form[f"z{i}_coupling_diag_k_dc"], repr(21.6))
 
+    def test_preset_captured_from_live_get_round_trips_without_dropping_any_field(self):
+        """THE regression this test class exists to catch, at the preset
+        overlay layer rather than the GET-echo layer test_round_trips_
+        without_dropping_any_field already covers: a preset authored by
+        copying a board's own GET /api/zones (or a backup export) verbatim
+        -- the module docstring's own "most natural way to author one" --
+        must not be refused just because it named a field back at the board.
+        Every zone key in the captured fixture is walked, by construction,
+        so this does not go stale the way a hardcoded field list would (same
+        reasoning as test_round_trips_without_dropping_any_field above) --
+        it is what would have caught coupling_diag_k_dc/normal_current_*/
+        tuning_* landing in neither _PRESET_ZONE_OVERRIDE_FIELDS nor
+        _PRESET_ZONE_KNOWN_IGNORED_FIELDS before this fix."""
+        current = self._load_fixture()
+        preset = {"zones": [dict(zone) for zone in current["zones"]]}
+        # Must not raise ZonesHttpUnknownFieldError.
+        zh.build_post_body(current, preset)
+
+    def test_MUTATION_preset_field_missing_from_both_sets_is_caught_BREAK_PROOF(self):
+        """Proves test_preset_captured_from_live_get_round_trips_without_
+        dropping_any_field is actually checking something: strip
+        coupling_diag_k_dc back out of both preset sets (simulating the
+        real regression -- a field zones_http_handlers.c/autotune_engine.c
+        started populating that the preset allowlist was never updated for)
+        and confirm build_post_body() refuses a preset naming it, quoting
+        the real refusal text."""
+        current = self._load_fixture()
+        preset = {"zones": [{"index": i, "coupling_diag_k_dc": 21.6}
+                             for i in range(len(current["zones"]))]}
+        with unittest.mock.patch.object(
+                zh, "_PRESET_ZONE_OVERRIDE_FIELDS",
+                zh._PRESET_ZONE_OVERRIDE_FIELDS - {"coupling_diag_k_dc"}):
+            with self.assertRaises(zh.ZonesHttpUnknownFieldError) as ctx:
+                zh.build_post_body(current, preset)
+        message = str(ctx.exception)
+        print(f"\n[negative-test] real refusal reproduced: {message}")
+        self.assertIn("coupling_diag_k_dc", message)
+        self.assertIn("is not in _PRESET_ZONE_OVERRIDE_FIELDS or "
+                       "_PRESET_ZONE_KNOWN_IGNORED_FIELDS", message)
+        # Restored automatically on exit from the patch context -- confirm
+        # the real (unpatched) module round-trips it again.
+        zh.build_post_body(current, preset)
+
     def test_MUTATION_a_new_unmapped_get_field_is_caught_BREAK_PROOF(self):
         """THE regression guard, proved red then green: inject a fake field
         into the captured payload the way a firmware change that grows GET

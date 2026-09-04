@@ -557,11 +557,29 @@ _PRESET_ZONE_COUPLING_FIELD = "coupling_coeff"
 #: build_post_body() now raises ZonesHttpUnknownFieldError for anything that
 #: lands in neither set, instead of quietly discarding it. See
 #: build_post_body()'s zone-merge loop.
+#: normal_current_measured/normal_current_a (Task 1, 2026-08-27+2) and the
+#: eleven tuning_* fields (ZONES_CFG_VERSION 12->13, the tuning-quality
+#: record) are read-only telemetry on THIS endpoint -- zones_http_handlers.c
+#: always emits them (same always-emit convention as model_k_dc/etc, see
+#: that handler's own comments) but parse_zone_fields() has no POST wire key
+#: for any of them; the encode side already treats them as read-only via
+#: _ZONE_READONLY_KEYS/_ZONE_TUNING_READONLY_KEYS. A preset built by copying
+#: a live GET or a backup export -- the module docstring's own "most natural
+#: way to author one" -- carries these keys too, and until now they landed
+#: in neither preset set, so that natural authoring path tripped exactly the
+#: cross_zone_max_delta_c incident's ZonesHttpUnknownFieldError class the
+#: moment a captured preset was re-applied. Reference-only: ignored, never
+#: overlaid, same as model_k_dc above.
 _PRESET_ZONE_KNOWN_IGNORED_FIELDS = {
     "index",
     "k_dc", "tau_s", "dead_time_s",
     "model_k_dc", "model_tau_s", "model_dead_time_s",
     "settings_source",
+    "normal_current_measured", "normal_current_a",
+    "tuning_valid", "tuning_method", "tuning_rule", "tuning_settled",
+    "tuning_extrapolation_converged", "tuning_tau_consistent",
+    "tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
+    "tuning_rise_inf_c", "tuning_seq",
 }
 
 
@@ -648,7 +666,22 @@ def build_post_body(current: dict, preset: dict) -> str:
                         merged[f"coupling_c{j}"] = cell
                 elif key in _PRESET_ZONE_OVERRIDE_FIELDS:
                     merged[key] = value
-                elif key not in _PRESET_ZONE_KNOWN_IGNORED_FIELDS:
+                elif key in _PRESET_ZONE_KNOWN_IGNORED_FIELDS:
+                    continue
+                elif (_ZONE_COUPLING_CELL_RE.match(key)
+                      or _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.match(key)):
+                    # A preset built by copying a live GET or a backup export
+                    # (the module docstring's "most natural way to author
+                    # one") carries the individual coupling_c%u/
+                    # coupling_tau_c%u/coupling_dead_time_c%u keys GET emits,
+                    # not the coupling_coeff list a hand-authored preset uses.
+                    # The row-level override path is coupling_coeff (handled
+                    # above) -- coupling_tau_c%u/dead_time_c%u have NO POST
+                    # path at all (see _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE's
+                    # own comment), so any of these three key shapes reaching
+                    # here are reference-only: ignored, never overlaid.
+                    continue
+                else:
                     raise ZonesHttpUnknownFieldError(
                         f"zone {idx}: preset field {key!r} is not in "
                         "_PRESET_ZONE_OVERRIDE_FIELDS or _PRESET_ZONE_KNOWN_IGNORED_FIELDS "
