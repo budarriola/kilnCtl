@@ -156,8 +156,23 @@
  * frame in one day is exactly why this constant exists as a plain,
  * hand-bumped literal rather than something inferred from "did the byte
  * count change": the safe default is bump-on-every-layout-change, not
- * bump-once-per-day. */
-#define UART_PROTOCOL_VERSION ((uint16_t)10)
+ * bump-once-per-day.
+ *
+ * Version 11 (2026-09-04): INFO_CMD_GET_STACK_MARGIN's reply gained a
+ * page header -- byte0 changed meaning from "count" to "count-this-page",
+ * and two new bytes (byte1=truncated, byte2=next_start_index) were inserted
+ * BEFORE the first entry (build_stack_margin_reply(), commit 4f61604,
+ * landed without a version bump at the time -- caught and closed out here).
+ * This is BREAKING, not additive, and in the opposite direction from
+ * Version 9/10's case: an OLD pc_tools build reading a NEW firmware's reply
+ * would misread the new byte1/byte2 as the first entry's name_len and a
+ * name byte, silently corrupting every task's stack-margin reading instead
+ * of refusing to parse. (The request side stays compatible either way --
+ * the new optional start_index request byte is read as 0, same as always,
+ * by firmware built before this version; see build_stack_margin_reply()'s
+ * own comment.) The exact-match gate this constant drives is what turns
+ * that silent corruption into a refused connection instead. */
+#define UART_PROTOCOL_VERSION ((uint16_t)11)
 
 #define UART_TASK_ID_THERMO   1u  /* MAX31856 x3 on the thermocouple board (J6) */
 #define UART_TASK_ID_IO       2u  /* SX1509 expander: relays, digital I/O, DRDY */

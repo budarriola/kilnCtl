@@ -32,11 +32,15 @@ from __future__ import annotations
 import os
 import struct
 import sys
+import threading
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl import devices  # noqa: E402
+from kilnctrl.devices import InfoResponseError, StackMarginEntry  # noqa: E402
+from kilnctrl.info import InfoClient  # noqa: E402
 from kilnctrl.protocol import (  # noqa: E402
     INFO_CMD_GET_FW_VERSION,
     INFO_CMD_GET_PIN_CONFIG,
@@ -245,6 +249,84 @@ class ParseInfoResponseDisambiguationTests(unittest.TestCase):
         )
         subcommand, _value = devices.parse_info_response(fw_payload)
         self.assertEqual(subcommand, INFO_CMD_GET_FW_VERSION)
+
+
+def _fake_entry(name: str) -> StackMarginEntry:
+    return StackMarginEntry(
+        name=name,
+        configured_stack_bytes=3072,
+        hwm_bytes=2048,
+        alive=True,
+        level=StackMarginLevel.OK,
+    )
+
+
+def _bare_info_client() -> InfoClient:
+    """An InfoClient with no real link/consumer thread -- get_stack_margin()'s
+    paging loop only touches self._query, self._query_lock and self._pending
+    (via _query, which we replace outright), so bypass __init__ (which needs
+    a real UartLink and spawns a background thread) rather than faking one."""
+    client = InfoClient.__new__(InfoClient)
+    client._query_lock = threading.RLock()
+    return client
+
+
+class GetStackMarginPagingTests(unittest.TestCase):
+    """InfoClient.get_stack_margin() (kilnctrl/info.py) -- the loop that
+    walks start_index/next_start_index across pages and aggregates them into
+    one list. This is exactly the kind of off-by-one-drops-the-last-page bug
+    class this repo keeps shipping (see MEMORY project_split_module_missing_
+    name_class.md and friends), so it gets its own coverage independent of
+    the byte-decode tests above."""
+
+    def test_single_page_not_truncated_returns_its_entries(self):
+        client = _bare_info_client()
+        client._query = unittest.mock.Mock(
+            return_value=([_fake_entry("a"), _fake_entry("b")], False, 0)
+        )
+        result = client.get_stack_margin()
+        self.assertEqual([e.name for e in result], ["a", "b"])
+        client._query.assert_called_once()
+
+    def test_three_pages_all_aggregated_including_the_last(self):
+        # 25 tasks, ~9 per page (matches the real ~10-short-names-per-253B
+        # bound) -- the exact shape that motivated pagination in the first
+        # place. The regression this guards against: an off-by-one that
+        # stops one page early would silently drop the final page's entries
+        # and this test would still see a shorter list than expected.
+        page1 = ([_fake_entry(f"t{i}") for i in range(9)], True, 9)
+        page2 = ([_fake_entry(f"t{i}") for i in range(9, 18)], True, 18)
+        page3 = ([_fake_entry(f"t{i}") for i in range(18, 25)], False, 0)
+        client = _bare_info_client()
+        client._query = unittest.mock.Mock(side_effect=[page1, page2, page3])
+        result = client.get_stack_margin()
+        self.assertEqual([e.name for e in result], [f"t{i}" for i in range(25)])
+        self.assertEqual(client._query.call_count, 3)
+        # start_index actually advanced across calls, in order.
+        start_indices = [call.args[1] for call in client._query.call_args_list]
+        self.assertEqual(
+            [devices.info_get_stack_margin(0), devices.info_get_stack_margin(9),
+             devices.info_get_stack_margin(18)],
+            start_indices,
+        )
+
+    def test_repeated_next_start_index_raises_instead_of_looping_forever(self):
+        """NEGATIVE TEST: a firmware bug that reports next_start_index=9 on
+        both page 1 and page 2 (an off-by-one that fails to advance) must be
+        caught and named, not silently re-fetched forever or silently
+        under-report. This is the exact failure mode the docstring on
+        get_stack_margin() promises to guard against."""
+        page1 = ([_fake_entry(f"t{i}") for i in range(9)], True, 9)
+        page2_stuck = ([_fake_entry(f"t{i}") for i in range(9, 18)], True, 9)  # BUG: repeats 9
+        client = _bare_info_client()
+        client._query = unittest.mock.Mock(side_effect=[page1, page2_stuck, page1, page2_stuck])
+        with self.assertRaises(InfoResponseError) as ctx:
+            client.get_stack_margin()
+        self.assertIn("start_index=9", str(ctx.exception))
+        self.assertIn("repeated", str(ctx.exception))
+        # And it must have stopped after the second call, not spun through
+        # the mock's whole side_effect list.
+        self.assertEqual(client._query.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -136,7 +136,13 @@ DEFAULT_BAUD_RATE = 921600
 #: of kilnlink's version from here on: bump it only when THIS protocol's own
 #: contract changes, never merely because the isolated ESP<->Pico link's
 #: number moved.
-UART_PROTOCOL_VERSION = 10
+#:
+#: 10 -> 11 (2026-09-04): INFO_CMD_GET_STACK_MARGIN's reply gained a page
+#: header (byte1=truncated, byte2=next_start_index inserted before the first
+#: entry -- uart_task_ids.h's Version 11 note has the full breaking-change
+#: rationale). Caught after the firmware-side pagination change
+#: (commit 4f61604) had already landed without a version bump.
+UART_PROTOCOL_VERSION = 11
 
 
 class Device(enum.IntEnum):

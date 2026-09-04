@@ -124,5 +124,5 @@ def test_wire_version_matches_on_both_sides():
     # that first and silently check the wrong number).
     firmware_literal = re.search(r"\(uint16_t\)\s*(\d+)", value_side)
     assert firmware_literal is not None, value_side
-    assert int(firmware_literal.group(1)) == 10
-    assert protocol.UART_PROTOCOL_VERSION == 10
+    assert int(firmware_literal.group(1)) == 11
+    assert protocol.UART_PROTOCOL_VERSION == 11

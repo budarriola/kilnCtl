@@ -1751,6 +1751,42 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       It was invisible because the instrumentation had inherited vanilla
       FreeRTOS's word units; ESP-IDF returns **bytes** (`task.h:1509`), so a
       stray ×4 reported that task as 45.3% and OK. `d90986c`
+- [x] **2026-09-04: `GET_STACK_MARGIN`'s pagination (follow-up to `ead4123`/
+      `e1e02e7` above) closed out, version-gated, and verified on hardware.**
+      The pagination itself (`start_index` request byte, `truncated`/
+      `next_start_index` reply header, `4f61604`) had already landed, so
+      this pass's job was to close three gaps left behind it: (1) it shipped
+      without bumping `UART_PROTOCOL_VERSION` even though it inserts two
+      bytes before the first reply entry — an old `pc_tools` build reading a
+      new firmware's reply would misread `truncated`/`next_start_index` as
+      the first entry's `name_len`/name byte, silent corruption, not a
+      refusal. `KILNLINK_MIN_COMPATIBLE`/the isolated-link version do NOT
+      apply here (this command is PC↔ESP only); bumped `UART_PROTOCOL_
+      VERSION` 10→11 on both sides instead (`uart_task_ids.h`,
+      `protocol.py`), with the version-history comment on each. (2) no test
+      covered `InfoClient.get_stack_margin()`'s own paging *loop* (only the
+      byte-decode of one page) — added positive coverage (single page,
+      3-page/25-entry aggregation) plus the mandated negative test:
+      disabling the `seen_start_indices` repeat-guard and re-running left
+      the mock's `side_effect` exhausted and raised `StopIteration` instead
+      of the intended `InfoResponseError` naming `start_index=9 repeated`,
+      confirming the test actually exercises the guard; reverted, reran
+      clean (`tools/PcTools/tests/test_stack_margin_info.py`). (3) hardware
+      verification: `build_kilnfw` OK, `flash_firmware(verify=True)`
+      confirmed (bootloader+partition table+app, running build `503ab3b`/
+      19:58:42Z, `protocol_version: 11`), `get_stack_margin()` returned all
+      21 currently-registered tasks in one call with no truncation error
+      (up from firmware's fixed 253-byte reply, which only ever fit
+      ~8-10 short-named entries) — `backlight_pwm`, `i2c_owner_ns2009`,
+      `i2c_owner_sx1509`, `kiln_io_owner`, `lvgl`, `ota_pico_rollback`,
+      `ota_rollback_reboot`, `recovery_exit`, `screen_idle` are registered
+      in source but weren't alive on this idle board, so 21/28 rather than
+      25/28 answered this time — count is live-state-dependent, not a
+      pagination miss. With the full set finally visible: **no task is
+      below 25% headroom** — the same three already-known `[LOW]` tasks
+      (`info_uart_bridge` 27.3%, `system_uart_bridge` 29.6%, `telemetry_log`
+      27.3%) remain the thinnest, everything else ≥46.6%. The truncation was
+      hiding incomplete visibility, not a hidden crisis.
 - [x] **A safety checklist could come back short and look like a pass.**
       `/api/readiness` appended items with the usual "stop rather than
       corrupt" overflow rule, so a dropped item was simply absent -- and this
