@@ -2053,7 +2053,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       response/scratch buffer.
 - [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
       ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, ~~`ota_http.c` (2508)~~,
-      `ui_page_home.c` (2279), `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
+      ~~`ui_page_home.c` (2279)~~, `panel_spi.c` (2174), ~~`profiles_http.c` (2097)~~,
       ~~`zones_config_json.c` (1867)~~, `main.c` (1820), ~~`backup_http.c` (1756)~~,
       ~~`uart_bridge_ext.c` (1727)~~, ~~`zones_http_handlers.c` (1598)~~. Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
@@ -2343,7 +2343,51 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       updated to `#include` the four new files instead of the one original
       and to call `zones_http_parse_zone_fields()` at its ~43 direct call
       sites, same convention as `test_profiles_http.c`/
-      `test_backup_import.c` above.
+      `test_backup_import.c` above. `ui_page_home.c` part — **CLOSED
+      2026-09-04**: move-only split into `ui_page_home.c` (1024 lines, the
+      page's header-comment design history, every shared `static` widget/
+      state variable, `ui_home_format_duration()`/`ui_home_freezing_point_
+      disp()` and `ui_page_home_build()`, the public entry point),
+      `ui_page_home_actions.c` (297, Start/Stop/Pause action handlers, the
+      confirm dialogs, `ui_home_menu_nav_cb()`, `ui_home_fire_btn_cb()`/
+      `ui_home_pause_resume_btn_cb()` and the `ui_home_build_button()`
+      helper), `ui_page_home_chart.c` (310, `ui_home_plan_lookup()`, the
+      dashed-planned-line/Y-tick-mark LVGL draw-event hooks, and the Y/X-
+      tick-label and legend layout helpers) and `ui_page_home_refresh.c`
+      (649, `ui_home_refresh_cb()`, the 1 Hz timer callback that repaints
+      every live number on the page), sharing state via a new
+      `ui_page_home_internal.h` on the same precedent (shared statics as
+      `extern`, former `static` helpers widened to file-scope-internal);
+      the sibling `ui_page_home_graph.c`/`.h` (pure host-tested chart-axis/
+      lag-notice logic, already its own file since before this pass) was
+      checked and needed no change. Symbol audit: grepped every widened
+      symbol — ~30 statics and ~14 functions, all prefixed `ui_home_`/
+      `s_ui_home_` regardless of outcome per the "rename even when
+      currently clean" rule — for both a non-static definition and a
+      same-named `static` across all of `App/drivers/`; four real
+      collisions found against other files' own same-named `static`s
+      (`s_zone_count` in `ui_page_temperature.c`, `s_progress_label` in
+      `ui_page_touch_cal.c`, `s_topbar` in `ui_page_config.c`/
+      `ui_page_diagnostics.c`, `s_status_label` in `ui_page_network.c`) —
+      all renamed along with everything else. `TAG` renamed `UI_HOME_TAG`
+      per the `DASH_TAG`/`PROFILES_TAG`/`OTA_HTTP_TAG`/`ZONES_CFG_TAG`/
+      `ZONES_HTTP_TAG`/`UART_BRIDGE_EXT_TAG` precedent. `flash_worker_
+      lint.py` stayed clean before and after (this file family makes no
+      NVS/flash-worker calls, so the FILENAME-keyed allowlist was never in
+      play here). `build_kilnfw` compiles and links clean end to end (a
+      concurrent, unrelated `screen_idle.c` edit from another in-progress
+      session briefly blocked the same build; reconfiguring picked up the
+      new source list and the next `build_kilnfw` run succeeded once that
+      file's own edit landed). `ui_page_home.c`/`ui_page_home_graph.c` are
+      the only members of this family pulled into a host-test translation
+      unit (`test_ui_page_home_graph.c`, unchanged — it only ever included
+      `ui_page_home_graph.c`, never `ui_page_home.c` itself), so no test
+      file needed updating; 20/21 host test executables build and pass
+      (the one non-build, `main`, fails on a concurrent, unrelated session's
+      new `test_display_power_wiring.c`, an untracked file this pass never
+      touched). Still open under this item: `autotune_engine.c` and
+      `ota_http.c`'s own remaining pieces (each already has an in-progress
+      split noted above), `panel_spi.c` (2174) and `main.c` (1820).
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
