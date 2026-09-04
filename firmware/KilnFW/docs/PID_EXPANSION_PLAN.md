@@ -2372,6 +2372,52 @@ same document's own 2026-08-29/30 bench sections contradict.
       a fair baseline arm), and the presets/campaign runner should be
       re-verified live the same way before committing kiln time again.
 
+      **FIXED 2026-09-04.** Both presets now set `"control_mode": 3`
+      (`ZONE_CONTROL_MODE_PID_FUZZY`) on all three zones, `fuzzy_strength_pct`
+      unchanged (50 for `fuzzy_ab_strength50_20260903`, 0 for
+      `fuzzy_ab_baseline_20260903`), and each description corrected to say
+      so instead of the "changes `fuzzy_strength_pct` only" claim that was
+      the bug. Also checked whether the JSON fix alone was sufficient:
+      `mcp_server_config_presets.py`'s `load_config_preset` only writes
+      `control_mode` back to the board when called WITH `zones_host` (its
+      docstring already says so — without it, `control_mode` is "reference/
+      expected state only, NOT written"). `run_queue.py`'s own campaign
+      path always supplies it: both `run_entry()` (line ~1095) and
+      `_restore_baseline_preset()` (line ~1706) call
+      `apply_preset_fn(control, preset, zones_host=cfg.host)`
+      unconditionally, and with no `--serial-port` given (the normal case
+      here, board reachable only over Wi-Fi) `apply_preset_fn` resolves to
+      `_apply_preset_http_only`, which round-trips through
+      `zones_http_client.apply_zone_preset` — i.e. the exact HTTP path that
+      writes `control_mode`. So the campaign runner was never the problem;
+      the JSON was the only thing that needed to change.
+
+      **Live proof before restarting kiln time.** Applied
+      `fuzzy_ab_strength50_20260903` via `run_queue._apply_preset_http_only`
+      directly; `GET /api/zones` read back `control_mode:3,
+      fuzzy_strength_pct:50.0` on all three zones (previously `2`). Started
+      profile #7 (the campaign profile) to force PID ticks and sampled
+      `GET /api/control` three times over ~15s:
+
+      | zone | base kp | sampled bd_kp_effective | base kd | sampled bd_kd_effective |
+      |---|---|---|---|---|
+      | z0 | 0.0318 | 0.02518 → 0.02532 → 0.02542 | 0.8401 | 0.65181 → 0.6542 → 0.65585 |
+      | z1 | 0.0485 | 0.03832 → 0.03864 → 0.03907 | 1.0548 | 0.81751 → 0.82185 → 0.82909 |
+      | z2 | 0.0631 | 0.05079 → 0.0513 → 0.05174 | 1.0690 | 0.83632 → 0.84259 → 0.84779 |
+
+      Every sample differs from the configured base gain (not bit-identical,
+      unlike the mode-2 halt evidence) and drifts sample-to-sample as the
+      bump-transfer/fuzzy state evolves — the signature the earlier
+      diagnosis said was missing. Stopped the proof-firing
+      (`profiles_stop`, `io_all_relays_off`, `io_read` confirmed R1-R4=0)
+      before it ran long enough to matter thermally. Re-applied
+      `fuzzy_ab_baseline_20260903` the same way and confirmed
+      `control_mode:3, fuzzy_strength_pct:0.0` on all three zones. Campaign
+      restarted as `fuzzy_ab_20260904c` (fresh prefix — `..._20260904_*` and
+      `..._20260904b_*` are the earlier halted runs, left alone) with
+      `--rested-timeout-s 14400` since the board was still ~38 °C from the
+      B1 proof-firing when the queue was launched.
+
       **Audited 2026-09-02: correct-but-unhelpful, not defective.** The
       monotonic strength-vs-tracking result above raised an obvious
       suspicion — an inverted error sign or a transposed rule table would
