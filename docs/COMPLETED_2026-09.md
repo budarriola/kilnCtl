@@ -909,6 +909,162 @@ be a step toward this one, not a separate mechanism). Raised 6 → 16; reset
 rate went from 22.5% to 0.0% at the same concurrency levels that were
 failing.
 
+## M11 — UI consolidation, full detail, moved 2026-09-04
+
+Moved from `ROADMAP.md`'s M11 milestone per the upkeep rule (M11 itself is
+fully closed — see ROADMAP.md for the one-line summary).
+
+Batch of direct owner requests, all landed: manual relay-control web page
+removed (the diagnostics Danger Zone is the sanctioned hand control,
+`POST /api/relay` removed with it); board-health and thermocouple-fault
+pages folded into `/diagnostics`; safety pages grouped into one expanding
+nav group; shared per-zone timing profiles (the nine per-zone timing fields
+moved into named profiles zones point at, `ZONES_CFG_VERSION` 8→9, lossless
+migration that de-duplicates identical value sets); relay/IO segments added
+to firing profiles, blocking or non-blocking with a per-segment leave-state
+choice (`PROFILE_VERSION` 2→3, `73c03c0`, migration verified byte-identical
+against the owner's live board); the rules engine deleted outright
+(`56dfa07`) — sequenced deliberately AFTER segments so there was never a
+window with no way to drive a non-zone relay, with its watchdog role
+replaced by `profile_executor.c`'s `io_segs_force_all_off(false)`; names
+added for non-zone relays; LCD pages folded the same way as the web
+(safety/board-health/thermocouple-fault pages combined into six
+Prev/Next-paged diagnostics screens, kiln setup/thermocouple-type/kiln
+config pages removed, profiles moved to top-left of a one-page main menu);
+a planned-profile preview added to the profile-detail page (the LCD could
+previously only draw a planned curve for an already-running profile — the
+preview went on the detail page rather than the home chart, which stays
+intentionally coupled to the running executor's snapshot).
+
+Durable constraint this work ran into and left behind: `zones_cfg_t` is
+500 B against a hard 512 B `ZONES_CONFIG_BLOB_MAX_SIZE` (also
+`kiln_cfg_store.c`'s buffer size, not a free knob) — the timing-profile work
+spent the remaining slack reordering the struct to kill alignment padding
+and cutting the profile-name length to 7. And the hazard every item here
+shares: two persisted structs embed arrays by value
+(`zones_cfg_t.zones[]`, `profile_t.segments[]`), so adding one field to an
+element displaces every element after the first — each migration needs a
+FROZEN snapshot struct of the old layout and a field-by-field walk.
+`profiles_http.c` once shipped the version of this bug that used `sizeof`
+the *current* struct for the *old* version, which rejected every profile on
+the owner's board and marked them unused; only a hardware flash caught it.
+
+## M13/M14 — fault reporting and verification findings, full detail, moved 2026-09-04
+
+Moved from `ROADMAP.md`'s M13/M14 milestones per the upkeep rule (M13's
+standing rule and clearing-semantics note stay in ROADMAP.md; M14 is fully
+closed).
+
+**M13 landed, 2026-08-28**: S6a decodes its fault-source bitmask everywhere
+it's reported (web, diagnostics, LCD) through one shared table,
+`safety_trip_words.h`, ending a prior drift where the LCD and web showed
+different text for the same trip. The mask is captured AT TRIP TIME, not
+read live, and flagged invalid when untrustworthy (an ESP reboot with a trip
+still latched would otherwise misattribute this boot's sources to an older
+trip). Every `safety_trip_t` cause line carries real numbers — S1's
+temperature vs. ceiling, S3's channel currents vs. threshold, S6b's elapsed
+silence, S11's reading vs. window — pulled from data that was already
+arriving on the wire and simply never copied into the message; where a
+number genuinely doesn't exist the sentence says so (caught by a negative
+test that found S12 about to print the wrong sensor's reading). S9 (a
+possibly-welded contactor) says explicitly it is NOT clearable from the UI.
+A repo-wide sweep for raw hex fault codes found and fixed two operator-facing
+misses on the first pass (autotune/profile-executor "heat is blocked"
+refusals reading `fault sources 0x%02X` — a different phrase than the
+`reason 0x%02X` the first sweep grepped for), verified by negative-testing
+the fix itself.
+
+**M14, 2026-08-28**: `build_kilnfw`'s PowerShell wrapper never propagated
+ninja's real exit code (`powershell.exe -Command` needs an explicit
+`exit $LASTEXITCODE`), so a failed build printed "OK" — caught live with
+"OK in 4.8s" printed over a log containing `ninja: build stopped`. This sat
+above every other guard, host suite, and review in the repo, since all of
+them ran through it; every sibling tool was checked rather than assumed
+safe, and only this one had the bug. `flash_firmware` was checking only
+that the `.bin` existed, not that it matched HEAD — fixed to compare the
+recorded build commit against HEAD, catching a real staleness on its first
+run. Two stack overflows found (`safety_poll` crashed twice, `safety_proto_
+rx` found at 25% by reading margins before it crashed) because both tasks
+were unregistered with the stack-margin instrumentation that already
+existed. Two new CI guard scripts (source-in-CMakeLists, no relay write
+outside `kiln_io_owner`) both found real violations on their first run, one
+of which three rounds of opus review had missed because reviews read the
+diff and the violation wasn't in the diff.
+
+## M10 — instrumentation findings, full detail, moved 2026-09-04
+
+Moved from `ROADMAP.md`'s M10 milestone per the upkeep rule; ROADMAP.md keeps
+one line per finding.
+
+- HTTP route table (`max_uri_handlers`) silently overflowed at 84 vs. 85 real
+  routes, so one route 404'd with no visible cause; had fallen behind four
+  times before. Raised to 95, guarded by `tools/check_uri_handler_cap.ps1`
+  which recounts from source. `2026-08-24`.
+- A quarter of every safety poll logged as a timeout on a healthy link:
+  `safety_drain_still_waiting()` didn't recognize an out-of-turn STATUS
+  frame, so the poll abandoned its budget early — the same bug a prior fix
+  had closed for three other callers, missing this fourth. Fixed; 310 polls,
+  0 timeouts afterward. `80f473d`.
+- Internal-DRAM low-water alarm split into a standing WARN and a `DRAM
+  REGRESSION` ERROR. Real trough is `app_main_done`, ~1 kB below the
+  previously-quoted `uart_bridges_1` figure, and sits below the one
+  documented real failure (free=11903 B, largest=8704 B — `/app.js`
+  truncated, pages stuck "Loading..."). `8d1b015`.
+- Display-power feature's ~3.25 kB DRAM cost measured under HTTP load (not
+  just idle) against that failure floor: min_free 23195 B, largest free
+  block 15360 B — ~11.3 kB of margin over the failure case, comfortable.
+  `get_stack_margin()` checked in passing: no resize needed.
+- `check_stack_margin_registration.ps1` went blind to three real tasks when
+  `main.c` split into `main_network_http.c`, because it scanned
+  `App/drivers/**` + `App/main.c` *by name* rather than globbing `App/*.c` —
+  the tenth instance of the "split breaks a filename-keyed check" class this
+  project has hit. Fixed to glob `App/*.c`. `ead4123`. Measured after: three
+  previously-invisible tasks all 48–76% headroom.
+- `info_uart_bridge`'s worst-case stack use found, measured, fixed: its
+  `GET_STACK_MARGIN` reply is always truncated at ~25 registered tasks, so
+  every call takes the log-heavy truncation-warning branch — worst case
+  476 B free of 3072 (15.5%, `[LOW]`), reproducible under adversarial HTTP
+  load. Bumped to 3584 B (PSRAM-backed, doesn't touch the internal-DRAM
+  budget above); re-measured at 988 B free (27.6%, `[OK]`).
+- Separately, `rules_task` (which gates heating) was reporting 45.3%
+  headroom when it was actually 10.9%, because the instrumentation had
+  inherited vanilla FreeRTOS's word units while ESP-IDF's high-water-mark
+  API returns bytes — a stray ×4. Raised 3072→4096. `d90986c`.
+- `GET_STACK_MARGIN` pagination shipped without a `UART_PROTOCOL_VERSION`
+  bump even though it inserted header bytes an old client would silently
+  misread as entry data — bumped 10→11 (PC↔ESP only, independent of the
+  isolated-link version). Also added missing test coverage of the
+  client-side paging *loop* itself (only single-page decode had been
+  tested), with a negative test proving the repeat-guard is load-bearing.
+  Hardware-verified: all registered tasks visible in one call, no task
+  below 25% headroom.
+- `/api/readiness` and `GET /api/zones` could return short, invalid JSON on
+  a buffer overflow and look like a pass — the one endpoint where "absent"
+  reads as "approved". Fixed to reserve space for the terminator and report
+  a drop as an item (or a named 500) instead of truncating silently.
+  Negative-tested with the buffer artificially cut. `4e8e1f1`, `88f12e0`.
+- Stack margins re-read after a real (heaters-disconnected) firing that
+  walked the full executor state machine — all margins held.
+- `rules_task`'s callees audited transitively for NVS/flash writes: none
+  found, but `dashboard_get_status()` (called every tick) did a
+  cache-disabling flash *read* behind a first-caller-wins static — safe
+  only by which task happened to run first, a race not a guarantee. Primed
+  at startup instead; stack moved to PSRAM. Standing DRAM regression
+  (6771→10675 B free at the same checkpoint) resolved. `47b004c`.
+- Four internal-DRAM task stacks were sized by one constant
+  (`UART_OWNER_STACK_SIZE`) that actually covered two pairs, not one —
+  `safety_link.c`'s pair (carrying the telemetry that gates all heating)
+  had never been registered for high-water reporting, so trimming on the
+  visible two would have resized two unmeasured tasks. Both pairs
+  registered, then trimmed 4096→3072 (~70% headroom on all four, 4 kB DRAM
+  reclaimed). `8ad7d5b`.
+- Cross-language (Python producer / C consumer) PC-tool heartbeat contract
+  had no guard — the fourth instance of the "consumer without producer"
+  class where the producer lives in the other language. Added
+  `tools/check_heartbeat_contract.ps1`, negative-tested against all three
+  failure shapes it catches (producer commented out, timing margin
+  violated, task-id collision).
+
 ## Sustained heat impossible on the bench — S6a firing within ~1s — full diagnosis, 2026-08-29
 
 Moved from `ROADMAP.md`'s "Software, doable now" table on 2026-09-04

@@ -1,10 +1,13 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep cleanup
-> pass — closed/struck-through narrative moved to `docs/COMPLETED_2026-09.md`
-> per this file's own "a finished item leaves this plan" rule (the "Software,
-> doable now" table, the "What is actually left" closeout paragraphs, and M12a
-> in full); no open item's text was changed. (Prior review: M15 CLOSED — all 22
+> pass (second sweep) — closed/struck-through narrative moved to
+> `docs/COMPLETED_2026-09.md` per this file's own "a finished item leaves this
+> plan" rule: the "Software, doable now" table, the "What is actually left"
+> closeout paragraphs, M12a, and now also M10 (fully closed, one-line
+> pointer), M11 (fully closed, one-line pointer) and M13/M14's landed
+> checklists (M13's standing rule and clearing-semantics note kept verbatim);
+> no open item's text was changed. (Prior review: M15 CLOSED — all 22
 > architecture-review findings landed same day, full detail in
 > `docs/COMPLETED_2026-09.md`; §1 nuisance-rejection coverage (S3/S4/S6a/S7/S9/
 > S10) and payload-decoder fuzzing closed against `GUARD_TEST_MATRIX.md`;
@@ -253,11 +256,6 @@ waiting, not unwritten:
 **Genuinely still software, and doable without you or the fixture.** This is
 now a short list, which is the point:
 
-- ~~**M11's remaining items are now the LCD consolidation only.**~~ **Stale,
-  corrected 2026-09-03: M11 is fully closed.** The LCD consolidation items
-  (temperature-page relay toggle, diagnostics/safety/thermocouple-fault
-  paging, planned-profile preview) also landed and are checked off in
-  [M11](#m11--the-ui-the-owner-actually-asked-for--opened-2026-08-28) itself.
 - **Display power (brightness/idle-timeout/keep-on-while-firing/display-on-
   error), 2026-09-04.** New feature, not an M11 reopen — see
   `firmware/KilnFW/docs/UI_PLAN.md`'s "Display power" section for the full
@@ -1095,86 +1093,22 @@ path. Two facts set the shape of this milestone:
       not hardware-verified (no board attached to confirm a real reboot
       suppresses the trip)
 
-## M11 — The UI the owner actually asked for · *opened 2026-08-28*
+## M11 — The UI the owner actually asked for · *opened and CLOSED 2026-08-28*
 
 Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) and
-[`firmware/KilnFW/docs/UI_PLAN.md`](firmware/KilnFW/docs/UI_PLAN.md). A batch of
-direct requests from the repository owner, recorded here because several of
-them change data structures and one of them deletes a subsystem — this is not
-cosmetic work and should not be filed as such.
-
-The through-line: **stop making the operator repeat themselves, and stop
-spreading one subject across several pages.**
-
-- [x] Manual relay-control web page removed; the diagnostics Danger Zone is
-      the sanctioned hand-control. `POST /api/relay` went with it — grep found
-      the page was its only caller, and both the LCD and the Danger Zone call
-      `dashboard_set_relay()` in-process, so the shared ownership/safety gate
-      is untouched
-- [x] Board health and Thermocouple faults folded into `/diagnostics`; both
-      standalone routes deleted. Board health turned out to be a byte-for-byte
-      duplicate of a card already there; the thermocouple-fault content was
-      entirely unique and was carried over whole, including the
-      ABSENT-vs-FAULTED distinction that is the entire point of that page
-- [x] Safety timings / Safety processor / Safety commissioning are now an
-      expanding nav group, not three flat entries and not a landing page
-- [x] Firing profiles is the first menu item
-- [x] Shared **safety timing profiles**: the nine per-zone timing fields moved
-      into named profiles that zones point at, so identical zones are
-      configured once. `ZONES_CFG_VERSION` 8→9, lossless migration that
-      de-duplicates identical value sets into one shared profile
-- [x] **Relay/IO segments in firing profiles**, blocking or non-blocking, with
-      a per-segment choice of whether the relay is left in its last state at
-      run end. `PROFILE_VERSION` 2→3 (`73c03c0`). Migration verified against
-      the owner's live board: both saved profiles came back byte-identical
-      with the five new fields defaulting to the old ramp behaviour
-- [x] **Rules engine deleted** (`56dfa07`) — `rules_http.c`, `rules_task.c`,
-      `rules_eval.c`, `rules_page.html` and their two test files, plus
-      PcTools' "Relay Rules (HTTP)" popup, which would have 404'd on first
-      use. Sequenced deliberately AFTER segments so there was never a window
-      with no way to drive a non-zone relay. The one thing that had to be
-      *replaced* rather than dropped is `rules_task`'s own watchdog:
-      `profile_executor.c`'s guard-9 watchdog now force-offs every segment via
-      `io_segs_force_all_off(false)`, where the `false` means a segment's
-      `leave_on_at_end` is ignored and the contacts always open.
-      `RELAY_OWNER_RULE` stays in the enum unrenumbered and marked retired, and
-      the stored `rules_cfg` NVS blob is left orphaned — both so a stale value
-      is never silently reinterpreted as something else. Flash-verified: relay
-      4, which rule R0 had been holding closed at ambient, came up open
-- [x] Names for relays not assigned to a zone (`bc3f7ad`) — a separate NVS key
-      rather than more bytes in `zones_cfg_t`, which had none to give
-- [x] LCD: temperature page stops offering a manual toggle for zone-assigned
-      relays (visible, not hidden — removing the control, not the reading),
-      keeps it for non-zone relays
-- [x] LCD: safety-processor, board-health and thermocouple-fault pages folded
-      into the LCD diagnostics page and removed; kiln setup, thermocouple types
-      and kiln config pages removed; profiles moved to the top-left of the main
-      menu and the whole menu scaled to one page. Diagnostics is now six
-      Prev/Next-paged screens under one nav item — the honest way to combine
-      three pages' content without scrolling or silently dropping any of it
-- [x] LCD: a planned-profile preview. The LCD could only draw a planned curve
-      for a profile ALREADY RUNNING (`ui_page_home.c:843` gates it on
-      `state != IDLE`), so a profile could never be previewed before firing it
-      the way `/profiles` allows on the web. The preview went on the
-      profile-detail page rather than the home chart, which stays coupled to the
-      running executor's snapshot and keeps its IDLE guard intact
-
-**The constraint that shapes most of this**: `zones_cfg_t` is 500 bytes
-against a hard 512-byte `ZONES_CONFIG_BLOB_MAX_SIZE`, and the timing-profile
-work spent the slack getting there (it had to reorder `zone_cfg_t` to kill
-alignment padding and cut the profile-name length to 7). Anything that wants
-to persist more per-zone or per-relay state now has to find the bytes or take
-its own NVS key. That cap is also `kiln_cfg_store.c`'s buffer size, so it is
-not a free knob.
-
-**And the hazard every item here shares**: these structs are persisted, and
-two of them embed arrays by value (`zones_cfg_t.zones[]`,
-`profile_t.segments[]`), so adding one field to an element displaces every
-element after the first. Each migration needs a FROZEN snapshot struct of the
-old layout and a field-by-field walk. `profiles_http.c` has already shipped
-the version of this that returns `sizeof` the *current* struct for the *old*
-version — it rejected every profile on the owner's board and marked them
-unused, and only a hardware flash caught it.
+[`firmware/KilnFW/docs/UI_PLAN.md`](firmware/KilnFW/docs/UI_PLAN.md). **CLOSED
+— all items landed and are hardware/migration-verified.** A batch of direct
+owner requests that changed persisted data structures and deleted the rules
+engine subsystem: relay control consolidated into the diagnostics Danger
+Zone; board-health/thermocouple-fault pages folded into `/diagnostics`;
+safety pages grouped into one nav group; shared per-zone timing profiles
+(`ZONES_CFG_VERSION` 8→9); relay/IO segments added to firing profiles
+(`PROFILE_VERSION` 2→3); the rules engine deleted in favor of segments; LCD
+pages consolidated the same way, plus a planned-profile preview. Full
+detail, including the durable `zones_cfg_t`/`profile_t` migration-hazard
+note (persisted structs that embed arrays by value displace every element
+after an insertion — read this before touching either struct again):
+[`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m11--ui-consolidation-full-detail-moved-2026-09-04).
 
 ## M12a — The commissioning surface lied · *opened and closed 2026-08-28*
 
@@ -1404,35 +1338,11 @@ PC_LINK / THERMO / SAFETY_LINK / APP / THERMAL_SANITY (`safety_link.h:139-142`),
 and `dashboard_http.c:261` already reads it. So the cause was measured, held,
 and simply never shown next to the trip.
 
-- [x] Decode the fault-source bitmask wherever an S6a trip is reported — web,
-      diagnostics, LCD. Through a shared table: `safety_trip_words.h` exists
-      because the LCD and web had already drifted into showing different things
-      for the same trip, and a second copy of the names would repeat that.
-      Verified 2026-08-28 by reading both surfaces directly rather than
-      trusting the landed list below: `dashboard_http.c:741-744` (web) and
-      `ui_page_diagnostics.c:675-722` (LCD, `ds.trip_reason == 6u` branch)
-      both decode via `safety_fault_source_words()`
-- [x] Distinguish "asserted right now" from "this is what tripped it". The
-      sources are the ESP's CURRENT state; the trip is a LATCHED past event, so
-      a source released after the latch would otherwise misreport the cause.
-      Capturing the mask at trip time is part of this — see the landed item
-      below ("captured AT TRIP TIME")
-- [x] Give every `safety_trip_t` reason (S1–S13) a real cause line **with the
-      numbers the firmware has** — the temperature and the ceiling it passed,
-      the current and its threshold, the elapsed time and the window — plus a
-      real remedy line. Where the firmware cannot currently say what was
-      detected, record that rather than filling the slot with a vague sentence.
-      See the landed item below ("Cause lines carry the NUMBERS")
-- [x] Cover the KilnFW-side faults too. A thermocouple reporting a raw SR
-      bitmask is the same defect as a bare S6a. See the landed items below —
-      closed further 2026-08-28 by the two `fault sources 0x%02X` refusals
-      the original sweep missed (autotune/profile-executor "heat is blocked")
-- [x] Say plainly when a fault is NOT operator-clearable. S9 means a possibly
-      welded contactor and the required response is "remove power at the
-      breaker" — offering a Clear button that will refuse is worse than saying
-      so. Verified 2026-08-28: `safety_trip_words.h:244` (S9/case 10) reads
-      "NOT clearable from here. Remove power at the breaker and inspect the
-      contactor before touching anything else."
+**Landed 2026-08-28, all of it — S6a's fault-source decode (shared
+`safety_trip_words.h` table across web/diagnostics/LCD, captured AT TRIP
+TIME not read live), real numbers on every `safety_trip_t` cause line,
+KilnFW-side fault coverage, and an explicit non-clearable notice for S9.**
+Full postmortem: [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m13m14--fault-reporting-and-verification-findings-full-detail-moved-2026-09-04).
 
 **The clearing semantics, recorded here because they were only discoverable by
 reading `safety_guards.c`:** an S6a trip LATCHES. It does not clear on its own,
@@ -1444,650 +1354,30 @@ re-trips on that same tick. So the operator sequence is: identify the source,
 remove it, then clear. None of that is currently told to the operator, and the
 owner had to ask.
 
-## M13 landed so far · *2026-08-28*
-
-- [x] S6a decodes its fault source, captured AT TRIP TIME and flagged invalid
-      when it cannot be trusted — an ESP reboot with a trip still latched would
-      otherwise present this boot's sources as the cause of an older trip. An
-      empty mask reads "not captured", never "none": for S6a a zero mask is
-      impossible if capture worked
-- [x] Cause lines carry the NUMBERS — S1's temperature and the ceiling it
-      passed, S3's three channel currents and threshold, S6b's elapsed silence,
-      S11's reading and window. **No wire format widened**: the values were
-      already arriving on Frame D and were simply never copied
-- [x] Where a number does not exist the sentence says so. The negative test
-      caught S12 about to print the safety thermocouple where the enclosure
-      reading belongs — a different sensor, and entirely plausible-looking
-- [x] The thermocouple SR bitmask, the web last-run banner and the per-zone
-      diagnostics subrow stopped printing bare codes
-- [x] The trip decision moved to its own translation unit so it can be
-      host-tested; nothing could link `safety_link.c` off-target
-- [x] `profile_executor`'s `fault_guard` swept: every emission is consumed
-      only by already-decoded call sites. A repo-wide `reason 0x%02X` sweep
-      found the remaining hex-coded surfaces were all `ESP_LOGW`/`ESP_LOGE`
-      serial log lines, except two operator-facing ones missed by the first
-      pass — `ui_page_temperature.c`'s relay-refusal LCD message and
-      `zones_http.c`'s zone-sweep refusal reason — fixed in the same push as
-      this checkbox
-- [x] A host harness that links `safety_link.c` itself
-      (`test_safety_link_compile.c`, 23/23): `SAFETY_FLAG_TEMP_VALID` as sole
-      NaN authority and peer-sent LINK_UP/FAULT bits being dropped are both
-      pinned against the real file, not a stub
-- [x] **Two more operator-facing raw hex values, missed by the earlier
-      `reason 0x%02X` sweep because these read `fault sources 0x%02X`, a
-      different phrase.** 2026-08-28: `autotune_engine.c`'s and
-      `profile_executor.c`'s "heat is blocked" refusals — the message a
-      `POST /api/autotune/start` or `POST /api/profile_exec/start` returns
-      when the safety link is down — now decode via
-      `safety_fault_source_words()`, same first-source-plus-"(+more)"
-      shortening `zones_http.c`'s zone-sweep refusal already uses. Verified a
-      repo-wide grep for `0x%02X` in `firmware/KilnFW/App/drivers/*.c`:
-      everything remaining is an `ESP_LOGW`/`ESP_LOGE`/`ESP_LOGI` line
-      (`profile_executor.c`'s stray-relay and config-reload-generation logs,
-      `uart_bridge.c`'s IO-refusal logs) or a genuinely unrelated code —
-      `ota_http.c`'s bad-image-magic byte, `profile_executor.c`'s
-      claimed-relay-mask value — not a fault-source mask. Negative-tested:
-      reverted the fix, confirmed the new
-      `test_run_decodes_fault_sources_instead_of_hex` host test fails with
-      exactly the "must not fall back to a bare hex value" message, then
-      restored it
-
-## M14 — Verification you can trust · *opened and largely closed 2026-08-28*
+## M14 — Verification you can trust · *opened and CLOSED 2026-08-28*
 
 Not a feature milestone. It exists because on 2026-08-28 the sentence "tests
 pass, build clean, flashed and verified" could be true and worthless, and
-almost every defect found that day was something reporting success it had not
-earned.
+almost every defect found that day was something reporting success it had
+not earned. **CLOSED, all findings landed** — a `build_kilnfw` wrapper that
+reported OK on a failed build, a `flash_firmware` that didn't check the
+binary matched HEAD, two stack overflows found via unregistered margins, and
+two new CI guard scripts that both caught real violations on their first
+run. Full postmortem: [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m13m14--fault-reporting-and-verification-findings-full-detail-moved-2026-09-04).
 
-- [x] **`build_kilnfw` reported OK for builds that failed.** PowerShell does not
-      propagate a native command's exit code as its own without an explicit
-      `exit $LASTEXITCODE`, so `powershell.exe` returned 0 whatever ninja did.
-      Caught live: "OK in 4.8s" printed over a log containing
-      `ninja: build stopped: subcommand failed`. **The most expensive instance
-      of the structurally-unfailable check in this repo, because it sat above
-      all the others** — every guard script, host suite and review funnelled
-      through a tool that could not say no. Every sibling tool was checked
-      rather than assumed to share the bug; only this one used `-Command`
-- [x] **`flash_firmware` would flash a stale binary and report success.** It
-      checked only that the `.bin` files existed. Composed with the above into
-      something worse than either: edit, build, flash, then verify behaviour
-      that had nothing to do with the edit. Now compares the RECORDED build
-      commit against HEAD — exact, and right in the case timestamps get wrong
-      (a dirty worktree flashing a clean-tree binary). It caught a real
-      staleness on its first run, and refused a flash minutes later
-- [x] **Two stack overflows, one after it crashed and one before.**
-      `safety_poll` died twice with `IllegalInstruction` — a canary trip, not a
-      watchdog — holding 1192 B of 4096 because the config refetch put ~1070 B
-      of locals on its frame this week and the stack did not move.
-      `safety_proto_rx` was then found at 25% by *reading the margins* rather
-      than by a second crash, having lost ~500 B to the enlarged RX chunk the
-      same day. Both tasks were unregistered with `stack_margin`: the
-      measurement existed, the tasks were not in it
-- [x] Two new guard scripts (12 → 14): every `src/**.c` in its CMakeLists, and
-      no relay write outside `kiln_io_owner`. **Both found real violations on
-      their first run**, one of which three rounds of opus review had read past
-      because reviews read the diff and it was not in the diff
-- [x] A guard for the "setter with no caller" shape of this class —
-      `check_unused_setters.ps1` (2026-08-28), which caught its own first
-      version blind to multi-line prototypes before it ever ran for real. The
-      wider class isn't closed: see M10's heartbeat-contract item for what's
-      still uncovered, and `check_guard_input_producers.ps1` still only proves
-      a field is assigned, not that the assignment carries a real measurement
+## M10 — Instrumentation: make the board tell you when it is wrong · *CLOSED 2026-09-04*
 
-## M10 — Instrumentation: make the board tell you when it is wrong
-
-Not a feature milestone. This exists because four separate defects in this
+Not a feature milestone. It exists because four separate defects in this
 project were invisible for weeks not because they were subtle, but because
-nothing on the board was counting the right thing — and in three of the four,
-something *was* counting and reported the comfortable answer.
+nothing on the board was counting the right thing — and in three of the
+four, something *was* counting and reported the comfortable answer.
+**All findings landed and are hardware-verified.** Full postmortem for each
+(route-table overflow, safety-poll false timeouts, DRAM/stack-margin
+instrumentation and its own blind spots, truncated-JSON readiness checks,
+the heartbeat-contract guard, and the HTTP-concurrency-reset root cause):
+[`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m10--instrumentation-findings-full-detail-moved-2026-09-04).
 
 Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
-
-- [x] **HTTP route table silently overflowed.** `max_uri_handlers` was 84
-      against 85 real routes, so `POST /api/safety/commissioning/bench_preset`
-      never registered and 404'd with no visible cause. The cap had fallen
-      behind four times, each time surfacing as "one page is broken"; a comment
-      saying "keep this ahead of the count" had already failed three times.
-      Raised to 95 (44 bytes: `esp_http_server` allocates an array of
-      *pointers*, `httpd_main.c:430`) and made durable by
-      [`tools/check_uri_handler_cap.ps1`](tools/check_uri_handler_cap.ps1),
-      which recounts from source and fails if the cap is lower. Verified over
-      HTTP: the route now answers 200. 2026-08-24
-- [x] **A quarter of every safety poll was logged as a timeout on a healthy
-      link.** `timeouts 3616` against `diag applied 3618` / `power applied
-      3618`, zero CRC errors, STATUS count equal to the send count.
-      `safety_drain_still_waiting()` could speak for CT_CAL, CONFIG_PAGE and
-      COMMIT_CONFIG_REJECTED but not for a STATUS, so the poll abandoned its
-      remaining budget the moment an unrelated push arrived first — the same
-      bug a 2026-08-23 fix had closed for the other three callers, with the
-      fourth left out. **No deadline was widened.** Measured after: 310 polls
-      carrying 77 DIAG and 77 POWER pushes, zero timeouts. `80f473d`
-- [x] **Internal-DRAM low-water alarm**, split into a standing WARN and a
-      `DRAM REGRESSION` ERROR, because an alarm that fires on every boot is
-      one everybody learns to scroll past. Corrected the trough itself while
-      building it: the real minimum is `app_main_done`, ~1 kB below the
-      `uart_bridges_1` figure everyone had been quoting, and it sits *below*
-      the one documented real failure (free=11903, largest=8704 — `/app.js`
-      truncated, pages stuck on "Loading..."). `8d1b015`
-- [x] **2026-09-04: display-power feature's ~3.25 kB DRAM cost checked
-      against the cliff, under load, not just at idle.** `6ba8ae8`/`7fc17cc`/
-      `192eb7d`/`e7b8efc` added a flat ~3.25 kB of internal-DRAM use from the
-      `display+touch` boot checkpoint onward (part of it the deliberate
-      `screen_idle_task` 3072→6144 stack fix for a real overflow — not
-      reverted, not in scope here). Measured live against the idle board
-      (192.168.1.156, healthy, no firing started): `get_heap_status()` showed
-      `heap_internal` free=36263 B, **min_free (low-water since boot)
-      =23195 B**, largest_free_block=15360 B. Then drove
-      `http_concurrency_reproducer.py --concurrency 8,16,24,28 --bursts 5`
-      against `/app.js` (380 requests, 0 resets/timeouts/other — the
-      separate socket-reset item above is fixed on this build) while polling
-      `/api/status`; `heap_internal.free` never moved off 36263 across any
-      burst, and a post-run `get_heap_status()` re-check still showed the
-      same min_free=23195, confirming the load did not create a new trough
-      below whatever boot already produced. **Verdict: comfortable, not
-      thin.** 23195 B low-water vs. the documented 11903 B failure floor is
-      ~11.3 kB of margin (net ~2x the cliff), and the largest free block
-      (15360 B) stays well clear of the failure case's fragmented 8704 B
-      too. `get_stack_margin()` checked in passing: `screen_idle` sits at
-      38.7% headroom (2376 B free of 6144 B) — not over-provisioned enough
-      to be worth trimming, and the three tasks flagged `[LOW]`
-      (`info_uart_bridge`, `system_uart_bridge`, `telemetry_log`) predate
-      this feature and are out of scope. No code changed this pass — the
-      margin didn't need it.
-- [x] **2026-09-04: the stack-margin check went blind when `main.c` split.**
-      `check_stack_margin_registration.ps1` reported `uart_owner_task`,
-      `uart_owner_evt_task` and `uart_proto_rx` unregistered. They were
-      registered correctly all along, in `main_network_http.c` — the checker
-      scanned `App/drivers/**` plus `App/main.c` *by name*, so the split hid
-      that whole file from it. Now globs `App/*.c` (`ead4123`). This is the
-      tenth instance of the day's dominant failure class: a check keyed to a
-      path, silently blinded by a split, while the build stayed green — see
-      the `source_path_drift_check` item. Measured on hardware afterwards,
-      idle and under combined HTTP + PC-link load: `uart_owner_task` 70.7%,
-      `uart_owner_evt_task` 76.0%, `uart_proto_rx` 48.3% headroom — all
-      healthy. Of the three standing `[LOW]` tasks, `info_uart_bridge` is
-      thinnest at 15.2–19.4% (596 B idle → 468 B under load, of 3072), but the
-      drop was small and non-progressive and its stack is dominated by a
-      fixed-size `BRIDGE_REPLY_MAX` local, so **no stack was resized** —
-      raising them all would spend the DRAM margin measured above for comfort
-      rather than evidence. Worth a focused follow-up to find which INFO
-      subcommand sequence produces `info_uart_bridge`'s worst case
-- [x] **2026-09-04: `info_uart_bridge`'s worst-case INFO subcommand found,
-      measured, and fixed** (follow-up to the `ead4123` item above).
-      `uart_bridge_info.c`'s INFO task services 4 subcommands
-      (`GET_PIN_CONFIG`, `GET_FW_VERSION`, `GET_WIFI_STATUS`,
-      `GET_STACK_MARGIN`); its stack is PSRAM-backed
-      (`MALLOC_CAP_SPIRAM`, since 2026-08-22), so an overflow here would hit
-      the PSRAM heap, not the internal-DRAM cliff the `6ba8ae8` item above
-      measured. Methodology: `debug_reset(peer="esp")` before each
-      candidate to keep HWM readings attributable (monotonic since boot),
-      then drove each subcommand individually via `kiln_call`/`kiln_batch`,
-      then all four interleaved, then repeated under
-      `http_concurrency_reproducer.py --concurrency 8,16,24,28 --bursts 5`
-      against the live board (192.168.1.156, idle, no firing started).
-      `GET_PIN_CONFIG`/`GET_FW_VERSION`/`GET_WIFI_STATUS` never pushed the
-      HWM past what a single `GET_STACK_MARGIN` call already set.
-      `GET_STACK_MARGIN` is the worst case because its own reply is *always*
-      truncated at today's 25 registered tasks (entries don't fit
-      `BRIDGE_REPLY_MAX`=253 B), so every call takes the `ESP_LOGW`
-      truncation-warning branch (`build_stack_margin_reply()`), and that
-      branch measured deeper again under concurrent HTTP load — repeatable
-      worst case **476 B free of 3072 (15.5%)**, matching the `ead4123`
-      item's 468 B almost exactly, and stable/non-progressive across
-      repeated adversarial bursts (confirmed by hammering it — no slow
-      leak). That's only ~34 B above the 15% `CRITICAL` cutoff, thin enough
-      given it's a real, reproducible worst case (not a hypothetical) to
-      resize rather than leave alone. Since the stack is PSRAM, the fix
-      doesn't touch the scarce internal-DRAM 23195 B low-water budget from
-      the item above. Bumped `info_uart_bridge` 3072→3584 B (+512 B PSRAM,
-      `uart_bridge_info.c`), rebuilt, reflashed
-      (`flash_firmware(verify=True)`, confirmed running build
-      `68e8d6e`/19:49:41Z), and re-measured with the identical worst-case
-      sequence: **988 B free of 3584 (27.6%), `[OK]` band** (was 476 B/3072,
-      15.5%, `[LOW]`) — the full +512 B landed as headroom, confirming
-      nothing else in that path is progressively eating stack. No defect
-      found (no path came close to overflow); this was margin thinness, not
-      a bug. `system_uart_bridge` and `telemetry_log` remain `[LOW]` and are
-      out of scope for this pass. and
-      it found `rules_task` — the rule evaluator that gates heating — at 336
-      bytes of 3072, 10.9% headroom, on an idle board. Raised to 4096.
-      It was invisible because the instrumentation had inherited vanilla
-      FreeRTOS's word units; ESP-IDF returns **bytes** (`task.h:1509`), so a
-      stray ×4 reported that task as 45.3% and OK. `d90986c`
-- [x] **2026-09-04: `GET_STACK_MARGIN`'s pagination (follow-up to `ead4123`/
-      `e1e02e7` above) closed out, version-gated, and verified on hardware.**
-      The pagination itself (`start_index` request byte, `truncated`/
-      `next_start_index` reply header, `4f61604`) had already landed, so
-      this pass's job was to close three gaps left behind it: (1) it shipped
-      without bumping `UART_PROTOCOL_VERSION` even though it inserts two
-      bytes before the first reply entry — an old `pc_tools` build reading a
-      new firmware's reply would misread `truncated`/`next_start_index` as
-      the first entry's `name_len`/name byte, silent corruption, not a
-      refusal. `KILNLINK_MIN_COMPATIBLE`/the isolated-link version do NOT
-      apply here (this command is PC↔ESP only); bumped `UART_PROTOCOL_
-      VERSION` 10→11 on both sides instead (`uart_task_ids.h`,
-      `protocol.py`), with the version-history comment on each. (2) no test
-      covered `InfoClient.get_stack_margin()`'s own paging *loop* (only the
-      byte-decode of one page) — added positive coverage (single page,
-      3-page/25-entry aggregation) plus the mandated negative test:
-      disabling the `seen_start_indices` repeat-guard and re-running left
-      the mock's `side_effect` exhausted and raised `StopIteration` instead
-      of the intended `InfoResponseError` naming `start_index=9 repeated`,
-      confirming the test actually exercises the guard; reverted, reran
-      clean (`tools/PcTools/tests/test_stack_margin_info.py`). (3) hardware
-      verification: `build_kilnfw` OK, `flash_firmware(verify=True)`
-      confirmed (bootloader+partition table+app, running build `503ab3b`/
-      19:58:42Z, `protocol_version: 11`), `get_stack_margin()` returned all
-      21 currently-registered tasks in one call with no truncation error
-      (up from firmware's fixed 253-byte reply, which only ever fit
-      ~8-10 short-named entries) — `backlight_pwm`, `i2c_owner_ns2009`,
-      `i2c_owner_sx1509`, `kiln_io_owner`, `lvgl`, `ota_pico_rollback`,
-      `ota_rollback_reboot`, `recovery_exit`, `screen_idle` are registered
-      in source but weren't alive on this idle board, so 21/28 rather than
-      25/28 answered this time — count is live-state-dependent, not a
-      pagination miss. With the full set finally visible: **no task is
-      below 25% headroom** — the same three already-known `[LOW]` tasks
-      (`info_uart_bridge` 27.3%, `system_uart_bridge` 29.6%, `telemetry_log`
-      27.3%) remain the thinnest, everything else ≥46.6%. The truncation was
-      hiding incomplete visibility, not a hidden crisis.
-- [x] **A safety checklist could come back short and look like a pass.**
-      `/api/readiness` appended items with the usual "stop rather than
-      corrupt" overflow rule, so a dropped item was simply absent -- and this
-      is the one endpoint where absent reads as approval, since the list
-      exists to say what is NOT ready before a firing. It could also open the
-      array `[,` from a single dropped first item, and skip its own closing
-      `]}`, both of which are invalid JSON that the page's fetch throws on,
-      leaving an operator on "Loading" with no reason why. Now a reserve is
-      held back for the terminator, `first` only clears when an item really
-      landed, and any drop is reported AS an item. `GET /api/zones` got the
-      matching treatment: a truncated body is now a 500 that names the cause
-      instead of a half-document. Negative-tested on the board with the
-      buffer cut to 900 bytes -- four items fit and the response carried the
-      "Checklist incomplete" entry. 2026-08-26/27, `4e8e1f1`, `88f12e0`
-- [x] **Re-read the stack margins after a real firing.** Done 2026-08-27.
-      The first run tripped guard 1 at 60 s and never reached a segment
-      advance, so a second was built to walk the whole state machine WITHOUT
-      heat: a three-segment profile whose targets sit just below ambient, so
-      the executor ramps, reaches temperature, dwells, advances segment,
-      and completes on a board with the heaters disconnected. Rules were
-      configured and driving a relay throughout. Every margin held --
-      `rules_task` 1372 B free of 4096 (33.5%), against 1368 idle
-- [x] **Audit whether anything `rules_task` calls writes NVS or flash.**
-      Done 2026-08-27, transitively over every callee: nothing writes NVS or
-      flash. The audit did find one real reach, and not the kind this note
-      predicted — not a write but a cache-disabling *read*.
-      `dashboard_get_status()`, called every tick by this task, performed
-      `esp_flash_get_size()` and `esp_image_get_metadata()` lazily behind a
-      first-caller-wins static, so a PSRAM stack was safe only because the
-      httpd task happened to get there first: a race, not a guarantee. Those
-      reads are now primed at startup on the app_main task, and the stack
-      moved to PSRAM. **The standing DRAM regression is gone** — `dram_free`
-      at the `uart_bridges_1` trough went 6771 → 10675 and the largest free
-      block 4608 → 7680, back to baseline, with no `DRAM REGRESSION` line at
-      any stage. `47b004c`
-- [x] **Reclaim internal DRAM from the healthy stacks.** Done 2026-08-27
-      (`8ad7d5b`) — and the delay was justified by what the coverage work
-      turned up. `UART_OWNER_STACK_SIZE` sizes **four** tasks, not two:
-      main.c's PC-link `uart_owner` pair was registered for high-water
-      reporting, while `safety_link.c`'s pair — the one carrying the telemetry
-      that gates all heating — was registered by nobody. Trimming on the two
-      visible numbers would have resized two tasks that could not be seen:
-      this project's recurring "two instances, one identifier" trap, the same
-      shape as the shared UART log tags. Both are now registered
-      (`safety_owner_task` / `safety_owner_evt`), the worst of the four had
-      used 904 B of 4096, and the shared size dropped to 3072 — ~70% headroom
-      on all four and **4 kB of internal DRAM back** (free 22471 → 26895).
-      Deliberately not cut closer: a Pico OTA relay transfer streams through
-      the safety-link pair and is still unmeasured, so the margin covers a
-      path the numbers do not. `rules_task`, `rules_watchdog`, `uart_proto_rx`
-      and `system_uart_bridge` are left alone — healthy, and the DRAM they
-      would return is no longer needed
-- [x] **The cross-language PC-tool heartbeat contract had no guard.** 2026-08-28,
-      `tools/check_heartbeat_contract.ps1`. Every existing "consumer with no
-      producer" guard (`check_guard_input_producers.ps1`,
-      `check_unused_setters.ps1`) is C-only, and this pair's producer
-      (`link_hub.py`'s `_heartbeat_loop`) is Python — invisible to both. This
-      is the fourth instance of that class this project has shipped
-      (`current_sense_set_cal`, `sample_counter_advancing`, `i_normal_a`, and
-      the heartbeat itself, `e3e8ec6`); the other three now have guards, this
-      is the heartbeat's. Regex-over-source across both files, checking three
-      things a future edit could break without either language's compiler
-      noticing: the producer call site (`LinkHub.start()` actually starting
-      the thread, not commented out), the timing margin (interval + ack
-      timeout must stay under `UART_BRIDGE_LINK_TIMEOUT_MS/2`, the bound
-      `link_hub.py`'s own comment already promises), and task-id isolation
-      (`_HEARTBEAT_TASK_ID` must not collide with a real `UART_TASK_ID_*`).
-      Negative-tested by inducing each of the three failures in turn on the
-      real files (commented-out start call, interval widened 1.5s→3.0s,
-      task id collided with 14/UI_TEST) and reverting — all three caught
-- [x] **~~HTTP connection resets under concurrency~~ — root-caused and
-      fixed 2026-09-04, see the dated entries below.** 2026-08-28:
-      built `GET /api/debug/lwip_stats` (`diagnostics_http.c`,
-      `CONFIG_LWIP_STATS=y`) to read lwIP's own TCP-layer counters
-      (drop/memerr/err) from a live burst without a JTAG halt that would
-      perturb the timing. Two dead ends on the way, kept in the code's own
-      comments so the next pass doesn't re-walk them: `stats_display()`'s
-      output routes through a bare `printf()` to the console UART unless
-      `CONFIG_LWIP_DEBUG_ESP_LOG` is also on, which entirely bypasses
-      `uart_log_bridge` (the thing `get_device_log()` reads) — and even with
-      that on, the call is hardcoded to `ESP_LOG_DEBUG`, stripped at compile
-      time by this project's `CONFIG_LOG_MAXIMUM_LEVEL=3` (INFO). Reading
-      `lwip_stats.tcp` fields directly into the JSON response sidesteps both.
-      `lwip_stats.mem` does not exist on this port at all — `MEM_STATS` is
-      unconditionally 0 whenever `MEM_LIBC_MALLOC == 1`, which ESP-IDF's
-      lwipopts.h sets, so there is no separate lwIP heap arena here to have a
-      counter for (found by the build refusing to compile it, not assumed).
-      With this live: **188 requests, 8/12/20-way parallel, both near-boot
-      and steady-state, zero failures**, `tcp.drop`/`memerr`/`err` all held
-      at 0 throughout. The one failure seen this session (2/8, the very
-      first burst) ran during a window this session's own Pico-recovery
-      sequence was generating "PC link lost" churn on the isolated UART — a
-      real confound, not present in any of the 180 clean follow-up requests.
-      Most likely explanation for the drop: the DRAM-reclaim work already
-      landed this session (`c8e10f0`/`8ad7d5b`/`47b004c`) moved the
-      fragmentation trough from 8704 → 13824 bytes, clear of `/app.js`'s
-      ~9490 B, which is exactly the largest-contiguous-block hypothesis this
-      item's previous text flagged as resting on two numbers being close —
-      those two numbers no longer are. **Not closing this**: absence of
-      failure across 188 requests is evidence the rate dropped, not proof
-      the mechanism is gone or was ever confirmed; the original 9/80 rate
-      was measured before that DRAM work, and there is no green run of the
-      *original* reproducer script to compare against directly. If it
-      resurfaces, `/api/debug/lwip_stats` is now in place to catch it live.
-      2026-09-04: **reproduced and root-caused, not fixed** (fix lands in a
-      file this pass doesn't own). Built a repeatable driver,
-      `tools/PcTools/scripts/http_concurrency_reproducer.py`
-      (`--host 192.168.1.156 --concurrency 4,8,...,32 --bursts N`), which
-      first had to get past a false positive of its own: every request came
-      back `HTTP 406` at *any* concurrency including 1, because `urllib`
-      sends no `Accept-Encoding` header and this server's gzip-only pages
-      (`web_encoding.c`) correctly refuse a client that doesn't advertise
-      gzip support — not a concurrency bug, fixed by adding
-      `Accept-Encoding: gzip` to the driver's request. With that fixed, live
-      against the board (idle, 192.168.1.156): **0/21 resets at concurrency
-      1/2/4**, resets start at **concurrency 8 (1/8, 12.5%)** and climb
-      smoothly with load — **12.5% at 8, ~30% at 12–16, ~25% at 20–24, ~30%
-      at 28, ~40% at 32** (420 requests total, 98 resets, 2 timeouts at the
-      5 s cap, 0 HTTP-level errors) — all `WinError 10054` /
-      `ECONNRESET`-equivalent on the client side. Across every burst at
-      every level, `lwip_stats.tcp.drop`/`memerr`/`err` **did not move once**
-      — only `xmit`/`recv` climbed with traffic — which rules the TCP-layer
-      drop/memerr mechanism this instrumentation was built to catch back
-      *out*: whatever is closing these connections isn't lwIP running out of
-      a resource, it's something above it doing it on purpose. That points
-      straight at `wifi_provision_http.c`'s `wifi_provision_http_start()`
-      (the only `httpd_start()` call site, per that file's own comment at
-      line 54): `config.lru_purge_enable = true` with
-      `config.max_open_sockets = 13` is exactly esp_http_server's documented
-      behavior for going over that cap — the server LRU-closes (RST) the
-      oldest open connection to admit a new one rather than refusing it —
-      and 8–13 concurrent clients is exactly the range where this reproducer
-      starts seeing resets. Not fully closed as a root cause because this
-      pass didn't confirm the mechanism *inside* esp_http_server's source
-      (not vendored into this repo to grep) and because `wifi_provision_http.c`
-      is out of scope for this pass to edit or instrument further — flagged,
-      not touched. **Next step for whoever owns that file**: a log line at
-      the LRU-purge call site (or bumping `max_open_sockets`/
-      `CONFIG_LWIP_MAX_SOCKETS` again, same accounting as the 2026-08-20 and
-      2026-09-01 comments already there) would confirm or refute this
-      directly; not done here since it requires editing/flashing a file this
-      pass does not own. The exact numbers above are this driver's own
-      run — re-run before trusting them again, load conditions on the board
-      (Wi-Fi clients, other pollers) were not otherwise controlled for.
-      2026-09-04: **the LRU-purge-at-13 hypothesis is refuted by direct
-      measurement, root cause still open.** `wifi_provision_http.c` is in
-      scope for this pass. Confirmed first that the accounting is not stale:
-      `CONFIG_LWIP_MAX_SOCKETS=18` (this build's `sdkconfig.cmake`, matching
-      `sdkconfig.defaults`), `max_open_sockets=13`, `httpd_socket_budget.h`'s
-      `_Static_assert` holds (13 + 3 internal + 1 `dns_hijack_task` = 17 ≤
-      18, one spare) — that math is fine. Instrumented the thing that was
-      actually unmeasured: `config.open_fn`/`close_fn` (ESP-IDF's supported
-      per-session hooks, not a source-vendoring exercise) now log
-      `httpd socket open/close: fd=%d active=%d/13` on every session
-      admitted to and evicted from httpd's own pool, atomically counted
-      (`s_httpd_open_sockets`). Built (`build_kilnfw` exit 0), flashed via
-      `flash_firmware()` (verify=True, confirmed running), re-ran
-      `http_concurrency_reproducer.py --concurrency 4,8,12,16 --bursts 3`
-      against the live board: **same failure shape as before** (0/12 resets
-      at 4, 1/7 (12.5%) at 8, 4/12 (33%) at each burst at 12, 3-4/16 (19-25%)
-      at 16 — 120 requests, 25 resets, 20.8% overall, all `WinError 10054`).
-      `get_device_log()` captured the instrumentation live across that exact
-      window (timestamps 8875-36045ms bracket the whole sweep). **The
-      logged `active` count never exceeded 6 of the configured 13** —
-      typically 1, briefly 4-5 during the 12/16-concurrency bursts, once 6 —
-      even in bursts that produced multiple resets in the same few hundred
-      ms. httpd's own session pool was nowhere near its cap when connections
-      were being reset, which directly rules out the LRU-purge-at-13
-      mechanism this item spent two passes chasing: `httpd_is_sess_available()`
-      /`httpd_accept_conn()` (esp_http_server, read from `$IDF_PATH` for
-      this pass, still not vendored into this repo) only purges when its
-      own `hd_sd_active_count` reaches `max_open_sockets` — it never got
-      close. Read further into `$IDF_PATH/components/lwip/lwip/src/api/
-      sockets.c`'s `lwip_accept()`: on `alloc_socket()` returning -1 (the
-      OS-level `sockets[]` table, sized by `CONFIG_LWIP_MAX_SOCKETS`, full),
-      it calls `netconn_delete(newconn)` on an already-three-way-handshake-
-      completed connection and returns `ENFILE` to httpd — a path that (a)
-      does not touch the `lwip_stats.tcp` MIB counters this item's earlier
-      pass checked (consistent with drop/memerr/err never moving), (b) can
-      produce an abrupt reset from unread/unacked data rather than an
-      orderly FIN (consistent with the client-side `WinError 10054`
-      symptom), and (c) never reaches `open_fn` at all (consistent with the
-      counter staying low) -- so this pass's own instrumentation is
-      consistent with, but does NOT prove, an OS-socket-table (not
-      httpd-session-pool) exhaustion mechanism. Checked for another
-      uncounted permanent consumer, the shape of this item's own 2026-09-01
-      precedent: grepped the whole `App/` tree for `socket(` call sites --
-      only `wifi_prov_link.c`'s `dns_hijack_task()` (already budgeted) and
-      `wifi_prov.c` remain; `mdns_init()` (`main.c`) and SNTP
-      (`time_sync.c`) both confirmed, by reading their linked
-      implementations, to use raw lwIP PCBs (`udp_new()`/`udp_new_ip_type()`
-      in `mdns_networking_lwip.c` -- `CONFIG_MDNS_NETWORKING_SOCKET` is
-      unset in this build, so the BSD-socket mdns backend isn't even
-      compiled in -- and `sntp.c`), which do not consume a `sockets[]`
-      slot. No new uncounted permanent consumer found. Leading remaining
-      candidate, not yet confirmed: this pass's own `close_fn` decrements
-      the `active` counter *before* calling `close(sockfd)`, so a session
-      that is slow to actually release its OS-level socket resource
-      (`netconn_delete()` on close is itself an async round-trip to lwIP's
-      tcpip thread, not instant) would read as "closed" here while still
-      occupying a `sockets[]` slot -- which would explain resets happening
-      while the logged count stays low without contradicting any
-      measurement taken so far. Not confirmed because it would need a
-      *second* counter instrumenting `close()`'s actual return, not
-      attempted this pass.
-      **Recommendation: do not bump `max_open_sockets` or
-      `CONFIG_LWIP_MAX_SOCKETS` on the strength of this item alone.** The
-      2026-09-01 rationale for the current values (13 / 18) was sized
-      against a real 10-connection wedge and remains valid for that case;
-      this pass's own measurement is now direct evidence AGAINST the
-      max_open_sockets=13 pool being what's saturating under this specific
-      reproducer's load (it topped out at 6), so widening it would spend
-      internal-DRAM budget (documented tight, ~11.9 kB failure floor, see
-      the DRAM exhaustion item) chasing a mechanism the data says isn't the
-      session pool. If OS-socket-table exhaustion is confirmed by the
-      close()-latency follow-up above, the fix that data would point to is
-      shortening how long a closing session holds its slot (e.g. `SO_LINGER`
-      tuning) or accepting fewer concurrent opens via `backlog_conn`, not a
-      bigger pool. **Not closing this item**: root cause is narrowed
-      (ruled out: LRU purge, lwIP TCP-stat-visible drops, mDNS/SNTP as
-      uncounted consumers) but not confirmed (the close()-latency hypothesis
-      is untested). `wifi_provision_http.c`'s `open_fn`/`close_fn`
-      instrumentation is now permanently in place in the shipped firmware
-      for whoever picks this up next to extend.
-      2026-09-04: **both remaining leads refuted by direct measurement --
-      root cause still open.** This pass's job was exactly the close()-
-      latency hypothesis the previous pass left untested, plus the sibling
-      question (does `lwip_accept()` ever actually return `ENFILE`). Two
-      things instrumented: (1) a second atomic counter,
-      `s_lwip_table_occupied`, that increments in `open_fn` (same moment as
-      before) but decrements only AFTER `close(sockfd)` *returns* inside
-      `close_fn` -- not on hook entry like `s_httpd_open_sockets` -- so it
-      measures actual `sockets[]` table occupancy instead of inferring it
-      from session-pool hook timing; logged as `httpd socket open: ...
-      table=N` and a new `httpd socket table-free: fd=%d table=N/%d` line
-      bracketing the real close. (2) confirmed (by reading
-      `$IDF_PATH/components/esp_http_server/src/httpd_main.c`) that
-      `httpd_accept_conn()` already logs `ESP_LOGE(TAG, "error in accept
-      (%d)", errno)` on every `accept()` failure, at ERROR level (always
-      compiled in under this build's `CONFIG_LOG_MAXIMUM_LEVEL=3`), and
-      that `uart_log_bridge.c` captures every `ESP_LOGx` call globally via
-      `esp_log_set_vprintf()` regardless of tag -- so this line was already
-      reaching `get_device_log()` without needing new code, just needed to
-      be watched for. Built (`build_kilnfw` exit 0 against HEAD `712bec1`,
-      after rebasing past another session's concurrent commit), flashed via
-      `flash_firmware()` (verify=True, confirmed running), re-ran
-      `http_concurrency_reproducer.py --concurrency 4,8,12,16 --bursts 3`
-      against the live idle board (192.168.1.156): **same failure shape
-      again** -- 120 requests, 27 resets (22.5%), 0/12 at 4, 3/8 (12.5%
-      per-burst average) at 8, 12/12 (33%, all four each burst) at 12,
-      12/12 (25%) at 16, all client-side `WinError 10054`. Captured the
-      full device log from boot through the entire sweep (timestamps
-      7665-45575ms, one continuous `get_device_log` pull, nothing missed).
-      **Neither lead survived**: `table` never exceeded `active` by more
-      than one log line's worth of scheduling jitter (0-30ms between the
-      `active=N` decrement and the paired `table=N` decrement in every
-      single close observed) and both peaked at the identical worst-case
-      value, 5 -- against caps of 13 and 18 respectively -- during the
-      12- and 16-way bursts that were actively producing resets at that
-      exact moment. There is no lingering-close effect large enough to
-      matter: the OS socket table was never meaningfully more occupied than
-      the session-pool counter already showed, which itself never got
-      close to either cap. And the accept-errno line never appeared once
-      in the entire captured window, across all four concurrency levels
-      including the ones that reset a third of their requests -- `accept()`
-      is not failing. **Conclusion: OS-socket-table exhaustion
-      (`lwip_accept()`'s `alloc_socket()` returning `ENFILE`) is refuted,
-      the same as httpd's own session-pool cap was refuted last pass.**
-      Both candidate resource-exhaustion mechanisms this item has now
-      chased -- httpd's `max_open_sockets` pool and lwIP's `sockets[]`
-      table -- are confirmed clear at the moment resets happen, at every
-      concurrency level tested, with the actual peak occupancy (5) not even
-      a third of either configured cap. Whatever is generating these RSTs
-      is not counting against a socket resource this instrumentation can
-      see. **Not closing this item; not bumping `max_open_sockets` or
-      `CONFIG_LWIP_MAX_SOCKETS` -- there is now direct evidence against
-      both of the mechanisms that recommendation would be defending
-      against.** Next lead, not yet investigated: `config.backlog_conn = 10`
-      (this file, `wifi_provision_http_start()`) is the kernel/lwIP-level
-      pending-accept queue depth, set *below* this reproducer's own
-      concurrency levels of 12 and 16 -- a SYN that completes the 3-way
-      handshake while the accept backlog is already full is a documented
-      lwIP path to an RST that happens entirely before `netconn_accept()`
-      is ever called, which would explain resets that never reach
-      `open_fn`, never touch `alloc_socket()`, and never log an accept
-      errno, all consistent with every measurement taken so far (this
-      pass's and the prior two). Not confirmed: no instrumentation of the
-      TCP listen backlog / SYN queue was attempted this pass -- lwIP does
-      not expose an equivalent hook the way `open_fn`/`close_fn` did for
-      the session pool, so confirming this would need either reading
-      `tcp_listen_backlogged` accounting in `$IDF_PATH`'s lwIP source (not
-      vendored) to find a countable field, or a packet capture to see the
-      handshake complete and RST for a request that never reached this
-      file's own hooks at all.
-      2026-09-04: **root-caused and fixed. `backlog_conn` refuted (made it
-      worse); the real mechanism is `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE`,
-      confirmed by direct measurement and now raised 6 -> 16 — reset rate
-      dropped from 22.5% to 0.0% at the previously-failing concurrency
-      levels.** Tested the assigned prediction first: `wifi_provision_http.c`'s
-      `config.backlog_conn` 10 -> 32, nothing else changed, built
-      (`build_kilnfw` exit 0), flashed (`flash_firmware()`, verify=True,
-      confirmed running), re-ran `http_concurrency_reproducer.py
-      --concurrency 4,8,12,16 --bursts 3` against the idle board
-      (192.168.1.156). **Before** (previous pass, same config baseline,
-      backlog_conn=10): 120 requests, 27 resets, 22.5% (0/12 @4, ~12.5% @8,
-      33% @12, 25% @16). **After** (backlog_conn=32 alone): 120 requests,
-      **54 resets, 45.0%** (0/12 @4, 2/6=33% @8, 6/12=50% @12, 10/16=62.5%
-      @16) — the rate did not just fail to improve, it roughly doubled.
-      Backlog is refuted, and in a way that resolves the onset-at-8-vs-
-      backlog-10 tension directly: at every concurrency from 8 through 16,
-      **exactly 6 of N requests per burst succeeded, every single burst,
-      regardless of N** — the failure count wasn't set by how many clients
-      showed up, it was `N - 6`. That flat ceiling of 6 pointed straight at
-      `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE`, which defaults to 6
-      (`$IDF_PATH/components/lwip/Kconfig` line 723-728, range 1-64 without
-      `LWIP_WND_SCALE`, not vendored, read directly) and was never touched
-      by this build — a Kconfig option entirely separate from
-      `backlog_conn`, confirmed by reading
-      `$IDF_PATH/components/lwip/lwip/src/api/api_msg.c`'s
-      `accept_function()`: lwIP posts each newly-ESTABLISHED connection into
-      `conn->acceptmbox` (a fixed-size mailbox, sized by this Kconfig value
-      at `sys_mbox_new(&msg->conn->acceptmbox, DEFAULT_ACCEPTMBOX_SIZE)` in
-      the same file) for the application to drain via `accept()`/
-      `netconn_accept()`; when `sys_mbox_trypost()` finds it full, the
-      handler's own comment says it plainly — "the pcb is aborted in
-      tcp_process()" — an RST, sent from inside lwIP's TCP callback, entirely
-      independent of `backlog_conn` (that one only gates SYN-stage entry,
-      checked against `pcb->accepts_pending` in `tcp_listen_input()`,
-      `tcp_in.c`), independent of httpd's session pool (never reached —
-      `accept()` is never called on an aborted pcb), independent of the OS
-      `sockets[]` table (`alloc_socket()` is never reached either), and
-      producing exactly the client-side symptom (`WinError 10054`/
-      `ECONNRESET`) every pass of this item has measured. This also explains
-      why raising `backlog_conn` made things *worse*: a deeper SYN queue let
-      more handshakes complete, only to pile into the same 6-slot mailbox and
-      get aborted post-handshake instead of never getting that far. Reverted
-      `backlog_conn` to 10 (`wifi_provision_http.c`, comment updated in
-      place with this result) and instead raised
-      `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` 6 -> 16 (`sdkconfig.defaults`, with
-      the mechanism and the measurement recorded in that file's own
-      comment — the gitignored `sdkconfig` had to be hand-edited too and a
-      full `build_kilnfw` re-run, since an incremental build does not
-      re-merge `sdkconfig.defaults` into the machine-local `sdkconfig`; the
-      generated `sdkconfig.cmake` was checked directly to confirm the new
-      value actually took before flashing — see this file's own prior
-      "gitignored config hides mismatch" precedent). Built, flashed
-      (verify=True, confirmed running), re-ran the same
-      `--concurrency 4,8,12,16 --bursts 3` sweep: **120/120 requests ok, 0
-      resets, 0.0%** — full clear at every level that was previously
-      failing. Extended the sweep to `--concurrency 20,24,28,32 --bursts 3`
-      to look for a new, higher onset: **clean through 28-way concurrency**
-      (240/240 ok), and at 32-way the only failures were **5 client-side
-      timeouts at the 5 s cap (`other`, not `reset`)** out of 96 requests —
-      the server queuing under real load and answering slowly, not an RST —
-      a qualitatively different and far more benign failure mode than the
-      one this item has chased since 2026-08-28. Host tests re-run clean
-      after both firmware changes (21/21 host test executables). Packet
-      capture (the fallback this pass was authorized to reach for if
-      backlog were refuted) turned out unnecessary — the `ok` count pinned
-      at exactly 6 per burst was a strong enough direct signal, and the
-      before/after measurement against the fix confirms it. **Closing this
-      item**: root cause confirmed by mechanism (lwIP source read) and by
-      two independent live measurements (the flat-6 signature, and the
-      fix's before/after). Next lead, if it resurfaces: 16 was chosen for
-      headroom over the 8-16 concurrency this reproducer exercises, not
-      tuned to a proven worst case — a workload with sustained concurrency
-      above ~28 (this reproducer's new, much milder failure floor) would be
-      the next thing to characterize, and `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE`
-      can go as high as 64 without `LWIP_WND_SCALE` if it does.
-- [x] **Wire the guard scripts into something that runs them.** Done
-      2026-08-27: `tools/run_all_checks.ps1`, plus a `run_repo_checks` tool on
-      both MCP servers. Discovery is by glob rather than a list, because a list
-      that falls behind is this repository's single most repeated defect; the
-      floor below which it refuses to report success exists because the
-      opposite trap — a glob matching nothing and reporting green — looks
-      exactly like a pass. Its first run found 24 scripts where the repo has
-      12, because `.claude/worktrees/` holds abandoned full-tree copies, and
-      found `check_link_impl_isolation.ps1` red on twelve false positives plus
-      one real hit. Twelve checks, all green
-- [x] **`safety_poll` crashed twice with `IllegalInstruction`, self-recovered
-      by rebooting.** `c8e10f0`, 2026-08-28. Root cause was a real stack
-      overflow, not the timing/blocking shape of the two earlier reverted
-      attempts (checked before changing anything, not assumed from the
-      symptom): `safety_cfg_store_maybe_refetch()`'s scratch (~680 B) and page
-      (~390 B) locals landed on this task's frame the week the refetch became
-      real, and the stack was never resized with it — measured at 1192 B free
-      of 4096 under ordinary traffic. Raised to 8192, PSRAM-backed, and
-      registered with `stack_margin` for the first time (why 29% headroom had
-      looked fine for weeks: nobody was reading it). Confirmed live on
-      hardware after this session's own commissioning-flow test — which
-      exercises exactly the refetch path that crashed it — with no panic:
-      4336 B free of 8192 (52.9% headroom) every check added here was made to
-fail on purpose before being trusted. That caught two checks that would
-otherwise have shipped useless — a slack constant expressed in terms of itself,
-and a Python test that could never fail on a C regression — and one that was
-actively dangerous: a string-literal fix to `check_isolation.ps1` that blinded
-its own `#include` rule while still printing "Isolation check passed". A check
-nobody has watched fail is not evidence.
 
 ## M15 — Architecture hardening · *opened and CLOSED 2026-09-04*
 
