@@ -66,6 +66,38 @@ default (K) rather than shipping disabled, but is *also* required for
 | `borrowed_stale_trip_s` | 60 | s | **S13** | 🔴 | …and then trip |
 | `borrowed_type_expected` | — | enum | S13 | 🟠 | The `tc_type` the borrowed channel is expected to report. A change means someone reconfigured the main board's channel underneath us |
 
+**S5's `bad_read_count_threshold` / `bad_read_time_s` are deliberately NOT in
+this table (owner decision, 2026-09-03).** `blind_grace_s` above is S5's one
+commissionable knob; the other two bars of S5's "count AND time" gate
+(`safety_guards.c`'s `BAD_READ_COUNT_DEFAULT` = 10, `BAD_READ_TIME_S_DEFAULT`
+= 5.0 s) stay **compiled-in**, unlike every other guard's limits in this
+file. `safety_guards.h`'s `safety_guard_config_t` still carries
+`bad_read_count_threshold`/`bad_read_time_s` fields with the usual "0 means
+use the compiled default" convention — that plumbing was added for Phase 7
+consistency with the struct's other fields — but nothing sets them:
+`config_store.c`/`config_params.c` (contrast `frozen_window_s`, S11's
+equivalent, which has a real `config_store` record field, a wire param at
+0x0207, and NVS persistence) never populate them, so they read 0 forever and
+S5's count/time gate always runs on the compiled defaults regardless of what
+a commissioning client sends.
+
+This is not an unwired gap waiting for its Phase 7 turn — **it is staying
+this way.** S5 works correctly on its compiled defaults, and the guard this
+table exists to protect is exactly the one a wrong commissioned value could
+weaken: making the count/time bars configurable would require a
+persisted-struct migration (a new `config_store` record field, a wire param
+id, `config_params.c` get/set cases, NVS layout versioning) to add a field
+whose only credible failure mode is "someone sets it wrong and a real bad
+read stops tripping S5 in time." There is no established benefit on record
+that offsets that risk — no bench finding that the compiled 10-reads/5.0s
+bar is wrong for this hardware, no commissioning workflow that needs it
+per-installation the way `abs_max_temp_c` or `tc_type` genuinely do. If a
+future finding DOES establish a concrete need (a specific installation
+where 10/5.0s is measurably wrong), reopen this as a fresh decision with
+that evidence — this note is not itself a blocker, it is the record of why
+nobody should re-propose the same migration on "more configurability is
+better" alone.
+
 ## 3. Current channels
 
 Remember the scope limit: **load-active detection and a power estimate,

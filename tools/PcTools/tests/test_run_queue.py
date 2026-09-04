@@ -364,9 +364,34 @@ def _patched_run_entry(entry, cfg, transport, preset_dict):
          unittest.mock.patch.object(rq, "get_zones", transport.get_zones), \
          unittest.mock.patch.object(rq, "get_profile_plan", transport.get_profile_plan), \
          unittest.mock.patch.object(rq, "start_profile", transport.start_profile), \
-         unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile):
+         unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile), \
+         unittest.mock.patch.object(rq, "ensure_stabilized_profile", return_value=False):
+        # ensure_stabilized_profile is patched out here (not exercised by
+        # _ScriptedTransport at all -- it has no GET /api/profile or POST
+        # /api/profile stand-in) so every pre-existing test in this file
+        # that does not care about TASK 1's stabilisation-hold-by-default
+        # keeps working unchanged. Its own behaviour is covered directly by
+        # StabilizationDefaultOnTest / StabilizationMismatchNegativeTest
+        # below, against a purpose-built fake.
         rq.run_entry(entry, cfg, control=None, apply_preset_fn=fake_apply_preset)
     return calls
+
+
+def _capture_rows(log_path):
+    """Read a run_entry capture file back, DROPPING the leading meta line
+    (TASK 1's ``{"meta": {...}}`` header, no "exec"/"t" key) -- every
+    pre-existing test that indexes ``line["exec"]`` on every captured line
+    should use this instead of a bare ``json.loads`` list comprehension."""
+    with open(log_path) as fh:
+        rows = []
+        for line in fh:
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            if "meta" in obj and "exec" not in obj:
+                continue
+            rows.append(obj)
+        return rows
 
 
 class ApplyPresetHttpOnlyTest(unittest.TestCase):
@@ -496,7 +521,8 @@ class ApplyPresetHttpOnlyTest(unittest.TestCase):
              unittest.mock.patch.object(rq, "get_zones", transport.get_zones), \
              unittest.mock.patch.object(rq, "get_profile_plan", transport.get_profile_plan), \
              unittest.mock.patch.object(rq, "start_profile", transport.start_profile), \
-             unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile):
+             unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile), \
+             unittest.mock.patch.object(rq, "ensure_stabilized_profile", return_value=False):
             rq.run_entry(entry, cfg, control=None, apply_preset_fn=None)  # must not raise
 
         self.assertEqual(transport.started_profile_id, 7)
@@ -527,8 +553,7 @@ class RunCompletionSeamTest(unittest.TestCase):
         cfg_kwargs.update(cfg_overrides or {})
         cfg = rq.RunQueueConfig(**cfg_kwargs)
         calls = _patched_run_entry(entry, cfg, transport, entry.preset_name)
-        with open(log_path) as fh:
-            lines = [json.loads(line) for line in fh if line.strip()]
+        lines = _capture_rows(log_path)
         return transport, calls, lines
 
     def test_idle_then_running_then_done_completes_without_exiting_early(self):
@@ -605,8 +630,7 @@ class RunEntryEndToEndTest(unittest.TestCase):
 
         self.assertEqual(transport.started_profile_id, 7)
         self.assertEqual(calls["applied"][1], "203.0.113.10")
-        with open(log_path) as fh:
-            lines = [json.loads(line) for line in fh if line.strip()]
+        lines = _capture_rows(log_path)
         self.assertGreaterEqual(len(lines), 1)
         self.assertIn("exec", lines[0])
         self.assertIn("status", lines[0])

@@ -169,6 +169,7 @@ class _Harness:
              unittest.mock.patch.object(rq, "get_profile_plan", self.transport.get_profile_plan), \
              unittest.mock.patch.object(rq, "start_profile", self.transport.start_profile), \
              unittest.mock.patch.object(rq, "stop_profile", self.transport.stop_profile), \
+             unittest.mock.patch.object(rq, "ensure_stabilized_profile", return_value=False), \
              unittest.mock.patch.object(rq, "run_entry", counting_run_entry):
             rq.run_queue(self.entries, self.cfg, control=None,
                           apply_preset_fn=_fake_apply_preset,
@@ -261,6 +262,7 @@ class StateFileWrittenTest(unittest.TestCase):
              unittest.mock.patch.object(rq, "get_profile_plan", h.transport.get_profile_plan), \
              unittest.mock.patch.object(rq, "start_profile", h.transport.start_profile), \
              unittest.mock.patch.object(rq, "stop_profile", h.transport.stop_profile), \
+             unittest.mock.patch.object(rq, "ensure_stabilized_profile", return_value=False), \
              unittest.mock.patch.object(rq, "run_entry", wrapper):
             rq.run_queue(h.entries, h.cfg, control=None, apply_preset_fn=_fake_apply_preset,
                          state_path=state_path, resume=False, preflight_fn=_fake_preflight_fn)
@@ -463,6 +465,7 @@ class PairedResumeTest(unittest.TestCase):
              unittest.mock.patch.object(rq, "get_profile_plan", h.transport.get_profile_plan), \
              unittest.mock.patch.object(rq, "start_profile", h.transport.start_profile), \
              unittest.mock.patch.object(rq, "stop_profile", h.transport.stop_profile), \
+             unittest.mock.patch.object(rq, "ensure_stabilized_profile", return_value=False), \
              unittest.mock.patch.object(rq, "run_entry", capturing_run_entry):
             rq.run_queue(h.entries, h.cfg, control=None, apply_preset_fn=_fake_apply_preset,
                          state_path=state_path, resume=True, preflight_fn=_fake_preflight_fn)
@@ -545,6 +548,7 @@ class PairedResumeTest(unittest.TestCase):
              unittest.mock.patch.object(rq, "get_profile_plan", h.transport.get_profile_plan), \
              unittest.mock.patch.object(rq, "start_profile", h.transport.start_profile), \
              unittest.mock.patch.object(rq, "stop_profile", h.transport.stop_profile), \
+             unittest.mock.patch.object(rq, "ensure_stabilized_profile", return_value=False), \
              unittest.mock.patch.object(rq, "run_entry", capturing_run_entry), \
              unittest.mock.patch.object(rq, "_rebuild_pair_start_status", return_value={}):
             # MUTATION: _rebuild_pair_start_status always returns {} here --
@@ -655,7 +659,8 @@ class ClobberRefusalTest(unittest.TestCase):
              unittest.mock.patch.object(rq, "get_zones", transport.get_zones), \
              unittest.mock.patch.object(rq, "get_profile_plan", transport.get_profile_plan), \
              unittest.mock.patch.object(rq, "start_profile", transport.start_profile), \
-             unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile):
+             unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile), \
+             unittest.mock.patch.object(rq, "ensure_stabilized_profile", return_value=False):
             with self.assertRaises(rq.RunQueueClobberError) as ctx:
                 rq.run_entry(entry, cfg, control=None, apply_preset_fn=_fake_apply_preset)
         self.assertIn(repr(log_path), str(ctx.exception))
@@ -690,7 +695,8 @@ class ClobberRefusalTest(unittest.TestCase):
              unittest.mock.patch.object(rq, "get_zones", transport.get_zones), \
              unittest.mock.patch.object(rq, "get_profile_plan", transport.get_profile_plan), \
              unittest.mock.patch.object(rq, "start_profile", transport.start_profile), \
-             unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile):
+             unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile), \
+             unittest.mock.patch.object(rq, "ensure_stabilized_profile", return_value=False):
             rq.run_entry(entry, cfg, control=None, apply_preset_fn=_fake_apply_preset)  # must not raise
         self.assertEqual(transport.started_profile_ids, [7])
 

@@ -913,3 +913,125 @@ def test_min_segment_index_mutation_wrong_default_would_leak_segment_0():
 def test_compute_zone_metrics_min_segment_index_beyond_run_returns_none():
     rows = _synthetic_two_segment_rows()
     assert ab.compute_zone_metrics(rows, zone=0, start_temp_c=20.0, min_segment_index=5) is None
+
+
+# ---------------------------------------------------------------------------
+# TASK 1 (2026-09-03, owner decision: hold on by default). resolve_min_
+# segment_index is the producer/consumer agreement point: run_queue.py
+# writes a {"meta": {...}} header line recording whether a capture got the
+# stabilisation hold, and this is the consumer side that reads it back and
+# refuses (loudly) rather than silently comparing two runs that used
+# different scoring-window conventions.
+# ---------------------------------------------------------------------------
+
+def _write_meta_capture(tmp_path, name: str, src_path: str, min_segment_index) -> str:
+    """Build a capture file shaped exactly like run_queue.py's own output:
+    a {"meta": {...}} header line (or none, if min_segment_index is None --
+    simulates a pre-TASK-1 capture with no marker at all) followed by the
+    real rows copied verbatim from an existing fixture."""
+    out = tmp_path / name
+    lines = []
+    if min_segment_index is not None:
+        lines.append(json.dumps({"meta": {
+            "stabilized": min_segment_index != 0,
+            "min_segment_index": min_segment_index,
+        }}))
+    with open(src_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                lines.append(line)
+    out.write_text("\n".join(lines) + "\n")
+    return str(out)
+
+
+def test_resolve_min_segment_index_no_meta_defaults_to_zero(tmp_path):
+    path = _write_meta_capture(tmp_path, "nometa.jsonl", EXCERPT, min_segment_index=None)
+    assert ab.resolve_min_segment_index(path) == 0
+
+
+def test_resolve_min_segment_index_reads_stabilized_meta(tmp_path):
+    path = _write_meta_capture(tmp_path, "stab.jsonl", EXCERPT, min_segment_index=1)
+    assert ab.resolve_min_segment_index(path) == 1
+
+
+def test_resolve_min_segment_index_agreeing_pair_resolves(tmp_path):
+    path_a = _write_meta_capture(tmp_path, "a.jsonl", EXCERPT, min_segment_index=1)
+    path_b = _write_meta_capture(tmp_path, "b.jsonl", EXCERPT, min_segment_index=1)
+    assert ab.resolve_min_segment_index(path_a, path_b) == 1
+
+
+def test_resolve_min_segment_index_explicit_override_uncontested(tmp_path):
+    # No meta line at all -- an explicit override with nothing to disagree
+    # with is accepted (the documented escape hatch).
+    path = _write_meta_capture(tmp_path, "nometa.jsonl", EXCERPT, min_segment_index=None)
+    assert ab.resolve_min_segment_index(path, explicit=1) == 1
+
+
+# --------------------------------------------------------------------------
+# THE HEADLINE NEGATIVE TEST: prove the runner and the analysis genuinely
+# cannot silently disagree.
+#
+# Step 1 (positive control): two captures both recording the stabilisation
+# convention (min_segment_index=1, exactly what run_queue.py writes for a
+# stabilized run) compare cleanly with NO explicit flag -- the analysis
+# picked up the runner's own convention automatically.
+#
+# Step 2 (the actual negative test): mutate ONE of the two captures' meta
+# line to claim the opposite convention (min_segment_index=0, as if that
+# arm had been run with --skip-stabilization-hold while its partner had
+# not) and confirm compare_runs refuses LOUDLY -- an "error" key naming
+# both paths and both recorded values -- rather than silently comparing
+# apples to oranges. This is exactly the class of bug
+# project_split_module_missing_name_class / project_consumer_without_
+# producer_class describe: a producer and consumer that quietly drift
+# apart. TASK 1 makes it structurally loud instead.
+# --------------------------------------------------------------------------
+
+def test_stabilization_agreement_end_to_end_and_mutation_makes_it_loud(tmp_path):
+    path_a = _write_meta_capture(tmp_path, "arm_a.jsonl", EXCERPT, min_segment_index=1)
+    path_b = _write_meta_capture(tmp_path, "arm_b.jsonl", EXCERPT, min_segment_index=1)
+
+    # REAL BEHAVIOUR: both arms recorded the same (stabilized) convention --
+    # compare_runs succeeds with no explicit min_segment_index at all, and
+    # actually used min_segment_index=1 (proven by cross-checking against
+    # calling compute_run_metrics directly with that value).
+    report = ab.compare_runs(path_a, path_b, noise_floor_artifact=None)
+    assert "error" not in report, report.get("error")
+
+    assert ab.resolve_min_segment_index(path_a, path_b) == ab.STABILIZATION_SEGMENT_INDEX
+
+    # MUTATION: arm_b's meta line is rewritten to claim min_segment_index=0
+    # (as if it had been captured with --skip-stabilization-hold while
+    # arm_a had the hold) -- everything else about the file (its rows) is
+    # untouched. This is the exact silent-disagreement scenario TASK 1
+    # exists to make impossible.
+    mutated_b = _write_meta_capture(tmp_path, "arm_b_mutated.jsonl", EXCERPT, min_segment_index=0)
+
+    report_mismatched = ab.compare_runs(path_a, mutated_b, noise_floor_artifact=None)
+    assert "error" in report_mismatched, (
+        "MUTATION CHECK FAILED: two captures recording DIFFERENT stabilisation "
+        "conventions (min_segment_index=1 vs 0) were compared without complaint -- "
+        "this is exactly the silently-reintroduced ambient-start confound TASK 1 "
+        "was supposed to make impossible"
+    )
+    msg = report_mismatched["error"]
+    assert "min_segment_index=1" in msg
+    assert "min_segment_index=0" in msg
+    assert path_a in msg or os.path.basename(path_a) in msg
+
+    # And resolve_min_segment_index itself raises the same way, with the
+    # dedicated exception type, when called directly (not just through
+    # compare_runs' try/except wrapper).
+    with pytest.raises(ab.StabilizationMismatchError):
+        ab.resolve_min_segment_index(path_a, mutated_b)
+
+
+def test_explicit_override_conflicting_with_recorded_meta_is_refused(tmp_path):
+    """The documented escape hatch (an explicit --min-segment-index) is not
+    a way to silently score a stabilised capture from its ambient segment 0
+    without comment -- passing 0 against a capture whose own meta line says
+    1 must be refused, loudly, naming both values."""
+    path = _write_meta_capture(tmp_path, "stab.jsonl", EXCERPT, min_segment_index=1)
+    with pytest.raises(ab.StabilizationMismatchError, match="min-segment-index=0.*must agree"):
+        ab.resolve_min_segment_index(path, explicit=0)

@@ -176,6 +176,7 @@ from kilnctrl import log_analysis as la
 from kilnctrl import http_capture_log as hc
 from kilnctrl import noise_floor as nf
 from kilnctrl import run_queue as rq
+from kilnctrl import profile_stabilization as ps
 
 #: 2026-09-03 REVISED to 1.5C (was 1.0C), and DERIVED FROM
 #: run_queue.DEFAULT_PAIR_START_TOL_C rather than chosen independently.
@@ -430,7 +431,112 @@ def compute_zone_metrics(
 #: to :func:`compute_run_metrics` / :func:`fit_start_temp_sensitivity`; callers
 #: still on the unstabilised protocol pass nothing (default 0, unchanged
 #: behaviour).
-STABILIZATION_SEGMENT_INDEX = 1
+#:
+#: IMPORTED, not redefined: the value is owned by profile_stabilization.py
+#: (the module that actually inserts the hold, so it is the one place the
+#: "exactly one segment" structural fact lives). Keeping a second, locally
+#: defined ``= 1`` here is exactly the class of bug this repo has shipped
+#: repeatedly -- a producer and a consumer that each hard-code the same
+#: number and can silently drift apart when one side changes. See
+#: ``resolve_min_segment_index`` below for how the runner and this module
+#: are kept from disagreeing about which convention any ONE capture used.
+STABILIZATION_SEGMENT_INDEX = ps.STABILIZATION_SEGMENT_INDEX
+
+
+def _read_capture_meta(path: str) -> Optional[dict]:
+    """Read the ``{"meta": {...}}`` header line ``run_queue.py`` writes as
+    the FIRST line of every capture it opens (see ``run_entry``'s
+    ``_write_capture_meta``) -- records whether that run got the
+    stabilisation hold and which ``min_segment_index`` the runner therefore
+    expects analysis to use. Returns ``None`` (not an error) for a capture
+    with no such line -- an older capture, one written by something other
+    than ``run_queue.py``, or an empty/unreadable path -- since the absence
+    of the marker is meaningful (means "unknown convention, do not assume
+    stabilised") rather than a failure to report."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            first_line = fh.readline()
+    except OSError:
+        return None
+    first_line = first_line.strip()
+    if not first_line:
+        return None
+    try:
+        obj = json.loads(first_line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    meta = obj.get("meta")
+    return meta if isinstance(meta, dict) else None
+
+
+class StabilizationMismatchError(ValueError):
+    """Raised by :func:`resolve_min_segment_index` when the scoring window
+    the runner recorded and the scoring window analysis was told (or would
+    otherwise infer) to use CANNOT be reconciled -- either because two
+    captures being compared disagree with each other, or because an
+    explicit ``--min-segment-index``/``min_segment_index=`` override
+    conflicts with what a capture's own meta line recorded. This is the
+    loud failure TASK 1 calls for: the alternative is a silently
+    reintroduced ambient-start confound that nothing would report."""
+
+
+def resolve_min_segment_index(
+    path_a: str, path_b: Optional[str] = None, explicit: Optional[int] = None,
+) -> int:
+    """THE PRODUCER/CONSUMER AGREEMENT POINT for TASK 1's default-on
+    stabilisation hold. ``run_queue.py`` (the producer) records, as the
+    first line of every capture it writes, whether that run's profile had a
+    stabilisation hold prepended and, if so, the ``min_segment_index`` the
+    scored window must start at (``STABILIZATION_SEGMENT_INDEX`` -- see
+    ``profile_stabilization.py``, the single source of truth for that
+    number). This function (the consumer side) reads that meta line back
+    out of ``path_a`` and (when comparing a pair) ``path_b``, and:
+
+      * if both captures recorded a convention and they DISAGREE, raises
+        :class:`StabilizationMismatchError` -- comparing them would silently
+        reintroduce exactly the ambient-start confound the hold exists to
+        prevent, and nothing else would say so.
+      * if ``explicit`` is given (the CLI's ``--min-segment-index``, or a
+        caller passing ``min_segment_index=`` directly) and it conflicts
+        with a recorded convention, ALSO raises -- an explicit override is
+        the documented escape hatch for a deliberate one-off, not a way to
+        silently score a stabilised capture from its ambient segment 0 (or
+        vice versa) without comment.
+      * otherwise returns whichever convention is available: the explicit
+        value if given and uncontested, else the value recorded in either
+        capture's meta line, else ``0`` (legacy behaviour, unchanged, for
+        captures written before this convention existed)."""
+    meta_a = _read_capture_meta(path_a)
+    meta_b = _read_capture_meta(path_b) if path_b is not None else None
+    idx_a = meta_a.get("min_segment_index") if meta_a else None
+    idx_b = meta_b.get("min_segment_index") if meta_b else None
+
+    if idx_a is not None and idx_b is not None and int(idx_a) != int(idx_b):
+        raise StabilizationMismatchError(
+            f"{path_a!r} was captured with min_segment_index={idx_a!r} but {path_b!r} "
+            f"was captured with min_segment_index={idx_b!r} -- these two runs used "
+            "different stabilisation conventions (one had the hold prepended, or a "
+            "different scored-window start, than the other) and cannot be honestly "
+            "compared. Re-run one of them under the same convention, or pass an explicit "
+            "--min-segment-index only if you are certain that is the right thing to score."
+        )
+
+    detected = idx_a if idx_a is not None else idx_b
+
+    if explicit is not None:
+        if detected is not None and int(explicit) != int(detected):
+            raise StabilizationMismatchError(
+                f"--min-segment-index={explicit} was given explicitly, but the capture's "
+                f"own recorded convention is min_segment_index={detected!r} -- the runner "
+                "and the analysis must agree. Drop the override to use the recorded value, "
+                "or confirm you genuinely intend to score a different window than the run "
+                "was captured for."
+            )
+        return int(explicit)
+
+    return int(detected) if detected is not None else 0
 
 
 def _first_valid_start_temp(rows: Sequence[la.PollRow], zone: int, min_segment_index: int = 0) -> float:
@@ -1031,7 +1137,7 @@ def compare_runs(
     run_index_a: Optional[int] = None, run_index_b: Optional[int] = None,
     noise_floor_artifact: Optional[dict] = None,
     sensitivity_paths: Optional[Sequence[str]] = None,
-    min_segment_index: int = 0,
+    min_segment_index: Optional[int] = None,
 ) -> dict:
     """``sensitivity_paths``, if given, must be a genuine same-configuration
     repeat set (see ``fit_start_temp_sensitivity``'s assumptions) used to
@@ -1042,13 +1148,23 @@ def compare_runs(
     construction. Never affects REFUSED/INDISTINGUISHABLE/PROVISIONAL --
     see the module docstring's 2026-09-02f section.
 
-    ``min_segment_index``: pass ``STABILIZATION_SEGMENT_INDEX`` (1) when both
-    captures are runs of the stabilised protocol (a stabilisation hold as
-    segment 0) so the comparison -- and ``sensitivity_paths``, if given --
-    score only the post-stabilisation segments. Both captures and the
-    sensitivity set must use the SAME convention; this function has no way
-    to detect a mismatch, so it is the caller's responsibility (see
-    PID_EXPANSION_PLAN.md's "A/B campaign ambient-confound protocol")."""
+    ``min_segment_index``: defaults to ``None``, which means "figure it out
+    from the captures themselves" via :func:`resolve_min_segment_index` --
+    ``run_queue.py`` (as of TASK 1, stabilisation-hold-by-default) writes
+    the convention each capture used into its own meta line, so a caller no
+    longer has to remember to pass ``STABILIZATION_SEGMENT_INDEX`` by hand.
+    Pass an explicit int only for the documented escape-hatch case (scoring
+    a window other than what the capture recorded); doing so against a
+    capture whose meta line disagrees raises
+    :class:`StabilizationMismatchError` rather than silently scoring the
+    wrong window -- see that function's docstring. Two captures whose OWN
+    recorded conventions disagree with EACH OTHER raise the same way even
+    with no explicit override, since comparing them at all would silently
+    reintroduce the ambient-start confound the hold exists to prevent."""
+    try:
+        min_segment_index = resolve_min_segment_index(path_a, path_b, explicit=min_segment_index)
+    except StabilizationMismatchError as exc:
+        return {"error": str(exc)}
     try:
         rows_a = load_run(path_a, run_index=run_index_a)
         rows_b = load_run(path_b, run_index=run_index_b)
@@ -1291,6 +1407,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_single.add_argument("--band", type=float, default=1.0)
     p_single.add_argument("--run", type=int, default=None, help="explicit run index, required if the capture holds more than one run")
     p_single.add_argument("--json", action="store_true")
+    p_single.add_argument(
+        "--min-segment-index", dest="min_segment_index", type=int, default=None,
+        help="score only segments >= this index (default: whatever run_queue.py recorded "
+             "for this capture, via its meta line -- STABILIZATION_SEGMENT_INDEX=1 for a "
+             "stabilised run, 0 otherwise). Pass explicitly only for the documented "
+             "escape-hatch case; it is refused if it conflicts with what the capture itself "
+             "recorded.")
 
     p_cmp = sub.add_parser("compare", help="A/B compare two HTTP captures, with the start-temp confound gate")
     p_cmp.add_argument("path_a")
@@ -1306,6 +1429,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="paths to a genuine same-configuration repeat set used to fit the "
                              "start-temp sensitivity reported alongside the whole-run IAE comparison "
                              "(default: the noise-floor artifact's own generated_from list, if any)")
+    p_cmp.add_argument(
+        "--min-segment-index", dest="min_segment_index", type=int, default=None,
+        help="score only segments >= this index (default: whatever run_queue.py recorded for "
+             "these captures, via each one's meta line -- STABILIZATION_SEGMENT_INDEX=1 for a "
+             "stabilised pair, 0 otherwise). Refused if path_a and path_b recorded different "
+             "conventions, or if this override conflicts with what either recorded -- the "
+             "runner and the analysis must agree.")
 
     p_split = sub.add_parser(
         "split",
@@ -1325,7 +1455,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not rows:
             print(f"error: no parseable rows in {args.path}")
             return 1
-        metrics = compute_run_metrics(rows, band_c=args.band)
+        try:
+            resolved_min_segment_index = resolve_min_segment_index(
+                args.path, explicit=args.min_segment_index)
+        except StabilizationMismatchError as exc:
+            print(f"error: {exc}")
+            return 1
+        metrics = compute_run_metrics(rows, band_c=args.band, min_segment_index=resolved_min_segment_index)
         if args.json:
             print(json.dumps(_jsonable(metrics), indent=2))
         else:
@@ -1347,7 +1483,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         report = compare_runs(args.path_a, args.path_b, band_c=args.band,
                                run_index_a=args.run_a, run_index_b=args.run_b,
                                noise_floor_artifact=artifact,
-                               sensitivity_paths=args.sensitivity_from)
+                               sensitivity_paths=args.sensitivity_from,
+                               min_segment_index=args.min_segment_index)
         print(compare_report_to_json(report) if args.json else format_compare_text(report))
         return 1 if "error" in report else 0
     elif args.cmd == "split":

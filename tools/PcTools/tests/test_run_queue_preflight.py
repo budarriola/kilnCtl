@@ -159,8 +159,13 @@ class _Harness(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def _entry(self, name, preset, profile_id=7, label=None):
+        # stabilize=False: these tests exercise the preflight-capability
+        # wiring, not TASK 1's stabilisation hold, and their fake
+        # urlopen router has no /api/profile stand-in for
+        # ensure_stabilized_profile to hit.
         return rq.QueueEntry(preset_name=preset, profile_id=profile_id,
-                              log_path=os.path.join(self.tmpdir, name), label=label or name)
+                              log_path=os.path.join(self.tmpdir, name), label=label or name,
+                              stabilize=False)
 
 
 # --------------------------------------------------------------------------

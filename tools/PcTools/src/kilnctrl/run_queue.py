@@ -63,6 +63,7 @@ import urllib.request
 from typing import Callable, Optional, Sequence
 
 from kilnctrl import capability_preflight, ramp_assist_http_client, zones_http_client
+from kilnctrl import profile_stabilization as ps
 
 log = logging.getLogger(__name__)
 
@@ -440,6 +441,145 @@ def get_profile_plan(host: str, profile_id: int, timeout: float = DEFAULT_HTTP_T
     return _get_json(host, f"/api/profile_plan?id={profile_id}", timeout)
 
 
+def get_profile_detail(host: str, profile_id: int, timeout: float = DEFAULT_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/profile?id=<n> -- the full profile including its segments
+    (unlike get_profile_plan, which returns only the plan curve). Field
+    names match profiles_http.c's profile_detail_get_handler() exactly:
+    each segment carries seg_kind/target_c/ramp_c_per_hr/dwell_min/
+    io_target/io_state/io_blocking/io_leave_on_at_end."""
+    return _get_json(host, f"/api/profile?id={profile_id}", timeout)
+
+
+def save_profile_segments(
+    host: str, profile_id: int, name: str, zone_mask: int, segments: Sequence[dict],
+    timeout: float = DEFAULT_HTTP_TIMEOUT_S,
+) -> dict:
+    """POST /api/profile, overwriting ``profile_id`` in place with
+    ``segments`` (a list of the same per-segment dicts GET /api/profile
+    returns -- see get_profile_detail). Field names match
+    profiles_http.c's parse_profile_fields() exactly (seg{i}_kind/target/
+    ramp/dwell for a ZONE_RAMP segment, seg{i}_io_target/io_state/
+    io_blocking/io_leave_on for a RELAY_IO one). Overwrites IN PLACE (the
+    same profile_id, not a new slot) -- ensure_stabilized_profile relies on
+    this to be idempotent across repeated campaign runs against one board
+    profile, rather than exhausting PROFILES_MAX_COUNT slots."""
+    fields = {"id": str(profile_id), "name": name, "zone_mask": str(zone_mask),
+              "seg_count": str(len(segments))}
+    for i, seg in enumerate(segments):
+        kind = int(seg.get("seg_kind", 0))
+        fields[f"seg{i}_kind"] = str(kind)
+        fields[f"seg{i}_dwell"] = str(int(seg.get("dwell_min", 0)))
+        if kind == 1:  # PROFILE_SEG_KIND_RELAY_IO
+            fields[f"seg{i}_io_target"] = str(int(seg.get("io_target", 0)))
+            fields[f"seg{i}_io_state"] = str(int(seg.get("io_state", 0)))
+            fields[f"seg{i}_io_blocking"] = str(int(seg.get("io_blocking", 1)))
+            fields[f"seg{i}_io_leave_on"] = str(int(seg.get("io_leave_on_at_end", 0)))
+        else:
+            fields[f"seg{i}_target"] = str(float(seg.get("target_c", 0.0)))
+            fields[f"seg{i}_ramp"] = str(float(seg.get("ramp_c_per_hr", 0.0)))
+    body = _post_form(host, "/api/profile", fields, timeout)
+    try:
+        return json.loads(body)
+    except Exception as exc:  # noqa: BLE001
+        raise RunQueueError(f"POST /api/profile response was not JSON: {body!r}") from exc
+
+
+def ensure_stabilized_profile(
+    host: str, profile_id: int, timeout: float = DEFAULT_HTTP_TIMEOUT_S,
+    target_c: float = ps.DEFAULT_STABILIZATION_TARGET_C,
+    ramp_c_per_hr: float = ps.DEFAULT_STABILIZATION_RAMP_C_PER_HR,
+    dwell_min: int = ps.DEFAULT_STABILIZATION_DWELL_MIN,
+) -> bool:
+    """TASK 1's runner-side half: make sure the board profile at
+    ``profile_id`` begins with a stabilisation hold, prepending and saving
+    one (IN PLACE -- same id) if it does not already. Returns True if the
+    profile now has (or already had) the hold, i.e. the caller should
+    expect the run's segment_index=0 to be the stabilisation hold and score
+    from ``profile_stabilization.STABILIZATION_SEGMENT_INDEX``.
+
+    IDEMPOTENT: if segment 0 already matches the stabilisation segment
+    ``profile_stabilization.is_stabilization_segment`` would build for these
+    parameters, this makes NO POST and returns True immediately -- a
+    campaign that reuses one profile_id run after run (the common case)
+    must not stack a second hold onto the first.
+
+    Reuses :func:`profile_stabilization.prepend_stabilization_hold` for the
+    actual prepend-and-validate step (over just the ZONE_RAMP-shaped
+    target_c/ramp_c_per_hr/dwell_min fields), so its refusals (stabilisation
+    target above 62C, an opening segment targeting below the stabilisation
+    setpoint, exceeding PROFILE_MAX_SEGMENTS) apply unchanged and are never
+    weakened here -- a RunQueueError wrapping the original ValueError
+    propagates rather than silently starting an un-stabilised run.
+    RELAY_IO segments (seg_kind=1) are passed through completely unmodified
+    in both the check and the rebuilt list -- only their target_c/ramp/
+    dwell would matter to prepend_stabilization_hold's opening-segment
+    check, and a profile that opens on a RELAY_IO segment has no
+    "temperature target" to compare against the stabilisation setpoint at
+    all, so that check is skipped for a RELAY_IO opening segment."""
+    detail = get_profile_detail(host, profile_id, timeout)
+    segments = detail.get("segments", [])
+    if not segments:
+        raise RunQueueError(
+            f"profile {profile_id} has no segments -- cannot ensure a stabilisation hold "
+            "ahead of an empty profile")
+
+    from types import SimpleNamespace
+    first = segments[0]
+    if ps.is_stabilization_segment(
+        SimpleNamespace(**first), target_c=target_c, ramp_c_per_hr=ramp_c_per_hr,
+        dwell_min=dwell_min,
+    ):
+        log.info("profile %d already begins with a stabilisation hold -- leaving it as is",
+                  profile_id)
+        return True
+
+    # Only the ZONE_RAMP-shaped fields matter to prepend_stabilization_hold
+    # (it never sees seg_kind/io_*); a RELAY_IO opening segment has no
+    # target_c to compare, so treat it as having no ceiling on the check by
+    # handing it the stabilisation target itself (0 delta -- neither
+    # triggers nor evades the "opening segment below setpoint" refusal
+    # incorrectly, since a RELAY_IO segment IS the profile's actual opening
+    # step and this function has no temperature to judge it by).
+    from .devices_profiles import ProfileSegment
+    check_segments = [
+        ProfileSegment(
+            target_c=float(s.get("target_c", target_c)) if int(s.get("seg_kind", 0)) == 0 else target_c,
+            ramp_c_per_hr=float(s.get("ramp_c_per_hr", 0.0)),
+            dwell_min=int(s.get("dwell_min", 0)) or 1,
+        )
+        for s in segments
+    ]
+    try:
+        ps.prepend_stabilization_hold(
+            check_segments, target_c=target_c, ramp_c_per_hr=ramp_c_per_hr, dwell_min=dwell_min)
+    except ValueError as exc:
+        raise RunQueueError(
+            f"refusing to prepend a stabilisation hold onto profile {profile_id}: {exc}") from exc
+
+    stabilize_seg = {
+        "seg_kind": 0, "target_c": target_c, "ramp_c_per_hr": ramp_c_per_hr,
+        "dwell_min": dwell_min, "io_target": 0, "io_state": 0, "io_blocking": 0,
+        "io_leave_on_at_end": 0,
+    }
+    new_segments = [stabilize_seg, *segments]
+    if len(new_segments) > ps.PROFILE_MAX_SEGMENTS:
+        raise RunQueueError(
+            f"prepending a stabilisation hold onto profile {profile_id} would produce "
+            f"{len(new_segments)} segments, exceeding PROFILE_MAX_SEGMENTS="
+            f"{ps.PROFILE_MAX_SEGMENTS}")
+
+    log.info("[profile %d] prepending a %.0fC/%.0fmin stabilisation hold (saved in place)",
+              profile_id, target_c, dwell_min)
+    result = save_profile_segments(
+        host, profile_id, detail.get("name", ""), int(detail.get("zone_mask", 0)),
+        new_segments, timeout)
+    if not result.get("ok", False):
+        raise RunQueueError(
+            f"POST /api/profile refused while prepending a stabilisation hold onto "
+            f"profile {profile_id}: {result!r}")
+    return True
+
+
 def start_profile(host: str, profile_id: int, timeout: float = DEFAULT_HTTP_TIMEOUT_S) -> dict:
     body = _post_form(host, "/api/profile_exec/start", {"id": str(profile_id)}, timeout)
     try:
@@ -516,6 +656,23 @@ class QueueEntry:
     #: "no pairing enforced" -- unchanged behaviour for entries that are not
     #: part of an A/B campaign.
     pair_key: Optional[str] = None
+    #: OWNER DECISION (2026-09-03, TASK 1): True (the default) means
+    #: ``run_entry`` ensures ``profile_id``'s board profile begins with a
+    #: stabilisation hold (see :func:`ensure_stabilized_profile`) before
+    #: starting it, and records ``STABILIZATION_SEGMENT_INDEX`` into this
+    #: entry's captured log so ``pid_ab_compare.py`` scores past it
+    #: automatically -- no operator has to remember either half. The
+    #: rationale (PID_EXPANSION_PLAN.md sec 8): ~51 min/arm (5.6 min ramp to
+    #: 48C + 45 min dwell) REPLACES the paired-start wait, and no future
+    #: campaign can silently repeat the 2026-08-31 outcome (six firings, one
+    #: usable pair) by forgetting to enforce comparable starts.
+    #:
+    #: False is the DOCUMENTED ESCAPE HATCH for a deliberate quick/
+    #: unstabilised run -- set it explicitly (``--skip-stabilization-hold``
+    #: on the CLI, or construct the entry with ``stabilize=False`` when
+    #: scripting) when the ambient-confound protection genuinely is not
+    #: wanted this run. It is never the accidental default.
+    stabilize: bool = True
 
 
 @dataclasses.dataclass
@@ -837,6 +994,15 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     blocks (:func:`wait_until_paired_start`) until its own reading lines up
     with it within ``cfg.pair_start_tol_c``, raising :class:`RunQueueError`
     rather than starting an arm the campaign will not be able to compare."""
+    # TASK 1 (owner decision, 2026-09-03): stabilisation-hold-by-default.
+    # entry.stabilize defaults True -- ensure the board profile has the
+    # hold BEFORE anything else so every later step (the ceiling check
+    # below, which re-fetches the plan; the actual start) sees the
+    # already-stabilised profile. entry.stabilize=False is the documented
+    # escape hatch for a deliberate quick/unstabilised run.
+    stabilized_applied = False
+    if entry.stabilize:
+        stabilized_applied = ensure_stabilized_profile(cfg.host, entry.profile_id, cfg.http_timeout_s)
     if apply_preset_fn is None:
         from kilnctrl import config_presets
         apply_preset_fn = config_presets.apply_preset if control is not None else _apply_preset_http_only
@@ -944,6 +1110,24 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
         raise RunQueueError(
             f"cannot open capture file {entry.log_path!r} -- refusing to start the kiln "
             f"with nowhere to capture to: {exc}") from exc
+
+    # META LINE -- TASK 1's producer/consumer agreement point. Written as
+    # the very first line, before any poll row, so pid_ab_compare.py's
+    # resolve_min_segment_index() can read it back without having to parse
+    # (or care about the shape of) the rest of the capture. Records exactly
+    # what this run did, not what it was asked to do: min_segment_index is
+    # STABILIZATION_SEGMENT_INDEX only when a hold was actually confirmed in
+    # place (stabilized_applied), never merely because entry.stabilize was
+    # True -- see ensure_stabilized_profile's refusal paths above, which
+    # raise before this point is ever reached, so in practice this is
+    # always in sync with entry.stabilize once we get here, but the
+    # variable it reads is the applied outcome, not the request.
+    meta_line = json.dumps({"meta": {
+        "stabilized": stabilized_applied,
+        "min_segment_index": ps.STABILIZATION_SEGMENT_INDEX if stabilized_applied else 0,
+    }})
+    fh.write(meta_line + "\n")
+    fh.flush()
 
     # started is set to True BEFORE the POST, not after it returns. The
     # start POST can be ACCEPTED by the board -- heaters energized -- while
@@ -1140,12 +1324,13 @@ def _atomic_write_json(path: str, obj: dict) -> None:
 
 def entry_to_dict(entry: QueueEntry) -> dict:
     return {"preset_name": entry.preset_name, "profile_id": entry.profile_id,
-            "log_path": entry.log_path, "label": entry.label}
+            "log_path": entry.log_path, "label": entry.label, "stabilize": entry.stabilize}
 
 
 def entry_from_dict(d: dict) -> QueueEntry:
     return QueueEntry(preset_name=d["preset_name"], profile_id=d["profile_id"],
-                       log_path=d["log_path"], label=d.get("label", ""))
+                       log_path=d["log_path"], label=d.get("label", ""),
+                       stabilize=d.get("stabilize", True))
 
 
 def new_campaign_state(entries: Sequence[QueueEntry], meta: Optional[dict] = None) -> dict:
@@ -1681,6 +1866,7 @@ def expand_repeat(entry: QueueEntry, n: int) -> list:
             profile_id=entry.profile_id,
             log_path=_numbered_log_path(entry.log_path, k),
             label=f"{entry.label or entry.preset_name} run{k}/{n}",
+            stabilize=entry.stabilize,
         ))
     return out
 
@@ -1728,6 +1914,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "back-to-back campaign, and says nothing about whether two arms line up with "
              "each other. Requires an even number of --run entries (or --state-file's saved "
              "queue, on --resume).")
+    parser.add_argument(
+        "--skip-stabilization-hold", action="store_true",
+        help="OWNER DECISION (2026-09-03): the stabilisation hold is prepended onto every "
+             "queued entry's profile by default (~51 min/arm: 5.6 min ramp to 48C + 45 min "
+             "dwell, replacing the paired-start wait) and pid_ab_compare.py is told to score "
+             "past it automatically. This is the DOCUMENTED ESCAPE HATCH for a deliberate "
+             "quick/unstabilised run -- pass it explicitly; it is never the accidental "
+             "default. Applies to every entry in this invocation (including --repeat and "
+             "--pair-consecutive expansions).")
     parser.add_argument("--poll-interval-s", type=float, default=DEFAULT_POLL_INTERVAL_S)
     parser.add_argument("--rested-tol-c", type=float, default=DEFAULT_RESTED_TOL_C)
     parser.add_argument("--rested-timeout-s", type=float, default=DEFAULT_RESTED_TIMEOUT_S)
@@ -1769,6 +1964,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if len(entries) != 1:
                 parser.error("--repeat requires exactly one --run entry")
             entries = expand_repeat(entries[0], args.repeat)
+
+    if args.skip_stabilization_hold:
+        entries = [dataclasses.replace(e, stabilize=False) for e in entries]
 
     if args.pair_consecutive:
         if len(entries) % 2 != 0:

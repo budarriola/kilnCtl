@@ -71,6 +71,54 @@ DEFAULT_STABILIZATION_RAMP_C_PER_HR = 300.0
 DEFAULT_STABILIZATION_DWELL_MIN = 45
 
 
+#: THE SINGLE SOURCE OF TRUTH for "which segment index does the scored
+#: schedule start at, once a stabilisation hold has been prepended". Defined
+#: HERE, not in pid_ab_compare.py, because it is a structural fact of
+#: :func:`prepend_stabilization_hold` itself (it always inserts exactly ONE
+#: segment at index 0) -- pid_ab_compare.py imports this rather than
+#: carrying its own copy of the number, so the runner (which prepends the
+#: hold) and the analysis (which has to know where it ends) cannot drift
+#: apart the way this repo's producer/consumer pairs have before (see
+#: project_split_module_missing_name_class / project_consumer_without_
+#: producer_class in the coordinator's memory). If this module ever grows a
+#: mode that prepends more than one segment, this constant is the one place
+#: that has to change, and every caller downstream follows automatically.
+STABILIZATION_SEGMENT_INDEX = 1
+
+
+def is_stabilization_segment(
+    segment: object,
+    target_c: float = DEFAULT_STABILIZATION_TARGET_C,
+    ramp_c_per_hr: float = DEFAULT_STABILIZATION_RAMP_C_PER_HR,
+    dwell_min: int = DEFAULT_STABILIZATION_DWELL_MIN,
+    tol_c: float = 0.05,
+) -> bool:
+    """True if ``segment`` (a :class:`ProfileSegment`, or any object with
+    ``target_c``/``ramp_c_per_hr``/``dwell_min`` attributes -- a plain dict
+    accessed via ``SimpleNamespace(**d)`` works too) already matches the
+    stabilisation segment :func:`build_stabilization_segment` would produce
+    for these parameters.
+
+    Used for IDEMPOTENCY: ``run_queue.py`` prepends a hold onto a board
+    profile IN PLACE (see ``ensure_stabilized_profile``), and the same
+    profile id is typically reused run after run within a campaign, and
+    across campaigns. Without this check, prepending unconditionally would
+    grow the profile by one segment every single run, and the second run
+    would silently stack a SECOND stabilisation hold onto the first (wrong
+    schedule, and eventually a real ``PROFILE_MAX_SEGMENTS`` refusal on an
+    otherwise-legitimate campaign)."""
+    seg_target = getattr(segment, "target_c", None)
+    seg_ramp = getattr(segment, "ramp_c_per_hr", None)
+    seg_dwell = getattr(segment, "dwell_min", None)
+    if seg_target is None or seg_ramp is None or seg_dwell is None:
+        return False
+    return (
+        abs(float(seg_target) - target_c) <= tol_c
+        and abs(float(seg_ramp) - ramp_c_per_hr) <= tol_c
+        and int(seg_dwell) == int(dwell_min)
+    )
+
+
 def build_stabilization_segment(
     target_c: float = DEFAULT_STABILIZATION_TARGET_C,
     ramp_c_per_hr: float = DEFAULT_STABILIZATION_RAMP_C_PER_HR,
