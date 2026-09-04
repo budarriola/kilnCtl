@@ -49,18 +49,32 @@ Firmware builds and host tests are tools too — `build_kilnfw`,
 `build_saftyfw_host_tests`, `run_pctools_tests` — so
 the toolchain invocations do not have to be rediscovered. Flashing is
 `debug_program(peer="pico")` for the Pico. For the ESP32-S3, use `flash_firmware()`
-instead — `debug_program(peer="esp")` reliably fails flash-bank detection/verify on
-this board (confirmed repeatedly); `flash_firmware()` is the sanctioned working path,
-still OpenOCD, never esptool.
+instead — `debug_program(peer="esp")` now **refuses immediately**, before touching
+OpenOCD at all, because that generic single-ELF path reliably fails flash-bank
+detection/verify on this board (confirmed repeatedly); `flash_firmware()` is the
+sanctioned working path, still OpenOCD, never esptool.
 
 `flash_firmware()` writes the **`factory`** partition only — it does not touch
 `otadata`. If an OTA has ever pointed the boot target at `ota_0`/`ota_1`, the
 bootloader keeps booting that image and every later `flash_firmware()` reports
 success while the board keeps running the OLD code (a change you added — a log
 line, say — looks like it "vanished"). Fix: `ota_rollback_esp()` to restore the
-factory boot target. To spot it before chasing a phantom firmware bug: check
-the running partition (`/api/partitions`'s RUNNING marker, or the boot log's
-`running partition: '<name>'`) and confirm it says `factory`.
+factory boot target.
+
+`flash_firmware()` now checks this **automatically** after every flash (the
+`verify` parameter, default `True`): it polls the board's own HTTP API for the
+running partition (`/api/partitions`'s RUNNING marker) and for its reported
+build timestamp (`fw_build`, compared against the `.bin`'s embedded
+`esp_app_desc_t` build time) and FAILS the tool call loud, naming the actual
+running partition/build and pointing at `ota_rollback_esp()`, if either
+disagrees with what was just flashed. Manually checking the RUNNING marker or
+the boot log's `running partition: '<name>'` line is now redundant for a normal
+flash — still useful for checking partition state independent of a flash, via
+`debug_check_partition_table()`. Pass `verify=False` only for bring-up when the
+board's HTTP stack isn't expected to be up yet (e.g. Wi-Fi not provisioned
+yet); when `verify=True` (the default) but the board just doesn't answer HTTP
+in time, the tool WARNS rather than failing, since that's not the same as
+confirming the wrong thing landed.
 
 Also: `debug_reset` does not power-cycle external I2C peripherals. A safety
 trip that latches right after an OTA reboot can be the SX1509 I/O expander

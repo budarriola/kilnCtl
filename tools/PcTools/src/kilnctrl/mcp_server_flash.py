@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, partition_table, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, debug_probe, devices, esp_app_desc, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -105,8 +105,111 @@ def kill_openocd_sessions() -> str:
     return openocd_util.kill_openocd_sessions_impl()
 
 
+#: Post-flash verification is intentionally quick -- the board is already
+#: rebooting off the reset in the OpenOCD tcl sequence, so this is a short
+#: poll for it to come back up over Wi-Fi, not a long wait. Chosen to be
+#: comfortably longer than a normal boot-to-HTTP-ready time without turning
+#: an unreachable-board case into a multi-minute hang.
+_VERIFY_POLL_ATTEMPTS = 5
+_VERIFY_POLL_INTERVAL_S = 2.0
+_VERIFY_HTTP_TIMEOUT_S = 3.0
+
+
+def _verify_flash_landed(host: Optional[str], bin_path: str) -> str:
+    """Post-flash confirmation that the binary just written to `factory` is
+    the one actually RUNNING -- added after the recurring "flash reports OK
+    but the board keeps running old code" failure mode (see this module's
+    header comment and esp_app_desc.py's docstring for the full history:
+    flash_firmware() only ever writes the `factory` partition and never
+    touches `otadata`; if an OTA ever pointed the boot target at
+    ota_0/ota_1, the bootloader keeps booting that stale image forever, and
+    OpenOCD's own "verified OK" during the write says nothing about which
+    partition actually boots).
+
+    Two independent checks, both against the RUNNING firmware, not the
+    write itself:
+      1. GET /api/partitions' "running" field must be "factory" -- anything
+         else means the bootloader is not even attempting to run what was
+         just flashed.
+      2. GET /api/status's fw_build must match the build timestamp parsed
+         out of the .bin's esp_app_desc_t -- catches a stale/mismatched
+         `factory` image passing check 1 (e.g. a previous factory flash that
+         never got overwritten because a caller thought a build was newer
+         than it was).
+
+    Returns "" on success (nothing worth reporting), a "WARNING: ..." string
+    if the board could not be reached at all (this is not treated as a
+    verification failure -- see flash_firmware()'s verify parameter), and
+    raises RuntimeError with an actionable message on an actual mismatch
+    (wrong running partition, or a build-timestamp mismatch)."""
+    try:
+        app_desc = esp_app_desc.parse_app_desc_file(bin_path)
+    except (OSError, esp_app_desc.AppDescError) as exc:
+        return f"WARNING: post-flash verification skipped -- could not parse app descriptor from {bin_path}: {exc}"
+
+    resolved_host = host or partition_http_client.PARTITION_AP_DEFAULT_HOST
+
+    last_exc: Optional[Exception] = None
+    partitions_data: Optional[dict] = None
+    for attempt in range(_VERIFY_POLL_ATTEMPTS):
+        if attempt:
+            time.sleep(_VERIFY_POLL_INTERVAL_S)
+        try:
+            partitions_data = partition_http_client.get_partitions(resolved_host, timeout=_VERIFY_HTTP_TIMEOUT_S)
+            last_exc = None
+            break
+        except partition_http_client.PartitionHttpError as exc:
+            last_exc = exc
+            continue
+
+    if partitions_data is None:
+        return (
+            "WARNING: post-flash verification skipped -- board did not answer "
+            f"GET /api/partitions at {resolved_host} after {_VERIFY_POLL_ATTEMPTS} "
+            f"attempts ({last_exc}). This does NOT confirm the flash landed -- "
+            "if HTTP normally comes up on this board, treat that as suspicious; "
+            "otherwise this is expected during early bring-up (pass verify=False "
+            "to silence this warning)."
+        )
+
+    running = partitions_data.get("running")
+    if running != "factory":
+        raise RuntimeError(
+            f"flash reported OK, but the board is running partition {running!r}, "
+            "not 'factory' -- flash_firmware() only ever writes the factory "
+            "partition, so this means an earlier OTA left the boot target "
+            "pointed at ota_0/ota_1 and the bootloader is still booting THAT "
+            "old image, not the one just flashed. Fix: call ota_rollback_esp() "
+            "to restore the factory boot target, then flash_firmware() again."
+        )
+
+    board = capability_preflight.get_board_info(resolved_host, timeout=_VERIFY_HTTP_TIMEOUT_S)
+    if not board.reachable:
+        return (
+            "WARNING: running partition confirmed 'factory', but GET /api/status "
+            f"failed ({board.error}) so the build timestamp could not be checked."
+        )
+    if not esp_app_desc.build_timestamps_match(app_desc, board.fw_build):
+        raise RuntimeError(
+            "flash reported OK and the board is running 'factory', but its "
+            f"reported build ({board.fw_build!r}) does not match the binary just "
+            f"flashed ({app_desc.build_timestamp!r}) -- the board is running a "
+            "DIFFERENT build than the one on disk. This can happen if factory "
+            "was flashed once, then a stale/leftover .bin got flashed again "
+            "without a fresh build_kilnfw, or if verification is racing a boot "
+            "that hasn't finished yet. Rebuild with build_kilnfw and reflash."
+        )
+    return ""
+
+
 @_srv._tool()
-def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: bool = True, allow_stale: bool = False) -> str:
+def flash_firmware(
+    board_cfg: str = "board/esp32s3-builtin.cfg",
+    retry_once: bool = True,
+    allow_stale: bool = False,
+    verify: bool = True,
+    host: Optional[str] = None,
+) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
     board (never esptool/`idf.py flash`, per CLAUDE.md). Always writes all
@@ -135,7 +238,35 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
     failure if the SECOND attempt also fails. On a persistent failure this
     returns the openocd output tail for diagnosis rather than guessing --
     do not attempt a raw `flash erase_sector` recovery by hand; that is
-    exactly what caused the incident this tool exists to prevent."""
+    exactly what caused the incident this tool exists to prevent.
+
+    After OpenOCD reports the write verified, this ALSO independently
+    confirms the flash actually LANDED (verify=True, the default): it polls
+    the board's own HTTP API for the partition it is actually running and
+    the build timestamp it reports, and FAILS LOUD if either disagrees with
+    what was just flashed. This exists because OpenOCD's "verify" is only a
+    byte-compare during the write -- it says nothing about which partition
+    the bootloader actually boots, and flash_firmware() only ever writes the
+    `factory` partition. If an earlier OTA left the boot target pointed at
+    ota_0/ota_1, every future flash_firmware() would otherwise report success
+    forever while the board keeps running old code (this is exactly the
+    "my change vanished" failure mode CLAUDE.md's flash_firmware section
+    warns about -- this check is what makes that fail at the tool instead of
+    costing a debugging session). On a mismatch the error names the actual
+    running partition/build and tells you to call ota_rollback_esp() first.
+
+    `verify=False` is the escape hatch for bring-up when the board's HTTP
+    stack is not expected to be up yet (e.g. Wi-Fi not provisioned) -- skips
+    verification entirely, no warning. When verify=True (the default) but the
+    board simply does not answer HTTP within a short poll, this is NOT
+    treated as a failure -- it's reported back as a WARNING line so the
+    caller knows verification did not happen and why, distinct from an
+    actual wrong-partition/wrong-build failure which always raises.
+
+    `host`: board IP/hostname for the verification HTTP calls (same
+    resolution as the ota_*/debug_check_partition_table tools otherwise --
+    defaults to the fallback AP address 192.168.4.1 if not given, since a
+    board fresh off a factory flash may not yet be on home Wi-Fi)."""
     openocd_exe = _find_openocd_exe()
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
@@ -170,15 +301,30 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
     )
     stale_prefix = f"WARNING: flashed a stale binary anyway ({stale.reason})\n" if (stale.stale and allow_stale) else ""
 
+    app_bin_path = os.path.join(build_dir, "KilnCtrl.bin")
+
+    def _post_flash(base_msg: str) -> str:
+        if not verify:
+            return base_msg
+        try:
+            landed_note = _verify_flash_landed(host, app_bin_path)
+        except RuntimeError as exc:
+            _srv._session_log.warning("flash_firmware: post-flash verification FAILED: %s", exc)
+            return f"error: {exc}\n\n(the OpenOCD write itself reported OK -- {base_msg})"
+        if landed_note:
+            _srv._session_log.warning("flash_firmware: %s", landed_note)
+            return f"{base_msg}\n{landed_note}"
+        return f"{base_msg}, and post-flash verification confirmed the board is running factory with the matching build"
+
     ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=kiln_fw_root, timeout_s=90)
     if ok:
-        return stale_prefix + "flashed and verified OK (bootloader + partition table + app), board reset and running"
+        return _post_flash(stale_prefix + "flashed and verified OK (bootloader + partition table + app), board reset and running")
 
     if retry_once:
         _srv._session_log.warning("flash_firmware: first attempt failed, retrying once (known benign quirk)")
         ok2, output2 = _run_openocd(openocd_exe, board_cfg, tcl, cwd=kiln_fw_root, timeout_s=90)
         if ok2:
-            return "flashed and verified OK on retry (first attempt hit the known benign Verify-Failed quirk)"
+            return _post_flash("flashed and verified OK on retry (first attempt hit the known benign Verify-Failed quirk)")
         output = output2
 
     tail = "\n".join(output.strip().splitlines()[-25:])

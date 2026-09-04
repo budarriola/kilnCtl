@@ -130,6 +130,14 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     (bootloader/partition-table/app) this tool does not; this generic path is
     for the RP2040, which ships one plain ELF with no bootloader.
 
+    peer="esp" is REFUSED outright (before touching OpenOCD at all): this
+    generic single-ELF program path reliably fails flash-bank detection/
+    verify on this board (confirmed repeatedly) -- flash_firmware() is the
+    sanctioned, working path for the ESP. This used to fail downstream after
+    wasted time instead of refusing immediately; see CLAUDE.md's
+    flash_firmware section. peer="pico" is unaffected -- the RP2040 has no
+    bootloader/partition table to get wrong and this path works fine there.
+
     For peer="pico" (SaftyFW), same staleness refusal as flash_firmware(): the
     ELF's build-identity header (saftyfw_build_info.h) is checked against
     current HEAD and, if firmware/SaftyFW or firmware/CommonFW have
@@ -137,6 +145,12 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     stale_check.py. Pass allow_stale=True to flash anyway. Only checked when
     using the peer's default ELF and default build-info location; an explicit
     elf_path bypasses the check (nothing to compare it against)."""
+    if peer == debug_probe.PEER_ESP:
+        return (
+            "error: debug_program(peer=\"esp\") is refused -- use flash_firmware(); "
+            "debug_program esp path fails flash-bank detection on this board -- see CLAUDE.md"
+        )
+
     if not confirm:
         return "error: flash write refused without confirm=True -- this writes flash on a live board"
 
