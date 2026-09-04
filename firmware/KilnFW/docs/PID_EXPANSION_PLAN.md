@@ -2605,6 +2605,18 @@ real tracking error. See the report for full per-zone numbers and the
 ranked recommendation (z0 overshoot investigation clears the 0.5 °C bar; the
 z2 overshoot regression and a re-run of the ease-off campaign do not).
 
+**PROPOSAL, not scheduled (2026-09-04):**
+`logs/coupling/hightemp_validation_proposal_20260904.md` scopes a first
+validation firing above ~65 °C to test the >62 °C coupled-hold-infeasible
+claim above against real tracking data for the first time. Confirms live
+that the current board's `max_temp_c=80` on all three zones would permit
+such a firing today, flags the safety processor's `abs_max_temp_c` (last
+documented as 0/"never trip", TODO.md 2026-08-28) as the item most needing
+re-confirmation first, and states a falsifiable prediction
+(`ff_hold_infeasible`/`ff_hold_used_matrix`/duty saturation in the 60-65 °C
+band) plus a proposed profile, kiln-hour cost, and go/no-go risk list.
+Awaiting owner go-ahead — nothing in it is scheduled work.
+
 **Other paired-run conclusions that changed a setting or closed an item**
 (§3.2's coupling-matrix six-firing A/B, §3.9's tuning-method campaign) were
 spot-checked for a `control_mode`-shaped gate on their own varied field
