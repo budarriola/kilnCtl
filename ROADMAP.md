@@ -1814,8 +1814,37 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       executables pass; `test_autotune_engine_prestart.c` unchanged except
       #including the four new files alongside `autotune_engine.c` and
       following the same renames at its own direct call sites, same
-      convention as `test_wifi_prov.c`. Both parts of this bullet now
-      closed.
+      convention as `test_wifi_prov.c`. `dashboard_http.c` part —
+      **CLOSED 2026-09-04**: move-only split into `dashboard_http.c` (774
+      lines, `s_dash` board-object storage, `DASH_TAG`, flash facts,
+      `reset_reason_name()`, `dashboard_get_status()`,
+      `dashboard_http_get_hw_ready()`, `dashboard_set_relay()`, and
+      `dashboard_http_start()` which registers every handler defined in the
+      other four files), `dashboard_status_http.c` (605, `json_f()` +
+      `GET /api/status`), `dashboard_settings_http.c` (133, `POST
+      /api/unit_pref` + `POST /api/safety/log_level`), `dashboard_exec_http.c`
+      (778, the profile-executor family: `GET /api/profile_exec`,
+      `/api/profile_plan`, `/api/control`, `/api/firing_history`,
+      `/api/history.csv`; `POST /api/profile_exec/{start,stop,pause,resume,
+      ack_last_run}`, `POST /api/safety/clear_trip`) and
+      `dashboard_autotune_http.c` (386, `GET /api/autotune`,
+      `/api/autotune/matrix`, `/api/autotune/trace.csv`; `POST
+      /api/autotune/{start,abort,accept}`), sharing state via
+      `dashboard_http_internal.h` on the same `profile_executor_internal.h`
+      precedent (shared statics as `extern`, former `static` helpers
+      widened to file-scope-internal). Symbol audit: grepped every widened
+      symbol for exactly one non-static definition repo-wide before
+      trusting the link; only one real collision found —
+      `status_get_handler` (already `static` in `adaptive_tune_http.c` and
+      `wifi_provision_http.c`) — renamed to `dashboard_status_get_handler`
+      per the audit rule even though today's check came back silent (both
+      others stay `static`, so no link-time clash exists yet, but the rule
+      says rename regardless). `build_kilnfw` compiles and links clean.
+      `dashboard_http.c` is never pulled into a host-test translation unit
+      (its `lvgl_port.h` include drags in a GCC-only attribute MSVC's host
+      toolchain rejects, per `build_host_tests.ps1`'s own comment), so no
+      test file needed updating; all 21/21 host test executables still
+      build and pass.
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because

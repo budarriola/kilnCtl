@@ -1,0 +1,386 @@
+/* Autotune family -- moved out of dashboard_http.c 2026-09-04 (ROADMAP.md
+ * M15, the 1500-line rule): GET /api/autotune, /api/autotune/matrix,
+ * /api/autotune/trace.csv; POST /api/autotune/{start,abort,accept}. See
+ * dashboard_http_internal.h for the shared s_dash/DASH_TAG seam. */
+
+#include "dashboard_http_internal.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_log.h"
+
+#include "autotune_engine.h"
+#include "dashboard_json.h"
+#include "http_form.h"
+#include "profile_executor.h"
+#include "zones_http.h"
+
+/* autotune_state_name()/autotune_rule_name()/autotune_refusal_name() and the
+ * response body itself moved to dashboard_json.c's
+ * dashboard_format_autotune_status_json() (2026-08-31 dashboard-split pass)
+ * -- pure formatting with no httpd/hardware dependency, so it can be host-
+ * tested the same way append_zone_status_json() already is. Same buffer size
+ * (1300, unchanged) and same snprintf-into-stack-buffer shape as before; only
+ * where the formatting code is DEFINED changed. */
+esp_err_t autotune_status_get_handler(httpd_req_t *req)
+{
+    autotune_engine_status_t st;
+    autotune_engine_get_status(&st);
+
+    char json[1300];
+    int n = dashboard_format_autotune_status_json(json, sizeof(json), &st);
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+/* TODO.md 6A.5(b): cross-zone coupling matrix built up across completed
+ * autotune runs (one row per zone that's been tested). Cheap enough
+ * (MAX31856_CHANNEL_COUNT^2 cells) to send as one JSON object, no pagination
+ * needed unlike the trace/history endpoints. */
+esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
+{
+    autotune_coupling_matrix_t m;
+    autotune_engine_get_coupling_matrix(&m);
+
+    /* Second term is the cells array, third is the RGA block appended below
+     * (n^2 Lambda values plus the zone map, or a refusal reason). HEAP, not
+     * stack: this runs on the same httpd_worker task as every handler above
+     * (measured at 64 bytes free of 8192 live) -- ~1.2KB of locals here adds
+     * to the same high-water mark those handlers do. Freed on every return
+     * path. */
+    const size_t json_cap = 64 + MAX31856_CHANNEL_COUNT * MAX31856_CHANNEL_COUNT * 96
+                           + 128 + MAX31856_CHANNEL_COUNT * MAX31856_CHANNEL_COUNT * 16;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(DASH_TAG, "GET /api/autotune_matrix: malloc(%u) failed for the response buffer",
+                 (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+    /* Report the zones this board actually HAS, not the number of MAX31856
+     * channels the hardware could carry. These differ whenever an operator
+     * has declared fewer thermocouples than are wired (thermo_count=1 on a
+     * 3-channel board is the bench's normal state), and every zones_config_*
+     * getter already refuses an index >= thermo_count -- so the extra rows
+     * and columns were cells that could never become valid, rendered as a
+     * 3x3 grid of "not measured yet" on a kiln with one zone. */
+    const uint8_t zone_count = zones_config_get_thermo_count();
+    size_t o = 0;
+
+    /* Self-clamping append via dashboard_json.c's shared json_append_clamped()
+     * -- snprintf returns the WOULD-BE length even when truncated, so an
+     * unguarded `o += snprintf(json+o, json_cap-o, ...)` lets `o` walk past
+     * `json_cap`; the next call's `json_cap - o` then wraps a size_t and
+     * writes out of bounds. This was a stack smash before this handler's
+     * buffer moved to the heap (coordinator review, 2026-08-31); it is a
+     * HEAP smash now, corrupting some other allocation instead of tripping a
+     * stack canary -- worse, not better, if it were ever reachable.
+     * Unreachable at MAX31856_CHANNEL_COUNT == 3 (this json_cap comfortably
+     * covers the ~400B the RGA block can produce), but json_append_clamped()
+     * clamps `o` back to `json_cap - 1` after EVERY call, not just once
+     * after the cells loop, so nothing downstream can ever see
+     * `o > json_cap - 1` again regardless of channel count -- and the same
+     * function is host-tested directly (test_dashboard_json.c) against a
+     * long chain of appends into a deliberately undersized buffer, which
+     * this handler itself cannot be (dashboard_json.h's own note on why
+     * dashboard_http.c doesn't compile on the host). */
+#define RGA_APPEND(...) (o = json_append_clamped(json, json_cap, o, __VA_ARGS__))
+
+    RGA_APPEND("{\"zone_count\":%u,\"cells\":[", (unsigned)zone_count);
+    bool first = true;
+    for (uint8_t i = 0; i < zone_count; i++) {
+        for (uint8_t j = 0; j < zone_count; j++) {
+            const autotune_coupling_cell_t *c = &m.cell[i][j];
+            if (!first) RGA_APPEND(",");
+            first = false;
+            if (c->valid) {
+                RGA_APPEND("{\"i\":%u,\"j\":%u,\"valid\":true,\"k\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f}", i, j,
+                    (double)c->model.k_gain_c_per_duty, (double)c->model.tau_s, (double)c->model.dead_time_s);
+            } else {
+                RGA_APPEND("{\"i\":%u,\"j\":%u,\"valid\":false}", i, j);
+            }
+            if (o >= json_cap - 1) break;
+        }
+    }
+
+    RGA_APPEND("]");
+
+    /* TODO.md 6A.5(c): the RGA rides along on the same response as the
+     * matrix it is derived from, rather than getting its own endpoint --
+     * one fetch, and the page can never render a Lambda computed from a
+     * different snapshot of K than the table above it is showing.
+     *
+     * When it can't be computed the response says so *and why* (empty
+     * matrix, hole in it, singular K), because "no RGA" has several
+     * distinct causes and only one of them ("nothing tuned yet") is
+     * expected: the others are telling the operator something about their
+     * kiln. `zones` maps Lambda's rows back to real zone numbers -- the
+     * sub-block used is not necessarily zones 0..n-1. */
+    autotune_rga_t rga;
+    autotune_engine_compute_rga(&m, &rga);
+    if (rga.valid) {
+        RGA_APPEND(",\"rga\":{\"available\":true,\"n\":%d,\"det\":%.4g,\"zones\":[",
+                   rga.n, (double)rga.determinant);
+        for (int a = 0; a < rga.n; a++) {
+            RGA_APPEND("%s%u", a ? "," : "", (unsigned)rga.zone_index[a]);
+        }
+        RGA_APPEND("],\"lambda\":[");
+        for (int a = 0; a < rga.n; a++) {
+            RGA_APPEND("%s[", a ? "," : "");
+            for (int b = 0; b < rga.n; b++) {
+                RGA_APPEND("%s%.4f", b ? "," : "", (double)rga.lambda[a][b]);
+            }
+            RGA_APPEND("]");
+        }
+        RGA_APPEND("]}");
+    } else {
+        /* An RGA describes how n>=2 control loops interact. On a board with
+         * fewer than two declared zones there is nothing to interact, so
+         * autotune_engine_compute_rga()'s generic "no 2 zones yet have every
+         * cross-gain between them measured" reads as "keep tuning and it
+         * will appear" -- it never will. Say which of the two it is. */
+        char rga_reason[sizeof(rga.invalid_reason) * 2 + 1];
+        if (zone_count < 2) {
+            json_escape("this kiln has fewer than 2 zones -- an RGA needs at least 2 interacting zones",
+                        rga_reason, sizeof(rga_reason));
+        } else {
+            json_escape(rga.invalid_reason, rga_reason, sizeof(rga_reason));
+        }
+        RGA_APPEND(",\"rga\":{\"available\":false,\"code\":%d,\"reason\":\"%s\"}",
+                   (int)rga.status, rga_reason);
+    }
+
+    RGA_APPEND("}");
+#undef RGA_APPEND
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, json, o < json_cap ? o : json_cap - 1);
+    free(json);
+    return ret;
+}
+
+esp_err_t autotune_start_post_handler(httpd_req_t *req)
+{
+    /* Raised from 64 when the relay method arrived: its form carries
+     * method/setpoint_c/relay_d/relay_h/rule on top of zone. */
+    if (req->content_len <= 0 || req->content_len > 192) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[193];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char zone_val[8], duty_val[16], method_val[12], sp_val[16], d_val[16], h_val[16], rule_val[20];
+    int zone_len = http_form_find_field(body, "zone", zone_val, sizeof(zone_val));
+    int duty_len = http_form_find_field(body, "step_duty", duty_val, sizeof(duty_val));
+    int method_len = http_form_find_field(body, "method", method_val, sizeof(method_val));
+    long zone = (zone_len > 0) ? strtol(zone_val, NULL, 10) : -1;
+    float step_duty = (duty_len > 0) ? strtof(duty_val, NULL) : 0.5f;
+    if (zone_len <= 0 || zone < 0 || zone > 255) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone missing or invalid");
+        return ESP_OK;
+    }
+
+    /* method is optional and defaults to the step test -- TODO.md 6A.4's
+     * recommendation is step-test-first, and the relay method oscillates the
+     * chamber on purpose. A caller that omits the field, or an older client
+     * that has never heard of it, must get the gentler test. Only the exact
+     * string "relay" opts in; anything else is refused rather than quietly
+     * falling back, so a typo cannot silently change which test runs. */
+    /* Parameter rejections take the same {"ok":false,"error":...} route the
+     * engine's own refusals do, rather than httpd_resp_send_err()'s HTML: the
+     * page parses this response as JSON and shows `error` verbatim, so an
+     * error sent the other way would reach the operator as a silent failure. */
+    char err_msg[128] = "";
+    bool params_ok = true;
+    bool started = false;
+    bool want_relay = false;
+    if (method_len > 0 && strcmp(method_val, "step") != 0) {
+        if (strcmp(method_val, "relay") == 0) {
+            want_relay = true;
+        } else {
+            params_ok = false;
+            snprintf(err_msg, sizeof(err_msg), "method must be \"step\" or \"relay\"");
+        }
+    }
+
+    if (params_ok && want_relay) {
+        int sp_len = http_form_find_field(body, "setpoint_c", sp_val, sizeof(sp_val));
+        int d_len = http_form_find_field(body, "relay_d", d_val, sizeof(d_val));
+        int h_len = http_form_find_field(body, "relay_h", h_val, sizeof(h_val));
+        int rule_len = http_form_find_field(body, "rule", rule_val, sizeof(rule_val));
+        /* 0 for d/h means "engine default" -- see autotune_engine.h. */
+        float setpoint_c = (sp_len > 0) ? strtof(sp_val, NULL) : 0.0f;
+        float relay_d = (d_len > 0) ? strtof(d_val, NULL) : 0.0f;
+        float relay_h = (h_len > 0) ? strtof(h_val, NULL) : 0.0f;
+        /* Tyreus-Luyben is the default rule, not Ziegler-Nichols: ZN targets
+         * quarter-amplitude decay, i.e. it is designed to leave the loop
+         * oscillating (pid_autotune.h). TL is roughly half the gain with a far
+         * longer integral time, which is the only one of the two worth having
+         * as a default on something that fires ware. */
+        autotune_rule_t rule = AUTOTUNE_RULE_TYREUS_LUYBEN;
+        if (rule_len > 0 && strcmp(rule_val, "zn") == 0) {
+            rule = AUTOTUNE_RULE_ZIEGLER_NICHOLS;
+        } else if (rule_len > 0 && strcmp(rule_val, "tl") != 0) {
+            params_ok = false;
+            snprintf(err_msg, sizeof(err_msg), "rule must be \"tl\" or \"zn\"");
+        }
+        if (sp_len <= 0) {
+            /* No default is possible here and inventing one would be the wrong
+             * kind of convenience: the operator is choosing the temperature the
+             * kiln will be held oscillating at. */
+            params_ok = false;
+            snprintf(err_msg, sizeof(err_msg), "relay method requires setpoint_c");
+        }
+        if (params_ok) {
+            started = autotune_engine_run_relay((uint8_t)zone, setpoint_c, relay_d, relay_h, rule, err_msg,
+                                                sizeof(err_msg));
+        }
+    } else if (params_ok) {
+        /* rule is optional on the step path too, and SIMC is the default --
+         * an omitted field, or an older client (PC tools, MCP autotune_start,
+         * test harnesses) that has never heard of this parameter, must get
+         * exactly today's behavior. Only "simc" and "cohen-coon" are valid
+         * here: ZN and Tyreus-Luyben are relay-only and are refused at this
+         * door rather than let through to autotune_engine_run(), which would
+         * refuse them anyway but only after the caller thinks the request was
+         * accepted -- see PID_EXPANSION_PLAN.md Phase 1 and §2a for why
+         * Cohen-Coon must stay opt-in, never the default, on a kiln. */
+        int step_rule_len = http_form_find_field(body, "rule", rule_val, sizeof(rule_val));
+        autotune_rule_t step_rule = AUTOTUNE_RULE_SIMC;
+        if (step_rule_len > 0 && strcmp(rule_val, "cohen-coon") == 0) {
+            step_rule = AUTOTUNE_RULE_COHEN_COON;
+        } else if (step_rule_len > 0 && strcmp(rule_val, "simc") != 0) {
+            params_ok = false;
+            snprintf(err_msg, sizeof(err_msg), "rule must be \"simc\" or \"cohen-coon\" on the step-test path "
+                                                "(zn/tl are relay-only)");
+        }
+        if (params_ok) {
+            started = autotune_engine_run((uint8_t)zone, step_duty, step_rule, err_msg, sizeof(err_msg));
+        }
+    }
+
+    if (!started) {
+        char json[192];
+        char err_escaped[128 * 2 + 1];
+        json_escape(err_msg, err_escaped, sizeof(err_escaped));
+        int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    }
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+esp_err_t autotune_abort_post_handler(httpd_req_t *req)
+{
+    autotune_engine_abort("aborted from web UI");
+    return httpd_resp_sendstr(req, "ok");
+}
+
+esp_err_t autotune_accept_post_handler(httpd_req_t *req)
+{
+    /* ack_unsettled is optional and defaults false -- an omitted body, or an
+     * older client that has never heard of this field, gets exactly the
+     * refuse-a-low-confidence-fit behavior autotune_engine_accept()'s own
+     * comment documents; only an explicit "1" opts in to persisting a fit
+     * that never genuinely settled. Same http_form_find_field() body-parse
+     * pattern autotune_start_post_handler() above already uses, not a new
+     * one. A body is optional here (the common case, accepting a genuinely
+     * settled fit, needs none), so a missing/empty body is not an error. */
+    bool ack_unsettled = false;
+    if (req->content_len > 0 && req->content_len < 64) {
+        char body[64];
+        size_t received = 0;
+        bool read_ok = true;
+        while (received < (size_t)req->content_len) {
+            int ret = httpd_req_recv(req, body + received, req->content_len - received);
+            if (ret <= 0) {
+                read_ok = false;
+                break;
+            }
+            received += (size_t)ret;
+        }
+        if (read_ok) {
+            body[received] = '\0';
+            char ack_val[4];
+            int ack_len = http_form_find_field(body, "ack_unsettled", ack_val, sizeof(ack_val));
+            ack_unsettled = (ack_len > 0) && (strcmp(ack_val, "1") == 0 || strcmp(ack_val, "true") == 0);
+        }
+    }
+
+    if (!autotune_engine_accept(ack_unsettled)) {
+        /* The specific reason (never settled / extrapolation didn't
+         * converge / tau inconsistent with the corrected gain) is in the
+         * ESP_LOGW autotune_engine_accept() itself already emitted -- see
+         * that function's own comment. This HTTP error stays generic
+         * because the page's own /api/autotune poll already shows the
+         * operator all three flags distinctly (model_settled/
+         * model_extrapolation_converged/model_tau_consistent) BEFORE they
+         * click Accept, which is the more useful place for that detail. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "no completed autotune result to accept, or it is not fully trustworthy "
+                            "yet (see the page for which condition) and needs ack_unsettled=1 to "
+                            "accept anyway");
+        return ESP_OK;
+    }
+    return httpd_resp_sendstr(req, "ok");
+}
+
+/* Streamed the same way history_csv_get_handler() is, for the same reason
+ * (see that function's comment) -- a single ~69KB one-shot buffer was tried
+ * first here too and is exactly the pattern that turned out to risk
+ * ESP_ERR_NO_MEM against this board's actual runtime-free heap. */
+#define AUTOTUNE_CSV_BATCH 128u
+
+esp_err_t autotune_trace_csv_get_handler(httpd_req_t *req)
+{
+    autotune_sample_t *batch = malloc(sizeof(autotune_sample_t) * AUTOTUNE_CSV_BATCH);
+    char *line = malloc(64);
+    if (!batch || !line) {
+        free(batch);
+        free(line);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"autotune_trace.csv\"");
+
+    int n = snprintf(line, 64, "elapsed_s,measurement_c\n");
+    esp_err_t err = httpd_resp_send_chunk(req, line, n > 0 ? (size_t)n : 0);
+
+    size_t start = 0;
+    while (err == ESP_OK) {
+        size_t got = autotune_engine_get_trace(batch, start, AUTOTUNE_CSV_BATCH);
+        if (got == 0) break;
+        for (size_t i = 0; i < got && err == ESP_OK; i++) {
+            n = snprintf(line, 64, "%.1f,%.2f\n", (double)batch[i].t_s, (double)batch[i].measurement_c);
+            err = httpd_resp_send_chunk(req, line, n > 0 ? (size_t)n : 0);
+        }
+        start += got;
+        if (got < AUTOTUNE_CSV_BATCH) break;
+    }
+    free(batch);
+    free(line);
+    if (err == ESP_OK) {
+        httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return ESP_OK;
+}
+

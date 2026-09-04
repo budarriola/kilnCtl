@@ -219,6 +219,14 @@ idf_component_register(SRCS "MAX31856.c"
                        "nvs_report.c"
                        "factory_reset.c"
                        "dashboard_http.c"
+                       # dashboard_http.c split 2026-09-04 (ROADMAP.md M15,
+                       # the 1500-line rule) -- see
+                       # dashboard_http_internal.h's own doc comment for the
+                       # file map.
+                       "dashboard_status_http.c"
+                       "dashboard_settings_http.c"
+                       "dashboard_exec_http.c"
+                       "dashboard_autotune_http.c"
                        "dashboard_json.c"
                        "diagnostics_http.c"
                        "partition_info_http.c"
