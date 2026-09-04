@@ -129,11 +129,29 @@ false. Read anything about relay behaviour with that in mind.
   threshold, not a kiln limit** -- it must come out before a real kiln, and it
   is a concrete instance of `SaftyFW/TODO.md` phase 9's "confirm no test
   threshold was left in place".
-- **The safety processor is NOT enforcing it.** Its `abs_max_temp_c` reads
+- **CORRECTED 2026-09-04, verified read-only against the live board
+  (`GET /api/safety/commissioning`):** the safety processor's `abs_max_temp_c`
+  no longer reads 0. It is now `{"set":true,"value":80}`, `commissioned:true`,
+  config CRC not stale. Something (this pass did not trace exactly what --
+  most likely the commissioning-gate interlock, `GUARD_TEST_MATRIX.md` §8)
+  has since commissioned it. S1 is therefore now ARMED: `safety_guards.c`
+  (`SAFETY_TRIP_OVERTEMP`, gated on `cfg->abs_max_temp_c > 0.0f`) will trip
+  and de-energize K4 independently of the ESP on the 3rd consecutive reading
+  above `min(abs_max_temp_c, firing_max_c + firing_margin_c)`. That ceiling
+  (80C) currently equals, not undercuts, the ESP-side zones' own
+  `max_temp_c` (also 80) -- real independent backstop, but not a tighter
+  second line of defense. See `docs/SAFETY_CASE.md` §2 (H1 row) and §3.1 for
+  the full verification and an OWNER-DECISION recommendation to commission a
+  tighter value (~70C) given this rig has never fired above 60C. The
+  original note below is preserved for history; it no longer describes the
+  live board.
+  <details><summary>Original 2026-08-28 note (superseded)</summary>
+  The safety processor was NOT enforcing it. Its `abs_max_temp_c` read
   `set: true, value: 0`, and 0 there means never trip -- so the only ceiling in
-  force runs on the same processor that commands the heat. `/api/readiness`
-  reporting "all 58 safety parameters have values" is what hid this: it counts
-  a zero as a value, while `commissioned` right beside it says `false`.
+  force ran on the same processor that commands the heat. `/api/readiness`
+  reporting "all 58 safety parameters have values" is what hid this: it counted
+  a zero as a value, while `commissioned` right beside it said `false`.
+  </details>
 - Relay 4 is currently held closed by rule `R0 (TEMP zone0 >= 25)`, a leftover
   bench rule whose condition is satisfied at ambient. Deleting the rules engine
   (below) will open it.

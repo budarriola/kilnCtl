@@ -48,7 +48,7 @@ mitigates it beyond operator diligence).
 
 | Hazard | Guard(s) / measure | Residual risk |
 |---|---|---|
-| H1 overheat | **G:** S1 (`abs_max_temp_c` ceiling), S2 (overshoot-sustained), S8 (rate-of-rise). **KilnFW:** thermal_guard guards 1,2,4,5,7 (per-zone, only while `profile_executor` runs that zone) | S1 and S8 both ship **disabled by default** (`abs_max_temp_c`=0, `max_rate_c_per_min`=0 — "0 = never trip" is deliberate, not a bug). An uncommissioned board has **no absolute temperature ceiling in force** at all until an operator sets one. KilnFW's per-zone guards only run while a profile is actively driving that zone — a direct `THERMO_CMD_READ`/dashboard-only session outside a running profile gets no thermal protection from KilnFW at all (`SAFETY_MODEL.md`, "What does NOT enforce it yet"). |
+| H1 overheat | **G:** S1 (`abs_max_temp_c` ceiling), S2 (overshoot-sustained), S8 (rate-of-rise). **KilnFW:** thermal_guard guards 1,2,4,5,7 (per-zone, only while `profile_executor` runs that zone) | **Verified live 2026-09-04 (`GET /api/safety/commissioning`, read-only): S1 is ARMED, `abs_max_temp_c`=80, `set:true`, `commissioned:true` on the current bench board — this has changed since the 2026-08-28 note below and in `firmware/KilnFW/TODO.md`, which described `abs_max_temp_c`=0 (never-trip).** S8 (`max_rate_c_per_min`) remains at 0 = disabled, deliberately, pending a measured full-power ramp (see §3.2). With S1 armed, a runaway is independently backstopped: `safety_guards.c` (`SAFETY_TRIP_OVERTEMP`, ~line 603) computes `ceiling = min(abs_max_temp_c, firing_max_c + firing_margin_c)` and trips on the 3rd consecutive over-ceiling reading (~300ms), which de-energizes K4 on the RP2040 side — independent of the ESP32-S3 regardless of what the ESP keeps commanding. Today that ceiling (80°C) equals, not undercuts, the ESP-side zones' own `max_temp_c` (also 80), so S1 is real protection against a runaway but not a *tighter* independent limit — see the owner-decision recommendation in §3.1. KilnFW's per-zone guards only run while a profile is actively driving that zone — a direct `THERMO_CMD_READ`/dashboard-only session outside a running profile gets no thermal protection from KilnFW at all (`SAFETY_MODEL.md`, "What does NOT enforce it yet"). |
 | H2 dry-fire / disconnected sensor | **G:** S5 (sensor validity, graduated WARN→TRIP), S11 (frozen sensor + heat commanded). **KilnFW:** thermal_guard guard 6 (per-zone, profile-running only) | S5/S11 need `ct_installed`/current sensing wired for S11's `heat_commanded` input; both are reachable in source (§6c below) but **not yet hardware-verified post-fix**. KilnFW's guard 6 only covers the profile-running window, same gap as H1. |
 | H3 welded contactor | **G:** S9 (`TRIP_INEFFECTIVE`, unconditional, never operator-clearable) | S9 is gated on `current_sensing_commissioned` — inert on a CT-less board (§9 of the matrix). **Never provoked with a genuinely welded contactor on real hardware** — ROADMAP.md M4 flags this as blocked on a hardware jig that injects real AC current through the CT loop; no such jig exists in this repo. Argued and host-tested only. |
 | H4 shock during service | **P:** physical isolation, TVS/current-limiting on input rails (`hardware/mainBoard/Power.kicad_sch`), K4 mechanical contactor | Standard practice, not re-verified as part of this pass — hardware review, out of scope here. Accepted as adequately covered by physical design, not by firmware. |
@@ -67,21 +67,47 @@ This system does **not** protect against, or protects only partially against,
 the following. Each was checked against code/docs before being written down
 here; none is copied from an unverified summary.
 
-1. **An uncommissioned board has no temperature ceiling.** `abs_max_temp_c`
-   defaults to 0, which `safety_guards.h`'s own convention reads as "not
-   commissioned, never trip" — this is a deliberate design choice (fail loud
-   at commissioning time, not fail dangerous with a guessed default), but it
-   means S1 is a no-op until an operator explicitly sets it. The
-   commissioning-gate interlock (`GUARD_TEST_MATRIX.md` §8, closed 2026-08-28)
-   now refuses to grant heat at all until the required fields including
-   `abs_max_temp_c` are set — **this closes the specific hole** of firing
-   with S1 silently off, but does not change that S1 itself has no built-in
-   floor.
+1. **An uncommissioned board has no temperature ceiling — but this board is
+   now commissioned.** `abs_max_temp_c` DEFAULTS to 0, which
+   `safety_guards.h`'s own convention reads as "not commissioned, never
+   trip" — a deliberate design choice (fail loud at commissioning time, not
+   fail dangerous with a guessed default). That was this bench board's
+   documented state on 2026-08-28 (`firmware/KilnFW/TODO.md`, and this
+   file's own hazard row above, both said `set: true, value: 0`). **Verified
+   live 2026-09-04, read-only, via `GET /api/safety/commissioning`
+   (`firmware/KilnFW/App/drivers/safety_cfg_http.c`'s
+   `commissioning_get_handler`) against the running board: `abs_max_temp_c`
+   is now `{"set":true,"value":80}`, `commissioned:true`, config CRC
+   matched (not stale).** Confirmed against source, not assumed: reading
+   `firmware/SaftyFW/src/safety_guards.c` (READ ONLY) shows S1's trip test
+   is gated on `cfg->abs_max_temp_c > 0.0f`
+   (`SAFETY_TRIP_OVERTEMP`/`abs_max_temp_c`, ~line 603-631) — with the value
+   now 80, S1 is live: it computes
+   `ceiling = min(abs_max_temp_c, firing_max_c + firing_margin_c)` and trips
+   on the 3rd consecutive tick over that ceiling, de-energizing K4
+   independently of the ESP32-S3. The commissioning-gate interlock
+   (`GUARD_TEST_MATRIX.md` §8, closed 2026-08-28) is presumably what caused
+   this to get set, though this pass did not trace exactly when/how it was
+   commissioned — only that it now is. **Owner decision needed:** the
+   commissioned ceiling (80°C) is identical to, not tighter than, the
+   ESP-side zones' own `max_temp_c` (80°C) — real backstop against the ESP
+   continuing to command heat, but not a second, lower line of defense. This
+   rig has never been recorded firing above 60°C. Recommend commissioning
+   `abs_max_temp_c` down to roughly 70°C (60°C highest recorded + headroom,
+   comfortably under the fixture's 80°C wiring/component rating) so S1
+   becomes a genuinely independent, tighter ceiling rather than a mirror of
+   the primary controller's own limit. This is an OWNER DECISION — no
+   safety configuration was written as part of this verification pass.
 
-2. **S8 (rate-of-rise) ships permanently at 0 = disabled** until an operator
-   measures a real full-power ramp on this specific kiln and commissions a
-   threshold at roughly 2x it. No such measurement is on record in this repo
-   as of this writing.
+2. **S8 (rate-of-rise), S13 (borrowed-TC-stale) and S14 (overcurrent) remain
+   commissioned OFF today**, confirmed by the same live read: `max_rate_c_per_min`=0
+   (S8, disabled, same 0-means-never-trip convention as S1 used to be),
+   `tc_source`=0/`OWN_J7` (S13's BORROWED_ZONE/BOTH gate, not engaged), and
+   `ct_installed`=0 with `i_normal_a[0..2]` unset (S14 — WARN-only by design
+   regardless, not a trip guard, `safety_guards.c` ~line 930-960). These are
+   dormant by design/commissioning gap, not defects — see
+   `GUARD_TEST_MATRIX.md` §6/§9 for the existing analysis, unchanged by this
+   pass.
 
 3. **The E-stop input is not exercised by a physical stop action on a
    freshly-built board.** Verified against `HARDWARE.md` §5 and the schematic
