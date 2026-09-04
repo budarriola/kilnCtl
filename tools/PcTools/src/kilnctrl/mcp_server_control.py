@@ -67,18 +67,93 @@ from . import mcp_server as _srv
 #
 # Manual relay control is NOT here -- see io_set_relay/io_set_relay_mask.
 # ---------------------------------------------------------------------------
+def _control_resolve_host(host: Optional[str]) -> str:
+    """Same discovery convention as ota_http.py's ``_ota_resolve_host()``:
+    an explicit `host` always wins; otherwise prefer the board's current
+    Wi-Fi station IP (read over the UART link, which works even with Wi-Fi
+    down), falling back to the fixed fallback-AP address."""
+    if host:
+        return host
+    try:
+        status = _srv._wifi.get_status()
+        if status.sta_connected and status.sta_ip:
+            return status.sta_ip
+    except WifiUartQueryError:
+        pass
+    return ota_http.OTA_AP_DEFAULT_HOST
+
+
+def _describe_coupling_matrix(zones_json: dict) -> str:
+    """Render the coupling matrix from a GET /api/zones JSON body.
+
+    Orientation is c[i][j] = how much zone i's (the AFFECTED zone's)
+    temperature moves per unit of zone j's (the STEPPED zone's) actuation --
+    zones_http.c emits it that way, and it is the same orientation
+    coupling_workflow.py/coupled_ident.py assume. The diagonal is always 0
+    (the firmware force-ranges the diagonal cell to exactly 0 -- see
+    zones_http_client.py's _ZONE_COUPLING_CELL_RE comment). This orientation
+    is easy to get backwards -- test_zones_http_client.py carries
+    test_TRANSPOSED_mapping_is_caught_by_this_test because it happened once
+    already -- so the row/col meaning is spelled out here rather than left
+    implicit."""
+    zones = zones_json.get("zones", [])
+    n = len(zones)
+    lines = [
+        "coupling matrix (row i = AFFECTED zone, column j = STEPPED zone; "
+        "c[i][j] = how much zone i's temperature moves per unit of zone j's "
+        "actuation; diagonal is always 0):"
+    ]
+    for i, z in enumerate(zones):
+        cells = [z.get(f"coupling_c{j}") for j in range(n)]
+        cells_str = ", ".join(
+            "0" if c == 0 else (f"{c:.2f}" if isinstance(c, (int, float)) else "?")
+            for c in cells
+        )
+        lines.append(f"  z{i}: [{cells_str}]")
+    diag_bits = []
+    for i, z in enumerate(zones):
+        k_dc = z.get("coupling_diag_k_dc")
+        if k_dc == 0.0:
+            diag_bits.append(f"z{i}=0.0 (never identified on hardware)")
+        else:
+            diag_bits.append(
+                f"z{i}={k_dc:.4f} (measured, but firmware's "
+                "s_coupling_use_measured_diag_k_dc is compiled false -- not "
+                "currently used even though present)"
+            )
+    lines.append("coupling_diag_k_dc: " + "  ".join(diag_bits))
+    return "\n".join(lines)
+
+
 @_srv._tool()
-def control_get_zones() -> str:
+def control_get_zones(host: Optional[str] = None) -> str:
     """Read every zone's current PID/model config, calibration offset and
-    temperature limits, plus the thermocouple and relay counts."""
+    temperature limits, plus the thermocouple and relay counts.
+
+    Also fetches the per-zone coupling matrix (coupling_c0.., a first-class
+    control parameter -- which matrix is live measurably changes tracking
+    IAE) and coupling_diag_k_dc over HTTP GET /api/zones, since neither is
+    on the UART CONTROL wire. Host is auto-resolved the same way the OTA
+    tools do (board's Wi-Fi station IP, falling back to the fallback-AP
+    address); pass `host` explicitly for kilnctl.local or a board reachable
+    only from a different network than this link. If the HTTP fetch fails
+    the PID/model section above is still returned, with the coupling
+    section noting why it's missing."""
     try:
         thermo_count, relay_count, zones = _srv._control.get_zones()
     except ControlQueryError as exc:
         return f"error: {exc}"
     header = f"{thermo_count} thermocouple(s), {relay_count} relay(s)"
-    if not zones:
-        return header
-    return header + "\n" + "\n".join(z.describe() for z in zones)
+    body = header
+    if zones:
+        body += "\n" + "\n".join(z.describe() for z in zones)
+
+    resolved_host = _control_resolve_host(host)
+    try:
+        zones_json = zones_http_client.get_zones(resolved_host)
+    except zones_http_client.ZonesHttpError as exc:
+        return body + f"\ncoupling matrix: unavailable ({exc}, host={resolved_host})"
+    return body + "\n" + _describe_coupling_matrix(zones_json)
 
 
 @_srv._tool()
