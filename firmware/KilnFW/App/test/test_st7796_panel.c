@@ -139,24 +139,18 @@ typedef struct {
 
 static void test_st7796_init_table_transcription(void)
 {
-    TEST_SECTION("ST7796 init table: vendor transcription PLUS one deliberate deviation (INVON)");
+    TEST_SECTION("ST7796 init table: exact transcription of ST7796_Init.txt");
 
-    /* DEVIATION FROM BYTE-FOR-BYTE, confirmed 2026-09-04 by camera capture
-     * (tools/PcTools/scripts/capture_lcd.ps1), not a transcription slip:
-     * the vendor's own LCD_Init() never sends INVON/INVOFF (0x21/0x20) at
-     * all, leaving the panel on its power-on-reset inversion default. On
-     * this physical MSP4031 unit that default renders the whole UI
-     * INVERTED (a near-black theme showed as a near-white/pale screen --
-     * background, top bar, graph field and Start button all wrong in the
-     * same direction, the signature of inversion rather than a channel/hue
-     * problem). Sending an explicit INVON (0x21, no params) right before
-     * the vendor's own trailing NORON/SLPOUT/DISPON fixed it: the SAME
-     * camera capture, same board, after this one change, showed the
-     * background genuinely dark again. This test now asserts the
-     * WITH-INVON table (23 steps) as the real, deliberately-deviated-from
-     * source, not the raw vendor dump (22 steps) -- see
-     * DISPLAY_ST7796_PLAN.md's 2026-09-04 entries for the full bisect log
-     * and both captures. */
+    /* 2026-09-04: an INVON (0x21) was added here, then removed, during this
+     * same session's bisect -- the first attempt was confounded by a
+     * separate RGB565 byte-order bug (panel_codec.c) that made every
+     * INVON/no-INVON, BGR/RGB combination look wrong for the wrong reason.
+     * With that bug fixed, a fresh capture showed the background still
+     * rendering light where the theme (UI_THEME_COLOR_BG_HEX 0x1a1f2b,
+     * ui_theme.h) is near-black -- being re-tested with INVON OUT, back to
+     * the vendor's exact byte-for-byte transcription, to re-isolate
+     * inversion now that it is no longer confounded. See
+     * DISPLAY_ST7796_PLAN.md's 2026-09-04 entries for the full bisect log. */
 
     static const uint8_t e0_params[] = { 0xF0, 0x09, 0x13, 0x12, 0x12, 0x2B, 0x3C, 0x44,
                                           0x4B, 0x1B, 0x18, 0x17, 0x1D, 0x21 };
@@ -181,16 +175,14 @@ static void test_st7796_init_table_transcription(void)
         { 0xB4, 1, NULL }, { 0xB7, 1, NULL }, { 0xC5, 1, NULL }, { 0xE4, 1, NULL },
         { 0xE8, 8, e8_params }, { 0xC2, 0, NULL }, { 0xA7, 0, NULL },
         { 0xE0, 14, e0_params }, { 0xE1, 14, e1_params },
-        { 0xF0, 1, NULL }, { 0xF0, 1, NULL },
-        { 0x21, 0, NULL }, /* INVON -- the deliberate deviation, see above */
-        { 0x13, 0, NULL }, { 0x11, 0, NULL }, { 0x29, 0, NULL },
+        { 0xF0, 1, NULL }, { 0xF0, 1, NULL }, { 0x13, 0, NULL }, { 0x11, 0, NULL }, { 0x29, 0, NULL },
     };
     /* The single-byte params, in the same order as `expected` above (index
      * -1 for multi-byte/zero-byte steps, where this array's entry is
      * unused). */
     const uint8_t single_byte_params[] = {
         0xC3, 0x96, 0x48, 0x05, 0x80, 0, 0, 0, 0x00, 0xC6, 0x1C, 0x31,
-        0, 0, 0, 0, 0, 0x3C, 0x69, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0x3C, 0x69, 0, 0, 0,
     };
     (void)one;
 
@@ -230,18 +222,17 @@ static void test_st7796_init_table_transcription(void)
         }
     }
     TEST_CHECK(offset == panel->init_len,
-               "ST7796 init table: decoder consumes every byte -- exactly 23 steps (22 vendor + "
-               "1 deliberate INVON), nothing left over");
+               "ST7796 init table: decoder consumes every byte -- exactly 22 steps, nothing left over");
 
     /* NEGATIVE TEST: proves the step count above is a real assertion, not
-     * vacuous -- decoding must NOT succeed for a 24th step past the real
+     * vacuous -- decoding must NOT succeed for a 23rd step past the real
      * table's end. */
     {
         uint8_t cmd, plen;
         const uint8_t *params;
         TEST_CHECK(panel_codec_init_step(panel->init_seq, panel->init_len, &offset,
                                           &cmd, &params, &plen) == false,
-                   "ST7796 init table NEGATIVE: no 24th step exists past the transcribed 23");
+                   "ST7796 init table NEGATIVE: no 23rd step exists past the transcribed 22");
     }
 }
 

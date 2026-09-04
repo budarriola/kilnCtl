@@ -88,23 +88,20 @@ static const uint8_t st7796_init_bytes[] = {
               0x4D, 0x0B, 0x17, 0x17, 0x1D, 0x21,
     0xF0, 1, 0x3C,
     0xF0, 1, 0x69,
-    /* RE-ADDED 2026-09-04 (third time this day, now under an actual camera
-     * capture instead of relayed verbal description): tools/PcTools/scripts/
-     * capture_lcd.ps1 on the PRE-INVON build (commit 0c38bbc, BGR=0x08, no
-     * INVON) showed the whole UI rendering PALE -- near-white background,
-     * light-blue top bar, a solid bright-green home graph, pale-cyan Start
-     * button -- against a UI theme whose real background is near-black.
-     * That is a straightforward display INVERSION symptom (dark reads as
-     * light, uniformly, across the whole frame), not a channel-order
-     * symptom (which would preserve luminance and only swap which channel
-     * is bright). This is exactly the vendor's own LCD_Init() gap (it never
-     * sends INVON/INVOFF at all, leaving the panel on its power-on-reset
-     * default) -- re-added ONE variable at a time, color_order_bit left at
-     * 0x08 (BGR, unchanged from the prior flash) so this flash tests
-     * inversion alone. Capture again after this flash before touching
-     * color_order_bit -- see DISPLAY_ST7796_PLAN.md's 2026-09-04 entries
-     * for the full bisect log. */
-    0x21, 0,
+    /* REMOVED 2026-09-04, fourth pass on this same table: the INVON added
+     * just above (see git blame for that comment's own history) was tested
+     * while panel_codec.c's RGB565 byte-order bug (see that file's own
+     * comment) was STILL PRESENT -- so every earlier INVON/BGR combination
+     * this session tried was confounded by a second, larger bug and is not
+     * usable evidence. With the byte-order bug now fixed, the coordinator's
+     * own capture against that build showed the background rendering LIGHT
+     * CYAN against this UI theme's near-black design (UI_THEME_COLOR_BG_HEX
+     * 0x1a1f2b, ui_theme.h) -- still an inversion symptom (whole-page
+     * luminance flipped), so INVON is coming back OUT to re-isolate that
+     * variable now that it is no longer confounded. If removing INVON does
+     * NOT restore a near-black background, or restores it but breaks hues,
+     * capture and report both outcomes rather than guessing further -- see
+     * DISPLAY_ST7796_PLAN.md's 2026-09-04 entries for the full bisect log. */
     0x13, 0,
     0x11, 0,
     0x29, 0,
