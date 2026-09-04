@@ -2551,6 +2551,72 @@ same document's own 2026-08-29/30 bench sections contradict.
       exception at the heaviest/most-shelved corner (4.0x mass, 0.7x
       coupling) — not large enough to change this section's conclusion.
 
+### 3.6b A/B reachability audit, prompted by the fuzzy-PID inert campaign (2026-09-04)
+
+The fuzzy-PID finding above (§3.6, "control_mode:2" bug) forced the question:
+**has the same flaw silently voided any other paired-run conclusion in this
+project?** A campaign whose varied preset field never reaches the control
+path produces a confident "no difference" that means nothing.
+
+**`ease_off_window_mult` campaign (`logs/coupling/easeoff_ab_20260904_report.md`,
+commit `5c1542e`) — audited, VALID, not inert.** Traced the consumer
+(`zone_taper_climb_rate()` in `profile_executor_feedforward.c`, called from
+`profile_executor_pid_tick.c` ~79-86): the gate is `!s_exec.dwelling &&
+ff_rate != 0.0f` plus `z->ff_dead_time_s > 0.0f` inside the taper function —
+**no `control_mode` gate**, unlike the fuzzy layer. Both `easeoff_ab_3p0` and
+`easeoff_ab_2p0` presets carry real per-zone identified models (`ff_enabled`
+true) and differ only in `ease_off_window_mult`; no second shared field gates
+it out. The captured `.jsonl` logs show real ~150-175s ramp segments with
+`dwelling==False` in every run of both arms, and `window_s = mult *
+ff_dead_time_s` (105.6s at 2.0x vs 158.4s at 3.0x for z0) falls inside that
+ramp length in both arms — the taper mechanically engages differently
+between arms, over a meaningful fraction of every ramp. The campaign's
+"indistinguishable" verdict reflects a genuinely small, noise-dominated
+effect (the multiplier only shifts *when* within the ramp's final dead-time
+multiples the taper starts, not whether one exists), not a wiring defect.
+**No retraction — the "no board change" conclusion and the guidance not to
+re-run this specific comparison without new information both stand.** One
+gap found in the process, not the conclusion: the campaign's captures kept
+only `exec`/`status` snapshots, not the finer-grained `bd_ff_rate_pretaper`/
+`bd_ff_rate_posttaper` fields `dashboard_json.c` already exposes, so the
+taper fraction itself could not be read back byte-for-byte from these logs —
+addressed by the standing pre-flight check below, which asks for exactly
+that field, live, before the fact rather than after.
+
+**Other paired-run conclusions that changed a setting or closed an item**
+(§3.2's coupling-matrix six-firing A/B, §3.9's tuning-method campaign) were
+spot-checked for a `control_mode`-shaped gate on their own varied field
+(`coupling_coeff` is read unconditionally by `zone_coupling_solve.c` once a
+zone qualifies as a coupling neighbour, which is not itself
+`control_mode`-gated beyond requiring a non-faulted, non-heat-blocked,
+`ff_enabled` zone — satisfied by both arms) and found no equivalent bug; both
+already carry their own extensive noise-floor/multiplicity discipline (§3.2,
+§3.9) independent of this audit. Not re-verified line-by-line to the same
+depth as the ease-off trace above — flagged here rather than re-litigated,
+since neither conclusion moved.
+
+**Standing pre-flight check — required before any future control-law A/B on
+this board:** before committing kiln time to a new paired-run campaign,
+prove from a **running** profile, live, that the varied preset field
+actually reaches the control law and differs between arms in real telemetry
+— not just that the preset JSON differs, and not just "verified by
+readback" of the field itself (that is exactly what the fuzzy-PID bug's
+original "verified" claim did: it read back `fuzzy_strength_pct`, the field
+that was set, not `control_mode`, the field that gated it). Concretely:
+apply arm A, start the profile, sample the relevant `bd_*` breakdown field
+(`GET /api/control`'s `duty_breakdown`, e.g. `bd_kp_effective`/
+`bd_ff_rate_posttaper`/`bd_coupling_correction` as applicable) a few times
+live, apply arm B, sample again, and confirm the sampled value differs
+between arms in a way consistent with the parameter under test — not merely
+that the config readback shows the new value. Stop the proof-firing before
+it runs long enough to matter thermally. This is the same discipline §3.6's
+"Live proof before restarting kiln time" subsection already used to re-open
+the fuzzy campaign; it is now required, not incidental, for every future A/B
+in this section. A campaign whose own captures cannot show this after the
+fact (as `ease_off_window_mult`'s could not, above) should capture the
+relevant `bd_*` fields going forward so the proof survives in the log, not
+only in a pre-flight check that happened once and was not recorded.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer

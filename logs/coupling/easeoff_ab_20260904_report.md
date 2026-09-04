@@ -82,3 +82,57 @@ firmware default, `ZONE_EASE_OFF_WINDOW_MULT_DEFAULT` in
   `logs/coupling/easeoff_ab_20260904_pair3.txt`
 - Run queue log: `logs/coupling/easeoff_ab_20260904_run_queue.log`
 - Raw captures (gitignored): `logs/coupling/easeoff_ab_20260904_{2p0,3p0}_run{1,2,3}.jsonl`
+
+## Post-hoc reachability audit (2026-09-04, after the fuzzy-PID inert-campaign discovery, commit 8906686)
+
+The fuzzy-PID campaign's presets both pinned `control_mode: 2`, so the fuzzy
+layer (only reachable under `control_mode: 3`/`PID_FUZZY`,
+`profile_executor.c` ~827-847) never ran, and two campaigns' worth of kiln
+time compared plain PID against itself. That discovery required auditing
+every other paired-run conclusion for the same class of bug: a varied preset
+field that never reaches the code path it is supposed to affect. This
+campaign was checked:
+
+1. **Gate trace.** `ease_off_window_mult` is read in
+   `firmware/KilnFW/App/drivers/profile_executor_feedforward.c`
+   (`zone_taper_climb_rate()`, via `zones_config_get_ease_off_window_mult()`)
+   and consumed only from `profile_executor_pid_tick.c` (~79-86). The call
+   site's gate is `!s_exec.dwelling && ff_rate != 0.0f` (i.e. actively
+   ramping, not dwelling and not stalled) plus, inside
+   `zone_taper_climb_rate()` itself, `z->ff_dead_time_s > 0.0f` (the zone
+   must have an identified plant model, i.e. `ff_enabled`). Unlike the fuzzy
+   bug, **this path is not gated by `control_mode` at all** -- it runs
+   identically for `control_mode: 2` (plain PID) and `3` (PID_FUZZY), so the
+   fact both presets used plain PID does not disable it.
+2. **Preset check.** Both `easeoff_ab_3p0_20260903` and
+   `easeoff_ab_2p0_20260903` carry real, non-zero `model_k_dc`/`model_tau_s`/
+   `model_dead_time_s` per zone (so `ff_enabled` is true for all three
+   zones), and differ **only** in the top-level `ease_off_window_mult`
+   (3.0 vs 2.0) -- no second field, matching the fuzzy bug's `control_mode`,
+   is shared between the two arms in a way that would gate this one out.
+3. **Capture check.** The captured `.jsonl` files carry `exec`/`status`
+   snapshots, not the finer-grained `bd_ff_rate_pretaper`/
+   `bd_ff_rate_posttaper` breakdown fields `dashboard_json.c` exposes --
+   those were not selected for this capture, so the taper fraction itself
+   cannot be read back byte-for-byte from these logs (a gap worth fixing,
+   see the pre-flight check below). What the captures *do* show is that
+   `s_exec.dwelling == False` with non-zero `target_c` movement for
+   ~150-175s per ramp segment in every run of both arms (e.g. `2p0_run1`
+   segment 0: 25.3C -> 40C over 172s; `3p0_run1` segment 0: 26.4C -> 40C
+   over 156s) -- i.e. the gate conditions (`!dwelling`, `ff_rate != 0`) were
+   genuinely satisfied on real hardware in both arms, not just in theory.
+   With z0's identified dead time at 52.8s, `window_s = mult * dead_time_s`
+   is 105.6s (2.0x) vs 158.4s (3.0x) -- both comfortably inside the ~150-175s
+   ramp length, so the taper mechanically DOES engage differently between
+   arms (a longer window starts tapering earlier and more aggressively) over
+   a meaningful fraction of every ramp, not just at its very tail.
+4. **Verdict: VALID, not inert.** `ease_off_window_mult` reached the control
+   law in both arms of every one of the six firings. This is a different
+   finding from the dwell-credit/PWM-chopping cases (features that are
+   *structurally* unreachable under the conditions tested): here the term
+   was live and differed by design; the campaign's "indistinguishable"
+   result reflects a genuinely small and noise-dominated effect (the
+   multiplier only changes *when within a ~2-3 dead-time window of segment
+   end* the taper starts, not whether it exists), not a wiring defect. The
+   original verdict, the "no board change" conclusion, and the "do not
+   re-run without a reason" guidance all stand. No retraction.
