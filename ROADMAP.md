@@ -614,11 +614,21 @@ soldering session.
       `TODO.md`'s spi_owner unbounded-wait entry), 2 (panel codec extracted),
       3 (`panel_spi`/`st7796_panel` split, Kconfig-selectable) and 5 (FT6336U
       touch abstraction, unvalidated on hardware) landed 2026-09-01/02.
-      Phases 4 (auto-detection) and 6 (SPI DMA) are in progress. Phase 0's
-      blocking hardware measurements (STOP-block 5V I2C hazard, RDDID bytes)
-      are still open, and the module has not yet touched J2. The only
-      hardware change required remains a custom harness; the main board
-      itself needs no modification
+      Phase 4 (auto-detection) is done ahead of hardware: the detection logic
+      is host-tested and wired into `panel_spi.c`, and is correctly inert
+      today because both descriptors' `id_matches` stay NULL — the ILI9488's
+      Sec.4 RDDID bytes were captured 2026-09-03 (`0x00 0x00 0x00`, MISO
+      undriven, i.e. permanently unmatchable) and the ST7796's have never
+      been read since the module has not touched J2. Phase 6 (SPI DMA) is
+      also done ahead of hardware: 9.2/9.5/9.9 landed; 9.3 (PSRAM DMA), 9.4
+      (hardware CS), 9.6 (async flush) and 9.7 (zero-copy flush) landed
+      compiled-in but default-OFF behind their own Kconfig symbols; 9.1's
+      instrumentation landed (`flush_last_us`/`flush_max_us`/`flush_count` on
+      `GET /api/status`) though 9.1b's number is not yet recorded live; 9.8
+      needed no code. Phase 0's blocking hardware measurements (STOP-block 5V
+      I2C hazard, ST7796 RDDID bytes) are still open, and the module has not
+      yet touched J2. The only hardware change required remains a custom
+      harness; the main board itself needs no modification
 - [ ] **HW change: relay status LEDs** for K1–K4, S9
 - [ ] **HW change: distinct connector types** for the thermocouple daughterboards
       vs. main-board connectors

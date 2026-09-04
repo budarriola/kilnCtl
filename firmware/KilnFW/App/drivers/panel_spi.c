@@ -2149,10 +2149,14 @@ esp_err_t ILI9488_read_id(ILI9488Class *disp, uint8_t out_id[3])
  * init_seq/init_len point at ili9488_init_bytes[] above, the same values
  * ili9488_init_sequence[] held in Phase 2, transcribed into the packed
  * format panel_codec_init_step() decodes -- see that array's own comment.
- * id_matches stays NULL: Sec.4's "RDDID bytes from the ILI9488 on this
- * wiring" line is still an open checkbox, and per Sec.6 Step 3, a matcher
- * must be written against bytes actually read off this board, never
- * datasheet nominal values. That is Phase 4's job. */
+ * id_matches stays NULL, permanently: Sec.4's "RDDID bytes from the ILI9488
+ * on this wiring" line was recorded 2026-09-03 as 0x00 0x00 0x00 (MISO not
+ * driven on the read device handle) -- panel_detect_id_equals() refuses to
+ * match on an all-0x00/all-0xFF triple by construction (that is "the read
+ * failed", not "this is the ID"), so a matcher for this row would be dead
+ * code. Per Sec.6 Step 3 a matcher must be written against bytes actually
+ * read off this board, never datasheet nominal values, and no usable bytes
+ * exist for this panel on this board. */
 static const panel_desc_t ili9488_panel_desc = {
     .name = "ILI9488",
     .panel_width = ILI9488_PANEL_WIDTH,

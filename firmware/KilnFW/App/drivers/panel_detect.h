@@ -8,19 +8,25 @@
 // test binary with no stub layer, the same split max31856_codec.c set the
 // precedent for.
 //
-// *** THE ID TABLE IS EMPTY. *** Both ili9488_panel_desc.id_matches and
-// st7796_panel_desc.id_matches (panel_spi.c, st7796_panel.c) are NULL today
-// because Sec.4's "RDDID bytes from the ILI9488 on this wiring" and "...from
-// the ST7796 on this wiring" bench measurements do not exist yet -- see the
-// TODO block right above panel_detect_choose() below for exactly which two
-// measurements fill it in. Per Sec.6 Step 3's explicit rule, matchers must be
-// written against bytes actually read on this board, never datasheet nominal
-// values -- so this file does not invent any. What it guarantees instead is
-// that an empty (or a not-yet-populated) table is SAFE: with no candidate's
-// id_matches able to return true, panel_detect_choose() always falls back to
-// the caller-supplied Kconfig default and reports why. That fallback path,
-// not the matching path, is what makes today's ILI9488-only board behave
-// identically once this lands.
+// *** THE ID TABLE IS EMPTY, AND FOR THE ILI9488 ROW STAYS THAT WAY. ***
+// Both ili9488_panel_desc.id_matches and st7796_panel_desc.id_matches
+// (panel_spi.c, st7796_panel.c) are NULL today, but not for the same reason
+// any more. The ILI9488's Sec.4 bench measurement WAS taken (2026-09-03):
+// RDDID on this wiring reads 0x00 0x00 0x00 (MISO not driven on the read
+// device handle), which panel_detect_id_equals() below refuses to match by
+// construction -- so ili9488_panel_desc.id_matches is correctly, permanently
+// NULL, not "not yet filled in". The ST7796 row is the one still open: its
+// bench measurement was never attempted because the MSP4031 has never been
+// wired to J2 (hardware-blocked, not software-blocked) -- see the TODO block
+// right above panel_detect_choose() below and DISPLAY_ST7796_PLAN.md Sec.4.
+// Per Sec.6 Step 3's explicit rule, matchers must be written against bytes
+// actually read on this board, never datasheet nominal values -- so this
+// file does not invent any. What it guarantees instead is that an empty (or
+// partially-populated) table is SAFE: with no candidate's id_matches able to
+// return true, panel_detect_choose() always falls back to the
+// caller-supplied Kconfig default and reports why. That fallback path, not
+// the matching path, is what makes today's ILI9488-only board behave
+// identically regardless of how this table ever fills in.
 #ifndef PANEL_DETECT_H
 #define PANEL_DETECT_H
 
@@ -88,44 +94,38 @@ typedef struct {
                                    * table, always */
 } panel_detect_result_t;
 
-/* --- TODO(Sec.4 bench measurements): fills panel_spi.c's
- * ili9488_panel_desc.id_matches and st7796_panel.c's st7796_panel_desc.
- * id_matches, both currently NULL --------------------------------------
+/* --- Sec.4 bench measurements: fills panel_spi.c's ili9488_panel_desc.
+ * id_matches (permanently NULL, see the file banner above -- done, not
+ * pending) and st7796_panel.c's st7796_panel_desc.id_matches (still NULL,
+ * still open) --------------------------------------------------------
  *
- * CORRECTION (2026-09-02): this block used to say "boot the board as it is
- * today (KILNCTL_DISPLAY_PANEL=ili9488, the default) and read the WARN this
- * file's caller logs on fallback". That is wrong -- panel_spi.c's
- * ILI9488_start() only calls ILI9488_read_id() inside the
- * `#elif CONFIG_KILNCTL_DISPLAY_PANEL_AUTO` branch. The explicit-ILI9488
- * default branch (`#else`, today's shipped config) calls ILI9488_init()
- * directly and never reads RDDID at all, so nothing is ever logged on a
- * default-config boot. See firmware/KilnFW/sdkconfig.paneldetect.defaults
- * and DISPLAY_ST7796_PLAN.md Sec.4 for the corrected one-build procedure
- * that actually exercises the read (build with AUTO selected for exactly
- * one flash, capture the boot log line, then rebuild normally).
+ * STATUS:
+ *   1. "RDDID (0x04) bytes from the ILI9488 on this wiring" -- DONE
+ *      (2026-09-03): read 0x00 0x00 0x00, i.e. MISO not driven on the read
+ *      device handle, the same signature a genuinely absent panel produces.
+ *      panel_detect_id_equals() below refuses to match on that triple by
+ *      construction, so writing a matcher for it would be dead code, not a
+ *      working detector. ili9488_panel_desc.id_matches stays NULL for good.
+ *   2. "RDDID (0x04) bytes from the ST7796 on this wiring" -- OPEN,
+ *      hardware-blocked: the MSP4031 has never been wired to J2 (the
+ *      STOP-block 5V hazard check in DISPLAY_ST7796_PLAN.md must be cleared
+ *      first). Procedure once it is: KILNCTL_DISPLAY_PANEL=st7796 forced
+ *      explicitly (skips probing, see Sec.6 Step 3 point 1) so the panel
+ *      actually inits while its ID gets read; record the three bytes in
+ *      DISPLAY_ST7796_PLAN.md Sec.4.
  *
- *   1. "RDDID (0x04) bytes from the ILI9488 on this wiring" -- build with
- *      the AUTO sdkconfig fragment (ILI9488 is AUTO's own bootstrap/
- *      fallback panel, so no wiring change is needed), flash, and read the
- *      "panel auto-detect: no RDDID match (read 0x.. 0x.. 0x.. ...)" WARN
- *      it logs. Record those three bytes in DISPLAY_ST7796_PLAN.md Sec.4.
- *   2. "RDDID (0x04) bytes from the ST7796 on this wiring" -- same, with the
- *      MSP4031 wired to J2 (only after the STOP-block 5V hazard check) and
- *      KILNCTL_DISPLAY_PANEL=st7796 forced explicitly (skips probing, see
- *      Sec.6 Step 3 point 1) so the panel actually inits while its ID gets
- *      read and recorded the same way.
- *
- * Once both are recorded, the one-step fill-in is: add a small static
- * matcher next to each panel_desc_t built on panel_detect_id_equals() below
+ * When bullet 2 is recorded, the one-step fill-in is: add a small static
+ * matcher next to st7796_panel_desc built on panel_detect_id_equals() below
  * (it already rejects all-0x00/all-0xFF, so the matcher body is just the
- * three bench bytes -- see panel_spi.c/st7796_panel.c for the exact
- * before/after) and point that descriptor's `.id_matches` at it. Nothing
- * else in this file, or its call site, needs to change: an empty table
- * already exercises the fallback path this function was built around, and a
- * populated one exercises the match path the same tests below already
- * cover with synthetic candidates -- see
+ * three bench bytes -- see st7796_panel.c for the exact before/after) and
+ * point st7796_panel_desc.id_matches at it. Nothing else in this file, or
+ * its call site, needs to change: an empty table already exercises the
+ * fallback path this function was built around, and a populated one
+ * exercises the match path the same tests below already cover with
+ * synthetic candidates -- see
  * test_panel_detect.c:test_recorded_id_matcher_pattern() for that exact
- * recipe proven against a synthetic ID ahead of the real bytes existing. */
+ * recipe proven against a synthetic ID ahead of the real ST7796 bytes
+ * existing. */
 
 /* Convenience equality check for id_matches implementations: true iff `id`
  * exactly equals {b0,b1,b2}. Guards the same "no panel wired" case
