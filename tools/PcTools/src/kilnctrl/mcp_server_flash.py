@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, debug_probe, devices, esp_app_desc, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, debug_probe, devices, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -221,6 +221,7 @@ def flash_firmware(
     allow_stale: bool = False,
     verify: bool = True,
     host: Optional[str] = None,
+    allow_sensitive_dirty: bool = False,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
@@ -279,7 +280,29 @@ def flash_firmware(
     exactly like every ota_*/debug_check_partition_table tool
     (`_ota_resolve_host`): the explicit argument if given, else the board's
     current station IP from wifi_get_status(), else the fallback-AP address
-    192.168.4.1 for a board that is not on home Wi-Fi yet."""
+    192.168.4.1 for a board that is not on home Wi-Fi yet.
+
+    Provenance / dirty-tree guard (added 2026-09-04 after an agent flashing
+    for an unrelated diagnosis carried another session's in-progress
+    zones_config schema-migration edits onto the board -- see
+    flash_provenance.py's module docstring for the full incident and the
+    guard-shape tradeoffs): every call records `git status --porcelain` and
+    HEAD at the moment of the flash -- unscoped, the whole repo, since a
+    shared working tree means the risk is not limited to KilnFW/CommonFW --
+    and reports it in the result so an operator can see exactly what rode
+    along, dirty tree or not. That capture is ALSO persisted to
+    KilnFW/build/flash_provenance.json so "what was actually on the board at
+    <time>" is answerable later from disk.
+
+    This does NOT refuse on an ordinary dirty tree -- several sessions
+    sharing one working tree is this project's normal state (CLAUDE.md), so
+    a blanket dirty-tree refusal would block routine work daily and get
+    disabled permanently. It refuses only when the dirty set touches a
+    narrow, named sensitive list (config-schema/migration code, safety
+    config -- see flash_provenance.SENSITIVE_PATTERNS), which is exactly
+    what the incident above involved. Pass allow_sensitive_dirty=True only
+    after you have actually looked at the named files and intend them to be
+    on the board -- this is a deliberate, visible override, not a default."""
     openocd_exe = _find_openocd_exe()
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
@@ -294,6 +317,17 @@ def flash_firmware(
     missing = [p for p in required if not os.path.isfile(p)]
     if missing:
         return "error: missing build output(s), run `idf.py build` first: " + ", ".join(missing)
+
+    tree_state = flash_provenance.capture_tree_state()
+    guard_reason = flash_provenance.decide_guard(tree_state, allow_sensitive_dirty=allow_sensitive_dirty)
+    flash_provenance.write_provenance_json(
+        tree_state, os.path.join(build_dir, "flash_provenance.json")
+    )
+    if guard_reason:
+        _srv._session_log.warning("flash_firmware: refused -- sensitive dirty files: %s", tree_state.sensitive_files)
+        return "error: " + guard_reason + "\n\n" + flash_provenance.format_report(tree_state)
+    provenance_note = flash_provenance.format_report(tree_state)
+    _srv._session_log.info("flash_firmware: %s", provenance_note.replace("\n", " | "))
 
     stale = stale_check.check_kilnfw_stale(kiln_fw_root)
     if stale.stale:
@@ -317,6 +351,7 @@ def flash_firmware(
     app_bin_path = os.path.join(build_dir, "KilnCtrl.bin")
 
     def _post_flash(base_msg: str) -> str:
+        base_msg = f"{base_msg}\n\n{provenance_note}"
         if not verify:
             return base_msg
         try:

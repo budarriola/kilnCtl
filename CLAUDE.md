@@ -76,6 +76,13 @@ yet); when `verify=True` (the default) but the board just doesn't answer HTTP
 in time, the tool WARNS rather than failing, since that's not the same as
 confirming the wrong thing landed.
 
+`flash_firmware()` also records `git status --porcelain`/HEAD at flash time
+(reported in the result, persisted to `KilnFW/build/flash_provenance.json`)
+and refuses — naming the files — if the dirty set touches config-schema/
+migration/safety code (e.g. `zones_config_*`), since this tree is normally
+shared across sessions. An ordinary dirty tree is never refused. Override
+only after reviewing the named files: `allow_sensitive_dirty=True`.
+
 Also: `debug_reset` does not power-cycle external I2C peripherals. A safety
 trip that latches right after an OTA reboot can be the SX1509 I/O expander
 failing its post-reset init, not a firmware defect — a second `debug_reset`

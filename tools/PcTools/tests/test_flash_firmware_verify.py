@@ -33,6 +33,7 @@ from kilnctrl import mcp_server_flash as mf  # noqa: E402
 from kilnctrl import esp_app_desc  # noqa: E402
 from kilnctrl import partition_http_client  # noqa: E402
 from kilnctrl import capability_preflight  # noqa: E402
+from kilnctrl import flash_provenance  # noqa: E402
 
 
 def _pad(s: str, width: int) -> bytes:
@@ -156,6 +157,22 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self._stale_patch = unittest.mock.patch.object(mf.stale_check, "check_kilnfw_stale", return_value=stale_ok)
         self._stale_patch.start()
         self.addCleanup(self._stale_patch.stop)
+
+        # This test class is about verify=True/False wiring, not the
+        # sensitive-dirty-file guard -- pin the tree state to clean so the
+        # actual (often dirty, shared) repo working tree can't flip these
+        # tests. See test_flash_provenance.py for the guard's own tests.
+        clean_state = flash_provenance.TreeState(timestamp=0.0, head="abc1234")
+        self._provenance_patch = unittest.mock.patch.object(
+            mf.flash_provenance, "capture_tree_state", return_value=clean_state
+        )
+        self._provenance_patch.start()
+        self.addCleanup(self._provenance_patch.stop)
+        self._provenance_write_patch = unittest.mock.patch.object(
+            mf.flash_provenance, "write_provenance_json", return_value=None
+        )
+        self._provenance_write_patch.start()
+        self.addCleanup(self._provenance_write_patch.stop)
 
         self._isfile_patch = unittest.mock.patch.object(mf.os.path, "isfile", return_value=True)
         self._isfile_patch.start()

@@ -201,6 +201,63 @@ Flashing is not in this table on purpose. It already exists as
 `debug_program(peer=...)` with `esp` / `pico` peers, each pinned to the
 right probe serial (`kilnctrl/debug_probe.py`).
 
+## Flash provenance and the sensitive-dirty-file guard
+
+`get_fw_version()`'s `tree: dirty` has always been a single bit -- true or
+false, no list. On 2026-09-04 that bit hid a real incident: an agent
+authorised only to build+flash `KilnCtrl.bin` for a display/watchdog
+diagnosis picked up *another* session's uncommitted, in-progress
+`zones_config_*` schema-migration edits from the shared working tree and
+flashed them, running an unplanned schema migration against the live board
+config. It happened to land correctly -- a good migration plus luck, not
+process -- and left a second live consequence (a client/firmware field
+mismatch on `/api/zones` that blocks `load_config_preset` for every preset).
+
+`flash_firmware()` (`kilnctrl/mcp_server_flash.py`, guard logic in
+`kilnctrl/flash_provenance.py`) now:
+
+1. **Always records** `git status --porcelain` (unscoped -- the whole repo,
+   not just KilnFW/CommonFW the way `stale_check.py`'s staleness comparison
+   is scoped, because the risk is cross-session) and HEAD at the moment of
+   the flash. This is reported in the tool result and persisted to
+   `KilnFW/build/flash_provenance.json`, so "what was actually on the board
+   at `<time>`" is answerable from disk later, not just from a chat
+   transcript that may have scrolled away.
+2. **Refuses only when the dirty set touches a narrow, named sensitive
+   list** (`flash_provenance.SENSITIVE_PATTERNS`: `zones?_config`,
+   `_migrat`, `safety_cfg`, `safety_link`, `kiln_cfg_store`, `schema`),
+   naming the offending files. An ordinary dirty tree -- this project's
+   normal state, since several sessions share one working tree by design --
+   is never refused; only that named list gates the flash. Override with
+   `allow_sensitive_dirty=True` after actually reviewing the named files.
+
+Two other guard shapes were considered and rejected:
+
+- **A blanket `allow_dirty` toggle on "any dirty file"** (default True =
+  report-only, False = refuse): a default-refuse would trip on ordinary,
+  unrelated dirty files within a day of shipping and get switched off
+  permanently -- worse than not existing, and it would not have
+  distinguished today's incident from routine work anyway.
+- **Caller-declares-its-own-scope** ("I'm only touching display code,
+  ignore the rest"): this trusts the caller to know the full uncommitted
+  footprint of every session sharing the tree at that instant -- exactly
+  the information the agent in the incident did not have. It would have
+  declared "display code", the guard would have checked declared-vs-dirty
+  and found no conflict, and the same flash would have gone out.
+
+A fixed sensitive-path list catches the incident regardless of what the
+caller believes it is doing, stays silent on the other dirty files that make
+a blanket gate unworkable here, and is bypassable only by an explicit,
+logged opt-in rather than a setting people learn to leave on. Extend
+`SENSITIVE_PATTERNS` (not a broader directory match) if another
+schema/migration/safety surface needs the same protection.
+
+Unit-tested in `tests/test_flash_provenance.py` against synthetic
+`git status --porcelain` output -- clean tree, dirty-but-benign, and the
+exact incident's mixed dirty set (schema files plus an unrelated edit) --
+with a required negative test that drops the `zones?_config` pattern and
+confirms the assertions fail, naming the file that slipped through.
+
 ## Adding a tool
 
 For `kilnctrl`, write it in the server module with the existing
