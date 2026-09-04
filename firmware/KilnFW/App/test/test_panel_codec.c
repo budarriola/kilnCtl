@@ -91,6 +91,70 @@ void run_test_panel_codec(void)
                    "rgb565 passthrough: does NOT reproduce the old LE-on-the-wire bug");
     }
 
+    /* --- 2026-09-04, coordinator-requested: re-derive the RGB565 5/6/5 field
+     * boundaries from first principles against known pure-channel values,
+     * proving by TEST (not by inspection) that panel_codec_rgb565_passthrough()
+     * is a whole-byte split of an already-correct 16-bit color -- it never
+     * decodes/re-encodes the R5/G6/B5 bit ranges, so a field-boundary
+     * off-by-one is not just unlikely here, it is structurally impossible:
+     * there is no shift/mask touching individual channel widths anywhere in
+     * this function. Each case below: encode the wire bytes, then decode
+     * R5/G6/B5 straight back out of those SAME wire bytes (reassembled
+     * MSB-first, matching what a real ST7796 does with the byte stream) and
+     * confirm the channel that should be lit is the only one lit. */
+    {
+        uint8_t out[2];
+
+        /* Pure red: R5=0x1F, G6=0, B5=0 -> 0xF800. */
+        panel_codec_rgb565_passthrough(0xF800, out);
+        TEST_CHECK(out[0] == 0xF8 && out[1] == 0x00, "rgb565 passthrough: pure red 0xF800 -> F8,00");
+        {
+            uint16_t wire = (uint16_t)((out[0] << 8) | out[1]);
+            uint8_t r5 = (uint8_t)((wire >> 11) & 0x1F);
+            uint8_t g6 = (uint8_t)((wire >> 5) & 0x3F);
+            uint8_t b5 = (uint8_t)(wire & 0x1F);
+            TEST_CHECK(r5 == 0x1F && g6 == 0 && b5 == 0,
+                       "rgb565 passthrough: pure red decodes back to R-only (no field shift)");
+        }
+
+        /* Pure green: R5=0, G6=0x3F, B5=0 -> 0x07E0. */
+        panel_codec_rgb565_passthrough(0x07E0, out);
+        TEST_CHECK(out[0] == 0x07 && out[1] == 0xE0, "rgb565 passthrough: pure green 0x07E0 -> 07,E0");
+        {
+            uint16_t wire = (uint16_t)((out[0] << 8) | out[1]);
+            uint8_t r5 = (uint8_t)((wire >> 11) & 0x1F);
+            uint8_t g6 = (uint8_t)((wire >> 5) & 0x3F);
+            uint8_t b5 = (uint8_t)(wire & 0x1F);
+            TEST_CHECK(r5 == 0 && g6 == 0x3F && b5 == 0,
+                       "rgb565 passthrough: pure green decodes back to G-only (no field shift)");
+        }
+
+        /* Pure blue: R5=0, G6=0, B5=0x1F -> 0x001F. */
+        panel_codec_rgb565_passthrough(0x001F, out);
+        TEST_CHECK(out[0] == 0x00 && out[1] == 0x1F, "rgb565 passthrough: pure blue 0x001F -> 00,1F");
+        {
+            uint16_t wire = (uint16_t)((out[0] << 8) | out[1]);
+            uint8_t r5 = (uint8_t)((wire >> 11) & 0x1F);
+            uint8_t g6 = (uint8_t)((wire >> 5) & 0x3F);
+            uint8_t b5 = (uint8_t)(wire & 0x1F);
+            TEST_CHECK(r5 == 0 && g6 == 0 && b5 == 0x1F,
+                       "rgb565 passthrough: pure blue decodes back to B-only (no field shift)");
+        }
+
+        /* Mid-grey: 8-bit (128,128,128) -> R5=0x10, G6=0x20, B5=0x10 -> 0x8410. */
+        panel_codec_rgb565_passthrough(0x8410, out);
+        TEST_CHECK(out[0] == 0x84 && out[1] == 0x10, "rgb565 passthrough: mid-grey 0x8410 -> 84,10");
+        {
+            uint16_t wire = (uint16_t)((out[0] << 8) | out[1]);
+            uint8_t r5 = (uint8_t)((wire >> 11) & 0x1F);
+            uint8_t g6 = (uint8_t)((wire >> 5) & 0x3F);
+            uint8_t b5 = (uint8_t)(wire & 0x1F);
+            TEST_CHECK(r5 == 0x10 && g6 == 0x20 && b5 == 0x10,
+                       "rgb565 passthrough: mid-grey decodes back to equal-weighted R/G/B "
+                       "(no channel bias introduced by the byte split)");
+        }
+    }
+
     /* --- CASET / PASET byte generation -------------------------------------
      * Big-endian x, then big-endian (x + w - 1). Matches ILI9488.c's
      * ili9488_begin_ram_write() before extraction: caset = {x>>8, x, x1>>8,
