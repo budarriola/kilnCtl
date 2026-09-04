@@ -3202,6 +3202,33 @@ the control law" failure class seen elsewhere in this project).
 the board 2026-09-03 and still live 2026-09-04, is the one every report's row
 and column sums come from, and it is in active use by the control law.
 
+### 3.6f Fuzzy-PID rule-base behavior, full arm B1 capture (2026-09-04, single-arm, no verdict)
+
+`fuzzy_ab_20260904d` arm B1 died to a task-watchdog reset ~64 min into its
+~104 min run; A1 never ran, and the campaign is stopped pending that reset's
+investigation (`PROJECT_STATUS.md`). §3.6b addendum above read the capture
+mid-firing (353-364 lines) purely as a reachability check. The full 726-row
+capture has now been read the same defensive way and characterized in
+detail — what the rule base actually did against its real inputs, where it
+acted and did not, anomaly checks, single-arm tracking numbers, and what the
+truncation costs (segment 2's dwell-entry, most likely the more thermally
+demanding of profile 7's two dwells, was never reached). **No A/B verdict is
+drawn or possible** — see the full writeup for the "why not" and the
+detailed per-zone gain-deviation analysis:
+`logs/coupling/fuzzy_behavior_20260904d_report.md`.
+
+Headline: all three zones show the rule table's ZERO/STEADY cell
+(`{kp:-1, ki:+1, kd:-1}`) dominating near-continuously, at or near the
+designed ±25% ceiling for `strength_pct=50`, because error stayed within
+±5.6 °C of a ±20 °C band for the whole capture; the one stretch with larger
+error (the initial approach ramp) softens the kp/kd deviation in exactly the
+direction the POS/STEADY rule predicts. No chattering, no saturation beyond
+the documented ceiling, no fighting against the feedforward term. This
+retires the *behavioral* half of "fuzzy has never been observed running
+above zero on hardware" (§3.6b's own inert-campaign finding, 89066869) —
+the rule base does what its own documentation says. The A/B tracking
+question stays exactly as open as before.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
