@@ -347,12 +347,33 @@ def _segment_normalized_iae(rows: Sequence[la.PollRow], windows: Sequence[la.Win
 
 def compute_zone_metrics(
     rows: Sequence[la.PollRow], zone: int, start_temp_c: float, band_c: float = 1.0,
+    min_segment_index: int = 0,
 ) -> Optional[ZoneRunMetrics]:
+    """``min_segment_index`` -- THE SCORED-WINDOW CONFOUND FIX (PID_EXPANSION_PLAN.md,
+    "A/B campaign ambient-confound protocol"). Segments below this index are
+    excluded from every metric here: the "whole" window, the per-segment
+    dicts, and the ramp-to-dwell transitions. Rows from excluded segments
+    are NOT deleted from ``rows`` -- ``la.build_windows``/``la.window_zone_stats``
+    still need the full row sequence for correct elapsed-time math -- they
+    are just excluded from what gets aggregated into the returned metrics.
+
+    Default 0 (score everything, today's behaviour) so every existing caller
+    is unaffected. Pass 1 when segment 0 is a stabilisation hold prepended
+    ahead of the profile under test (see ``STABILIZATION_SEGMENT_INDEX``)
+    to score only the segments that begin from the controlled stabilisation
+    temperature, not the uncontrolled room-ambient start.
+    """
     windows = la.build_windows(rows)
     if not windows:
         return None
+    windows = [w for w in windows if w.segment_index >= min_segment_index]
+    if not windows:
+        return None
 
-    whole = la.Window(-1, "all", 0, len(rows) - 1, rows[0].elapsed_s, rows[-1].elapsed_s)
+    whole = la.Window(
+        -1, "all", windows[0].start_idx, windows[-1].end_idx,
+        rows[windows[0].start_idx].elapsed_s, rows[windows[-1].end_idx].elapsed_s,
+    )
     whole_stats = la.window_zone_stats(whole, rows, zone)
     if whole_stats is None:
         return None
@@ -372,7 +393,10 @@ def compute_zone_metrics(
         elif w.phase == "dwell":
             dwell_offset[w.segment_index] = s.mean_error_c
 
-    transitions = la.ramp_to_dwell_transitions(rows, windows, zone, band_c=band_c)
+    transitions = [
+        ev for ev in la.ramp_to_dwell_transitions(rows, windows, zone, band_c=band_c)
+        if ev.segment_index >= min_segment_index
+    ]
     overshoot_peak: dict = {}
     time_to_peak: dict = {}
     settle_time: dict = {}
@@ -397,7 +421,19 @@ def compute_zone_metrics(
     )
 
 
-def _first_valid_start_temp(rows: Sequence[la.PollRow], zone: int) -> float:
+#: Convention for the recommended ambient-confound protocol (PID_EXPANSION_PLAN.md
+#: "A/B campaign ambient-confound protocol"): segment 0 of the profile under
+#: test is a stabilisation hold (ramp to a fixed setpoint, dwell until every
+#: zone has settled), and the segments that actually get scored -- the ones
+#: the plan's numbers are about -- start at this index. Callers that use the
+#: stabilised protocol pass ``min_segment_index=STABILIZATION_SEGMENT_INDEX``
+#: to :func:`compute_run_metrics` / :func:`fit_start_temp_sensitivity`; callers
+#: still on the unstabilised protocol pass nothing (default 0, unchanged
+#: behaviour).
+STABILIZATION_SEGMENT_INDEX = 1
+
+
+def _first_valid_start_temp(rows: Sequence[la.PollRow], zone: int, min_segment_index: int = 0) -> float:
     """The zone's starting temperature: the first row's ``actual_c`` UNLESS
     that row is invalid, in which case the first genuinely valid row's value
     is used instead.
@@ -418,8 +454,18 @@ def _first_valid_start_temp(rows: Sequence[la.PollRow], zone: int) -> float:
 
     See ``START_TEMP_METRIC_NOTE`` -- this is the PER-ZONE figure the
     CONFOUND_THRESHOLD_C gate uses, deliberately not the same quantity as
-    noise_floor.extract_start_conditions's all-channel mean."""
+    noise_floor.extract_start_conditions's all-channel mean.
+
+    ``min_segment_index`` -- when scoring only segments >= a stabilisation
+    hold (see ``STABILIZATION_SEGMENT_INDEX``), this returns the start
+    temperature AT THE START OF THE SCORED WINDOW (the stabilised
+    temperature, e.g. ~48C), not the room-ambient temperature the run
+    physically began at. That is deliberate: it is what the confound gate
+    and sensitivity fit should be comparing across arms once the ambient
+    start is no longer what feeds the score."""
     for r in rows:
+        if r.segment_index < min_segment_index:
+            continue
         s = r.zones.get(zone)
         if s is None:
             continue
@@ -428,13 +474,20 @@ def _first_valid_start_temp(rows: Sequence[la.PollRow], zone: int) -> float:
     return math.nan
 
 
-def compute_run_metrics(rows: Sequence[la.PollRow], band_c: float = 1.0) -> dict:
-    """All zones' metrics for a single (already-selected) run."""
+def compute_run_metrics(
+    rows: Sequence[la.PollRow], band_c: float = 1.0, min_segment_index: int = 0,
+) -> dict:
+    """All zones' metrics for a single (already-selected) run.
+
+    ``min_segment_index``: see :func:`compute_zone_metrics` and
+    ``STABILIZATION_SEGMENT_INDEX``."""
     zones = la.zones_in_rows(rows)
-    starts = {z: _first_valid_start_temp(rows, z) for z in zones}
+    starts = {z: _first_valid_start_temp(rows, z, min_segment_index=min_segment_index) for z in zones}
     out = {}
     for z in zones:
-        m = compute_zone_metrics(rows, z, starts.get(z, math.nan), band_c=band_c)
+        m = compute_zone_metrics(
+            rows, z, starts.get(z, math.nan), band_c=band_c, min_segment_index=min_segment_index,
+        )
         if m is not None:
             out[z] = m
     return out
@@ -675,9 +728,18 @@ def _pearson(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
 def fit_start_temp_sensitivity(
     paths: Sequence[str], band_c: float = 1.0,
     run_indices: Optional[Sequence[Optional[int]]] = None,
+    min_segment_index: int = 0,
 ) -> dict:
     """Per-zone OLS slope of ``SENSITIVITY_METRIC`` (iae_normalized_whole_c)
     on start temperature, fit across ``paths``.
+
+    ``min_segment_index``: pass ``STABILIZATION_SEGMENT_INDEX`` to refit this
+    against a stabilised-protocol repeat set -- both the x (start temp) and y
+    (whole-window IAE) values then come from the scored window only, same as
+    :func:`compute_run_metrics`. Do not mix a stabilised repeat set fit at
+    ``min_segment_index=0`` (that reintroduces the room-ambient start into the
+    x-axis) or an unstabilised set fit at ``min_segment_index=1`` (there is no
+    segment 1 to score).
 
     ASSUMPTIONS -- stated because they matter more than the fit:
       * every path is the SAME controller configuration (same gains/preset/
@@ -702,7 +764,7 @@ def fit_start_temp_sensitivity(
             continue
         if not rows:
             continue
-        metrics = compute_run_metrics(rows, band_c=band_c)
+        metrics = compute_run_metrics(rows, band_c=band_c, min_segment_index=min_segment_index)
         for z, m in metrics.items():
             if math.isnan(m.start_temp_c) or math.isnan(m.iae_normalized_whole_c):
                 continue
@@ -969,6 +1031,7 @@ def compare_runs(
     run_index_a: Optional[int] = None, run_index_b: Optional[int] = None,
     noise_floor_artifact: Optional[dict] = None,
     sensitivity_paths: Optional[Sequence[str]] = None,
+    min_segment_index: int = 0,
 ) -> dict:
     """``sensitivity_paths``, if given, must be a genuine same-configuration
     repeat set (see ``fit_start_temp_sensitivity``'s assumptions) used to
@@ -977,7 +1040,15 @@ def compare_runs(
     not given explicitly and the artifact carries one -- the noise-floor
     campaign's repeat set is exactly this kind of same-config set by
     construction. Never affects REFUSED/INDISTINGUISHABLE/PROVISIONAL --
-    see the module docstring's 2026-09-02f section."""
+    see the module docstring's 2026-09-02f section.
+
+    ``min_segment_index``: pass ``STABILIZATION_SEGMENT_INDEX`` (1) when both
+    captures are runs of the stabilised protocol (a stabilisation hold as
+    segment 0) so the comparison -- and ``sensitivity_paths``, if given --
+    score only the post-stabilisation segments. Both captures and the
+    sensitivity set must use the SAME convention; this function has no way
+    to detect a mismatch, so it is the caller's responsibility (see
+    PID_EXPANSION_PLAN.md's "A/B campaign ambient-confound protocol")."""
     try:
         rows_a = load_run(path_a, run_index=run_index_a)
         rows_b = load_run(path_b, run_index=run_index_b)
@@ -986,8 +1057,8 @@ def compare_runs(
     if not rows_a or not rows_b:
         return {"error": "one or both HTTP captures had no parseable rows"}
 
-    metrics_a = compute_run_metrics(rows_a, band_c=band_c)
-    metrics_b = compute_run_metrics(rows_b, band_c=band_c)
+    metrics_a = compute_run_metrics(rows_a, band_c=band_c, min_segment_index=min_segment_index)
+    metrics_b = compute_run_metrics(rows_b, band_c=band_c, min_segment_index=min_segment_index)
     zones = sorted(set(metrics_a) & set(metrics_b))
 
     start_deltas = {
@@ -1012,7 +1083,9 @@ def compare_runs(
     sensitivity: dict = {}
     if sensitivity_paths and len(sensitivity_paths) >= MIN_N_FOR_SENSITIVITY:
         try:
-            sensitivity = fit_start_temp_sensitivity(sensitivity_paths, band_c=band_c)
+            sensitivity = fit_start_temp_sensitivity(
+                sensitivity_paths, band_c=band_c, min_segment_index=min_segment_index,
+            )
         except Exception:
             sensitivity = {}
 

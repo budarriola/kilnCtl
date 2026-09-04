@@ -834,3 +834,82 @@ def test_single_lucky_distinguishable_key_is_not_a_consistent_pattern():
         )
     finally:
         ab.CONSISTENT_PATTERN_MIN_KEYS = original
+
+
+# ---------------------------------------------------------------------------
+# min_segment_index -- the scored-window ambient-confound fix (see
+# PID_EXPANSION_PLAN.md "A/B campaign ambient-confound protocol").
+# ---------------------------------------------------------------------------
+
+def _synthetic_two_segment_rows():
+    """Segment 0: a ramp from 20C to 48C with a huge, deliberately garbage
+    tracking error (stands in for an unstabilised, ambient-exposed opening
+    ramp -- this is exactly what min_segment_index=1 should exclude).
+    Segment 1: a clean, near-zero-error ramp from 48C -> 50C (the "real"
+    scored segment). If min_segment_index correctly excludes segment 0, the
+    whole-window IAE should be small and start_temp_c should read ~48C, not
+    ~20C."""
+    rows = []
+    t = 0.0
+    # segment 0 -- huge error, ramping (garbage, must be excluded)
+    for i in range(5):
+        actual = 20.0 + i * 2.0   # 20, 22, 24, 26, 28
+        target = 48.0             # far ahead -- huge error on purpose
+        rows.append(la.PollRow(
+            wall_time=f"t{i}", elapsed_s=t, segment_index=0, segment_count=2,
+            dwelling=False, target_c=target, state="running",
+            zones={0: la.ZoneSample(zone=0, actual_c=actual, duty=1.0)},
+        ))
+        t += 60.0
+    # segment 1 -- clean, near-zero error, ramping from 48 to 50
+    for i in range(5):
+        actual = 48.0 + i * 0.4   # 48.0 .. 49.6
+        target = 48.0 + i * 0.4   # tracks exactly -- ~0 error
+        rows.append(la.PollRow(
+            wall_time=f"s{i}", elapsed_s=t, segment_index=1, segment_count=2,
+            dwelling=False, target_c=target, state="running",
+            zones={0: la.ZoneSample(zone=0, actual_c=actual, duty=0.5)},
+        ))
+        t += 60.0
+    return rows
+
+
+def test_min_segment_index_excludes_stabilization_segment_from_whole_iae():
+    rows = _synthetic_two_segment_rows()
+
+    unscored = ab.compute_run_metrics(rows)  # default: everything scored
+    m0_unscored = unscored[0]
+    assert m0_unscored.start_temp_c == pytest.approx(20.0)
+    assert set(m0_unscored.iae_normalized_by_segment) == {0, 1}
+    # segment 0's huge error dominates the whole-run IAE
+    assert m0_unscored.iae_normalized_whole_c > 5.0
+
+    scored = ab.compute_run_metrics(rows, min_segment_index=ab.STABILIZATION_SEGMENT_INDEX)
+    m0_scored = scored[0]
+    # start temp is now the stabilised ~48C, not the ambient ~20C start
+    assert m0_scored.start_temp_c == pytest.approx(48.0)
+    # only segment 1 survives in the per-segment dicts
+    assert set(m0_scored.iae_normalized_by_segment) == {1}
+    # and the whole-window IAE reflects only the clean segment
+    assert m0_scored.iae_normalized_whole_c < 1.0
+
+
+def test_min_segment_index_mutation_wrong_default_would_leak_segment_0():
+    """Negative test: prove the exclusion is actually load-bearing, not a
+    parameter that happens to do nothing. Mutate by simulating the OLD
+    (pre-fix) call -- i.e. omitting min_segment_index entirely -- and
+    confirm the real bug this feature fixes (segment 0's huge error leaking
+    into the whole-run IAE) is reproduced when the fix isn't applied."""
+    rows = _synthetic_two_segment_rows()
+    # "mutated" call: forgetting to pass min_segment_index at all
+    forgot = ab.compute_run_metrics(rows)[0]
+    assert forgot.iae_normalized_whole_c > 5.0, (
+        "MUTATION CHECK: omitting min_segment_index must reproduce the ambient-segment "
+        "leak this feature exists to fix -- if it doesn't, the real test above proves "
+        "nothing about what the parameter actually does"
+    )
+
+
+def test_compute_zone_metrics_min_segment_index_beyond_run_returns_none():
+    rows = _synthetic_two_segment_rows()
+    assert ab.compute_zone_metrics(rows, zone=0, start_temp_c=20.0, min_segment_index=5) is None
