@@ -2672,6 +2672,13 @@ fact (as `ease_off_window_mult`'s could not, above) should capture the
 relevant `bd_*` fields going forward so the proof survives in the log, not
 only in a pre-flight check that happened once and was not recorded.
 
+**Operational checklist:** the standing pre-flight above, the reachability
+tooling below, probe-field selection, power/design, capture requirements,
+the post-run gates, and a running "known dead ends" list are consolidated
+into a single run-it-in-order pre-flight at
+`firmware/KilnFW/docs/AB_EXPERIMENT_CHECKLIST.md` -- use that before the next
+campaign instead of re-deriving this section's discipline from prose.
+
 **Tooling that makes this checkable, not just describable (2026-09-04).**
 `run_queue.py` now polls `GET /api/control` on every capture line and stores
 its per-zone `bd_*` fields under a `"control"` key (`RunQueueConfig.
