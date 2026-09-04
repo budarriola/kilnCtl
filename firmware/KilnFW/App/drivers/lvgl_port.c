@@ -528,9 +528,30 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
                 s_inject_logged_y = inject_y;
             }
             if (p->idle) {
-                screen_idle_inject_touch(p->idle, (uint16_t)inject_x, (uint16_t)inject_y, inject_pressed);
+                // 2026-09-04 owner request (docs/UI_PLAN.md "Display power",
+                // rule 3/4): screen_idle_touch_swallow() replaces the plain
+                // wake-only screen_idle_inject_touch() here -- it does the
+                // same wake/idle-timer bookkeeping PLUS runs
+                // display_power_policy_step() and reports whether THIS
+                // touch must be swallowed (the display was off, or an
+                // error-hold dismissal). Swallowing means overwriting
+                // data->state back to RELEASED right after it was set above
+                // -- LVGL then hit-tests nothing for this poll, exactly the
+                // same as if no press had happened, while screen_idle still
+                // saw it and already woke/dismissed. Applies to an injected
+                // touch exactly like a physical one (see the physical
+                // branch below) -- a test harness driving the UI through
+                // TOUCH_CMD_INJECT must see the identical wake-swallows
+                // behaviour a real finger would, or its results would not
+                // mean what they claim to. */
+                bool swallow = false;
+                screen_idle_touch_swallow(p->idle, (uint16_t)inject_x, (uint16_t)inject_y, inject_pressed,
+                                          &swallow);
+                if (swallow) {
+                    data->state = LV_INDEV_STATE_RELEASED;
+                }
             }
-            if (inject_pressed) {
+            if (inject_pressed && data->state == LV_INDEV_STATE_PRESSED) {
                 apply_touch_group_arbitration(data);
             }
             return;
@@ -546,6 +567,20 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     uint16_t raw_x = 0, raw_y = 0, raw_z1 = 0;
     esp_err_t err = touch_dev_read(&p->touch_dev, &pressed, &raw_x, &raw_y, &raw_z1);
     if (err != ESP_OK || !pressed) {
+        // 2026-09-04 (docs/UI_PLAN.md "Display power"): this is the ONLY
+        // place a physical release is ever observed (touch_dev_read simply
+        // stops reporting `pressed`, unlike the injected path's explicit
+        // pressed=false frame) -- screen_idle's press-edge tracker
+        // (screen_idle.h's touch_held) needs this notified or a physical
+        // touch's release would never clear it, and every later press would
+        // be mistaken for a "repeat" of the first (wrongly reusing that
+        // first press's swallow verdict forever). p->idle is intentionally
+        // allowed to be NULL (no auto-blank integration -- see
+        // lvgl_port_start()'s doc comment); this is then simply a no-op.
+        if (p->idle) {
+            bool swallow_unused;
+            screen_idle_touch_swallow(p->idle, 0, 0, false, &swallow_unused);
+        }
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
@@ -625,6 +660,30 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     data->point.y = py;
     data->state = LV_INDEV_STATE_PRESSED;
 
+    // 2026-09-04 owner request (docs/UI_PLAN.md "Display power", rule 3/4):
+    // report this press to screen_idle BEFORE arbitration/hit-testing --
+    // screen_idle_touch_swallow() both wakes a blanked/error-held screen and
+    // (on the press edge) returns whether this touch must be swallowed. On
+    // swallow, revert to RELEASED and skip arbitration entirely: this exact
+    // press must never reach any widget underneath, on this or any later
+    // poll of the same held press (see screen_idle.h's touch_held comment --
+    // the verdict is cached for the whole press/release gesture, not just
+    // this one sample). This is the fix for the gap lvgl_port.h's own
+    // header comment used to document ("neither path checks screen_idle's
+    // blanked/awake state before hit-testing ... a wake tap also activates
+    // whatever it lands on underneath, intentionally") -- that was correct
+    // for the old "blank is just a black paint, nothing to protect"
+    // feature, but is exactly the bug this pass fixes for the new policy's
+    // wake-only-does-not-act rule.
+    if (p->idle) {
+        bool swallow = false;
+        screen_idle_touch_swallow(p->idle, (uint16_t)px, (uint16_t)py, true, &swallow);
+        if (swallow) {
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
+    }
+
     /* Touch-group arbitration -- TODO.md 10.4's open item, ui_theme.h's
      * "Touch-group arbitration" block comment has the full design writeup.
      * ui_theme_touch_groups_active() is a single flag check, so this costs
@@ -643,10 +702,10 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
      * here is sufficient to redirect the press; nothing about LVGL's own
      * press/release/drag state machine needs to be touched or duplicated. */
     apply_touch_group_arbitration(data);
-
-    if (p->idle) {
-        screen_idle_inject_touch(p->idle, (uint16_t)px, (uint16_t)py, true);
-    }
+    // screen_idle was already notified of this press above (before
+    // arbitration), which is also where the swallow decision that could
+    // have returned early from this function was made -- no second
+    // notification needed here.
 }
 
 /* --- Task: the only thing that ever calls lv_timer_handler() ----------

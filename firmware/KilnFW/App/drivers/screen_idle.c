@@ -7,6 +7,24 @@
 #include "settings.h"
 #include "stack_margin.h"
 
+// 2026-09-04 owner request (docs/UI_PLAN.md "Display power"): the pure
+// decision core (display_power_policy.h) and its real inputs -- the
+// persisted brightness/timeout/keep-on/display-on-error settings
+// (display_power_cfg.h, already landed, not modified by this pass), the
+// REAL firing-active producer (profile_executor_get_status() -- the same
+// accessor boot_button.c/danger_mode.c/gpio_probe.c already use for exactly
+// this "is a firing live" question), and the REAL error/fault producer
+// (dashboard_get_status()'s diag_ever_received/diag_state/diag_age_ms --
+// the identical fields+gate ui_page_home.c's own safety-trip strip already
+// keys off, so this module raises the display for precisely the condition
+// the LCD already paints red, not a second, possibly-different notion of
+// "error"). dashboard_http.c/profile_executor.c are READ ONLY from here
+// (their public accessors) -- neither is edited by this pass.
+#include "display_power_policy.h"
+#include "display_power_cfg.h"
+#include "profile_executor.h"
+#include "dashboard_http.h"
+
 static const char *TAG = "screen_idle";
 
 /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target. Only one
@@ -35,29 +53,76 @@ static void screen_idle_unlock(screen_idle_t *idle)
     xSemaphoreGive(idle->lock);
 }
 
-/* Stamps activity and, if the screen is currently blanked, wakes it. Shared
- * by the poll task's own press detection and screen_idle_inject_touch(), so
- * a real press and an MCP-injected one are indistinguishable to everything
- * downstream of this call. Returns ESP_OK immediately if the screen was
- * already on -- nothing to do.
- *
- * "Wake" is deliberately just a flag flip, not a hardware call: this board
- * has no backlight control line (docs/HARDWARE.md), so blanking (below)
- * never powers the panel down -- it paints black and leaves the panel
- * running. There is nothing to "turn back on"; whatever owns the UI (the
- * PC/dashboard) is responsible for repainting real content once it sees
- * screen_on go back to true (TOUCH_CMD_GET_STATE), same as it would after
- * any other blank period. */
-static esp_err_t screen_idle_mark_active(screen_idle_t *idle)
+static uint32_t screen_idle_now_ms(void)
 {
-    if (!screen_idle_lock(idle)) return ESP_ERR_TIMEOUT;
-    idle->last_activity_tick = xTaskGetTickCount();
-    bool need_wake = !idle->screen_on;
-    if (need_wake) idle->screen_on = true;
-    screen_idle_unlock(idle);
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
 
-    if (need_wake) ESP_LOGI(TAG, "screen woken");
-    return ESP_OK;
+/* THE single call site for display_power_policy_step() -- both the poll
+ * task's idle-timeout tick and a touch edge (screen_idle_touch_swallow())
+ * fund it through here so the edge-tracked inputs (error_prev_active,
+ * touch_held/touch_held_swallow) are never computed two different ways.
+ * MUST be called with idle->lock already held; never takes/releases it
+ * itself (same "caller's discipline" convention profile_executor_wd_
+ * decide()'s doc comment describes for its own pure-step neighbor). Reads
+ * profile_executor_get_status()/dashboard_get_status() while holding this
+ * module's own lock -- safe: neither of those modules ever calls back into
+ * screen_idle, so there is no lock-order cycle, only a leaf read.
+ *
+ * Returns the policy's swallow_touch (meaningful only when touch_event is
+ * true); always updates idle->policy_state/screen_on/last_activity_tick/
+ * error_prev_active as a side effect. */
+static bool screen_idle_run_policy_locked(screen_idle_t *idle, uint32_t now_ms, bool touch_event)
+{
+    profile_exec_status_t pst;
+    profile_executor_get_status(&pst);
+    bool firing_active = (pst.state == PROFILE_EXEC_RUNNING || pst.state == PROFILE_EXEC_PAUSED);
+
+    dashboard_status_t ds;
+    dashboard_get_status(&ds);
+    // Identical gate to ui_page_home.c's own s_trip_strip condition (that
+    // file's comment: "a STALE diag_state == TRIPPED is a silent link, not
+    // a live trip") -- this module must raise the display for exactly the
+    // condition the LCD already paints red, not a differently-gated
+    // "error" of its own invention.
+    bool error_active = ds.diag_ever_received && ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                         ds.diag_age_ms < SAFETY_LINK_STALE_MS;
+    bool error_entered_this_tick = error_active && !idle->error_prev_active;
+    idle->error_prev_active = error_active;
+
+    display_power_input_t in = {
+        .now_ms = now_ms,
+        .last_touch_ms = (uint32_t)(idle->last_activity_tick * portTICK_PERIOD_MS),
+        .timeout_setting = display_power_cfg_timeout_setting(),
+        .firing_active = firing_active,
+        .keep_on_while_firing = display_power_cfg_keep_on_while_firing(),
+        .error_active = error_active,
+        .error_entered_this_tick = error_entered_this_tick,
+        .display_on_error = display_power_cfg_display_on_error(),
+        .current_state = idle->policy_state,
+        .touch_event = touch_event,
+    };
+    display_power_result_t out = display_power_policy_step(&in);
+
+    if (out.state != idle->policy_state) {
+        ESP_LOGI(TAG, "display power: state %d -> %d (firing=%d error=%d touch=%d)",
+                 (int)idle->policy_state, (int)out.state, (int)firing_active, (int)error_active,
+                 (int)touch_event);
+    }
+    idle->policy_state = out.state;
+    idle->screen_on = (out.state != DISPLAY_POWER_OFF);
+    // Header contract: "the caller must still update ITS OWN last-activity
+    // timestamp to now_ms" whenever a touch is swallowed OR passed through
+    // -- and every poll tick this function is called from is itself real
+    // activity-adjacent bookkeeping (mirrors the old screen_idle_mark_
+    // active()'s unconditional stamp). Not gated on touch_event: the poll
+    // tick must NOT keep stamping activity every 50ms (that would defeat
+    // the idle timeout entirely) -- see the caller below, which only lets
+    // this land on a genuine touch edge.
+    if (touch_event) {
+        idle->last_activity_tick = xTaskGetTickCount();
+    }
+    return out.swallow_touch;
 }
 
 static void screen_idle_task(void *arg)
@@ -74,67 +139,31 @@ static void screen_idle_task(void *arg)
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "NS2009_read failed: %s", esp_err_to_name(err));
             } else if (pressed) {
-                screen_idle_mark_active(idle);
+                bool swallow_unused;
+                screen_idle_touch_swallow(idle, x, y, true, &swallow_unused);
+                // This task's own direct NS2009 poll only runs when
+                // lvgl_port.c was started WITHOUT a touch_dev_t (idle->touch
+                // non-NULL implies lvgl_port never took over touch reads --
+                // see screen_idle.h's top comment and lvgl_port.h's
+                // touch_dev_t contract). In that configuration nothing else
+                // could have delivered this press to LVGL for swallowing to
+                // matter against, so the return value genuinely has no
+                // caller here -- this branch exists purely so the idle
+                // timer / display-power state machine still runs when no
+                // on-device UI is driving touch at all.
             }
         }
 
-        TickType_t last_activity_tick;
-        bool screen_on;
+        // Idle-timeout / keep-on-while-firing / display-on-error poll tick
+        // -- touch_event=false, so this can never itself produce a swallow
+        // decision or re-stamp last_activity_tick (see screen_idle_run_
+        // policy_locked()'s comment). Runs every SCREEN_IDLE_POLL_MS
+        // regardless of current screen_on, same as the pure policy step
+        // itself needs to see (an OFF->ERROR_HOLD transition, for example,
+        // must be evaluated while already OFF).
         if (!screen_idle_lock(idle)) continue;
-        last_activity_tick = idle->last_activity_tick;
-        screen_on = idle->screen_on;
+        screen_idle_run_policy_locked(idle, screen_idle_now_ms(), false);
         screen_idle_unlock(idle);
-
-        if (!screen_on) continue;
-
-/* CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS == 0 (Kconfig default as of
- * 2026-08-18, user request) means auto-blank is disabled: the panel just
- * stays on. This is a compile-time #if, not a runtime `if (... == 0)`
- * check, for two reasons -- both of the blank-after-idle block below become
- * dead code when the timeout is 0, so there's no reason to pay for it in
- * the built image; and a runtime `elapsed_ticks < pdMS_TO_TICKS(0)`
- * comparison is a `TickType_t < 0` in disguise once the macro is
- * substituted, which -Werror=type-limits correctly flags as always-false
- * regardless of whether it's reachable (found building 2026-08-18).
- * Activity tracking above still runs either way -- last_activity_tick keeps
- * updating from real and injected touches, and TOUCH_CMD_GET_STATE's
- * idle_ms still reports it -- only the blank decision itself is compiled
- * out. The feature is untouched and stays toggleable via menuconfig
- * (setting it back above 0 and rebuilding restores the old behavior). */
-#if CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS > 0
-        /* Unsigned subtraction on TickType_t wraps correctly across the tick
-         * counter's ~49-day rollover, same reasoning as
-         * uart_bridge.c's link_watchdog_task. */
-        TickType_t elapsed_ticks = xTaskGetTickCount() - last_activity_tick;
-        if (elapsed_ticks < pdMS_TO_TICKS(TOUCH_IDLE_TIMEOUT_MS)) continue;
-
-        /* No backlight control line on this board (docs/HARDWARE.md), so
-         * ILI9488_set_power(false) (display-off + sleep-in) is not used here
-         * -- on this panel that shows as a blank WHITE page (2026-08-17
-         * bench finding: DISPOFF forces a blank page independent of GRAM
-         * content, so pre-clearing wouldn't help either), which is brighter
-         * than doing nothing. Painting the frame black instead is the
-         * closest a firmware-only fix gets to "dark": the backlight stays
-         * lit (nothing can switch it off), but black LCD content blocks far
-         * more of it than white does. A real "screen and backlight out" needs
-         * a board revision with a GPIO-driven backlight switch.
-         *
-         * This task does NOT issue the ILI9488_clear() call itself -- the
-         * display's SPI device has exactly one legal owner, the LVGL task
-         * (DISPLAY_ST7796_PLAN.md section 8), and a second task drawing to
-         * it is precisely the race that got the old UART DISPLAY task
-         * deleted on 2026-08-27. This task only requests the blank by
-         * flipping screen_on; lvgl_port_task notices the on->off edge (the
-         * same way it already notices the off->on "wake" edge) and performs
-         * the actual clear from within its own task context. */
-        if (!screen_idle_lock(idle)) continue; /* lock timeout: retry next poll */
-        idle->screen_on = false;
-        screen_idle_unlock(idle);
-        ESP_LOGI(TAG, "idle timeout (%lu ms) reached -- requesting blank",
-                 (unsigned long)(TOUCH_IDLE_TIMEOUT_MS));
-#else
-        (void)last_activity_tick; /* only consumed by the elapsed_ticks calc above, compiled out here */
-#endif
     }
 }
 
@@ -147,6 +176,7 @@ esp_err_t screen_idle_init(screen_idle_t *idle, ILI9488Class *display, NS2009Cla
     idle->touch = touch;
     idle->last_activity_tick = xTaskGetTickCount();
     idle->screen_on = true; /* the display driver leaves the panel lit after bring-up */
+    idle->policy_state = DISPLAY_POWER_ON; /* display_power_policy_step()'s documented first-call value */
 
     idle->lock = xSemaphoreCreateMutex();
     if (!idle->lock) return ESP_ERR_NO_MEM;
@@ -173,12 +203,61 @@ esp_err_t screen_idle_start(screen_idle_t *idle)
 
 esp_err_t screen_idle_inject_touch(screen_idle_t *idle, uint16_t x, uint16_t y, bool pressed)
 {
+    // Thin wrapper over screen_idle_touch_swallow() that discards the
+    // swallow verdict -- this function's callers (uart_bridge_touch.c's
+    // TOUCH_CMD_INJECT handler) only ever wanted the wake/idle-timer side
+    // effect; the actual LVGL delivery for that same wire event is a
+    // SEPARATE call (lvgl_port_inject_touch(), read back by touch_read_cb(),
+    // which is the call site that owns the real swallow decision -- see
+    // that function's own screen_idle_touch_swallow() call). Both paths
+    // share the one edge-tracked state in `idle` (touch_held et al.), so
+    // whichever of the two calls observes a press transition first computes
+    // the edge; the other lands as a harmless repeat. See screen_idle.h's
+    // touch_held field comment.
+    bool swallow_unused;
+    return screen_idle_touch_swallow(idle, x, y, pressed, &swallow_unused);
+}
+
+esp_err_t screen_idle_touch_swallow(screen_idle_t *idle, uint16_t x, uint16_t y, bool pressed,
+                                    bool *out_swallow)
+{
+    if (!out_swallow) return ESP_ERR_INVALID_ARG;
+    *out_swallow = false;
     if (!idle || !idle->ready) return ESP_ERR_INVALID_STATE;
     (void)x;
-    (void)y; /* not used for the idle/wake decision -- only *that* a touch happened */
+    (void)y; /* not used for the idle/wake/swallow decision -- only *that* a touch happened, and its press/release edge */
 
-    if (!pressed) return ESP_OK; /* a release event: nothing to feed the idle timer */
-    return screen_idle_mark_active(idle);
+    if (!screen_idle_lock(idle)) return ESP_ERR_TIMEOUT;
+
+    if (!pressed) {
+        // A release: clears the held-press edge tracker so the NEXT press
+        // is evaluated as a fresh edge. Never itself swallowed (there is
+        // nothing new to decide) -- if the press that is now releasing was
+        // swallowed, the caller was already reporting RELEASED to LVGL for
+        // every poll of it (see screen_idle.h's touch_held comment), so
+        // this changes nothing observable, only resets bookkeeping.
+        idle->touch_held = false;
+        screen_idle_unlock(idle);
+        return ESP_OK;
+    }
+
+    uint32_t now_ms = screen_idle_now_ms();
+    bool was_wake = !idle->screen_on;
+
+    if (!idle->touch_held) {
+        // Press EDGE: exactly one display_power_policy_step() call with
+        // touch_event=true per the header's calling contract.
+        idle->touch_held = true;
+        idle->touch_held_swallow = screen_idle_run_policy_locked(idle, now_ms, true);
+    }
+    // Repeat within the same held press: return the edge's cached verdict,
+    // do NOT re-run the policy (would violate "exactly one call per edge").
+
+    *out_swallow = idle->touch_held_swallow;
+    screen_idle_unlock(idle);
+
+    if (was_wake) ESP_LOGI(TAG, "screen woken");
+    return ESP_OK;
 }
 
 esp_err_t screen_idle_get_state(const screen_idle_t *idle, bool *out_screen_on,

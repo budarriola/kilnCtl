@@ -189,24 +189,96 @@ next to the slider saying the same thing to the owner. Wiring
 duty (replacing its current Kconfig-constant percentages) is follow-up work
 for whoever verifies that hardware.
 
-**NOT wired into the running display stack this pass, and why:** the actual
-touch-swallow behaviour and the idle-timeout/error-hold state machine are
-not yet hooked up to `screen_idle.c`'s poll task or `lvgl_port.c`'s
-`touch_read_cb()` — those files, and the board's flash, are owned by another
-agent mid-work on the panel driver this same day, and this pass was scoped
-to stop short of them to avoid collision. `display_power_policy.h`'s header
-comment states the exact calling contract (call once per touch edge and once
-per idle-poll tick, who owns `last_touch_ms`, what `error_entered_this_tick`
-means and why it must be an edge not a level) so that hookup is a
-self-contained, already-tested seam rather than new design work. Also still
-open: an "error is currently active" signal to feed `error_active`/
-`error_entered_this_tick` — this pass did not audit every fault/error source
-in the firmware to find the one authoritative "is there an active error"
-query; whoever wires the consumer needs to pick that source (event_log?
-profile_executor fault state? a new aggregate?) as part of the hookup.
-**Needs a flash plus the owner's finger to verify** once wired: the actual
-on-screen timeout/wake/error-hold behaviour, and (separately, once the
-backlight bodge is fitted) brightness.
+**Wired into the running display stack — 2026-09-04, this pass:**
+- `App/drivers/screen_idle.c` — `screen_idle_run_policy_locked()` is now the
+  single call site for `display_power_policy_step()`, called from
+  `screen_idle_task`'s existing 50ms poll tick (`touch_event=false`) and from
+  the new `screen_idle_touch_swallow()` on a press EDGE (`touch_event=true`,
+  exactly once per press, per the header's calling contract). It supplies:
+  - `firing_active` — `profile_executor_get_status()`'s `state ==
+    PROFILE_EXEC_RUNNING || PROFILE_EXEC_PAUSED`, the same accessor
+    `boot_button.c`/`danger_mode.c`/`gpio_probe.c` already use for this exact
+    question. Real producer: `profile_executor_run.c`/`profile_executor_
+    status.c` assign `s_exec.state = PROFILE_EXEC_RUNNING` when a firing
+    actually starts — not a stub, not a value nothing writes.
+  - `error_active` (and its `error_entered_this_tick` edge, computed against
+    a remembered `idle->error_prev_active`) — `dashboard_get_status()`'s
+    `diag_ever_received && diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+    diag_age_ms < SAFETY_LINK_STALE_MS`, the **identical** fields and gate
+    `ui_page_home.c`'s own safety-trip strip already keys off (that file's
+    comment: "a STALE diag_state == TRIPPED is a silent link, not a live
+    trip"). Real producer: `safety_link_frames.c`'s wire-frame parser sets
+    `link->cached.diag_state = p[24]` from an actual DIAG frame off the RP2040
+    safety processor. This module raises the display for exactly the
+    condition the LCD already paints red, not a second, differently-gated
+    notion of "error".
+  - The three persisted settings, read live from `display_power_cfg.c`'s
+    accessors (`display_power_cfg_timeout_setting()`/`_keep_on_while_firing()`/
+    `_display_on_error()`) — so a Save on the settings page takes effect on
+    the very next poll tick, no reboot.
+  `idle->screen_on` (already read by `lvgl_port.c`'s `ili9488_flush_cb`/
+  `lvgl_port_service_idle_blank()` — unchanged) is now `policy_state !=
+  DISPLAY_POWER_OFF`, so `ERROR_HOLD` reads as "on" for that existing wake/
+  blank plumbing, exactly as intended.
+- `App/drivers/lvgl_port.c` — `touch_read_cb()`'s physical-NS2009 branch and
+  its LVGL-side injected-touch branch (`TOUCH_CMD_INJECT`) each now call the
+  new `screen_idle_touch_swallow()` before arbitration/delivery; when it
+  reports `swallow_touch`, `data->state` is forced back to
+  `LV_INDEV_STATE_RELEASED` for every poll of that one press/release gesture
+  (cached at the edge, not re-decided mid-drag), so the widget underneath
+  never sees it — this is rules 3 and 4. A physical release (previously never
+  reported to `screen_idle` at all — `touch_dev_read()` just stops returning
+  `pressed`) now also notifies `screen_idle_touch_swallow(..., false, ...)`,
+  clearing the edge tracker so the *next* separate press is evaluated fresh.
+
+**"Display off" mechanism — exactly what it physically does, and why:**
+This board has **no backlight control line today**
+(`CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE` is off by default — `backlight_pwm.h`:
+"No backlight pin exists on the board... That wire is NOT fitted on the bench
+board as of this writing"). With the flag off, `backlight_pwm_init()`/
+`_start()` are no-ops that touch no GPIO/LEDC peripheral at all — confirmed
+by reading `backlight_pwm.c`'s `#else` branch, not assumed. So `DISPLAY_
+POWER_OFF` does **not** cut backlight power; it cannot, on unmodified
+hardware. What it actually does is the same mechanism `screen_idle.c` already
+used before this pass: `lvgl_port.c`'s `lvgl_port_service_idle_blank()`
+paints the panel solid black (`ILI9488_clear(display, 0x0000)`) on the
+on→off edge, and the backlight (whatever is driving it — hardwired on)
+stays lit shining through black content, which blocks far more light than a
+white/idle screen would but is not "off". If `CONFIG_KILNCTL_BACKLIGHT_PWM_
+ENABLE` is ever turned on (the flying-wire bodge from `backlight_pwm.h`
+lands), `backlight_pwm.c`'s own poll task already reads `screen_idle_get_
+state()`'s `screen_on` flag independently and drives real LEDC PWM duty from
+it — that path needed **no changes** in this pass, since it was already
+written against `screen_idle_t`'s public `screen_on`, which this pass keeps
+meaning exactly what it always meant ("the panel should show real content
+right now").
+
+**Tests added this pass:** `App/test/test_display_power_wiring.c` —
+`screen_idle.c`/`lvgl_port.c` are not host-compilable (pull in `panel_spi.h`/
+`NS2009.h`/`lvgl.h`), so this follows SaftyFW's `test_safety_core_s8_
+wiring.c` precedent: a source-text scan of the real `.c` files, extracting
+the specific function bodies under test so a match can only land inside them,
+failing closed if the file/symbol can't be found at all. Verifies (1)
+`screen_idle_run_policy_locked()` actually calls `display_power_policy_step()`
+and reads the real `profile_executor_get_status()`/`dashboard_get_status()`
+producers (not a stub), and that `error_entered_this_tick` is computed as a
+real edge; (2) `touch_read_cb()` calls `screen_idle_touch_swallow()` from
+**both** the physical and injected paths (≥2 call sites) and that a swallow
+verdict actually resets `data->state` at each site (counts `if (swallow) {`
+gates, not just "does the RELEASED text appear anywhere in the function" —
+that weaker form of the check was tried first and did not catch a mutation
+that dropped one gate's body while leaving its neighbor's release-branch text
+elsewhere in the function). Negative-tested by hand: removing the physical
+branch's `if (swallow) { data->state = ...; return; }` guard makes this test
+fail with `found fewer than 2 'if (swallow) {' gates in touch_read_cb()...`;
+restoring it makes the suite pass clean again (21/21 host-test executables).
+
+**Needs a flash plus the owner's finger to verify — NOT done yet.** This pass
+built and host-tested only (see this repo's git log for evidence); nothing
+above has been flashed to real hardware, and the on-screen timeout/wake/
+error-hold/touch-swallow behaviour has not been confirmed with an actual
+finger on the glass. Brightness stays inert pending the backlight flying-wire
+bodge, as before.
 
 ## Open, explicitly deferred by the owner: TLS for web UI and OTA
 
