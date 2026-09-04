@@ -2936,6 +2936,57 @@ the healthy signature this check exists to distinguish from the inert one
 two now-fixed control_mode-2 campaigns). No inert zone found; no basis to
 recommend halting `fuzzy_ab_20260904d` on reachability grounds.
 
+### 3.6e Live coupling matrix re-verified against today's reports (2026-09-04)
+
+Today's tracking synthesis (column sums, §3.6c) and z0 mechanism report (row
+sums, §3.6d) both reason from specific coupling-matrix cell values without
+re-reading the board — a risk given the capture set spans multiple matrix
+eras (old vs new, per the 2026-09-03 check below). Re-verified read-only
+while `fuzzy_ab_20260904d` arm B1 was live-firing, no write made:
+
+`kiln_call(name="control_get_zones")` (which now surfaces `coupling_coeff`
+directly, unlike the 2026-09-03 note above claiming it doesn't) returns:
+
+```
+z0: [0,     27.32, 21.72]
+z1: [14.30, 0,     22.15]
+z2: [8.33,  12.42, 0    ]
+```
+
+(`[affected][stepped]`, row = heat received, column = heat exerted — same
+orientation the opus review resolved from `adaptive_tune_model.c:187`.) This
+is byte-identical to the `coupling_matrix_20260831` ("new") matrix confirmed
+live on 2026-09-03 (§ addendum below it) — no re-solve or reload happened in
+the interim.
+
+Cross-checked against every place this matrix's derived values get quoted:
+
+- **Row sums (heat received):** z0 49.04, z1 36.45, z2 20.75 — matches
+  `z0_dwell_overshoot_mechanism_20260904_report.md` lines 91-93 exactly.
+- **Column sums (heat exerted):** z2 43.87, z1 39.74, z0 22.63 — matches
+  `tracking_synthesis_20260904_report.md` lines 147-148/307-308 exactly.
+- **Firmware doc:** §3.2 above (line 59-61) and line 781 both quote this same
+  matrix. `hightemp_validation_proposal_20260904.md`'s "z2 saturates first"
+  prediction is unaffected — it follows from z2's largest column sum
+  (43.87, most heat exerted onto its neighbours pulls z2's own duty down
+  least among the three), which is confirmed current.
+
+**All three documents agree with the live board and with each other. No
+conclusion moves; nothing to correct.**
+
+**Applied, not just stored:** `ff_hold_used_matrix` in
+`logs/coupling/fuzzy_ab_20260904d_s50_run1.jsonl` (in-progress capture,
+read-only) is `true` on 3915 of 3918 samples — the 3 `false` rows are
+startup/idle-edge ticks, not a steady counterexample — confirming the coupled
+feedforward hold solve (`profile_executor_feedforward.c`,
+`zone_coupling_solve`) is actually consuming this matrix on the live
+campaign, not just holding it in config unread (the "read but never reaches
+the control law" failure class seen elsewhere in this project).
+
+**Conclusion: clean confirmation.** The matrix identified 2026-08-31, live on
+the board 2026-09-03 and still live 2026-09-04, is the one every report's row
+and column sums come from, and it is in active use by the control law.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
