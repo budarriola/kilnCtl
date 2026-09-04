@@ -238,6 +238,24 @@ here; none is copied from an unverified summary.
    Nothing in the schematic or firmware can answer that — it is a fact about
    the owner's own external wiring.
 
+   **Detection options beyond CTs, assessed 2026-09-04:**
+   `docs/CONTACTOR_FEEDBACK_OPTIONS.md` — owner decision, no recommendation.
+   Headline: every K1–K5 pilot relay (K4 included) is DPDT with one entire
+   Form-C contact set wired to nothing (schematic-confirmed, `SSD.kicad_sch`),
+   and the ESP already has a spare opto-isolated input landed on an external
+   screw terminal (`IO_1`/J24) doing nothing today — either could carry a
+   contactor auxiliary-contact signal if the physically fitted contactor has
+   one (unverified — owner question). Also confirms
+   `relay_owner_is_energized()` (`firmware/SaftyFW/src/tasks/relay_owner.c`)
+   is a software mirror of the command, never a pin read-back, so it cannot
+   itself detect a weld. CTs and contactor feedback are argued as
+   complementary, not alternatives: CTs catch a welded SSR (via the current
+   symptom) and confirm after the fact; contactor feedback catches the
+   contactor specifically and can do so before any current-based symptom
+   appears — neither substitutes for the other, and landing a feedback
+   signal on the ESP rather than the RP2040 trades away the independence
+   that makes it valuable in the first place.
+
 5. **S9's welded-contactor escalation has never been provoked with a
    genuinely welded contactor.** It is argued from code inspection
    (`safety_guards.c:363-389`) and reachable in source (§6c), but the only way
