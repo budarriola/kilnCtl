@@ -54,13 +54,18 @@ def _exec(fault_guards, state="running"):
     return {"state": state, "zones": [{"zone": i, "fault_guard": fg} for i, fg in enumerate(fault_guards)]}
 
 
-def _preset(ramp_assist_enabled, name="p"):
+def _preset(ramp_assist_enabled, name="p", pid_kp=1.0):
+    # pid_kp is parameterized (not just `name`) so tests that queue several
+    # DISTINCT-named presets in one call don't trip B9's arms-differ
+    # preflight (run_queue.py's _check_arms_differ) by accident -- that
+    # check compares payload content excluding "name", so two presets that
+    # differ only by name are (correctly) treated as identical arms.
     return {
         "name": name,
         "ramp_assist_enabled": ramp_assist_enabled,
         "zones": [{
             "index": 0, "relay_mask": 1, "control_mode": 1, "cal_offset_c": 0.0,
-            "pid_kp": 1.0, "pid_ki": 0.1, "pid_kd": 0.0, "max_ramp_c_per_hr": 100.0,
+            "pid_kp": pid_kp, "pid_ki": 0.1, "pid_kd": 0.0, "max_ramp_c_per_hr": 100.0,
             "max_temp_c": 200.0, "min_temp_c": 0.0,
         }],
     }
@@ -225,9 +230,9 @@ class PreflightWiringTest(_Harness):
             return None
 
         entries = [
-            self._entry("a.jsonl", _preset(False, "p1")),
-            self._entry("b.jsonl", _preset(False, "p2")),
-            self._entry("c.jsonl", _preset(False, "p3")),  # this one is fatal
+            self._entry("a.jsonl", _preset(False, "p1", pid_kp=1.0)),
+            self._entry("b.jsonl", _preset(False, "p2", pid_kp=2.0)),
+            self._entry("c.jsonl", _preset(False, "p3", pid_kp=3.0)),  # this one is fatal
         ]
         with self.assertRaises(cp.PreflightFailed):
             rq.run_queue(entries, self.cfg, control=None, apply_preset_fn=_fake_apply_preset,

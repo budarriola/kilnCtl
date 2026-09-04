@@ -1836,12 +1836,28 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       Negative-tested: added a bogus second argument to `stubs/driver/ledc.h`'s
       `ledc_timer_config()`, check failed naming
       `stubs/driver/ledc.h:43`; reverted, confirmed clean again.
-- [ ] **Campaign runner has no board-config restore on abnormal exit.**
+- [x] **Campaign runner has no board-config restore on abnormal exit.**
       `run_queue.py` has atomic state and resume, but the `finally` path
       (~1203-1213) only closes the capture file and removes a stray empty
       log — it never re-applies a safe preset via `_apply_preset_http_only`
       (~836). Add a restore-on-exit hook plus a verify-arms-differ preflight
-      as built-ins. M
+      as built-ins. M — **CLOSED 2026-09-04**: `run_queue()`'s entry loop is
+      wrapped in `try/except BaseException` — `_handle_abnormal_exit` skips
+      restore if the board was never touched, re-applies the campaign's
+      baseline preset (last entry's, or `--baseline-preset`) once
+      `_board_is_idle()` confirms `profile_exec` is not running/paused
+      (never races an active firing), and records
+      attempted/succeeded/error into the state file either way; a failed
+      restore logs an unmissable banner naming the preset and fields to
+      check by hand. `_check_arms_differ`, wired into `_preflight_campaign`
+      before any HTTP probe, compares every pair of distinct local preset
+      payloads (excluding `name`) and refuses naming the identical pair.
+      `tools/PcTools/tests/test_run_queue_restore_and_arms.py` (10 tests).
+      Negative-tested both: disabling `_check_arms_differ`'s call site
+      failed the identical-arms test; disabling the `except` block's
+      restore call failed 4/6 restore tests; both reverted, full
+      `test_run_queue*.py` suite (119 passed, 2 skipped) confirmed clean
+      again.
 - [x] **Four hand-rolled JSONL parse loops disagree on malformed-line
       handling.** `coupling_pair_log.py:187-192,239-245`,
       `http_capture_log.py:67-72`, `link_hub.py:197-202,588-595`,

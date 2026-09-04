@@ -920,6 +920,51 @@ def _resolve_preset(entry: QueueEntry, apply_preset_fn) -> dict:
     return entry.preset_name
 
 
+def _check_arms_differ(presets_by_name: dict) -> None:
+    """B9 ARMS-DIFFER PREFLIGHT. Raise :class:`RunQueueError` if any two of
+    ``presets_by_name`` (distinct preset NAME -> resolved payload dict, the
+    same mapping :func:`_preflight_campaign` already builds to dedup its
+    capability probes) are byte-identical.
+
+    This exists because A/B arms were once silently IDENTICAL on the board:
+    ``build_post_body()`` dropped an unknown top-level field, so two
+    presets that were supposed to differ on that field produced the exact
+    same ``POST /api/zones`` payload, and only a live-board readback caught
+    it -- a campaign can run to completion, capture clean-looking
+    telemetry, and still not actually be an A/B comparison of anything.
+    Checking the full LOCAL preset payloads (not a re-read of the board)
+    catches the authoring mistake before a single POST goes out: a queue
+    that reuses one preset's file for both arms, or two preset files that
+    happen to agree on every field a build_post_body-style translator
+    forwards, is refused with the exact pair named, rather than silently
+    producing two "different" captures of the same configuration.
+
+    A queue with only one distinct preset (--repeat, or a queue that is not
+    an A/B comparison at all) is not checked -- there is no pair to be
+    identical."""
+    names = list(presets_by_name.keys())
+    if len(names) < 2:
+        return
+    # Compare payload content only, excluding the "name" field itself: two
+    # presets are DISTINCT by definition (that's how they got two different
+    # dict-keys here at all), so including "name" in the equality check
+    # would make every pair trivially "different" and defeat the entire
+    # point -- what has to differ is the actual config the board receives
+    # (zones/pid/coupling/ramp_assist/...), not which file it came from.
+    payloads = {name: {k: v for k, v in presets_by_name[name].items() if k != "name"}
+                for name in names}
+    for a, b in itertools.combinations(names, 2):
+        if payloads[a] == payloads[b]:
+            raise RunQueueError(
+                f"refusing to start: presets {a!r} and {b!r} resolve to byte-identical "
+                "payloads -- this queue's arms would not actually differ on the board (see "
+                "the 'A/B arms were silently identical' incident this check exists to catch: "
+                "an unknown top-level field silently dropped by the apply path, or two "
+                "preset files that happen to agree on every field, only ever caught before "
+                "by a live-board readback). Check the preset files for a missing/renamed "
+                "field before retrying.")
+
+
 def _preflight_campaign(entries: Sequence[QueueEntry], cfg: RunQueueConfig,
                          apply_preset_fn=None,
                          preflight_fn: "Optional[Callable]" = None) -> None:
@@ -950,7 +995,18 @@ def _preflight_campaign(entries: Sequence[QueueEntry], cfg: RunQueueConfig,
     if preflight_fn is None:
         preflight_fn = capability_preflight.preflight_or_raise
 
-    checked = set()
+    # De-dup key: the resolved preset NAME, not identity -- two entries
+    # that name the same preset (--repeat, or several queue entries
+    # reusing one preset by name) are probed/checked only once, whether the
+    # caller resolves that name to a shared dict object (real
+    # config_presets.load_preset_data, which does not cache) or a test
+    # fixture hands two distinct-but-same-content dict objects for what
+    # is conceptually "the same preset". Over-checking (a false miss on
+    # this dedup) is harmless -- just an extra cheap probe; under-
+    # checking (falsely treating two different presets as one) is not
+    # possible here since the key IS the name a human/queue used to
+    # refer to the preset.
+    resolved: "dict[str, dict]" = {}
     for entry in entries:
         preset = _resolve_preset(entry, apply_preset_fn)
         if apply_preset_fn is None:
@@ -958,21 +1014,16 @@ def _preflight_campaign(entries: Sequence[QueueEntry], cfg: RunQueueConfig,
         else:
             preset_name = (isinstance(preset, dict) and preset.get("name")) \
                 or entry.label or entry.preset_name or "(unnamed)"
-        # De-dup key: the resolved preset NAME, not identity -- two entries
-        # that name the same preset (--repeat, or several queue entries
-        # reusing one preset by name) are probed only once, whether the
-        # caller resolves that name to a shared dict object (real
-        # config_presets.load_preset_data, which does not cache) or a test
-        # fixture hands two distinct-but-same-content dict objects for what
-        # is conceptually "the same preset". Over-checking (a false miss on
-        # this dedup) is harmless -- just an extra cheap probe; under-
-        # checking (falsely treating two different presets as one) is not
-        # possible here since the key IS the name a human/queue used to
-        # refer to the preset.
         key = str(preset_name)
-        if key in checked:
-            continue
-        checked.add(key)
+        if key not in resolved:
+            resolved[key] = preset
+
+    # ARMS-DIFFER PREFLIGHT (B9), before any HTTP probe -- pure local data,
+    # so it is the cheapest possible refusal and never depends on the board
+    # being reachable at all.
+    _check_arms_differ(resolved)
+
+    for preset_name, preset in resolved.items():
         log.info("[preflight] checking preset %s capabilities against %s",
                   preset_name, cfg.host)
         preflight_fn(preset, cfg.host, zones_host=cfg.host, safety_host=None,
@@ -1611,9 +1662,141 @@ def _discard_partial_capture(entry: QueueEntry) -> None:
             pass
 
 
+def _board_is_idle(cfg: RunQueueConfig) -> bool:
+    """True iff ``GET /api/profile_exec`` reports a state OTHER than
+    running/paused -- the same ``_ACTIVE_STATES`` test
+    :func:`check_board_not_running_for_resume` already uses to decide the
+    board is safe to act on. Shared here so RESTORE-ON-EXIT (B9) gates on
+    exactly the same notion of "idle" the rest of this module already
+    trusts, rather than inventing a second one."""
+    exec_body = get_exec(cfg.host, cfg.http_timeout_s)
+    return str(exec_body.get("state", "")).lower() not in _ACTIVE_STATES
+
+
+def _restore_baseline_preset(baseline_preset_ref, cfg: RunQueueConfig, control,
+                              apply_preset_fn) -> None:
+    """Re-apply the campaign's baseline preset through the exact same apply
+    path :func:`run_entry` uses for every ordinary entry -- resolved via
+    :func:`_resolve_preset` (a preset NAME in real use, a raw dict in
+    tests), applied via ``apply_preset_fn`` if the caller injected one,
+    else the same control/None selection ``run_entry`` makes. Raises
+    whatever the underlying apply raises (never swallowed) -- the caller
+    decides what to log/record."""
+    baseline_entry = QueueEntry(preset_name=baseline_preset_ref, profile_id=0, log_path="")
+    preset = _resolve_preset(baseline_entry, apply_preset_fn)
+    if apply_preset_fn is not None:
+        apply_fn = apply_preset_fn
+    else:
+        from kilnctrl import config_presets
+        apply_fn = config_presets.apply_preset if control is not None else _apply_preset_http_only
+    apply_fn(control, preset, zones_host=cfg.host)
+
+
+def _record_restore(state: Optional[dict], state_path: Optional[str], restore_record: dict) -> None:
+    """Persist ``restore_record`` into the campaign state file, if one is in
+    use. Best-effort: a failure to WRITE the record must not mask whatever
+    the restore attempt itself did or did not do -- that is already fully
+    logged by the caller before this is reached."""
+    if state is None:
+        return
+    state["restore"] = restore_record
+    try:
+        save_campaign_state(state_path, state)
+    except RunQueueError:
+        log.exception(
+            "restore-on-exit: could not persist the restore record to the state file %r -- "
+            "see the log lines above for what the restore itself actually did", state_path)
+
+
+def _handle_abnormal_exit(board_touched: bool, baseline_preset_ref, cfg: RunQueueConfig,
+                           control, apply_preset_fn, state: Optional[dict],
+                           state_path: Optional[str]) -> None:
+    """RESTORE-ON-EXIT (B9). Called from :func:`run_queue` when the entry
+    loop exits abnormally (any exception, including ``KeyboardInterrupt``)
+    -- BEFORE that exception is re-raised. Before this existed, a queue
+    that died mid-campaign left the board holding whatever preset the
+    dying entry had last applied, and the only way to notice was for the
+    operator to check by hand.
+
+    Does nothing if the board was never touched by this invocation (a
+    failure during preflight, or before entry 0 was ever attempted, leaves
+    nothing to restore). Otherwise re-applies ``baseline_preset_ref``
+    (the queue's designated baseline -- see :func:`run_queue`) UNLESS the
+    board is still actively firing: restoring config must never race a
+    firing that is, for whatever reason, still running --
+    profile_executor runs from the board's own flash independent of this
+    process, the same reasoning :func:`check_board_not_running_for_resume`
+    already relies on. Every outcome (skipped / attempted+succeeded /
+    attempted+failed / could-not-check) is logged loudly and recorded into
+    the campaign state file, when one is in use, via :func:`_record_restore`."""
+    if not board_touched:
+        log.info("restore-on-exit: the board was never touched by this invocation -- "
+                  "nothing to restore")
+        return
+    if baseline_preset_ref is None:
+        log.warning("restore-on-exit: no baseline preset is configured (empty queue?) -- "
+                     "nothing to restore")
+        return
+
+    restore_record = {
+        "attempted": False, "succeeded": False,
+        "baseline_preset": str(baseline_preset_ref), "error": None, "at": time.time(),
+    }
+
+    try:
+        idle = _board_is_idle(cfg)
+    except Exception as probe_exc:  # noqa: BLE001
+        log.error(
+            "restore-on-exit: could not confirm the board is idle before restoring (%s) -- "
+            "SKIPPING the restore rather than risk interrupting a firing that may still be "
+            "running. CHECK BY HAND: the board's current preset may not be %r -- verify "
+            "ease-off / max_temp_c / relay_mask / pid_kp,ki,kd / coupling_coeff against that "
+            "preset file.", probe_exc, baseline_preset_ref)
+        restore_record["error"] = f"could not confirm board idle: {probe_exc}"
+        _record_restore(state, state_path, restore_record)
+        return
+
+    if not idle:
+        log.warning(
+            "restore-on-exit: SKIPPING restore -- profile_exec is still running/paused. "
+            "Restoring config now could interfere with an active firing. Once it reaches "
+            "done/faulted, re-apply baseline preset %r by hand if the board still needs it.",
+            baseline_preset_ref)
+        restore_record["error"] = "skipped: board still actively firing"
+        _record_restore(state, state_path, restore_record)
+        return
+
+    restore_record["attempted"] = True
+    log.error(
+        "restore-on-exit: the queue is aborting -- re-applying baseline preset %r so the "
+        "board is not left holding whatever preset the aborted entry last applied",
+        baseline_preset_ref)
+    try:
+        _restore_baseline_preset(baseline_preset_ref, cfg, control, apply_preset_fn)
+    except Exception as restore_exc:  # noqa: BLE001
+        restore_record["error"] = str(restore_exc)
+        log.error("!" * 70)
+        log.error(
+            "!! RESTORE-ON-EXIT FAILED: the board may still be holding an aborted entry's "
+            "config, NOT baseline preset %r.", baseline_preset_ref)
+        log.error(
+            "!! CHECK BY HAND: re-apply preset %r yourself (config_presets.apply_preset, or "
+            "POST /api/zones) and verify its ease-off / max_temp_c / relay_mask / "
+            "pid_kp,ki,kd / coupling_coeff fields actually match the board's current config "
+            "before trusting it. Underlying error: %s", baseline_preset_ref, restore_exc)
+        log.error("!" * 70)
+        _record_restore(state, state_path, restore_record)
+        return
+
+    restore_record["succeeded"] = True
+    log.error("restore-on-exit: baseline preset %r re-applied successfully", baseline_preset_ref)
+    _record_restore(state, state_path, restore_record)
+
+
 def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
               apply_preset_fn=None, state_path: Optional[str] = None,
-              resume: bool = False, preflight_fn: "Optional[Callable]" = None) -> None:
+              resume: bool = False, preflight_fn: "Optional[Callable]" = None,
+              baseline_preset: Optional[str] = None) -> None:
     """Run every entry in order. Stops (re-raises) on the first
     :class:`RunQueueError` -- in particular a :class:`RunQueueFaultError`
     from mid-run -- rather than continuing to the next entry, since a fault
@@ -1725,43 +1908,69 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
             state = new_campaign_state(entries, meta={"host": cfg.host})
             save_campaign_state(state_path, state)
 
-    for i, entry in enumerate(entries):
-        if state is not None and state["entries"][i]["status"] == "completed":
-            log.info("[%s] already completed -- skipping (resume)",
-                      entry.label or entry.preset_name)
-            continue
-        if state is not None:
-            state["entries"][i]["status"] = "in_progress"
-            save_campaign_state(state_path, state)
+    # RESTORE-ON-EXIT (B9): the queue's designated baseline preset -- either
+    # an explicit override, or (the natural default) the LAST queued
+    # entry's own preset. A campaign is normally built ending on the arm
+    # the operator wants the board left in (or on a known-safe "off"
+    # preset) precisely so an abort has something sane to fall back to;
+    # defaulting to the last entry means a queue that never names one
+    # explicitly still restores to something the operator chose, not an
+    # arbitrary early arm.
+    if baseline_preset is not None:
+        baseline_preset_ref = baseline_preset
+    elif entries:
+        baseline_preset_ref = entries[-1].preset_name
+    else:
+        baseline_preset_ref = None
 
-        pair_reference_status = None
-        if entry.pair_key is not None:
-            pair_reference_status = pair_start_status.get(entry.pair_key)
+    board_touched = False
+    try:
+        for i, entry in enumerate(entries):
+            if state is not None and state["entries"][i]["status"] == "completed":
+                log.info("[%s] already completed -- skipping (resume)",
+                          entry.label or entry.preset_name)
+                continue
+            # From here on, this invocation is about to touch the board for
+            # this entry (apply_preset_fn runs very early inside run_entry,
+            # before the rested wait) -- an abnormal exit past this point
+            # has something to restore.
+            board_touched = True
+            if state is not None:
+                state["entries"][i]["status"] = "in_progress"
+                save_campaign_state(state_path, state)
 
-        start_status = run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn,
-                                  pair_reference_status=pair_reference_status)
+            pair_reference_status = None
+            if entry.pair_key is not None:
+                pair_reference_status = pair_start_status.get(entry.pair_key)
 
-        if entry.pair_key is not None:
-            if pair_reference_status is None:
-                # First arm of this pair -- remember its start reading for
-                # whichever later entry shares this key. Also persisted into
-                # the state file below (if one is in use) so a --resume
-                # after this point can rebuild pair_start_status instead of
-                # silently losing the pairing -- see
-                # _rebuild_pair_start_status.
-                pair_start_status[entry.pair_key] = start_status
-                if state is not None:
-                    state["entries"][i]["pair_start_status"] = start_status
-            else:
-                # Second arm consumed the reference -- drop it so a THIRD
-                # entry reusing this key starts a fresh pair instead of
-                # silently matching a stale reading.
-                pair_start_status.pop(entry.pair_key, None)
+            start_status = run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn,
+                                      pair_reference_status=pair_reference_status)
 
-        if state is not None:
-            state["entries"][i]["status"] = "completed"
-            state["entries"][i]["completed_at"] = cfg.now()
-            save_campaign_state(state_path, state)
+            if entry.pair_key is not None:
+                if pair_reference_status is None:
+                    # First arm of this pair -- remember its start reading for
+                    # whichever later entry shares this key. Also persisted into
+                    # the state file below (if one is in use) so a --resume
+                    # after this point can rebuild pair_start_status instead of
+                    # silently losing the pairing -- see
+                    # _rebuild_pair_start_status.
+                    pair_start_status[entry.pair_key] = start_status
+                    if state is not None:
+                        state["entries"][i]["pair_start_status"] = start_status
+                else:
+                    # Second arm consumed the reference -- drop it so a THIRD
+                    # entry reusing this key starts a fresh pair instead of
+                    # silently matching a stale reading.
+                    pair_start_status.pop(entry.pair_key, None)
+
+            if state is not None:
+                state["entries"][i]["status"] = "completed"
+                state["entries"][i]["completed_at"] = cfg.now()
+                save_campaign_state(state_path, state)
+    except BaseException:
+        _handle_abnormal_exit(board_touched, baseline_preset_ref, cfg, control,
+                               apply_preset_fn, state, state_path)
+        raise
 
 
 # --------------------------------------------------------------------------
@@ -1943,6 +2152,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "margin AND sit below every scored profile's opening segment target, or "
              "ensure_stabilized_profile()/prepend_stabilization_hold() refuses that entry "
              "rather than silently reshaping the profile.")
+    parser.add_argument(
+        "--baseline-preset", default=None, metavar="NAME",
+        help="RESTORE-ON-EXIT (B9): the preset re-applied if the queue aborts mid-campaign "
+             "(exception or Ctrl-C) after the board has been touched, once the board is "
+             "confirmed idle. Defaults to the LAST --run entry's own preset -- name this "
+             "explicitly when the last queued entry is not the state the board should be "
+             "left in on an abort.")
     parser.add_argument("--poll-interval-s", type=float, default=DEFAULT_POLL_INTERVAL_S)
     parser.add_argument("--rested-tol-c", type=float, default=DEFAULT_RESTED_TOL_C)
     parser.add_argument("--rested-timeout-s", type=float, default=DEFAULT_RESTED_TIMEOUT_S)
@@ -2013,7 +2229,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         control = ControlClient(link)
 
     try:
-        run_queue(entries, cfg, control=control, state_path=args.state_file, resume=args.resume)
+        run_queue(entries, cfg, control=control, state_path=args.state_file, resume=args.resume,
+                  baseline_preset=args.baseline_preset)
     except capability_preflight.PreflightFailed as exc:
         # str(exc) is already PreflightReport.describe() -- the full,
         # operator-facing report (which capability, why fatal, the remedy).
