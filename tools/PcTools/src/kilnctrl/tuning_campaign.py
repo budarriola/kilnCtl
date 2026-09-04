@@ -185,7 +185,24 @@ def fit_fopdt(t: np.ndarray, y: np.ndarray, baseline_c: float, duty_step: float)
     return FopdtModel(valid=True, k_gain_c_per_duty=raw_rise / duty_step, tau_s=tau, dead_time_s=dead_time)
 
 
-def run_step_test(duty_step: float = 0.05, duration_s: float = 150_000.0, regime: str = "physical") -> FopdtModel:
+def _quantize(value: float) -> float:
+    """Round to the nearest MAX31856 representable temperature.
+
+    ``plant_sim.MAX31856_QUANTUM_C`` (0.0078125 C = 1/128 C, the ADC's LSB)
+    -- see plant_sim.py's own doc comment on that constant. The rest of this
+    module's step/relay tests emitted raw floats from the continuous plant
+    model; project history (see MEMORY "Idealized test input bug class") is
+    that unquantized synthetic measurement data can hide whole branches a
+    real, quantized thermocouple reading would exercise, while the suite
+    still reports green. Quantizing the measured-temperature outputs here
+    keeps this campaign's synthetic data honest about what the real sensor
+    chain actually delivers.
+    """
+    return round(value / plant_sim.MAX31856_QUANTUM_C) * plant_sim.MAX31856_QUANTUM_C
+
+
+def run_step_test(duty_step: float = 0.05, duration_s: float = 150_000.0, regime: str = "physical",
+                   quantize: bool = True) -> FopdtModel:
     """Empty-kiln (mass_mult=1.0, the identification-time load) open-loop
     step test, symmetric duty across all 3 zones (so coupling nets out and
     zone 0's trace is representative -- see module docstring on the
@@ -201,7 +218,7 @@ def run_step_test(duty_step: float = 0.05, duration_s: float = 150_000.0, regime
     y = np.empty(n)
     for i in range(n):
         temps = plant.step(duty)
-        y[i] = temps[0]
+        y[i] = _quantize(temps[0]) if quantize else temps[0]
     return fit_fopdt(t, y, AMBIENT_C, duty_step)
 
 
@@ -221,7 +238,7 @@ class RelayModel:
 
 def run_relay_test(relay_amplitude_duty: float = 0.05, hysteresis_c: float = 1.0,
                     center_c: float = 150.0, duration_s: float = 400_000.0,
-                    regime: str = "physical") -> RelayModel:
+                    regime: str = "physical", quantize: bool = True) -> RelayModel:
     """Empty-kiln (mass_mult=1.0) relay-feedback test around ``center_c``,
     symmetric across zones (same rationale as the step test). Amplitude/
     center/duration picked empirically to reach a genuine limit cycle on
@@ -232,6 +249,7 @@ def run_relay_test(relay_amplitude_duty: float = 0.05, hysteresis_c: float = 1.0
     ys = np.empty(n)
     for i in range(n):
         y0 = plant.temp[0]
+        y0 = _quantize(y0) if quantize else y0
         ys[i] = y0
         if relay_on and y0 >= center_c + hysteresis_c:
             relay_on = False

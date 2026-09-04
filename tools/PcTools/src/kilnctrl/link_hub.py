@@ -62,6 +62,7 @@ import threading
 import time
 from typing import Optional
 
+from .jsonl_util import iter_jsonl
 from .protocol import (
     DEFAULT_BAUD_RATE,
     SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED,
@@ -194,15 +195,9 @@ class _ClientHandler:
     def run(self) -> None:
         try:
             f = self.sock.makefile("r", encoding="utf-8", newline="\n")
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    req = json.loads(line)
-                except json.JSONDecodeError:
-                    log.debug("hub: dropping malformed request line: %r", line)
-                    continue
+            for req in iter_jsonl(
+                f, on_error=lambda line: log.debug("hub: dropping malformed request line: %r", line)
+            ):
                 if not isinstance(req, dict):
                     # Valid JSON, wrong shape (a bare number/list/string).
                     # req.get() would raise AttributeError out of this loop,
@@ -585,16 +580,9 @@ class RemoteUartLink:
     def _read_loop(self) -> None:
         try:
             f = self._sock.makefile("r", encoding="utf-8", newline="\n")
-            for line in f:
+            for msg in iter_jsonl(f, on_error="skip"):
                 if self._stop.is_set():
                     break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
                 if not isinstance(msg, dict):
                     continue
                 try:

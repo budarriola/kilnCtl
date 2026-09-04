@@ -1804,14 +1804,24 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       Negative-tested: added a bare `nvs_set_u8()` call to `MAX31856.c` (not
       allowlisted), lint failed naming `drivers\MAX31856.c:1374`; reverted,
       confirmed clean again.
-- [ ] **`zones_http_client.py` hand-types its field table instead of reading
+- [x] **`zones_http_client.py` hand-types its field table instead of reading
       it live.** `zones_http_client.py:320-350`'s `_TOP_FIELD_FORM_KEY` /
       `_TOP_INT_FIELDS` maps drift from firmware JSON keys by hand;
       `safety_cfg_http_client.py:136-213`'s `params_by_name()` +
       `build_post_body()` already use a live-GET lookup instead. Port zones to
       that pattern, or extend `selfcheck.py` (already parses
       `UART_PROTOCOL_VERSION` from firmware headers, `selfcheck.py:74-89`) to
-      diff the dict against `zones_http_handlers.c` literals. S-M
+      diff the dict against `zones_http_handlers.c` literals. S-M — **CLOSED
+      2026-09-04**: `selfcheck_zones_fields.py` extracts both `zones_get_handler`'s
+      top-level JSON keys (walks the concatenated `APPEND()` string-literal
+      template with a brace/bracket-depth tracker, so a `"key":` only counts
+      at depth 1 -- nested `safety_wiring`/per-zone/per-profile keys are
+      excluded without hand-listing them) and `zones_post_handler`'s literal
+      top-level POST field names, and diffs both against
+      `_TOP_FIELD_FORM_KEY`/`_TOP_READONLY_OR_STRUCTURAL_KEYS`. Wired into
+      `selfcheck.py`'s `main()`. Negative-tested: removed
+      `safety_tc_type` from `_TOP_FIELD_FORM_KEY`, both new checks failed
+      naming it, reverted, confirmed clean again.
 - [x] **No stub-vs-real-IDF signature check.** `App/test/stubs/*.h` can drift
       from the real ESP-IDF headers they stand in for with nothing catching
       it. Add a signature-diff script. M — **CLOSED 2026-09-04**:
@@ -1832,18 +1842,41 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       log — it never re-applies a safe preset via `_apply_preset_http_only`
       (~836). Add a restore-on-exit hook plus a verify-arms-differ preflight
       as built-ins. M
-- [ ] **Four hand-rolled JSONL parse loops disagree on malformed-line
+- [x] **Four hand-rolled JSONL parse loops disagree on malformed-line
       handling.** `coupling_pair_log.py:187-192,239-245`,
       `http_capture_log.py:67-72`, `link_hub.py:197-202,588-595`,
-      `relay_ku_tu_check.py:97-101`. Factor a shared `iter_jsonl` helper. S
-- [ ] **`tuning_campaign.py`'s `make_plant` generates continuous floats.**
+      `relay_ku_tu_check.py:97-101`. Factor a shared `iter_jsonl` helper. S —
+      **CLOSED 2026-09-04**: `kilnctrl/jsonl_util.py`'s `iter_jsonl(source,
+      on_error=..., with_line=...)` accepts either a path or an already-open
+      line iterable (e.g. `link_hub.py`'s socket `makefile()`), and preserves
+      each caller's prior malformed-line behaviour explicitly per call site:
+      `on_error="skip"` (coupling_pair_log/http_capture_log/link_hub's second
+      loop), `on_error="raise"` (relay_ku_tu_check, which never caught
+      `json.loads()` before), `on_error=<callable>` (link_hub's first loop,
+      which logs before skipping). `with_line=True` covers
+      `load_thermo_samples_any_format`'s two-format fallback, which needs the
+      raw line when the primary `{"t","s"}` parse fails. All five call sites
+      ported, no behaviour change. Negative-tested: made the "raise" path a
+      no-op, `test_jsonl_util.py`'s raise test failed as expected; reverted.
+- [x] **`tuning_campaign.py`'s `make_plant` generates continuous floats.**
       (~126-268) No MAX31856 0.0078125 C quantization, unlike the real
       sensor path. Add a quantize pass, or document explicitly why continuous
-      is intentional. S
-- [ ] **Vendored `mcpkit_registry.py` has no drift guard.** Currently
+      is intentional. S — **CLOSED 2026-09-04**: `run_step_test`/
+      `run_relay_test` gained a `_quantize()` helper (rounds to
+      `plant_sim.MAX31856_QUANTUM_C`, 0.0078125 C = 1/128 C) applied to every
+      measured-temperature output, on by default via a new `quantize=True`
+      parameter (`quantize=False` restores the old continuous behaviour).
+      Negative-tested: made `_quantize()` a no-op, `test_tuning_campaign_
+      quantize.py` failed (3 of 6 tests), reverted, confirmed clean again.
+- [x] **Vendored `mcpkit_registry.py` has no drift guard.** Currently
       byte-identical to `tools/PcTools/src/mcpkit/registry.py`, the source of
       truth it's vendored from — add a one-line diff check to `selfcheck.py`
-      so it stays that way. S
+      so it stays that way. S — **CLOSED 2026-09-04**: `pytest`-side coverage
+      already existed (`tests/test_mcpkit_vendored_copy.py`), but nothing
+      covered it in `selfcheck.py`, which runs in contexts pytest doesn't
+      (per this item's own request). Added `_mcpkit_vendored_copy_check()` --
+      same byte-identical (line-ending normalized) comparison, skips cleanly
+      when the `mykicadMcp` submodule isn't checked out.
 - [ ] **Frame A's field layout is hand-duplicated across firmwares.**
       `SaftyFW/src/tasks/link_frame.h:1-16` (pack side) says it is
       "byte-for-byte the layout `safety_link.h` already parses" against

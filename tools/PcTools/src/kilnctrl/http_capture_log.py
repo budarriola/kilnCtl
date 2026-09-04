@@ -42,6 +42,7 @@ import os
 from typing import Optional, Sequence
 
 from kilnctrl import log_analysis as la
+from kilnctrl.jsonl_util import iter_jsonl
 
 
 @dataclasses.dataclass
@@ -63,27 +64,19 @@ def parse_http_capture_jsonl(path: str) -> list[HttpPollRow]:
     """Parse an HTTP-capture ``{"t","exec","status"}`` JSONL file into
     ``HttpPollRow`` records (one per line with a valid ``exec`` body)."""
     rows: list[HttpPollRow] = []
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            body = obj.get("exec")
-            if not isinstance(body, dict) or "zones" not in body or "dwelling" not in body:
-                continue
-            t = obj.get("t")
-            try:
-                t = float(t)
-            except (TypeError, ValueError):
-                continue
-            poll = la.poll_row_from_exec_body(_wall_time(t), body)
-            rows.append(HttpPollRow(t=t, poll=poll, status=obj.get("status")))
+    for obj in iter_jsonl(path, on_error="skip"):
+        if not isinstance(obj, dict):
+            continue
+        body = obj.get("exec")
+        if not isinstance(body, dict) or "zones" not in body or "dwelling" not in body:
+            continue
+        t = obj.get("t")
+        try:
+            t = float(t)
+        except (TypeError, ValueError):
+            continue
+        poll = la.poll_row_from_exec_body(_wall_time(t), body)
+        rows.append(HttpPollRow(t=t, poll=poll, status=obj.get("status")))
     return rows
 
 

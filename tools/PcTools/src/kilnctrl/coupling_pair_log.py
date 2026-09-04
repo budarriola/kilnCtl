@@ -88,6 +88,7 @@ import re
 from typing import Optional, Sequence
 
 from . import log_analysis as la
+from .jsonl_util import iter_jsonl
 
 ZONES = (0, 1, 2)
 
@@ -183,18 +184,10 @@ def _load_jsonl(path: str) -> list:
     parse (blank/truncated trailing line from a still-being-written
     capture -- same tolerance ``log_analysis`` documents elsewhere)."""
     out = []
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if "t" not in obj or "s" not in obj:
-                continue
-            out.append((float(obj["t"]), obj["s"]))
+    for obj in iter_jsonl(path, on_error="skip"):
+        if "t" not in obj or "s" not in obj:
+            continue
+        out.append((float(obj["t"]), obj["s"]))
     return out
 
 
@@ -235,33 +228,25 @@ def load_thermo_samples_any_format(path: str) -> list[ThermoSample]:
     tolerance as ``_load_jsonl``.
     """
     out = []
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            sample = None
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                obj = None
-            if obj is not None and "t" in obj and "s" in obj:
-                channels = parse_thermo_text(obj["s"])
-                if channels is not None:
-                    sample = ThermoSample(t=float(obj["t"]), channels=channels)
-            if sample is None:
-                brace = line.find("{")
-                if brace > 0:
-                    try:
-                        status = json.loads(line[brace:])
-                    except json.JSONDecodeError:
-                        status = None
-                    if status is not None and "channels" in status and "time_now_epoch" in status:
-                        channels = {c["channel"]: c["temp_c"] for c in status["channels"] if c.get("valid")}
-                        if channels:
-                            sample = ThermoSample(t=float(status["time_now_epoch"]), channels=channels)
-            if sample is not None:
-                out.append(sample)
+    for line, obj in iter_jsonl(path, on_error="skip", with_line=True):
+        sample = None
+        if obj is not None and "t" in obj and "s" in obj:
+            channels = parse_thermo_text(obj["s"])
+            if channels is not None:
+                sample = ThermoSample(t=float(obj["t"]), channels=channels)
+        if sample is None:
+            brace = line.find("{")
+            if brace > 0:
+                try:
+                    status = json.loads(line[brace:])
+                except json.JSONDecodeError:
+                    status = None
+                if status is not None and "channels" in status and "time_now_epoch" in status:
+                    channels = {c["channel"]: c["temp_c"] for c in status["channels"] if c.get("valid")}
+                    if channels:
+                        sample = ThermoSample(t=float(status["time_now_epoch"]), channels=channels)
+        if sample is not None:
+            out.append(sample)
     out.sort(key=lambda s: s.t)
     return out
 

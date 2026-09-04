@@ -65,6 +65,7 @@ from selfcheck_link_hub import link_hub_checks  # noqa: F401
 from selfcheck_actions import actions_checks  # noqa: F401
 from selfcheck_commonfw import commonfw_vector_checks, commonfw_payload_vector_checks  # noqa: F401
 from selfcheck_hardening import hardening_checks  # noqa: F401
+from selfcheck_zones_fields import zones_field_table_checks  # noqa: F401
 
 # Same cross-language-pin idiom as tests/test_ramp_assist.py's
 # RampAssistLagBandCrossLanguageTest: parse the firmware header's #define
@@ -93,6 +94,36 @@ def _firmware_uart_protocol_version() -> int:
             f"{_UART_TASK_IDS_H_PATH} -- parser or macro spelling is broken"
         )
     return int(m.group(1))
+
+
+#: B12: tests/test_mcpkit_vendored_copy.py already asserts (via pytest) that
+#: tools/mykicadMcp/mcpkit_registry.py is byte-identical (line-ending
+#: normalized) to tools/PcTools/src/mcpkit/registry.py. selfcheck.py runs in
+#: contexts where pytest doesn't (see this module's docstring/run line), so
+#: mirror that one guard here too -- a one-line diff, not a duplicate of the
+#: pytest suite's fuller assertions (missing-source failure, skip-on-
+#: uninitialized-submodule).
+_MCPKIT_REGISTRY_SOURCE_PATH = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "tools" / "PcTools" / "src" / "mcpkit" / "registry.py"
+)
+_MCPKIT_REGISTRY_VENDORED_PATH = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "tools" / "mykicadMcp" / "mcpkit_registry.py"
+)
+
+
+def _mcpkit_vendored_copy_check() -> None:
+    if not _MCPKIT_REGISTRY_VENDORED_PATH.is_file():
+        print("  (skipped: tools/mykicadMcp submodule not checked out)")
+        return
+    source_text = _MCPKIT_REGISTRY_SOURCE_PATH.read_text(encoding="utf-8")
+    vendored_text = _MCPKIT_REGISTRY_VENDORED_PATH.read_text(encoding="utf-8")
+    check(
+        "tools/mykicadMcp/mcpkit_registry.py matches tools/PcTools/src/mcpkit/registry.py",
+        vendored_text,
+        source_text,
+    )
 
 
 def _mcpkit_staleness_checks() -> None:
@@ -129,6 +160,9 @@ def _mcpkit_staleness_checks() -> None:
 def main() -> int:
     print("== mcpkit stale-server detection ==")
     _mcpkit_staleness_checks()
+
+    print("\n== mcpkit vendored-registry copy (mykicadMcp) ==")
+    _mcpkit_vendored_copy_check()
 
     print("== CRC-16/CCITT-FALSE ==")
     # The canonical check value for this variant.
@@ -238,6 +272,9 @@ def main() -> int:
     link_hub_checks()
     actions_checks()
     hardening_checks()
+
+    print("\n== zones top-level field table vs firmware (zones_http_handlers.c) ==")
+    zones_field_table_checks()
 
     print("\n== port discovery (no device required) ==")
     ports = list_ports()

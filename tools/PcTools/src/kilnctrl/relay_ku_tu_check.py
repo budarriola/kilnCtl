@@ -63,6 +63,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from .jsonl_util import iter_jsonl
+
 # ---------------------------------------------------------------------------
 # Capture loading
 # ---------------------------------------------------------------------------
@@ -93,13 +95,10 @@ class RelayCapture:
 
 def _read_jsonl(path: str) -> list[tuple[float, str]]:
     out: list[tuple[float, str]] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            d = json.loads(line)
-            out.append((float(d["t"]), str(d["s"])))
+    # on_error="raise": this call site never caught json.loads() before --
+    # keep letting a malformed line raise rather than silently swallowing it.
+    for d in iter_jsonl(path, on_error="raise"):
+        out.append((float(d["t"]), str(d["s"])))
     return out
 
 
