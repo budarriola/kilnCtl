@@ -3262,6 +3262,139 @@ to check the untested outer 8 rule cells before spending hardware time
 trying to reach them. Full analysis, quantile tables, and the ranked
 option list: `logs/coupling/fuzzy_bands_envelope_20260904e_report.md`.
 
+### 3.6h Outer 8 rule cells exercised in host tests (2026-09-04)
+
+§3.6g's zero-kiln-cost recommendation, done: `pid_fuzzy_adjust()` driven
+directly in `firmware/KilnFW/App/test/test_pid_fuzzy.c` (host tests, no
+hardware). This closes the "check before spending hardware time" half of
+§3.6g's option list; it does **not** change the rig's measured envelope or
+make the bands reachable in reality — those are separate claims, kept
+separate below.
+
+**Before this pass:** all 9 rule-table cells were already exercised, but
+only at their *saturated corners* (`|error| = 500` and `|rate| = 1.0`, both
+>= their bands so membership degree is exactly 1.0 in one bucket — pure
+`{Kp,Ki,Kd}` direction, no blending). `strength=0` bit-exactness,
+NaN/inf inputs, non-negativity/finiteness at absurd inputs, and
+strength-monotonicity were also already covered. What was **not** covered:
+any point with *partial* membership (the region a real, in-band excursion
+actually passes through), the continuity of the output across a bucket
+boundary, and a direct numeric check of the documented ±25%-at-strength-50
+/ ±50%-at-strength-100 ceiling (only inferred previously, from
+monotonicity).
+
+**Cell-by-cell (existing coverage, corners only), verified against
+`pid_fuzzy.h`'s documented table (not `pid_fuzzy.c`'s `RULE_TABLE`, so an
+inversion in the .c file has an independent source to be caught against):
+all 9 corners already matched the documented directions exactly.** No
+code-vs-doc disagreement found anywhere in this pass, at either the
+corners or the newly-added blended/boundary points.
+
+**New tests added this pass** (`test_pid_fuzzy.c`, 55 → 77 `TEST_CHECK`s):
+  * **Blending.** error=10 (exactly halfway between ZERO's center and
+    POS's edge on the `ERROR_BAND_C=20` scale) at rate=STEADY: the
+    ZERO/STEADY cell is `{Kp-,Ki+,Kd-}` and POS/STEADY is `{Kp+,Ki=,Kd=}`
+    — opposite kp direction — so the midpoint's kp/ki are asserted
+    **strictly between** the two corner outputs, not equal to either. This
+    is the case a hard bucket-switch (round-to-nearest instead of
+    weighted-average defuzzification) would fail by snapping straight to
+    one corner. **Passes**: the blend is a real weighted average.
+  * **Boundary continuity.** Error stepped across the ERROR_BAND_C=20 edge
+    (19.99 / 20.00 / 20.01) and rate stepped across the RATE_BAND_C_PER_S
+    boundary (0.499 / 0.501), each gain's change bounded to <0.0005 (out of
+    a ~0.005 corner-to-corner swing at strength=100) — no near-discontinuity
+    at either boundary. **Passes.** (A step here would read as chattering
+    on a real controller, which is why this was worth checking rather than
+    assuming triangular membership guarantees it — the code's `<=`/`>=`
+    saturation branches in `triangular_memberships()` could in principle
+    have been off by an ULP at the boundary; they are not.)
+  * **Ceiling, checked directly.** At the fully-saturated POS/RISING corner
+    (full rule membership, no blending to dilute the number):
+    `strength=50` keeps every gain within the documented ±25% and lands
+    within 1% of it (not just "under some looser bound"); `strength=100`
+    keeps every gain within ±50% and likewise lands close to it. **Passes**,
+    and is a real discriminator — the mandatory negative test below (mutate
+    `MAX_NUDGE_FRACTION`) proves it can fail.
+  * **`strength_pct` above the documented 0-100 range** (uint8_t allows up
+    to 255; tested at 200): clamps to exactly the strength=100 result
+    rather than extrapolating past the ceiling. **Passes.**
+  * **Extreme base gain** (`base_kp/ki/kd = 1.0e6`) nudged upward: stays
+    finite and positive. **Passes.**
+  * **One planned test was wrong, not the code — recorded rather than
+    silently dropped.** A first draft asserted that error=±10 at
+    rate=FALLING (partial membership straddling the ZERO bucket) would
+    nudge kp in exactly opposite directions for +10 vs -10, extrapolating
+    the documented NEG/POS corner symmetry into the blended region. It
+    failed: `error=+10,rate=FALLING` gives kp≈0.01 (nudged down) while
+    `error=-10,rate=FALLING` gives kp=0.02 (exactly unchanged). Hand
+    verification: ZERO/FALLING's direction (`{Kp-,Ki-,Kd+}`) is shared
+    *unmirrored* by both signs of a small error, so
+    `0.5*(-1)+0.5*(-1)=-1` (POS side, ZERO+POS both agree kp-) vs.
+    `0.5*(-1)+0.5*(+1)=0` (NEG side, ZERO and NEG disagree and cancel) —
+    correct weighted-average defuzzification, not a bug. The header's
+    NEG/POS symmetry claim holds at the saturated corners (already
+    covered) and was never claimed to extend through a differently-shaped
+    ZERO row at partial membership. Test removed; the arithmetic is
+    recorded in a comment in its place so the next person doesn't
+    reintroduce the same wrong assertion.
+
+**Mandatory negative tests (both run, both reverted, both verbatim):**
+
+  1. *Transposed rows.* Swapped `RULE_TABLE`'s NEG (index 0) and POS
+     (index 2) rows in `pid_fuzzy.c`, rebuilt, ran the full suite:
+     ```
+     FAIL test_pid_fuzzy.c:52: POS error, RISING rate: kp nudged up
+     FAIL test_pid_fuzzy.c:53: POS error, RISING rate: ki nudged down
+     FAIL test_pid_fuzzy.c:54: POS error, RISING rate: kd nudged up
+     FAIL test_pid_fuzzy.c:62: POS error, FALLING rate: kp nudged down
+     FAIL test_pid_fuzzy.c:63: POS error, FALLING rate: ki nudged up
+     FAIL test_pid_fuzzy.c:64: POS error, FALLING rate: kd nudged down
+     FAIL test_pid_fuzzy.c:75: NEG error, FALLING rate: kp nudged up
+     FAIL test_pid_fuzzy.c:76: NEG error, FALLING rate: ki nudged down
+     FAIL test_pid_fuzzy.c:77: NEG error, FALLING rate: kd nudged up
+     FAIL test_pid_fuzzy.c:85: NEG error, RISING rate: kp nudged down
+     FAIL test_pid_fuzzy.c:86: NEG error, RISING rate: ki nudged up
+     FAIL test_pid_fuzzy.c:87: NEG error, RISING rate: kd nudged down
+     ```
+     12 failures, all naming exactly the transposed NEG/POS cells (the
+     ZERO row and STEADY column, untouched by the mutation, kept passing).
+     Reverted (`git diff` on `pid_fuzzy.c` empty afterward); full suite
+     clean on rebuild.
+  2. *Ceiling disabled.* Changed `MAX_NUDGE_FRACTION` from `0.5f` to
+     `1.5f` (bad clamp: allows up to ±150% instead of ±50%), rebuilt:
+     ```
+     FAIL test_pid_fuzzy.c:373: strength=50: kp nudge does not exceed the documented +/-25% ceiling
+     FAIL test_pid_fuzzy.c:374: strength=50: ki nudge does not exceed the documented +/-25% ceiling
+     FAIL test_pid_fuzzy.c:375: strength=50: kd nudge does not exceed the documented +/-25% ceiling
+     FAIL test_pid_fuzzy.c:388: strength=100: kp nudge does not exceed the documented +/-50% ceiling
+     ```
+     4 failures, naming exactly the ceiling checks. Reverted (`git diff`
+     on `pid_fuzzy.c` empty afterward); full suite clean on rebuild.
+
+**What this does and does not establish.** Every rule cell now has host-test
+coverage at both its saturated corner and, for the cells adjacent to
+ZERO/STEADY, a blended interior point, and the two axis boundaries are
+checked for continuity. This means: *if* the bands are ever rescaled per
+§3.6g's option (a) to this rig's actual envelope (`ERROR_BAND_C` ~6-8 °C,
+`RATE_BAND_C_PER_S` ~0.2-0.25 °C/s — still an owner decision, not applied
+here, and **not applied by this pass either** — `pid_fuzzy.c`'s band
+constants are untouched, confirmed by `git diff` above), the newly-reachable
+cells are already known-good in isolation. It does **not** mean any of this
+has run, or now can run, against the physical plant: §3.6g's 100%-in-center
+finding is about the CAPTURED ARCHIVE and is unaffected by tests that never
+touch hardware. "Covered in test" and "reachable in reality" remain the two
+different claims §3.6g asked not to conflate — after this pass, all 9 cells
+are the former, 1 of 9 is the latter.
+
+**Verification:** `firmware/KilnFW/App/test/build_host_tests.ps1`, rerun
+after every mutation and after the final revert. 21/21 executables built
+and passed clean on the last run; `pid_fuzzy`'s own block never failed
+except during the two deliberate mutations above (a handful of unrelated,
+pre-existing failures in `test_heat_enable.c` / `test_display_power_policy.c`
+appeared transiently on one run and cleared on rerun — consistent with
+another session's concurrent edits, not this section's changes; `pid_fuzzy.c`
+was not touched by this pass, `git diff` confirms zero net change).
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer

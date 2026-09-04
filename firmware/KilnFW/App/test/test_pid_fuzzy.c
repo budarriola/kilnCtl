@@ -265,4 +265,170 @@ void run_test_pid_fuzzy(void)
                   "sanity: under the OLD 0.05 band, an ordinary ramp is already >25% toward saturation -- "
                   "confirms the rescale above is what makes the <25% assertion pass, not a coincidence");
     }
+
+    /* ------------------------------------------------------------------
+     * Everything above drives the 9 rule-table cells only at their
+     * SATURATED corners (|error| >= 20, |rate| >= 0.5 -- pure membership
+     * 1.0 in one bucket). The archive finding this file exists to answer
+     * (logs/coupling/fuzzy_bands_envelope_20260904e_report.md,
+     * PID_EXPANSION_PLAN.md 3.6g) is that this rig's real error/rate never
+     * leaves the CENTRE cell at all, let alone reaches a saturated corner --
+     * so the corner tests above establish "the 9 cells are correct in
+     * isolation" but say nothing about the blended region a real, in-band
+     * excursion would actually traverse. The blocks below exercise that
+     * region: partial membership, the boundary between buckets, and the
+     * strength-scaled ceiling.
+     * ------------------------------------------------------------------ */
+
+    /* Blending: an error/rate pair strictly BETWEEN bucket centers must
+     * produce a gain strictly between the two adjacent corner outputs
+     * (weighted-average defuzzification, not a hard switch). error=10 is
+     * exactly halfway between ZERO's center (0) and POS's edge (20) on the
+     * ERROR_BAND_C=20 scale -- e_zero = e_pos = 0.5, e_neg = 0. Rate held at
+     * the RISING corner (1.0, i.e. >= RATE_BAND_C_PER_S so r_pos = 1.0
+     * purely) isolates the blend to the error axis alone. */
+    {
+        float kp_zero_rising, ki_zero_rising, kd_zero_rising;
+        float kp_pos_rising, ki_pos_rising, kd_pos_rising;
+        float kp_mid, ki_mid, kd_mid;
+        pid_fuzzy_adjust(0.0f, 1.0f, 0.02f, 0.02f, 0.02f, 100, &kp_zero_rising, &ki_zero_rising, &kd_zero_rising);
+        pid_fuzzy_adjust(500.0f, 1.0f, 0.02f, 0.02f, 0.02f, 100, &kp_pos_rising, &ki_pos_rising, &kd_pos_rising);
+        pid_fuzzy_adjust(10.0f, 1.0f, 0.02f, 0.02f, 0.02f, 100, &kp_mid, &ki_mid, &kd_mid);
+        /* ZERO/RISING is {Kp+,Ki-,Kd+}; POS/RISING is also {Kp+,Ki-,Kd+} --
+         * same directions, so this pair alone can't show a blend; use it
+         * only to confirm the midpoint stays within [min,max] of the two
+         * corners rather than overshooting past either. */
+        float kp_lo = fminf(kp_zero_rising, kp_pos_rising), kp_hi = fmaxf(kp_zero_rising, kp_pos_rising);
+        float ki_lo = fminf(ki_zero_rising, ki_pos_rising), ki_hi = fmaxf(ki_zero_rising, ki_pos_rising);
+        float kd_lo = fminf(kd_zero_rising, kd_pos_rising), kd_hi = fmaxf(kd_zero_rising, kd_pos_rising);
+        TEST_CHECK(kp_mid >= kp_lo - 1e-6f && kp_mid <= kp_hi + 1e-6f, "blend at error=10 (halfway ZERO/POS): kp stays within the two adjacent corners' range");
+        TEST_CHECK(ki_mid >= ki_lo - 1e-6f && ki_mid <= ki_hi + 1e-6f, "blend at error=10: ki stays within the two adjacent corners' range");
+        TEST_CHECK(kd_mid >= kd_lo - 1e-6f && kd_mid <= kd_hi + 1e-6f, "blend at error=10: kd stays within the two adjacent corners' range");
+    }
+
+    /* Real blending discriminator: ZERO/STEADY is {Kp-,Ki+,Kd-} and
+     * POS/STEADY is {Kp+,Ki=,Kd=} -- opposite kp direction, so a midpoint
+     * error at rate=0 (pure STEADY) must land strictly BETWEEN the two kp
+     * outputs, not equal to either one, and ki/kd must sit strictly between
+     * "nudged" and "unchanged". This is the case a hard bucket-switch
+     * (round to nearest bucket instead of blending) would fail: it would
+     * jump straight to one corner's exact output. */
+    {
+        float kp_zero, ki_zero, kd_zero;
+        float kp_pos, ki_pos, kd_pos;
+        float kp_mid, ki_mid, kd_mid;
+        pid_fuzzy_adjust(0.0f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp_zero, &ki_zero, &kd_zero);
+        pid_fuzzy_adjust(500.0f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp_pos, &ki_pos, &kd_pos);
+        pid_fuzzy_adjust(10.0f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp_mid, &ki_mid, &kd_mid);
+        TEST_CHECK(kp_mid > fminf(kp_zero, kp_pos) + 1e-6f && kp_mid < fmaxf(kp_zero, kp_pos) - 1e-6f,
+                  "blend at error=10, rate=0 (halfway ZERO/POS, opposite kp directions): kp strictly between the two corners, not snapped to either");
+        TEST_CHECK(ki_mid > fminf(ki_zero, ki_pos) + 1e-6f && ki_mid < fmaxf(ki_zero, ki_pos) - 1e-6f,
+                  "blend at error=10, rate=0: ki strictly between the two corners");
+    }
+
+    /* Boundary continuity: approaching the error=+20 (ZERO/POS) boundary
+     * from just inside vs just outside must NOT produce a discontinuous
+     * jump in any gain. A real controller sees error cross this boundary
+     * continuously as the kiln tracks; a step here would be audible as
+     * chattering. Check both directly adjacent to the boundary and confirm
+     * output varies smoothly (bounded step for a small input step). */
+    {
+        float kp_below, ki_below, kd_below;
+        float kp_at, ki_at, kd_at;
+        float kp_above, ki_above, kd_above;
+        pid_fuzzy_adjust(19.99f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp_below, &ki_below, &kd_below);
+        pid_fuzzy_adjust(20.00f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp_at, &ki_at, &kd_at);
+        pid_fuzzy_adjust(20.01f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp_above, &ki_above, &kd_above);
+        /* A 0.02 degC step in error must move kp by far less than the full
+         * corner-to-corner swing (~0.005 at strength=100 here) -- anything
+         * near that magnitude would mean a near-discontinuity at exactly
+         * the boundary the membership function is defined to saturate at. */
+        TEST_CHECK(fabsf(kp_at - kp_below) < 0.0005f, "error boundary at +20 (ZERO/POS edge): no discontinuity approaching from below");
+        TEST_CHECK(fabsf(kp_above - kp_at) < 0.0005f, "error boundary at +20: no discontinuity leaving into fully-saturated POS");
+        TEST_CHECK(fabsf(ki_at - ki_below) < 0.0005f, "error boundary at +20: ki continuous approaching from below");
+        TEST_CHECK(fabsf(ki_above - ki_at) < 0.0005f, "error boundary at +20: ki continuous leaving into fully-saturated POS");
+    }
+
+    /* Same boundary check on the rate axis, at its +/-0.5 degC/s edge
+     * (RISING/STEADY boundary), since the rate axis is the one the
+     * archive's finding and the RATE_BAND_C_PER_S rescale both concern. */
+    {
+        float kp_below, ki_below, kd_below;
+        float kp_above, ki_above, kd_above;
+        pid_fuzzy_adjust(0.0f, 0.499f, 0.02f, 0.02f, 0.02f, 100, &kp_below, &ki_below, &kd_below);
+        pid_fuzzy_adjust(0.0f, 0.501f, 0.02f, 0.02f, 0.02f, 100, &kp_above, &ki_above, &kd_above);
+        TEST_CHECK(fabsf(kp_above - kp_below) < 0.0005f, "rate boundary at +0.5 (STEADY/RISING edge): kp continuous crossing it");
+        TEST_CHECK(fabsf(ki_above - ki_below) < 0.0005f, "rate boundary at +0.5: ki continuous crossing it");
+    }
+
+    /* strength_pct=50 ceiling: the header/plan's "at most +/-25% at
+     * strength 50" contract, checked directly rather than inferred from
+     * monotonicity. Use the fully-saturated POS/RISING corner (Kp+, Ki-,
+     * Kd+, all at full 1.0 rule membership) so the nudge is exactly
+     * scale = (50/100)*MAX_NUDGE_FRACTION with no partial-membership
+     * damping to obscure the number. */
+    {
+        float kp, ki, kd;
+        pid_fuzzy_adjust(500.0f, 1.0f, 0.02f, 0.02f, 0.02f, 50, &kp, &ki, &kd);
+        TEST_CHECK(fabsf(kp - 0.02f) <= 0.02f * 0.25f + 1e-6f, "strength=50: kp nudge does not exceed the documented +/-25% ceiling");
+        TEST_CHECK(fabsf(ki - 0.02f) <= 0.02f * 0.25f + 1e-6f, "strength=50: ki nudge does not exceed the documented +/-25% ceiling");
+        TEST_CHECK(fabsf(kd - 0.02f) <= 0.02f * 0.25f + 1e-6f, "strength=50: kd nudge does not exceed the documented +/-25% ceiling");
+        /* And it should be CLOSE to 25%, not just under some looser bound
+         * -- at full rule membership the ceiling should be reached almost
+         * exactly, otherwise "at most 25%" would be true of a much weaker
+         * effect too and this assertion would be vacuous. */
+        TEST_CHECK(fabsf(kp - 0.02f) > 0.02f * 0.24f, "strength=50, full membership: kp nudge is close to the 25% ceiling, not far under it");
+    }
+
+    /* strength_pct=100 ceiling: same corner, must reach close to the full
+     * +/-50% MAX_NUDGE_FRACTION bound documented in pid_fuzzy.c. */
+    {
+        float kp, ki, kd;
+        pid_fuzzy_adjust(500.0f, 1.0f, 0.02f, 0.02f, 0.02f, 100, &kp, &ki, &kd);
+        TEST_CHECK(fabsf(kp - 0.02f) <= 0.02f * 0.5f + 1e-6f, "strength=100: kp nudge does not exceed the documented +/-50% ceiling");
+        TEST_CHECK(fabsf(kp - 0.02f) > 0.02f * 0.49f, "strength=100, full membership: kp nudge is close to the 50% ceiling");
+    }
+
+    /* strength_pct above the documented 0-100 range (uint8_t allows up to
+     * 255) must clamp to the strength=100 behavior, not extrapolate past
+     * it -- the ceiling is a safety bound, not a formula that happens to
+     * be evaluated at <=100 in practice. */
+    {
+        float kp100, ki100, kd100;
+        float kp200, ki200, kd200;
+        pid_fuzzy_adjust(500.0f, 1.0f, 0.02f, 0.02f, 0.02f, 100, &kp100, &ki100, &kd100);
+        pid_fuzzy_adjust(500.0f, 1.0f, 0.02f, 0.02f, 0.02f, 200, &kp200, &ki200, &kd200);
+        TEST_CHECK(kp200 == kp100, "strength_pct=200 (out of documented range): kp clamps to the strength=100 result");
+        TEST_CHECK(ki200 == ki100, "strength_pct=200: ki clamps to the strength=100 result");
+        TEST_CHECK(kd200 == kd100, "strength_pct=200: kd clamps to the strength=100 result");
+    }
+
+    /* Symmetric monotonicity: the plan's stated NEG/POS symmetry ("far
+     * from target behaves the same regardless of direction, only error's
+     * own sign -- handled in pid.c, not here -- decides which way duty
+     * moves") is a property of the RULE TABLE's saturated corners, checked
+     * above (the NEG-error and POS-error corner blocks share magnitudes).
+     * It does NOT extend to partial-membership points that also straddle
+     * the ZERO bucket: ZERO/FALLING's direction ({Kp-,Ki-,Kd+}) is shared
+     * unmirrored by both a slightly-positive and a slightly-negative
+     * error, so blending it in with POS/FALLING ({Kp-,Ki+,Kd-}) vs.
+     * NEG/FALLING ({Kp+,Ki-,Kd+}) does NOT generally cancel to equal and
+     * opposite magnitudes (confirmed by hand: error=+/-10, rate=-1.0,
+     * strength=100 gives kp_pos=0.01 (nudged down) but kp_neg=0.02
+     * (exactly unchanged) -- 0.5*(-1)+0.5*(-1)=-1 vs 0.5*(-1)+0.5*(+1)=0.
+     * This is arithmetically correct weighted-average defuzzification, not
+     * a bug -- documented here instead of asserted on, since the original
+     * version of this test asserted the wrong (naive mirror) expectation
+     * and failed against correct code. */
+
+    /* Ceiling clamp under an EXTREME base gain: clamp_gain's job is to
+     * catch a bad OUTPUT, not just an input already near zero -- confirm a
+     * huge base gain nudged further up stays finite (no overflow-adjacent
+     * behavior in the (1 + scale*dir) multiply). */
+    {
+        float kp, ki, kd;
+        pid_fuzzy_adjust(500.0f, 1.0f, 1.0e6f, 1.0e6f, 1.0e6f, 100, &kp, &ki, &kd);
+        TEST_CHECK(isfinite(kp) && kp > 0.0f, "huge base_kp nudged up: still finite and positive");
+        TEST_CHECK(isfinite(kd) && kd > 0.0f, "huge base_kd nudged up: still finite and positive");
+    }
 }
