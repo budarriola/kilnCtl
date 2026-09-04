@@ -482,28 +482,33 @@ in `PID_EXPANSION_PLAN.md`, not restated here.
 | Fuzzy-PID membership bands | Owner decision: rescale to this rig's measured envelope, relabel as a gain-rescale test, or drop it — see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these) | `PID_EXPANSION_PLAN.md` §3.6 |
 | High-temperature (>62 °C) coupled-hold validation | Owner approval of a ~4–5 h firing — never yet run, see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these) | `PID_EXPANSION_PLAN.md` §3.6c |
 
-**Two operational facts a future session must not miss (corrected against
-`d800a60` itself — see this sync's report for the discrepancy):**
-- **`approach_rate_cap_c_per_hr` (`ZONES_CFG_VERSION` 17→18, `d800a60`) is
-  built and host-tested only — NOT YET FLASHED to the live board.** `d800a60`
-  says so explicitly: it stayed unflashed while `fuzzy_ab_20260904d` ran, and
-  because 17→18 stacks on the still-unflashed 16→17 `ease_off_window_mult`
-  migration, the eventual flash needs the full v16→v17→v18 chain verified
-  against the board's real, non-default live config, not a fresh commission.
-  `load_config_preset`'s POST mapping for this field was ALSO fixed in the
-  same commit (`z%u_approachratecap` / `_PRESET_ZONE_OVERRIDE_FIELDS`,
-  `zones_http_client.py`) — a board flashed with the GET-emitting half but not
-  this fix would have had every preset load refused; that gap no longer
-  exists in the tree, but is exactly the trap the next flash must not walk
-  into by flashing an older commit.
-- **Two zone-config migrations exist in the tree but are chained, not yet
-  applied to the live board's real config.** `ZONES_CFG_VERSION` 16→17
-  (`7968650`) carries the one prior global `ease_off_window_mult` value
-  verbatim to every zone; 17→18 (`d800a60`) adds `approach_rate_cap_c_per_hr`
-  at 0/uncapped for every zone. Both are lossless, bit-identical-behaviour
-  migrations against synthetic/default configs — neither has been verified
-  against this board's actual non-default live config yet, which `d800a60`
-  flags as the remaining step before either reaches hardware.
+**Two operational facts a future session must not miss (verified by READING
+THE BOARD, 2026-09-04 — not inferred from commit messages):**
+- **Both zone-config migrations are ALREADY on the live board and have already
+  run against its real config.** `GET /api/zones` returns
+  `ease_off_window_mult: 2.0` and `approach_rate_cap_c_per_hr: 0.0` on all
+  three zones; `GET /api/status` reports `fw_build: Sep 4 2026 14:53:53`.
+  This was NOT deliberate: an agent authorised to flash while diagnosing a
+  watchdog reset built from a shared working tree carrying another session's
+  in-progress schema work, and the v16→v17→v18 chain rode along. It landed
+  correctly — v16→v17 carried the prior global `ease_off_window_mult` of 2.0
+  verbatim to every zone (the intended default; had it been left at 3.0 by the
+  withdrawn A/B, every zone would silently have inherited 3.0), and v17→v18
+  added the cap at 0/uncapped. PID gains, plant models and the 80 °C ceilings
+  are intact. Note `d800a60`'s own commit message says it stayed unflashed —
+  true of *that agent*, and wrong about the board. **Read the board.**
+- **The accidental flash briefly broke every preset apply**, because the
+  firmware emitted `approach_rate_cap_c_per_hr` while `zones_http_client.py`
+  had no POST mapping, so `load_config_preset` refused rather than risk
+  silently zeroing it — correct behaviour, and the reason the board still sits
+  on the `fuzzy_ab_strength50_20260903` arm preset rather than the baseline.
+  The mapping landed in `d800a60` (`z%u_approachratecap` /
+  `_PRESET_ZONE_OVERRIDE_FIELDS`), so the tree is whole; a long-running MCP
+  server started before that commit will still refuse until restarted. The
+  trap for the next flash: never flash a build carrying the GET half without
+  the matching client POST half. `7afd2e6`'s flash-provenance guard now
+  refuses when the dirty tree touches config-schema files, which is what
+  should have stopped this.
 
 **What is done and should not be reopened:** the link itself, the wire
 contract and its two independent version numbers, the PC-link acknowledgement
