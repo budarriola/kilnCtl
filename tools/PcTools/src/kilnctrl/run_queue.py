@@ -199,6 +199,14 @@ _ACTIVE_STATES = frozenset({"running", "paused"})
 #: to IDLE, only to DONE or FAULTED.
 _TERMINAL_STATES = frozenset({"done", "faulted"})
 
+#: Public alias of the above. External consumers that need to judge whether
+#: an arm's own recorded exec.state is terminal (e.g.
+#: pid_ab_compare.capture_completeness's short/truncated-arm check) import
+#: this rather than duplicating the {"done", "faulted"} set -- see this
+#: module's own history of two hard-coded copies of one number drifting
+#: apart (CONFOUND_THRESHOLD_C / DEFAULT_PAIR_START_TOL_C).
+TERMINAL_STATES = _TERMINAL_STATES
+
 
 class RunQueueError(RuntimeError):
     """A safety refusal or an HTTP failure -- never silently skipped."""

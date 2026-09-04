@@ -2666,6 +2666,37 @@ negative test (two arms built from identical source data -- confirms the
 tool reports VOID/INERT and refuses to proceed to a tracking-error
 conclusion, rather than reporting a false REACHABLE).
 
+**A SHORT/TRUNCATED arm is a third failure mode, distinct from missing or
+INERT, and is now gated too (2026-09-04).** A campaign killed mid-arm (it has
+happened twice in one day on this rig), a runner crash, a board reboot, or a
+full disk all leave behind a capture file that EXISTS and PARSES -- the
+file-existence check above sees nothing wrong with it -- but never reached a
+terminal executor state. Comparing that against a complete sibling arm
+produces a large apparent difference that is pure artifact (a partial ramp
+compared against a full profile), and the `>=3`-zone decision rule would
+happily call it DISTINGUISHABLE. `pid_ab_compare.compare_runs` (called by
+`fuzzy_ab_analyze.py`'s stage 2) now judges each arm's `capture_completeness`
+before computing any metric: the capture's own last recorded `exec.state`
+must be terminal (`"done"`/`"faulted"`, `run_queue.TERMINAL_STATES` --
+the same signal `run_queue.py` itself uses internally to tell a genuinely
+partial capture from a complete one), cross-checked against the runner's own
+`<prefix>_state.json` entry for that arm when one exists next to the
+capture (authoritative when it agrees; a `"completed"` entry next to a
+capture whose own last row is NOT terminal is reported as a STALE state-file
+claim and the capture's own data wins). A pair with either arm short or
+truncated is reported `VOID (short/truncated arm -- EXCLUDED ...)` and
+excluded from the campaign verdict exactly like an INERT pair -- never
+silently averaged in -- and the DANGEROUS ASYMMETRIC case (one arm complete,
+one truncated -- the pair that otherwise *looks* valid) is named explicitly
+in the refusal text. Pass `--skip-completeness-check` to
+`kilnctrl-pid-ab-compare compare` (or `check_completeness=False` to
+`compare_runs`) only to inspect a known-partial capture on purpose; the real
+campaign entry point never does. See
+`tools/PcTools/src/kilnctrl/pid_ab_compare.py`'s `capture_completeness` for
+the full reconciliation rules and
+`tools/PcTools/tests/test_fuzzy_ab_analyze.py`'s `TruncatedArmNegativeTest`
+for the mandatory negative test.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer

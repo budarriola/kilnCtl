@@ -168,6 +168,7 @@ import argparse
 import dataclasses
 import json
 import math
+import os
 import random
 from collections import Counter
 from typing import Optional, Sequence
@@ -627,6 +628,178 @@ def load_run(path: str, run_index: Optional[int] = None) -> list:
         return []
     rows, _n_runs, _used = la.select_run(all_rows, path, run_index=run_index)
     return rows
+
+
+# ---------------------------------------------------------------------------
+# THE SHORT/TRUNCATED-ARM GATE.
+#
+# compare_runs used to compute every metric from whatever rows happened to
+# be in a capture file, with no regard for whether the run that produced it
+# ever finished. A campaign killed mid-arm (it has happened twice in one
+# day), a runner crash, a board reboot, or a full disk all leave behind a
+# capture file that EXISTS and PARSES -- fuzzy_ab_analyze.py's own
+# file-existence check sees nothing wrong -- but stopped partway through the
+# profile. Comparing that against a complete arm produces a large apparent
+# difference that is pure artifact (a partial ramp compared against a full
+# profile), and the project's >=3-zone decision rule would happily call it
+# DISTINGUISHABLE. That is worse than no analysis at all.
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class ArmCompleteness:
+    path: str
+    complete: bool
+    reason: str
+    final_state: Optional[str]        # the capture's own last row's exec.state, or None
+    state_file_status: Optional[str]  # "completed"/"in_progress"/"pending", or None if no entry found
+    state_file_path: Optional[str]    # which <prefix>_state.json this came from, if any
+
+
+def _find_state_file_status(path: str) -> tuple:
+    """Best-effort: scan the same directory as ``path`` for any
+    ``run_queue.py`` campaign state file (``*_state.json``) whose
+    ``entries`` list records THIS capture, and return
+    ``(status, state_file_path)`` -- e.g. ``("in_progress",
+    ".../fuzzy_ab_20260904d_state.json")``.
+
+    Matched by BASENAME, not full-path resolution: a state file's
+    ``entry["log_path"]`` is recorded relative to whatever directory
+    ``run_queue.py`` was invoked FROM (typically ``tools/PcTools/scripts``),
+    not relative to the state file's own directory -- resolving it as if it
+    were would silently point at the wrong file. Every capture in a given
+    campaign has a distinctive, campaign-specific basename (the whole point
+    of the ``<prefix>_<label>_run<N>.jsonl`` naming convention), so basename
+    matching within one directory is unambiguous in practice.
+
+    Returns ``(None, None)`` -- not an error -- when no directory-mate state
+    file has a matching entry: an older capture, one made by hand, or one
+    whose campaign used a different directory layout. Absence of a state
+    file must never block judging the capture on its own merits; see
+    :func:`capture_completeness`."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    target_name = os.path.basename(path)
+    try:
+        candidates = sorted(f for f in os.listdir(directory) if f.endswith("_state.json"))
+    except OSError:
+        return None, None
+    for fname in candidates:
+        state_path = os.path.join(directory, fname)
+        try:
+            with open(state_path, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(state, dict):
+            continue
+        for entry in state.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            log_path = entry.get("log_path")
+            if log_path and os.path.basename(log_path) == target_name:
+                return entry.get("status"), state_path
+    return None, None
+
+
+def capture_completeness(path: str, rows: Optional[Sequence] = None) -> ArmCompleteness:
+    """Is this arm's capture COMPLETE, or SHORT/TRUNCATED?
+
+    TWO SIGNALS, in priority order:
+
+      1. THE CAPTURE'S OWN LAST RECORDED ``exec.state`` -- terminal iff it
+         is ``"done"`` or ``"faulted"`` (``run_queue.TERMINAL_STATES``, the
+         same signal ``run_queue.py`` itself uses internally
+         (``_capture_run_reached_terminal_state``) to tell a genuinely
+         partial capture from a complete one). This is always available
+         once the file has any rows at all, and needs no other file to
+         exist -- it is what lets a capture with no matching state file
+         (an older run, a hand-made file, or a different directory layout)
+         still be judged. This is how the six checked-in
+         ``easeoff_ab_20260904_*`` arms, which predate this campaign's
+         ``*_state.json`` convention, are judged.
+      2. THE RUNNER'S OWN ``*_state.json`` entry for this ``log_path``, when
+         one exists in the same directory (see ``_find_state_file_status``).
+         Normally the MORE authoritative signal -- it is the runner's own
+         bookkeeping of whether it considers the arm done -- but it can go
+         stale: a crash between the run finishing and the state file being
+         rewritten leaves a ``"pending"``/``"in_progress"`` entry next to a
+         capture that is, on its own data, fully complete (see
+         ``run_queue.py``'s own RESUME COMPLETION RECOVERY handling of
+         exactly this).
+
+    RECONCILIATION:
+      * ``"pending"``/``"in_progress"`` in the state file is trusted on its
+        own: a run genuinely still running (or never started -- exactly
+        arm B1 of the live ``fuzzy_ab_20260904d`` campaign as of this
+        writing) cannot be complete no matter how far its last polled row
+        happens to look.
+      * ``"completed"`` in the state file is CROSS-CHECKED against the
+        capture's own last ``exec.state``. Agreement is the strongest
+        evidence available. Disagreement (state file says completed, but
+        the capture's own last row is not terminal) means the state file
+        entry is STALE -- the capture's own data wins, and the mismatch is
+        reported loudly rather than trusting an unverifiable external claim
+        over the data actually in hand.
+      * No matching state-file entry at all: judged purely from the
+        capture's own last ``exec.state`` (signal 1).
+
+    ``rows``, if given, must be ``load_run(path)``'s own return value (saves
+    a re-parse -- ``compare_runs`` already loaded both arms). If not given,
+    this function loads the file itself so it can be used standalone."""
+    if rows is None:
+        try:
+            rows = load_run(path)
+        except (FileNotFoundError, OSError, la.MultiRunError, IndexError):
+            rows = []
+
+    final_state = rows[-1].state if rows else None
+    capture_terminal = bool(final_state) and final_state.lower() in rq.TERMINAL_STATES
+
+    status, state_path = _find_state_file_status(path)
+
+    if status in ("pending", "in_progress"):
+        return ArmCompleteness(
+            path=path, complete=False,
+            reason=f"state file {state_path!r} records this arm as {status!r} -- not yet "
+                   "finished, cannot be treated as a complete run",
+            final_state=final_state, state_file_status=status, state_file_path=state_path,
+        )
+    if status == "completed":
+        if capture_terminal:
+            return ArmCompleteness(
+                path=path, complete=True,
+                reason=f"state file {state_path!r} records 'completed' and the capture's own "
+                       f"last exec.state={final_state!r} is terminal -- agree",
+                final_state=final_state, state_file_status=status, state_file_path=state_path,
+            )
+        return ArmCompleteness(
+            path=path, complete=False,
+            reason=f"STALE STATE FILE: {state_path!r} records this arm as 'completed' but the "
+                   f"capture's own last exec.state={final_state!r} is NOT terminal -- trusting "
+                   "the capture's own data over the (apparently stale) state-file claim and "
+                   "treating this arm as INCOMPLETE",
+            final_state=final_state, state_file_status=status, state_file_path=state_path,
+        )
+    # No state-file entry found for this path -- judge from the capture alone.
+    if not rows:
+        return ArmCompleteness(
+            path=path, complete=False,
+            reason="no parseable rows and no state file entry found -- cannot be judged complete",
+            final_state=None, state_file_status=None, state_file_path=None,
+        )
+    if capture_terminal:
+        return ArmCompleteness(
+            path=path, complete=True,
+            reason=f"no state file entry found; capture's own last exec.state={final_state!r} "
+                   "is terminal",
+            final_state=final_state, state_file_status=None, state_file_path=None,
+        )
+    return ArmCompleteness(
+        path=path, complete=False,
+        reason=f"no state file entry found; capture's own last exec.state={final_state!r} is "
+               "NOT terminal -- this looks like a SHORT/TRUNCATED capture (campaign killed "
+               "mid-arm, runner crashed, board rebooted, disk full)",
+        final_state=final_state, state_file_status=None, state_file_path=None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1138,8 +1311,17 @@ def compare_runs(
     noise_floor_artifact: Optional[dict] = None,
     sensitivity_paths: Optional[Sequence[str]] = None,
     min_segment_index: Optional[int] = None,
+    check_completeness: bool = True,
 ) -> dict:
-    """``sensitivity_paths``, if given, must be a genuine same-configuration
+    """``check_completeness`` (default True): refuse to compare, exactly as
+    the confound gate refuses, when either arm's capture is SHORT or
+    TRUNCATED -- see :func:`capture_completeness`. Pass False only for a
+    caller that has already established both captures represent complete
+    runs by some other means, or a test exercising unrelated logic against a
+    deliberately-truncated fixture excerpt; the real campaign entry point
+    (``fuzzy_ab_analyze.py``) always leaves this at its default.
+
+    ``sensitivity_paths``, if given, must be a genuine same-configuration
     repeat set (see ``fit_start_temp_sensitivity``'s assumptions) used to
     estimate the start-temp sensitivity reported alongside the whole-run IAE
     comparison. Defaults to ``noise_floor_artifact['generated_from']`` when
@@ -1172,6 +1354,31 @@ def compare_runs(
         return {"error": str(exc)}
     if not rows_a or not rows_b:
         return {"error": "one or both HTTP captures had no parseable rows"}
+
+    completeness_a = capture_completeness(path_a, rows_a) if check_completeness else None
+    completeness_b = capture_completeness(path_b, rows_b) if check_completeness else None
+    if check_completeness and (not completeness_a.complete or not completeness_b.complete):
+        incomplete = [c for c in (completeness_a, completeness_b) if not c.complete]
+        complete_side = [c for c in (completeness_a, completeness_b) if c.complete]
+        asym_note = ""
+        if complete_side:
+            asym_note = (
+                f"THE DANGEROUS ASYMMETRIC CASE: the other arm ({complete_side[0].path!r}) IS "
+                "complete -- comparing it against a truncated arm would look like a valid pair "
+                "and produce a confident but artifactual verdict (a partial ramp compared "
+                "against a full profile). "
+            )
+        return {
+            "error": (
+                "INCOMPLETE/VOID: at least one arm's capture is short or truncated -- "
+                "refusing to compare. " + asym_note +
+                "; ".join(f"{c.path!r}: {c.reason}" for c in incomplete)
+            ),
+            "incomplete_arms": {
+                "a": None if completeness_a.complete else dataclasses.asdict(completeness_a),
+                "b": None if completeness_b.complete else dataclasses.asdict(completeness_b),
+            },
+        }
 
     metrics_a = compute_run_metrics(rows_a, band_c=band_c, min_segment_index=min_segment_index)
     metrics_b = compute_run_metrics(rows_b, band_c=band_c, min_segment_index=min_segment_index)
@@ -1436,6 +1643,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "stabilised pair, 0 otherwise). Refused if path_a and path_b recorded different "
              "conventions, or if this override conflicts with what either recorded -- the "
              "runner and the analysis must agree.")
+    p_cmp.add_argument(
+        "--skip-completeness-check", dest="skip_completeness_check", action="store_true",
+        help="do not refuse a short/truncated arm (see capture_completeness) -- for "
+             "inspecting a known-partial capture on purpose. Never use this to force a "
+             "verdict out of a campaign that is still running.")
 
     p_split = sub.add_parser(
         "split",
@@ -1484,7 +1696,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                run_index_a=args.run_a, run_index_b=args.run_b,
                                noise_floor_artifact=artifact,
                                sensitivity_paths=args.sensitivity_from,
-                               min_segment_index=args.min_segment_index)
+                               min_segment_index=args.min_segment_index,
+                               check_completeness=not args.skip_completeness_check)
         print(compare_report_to_json(report) if args.json else format_compare_text(report))
         return 1 if "error" in report else 0
     elif args.cmd == "split":

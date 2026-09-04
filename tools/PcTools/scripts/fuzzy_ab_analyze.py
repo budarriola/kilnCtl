@@ -122,6 +122,7 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
         return report
 
     any_inert = False
+    any_truncated = False
     per_pair_zone_directions: dict[str, list[tuple[int, str]]] = {}
     # zone -> list of (pair_index, "A"/"B"/None) for whole-run iae_normalized_whole_c
 
@@ -162,7 +163,14 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
             continue
         if "error" in cmp_report:
             pair_report["compare_error"] = cmp_report["error"]
-            pair_report["status"] = "COMPARE FAILED"
+            if "incomplete_arms" in cmp_report:
+                any_truncated = True
+                pair_report["incomplete_arms"] = cmp_report["incomplete_arms"]
+                pair_report["status"] = (
+                    "VOID (short/truncated arm -- EXCLUDED from the campaign verdict, "
+                    "see compare_error)")
+            else:
+                pair_report["status"] = "COMPARE FAILED"
             report["pairs"].append(pair_report)
             continue
 
@@ -179,16 +187,25 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
             per_pair_zone_directions.setdefault(str(zone), []).append((i, direction))
 
     report["any_pair_inert"] = any_inert
+    report["any_pair_truncated"] = any_truncated
+
+    def _with_truncated_note(verdict: str) -> str:
+        if not any_truncated:
+            return verdict
+        return verdict + (
+            " (NOTE: at least one pair had a short/truncated arm and was EXCLUDED from this "
+            "verdict -- see the per-pair 'VOID (short/truncated arm ...)' status above; that "
+            "pair's data was never averaged in.)")
 
     complete_analyzed = [p for p in report["pairs"] if p.get("status") == "analyzed"]
     if not complete_analyzed and any_inert:
-        report["verdict"] = (
+        report["verdict"] = _with_truncated_note(
             "VOID -- at least one complete pair's fuzzy term was bit-identical between arms "
             "(INERT). Do not trust any tracking-error conclusion from this campaign until the "
             "wiring is fixed and re-fired. See per-pair reachability reports above.")
         return report
     if not complete_analyzed:
-        report["verdict"] = "INCOMPLETE -- no complete, reachable pairs yet"
+        report["verdict"] = _with_truncated_note("INCOMPLETE -- no complete, reachable pairs yet")
         return report
 
     # Stage 3: >=3-zone same-direction decision rule, across whatever
@@ -226,6 +243,8 @@ def analyze(log_dir: str, prefix: str, n_pairs: int) -> dict:
             "INDISTINGUISHABLE -- no metric shows a same-direction, >=3-zone-consistent "
             "difference across all analyzed pairs. Per project decision rule, report only, "
             "do not act.")
+
+    report["verdict"] = _with_truncated_note(report["verdict"])
 
     return report
 

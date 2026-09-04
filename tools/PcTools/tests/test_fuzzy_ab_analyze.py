@@ -36,9 +36,9 @@ def _control_body(bd_by_zone: dict) -> dict:
     return {"zones": [dict(bd, zone=z) for z, bd in bd_by_zone.items()]}
 
 
-def _exec_body(target_c: float, actual_by_zone: dict, dwelling: bool = True) -> dict:
+def _exec_body(target_c: float, actual_by_zone: dict, dwelling: bool = True, state: str = "running") -> dict:
     return {
-        "state": "running", "profile_id": 7, "segment_index": 0, "segment_count": 1,
+        "state": state, "profile_id": 7, "segment_index": 0, "segment_count": 1,
         "dwelling": dwelling, "target_c": target_c,
         "zones": [
             {"zone": z, "actual_c": a, "actual_valid": True,
@@ -55,14 +55,22 @@ def _exec_body(target_c: float, actual_by_zone: dict, dwelling: bool = True) -> 
     }
 
 
-def _write_capture(path: str, n: int, bd_seed: float, actual_seed: float) -> None:
+def _write_capture(path: str, n: int, bd_seed: float, actual_seed: float,
+                    final_state: str = "done") -> None:
+    """Writes ``n`` rows, all ``state="running"`` except the LAST, which is
+    ``final_state`` (default ``"done"`` -- a genuinely complete arm, so this
+    helper's callers pass the completeness gate (pid_ab_compare.
+    capture_completeness) without having to think about it). Pass
+    ``final_state="running"`` to build a deliberately SHORT/TRUNCATED
+    capture instead -- see the completeness negative test below."""
     with open(path, "w", encoding="utf-8") as fh:
         for i in range(n):
             bd = {z: {"bd_kp_effective": bd_seed + z * 0.01 + i * 0.0001,
                       "bd_ki_effective": 0.0001, "bd_kd_effective": 0.5}
                   for z in range(3)}
             actual = {z: actual_seed + z * 0.1 + i * 0.01 for z in range(3)}
-            row = {"t": 1000.0 + i, "exec": _exec_body(40.0, actual),
+            state = final_state if i == n - 1 else "running"
+            row = {"t": 1000.0 + i, "exec": _exec_body(40.0, actual, state=state),
                    "control": _control_body(bd)}
             fh.write(json.dumps(row) + "\n")
 
@@ -129,6 +137,58 @@ class InertPairNegativeTest(unittest.TestCase):
             report = faa.analyze(d, "campaign", 1)
 
             self.assertFalse(report["any_pair_inert"])
+            self.assertEqual(report["pairs"][0]["status"], "analyzed")
+
+
+class TruncatedArmNegativeTest(unittest.TestCase):
+    """MANDATORY NEGATIVE TEST for the short/truncated-arm gate
+    (pid_ab_compare.capture_completeness). A campaign killed mid-arm leaves
+    behind a capture file that EXISTS and PARSES -- the file-existence check
+    this script already had sees nothing wrong -- but never reached a
+    terminal exec.state. Comparing it against a complete sibling arm must be
+    reported and REFUSED, exactly like an INERT pair, not silently averaged
+    into a verdict."""
+
+    def test_truncated_arm_reported_void_and_excluded_not_analyzed(self):
+        with tempfile.TemporaryDirectory() as d:
+            a_path, b_path = faa.arm_paths(d, "campaign", 1)
+            # A: genuinely complete (last row state="done").
+            _write_capture(a_path, 5, bd_seed=0.02, actual_seed=39.0, final_state="done")
+            # B: SHORT/TRUNCATED -- last row still "running", as if the
+            # runner/board died mid-arm. THE DANGEROUS ASYMMETRIC CASE: one
+            # side is complete, so this pair looks superficially valid.
+            _write_capture(b_path, 3, bd_seed=0.05, actual_seed=39.0, final_state="running")
+
+            report = faa.analyze(d, "campaign", 1)
+
+            self.assertFalse(report["any_pair_inert"])
+            self.assertTrue(report["any_pair_truncated"])
+            pair0 = report["pairs"][0]
+            self.assertIn("VOID", pair0["status"])
+            self.assertIn("short/truncated", pair0["status"])
+            self.assertIn("EXCLUDED", pair0["status"])
+            # Must NOT have proceeded to a tracking-error comparison for
+            # this pair -- it was never averaged in.
+            self.assertNotIn("compare_text", pair0)
+            self.assertIn("incomplete_arms", pair0)
+            # The asymmetric danger (one complete, one truncated) must be
+            # named explicitly, not left implicit.
+            self.assertIn("DANGEROUS ASYMMETRIC", pair0["compare_error"])
+            self.assertIn("SHORT/TRUNCATED", pair0["compare_error"])
+            # The overall campaign verdict must call out the exclusion too.
+            self.assertIn("EXCLUDED", report["verdict"])
+
+    def test_both_arms_complete_are_not_falsely_flagged_truncated(self):
+        """Sanity companion: two genuinely complete arms must be analyzed
+        normally -- proves the gate isn't just always failing closed."""
+        with tempfile.TemporaryDirectory() as d:
+            a_path, b_path = faa.arm_paths(d, "campaign", 1)
+            _write_capture(a_path, 5, bd_seed=0.02, actual_seed=39.0, final_state="done")
+            _write_capture(b_path, 5, bd_seed=0.05, actual_seed=39.0, final_state="done")
+
+            report = faa.analyze(d, "campaign", 1)
+
+            self.assertFalse(report["any_pair_truncated"])
             self.assertEqual(report["pairs"][0]["status"], "analyzed")
 
 

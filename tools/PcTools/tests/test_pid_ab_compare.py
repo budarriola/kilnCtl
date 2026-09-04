@@ -81,7 +81,7 @@ def test_compute_zone_metrics_empty_rows_returns_none():
 # ---------------------------------------------------------------------------
 
 def test_identical_runs_no_confound_gives_provisional_verdict():
-    report = ab.compare_runs(EXCERPT, EXCERPT)
+    report = ab.compare_runs(EXCERPT, EXCERPT, check_completeness=False)
     assert "error" not in report
     for z, d in report["start_temp_deltas_c"].items():
         assert d == pytest.approx(0.0)
@@ -92,7 +92,7 @@ def test_identical_runs_no_confound_gives_provisional_verdict():
 
 def test_large_start_temp_delta_refuses_a_winner(tmp_path):
     shifted = _write_shifted_copy(tmp_path, EXCERPT, temp_shift_c=4.8, name="shifted.jsonl")
-    report = ab.compare_runs(EXCERPT, shifted)
+    report = ab.compare_runs(EXCERPT, shifted, check_completeness=False)
     assert "error" not in report
     for z, d in report["start_temp_deltas_c"].items():
         assert d == pytest.approx(4.8, abs=0.05)
@@ -106,7 +106,7 @@ def test_large_start_temp_delta_refuses_a_winner(tmp_path):
 
 def test_small_start_temp_delta_stays_below_threshold_and_provisional(tmp_path):
     shifted = _write_shifted_copy(tmp_path, EXCERPT, temp_shift_c=0.3, name="shifted_small.jsonl")
-    report = ab.compare_runs(EXCERPT, shifted)
+    report = ab.compare_runs(EXCERPT, shifted, check_completeness=False)
     assert report["start_temp_deltas_c"][0] < ab.CONFOUND_THRESHOLD_C
     comps = [c for c in report["comparisons"] if c.zone == 0]
     assert comps
@@ -114,7 +114,7 @@ def test_small_start_temp_delta_stays_below_threshold_and_provisional(tmp_path):
 
 
 def test_noise_floor_note_always_present_in_text_output():
-    report = ab.compare_runs(EXCERPT, EXCERPT)
+    report = ab.compare_runs(EXCERPT, EXCERPT, check_completeness=False)
     text = ab.format_compare_text(report)
     assert "NOISE FLOOR: UNKNOWN" in text
     assert ab.NOISE_FLOOR_NOTE in text
@@ -141,7 +141,7 @@ def test_cli_run_json(capsys):
 
 
 def test_cli_compare_text(capsys):
-    rc = ab.main(["compare", EXCERPT, EXCERPT])
+    rc = ab.main(["compare", EXCERPT, EXCERPT, "--skip-completeness-check"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "A/B compare" in out
@@ -209,7 +209,7 @@ def test_single_run_capture_still_works_unchanged():
     rows_implicit = ab.load_run(EXCERPT)
     rows_explicit = ab.load_run(EXCERPT, run_index=0)
     assert rows_implicit == rows_explicit
-    report = ab.compare_runs(EXCERPT, EXCERPT)
+    report = ab.compare_runs(EXCERPT, EXCERPT, check_completeness=False)
     assert "error" not in report
 
 
@@ -346,7 +346,7 @@ def test_compare_runs_with_huge_floor_marks_identical_run_indistinguishable():
     # EXCERPT vs itself: every delta is exactly 0.0, so ANY positive floor
     # must mark every comparable metric INDISTINGUISHABLE.
     artifact = _fake_artifact(floor_c=999.0)
-    report = ab.compare_runs(EXCERPT, EXCERPT, noise_floor_artifact=artifact)
+    report = ab.compare_runs(EXCERPT, EXCERPT, noise_floor_artifact=artifact, check_completeness=False)
     assert report["noise_floor_known"] is True
     comparable = [c for c in report["comparisons"] if c.a is not None]
     assert comparable  # sanity: the fixture actually produced comparisons
@@ -355,7 +355,7 @@ def test_compare_runs_with_huge_floor_marks_identical_run_indistinguishable():
 
 
 def test_compare_runs_without_artifact_reports_noise_floor_unknown():
-    report = ab.compare_runs(EXCERPT, EXCERPT)
+    report = ab.compare_runs(EXCERPT, EXCERPT, check_completeness=False)
     assert report["noise_floor_known"] is False
     for c in report["comparisons"]:
         assert "REFUSED" not in c.verdict or True  # start temps match here (delta 0)
@@ -364,20 +364,20 @@ def test_compare_runs_without_artifact_reports_noise_floor_unknown():
 
 def test_format_compare_text_uses_known_note_when_artifact_present():
     artifact = _fake_artifact(floor_c=0.001)
-    report = ab.compare_runs(EXCERPT, EXCERPT, noise_floor_artifact=artifact)
+    report = ab.compare_runs(EXCERPT, EXCERPT, noise_floor_artifact=artifact, check_completeness=False)
     text = ab.format_compare_text(report)
     assert "NOISE FLOOR: measured" in text
     assert "NOISE FLOOR: UNKNOWN" not in text
 
 
 def test_format_compare_text_uses_unknown_note_without_artifact():
-    report = ab.compare_runs(EXCERPT, EXCERPT)
+    report = ab.compare_runs(EXCERPT, EXCERPT, check_completeness=False)
     text = ab.format_compare_text(report)
     assert "NOISE FLOOR: UNKNOWN" in text
 
 
 def test_cli_compare_none_flag_disables_the_artifact_lookup(capsys):
-    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", "none"])
+    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", "none", "--skip-completeness-check"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "NOISE FLOOR: UNKNOWN" in out
@@ -385,7 +385,7 @@ def test_cli_compare_none_flag_disables_the_artifact_lookup(capsys):
 
 def test_cli_compare_missing_artifact_path_behaves_like_unknown(capsys, tmp_path):
     missing = str(tmp_path / "does_not_exist_noise_floor.json")
-    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", missing])
+    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", missing, "--skip-completeness-check"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "NOISE FLOOR: UNKNOWN" in out
@@ -404,7 +404,7 @@ def test_cli_compare_unreadable_artifact_reports_distinct_loud_warning(capsys, t
     must say *unreadable*, not *missing*."""
     bad = tmp_path / "corrupt_noise_floor.json"
     bad.write_text("{not valid json")
-    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", str(bad)])
+    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", str(bad), "--skip-completeness-check"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "NOISE FLOOR: UNKNOWN" in out
@@ -631,7 +631,7 @@ def test_compare_runs_confound_refusal_still_fires_alongside_sensitivity(tmp_pat
     to talk its way past a refusal."""
     shifted = _write_shifted_copy(tmp_path, EXCERPT, temp_shift_c=4.8, name="shifted_refuse.jsonl")
     artifact = _real_artifact()
-    report = ab.compare_runs(EXCERPT, shifted, noise_floor_artifact=artifact)
+    report = ab.compare_runs(EXCERPT, shifted, noise_floor_artifact=artifact, check_completeness=False)
     assert "error" not in report
     zone0 = [c for c in report["comparisons"] if c.zone == 0 and c.metric == "iae_normalized_whole_c"]
     assert zone0
@@ -786,7 +786,7 @@ def test_multiplicity_note_and_summary_survive_into_text_report():
 def test_start_temp_metric_note_present_in_every_text_report():
     """PROBLEM 3: the two 1.0C thresholds gate different quantities -- prove
     the disambiguating note is actually printed, not just documented."""
-    report = ab.compare_runs(EXCERPT, EXCERPT)
+    report = ab.compare_runs(EXCERPT, EXCERPT, check_completeness=False)
     text = ab.format_compare_text(report)
     assert "START-TEMP UNIT NOTE" in text
     assert "DIFFERENT" in text
@@ -996,7 +996,7 @@ def test_stabilization_agreement_end_to_end_and_mutation_makes_it_loud(tmp_path)
     # compare_runs succeeds with no explicit min_segment_index at all, and
     # actually used min_segment_index=1 (proven by cross-checking against
     # calling compute_run_metrics directly with that value).
-    report = ab.compare_runs(path_a, path_b, noise_floor_artifact=None)
+    report = ab.compare_runs(path_a, path_b, noise_floor_artifact=None, check_completeness=False)
     assert "error" not in report, report.get("error")
 
     assert ab.resolve_min_segment_index(path_a, path_b) == ab.STABILIZATION_SEGMENT_INDEX
