@@ -179,10 +179,10 @@ given).
 | S13 borrowed-zone staleness | host-tested | reachable in source (`context_borrowed_sample_counter_advancing()`); commissioning-gated off by default |
 | S14 per-channel overcurrent WARN | host-tested | new guard 2026-08-28, `test_ct_disabled_guards()` pair-tested |
 | Relay-authority gate (KilnFW, all three callers) | argued + host-tested per caller | `relay_authority.{c,h}`; UART bridge, diagnostics HTTP, profile executor all confirmed routed through it |
-| KilnFW thermal_guard guards 1,2,4,5,7 | **argued + code-reviewed only** | "implemented and code-reviewed but not yet live-tested (no thermocouple/relay hardware attached to provoke them)" per `SAFETY_MODEL.md` |
-| KilnFW thermal_guard guard 6 (sensor validity) | hardware-verified | live-verified end to end, no TC attached, trip fired after exactly 3 bad reads, board relay stayed off (`SAFETY_MODEL.md`) |
-| KilnFW thermal_guard guard 3 (relay welded, thermal sanity) | argued only | in summary table, not called out as separately hardware-tested |
-| KilnFW thermal_guard guard 9 (control-task stall) | argued via code inspection of trigger path | "guard 9's mechanism... exercised on real hardware... only via code inspection of its trigger path, not by actually stalling the control task" |
+| KilnFW thermal_guard guards 1,2,4,5,7 | **host-tested, not hardware-verified** | `App/test/test_thermal_guard.c` exercises the real `thermal_guard_tick()` (not a stub) for each of these, including override/arming/regression cases (e.g. `"guard 1 trips when commanded heat produces far less than sanity_rate_c_per_min"`, `"guard 4 eventually trips a zone that starts hot and never settles"`); no bench provocation of any of these five is on record (`SAFETY_MODEL.md` summary table, corrected 2026-09-04 — a previous pass of this row read "not yet live-tested" as "not tested at all" and understated the coverage; see `SAFETY_MODEL.md`'s own disagreement note) |
+| KilnFW thermal_guard guard 6 (sensor validity) | hardware-verified | live-verified end to end, no TC attached, trip fired after exactly 3 bad reads, board relay stayed off (`SAFETY_MODEL.md`); also host-tested against the real function (`App/test/test_thermal_guard.c`) |
+| KilnFW thermal_guard guard 3 (relay welded, thermal sanity) | host-tested, not hardware-verified | `App/test/test_thermal_guard.c`, including a named hardware-motivated regression case ("found on hardware 2026-08-12 against the simulated…") and the `runaway_margin_c` override; the only hardware contact this guard has had is the false-positive it was tuned against, not a genuine positive trip |
+| KilnFW thermal_guard guard 9 (control-task stall) | host-tested (trip/priority logic) + argued (fault-clear defect), not hardware-verified | the tick-stale fault path itself is a real-function test, not a stub (`App/test/test_safety_watchdog.c::test_tick_stale_still_faults_running_and_takes_priority`); the separate `SAFETY_FAULT_SRC_APP`-never-clears defect was found by code inspection of the trigger path, not by deliberately stalling the control task on real hardware — no commit or bench record around 2026-08-25 (or any other date) shows a genuinely provoked control-task stall; see `SAFETY_MODEL.md`'s own disagreement note, which resolves the "found on the bench" wording the same way |
 | KilnFW thermal_guard guard 8 (cross-zone plausibility) | **not built** | unimplemented, needs concurrent multi-zone execution |
 | Link-loss 30s firing-abort (KilnFW side) | host-tested | `test_safety_link.c:77-92`, pinned 2026-09-04 |
 | Link-loss 30s firing-abort, real bench | **not done** | ROADMAP.md: "Code is flashed; nobody has held the link down" |
@@ -192,14 +192,19 @@ given).
 | `virtual_dut`/SimFW cross-check evidence generally | **withdrawn** | tool deleted 2026-08-28; every "Yes" reachability verdict that cited it now rests on source-reading alone (method 1), re-confirmed independently in §6c |
 
 **Rollup (guard-level rows above, S1–S14 plus the two KilnFW-side items called
-out separately):** roughly 20 discrete claims tracked here — **13
-host-tested**, **3 hardware-verified** (S5's fit/masking finding, KilnFW guard
-6, E-stop polarity fix), and the remaining **~8 explicitly marked "not done"**
-for hardware, plus several guard rows that are **argued only** (KilnFW
-guards 1/2/3/4/5/7/9, S6a's permanent hardware-only status, the E-stop
-jumper/button claim). No claim in this document is stronger than its weakest
-supporting sentence in the source docs; where a source hedges, this table
-hedges identically.
+out separately):** roughly 20 discrete claims tracked here — **19
+host-tested** (S1–S14's logic rows plus KilnFW guards 1,2,3,4,5,6,7, and
+guard 9's trip/priority path), **3 hardware-verified** (S5's fit/masking
+finding, KilnFW guard 6, E-stop polarity fix), and the remaining **~8
+explicitly marked "not done"** for hardware. What remains **argued only** is
+narrower than a previous pass of this table claimed: S6a's permanent
+hardware-only status, the E-stop jumper/button claim, and guard 9's
+fault-clear defect specifically (its trip/priority mechanism is host-tested;
+only the "never clears" defect's trigger path is code-inspection-only).
+KilnFW guards 1/2/3/4/5/6/7 are **not** argued-only — see the corrected rows
+above. No claim in this document is stronger than its weakest supporting
+sentence in the source docs; where a source hedges, this table hedges
+identically.
 
 ---
 
@@ -259,6 +264,25 @@ Reviewed section by section (§1–§10) against this file's claims above.
    than that. Flagged here so this file does not repeat the same
    overstatement.
 
+5. **Corrected 2026-09-04:** this file's own §4 previously classified KilnFW
+   `thermal_guard` guards 1, 2, 4, 5, 7 as "argued + code-reviewed only, not
+   yet live-tested" and read that as "not tested at all"; it also classified
+   guard 3 as "argued only" and guard 9 as flatly "argued via code
+   inspection". `firmware/KilnFW/App/test/test_thermal_guard.c` demonstrably
+   host-tests guards 1, 2, 3, 4, 5, 6, 7 against the real `thermal_guard_tick()`
+   function (override, arming and regression cases included, none of them
+   inert in the tested configuration or driven by a stub); guard 9's
+   trip/priority path is likewise host-tested (`test_safety_watchdog.c`), with
+   only its separate fault-clear defect remaining argued-only. Both this
+   file's §4 rows and `firmware/KilnFW/docs/SAFETY_MODEL.md`'s summary table
+   (already corrected in `ecdad62`) now agree: host-tested, not
+   hardware-verified, for guards 1–7; host-tested + argued for guard 9.
+   Separately, `SAFETY_MODEL.md`'s claim that guard 9's fault-latch defect was
+   "found on the bench 2026-08-25" is retracted — no commit or status-doc
+   entry near that date records a genuine bench-provoked control-task stall;
+   the defect was found by code inspection, corrected in `SAFETY_MODEL.md`
+   alongside this pass.
+
 ---
 
 ## Completion checklist
@@ -268,8 +292,9 @@ Reviewed section by section (§1–§10) against this file's claims above.
 - [x] Residual risks and non-protections stated explicitly (§3)
 - [x] Evidence classified: argued / host-tested / hardware-verified (§4)
 - [x] Reviewed against [`../firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`](../firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md) (§5) —
-      reviewed through §10 as it stood 2026-09-04; two disagreements recorded above, none
-      requiring a code change, both requiring careful reading rather than a
+      reviewed through §10 as it stood 2026-09-04; four disagreements recorded above
+      (items 1, 2, 4 pre-existing, item 5 a self-correction made this pass), none
+      requiring a code change, all requiring careful reading rather than a
       single number.
 
 **What would most improve this document next:** a real bench session against

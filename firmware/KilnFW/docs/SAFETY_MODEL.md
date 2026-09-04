@@ -210,7 +210,15 @@ stuck on" failure mode). See `TODO.md` section 6A.6 for the implementation
 note.
 
 **`SAFETY_FAULT_SRC_APP` latches forever once guard 9 sets it for a
-transient control-task stall — found on the bench 2026-08-25.** Guard 9
+transient control-task stall.** Found by code inspection of the trigger path
+(see the summary-table row below and the disagreement note under it) — not by
+deliberately stalling the control task on the bench. No commit or
+`PROJECT_STATUS.md`/`ROADMAP.md` entry around 2026-08-25, or any other date,
+records a genuine bench-provoked control-task stall; that date's actual bench
+work (`8c2bba6`, the commit that added this paragraph) was the safety-link
+230400 baud sweep, unrelated to this defect. A prior revision of this
+paragraph said "found on the bench 2026-08-25", which this correction
+retracts as unsupported. Guard 9
 (`profile_executor.c:1653`) asserts `SAFETY_FAULT_SRC_APP` when the control
 task's tick has been stale longer than `WATCHDOG_TICK_DEAD_MS` (10 s,
 `profile_executor.c:75`). Nothing ever clears it. The only
