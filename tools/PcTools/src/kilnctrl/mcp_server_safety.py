@@ -268,6 +268,155 @@ def safety_get_ct_cal() -> str:
     return "; ".join(lines)
 
 
+def _describe_commissioning(data: dict) -> str:
+    """Render GET /api/safety/commissioning's JSON as an answer to the
+    question people actually ask -- "which guards are armed, which are
+    dormant, and why" -- rather than a raw field dump.
+
+    Armed/dormant semantics were verified directly against
+    firmware/SaftyFW/src/safety_guards.c (READ ONLY -- not this change's
+    file to edit), not inferred from this endpoint's own field names:
+
+    * S1 (SAFETY_TRIP_OVERTEMP, independent overtemp ceiling): guarded by
+      ``if (cfg->abs_max_temp_c > 0.0f)`` (safety_guards.c line ~607) --
+      0 (or unset, which the firmware also stores as 0) means "not
+      commissioned yet", and that comment is explicit: "never trip, and
+      never...". Any positive value arms it.
+    * S8 (SAFETY_TRIP_RATE, rate-of-rise ceiling): guarded by
+      ``if (cfg->max_rate_c_per_min > 0.0f)`` (line ~733); the surrounding
+      comment says the guard "ships disabled: max_rate_c_per_min == 0" for
+      the identical reason as S1. Same rule, same sentinel.
+    * S14 (over-current vs measured normal, WARN only -- not a trip code):
+      active per-channel only when ``i_normal_valid[ch] && i_normal_a[ch] >
+      0.0f`` AND current sensing is not disabled (line ~941); a channel
+      whose normal current was never measured is skipped entirely, not
+      treated as passing. This tool reports that per the endpoint's
+      ``ct_installed``/``i_normal_a[n]`` params, which is what commissions
+      i_normal_a in the first place.
+
+    A field the endpoint reports as unset is rendered the same as the
+    firmware treats it operationally (0 / not commissioned), because that
+    IS the live behaviour -- but the "(unset)" note is kept so a caller
+    does not mistake an uncommissioned board for one someone deliberately
+    disabled a guard on.
+    """
+    params = {p["name"]: p for p in data.get("params", []) if "name" in p}
+    reliable = bool(data.get("unset_reporting_reliable"))
+
+    def numeric(name: str) -> "tuple[float, bool]":
+        """(value, is_set) -- unset (or unreliable-unset-reporting) reads as
+        0.0, matching what the firmware itself falls back to."""
+        p = params.get(name)
+        if p is None:
+            return 0.0, False
+        is_set = bool(p.get("set")) and reliable
+        if not is_set:
+            return 0.0, False
+        return float(p.get("value", 0.0)), True
+
+    lines = []
+    lines.append(f"link_up={data.get('link_up')}  commissioned={data.get('commissioned')}")
+    if data.get("stale"):
+        lines.append(f"WARNING: config CRC is STALE -- cached={data.get('cached_config_crc')} "
+                     f"live={data.get('live_config_crc')} (this board's cache does not match "
+                     "what the Pico is actually running; treat everything below as suspect "
+                     "until a refetch)")
+    else:
+        lines.append(f"config CRC {data.get('cached_config_crc')} (matches live, not stale)")
+    if not reliable:
+        lines.append("WARNING: unset_reporting_reliable=false -- the Pico's protocol version "
+                     "cannot distinguish 'never commissioned' from a genuine 0, so every "
+                     "threshold below is shown as read even though it may just be unset")
+
+    abs_max, abs_set = numeric("abs_max_temp_c")
+    if abs_max > 0.0:
+        lines.append(f"S1 abs_max_temp_c={abs_max:g}C  ARMED")
+    else:
+        lines.append(f"S1 abs_max_temp_c={abs_max:g}C  DORMANT "
+                     f"({'0 = not commissioned, never trips' if not abs_set else '0 = never trips'})")
+
+    rate, rate_set = numeric("max_rate_c_per_min")
+    if rate > 0.0:
+        lines.append(f"S8 max_rate_c_per_min={rate:g}C/min  ARMED")
+    else:
+        lines.append(f"S8 max_rate_c_per_min={rate:g}C/min  DORMANT "
+                     f"(0 = never trips{'' if rate_set else ', not commissioned'}; ships disabled)")
+
+    tc_source_p = params.get("tc_source")
+    if tc_source_p is not None and tc_source_p.get("set") and reliable:
+        lines.append(f"tc_source={tc_source_p.get('value')}")
+
+    ct_installed_p = params.get("ct_installed")
+    ct_installed_known = bool(ct_installed_p and ct_installed_p.get("set") and reliable)
+    ct_installed = bool(ct_installed_p.get("value")) if ct_installed_known else None
+    if ct_installed_known and not ct_installed:
+        lines.append("S14 over-current (per channel): DORMANT (ct_installed=0 -- no CTs fitted)")
+    else:
+        chan_bits = []
+        for ch in range(3):
+            i_norm, i_set = numeric(f"i_normal_a[{ch}]")
+            if i_set and i_norm > 0.0:
+                chan_bits.append(f"ch{ch} i_normal_a={i_norm:g}A ARMED")
+            else:
+                chan_bits.append(f"ch{ch} DORMANT (i_normal_a not measured)")
+        prefix = "S14 over-current (WARN only, per channel)" if ct_installed_known else \
+            "S14 over-current (WARN only, per channel; ct_installed unknown)"
+        lines.append(prefix + ": " + "; ".join(chan_bits))
+
+    if data.get("tc_not_installed"):
+        lines.append("live flag: tc_not_installed (safety thermocouple reports not installed)")
+    if data.get("tc_injected"):
+        lines.append("live flag: tc_injected (safety thermocouple reading is injected/simulated)")
+    if data.get("borrowed_known"):
+        lines.append(f"borrowed={data.get('borrowed')}"
+                     + (f" zone_index={data.get('borrowed_zone_index')}"
+                        if data.get("borrowed") and "borrowed_zone_index" in data else ""))
+
+    return "\n".join(lines)
+
+
+@_srv._tool()
+def safety_get_commissioning(host: Optional[str] = None) -> str:
+    """READ-ONLY: fetch and render the safety processor's commissioned guard
+    thresholds from GET /api/safety/commissioning (safety_cfg_http.c's
+    commissioning_get_handler on the ESP, which itself is a cached view of
+    the RP2040's config record -- not a live round trip to the Pico).
+
+    Answers the question people actually ask ("which guards are ARMED right
+    now, which are DORMANT, and why") rather than dumping raw JSON: reports
+    S1 (abs_max_temp_c, the independent overtemp ceiling), S8
+    (max_rate_c_per_min), and S14 (per-channel over-current vs measured
+    normal, WARN-only) with their armed/dormant state, plus the
+    `commissioned` flag, config CRC staleness, tc_source and the live
+    tc_not_installed/tc_injected/borrowed flags. Armed/dormant thresholds
+    (0 = never trips) were verified against firmware/SaftyFW/src/
+    safety_guards.c, not guessed from field names -- see
+    safety_get_commissioning's own docstring detail in
+    mcp_server_safety.py's ``_describe_commissioning()`` for the exact
+    lines.
+
+    Pure GET, no side effects whatsoever -- safe to call at any time,
+    including during a live firing. This is the counterpart
+    safety_set_tc_type()/safety_set_ct_cal() have needed: those write
+    commissioning config, this only ever reads it. It never writes,
+    commits, or touches the Pico's config in any way.
+
+    Host is auto-resolved the same way the OTA/control tools do (board's
+    current Wi-Fi station IP over the UART link, falling back to the
+    fallback-AP address); pass `host` explicitly for kilnctl.local or a
+    board reachable only from a different network than this link's serial
+    port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as load_config_preset()
+
+    resolved = _ota_resolve_host(host)
+    try:
+        data = safety_cfg_http_client.get_commissioning(resolved)
+    except safety_cfg_http_client.SafetyCfgHttpError as exc:
+        return f"error reading safety commissioning over HTTP (host={resolved}): {exc}"
+    return _describe_commissioning(data)
+
+
 @_srv._tool()
 def ota_rollback_pico() -> str:
     """Explicitly revert the safety processor (RP2040/SaftyFW) to its
