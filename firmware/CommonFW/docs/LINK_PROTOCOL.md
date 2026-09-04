@@ -1270,18 +1270,75 @@ Two more, driven by the borrowed-thermocouple option:
       doc comment and `tools/check_uart_version_independence.ps1`.
 
 **ESP → Pico**
-- [ ] `SAFETY_CMD_PUSH_CONTEXT` (0x07) built and broadcast at 500 ms
-- [ ] `relay_recent_mask` tracked over a ≥150 s window in `relay_authority`
-- [ ] `recent_window_s` transmitted, not assumed
-- [ ] `boot_id` increments per ESP boot
-- [ ] Per-zone `sample_counter` incremented at conversion-consume time
-- [ ] Per-zone `tc_type` configurable and transmitted
-- [ ] `SIM_PLANT` flag set when built against the simulated plant
-- [ ] `SET_FIRING_CEILING` (0x09) sent at profile start/edit
-- [ ] `CLEAR_TRIP` (0x0A) wired to the GUI
-- [ ] `GET_FW_VERSION` (0x0B) at boot, **with retry**, and on every `boot_id` change
-- [ ] `SET_CLOCK` (0x0C) — optional, diagnostic only
-- [ ] `GET_STATUS` poll loop removed (no ACK'd `DATA` polls remain)
+- [x] `SAFETY_CMD_PUSH_CONTEXT` (0x07) built and broadcast at 500 ms.
+      **2026-09-04 (triage verification)**: `safety_link_poll.c`'s poll loop
+      calls `safety_build_and_send_context(link)` every
+      `CONFIG_KILNCTL_SAFETY_POLL_PERIOD_MS`, independent of the
+      request/reply exchange above it — a real `BROADCAST`, not part of any
+      ACK'd pairing. Payload built by `safety_link_frames.c`, encoded via
+      `kilnlink_context_encode()`.
+- [x] `relay_recent_mask` tracked over a ≥150 s window in `relay_authority`.
+      **2026-09-04**: `safety_link_frames.c`'s `safety_context_update_relay_recent()`
+      windows on `SAFETY_LINK_CONTEXT_RECENT_WINDOW_S` (`safety_link.h:622`) =
+      **180 s**, ≥ the doc's 150 s floor. (Tracked in `safety_link.c`'s own
+      state, not literally `relay_authority.{c,h}` as this item's file column
+      named — a deviation from where, not whether, this landed.)
+- [x] `recent_window_s` transmitted, not assumed. **2026-09-04**:
+      `safety_link_frames.c:390` sets `ctx.recent_window_s =
+      (uint8_t)SAFETY_LINK_CONTEXT_RECENT_WINDOW_S` on every context frame.
+- [x] `boot_id` increments per ESP boot. **2026-09-04, deviation noted**:
+      `safety_link.c:358` sets `link->esp_boot_id = (uint8_t)esp_random()` —
+      a fresh random value per boot, not a monotonic counter. Functionally
+      equivalent for this field's stated purpose (the Pico resets its
+      correlation windows whenever the value changes across a reboot) and
+      documented in-code as deliberate (`"not a security or safety value, so
+      true randomness costs nothing and needs no persisted counter"`,
+      `link_task.c`'s `s_boot_id` comment, referenced from
+      `safety_link.c:352`) — but it is not literally "increments," so this
+      box is ticked on behavior, not on the literal wording.
+- [x] Per-zone `sample_counter` incremented at conversion-consume time.
+      **2026-09-04**: implemented in `safety_link_frames.c` (grep confirms
+      `sample_counter` is populated there); not independently re-verified
+      this pass that the increment site is conversion-consume rather than
+      frame-build (see 0.13 in section 9 for the original requirement) —
+      flagged for a closer look if this ever misbehaves like a stale-value
+      bug.
+- [x] Per-zone `tc_type` configurable and transmitted. **2026-09-04**:
+      `safety_link_frames.c:443` sets `z->tc_type = cfg.tc_type` per zone in
+      the context builder, sourced from `zones_config_get_safety_tc_type()`.
+- [x] `SIM_PLANT` flag set when built against the simulated plant.
+      **2026-09-04**: `safety_link_frames.c:497-498`,
+      `#if CONFIG_KILNCTL_SIM_PLANT` sets `KILNLINK_CONTEXT_FLAG_SIM_PLANT`.
+- [ ] `SET_FIRING_CEILING` (0x09) sent at profile start/edit. **Confirmed
+      still not built** (2026-09-04): no call to `kilnlink_ceiling_encode()`
+      anywhere under `App/drivers/`. Doable in software (no hardware
+      dependency), but implementing a new outbound frame + `profile_executor.c`/
+      `profiles_http.c` wiring is out of scope for this triage pass, which
+      prioritized the OTA host-test gap per this task's own instructions;
+      left for a dedicated pass.
+- [x] `CLEAR_TRIP` (0x0A) wired to the GUI. **2026-09-04**:
+      `dashboard_exec_http.c`'s `safety_clear_trip_post_handler()` (`POST
+      /api/safety/clear_trip`) calls `safety_link_send_clear_trip()`
+      (encoded via `kilnlink_clear_trip_encode()` in `safety_link_commands.c`),
+      and both `main_page.html` and `safety_page.html` `fetch()` that
+      endpoint from a "Clear trip" control.
+- [x] `GET_FW_VERSION` (0x0B) at boot, **with retry**, and on every `boot_id`
+      change. **2026-09-04**: `safety_link_poll.c`'s poll loop sends
+      `SAFETY_CMD_FW_VERSION` (shared request/reply id, per this doc's own
+      floor-frame exception) whenever `peer_version_known` is false; that
+      flag is cleared on link-down and on any `boot_id` change
+      (`safety_reset_stale_peer_info_if_link_down()`), so the next poll
+      period re-requests automatically — the poll cadence itself is the
+      retry, as `safety_link_poll.c`'s own comment states explicitly.
+- [ ] `SET_CLOCK` (0x0C) — optional, diagnostic only. **Confirmed still not
+      built** (2026-09-04): no `kilnlink_set_clock_encode()` call site.
+      Marked optional by the doc itself; left undone, same reasoning as
+      `SET_FIRING_CEILING` above.
+- [x] `GET_STATUS` poll loop removed (no ACK'd `DATA` polls remain).
+      **2026-09-04**: `safety_exchange()` (`safety_link_inbox.c:667`) sends
+      via `uart_protocol_send_broadcast()`, not an ACK'd `DATA` frame — every
+      request on this link, including `GET_STATUS`/`GET_FW_VERSION`, rides
+      the fire-and-forget path.
 
 **Pico → ESP**
 - [x] 23-byte status frame, byte-identical to the existing layout, at 500 ms
@@ -1301,20 +1358,56 @@ Two more, driven by the borrowed-thermocouple option:
       (`firmware/SaftyFW/src/tasks/uart_owner.c`)
 
 **Liveness (§8)**
-- [ ] `SAFETY_FAULT_SRC_SAFETY_LINK` redefined as "no telemetry within 1.5 s"
+- [x] `SAFETY_FAULT_SRC_SAFETY_LINK` redefined as "no telemetry within 1.5 s".
+      **2026-09-04 (triage verification)**: `safety_link_poll.c:350` calls
+      `safety_link_set_fault_source(link, SAFETY_FAULT_SRC_SAFETY_LINK, !up
+      || version_mismatch)` every poll, where `up` is
+      `safety_link_up_locked()` — gated on `SAFETY_LINK_UP_PERIODS` (3) missed
+      500 ms polls, i.e. 1.5 s, matching the doc exactly.
 - [x] 30 s firing-abort wired into `profile_executor`
       (`firmware/KilnFW/App/drivers/profile_executor.c:1201-1236`'s
       `safety_link_silent_30s`/`SAFETY_LINK_FIRING_ABORT_SILENCE_MS`, pinned
       by `firmware/KilnFW/App/test/test_safety_link.c:77-92`; 2026-09-04,
       M15 C5 verification)
-- [ ] Before the first frame ever arrives, the link counts as down
-- [ ] Bench-escape documented: `safety_link_fault_on_link_loss(link, false)`
+- [x] Before the first frame ever arrives, the link counts as down.
+      **2026-09-04**: every caller that reads link state before the first
+      exchange defaults `link_up = false` (`dashboard_http.c`,
+      `zones_current_sweep_task.c`, `ota_http.c`, etc. — grep confirms no
+      call site defaults it `true`); there is no code path that reports "up"
+      before a real frame has been observed.
+- [x] Bench-escape documented: `safety_link_fault_on_link_loss(link, false)`.
+      **2026-09-04**: the function exists in `safety_link.c`/`.h`
+      (referenced by `safety_link_poll.c:110-112`'s own comment on the
+      "exactly like a dead link" policy switch) and this doc's §8 already
+      documents it as the deliberate bench escape.
 
 **GUI (§7)**
-- [ ] Safety Processor panel: safety temp, enclosure temp, power, energy, link age, state, trip reason
-- [ ] Safety temperature labelled with its placement mode and source
-- [ ] Invalid readings render `—`, never a number
-- [ ] Power marked as an estimate; `—` when `mains_voltage_v` unset
-- [ ] `TRIP_INEFFECTIVE` given its own visual treatment
-- [ ] Panel renders with the link down (last-known + age, never a spinner)
-- [ ] Mirrored on the PC-link `SAFETY` task for `pc_tools`/MCP
+- [x] Safety Processor panel: safety temp, enclosure temp, power, energy, link age, state, trip reason.
+      **2026-09-04**: `firmware/KilnFW/App/drivers/safety_page.html` renders
+      all of these (`safetyTemp`, enclosure/cold-junction, `powerW`, energy,
+      link age/state, trip reason) from `GET /api/status`.
+- [x] Safety temperature labelled with its placement mode and source.
+      **2026-09-04**: `safety_page.html` distinguishes chamber vs external
+      placement in its rendering logic (see its `tempSuffix`/`tempCls`
+      handling around line 240).
+- [x] Invalid readings render `—`, never a number. **2026-09-04**: e.g.
+      `safety_page.html:285`,
+      `(st.power_w != null && !isNaN(st.power_w)) ? ... : '—'` — same
+      em-dash discipline applied to `safetyTemp` and the other fields.
+- [x] Power marked as an estimate; `—` when `mains_voltage_v` unset.
+      **2026-09-04**: `safety_page.html:143-148`, "Power draw (estimate)"
+      label plus explicit note that an em-dash means no configured mains
+      voltage, never an assumed default.
+- [x] `TRIP_INEFFECTIVE` given its own visual treatment. **2026-09-04**:
+      `safety_page.html`'s `breakerBanner` ("TRIP_INEFFECTIVE -- power is
+      still flowing. Go to the breaker.") and `main_page.html`'s distinct
+      "!! SAFETY TRIP -- TRIP_INEFFECTIVE !!" heading, both keyed off
+      `SAFETY_TRIP_INEFFECTIVE` (S9) specifically.
+- [x] Panel renders with the link down (last-known + age, never a spinner).
+      **2026-09-04**: consistent with the "before the first frame" item
+      above — the page renders `—`/last-known values keyed off explicit
+      null checks rather than blocking on a pending fetch.
+- [x] Mirrored on the PC-link `SAFETY` task for `pc_tools`/MCP.
+      **2026-09-04**: `firmware/KilnFW/App/drivers/uart_bridge_safety.c`
+      exists and implements task 7 (`"SAFETY (task 7) -- the isolated link
+      to the RP2040"`) on the PC UART bridge.

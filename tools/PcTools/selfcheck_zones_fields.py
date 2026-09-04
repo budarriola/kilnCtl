@@ -6,8 +6,12 @@ top-level scalar fields a POST round-trips) and
 client deliberately never echoes back -- structural arrays/objects handled
 by their own dedicated logic, or read-only telemetry with no POST field at
 all). Together those two dicts/sets are supposed to cover EXACTLY the
-top-level JSON keys ``firmware/KilnFW/App/drivers/zones_http_handlers.c``'s
-``zones_get_handler``/``zones_post_handler`` actually emit/accept. Nothing
+top-level JSON keys ``zones_get_handler`` (``firmware/KilnFW/App/drivers/zones_http_get.c``)
+and ``zones_post_handler`` (``firmware/KilnFW/App/drivers/zones_http_post.c``)
+actually emit/accept -- these two handlers used to share one
+``zones_http_handlers.c`` file; a 2026-09-04 split moved GET and POST into
+their own files (see this module's ``_GET_C_PATH``/``_POST_C_PATH`` below).
+Nothing
 enforced that -- a firmware change to either handler's top-level key set
 could drift from the client silently (see this module's sibling checks for
 the same class of bug: ``_firmware_uart_protocol_version``).
@@ -47,10 +51,12 @@ from kilnctrl.zones_http_client import (
 
 from selfcheck_common import check
 
-_ZONES_HANDLERS_C_PATH = (
+_DRIVERS_DIR = (
     pathlib.Path(__file__).resolve().parents[2]
-    / "firmware" / "KilnFW" / "App" / "drivers" / "zones_http_handlers.c"
+    / "firmware" / "KilnFW" / "App" / "drivers"
 )
+_ZONES_GET_C_PATH = _DRIVERS_DIR / "zones_http_get.c"
+_ZONES_POST_C_PATH = _DRIVERS_DIR / "zones_http_post.c"
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: Between two adjacent (C-concatenated) string-literal fragments of one
@@ -66,7 +72,7 @@ _STRING_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _FN_START_RE = re.compile(r"\nesp_err_t\s+(\w+)\s*\(")
 
 
-def _function_body(text: str, name: str) -> str:
+def _function_body(text: str, name: str, source_path: pathlib.Path) -> str:
     """Slice ``text`` down to one ``esp_err_t <name>(...)`` function's body,
     ending right before the next top-level ``esp_err_t`` function starts (or
     end of file). Tolerant of the exact braces/whitespace around the
@@ -74,7 +80,7 @@ def _function_body(text: str, name: str) -> str:
     bound, not to fully parse C scoping."""
     m = re.search(rf"esp_err_t\s+{re.escape(name)}\s*\(", text)
     if m is None:
-        raise AssertionError(f"{name}() not found in {_ZONES_HANDLERS_C_PATH}")
+        raise AssertionError(f"{name}() not found in {source_path}")
     start = m.start()
     nxt = _FN_START_RE.search(text, start + 1)
     end = nxt.start() if nxt else len(text)
@@ -111,8 +117,8 @@ def _scan_template_keys(dequoted: str, depth: int, keys: set) -> int:
     return depth
 
 
-def _extract_get_top_level_keys(text: str) -> set:
-    body = _function_body(text, "zones_get_handler")
+def _extract_get_top_level_keys(text: str, source_path: pathlib.Path) -> set:
+    body = _function_body(text, "zones_get_handler", source_path)
     depth = 0
     keys: set = set()
     for m in _APPEND_CALL_RE.finditer(body):
@@ -129,15 +135,18 @@ _POST_FIELD_LITERAL_RE = re.compile(
 )
 
 
-def _extract_post_top_level_keys(text: str) -> set:
-    body = _function_body(text, "zones_post_handler")
+def _extract_post_top_level_keys(text: str, source_path: pathlib.Path) -> set:
+    body = _function_body(text, "zones_post_handler", source_path)
     return set(_POST_FIELD_LITERAL_RE.findall(body))
 
 
 def zones_field_table_checks() -> None:
-    text = _ZONES_HANDLERS_C_PATH.read_text(encoding="utf-8")
-    fw_get_keys = _extract_get_top_level_keys(text)
-    fw_post_keys = _extract_post_top_level_keys(text)
+    # zones_get_handler and zones_post_handler used to share one
+    # zones_http_handlers.c; a 2026-09-04 split moved each into its own file.
+    get_text = _ZONES_GET_C_PATH.read_text(encoding="utf-8")
+    post_text = _ZONES_POST_C_PATH.read_text(encoding="utf-8")
+    fw_get_keys = _extract_get_top_level_keys(get_text, _ZONES_GET_C_PATH)
+    fw_post_keys = _extract_post_top_level_keys(post_text, _ZONES_POST_C_PATH)
 
     client_get_keys = set(_TOP_FIELD_FORM_KEY) | set(_TOP_READONLY_OR_STRUCTURAL_KEYS)
     client_post_keys = set(_TOP_FIELD_FORM_KEY)

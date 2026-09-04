@@ -132,6 +132,12 @@ the board, only used locally in this page to sign each request.</p>
      lives outside either picker since it's shared by both processors. -->
 <label for="apPassword">Wi-Fi AP password (update key)</label>
 <input type="password" id="apPassword" autocomplete="off">
+<p class="note">This proves you're on the network with the AP password --
+it does not stop anyone else who also knows it, and it can't stop a
+compromised ESP from pushing anything it likes to the safety processor
+(the ESP is the only thing authorising a Pico update). See
+UPDATE_PROTOCOL.md section 2, "What this does and does not defend
+against".</p>
 
 <div id="espPicker" style="display:none">
   <label for="espFile">New ESP image (.bin)</label>

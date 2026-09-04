@@ -273,7 +273,7 @@ def main() -> int:
     actions_checks()
     hardening_checks()
 
-    print("\n== zones top-level field table vs firmware (zones_http_handlers.c) ==")
+    print("\n== zones top-level field table vs firmware (zones_http_get.c / zones_http_post.c) ==")
     zones_field_table_checks()
 
     print("\n== port discovery (no device required) ==")

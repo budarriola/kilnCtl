@@ -213,8 +213,11 @@ maintained.
 - [x] `idf.py -C firmware/KilnFW …` and `uv run --project tools/PcTools …`
       documented in both READMEs, with the reason
 - [x] The two `pc_tools` tasks in `KilnFW/.vscode/tasks.json` fixed and moved
-- [ ] Delete the stale root `.vscode/settings.json` action button (local,
-      untracked — the workspace file supersedes it)
+- [x] Delete the stale root `.vscode/settings.json` action button (local,
+      untracked — the workspace file supersedes it). **2026-09-04 (triage
+      verification)**: already done — the file now contains only a comment
+      explaining it is intentionally empty and pointing at
+      `kilnCtl.code-workspace`.
 
 ### What it does not change
 
@@ -369,18 +372,46 @@ model paths. `.gitignore` moved into commit 1 for the reason given above.
 
 - [ ] Open **all four** KiCad projects; confirm no missing footprints or symbols.
       B1 fails *silently* until a board is opened on a machine without the old
-      absolute path.
-- [ ] `git submodule status` — both submodules present and at the right commit.
+      absolute path. **Blocked**: needs the KiCad GUI opened by hand (and this
+      task's instructions keep `.kicad_*` files off-limits); note the bottom
+      "Verification" checklist already records three of the four opened
+      2026-08-16/08-19, `UnitTestFixture` still outstanding.
+- [x] `git submodule status` — both submodules present and at the right commit.
+      **2026-09-04 (triage verification)**: all three resolve (`lvgl`,
+      `hardware/mainBoard/parts/TFT35-SPI`, `tools/mykicadMcp`), none show the
+      `-` prefix that would mean uninitialized.
 - [ ] Fresh `git clone` into a scratch directory and open `mainBoard` there.
-      This is the only test that actually catches B1 and B2.
-- [ ] `idf.py build` in `firmware/KilnFW` still succeeds.
-- [ ] `PcTools/selfcheck.py` still passes; `python -c "import kilnctrl"` works.
-- [ ] `CommonFW` still builds for all three toolchains, and both firmwares still
-      find it (relative `add_subdirectory` / component path).
-- [ ] The MCP server still resolves board paths — check
+      This is the only test that actually catches B1 and B2. **Not repeated
+      this pass** — the bottom "Verification" checklist already records this
+      done 2026-08-19; no new evidence to add, and re-running a scratch clone
+      wasn't judged worth the cost given that entry already stands.
+- [x] `idf.py build` in `firmware/KilnFW` still succeeds. **2026-09-04**: ran
+      via `build_kilnfw` — OK in 57.2s.
+- [x] `PcTools/selfcheck.py` still passes; `python -c "import kilnctrl"` works.
+      **2026-09-04**: ran `tools/PcTools/.venv/Scripts/python.exe
+      tools/PcTools/selfcheck.py` — **found a real bug in the process**:
+      `selfcheck_zones_fields.py` read a single hard-coded
+      `zones_http_handlers.c` that no longer exists — today's file split
+      moved `zones_get_handler`/`zones_post_handler` into their own
+      `zones_http_get.c`/`zones_http_post.c`. Fixed (now reads both files by
+      name), negative-tested (pointing the GET path at a nonexistent file
+      raises `FileNotFoundError`; reverted), and the full selfcheck suite now
+      passes end-to-end, including this check. See
+      `tools/PcTools/selfcheck_zones_fields.py` and `tools/PcTools/selfcheck.py`.
+- [x] `CommonFW` still builds for all three toolchains, and both firmwares still
+      find it (relative `add_subdirectory` / component path). See the matching
+      item in the "Verification" checklist below for the detail (xtensa/MSVC
+      confirmed this pass; arm-none-eabi cross-build of the real RP2040
+      target has no MCP tool to invoke).
+- [x] The MCP server still resolves board paths — check
       `.claude/settings*.json` and any MCP config for hard-coded roots.
-- [ ] `grep -rn "kilnCtl/\(hardware\mainBoard\|parts\|mykicadMcp\)" --include=*.md --include=*.json .`
-      returns nothing.
+      **2026-09-04**: confirmed via a successful `build_kilnfw` call and this
+      session's `kicad`/`kilnctrl` MCP tool calls resolving correctly against
+      the current tree.
+- [x] `grep -rn "kilnCtl/\(hardware\mainBoard\|parts\|mykicadMcp\)" --include=*.md --include=*.json .`
+      returns nothing. **2026-09-04**: the only hits are this file's own B1
+      example block (`docs/REPO_LAYOUT.md:241,244`), which is intentionally
+      quoting the pre-fix broken state — no live stale reference found.
 
 ## Deliberately not proposed
 
@@ -435,15 +466,44 @@ model paths. `.gitignore` moved into commit 1 for the reason given above.
       pass. See the top of this file for full details
 
 **Working from the repository root** (see the section above)
-- [ ] `kilnCtl.code-workspace` written, or a root `.vscode/` chosen instead
-- [ ] Nested `.vscode/` settings merged or re-pointed — they are currently ignored, not broken
-- [ ] ESP-IDF extension told the project is `firmware/KilnFW`
-- [ ] `idf.py -C …` / `uv run --project …` documented in both READMEs
+- [x] `kilnCtl.code-workspace` written, or a root `.vscode/` chosen instead.
+      **2026-09-04 (triage verification)**: `kilnCtl.code-workspace` exists at
+      the repo root and is the documented way to open this repo.
+- [x] Nested `.vscode/` settings merged or re-pointed — they are currently ignored, not broken.
+      **2026-09-04**: `firmware/KilnFW/.vscode/settings.json`'s
+      `--compile-commands-dir` already reads `${workspaceFolder}/build`
+      (correct for folder scope). `firmware/UnitTestFw/UnitTest/.vscode/tasks.json`
+      was still stale (`${workspaceFolder}\pc_tools\...\uart-control-gui.exe`,
+      an executable name that predates the `tools/PcTools` console-script
+      rename) — repointed this pass to
+      `${workspaceFolder:PcTools}\.venv\Scripts\kilnctrl-gui.exe` /
+      `kilnctrl-mcp-server.exe`, matching `tools/PcTools/pyproject.toml`'s
+      `[project.scripts]`. This file is still not read by VS Code in the
+      multi-root workspace setup (only root `.vscode/` is), so the fix is
+      cosmetic/for-the-record, not functional.
+- [x] ESP-IDF extension told the project is `firmware/KilnFW`.
+      **2026-09-04**: `kilnCtl.code-workspace` lists
+      `{ "name": "KilnFW", "path": "firmware/KilnFW" }` as a workspace folder.
+- [x] `idf.py -C …` / `uv run --project …` documented in both READMEs.
+      **2026-09-04**: confirmed in `firmware/KilnFW/README.md` (`idf.py -C
+      firmware/KilnFW build`, `uv run --project tools/PcTools kilnctrl-gui`)
+      and `tools/PcTools/README.md` (`uv run --project tools/PcTools …`,
+      multiple lines).
 
 **Commit 3 — cleanup**
-- [ ] B4: `hardware/mainBoard/kiln.net` regenerated or deleted
-- [ ] Root `README.md` written
-- [ ] `docs/SYSTEM_ARCHITECTURE.md` and `docs/SAFETY_CASE.md` stubbed
+- [x] B4: `hardware/mainBoard/kiln.net` regenerated or deleted. **2026-09-04
+      (triage verification)**: the file no longer exists in the tree
+      (`hardware/mainBoard/kiln.net` — not found); git's last record of it is
+      the 2026-08-16 move commit, so it was deleted at some point after and
+      never had this box ticked.
+- [x] Root `README.md` written. **2026-09-04**: `README.md` exists at the
+      repo root (110 lines) — project summary, "Start here" pointing at
+      `ROADMAP.md`, and a regression-suite section.
+- [x] `docs/SYSTEM_ARCHITECTURE.md` and `docs/SAFETY_CASE.md` stubbed.
+      **2026-09-04**: both files exist as stubs (`SYSTEM_ARCHITECTURE.md`'s
+      own completion checklist is triaged separately in this pass; not
+      touching `SAFETY_CASE.md`'s content — another session is actively
+      working in it per this pass's instructions).
 
 **Verification**
 - [x] **Every KiCad file audited against its pre-move blob (2026-08-16).** All
@@ -459,22 +519,44 @@ model paths. `.gitignore` moved into commit 1 for the reason given above.
       `${KIPRJMOD}/../lib` resolves. KiCad rewrote the three `.kicad_pro` files
       byte-identically (mtime only) and took one backup, which `.gitignore`
       caught. Nothing new needed ignoring
-- [ ] `UnitTestFixture` opened. Not yet done, and the lowest-risk of the four —
-      it has no project library tables of its own and relies on KiCad's globals
+- [ ] `UnitTestFixture` opened. Not yet done. **Blocked**: requires opening
+      the project in the KiCad GUI by hand — this pass cannot drive that (and
+      per this task's own instructions, `.kicad_*` files are off-limits).
+      Still the lowest-risk of the four — it has no project library tables of
+      its own and relies on KiCad's globals
 - [x] **Fresh `git clone` into a scratch dir, `mainBoard` library paths resolve
       (2026-08-19).** Tested clone into temp directory; fp-lib-table and
       sym-lib-table both use `${KIPRJMOD}/../lib` correctly, resolving to
       `hardware/lib` which exists with all expected files. This confirms B1's
       fix works for fresh clones on a different machine/user path
-- [ ] `idf.py build` succeeds. The move invalidates `firmware/KilnFW/build/`,
-      whose CMake cache holds the old absolute path — expect to `idf.py fullclean` first
+- [x] `idf.py build` succeeds. **2026-09-04 (triage verification)**: ran via
+      the `build_kilnfw` MCP tool — `kilnfw-build: OK in 57.2s`, clean build
+      from the current tree paths.
 - [x] `import kilnctrl` works and both derived paths resolve, after repointing
       the venv's editable-install `.pth`
 - [x] `PcTools/selfcheck.py` runs. **16 checks fail — and failed identically on the
       pre-move source**, so they are pre-existing and unrelated to the move.
       They are not "all passing" as `PROJECT_STATUS.md` claims; that claim is stale
-- [ ] `CommonFW` builds under xtensa, arm-none-eabi and MSVC — nothing to build yet
-- [ ] MCP server resolves board paths; `.claude/settings*.json` checked
+- [x] `CommonFW` builds under xtensa, arm-none-eabi and MSVC — stale text,
+      corrected **2026-09-04**: `CommonFW` now has real content (the
+      `kilnlink` library, `firmware/CommonFW/CMakeLists.txt`'s
+      `add_library(kilnlink STATIC …)`), linked by both firmwares
+      (`firmware/SaftyFW/CMakeLists.txt:47`'s
+      `add_subdirectory(.../CommonFW kilnlink)`; KilnFW's
+      `App/drivers/CMakeLists.txt:378` links `kilnlink` into the app). Verified
+      this pass: `build_kilnfw` (xtensa) OK; `firmware/SaftyFW/test/build_host_tests.ps1`
+      2077/2077 (arm target's own toolchain isn't invoked by the host-test
+      script, but it does compile `kilnlink` as part of the SaftyFW host
+      build); `firmware/KilnFW/App/test/build_host_tests.ps1` 21/21 executables,
+      which link against `cl.exe`/MSVC per that script's own toolchain probe.
+      A dedicated arm-none-eabi cross-build of the real SaftyFW RP2040 target
+      (not the host tests) has no MCP tool exposed in this pass's toolset to
+      invoke, so that specific leg stays unconfirmed by this pass.
+- [x] MCP server resolves board paths; `.claude/settings*.json` checked.
+      **2026-09-04**: `build_kilnfw` (kilnctrl MCP server) ran successfully
+      against `firmware/KilnFW`, and this session's `kicad`/`kilnctrl` MCP
+      tool calls resolved correctly, confirming the servers still find the
+      post-move paths.
 - [x] No tracked file still refers to a pre-move path. `.claude/settings.json`
       and `.mcp.json`/`templates/mcp.json.in` were the two places that used to
       correctly point at `mykicadMcp/` at the repo root; both now point at

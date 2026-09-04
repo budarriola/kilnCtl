@@ -213,6 +213,12 @@ that BOM line; treat it as unverified.
 - [ ] **Settle it with `esptool flash_id` on the board**, and update the BOM and
       the 3D model reference to match. Three records disagreeing is worse than
       one record being wrong, because each one looks authoritative on its own.
+      **Blocked**: needs `esptool` against physical hardware. Already
+      answered with high confidence a different way (LonelyBinary product
+      page, N16R8/16 MB, 2026-08-17 — see the checked item below), but this
+      box specifically asks for the `esptool flash_id` confirmation and the
+      BOM/3D-model corrections, neither of which happened; both remain
+      tracked separately in `KilnFW/TODO.md` 9.1.
 
 **The layout below does not depend on the answer.** It needs 8 MB; at 16 MB
 everything simply has more room after it. Sizing it for 8 MB and discovering
@@ -292,17 +298,25 @@ Why this shape rather than re-carving the existing app region:
       not yet corrected at the source (separate, tracked in `KilnFW/TODO.md` 9.1).
 - [x] Set `CONFIG_ESPTOOLPY_FLASHSIZE` to the **confirmed** size — done
       2026-08-17 (`CONFIG_ESPTOOLPY_FLASHSIZE_16MB`).
-- [ ] **Reflash the bootloader** — the flash size lives in the bootloader
-      header, so a new table alone is not enough. Still outstanding: this needs
-      the physical board over serial, which this pass did not have.
+- [x] **Reflash the bootloader** — the flash size lives in the bootloader
+      header, so a new table alone is not enough. **Stale text, corrected
+      2026-09-04**: this box's own "still outstanding, needs the physical
+      board" note is contradicted by this same file's later "ESP OTA"
+      checklist, which records "Bootloader + partition table reflashed
+      against physical hardware, 2026-08-22" as done (JTAG, verified). Ticked
+      here to match; the later entry is the authoritative one.
 - [x] Confirm the offsets against the real table before flashing. Host-build
       verified 2026-08-17: `gen_esp32part.py`/`check_sizes.py` reports no
       overlap/overflow, and the six pre-existing entries are byte-identical to
-      before (diffed, not just eyeballed). **Not yet confirmed against the
-      physical board** — that is still a one-time serial step.
+      before (diffed, not just eyeballed). **Confirmed against physical
+      hardware too, 2026-08-22** (same reflash event as above) — no longer
+      just the host-build check this line originally described.
 - [ ] Archive the pre-change table, and read out all four NVS partitions with
       `esptool read_flash` first. This is the one irreversible step in the plan,
-      and this pass has no hardware access to perform it.
+      and this pass has no hardware access to perform it. **Blocked**: needs
+      `esptool` against physical hardware; matches the later, more detailed
+      duplicate of this item under §7's "ESP OTA" checklist, also left
+      unchecked there for the same reason.
 
 #### A staging partition also solves the relay problem
 
@@ -312,7 +326,9 @@ speed because it has nowhere to put it. With staging, the browser upload runs at
 Wi-Fi speed and finishes in a second, and the slow relay over the isolated link
 happens afterwards — resumable, restartable, and immune to an HTTP timeout.
 
-- [ ] Decide between streaming and staging once the 8 MB table exists. Staging
+- [x] Decide between streaming and staging once the 8 MB table exists.
+      **Decided, 2026-09-04**: staging — `ota_pico_do_stage()` writes into
+      `pico_img`, confirmed above. Staging
       is better in every way except flash wear, and an update is not a frequent
       enough event for wear to matter. Streaming remains the fallback if the
       8 MB change is deferred.
@@ -397,16 +413,26 @@ Before building this:
       received tracking sent one for one over minutes of 500 ms status
       frames at the old 9600 optocoupler-era rate, but that is a much lighter
       load than a saturated update transfer, and the barrier itself has since
-      changed.
+      changed. **Blocked**: needs a sustained multi-megabyte transfer over
+      the physical isolated link (U6, 230400 baud); no hardware access this
+      pass. Matches the duplicate of this item under §7's "Pico update"
+      checklist, also left unchecked there.
 - [ ] Decide whether to raise the baud rate for the duration of an update.
+      **Blocked on the measurement above** — this is a real engineering
+      decision (not just a software task), and it needs that data first.
       The old measurement's "not without a faster part or line driver"
       conclusion was specific to the TCMT1109/R15 pair and does not carry
       over to U6, the digital isolator that replaced it — re-evaluate against
       current hardware rather than assuming that limit still holds. A
       negotiated rate in `UPDATE_BEGIN` with an automatic fallback remains
       the flexible option either way.
-- [ ] Report progress to the GUI at least every 2 s. A silent 35-second bar is
-      indistinguishable from a hang.
+- [x] Report progress to the GUI at least every 2 s. A silent 35-second bar is
+      indistinguishable from a hang. **2026-09-04 (triage verification)**:
+      duplicate of the item already ticked in §7's "Pico update" checklist —
+      `ota_pico_relay_get_status()` updates at each phase transition and
+      roughly every 10% during streaming/retransmit, polled by
+      `GET /api/ota/pico/status`, which `ota_page.html`'s `picoProgressBar`
+      reads.
 
 ### Flow
 
@@ -491,10 +517,17 @@ be designed for rather than discovered:
   socket timeout is what bites.
 - **A browser or proxy may still time out.** The MCP tool path does not have
   this problem, which is another reason the tools matter more than the page.
-- [ ] **Superseded if the 8 MB table lands:** a 512 KB `pico_img` staging
+- [x] **Superseded if the 8 MB table lands:** a 512 KB `pico_img` staging
       partition removes this constraint entirely — fast upload, then a slow
       resumable relay that no HTTP timeout can interrupt. See §3. Streaming
-      remains the fallback if the flash-size change is deferred.
+      remains the fallback if the flash-size change is deferred. **Resolved,
+      2026-09-04**: the 8 MB (actually 16 MB, N16R8) table landed
+      2026-08-17/21 and `pico_img` (896K, corrected up from the original
+      512K estimate) is real — `ota_pico_do_stage()` writes the browser
+      upload there at Wi-Fi speed, and `POST /api/ota/pico` returns `202
+      Accepted` immediately, with the slow relay running afterward from the
+      staged copy. This is the resolved state this bullet was hedging
+      against, not the fallback.
 
 ### Throughput: stop-and-wait is the wrong tool for bulk transfer
 
@@ -517,8 +550,11 @@ This reuses `UPDATE_PROTO_MSG_BROADCAST`, which already has to exist, and it
 turns a lossy link from a linear slowdown into a small percentage of
 retransmission. It also removes the retry-storm failure mode entirely.
 
-- [ ] Cap total retransmission rounds, and fail cleanly rather than looping if a
-      range never lands. A link that cannot deliver the same 248 bytes after ten
+- [x] Cap total retransmission rounds, and fail cleanly rather than looping if a
+      range never lands. **2026-09-04 (triage verification)**: duplicate of
+      the item already ticked in §7's "Pico update" checklist —
+      `ota_pico_relay.c` caps at 10 rounds (`RELAY_MAX_RETRANSMIT_ROUNDS`)
+      and aborts cleanly on `UPDATE_STATUS_ERR_RETRANSMIT_CAP`. A link that cannot deliver the same 248 bytes after ten
       attempts is broken, and saying so beats retrying forever.
 
 ### An ESP reboot must not look like an ESP failure
@@ -544,14 +580,25 @@ So the ESP sends `SAFETY_CMD_ANNOUNCE_REBOOT` before it goes:
 
 ### One update at a time, and a record of what happened
 
-- [ ] A single update mutex covering both processors. A second browser tab, or
+- [x] A single update mutex covering both processors. A second browser tab, or
       an agent racing a human, must be refused rather than interleaved.
-- [ ] An append-only update record in NVS: timestamp, processor, image SHA-256,
-      version before and after, result. For a device that can start a fire,
-      "which firmware was running when that happened" should not depend on
-      someone remembering.
-- [ ] A downgrade is allowed but logged as such. Blocking it would eventually
-      block a legitimate rollback during debugging.
+      **2026-09-04 (triage verification)**: `ota_http.c`'s
+      `ota_http_update_in_progress()` / `ota_update_claim_t` is a single
+      claim shared across ESP and Pico contexts — `ota_interlock.c`'s
+      `other_update_in_progress` check refuses a Pico update while an ESP
+      claim (or vice versa) is held, and the function fails safe ("in
+      progress") even before the OTA subsystem has finished starting.
+- [x] An append-only update record in NVS: timestamp, processor, image SHA-256,
+      version before and after, result. **2026-09-04**: `ota_record.c`
+      (`ota_record_build()`/`ota_record_log()`) carries `image_sha256_hex`,
+      `version_after`, timestamp and reason, persisted and surfaced via
+      `GET /api/ota/esp/status`'s `last_update` object
+      (`ota_http_esp.c:531-538`).
+- [ ] A downgrade is allowed but logged as such. **Confirmed not built**
+      (2026-09-04): no `downgrade` reference anywhere in `ota_http_esp.c`,
+      `ota_http_pico.c` or `ota_record.c` — a downgrade is silently allowed
+      (nothing blocks it) but is not distinguished from an upgrade in the
+      record. Doable in software; out of scope for this triage pass.
 
 ### What holds the heaters off while the ESP reboots
 
@@ -561,6 +608,11 @@ So the ESP sends `SAFETY_CMD_ANNOUNCE_REBOOT` before it goes:
       energised through the update. The interlocks require an idle kiln so
       nothing should be on — but "should be" is not the standard that applies to
       the thing that energises heaters, and this is a five-minute bench check.
+      **Blocked**: needs the physical board on the bench; this pass has no
+      hardware access. (Related, already known and documented in `CLAUDE.md`:
+      the SX1509 can fail its post-reset init after a JTAG `debug_reset`,
+      requiring a second reset — a different symptom of the same "what
+      happens to this chip across a reset" question.)
 
 ## 5. Recovery
 
@@ -589,12 +641,23 @@ running version, build commit, build date, dirty flag, active slot, and the
 version in the inactive slot. Then a file picker, a password field, a progress
 bar, and a rollback button per processor.
 
-- [ ] Show the interlock state **before** the user picks a file, with the
-      specific blocker named.
-- [ ] Refuse to start if the other processor is mid-update.
+- [x] Show the interlock state **before** the user picks a file, with the
+      specific blocker named. **2026-09-04 (triage verification)**:
+      `ota_page.html`'s `#interlockBox` calls `GET /api/ota/interlock`
+      (`ota_http.c`) on load and before any file is chosen — see
+      `ota_page.html:122,332,348-370`.
+- [x] Refuse to start if the other processor is mid-update. **2026-09-04**:
+      covered by the single-claim mutex documented under "Reboots and
+      concurrency" above (`ota_http_update_in_progress()`).
 - [ ] Warn, and require a second confirmation, when the uploaded image's
-      protocol version differs from the running one — that is the case where a
-      successful update leaves the two processors unable to talk.
+      protocol version differs from the running one. **Not built**
+      (2026-09-04): `ota_page.html` shows a protocol-version mismatch
+      *after the fact* for an already-running/inactive image
+      (`"Compatible with this ESP" ... "NO -- mismatch"`), but there is no
+      pre-upload check of a picked file's own protocol version — consistent
+      with UPDATE_PROTOCOL.md §3's own note that the ESP has "no
+      embedded-version parser for a raw `.bin`" today, so the file's
+      protocol version genuinely isn't knowable before it is sent.
 
 ### MCP tools
 
@@ -632,9 +695,18 @@ during development will be driven by an agent:
 - [x] `ota_update_pico(image_path, password)` — stages + starts the relay,
       returns immediately (202) with staged bytes/CRC; does not itself wait
       for the ~35s+ relay to finish (see `ota_status()`).
-- [ ] `ota_rollback(processor)` — **not built**, see the deviation note above:
-      no HTTP endpoint exists for this to wrap. Would need a new
-      `ota_http.c` route first.
+- [x] `ota_rollback(processor)` — **built since this section was last
+      reviewed, 2026-09-04**: the gap this bullet described (no HTTP endpoint
+      to wrap) is closed. `ota_http.c` now registers
+      `POST /api/ota/esp/rollback` (`ota_esp_rollback_post_handler`) and
+      `POST /api/ota/pico/rollback`, and `tools/PcTools/src/kilnctrl/mcp_server_ota.py`
+      exposes `ota_rollback_esp(password, host)` (its own doc comment
+      describes it as "the OTHER half of the rollback story" alongside
+      `ota_rollback_confirm_task()`). The wire-level Pico half
+      (`SAFETY_CMD_ROLLBACK` = `0x17`, `SAFETY_CMD_ROLLBACK_RESULT` = `0x25`)
+      landed in `LINK_PROTOCOL.md` §4, protocol 9+. This bullet's own
+      deviation note is now stale — corrected here rather than deleted, so
+      the "why it was missing" history stays legible.
 - [x] Every push tool's board-reported result (including refusals) is
       returned verbatim to the caller. **Not yet true**: neither tool
       computes or logs a local SHA-256 of the image before sending — the doc
@@ -654,10 +726,31 @@ during development will be driven by an agent:
 ## 7. Completion checklist
 
 **Preconditions and interlocks**
-- [ ] Interlock table above implemented on the ESP, each refusal naming its blocker
-- [ ] Pico independently enforces relay-open, no-trip-pending, and the temperature ceiling
-- [ ] GUI distinguishes "updating" from "not responding" **without** weakening the relay block
-- [ ] Temperature ceiling configurable, default 100 °C
+- [x] Interlock table above implemented on the ESP, each refusal naming its
+      blocker. **2026-09-04 (triage verification)**: `ota_interlock.c`
+      checks the full precondition set (update mutex, safety link,
+      autotune, profile run state, heater-commanded, per-zone temperature
+      ceiling, invalid readings) in the documented order, and is host-tested
+      exhaustively in `firmware/KilnFW/App/test/test_ota_interlock.c`
+      (`test_check_order`, one test per precondition).
+- [x] Pico independently enforces relay-open, no-trip-pending, and the
+      temperature ceiling. **2026-09-04**: `firmware/SaftyFW/src/tasks/update_task.c`'s
+      `update_task_gather_preconditions()` reads
+      `safety_core_get_output_status()`/`thermo_task_get_snapshot()` itself
+      rather than trusting the ESP, per this doc's own top-of-file
+      2026-08-19 code-inspection note (`git show a7a5653`).
+- [x] GUI distinguishes "updating" from "not responding" **without**
+      weakening the relay block. **2026-09-04**: `LINK_PROTOCOL.md` §8
+      already documents this as implemented policy; the OTA page's own
+      `#interlockBox`/status text sources its "safety processor updating"
+      framing from the same interlock/status data, never from a bypass of
+      `relay_authority_on_blocked()`.
+- [~] Temperature ceiling configurable, default 100 °C. **2026-09-04**: the
+      **default 100 °C is correct** (`ota_interlock.h:65`,
+      `OTA_INTERLOCK_TEMP_CEILING_C 100.0f`), but it is **not actually
+      configurable** — that header's own comment says the constant is used
+      "unless/until a real config item exists." Left unchecked: this box
+      asks for more than what exists.
 
 **Authentication**
 - [x] Nonce endpoint: 16 random bytes, single use, 30 s expiry. **2026-08-17**:
@@ -690,11 +783,12 @@ during development will be driven by an agent:
       valid nonce increments the counter -- this is a considered
       interpretation of "failure," not an oversight, but worth flagging
       since the doc text doesn't make the distinction explicit.
-- [ ] Documented: this does not defend against someone who knows the AP
-      password. Still just prose in this file (section 2, "What this does
-      and does not defend against") -- no code checkbox to earn here, but
-      leaving unchecked since nothing new was added to say so anywhere a
-      user would see it (e.g. the eventual OTA web page, not yet built).
+- [x] Documented: this does not defend against someone who knows the AP
+      password. **2026-09-04**: the OTA web page now exists (`ota_page.html`)
+      but had no on-page statement of this limitation; added a `.note`
+      paragraph directly under the password field pointing at UPDATE_PROTOCOL.md
+      §2's "What this does and does not defend against" (also names the
+      compromised-ESP gap that section calls out specifically).
 
 **Built as of 2026-08-17**: both `POST /api/ota/esp` and `POST /api/ota/pico`
 now exist -- `ota_http_verify_request()` has real callers. See the "ESP OTA"
@@ -758,14 +852,35 @@ and "Pico update" sections below for what each actually covers.
       `!peer_version_known` branch re-requests `FW_VERSION` on reconnect
       instead of trusting a stale pre-drop verdict forever (covered by
       `test_safety_link_compile.c`'s own reconnect test).
-- [ ] ESP refuses to push a Pico image it could not then talk to, unless
-      explicitly overridden
-- [ ] GUI states the order — ESP first — when both need updating
+- [x] ESP refuses to push a Pico image it could not then talk to, unless
+      explicitly overridden. **2026-09-04, deviation noted**: enforced
+      Pico-side rather than as an ESP pre-check — `ota_pico_relay.c` surfaces
+      `SAFETY_LINK_UPDATE_ERR_VERSION_INCOMPATIBLE` ("protocol version
+      incompatible") when the Pico itself refuses `UPDATE_BEGIN` over a
+      version mismatch, and that refusal reaches the ESP's relay status. The
+      net effect (an incompatible push is refused, with a named reason) is
+      what this bullet asks for; it is not literally "the ESP compares the
+      header before sending," which this doc's §4 also describes as the
+      design.
+- [ ] GUI states the order — ESP first — when both need updating. **Not
+      built** (2026-09-04): no ordering guidance found in `ota_page.html`.
 
 **Image identification**
-- [ ] Pico image header: magic, target, header version, protocol version,
-      `min_compatible`, length, CRC32 — all validated **before the first erase**
-- [ ] ESP image magic and chip ID checked before `esp_ota_begin()`
+- [x] Pico image header: magic, target, header version, protocol version,
+      `min_compatible`, length, CRC32 — all validated **before the first erase**.
+      **2026-09-04 (triage verification)**: `update_task.c`'s handler calls
+      `update_receiver_handle_begin()` (which runs `update_image_header_validate()`)
+      and only reaches `update_task_erase_slot()` after an
+      `UPDATE_BEGIN_ACCEPTED` outcome — a `UPDATE_BEGIN_REFUSED_HEADER_INVALID`
+      or `_REFUSED_VERSION_INCOMPATIBLE` returns before any erase call.
+      Host-tested: `firmware/SaftyFW/test/test_update.c`'s
+      `test_image_header_validate`/`test_handle_begin`.
+- [x] ESP image magic and chip ID checked before `esp_ota_begin()`.
+      **2026-09-04**: `ota_http_esp.c` reads the 24-byte `esp_image_header_t`,
+      checks `hdr.magic != ESP_IMAGE_HEADER_MAGIC` and
+      `hdr.chip_id != ESP_CHIP_ID_ESP32S3`, and refuses (`goto cleanup`) —
+      all before the `esp_ota_begin()` call a few lines below, matching the
+      function's own inline comment quoting this exact requirement.
 
 **ESP OTA**
 - [x] **Physical flash size confirmed** — done 2026-08-17 via the LonelyBinary
@@ -790,12 +905,21 @@ and "Pico update" sections below for what each actually covers.
       (`gen_esp32part.py`/`check_sizes.py` reports no overlap/overflow) AND
       now flashed and verified against the physical board, 2026-08-22 (see
       the bootloader-reflash item above).
-- [ ] Pre-change table archived for rollback — nothing to archive yet, since no
-      physical flash has occurred
+- [ ] Pre-change table archived for rollback. **Stale premise, flagged
+      2026-09-04**: this line's own reasoning ("nothing to archive yet,
+      since no physical flash has occurred") is no longer true — the
+      bootloader-reflash item above records the physical flash as done
+      2026-08-22. Whether the pre-change table was actually archived before
+      that flash is not recorded anywhere this pass could find; left
+      unchecked rather than assumed. Worth a direct question to the owner:
+      was this step done, or did the irreversible flash happen without it?
 - [ ] **`nvs`, `wifi_nvs`, `kiln_nvs` and `profiles_nvs` read out with esptool and
       saved before the table is flashed.** The one irreversible step in this whole
-      plan is writing a wrong partition table over live config. This pass has no
-      hardware access and could not perform it — stays unchecked.
+      plan is writing a wrong partition table over live config. **Same flag
+      as above**: the table has since been physically flashed (2026-08-22),
+      so this box's status is now "was this done beforehand, or not" rather
+      than "still pending" — this pass has no hardware access to check
+      either way and found no record of it having happened.
 - [x] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` — set 2026-08-17, confirmed by a
       clean `idf.py build`
 - [x] `esp_ota_mark_app_valid_cancel_rollback()` called only after NVS, the web
@@ -817,8 +941,14 @@ and "Pico update" sections below for what each actually covers.
       (expander up, safety armed, thermocouples reading, Wi-Fi
       reconnected) — a JTAG-reset artifact of this verification method,
       not a defect in the rollback-cancel path itself.
-- [ ] Streamed `esp_ota_ops` POST handler, no whole-image buffering — **not
-      built this pass**, deliberately out of scope (see `KilnFW/TODO.md` 9.5)
+- [x] Streamed `esp_ota_ops` POST handler, no whole-image buffering.
+      **Built since this line was last reviewed, 2026-09-04**:
+      `ota_http_esp.c`'s `ota_esp_post_handler()` reads the image header,
+      then loops `httpd_req_recv()` into a fixed-size chunk buffer
+      (`s_ota_esp_chunk`) and calls `esp_ota_write()` per chunk — never
+      holding more than one chunk of the image in RAM. The `KilnFW/TODO.md`
+      9.5 "not built this pass" note this bullet pointed at is stale for the
+      current tree.
 
 **Pico update**
 - [x] Five frames -- **2026-08-17, mirrored rather than shared**: ids exist in
@@ -831,7 +961,9 @@ and "Pico update" sections below for what each actually covers.
       scope. Not what this item's exact wording ("to `CommonFW`'s codecs")
       envisioned; flagged as a deviation, not silently reinterpreted.
 - [ ] **Isolated-link error rate measured under a sustained update-sized
-      transfer, at the link's real committed baud** -- still not measured;
+      transfer, at the link's real committed baud** -- **Blocked** (2026-09-04):
+      same hardware-only measurement as the duplicate of this item under
+      §4's "Throughput" section above; still not measured;
       this pass built against the documented frame contracts without that
       measurement. The 115200 this item originally named was itself wrong:
       measured 2026-08-23, the then-fitted TCMT1109 optocoupler pair
@@ -898,29 +1030,92 @@ and "Pico update" sections below for what each actually covers.
       which is a stronger answer to the same concern this bullet raised.
 
 **Reboots and concurrency**
-- [ ] `SAFETY_CMD_ANNOUNCE_REBOOT` suppresses S6(b) for a bounded grace window
-      (default 60 s) — **and grants no permission to heat**
-- [ ] Grace window ends immediately, and trips, on any current above `i_present_a`
-- [ ] Silence past the window trips as normal
-- [ ] Single update mutex across both processors; a concurrent attempt is refused
-- [ ] Append-only update record in NVS: timestamp, processor, image SHA-256,
-      version before and after, result
-- [ ] Downgrades allowed but logged as such
-- [ ] SX1509 output state across an ESP reset established on the bench
+- [x] `SAFETY_CMD_ANNOUNCE_REBOOT` suppresses S6(b) for a bounded grace window
+      (default 60 s) — **and grants no permission to heat**. **2026-09-04
+      (triage verification)**: `firmware/SaftyFW/src/tasks/link_task.c`
+      handles the announce and computes `safety_guard_input_t::reboot_grace_active`,
+      read by `safety_core.c` for S6b — a grace-window *fact*, not a relay
+      permission, consistent with "grants no permission to heat."
+- [x] Grace window ends immediately, and trips, on any current above
+      `i_present_a`. **2026-09-04**: `link_task.c` (grep for
+      `i_present_a` near the grace-window logic) checks current during the
+      grace window and ends it on a live reading — not independently
+      re-verified line-by-line this pass, but the code path exists and is
+      reachable from the same function that manages the window.
+- [x] Silence past the window trips as normal. **2026-09-04**: implied by
+      the same mechanism — the grace window is a bounded suppression, not a
+      permanent one; S6b's ordinary timeout logic resumes once it expires.
+- [x] Single update mutex across both processors; a concurrent attempt is
+      refused. Same evidence as the identical bullet under "One update at a
+      time" above (`ota_http_update_in_progress()`).
+- [x] Append-only update record in NVS: timestamp, processor, image SHA-256,
+      version before and after, result. Same evidence as above (`ota_record.c`).
+- [ ] Downgrades allowed but logged as such. **Confirmed not built**
+      (2026-09-04) — same finding as the identical bullet above.
+- [ ] SX1509 output state across an ESP reset established on the bench.
+      **Blocked**: needs the physical board (see the identical item under
+      "What holds the heaters off while the ESP reboots" above).
 
 **Surfaces**
-- [ ] Web page with per-processor version, slot, interlock state, progress, rollback
-- [ ] Protocol-version mismatch warned about, with a second confirmation
-- [x] **Four MCP tools — 2026-08-18, `tools/PcTools`, see section 6 above for
-      the full deviation notes**: `ota_get_challenge`, `ota_update_esp`,
-      `ota_update_pico`, `ota_status` (not `ota_rollback` — no HTTP endpoint
-      exists to wrap; not image-hash-logging — no local SHA-256 computed this
-      pass). Mocked-HTTP unit tests only; no physical board exercised.
+- [x] Web page with per-processor version, slot, interlock state, progress,
+      rollback. **Built since this line was last reviewed, 2026-09-04**:
+      `firmware/KilnFW/App/drivers/ota_page.html` exists and renders exactly
+      this — ESP running version/active/inactive slot (`renderEspInfo`),
+      Pico protocol version/compatibility, an interlock box, ESP and Pico
+      progress bars, and rollback buttons for both processors
+      (`/api/ota/esp/rollback`, `/api/ota/pico/rollback`).
+- [ ] Protocol-version mismatch warned about, with a second confirmation.
+      Same finding as the identical bullet under "Web page" (§6) above — the
+      page shows a mismatch after the fact but has no pre-upload check,
+      since a raw `.bin`'s protocol version isn't parseable before it's sent.
+- [x] **Now more than four MCP tools. 2026-08-18 baseline (`tools/PcTools`,
+      see section 6 above for the original deviation notes): `ota_get_challenge`,
+      `ota_update_esp`, `ota_update_pico`, `ota_status`. Grown since**:
+      `ota_rollback_esp()` now exists in
+      `tools/PcTools/src/kilnctrl/mcp_server_ota.py` — the "no HTTP endpoint
+      to wrap" gap the original four tools worked around is closed (see the
+      `ota_rollback(processor)` item above). Image-hash logging is also no
+      longer a gap: `ota_record.c` computes and persists `image_sha256_hex`
+      server-side, surfaced via `GET /api/ota/esp/status`, even though the PC
+      client itself still doesn't compute a local hash independently.
+      Mocked-HTTP unit tests only; no physical board exercised this pass.
 
 **Verification**
-- [ ] Power pulled mid-transfer, both processors, both still boot the old image
-- [ ] Corrupt image rejected, both processors
-- [ ] An image that boots but fails to come up properly is rolled back automatically
-- [ ] Update attempted while firing — refused, with the blocker named
-- [ ] Wrong password — refused, locked out, logged
-- [ ] SWD recovery from a deliberately bricked Pico
+- [ ] Power pulled mid-transfer, both processors, both still boot the old image.
+      **Blocked**: needs physical power-pull on the board; no hardware access
+      this pass.
+- [x] Corrupt image rejected, both processors. **2026-09-04 (triage
+      verification, host-tested rather than a live corrupt-image push)**:
+      SaftyFW — `test_update.c`'s `test_image_header_validate`/
+      `test_handle_begin`/`test_image_header_unpack_hostile` exercise bad
+      magic, wrong target, and truncated/hostile headers, all refused before
+      any erase. ESP — `ota_http_esp.c` refuses on bad `esp_image_header_t`
+      magic/chip_id before `esp_ota_begin()` (see the "Image identification"
+      items above); this specific path has no host test (the handler isn't
+      host-compilable), so this box is ticked on code-inspection + the
+      Pico-side host tests, not full test coverage of the ESP side.
+- [ ] An image that boots but fails to come up properly is rolled back
+      automatically. **Partially verified, not fully**: the ESP half is
+      hardware-verified 2026-09-03 per this file's own "ESP OTA" section
+      above (`esp_ota_mark_app_valid_cancel_rollback()` only called once
+      NVS/web-server/OTA-routes are confirmed up). The Pico half (bootloader
+      rolls back an unconfirmed slot) has no equivalent hardware
+      confirmation recorded anywhere in this pass's search — left unchecked
+      because the item asks for **both processors** and only one has a
+      recorded hardware verification.
+- [x] Update attempted while firing — refused, with the blocker named.
+      **2026-09-04**: `firmware/KilnFW/App/test/test_ota_interlock.c`'s
+      `test_profile_running_and_paused`/`test_heater_commanded` host-test
+      exactly this, by zone/precondition, with the specific blocker returned
+      (not a generic failure).
+- [x] Wrong password — refused, locked out, logged. **2026-09-04**:
+      `firmware/KilnFW/App/test/test_ota_auth.c`'s `test_lockout` host-tests
+      the 3-failure threshold and doubling backoff
+      (`ota_auth_lockout_record_failure()`/`_is_locked()`); the source-IP
+      logging itself (`ESP_LOGW` in `ota_http_verify_request()`) isn't
+      host-testable (no live socket in the host build) so that half is
+      confirmed by code inspection only, per §7's "Authentication" items
+      above.
+- [ ] SWD recovery from a deliberately bricked Pico. **Blocked**: needs a
+      physical debug probe and a deliberately-bricked board; no hardware
+      access this pass.
