@@ -93,6 +93,24 @@ Not every field that looks like it should move actually does.
   expected-effect arithmetic mixed a stock-p7 baseline (2.2 °C) with a
   stabilised-p7 campaign's own baseline (1.93 °C) — two different profiles'
   numbers subtracted as if comparable.
+- **"Same profile" includes stabilisation-hold status, not just the
+  profile ID.** (2026-09-04, `PID_EXPANSION_PLAN.md` noise-floor
+  re-derivation section.) `run_queue.py` has prepended a 40 °C/45 min
+  stabilisation hold onto every queued profile by default since
+  2026-09-03 (`--skip-stabilization-hold` is the opt-out); scoring then
+  starts at `min_segment_index: 1`, past the hold. Pooling
+  `ab_new_{1,2,3}` (bare 2-segment profile 7, no hold, no `meta` record)
+  with `easeoff_ab_20260904_2p0_run{1,2,3}` (3-segment stabilised profile
+  7, `meta: {stabilized: true, min_segment_index: 1}`) as "same nominal
+  config, current matrix, stock ease-off" looked reasonable by profile ID
+  and preset name alone, but made the pooled `iae_normalized_whole_c`
+  range jump from ~0.06 (each triplet alone) to ~0.25 °C — an apparent
+  hidden between-campaign confound that was actually just two different
+  profiles under one nickname. Before pooling or comparing runs across
+  campaigns for noise-floor or A/B purposes, check the run's own capture
+  for a `meta.stabilized`/`meta.min_segment_index` record (or the
+  campaign's `run_queue.log` for the "prepending a stabilisation hold"
+  line) — don't rely on the profile ID or campaign name matching.
 - **Use untreated zones as negative controls.** A zone-scoped intervention
   (e.g. z0-only) should show the effect in the targeted zone and NOT in the
   others; pre-register that expectation.

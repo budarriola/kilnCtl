@@ -1232,6 +1232,79 @@ HTTP endpoint and zones-page UI.
       quoted conclusion moves; the open action item is a proper ≥6-repeat
       current-matrix noise-floor campaign to replace `noise_floor.json`,
       not a correction to any existing verdict.
+
+      **2026-09-04 — the pooling jump traced: the two triplets are not repeats
+      of one configuration.** The n=3 vs n=3 pooling above (`ab_new_{1,2,3}`
+      vs `easeoff_ab_20260904_2p0_run{1,2,3}`) that jumped from
+      0.060/0.056/0.036 and 0.064/0.034/0.065 individually to a pooled
+      0.246/0.247/0.141 was flagged as a possible hidden between-campaign
+      confound threatening every cross-campaign comparison in this project.
+      Checked the leading suspect first, per `run_queue.py`'s own OWNER
+      DECISION (2026-09-03, `--skip-stabilization-hold` help text): **the
+      stabilisation hold is prepended onto every queued entry's profile by
+      default since 2026-09-03.** Reading the raw captures settles it
+      directly, no inference needed:
+      - `easeoff_ab_20260904_2p0_run{1,2,3}.jsonl` each open with an explicit
+        `{"meta": {"stabilized": true, "min_segment_index": 1}}` record —
+        `run_queue.py` prepended a 40 °C/45 min stabilisation hold onto
+        profile 7 (confirmed in `easeoff_ab_20260904_run_queue.log:13`,
+        `"[profile 7] prepending a 40C/45min stabilisation hold (saved in
+        place)"`) and `pid_ab_compare.py` was told to score from segment
+        index 1 onward, past the hold.
+      - `ab_new_{1,2,3}.jsonl` carry **no such `meta` record at all** — the
+        first line's `exec` block starts directly at `segment_index: 0`,
+        `segment_count: 2` (the bare two-segment profile 7, no hold), and no
+        `ab_new*run_queue.log`/`*state.json` exists anywhere under
+        `logs/coupling/` (unlike every 2026-09-03+ campaign, which has both).
+      These are two different profiles under the same nickname — a bare
+      2-segment profile 7 starting cold, versus a 3-segment profile 7 that
+      spends its first ~51 minutes doing a rested ramp-and-dwell to 40 °C
+      before the scored portion even begins. **The pooling was invalid by
+      construction**: `ab_new` and `easeoff_ab_20260904_2p0` are not
+      same-configuration repeats, so treating their union as one n=6
+      population and taking its range was never a meaningful operation — the
+      "hidden variable" is a mislabel, not a discovered confound. This is the
+      cheap explanation named as the leading suspect and it is sufficient
+      that no further quantitative search (start temp, firmware build,
+      ambient, time-of-day) was needed or performed against the pooled six;
+      each triplet's *individual* range remains valid on its own terms
+      (that comparison, both triplets individually beating the published
+      floor, is unaffected by this finding).
+
+      **Consequence.** None of today's conclusions weaken: nothing published
+      anywhere in this project pools `ab_new` with `easeoff_ab_20260904_2p0`
+      as one repeat set — the pooling was constructed only for this
+      diagnostic pass, to stress-test whether "current matrix, stock
+      ease-off" was a fine enough label to certify a new floor artifact from
+      n=3+n=3. It is not: **the correctly-scoped lesson is that a
+      same-configuration claim for pooling/floor purposes must include
+      stabilisation-hold status as a first-class field**, not just matrix
+      version and preset name, and `AB_EXPERIMENT_CHECKLIST.md` is updated
+      below to say so. The 0.313 °C ease-off pair-2 delta and the 1.7 °C z0
+      gap were never compared across these two triplets and are untouched.
+      Cross-campaign contrasts that already hold profile/stabilisation
+      status fixed (which is every published verdict checked in this
+      section) remain valid; the margin this pass would have implied (~0.25
+      °C between-campaign term) does not apply to them because they were
+      never actually mixing hold/no-hold data.
+
+      **Would `fuzzy_ab_20260904d`'s A1/A2/A3 baseline arms settle anything
+      further, once they land?** They would settle a *different*, still-open
+      question — whether two independent triplets that both genuinely have
+      the stabilisation hold (A1/A2/A3 on the stabilised profile vs.
+      `easeoff_ab_20260904_2p0_run{1,2,3}`, also stabilised) pool cleanly —
+      which this pass did not test, since `ab_new` (the other current-matrix
+      triplet available) has no hold at all and was never a valid comparison
+      partner for that question. If A1–A3's range, pooled with the easeoff
+      2.0× triplet into n=6, stays commensurate with each triplet's own
+      internal spread, that is a real (if still small, n=6) step toward
+      certifying a current-matrix, stabilised-profile noise floor. If it
+      again jumps sharply on pooling, that would be actual evidence of a
+      between-campaign confound among genuinely-matched configurations —
+      unlike today's jump, which is fully accounted for by the hold
+      mismatch — and would justify the wider search (start temp
+      correlation, firmware build, ambient) that this pass found unnecessary
+      to run.
 - [x] **One-click revert** to the last accepted gain set (`5b44403`). Snapshots
       Kp/Ki/Kd, K_dc/tau/dead_time and `ki_baseline` before each commit point and
       restores them exactly, `ki_baseline` included — restoring gains while
