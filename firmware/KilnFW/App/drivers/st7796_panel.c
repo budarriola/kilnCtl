@@ -90,19 +90,19 @@ static const uint8_t st7796_init_bytes[] = {
               0x4D, 0x0B, 0x17, 0x17, 0x1D, 0x21,
     0xF0, 1, 0x3C,
     0xF0, 1, 0x69,
-    /* DEVIATION from the byte-for-byte vendor transcription above, added
-     * 2026-09-04 after real bench hardware: the vendor's LCD_Init() never
-     * sends INVON/INVOFF (0x21/0x20) at all, leaving the panel on its
-     * power-on-reset inversion default -- and on this physical MSP4031 unit
-     * that default renders as garish, wrong-contrast color (bench report:
-     * "crazy contrast", not merely off-hue), the same failure mode
-     * TFT_eSPI/Adafruit-style ST7796 drivers work around by explicitly
-     * calling invertDisplay(true) (INVON, 0x21) during init -- this is a
-     * known per-batch ST7796 clone quirk, not something the vendor's own
-     * demo file would show if their sample unit happened to reset into the
-     * other state. INVON takes no parameters. If a future panel batch needs
-     * the opposite, this is the first thing to flip back to 0x20/omit. */
-    0x21, 0,
+    /* REVERTED 2026-09-04 (this same day, after further bench evidence):
+     * an INVON (0x21) was added here earlier in this session chasing a
+     * "crazy contrast" report. Later evidence changed the diagnosis: on
+     * this board's VERY FIRST power-up of the MSP4031 -- before ANY
+     * firmware edits, running the ILI9488 driver/init table (wrong panel
+     * driver, but empirically correct colors, just dim) -- colors were
+     * already right. The contrast regressions (both "crazy contrast" and
+     * "blue reads as purple") only appeared after this session's own
+     * ST7796-path edits, i.e. they were introduced, not pre-existing. Back
+     * to the vendor's byte-for-byte LCD_Init() transcription, which never
+     * sends INVON/INVOFF at all (confirmed against the vendor source) --
+     * do not re-add this without a bench A/B that isolates it from every
+     * other variable. */
     0x13, 0,
     0x11, 0,
     0x29, 0,
@@ -159,14 +159,20 @@ static const panel_desc_t st7796_panel_desc = {
      * tiebreak is the only signal that still functions on this board's
      * wiring -- RDDID cannot distinguish either panel here. Stays NULL,
      * same reasoning as ili9488_panel_desc.id_matches above. */
-    /* 2026-09-04, bench report on commit 16fe9ed: blue rendered as purple
-     * on the real MSP4031 -- the wrong MADCTL color-filter-order bit for
-     * this panel's glass. This module's glass is RGB, not the ILI9488's
-     * BGR -- 0x00 (bit clear) instead of ILI9488_MADCTL_COLOR_ORDER (BGR,
-     * 0x08). Panel_codec.h's color_order_bit field comment has the full
-     * writeup on why this had to move off the old shared constant. Awaiting
-     * owner visual confirmation on real hardware. */
-    .color_order_bit = 0x00,
+    /* REVERTED 2026-09-04: this was set to 0x00 (RGB) earlier in this
+     * session chasing the "blue reads as purple" report from the SAME
+     * broken rendering path (see the INVON revert note above -- both
+     * symptoms trace to this session's own init-table edits, not to the
+     * BGR bit). The panel's very first power-up rendered correct colors
+     * through the ILI9488 driver, which uses ILI9488_MADCTL_COLOR_ORDER
+     * (BGR) -- so BGR is the empirically-confirmed value for this glass,
+     * not RGB. Do not flip this again without a bench A/B isolated from
+     * every other init-table variable. */
+    .color_order_bit = 0x08, /* MADCTL D3 (BGR) -- same value as panel_spi.c's
+                               * ILI9488_MADCTL_COLOR_ORDER; not referenced
+                               * directly, that macro is file-static to
+                               * panel_spi.c and this file has no reason to
+                               * pull in the rest of panel_spi.h for one bit. */
     .id_matches = NULL,
     .blank_via_power_off = false, /* safe default; NEEDS BENCH CONFIRMATION, see above */
     /* FT6336U's OWN bench-tuned Kconfig knobs (settings.h) -- deliberately
