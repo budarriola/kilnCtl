@@ -2034,25 +2034,22 @@ tests) for every item below lives in
 - [x] `GET /api/status` allocates from internal DRAM — converted to
       `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)` in `dashboard_http.c`/
       `backup_http.c`. **CLOSED 2026-09-04.**
-- [ ] **12 files exceed the 1500-line rule.** Eleven closed 2026-09-04:
+- [x] **12 files exceed the 1500-line rule.** All twelve closed 2026-09-04:
       `wifi_prov.c`, `autotune_engine.c`, `dashboard_http.c`, `profiles_http.c`,
       `ota_http.c`, `zones_config_json.c`, `backup_http.c`, `uart_bridge_ext.c`,
       `zones_http_handlers.c` (now split across `zones_http_get.c`/
-      `_post.c`/`_post_parse.c`/`_pid.c`), `ui_page_home.c`, `panel_spi.c` — each
-      split move-only, symbol-audited for collisions, `build_kilnfw` +
-      21/21 host tests green after each. Full per-file split map in
+      `_post.c`/`_post_parse.c`/`_pid.c`), `ui_page_home.c`, `panel_spi.c`,
+      `main.c` — each split move-only, symbol-audited for collisions,
+      `build_kilnfw` + 21/21 host tests green after each. Full per-file split
+      map in
       [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m15-architecture-hardening-findings-full-detail).
       **Verified against measured `wc -l` 2026-09-04**: `autotune_engine.c`
       1462, `wifi_prov.c` 561, `dashboard_http.c` 774, `ota_http.c` 1079,
       `ui_page_home.c` 1024, `panel_spi.c` 551, `profiles_http.c` 1151,
-      `zones_config_json.c` 674, `backup_http.c` 96, `uart_bridge_ext.c` 539 —
-      all under 1500. **Still outstanding: `main.c`.** Another session/agent
-      appears to be splitting it concurrently right now (untracked
-      `App/main_boot_early.c`, `App/main_control_bringup.c`,
-      `App/main_internal.h` present in the working tree, uncommitted); at the
-      moment of this check `main.c` itself measured 1859 lines, still over the
-      threshold and the split not yet landed — left exactly as found, not
-      resolved here.
+      `zones_config_json.c` 674, `backup_http.c` 96, `uart_bridge_ext.c` 539,
+      `main.c` 218 (split into `main_boot_early.c` 704, `main_control_
+      bringup.c` 218, `main_network_http.c` 644, `main_bridges_bringup.c`
+      228, `main_internal.h` 126) — all under 1500. **CLOSED 2026-09-04.**
 - [x] Stand-in stubs sit above the polarity/decode layer — audited against
       every `safety_guard_input_t` field; one new relocation (S9's
       `.relay_deenergized` negation). **CLOSED 2026-09-04** (audit part).

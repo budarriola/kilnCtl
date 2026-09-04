@@ -44,10 +44,10 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       (`dashboard_http.c:582`, `backup_http.c:178` and `:1679`); swept the rest
       of the HTTP handler files and found no other plain `malloc` of a
       response/scratch buffer.
-- [ ] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
+- [x] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
       ~~`wifi_prov.c` (2820)~~, ~~`dashboard_http.c` (2572)~~, ~~`ota_http.c` (2508)~~,
       ~~`ui_page_home.c` (2279)~~, ~~`panel_spi.c` (2174)~~, ~~`profiles_http.c` (2097)~~,
-      ~~`zones_config_json.c` (1867)~~, `main.c` (1820), ~~`backup_http.c` (1756)~~,
+      ~~`zones_config_json.c` (1867)~~, ~~`main.c` (1859)~~, ~~`backup_http.c` (1756)~~,
       ~~`uart_bridge_ext.c` (1727)~~, ~~`zones_http_handlers.c` (1598)~~. Split
       `wifi_prov.c` and `autotune_engine.c` first — riskiest per
       `ARCHITECTURE.md`, and autotune has four separable concerns, on the
@@ -436,9 +436,73 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       its new siblings are never pulled into a host-test translation unit
       (`test_st7796_panel.c`/`test_panel_codec.c` exercise `st7796_panel.c`/
       `panel_codec.c` directly, not this driver), so no test file needed
-      updating. Still open under this item: `autotune_engine.c` and
-      `ota_http.c`'s own remaining pieces (each already has an in-progress
-      split noted above) and `main.c` (1820).
+      updating. `main.c` part — **CLOSED 2026-09-04**: move-only split, by
+      boot phase, into `main.c` (218 lines — `app_main()` plus the two
+      helpers shared across every phase, `main_heap_stage()` and
+      `main_kiln_enter_safe_state()`), `main_internal.h` (126 — the new
+      `main_boot_ctx_t` struct, which replaced app_main's flat stack of
+      `static` locals so each phase function can take one pointer instead of
+      an ever-growing argument list, plus the phase prototypes),
+      `main_boot_early.c` (704 — entry through "heap stage display+touch":
+      reset-reason/coredump diagnostics, the ESP32-S3 die-temp sensor,
+      time_sync, Wi-Fi+mDNS, the I2C bus and SX1509/kiln_io board layer,
+      boot_guard/rtc_watchdog/watchdog_cfg/boot_button, i2c_scan, the shared
+      SPI bus, the MAX31856 thermocouple channels, and display/touch/
+      screen_idle/backlight-pwm bring-up), `main_control_bringup.c` (218 —
+      through "heap stage executor+autotune": safety_link, danger_mode,
+      heat_enable, kiln_io_owner, relay_cycles, profile_executor,
+      autotune_engine, the flash-safe executor), `main_network_http.c`
+      (644 — through "heap stage uart_owner+proto": every HTTP route
+      registration (dashboard/board-temps/settings/zones/profiles/factory-
+      reset/readiness/log/adaptive-tune/diagnostics/partition-info/ota/kiln-
+      cfg/backup/safety-cfg/sim), the OTA rollback-confirmation task, the
+      monitor task, and the PC-link UART owner+protocol stack),
+      `main_bridges_bringup.c` (228 — through "heap stage app_main_done":
+      the first- and second-wave UART bridge tasks, `lvgl_port_start()`, and
+      the fail-safe link watchdog). `app_main()` calls the four phase
+      functions in exactly the order it used to inline their bodies; each
+      phase ends on the identical `heap_stage()` checkpoint name it logged
+      before the split, so the boot log's stage sequence is unchanged.
+      SX1509Class needed pulling out of the owner-gated `SX1509_internal.h`
+      into plain `SX1509.h` for `main_internal.h` to reference the type
+      without every including file having to `#define SX1509_OWNER_BUILD`;
+      only `main_boot_early.c` (the actual SX1509 bring-up) defines that
+      macro and includes the gated header. Symbol audit: only three symbols
+      needed widening from `static` to non-static (used from more than one
+      of the new files) — `TAG`→`MAIN_TAG`, `heap_stage`→`main_heap_stage`,
+      `kiln_enter_safe_state`→`main_kiln_enter_safe_state`; grepped across
+      all of `App/` for both a non-static definition and a same-named static
+      elsewhere and found neither (the only hits were comments in other
+      files referencing `main.c`'s functions by their old names, since
+      updated). `kiln_drdy_provider`, `alloc_fail_trace_cb`,
+      `ota_rollback_confirm_task`/`ota_confirm_ctx_t`/`OTA_CONFIRM_POLL_MS`/
+      `OTA_CONFIRM_WARN_MS` are each used from only one new file and stayed
+      `static`, renamed `main_`/`MAIN_`-prefixed anyway per the "rename even
+      when currently clean" rule. Boot-order preservation verified two ways:
+      (1) every phase function's body was transcribed as a byte-for-byte
+      relocation of the original block between the same two `heap_stage()`
+      checkpoints (only local-variable references rewritten to
+      `ctx->field`), diffed by eye against the pre-split file section by
+      section while writing it; (2) a script stripped comments/strings from
+      both the pre-split `main.c` and the five post-split files (concatenated
+      in `app_main()`'s call order) and extracted the ordered sequence of
+      every bring-up call (`*_start`/`*_init`/`heap_stage`/`xTaskCreate`,
+      whitelisted by name) — 105/105 tokens identical in sequence; the one
+      apparent mismatch in a naive unfiltered version of the same diff was
+      the scanner also matching a call inside `kiln_enter_safe_state()`'s
+      own definition body (present in both versions, just relocated), not
+      an actual reordering. `build_kilnfw` OK; 21/21 host test executables
+      pass (none of the five new files are pulled into a host-test
+      translation unit, so no test file needed updating);
+      `flash_worker_lint.py` stayed clean, 180 driver files scanned, 22
+      allowlisted, no new filename needed adding. **No real hardware boot
+      was observed for this split** — the board is shared with other
+      in-flight work (a verification agent running builds/suites, another
+      split in progress on `panel_spi.c`) and was deliberately not flashed;
+      correctness rests on the move-only diff and the two order-preservation
+      checks above, not a bench boot. This closes the item: `autotune_engine.c`
+      and `ota_http.c` each already had their own in-progress split land
+      separately (see their own entries above/below).
 - [x] **Stand-in stubs sit above the polarity/decode layer.**
       `SaftyFW/src/tasks/discrete_task.c:91-97` documents the shipped E-stop
       polarity bug that 378/378 host checks could not see because
