@@ -1868,11 +1868,25 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `test_profile_executor_prestart.c` with a negative-test mutation
       proving the check has teeth. 21/21 host test executables and
       `build_kilnfw` pass.
-- [ ] **Mode-state sprawl.** >=5 independent enums/booleans describe system
+- [x] **Mode-state sprawl.** >=5 independent enums/booleans describe system
       mode; the dwelling/ramp-lock caveat is re-derived identically at
       `profile_executor_feedforward.c:243-244` and `:566-576`. Document a
       legal-state table or add a runtime assertion — not a forced single enum.
-      M
+      M — **CLOSED 2026-09-04**: legal/illegal-state table documented as a
+      comment block in `profile_executor_internal.h` (6 illegal rules, 3
+      called-out legal-but-tricky rows: ramp-lock stall without dwelling,
+      PAUSED mid-dwell, autotune SETTLING with no_setpoint). `exec_mode_
+      state_check()` (`profile_executor.c`) asserts the illegal rows every
+      control tick under the existing lock; host build has no NDEBUG
+      convention to plug an on-target assert into (verified by grep — only
+      compile-time `_Static_assert` exists elsewhere in `App/drivers`), so
+      the call site uses plain `assert()`, live on host, log-only-if-Kconfig-
+      disables-it on target — documented as such rather than invented.
+      9 new host tests in `test_profile_executor_prestart.c` (5 illegal
+      combinations incl. the 3 required, 4 legal-but-tricky including the
+      two named in the ROADMAP item). Negative-tested: disabled rule 4's
+      check, confirmed 2 of its tests failed, restored — 21/21 host test
+      executables and `build_kilnfw` pass.
 - [x] **No lint against flash/NVS writes outside the flash worker.** Direct
       writes bypassing `kiln_cfg_store.c`'s worker dispatch (`nvs_set_blob` at
       `kiln_cfg_store.c:356`, `kiln_cfg_store_apply()` at `:681`) have panicked

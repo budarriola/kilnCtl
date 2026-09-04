@@ -599,6 +599,25 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
     return false;
 }
 
+/* ROADMAP.md M15 "Mode-state sprawl": exec_mode_state_check() (profile_
+ * executor.c, rule 1/6) reads autotune_engine_get_status() to see whether
+ * an in-progress autotune run is actively driving the same zone this run
+ * has active. autotune_engine.c is NOT linked into this executable (see
+ * this file's own header comment, cmd4's source list) -- it is a large,
+ * separately host-tested module (test_autotune_engine_prestart.c's own
+ * executable) with its own dependency chain this file's fake surface has
+ * never needed before this check. Settable, defaulting to the all-zero
+ * "no autotune has ever run" status (state==AUTOTUNE_ENGINE_IDLE==0,
+ * zone_index==0, method==AUTOTUNE_METHOD_STEP==0, relay_setpoint_c==0.0f)
+ * so every pre-existing test in this file -- none of which touches
+ * autotune -- sees exactly the same "nothing running" answer it always
+ * implicitly got before this fake existed. */
+static autotune_engine_status_t g_stub_autotune_status;
+void autotune_engine_get_status(autotune_engine_status_t *out)
+{
+    if (out) *out = g_stub_autotune_status;
+}
+
 /* PID_EXPANSION_PLAN.md section 2c/Phase 3b: settable coupling matrix, one
  * row per zone, defaulting to all-zero (every pre-existing test never
  * touches this and gets exactly today's zero-coefficient feedforward). Test
@@ -6405,6 +6424,187 @@ static void test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack
     nvs_test_clear();
 }
 
+// ROADMAP.md M15 "Mode-state sprawl" -- exec_mode_state_check() (profile_
+// executor.c) against the legal/illegal-state table documented in profile_
+// executor_internal.h. Each test starts from memset(&s_exec, 0, ...) (the
+// same convention every other test in this file uses) and g_stub_autotune_
+// status reset to all-zero ("no autotune has ever run"), so tests are
+// order-independent and never see a previous test's autotune stub leak in.
+
+static void reset_mode_state_check_test_state(void)
+{
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(&g_stub_autotune_status, 0, sizeof(g_stub_autotune_status));
+}
+
+// ---- illegal combinations (3 required by ROADMAP.md M15 B5) --------------
+
+static void test_mode_state_check_rule4_idle_with_active_zone(void)
+{
+    TEST_SECTION("exec_mode_state_check -- rule 4: IDLE with an active zone is illegal");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_exec.zones[1].active = true;
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 1, "exactly one violation: zone 1 active while IDLE");
+    TEST_CHECK(strstr(msg, "rule 4") != NULL, "violation message names rule 4");
+}
+
+static void test_mode_state_check_rule5_dwelling_while_done(void)
+{
+    TEST_SECTION("exec_mode_state_check -- rule 5: dwelling==true outside RUNNING/PAUSED is illegal");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.dwelling = true;
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 1, "exactly one violation: dwelling left true into DONE");
+    TEST_CHECK(strstr(msg, "rule 5") != NULL, "violation message names rule 5");
+}
+
+static void test_mode_state_check_rule1_autotune_and_profile_same_zone(void)
+{
+    TEST_SECTION("exec_mode_state_check -- rule 1: autotune actively driving a zone the profile "
+                 "run also has active is illegal");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[2].active = true;
+    g_stub_autotune_status.state = AUTOTUNE_ENGINE_STEPPING;
+    g_stub_autotune_status.zone_index = 2;
+    g_stub_autotune_status.method = AUTOTUNE_METHOD_STEP; // STEP: no_setpoint true, doesn't matter to rule 1
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 1, "exactly one violation: zone 2 double-owned by autotune and the profile run");
+    TEST_CHECK(strstr(msg, "rule 1") != NULL, "violation message names rule 1");
+}
+
+static void test_mode_state_check_rule2_cooling_limited_outside_pid(void)
+{
+    TEST_SECTION("exec_mode_state_check -- rule 2: cooling_limited==true outside PID/PID_FUZZY is "
+                 "illegal (a fourth illegal combination, beyond the 3 required)");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_BANGBANG;
+    s_exec.zones[0].cooling_limited = true;
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 1, "exactly one violation: stale cooling_limited surviving a mode switch to BANGBANG");
+    TEST_CHECK(strstr(msg, "rule 2") != NULL, "violation message names rule 2");
+}
+
+static void test_mode_state_check_rule3_faulted_zone_relay_commanded(void)
+{
+    TEST_SECTION("exec_mode_state_check -- rule 3: a faulted zone's relay must never read commanded "
+                 "on (a fifth illegal combination)");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].faulted = true;
+    s_exec.zones[0].relay_commanded_on = true;
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 1, "exactly one violation: relay reads commanded on for a faulted zone");
+    TEST_CHECK(strstr(msg, "rule 3") != NULL, "violation message names rule 3");
+}
+
+// ---- legal-but-tricky combinations: the check must stay quiet ------------
+
+static void test_mode_state_check_legal_ramp_lock_stall_without_dwelling(void)
+{
+    TEST_SECTION("exec_mode_state_check -- legal: ramp-lock stall (RUNNING, dwelling=false, "
+                 "ramp_lock_held=true) stays quiet");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.dwelling = false;
+    s_exec.ramp_lock_held = true; // a lagging zone freezing the schedule -- see the table's LEGAL row
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "a ramp-lock stall with no dwelling is a normal, documented LEGAL state");
+}
+
+static void test_mode_state_check_legal_autotune_settling_no_setpoint(void)
+{
+    TEST_SECTION("exec_mode_state_check -- legal: autotune SETTLING with no_setpoint (STEP method) "
+                 "stays quiet");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_IDLE; // no profile run active -- SETTLING zone is autotune's alone
+    g_stub_autotune_status.state = AUTOTUNE_ENGINE_SETTLING;
+    g_stub_autotune_status.zone_index = 0;
+    g_stub_autotune_status.method = AUTOTUNE_METHOD_STEP; // no_setpoint == true for the whole STEP lifetime
+    g_stub_autotune_status.relay_setpoint_c = 0.0f;        // STEP never sets this -- expected, not a violation
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "STEP method's SETTLING/no_setpoint pairing is the documented LEGAL state, "
+                       "not a bug");
+}
+
+static void test_mode_state_check_legal_paused_mid_dwell(void)
+{
+    TEST_SECTION("exec_mode_state_check -- legal: PAUSED with dwelling/ramp_lock_held still true "
+                 "(frozen mid-dwell) stays quiet");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_PAUSED;
+    s_exec.dwelling = true;
+    s_exec.ramp_lock_held = true;
+    s_exec.zones[0].active = true;
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "pause() freezes dwelling/ramp_lock_held rather than resetting them -- both "
+                       "true across PAUSED is the documented LEGAL state");
+}
+
+static void test_mode_state_check_legal_autotune_done_does_not_conflict(void)
+{
+    TEST_SECTION("exec_mode_state_check -- legal: autotune DONE (holding, not driving) on the same "
+                 "zone a profile run has active does not trip rule 1");
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[2].active = true;
+    g_stub_autotune_status.state = AUTOTUNE_ENGINE_DONE; // awaiting accept()/abort() -- not driving heat
+    g_stub_autotune_status.zone_index = 2;
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "DONE/ABORTED/IDLE are not 'actively driving' -- rule 1 must not fire against them");
+}
+
+static void run_test_exec_mode_state_check(void)
+{
+    test_mode_state_check_rule4_idle_with_active_zone();
+    test_mode_state_check_rule5_dwelling_while_done();
+    test_mode_state_check_rule1_autotune_and_profile_same_zone();
+    test_mode_state_check_rule2_cooling_limited_outside_pid();
+    test_mode_state_check_rule3_faulted_zone_relay_commanded();
+    test_mode_state_check_legal_ramp_lock_stall_without_dwelling();
+    test_mode_state_check_legal_autotune_settling_no_setpoint();
+    test_mode_state_check_legal_paused_mid_dwell();
+    test_mode_state_check_legal_autotune_done_does_not_conflict();
+
+    // Leave clean s_exec/autotune-stub state behind for whichever test runs next.
+    reset_mode_state_check_test_state();
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -6579,6 +6779,9 @@ void run_test_profile_executor_prestart(void)
     test_dwell_credit_spend_single_weak_zone_applies_nothing();
     test_dwell_credit_spend_faulted_zone_ignored();
     test_dwell_credit_spend_no_active_zones_returns_zero();
+
+    // ROADMAP.md M15 "Mode-state sprawl" -- exec_mode_state_check().
+    run_test_exec_mode_state_check();
 }
 
 

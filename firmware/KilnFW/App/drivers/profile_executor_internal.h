@@ -51,9 +51,161 @@
 #include "heater_output.h"
 #include "run_state.h"
 #include "zone_coupling_solve.h"
+#include "autotune_engine.h"
 
 /* ---- shared log tag ------------------------------------------------------ */
 extern const char *PE_TAG;
+
+/* ============================================================================
+ * ROADMAP.md M15 "Mode-state sprawl" -- the legal-state table
+ * ============================================================================
+ * >=5 independent enums/booleans describe executor mode:
+ *
+ *   1. s_exec.state              profile_exec_state_t   (profile_executor.h)
+ *                                 IDLE / RUNNING / PAUSED / DONE / FAULTED
+ *   2. s_exec.dwelling            bool                   (this file)
+ *   3. s_exec.ramp_lock_held      bool                   (this file)
+ *   4. autotune per-zone state    autotune_engine_state_t (autotune_engine.h)
+ *                                 IDLE / SETTLING / STEPPING / RELAY_APPROACH /
+ *                                 RELAY_CYCLING / DONE / ABORTED, plus
+ *                                 `no_setpoint` derived from `method` (STEP
+ *                                 has none, RELAY has relay_setpoint_c)
+ *   5. per-zone flags             zone_runtime_t          (this file)
+ *                                 active, faulted, heat_blocked,
+ *                                 cooling_limited, lag_sustained
+ *
+ * A forced single enum was REJECTED (some exclusions below are load-bearing:
+ * e.g. dwelling surviving a PAUSE is what makes resume-mid-dwell correct, so
+ * collapsing dwelling into s_exec.state would either lose that information or
+ * multiply the state count instead of shrinking it). Two bug classes have
+ * already come from illegal-but-representable combinations of these fields
+ * slipping past review (project_autotune_feeds_fake_setpoint.md,
+ * project_dwell_credit_unreachable.md) -- this table is the one place a
+ * future feature that adds another mode flag has to read and update before
+ * shipping. exec_mode_state_check() below is a runtime assertion of the
+ * ILLEGAL rows; nothing checks the LEGAL rows are reachable (a table entry
+ * marked "legal" is a claim about the code's own invariants, not a promise
+ * that a particular combination in it is ever hit in practice).
+ *
+ * ---- LEGAL combinations (non-exhaustive; the ones that recur across this
+ * ---- module's own comments, called out because a first reading would
+ * ---- guess them illegal) --------------------------------------------------
+ *
+ *  state=RUNNING, dwelling=false, ramp_lock_held=true
+ *      "ramp-lock stall without dwelling" -- a lagging zone freezes
+ *      target_c/segment_elapsed_s (sec 7.1) *before* the segment can ever
+ *      reach seg->target_c and flip dwelling true. The stall is what keeps
+ *      the ramp segment from silently completing on a zone that never
+ *      climbed. Loses legality only once every zone is back in-band and the
+ *      segment-stepping block's own reached-target check fires.
+ *
+ *  state=RUNNING, dwelling=true, ramp_lock_held=true
+ *      A zone can start lagging again mid-dwell (thermal mass sagging back
+ *      below EXEC_RAMP_LOCK_BAND_C after the ramp step ended) -- ramp_lock_
+ *      held is recomputed every tick off the CURRENT lock_ok, independent of
+ *      dwelling; nothing in profile_executor.c clears it on the dwelling
+ *      transition. Cosmetically odd (the schedule isn't advancing either
+ *      way during a dwell) but not double-counted: sec 7.2 auto-stretch and
+ *      sec 7.3 dwell-credit's "ramping_now"/"credit_ramping_now" gates both
+ *      key off dwelling/seg_kind, never off ramp_lock_held directly, so this
+ *      combination changes nothing about what the tick actually does.
+ *
+ *  state=PAUSED, dwelling=true (or ramp_lock_held=true)
+ *      profile_executor_pause() freezes the shared schedule without
+ *      resetting either field (profile_executor_status.c) -- a firing
+ *      paused mid-dwell resumes mid-dwell, not at the dwell's start. This is
+ *      the specific exclusion the rejected single-enum design would have
+ *      had to either lose or re-encode as its own extra state.
+ *
+ *  autotune state=SETTLING, no_setpoint=true
+ *      SETTLING only occurs on the STEP method (RELAY has no SETTLING
+ *      phase, see autotune_engine_state_t), and no_setpoint is `method !=
+ *      AUTOTUNE_METHOD_RELAY` (autotune_engine.c) -- STEP has no real
+ *      setpoint at ANY of its states, so this pairing holds for the whole
+ *      SETTLING/STEPPING lifetime of a step run, not just as a momentary
+ *      transition value. It exists so thermal_guard.c's guard 4 (drift-at-
+ *      setpoint) does not fire against a setpoint that was never real.
+ *
+ *  zone: active=true, faulted=false, heat_blocked=true
+ *      relay_authority_zone_blocked()/a safety-link outage can block a
+ *      healthy, still-participating zone; z->duty is still computed and
+ *      reported (profile_executor_guard_commanded_duty() zeroes only the
+ *      value FED TO THE GUARDS, not z->duty itself) so the dashboard shows
+ *      what the zone WANTS while heat_blocked explains why it isn't getting
+ *      it. Distinct from faulted, which is this zone's OWN guard latch.
+ *
+ *  zone: control_mode=PID, cooling_limited=true
+ *      Legal, and the only mode this can ever be true in (see the next
+ *      table row) -- duty has read 0 for >= the debounce hold while still
+ *      PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C above target: normal for a
+ *      kiln coming down off a big overshoot, nothing to escalate.
+ *
+ * ---- ILLEGAL combinations (what exec_mode_state_check() asserts against)--
+ *
+ *  1. zone active in a RUNNING/PAUSED profile run AND that SAME zone's
+ *     autotune state is one of {SETTLING, STEPPING, RELAY_APPROACH,
+ *     RELAY_CYCLING} (i.e. autotune is actively driving heat on it).
+ *     Reason: two independent control loops would be writing duty/relay
+ *     commands to the same zone. profile_executor_run() refuses to start
+ *     against an actively-autotuning zone and autotune_engine.c refuses to
+ *     start against a profile_executor_zone_is_active() zone (profile_
+ *     executor.h's own doc comment on profile_executor_run(), "zones must
+ *     be autotuned one at a time" -- enforced from both directions). DONE/
+ *     ABORTED/IDLE are not "actively driving" (DONE holds the last recorded
+ *     duty only until accept/abort; IDLE/ABORTED command nothing) so those
+ *     three do NOT trip this rule even against an active zone.
+ *
+ *  2. control_mode != ZONE_CONTROL_MODE_PID (and != PID_FUZZY, which shares
+ *     the PID tick body) AND cooling_limited == true.
+ *     Reason: cooling_limited is explicitly documented as "a PID-mode-only
+ *     diagnostic" (zone_runtime_t.cooling_limited's own comment) and both
+ *     the BANGBANG and OFF branches of the control-mode switch unconditionally
+ *     zero cooling_limited_hold_s/cooling_limited every tick they run --
+ *     seeing it true outside PID/PID_FUZZY means a mode switch failed to
+ *     clear stale state from before the switch.
+ *
+ *  3. zone faulted == true AND (heater relay actually commanded on this
+ *     tick, i.e. z->relay_commanded_on == true after apply_relay()).
+ *     Reason: a faulted zone's guard latch exists specifically to stop
+ *     commanding heat to it; apply_relay()/force_zone_relay_off() are the
+ *     only writers of relay_commanded_on and every faulted-zone path in
+ *     profile_executor.c skips the zone (`if (!active || faulted) continue`)
+ *     before ever reaching the switch that could set want_relay_on true.
+ *
+ *  4. s_exec.state == PROFILE_EXEC_IDLE AND any zone active == true.
+ *     Reason: `active` means "in the current run's zone_mask"
+ *     (zone_runtime_t.active's own comment) -- profile_executor_run()
+ *     is the only writer that sets it true, and it always also sets state
+ *     to RUNNING in the same locked section; profile_executor_halt() and
+ *     the DONE/FAULTED transition paths clear every zone's `active` at the
+ *     same time they leave RUNNING/PAUSED. An IDLE tick with an active zone
+ *     means the run-teardown path updated one without the other.
+ *
+ *  5. s_exec.dwelling == true AND s_exec.state NOT IN {RUNNING, PAUSED}.
+ *     Reason: dwelling is only ever set true inside the RUNNING control
+ *     loop's segment-stepping block and only ever read back (never reset)
+ *     across a PAUSED interval -- see the LEGAL row above. Every path that
+ *     leaves RUNNING/PAUSED for IDLE/DONE/FAULTED (profile_executor_run() at
+ *     the top of a fresh run, profile_executor_halt()) resets the whole
+ *     s_exec_state_t including dwelling. Seeing it true in IDLE/DONE/FAULTED
+ *     means a teardown path forgot to reset it.
+ *
+ *  6. autotune per-zone state has no_setpoint == true AND method ==
+ *     AUTOTUNE_METHOD_RELAY.
+ *     Reason: no_setpoint is defined as `method != AUTOTUNE_METHOD_RELAY`
+ *     (autotune_engine.c's `.no_setpoint = (s_at.method != AUTOTUNE_METHOD_
+ *     RELAY)`) -- RELAY always has a genuine relay_setpoint_c to check drift
+ *     against (see the comment immediately above that assignment). The two
+ *     fields are a single boolean's worth of information written from one
+ *     expression; seeing them disagree means a caller constructed a
+ *     thermal_guard_input_t by hand instead of through that one call site.
+ *
+ * Rules 1/4/5 are the ones a host test drives directly (s_exec is plain,
+ * host-writable struct state); rules 2/3/6 are exercised the same way by
+ * writing the same fields the real control loop would have written, since
+ * exec_mode_state_check() only ever reads state, never re-derives it from
+ * I/O. See exec_mode_state_check()'s own doc comment (near the bottom of
+ * this file) for the exact violation-string wording each rule produces. */
 
 /* Pre-start warnings from the POLLED readers (profile_executor_status.c),
  * throttled to one line each per boot.
@@ -945,5 +1097,46 @@ profile_warm_start_plan_t profile_executor_plan_warm_start(const profile_t *p, f
  * profile_executor_start.c's xTaskCreatePinnedToCore() calls ------------- */
 void executor_task_entry(void *arg);
 void watchdog_task_entry(void *arg);
+
+/* ---- mode-state consistency check (ROADMAP.md M15 "Mode-state sprawl";
+ * profile_executor.c) -- see this header's big table comment above for what
+ * each rule means and why. Must be called with s_exec.lock already held
+ * (same discipline as everything else that reads s_exec directly); it takes
+ * no lock of its own and does no I/O.
+ *
+ * Checks every state combination the table marks ILLEGAL and returns the
+ * count of violations found this call (0 = consistent) -- never aborts or
+ * asserts itself, so a host test can call it directly against a hand-built
+ * s_exec (including a deliberately illegal one, to prove the check has
+ * teeth) without taking the whole test binary down. When
+ * out_first_violation is non-NULL and at least one violation was found, it
+ * is filled with a short, stable, human-readable description of the FIRST
+ * one (rule order matches the table's numbering); every violation is also
+ * ESP_LOGE'd unconditionally (host build and target alike), whether or not
+ * the caller asserts on the return value.
+ *
+ * The ONE real control-loop call site (profile_executor.c's tick, end of
+ * the locked section) additionally does:
+ *     assert(exec_mode_state_check(buf, sizeof(buf)) == 0 && buf);
+ * making that call site the actual "debug-buildable consistency assertion"
+ * the ROADMAP item asks for. This repo has no existing runtime-assert
+ * convention to plug into on target -- no `assert()`/`configASSERT()` call
+ * site exists anywhere else in App/drivers, only compile-time
+ * `_Static_assert` (verified by grep across App/drivers before writing
+ * this) -- so plain libc `assert()` is used directly rather than inventing
+ * a new macro. On the host-test build this is live (build_host_tests.ps1
+ * defines no NDEBUG, so `assert()` aborts the test binary on a violation --
+ * exactly what "assert it fires" means for host tests: they call
+ * exec_mode_state_check() directly instead of going through the real tick,
+ * so they observe the nonzero return/message with TEST_CHECK rather than
+ * triggering that abort). On an ESP-IDF target build, whether `assert()`
+ * compiles to a real abort depends on the Release optimization-assertion
+ * Kconfig setting, same as every other libc `assert()` in this toolchain --
+ * this function does not change or override that; if that setting resolves
+ * to a no-op on this board's shipped config, this call site degrades to
+ * "still ESP_LOGE'd, no board-side abort" for exactly the reason given in
+ * the ROADMAP item: "if no convention exists, host-test-only is
+ * acceptable." */
+uint32_t exec_mode_state_check(char *out_first_violation, size_t out_cap);
 
 #endif /* PROFILE_EXECUTOR_INTERNAL_H */

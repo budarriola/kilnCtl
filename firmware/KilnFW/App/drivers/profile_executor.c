@@ -1,6 +1,7 @@
 #include "profile_executor.h"
 #include "profile_executor_internal.h"
 
+#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -62,6 +63,95 @@ const char *PE_TAG = "profile_executor";
  *   duty     whole percent, u8; 255 encodes "no value"
  * The graph this feeds is a multi-hour trend, not a scope trace. */
 s_exec_state_t s_exec;
+
+/* ROADMAP.md M15 "Mode-state sprawl" -- see profile_executor_internal.h's
+ * big table comment for the full rule list and rationale; this is just the
+ * mechanical check against it. Called once per control tick (below, near
+ * the end of the locked section) and by host tests directly. Pure: reads
+ * s_exec and autotune_engine_get_status(), writes nothing, does no I/O of
+ * its own beyond the ESP_LOGE/assert() on a violation. */
+uint32_t exec_mode_state_check(char *out_first_violation, size_t out_cap)
+{
+    uint32_t violations = 0;
+    char first[160] = {0};
+
+#define EXEC_MODE_VIOLATION(fmt, ...)                                                            \
+    do {                                                                                          \
+        violations++;                                                                             \
+        char _msg[160];                                                                           \
+        snprintf(_msg, sizeof(_msg), fmt, ##__VA_ARGS__);                                          \
+        ESP_LOGE(PE_TAG, "exec_mode_state_check: %s", _msg);                                       \
+        if (first[0] == '\0') {                                                                   \
+            memcpy(first, _msg, sizeof(first));                                                    \
+        }                                                                                          \
+    } while (0)
+
+    /* Rule 4: no active zone while IDLE. */
+    if (s_exec.state == PROFILE_EXEC_IDLE) {
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (s_exec.zones[zi].active) {
+                EXEC_MODE_VIOLATION("rule 4: zone %u active while state==IDLE", (unsigned)zi);
+            }
+        }
+    }
+
+    /* Rule 5: dwelling only while RUNNING/PAUSED. */
+    if (s_exec.dwelling && s_exec.state != PROFILE_EXEC_RUNNING && s_exec.state != PROFILE_EXEC_PAUSED) {
+        EXEC_MODE_VIOLATION("rule 5: dwelling==true while state=%d (not RUNNING/PAUSED)", (int)s_exec.state);
+    }
+
+    /* Rule 1: a zone this run has active cannot also be the zone an
+     * in-progress (heat-driving) autotune run owns. */
+    autotune_engine_status_t at;
+    autotune_engine_get_status(&at);
+    bool autotune_driving = (at.state == AUTOTUNE_ENGINE_SETTLING || at.state == AUTOTUNE_ENGINE_STEPPING ||
+                             at.state == AUTOTUNE_ENGINE_RELAY_APPROACH ||
+                             at.state == AUTOTUNE_ENGINE_RELAY_CYCLING);
+    if (autotune_driving && (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED) &&
+        at.zone_index < MAX31856_CHANNEL_COUNT && s_exec.zones[at.zone_index].active) {
+        EXEC_MODE_VIOLATION("rule 1: zone %u active in a %s profile run AND autotune state=%d driving it",
+                            (unsigned)at.zone_index,
+                            s_exec.state == PROFILE_EXEC_RUNNING ? "RUNNING" : "PAUSED", (int)at.state);
+    }
+
+    /* Rule 6: no_setpoint must agree with method -- checked structurally
+     * here since s_exec has no window into autotune's own s_at.method, but
+     * no_setpoint is documented as `method != AUTOTUNE_METHOD_RELAY`
+     * (autotune_engine.c): a RELAY run always has a genuine relay_setpoint_c
+     * to check drift against, so relay_setpoint_c == 0.0f while method
+     * implies RELAY (relay_cycles_target/relay_amplitude_duty configured)
+     * would itself be the tell -- kept as a light structural check rather
+     * than reaching into autotune's private state. */
+    if (at.method == AUTOTUNE_METHOD_RELAY && !(at.relay_setpoint_c > 0.0f) &&
+        (at.state == AUTOTUNE_ENGINE_RELAY_APPROACH || at.state == AUTOTUNE_ENGINE_RELAY_CYCLING)) {
+        EXEC_MODE_VIOLATION("rule 6: method=RELAY driving (state=%d) but relay_setpoint_c<=0 (no_setpoint "
+                            "should be false)", (int)at.state);
+    }
+
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zone_runtime_t *z = &s_exec.zones[zi];
+
+        /* Rule 2: cooling_limited is a PID/PID_FUZZY-only diagnostic. */
+        if (z->cooling_limited && z->control_mode != ZONE_CONTROL_MODE_PID &&
+            z->control_mode != ZONE_CONTROL_MODE_PID_FUZZY) {
+            EXEC_MODE_VIOLATION("rule 2: zone %u cooling_limited==true but control_mode=%d (not PID/PID_FUZZY)",
+                                (unsigned)zi, (int)z->control_mode);
+        }
+
+        /* Rule 3: a faulted zone's relay must never read commanded on. */
+        if (z->faulted && z->relay_commanded_on) {
+            EXEC_MODE_VIOLATION("rule 3: zone %u faulted==true but relay_commanded_on==true", (unsigned)zi);
+        }
+    }
+
+#undef EXEC_MODE_VIOLATION
+
+    if (out_first_violation != NULL && out_cap > 0) {
+        strncpy(out_first_violation, first, out_cap - 1);
+        out_first_violation[out_cap - 1] = '\0';
+    }
+    return violations;
+}
 
 static int16_t history_pack_temp(float c)
 {
@@ -1050,6 +1140,19 @@ void executor_task_entry(void *arg)
          * this one is easy to keep outside, and the lock also serves
          * profile_executor_get_status(), which the dashboard polls every 2 s.
          * There is no reason to make a status request wait behind an erase. */
+        /* ROADMAP.md M15 "Mode-state sprawl" -- see profile_executor_
+         * internal.h's own doc comment on exec_mode_state_check() for why
+         * this is the one real call site that asserts, and why plain
+         * assert() rather than a project convention (none exists). Placed
+         * here: every field the check reads is final for this tick, and
+         * it must run before the lock is released. */
+        {
+            char mode_violation[160];
+            uint32_t mode_violations = exec_mode_state_check(mode_violation, sizeof(mode_violation));
+            assert(mode_violations == 0 && "exec_mode_state_check found a mode-state violation -- see the ESP_LOGE just above for which rule");
+            (void)mode_violation; /* only read by assert()'s message above on a debug build */
+        }
+
         run_snapshot_buf_t tick_snap;
         capture_run_snapshot(&tick_snap);
         bool faulted_now = run_faulted_this_tick;
