@@ -38,6 +38,7 @@
 #include "heat_interlock.h"
 #include "kiln_io.h"
 #include "ota_interlock.h"
+#include "ota_state.h"
 #include "safety_link.h"
 
 #ifdef __cplusplus
@@ -309,7 +310,12 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 // contract as ota_http_check_interlocks()) if a heat-causing action should
 // be refused because an update is in progress on either processor; false
 // if it may proceed.
-bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap);
+//
+// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md "drivers/
+// layering" item 2) -- this is the one query control/owner code needs, and
+// they should include ota_state.h directly rather than this whole
+// http-layer header. Included above so existing callers of this header are
+// unaffected.
 
 // --- POST /api/ota/esp (TODO.md 9.5) -- the ESP's own self-update ---------
 //

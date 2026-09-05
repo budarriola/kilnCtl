@@ -22,7 +22,7 @@
 #include "heat_enable.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
-#include "ota_http.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
+#include "ota_state.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
 #include "pid.h"
 #include "pid_fuzzy.h"
 #include "ramp_assist_cfg.h"

@@ -40,6 +40,10 @@
 
 #include "esp_err.h"
 #include "esp_http_server.h" /* PID_EXPANSION_PLAN.md Phase 7d -- adaptive_tune.c's httpd_* fakes below need these types */
+#include "../drivers/ota_interlock.h" /* ota_interlock_result_t -- previously transitive via profile_executor.c's
+                                        * old ota_http.h include; profile_executor.c now includes the narrower
+                                        * ota_state.h instead (docs/HW_ABSTRACTION_PLAN.md drivers/ layering item 2),
+                                        * so this stub's own return type needs an explicit include */
 
 // Own executable (see this file's header comment) -- test_common.h's
 // counters are defined once per host-test binary, same as test_main.c does

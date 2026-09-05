@@ -14,7 +14,8 @@
 #include "freertos/task.h"
 
 #include "danger_mode.h" /* danger_mode_active() -- see relay_on_blocked() below */
-#include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
+#include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- previously transitive via ota_http.h */
+#include "ota_state.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
 #include "owner_slot_pool.h"
 #include "relay_authority.h"
 #include "stack_margin.h"

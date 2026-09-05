@@ -18,7 +18,7 @@
 #include "autotune_engine.h"
 #include "heat_enable.h"
 #include "kiln_io_owner.h"
-#include "ota_http.h"
+#include "ota_state.h"
 #include "relay_authority.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"
