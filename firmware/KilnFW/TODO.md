@@ -67,15 +67,26 @@ sweep: `/api/status` emitting bare `nan`, danger mode leaving relays closed
 on exit, the tap-target dump captioning containers with a hidden child's
 text, and the safety-link config-page hardening. Still open:
 
-- [ ] **Page 1 of a two-page safety config is never received.** The Pico's own
-      counters (read over SWD) show 1195 of 1195 requests seen, handled and
-      broadcast, worst-case service 609 us, last reply 157 bytes; the ESP
-      receives page 0 every time and page 1 never, so the cached mirror of the
-      safety processor's configuration has never converged. Request pacing did
-      not change it. The counter proves the Pico CALLED send_broadcast, not
-      that the bytes reached the wire -- next step is an analyser capture of
-      the page-1 reply, or a TX-completion (not TX-queued) counter on the Pico.
-      Do not add another speculative fix without one of those.
+- [x] **Page 1 of a two-page safety config is never received.** This note
+      predates the actual root cause, found the next day: `3149393` (2026-08-28)
+      -- the ESP's `uart_protocol_rx_task` read UART bytes 32 at a time, so a
+      ~157-253 byte CONFIG_PAGE took 5-8 scheduler round trips to assemble
+      against the reply window, while small STATUS/DIAG/POWER frames always
+      finished it in 1-2; page 1 (the bigger page) missed its window almost
+      every time and page 0 only "succeeded" via stash-adoption. Fixed by
+      reading a whole frame in one go (chunk buffer 32 -> `STUFFED_FRAME_MAX`)
+      plus 300 ms of fixed reply margin -- not a bigger multi-page ceiling,
+      which is exactly what caused the panic-reboot regression named in
+      `safety_cfg_store.c`'s own history (see `SAFETY_CFG_STORE_REFETCH_BUDGET_MS`
+      and `safety_cfg_store_refetch_nonblocking()`'s comments). Verified live
+      then (`cached_config_crc == live_config_crc == 31328`) and re-confirmed
+      2026-09-04: `GET /api/safety/commissioning` reads `config CRC 42736
+      (matches live, not stale)` and `safety_get_link_stats` shows
+      `config_page=0` in the cmd histogram -- i.e. no refetch is even running
+      right now because the cache is already converged, which is the designed
+      steady state (`safety_cfg_store_maybe_refetch()`: "no UART traffic at
+      all, by design"). No analyser capture was ever needed; the Pico was
+      innocent, as suspected.
 - [ ] **The PC-link watchdog drops all relays every 5 s of host silence**, and
       an idle-but-connected MCP session is enough to trigger it repeatedly
       (observed continuously through this whole sweep). It overrode LCD manual
