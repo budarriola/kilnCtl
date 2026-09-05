@@ -27,36 +27,6 @@
 
 #include "test_common.h"
 
-static char *read_file_any(const char *const *candidates, size_t count)
-{
-    for (size_t i = 0; i < count; i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (!f) {
-            continue;
-        }
-        if (fseek(f, 0, SEEK_END) != 0) {
-            fclose(f);
-            continue;
-        }
-        long len = ftell(f);
-        if (len < 0) {
-            fclose(f);
-            continue;
-        }
-        rewind(f);
-        char *buf = (char *)malloc((size_t)len + 1);
-        if (!buf) {
-            fclose(f);
-            return NULL;
-        }
-        size_t got = fread(buf, 1, (size_t)len, f);
-        fclose(f);
-        buf[got] = '\0';
-        return buf;
-    }
-    return NULL;
-}
-
 // Same convention test_display_power_wiring.c uses: this codebase's own
 // functions close at column 0, so the first "\n}" after the opening brace
 // is the real end of the function.
@@ -101,7 +71,8 @@ static void run_section1_result_checked_and_logged(void)
                  "result and logs a named failure -- source-text scan, zones_current_sweep_"
                  "engine.c is not in this suite's host-compiled source list");
 
-    char *text = read_file_any(SWEEP_ENGINE_C_CANDIDATES, 3);
+    char *text = test_read_source_anchored(__FILE__, "../drivers/zones_current_sweep_engine.c",
+                                            SWEEP_ENGINE_C_CANDIDATES, 3);
     if (!text) {
         TEST_CHECK(false, "could not locate drivers/zones_current_sweep_engine.c from the host "
                            "test's working directory -- update the candidate paths in this test "

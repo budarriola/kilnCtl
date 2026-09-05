@@ -40,34 +40,15 @@
 
 #include "test_common.h"
 
+// candidates[0] is always this test's file written relative to its OWN
+// directory (e.g. "../drivers/screen_idle.c") -- test_read_source_anchored()
+// (test_common.h) uses it to resolve an absolute path anchored to __FILE__
+// first, which works from ANY working directory the test binary is
+// launched from, then falls back to the literal candidates[] entries
+// (App/test, App, repo-root CWDs) as a second layer.
 static char *read_file_any(const char *const *candidates, size_t count)
 {
-    for (size_t i = 0; i < count; i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (!f) {
-            continue;
-        }
-        if (fseek(f, 0, SEEK_END) != 0) {
-            fclose(f);
-            continue;
-        }
-        long len = ftell(f);
-        if (len < 0) {
-            fclose(f);
-            continue;
-        }
-        rewind(f);
-        char *buf = (char *)malloc((size_t)len + 1);
-        if (!buf) {
-            fclose(f);
-            return NULL;
-        }
-        size_t got = fread(buf, 1, (size_t)len, f);
-        fclose(f);
-        buf[got] = '\0';
-        return buf;
-    }
-    return NULL;
+    return test_read_source_anchored(__FILE__, candidates[0], candidates, count);
 }
 
 // Extracts the body of a function from its exact declaration/signature

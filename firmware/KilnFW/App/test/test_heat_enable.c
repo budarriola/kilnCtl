@@ -230,34 +230,18 @@ static void test_release_after_failed_request_still_sends(void)
 
 static char *heat_enable_read_source(void)
 {
+    /* test_read_source_anchored() (test_common.h) tries the path anchored
+     * to this test file's own on-disk location first -- correct for ANY
+     * working directory the test binary is launched from -- and falls
+     * back to these literal candidates (which only covered App/test, App,
+     * and the repo root) as a second layer. */
     static const char *const candidates[] = {
         "../drivers/heat_enable.c",
         "App/drivers/heat_enable.c",
         "firmware/KilnFW/App/drivers/heat_enable.c",
     };
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (!f) {
-            continue;
-        }
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        if (len < 0) {
-            fclose(f);
-            continue;
-        }
-        rewind(f);
-        char *buf = (char *)malloc((size_t)len + 1);
-        if (!buf) {
-            fclose(f);
-            return NULL;
-        }
-        size_t got = fread(buf, 1, (size_t)len, f);
-        fclose(f);
-        buf[got] = '\0';
-        return buf;
-    }
-    return NULL;
+    return test_read_source_anchored(__FILE__, "../drivers/heat_enable.c", candidates,
+                                      sizeof(candidates) / sizeof(candidates[0]));
 }
 
 static void test_release_failure_is_checked_and_logged(void)

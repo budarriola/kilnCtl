@@ -32,34 +32,15 @@
 
 // Mirrors test_boot_checkin_coverage.c's read_file_any() exactly -- same
 // "different build layouts have different working directories" reasoning.
+// candidates[0] is always this test's target written relative to this
+// test file's OWN directory (e.g. "../src/tasks/safety_core.c") --
+// test_read_source_anchored() (test_common.h) uses it to resolve an
+// absolute path anchored to __FILE__ first, which works from ANY working
+// directory the test binary is launched from, then falls back to the
+// literal candidates[] entries as a second layer.
 static char *read_file_any(const char *const *candidates, size_t count)
 {
-    for (size_t i = 0; i < count; i++) {
-        FILE *f = fopen(candidates[i], "rb");
-        if (!f) {
-            continue;
-        }
-        if (fseek(f, 0, SEEK_END) != 0) {
-            fclose(f);
-            continue;
-        }
-        long len = ftell(f);
-        if (len < 0) {
-            fclose(f);
-            continue;
-        }
-        rewind(f);
-        char *buf = (char *)malloc((size_t)len + 1);
-        if (!buf) {
-            fclose(f);
-            return NULL;
-        }
-        size_t got = fread(buf, 1, (size_t)len, f);
-        fclose(f);
-        buf[got] = '\0';
-        return buf;
-    }
-    return NULL;
+    return test_read_source_anchored(__FILE__, candidates[0], candidates, count);
 }
 
 // Finds "#define <name> <digits>" (any whitespace between the name and the
