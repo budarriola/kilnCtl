@@ -104,7 +104,7 @@ profile_seg_verdict_t profile_feasibility_segment(uint8_t zone_index, float star
      * verdict, because it is the more serious failure: TOO_FAST means "slow
      * this segment down and it works", UNREACHABLE means the kiln will sit
      * below the target at full power until the operator gives up. */
-    if (target > start_c && target > ceiling_c - FEASIBILITY_CEILING_MARGIN_C) {
+    if (target >= start_c && target > ceiling_c - FEASIBILITY_CEILING_MARGIN_C) {
         return PROFILE_SEG_UNREACHABLE;
     }
 

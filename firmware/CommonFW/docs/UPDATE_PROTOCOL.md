@@ -1136,7 +1136,7 @@ and "Pico update" sections below for what each actually covers.
 
 ---
 
-## Hardware exercise 2026-09-05
+## Hardware exercise 2026-09-05/06
 
 Bench test kiln, idle, no firing. `kiln_call`/`kiln_batch` (kilnctrl MCP,
 192.168.1.156). AP password used: the Kconfig default (`password`) — no
@@ -1173,9 +1173,11 @@ override had been set.
   (see CLAUDE.md), surfacing here because nothing in this session's path
   acknowledges/clears the stored report. Board state itself is healthy
   throughout (safety link up, relay off, ambient temperature, gains
-  correct) — this is a stale reporting artifact, not a live fault, but it
-  was never cleared and should be looked at before trusting `get_heap_status`
-  "healthy" output at face value on this board.
+  correct) — consistent with a persisted record surfacing rather than a
+  fresh crash per boot; root cause under separate investigation (dump_id CRC
+  computed over un-zeroed esp_core_dump_summary_t padding) — not confirmed
+  stale, and it was never cleared, so it should be looked at before trusting
+  `get_heap_status` "healthy" output at face value on this board.
 
 **Pico bootloader update over UART1 — attempted 2026-09-06, refused by the
 Pico before any flash write.**

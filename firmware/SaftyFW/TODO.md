@@ -612,7 +612,7 @@ the application *through* the bootloader from a slot — see the open item
 below — and a real end-to-end update crossing the isolated link.
 
 **2026-09-06, first live attempt at the isolated-link half**
-(`firmware/CommonFW/docs/UPDATE_PROTOCOL.md` "Hardware exercise 2026-09-05"):
+(`firmware/CommonFW/docs/UPDATE_PROTOCOL.md` "Hardware exercise 2026-09-05/06"):
 `ota_update_pico()` staged a real `SaftyFW_slotA.elf`-derived `.bin`
 (95,020 bytes, `arm-none-eabi-objcopy -O binary`, no hand-built header
 needed) and started the relay, but the Pico refused `UPDATE_BEGIN` with "a
@@ -687,6 +687,12 @@ current image is.
       the metadata write; corrupt slot rejected; bad-but-booting image rolled
       back; both slots invalidated and recovered over the link with no probe.
       Hardware-gated, entirely unstarted.
+- [ ] Reconcile host-side vs ESP-side UPDATE_BEGIN image CRC before trusting a
+      CRC match as proof of a correct transfer — the 2026-09-06 exercise saw
+      host zlib CRC32 `0xc02711a8` against the ESP-reported `0x02F15704` for
+      the same staged image, so the two sides are not computing the same
+      CRC32 variant/parameters (`../CommonFW/docs/UPDATE_PROTOCOL.md`
+      "Hardware exercise 2026-09-05/06").
 
 ---
 

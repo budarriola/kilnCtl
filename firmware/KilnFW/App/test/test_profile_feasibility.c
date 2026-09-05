@@ -616,7 +616,7 @@ static void test_ceiling_test_gated_to_rising_segments(void)
     stub_reset(); /* ceiling 1020 C, UNREACHABLE threshold 1015 C */
 
     profile_segment_t cool_near_ceiling = seg_of(1016.0f, 50.0f);
-    TEST_CHECK(profile_feasibility_segment(0, 1018.0f, &cool_near_ceiling) != PROFILE_SEG_UNREACHABLE,
+    TEST_CHECK(profile_feasibility_segment(0, 1018.0f, &cool_near_ceiling) == PROFILE_SEG_OK,
                "cooling 1018 -> 1016 C is no longer UNREACHABLE now that the ceiling test is "
                "gated on target > start_c (rising only)");
 
@@ -633,6 +633,21 @@ static void test_ceiling_test_gated_to_rising_segments(void)
                "a descending segment 5 C further down is not UNREACHABLE either");
 }
 
+static void test_flat_segment_above_ceiling_is_unreachable(void)
+{
+    TEST_SECTION("a standalone flat segment (target == start_c) above the ceiling is "
+                 "UNREACHABLE -- the ceiling gate uses target >= start_c, not target > start_c, "
+                 "so a dwell held above the ceiling cannot slip through as neither rising nor "
+                 "falling");
+
+    stub_reset(); /* ceiling 1020 C, UNREACHABLE threshold 1015 C */
+
+    profile_segment_t flat_above_ceiling = seg_of(1016.0f, 50.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 1016.0f, &flat_above_ceiling) == PROFILE_SEG_UNREACHABLE,
+               "a flat dwell at 1016 C, above the 1015 C threshold, is UNREACHABLE even though "
+               "target == start_c is neither strictly heating nor cooling");
+}
+
 void run_test_profile_feasibility(void)
 {
     test_no_model_is_never_ok_and_never_red();
@@ -647,4 +662,5 @@ void run_test_profile_feasibility(void)
     test_rollup_ordering();
     test_profile_mask();
     test_ceiling_test_gated_to_rising_segments();
+    test_flat_segment_above_ceiling_is_unreachable();
 }

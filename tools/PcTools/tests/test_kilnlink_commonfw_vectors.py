@@ -30,7 +30,11 @@ module, each for a documented reason (not an oversight):
     config_crc), decoded on the pc_tools side by
     kilnctrl.devices_safety.parse_safety_response(), not encoded by
     kilnlink_codec.py (which only has the *request*-side encode_announce/
-    encode_get_fw_version). Checked below via that decoder instead.
+    encode_get_fw_version). Checked below via that decoder instead. Its
+    `hostile_vectors` entries are likewise decode-side only -- malformed
+    response frames the decoder must reject -- and have no encoder
+    counterpart to round-trip, so they are exercised only against the
+    decoder, never through kilnlink_codec.py.
   * frame_vectors.json / benchproto_frame_vectors.json -- the outer framing
     layer (header/CRC/stuffing), already mirrored by kilnctrl.protocol per
     kilnlink_codec.py's own module docstring; out of scope for this payload
