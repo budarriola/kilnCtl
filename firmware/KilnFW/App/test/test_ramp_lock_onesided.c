@@ -1,10 +1,12 @@
 // Reproduction + regression test for the ramp-lock hot-start stall defect
 // (owner-confirmed, adversarial review) and its fix, both in profile_
 // executor.c's control tick:
-//   - the lock decision at profile_executor.c:~358-370 (inside the
-//     `for (uint8_t zi ...)` loop building lock_ok/lagging)
-//   - the ramp-stepping gate at profile_executor.c:~439
-//     (`} else if (lock_ok) { s_exec.segment_elapsed_s += ...; ... }`)
+//   - the lock decision loop building lock_ok/lagging (anchored on the
+//     one-sided condition itself, not a line number -- see
+//     ramp_lock_decision_mirror_drift_check.py)
+//   - the ramp-stepping gate (`} else if (lock_ok || stretched_this_tick) {
+//     s_exec.segment_elapsed_s += ...; ... }` -- PID_EXPANSION_PLAN.md sec
+//     7.2's auto-stretch branch, added 2026-09-03)
 //
 // Both live directly in executor_task_entry()'s `for (;;) { vTaskDelay(...);
 // ... }` body -- a real FreeRTOS task loop that would spin forever if called
@@ -18,12 +20,33 @@
 // pid_fuzzy_prepare_gains() (another `static`/inline-only piece of
 // profile_executor.c): a hand-written MIRROR of the two code fragments
 // above, textually identical to what profile_executor.c contains (checked
-// by diffing this file's `lock_held()`/`step_schedule()` against the real
-// source at the line numbers cited above whenever either changes) rather
-// than a call into the production functions themselves. A future edit to
-// either fragment in profile_executor.c that isn't mirrored here would
-// silently diverge from what this file tests -- same caveat test_closed_
-// loop.c states for its own mirror.
+// by ramp_lock_decision_mirror_drift_check.py and
+// ramp_stepping_gate_mirror_drift_check.py, both anchored on distinctive
+// text rather than line numbers) rather than a call into the production
+// functions themselves. A future edit to either fragment in
+// profile_executor.c that isn't mirrored here would silently diverge from
+// what this file tests -- same caveat test_closed_loop.c states for its own
+// mirror. This file's two mirrored helpers are named lock_lagging_mask()
+// and step_schedule().
+//
+// step_schedule() covers only the ZONE_RAMP ramp sub-case of the gate
+// (`else if (lock_ok || stretched_this_tick) { ...; if (!s_exec.dwelling)
+// { <ramp math> } }`) -- the io_blocking/relay-segment branch, the
+// already-dwelling `else` branch (dwell-credit accounting), and the
+// dwelling-ENTRY bookkeeping inside the ramp branch (setting
+// s_exec.dwelling = true and spending dwell credit once target_c reaches
+// seg->target_c) are all out of scope: none of that state is exercised by
+// what this file's tests check (whether the schedule advances at all under
+// a one-sided lock), and reconstructing it would need s_exec itself. The
+// auto-stretch RATE decision (ramp_assist_stretch_rate_c_per_s(), which
+// reads sustained-lag bookkeeping this host test cannot construct) is
+// likewise not reproduced -- stretched_this_tick and stretch_rate_c_per_s
+// are accepted as caller-supplied parameters, exactly as lock_ok already
+// was, and every test in this file passes stretched_this_tick=false /
+// stretch_rate_c_per_s=-1.0f (production's own "no stretch" sentinel), so
+// the gate's behavior in every test below is identical to before sec 7.2
+// existed. Only the gate's own shape -- the `|| stretched_this_tick`
+// disjunct and the stretch-rate substitution when it fires -- is mirrored.
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -43,8 +66,9 @@ typedef struct {
     float actual_c;
 } mirror_zone_t;
 
-/* Mirrors profile_executor.c's per-tick lock_ok/lagging loop
- * (profile_executor.c:358-370). old_fabsf selects the PRE-FIX formula
+/* Mirrors profile_executor.c's per-tick lock_ok/lagging loop (anchored on
+ * the one-sided condition itself, not a line number -- see
+ * ramp_lock_decision_mirror_drift_check.py). old_fabsf selects the PRE-FIX formula
  * (bit-identical hot/cold via fabsf) vs the FIX (one-sided: only a zone
  * COLDER than target by more than the band holds the lock). */
 static uint8_t lock_lagging_mask(const mirror_zone_t zones[TEST_ZONE_COUNT], float target_c, bool old_fabsf)
@@ -63,21 +87,28 @@ static uint8_t lock_lagging_mask(const mirror_zone_t zones[TEST_ZONE_COUNT], flo
     return lagging;
 }
 
-/* Mirrors profile_executor.c's ramp-stepping gate (profile_executor.c:~439,
- * the `} else if (lock_ok) { s_exec.segment_elapsed_s += ...` branch, ramp
- * sub-case only -- the io_blocking/relay-segment and dwelling branches are
- * out of scope for what this defect touches). Advances segment_elapsed_s
- * and steps target_c toward seg_target_c at ramp_c_per_hr, but ONLY when
- * lock_ok (no zone lagging). */
+/* Mirrors profile_executor.c's ramp-stepping gate, ZONE_RAMP ramp sub-case
+ * only (`} else if (lock_ok || stretched_this_tick) { s_exec.segment_
+ * elapsed_s += ...; if (!s_exec.dwelling) { <ramp math> } }` --
+ * PID_EXPANSION_PLAN.md sec 7.2). The io_blocking/relay-segment branch, the
+ * already-dwelling branch, and the dwelling-entry bookkeeping are out of
+ * scope -- see this file's header comment. Advances segment_elapsed_s and
+ * steps target_c toward seg_target_c, but ONLY when lock_ok OR
+ * stretched_this_tick (production's own disjunct); the rate used is
+ * stretch_rate_c_per_s (converted to C/hr) while stretched_this_tick,
+ * ramp_c_per_hr otherwise -- bit-identical to before sec 7.2 whenever
+ * stretched_this_tick is false. */
 static void step_schedule(float *target_c, uint32_t *segment_elapsed_s, float seg_target_c,
-                          float ramp_c_per_hr, float dt_s, bool lock_ok)
+                          float ramp_c_per_hr, float dt_s, bool lock_ok,
+                          bool stretched_this_tick, float stretch_rate_c_per_s)
 {
-    if (!lock_ok) {
+    if (!lock_ok && !stretched_this_tick) {
         return; /* the lock -- schedule frozen exactly as profile_executor.c freezes it */
     }
     *segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
+    float rate_c_per_hr = stretched_this_tick ? (stretch_rate_c_per_s * 3600.0f) : ramp_c_per_hr;
     float direction = (seg_target_c >= *target_c) ? 1.0f : -1.0f;
-    float new_target = *target_c + direction * ramp_c_per_hr * (dt_s / 3600.0f);
+    float new_target = *target_c + direction * rate_c_per_hr * (dt_s / 3600.0f);
     bool reached = (direction > 0.0f) ? (new_target >= seg_target_c) : (new_target <= seg_target_c);
     *target_c = reached ? seg_target_c : new_target;
 }
@@ -109,7 +140,7 @@ void run_test_ramp_lock_onesided(void)
         for (int i = 0; i < 500; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/true);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok);
+            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
             zones[1].actual_c -= 0.02f; /* passive cooling only, ~50 min to close 50C at this rate */
         }
 
@@ -146,7 +177,7 @@ void run_test_ramp_lock_onesided(void)
         for (int i = 0; i < 20; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok);
+            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
             zones[1].actual_c -= 0.02f;
             zones[0].actual_c = target_c; /* z0 tracks the setpoint perfectly -- keeps it a non-issue zone
                                            * throughout, isolating the assertion to z1's hot-start behavior
@@ -182,7 +213,7 @@ void run_test_ramp_lock_onesided(void)
         for (int i = 0; i < 500; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok);
+            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
             zones[1].actual_c += 0.02f; /* slow but real heating -- still can't keep up with a 10C/min commanded ramp */
         }
 
@@ -210,7 +241,7 @@ void run_test_ramp_lock_onesided(void)
         for (int i = 0; i < 10; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, 200.0f, 600.0f, 10.0f, lock_ok);
+            step_schedule(&target_c, &segment_elapsed_s, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
         }
         TEST_CHECK(segment_elapsed_s == 0, "an invalid sensor holds the lock under the fix, same as before -- "
                                             "the !sensor_ok clause was left exactly as-is");

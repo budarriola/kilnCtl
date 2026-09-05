@@ -10,26 +10,27 @@ extract-normalize-diff technique as approach_rate_cap_mirror_drift_check.py,
 frame_a_offset_drift_check.py and power_diag_flag_mirror_drift_check.py (read
 those first).
 
-SCOPE, DELIBERATELY NARROWER THAN THE MIRROR FILE'S OWN HEADER CLAIMS: that
-header names TWO fragments as mirrored -- the ramp-lock decision loop
-(lock_lagging_mask()) and the ramp-stepping gate (step_schedule()). This
-check binds ONLY the first. step_schedule() is NOT covered, and no check for
-it is being added: profile_executor.c's stepping gate has grown a
-stretched_this_tick / auto-stretch branch (PID_EXPANSION_PLAN.md sec 7.2,
-`} else if (lock_ok || stretched_this_tick)`, not the `else if (lock_ok)` the
-mirror file's own header still cites) plus per-branch dwelling-entry and
-target-rate bookkeeping that step_schedule()'s mirror does not attempt at
-all -- it hard-codes the pre-sec-7.2 two-argument gate and a fixed
-ramp_c_per_hr. Normalizing away stretched_this_tick and the dwelling
-machinery to force a byte-for-byte match would not be folding a structurally
--required difference (the pattern every other normalization in this family
-follows) -- it would be deleting the exact logic step_schedule() has already,
-silently, stopped covering. That is real drift already in effect, not
-something a normalization rule can honestly paper over. See this repo's own
-standing rule (task instructions, `feedback_*` memory) that a check aggressive
-enough to force a match on a paraphrase stops detecting the drift it exists
-for -- so step_schedule() is left unbound rather than faked, and this
-docstring records why for the next person who considers doing so.
+SCOPE: the mirror file's header names TWO fragments as mirrored -- the
+ramp-lock decision loop (lock_lagging_mask()) and the ramp-stepping gate
+(step_schedule()). This check binds ONLY the first; the second is bound
+separately by ramp_stepping_gate_mirror_drift_check.py (see that module's
+own docstring). They were split into two checks rather than one because the
+two fragments live at different anchors in profile_executor.c and drift
+independently -- step_schedule() previously WAS left unbound here, after
+profile_executor.c's stepping gate grew a stretched_this_tick / auto-stretch
+branch (PID_EXPANSION_PLAN.md sec 7.2, `} else if (lock_ok ||
+stretched_this_tick)`) that the mirror's step_schedule() did not reproduce
+at all: it hard-coded the pre-sec-7.2 two-argument gate and a fixed
+ramp_c_per_hr. Normalizing that gap away to force a byte-for-byte match
+would not have been folding a structurally-required difference (the pattern
+every other normalization in this family follows) -- it would have deleted
+the exact logic step_schedule() had already, silently, stopped covering.
+The mirror's step_schedule() has since been brought back into
+correspondence with the auto-stretch branch (stretched_this_tick and
+stretch_rate_c_per_s are now accepted as caller-supplied parameters, same
+as lock_ok already was), so it is safe to bind -- see
+ramp_stepping_gate_mirror_drift_check.py for what is and is not covered
+there.
 
 WHAT IS COMPARED (lock_lagging_mask() only): both sides reduce to the same
 per-zone loop once two structurally-required differences are normalized away:

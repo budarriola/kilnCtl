@@ -4,11 +4,10 @@
 # cap_mirror_drift.ps1: the check itself is Python, so this file's only job
 # is find python, run the check, propagate its exit code.
 #
-# NOTE this check covers only lock_lagging_mask() (the ramp-lock decision),
-# not step_schedule() (the ramp-stepping gate) -- see ramp_lock_decision_
-# mirror_drift_check.py's own module docstring for why step_schedule() is
-# left unbound rather than forced to match a production stepping gate it has
-# already, honestly, fallen behind.
+# NOTE this check covers only lock_lagging_mask() (the ramp-lock decision).
+# step_schedule() (the ramp-stepping gate) is covered separately by
+# check_ramp_stepping_gate_mirror_drift.ps1 / ramp_stepping_gate_mirror_
+# drift_check.py -- see that module's own docstring for what it compares.
 #
 # A missing python FAILS this check (non-zero exit), not a silent skip --
 # this machine is expected to have Python, so a missing interpreter means
