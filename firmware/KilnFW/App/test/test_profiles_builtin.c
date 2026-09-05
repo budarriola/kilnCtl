@@ -155,15 +155,29 @@ static void test_every_rising_segment_has_bounded_positive_ramp(void)
                  "above 0 for a profile's first segment) has 0 < ramp_c_per_hr <= 999.0 C/hr, so none "
                  "can produce SaftyFW S8's modeled \"unlimited rate\" (ramp_c_per_hr <= 0) behavior "
                  "and none exceeds the fastest rate the 33.3 C/min default was sized against");
+    int checked = 0;
     for (size_t i = 0; i < g_builtin_profile_count; i++) {
         const builtin_profile_t *b = &g_builtin_profiles[i];
         float prev_target = 0.0f;
         for (uint8_t s = 0; s < b->segment_count; s++) {
             const profile_segment_t *seg = &b->segments[s];
+            /* target_c/ramp_c_per_hr are only meaningful for
+             * PROFILE_SEG_KIND_ZONE_RAMP (profiles_http.h) -- a RELAY_IO
+             * segment's target_c/ramp_c_per_hr fields are unrelated unions
+             * of io_* state, not a temperature ramp, so they must not be
+             * fed into this invariant. */
+            if (seg->seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+                continue;
+            }
             bool rising = seg->target_c > prev_target;
             if (rising) {
+                checked++;
                 TEST_CHECK(seg->ramp_c_per_hr > 0.0f,
                            "rising segment declares a positive (bounded) ramp, not \"unlimited\"");
+                /* 999.0 C/hr mirrors SaftyFW's
+                 * CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN (config_store.h,
+                 * 33.3 C/min = 2x this) -- the other side of the pair this
+                 * test protects. */
                 TEST_CHECK(seg->ramp_c_per_hr <= 999.0f,
                            "rising segment's ramp does not exceed the fastest rate the S8 default "
                            "was sized against (999.0 C/hr, FSCGB1)");
@@ -171,6 +185,11 @@ static void test_every_rising_segment_has_bounded_positive_ramp(void)
             prev_target = seg->target_c;
         }
     }
+    /* Coverage floor: 94 is today's count of rising ZONE_RAMP segments
+     * across the built-in catalogue (reviewer re-derived). Guards against
+     * the loop silently checking near-zero segments if seg_kind filtering
+     * or the catalogue itself regresses. */
+    TEST_CHECK(checked >= 94, "checked at least 94 rising ZONE_RAMP segments across the catalogue");
 }
 
 void run_test_profiles_builtin(void)

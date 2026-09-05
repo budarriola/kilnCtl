@@ -119,7 +119,9 @@
  * it. KilnCtrl.map's .ext_ram.bss section totals 0x6ca4 = 27812 B; the three
  * annotated safety_cfg_http.c buffers account for 12826 B of that, leaving
  * 14986 B (~15 kB) for the lwIP/Wi-Fi .bss now riding along. 18323 + 27812 =
- * 46135, matching the measured 46083 to within normal jitter. Consequence:
+ * 46135, consistent with the measured 46083 (18323 was an untracked prior
+ * trough, and the jitter between the two has never actually been measured).
+ * Consequence:
  * turning CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY back off would silently
  * cost ~15 kB of this gain -- the regression line above would fire, and this
  * option is the cause to check first. */
@@ -151,7 +153,7 @@
  * the second is supposed to be the early warning for the first.
  *
  * 20480, against the current measured trough of 46083 (app_main_done,
- * 2026-09-05) -- about 25.6 kB of room. If a future change pushes below this
+ * 2026-09-05) -- 25603 B (25.0 KiB) of room. If a future change pushes below this
  * the boot log says so while there is still evidence-backed headroom left to
  * spend. */
 #define KILN_DRAM_FREE_FLOOR_BYTES ((size_t)20480)
