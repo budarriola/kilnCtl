@@ -50,17 +50,6 @@ esp_err_t nvs_set_u32(nvs_handle_t handle, const char *key, uint32_t value)
 
 #include "profiles_builtin.c"
 
-// Mirrors ui_page_profiles_builtin_list.c's static sort_key() -- that
-// function lives in an LVGL-dependent UI file with no host-test seam, so
-// this test re-expresses the same widening rule against the real table
-// rather than skip verifying the invariant it exists for. If the UI file's
-// sort_key() and this ever diverge, the fix is to make the UI one the single
-// source (e.g. move it into profiles_builtin.c), not to relax this test.
-static int16_t test_sort_key(int8_t cone)
-{
-    return (cone == PROFILES_BUILTIN_CONE_UNRATED) ? INT16_MAX : (int16_t)cone;
-}
-
 static const char *UNRATED_CODES[] = {
     "FSCG1", "FSCGB1", "FSCGCL", "FSCGWM", "FSCRGL",
     "FSHP1", "FSHP3", "FSNM5", "MDDCL", "QICA",
@@ -134,7 +123,7 @@ static void test_unrated_sorts_after_every_real_cone_same_firing_type(void)
             if (r->firing_type != u->firing_type || r->cone == PROFILES_BUILTIN_CONE_UNRATED) {
                 continue;
             }
-            TEST_CHECK(test_sort_key(r->cone) < test_sort_key(u->cone),
+            TEST_CHECK(profiles_builtin_cone_sort_key(r->cone) < profiles_builtin_cone_sort_key(u->cone),
                        "a real cone in the same firing-type group sorts strictly before Unrated");
             if (u->firing_type == PROFILE_FIRING_GLAZE) {
                 any_glaze_unrated_checked = true;

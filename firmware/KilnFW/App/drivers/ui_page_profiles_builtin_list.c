@@ -42,14 +42,6 @@ static ui_topbar_t s_tb;
 
 static void render_page(void); /* forward decl -- set_firing_type() below needs it */
 
-/* Widened sort key: every real cone (int8_t range) sorts by its ordinary
- * signed value, but PROFILES_BUILTIN_CONE_UNRATED maps to INT16_MAX so it
- * always sorts after every real cone, never before (see reload_ids()). */
-static int16_t sort_key(int8_t cone)
-{
-    return (cone == PROFILES_BUILTIN_CONE_UNRATED) ? INT16_MAX : (int16_t)cone;
-}
-
 static void reload_ids(void)
 {
     s_id_count = 0;
@@ -72,18 +64,18 @@ static void reload_ids(void)
     /* Sort ascending by cone (see builtin_profile_t.cone's comment in
      * profiles_builtin.h for why plain signed comparison already matches
      * ascending heat-work), with PROFILES_BUILTIN_CONE_UNRATED entries last
-     * regardless of its raw INT8_MIN value -- sort_key() below maps the
-     * sentinel to INT16_MAX so it never sorts ahead of a real cone (a plain
+     * regardless of its raw INT8_MIN value -- profiles_builtin_cone_sort_key()
+     * maps the sentinel to INT16_MAX so it never sorts ahead of a real cone (a plain
      * int8_t compare would have put it first, since INT8_MIN is already the
      * lowest possible value). Small n (<= 28), insertion sort is plenty. */
     for (uint8_t i = 1; i < s_id_count; i++) {
         uint8_t key_id = s_ids[i];
         const builtin_profile_t *key = profiles_builtin_entry(key_id);
-        int16_t key_cone = key ? sort_key(key->cone) : 0;
+        int16_t key_cone = key ? profiles_builtin_cone_sort_key(key->cone) : 0;
         int8_t j = (int8_t)(i - 1);
         while (j >= 0) {
             const builtin_profile_t *cur = profiles_builtin_entry(s_ids[j]);
-            int16_t cur_cone = cur ? sort_key(cur->cone) : 0;
+            int16_t cur_cone = cur ? profiles_builtin_cone_sort_key(cur->cone) : 0;
             if (cur_cone <= key_cone) {
                 break;
             }
