@@ -55,6 +55,53 @@ def _zones_json(n=3):
 
 
 class ControlGetZonesCouplingTest(unittest.TestCase):
+    def test_http_only_fields_are_surfaced(self):
+        """The gap this closes: the 2026-09-04 bench snapshot reported
+        fuzzy_strength_pct/ease_off_window_mult/approach_rate_cap_c_per_hr
+        as unreadable from the live board at all. They ARE in the board's
+        raw GET /api/zones response (confirmed against a live board); this
+        tool just fetched that response and dropped everything but the
+        coupling matrix. Prove all three now appear per zone."""
+        zones_json = _zones_json()
+        zones_json["zones"][0]["fuzzy_strength_pct"] = 50.0
+        zones_json["zones"][0]["ease_off_window_mult"] = 2.0
+        zones_json["zones"][0]["approach_rate_cap_c_per_hr"] = 0.0
+        zones_json["zones"][1]["fuzzy_strength_pct"] = 0.0
+        zones_json["zones"][1]["ease_off_window_mult"] = 2.0
+        zones_json["zones"][1]["approach_rate_cap_c_per_hr"] = 0.0
+        p1, p2, p3 = self._patch(zones_json)
+        with p1, p2, p3:
+            result = mc.control_get_zones()
+        self.assertIn("http-only fields", result)
+        self.assertIn(
+            "z0: fuzzy_strength_pct=50.0, ease_off_window_mult=2.0, "
+            "approach_rate_cap_c_per_hr=0.0",
+            result,
+        )
+        self.assertIn(
+            "z1: fuzzy_strength_pct=0.0, ease_off_window_mult=2.0, "
+            "approach_rate_cap_c_per_hr=0.0",
+            result,
+        )
+
+    def test_NEGATIVE_missing_projected_field_is_caught(self):
+        """Negative test (required by feedback_negative_test_every_check):
+        prove the positive test above would actually fail if a field were
+        dropped from HTTP_ONLY_ZONE_FIELDS again, the same way
+        fuzzy_strength_pct/ease_off_window_mult/approach_rate_cap_c_per_hr
+        were silently dropped before this fix."""
+        zones_json = _zones_json()
+        zones_json["zones"][0]["fuzzy_strength_pct"] = 50.0
+        zones_json["zones"][0]["ease_off_window_mult"] = 2.0
+        zones_json["zones"][0]["approach_rate_cap_c_per_hr"] = 0.0
+        with unittest.mock.patch.object(
+            mc, "HTTP_ONLY_ZONE_FIELDS",
+            ("fuzzy_strength_pct", "approach_rate_cap_c_per_hr"),
+        ):
+            rendered = mc._describe_http_only_zone_fields(zones_json)
+        self.assertIn("fuzzy_strength_pct=50.0", rendered)
+        self.assertNotIn("ease_off_window_mult", rendered)
+
     def _patch(self, zones_json):
         control_mock = unittest.mock.Mock()
         control_mock.get_zones.return_value = (5, 8, [])

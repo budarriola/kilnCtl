@@ -125,6 +125,35 @@ def _describe_coupling_matrix(zones_json: dict) -> str:
     return "\n".join(lines)
 
 
+#: Per-zone fields that, like the coupling matrix above, only come back over
+#: GET /api/zones (not the UART CONTROL wire) -- these three are the fields
+#: a 2026-09-04 bench snapshot claimed were unreadable from the live board at
+#: all. They ARE in the board's raw HTTP response (confirmed against a live
+#: board that day); the gap was that this tool fetched zones_json for the
+#: coupling matrix only and silently dropped everything else in it. Adding a
+#: field here fixes a readback verification gap the same way missing
+#: control_mode did (see project_safety_calls_logging_unchecked_success-style
+#: incidents): a tool that omits fields makes a campaign look verified when
+#: it wasn't actually checked.
+HTTP_ONLY_ZONE_FIELDS = (
+    "fuzzy_strength_pct",
+    "ease_off_window_mult",
+    "approach_rate_cap_c_per_hr",
+)
+
+
+def _describe_http_only_zone_fields(zones_json: dict) -> str:
+    """Render the HTTP_ONLY_ZONE_FIELDS for every zone in a GET /api/zones
+    JSON body, one line per zone, so a readback through this tool is
+    complete rather than silently partial."""
+    zones = zones_json.get("zones", [])
+    lines = ["http-only fields (not on the UART CONTROL wire):"]
+    for i, z in enumerate(zones):
+        parts = [f"{name}={z.get(name)!r}" for name in HTTP_ONLY_ZONE_FIELDS]
+        lines.append(f"  z{i}: " + ", ".join(parts))
+    return "\n".join(lines)
+
+
 @_srv._tool()
 def control_get_zones(host: Optional[str] = None) -> str:
     """Read every zone's current PID/model config, calibration offset and
@@ -132,13 +161,17 @@ def control_get_zones(host: Optional[str] = None) -> str:
 
     Also fetches the per-zone coupling matrix (coupling_c0.., a first-class
     control parameter -- which matrix is live measurably changes tracking
-    IAE) and coupling_diag_k_dc over HTTP GET /api/zones, since neither is
-    on the UART CONTROL wire. Host is auto-resolved the same way the OTA
-    tools do (board's Wi-Fi station IP, falling back to the fallback-AP
-    address); pass `host` explicitly for kilnctl.local or a board reachable
-    only from a different network than this link. If the HTTP fetch fails
-    the PID/model section above is still returned, with the coupling
-    section noting why it's missing."""
+    IAE), coupling_diag_k_dc, and the HTTP-only fields fuzzy_strength_pct,
+    ease_off_window_mult and approach_rate_cap_c_per_hr over HTTP GET
+    /api/zones, since none of these are on the UART CONTROL wire (they ARE
+    present in the board's raw HTTP response -- this tool used to fetch that
+    response and then silently drop everything but the coupling matrix from
+    it). Host is auto-resolved the same way the OTA tools do (board's Wi-Fi
+    station IP, falling back to the fallback-AP address); pass `host`
+    explicitly for kilnctl.local or a board reachable only from a different
+    network than this link. If the HTTP fetch fails the PID/model section
+    above is still returned, with the coupling matrix and HTTP-only-fields
+    sections noting why they're missing."""
     try:
         thermo_count, relay_count, zones = _srv._control.get_zones()
     except ControlQueryError as exc:
@@ -153,7 +186,11 @@ def control_get_zones(host: Optional[str] = None) -> str:
         zones_json = zones_http_client.get_zones(resolved_host)
     except zones_http_client.ZonesHttpError as exc:
         return body + f"\ncoupling matrix: unavailable ({exc}, host={resolved_host})"
-    return body + "\n" + _describe_coupling_matrix(zones_json)
+    return (
+        body
+        + "\n" + _describe_coupling_matrix(zones_json)
+        + "\n" + _describe_http_only_zone_fields(zones_json)
+    )
 
 
 @_srv._tool()
