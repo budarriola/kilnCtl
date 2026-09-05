@@ -54,19 +54,29 @@ if (-not (Test-Path $MappingCsv)) {
 
 $rows = Import-Csv $MappingCsv
 
-# Layer tiers per the plan's allowed include direction:
-#   ui/http/bridge (tier 0, top)
+# Layer tiers per the plan's allowed include direction (decision A: layers
+# are subdirectories of the single `drivers` component,
+# firmware/KilnFW/App/drivers/<layer>/, not sibling App/<layer> components --
+# see HW_ABSTRACTION_PLAN.md's reorg section for the rationale).
+#   ui/http/bridge/sim (tier 0, top -- decision D puts sim here: the sim
+#     backend drives the system from above, same as ui/http/bridge)
 #     -> control/safety/persist/net (tier 1, mid)
-#       -> owners/hw/sim (tier 2, bottom) -> hwAbstraction (not modeled yet)
+#       -> owners/hw (tier 2, bottom)
+#         -> common (tier 3, bottom-most -- decision B: pure leaf
+#           headers/utilities with no includes above this tier)
 $tierOf = @{
-    "ui" = 0; "http" = 0; "bridge" = 0
+    "ui" = 0; "http" = 0; "bridge" = 0; "sim" = 0
     "control" = 1; "safety" = 1; "persist" = 1; "net" = 1
-    "owners" = 2; "hw" = 2; "sim" = 2
+    "owners" = 2; "hw" = 2
+    "common" = 3
 }
 
 function Get-Layer([string]$path) {
-    # firmware/KilnFW/App/<layer>/<file>  (skips drivers_build_meta rows)
-    if ($path -match '^firmware/KilnFW/App/([^/]+)/') { return $matches[1] }
+    # firmware/KilnFW/App/drivers/<layer>/<file> (STAY rows -- CMakeLists.txt,
+    # Kconfig, README.md, gen_build_info.cmake -- have old_path == new_path
+    # sitting directly in drivers/, so they never match a <layer> subdir and
+    # fall out of $moveRows below without any special-casing).
+    if ($path -match '^firmware/KilnFW/App/drivers/([^/]+)/') { return $matches[1] }
     return $null
 }
 
@@ -75,9 +85,9 @@ function Get-Layer([string]$path) {
 # ---------------------------------------------------------------------------
 Write-Host "=== 1. git mv plan ($($rows.Count) rows) ===" -ForegroundColor Cyan
 $moveRows = $rows | Where-Object { (Get-Layer $_.new_path) -and ($tierOf.ContainsKey((Get-Layer $_.new_path))) }
-$metaRows = $rows | Where-Object { -not ((Get-Layer $_.new_path) -and $tierOf.ContainsKey((Get-Layer $_.new_path))) }
+$stayRows = $rows | Where-Object { -not ((Get-Layer $_.new_path) -and $tierOf.ContainsKey((Get-Layer $_.new_path))) }
 
-Write-Host "$($moveRows.Count) rows map into the ten layer dirs; $($metaRows.Count) are BUILD_META (excluded from git mv, need a coordinator decision - see mapping.csv AMBIGUOUS rows)."
+Write-Host "$($moveRows.Count) rows map into the eleven layer subdirs; $($stayRows.Count) are STAY rows (CMakeLists.txt/Kconfig/README.md/gen_build_info.cmake -- component root files, no git mv needed since old_path == new_path)."
 
 foreach ($r in $moveRows) {
     $cmd = "git mv `"$($r.old_path)`" `"$($r.new_path)`""
@@ -97,7 +107,7 @@ Write-Host "`n=== 2. CMakeLists literal SRCS rewrite ===" -ForegroundColor Cyan
 $literalMap = @{}
 foreach ($r in $moveRows) {
     $oldRel = $r.old_path -replace '^firmware/KilnFW/App/drivers/', ''
-    $literalMap[$oldRel] = $r.new_path -replace '^firmware/KilnFW/App/', ''
+    $literalMap[$oldRel] = $r.new_path -replace '^firmware/KilnFW/App/drivers/', ''
 }
 
 foreach ($cmakeFile in @($DriversCmake, $AppCmake)) {
@@ -121,28 +131,32 @@ foreach ($cmakeFile in @($DriversCmake, $AppCmake)) {
         Write-Host "  rewritten: $cmakeFile"
     }
 }
-Write-Host "NOTE: firmware/KilnFW/App/CMakeLists.txt has no literal drivers/<file> paths (it only has REQUIRES drivers); the 185 literal SRCS entries the plan refers to are all inside drivers/CMakeLists.txt itself. Applying the move requires either (a) relocating that SRCS list into a new App/CMakeLists.txt that lists all ten dirs, or (b) leaving ten small per-layer CMakeLists.txt files. This is one of the BUILD_META rows the coordinator must decide -- see mapping.csv."
+Write-Host "NOTE (decision A): the single `drivers` component is retained -- CMakeLists.txt/Kconfig/README.md/gen_build_info.cmake all STAY at firmware/KilnFW/App/drivers/ (mapping.csv STAY rows, old_path == new_path). firmware/KilnFW/App/CMakeLists.txt still has no literal drivers/<file> paths (it only has REQUIRES drivers); the ~201 literal SRCS entries live entirely inside drivers/CMakeLists.txt and are rewritten in place above to their new '<layer>/<file>' relative path -- no new per-layer CMakeLists.txt fragments and no App/CMakeLists.txt restructuring needed."
 
 # ---------------------------------------------------------------------------
 # 3. Bare-include feasibility (INCLUDE_DIRS covering all ten dirs)
 # ---------------------------------------------------------------------------
 Write-Host "`n=== 3. Bare-include feasibility ===" -ForegroundColor Cyan
 Write-Host @"
-PROPOSAL (preferred): list all ten new directories in the component's
-INCLUDE_DIRS (idf_component_register PRIV_INCLUDE_DIRS/INCLUDE_DIRS in
-firmware/KilnFW/App/CMakeLists.txt), the same way drivers/ itself is a single
-INCLUDE_DIRS entry today. #include "x.h" lines stay BARE -- no path-qualified
-rewrite needed -- because ESP-IDF's build resolves an unqualified include
-against every directory on the include path, and mapping.csv's collision
-check (see below) found zero basename collisions across the ten target
-dirs, so there is no ambiguity a bare include could hit.
+PROPOSAL (preferred): list all eleven new subdirectories
+(firmware/KilnFW/App/drivers/{hw,owners,control,safety,persist,net,http,ui,
+bridge,sim,common}) in the drivers component's own INCLUDE_DIRS
+(idf_component_register in firmware/KilnFW/App/drivers/CMakeLists.txt, which
+stays put per decision A), the same way drivers/ itself is a single
+INCLUDE_DIRS entry today -- this is unchanged from before decision A except
+the dirs are now subdirectories of drivers/ instead of siblings of it.
+#include "x.h" lines stay BARE -- no path-qualified rewrite needed --
+because ESP-IDF's build resolves an unqualified include against every
+directory on the include path, and mapping.csv's collision check (see below)
+found zero basename collisions across the eleven target dirs, so there is no
+ambiguity a bare include could hit.
 "@
 $dupCheck = $rows | Group-Object { Split-Path $_.new_path -Leaf } | Where-Object { $_.Count -gt 1 }
 if ($dupCheck) {
     Write-Host "WARNING: basename collisions found across target dirs -- bare includes would be ambiguous for these:" -ForegroundColor Yellow
     $dupCheck | ForEach-Object { Write-Host "  $($_.Name) : $($_.Count) occurrences" }
 } else {
-    Write-Host "No basename collisions across the ten target directories -- bare-include plan holds."
+    Write-Host "No basename collisions across the eleven target directories -- bare-include plan holds."
 }
 
 # ---------------------------------------------------------------------------
@@ -209,7 +223,12 @@ foreach ($file in $srcFiles) {
 
     $lines = Get-Content $file.FullName
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '#include\s*"([^"]+)"') {
+        # Anchor to an actual preprocessor directive (optional leading
+        # whitespace only) so a comment that merely mentions #include "x.h"
+        # as prose -- e.g. backlight_pwm.h's "Deliberately NOT #include
+        # ..." and safety_cfg_store.c's "Declared here by hand rather than
+        # via #include ..." -- is not misreported as a real upward include.
+        if ($lines[$i] -match '^\s*#include\s*"([^"]+)"') {
             $incName = $matches[1] -replace '^.*/', ''
             if ($layerOf.ContainsKey($incName)) {
                 $includedLayer = $layerOf[$incName]

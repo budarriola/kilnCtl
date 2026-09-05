@@ -148,7 +148,7 @@ typedef struct {
     int cs_pin;                // bit-banged CS around each transfer, or HAL_CS_NONE
 } hal_spi_device_cfg_t;
 
-hal_status_t hal_spi_bus_init(bus, bus_id, sck, mosi, miso);   // see ALREADY_INIT note
+hal_status_t hal_spi_bus_init(bus, bus_id, const hal_spi_bus_cfg_t *cfg);   // see ALREADY_INIT note
 hal_status_t hal_spi_bus_deinit(bus);
 hal_status_t hal_spi_device_attach(bus, dev, &cfg);
 hal_status_t hal_spi_transfer(dev, tx, tx_len, rx, rx_len, timeout_ms);
@@ -804,16 +804,51 @@ drivers. Census by role (2026-09-05):
 | sim | 2 | |
 | misc | 5 | event_log |
 
-Target: `App/{hw,owners,control,safety,persist,net,http,ui,bridge,sim}/`
-with `misc` folded into whichever layer owns each file. Preparation for this
-move (full 358-file mapping with proposed answers for every ambiguous
-placement, a `git mv` + CMakeLists-rewrite script, and a dry-run report
-naming the 18 path-keyed check scripts and 73 remaining upward includes)
-lives in `tools/drivers_reorg/` -- see `tools/drivers_reorg/DRYRUN.md`.
-Nothing has been applied yet. Allowed include
-direction is strictly downward: ui/http/bridge → control/safety/persist →
-owners/hw → hwAbstraction. Six upward-include patterns exist today and must
-be untangled before the move, otherwise the reorg just relabels the tangle:
+**Layout deviation from the original plan (coordinator decision, 2026-09-05,
+third round):** target directories are subdirectories of the existing
+`drivers` component -- `App/drivers/{hw,owners,control,safety,persist,net,
+http,ui,bridge,sim,common}/` -- **not** sibling `App/<layer>/` components as
+the "Target:" line originally read. `drivers` stays the single ESP-IDF
+component; `CMakeLists.txt`, `Kconfig`, `README.md` and
+`gen_build_info.cmake` all stay at `App/drivers/` unmoved. Reasons: (1) one
+component means zero `REQUIRES`/component-boundary changes anywhere else in
+the tree; (2) `Kconfig`'s options already span net/ui/safety with no single
+natural new owner, and splitting it per layer would need a matching split of
+every place that reads it (`check_safety_baud_sync.ps1` and others);
+(3) `README.md` documents the whole former `drivers/` tree, not one layer;
+(4) it collapses what would otherwise be ten new per-layer `CMakeLists.txt`
+fragments (or an `App/CMakeLists.txt` restructuring) into one in-place
+literal-path rewrite of the existing `drivers/CMakeLists.txt` SRCS list --
+far less CMake churn for the same layering benefit. `INCLUDE_DIRS` lists the
+eleven subdirs instead of ten sibling directories; bare `#include "x.h"`
+still works with zero path-qualification, per the zero-basename-collision
+check in `tools/drivers_reorg/DRYRUN.md` section 3.
+
+A new bottom-most tier, `common` (below `hw`), holds pure leaf
+headers/utilities with no dependency on anything above it: `uart_task_ids.h`,
+`settings.h`, `stack_margin.{c,h}`, `stack_margin_calc.h`, `http_form.h`,
+`web_encoding.{c,h}`, `httpd_socket_budget.h`, `dram_margin.h`,
+`bx_worker_reentrancy.h`. Each was checked before placement and confirmed to
+include only ESP-IDF/libc headers; this single mapping.csv change (with `sim`
+promoted to the top tier alongside ui/http/bridge, since the sim backend
+drives the system from above) resolved 51 of the 73 upward includes found in
+the second-round dry run without touching any source file -- see
+`tools/drivers_reorg/DRYRUN.md` section 5 for the 22 that remain and a
+proposed one-line fix for each.
+
+Target: `App/drivers/{hw,owners,control,safety,persist,net,http,ui,bridge,
+sim,common}/` with `misc` folded into whichever layer owns each file (only
+`event_log*` -- folded into persist). Preparation for this move (full
+358-file mapping with resolved answers for every ambiguous placement, a
+`git mv` + CMakeLists-rewrite script, and a dry-run report naming the 18
+path-keyed check scripts and the 22 remaining upward includes) lives in
+`tools/drivers_reorg/` -- see `tools/drivers_reorg/DRYRUN.md`. Nothing has
+been applied yet. Allowed include direction is strictly downward:
+ui/http/bridge/sim → control/safety/persist/net → owners/hw → common →
+hwAbstraction. Six upward-include patterns existed before this dry-run pass
+and were already untangled as ordinary commits (items 1-6 below); the 22
+that remain after the second-round mapping revision are catalogued with
+proposed fixes in `tools/drivers_reorg/DRYRUN.md` rather than repeated here:
 
 1. DONE (2026-09-05): 18+ control/safety/persist files included zones_http.h
    for what are really config accessors. Split into zones_config_accessors.h
@@ -846,18 +881,27 @@ be untangled before the move, otherwise the reorg just relabels the tangle:
    full `profile_exec_status_t` snapshot for SAFETY_CMD_PUSH_CONTEXT, still a
    pure query, no start/stop/command surface pulled in).
 
-Ambiguous placements to decide during the move, not before: the zones_http
-family (persist vs http after item 1), zones_current_sweep_* (control vs
-safety), danger_mode (safety), wifi_status_ui (ui), settings.h (persist),
-event_log (misc → persist).
+All placements ambiguous under the original plan are now resolved in
+`mapping.csv` (coordinator decisions, third round): the zones_http family
+splits between `http` (thin registration + get/post/pid handlers) and
+`persist` (`zones_http_internal.h`, since `zones_config_store.c`/
+`zones_config_accessors.c` are consumers), zones_current_sweep_* → control,
+danger_mode → safety, wifi_status_ui → ui, settings.h → **common** (not
+persist -- decision B), event_log → persist. `heat_enable`/`heat_interlock`
+→ control, `kiln_io`/`kiln_io_owner`/`relay_authority` → owners,
+`relay_cycles` → persist, `thermo_combine` → control,
+`tuning_recommendations_fallback.json` → http, `zone_settings_source_chain.h`
+→ persist. See `tools/drivers_reorg/DRYRUN.md` section 0 for the full
+per-decision rationale.
 
 Sequencing: untangle the six include patterns as ordinary commits first
 (each is a small behaviour-preserving edit that builds and passes on its
-own); then the directory move as one planned tree, with CMakeLists' 185
-literal SRCS rewritten in the same commit and every check_*.ps1 grepped for
-old paths; then HAL Phase 1a moves espInterfaces/ out of owners/ into
-hwAbstraction/. Doing the reorg before Phase 1a means the HAL move touches
-paths that are already final. The Phase 4 include-direction check (ratchet
-now, strict after Phase 3) is what keeps the layering honest afterwards.
-SaftyFW's src/ is 48 files (23 .c, 25 .h) and flat by choice; it is not
-part of this.
+own) -- already done. Then the directory move as one planned tree, with
+`drivers/CMakeLists.txt`'s ~201 literal SRCS entries rewritten **in place**
+in the same commit (decision A keeps this one file; no new per-layer
+CMakeLists.txt files) and every check_*.ps1 grepped for old paths; then HAL
+Phase 1a moves espInterfaces/ out of owners/ into hwAbstraction/. Doing the
+reorg before Phase 1a means the HAL move touches paths that are already
+final. The Phase 4 include-direction check (ratchet now, strict after Phase
+3) is what keeps the layering honest afterwards. SaftyFW's src/ is 48 files
+(23 .c, 25 .h) and flat by choice; it is not part of this.
