@@ -1385,10 +1385,11 @@ land.
    compile) through Phase 4 (include-direction check goes strict). Phase 1a
    moves `espInterfaces/` only after item 1 so paths move once.
 
-Sequence: untangle includes, reorg, then HAL Phase 1a. Open owner decisions
-before Phase 1: tree location/naming, the opaque-storage pattern (option a),
-the hal_uart two-primitive shape. `firmware/UnitTestFw` stays untouched
-throughout (decision 2026-09-05).
+Sequence: untangle includes, reorg, then HAL Phase 1a. All owner decisions
+are taken (2026-09-05): tree location/naming as above, opaque-storage
+option a, hal_uart `send` + `send_blocking`. `firmware/UnitTestFw` stays
+untouched throughout. Nothing blocks a start except the dirty-tree
+condition.
 
 Gates: `build_kilnfw` + all 23 host executables green after every commit;
 every check script proven able to go red after the move (nine of twelve

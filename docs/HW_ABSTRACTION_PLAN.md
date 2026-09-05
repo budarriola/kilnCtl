@@ -17,9 +17,12 @@ Owner decisions taken 2026-09-05 (second round): the drivers/ layering
 target layout is approved as written; order of work is untangle the six
 upward includes, then the directory reorg, then HAL Phase 1a; no move starts
 until the currently dirty KilnFW files land (wait, do not commit them from
-this pass); plan only for now — no code changes yet. Still open before Phase
-1 starts: approve the tree location and naming, the opaque-storage pattern
-(option a, below) and the hal_uart two-primitive shape.
+this pass); plan only for now — no code changes yet. Third round, same day:
+tree location and naming approved as `firmware/hwAbstraction/{interface,
+esp,pico,host}`; opaque-storage option a (fixed `_Alignas(8)` storage in the
+header, backend `_Static_assert`) approved; hal_uart two-primitive shape
+(`send` + `send_blocking`) approved. No owner decision remains open; the
+plan is complete and waits only on the dirty-tree condition above.
 
 ## Goal
 
