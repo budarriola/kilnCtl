@@ -678,14 +678,28 @@ Phase 2 for the itemised done/not-done breakdown this summarizes.
 - [ ] `pause_on_debug` true in dev builds, **false in release** — true is
       hardcoded (`main.c`); there is no release/debug build distinction in
       this CMake project yet to switch on, so the "false in release" half is
-      not implemented
+      not implemented. **STILL TRUE, verified 2026-09-04**: `main.c:224`
+      still hardcodes `pause_on_debug = true` with the same comment.
 
 **RP2040 specifics (§8)**
-- [ ] `flash_safe_execute()` for every config write — **not started**, no
-      config store exists yet (Phase 9)
-- [ ] ISRs that can fire during a flash write are `__not_in_flash_func` —
-      **not started**, no such ISR exists yet (the `~DRDY`/UART ISRs are
-      Phase 3/7)
+- [x] `flash_safe_execute()` for every config write — **STALE, corrected
+      2026-09-04**: `src/config_store.c` and `src/config_store_flash.c` now
+      exist and every flash write goes through `flash_safe_execute()`
+      (`config_store_flash.c:296`'s `config_store_write_cb`,
+      `update_task.c`'s erase/program/metadata-write callbacks at lines
+      300/345/405 use the same pattern). Config store is no longer Phase 9
+      future work.
+- [x] ISRs that can fire during a flash write are RAM-resident where needed
+      — **STALE, corrected 2026-09-04**: no ISR needs `__not_in_flash_func`
+      today. `update_task.c`'s own header comment (lines ~10-30) explains
+      why: `flash_safe_execute()`'s multicore lockout globally disables
+      interrupts on BOTH cores for the whole callback (confirmed by reading
+      the vendored pico-sdk's `default_enter_safe_zone_timeout_ms()`), which
+      is a *stronger* guarantee than "every ISR touching flash is
+      RAM-resident" and subsumes it — so the erase/program callbacks are
+      deliberately ordinary flash-resident functions, not
+      `__not_in_flash_func()`. Revisit only if a flash-write path is added
+      that does NOT go through `flash_safe_execute()`.
 - [x] `adc_gpio_init()` called; ADC3/VSYS **not** sampled — `adc_gpio_init()`
       is called for ADC0/1/2 in `src/tasks/current_task.c`; `src/current_sense.c`
       only ever selects channels 0/1/2, ADC3 is never sampled. Build-verified
@@ -702,6 +716,21 @@ Phase 2 for the itemised done/not-done breakdown this summarizes.
       three-channel round-robin behaviour it describes is.
 
 **Tests (§10)**
-- [ ] Host harness building without the SDK
-- [ ] `sim_plant.c` reused for thermal traces
-- [ ] Guard verdicts bit-identical with the TX path stubbed out
+- [x] Host harness building without the SDK — **STALE, corrected 2026-09-04**:
+      `test/build_host_tests.ps1` builds and runs the host-side unit tests
+      with MSVC, "entirely off-target -- no pico-sdk, no FreeRTOS, no
+      hardware" (its own header comment); 37 test source files exist under
+      `firmware/SaftyFW/test/`.
+- [ ] `sim_plant.c` reused for thermal traces — **still not done, verified
+      2026-09-04**: no reference to `sim_plant` anywhere under
+      `firmware/SaftyFW` (`grep -rl sim_plant firmware/SaftyFW` is empty).
+      Per `project_simfw_and_kilnsim_removed`, `SimFW`/`kilnsim` were removed
+      2026-08-28 and are not coming back as a dependency, so this item may
+      be moot rather than merely undone — flagged for the owner to either
+      retarget at a different thermal-trace source or drop.
+- [x] Guard verdicts bit-identical with the TX path stubbed out — **STALE,
+      corrected 2026-09-04**: `test/test_safety_guards.c` (lines ~1045-1254)
+      runs the guard suite with independent states standing in for "TX
+      stubbed" vs "TX live" and asserts `memcmp` bit-identical verdict
+      streams and final structs at every tick, exactly as this item
+      describes.

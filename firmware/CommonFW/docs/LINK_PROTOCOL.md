@@ -1286,18 +1286,22 @@ Two more, driven by the borrowed-thermocouple option:
 - [x] 0.1 Safety-UART pins in `KilnFW` measured and set (TX→5, RX→4), pull-up on GPIO4
 - [x] 0.2 `UART_PROTO_MSG_BROADCAST = 0x04` added (send + receive path; not yet called from `safety_link.c`)
 - [x] 0.3 `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` optocoupler direction corrected
-- [~] 0.10 `KILNLINK_PROTOCOL_VERSION` bumped to 5, `UART_PROTOCOL_VERSION` aliased to it
-      -- **half done (2026-08-17)**: the alias is real,
-      `firmware/KilnFW/App/drivers/uart_task_ids.h`'s `UART_PROTOCOL_VERSION`
-      is now `((uint16_t)KILNLINK_PROTOCOL_VERSION)`, not a second number.
-      The bump to 5 was deliberately **not** done this pass: it is a
-      cross-firmware wire-compatibility decision (both `KilnFW` and `SaftyFW`
-      must agree on the same number in the same commit) and `SaftyFW` was
-      being worked on in parallel by a different pass when this one landed --
-      bumping the shared `CommonFW/include/kilnlink/kilnlink_version.h`
-      constant unilaterally risked stepping on that work. Revisit together,
-      in one commit touching both firmwares, per this file's own header
-      guidance ("bump `KILNLINK_PROTOCOL_VERSION` if a peer would break").
+- [x] 0.10 `KILNLINK_PROTOCOL_VERSION` bumped, `UART_PROTOCOL_VERSION` aliased to it
+      -- **STALE, corrected 2026-09-04**: this item's premise (a single bump
+      to 5, done in one cross-firmware commit) was overtaken by events long
+      ago. `firmware/CommonFW/include/kilnlink/kilnlink_version.h`'s own
+      history comment shows the two numbers were later made INDEPENDENT
+      (2026-08-24, after three incidents of a bump here silently refusing
+      PC<->ESP traffic for changes that never touched that link) rather than
+      kept aliased, and `KILNLINK_PROTOCOL_VERSION` has since been bumped
+      six more times on its own schedule (5->6->7->8->9->10, one step per
+      dated comment in that file, the last on 2026-09-03 for the BORROWED
+      status flag). `KILNLINK_MIN_COMPATIBLE` is currently 7. The alias part
+      of this item is real and current: `uart_task_ids.h`'s
+      `UART_PROTOCOL_VERSION` doc comment documents the two numbers as
+      independently maintained, not that one is aliased to the other --
+      leaving the original "aliased to it" wording obsolete too. See
+      `CommonFW/README.md` "Versioning" for the full split history.
       **Superseded 2026-08-24**: the alias itself turned out to be the
       problem it was trying to avoid, not a solution — a `KILNLINK_PROTOCOL_
       VERSION` bump driven purely by the isolated link (5->6, `tx_dropped_

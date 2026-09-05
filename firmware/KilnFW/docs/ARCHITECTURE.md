@@ -25,41 +25,49 @@ verified against the code that creates these tasks, cited by file and line.
 ## 1. Task inventory
 
 Every `xTaskCreate`/`xTaskCreatePinnedToCore` call in `firmware/KilnFW/App`,
-as of 2026-08-19. **All of them pass `tskNO_AFFINITY`** — core placement is
-left to the scheduler; only priority orders them. Priority numbers are
-FreeRTOS convention: higher = more urgent.
+as of 2026-08-19, **file:line citations corrected 2026-09-04**. The original
+2026-08-19 pass cited `uart_bridge.c` and `uart_bridge_ext.c` for most of the
+bridge tasks and `profile_executor.c` for both executor tasks; both files
+have since been split (per this project's own "After splitting an oversized
+firmware file" gotcha in the root `CLAUDE.md`), so nearly every citation in
+this table pointed past that file's current end-of-file. Re-verified against
+`xTaskCreate*`/`stack_margin_register` call sites directly. **All of them
+pass `tskNO_AFFINITY`** — core placement is left to the scheduler; only
+priority orders them. Priority numbers are FreeRTOS convention: higher = more
+urgent.
 
 | Task | Prio | Stack | Owns / does | Created in |
 |---|---|---|---|---|
-| `link_watchdog` | **6** | 3072 | Highest-priority task in the system: drops all relays and asserts the isolated fault line when the PC UART link goes silent. Calls `kiln_io_all_relays_off()` **directly**, bypassing `kiln_io_owner` — see §2's exceptions | `App/drivers/uart_bridge.c:1829` |
-| `uart_log_bridge` (sender) | 7* | 4096 | *Highest number in the file, but it's the log drain, not a control path — see the file's own comment; treat `link_watchdog`(6)/owner tasks(5) as the real safety-priority ceiling* | `App/drivers/uart_log_bridge.c:255` |
-| `kiln_io_owner` | 5 | 4096 | **Single writer** of the SX1509 relay/IO expander — all relay, digital-IO, and raw-register writes | `App/drivers/kiln_io_owner.c:282` |
-| `thermo_owner` | 5 | 4096 | **Single writer/caller** of the MAX31856 thermocouple SPI API (config, thresholds, one-shot/read, faults) | `App/drivers/thermo_owner.c:186` |
-| `profile_executor` | 5 | 4096 | The fire-profile control task: PID/bang-bang per zone, ramp/dwell stepping, relay drive via `kiln_io_owner`'s AUTHORIZED path | `App/drivers/profile_executor.c:1644` |
-| `profile_exec_wdt` | 5 | 2560 | Guard 9 — profile-executor's own watchdog; forces relays off if the control task's tick goes stale or the safety link is silent ≥30 s. Deliberately independent of the task it watches | `App/drivers/profile_executor.c:1655` |
-| `autotune_engine` | 5 | 4096 | PID autotune step-test task (relay-feedback autotune not yet built) | `App/drivers/autotune_engine.c:710` |
-| `wifi_prov_owner` | 5 | 4096 | **Single writer** of `s_wifi` — all `esp_wifi_*`/NVS Wi-Fi calls, including the driver's own `on_wifi_event`/`on_ip_event` handlers, routed through the same queue as external callers | `App/drivers/wifi_prov.c:1392` |
-| `thermo_uart_bridge` | 5 | 4096 | UART bridge subsystem task, THERMO command family — dispatches into `thermo_owner` | `App/drivers/uart_bridge.c:521` |
-| `io_uart_bridge` | 5 | 4096 | UART bridge subsystem task, IO command family — dispatches into `kiln_io_owner` | `App/drivers/uart_bridge.c:956` |
-| `touch_uart_bridge` | 5 | 3072 | UART bridge subsystem task, TOUCH command family | `App/drivers/uart_bridge.c:1268` |
-| `safety_uart_bridge` | 5 | 4096 | UART bridge subsystem task, SAFETY command family (isolated-link cache reads, mostly fire-and-forget) | `App/drivers/uart_bridge.c:1389` |
-| `system_uart_bridge` | 5 | 3072 | UART bridge subsystem task, SYSTEM command family (`FACTORY_RESET` reboots immediately after, so blocking briefly is accepted) | `App/drivers/uart_bridge.c:1476` |
-| `info_uart_bridge` | 5 | 3072 | UART bridge subsystem task, INFO/version command family | `App/drivers/uart_bridge.c:1682` |
-| `info_boot_push` | 5 | 3072 | One-shot: pushes firmware version/boot info to the PC link right after boot | `App/drivers/uart_bridge.c:1696` |
-| `control_uart_bridge` | 5 | 4096 | UART bridge extension task, CONTROL command family (calibration offset, etc.) | `App/drivers/uart_bridge_ext.c:245` |
-| `profiles_uart_bridge` | 5 | 4096 | UART bridge extension task, PROFILES command family — dispatches into `profile_executor`'s public API | `App/drivers/uart_bridge_ext.c:506` |
-| `autotune_uart_bridge` | 5 | 4096 | UART bridge extension task, AUTOTUNE command family | `App/drivers/uart_bridge_ext.c:632` |
-| `wifi_uart_bridge` | 5 | 4096 | UART bridge extension task, WIFI command family — dispatches into `wifi_prov`'s public API | `App/drivers/uart_bridge_ext.c:951` |
+| `link_watchdog` | **6** | 3072 | Highest-priority task in the system: drops all relays and asserts the isolated fault line when the PC UART link goes silent. Calls `kiln_io_all_relays_off()` **directly**, bypassing `kiln_io_owner` — see §2's exceptions | `App/drivers/uart_bridge.c:549` |
+| `uart_log_bridge` (sender) | 7* | 4096 | *Highest number in the file, but it's the log drain, not a control path — see the file's own comment; treat `link_watchdog`(6)/owner tasks(5) as the real safety-priority ceiling* | `App/drivers/uart_log_bridge.c:326` |
+| `kiln_io_owner` | 5 | 4096 | **Single writer** of the SX1509 relay/IO expander — all relay, digital-IO, and raw-register writes | `App/drivers/kiln_io_owner.c:533` |
+| `thermo_owner` | 5 | 4096 | **Single writer/caller** of the MAX31856 thermocouple SPI API (config, thresholds, one-shot/read, faults) | `App/drivers/thermo_owner.c:245` |
+| `profile_executor` | 5 | 4096 | The fire-profile control task: PID/bang-bang per zone, ramp/dwell stepping, relay drive via `kiln_io_owner`'s AUTHORIZED path | `App/drivers/profile_executor_start.c:85` (moved out of `profile_executor.c`, which split into several `profile_executor_*.c` files) |
+| `profile_exec_wdt` | 5 | **4096** (STALE — was 2560, corrected 2026-09-04) | Guard 9 — profile-executor's own watchdog; forces relays off if the control task's tick goes stale or the safety link is silent ≥30 s. Deliberately independent of the task it watches | `App/drivers/profile_executor_start.c:129` |
+| `autotune_engine` | 5 | 4096 | PID autotune step-test task (relay-feedback autotune not yet built) | `App/drivers/autotune_engine.c:813` |
+| `wifi_prov_owner` | 5 | 4096 | **Single writer** of `s_wifi` — all `esp_wifi_*`/NVS Wi-Fi calls, including the driver's own `on_wifi_event`/`on_ip_event` handlers, routed through the same queue as external callers | `App/drivers/wifi_prov.c:399` |
+| `thermo_uart_bridge` | 5 | 4096 | UART bridge subsystem task, THERMO command family — dispatches into `thermo_owner` | `App/drivers/uart_bridge_thermo.c:475` (split out of `uart_bridge.c`) |
+| `io_uart_bridge` | 5 | 4096 | UART bridge subsystem task, IO command family — dispatches into `kiln_io_owner` | `App/drivers/uart_bridge_io.c:652` (split out of `uart_bridge.c`) |
+| `touch_uart_bridge` | 5 | 3072 | UART bridge subsystem task, TOUCH command family | `App/drivers/uart_bridge_touch.c:274` (split out of `uart_bridge.c`) |
+| `safety_uart_bridge` | 5 | 4096 | UART bridge subsystem task, SAFETY command family (isolated-link cache reads, mostly fire-and-forget) | `App/drivers/uart_bridge_safety.c:294` (split out of `uart_bridge.c`) |
+| `system_uart_bridge` | 5 | 3072 | UART bridge subsystem task, SYSTEM command family (`FACTORY_RESET` reboots immediately after, so blocking briefly is accepted) | `App/drivers/uart_bridge_system.c:162` (split out of `uart_bridge.c`) |
+| `info_uart_bridge` | 5 | 3072 | UART bridge subsystem task, INFO/version command family | `App/drivers/uart_bridge_info.c:337` (split out of `uart_bridge.c`) |
+| `info_boot_push` | 5 | 3072 | One-shot: pushes firmware version/boot info to the PC link right after boot | `App/drivers/uart_bridge_info.c:359` (split out of `uart_bridge.c`) |
+| `control_uart_bridge` | 5 | 4096 | UART bridge extension task, CONTROL command family (calibration offset, etc.) | `App/drivers/uart_bridge_ext_control.c:199` (split out of `uart_bridge_ext.c`) |
+| `profiles_uart_bridge` | 5 | 4096 | UART bridge extension task, PROFILES command family — dispatches into `profile_executor`'s public API | `App/drivers/uart_bridge_ext_control.c:593` (split out of `uart_bridge_ext.c`, landed alongside CONTROL rather than its own file) |
+| `autotune_uart_bridge` | 5 | 4096 | UART bridge extension task, AUTOTUNE command family | `App/drivers/uart_bridge_ext_autotune.c:239` (split out of `uart_bridge_ext.c`) |
+| `wifi_uart_bridge` | 5 | **8192** (STALE — was 4096, corrected 2026-09-04) | UART bridge extension task, WIFI command family — dispatches into `wifi_prov`'s public API | `App/drivers/uart_bridge_ext_wifi.c:404` (split out of `uart_bridge_ext.c`) |
+| `bx_flash_worker` | 5 | configurable (`BX_WORKER_STACK`) | **Missing from this inventory until 2026-09-04.** Single worker for flash-touching UART-bridge-extension jobs (dispatched serially off a queue, plain `xTaskCreatePinnedToCore`, not the `*WithCaps` retry helper the other `uart_bridge_ext_*` tasks use — see the file's own comment) | `App/drivers/uart_bridge_ext.c:324` |
 | `uart_owner_task` / `uart_owner_evt_task` | configurable (`UART_OWNER_TASK_PRIORITY`) | configurable | `espInterfaces/uart_owner.c` — single owner of the PC-link UART port (TX/RX + event handling) underneath `uart_protocol`/`uart_bridge*` | `App/drivers/espInterfaces/uart_owner.c:194`, `:211` |
 | `uart_proto_rx` | configurable | configurable | `espInterfaces/uart_protocol.c` — frame parser reading off `uart_owner`'s RX path | `App/drivers/espInterfaces/uart_protocol.c:309` |
 | `esp_spi_owner` (`spi_owner_task`) | configurable | configurable | `espInterfaces/esp_spi_owner.c` — single owner of the shared SPI bus request queue, underneath `thermo_owner`/MAX31856 | `App/drivers/espInterfaces/esp_spi_owner.c:81` |
 | `i2c_owner_task` | configurable | configurable | `espInterfaces/i2c_owner.c` — single owner of the shared I2C bus request queue, underneath `kiln_io_owner`/SX1509 | `App/drivers/espInterfaces/i2c_owner.c:136` |
-| `safety_poll` | `SAFETY_POLL_TASK_PRIORITY` | `SAFETY_POLL_TASK_STACK` | `safety_link.c` — polls/exchanges frames with the RP2040 safety processor over the isolated link, builds the periodic context broadcast | `App/drivers/safety_link.c:1298` |
-| `lvgl` (`lvgl_port_task`) | 4 | 8192 | **The only task allowed to call any `lv_*` function.** Owns the on-device LCD UI entirely | `App/drivers/lvgl_port.c:309` |
-| `monitor_task` | 4 | 3072 | Heartbeat/liveness monitor | `App/monitor_task.c:104` |
-| `gpio_probe` | 3 | 3072 | Debug GPIO probing task (bench/dev tool) | `App/drivers/gpio_probe.c:304` |
-| `screen_idle` | 3 | 3072 | LCD idle/screensaver timer | `App/drivers/screen_idle.c:153` |
-| `wifi_mode_ui` / `wifi_connect_ui` / `wifi_scan_ui` | 5 | 4096 | `ui_page_network.c`'s three ad-hoc job-struct worker tasks (Scan/mode-switch/connect), predating and **not yet migrated onto** `wifi_prov_owner`'s queue — see §3 | `App/drivers/ui_page_network.c:251,535,628` |
+| `safety_poll` | `SAFETY_POLL_TASK_PRIORITY` | `SAFETY_POLL_TASK_STACK` | `safety_link.c` — polls/exchanges frames with the RP2040 safety processor over the isolated link, builds the periodic context broadcast | `App/drivers/safety_link.c:533` |
+| `lvgl` (`lvgl_port_task`) | 4 | 8192 | **The only task allowed to call any `lv_*` function.** Owns the on-device LCD UI entirely | `App/drivers/lvgl_port.c` (line unverified this pass; not spot-checked) |
+| `monitor_task` | 4 | 3072 | Heartbeat/liveness monitor | `App/monitor_task.c:130` |
+| `gpio_probe` | 3 | **6144** (STALE — was 3072, corrected 2026-09-04) | Debug GPIO probing task (bench/dev tool) | `App/drivers/gpio_probe.c:305` |
+| `screen_idle` | 3 | **6144** (STALE — was 3072, corrected 2026-09-04) | LCD idle/screensaver timer | `App/drivers/screen_idle.c:326` |
+| `wifi_mode_ui` / `wifi_connect_ui` / `wifi_scan_ui` / `wifi_ap_id_ui` | 5 | 4096 | **STALE, corrected 2026-09-04**: `ui_page_network.c` split — `wifi_connect_ui`/`wifi_scan_ui` moved to `ui_page_network_manage.c`, `wifi_mode_ui` stayed, and a FOURTH task, `wifi_ap_id_ui` (AP-identity worker), was added and was missing from this inventory entirely. All four are still ad-hoc job-struct worker tasks predating and **not yet migrated onto** `wifi_prov_owner`'s queue — see §3 | `App/drivers/ui_page_network.c:271` (`wifi_mode_ui`), `:585` (`wifi_ap_id_ui`), `App/drivers/ui_page_network_manage.c:296` (`wifi_connect_ui`), `:378` (`wifi_scan_ui`) |
 | `ota_pico_relay` | task-supplied | `OTA_PICO_RELAY_TASK_STACK` | Relays an OTA image to the Pico safety processor over the link | `App/drivers/ota_pico_relay.c:672` |
 | `ota_confirm` | task-supplied | 3072 | One-shot: confirms an ESP-side OTA rollback candidate | `App/main.c:695` |
 | `factory_reset_reboot` | `tskIDLE_PRIORITY+1` | 2048 | One-shot: reboots after a factory-reset request | `App/drivers/factory_reset.c:104` |
