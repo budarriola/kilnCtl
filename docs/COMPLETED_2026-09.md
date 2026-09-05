@@ -1274,3 +1274,35 @@ bench — S1's absolute ceiling was armed for the first time in the project.
 writes are refused whenever the relay owner is `ARMED` (steady state ~60 s
 after boot), so the only write window is the boot GRACE period — nothing in
 the UI, API or error text said so before this was found.
+
+## M7 — repo reorganisation, closed items full detail, moved 2026-09-04
+
+Moved from `ROADMAP.md` M7. Both items below are done; the one remaining
+open item (`hardware/UnitTestFixture` still unopened) stayed in `ROADMAP.md`.
+
+- [x] `pdfMcp/` moved under `tools/` — 2026-08-28. Its own running `pdf-mcp.exe`
+      process blocked a plain rename the same way `mykicadMcp`'s would, so
+      `tools/pdfMcp/` is a copy, not a move; `.mcp.json` updated to the new
+      path. The stale root-level copy cleans up on the next session restart,
+      once nothing holds it open
+- [x] `mykicadMcp/` moved under `tools/` — 2026-08-28, as its own dedicated pass
+      per the plan above: stopped the `kicad` server (`mcp_servers.ps1 stop
+      -Server kicad`), moved the submodule (a directory-rename `git mv` hit
+      the same "Permission denied" this repo's original hardware/firmware
+      split ran into — worked around the documented way, pre-creating the
+      destination and moving children individually; one stale abandoned
+      `.claude/worktrees/` leftover from an unrelated old session couldn't be
+      moved and was left behind, harmless debris, not part of the submodule's
+      tracked content), fixed the submodule's own `.git` gitdir pointer and
+      `core.worktree` for its new depth (the actual cause of a first attempt
+      silently re-adding it as 43 individual file blobs instead of one
+      gitlink — caught by `git ls-files -s` showing `100644` entries instead
+      of a single `160000`, not assumed away), updated `.gitmodules`,
+      `mcp_servers.ps1`, and all 8 of the 9 `.claude/settings.json` allowlist
+      entries with an unambiguous path (the 9th, `../mykicadMcp/...`, has no
+      recoverable original working directory to translate against and was
+      left to simply stop matching — the safe direction, a future prompt
+      rather than a silently wrong grant). Verified: `git submodule status`
+      resolves all three submodules, the `kicad` server restarted clean from
+      the new path and answered a real `kicad_call`, and the submodule's own
+      110-test suite passed unchanged from its new location

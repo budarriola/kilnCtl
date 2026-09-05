@@ -1,13 +1,19 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep cleanup
-> pass (second sweep) — closed/struck-through narrative moved to
+> **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep audit +
+> third sweep — verified the two prior sweeps (M10/M11/M12a/M13/M14 closed
+> narrative moved to `docs/COMPLETED_2026-09.md`) moved nothing that wasn't
+> actually finished, dropped no durable lesson, and left both "verified by
+> READING THE BOARD" operational notes and every open item's text untouched;
+> then moved M7's two closed submodule/tool-move items out the same way,
+> leaving its one open item (`hardware/UnitTestFixture` unopened) inline.
+> Cross-reference anchors into `docs/COMPLETED_2026-09.md` checked against its
+> section headings. (Prior review: closed/struck-through narrative moved to
 > `docs/COMPLETED_2026-09.md` per this file's own "a finished item leaves this
 > plan" rule: the "Software, doable now" table, the "What is actually left"
-> closeout paragraphs, M12a, and now also M10 (fully closed, one-line
-> pointer), M11 (fully closed, one-line pointer) and M13/M14's landed
-> checklists (M13's standing rule and clearing-semantics note kept verbatim);
-> no open item's text was changed. (Prior review: M15 CLOSED — all 22
+> closeout paragraphs, M12a, M10, M11 and M13/M14's landed checklists (M13's
+> standing rule and clearing-semantics note kept verbatim); no open item's
+> text was changed.) (Prior review: M15 CLOSED — all 22
 > architecture-review findings landed same day, full detail in
 > `docs/COMPLETED_2026-09.md`; §1 nuisance-rejection coverage (S3/S4/S6a/S7/S9/
 > S10) and payload-decoder fuzzing closed against `GUARD_TEST_MATRIX.md`;
@@ -966,38 +972,15 @@ in `firmware/KilnFW/TODO.md` and `docs/UI_PLAN.md`; two hazards worth reuse
 were promoted to the decisions table below (internal-SRAM exhaustion at task
 creation, and the UART owner's per-transfer heap churn).
 
-## M7 — Repo reorganisation · *done 2026-08-16, two items open*
+## M7 — Repo reorganisation · *done 2026-08-16, one item open*
 
 Owned by [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md). Tree split into
 `hardware/`/`firmware/`/`tools/`/`docs/`, library tables and submodule paths
-fixed, fresh-clone `mainBoard` open confirmed 2026-08-19.
+fixed, fresh-clone `mainBoard` open confirmed 2026-08-19. `pdfMcp/` and
+`mykicadMcp/` both moved under `tools/` (2026-08-28); full detail, including
+the submodule-move gitdir/allowlist fixes:
+[`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m7--repo-reorganisation-closed-items-full-detail-moved-2026-09-04).
 
-- [x] `pdfMcp/` moved under `tools/` — 2026-08-28. Its own running `pdf-mcp.exe`
-      process blocked a plain rename the same way `mykicadMcp`'s would, so
-      `tools/pdfMcp/` is a copy, not a move; `.mcp.json` updated to the new
-      path. The stale root-level copy cleans up on the next session restart,
-      once nothing holds it open
-- [x] `mykicadMcp/` moved under `tools/` — 2026-08-28, as its own dedicated pass
-      per the plan above: stopped the `kicad` server (`mcp_servers.ps1 stop
-      -Server kicad`), moved the submodule (a directory-rename `git mv` hit
-      the same "Permission denied" this repo's original hardware/firmware
-      split ran into — worked around the documented way, pre-creating the
-      destination and moving children individually; one stale abandoned
-      `.claude/worktrees/` leftover from an unrelated old session couldn't be
-      moved and was left behind, harmless debris, not part of the submodule's
-      tracked content), fixed the submodule's own `.git` gitdir pointer and
-      `core.worktree` for its new depth (the actual cause of a first attempt
-      silently re-adding it as 43 individual file blobs instead of one
-      gitlink — caught by `git ls-files -s` showing `100644` entries instead
-      of a single `160000`, not assumed away), updated `.gitmodules`,
-      `mcp_servers.ps1`, and all 8 of the 9 `.claude/settings.json` allowlist
-      entries with an unambiguous path (the 9th, `../mykicadMcp/...`, has no
-      recoverable original working directory to translate against and was
-      left to simply stop matching — the safe direction, a future prompt
-      rather than a silently wrong grant). Verified: `git submodule status`
-      resolves all three submodules, the `kicad` server restarted clean from
-      the new path and answered a real `kicad_call`, and the submodule's own
-      110-test suite passed unchanged from its new location
 - [ ] `hardware/UnitTestFixture` KiCad project still unopened (the other three
       projects were confirmed clean 2026-08-16)
 
