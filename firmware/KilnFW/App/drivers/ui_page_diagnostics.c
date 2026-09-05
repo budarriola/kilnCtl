@@ -981,7 +981,6 @@ static lv_obj_t *build_full_text_row(lv_obj_t *parent, const char *initial_text)
  * page as a whole. */
 static void build_thermo_fault_row(lv_obj_t *parent, uint8_t channel, lv_color_t accent)
 {
-    (void)channel;
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_set_width(row, lv_pct(100));
     lv_obj_set_flex_grow(row, 1);
