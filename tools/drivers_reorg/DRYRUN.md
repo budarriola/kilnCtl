@@ -167,7 +167,55 @@ Tiers (decision A keeps the same grouping, decision D moves `sim` up):
 `ui/http/bridge/sim` (top) -> `control/safety/persist/net` (mid) ->
 `owners/hw` (lower) -> `common` (bottom-most, decision B).
 
-**22 upward includes remain** (down from 73 in the prior pass -- decisions B
+**UPDATE (2026-09-05, coordinator pass on Fix 4/5/6):** applied. Decision D
+was reverted -- `sim` moved back to the bottom tier (`owners/hw/sim`) in
+`plan_moves.ps1`'s `$tierOf`, since it is a hardware substitute, not a
+top-tier orchestrator; this resolved the 4 Fix-4 `control -> sim_backend.h`
+findings for free (`autotune_engine_internal.h`, `profile_executor.c`,
+`profile_executor_relay_io.c`, `profile_executor_run.c` all sit at the same
+tier as `sim` now). Fix 5's five owner-interlock pairs are now a named
+allowlist in the verifier (`$allowedUpwardIncludes` in `plan_moves.ps1`,
+keyed `"<includer basename>|<included basename>"`) rather than silently
+tolerated -- any *other* upward include from those same files still reports.
+Fix 6 shipped: a new `firmware/KilnFW/App/drivers/flash_worker.h` declares
+only `uart_bridge_ext_run_on_flash_worker()` (with the re-entrancy hazard
+documented on it directly); `log_store_mount.c` now includes it instead of
+`uart_bridge.h`, and `uart_bridge.h` itself `#include`s it back so the
+declaration has one source. Mapped to `common` in `mapping.csv` (it includes
+only `esp_err.h`, nothing above `common`). Grepped the rest of `drivers/`
+for other `uart_bridge.h` includes that exist solely for this call: none --
+every other hit is either the bridge family itself (`uart_bridge*.c`,
+`uart_bridge_ext*.c`, which need the full API) or a comment/prose match
+(`safety_cfg_store.c`, `autotune_engine_internal.h` already hand-declare the
+function and don't include the header at all -- the same false-positive
+shape the anchored regex above already accounts for).
+
+Sim reclassification surfaced two genuine (not false-positive) upward
+includes directly on `sim_backend.c` itself, now tier 2 (`sim`) same as
+`owners/hw`: `sim_backend.c:16 #include "wifi_provision_http.h"` [http] and
+`sim_backend.c:17 #include "zones_config_accessors.h"` [persist]. Checked
+what it actually calls from each -- one accessor apiece:
+`wifi_provision_http_get_server()` (line 332) and
+`zones_config_get_thermo_count()` (line 45). Both are narrow; per the
+group-4 instruction this is a **propose, don't implement** finding:
+- `wifi_provision_http.h`: already covered by Fix 3 below (a narrow
+  `wifi_provision_state.h` exposing `wifi_provision_http_get_server()` would
+  serve `sim_backend.c` too, alongside `factory_reset.c` and `wifi_prov.c`
+  -- no separate header needed, just add `sim_backend.c` to that fix's
+  consumer list once it lands). Confirmed via `git log -1 --format='%H %ci
+  %s' -- firmware/KilnFW/App/drivers/wifi_provision_http.h` that no other
+  session has narrowed it since the 2026-08-16 tree reorg -- it is still
+  the full httpd-handler header, so this is real, not stale.
+- `zones_config_accessors.h`: propose pulling
+  `zones_config_get_thermo_count()` (and any other single-purpose read-only
+  accessors `sim`/`hw`-tier files need) into a narrow
+  `zones_config_query.h` (home: `persist`, alongside
+  `zones_config_accessors.h`), with `zones_config_accessors.h` including it
+  back for its own use -- same split pattern as Fix 1/2/3. Not implemented
+  this pass; `sim_backend.c` is explicitly read-only for this task.
+
+**22 upward includes remain (now 5 after the above -- confirmed via a
+`plan_moves.ps1 -DryRun` re-run 2026-09-05)** (down from 73 in the prior pass -- decisions B
 and C's reclassifications resolved the other 51 without any code change,
 since they were all narrow shared-header cases exactly as flagged before).
 One entry from the prior pass, `safety_cfg_store.c [safety]:23 includes
@@ -216,7 +264,8 @@ companion, and have `ota_http.c` implement them there instead of in
 callers need from a narrow `wifi_provision_state.h` (net-tier, alongside
 `wifi_prov_internal.h`) instead of the full httpd-handler header.
 
-**Fix 4 -- `sim_backend.h` consumers in `control` are a direct consequence
+**Fix 4 -- RESOLVED 2026-09-05 (decision D reverted, see update above).**
+`sim_backend.h` consumers in `control` are a direct consequence
 of decision D, not a pre-existing gap.** 4 sites:
 `autotune_engine_internal.h [control]:80`, `profile_executor.c
 [control]:34`, `profile_executor_relay_io.c [control]:23`,
@@ -237,7 +286,8 @@ well-established pattern in this codebase (compare `kiln_io_owner.c`'s hw
 abstraction) -- either the split or an explicit exception comment resolves
 the finding.
 
-**Fix 5 -- `kiln_io_owner`/`relay_authority`'s interlock includes are very
+**Fix 5 -- RESOLVED 2026-09-05 (verifier allowlist added, see update
+above).** `kiln_io_owner`/`relay_authority`'s interlock includes are very
 likely a deliberate exception, not a bug.** 4 sites:
 `kiln_io_owner.c [owners]:16` (`danger_mode.h` [safety]),
 `kiln_io_owner.c [owners]:17` (`heat_interlock.h` [control]),
@@ -255,7 +305,8 @@ record the exception explicitly (a one-line comment at each `#include`, or
 a documented carve-out in the tier table) rather than attempting a header
 split that would only relocate the same coupling.
 
-**Fix 6 -- `log_store_mount.c [persist]:9` includes `uart_bridge.h`
+**Fix 6 -- RESOLVED 2026-09-05 (`flash_worker.h` shipped, see update
+above).** `log_store_mount.c [persist]:9` includes `uart_bridge.h`
 [bridge].** Real, single-purpose include:
 `uart_bridge_ext_run_on_flash_worker()`, the flash-safe-executor dispatch
 CLAUDE.md's "Flash worker re-entrancy"/"PSRAM stack + NVS = panic" notes

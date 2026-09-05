@@ -58,16 +58,18 @@ $rows = Import-Csv $MappingCsv
 # are subdirectories of the single `drivers` component,
 # firmware/KilnFW/App/drivers/<layer>/, not sibling App/<layer> components --
 # see HW_ABSTRACTION_PLAN.md's reorg section for the rationale).
-#   ui/http/bridge/sim (tier 0, top -- decision D puts sim here: the sim
-#     backend drives the system from above, same as ui/http/bridge)
+#   ui/http/bridge (tier 0, top)
 #     -> control/safety/persist/net (tier 1, mid)
-#       -> owners/hw (tier 2, bottom)
+#       -> owners/hw/sim (tier 2, bottom -- decision D REVERTED: sim is a
+#         hardware substitute, same tier as the real hw drivers it stands in
+#         for, not a top-tier orchestrator; control legitimately consumes
+#         sim_backend.h the same way it consumes a real driver header)
 #         -> common (tier 3, bottom-most -- decision B: pure leaf
 #           headers/utilities with no includes above this tier)
 $tierOf = @{
-    "ui" = 0; "http" = 0; "bridge" = 0; "sim" = 0
+    "ui" = 0; "http" = 0; "bridge" = 0
     "control" = 1; "safety" = 1; "persist" = 1; "net" = 1
-    "owners" = 2; "hw" = 2
+    "owners" = 2; "hw" = 2; "sim" = 2
     "common" = 3
 }
 
@@ -211,6 +213,24 @@ foreach ($r in $moveRows) {
     $layerOf[$bn] = Get-Layer $r.new_path
 }
 
+# Deliberate exceptions (coordinator-reviewed, not architecture violations):
+# the owner modules that arbitrate direct relay/GPIO access reach *up* to
+# consult the safety/control state that gates whether a write is allowed at
+# all -- CLAUDE.md's "Bypassed owner module bug class" note is explicit that
+# every relay write must route through these owners with interlocks
+# consulted, so an owner checking danger_mode/heat_interlock/ota_state/
+# safety_link before acting is the safety property, not a layering bug.
+# Keyed by "<includer basename>|<included basename>" so only these exact
+# pairs are suppressed -- any other upward include from these same files
+# still reports.
+$allowedUpwardIncludes = @{
+    "kiln_io_owner.c|danger_mode.h"   = $true
+    "kiln_io_owner.c|heat_interlock.h" = $true
+    "kiln_io_owner.c|ota_state.h"     = $true
+    "kiln_io_owner.h|safety_link.h"   = $true
+    "relay_authority.h|safety_link.h" = $true
+}
+
 $violations = @()
 $driversDir = Join-Path $RepoRoot "firmware/KilnFW/App/drivers"
 $srcFiles = Get-ChildItem -Path $driversDir -Recurse -File -Include *.c,*.h
@@ -235,9 +255,12 @@ foreach ($file in $srcFiles) {
                 if ($tierOf.ContainsKey($includedLayer)) {
                     $includedTier = $tierOf[$includedLayer]
                     if ($includerTier -gt $includedTier) {
-                        $violations += [pscustomobject]@{
-                            File = $bn; Layer = $includerLayer; Line = $i + 1
-                            Include = $incName; IncludedLayer = $includedLayer
+                        $allowKey = "$bn|$incName"
+                        if (-not $allowedUpwardIncludes.ContainsKey($allowKey)) {
+                            $violations += [pscustomobject]@{
+                                File = $bn; Layer = $includerLayer; Line = $i + 1
+                                Include = $incName; IncludedLayer = $includedLayer
+                            }
                         }
                     }
                 }

@@ -6,7 +6,7 @@
 #include "esp_spiffs.h"
 
 #include "log_store.h"
-#include "uart_bridge.h"
+#include "flash_worker.h"
 
 static const char *TAG = "log_store";
 
