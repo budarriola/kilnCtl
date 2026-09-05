@@ -84,9 +84,24 @@ the boot log's `running partition: '<name>'` line is now redundant for a normal
 flash — still useful for checking partition state independent of a flash, via
 `debug_check_partition_table()`. Pass `verify=False` only for bring-up when the
 board's HTTP stack isn't expected to be up yet (e.g. Wi-Fi not provisioned
-yet); when `verify=True` (the default) but the board just doesn't answer HTTP
-in time, the tool WARNS rather than failing, since that's not the same as
-confirming the wrong thing landed.
+yet). Verification tries an ordered list of candidate hosts (the address the
+board was actually observed answering at moments before the flash, first —
+2026-09-04 fixed a bug where it polled only the AP-fallback `192.168.4.1`
+immediately post-reset, before Wi-Fi re-associated, while the board was live
+on the LAN the whole time) and re-resolves on every poll attempt. A board that
+was demonstrably reachable pre-flash and answers at none of the candidates
+afterward is a hard verification failure; only a board that was never
+observed up (genuine bring-up) gets the soft WARNING instead of a failure,
+since that's not the same as confirming the wrong thing landed.
+
+Getting the board's own view of its health is one call: `get_heap_status` now
+carries `reset_reason`/`uptime_s` through and also checks
+`GET /api/crash_report`, printing a loud `UNACKNOWLEDGED CRASH REPORT` banner
+if the board panicked and nobody has reviewed it yet (`2cc90b0` — the previous
+version discarded `reset_reason` and never looked at crash_report at all, so a
+board that panicked and rebooted clean read as healthy). `capability_preflight`
+now refuses to start a run on a board with an unacknowledged crash regardless
+of what the run needs.
 
 `flash_firmware()` also records `git status --porcelain`/HEAD at flash time
 (reported in the result, persisted to `KilnFW/build/flash_provenance.json`)
@@ -223,6 +238,30 @@ replicates routing already drawn on one instance of a repeated block onto its si
 - Example tools: "List the components on the PCB", "Show me component R1 and its connections", "Provide details for net /MainControler/CLK"
 
 ## Firmware gotchas
+
+Symbolize a crash against the ELF that matches the RUNNING image, not
+`build/KilnCtrl.elf` — that path is whatever was built most recently and
+produces confident, wrong line numbers once the board is running an older
+flash. Use `build/elf_archive/KilnCtrl-<hash>.elf`, matched by embedded build
+timestamp against the board's `fw_build`.
+
+Run `tools/run_all_checks.ps1` with `-ExecutionPolicy Bypass`. Without it the
+script fails to load, and the Bash tool still reports exit 0 for the wrapper
+— an unbypassed run looks like a pass when nothing ran. Separately, SaftyFW
+host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
+`.claude/worktrees/...` path overflows the MSVC command line.
+
+A 2026-09-04 panic (`safety_poll`, `IllegalInstruction`, `exc_addr 0x0`) ran
+five hours unnoticed before `get_heap_status` was fixed to surface it (see
+the flash/OTA section above). `exc_addr 0x0` was a red herring: the real
+cause was a deliberate `abort()` from FreeRTOS's `configASSERT(pxQueue->uxItemSize
+== 0)` in `queue.c`, reached via `thermo_owner.c:286`'s `xSemaphoreTake` —
+the semaphore handle was non-null but its `StaticSemaphore_t` storage had
+been corrupted. Root cause: `s_lvgl_task_stack` (`lvgl_port.c:988`, 8192 B)
+sits close behind `thermo_owner.c`'s `s_slots[]` in `.bss`, and the
+pre-`51e1ef5` reentrant `lv_obj_invalidate()`-inside-flush-callback path
+(see that commit) could run the LVGL task stack deep enough to corrupt it.
+Fixed by `51e1ef5` and flashed.
 
 After splitting an oversized firmware file: grep `tools/`, `firmware/*/tools/`
 and `tools/PcTools/tests/` for the old filename *and* any renamed identifiers,
