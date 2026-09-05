@@ -8,7 +8,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#include "profile_executor.h"
+#include "profile_executor_state.h"
 #include "stack_margin.h"
 
 static const char *TAG = "boot_button";

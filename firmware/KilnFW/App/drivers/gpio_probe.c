@@ -29,7 +29,7 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 #include "freertos/task.h"
 
 #include "gpio_probe_denylist.h"
-#include "profile_executor.h"
+#include "profile_executor_state.h"
 #include "settings.h"
 #include "stack_margin.h"
 #include "uart_task_ids.h"

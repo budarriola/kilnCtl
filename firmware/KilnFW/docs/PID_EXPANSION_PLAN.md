@@ -4080,7 +4080,7 @@ same executor/feedforward machinery §3 already covers, not a new subsystem.
 `profile_executor.c`'s ramp-lock (~line 354-369) already detects "not
 achieving the commanded ramp rate": a zone is lagging when
 `|actual_c - target_c| > EXEC_RAMP_LOCK_BAND_C(zi)` (25 °C,
-`PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`, `profile_executor.h:638` — the value
+`PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`, `profile_executor.h:351` — the value
 `exec_threshold(zi, 3)` in `profile_executor_pid_tick.c` falls back to
 whenever no per-zone override is configured, true for every shipped
 config. CORRECTED 2026-09: this section previously said "3 °C" here, which

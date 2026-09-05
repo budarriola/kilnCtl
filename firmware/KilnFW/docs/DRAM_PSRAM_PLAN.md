@@ -232,7 +232,7 @@ confirmed on-chip, not just source.
     documented pattern): `telemetry_log_task()`'s frame carries, all live
     simultaneously across one loop iteration: `profile_exec_status_t fst`
     (contains `profile_exec_zone_status_t zones[MAX31856_CHANNEL_COUNT]`,
-    `profile_executor.h:555`), `autotune_engine_status_t ast`, `char
+    `profile_executor_state.h:336`), `autotune_engine_status_t ast`, `char
     line[TELEMETRY_LOG_LINE_BUF]` (320 B, `telemetry_log.c:68`), four
     `MAX31856_CHANNEL_COUNT`-sized `lag_prev_*` arrays, plus a
     `char firing_note[EVENT_LOG_NOTE_LEN]` (16 B) and, inside the per-zone
