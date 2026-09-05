@@ -52,7 +52,7 @@ default (K) rather than shipping disabled, but is *also* required for
 | `firing_margin_c` | 100 | °C | S1 | 🟠 | Added to the profile's peak. **`CHAMBER_AGREED` only** |
 | `overshoot_margin_c` | 75 | °C | S2 | 🟠 | Generous on purpose — ramp-end overshoot and TC placement spread both live inside this |
 | `overshoot_time_s` | 120 | s | S2 | 🟠 | Two minutes of sustained excess, not a transient |
-| `max_rate_c_per_min` | **333.3** (2026-09-05, was 0/off) | °C/min | S8 | 🟠 | Compiled record default is **2× the fastest `ramp_c_per_hr` in any of KilnFW's 28 built-in profiles** (`profiles_builtin_table.inc`): max is 9999.0 C/hr (four tied crystalline-glaze crash-cool segments, e.g. `FSCGCL` "Shimbo Crystal Celestite Schedule"), so 9999.0 / 60 × 2 = 333.3 C/min — permissive by construction, no shipped profile can trip it. **Still fields_set-gated** (`safety_core.c`'s `safety_core_load_guard_cfg()`): on an uncommissioned board the guard stays forced OFF (0.0f) exactly as before — this default only becomes the *armed* value once `0x0204` is explicitly written through commissioning, or is otherwise just the record's at-rest value. A bench rig should still commission its own tighter, measured value rather than rely on this one — see `COMMISSIONING.md` |
+| `max_rate_c_per_min` | **33.3** (2026-09-05, was 0/off) | °C/min | S8 | 🟠 | Compiled record default is **2× the fastest RISING `ramp_c_per_hr` in any of KilnFW's 28 built-in profiles** (`profiles_builtin_table.inc`). S8 (`safety_guards.c`) only trips on a positive (climbing) delta, so a fast COOLING segment cannot be the basis even though its declared rate is a larger number: the four tied 9999.0 C/hr segments (e.g. `FSCGCL` "Shimbo Crystal Celestite Schedule") are all crash-cool (target below the previous segment's) and are excluded. The fastest actual rising segment is 999.0 C/hr, `FSCGB1` "Shimbo Crystal Holding Pattern 2" stepping its holding-pattern target back up from 1075 C to 1100 C, so 999.0 / 60 × 2 = 33.3 C/min — permissive by construction, no shipped profile's rising ramp can trip it. **Still fields_set-gated** (`safety_core.c`'s `safety_core_load_guard_cfg()`): on an uncommissioned board the guard stays forced OFF (0.0f) exactly as before — this default only becomes the *armed* value once `0x0204` is explicitly written through commissioning, or is otherwise just the record's at-rest value. A bench rig should still commission its own tighter, measured value rather than rely on this one — see `COMMISSIONING.md` |
 | `rate_window_s` | 60 | s | S8 | 🟠 | |
 | `blind_grace_s` | 60 | s | S5 | 🔴🟠 | WARN immediately, TRIP after this. Long enough for a connector wiggle, short enough that a whole firing cannot run blind |
 | `frozen_window_s` | 600 | s | S11 | 🟠 | Matches `thermal_guard.c`'s `FROZEN_WINDOW_S`. Only armed while heat is happening |
@@ -183,9 +183,10 @@ default the field ships unset and its guard ships disabled — `mains_voltage_v`
 is the example, and `thermal_guard.h:67-75` is the precedent in this project.
 `max_rate_c_per_min` (section 2) is a partial exception since 2026-09-05: its
 *compiled record value* is a defensible, derived default (2× the fastest
-shipped built-in profile ramp) rather than a guess, but the guard it feeds
-still ships fields_set-gated OFF like the rest of this section — see section
-2's row for the exact mechanism.
+RISING shipped built-in profile ramp — S8 only trips on a climbing delta, so
+a fast cooling segment does not count) rather than a guess, but the guard it
+feeds still ships fields_set-gated OFF like the rest of this section — see
+section 2's row for the exact mechanism.
 
 **A guard that is off must say so.** The diagnostic frame carries which guards
 are active; the GUI shows it. A disabled guard that looks enabled is worse than

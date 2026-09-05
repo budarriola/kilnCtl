@@ -15,6 +15,18 @@
 #include "crc32.h" // bootloader/ -- to hand-assemble a legacy v1 record for the migration test
 #include "kilnlink/kilnlink_config_page.h"
 
+// S8 sanity-rate guard basis (2026-09-05, review fix): CONFIG_STORE_DEFAULT_
+// MAX_RATE_C_PER_MIN must stay reconciled with 2x the fastest RISING
+// built-in-profile ramp (999.0 C/hr, "FSCGB1" stepping 1075 C -> 1100 C --
+// see config_store.h's macro comment for why only rising segments count).
+// A _Static_assert was tried here first but this test binary is compiled by
+// cl.exe with no /std flag (see build_host_tests.ps1's main $cmd -- only the
+// separate fuzz-target line passes /std:c17), which does not recognize
+// _Static_assert at all; the runtime checks in test_default() below (which
+// independently recompute the 999.0/60*2 basis and compare it against both
+// the macro and the record it produces) are the reconciliation check
+// instead, per the review finding's "or a host-test check" alternative.
+
 static void test_pack_unpack_roundtrip(void)
 {
     TEST_SECTION("config_store_pack/unpack -- roundtrip");
@@ -202,24 +214,34 @@ static void test_default(void)
                "default format_version is current");
     TEST_CHECK(rec.seq == 0, "default seq is 0");
     TEST_CHECK(rec.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE, "default tc_type is K");
-    // S8 sanity-rate guard (2026-09-05): the compiled record default must be
-    // exactly 2x the fastest ramp_c_per_hr among KilnFW's built-in profiles
-    // (9999.0 C/hr, four tied crystalline-glaze crash-cool segments),
-    // converted to C/min -- 9999.0 / 60 * 2 = 333.3. This does NOT arm S8 by
-    // itself (safety_core_load_guard_cfg() still forces 0.0f unless
+    // S8 sanity-rate guard (2026-09-05, review fix): the compiled record
+    // default must be exactly 2x the fastest RISING ramp_c_per_hr among
+    // KilnFW's built-in profiles -- S8 (safety_guards.c) only ever trips on
+    // a positive (climbing) delta, so a fast COOLING segment cannot be the
+    // basis even though its declared rate is a larger number (the four tied
+    // 9999.0 C/hr segments are all crash-cool). The fastest actual rising
+    // segment is 999.0 C/hr ("FSCGB1" stepping 1075 C -> 1100 C), converted
+    // to C/min -- 999.0 / 60 * 2 = 33.3. This does NOT arm S8 by itself
+    // (safety_core_load_guard_cfg() still forces 0.0f unless
     // CONFIG_STORE_SET_MAX_RATE_C_PER_MIN is set -- see
     // test_safety_core_s8_wiring.c), it only checks the at-rest record value
     // documented in CONFIG_REFERENCE.md section 2.
     {
-        const float max_shipped_ramp_c_per_hr = 9999.0f;
-        const float expected_default = max_shipped_ramp_c_per_hr / 60.0f * 2.0f;
+        const float max_shipped_rising_ramp_c_per_hr = 999.0f;
+        const float expected_default = max_shipped_rising_ramp_c_per_hr / 60.0f * 2.0f;
+        // Real check: the record's default must match both the macro itself
+        // and the independently recomputed expected value -- not just be
+        // nonzero. If either config_store_default() stops using the macro,
+        // or the macro drifts from the documented basis, this fails.
+        TEST_CHECK(rec.max_rate_c_per_min == CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN,
+                   "default max_rate_c_per_min comes from the compiled macro");
         TEST_CHECK(rec.max_rate_c_per_min == expected_default,
-                   "default max_rate_c_per_min is 2x the max shipped built-in profile ramp "
-                   "(333.3 C/min)");
-        // Negative test: prove this check can actually fail. A deliberately
-        // wrong "old" constant (the previous 0.0f/off default) must NOT match.
-        TEST_CHECK(rec.max_rate_c_per_min != 0.0f,
-                   "default max_rate_c_per_min is no longer the old 0.0f/off value");
+                   "default max_rate_c_per_min is 2x the fastest RISING shipped built-in "
+                   "profile ramp (33.3 C/min)");
+        // Both checks were proven capable of failing by temporarily changing
+        // CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN in config_store.h to an
+        // unrelated value, observing the failure, and restoring it by hand
+        // -- see the commit message for this pass.
     }
     TEST_CHECK(rec.calibration_missing == true, "default calibration_missing is true");
     TEST_CHECK(rec.safety_tc_installed == 1u,

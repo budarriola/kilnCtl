@@ -48,6 +48,15 @@
 //     CONFIG_STORE_SET_* bit before trusting the value; the raw bytes when
 //     the bit is clear are documented in config_store_default()'s comment
 //     but are not a promise -- only the bit is authoritative.
+//     `max_rate_c_per_min` is a partial exception since 2026-09-05: the
+//     compiled RECORD now carries CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN
+//     (2x the fastest rising built-in-profile ramp) as its at-rest value
+//     instead of a bare 0.0f. That does not make it an armed default,
+//     though -- safety_core.c's safety_core_load_guard_cfg() (around lines
+//     393-394) still forces the value the guard actually runs with to 0.0f
+//     (S8 off) unless CONFIG_STORE_SET_MAX_RATE_C_PER_MIN has been set
+//     through commissioning, so the "no safe compiled-in ARMED default"
+//     rule this paragraph describes is otherwise unchanged for this field.
 //   - Three-outcome load in config_store_unpack(), mirroring the discipline
 //     KilnFW's NVS loaders use (see e.g. App/drivers/zones_http.c):
 //       * stored format_version == CONFIG_STORE_FORMAT_VERSION (2): load
@@ -169,19 +178,30 @@ extern "C" {
                                             // DOES know about max31856.h)
                                             // asserts the two agree.
 
-// S8 sanity-rate guard code default -- 2x the fastest ramp_c_per_hr found
-// across all 28 KilnFW built-in profiles (firmware/KilnFW/App/drivers/
-// profiles_builtin_table.inc), converted to C/min: max is 9999.0 C/hr (four
-// crystalline-glaze crash-cool segments tie for it, e.g. "FSCGCL" -- Shimbo
-// Crystal Celestite Schedule), so 9999.0 / 60 * 2 = 333.3 C/min. Unlike
-// CONFIG_STORE_DEFAULT_TC_TYPE this is NOT a "safe, documented default" in
-// the same sense -- it is deliberately permissive (every shipped profile
-// ramp, at 2x, cannot trip it), decided 2026-09-05 to replace the previous
-// "ships disabled" (0.0f) default. Still overridable through the normal
+// S8 sanity-rate guard code default -- 2x the fastest RISING ramp_c_per_hr
+// found across all 28 KilnFW built-in profiles (firmware/KilnFW/App/drivers/
+// profiles_builtin_table.inc). S8 (safety_guards.c) is a strictly rising-rate
+// guard -- it compares the signed temperature delta against the threshold,
+// so it can only ever trip while the setpoint is climbing, never while it is
+// falling. That means only segments whose target_c is ABOVE the previous
+// segment's target_c (or above the start temperature, for a profile's first
+// segment) are legitimate basis candidates; a segment's declared
+// ramp_c_per_hr is the same field regardless of direction, so a fast COOLING
+// segment (target_c dropping) must be excluded even though its number is
+// large. The four tied 9999.0 C/hr segments (e.g. "FSCGCL" -- Shimbo Crystal
+// Celestite Schedule) are all crash-COOL segments (target_c below the
+// previous segment's), so none of them qualify. The fastest RISING segment
+// across all 28 profiles is 999.0 C/hr, "FSCGB1" (Shimbo Crystal Holding
+// Pattern 2) stepping its holding-pattern target back up from 1075 C to
+// 1100 C -- so 999.0 / 60 * 2 = 33.3 C/min. Unlike CONFIG_STORE_DEFAULT_TC_TYPE
+// this is NOT a "safe, documented default" in the same sense -- it is
+// deliberately permissive (every shipped profile's actual rising ramp, at
+// 2x, cannot trip it), decided 2026-09-05 to replace the previous "ships
+// disabled" (0.0f) default. Still overridable through the normal
 // commissioning path (0x0204 / CONFIG_STORE_SET_MAX_RATE_C_PER_MIN); a bench
 // rig with a real measured max heating rate should commission its own
 // tighter value rather than rely on this one.
-#define CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN 333.3f
+#define CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN 33.3f
 
 // Highest tc_type/borrowed_type_expected byte that is a real, linearized
 // MAX31856 thermocouple type (MAX31856_TC_TYPE_T) -- duplicated as a literal
