@@ -4,6 +4,231 @@ Output of `tools/drivers_reorg/plan_moves.ps1 -DryRun` against the
 coordinator-revised `mapping.csv` (decisions A-E below). Nothing was applied;
 this whole pass is preparation only.
 
+## -1. Opus pre-apply review pass (2026-09-05, this session) -- 12 blockers fixed
+
+A second Opus review of `f4411bb` found 12 blockers before `-Apply` could
+ever be trusted. All 12 are fixed in `plan_moves.ps1`/`mapping.csv` this
+session; `stack_margin.h` was touched only transiently for negative test 8
+below and is byte-identical to HEAD afterward (`git diff` empty).
+
+1. **`build_host_tests.ps1`'s `Join-Path $driversDir "<name>"` bare-basename
+   form.** New `$joinPathPattern` in section 4b rewrites the quoted
+   basename argument to `"<layer>/<name>"` (e.g. `(Join-Path $driversDir
+   "pid.c")` -> `(Join-Path $driversDir "control/pid.c")`) -- confirmed via
+   `-PreviewDir` against all ~30+ occurrences (more than the "~30, lines
+   90-114/205-207/220" the coordinator named; every `Join-Path $driversDir
+   "<name>"` site across cmd1-cmd23 is covered, not just the three ranges
+   originally called out). The same pass expands any literal `/I`"$driversDir`"`
+   flag into one `/I` per layer subdir (`$layerNames`), since a bare
+   `#include` that used to resolve via `$driversDir`'s single flat directory
+   now needs the whole layer set on the include path.
+2. **`$candidateFiles` was `*.ps1,*.py` only.** `firmware/KilnFW/App/test`
+   now also scans `*.c,*.h` (every other search dir stays script-only) --
+   this is what makes the 153 `#include "../drivers/<file>"` host-test-mirror
+   lines rewritable at all; they were invisible to the old filter.
+3. **Path-qualified `espInterfaces/` includes inside `drivers/` itself.**
+   New section 4c scans `drivers/**/*.c,*.h` for bare `#include
+   "espInterfaces/<name>"` (no `App/drivers/`/`../drivers/` prefix -- these
+   are real in-tree production includes, not check-script literals) and
+   strips the segment: `gpio_probe.h:5`, `uart_bridge.h:6`,
+   `uart_bridge_internal.h:30`, `uart_log_bridge.h:5` all confirmed rewired
+   to bare `#include "uart_protocol.h"` in a `-PreviewDir` run (4/4 files, 4
+   lines).
+4. **`KILNCTL_GZIP_ASSETS` quoted asset literals must not be rewritten in
+   place.** Section 2 now carves that whole `set(...)` block out via a
+   placeholder before the generic per-literal rewrite runs, and splices it
+   back verbatim; a dedicated section 2c instead rewrites each of the 16
+   asset entries to `"<layer>/<basename>"` (they span more than one layer --
+   14 are `http`, but `ota_page.html` and `wifi_provision_page.html` are
+   `net` per `mapping.csv`) and restructures the `kilnctl_gz_src`/
+   `kilnctl_gz_out` pair so `kilnctl_gz_src` reads the layer-qualified path
+   while `kilnctl_gz_out` is rebuilt from `get_filename_component(...
+   NAME)` -- flat, so the `EMBED_TXTFILES`
+   `_binary_<name>_gz_start`/`_end` symbol names are provably unchanged by
+   this move. Verified in the `-PreviewDir` copy (see section 2c output
+   below) and by running the rewritten `CMakeLists.txt` through `cmake -P`
+   (see "Preview verification" below).
+5. **`tuning_recommendations_fallback.json` embedded in a longer string.**
+   The generic literal rewrite is now one combined regex per basename,
+   `(["/])<basename>"`, matching both the bare-quoted SRCS form and a
+   basename embedded after a `/` in a longer path, and echoing back
+   whichever character preceded it. `"${CMAKE_CURRENT_SOURCE_DIR}/tuning_
+   recommendations_fallback.json"` -> `.../http/tuning_recommendations_
+   fallback.json"`, confirmed in the preview copy.
+   **Bug found and fixed while implementing this**: the first version ran
+   the bare-quote and embedded-path substitutions as two *separate*
+   sequential `-replace` calls against the same mutated `$text`; the second
+   pass re-matched the `/` the first pass had just inserted before the new
+   `"<layer>/<basename>"` text and double-prefixed it (`"hw/hw/SX1509.c"`,
+   caught across the entire SRCS list in a `-PreviewDir` run). Fixed by
+   using one combined pattern/replacement per basename instead of two.
+6. **`INCLUDE_DIRS` regex swallowed the trailing newline+indent.** The
+   original `(?:"[^"]*"\s*)+` capture group's own trailing `\s*` includes
+   the whitespace *inside* group 1's captured value -- so "replace only
+   Groups[1]" alone (the first fix attempt) still deleted that whitespace
+   and reproduced `"ui"PRIV_INCLUDE_DIRS` in a `-PreviewDir` run. Real fix:
+   trim the replacement span to end right after the *last* `"` inside
+   group 1's captured text (`$lastQuoteIdx`), leaving every byte after it
+   -- including the newline and indentation before `PRIV_INCLUDE_DIRS` --
+   completely untouched. A whitespace-preservation assertion was added
+   (`$tailAfterOld -eq $tailAfterNew`, comparing the 40 chars following the
+   old and new spans) so a future edit that reintroduces this class of bug
+   fails loud instead of shipping a syntax error. `"."` is kept in the new
+   list (`$includeDirsEntries = @(".") + $layerNames`) per the coordinator's
+   instruction -- dropping it would have been an unstated behavior change.
+   Confirmed via `-PreviewDir`: `INCLUDE_DIRS "." "bridge" "common"
+   "control" "http" "hw" "net" "owners" "persist" "safety" "sim" "ui"` on
+   its own line, `PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"` still on
+   the very next line with its original indentation.
+7. **Section 0: CSV old_path/new_path duplicates and nonexistent old_path.**
+   New section 0a. Duplicate `old_path`/`new_path` rows are a pure
+   data-authoring bug independent of repo state, so they fail on *every*
+   invocation including `-DryRun` (negative-tested below). A nonexistent
+   `old_path` is allowed to be a *pending* row -- the coordinator explicitly
+   asked for a `profiles_store.h` mapping row "now" even though that file
+   was expected to land from another in-flight session -- so it only
+   hard-fails under `-Apply`; `-DryRun` reports it as a warning naming the
+   file. (As it happens, `profiles_store.h` had already landed on disk by
+   the time this pass ran, so the missing-old_path count is 0 in the
+   current dry run -- the -Apply-only gate is exercised by the mechanism,
+   not by this specific row, today.)
+8. **Section 5 (upward-include verifier) now hard-fails `-Apply`.**
+   Previously it only printed the list. `if ($violations.Count -gt 0 -and
+   $Apply) { exit 1 }` added -- negative-tested below by injecting a fake
+   upward include into a real driver header, confirming the count and the
+   named violation both appear, then reverting the file byte-for-byte.
+9. **Coordinator tier decisions applied.** `sim` moves from the bottom tier
+   (`owners/hw/sim`) to the MID tier (`control/safety/persist/net/sim`) in
+   `$tierOf` -- a sim backend legitimately reads config the way
+   control/persist/net do, not a bottom-tier device driver. `factory_reset.c`/
+   `.h` move from `persist` to `http` in `mapping.csv` (it registers an
+   httpd route, same as the rest of the `*_http.c` family). A `mapping.csv`
+   row for `firmware/KilnFW/App/drivers/profiles_store.h` (persist) was
+   added per instruction, ahead of/alongside another agent's work on that
+   file -- see finding 7 above for how the old_path-existence check treats
+   a pending row. The `profile_executor_run.c -> profiles_http.h` residual
+   itself was deliberately left untouched, as instructed.
+10. **Section 6 `$already` scoping bug.** `$already`/`$missingEntries` are
+    now computed once inside section 2b (from `$includeDirsEntries`, which
+    includes `"."`) and exposed via `$script:includeDirsAlreadyCount` /
+    `$script:includeDirsClauseMissing`, read back explicitly by section 6's
+    summary line, which now prints "INCLUDE_DIRS clause not found" by name
+    if section 2b couldn't locate the clause at all, instead of silently
+    treating a missing clause the same as "0 dirs to add".
+11. **Working-tree cleanliness gate for `-Apply`.** New `-AllowDirty`
+    switch; `-Apply` (without it) runs `git status --porcelain --
+    firmware/KilnFW/App/drivers firmware/KilnFW/App/test
+    firmware/KilnFW/App/drivers/CMakeLists.txt tools/` before touching
+    anything and refuses if it's non-empty, naming the dirty files. This
+    check was never exercised in this session (per the sandboxing rule,
+    `-Apply` itself is never invoked here) but was read-reviewed against
+    the current (dirty, per the session's own git status) tree by hand: the
+    `git status --porcelain -- <paths>` invocation and message format were
+    confirmed correct by inspection, not by running `-Apply`.
+12. **Markdown citations of `App/drivers/<file>[:line]`.** 111 `.md` files
+    are now scanned (`docs/`, `firmware/**/docs`, any `firmware/**/*.md`,
+    plus the root `ROADMAP.md`/`CLAUDE.md`/`TODO.md` family) through the
+    same `$siteRewritePattern`/rewrite loop as the check/test scripts --
+    111 files found, 25 of them actually cite a moved `App/drivers/<file>`
+    (part of the 641 total sites across 188 files in the final summary
+    below). `check_uri_handler_cap.ps1`,
+    `check_nvs_write_guard_coverage.ps1` and
+    `check_host_embed_symbols_defined.ps1` are explicitly excluded by name
+    from every scan (`$otherAgentOwnedScripts`) since another agent is
+    making them layout-agnostic in parallel -- this rewriter never touches
+    them, avoiding a conflicting edit.
+
+### Negative tests (both performed this session, both reverted)
+
+- **Finding 7 (mapping.csv duplicate row).** Appended a bogus row
+  (`firmware/KilnFW/App/drivers/pid.c,.../NEGATIVE_TEST_BOGUS_DUPLICATE.c,...`)
+  duplicating `pid.c`'s existing `old_path`, ran `plan_moves.ps1 -DryRun`:
+  exited 1 with `mapping.csv: duplicate old_path
+  'firmware/KilnFW/App/drivers/pid.c'`. Removed the row immediately after;
+  `mapping.csv` is back to 364 lines with zero `NEGATIVE_TEST` occurrences.
+- **Finding 8 (fake upward include).** Temporarily inserted `#include
+  "pid.h"` (control, tier 1) as the first line of
+  `firmware/KilnFW/App/drivers/stack_margin.h` (common, tier 3 -- a real
+  upward include by construction). `plan_moves.ps1 -DryRun` reported "2
+  upward include(s) remain" (up from the baseline 1) and named the
+  injected one explicitly: `stack_margin.h [common]:1 includes "pid.h"
+  [control] -- bottom-tier file including a higher-tier header`. Reverted
+  the single inserted line immediately after; `git diff -- firmware/KilnFW/
+  App/drivers/stack_margin.h` is empty (byte-identical to HEAD). This
+  demonstrates the exact detection `-Apply` gates on (finding 8) without
+  ever invoking `-Apply` itself, per this task's sandboxing rule.
+
+### Final refreshed dry-run summary (this session, after all 12 fixes)
+
+```
+=== 6. Dry-run diff preview (counts) ===
+  git mv                         : 359 file(s), 4 STAY (no-op)
+  CMakeLists SRCS rewrite        : 186 literal(s) in drivers/CMakeLists.txt, 0 in App/CMakeLists.txt
+  INCLUDE_DIRS rewrite           : 11 of 12 '.'+layer dir(s) to add (0 = already up to date)
+  Path-keyed site rewrite        : 641 line(s) across 188 file(s) (incl. markdown + Join-Path $driversDir sites)
+  espInterfaces/ include strip   : 4 line(s) across 4 file(s)
+  Unmapped 'drivers/<name>' hits : 40 (of which 0 would hard-fail -Apply)
+  Upward includes remaining      : 1 (would hard-fail -Apply)
+  Missing old_path row(s)        : 0 (would hard-fail -Apply; benign in -DryRun -- see section 0a)
+```
+
+The 0-genuinely-unmapped figure reflects one more fix made while writing
+this pass: `$knownPlaceholders` grew from 6 to ~30 entries to absorb two new
+false-positive shapes the markdown scan (finding 12) surfaced -- bare
+module-name prose mentions with no file extension (`board_temps`,
+`profiles_http`, `sim_backend`, ...) and UnitTestFw hardware-component
+citations whose enclosing line didn't happen to also say "UnitTestFw"
+(`AD9833.c`, `DcDac.c`, `ILI9488.c`, `PCF8575.c`, `SSD1306.c`). A second,
+smaller bug was fixed alongside it: `check_c_files_in_cmakelists.ps1`'s
+`Join-Path $driversDir "CMakeLists.txt"` (a STAY file, correctly never
+rewritten) was being tracked in `$unmapped` under a literal-PowerShell-call
+string shape that the genuinely-unmapped filter's basename extraction
+couldn't parse, so it spuriously counted as a hard-`-Apply`-failure
+candidate; now tracked as `"Join-Path/<basename>"`, matching the same shape
+the filter already handles for every other site.
+
+### Preview verification (`-PreviewDir`)
+
+`plan_moves.ps1 -DryRun -PreviewDir <scratch>` writes a rewritten copy of
+every file this script would touch under `<scratch>/<repo-relative-path>`,
+leaving the real tree untouched -- 194 files in the current run. Spot
+checks against the preview copy:
+- `firmware/KilnFW/App/drivers/CMakeLists.txt`: `INCLUDE_DIRS "." "bridge"
+  "common" "control" "http" "hw" "net" "owners" "persist" "safety" "sim"
+  "ui"` on one line, `PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"`
+  immediately after on its own line (finding 6, fixed). SRCS entries read
+  `"hw/SX1509.c"`, `"owners/kiln_io_owner.c"`, `"ui/lvgl_port.c"`, etc. --
+  single layer prefix, no `"hw/hw/..."` doubling (finding 5's fix
+  regression-checked). `KILNCTL_TUNING_REC_FALLBACK` reads
+  `"${CMAKE_CURRENT_SOURCE_DIR}/http/tuning_recommendations_fallback.json"`
+  (finding 5). The `KILNCTL_GZIP_ASSETS` block reads `"net/wifi_provision_
+  page.html" "http/main_page.html" ... "http/zones_page.html"` (14 http +
+  2 net, all 16 layer-qualified) and the loop body is
+  `get_filename_component(kilnctl_gz_basename "${asset}" NAME)` /
+  `set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")` /
+  `set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${kilnctl_gz_basename}.gz")`
+  (finding 4).
+- Ran the preview copy of `drivers/CMakeLists.txt` through `cmake -P`
+  directly (this repo has cmake 4.4.2 on PATH). It parsed cleanly past both
+  the `INCLUDE_DIRS` line and the entire `KILNCTL_GZIP_ASSETS` block --
+  `Found Python3` printed, then it reached the `execute_process` copying
+  `tuning_recommendations_fallback.json` and failed only on a *path*
+  (`FileNotFoundError` -- the preview dir doesn't contain a copy of the
+  actual asset files, only the rewritten scripts/CMakeLists.txt), not a
+  syntax error. That failure mode is expected and is exactly the evidence
+  requested: a real CMake syntax error (e.g. the pre-fix `"ui"PRIV_
+  INCLUDE_DIRS`) would have failed at the *parse* stage, before
+  `find_package(Python3)` ever ran.
+- `firmware/KilnFW/App/test/build_host_tests.ps1`: `(Join-Path $driversDir
+  "control/pid.c")`, `(Join-Path $driversDir "hw/max31856_codec.c")`, etc.
+  (finding 1).
+- `firmware/KilnFW/App/drivers/gpio_probe.h`: `#include "uart_protocol.h"`
+  (finding 3, espInterfaces/ prefix stripped).
+- `ROADMAP.md`/`CLAUDE.md`/firmware doc citations rewritten in place
+  (finding 12) -- 25 markdown files touched, 111 total scanned.
+
+## 0. Coordinator decisions applied this pass
+
 ## 0. Coordinator decisions applied this pass
 
 - **A -- layout deviation from the original plan.** Target directories are
@@ -104,6 +329,12 @@ this whole pass is preparation only.
   remaining) prints at the end of every dry run.
 
 ## 1. git mv plan
+
+**Refreshed 2026-09-05 (this session):** 359 files map into the eleven layer
+subdirs (`mapping.csv`, 363 rows minus the 4 STAY rows from decision A -- up
+from 358/362 in the prior pass: item 9 added the `profiles_store.h` row).
+No basename collisions across the eleven target dirs. Full list of `git mv`
+commands: run the script, or read `mapping.csv` directly (one row per file).
 
 358 files map into the eleven layer subdirs (`mapping.csv`, 362 rows minus
 the 4 STAY rows from decision A -- up from 354/358 in the prior pass: the
@@ -385,3 +616,31 @@ function (see the false-positive note above for the precedent), or split it
 into a narrow `flash_worker.h` at a shared tier (candidate: `common`, since
 it is a single function pointer dispatch with no other bridge-layer
 dependency) so both callers stop pulling in all of `uart_bridge.h`.
+
+## 5 (continued). Residuals refreshed 2026-09-05 (this session, item 9)
+
+Re-running `plan_moves.ps1 -DryRun` after moving `sim` to the MID tier
+(`control/safety/persist/net/sim`, superseding the "decision D reverted"
+bottom-tier placement above) drops the residual count from 4 to **1**:
+every `sim_backend.c`/`*_internal.h [control]` site that used to read
+`sim_backend.h [sim]` as an upward include is now same-tier (both MID), and
+the `sim_backend.c -> zones_config_query.h [persist]` site from Fix 4's
+"sim reclassification" discussion is likewise now same-tier. The
+`factory_reset.c -> ota_http.h` (Fix 2) and `factory_reset.c ->
+wifi_provision_http.h` (Fix 3) sites are also resolved: `factory_reset.c`
+itself moved to `http` (item 9), so both are now same-tier (`http -> http`)
+rather than `persist -> http`.
+
+**1 upward include remains**: `sim_backend.c [sim]:16 includes
+"wifi_provision_http.h" [http]` -- unaffected by the sim-tier change since
+`http` (tier 0) is still strictly above `sim`'s new tier (1). This is the
+same real, narrow dependency Fix 3 already proposed a resolution for
+(`wifi_provision_http_get_server()`, one accessor); `wifi_provision_state.h`
+already exists with exactly that accessor (item 9's narrow-header family),
+but `sim_backend.c` itself has not been repointed at it -- left as-is per
+the coordinator's "do not chase" instruction for this pass (that specific
+residual was named as an exception; this one is the same shape but was not
+named, so it's reported here rather than silently fixed out of scope).
+Confirmed via `plan_moves.ps1 -DryRun`'s section 5 output and negative-test
+8 above (which temporarily added a second, injected violation on top of
+this real one, then reverted it).

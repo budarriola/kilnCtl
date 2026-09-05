@@ -35,7 +35,17 @@
 [CmdletBinding()]
 param(
     [switch]$Apply,
-    [switch]$DryRun = $true
+    [switch]$DryRun = $true,
+    # Writes a rewritten copy of every file this script would edit into
+    # $PreviewDir (mirroring its repo-relative path) so the rewrite logic can
+    # be inspected/diffed without touching the real tree. Independent of
+    # -DryRun/-Apply: it runs in addition to whatever else this invocation
+    # does. Directories are created as needed; existing content at the same
+    # path is overwritten.
+    [string]$PreviewDir = $null,
+    # -Apply refuses (see the cleanliness gate below) if the working tree
+    # under the paths this script touches is dirty, unless this is set.
+    [switch]$AllowDirty
 )
 
 if ($Apply) { $DryRun = $false }
@@ -52,7 +62,84 @@ if (-not (Test-Path $MappingCsv)) {
     exit 1
 }
 
+if ($PreviewDir) {
+    New-Item -ItemType Directory -Force -Path $PreviewDir | Out-Null
+    Write-Host "Preview mode: rewritten copies will be written under $PreviewDir (real tree untouched by this)." -ForegroundColor Magenta
+}
+
+# Writes $Content to $RealPath's rewritten form. Always mirrors into
+# -PreviewDir (repo-relative path) when set, regardless of -DryRun/-Apply --
+# that is the whole point of -PreviewDir. Only writes the real file when this
+# is an actual -Apply run.
+function Write-RewrittenFile([string]$RealPath, [string]$Content, [System.Text.Encoding]$Encoding) {
+    $rel = $RealPath.Substring($RepoRoot.Length + 1)
+    if ($PreviewDir) {
+        $dest = Join-Path $PreviewDir $rel
+        $destDir = Split-Path $dest -Parent
+        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Force -Path $destDir | Out-Null }
+        [System.IO.File]::WriteAllText($dest, $Content, $Encoding)
+        Write-Host "  [preview] $rel"
+    }
+    if (-not $DryRun) {
+        [System.IO.File]::WriteAllText($RealPath, $Content, $Encoding)
+        Write-Host "  rewritten: $RealPath"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# -Apply working-tree cleanliness gate (finding 11). Runs before anything
+# else that could act on -Apply, so a dirty tree never gets git-mv'd or
+# rewritten out from under other in-flight work.
+# ---------------------------------------------------------------------------
+if ($Apply -and -not $AllowDirty) {
+    $cleanlinessPaths = @(
+        "firmware/KilnFW/App/drivers",
+        "firmware/KilnFW/App/test",
+        "firmware/KilnFW/App/drivers/CMakeLists.txt",
+        "tools/"
+    )
+    $dirty = git status --porcelain -- $cleanlinessPaths
+    if ($dirty) {
+        Write-Error "Refusing -Apply: working tree is dirty under $($cleanlinessPaths -join ', '). Commit/stash first, or pass -AllowDirty to override:`n$dirty"
+        exit 1
+    }
+}
+
 $rows = Import-Csv $MappingCsv
+
+# ---------------------------------------------------------------------------
+# 0a. mapping.csv integrity: duplicate old_path/new_path rows, and old_path
+#     entries that don't exist on disk (finding 7). Duplicates are a pure
+#     data-authoring bug independent of repo state, so they fail on every
+#     invocation including -DryRun (same posture as the completeness check
+#     below). A missing old_path is allowed to be a *pending* row (a file
+#     another in-flight session is about to add -- see profiles_store.h in
+#     mapping.csv) so it only hard-fails under -Apply; -DryRun reports it as
+#     a warning instead.
+# ---------------------------------------------------------------------------
+Write-Host "=== 0a. mapping.csv integrity (duplicates, old_path existence) ===" -ForegroundColor Cyan
+$dupOld = $rows | Group-Object old_path | Where-Object { $_.Count -gt 1 }
+$dupNew = $rows | Group-Object new_path | Where-Object { $_.Count -gt 1 }
+if ($dupOld -or $dupNew) {
+    if ($dupOld) { $dupOld | ForEach-Object { Write-Error "mapping.csv: duplicate old_path '$($_.Name)' ($($_.Count) rows)" } }
+    if ($dupNew) { $dupNew | ForEach-Object { Write-Error "mapping.csv: duplicate new_path '$($_.Name)' ($($_.Count) rows)" } }
+    exit 1
+}
+Write-Host "No duplicate old_path/new_path rows."
+
+$missingOldPath = $rows | Where-Object { -not (Test-Path (Join-Path $RepoRoot $_.old_path)) }
+if ($missingOldPath) {
+    $names = ($missingOldPath | ForEach-Object { $_.old_path }) -join "`n"
+    if ($Apply) {
+        Write-Error "Refusing -Apply: mapping.csv has $($missingOldPath.Count) old_path row(s) that do not exist on disk:`n$names"
+        exit 1
+    } else {
+        Write-Host "WARNING: $($missingOldPath.Count) old_path row(s) do not exist on disk yet (pending, e.g. profiles_store.h -- not a failure in -DryRun, but -Apply would refuse until the file lands or the row is removed):" -ForegroundColor Yellow
+        $missingOldPath | ForEach-Object { Write-Host "  $($_.old_path)" }
+    }
+} else {
+    Write-Host "All old_path rows exist on disk."
+}
 
 # ---------------------------------------------------------------------------
 # 0. Mapping completeness check -- FAIL if any real file under
@@ -80,17 +167,23 @@ Write-Host "All $($actualFiles.Count) files under firmware/KilnFW/App/drivers/**
 # firmware/KilnFW/App/drivers/<layer>/, not sibling App/<layer> components --
 # see HW_ABSTRACTION_PLAN.md's reorg section for the rationale).
 #   ui/http/bridge (tier 0, top)
-#     -> control/safety/persist/net (tier 1, mid)
-#       -> owners/hw/sim (tier 2, bottom -- decision D REVERTED: sim is a
-#         hardware substitute, same tier as the real hw drivers it stands in
-#         for, not a top-tier orchestrator; control legitimately consumes
-#         sim_backend.h the same way it consumes a real driver header)
+#     -> control/safety/persist/net/sim (tier 1, mid -- coordinator decision
+#       2026-09-05, item 9: sim moves back to MID, alongside
+#       control/safety/persist/net, superseding the earlier "decision D
+#       reverted" placement in owners/hw/sim. Rationale: a sim backend
+#       legitimately reads config the way control/persist/net do -- it is a
+#       system-level stand-in, not a bottom-tier device driver -- and the
+#       plan's own residual list (DRYRUN.md Fix 4) already showed control
+#       consumes sim_backend.h the same way it consumes a config/status
+#       header from this same tier, not the way it consumes a raw hw driver)
+#       -> owners/hw (tier 2, bottom -- bus/IO arbitration and real device
+#         drivers)
 #         -> common (tier 3, bottom-most -- decision B: pure leaf
 #           headers/utilities with no includes above this tier)
 $tierOf = @{
     "ui" = 0; "http" = 0; "bridge" = 0
-    "control" = 1; "safety" = 1; "persist" = 1; "net" = 1
-    "owners" = 2; "hw" = 2; "sim" = 2
+    "control" = 1; "safety" = 1; "persist" = 1; "net" = 1; "sim" = 1
+    "owners" = 2; "hw" = 2
     "common" = 3
 }
 
@@ -152,34 +245,138 @@ foreach ($r in $moveRows) {
     $literalMap[$oldRel] = $r.new_path -replace '^firmware/KilnFW/App/drivers/', ''
 }
 
+# finding 4: the KILNCTL_GZIP_ASSETS quoted literals (drivers/CMakeLists.txt)
+# must NOT be touched by the generic per-literal rewrite below -- they get a
+# dedicated structural rewrite instead (see "2c" below) since kilnctl_gz_out
+# must stay flat (unqualified basename) so the EMBED_TXTFILES
+# _binary_<name>_gz_start/_end symbol names don't change. Carve that block
+# out of $text before the generic pass runs, and splice it back in after.
+$gzipBlockPattern = '(?s)(set\(KILNCTL_GZIP_ASSETS.*?\r?\n\s*\))'
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
 foreach ($cmakeFile in @($DriversCmake, $AppCmake)) {
     if (-not (Test-Path $cmakeFile)) { continue }
     $text = Get-Content $cmakeFile -Raw
+
+    $gzipBlockMatch = [regex]::Match($text, $gzipBlockPattern)
+    $gzipPlaceholder = "@@KILNCTL_GZIP_ASSETS_BLOCK_PLACEHOLDER@@"
+    $gzipBlockText = $null
+    if ($gzipBlockMatch.Success) {
+        $gzipBlockText = $gzipBlockMatch.Value
+        $text = $text.Substring(0, $gzipBlockMatch.Index) + $gzipPlaceholder + $text.Substring($gzipBlockMatch.Index + $gzipBlockMatch.Length)
+    }
+
     $hits = 0
     foreach ($old in $literalMap.Keys) {
         # drivers/CMakeLists.txt's SRCS entries are bare quoted filenames
-        # ("MAX31856.c"), not path-qualified -- match the quoted literal.
-        $pattern1 = '"' + [regex]::Escape($old) + '"'
-        $m1 = [regex]::Matches($text, $pattern1)
-        $hits += $m1.Count
+        # ("MAX31856.c"); finding 5: a basename can ALSO appear embedded in
+        # a longer quoted path, e.g. "${CMAKE_CURRENT_SOURCE_DIR}/tuning_
+        # recommendations_fallback.json". Both shapes are matched by ONE
+        # regex -- the character immediately before the basename is either
+        # `"` (bare) or `/` (embedded), captured so it can be echoed back
+        # unchanged. This single combined pattern is essential, not just
+        # tidier: two separate sequential -replace passes (bare-quote first,
+        # then embedded-path) would have the second pass re-match the `/`
+        # the first pass just inserted before the new "<layer>/<basename>"
+        # text and double-prefix it (e.g. "hw/hw/SX1509.c") -- caught by a
+        # -PreviewDir run while developing this fix.
+        $pattern = '(["/])' + [regex]::Escape($old) + '"'
+        $hits += [regex]::Matches($text, $pattern).Count
     }
-    Write-Host "$cmakeFile : $hits literal quoted-filename occurrence(s) found"
+    if ($gzipBlockText) {
+        Write-Host "$cmakeFile : KILNCTL_GZIP_ASSETS block excluded from the generic rewrite (handled by 2c)"
+    }
+    Write-Host "$cmakeFile : $hits literal quoted-filename occurrence(s) found (outside KILNCTL_GZIP_ASSETS)"
     $cmakeHits[$cmakeFile] = $hits
-    if (-not $DryRun) {
-        foreach ($old in $literalMap.Keys) {
-            $newRel = $literalMap[$old]
-            $text = $text -replace ('"' + [regex]::Escape($old) + '"'), ('"' + ($newRel -replace '\\','/') + '"')
+
+    foreach ($old in $literalMap.Keys) {
+        $newRel = ($literalMap[$old] -replace '\\','/')
+        $pattern = '(["/])' + [regex]::Escape($old) + '"'
+        $text = [regex]::Replace($text, $pattern, { param($mm) $mm.Groups[1].Value + $newRel + '"' })
+    }
+
+    if ($gzipBlockText) {
+        $text = $text.Replace($gzipPlaceholder, $gzipBlockText)
+    }
+
+    if ($cmakeFile -eq $DriversCmake) {
+        # Don't write yet -- section 2c below still needs to apply the
+        # KILNCTL_GZIP_ASSETS structural rewrite on top of this same text;
+        # writing here and re-reading from disk in 2c would silently drop
+        # this generic-literal pass in -PreviewDir/-Apply (the two rewrites
+        # would clobber each other instead of composing).
+        $driversCmakeRewrittenText = $text
+        continue
+    }
+
+    # Preserve the file's original trailing-newline convention instead of
+    # always stripping it: Set-Content -NoNewline with no -Encoding writes
+    # the system ANSI codepage and drops the final newline. Write UTF-8
+    # without a BOM (matches how this repo's other generated scripts write
+    # text -- checked build_host_tests.ps1 and gen_build_info.cmake, neither
+    # emits a BOM) and keep whatever trailing newline the original had.
+    Write-RewrittenFile -RealPath $cmakeFile -Content $text -Encoding $utf8NoBom
+}
+
+# ---------------------------------------------------------------------------
+# 2c. KILNCTL_GZIP_ASSETS structural rewrite (finding 4). The 16 assets span
+#     more than one target layer (most are http, but ota_page.html and
+#     wifi_provision_page.html are net per mapping.csv), so a single
+#     "${CMAKE_CURRENT_SOURCE_DIR}/<layer>/" prefix constant can't work --
+#     each list entry becomes "<layer>/<basename>" instead, kilnctl_gz_src
+#     is built straight from that (picks up the layer), and kilnctl_gz_out
+#     is rebuilt from get_filename_component(... NAME) so it stays the flat
+#     basename -- EMBED_TXTFILES' _binary_<name>_gz_start/_end symbols are
+#     therefore unchanged by this move.
+# ---------------------------------------------------------------------------
+Write-Host "`n=== 2c. KILNCTL_GZIP_ASSETS structural rewrite ===" -ForegroundColor Cyan
+if (Test-Path $DriversCmake) {
+    # Chain onto the generic-literal-rewritten text from section 2 above
+    # (not a fresh read from disk) so the two rewrites compose instead of
+    # one clobbering the other.
+    $text2c = if ($driversCmakeRewrittenText) { $driversCmakeRewrittenText } else { Get-Content $DriversCmake -Raw }
+    $assetBlockMatch = [regex]::Match($text2c, $gzipBlockPattern)
+    if (-not $assetBlockMatch.Success) {
+        Write-Error "Could not locate the KILNCTL_GZIP_ASSETS block in $DriversCmake -- refusing to apply this rewrite."
+        if (-not $DryRun) { exit 1 }
+    } else {
+        $assetListText = $assetBlockMatch.Value
+        $assetLiterals = [regex]::Matches($assetListText, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
+        $newAssetListText = $assetListText
+        $gzAssetHits = 0
+        foreach ($asset in $assetLiterals) {
+            if ($literalMap.ContainsKey($asset)) {
+                $newRel = ($literalMap[$asset] -replace '\\','/')
+                $newAssetListText = $newAssetListText -replace ('"' + [regex]::Escape($asset) + '"'), ('"' + $newRel + '"')
+                $gzAssetHits++
+            }
         }
-        # Preserve the file's original trailing-newline convention instead of
-        # always stripping it (finding 4): Set-Content -NoNewline with no
-        # -Encoding writes the system ANSI codepage and drops the final
-        # newline. Write UTF-8 without a BOM (matches how this repo's other
-        # generated scripts write text -- checked build_host_tests.ps1 and
-        # gen_build_info.cmake, neither emits a BOM) and keep whatever
-        # trailing newline the original had.
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($cmakeFile, $text, $utf8NoBom)
-        Write-Host "  rewritten: $cmakeFile"
+        Write-Host "$($assetLiterals.Count) KILNCTL_GZIP_ASSETS entries, $gzAssetHits will gain a layer prefix"
+
+        $gzSrcOldLine = 'set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")'
+        $gzOutOldLine = 'set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${asset}.gz")'
+        $gzNewLines = 'get_filename_component(kilnctl_gz_basename "${asset}" NAME)' + "`r`n" +
+            '        set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")' + "`r`n" +
+            '        set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${kilnctl_gz_basename}.gz")'
+
+        if ($text2c -notmatch [regex]::Escape($gzSrcOldLine) -or $text2c -notmatch [regex]::Escape($gzOutOldLine)) {
+            Write-Error "Could not locate the kilnctl_gz_src/kilnctl_gz_out lines verbatim in $DriversCmake -- refusing to apply this rewrite (the file may have changed shape since this script was written)."
+            if (-not $DryRun) { exit 1 }
+        } else {
+            $newText2c = $text2c.Replace($assetListText, $newAssetListText)
+            $newText2c = $newText2c.Replace($gzSrcOldLine, $gzNewLines).Replace($gzOutOldLine, '')
+            # The .Replace($gzOutOldLine, '') above just deletes the old
+            # out-line text since $gzNewLines already supplies the
+            # replacement kilnctl_gz_out line; strip the now-empty line it
+            # leaves behind so indentation stays tidy.
+            $newText2c = $newText2c -replace '(\r?\n)[ \t]*(\r?\n)', '$1'
+            Write-Host "kilnctl_gz_src will read the asset's own '<layer>/<basename>' entry; kilnctl_gz_out stays flat via get_filename_component(NAME)."
+            # Update the running text, don't write yet -- 2b (INCLUDE_DIRS)
+            # below still needs to chain onto this same text; a single write
+            # happens after 2b so all three drivers/CMakeLists.txt rewrites
+            # (2, 2c, 2b) compose into one file instead of clobbering.
+            $driversCmakeRewrittenText = $newText2c
+        }
     }
 }
 
@@ -190,38 +387,84 @@ foreach ($cmakeFile in @($DriversCmake, $AppCmake)) {
 # ---------------------------------------------------------------------------
 Write-Host "`n=== 2b. INCLUDE_DIRS rewrite ===" -ForegroundColor Cyan
 $layerNames = $tierOf.Keys | Sort-Object
-$includeDirsList = ($layerNames | ForEach-Object { "`"$_`"" }) -join ' '
+# finding 6: KEEP "." in the list -- it is the existing bare-include root
+# ("." resolves the huge majority of same-directory bare includes today) --
+# dropping it would be an unstated behavior change, not just a reformat.
+# "espInterfaces" is dropped: that subfolder is flattened into owners/ by
+# the move, so it no longer exists as a name on the include path.
+$includeDirsEntries = @(".") + $layerNames
+$includeDirsList = ($includeDirsEntries | ForEach-Object { "`"$_`"" }) -join ' '
 $includeDirsPattern = 'INCLUDE_DIRS\s+((?:"[^"]*"\s*)+)'
+$script:includeDirsAlreadyCount = $null
+$script:includeDirsClauseMissing = $false
 if (-not (Test-Path $DriversCmake)) {
     Write-Error "$DriversCmake not found -- cannot rewrite INCLUDE_DIRS"
+    $script:includeDirsClauseMissing = $true
     if (-not $DryRun) { exit 1 }
 } else {
-    $cmakeText = Get-Content $DriversCmake -Raw
+    # Chain onto whatever section 2/2c already produced for this same file
+    # rather than re-reading from disk, so all three rewrites compose.
+    $cmakeText = if ($driversCmakeRewrittenText) { $driversCmakeRewrittenText } else { Get-Content $DriversCmake -Raw }
     $m = [regex]::Match($cmakeText, $includeDirsPattern)
     if (-not $m.Success) {
         Write-Error "Could not locate an INCLUDE_DIRS clause in $DriversCmake -- refusing to apply (finding 2: -Apply must refuse rather than silently skip this edit)."
+        $script:includeDirsClauseMissing = $true
         if (-not $DryRun) { exit 1 }
     } else {
-        $already = $layerNames | Where-Object { $m.Groups[1].Value -notmatch [regex]::Escape("`"$_`"") }
-        if (-not $already) {
-            Write-Host "INCLUDE_DIRS already lists all eleven layer subdirs -- no change needed (idempotent)."
+        $already = $includeDirsEntries | Where-Object { $m.Groups[1].Value -match [regex]::Escape("`"$_`"") }
+        $missingEntries = $includeDirsEntries | Where-Object { $m.Groups[1].Value -notmatch [regex]::Escape("`"$_`"") }
+        $script:includeDirsAlreadyCount = $already.Count
+        if (-not $missingEntries) {
+            Write-Host "INCLUDE_DIRS already lists '.' and all eleven layer subdirs -- no change needed (idempotent)."
         } else {
             Write-Host "INCLUDE_DIRS will become: INCLUDE_DIRS $includeDirsList"
-            if (-not $DryRun) {
-                $newCmakeText = $cmakeText.Substring(0, $m.Index) + "INCLUDE_DIRS $includeDirsList" + $cmakeText.Substring($m.Index + $m.Length)
-                $verify = [regex]::Match($newCmakeText, $includeDirsPattern)
-                $stillMissing = $layerNames | Where-Object { $verify.Groups[1].Value -notmatch [regex]::Escape("`"$_`"") }
-                if ($stillMissing) {
-                    Write-Error "INCLUDE_DIRS rewrite failed verification (still missing: $($stillMissing -join ', ')) -- refusing to write $DriversCmake"
-                    exit 1
+            # finding 6: replace ONLY Groups[1]'s span (the captured dir-list
+            # text), not the whole match -- the whole match's trailing `\s*`
+            # can swallow the newline+indentation before the next keyword
+            # (e.g. PRIV_INCLUDE_DIRS), which previously produced
+            # `"ui"PRIV_INCLUDE_DIRS` (a CMake syntax error) because that
+            # whitespace was deleted along with the old dir list.
+            $g = $m.Groups[1]
+            # $g.Value's own greedy `(?:"[^"]*"\s*)+` includes the trailing
+            # whitespace/newline after the LAST quoted entry as part of the
+            # capture (that's exactly how the original bug happened: the
+            # first version of this fix replaced "Groups[1]" verbatim,
+            # which still deleted that trailing whitespace along with the
+            # dir list). Trim the replacement span to end right after the
+            # last '"' in the group so the whitespace before the next
+            # keyword (PRIV_INCLUDE_DIRS) is left completely untouched.
+            $lastQuoteIdx = $g.Value.LastIndexOf('"')
+            $effectiveLen = $lastQuoteIdx + 1
+            $newCmakeText = $cmakeText.Substring(0, $g.Index) + $includeDirsList + $cmakeText.Substring($g.Index + $effectiveLen)
+            $verify = [regex]::Match($newCmakeText, $includeDirsPattern)
+            $stillMissing = $includeDirsEntries | Where-Object { $verify.Groups[1].Value -notmatch [regex]::Escape("`"$_`"") }
+            if ($stillMissing) {
+                Write-Error "INCLUDE_DIRS rewrite failed verification (still missing: $($stillMissing -join ', ')) -- refusing to write $DriversCmake"
+                if (-not $DryRun) { exit 1 }
+            } else {
+                # Also verify the whitespace immediately after the new list
+                # was preserved (the exact regression this fix targets):
+                # whatever directly follows the old dir list in the original
+                # text must still directly follow the new one.
+                $tailAfterOld = $cmakeText.Substring($g.Index + $effectiveLen, [Math]::Min(40, $cmakeText.Length - ($g.Index + $effectiveLen)))
+                $tailAfterNew = $newCmakeText.Substring($g.Index + $includeDirsList.Length, [Math]::Min(40, $newCmakeText.Length - ($g.Index + $includeDirsList.Length)))
+                if ($tailAfterOld -ne $tailAfterNew) {
+                    Write-Error "INCLUDE_DIRS rewrite changed the whitespace/text following the dir list (expected '$tailAfterOld', got '$tailAfterNew') -- refusing to write $DriversCmake"
+                    if (-not $DryRun) { exit 1 }
+                } else {
+                    $driversCmakeRewrittenText = $newCmakeText
                 }
-                $utf8NoBom2 = New-Object System.Text.UTF8Encoding($false)
-                [System.IO.File]::WriteAllText($DriversCmake, $newCmakeText, $utf8NoBom2)
-                Write-Host "  rewritten: $DriversCmake (INCLUDE_DIRS)"
             }
         }
     }
 }
+
+# Single write for drivers/CMakeLists.txt, after sections 2, 2c and 2b have
+# all had a chance to chain their edits onto $driversCmakeRewrittenText.
+if ($driversCmakeRewrittenText -and (Test-Path $DriversCmake)) {
+    Write-RewrittenFile -RealPath $DriversCmake -Content $driversCmakeRewrittenText -Encoding $utf8NoBom
+}
+
 Write-Host "NOTE (decision A): the single `drivers` component is retained -- CMakeLists.txt/Kconfig/README.md/gen_build_info.cmake all STAY at firmware/KilnFW/App/drivers/ (mapping.csv STAY rows, old_path == new_path). firmware/KilnFW/App/CMakeLists.txt still has no literal drivers/<file> paths (it only has REQUIRES drivers); the ~201 literal SRCS entries live entirely inside drivers/CMakeLists.txt and are rewritten in place above to their new '<layer>/<file>' relative path -- no new per-layer CMakeLists.txt fragments and no App/CMakeLists.txt restructuring needed."
 
 # ---------------------------------------------------------------------------
@@ -262,16 +505,53 @@ $searchDirs = @(
     "firmware/KilnFW/App/test"
 ) | Where-Object { Test-Path (Join-Path $RepoRoot $_) }
 
+# finding 12: check_uri_handler_cap.ps1, check_nvs_write_guard_coverage.ps1
+# and check_host_embed_symbols_defined.ps1 are being made layout-agnostic by
+# another agent in parallel -- excluded here by name so this rewriter never
+# edits them (avoiding a conflicting edit), noted again in DRYRUN.md.
+$otherAgentOwnedScripts = @(
+    'check_uri_handler_cap.ps1',
+    'check_nvs_write_guard_coverage.ps1',
+    'check_host_embed_symbols_defined.ps1'
+)
+
 $candidateFiles = foreach ($d in $searchDirs) {
-    Get-ChildItem -Path (Join-Path $RepoRoot $d) -Recurse -File -Include *.ps1,*.py |
+    # finding 2: App/test's host-test mirror sources (`#include "../drivers/
+    # X.c"`) are *.c/*.h, not *.ps1/*.py -- the original -Include list never
+    # matched any of the 153 such lines. Every other search dir stays
+    # script-only (tools/**, firmware/KilnFW/tools/** have no .c/.h that
+    # legitimately reference drivers/ this way).
+    $includePatterns = if ($d -eq "firmware/KilnFW/App/test") { @('*.ps1', '*.py', '*.c', '*.h') } else { @('*.ps1', '*.py') }
+    Get-ChildItem -Path (Join-Path $RepoRoot $d) -Recurse -File -Include $includePatterns |
         Where-Object {
             $_.FullName -notmatch '\\drivers_reorg\\' -and
             $_.FullName -notmatch '\\\.venv\\' -and
             $_.FullName -notmatch '\\node_modules\\' -and
             $_.FullName -notmatch '\\site-packages\\' -and
-            $_.FullName -notmatch '\\\.git\\'
+            $_.FullName -notmatch '\\\.git\\' -and
+            -not ($otherAgentOwnedScripts -contains $_.Name)
         }
 }
+
+# finding 12: markdown citations of "App/drivers/<file>[:line]" -- docs/,
+# firmware/**/docs, any *.md under firmware/**, and the root-level
+# ROADMAP.md/CLAUDE.md/TODO.md family. Folded into the same rewrite pass as
+# the check/test scripts below (same $siteRewritePattern, same basename ->
+# layer map) rather than a separate pass.
+$mdRoots = @(
+    "docs",
+    "firmware"
+) | Where-Object { Test-Path (Join-Path $RepoRoot $_) }
+$mdFiles = foreach ($d in $mdRoots) {
+    Get-ChildItem -Path (Join-Path $RepoRoot $d) -Recurse -File -Include *.md |
+        Where-Object { $_.FullName -notmatch '\\\.git\\' }
+}
+$rootMdFiles = @('ROADMAP.md', 'CLAUDE.md', 'TODO.md') | ForEach-Object {
+    $p = Join-Path $RepoRoot $_
+    if (Test-Path $p) { Get-Item $p }
+}
+$mdFiles = @($mdFiles) + @($rootMdFiles) | Where-Object { $_ }
+Write-Host "Markdown citation scan: $($mdFiles.Count) .md file(s) under docs/, firmware/**, and the root TODO/ROADMAP/CLAUDE family."
 
 $hitCount = 0
 # Single combined regex (alternation) instead of an O(files*lines*basenames)
@@ -324,12 +604,61 @@ $unmapped = New-Object System.Collections.Generic.HashSet[string]
 $rewriteFileCount = 0
 $rewriteLineCount = 0
 
-foreach ($file in $candidateFiles) {
+# finding 1: build_host_tests.ps1's `Join-Path $driversDir "<name>"` bare-
+# basename form (no "App/drivers/"/"../drivers/" prefix at all -- $driversDir
+# is a PowerShell variable holding that path) -- rewrite the quoted basename
+# argument to "<layer>/<name>" so Join-Path resolves into the new subdir.
+# Matches both quote styles used in the file ("pid.c" and 'zones_config_json.c').
+$joinPathPattern = 'Join-Path\s+\$driversDir\s+([\x22\x27])([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\1'
+
+$allRewriteTargets = @($candidateFiles) + @($mdFiles)
+foreach ($file in $allRewriteTargets) {
     $raw = Get-Content -Path $file.FullName -Raw -ErrorAction SilentlyContinue
     if ($null -eq $raw) { continue }
-    if ($raw -notmatch [regex]::Escape('App/drivers/') -and $raw -notmatch [regex]::Escape('../drivers/')) { continue }
+    $hasSiteHits = ($raw -match [regex]::Escape('App/drivers/')) -or ($raw -match [regex]::Escape('../drivers/'))
+    $hasJoinPathHits = $raw -match 'Join-Path\s+\$driversDir'
+    if (-not $hasSiteHits -and -not $hasJoinPathHits) { continue }
 
     $fileLineHits = 0
+
+    if ($hasJoinPathHits) {
+        $jpMatches = [regex]::Matches($raw, $joinPathPattern)
+        $jsb = New-Object System.Text.StringBuilder
+        $jLastEnd = 0
+        foreach ($jm in $jpMatches) {
+            $bn = $jm.Groups[2].Value
+            [void]$jsb.Append($raw.Substring($jLastEnd, $jm.Index - $jLastEnd))
+            if ($basenameLayer.ContainsKey($bn)) {
+                $q = $jm.Groups[1].Value
+                [void]$jsb.Append("Join-Path `$driversDir $q$($basenameLayer[$bn])/$bn$q")
+                $fileLineHits++
+            } else {
+                [void]$jsb.Append($jm.Value)
+                # Tracked as "Join-Path/<basename>" (not the literal
+                # PowerShell call text) so the genuinely-unmapped filter's
+                # `-replace '^.*/', ''` extraction below finds the same
+                # basename it would for a "prefix/basename" site hit -- e.g.
+                # check_c_files_in_cmakelists.ps1's `Join-Path $driversDir
+                # "CMakeLists.txt"` correctly falls out via $stayBasenames
+                # (CMakeLists.txt is a STAY row, never gets a layer prefix)
+                # instead of spuriously hard-failing -Apply.
+                [void]$unmapped.Add("Join-Path/$bn")
+            }
+            $jLastEnd = $jm.Index + $jm.Length
+        }
+        [void]$jsb.Append($raw.Substring($jLastEnd))
+        $raw = $jsb.ToString()
+
+        # Same file's `cl ... /I"$driversDir"` invocations need /I for every
+        # layer subdir too -- a bare #include that used to resolve via
+        # $driversDir's own directory (single flat dir) now needs one /I per
+        # layer, since the including and included file can land in
+        # different layer subdirs. Expand in place, once per literal
+        # occurrence of the flag.
+        $layerIncludeFlags = ($layerNames | ForEach-Object { '/I`"$driversDir\' + $_ + '`"' }) -join ' '
+        $raw = $raw -replace '/I`"\$driversDir`"', $layerIncludeFlags
+    }
+
     $rxMatches = [regex]::Matches($raw, $siteRewritePattern)
     $sb = New-Object System.Text.StringBuilder
     $lastEnd = 0
@@ -371,12 +700,41 @@ foreach ($file in $candidateFiles) {
         Write-Host "$relPath : $fileLineHits site(s) to rewrite"
         $rewriteFileCount++
         $rewriteLineCount += $fileLineHits
-        if (-not $DryRun) {
-            $utf8NoBom3 = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::WriteAllText($file.FullName, $newRaw, $utf8NoBom3)
-        }
+        Write-RewrittenFile -RealPath $file.FullName -Content $newRaw -Encoding $utf8NoBom
     }
 }
+
+# ---------------------------------------------------------------------------
+# 4c. espInterfaces/ bare-include prefix strip inside drivers/ itself
+#     (finding 3). Unlike the check/test-script sites above, these are real
+#     production #include lines with NO "App/drivers/"/"../drivers/" prefix
+#     at all -- gpio_probe.h:5, uart_bridge.h:6, uart_bridge_internal.h:30,
+#     uart_log_bridge.h:5 each say `#include "espInterfaces/uart_protocol.h"`
+#     bare, relative to the old flat drivers/ dir. Once espInterfaces/ is
+#     flattened into owners/ (mapping.csv), the segment must be dropped so
+#     the include becomes bare "uart_protocol.h", resolved via the new
+#     eleven-dir INCLUDE_DIRS (section 3) the same way every other
+#     same-tier bare include already works.
+# ---------------------------------------------------------------------------
+Write-Host "`n=== 4c. espInterfaces/ bare-include prefix strip ===" -ForegroundColor Cyan
+$espIncludePattern = '(#\s*include\s*")espInterfaces/([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)(")'
+$espHitFiles = 0
+$espHitLines = 0
+$driversSrcFilesForEsp = Get-ChildItem -Path $driversDirAll -Recurse -File -Include *.c,*.h
+foreach ($file in $driversSrcFilesForEsp) {
+    $raw = Get-Content -Path $file.FullName -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $raw) { continue }
+    if ($raw -notmatch 'espInterfaces/') { continue }
+    $espMatches = [regex]::Matches($raw, $espIncludePattern)
+    if ($espMatches.Count -eq 0) { continue }
+    $relPath = $file.FullName.Substring($RepoRoot.Length + 1) -replace '\\','/'
+    Write-Host "$relPath : $($espMatches.Count) espInterfaces/ include(s) to strip"
+    $espHitFiles++
+    $espHitLines += $espMatches.Count
+    $newRaw = [regex]::Replace($raw, $espIncludePattern, '$1$2$3')
+    Write-RewrittenFile -RealPath $file.FullName -Content $newRaw -Encoding $utf8NoBom
+}
+Write-Host "Total: $espHitLines espInterfaces/ include(s) across $espHitFiles file(s) $(if ($DryRun) {'would be rewritten'} else {'rewritten'})."
 
 # build_host_tests.ps1's own include-path handling, if any (finding 3, last
 # sentence) -- it is one of the $candidateFiles above (App/test), so it was
@@ -400,7 +758,29 @@ $stayBasenames = $stayRows | ForEach-Object { Split-Path $_.old_path -Leaf }
 # "App/drivers/test" meaning the test *directory*, and
 # check_bridge_reject_reason.ps1's "uart_bridge*.c" glob has its `*`
 # stripped by the basename regex, leaving the bare prefix "uart_bridge".
-$knownPlaceholders = @('X.c', 'foo.c', 'kilnlink', 'test', 'uart_bridge', 'uart_protocol')
+# finding 12's markdown scan surfaced a second wave of the same class: prose
+# that mentions a module by name without a file extension ("the board_temps
+# module", "see profiles_http's handler", etc. -- the basename regex's
+# extension group is optional so it still matches), and prose that names a
+# UnitTestFw hardware-component file (AD9833.c, DcDac.c, ILI9488.c,
+# PCF8575.c, SSD1306.c) whose enclosing line didn't happen to also say
+# "UnitTestFw" (the per-occurrence UnitTestFw exclusion in the rewrite loop
+# above is line-scoped, not file-scoped, so a citation on its own line in a
+# UnitTestFw doc without a same-line "UnitTestFw" mention still surfaces
+# here). rules_task.c/rules_http are prose references to the deleted
+# "Relays & Rules" engine (CLAUDE.md/CMakeLists.txt comment), not a file
+# that exists to be moved.
+$knownPlaceholders = @(
+    'X.c', 'foo.c', 'kilnlink', 'test', 'uart_bridge', 'uart_protocol',
+    'AD9833.c', 'AD9833.h', 'DcDac.c', 'DcDac.h', 'ILI9488.c',
+    'PCF8575.c', 'PCF8575.h', 'SSD1306.c', 'SSD1306.h',
+    'rules_http', 'rules_task.c',
+    'board_temps', 'dashboard_http', 'heater_output', 'nvs_report',
+    'ota_auth', 'ota_pico_relay', 'pid', 'profiles_http',
+    'relay_authority', 'sim_backend', 'stack_margin', 'thermal_guard',
+    'thermo_combine', 'ui_topbar', 'web_encoding', 'wifi_prov',
+    'wifi_provision_http', 'zones_http', 'espInterfaces'
+)
 $genuinelyUnmapped = $unmapped | Where-Object {
     $bn = $_ -replace '^.*/', ''
     -not ($stayBasenames -contains $bn) -and -not ($knownPlaceholders -contains $bn)
@@ -491,16 +871,35 @@ if ($violations.Count -eq 0) {
     $violations | ForEach-Object {
         Write-Host "  $($_.File) [$($_.Layer)]:$($_.Line) includes `"$($_.Include)`" [$($_.IncludedLayer)] -- bottom-tier file including a higher-tier header"
     }
+    # finding 8: a non-allowlisted upward include is an architecture
+    # violation the reorg is supposed to remove, not just a thing to note --
+    # -Apply must refuse rather than complete a move that leaves it in
+    # place. -DryRun (including a -PreviewDir run, which is still a dry
+    # run) only reports it, since that's exactly what dry runs are for.
+    if ($Apply) {
+        Write-Error "Refusing -Apply: $($violations.Count) non-allowlisted upward include(s) remain (listed above). Either resolve them (see DRYRUN.md section 5's proposed fixes) or add a reviewed entry to `$allowedUpwardIncludes."
+        exit 1
+    }
 }
 
 if ($DryRun) {
     Write-Host "`n=== 6. Dry-run diff preview (counts) ===" -ForegroundColor Cyan
     Write-Host "  git mv                         : $($moveRows.Count) file(s), $($stayRows.Count) STAY (no-op)"
     Write-Host "  CMakeLists SRCS rewrite        : $($cmakeHits[$DriversCmake]) literal(s) in drivers/CMakeLists.txt, $($cmakeHits[$AppCmake]) in App/CMakeLists.txt"
-    Write-Host "  INCLUDE_DIRS rewrite           : $(if ($already) { $already.Count } else { 0 }) layer dir(s) to add (0 = already up to date)"
-    Write-Host "  Path-keyed site rewrite        : $rewriteLineCount line(s) across $rewriteFileCount file(s)"
+    if ($script:includeDirsClauseMissing) {
+        Write-Host "  INCLUDE_DIRS rewrite           : INCLUDE_DIRS clause not found (see section 2b error above)"
+    } else {
+        $includeDirsMissingCount = $includeDirsEntries.Count - $script:includeDirsAlreadyCount
+        Write-Host "  INCLUDE_DIRS rewrite           : $includeDirsMissingCount of $($includeDirsEntries.Count) '.'+layer dir(s) to add (0 = already up to date)"
+    }
+    Write-Host "  Path-keyed site rewrite        : $rewriteLineCount line(s) across $rewriteFileCount file(s) (incl. markdown + Join-Path `$driversDir sites)"
+    Write-Host "  espInterfaces/ include strip   : $espHitLines line(s) across $espHitFiles file(s)"
     Write-Host "  Unmapped 'drivers/<name>' hits : $($unmapped.Count) (of which $($genuinelyUnmapped.Count) would hard-fail -Apply)"
-    Write-Host "  Upward includes remaining      : $($violations.Count)"
+    Write-Host "  Upward includes remaining      : $($violations.Count) $(if ($violations.Count -gt 0) {'(would hard-fail -Apply)'})"
+    Write-Host "  Missing old_path row(s)        : $($missingOldPath.Count) (would hard-fail -Apply; benign in -DryRun -- see section 0a)"
+}
+if ($PreviewDir) {
+    Write-Host "`nPreview copies written under: $PreviewDir"
 }
 
 Write-Host "`n=== Done ($(if ($DryRun) {'DRY RUN -- nothing changed'} else {'APPLIED'})) ===" -ForegroundColor Cyan
