@@ -236,6 +236,56 @@ policy tick makes (`dashboard_get_status()` alone does five MAX31856 SPI reads,
 a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
 
+**"Reset one side of a pair" bug class — no mechanical check, review by hand.**
+Four confirmed instances so far, all silent, all cost real debugging time:
+the PC-side `msg_index` restarting per benchproto connection while firmware's
+dedup ring/ACK cache lives for the MCU's boot lifetime; SimFW's
+`apply_reset()` zeroing `s_ring_next_seq` while `telemetry.c`'s consumer
+cursor was only ever initialised at boot (stranded cursor, `drain()` returns
+0 forever); `fault_sched.c` reseeding `s_seed` on `SET_SEED` while
+`fault_engine_t.rng_state` stayed hardcoded to `0` from
+`fault_engine_init(&s_engine, 0)` (every scenario's `seed:` was cosmetic);
+and `safety_link_frames.c`'s Pico-reboot handling, where `trip_seq` restarts
+at 0 on the Pico but the ESP's dedup `trip_last_seq` did not — fixed in the
+2026-08-27 audit (see the comment at `safety_link_frames.c` around the
+`boot_id_changed` block, which now explicitly clears `trip_last_seq` and
+names this class).
+
+What the four share structurally: two pieces of state, in different modules
+(sometimes different processes/processors entirely), joined by a semantic
+contract — equality, a monotonic derivation, a shared seed — that is never
+expressed as a shared type or a single owning function. A reset/reinit event
+is naturally written against only ONE side (the side whose lifecycle event it
+is: a new connection, a sim reset, a reseed command, a reboot), and nothing
+forces the other side's dependent state to be revisited. Both sides stay
+internally consistent afterward — no crash, no assertion — so only the
+*relationship* is broken, and it fails silently: health counters on the
+stalled side often read perfectly clean (`evt_seq_gap_count: 0`) precisely
+*because* nothing downstream of the break ever ran again. Comparing against
+a maintained reference model (`tools/virtual_simfw`'s
+`reset_client_evt_cursors()`, which the real firmware lacked) is a cheap way
+to spot the gap by hand.
+
+This was evaluated for a mechanical `check_*` and rejected: the four
+instances have no unifying syntactic shape (a per-connection PC/firmware
+pair; a struct field skipped by one initialiser but not its sibling; an RNG
+seed shadowed by an unrelated hardcoded one; a reboot-driven dedup counter)
+and no naming convention connects the two sides of any of them — a regex or
+AST rule general enough to catch all four would also flag the large majority
+of ordinary, correctly one-sided resets in this codebase (most reset
+functions have no paired counterpart at all — see `heater_output_reset()`
+zeroing its window state alone, which is correct: nothing outside it derives
+from that window). A *narrow* check pinned to one specific pair (e.g. a
+mirror-drift check like `approach_rate_cap_mirror_drift_check.py` uses) is
+honest only once a concrete pair is nailed down and stable; the current live
+candidate for one (`thermal_guard.c`'s window state vs. the PWM-chopping
+behaviour under investigation as of 2026-09-04) is mid-edit in another
+session's pass, so writing a check against it now would either duplicate
+that fix or break under it. **Standing practice instead:** whenever code
+resets a counter, window, timestamp, or seed, ask explicitly "who else holds
+a copy or a derived expectation of this?" before committing — the four
+instances above are the checklist.
+
 ## Key Architecture Notes
 
 ### Hierarchical Schematic Design
