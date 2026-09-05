@@ -247,6 +247,64 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
 #define UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL 5
 #define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL + 1)
 
+/* ---- No-scroll budget proofs --------------------------------------------
+ * Compile-time mirrors of this file's own header-comment arithmetic, same
+ * style ui_page_temperature.c/ui_page_network.c use (check_ui_budget_asserts.ps1
+ * pins these exact assertion texts -- see that script's own header comment).
+ *
+ * Safety & Board Health: a single-line stat/full-text row's height is its own
+ * top+bottom pad_all (UI_THEME_PADDING_PX/2, twice) plus one font line --
+ * build_stat_row() and build_full_text_row_accent() both use exactly this
+ * shape, so one constant covers both row kinds. 5 Safety Processor sentence
+ * rows plus MAX31856_CHANNEL_COUNT cold-junction rows, joined by
+ * build_page()'s own UI_THEME_PADDING_PX/2 inter-row gap. */
+#define UI_PAGE_DIAGNOSTICS_STAT_ROW_HEIGHT_PX \
+    (((UI_THEME_PADDING_PX / 2) * 2) + UI_THEME_FONT_LINE_HEIGHT_PX)
+
+#define UI_PAGE_DIAGNOSTICS_SAFETY_BH_TEXT_ROW_COUNT 5
+#define UI_PAGE_DIAGNOSTICS_SAFETY_BH_ROW_COUNT \
+    (UI_PAGE_DIAGNOSTICS_SAFETY_BH_TEXT_ROW_COUNT + MAX31856_CHANNEL_COUNT)
+
+#define UI_PAGE_DIAGNOSTICS_SAFETY_BH_WORST_CASE_HEIGHT_PX \
+    ((UI_PAGE_DIAGNOSTICS_SAFETY_BH_ROW_COUNT * UI_PAGE_DIAGNOSTICS_STAT_ROW_HEIGHT_PX) + \
+     ((UI_PAGE_DIAGNOSTICS_SAFETY_BH_ROW_COUNT - 1) * (UI_THEME_PADDING_PX / 2)))
+
+_Static_assert(UI_PAGE_DIAGNOSTICS_SAFETY_BH_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
+               "ui_page_diagnostics.c: 5 Safety Processor rows plus MAX31856_CHANNEL_COUNT "
+               "cold-junction rows exceed UI_THEME_PAGE_CONTENT_BUDGET_PX (ui_theme.h) -- shrink "
+               "a row or move content to another paged screen, don't widen the budget to match.");
+
+/* Thermocouple Faults: MAX31856_CHANNEL_COUNT flex_grow(1) rows sharing one
+ * page. Each row's own worst-case CONTENT (not its rendered flex-grow share)
+ * is a wrapped fault line (up to
+ * UI_PAGE_DIAGNOSTICS_THERMO_FAULT_LINE_MAX_LINES lines), a one-line status
+ * sentence, and the row's own top+bottom pad_all -- see
+ * build_thermo_fault_row(). Summing every row's worst-case content plus the
+ * inter-row gaps and checking that against the budget is the same proof
+ * shape ui_page_temperature.c's relay section uses for a fixed-height list;
+ * here it stands in for "does the page have enough room to give each
+ * flex-grow row at least its own worst-case content", since flex-grow alone
+ * provides no such guarantee -- an under-provisioned page silently CLIPS a
+ * row's content instead of scrolling or erroring (see this file's P4-C
+ * comment above on exactly that failure mode). */
+#define UI_PAGE_DIAGNOSTICS_THERMO_FAULT_LINE_MAX_LINES 2
+#define UI_PAGE_DIAGNOSTICS_THERMO_STATUS_LINE_MAX_LINES 1
+#define UI_PAGE_DIAGNOSTICS_THERMO_FAULT_ROW_CONTENT_PX \
+    (((UI_PAGE_DIAGNOSTICS_THERMO_FAULT_LINE_MAX_LINES + UI_PAGE_DIAGNOSTICS_THERMO_STATUS_LINE_MAX_LINES) * \
+      UI_THEME_FONT_LINE_HEIGHT_PX) + ((UI_THEME_PADDING_PX / 2) * 2))
+
+#define UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX \
+    ((MAX31856_CHANNEL_COUNT * UI_PAGE_DIAGNOSTICS_THERMO_FAULT_ROW_CONTENT_PX) + \
+     ((MAX31856_CHANNEL_COUNT - 1) * (UI_THEME_PADDING_PX / 2)))
+
+_Static_assert(UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
+               "ui_page_diagnostics.c: MAX31856_CHANNEL_COUNT Thermocouple Faults rows' worst-case "
+               "content exceeds UI_THEME_PAGE_CONTENT_BUDGET_PX (ui_theme.h) -- a flex_grow(1) row "
+               "given less than its own worst-case content silently clips it instead of scrolling; "
+               "shrink the per-row content or split channels across more pages, don't widen the "
+               "budget to match.");
+
+
 static ui_topbar_t s_topbar;
 static lv_obj_t *s_pages[UI_PAGE_DIAGNOSTICS_PAGE_COUNT];
 static uint8_t s_page_index;

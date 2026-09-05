@@ -172,6 +172,52 @@ static ui_topbar_t s_tb;
  * cross. */
 #define UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX 48
 
+/* ---- No-scroll budget proof --------------------------------------------
+ * Compile-time mirror of the file header comment's arithmetic, in the same
+ * style ui_page_temperature.c/ui_page_network.c use (check_ui_budget_asserts.ps1
+ * pins this exact assertion text -- see that script's own header comment).
+ *
+ * Info card: its own top+bottom pad_all (UI_THEME_PADDING_PX/2, twice), three
+ * stacked single-line labels (name/segcount/family), each pair joined by the
+ * card's own pad_gap (UI_THEME_PADDING_PX/4). */
+#define UI_PAGE_PROFILE_DETAIL_INFO_CARD_LINES 3
+#define UI_PAGE_PROFILE_DETAIL_INFO_CARD_HEIGHT_PX \
+    (((UI_THEME_PADDING_PX / 2) * 2) + (UI_PAGE_PROFILE_DETAIL_INFO_CARD_LINES * UI_THEME_FONT_LINE_HEIGHT_PX) + \
+     ((UI_PAGE_PROFILE_DETAIL_INFO_CARD_LINES - 1) * (UI_THEME_PADDING_PX / 4)))
+
+/* action_row's own raw height: the drawn button height plus the pad_ver
+ * top+bottom that ui_page_profile_detail_build() adds so the row's raw coords
+ * reach UI_THEME_MIN_TOUCH_TARGET_PX -- reads the SAME expression the build
+ * code evaluates (see that call site, just below this file's action_row
+ * setup), not a copy of the resulting number. */
+#define UI_PAGE_PROFILE_DETAIL_ACTION_ROW_HEIGHT_PX \
+    (UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX + \
+     (2 * ((UI_THEME_MIN_TOUCH_TARGET_PX - UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX) / 2)))
+
+/* s_plan_chart flex-grows to absorb whatever the fixed siblings leave over --
+ * it has no fixed height to sum here, but a chart squeezed to near-zero is
+ * not a useful preview, so this names the smallest height this page still
+ * considers worth showing rather than leaving that judgment unstated. Picked
+ * as a round number comfortably above "just the axis labels" -- not measured
+ * against a specific rendering, since the chart's actual worst case is always
+ * whatever the budget has left over once the fixed parts below are
+ * subtracted, and that remainder only shrinks if a fixed part above grows. */
+#define UI_PAGE_PROFILE_DETAIL_CHART_MIN_HEIGHT_PX 60
+
+/* Fixed parts (info card + action row) plus the chart's minimum useful
+ * height plus the two scr pad_gaps (UI_THEME_PADDING_PX/2 each) separating
+ * info card / chart / action row -- must fit UI_THEME_PAGE_CONTENT_BUDGET_PX
+ * even though the chart's real on-screen height is normally larger than its
+ * minimum (flex-grow gives it whatever is left over). */
+#define UI_PAGE_PROFILE_DETAIL_WORST_CASE_HEIGHT_PX \
+    (UI_PAGE_PROFILE_DETAIL_INFO_CARD_HEIGHT_PX + UI_PAGE_PROFILE_DETAIL_ACTION_ROW_HEIGHT_PX + \
+     UI_PAGE_PROFILE_DETAIL_CHART_MIN_HEIGHT_PX + (2 * (UI_THEME_PADDING_PX / 2)))
+
+_Static_assert(UI_PAGE_PROFILE_DETAIL_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
+               "ui_page_profile_detail.c: info card + action row + a minimum useful chart height "
+               "exceed UI_THEME_PAGE_CONTENT_BUDGET_PX (ui_theme.h) -- shrink a fixed row or "
+               "UI_PAGE_PROFILE_DETAIL_CHART_MIN_HEIGHT_PX, don't widen the budget to match.");
+
 static lv_obj_t *s_plan_chart;
 static lv_chart_series_t *s_plan_series;
 static int32_t s_plan_pts[UI_PAGE_PROFILE_DETAIL_CHART_POINTS];

@@ -55,6 +55,19 @@ $required = @(
         Asserts = @(
             "_Static_assert(UI_PAGE_NETWORK_MANAGE_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,"
         )
+    },
+    @{
+        File = "ui_page_diagnostics.c"
+        Asserts = @(
+            "_Static_assert(UI_PAGE_DIAGNOSTICS_SAFETY_BH_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,",
+            "_Static_assert(UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,"
+        )
+    },
+    @{
+        File = "ui_page_profile_detail.c"
+        Asserts = @(
+            "_Static_assert(UI_PAGE_PROFILE_DETAIL_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,"
+        )
     }
 )
 
@@ -129,5 +142,6 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ("UI budget assert check passed: UI_THEME_PAGE_CONTENT_BUDGET_PX and all per-page worst-case " +
-    "_Static_asserts (ui_page_temperature.c, ui_page_network.c, ui_page_network_manage.c) are present.")
+    "_Static_asserts (ui_page_temperature.c, ui_page_network.c, ui_page_network_manage.c, " +
+    "ui_page_diagnostics.c, ui_page_profile_detail.c) are present.")
 exit 0
