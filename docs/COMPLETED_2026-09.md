@@ -1311,3 +1311,102 @@ open item (`hardware/UnitTestFixture` still unopened) stayed in `ROADMAP.md`.
       resolves all three submodules, the `kicad` server restarted clean from
       the new path and answered a real `kicad_call`, and the submodule's own
       110-test suite passed unchanged from its new location
+
+## 2026-09-04 LCD/display session — six items landed
+
+Moved from `ROADMAP.md`'s M1 and "Genuinely still software" sections during
+the fifth roadmap-upkeep sweep, same day. All from direct owner feedback on
+the real ST7796 panel unless noted.
+
+- **LCD backlight control (M1 HW-change item) — `be02d34`.** The GPIO15
+  flying wire to the panel's backlight input is fitted, owner-confirmed by
+  meter after it read flat with `KILNCTL_BACKLIGHT_PWM_ENABLE` off (the flag
+  being off meant `backlight_pwm_init()`/`_start()` never configured the
+  GPIO at all — the flat reading was consistent with either a missing wire
+  or a disabled driver, and it was the driver). Flag now defaults on, and ON
+  duty comes from `display_power_cfg_brightness_percent()` instead of the
+  `CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT` constant it used to read — that
+  setting had persisted and round-tripped through the settings API since the
+  display-power feature landed but drove nothing (`brightness_inert` in
+  `GET /api/settings/display`). IDLE stays a Kconfig constant, since it's
+  the blanked state, not something the brightness slider addresses. The
+  poll loop's skip condition now also gates on the computed duty, not just
+  `screen_on`, so a brightness change is never invisible until the next
+  blank/wake edge. **Not yet confirmed by meter or eye that the panel
+  actually dims** — the owner is flashing this; that's the next check.
+- **Touch was mirrored top-to-bottom on the ST7796 glass — `f028e2f`.**
+  Pressing the bottom-right corner activated the top-right menu button: X
+  landed correctly, Y was mirrored. `touch_dev_map_uncalibrated()` derives
+  `out_py` from `ay` (the post-swap axis) through `invert_y`, so the
+  mirror was that knob, not `invert_x`. `KILNCTL_TOUCH_CAP_INVERT_Y` now
+  defaults on. The capacitive orientation knobs (`KILNCTL_TOUCH_CAP_*`) are
+  now written `default <v> if KILNCTL_DISPLAY_PANEL_ST7796` instead of as
+  bare defaults, since film orientation under the glass is a property of
+  the display module, not the board — the same reasoning that already
+  splits the capacitive knobs from the resistive ones. A future second
+  panel gets its own conditional line instead of silently inheriting the
+  MSP4031's. Same commit also flipped `keep_on_while_firing`/
+  `display_on_error` to default **true** (previously false, argued only
+  from internal consistency with `DISPLAY_TIMEOUT_NEVER` — an argument
+  about the code, not what the operator wants).
+- **LVGL wake-edge invalidate reentered its own flush callback — `51e1ef5`,
+  killed a live firing on the bench before the fix.** `ili9488_flush_cb()`
+  ran `lv_obj_invalidate()` on the off→on wake edge from inside LVGL's own
+  active-refresh flush callback, reentering its invalid-area walk and
+  starving the idle task until the task watchdog fired on the LVGL task.
+  Reproduced twice on an idle board. Fixed by moving the wake-edge
+  invalidate into `lvgl_port_service_idle_wake()`, run from
+  `lvgl_port_task`'s loop before `lv_timer_handler()`, outside any refresh.
+  Verified clean on hardware; regression test added and negative-tested by
+  hand. This is the root cause behind the `safety_poll`
+  `IllegalInstruction`/`configASSERT` panic described in `CLAUDE.md`
+  "Firmware gotchas" — `exc_addr 0x0` there was a red herring, and this fix
+  is what actually closed the underlying stack-corruption path.
+- **LCD diagnostics consolidated 9 pages → 6 — `1cf200f`.** Three
+  per-channel Thermocouple Faults pages folded into one (per-row remedy
+  text trimmed to a fixed short phrase, per-channel title folded into the
+  fault line). Safety Processor and Board Health merged into one page,
+  using Board Health's accented left-border row style throughout per the
+  owner's stated preference; the duplicate ESP32 die-temp row was dropped
+  (already shown on the PSRAM & storage page) and the live State row
+  dropped its "last trip" tail (owned by the Trip Detail page). Worst-case
+  content fits the 320x480 no-scroll budget: ~212–248px for the merged
+  fault page, ~237–257px for the merged safety/board-health page, both
+  under the ~267px ceiling.
+- **Profile-detail page: chart flex-grows, buttons shrink to 40px,
+  bottom-anchored — `445a78e`.** Owner feedback on the real 480x320 panel:
+  action buttons dominated the screen, the planned-curve chart was a fixed
+  90px, and the button row sat under the chart rather than the bottom edge.
+  Chart given `flex_grow(1)`; drawn buttons shrunk from
+  `UI_THEME_MIN_TOUCH_TARGET_PX` (72px) to 40px, with the action row's gap
+  widened 4px → 48px so the three buttons' `ui_theme_apply_touch_area()`-
+  extended (88px effective) hit boxes don't overlap — LVGL 9 has no
+  per-axis `ext_click_area`, so the extension is symmetric on all sides.
+  `ui_page_profile_segments.c` checked and found unaffected (no chart, no
+  action-button row).
+- **Built-in schedule catalogue browsed by firing type → cone, not
+  publisher family — `0470185`.** The 28 built-in schedules were browsed by
+  publisher family (Bartlett/Plainsman/Crystalline/General), not the axis a
+  potter actually picks on. `ui_page_profiles_family.c` is now a firing-type
+  picker (Bisque/Glaze/Other); `ui_page_profiles_builtin_list.c` lists that
+  type's schedules sorted by cone ascending, cone shown per row.
+  `builtin_profile_t` gained `.firing_type` (hand-classified — no universal
+  derivation exists, so a decal firing and a quartz-inversion
+  crack-avoidance schedule both land in "Other") and `.cone` (derived from
+  each entry's peak segment + ramp rate off a two-speed Orton chart,
+  falling back to a title-stated cone). No `target_c`/`ramp_c_per_hr`/
+  `dwell_min` value was touched. `family` is kept (still shown on the
+  detail page) — every consumer was checked before anything changed.
+  `profiles_builtin_table.inc`'s header comment, which claimed a
+  regeneration path via a `gen_builtin_profiles.py` that no longer exists in
+  the repo, was corrected to say the table is hand-maintained.
+- **Display settings web page restyled to house idiom — `70ef683`.**
+  `settings_display_page.html` had hand-rolled `.kc-dp-*` CSS instead of
+  reusing `theme.css`'s shared `.card`/block-label/`.hint`/inline-flex
+  idiom already used by `zones_page.html`/`main_page.html`. Swapped the
+  markup and page-local CSS; no new classes invented, no other page
+  touched. Same commit fixed `test_display_power_cfg.c`'s empty-NVS
+  defaults check, left stale by `f028e2f` — it still asserted `false` for
+  both switches after their default flipped to `true`, and the test's
+  "deliberately wrong" seed values no longer proved an override once `true`
+  became the real default.

@@ -1,7 +1,19 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep audit +
-> fourth sweep — found two stale open items that were actually already
+> **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep audit
+> (fifth sweep) — absorbed the day's LCD/display session: backlight wire
+> fitted and driven from the brightness setting (`be02d34`, M1 item closed),
+> touch Y-mirror fixed and both display switches default on (`f028e2f`),
+> four owner-feedback UI polish items closed (diagnostics 9→6 pages,
+> profile-detail layout, builtin catalogue by cone, settings-page restyle),
+> and the LVGL wake-invalidate watchdog fix (`51e1ef5`) that killed a live
+> firing. Recorded three new open facts: internal DRAM now below its 20480 B
+> floor, a cone-value verification pass in flight, and the >62 °C validation
+> firing now approved and running (moved out of "blocked on you" into
+> in-progress). Full detail for everything closed this sweep moved to
+> `docs/COMPLETED_2026-09.md` per this file's own upkeep rule; no open
+> item's substance was changed beyond reflecting today's landings.
+> + fourth sweep — found two stale open items that were actually already
 > answered/fixed and never removed: "physical zone arrangement" was
 > owner-confirmed 2026-09-03 (`firmware/KilnFW/docs/HARDWARE.md`) but still
 > listed open in two places here and in `KilnFW/TODO.md`; the "HTTP
@@ -99,8 +111,9 @@ What is still genuinely open is short:
 | **M** | **Fuzzy-PID membership bands — set the values, 2026-09-04.** The open question is resolved, not just re-scoped: `778ad64`'s "37,008 samples, 29 firings, never leaves the centre cell" was withdrawn (`50d62ee`, `1584597`) — 28 of those 29 captures ran `control_mode: 2`, where the fuzzy layer never executes; real evidence is one run, 2178 samples, and it still shows the shipped bands (20.0 °C / 0.5 °C/s) never span this rig's envelope. Two blockers that used to require a decision-before-action are gone: bands are now per-zone config (`904db54`, `ZONES_CFG_VERSION` 19 — a config POST, not a reflash), and `tools/PcTools/src/kilnctrl/fuzzy_band_probe.py` (`28685c3`) answers band questions offline from an existing capture, no kiln time. Recommended envelope from that tool: `error_band_c` 6–8 °C, `rate_band_c_per_s` 0.20–0.25 °C/s (observed maxima 5.55 °C / 0.110 °C/s); narrowing to 6.0/0.20 moves the gains 13–29% against the ±25% ceiling. **Ask: set the per-zone bands to a value in that range (or explicitly decline to) before the next `fuzzy_ab` campaign** — the campaign itself no longer needs a restart-vs-relabel-vs-drop call, only the band number. | `PID_EXPANSION_PLAN.md` §3.6 |
 | **M** | **Tighten `abs_max_temp_c`, 2026-09-04.** Armed and committed at 80 °C (`5a4ddfc` — the earlier "value 0" report was stale), but 80 °C is also the ESP-side `max_temp_c` ceiling, so the "independent" safety ceiling currently enforces nothing the primary controller wasn't already enforcing. Recommend commissioning it down to roughly 70 °C so the Pico's ceiling is genuinely tighter than the ESP's. No capture to date has exceeded 60 °C (`d5ae465`, 27 captures), so 70 °C leaves headroom without narrowing the room firings actually use. | `SaftyFW/docs/COMMISSIONING.md`; `docs/SAFETY_CASE.md` |
 | **XL** | **Whether to fit CTs, 2026-09-04.** Topology is now written down (`9e3bd1f`, `9f9bf7c`, `docs/CONTACTOR_FEEDBACK_OPTIONS.md`): mains is staged contactor → SSRs, so a single relay weld is tolerated and only a *double* failure (contactor **and** its SSR) is dangerous — but nothing today detects a welded contactor, all five pilot relays are DPDT with the second pole unconnected, and `relay_owner_is_energized()` reports what was commanded, not what is sensed. Fitting CTs is the one check that would let either processor independently confirm actual current flow instead of trusting its own command; every other candidate (the second relay pole, wiring it up) was surveyed in `CONTACTOR_FEEDBACK_OPTIONS.md` and costs hardware anyway. Decide whether that check is worth ordering the parts (M5's Hammond 140QEX is already scoped) or whether the double-failure risk stays an accepted risk in `SAFETY_CASE.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5; `docs/SAFETY_CASE.md` |
-| **L** | **Approve or decline the high-temperature validation firing, 2026-09-04.** `4ec7387` scopes a ~4–5 h firing to exercise the coupled feedforward hold above ~62 °C, the one regime the matrix has never run in (infeasible ties to an offset, not a temperature — `68711df`) and that no capture has yet reached (max seen: 60 °C, `d5ae465`). Needs the owner's go-ahead before it's scheduled — it is the longest single firing proposed to date. | `PID_EXPANSION_PLAN.md` §3.6c |
-| **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Four separate: (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) touch corner accuracy (`KILNCTL_TOUCH_CAP_*` defaults untried on glass); (4) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken, gating the backlight flying-wire and any future harness work at J2. | `DISPLAY_ST7796_PLAN.md` §4 |
+| **L** | **High-temperature validation firing — APPROVED and RUNNING, 2026-09-04.** `4ec7387` scoped a ~4–5 h firing to exercise the coupled feedforward hold above ~62 °C, the one regime the matrix had never run in (infeasible ties to an offset, not a temperature — `68711df`) and that no capture had yet reached (max seen: 60 °C, `d5ae465`); go-ahead given and a firing to 70 °C is on the bench now. Result pending — do not treat the ff_hold-infeasible-above-62°C finding as retested until it reports. | `PID_EXPANSION_PLAN.md` §3.6c |
+| **M** | **Internal DRAM below the 20480 B floor, 2026-09-04.** `dram_free` ~18323 B at `app_main_done`, since the backlight task (now real hardware, see M1) became a genuine consumer rather than a no-op. The backlight task itself is measured at 29.4% stack headroom, so it cannot be shrunk. The one lever identified: disabling the bench-only `KILNCTL_ENABLE_GPIO_PROBE` (frees 6144 B) — owner decision on whether to give that up. | `DRAM_PSRAM_PLAN.md` |
+| **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |
 | S | The deferred sanity rate for S8 — S8 gained a pure-module implementation and is integrated (2026-09-03, `safety_guards.c`/`safety_core.c`, `SaftyFW/docs/GUARD_TEST_MATRIX.md`), but ships deliberately off (`max_rate_c_per_min` defaults to 0, same "no default by design" shape as S1), so commissioning that field is what will enable it | M3 |
 | S | `hardware/UnitTestFixture/` — delete or keep | M7 |
 | XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
@@ -122,7 +135,7 @@ What is still genuinely open is short:
 | M | S9's welded-contactor escalation — by definition needs a welded contactor. **Checked 2026-09-03: SimFW cannot do this — SimFW itself no longer exists** (removed `8553244`, 2026-08-28; `firmware/UnitTestFw` took its place and is unrelated ESP32-S3 bench-instrument firmware — DAC/AD9833/OLED/PCF8575 — with no path to the safety processor's current-sense input at all). Even when SimFW existed, its own removal commit records that `ct_calibration` "needs the fixture to physically drive current into the CT" — S9 (`firmware/SaftyFW/src/safety_guards.c:363-389`) latches only on real `any_current_present`, gated by `in->context_valid`, `in->current_sensing_commissioned` and NOT `in->current_sensing_disabled`; that flag comes from the CT's analog current-transformer signal through `current_sense.c`, not a GPIO a simulator MCU could assert. What would actually be required: a fixture that injects genuine AC current through the CT sense loop while the K4 drive line is confirmed de-energized — i.e. a hardware jig, not firmware simulation — plus a CT actually fitted and commissioned (`ct_installed=yes`; on the bare bench today `ct_installed=no` switches S9 off and reports it off). | M4 |
 | M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
 | M | Per-channel CT-to-jack commissioning, plus a bench measurement of the ADC noise floor under the 25-count presence fallback | M5 |
-| M | **HW changes:** LCD backlight control (fix scoped in `DISPLAY_ST7796_PLAN.md` §3.4.1: one flying wire, GPIO15/16 to module pin 8 — needs the second-panel harness to carry it), relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector | M1 |
+| M | **HW changes:** relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector. (LCD backlight control's flying wire is fitted and confirmed — see M1, closed 2026-09-04.) | M1 |
 | S | **Blocking, before the MSP4031 touches J2 at all**: meter module pins 10/12 (CTP_SCL/CTP_SDA) at 5V — confirms or clears a hazard that can back-feed the SX1509/ESP32-S3 through the shared I2C bus. `DISPLAY_ST7796_PLAN.md` §4 | M1 |
 | M | DEBUG header and GP16/GP17 access before A1 is soldered down | M0 |
 | L | Field updates exercised against real hardware: Pico bootloader over a live UART1, an actual OTA into `ota_0`/`ota_1` (a JTAG flash boots `factory` and never runs the rollback machinery), a real version mismatch | M8 |
@@ -280,9 +293,15 @@ now a short list, which is the point:
   error), 2026-09-04.** New feature, not an M11 reopen — see
   `firmware/KilnFW/docs/UI_PLAN.md`'s "Display power" section for the full
   writeup. Pure decision core + persisted settings + HTTP API + settings-page
-  UI are built and host-tested; brightness is inert until
-  `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE`'s flying-wire bodge is verified.
-  The `screen_idle.c`/`lvgl_port.c` touch-swallow/timeout hookup landed the
+  UI are built and host-tested. **Brightness is no longer inert
+  (`be02d34`):** the flying wire (GPIO15 → panel pin 8) is fitted, owner-
+  confirmed by meter, `KILNCTL_BACKLIGHT_PWM_ENABLE` now defaults on, and ON
+  duty is driven from the operator's brightness setting rather than a
+  Kconfig constant — not yet confirmed by meter/eye that the panel actually
+  dims, that's the next check. `keep_on_while_firing`/`display_on_error` now
+  default **true** (`f028e2f`, owner decision from a real finger on the
+  glass), so both are already right the day a timeout is chosen. The
+  `screen_idle.c`/`lvgl_port.c` touch-swallow/timeout hookup landed the
   same day (`7fc17cc`), bound to real producers — the executor for
   `firing_active`, the RP2040 DIAG trip for `error_active`. Review then found
   both producers too narrow (`192eb7d`): keep-on-while-firing blanked the
@@ -290,10 +309,22 @@ now a short list, which is the point:
   IDLE, and display-on-error missed the ESP's own guard aborts, which never
   touch the RP2040's `diag_state`. Both widened. The 1-minute timeout is
   hardware-verified via `touch_get_state()` ("screen on" → "screen blanked"),
-  as is NVS persistence across a reboot. **"Off" blanks the panel to black
-  under a lit backlight — it cannot cut the backlight**, so it hides the UI
-  and saves nothing until the §3.4.1 flying wire lands. Wake-on-touch,
-  first-touch-swallow and error dismissal all still need the owner's finger.
+  as is NVS persistence across a reboot. Wake-on-touch, first-touch-swallow
+  and error dismissal still need the owner's finger.
+- ~~Touch was mirrored top-to-bottom on the ST7796 glass~~ **CLOSED
+  (`f028e2f`)** — Y-invert was the wrong knob (X was fine); capacitive
+  orientation knobs are now conditional on `KILNCTL_DISPLAY_PANEL_ST7796`.
+- ~~LVGL's wake-edge invalidate reentered its own flush callback~~
+  **CLOSED (`51e1ef5`) — killed a live firing on the bench before the fix.**
+  This is the root cause behind the `safety_poll` panic/`configASSERT`
+  chain; full postmortem in `CLAUDE.md` "Firmware gotchas".
+- ~~LCD diagnostics 9 pages, profile-detail layout, builtin-catalogue
+  browse-by-family, web display-settings styling~~ **all CLOSED 2026-09-04**
+  (`1cf200f`, `445a78e`, `0470185`, `70ef683`) — four separate owner-feedback
+  fixes on the real panel. Full detail: `docs/COMPLETED_2026-09.md`.
+- **The 11 derived cone values in `profiles_builtin_table.inc` are being
+  verified against digitalfire.com by another agent as of 2026-09-04** — in
+  flight, no result to record yet.
 - **`screen_idle` held its own lock across the producer reads, 2026-09-04
   (`7a8594d`).** The policy tick called `dashboard_get_status()` (five
   MAX31856 SPI bursts), `kiln_io_owner_command_read()` (blocks up to 200 ms on
@@ -627,21 +658,12 @@ soldering session.
 - [x] Per-processor console capture + interleaved log file
       (`kilnctrl-console-capture`) — host-verified only; the SAFETY log-relay
       wire path is still unimplemented in firmware
-- [ ] **HW change: LCD backlight control.** The firmware side landed
-      2026-09-03 (commit `ad35720`): `App/drivers/backlight_pwm.c/.h`, an
-      LEDC PWM driver polling `screen_idle_get_state()` and mapping
-      screen-on/idle to duty, wired into `App/main.c`, host-tested
-      (`App/test/test_backlight_pwm.c`), behind default-OFF
-      `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE` — same anticipatory/default-off
-      posture as `DISPLAY_ST7796_PLAN.md`'s 9.3/9.4/9.6/9.7. What remains is
-      purely hardware: the flying wire (GPIO15 or GPIO16 to module pin 8),
-      scoped in `DISPLAY_ST7796_PLAN.md` §3.4.1 to ride along with the
-      second-panel harness, is still **not fitted**, and stays gated on the
-      STOP-block 5V I2C hazard measurement in that plan's §4 before any
-      harness is connected. Pin-by-pin wiring sheet, plus the R4/R6 module
-      rework touch requires: `firmware/KilnFW/docs/DISPLAY_ST7796_WIRING.md`.
-      Firmware is **not flash-verified** — it was written ahead of the
-      hardware, so first enable must confirm the panel actually dims.
+- [x] **HW change: LCD backlight control — CLOSED 2026-09-04 (`be02d34`).**
+      Flying wire (GPIO15 → module pin 8) is fitted, owner-confirmed by
+      meter; `KILNCTL_BACKLIGHT_PWM_ENABLE` now defaults on and ON duty
+      comes from the operator's brightness setting. Not yet confirmed by
+      meter/eye that the panel actually dims — that's the next check, not a
+      firmware gap. Full buildup history in `docs/COMPLETED_2026-09.md`.
 - [~] **Second LCD panel (ST7796/MSP4031), auto-detection, display SPI
       async/DMA.** `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`, sequenced
       Phase 0 (bench facts/hazard measurement) through Phase 7 (UI). Phases 1
@@ -688,9 +710,10 @@ soldering session.
       clock swept 20/15/10 MHz with the blue *fraction* flat at 0.62/0.61/0.58
       — `07cad60`, table in `DISPLAY_ST7796_PLAN.md` §4). Treat as a module
       characteristic needing the owner's eye, a colorimeter or a second unit,
-      not more firmware. Also open: touch corner accuracy
-      (`KILNCTL_TOUCH_CAP_*` defaults untried on glass) and the 5V I2C hazard
-      measurement. Rendering can now be checked without a person at the bench
+      not more firmware. Touch corner accuracy CLOSED 2026-09-04 (`f028e2f`
+      — Y was mirrored, `KILNCTL_TOUCH_CAP_INVERT_Y` now defaults on).
+      Still open: the 5V I2C hazard measurement. Rendering can now be
+      checked without a person at the bench
       via `tools/PcTools/scripts/capture_lcd.ps1` (`5fd9761`) — sample pixels
       numerically, never by eye, and always include an off-screen reference.
       The only hardware change required remains a custom
