@@ -178,6 +178,16 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self._isfile_patch.start()
         self.addCleanup(self._isfile_patch.stop)
 
+        # flash_firmware() now probes the board's HTTP address BEFORE
+        # flashing (see _preflash_board_address). These tests are about the
+        # verify= wiring, not that probe -- and an unpatched probe would try
+        # a real UART/HTTP round trip from a unit test.
+        self._preflash_patch = unittest.mock.patch.object(
+            mf, "_preflash_board_address", return_value=None
+        )
+        self.preflash_mock = self._preflash_patch.start()
+        self.addCleanup(self._preflash_patch.stop)
+
     def test_verify_false_skips_verification_entirely(self):
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock:
             result = mf.flash_firmware(verify=False)
@@ -235,6 +245,147 @@ class DefaultHostResolutionTest(unittest.TestCase):
         self.assertEqual(result, "")
         self.assertEqual(seen, ["192.168.1.77"])
         self.assertNotIn(partition_http_client.PARTITION_AP_DEFAULT_HOST, seen)
+
+
+class WrongAddressRegressionTest(unittest.TestCase):
+    """THE 2026-09-04 DEFECT. `flash_firmware()` (defaults) verified against
+    192.168.4.1 -- the SoftAP fallback -- while the board sat on the LAN at
+    192.168.1.156 answering fine. Cause: verification resolved its host ONCE,
+    via `_ota_resolve_host()`, immediately after the OpenOCD reset, i.e. at
+    the one moment the board provably has not re-associated with Wi-Fi yet;
+    wifi_get_status() answered sta_connected=False and resolution fell to the
+    AP address. The resulting timeout produced the deliberately-soft
+    "could not reach the board" WARNING -- emitted identically whether the
+    flash landed or not, so the check said nothing in exactly the case it
+    exists for.
+
+    Fix under test: an ordered candidate list (pre-flash-observed address
+    first), re-resolved on each poll attempt, plus failure semantics keyed on
+    whether the board was answering BEFORE the flash."""
+
+    def setUp(self):
+        self.bin_path = _write_bin()
+        self.addCleanup(os.unlink, self.bin_path)
+
+    def _patch_resolve(self, resolved):
+        from kilnctrl import mcp_server_ota
+        return unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", return_value=resolved)
+
+    def test_lan_address_tried_even_when_resolution_says_ap(self):
+        """(a) Board reachable at the LAN address while post-reset
+        wifi_get_status() still reports the AP fallback (the live failure).
+        Verification must still find the board and confirm the build."""
+        seen = []
+
+        def fake_get_partitions(host, timeout=None):
+            seen.append(host)
+            if host != "192.168.1.156":
+                raise partition_http_client.PartitionHttpError("unreachable: timed out")
+            return {"running": "factory", "partitions": []}
+
+        with self._patch_resolve("192.168.4.1"), unittest.mock.patch.object(
+            partition_http_client, "get_partitions", side_effect=fake_get_partitions
+        ), unittest.mock.patch.object(
+            capability_preflight, "get_board_info",
+            return_value=capability_preflight.BoardInfo(reachable=True, fw_build="Sep  3 2026 20:13:41"),
+        ) as board_mock:
+            result = mf._verify_flash_landed(None, self.bin_path, pre_flash_host="192.168.1.156")
+
+        self.assertEqual(result, "")
+        self.assertEqual(seen[0], "192.168.1.156")
+        self.assertEqual(board_mock.call_args[0][0], "192.168.1.156")
+
+    def test_old_build_on_lan_address_fails_loud(self):
+        """(b) Board reachable, running 'factory', but reporting an OLD
+        build -- the failure the whole feature exists for. Must RAISE and
+        name both timestamps."""
+        with self._patch_resolve("192.168.4.1"), unittest.mock.patch.object(
+            partition_http_client, "get_partitions",
+            return_value={"running": "factory", "partitions": []},
+        ), unittest.mock.patch.object(
+            capability_preflight, "get_board_info",
+            return_value=capability_preflight.BoardInfo(reachable=True, fw_build="Aug 12 2026 08:01:02"),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                mf._verify_flash_landed(None, self.bin_path, pre_flash_host="192.168.1.156")
+        msg = str(ctx.exception)
+        self.assertIn("Aug 12 2026 08:01:02", msg)
+        self.assertIn("Sep  3 2026 20:13:41", msg)
+
+    def test_unreachable_after_being_reachable_before_is_a_hard_failure(self):
+        """(c1) Nothing answers anywhere AND the board was answering before
+        the flash -> hard failure, not a warning."""
+        with self._patch_resolve("192.168.4.1"), unittest.mock.patch.object(
+            partition_http_client, "get_partitions",
+            side_effect=partition_http_client.PartitionHttpError("unreachable: timed out"),
+        ), unittest.mock.patch.object(mf.time, "sleep", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                mf._verify_flash_landed(None, self.bin_path, pre_flash_host="192.168.1.156")
+        msg = str(ctx.exception)
+        self.assertIn("192.168.1.156", msg)
+        self.assertIn("192.168.4.1", msg)
+        self.assertIn("verification FAILURE", msg)
+
+    def test_unreachable_and_was_unreachable_before_stays_a_warning(self):
+        """(c2) Same silence, but the board was NOT answering before the
+        flash either -- genuine bring-up, still only a WARNING."""
+        with self._patch_resolve("192.168.4.1"), unittest.mock.patch.object(
+            partition_http_client, "get_partitions",
+            side_effect=partition_http_client.PartitionHttpError("unreachable: timed out"),
+        ), unittest.mock.patch.object(mf.time, "sleep", return_value=None):
+            result = mf._verify_flash_landed(None, self.bin_path, pre_flash_host=None)
+        self.assertTrue(result.startswith("WARNING:"))
+        self.assertIn("192.168.4.1", result)
+        self.assertIn("early bring-up", result)
+
+    def test_explicit_host_is_the_only_address_probed(self):
+        with self._patch_resolve("192.168.4.1"):
+            self.assertEqual(
+                mf._resolve_verify_hosts("10.0.0.9", pre_flash_host="192.168.1.156"),
+                ["10.0.0.9"],
+            )
+
+    def test_candidate_order_is_preflash_then_resolved_then_ap(self):
+        with self._patch_resolve("192.168.1.200"):
+            self.assertEqual(
+                mf._resolve_verify_hosts(None, pre_flash_host="192.168.1.156"),
+                ["192.168.1.156", "192.168.1.200", "192.168.4.1"],
+            )
+
+    def test_preflash_probe_returns_the_answering_address(self):
+        def fake_get_partitions(host, timeout=None):
+            if host != "192.168.1.156":
+                raise partition_http_client.PartitionHttpError("unreachable: timed out")
+            return {"running": "factory", "partitions": []}
+
+        with self._patch_resolve("192.168.1.156"), unittest.mock.patch.object(
+            partition_http_client, "get_partitions", side_effect=fake_get_partitions
+        ):
+            self.assertEqual(mf._preflash_board_address(None), "192.168.1.156")
+
+    def test_preflash_probe_returns_none_when_nothing_answers(self):
+        with self._patch_resolve("192.168.4.1"), unittest.mock.patch.object(
+            partition_http_client, "get_partitions",
+            side_effect=partition_http_client.PartitionHttpError("unreachable: timed out"),
+        ):
+            self.assertIsNone(mf._preflash_board_address(None))
+
+
+class PreFlashProbeWiringTest(FlashFirmwareVerifyWiringTest):
+    """flash_firmware() must actually take the pre-flash observation and hand
+    it to _verify_flash_landed -- otherwise the semantics above are dead code."""
+
+    def test_preflash_address_is_passed_through_to_verification(self):
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value="") as verify_mock:
+            mf.flash_firmware(verify=True)
+        self.assertEqual(verify_mock.call_args[0][2], "192.168.1.156")
+
+    def test_no_preflash_probe_when_verify_is_false(self):
+        with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock:
+            mf.flash_firmware(verify=False)
+        verify_mock.assert_not_called()
+        self.preflash_mock.assert_not_called()
 
 
 if __name__ == "__main__":
