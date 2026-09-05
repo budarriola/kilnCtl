@@ -213,6 +213,18 @@ class BoardInfo:
     fw_build: Optional[str] = None
     self_protocol_version: Optional[int] = None
     error: str = ""
+    # reset_reason/uptime_s: straight from the same /api/status body already
+    # read for fw identity -- no extra probe. crash_unacknowledged/
+    # crash_summary come from a second, always-attempted GET /api/
+    # crash_report: this is the field the 2026-08-31 incident showed going
+    # unread everywhere -- present:true, acknowledged:false sat in the API
+    # the whole afternoon a board ran five hours post-panic with nobody
+    # noticing, including through this very preflight before this fix.
+    # NEVER acknowledge or clear it from here -- this module only reads.
+    reset_reason: Optional[str] = None
+    uptime_s: Optional[float] = None
+    crash_unacknowledged: bool = False
+    crash_summary: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -224,10 +236,15 @@ class PreflightReport:
 
     @property
     def ok(self) -> bool:
-        """False if the board never answered at all, or if any required
-        capability is FATALLY missing. A board that fails to answer is
-        never reported as fine -- there is nothing to base "fine" on."""
+        """False if the board never answered at all, if any required
+        capability is FATALLY missing, or if the board is carrying an
+        unacknowledged crash report. That last case is deliberately checked
+        regardless of what the preset needs -- a panic five hours ago is a
+        reason to not start ANY unattended run, not just ones that happen to
+        probe a capability."""
         if not self.board.reachable:
+            return False
+        if self.board.crash_unacknowledged:
             return False
         return not any(c.fatal for c in self.checks)
 
@@ -250,6 +267,19 @@ class PreflightReport:
         proto = self.board.self_protocol_version
         proto_s = str(proto) if proto is not None else "(unknown)"
         lines.append(f"  board firmware: version={fw} build={build} link_protocol={proto_s}")
+        lines.append(
+            f"  reset_reason={self.board.reset_reason!r} uptime_s={self.board.uptime_s!r}"
+        )
+        if self.board.crash_unacknowledged:
+            lines.append(
+                "  [FATAL]  UNACKNOWLEDGED CRASH REPORT ON BOARD -- "
+                f"{self.board.crash_summary}. This board panicked and nobody has "
+                "acknowledged it (GET /api/crash_report). Do not start this run: "
+                "either the crash is unrelated to this firing and should be "
+                "reviewed and acknowledged, or it is exactly the failure mode "
+                "this run would repeat. REMEDY: investigate, then "
+                "POST /api/crash_report/ack once reviewed."
+            )
         if not self.checks:
             lines.append("  no HTTP-gated capabilities required by this preset/apply plan.")
         for c in self.checks:
@@ -270,7 +300,14 @@ class PreflightReport:
                     f"preset pins {c.preset_value!r}, which is what firmware lacking "
                     f"{c.capability.description} already does. No action needed."
                 )
-        if self.fatal_checks:
+        if self.board.crash_unacknowledged and self.fatal_checks:
+            lines.append(
+                f"  RESULT: unacknowledged crash report AND {len(self.fatal_checks)} "
+                "FATAL capability gap(s) -- do not start this run."
+            )
+        elif self.board.crash_unacknowledged:
+            lines.append("  RESULT: unacknowledged crash report -- do not start this run.")
+        elif self.fatal_checks:
             lines.append(
                 f"  RESULT: {len(self.fatal_checks)} FATAL capability gap(s) -- do not start this run."
             )
@@ -281,20 +318,54 @@ class PreflightReport:
 
 def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> BoardInfo:
     """GET /api/status once, for the operator-facing firmware identity
-    fields (dashboard_http.c: fw_version/fw_build/self_protocol_version).
-    Purely informational -- see this module's docstring for why it is never
-    used to decide fatal/benign."""
+    fields (dashboard_http.c: fw_version/fw_build/self_protocol_version),
+    PLUS reset_reason/uptime_s from that same body, PLUS one more GET of
+    /api/crash_report -- so an unacknowledged crash is ALWAYS part of board
+    identity, never something a separate tool has to be remembered and
+    called. fw_version/fw_build/self_protocol_version stay purely
+    informational (see this module's docstring for why); crash_unacknowledged
+    is NOT informational -- see PreflightReport.ok and describe() below,
+    where it makes the whole preflight fail.
+
+    This function only ever reads /api/crash_report. It must never call
+    /api/crash_report/ack or /api/crash_report/clear -- doing so from a
+    preflight would silence the very evidence an operator needs to see."""
     try:
         data, _raw = _get_json(host, "/api/status", timeout)
     except PreflightTransportError as exc:
         return BoardInfo(reachable=False, error=str(exc))
     if not isinstance(data, dict):
         return BoardInfo(reachable=False, error="GET /api/status did not return a JSON object")
+
+    crash_unacknowledged = False
+    crash_summary = None
+    try:
+        crash, _raw2 = _get_json(host, "/api/crash_report", timeout)
+    except PreflightTransportError:
+        # Board answered /api/status but not /api/crash_report -- older
+        # firmware without this endpoint, most likely. Not fatal on its
+        # own: there is no crash data to act on, so this preflight has
+        # nothing to refuse over. (A firmware new enough to HAVE a crash
+        # but too old to report it is not a case any client-side check can
+        # detect.)
+        crash = None
+    if isinstance(crash, dict) and crash.get("present") and not crash.get("acknowledged", True):
+        crash_unacknowledged = True
+        crash_summary = (
+            f"exc_task={crash.get('exc_task')!r} "
+            f"exc_cause_str={crash.get('exc_cause_str')!r} "
+            f"reset_reason={crash.get('found_on_boot_reset_reason')!r}"
+        )
+
     return BoardInfo(
         reachable=True,
         fw_version=data.get("fw_version") or None,
         fw_build=data.get("fw_build") or None,
         self_protocol_version=data.get("self_protocol_version"),
+        reset_reason=data.get("reset_reason"),
+        uptime_s=data.get("uptime_s"),
+        crash_unacknowledged=crash_unacknowledged,
+        crash_summary=crash_summary,
     )
 
 

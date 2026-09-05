@@ -155,6 +155,23 @@ def get_heap_status(host: Optional[str] = None) -> str:
     except dashboard_http_client.DashboardHttpError as exc:
         return f"error: {exc} (host={resolved})"
     lines = [f"host={resolved}"]
+    crash = heap.get("unacknowledged_crash")
+    if crash:
+        lines.append(
+            "!!! UNACKNOWLEDGED CRASH REPORT !!! exc_task="
+            f"{crash.get('exc_task')!r} exc_cause_str={crash.get('exc_cause_str')!r} "
+            f"reset_reason={crash.get('found_on_boot_reset_reason')!r} -- "
+            "this board panicked and nobody has reviewed it yet "
+            "(GET /api/crash_report). Do not assume this run/board is healthy."
+        )
+    reset_reason = heap.get("reset_reason")
+    if reset_reason in dashboard_http_client.UNCLEAN_RESET_REASONS:
+        lines.append(f"!!! reset_reason={reset_reason!r} (unclean boot) uptime_s={heap.get('uptime_s')}")
+    else:
+        lines.append(f"reset_reason={reset_reason!r} uptime_s={heap.get('uptime_s')}")
+    check_err = heap.get("unacknowledged_crash_check_error")
+    if check_err:
+        lines.append(f"(could not check /api/crash_report: {check_err})")
     for key in ("heap_internal", "heap_spiram", "heap_dma"):
         h = heap[key]
         lines.append(

@@ -109,6 +109,86 @@ class GetHeapStatusTest(unittest.TestCase):
                 dh.get_heap_status("10.0.0.5")
 
 
+def _urlopen_router(responses: dict):
+    """responses: {path_substring: body_bytes}. First match by substring
+    wins; used to route GET /api/status vs GET /api/crash_report to
+    different canned bodies within one test."""
+
+    def _fake_urlopen(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        for key, value in responses.items():
+            if key in url:
+                return _fake_response(value)
+        raise AssertionError(f"unexpected URL in test: {url}")
+
+    return _fake_urlopen
+
+
+_CRASH_UNACK_BODY = json.dumps({
+    "present": True, "acknowledged": False, "exc_cause": 6, "exc_cause_str": "IllegalInstruction",
+    "exc_task": "safety_poll", "found_on_boot_reset_reason": "panic/exception",
+    "backtrace": [], "backtrace_corrupted": False,
+}).encode("utf-8")
+
+_CRASH_NONE_BODY = json.dumps({"present": False}).encode("utf-8")
+
+
+class UnacknowledgedCrashSurfacingTest(unittest.TestCase):
+    """MANDATORY negative test: the 2026-08-31 incident happened because
+    get_heap_status() (dashboard_http_client.py:89) discarded reset_reason
+    and never looked at /api/crash_report at all -- a board that panicked at
+    ~15:05 and ran 5 hours with an unacknowledged crash report looked
+    identical, through this function, to a perfectly healthy one. These
+    tests construct that exact synthetic state and prove it now surfaces,
+    then prove a clean board still reads clean."""
+
+    def test_unacknowledged_crash_surfaces_in_get_heap_status(self):
+        responses = {
+            "/api/status": json.dumps(_sample_status(reset_reason="panic/exception")).encode(),
+            "/api/crash_report": _CRASH_UNACK_BODY,
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            heap = dh.get_heap_status("10.0.0.5")
+        self.assertEqual(heap["reset_reason"], "panic/exception")
+        self.assertIsNotNone(heap["unacknowledged_crash"])
+        self.assertEqual(heap["unacknowledged_crash"]["exc_task"], "safety_poll")
+        self.assertTrue(heap["unacknowledged_crash"]["present"])
+        self.assertFalse(heap["unacknowledged_crash"]["acknowledged"])
+
+    def test_unacknowledged_crash_surfaces_in_mcp_tool_text(self):
+        from kilnctrl import mcp_server as m
+
+        responses = {
+            "/api/status": json.dumps(_sample_status(reset_reason="panic/exception")).encode(),
+            "/api/crash_report": _CRASH_UNACK_BODY,
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            result = m.get_heap_status(host="10.0.0.5")
+        self.assertIn("UNACKNOWLEDGED CRASH REPORT", result)
+        self.assertIn("safety_poll", result)
+        self.assertIn("panic/exception", result)
+
+    def test_clean_board_reports_no_crash(self):
+        """PROOF a clean board passes: reset_reason is a normal boot reason
+        and /api/crash_report says present:false -- neither the dict key nor
+        the MCP text should claim a crash exists."""
+        responses = {
+            "/api/status": json.dumps(_sample_status(reset_reason="power-on")).encode(),
+            "/api/crash_report": _CRASH_NONE_BODY,
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            heap = dh.get_heap_status("10.0.0.5")
+        self.assertIsNone(heap["unacknowledged_crash"])
+        self.assertEqual(heap["reset_reason"], "power-on")
+
+        from kilnctrl import mcp_server as m
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            result = m.get_heap_status(host="10.0.0.5")
+        self.assertNotIn("UNACKNOWLEDGED CRASH REPORT", result)
+        self.assertIn("reset_reason='power-on'", result)
+
+
 class McpToolTest(unittest.TestCase):
     """get_heap_status() as wired into mcp_server_info.py -- the string
     formatting a caller actually sees, and the host-resolution/error path."""

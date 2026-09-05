@@ -86,14 +86,67 @@ def get_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
         raise DashboardHttpError(f"GET /api/status response was not valid JSON: {body_text!r}") from exc
 
 
+#: 2026-08-31 incident: the board panicked at ~15:05 and ran five hours with
+#: nobody noticing, including through this very function -- get_heap_status
+#: called get_status(host) and discarded every key except the three heap
+#: ones, so reset_reason (and uptime_s) passed through and were thrown away
+#: even though they were sitting right there in the same response. This is
+#: the read path every other diagnostic in this tree already calls; rather
+#: than add a new tool nobody would think to call, these two keys are always
+#: carried through from here on -- loud, not buried behind a separate GET.
+_CARRY_THROUGH_KEYS = ("reset_reason", "uptime_s")
+
+#: reset_reason values that mean "the board did not shut down cleanly" --
+#: mirrors pid_validation.PANIC_RESET_REASONS's intent (that module compares
+#: consecutive readings to detect a NEW restart; this one just flags
+#: whatever the CURRENT boot's reason is, on every single read).
+UNCLEAN_RESET_REASONS = frozenset({
+    "panic/exception", "panic", "exception", "watchdog", "brownout",
+})
+
+
+def get_crash_report(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/crash_report and return the full decoded JSON object
+    (diagnostics_http.c: crash_report_get_handler -- ``{"present": false}``
+    when there is nothing on record, otherwise ``present/acknowledged/
+    exc_task/exc_cause_str/...``).
+
+    READ-ONLY: this module has no function that POSTs to
+    ``/api/crash_report/ack`` or ``/api/crash_report/clear``, and none should
+    be added here without a very deliberate reason -- a live crash report
+    must stay exactly as unacknowledged as the board reports it until a
+    person (or an explicit, separately-invoked tool) decides otherwise."""
+    req = urllib.request.Request(_url(host, "/api/crash_report"), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise DashboardHttpError(f"GET /api/crash_report failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise DashboardHttpError(
+            f"GET /api/crash_report response was not valid JSON: {body_text!r}") from exc
+
+
 def get_heap_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
-    """GET /api/status and return only the heap_internal/heap_spiram/
-    heap_dma sub-objects, each {free, largest_free_block, min_free, total}
-    in bytes. Raises DashboardHttpError with a specific message (not a
-    silent partial dict) if any of the three keys is missing from the
+    """GET /api/status and return the heap_internal/heap_spiram/heap_dma
+    sub-objects (each {free, largest_free_block, min_free, total} in bytes),
+    PLUS reset_reason/uptime_s carried through unchanged, PLUS a top-level
+    ``unacknowledged_crash`` summary (``None`` when there is nothing to
+    report, otherwise a dict with the crash-report fields) from one extra
+    GET /api/crash_report -- see _CARRY_THROUGH_KEYS's comment for why this
+    function, of all places, is where that lives now.
+
+    Raises DashboardHttpError with a specific message (not a silent partial
+    dict) if any of the three heap keys is missing from the /api/status
     response -- a firmware/tool version mismatch should be loud here, not
     read back as "0 bytes everywhere", which would look like the DRAM
-    exhaustion this plan exists to measure."""
+    exhaustion this plan exists to measure. A missing/unreachable
+    /api/crash_report endpoint (older firmware) is NOT treated as fatal for
+    this call -- heap figures must still be reported -- but shows up as
+    ``unacknowledged_crash_check_error`` rather than being silently dropped."""
     status = get_status(host, timeout=timeout)
     result: dict = {}
     missing = []
@@ -107,4 +160,15 @@ def get_heap_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dic
             f"GET /api/status response is missing {missing} -- "
             f"firmware/pc_tools version mismatch? (present keys: {sorted(status.keys())})"
         )
+    for key in _CARRY_THROUGH_KEYS:
+        result[key] = status.get(key)
+
+    result["unacknowledged_crash"] = None
+    try:
+        crash = get_crash_report(host, timeout=timeout)
+    except DashboardHttpError as exc:
+        result["unacknowledged_crash_check_error"] = str(exc)
+    else:
+        if isinstance(crash, dict) and crash.get("present") and not crash.get("acknowledged", True):
+            result["unacknowledged_crash"] = crash
     return result

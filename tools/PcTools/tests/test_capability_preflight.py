@@ -197,6 +197,86 @@ class BoardUnreachableTest(unittest.TestCase):
         self.assertIn("do not start this run", text)
         self.assertNotIn("ok to start", text)
 
+
+_CRASH_UNACK_BODY = json.dumps({
+    "present": True, "acknowledged": False, "exc_cause": 6, "exc_cause_str": "IllegalInstruction",
+    "exc_pc": "0x4008abcd", "exc_addr": "0x00000000", "exc_task": "safety_poll",
+    "found_on_boot_reset_reason": "panic/exception", "backtrace": [], "backtrace_corrupted": False,
+}).encode()
+_CRASH_ACK_BODY = json.dumps({
+    "present": True, "acknowledged": True, "exc_cause": 6, "exc_cause_str": "IllegalInstruction",
+    "exc_pc": "0x4008abcd", "exc_addr": "0x00000000", "exc_task": "safety_poll",
+    "found_on_boot_reset_reason": "panic/exception", "backtrace": [], "backtrace_corrupted": False,
+}).encode()
+_CRASH_NONE_BODY = json.dumps({"present": False}).encode()
+
+
+class UnacknowledgedCrashReportTest(unittest.TestCase):
+    """MANDATORY negative test (task instructions): an unacknowledged crash
+    report must fail the preflight regardless of whether the preset needs
+    any HTTP capability at all -- the 2026-08-31 incident (board panicked,
+    ran 5 hours unnoticed, including through a preflight-shaped check) is
+    exactly the scenario this guards. Constructed with SYNTHETIC data only;
+    no real board is touched."""
+
+    def test_unacknowledged_crash_blocks_a_run_that_needs_no_capability(self):
+        preset = _preset(False)  # benign/no-fatal-capability preset on purpose
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_UNACK_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset")
+            self.assertFalse(report.ok, "unacknowledged crash must fail the preflight")
+            self.assertTrue(report.board.crash_unacknowledged)
+            self.assertIn("safety_poll", report.board.crash_summary)
+            text = report.describe()
+            self.assertIn("UNACKNOWLEDGED CRASH REPORT", text)
+            self.assertIn("do not start this run", text)
+            self.assertNotIn("ok to start", text)
+
+            with self.assertRaises(cp.PreflightFailed) as ctx:
+                cp.preflight_or_raise(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset")
+            self.assertIn("UNACKNOWLEDGED CRASH REPORT", str(ctx.exception))
+
+    def test_acknowledged_crash_does_not_block(self):
+        """Same crash record, but acknowledged=true -- an operator has
+        reviewed it, so this must NOT be fatal (the run stays gate-able only
+        by an actual unresolved capability gap)."""
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_ACK_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset")
+        self.assertTrue(report.ok)
+        self.assertFalse(report.board.crash_unacknowledged)
+
+    def test_clean_board_no_crash_record_passes(self):
+        """PROOF a clean board still passes: {"present": false} is the
+        common case and must never itself be treated as a problem."""
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset")
+        self.assertTrue(report.ok)
+        self.assertFalse(report.board.crash_unacknowledged)
+        self.assertNotIn("UNACKNOWLEDGED CRASH REPORT", report.describe())
+
         with self.assertRaises(cp.PreflightFailed):
             cp.preflight_or_raise(preset, "192.168.1.50", zones_host="192.168.1.50",
                                    preset_name="test-preset")
