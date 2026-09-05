@@ -20,14 +20,18 @@ this whole pass is preparation only.
   http, ui, bridge, sim, common`) instead of ten sibling directories -- see
   section 3.
 - **B -- new bottom-most tier `common`**, below `hw`, for pure leaf
-  headers/utilities: `uart_task_ids.h`, `settings.h`, `stack_margin.{c,h}`,
+  headers/utilities: `uart_task_ids.h`, `stack_margin.{c,h}`,
   `stack_margin_calc.h`, `http_form.h`, `web_encoding.{c,h}`,
   `httpd_socket_budget.h`, `dram_margin.h`, `bx_worker_reentrancy.h`. Each
   was checked by hand before placement: every one includes only ESP-IDF/libc
   headers (or each other) and nothing from `control/safety/persist/net/
-  owners/hw`, so **all nine passed the leaf check** -- none were left in
+  owners/hw`, so **all eight passed the leaf check** -- none were left in
   place. `stack_margin.c` was included in the tier move alongside its header
-  since it has the same include profile.
+  since it has the same include profile. `settings.h` was originally
+  proposed here too, but **correction 2026-09-05**: it includes
+  `driver/gpio.h`, `driver/spi_master.h` and `driver/uart.h` -- ESP-IDF
+  peripheral headers, not leaf/libc -- so it failed the leaf check and moved
+  to `hw` instead (mapping.csv).
 - **C -- every `*_http.c/.h` / `*_http_*.c` file goes to `http`** regardless
   of subject matter: `ota_http*`, `wifi_provision_http*`, `safety_cfg_http*`,
   `adaptive_tune_http*`, plus `backup_export.c`/`backup_import.c` (paired
@@ -38,11 +42,15 @@ this whole pass is preparation only.
   by `zones_config_store.c`/`zones_config_accessors.c` (persist) as well as
   the `zones_current_sweep_*`/`zones_http_*` files -- placed in `persist`
   per the exception clause, since a `zones_config_*.c` file is a consumer.
-- **D -- `sim` moves to the top tier** in the verifier (with `ui/http/
-  bridge`): the sim backend drives the system from above. This is a genuine
-  tier reclassification, not just a mapping.csv edit -- it turns four
-  existing `control -> sim_backend.h` includes into new upward-include
-  findings (see section 5).
+- **D -- proposed, then REVERTED (see section 5 update)**: originally moved
+  `sim` to the top tier in the verifier (with `ui/http/bridge`), reasoning
+  the sim backend drives the system from above. This turned four existing
+  `control -> sim_backend.h` includes into new upward-include findings.
+  Reverted 2026-09-05: `sim` is a hardware substitute, the same tier as the
+  real hw drivers it stands in for, not a top-tier orchestrator -- final
+  tiering is `ui/http/bridge` (top) -> `control/safety/persist/net` (mid) ->
+  `owners/hw/sim` (bottom) -> `common` (bottom-most). `plan_moves.ps1`'s
+  `$tierOf` and mapping.csv both reflect this final, reverted state.
 - **E -- all remaining `AMBIGUOUS:`-prefixed rows accepted** as the agent
   originally proposed: `heat_enable`/`heat_interlock` -> control,
   `kiln_io`/`kiln_io_owner`/`relay_authority` -> owners, `relay_cycles` ->
@@ -52,12 +60,59 @@ this whole pass is preparation only.
   stripped in mapping.csv; each row keeps a short "Coordinator-accepted
   placement: ..." rationale.
 
+## 0a. Opus review pass (2026-09-05) applied to `plan_moves.ps1`/`mapping.csv`
+
+- `-Apply` now creates all eleven layer directories up front and calls
+  `git mv -- $old $new` directly (no `Invoke-Expression`), failing loud on
+  any individual `git mv` error.
+- `-Apply` now rewrites `INCLUDE_DIRS` in `drivers/CMakeLists.txt` to list
+  all eleven layer subdirs (idempotent -- a second run is a no-op), and
+  refuses (`exit 1`) if it cannot locate/verify the `INCLUDE_DIRS` clause.
+- `-Apply` now mechanically rewrites the host-test mirror `#include
+  "../drivers/X.c"` sites (~66 files, was undercounted at "~84/12" in the
+  original review comment) and the path-keyed `check_*`/`selfcheck*`
+  scripts from the same literal map used for the CMakeLists rewrite --
+  section 4b below. Any `drivers/<name>` literal that cannot be mapped to
+  either a moved file or a known STAY/placeholder/out-of-scope name is a
+  hard `-Apply` failure, not a silent skip.
+- File writes use UTF-8 without a BOM (`[System.IO.File]::WriteAllText`
+  with a BOM-less `UTF8Encoding`) instead of `Set-Content -NoNewline`,
+  which wrote the system ANSI codepage and dropped the trailing newline.
+- `mapping.csv`: `settings.h` corrected from `common` to `hw` -- it
+  includes `driver/gpio.h`, `driver/spi_master.h`, `driver/uart.h` (ESP-IDF
+  peripheral headers), so it fails the leaf-header check decision B
+  requires. `zone_settings_source_chain.h`'s rationale, which said it sat
+  "alongside settings.h", is corrected to note settings.h moved out.
+- `^\s*#include` in the verifier's regex became `^\s*#\s*include` (a
+  `#include` with space before the directive name, while rare, would
+  otherwise be missed).
+- Section 0 (new): a mapping-completeness check runs before anything else
+  and fails, naming the file(s), if any real file under
+  `firmware/KilnFW/App/drivers/**` has no mapping.csv row. Negative-tested
+  2026-09-05: temporarily deleted the `flash_worker.h` row, confirmed the
+  script fails with exit 1 and names exactly that file, then restored the
+  row (verified byte-identical via `diff` against a backup copy) before
+  resuming. This check also caught two real, not hypothetical, files
+  missing from `mapping.csv` mid-session -- `zones_config_query.h` (a new
+  narrow header that landed on 2026-09-05, `9b38354`) and
+  `wifi_provision_state.h` (from item 9, `76bb15a`, already present by the
+  time this pass ran) -- both now have rows (persist and net tier
+  respectively).
+- Section 6 (new): a `-DryRun` counts summary (git mv, CMakeLists literal
+  hits per file, INCLUDE_DIRS dirs to add, path-keyed rewrite lines/files,
+  unmapped-literal counts split by hard-fail vs. benign, upward includes
+  remaining) prints at the end of every dry run.
+
 ## 1. git mv plan
 
-354 files map into the eleven layer subdirs (`mapping.csv`, 358 rows minus
-the 4 STAY rows from decision A). No basename collisions across the eleven
-target dirs. Full list of `git mv` commands: run the script, or read
-`mapping.csv` directly (one row per file).
+358 files map into the eleven layer subdirs (`mapping.csv`, 362 rows minus
+the 4 STAY rows from decision A -- up from 354/358 in the prior pass: the
+0a review added `zones_config_query.h` (persist), confirmed
+`wifi_provision_state.h`/`flash_worker.h` were already present, and the
+mapping-completeness check in section 0 now guarantees this count always
+matches every real file under `firmware/KilnFW/App/drivers/**`). No basename
+collisions across the eleven target dirs. Full list of `git mv` commands:
+run the script, or read `mapping.csv` directly (one row per file).
 
 ## 2. CMakeLists literal SRCS rewrite
 
@@ -163,9 +218,10 @@ literal.
 
 ## 5. Include-direction verifier
 
-Tiers (decision A keeps the same grouping, decision D moves `sim` up):
-`ui/http/bridge/sim` (top) -> `control/safety/persist/net` (mid) ->
-`owners/hw` (lower) -> `common` (bottom-most, decision B).
+Tiers (decision A keeps the same grouping; decision D's `sim`-up proposal
+below was reverted -- see the UPDATE that follows):
+`ui/http/bridge` (top) -> `control/safety/persist/net` (mid) ->
+`owners/hw/sim` (lower) -> `common` (bottom-most, decision B).
 
 **UPDATE (2026-09-05, coordinator pass on Fix 4/5/6):** applied. Decision D
 was reverted -- `sim` moved back to the bottom tier (`owners/hw/sim`) in
@@ -211,8 +267,13 @@ group-4 instruction this is a **propose, don't implement** finding:
   accessors `sim`/`hw`-tier files need) into a narrow
   `zones_config_query.h` (home: `persist`, alongside
   `zones_config_accessors.h`), with `zones_config_accessors.h` including it
-  back for its own use -- same split pattern as Fix 1/2/3. Not implemented
-  this pass; `sim_backend.c` is explicitly read-only for this task.
+  back for its own use -- same split pattern as Fix 1/2/3. **DONE 2026-09-05
+  (`9b38354`, outside this task's scope):** `zones_config_query.h` now
+  exists exactly as proposed; `mapping.csv` gained a row for it (persist)
+  during the 0a review pass since it was a real file missing from the map
+  (caught by the section-0 completeness check). It is still a `sim ->
+  persist` upward include under decision D's reverted tiering, tracked in
+  the updated count below.
 
 **22 upward includes remain (now 5 after the above -- confirmed via a
 `plan_moves.ps1 -DryRun` re-run 2026-09-05)** (down from 73 in the prior pass -- decisions B
@@ -229,6 +290,14 @@ regex matched the string `#include "x.h"` inside prose. Fixed in
 `plan_moves.ps1` by anchoring the match to `^\s*#include\s*"..."` (an actual
 directive, optional leading whitespace only) instead of matching anywhere in
 the line -- confirmed neither file has a real matching `#include` line.
+
+**UPDATE (0a review, 2026-09-05 re-run):** the verifier regex was tightened
+further to `^\s*#\s*include` (a `#include` with whitespace before the
+directive name still counts). Current count is **4**: the 3 already listed
+as Fix 1/3/4 below (one site each, `profiles_http.h`,
+`wifi_provision_state.h` via `sim_backend.c`, `zones_config_query.h` via
+`sim_backend.c`) plus one from Fix 2's family, `factory_reset.c [persist]:14
+includes "ota_http.h" [http]`, confirmed still open by the same re-run.
 
 Residuals, grouped by proposed fix:
 
