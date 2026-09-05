@@ -2,125 +2,61 @@
 
 #include <math.h>
 
-#include "MAX31856.h"
-#include "thermo_owner.h"
 #include "zones_http.h"
 
-#include "esp_timer.h"
-
-/* Fallback ambient for the plant model, used whenever no live cold-junction
- * reading is available (bench never wired, every channel faulted, or the
- * first call before the throttled cache below has ever refreshed). Also the
- * value profile_executor.c falls back to when its own step_ambient_c capture
- * never happened.
+/* A feasibility colour that changed while the user was looking at it -- the
+ * same segment reading OK, then UNREACHABLE, then OK again as they sat on
+ * the profile editor page -- would be worse than a slightly stale one: it
+ * teaches the operator that the colour is noise, not a verdict, and the
+ * whole point of this module is that the colour can be trusted. This is why
+ * the ambient this module uses is the ZONE'S OWN PERSISTED
+ * tuning_step_ambient_c (get_persisted_ambient_c() below), not a fresh live
+ * reading: it only changes when that zone is re-autotuned, which is a
+ * deliberate, infrequent, operator-visible event, never a background poll
+ * racing the page the user is reading.
  *
- * Kept as a named constant rather than folded into get_live_ambient_c()
- * because zero-tuned/no-thermocouple boards need SOME number, and the old
- * hardcoded 20 C is a reasonable room-temperature guess for that case. On a
- * bench that is actually warmer than 20 C (see get_live_ambient_c() below),
- * using the live reading instead of this constant is exactly the fix for the
- * false UNREACHABLE this module used to report: at true bench ambient (e.g.
- * 30 C+, this shop runs warm), a zone's coupled k_eff of 52.4 C gives a
- * ceiling of ambient + 52.4, comfortably above a 70 C target once ambient
- * is read correctly instead of assumed at 20. */
+ * Fallback ambient for the plant model, used whenever no persisted ambient
+ * is available for a zone (never autotuned, a getter that cannot answer, or
+ * a stored value that is non-finite or outside the sane range below). Also
+ * the value profile_executor.c falls back to when its own step_ambient_c
+ * capture never happened. Kept as a named constant rather than folded into
+ * get_persisted_ambient_c() because zero-tuned/no-thermocouple boards need
+ * SOME number, and 20 C is a reasonable room-temperature guess for that
+ * case. */
 #define FEASIBILITY_AMBIENT_C 20.0f
 
-/* Live ambient is clamped to this range before use -- a MAX31856 cold
- * junction reads the IC's own local temperature, not the room, and a bad
- * fault/decode that still limped past thermo_owner's own checks should not
- * be allowed to hand this module something like -40 or 150 that would
- * silently make every profile look reachable or nothing look reachable. */
+/* Persisted ambient is required to fall in this range before it is trusted --
+ * a corrupt or pre-migration record handing this module something like -40
+ * or 150 should not be allowed to silently make every profile look reachable
+ * or nothing look reachable. */
 #define FEASIBILITY_AMBIENT_MIN_C 0.0f
 #define FEASIBILITY_AMBIENT_MAX_C 60.0f
 
-/* thermo_owner_command_read_all() does real SPI I/O through the thermo owner
- * task (bounded by THERMO_OWNER_WAIT_MS, no lock held across the call by this
- * module -- see thermo_owner.h) -- it is the cheapest available producer for
- * a fresh cold-junction reading in this codebase today; nothing exposes a
- * pre-existing zero-I/O cached snapshot (dashboard_http.c/board_temps.c/
- * thermo_owner.c all either do the SPI themselves on every call or require a
- * caller-supplied MAX31856Reading array that only exists inside another
- * module's own I/O call). Since this module answers from httpd (profile
- * edit/preview) and LCD paths, it must not turn every keystroke or every
- * frame into a bus transaction, so the result is cached here and refreshed
- * at most once per FEASIBILITY_AMBIENT_REFRESH_US -- ordinary calls just
- * read the cache. */
-#define FEASIBILITY_AMBIENT_REFRESH_US ((int64_t)30 * 1000 * 1000) /* 30 s */
-
-static bool s_ambient_override_active = false;
-static float s_ambient_override_c = FEASIBILITY_AMBIENT_C;
-
-/* Forces get_live_ambient_c() to return `ambient_c` without touching
- * thermo_owner at all -- test-only. Declared here rather than in the public
- * header (production code never calls it); test_profile_feasibility.c
- * forward-declares these two the same way it already stubs
- * zones_config_get_model()/get_coupling(). */
-void profile_feasibility_test_set_ambient_c(float ambient_c)
-{
-    s_ambient_override_active = true;
-    s_ambient_override_c = ambient_c;
-}
-
-void profile_feasibility_test_clear_ambient_override(void)
-{
-    s_ambient_override_active = false;
-    s_ambient_override_c = FEASIBILITY_AMBIENT_C;
-}
-
-static float s_ambient_cache_c = FEASIBILITY_AMBIENT_C;
-static int64_t s_ambient_cache_last_us = -(FEASIBILITY_AMBIENT_REFRESH_US);
-
-/* Live ambient reference for the plant model: the MINIMUM cold-junction
- * reading across every channel thermo_owner answers for. Minimum, not mean
- * or the reading from channel 0, because a channel sitting near an active
- * heater or a warm enclosure wall reads hotter than the room -- the coolest
- * channel is the best available proxy for the ambient the kiln shell itself
- * will cool toward, which is what T_amb in the FOPDT model actually means.
- * Non-finite/faulted channels are ignored outright; if none answer, or
- * thermo_owner itself cannot answer (never started, no bus, timeout), this
- * falls back to FEASIBILITY_AMBIENT_C exactly as before this live reading
- * existed.
+/* Persisted per-zone ambient the fitted model (zones_config_get_model()) is
+ * actually relative to: the room temperature autotune measured before that
+ * zone's identification step began (zone_tuning_quality_t::step_ambient_c,
+ * zones_config_get_tuning_quality()), NOT a live cold-junction reading. A
+ * cold junction measures the board itself, which self-heats during a
+ * firing -- autotune_engine_step_identify.c deliberately does not use it as
+ * an absolute reference for exactly that reason, and this module must not
+ * either: using a self-heated board temperature as "ambient" would inflate
+ * the computed ceiling precisely when a firing is running and the check
+ * matters most.
  *
- * Throttled by s_ambient_cache_* -- see FEASIBILITY_AMBIENT_REFRESH_US above
- * for why a fresh SPI round trip is not done on every call. */
-static float get_live_ambient_c(void)
+ * Requires q.valid (a zone that has never been autotuned reads step_ambient_c
+ * as 0, which is inside the sane range below and would otherwise be
+ * mistaken for a real cold-room reading) as well as a finite, in-range
+ * value; any failure of either falls back to FEASIBILITY_AMBIENT_C. Pure
+ * config lookup -- no I/O, no lock, no cached/stale state to reason about. */
+static float get_persisted_ambient_c(uint8_t zone_index)
 {
-    if (s_ambient_override_active) {
-        return s_ambient_override_c;
+    zone_tuning_quality_t q;
+    if (zones_config_get_tuning_quality(zone_index, &q) && q.valid &&
+        isfinite(q.step_ambient_c) && q.step_ambient_c >= FEASIBILITY_AMBIENT_MIN_C &&
+        q.step_ambient_c <= FEASIBILITY_AMBIENT_MAX_C) {
+        return q.step_ambient_c;
     }
-
-    int64_t now_us = esp_timer_get_time();
-    if (now_us - s_ambient_cache_last_us < FEASIBILITY_AMBIENT_REFRESH_US) {
-        return s_ambient_cache_c;
-    }
-    s_ambient_cache_last_us = now_us;
-
-    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-    size_t count = 0;
-    float ambient = FEASIBILITY_AMBIENT_C;
-    if (thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &count) == ESP_OK &&
-        count > 0) {
-        float min_cj = NAN;
-        for (size_t i = 0; i < count; i++) {
-            if (readings[i].spi_failed || !isfinite(readings[i].cj_temperature_c)) {
-                continue;
-            }
-            float cj = readings[i].cj_temperature_c;
-            if (!isfinite(min_cj) || cj < min_cj) {
-                min_cj = cj;
-            }
-        }
-        if (isfinite(min_cj)) {
-            if (min_cj < FEASIBILITY_AMBIENT_MIN_C) {
-                min_cj = FEASIBILITY_AMBIENT_MIN_C;
-            } else if (min_cj > FEASIBILITY_AMBIENT_MAX_C) {
-                min_cj = FEASIBILITY_AMBIENT_MAX_C;
-            }
-            ambient = min_cj;
-        }
-    }
-    s_ambient_cache_c = ambient;
-    return ambient;
+    return FEASIBILITY_AMBIENT_C;
 }
 
 /* A rate within this fraction of the modelled maximum is still called OK.
@@ -167,6 +103,13 @@ static profile_seg_verdict_t worse(profile_seg_verdict_t a, profile_seg_verdict_
 {
     return verdict_rank(b) > verdict_rank(a) ? b : a;
 }
+
+/* Forward declaration -- the actual verdict logic, taking t_amb as a
+ * parameter rather than sampling it itself. See profile_feasibility_segment_in_mask()
+ * and profile_feasibility_profile_in_mask() below for the two public entry
+ * points that sample it once and pass it down. */
+static profile_seg_verdict_t segment_verdict(uint8_t zone_index, uint8_t zone_mask, float start_c,
+                                             const profile_segment_t *seg, float t_amb);
 
 /* Effective full-power steady-state gain for zone `zone_index` when the run
  * drives every zone in `zone_mask` at once.
@@ -236,6 +179,19 @@ profile_seg_verdict_t profile_feasibility_segment_in_mask(uint8_t zone_index, ui
                                                           float start_c,
                                                           const profile_segment_t *seg)
 {
+    /* Public entry point -- ambient is sampled exactly once here and threaded
+     * down to segment_verdict(), rather than each internal step reading its
+     * own copy (the persisted getter is deterministic and I/O-free, so two
+     * calls would in practice agree, but review of the earlier live-ambient
+     * version flagged exactly this pattern -- start_c and t_amb sampled at
+     * two different points -- as fragile, so it is not repeated here even
+     * though it is no longer live I/O). */
+    return segment_verdict(zone_index, zone_mask, start_c, seg, get_persisted_ambient_c(zone_index));
+}
+
+static profile_seg_verdict_t segment_verdict(uint8_t zone_index, uint8_t zone_mask, float start_c,
+                                             const profile_segment_t *seg, float t_amb)
+{
     if (!seg) {
         return PROFILE_SEG_UNKNOWN;
     }
@@ -270,7 +226,6 @@ profile_seg_verdict_t profile_feasibility_segment_in_mask(uint8_t zone_index, ui
      * -- see effective_k_dc() above for the model and why it matters. */
     const float k_eff = effective_k_dc(zone_index, zone_mask, k_dc);
 
-    const float t_amb = get_live_ambient_c();
     const float ceiling_c = t_amb + k_eff; /* steady state at u = 1: T - T_amb = K_eff */
 
     float target = seg->target_c;
@@ -424,15 +379,18 @@ profile_seg_verdict_t profile_feasibility_profile_in_mask(uint8_t zone_index, ui
         return PROFILE_SEG_UNKNOWN;
     }
 
-    /* The run starts from the room, then each segment starts where the
-     * previous one's target left it -- the same walk profile_executor.c does
-     * with real setpoints. */
-    float start_c = get_live_ambient_c();
+    /* Public entry point -- ambient is sampled exactly once here, used both
+     * as the starting temperature (the run starts from the room) and passed
+     * down to every segment_verdict() call below, so all segments of this
+     * one profile walk see the identical value even though each segment
+     * call happens at a different point in the loop. */
+    const float t_amb = get_persisted_ambient_c(zone_index);
+    float start_c = t_amb;
     profile_seg_verdict_t rollup = PROFILE_SEG_OK;
 
     for (uint8_t i = 0; i < p->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
         profile_seg_verdict_t v =
-            profile_feasibility_segment_in_mask(zone_index, zone_mask, start_c, &p->segments[i]);
+            segment_verdict(zone_index, zone_mask, start_c, &p->segments[i], t_amb);
         if (out_segments && i < out_cap) {
             out_segments[i] = v;
         }

@@ -625,22 +625,66 @@ model (`dT/dt = (K*u - (T - T_amb)) / tau`): max heating/cooling rate, an
 (never a false OK or false red). Verified on hardware that the badge agrees with
 what `profiles_start()` actually refuses. DONE and hardware-verified 2026-08-20.
 
-- [x] **`T_amb` is now a live reading, not a hardcoded 20 C (2026-09-05).**
-      `get_live_ambient_c()` in `profile_feasibility.c` takes the minimum
-      cold-junction reading across every channel `thermo_owner_command_read_all()`
-      answers for (clamped to `[0, 60]` C), and falls back to the
-      `FEASIBILITY_AMBIENT_C` constant (still 20 C) only when no live reading is
-      available. Root cause of the bug this fixes: a bench that actually sits
-      well above 20 C (this shop runs warm) made zone 2's coupled ceiling
-      (`20 + 52.4 = 72.4`, minus the 5 C margin = 67.4) report a 70 C profile
-      `UNREACHABLE`, while the fixture was observed reaching 80 C on the bench.
-      Since this module answers from httpd (profile edit/preview) and LCD
-      render paths and must not turn every request into a fresh SPI
-      transaction, the reading is cached and refreshed at most once per 30 s
-      (`FEASIBILITY_AMBIENT_REFRESH_US`) rather than read live on every call.
-      Tests drive `profile_feasibility_test_set_ambient_c()`/
-      `_clear_ambient_override()` (test-only hooks, not in the public header)
-      instead of exercising the real timer/thermo_owner path.
+- [x] **`T_amb` is now each zone's own persisted autotune ambient, not a live
+      cold-junction reading (2026-09-05, reworked — the 2026-09-05
+      live-cold-junction version below was reviewed and rejected same day).**
+      `get_persisted_ambient_c()` in `profile_feasibility.c` reads
+      `zone_tuning_quality_t::step_ambient_c` via
+      `zones_config_get_tuning_quality()` — the room temperature autotune
+      measured before that zone's identification step, i.e. the ambient the
+      fitted model (`k_dc`/`tau_s`) is actually relative to — and falls back
+      to the `FEASIBILITY_AMBIENT_C` constant (20 C) whenever
+      `tuning_valid` is false, the getter cannot answer, or the stored value
+      is non-finite or outside `[0, 60]` C. Sampled once per public entry
+      point (`profile_feasibility_segment_in_mask()`,
+      `profile_feasibility_profile_in_mask()`) and threaded down as a
+      parameter, so every segment of one profile walk sees the identical
+      value even though `start_c` and `t_amb` used to be sampled at two
+      separate call sites. Pure config lookup — no I/O, no lock, no cache,
+      nothing that can go stale between calls.
+
+      **Why the live cold-junction version (below) was wrong, not just
+      differently implemented:** Opus review the same day rejected it on
+      four independent grounds — ~300 B of added stack on the httpd and LVGL
+      tasks, both already near-overflowed elsewhere in this codebase; the
+      LVGL task blocking up to `THERMO_OWNER_WAIT_MS` on the same SPI bus the
+      display uses, from inside a render path; the ambient cache
+      (`s_ambient_cache_c`/`_last_us`) being a plain, non-atomic pair
+      written by whichever task called in and read by every other, i.e.
+      torn under concurrent access with nothing serialising it; and,
+      decisively, wrong physics — a MAX31856 cold junction reads the
+      **board's own temperature**, which self-heats over the course of a
+      firing, so using it as "ambient" would inflate the computed ceiling
+      exactly when a firing is running and the check matters most.
+      `autotune_engine_step_identify.c` (around line 920-935) already
+      documents rejecting the cold junction as an absolute reference for
+      this same reason — the live-ambient version above re-introduced
+      exactly the input that file explicitly avoids. The tests added
+      alongside the live version also never executed the live-reading
+      branch (the stub always returned "no reading"), so the one bit of
+      behavior that actually changed shipped unverified.
+
+      Bench check 2026-09-05: `GET /api/zones` on the live board shows all
+      three zones with `tuning_valid: false` / `tuning_step_ambient_c: 0.0`
+      — no zone has ever been autotuned with this field populated, so today
+      every zone still gets the 20 C fallback in practice. The fix is
+      correct and in place regardless; it starts mattering as soon as a
+      zone is next autotuned and this field gets a real, non-zero value.
+
+      Tests drive `test_stub_zones_set_coupling()`-style stub hooks (a new
+      `stub_zone_ambient()` local to `test_profile_feasibility.c`, backing
+      the file's own `zones_config_get_tuning_quality()` stand-in) covering:
+      a persisted 30 C ambient reaching a 70 C target the 20 C fallback
+      calls `UNREACHABLE`; getter failure, NaN, and out-of-range (80 C) all
+      falling back to 20 C, plus the `tuning_valid == false` case
+      specifically (step_ambient_c reads 0 for a never-tuned zone, which is
+      *inside* the sane range and would be mistaken for a real cold-room
+      reading if valid weren't checked separately — exactly today's bench
+      state); and two zones in the same profile judged independently against
+      their own persisted ambients. Negative-tested by temporarily reducing
+      `get_persisted_ambient_c()` to `return FEASIBILITY_AMBIENT_C;`
+      unconditionally and confirming the ceiling-raising and per-zone tests
+      go red, then restoring it.
 
 - [ ] **One global bridge stall in a 25-minute soak (2026-08-20), cause not
       found.** 78 polling ticks, 77 clean; at t=1031s EVERY bridge surface

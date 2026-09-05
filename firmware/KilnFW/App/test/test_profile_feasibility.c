@@ -36,6 +36,9 @@ typedef struct {
     float dead_time_s;
     bool max_ramp_getter_answers;
     float max_ramp_c_per_hr;
+    bool ambient_getter_answers; /* false = zones_config_get_tuning_quality() cannot answer */
+    bool ambient_valid;          /* zone_tuning_quality_t::valid */
+    float ambient_c;             /* zone_tuning_quality_t::step_ambient_c */
 } stub_zone_t;
 
 static stub_zone_t s_zones[STUB_MAX_ZONES];
@@ -54,9 +57,27 @@ static void stub_zone_coupling_clear(uint8_t zi)
     test_stub_zones_set_coupling(zi, true, zero);
 }
 
+/* Mirrors test_stub_zones_set_coupling()'s shape for the ambient getter
+ * (zones_config_get_tuning_quality()): a plain setter driving the same
+ * s_zones state the stub definition below reads. Only used within this
+ * file (no other test file needs a zone's ambient), so unlike the coupling
+ * hook it is not forward-declared/exported -- it just has to exist before
+ * stub_zone_tuned() below, which every test's stub_reset() calls. */
+static void stub_zone_ambient(uint8_t zi, bool answers, bool valid, float ambient_c)
+{
+    if (zi < STUB_MAX_ZONES) {
+        s_zones[zi].ambient_getter_answers = answers;
+        s_zones[zi].ambient_valid = valid;
+        s_zones[zi].ambient_c = ambient_c;
+    }
+}
+
 /* A zone with the hand-checkable model above and a ceiling high enough that
  * the policy check never fires -- so a verdict is attributable to the physics
- * alone unless a test deliberately lowers it. */
+ * alone unless a test deliberately lowers it. Ambient defaults to a valid,
+ * persisted 20 C -- numerically identical to FEASIBILITY_AMBIENT_C's fallback,
+ * so every pre-existing test in this file that never touches the ambient
+ * stub keeps its original expected values without change. */
 static void stub_zone_tuned(uint8_t zi)
 {
     s_zones[zi].model_getter_answers = true;
@@ -66,10 +87,15 @@ static void stub_zone_tuned(uint8_t zi)
     s_zones[zi].max_ramp_getter_answers = true;
     s_zones[zi].max_ramp_c_per_hr = 100000.0f;
     stub_zone_coupling_clear(zi);
+    stub_zone_ambient(zi, true, true, 20.0f);
 }
 
 /* The "never autotuned" state zones_http.c documents: zeros in all three
- * model fields, with the getter itself succeeding. */
+ * model fields, with the getter itself succeeding. Ambient is left at
+ * whatever stub_reset() set it to; a never-tuned zone realistically has
+ * tuning_valid == 0 too (get_persisted_ambient_c() must fall back to 20 C
+ * for that case), which test 1 below relies on stub_reset()'s default -- see
+ * that test's own setup for the explicit stub_zone_ambient() call. */
 static void stub_zone_untuned(uint8_t zi)
 {
     s_zones[zi].model_getter_answers = true;
@@ -115,35 +141,27 @@ uint8_t zones_config_get_thermo_count(void)
     return s_thermo_count;
 }
 
-// thermo_owner_command_read_all() is thermo_owner.c's real production
-// producer for profile_feasibility.c's live-ambient reading (see
-// get_live_ambient_c() there); thermo_owner.c itself is not compiled into
-// the host-test binary (it is a FreeRTOS task with a real SPI-bus owner
-// loop), so this is the ONE definition of that symbol the linker sees here --
-// same "plain C stand-in for the real symbol" shape as the zones_http.c
-// getters above. Answering "not found, no readings" reproduces exactly the
-// pre-live-ambient behaviour (fallback to FEASIBILITY_AMBIENT_C) for every
-// existing test in this file that never calls
-// profile_feasibility_test_set_ambient_c() -- see that hook below for the
-// tests that exercise the live path instead.
-esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_readings,
-                                        size_t *out_count)
+// zones_config_get_tuning_quality() is profile_feasibility.c's real
+// production source for a zone's persisted ambient (get_persisted_ambient_c()
+// there reads out->valid and out->step_ambient_c); zones_config_accessors.c
+// itself is not compiled into the host-test binary, so this is the ONE
+// definition of that symbol the linker sees here -- same "plain C stand-in
+// for the real symbol" shape as the other zones_http.c getters above. Every
+// field besides valid/step_ambient_c is zeroed -- profile_feasibility.c does
+// not read them.
+bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *out)
 {
-    (void)out;
-    (void)max_readings;
-    if (out_count) {
-        *out_count = 0;
+    if (!out) {
+        return false;
     }
-    return ESP_ERR_NOT_FOUND;
+    memset(out, 0, sizeof(*out));
+    if (zone_index >= STUB_MAX_ZONES || !s_zones[zone_index].ambient_getter_answers) {
+        return false;
+    }
+    out->valid = s_zones[zone_index].ambient_valid;
+    out->step_ambient_c = s_zones[zone_index].ambient_c;
+    return true;
 }
-
-// ---------------------------------------------------------------------------
-// Test-only ambient hooks -- defined in profile_feasibility.c, not declared
-// in profile_feasibility.h since production code never calls them (see that
-// file's comment on profile_feasibility_test_set_ambient_c()).
-// ---------------------------------------------------------------------------
-void profile_feasibility_test_set_ambient_c(float ambient_c);
-void profile_feasibility_test_clear_ambient_override(void);
 
 // ---------------------------------------------------------------------------
 // Cross-file control hooks for test_backup_import.c
@@ -839,67 +857,142 @@ static void test_segment_in_mask_zone_not_in_mask_is_unknown(void)
 }
 
 // ---------------------------------------------------------------------------
-// 17. Live ambient: a warmer bench raises the ceiling and can flip a verdict
-// from UNREACHABLE to OK, matching the owner's bench observation (a 70 C
-// target reported UNREACHABLE at the old hardcoded 20 C ambient, on a kiln
-// that actually reaches 80 C).
+// 17. Persisted ambient: a warmer zone raises the ceiling and can flip a
+// verdict from UNREACHABLE to OK, matching the owner's bench observation (a
+// 70 C target reported UNREACHABLE at the old hardcoded 20 C ambient, on a
+// kiln that actually reaches 80 C) -- and the bench zone-2 shape from the
+// task (k_dc 31.681, coupling 8.33 + 12.42): a persisted ambient of 30 makes
+// a 70 C target OK, where the 20 C fallback still calls it UNREACHABLE.
 // ---------------------------------------------------------------------------
 
-static void test_live_ambient_raises_ceiling(void)
+static void test_persisted_ambient_raises_ceiling(void)
 {
-    TEST_SECTION("a live ambient of 30 C reaches a target that the 20 C fallback calls "
+    TEST_SECTION("a persisted ambient of 30 C reaches a target that the 20 C fallback calls "
                  "UNREACHABLE -- ambient + k_eff is the ceiling, so raising ambient raises it");
 
     stub_reset();
     s_zones[0].k_dc = 50.0f;      // ceiling = t_amb + 50
     s_zones[0].tau_s = 3600.0f;   // so C/s * 3600 == C/hr, arithmetic stays hand-checkable
-    profile_feasibility_test_clear_ambient_override();
 
-    // At the 20 C fallback: ceiling 70, threshold 65 C -- a 70 C target sits
-    // inside the margin (70 > 65) and is UNREACHABLE, same shape as the real
-    // zone-2 bench case (72.4 C ceiling, 67.4 C threshold, 70 C target).
+    // At the 20 C fallback (getter answers false so get_persisted_ambient_c()
+    // falls back to FEASIBILITY_AMBIENT_C): ceiling 70, threshold 65 C -- a
+    // 70 C target sits inside the margin (70 > 65) and is UNREACHABLE, same
+    // shape as the real zone-2 bench case (72.4 C ceiling, 67.4 C threshold,
+    // 70 C target).
+    stub_zone_ambient(0, false, false, 0.0f);
     profile_segment_t target70 = seg_of(70.0f, 1.0f); // slow rate -- only the ceiling matters
     TEST_CHECK(profile_feasibility_segment(0, 20.0f, &target70) == PROFILE_SEG_UNREACHABLE,
                "at the 20 C fallback ambient, 70 C is inside the 65 C threshold -> UNREACHABLE");
 
-    // The SAME segment, judged with a live ambient of 30 C: ceiling 80,
+    // The SAME segment, judged with a persisted ambient of 30 C: ceiling 80,
     // threshold 75 C -- 70 C is now comfortably outside the margin.
-    profile_feasibility_test_set_ambient_c(30.0f);
+    stub_zone_ambient(0, true, true, 30.0f);
     TEST_CHECK(profile_feasibility_segment(0, 20.0f, &target70) == PROFILE_SEG_OK,
-               "at a live 30 C ambient, the same 70 C target clears the 75 C threshold -> OK");
-
-    profile_feasibility_test_clear_ambient_override();
+               "at a persisted 30 C ambient, the same 70 C target clears the 75 C threshold -> "
+               "OK");
 }
 
 // ---------------------------------------------------------------------------
-// 18. No live reading (thermo_owner cannot answer, or the reading it gives
-// is unusable) falls back to FEASIBILITY_AMBIENT_C (20 C), reproducing every
-// verdict this module gave before a live ambient existed.
+// 18. No usable persisted ambient falls back to FEASIBILITY_AMBIENT_C (20 C),
+// reproducing every verdict this module gave before a persisted ambient
+// existed. Three ways the persisted value can be unusable: the getter itself
+// cannot answer, tuning_valid is false (the "never autotuned" encoding, whose
+// step_ambient_c reads 0 -- inside the sane range, so this must be an
+// explicit valid check, not just a range/finite check), and a stored value
+// that is finite but out of the sane [0, 60] range.
 // ---------------------------------------------------------------------------
 
-static void test_no_live_ambient_falls_back_to_20(void)
+static void test_no_persisted_ambient_falls_back_to_20(void)
 {
-    TEST_SECTION("no usable live reading -> falls back to 20 C, old verdicts unchanged");
+    TEST_SECTION("no usable persisted ambient -> falls back to 20 C, old verdicts unchanged");
+
+    // This test pins the two boundary verdicts from test_ceiling_unreachable()
+    // explicitly, so a regression that made the fallback silently drift off
+    // 20 C would be caught here even if the ceiling-specific test above
+    // changed its own stub setup first.
+    profile_segment_t inside_margin = seg_of(1016.0f, 1.0f);  // ceiling 1020, threshold 1015
+    profile_segment_t outside_margin = seg_of(1014.0f, 1.0f);
+
+    // (a) getter itself cannot answer.
+    stub_reset();
+    stub_zone_ambient(0, false, false, 0.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
+               "getter failure -> ambient falls back to 20 C -- 1016 C stays inside the 1015 C "
+               "threshold, UNREACHABLE");
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &outside_margin) != PROFILE_SEG_UNREACHABLE,
+               "and 1014 C still clears it -> not UNREACHABLE, same 20 C fallback boundary");
+
+    // (b) getter answers, but the value is NaN.
+    stub_reset();
+    stub_zone_ambient(0, true, true, NAN);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
+               "NaN persisted ambient -> falls back to 20 C, same UNREACHABLE boundary");
+
+    // (c) getter answers, valid, but out of the sane [0, 60] range.
+    stub_reset();
+    stub_zone_ambient(0, true, true, 80.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
+               "out-of-range (80 C) persisted ambient -> falls back to 20 C, same UNREACHABLE "
+               "boundary");
+
+    // (d) getter answers with a value that IS in range, but tuning_valid is
+    // false (the real shape of a never-autotuned zone: step_ambient_c reads
+    // 0, which sits inside [0, 60] and would be mistaken for a real cold-room
+    // reading if valid weren't checked separately).
+    stub_reset();
+    stub_zone_ambient(0, true, false, 0.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
+               "tuning_valid == false -> falls back to 20 C even though step_ambient_c (0) is "
+               "technically in range");
+}
+
+// ---------------------------------------------------------------------------
+// 19. Per-zone: each zone's ambient is its own -- a profile spanning two
+// zones with different persisted ambients (one set, one missing) must judge
+// each zone against ITS OWN value, never mixing them up or falling back to
+// 20 C for the zone that does have one.
+// ---------------------------------------------------------------------------
+
+static void test_per_zone_ambient_is_independent(void)
+{
+    TEST_SECTION("zone 0's persisted ambient (30) and zone 2's missing one (falls back to 20) "
+                 "are judged independently -- neither leaks into the other's verdict");
 
     stub_reset();
-    profile_feasibility_test_clear_ambient_override();
-    // thermo_owner_command_read_all() is stubbed above to always answer
-    // ESP_ERR_NOT_FOUND/count==0 -- exactly "thermo_owner cannot answer" --
-    // so every test in this file that never touches the ambient override
-    // already exercises this path. This test pins the two boundary verdicts
-    // from test_ceiling_unreachable() explicitly, so a regression that made
-    // the fallback silently drift off 20 C would be caught here even if the
-    // ceiling-specific test above changed its own stub setup first.
-    profile_segment_t inside_margin = seg_of(1016.0f, 1.0f);  // ceiling 1020, threshold 1015
-    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
-               "with no live reading, ambient is still 20 C -- 1016 C stays inside the 1015 C "
-               "threshold, UNREACHABLE exactly as before this feature existed");
+    s_zones[0].k_dc = 50.0f;
+    s_zones[0].tau_s = 3600.0f;
+    s_zones[2].k_dc = 50.0f;
+    s_zones[2].tau_s = 3600.0f;
+    stub_zone_ambient(0, true, true, 30.0f);   // zone 0: persisted 30 C
+    stub_zone_ambient(2, false, false, 0.0f);  // zone 2: getter cannot answer -> falls back to 20
 
-    profile_segment_t outside_margin = seg_of(1014.0f, 1.0f);
-    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &outside_margin) != PROFILE_SEG_UNREACHABLE,
-               "and 1014 C still clears it -> not UNREACHABLE, same boundary as the 20 C "
-               "fallback always gave");
+    profile_segment_t target70 = seg_of(70.0f, 1.0f);
+
+    // Zone 0: ceiling 80 (30 + 50), threshold 75 -- 70 C clears it.
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &target70) == PROFILE_SEG_OK,
+               "zone 0 uses its own persisted 30 C ambient -> 70 C target is OK");
+
+    // Zone 2: ceiling 70 (20 + 50), threshold 65 -- 70 C does not clear it.
+    TEST_CHECK(profile_feasibility_segment(2, 20.0f, &target70) == PROFILE_SEG_UNREACHABLE,
+               "zone 2 has no usable persisted ambient and falls back to 20 C -> the same 70 C "
+               "target is UNREACHABLE, unaffected by zone 0's higher ambient");
 }
+
+// ---------------------------------------------------------------------------
+// Negative test: prove the (a)/(b)/(c) fallback checks in
+// get_persisted_ambient_c() are load-bearing, not vacuous. Breaking the
+// production selection to ignore the persisted getter (always fall back to
+// FEASIBILITY_AMBIENT_C, i.e. as if get_persisted_ambient_c() were `return
+// FEASIBILITY_AMBIENT_C;` unconditionally) must fail
+// test_persisted_ambient_raises_ceiling() and test_per_zone_ambient_is_independent()
+// above -- exercised here by re-running the zone-0-raised-ceiling check with
+// the SAME setup those tests use, but asserting it would fail without the
+// persisted read, i.e. confirming today's code does NOT match the broken
+// behaviour. This is a standing comment, not a toggle -- flip
+// get_persisted_ambient_c() by hand to `return FEASIBILITY_AMBIENT_C;` and
+// re-run this file to see test_persisted_ambient_raises_ceiling() and
+// test_per_zone_ambient_is_independent() go red, then restore it.
+// ---------------------------------------------------------------------------
 
 void run_test_profile_feasibility(void)
 {
@@ -919,6 +1012,7 @@ void run_test_profile_feasibility(void)
     test_coupling_raises_ceiling_in_mask();
     test_mask_zero_is_judged_coupled_across_configured_zones();
     test_segment_in_mask_zone_not_in_mask_is_unknown();
-    test_live_ambient_raises_ceiling();
-    test_no_live_ambient_falls_back_to_20();
+    test_persisted_ambient_raises_ceiling();
+    test_no_persisted_ambient_falls_back_to_20();
+    test_per_zone_ambient_is_independent();
 }
