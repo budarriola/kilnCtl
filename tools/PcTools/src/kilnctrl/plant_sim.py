@@ -875,102 +875,52 @@ class FOPDTPlantPerPath:
 
 
 # ---------------------------------------------------------------------------
-# Fuzzy-PID layer -- FAITHFUL mirror of firmware/KilnFW/App/drivers/
-# pid_fuzzy.c's pid_fuzzy_adjust(), not an approximation. Constants, the 3x3
-# rule table, the triangular-membership shape and the strength_pct==0
-# short-circuit are copied line-for-line from the C source (read
-# 2026-09-02 for this sweep). Any future edit to pid_fuzzy.c must be
-# mirrored here too, or this module's PID_FUZZY_STRENGTH_ZERO_INVARIANT
-# test (tests/test_plant_sim.py) is the tripwire that should catch the drift
-# -- it only proves strength=0 is a no-op in THIS mirror, so a firmware
-# change that only affects strength>0 behaviour would not be caught by it.
-FUZZY_ERROR_BAND_C = 20.0
-FUZZY_RATE_BAND_C_PER_S = 0.5
-FUZZY_MAX_NUDGE_FRACTION = 0.5
-
-# rule table [error_bucket][rate_bucket] -> (kp_dir, ki_dir, kd_dir),
-# bucket order 0=NEG/FALLING, 1=ZERO/STEADY, 2=POS/RISING -- copied from
-# pid_fuzzy.c's RULE_TABLE.
-FUZZY_RULE_TABLE = [
-    [(1.0, -1.0, 1.0), (1.0, 0.0, 0.0), (-1.0, 1.0, -1.0)],
-    [(-1.0, -1.0, 1.0), (-1.0, 1.0, -1.0), (1.0, -1.0, 1.0)],
-    [(-1.0, 1.0, -1.0), (1.0, 0.0, 0.0), (1.0, -1.0, 1.0)],
-]
-
-
-def _fuzzy_triangular_memberships(x, band):
-    """Mirrors pid_fuzzy.c's triangular_memberships(): returns
-    (neg, zero, pos), each in [0,1], summing to exactly 1.0."""
-    if x <= -band:
-        return 1.0, 0.0, 0.0
-    if x >= band:
-        return 0.0, 0.0, 1.0
-    if x <= 0.0:
-        t = (-x) / band
-        return t, 1.0 - t, 0.0
-    t = x / band
-    return 0.0, 1.0 - t, t
+# Fuzzy-PID layer. The mirror of firmware/KilnFW/App/drivers/pid_fuzzy.c's
+# pid_fuzzy_adjust() itself now lives in ``fuzzy_band_probe`` (built and
+# pinned-by-test 2026-09-04 for the offline band-probe tool) -- this module
+# used to carry its OWN hand-copied line-for-line port with the bands
+# hardcoded as ``FUZZY_ERROR_BAND_C``/``FUZZY_RATE_BAND_C_PER_S`` module
+# constants. Commit 904db54 made those two numbers per-zone runtime config
+# (``error_band_c``/``rate_band_c_per_s``, ZONES_CFG_VERSION 19) on the C
+# side without updating this file's copy or its call sites, which is
+# invisible today only because the config defaults happen to resolve to
+# exactly 20.0/0.5 -- the moment a zone is configured with a different band
+# (e.g. the 6-8 C / 0.20-0.25 envelope recommended from the 2026-09-04
+# capture), every prediction this module makes silently keeps simulating
+# the old fixed band. Importing the probe's implementation instead of
+# maintaining a second hand copy means there is exactly one Python port of
+# pid_fuzzy.c to keep in lockstep with the firmware, not two; see
+# ``fuzzy_band_probe``'s own module docstring and
+# ``tests/test_fuzzy_band_probe_drift.py`` for the drift check against the
+# C source.
+from .fuzzy_band_probe import (  # noqa: E402  (import placed here for context)
+    ERROR_BAND_C_DEFAULT as FUZZY_ERROR_BAND_C_DEFAULT,
+    RATE_BAND_C_PER_S_DEFAULT as FUZZY_RATE_BAND_C_PER_S_DEFAULT,
+    pid_fuzzy_adjust as _fuzzy_band_probe_pid_fuzzy_adjust,
+)
 
 
-def _fuzzy_clamp_gain(g):
-    if not math.isfinite(g) or g < 0.0:
-        return 0.0
-    return g
-
-
-def _fuzzy_sanitize_base(base):
-    if not math.isfinite(base) or base < 0.0:
-        return 0.0
-    return base
-
-
-def pid_fuzzy_adjust(error_c, error_rate_c_per_s, base_kp, base_ki, base_kd, strength_pct):
-    """Python mirror of pid_fuzzy.c's ``pid_fuzzy_adjust()``. ``strength_pct``
-    is a float here (the sim has no uint8_t rounding step) but is clamped to
-    [0, 100] exactly as the C caller (profile_executor_pid_tick.c) clamps
-    before the uint8_t cast -- strength_pct == 0 is the safety-contract
-    short-circuit and MUST reproduce the base gains bit-for-bit (see
-    pid_fuzzy.c's own comment on that short-circuit)."""
-    kp = _fuzzy_sanitize_base(base_kp)
-    ki = _fuzzy_sanitize_base(base_ki)
-    kd = _fuzzy_sanitize_base(base_kd)
-
-    if strength_pct > 100.0:
-        strength_pct = 100.0
-    if strength_pct < 0.0:
-        strength_pct = 0.0
-
-    if strength_pct == 0.0:
-        return kp, ki, kd
-
-    if not math.isfinite(error_c) or not math.isfinite(error_rate_c_per_s):
-        return kp, ki, kd
-
-    e_neg, e_zero, e_pos = _fuzzy_triangular_memberships(error_c, FUZZY_ERROR_BAND_C)
-    r_neg, r_zero, r_pos = _fuzzy_triangular_memberships(error_rate_c_per_s, FUZZY_RATE_BAND_C_PER_S)
-    e_deg = (e_neg, e_zero, e_pos)
-    r_deg = (r_neg, r_zero, r_pos)
-
-    kp_sum = ki_sum = kd_sum = weight_sum = 0.0
-    for ei in range(3):
-        for ri in range(3):
-            firing = e_deg[ei] * r_deg[ri]
-            kp_dir, ki_dir, kd_dir = FUZZY_RULE_TABLE[ei][ri]
-            kp_sum += firing * kp_dir
-            ki_sum += firing * ki_dir
-            kd_sum += firing * kd_dir
-            weight_sum += firing
-
-    kp_dir = (kp_sum / weight_sum) if weight_sum > 0.0 else 0.0
-    ki_dir = (ki_sum / weight_sum) if weight_sum > 0.0 else 0.0
-    kd_dir = (kd_sum / weight_sum) if weight_sum > 0.0 else 0.0
-
-    scale = (strength_pct / 100.0) * FUZZY_MAX_NUDGE_FRACTION
-
-    out_kp = _fuzzy_clamp_gain(kp * (1.0 + scale * kp_dir))
-    out_ki = _fuzzy_clamp_gain(ki * (1.0 + scale * ki_dir))
-    out_kd = _fuzzy_clamp_gain(kd * (1.0 + scale * kd_dir))
-    return out_kp, out_ki, out_kd
+def pid_fuzzy_adjust(error_c, error_rate_c_per_s, base_kp, base_ki, base_kd,
+                      strength_pct, error_band_c=FUZZY_ERROR_BAND_C_DEFAULT,
+                      rate_band_c_per_s=FUZZY_RATE_BAND_C_PER_S_DEFAULT):
+    """Thin wrapper over ``fuzzy_band_probe.pid_fuzzy_adjust`` (the single
+    Python port of pid_fuzzy.c's ``pid_fuzzy_adjust()`` this repo now
+    maintains) matching the C function's signature: bands are explicit
+    parameters, not module constants, sourced by the caller from the zone's
+    actual config -- see ``PID.__init__``/``run_profile``'s
+    ``error_band_c``/``rate_band_c_per_s`` parameters below. Defaulting both
+    band parameters to the firmware's documented defaults (20.0 C /
+    0.5 C/s, the ``ZONE_ERROR_BAND_C_DEFAULT``/``ZONE_RATE_BAND_C_PER_S_
+    DEFAULT`` sentinel-resolution values) preserves every existing caller's
+    behaviour byte-for-byte."""
+    # strength_pct here may be a float (the sim has no uint8_t rounding
+    # step); fuzzy_band_probe.pid_fuzzy_adjust clamps to [0, 100] the same
+    # way the C caller does before its uint8_t cast, so passing a float
+    # through is safe and behaviourally identical.
+    return _fuzzy_band_probe_pid_fuzzy_adjust(
+        error_c, error_rate_c_per_s, error_band_c, rate_band_c_per_s,
+        base_kp, base_ki, base_kd, strength_pct,
+    )
 
 
 def _pid_rescale_integral_for_new_ki(integral, old_ki, new_ki):
@@ -1000,13 +950,28 @@ class PID:
     (error_rate read from *last* tick's d_filtered, matching the firmware's
     documented one-tick lag) feed pid_fuzzy_adjust() against the zone's base
     gains, and a Ki change is bump-transferred into the integral
-    accumulator via pid_rescale_integral_for_new_ki() before it is used."""
+    accumulator via pid_rescale_integral_for_new_ki() before it is used.
 
-    def __init__(self, kp, ki, kd, d_tau, b, pid_range_c, fuzzy_strength_pct=0.0):
+    ``error_band_c``/``rate_band_c_per_s`` are the same per-zone config
+    values profile_executor_pid_tick.c resolves via
+    ``zones_config_get_error_band_c()``/``zones_config_get_rate_band_c_per_s()``
+    before calling ``pid_fuzzy_adjust()`` (ZONES_CFG_VERSION 19, commit
+    904db54). They default to the firmware's documented defaults (20.0 C /
+    0.5 C/s) so a caller that never sets them behaves exactly as before
+    that commit made the bands configurable; a caller simulating a
+    non-default band (e.g. evaluating a tighter band before recommending it
+    to the owner) MUST pass the zone's actual configured values here, not
+    rely on the default."""
+
+    def __init__(self, kp, ki, kd, d_tau, b, pid_range_c, fuzzy_strength_pct=0.0,
+                 error_band_c=FUZZY_ERROR_BAND_C_DEFAULT,
+                 rate_band_c_per_s=FUZZY_RATE_BAND_C_PER_S_DEFAULT):
         self.base_kp, self.base_ki, self.base_kd = kp, ki, kd
         self.kp, self.ki, self.kd = kp, ki, kd
         self.d_tau, self.b, self.pid_range_c = d_tau, b, pid_range_c
         self.fuzzy_strength_pct = fuzzy_strength_pct
+        self.error_band_c = error_band_c
+        self.rate_band_c_per_s = rate_band_c_per_s
         self.integral = 0.0
         self.d_filtered = 0.0
         self.prev_measurement = None
@@ -1029,6 +994,8 @@ class PID:
         adj_kp, adj_ki, adj_kd = pid_fuzzy_adjust(
             error_c, error_rate_c_per_s, self.base_kp, self.base_ki, self.base_kd,
             self.fuzzy_strength_pct,
+            error_band_c=self.error_band_c,
+            rate_band_c_per_s=self.rate_band_c_per_s,
         )
         self.integral = _pid_rescale_integral_for_new_ki(
             self.integral, self.fuzzy_prev_effective_ki, adj_ki)
@@ -1340,6 +1307,8 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                  controller_K_inv=None, controller_tau=None, plant_regime='measured',
                  controller_K=None, controller_L_pair=None,
                  fuzzy_strength_pct=0.0,
+                 fuzzy_error_band_c=FUZZY_ERROR_BAND_C_DEFAULT,
+                 fuzzy_rate_band_c_per_s=FUZZY_RATE_BAND_C_PER_S_DEFAULT,
                  measurement_quantum_c=0.0, measurement_noise_std_c=0.0, measurement_seed=0,
                  pwm_window_ms=0.0, pwm_min_on_ms=0.0, pwm_min_off_ms=0.0):
     """Run the plant+PID loop over an explicit segment list.
@@ -1404,7 +1373,21 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     (regression tests, capture comparisons, the matrix sweep) is
     unaffected -- see ``MEASURED_THERMO_NOISE_STD_C``/``MAX31856_QUANTUM_C``
     below for the values the gain-search entry points default these to
-    instead. ``measurement_seed`` seeds the noise draw so a given call is
+    instead.
+
+    ``fuzzy_error_band_c``/``fuzzy_rate_band_c_per_s``: the per-zone
+    ``error_band_c``/``rate_band_c_per_s`` config (ZONES_CFG_VERSION 19,
+    commit 904db54) each ``PID`` instance's fuzzy layer uses -- see
+    ``PID``'s own docstring. Each accepts a scalar (all zones) or a
+    length-3 sequence (one per zone), same broadcast convention as
+    ``kp``/``ki``/``kd`` (``_broadcast_zone_param``). Both default to the
+    firmware's documented defaults (20.0 C / 0.5 C/s), so every existing
+    caller is unaffected; a caller evaluating a candidate band -- e.g. the
+    6-8 C / 0.20-0.25 C/s envelope under consideration for the owner's
+    kiln -- MUST pass it here, or the prediction silently keeps simulating
+    the old fixed band while the real board runs the new one.
+
+    ``measurement_seed`` seeds the noise draw so a given call is
     reproducible; ``measurement_noise_std_c`` accepts a scalar (every zone)
     or a length-3 per-zone sequence, same convention as ``kp``/``ki``/
     ``kd`` (see ``_broadcast_zone_param``); quantization rounds to the
@@ -1466,8 +1449,12 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     kp_arr = _broadcast_zone_param(kp)
     ki_arr = _broadcast_zone_param(ki)
     kd_arr = _broadcast_zone_param(kd)
+    fuzzy_error_band_c_arr = _broadcast_zone_param(fuzzy_error_band_c)
+    fuzzy_rate_band_c_per_s_arr = _broadcast_zone_param(fuzzy_rate_band_c_per_s)
     pids = [PID(kp_arr[i], ki_arr[i], kd_arr[i], d_tau=30.0, b=1.0, pid_range_c=1000.0,
-                fuzzy_strength_pct=fuzzy_strength_pct) for i in range(N_ZONES)]
+                fuzzy_strength_pct=fuzzy_strength_pct,
+                error_band_c=fuzzy_error_band_c_arr[i],
+                rate_band_c_per_s=fuzzy_rate_band_c_per_s_arr[i]) for i in range(N_ZONES)]
     lag_ff = None
     if climb_mode == 'lag_compensated':
         K_ctrl = K_full if controller_K is None else controller_K

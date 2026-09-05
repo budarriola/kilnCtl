@@ -99,14 +99,23 @@ def _profile7_segs(capture_path: Optional[str] = None):
 
 def _run_loop_fuzzy(plant, segs, kp, ki, kd, ambient, fuzzy_strength_pct,
                      measurement_quantum_c, measurement_noise_std_c, measurement_seed,
-                     integral_floor='ff_hold'):
+                     integral_floor='ff_hold',
+                     fuzzy_error_band_c=ps.FUZZY_ERROR_BAND_C_DEFAULT,
+                     fuzzy_rate_band_c_per_s=ps.FUZZY_RATE_BAND_C_PER_S_DEFAULT):
     """Same coupled-ff/PID loop as ``plant_sim.run_profile`` and
     ``load_mass_sweep._run_loop``, with BOTH the fuzzy gain layer and the
     measurement mock wired in against a load-scaled plant object -- see
     module docstring for why this is a third copy rather than editing
-    either existing one."""
+    either existing one.
+
+    ``fuzzy_error_band_c``/``fuzzy_rate_band_c_per_s`` default to the
+    firmware's documented defaults (20.0 C / 0.5 C/s, ZONES_CFG_VERSION 19)
+    -- see ``plant_sim.PID``'s docstring. A caller evaluating a candidate
+    band must pass it here explicitly."""
     pids = [ps.PID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0,
-                    fuzzy_strength_pct=fuzzy_strength_pct) for _ in range(ps.N_ZONES)]
+                    fuzzy_strength_pct=fuzzy_strength_pct,
+                    error_band_c=fuzzy_error_band_c,
+                    rate_band_c_per_s=fuzzy_rate_band_c_per_s) for _ in range(ps.N_ZONES)]
     total_t = segs[-1][1]
     times, targets, temps_log, duty_log = [], [], [], []
     duty = np.zeros(ps.N_ZONES)
@@ -149,20 +158,29 @@ def run_profile7_fuzzy_loaded(mass_mult: float, coupling_mult: float, fuzzy_stre
                                ambient: float = 20.0,
                                measurement_quantum_c: float = DEFAULT_MEASUREMENT_QUANTUM_C,
                                measurement_noise_std_c: float = DEFAULT_MEASUREMENT_NOISE_STD_C,
-                               capture_path: Optional[str] = None) -> dict:
+                               capture_path: Optional[str] = None,
+                               fuzzy_error_band_c: float = ps.FUZZY_ERROR_BAND_C_DEFAULT,
+                               fuzzy_rate_band_c_per_s: float = ps.FUZZY_RATE_BAND_C_PER_S_DEFAULT) -> dict:
     """Profile 7, current production gains/ADOPTED matrix, one (mass,
     coupling, fuzzy strength, seed) cell. Plant is load-scaled
     (``load_mass_sweep.loaded_K_tau``); controller feedforward is not
     (module docstring). Measurement chain (0.1 C quantum / 0.05 C noise by
     default) is always on, matching the 69df78e re-run's finding that the
     noise-free sim structurally cannot exercise the fuzzy layer's design
-    target."""
+    target.
+
+    ``fuzzy_error_band_c``/``fuzzy_rate_band_c_per_s`` default to the
+    firmware's documented defaults (20.0 C / 0.5 C/s) -- pass the zone's
+    actual configured bands (ZONES_CFG_VERSION 19) when evaluating a
+    non-default candidate; see ``plant_sim.PID``'s docstring."""
     segs, start_c = _profile7_segs(capture_path)
     start_temp = [start_c, start_c, start_c]
     K_loaded, tau_loaded = lms.loaded_K_tau(mass_mult, coupling_mult)
     plant = ps.FOPDTPlant(K_loaded, tau_loaded, ps.L, ps.DT, ambient=ambient, start_temp=start_temp)
     result = _run_loop_fuzzy(plant, segs, kp, ki, kd, ambient, fuzzy_strength_pct,
-                              measurement_quantum_c, measurement_noise_std_c, measurement_seed)
+                              measurement_quantum_c, measurement_noise_std_c, measurement_seed,
+                              fuzzy_error_band_c=fuzzy_error_band_c,
+                              fuzzy_rate_band_c_per_s=fuzzy_rate_band_c_per_s)
     result.update(mass_mult=mass_mult, coupling_mult=coupling_mult,
                    fuzzy_strength_pct=fuzzy_strength_pct, measurement_seed=measurement_seed,
                    segs=segs)
