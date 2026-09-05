@@ -368,7 +368,8 @@ severity.
       `profile_executor` uses, and nothing else clears an arbitrary source, so
       one autotune trip or one 10-second executor stall blocks all heat
       board-wide until reboot -- and masks any later, different fault. DONE
-      -- `autotune_engine.c:3193-3212` clears a stale zone/global fault
+      -- `autotune_engine.c:1009-1035` (this was around line 3193 before
+      later edits shifted the file) clears a stale zone/global fault
       source on the next autotune start, and
       `profile_executor_relay_io.c:555-568`'s `clear_this_runs_faults()`
       deasserts `s_exec.global_fault_source` on every exit from a run.
@@ -1226,8 +1227,9 @@ and polled progress for both paths.
       would need hashing the stream as it passes through the transfer
       handler (mbedTLS/PSA is already linked for the HMAC path). DONE --
       `image_sha256_hex` is hashed via PSA as the transfer streams through
-      (`ota_http.c:947`) and surfaced on `/api/ota/status`
-      (`ota_http.c:1649-1656`).
+      (`ota_http_esp.c:207-342`, split out of what was then `ota_http.c`)
+      and surfaced on `/api/ota/status` (`ota_http_esp.c:538`, likewise
+      split out of `ota_http.c`).
 
 ### 9.6 Web page
 

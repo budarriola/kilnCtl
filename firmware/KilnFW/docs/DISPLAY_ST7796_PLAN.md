@@ -148,7 +148,7 @@ a `panel_desc_t`, with `panel_codec.c` and `st7796_panel.c` alongside it.)*
 | LVGL | `components/lvgl` 9.5.0, vendored local component | `LV_COLOR_FORMAT_RGB565`, `RENDER_MODE_PARTIAL`, two 480×40×2 = 38400 B buffers in PSRAM (`lvgl_port.c:544`), custom PSRAM allocator. |
 | Flush | `lvgl_port.c:120` | Fully synchronous. The double buffer buys nothing today. |
 | Touch | `App/drivers/NS2009.c` | 4-wire resistive, I²C 0x48/0x49 (probed). 3×3 affine calibration in NVS. PENIRQ unused. |
-| SPI bus | `App/main.c:753-761` | **SPI2**, `SPI_DMA_CH_AUTO`, `max_transfer_sz = 1440`. SCLK 12 / MOSI 11 / MISO 13 — **these are exactly the SPI2 IOMUX pins**, so clock and data are already on IOMUX, not the GPIO matrix. Display CS = GPIO21 (matrix, fine). |
+| SPI bus | `App/main_boot_early.c:420-439` (was `App/main.c` line 753 area before the boot-phase split) | **SPI2**, `SPI_DMA_CH_AUTO`, `max_transfer_sz = 1440`. SCLK 12 / MOSI 11 / MISO 13 — **these are exactly the SPI2 IOMUX pins**, so clock and data are already on IOMUX, not the GPIO matrix. Display CS = GPIO21 (matrix, fine). |
 | SPI arbitration | `espInterfaces/esp_spi_owner.c` | One owner task + queue; **software CS** (`spics_io_num = -1` everywhere); blocking `spi_device_transmit()`. Display borrows the thermocouples' owner (`main.c:906`). |
 | I²C | `main.c:634`, `i2c_owner.c` | New `i2c_master` driver. SX1509 at 0x3E. Each driver builds its own `i2c_owner_t`. |
 | Build | ESP-IDF 6.0.2, esp32s3 | Managed components: `espressif__mdns` only. No submodules under KilnFW. All C11. |
@@ -1357,7 +1357,8 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
 - [x] `panel_detect.c/.h`: pure `panel_detect_choose()` — SPI-ID match count,
       touch-kind tiebreak/corroboration, disagreement flagging, Kconfig
       fallback. Host-tested (`test_panel_detect.c`), wired into
-      `panel_spi.c:902-907`.
+      `panel_spi_bringup.c:419-421` (that call site lived in `panel_spi.c`
+      around line 902 before `panel_spi.c` was split).
 - [x] ILI9488 row (`panel_spi.c` `ili9488_panel_desc.id_matches`): RDDID bytes
       captured 2026-09-03 (§4) — `0x00 0x00 0x00`, a MISO-not-driven read, not
       a real ID. `id_matches` stays `NULL` **on purpose, not pending** — a

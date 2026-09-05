@@ -92,6 +92,7 @@ BASES = [
     "firmware",
     "firmware/KilnFW/App",
     "firmware/KilnFW/App/drivers",
+    "firmware/KilnFW/App/test",
     "firmware/SaftyFW",
     "firmware/SaftyFW/src",
     "firmware/SaftyFW/tools",

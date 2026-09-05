@@ -38,10 +38,13 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       executables pass.
 - [x] **`GET /api/status` allocates from internal DRAM.** `dashboard_http.c:582`
       uses plain `malloc` while sibling handlers in the same file use
-      `heap_caps_malloc` SPIRAM; same gap in `backup_http.c:178`. This is the
+      `heap_caps_malloc` SPIRAM; same gap in `backup_export.c:138` (that file
+      was `backup_http.c` at the time; split since). This is the
       most-polled handler against the tightest heap. S — **CLOSED 2026-09-04**:
       both converted to `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`
-      (`dashboard_http.c:582`, `backup_http.c:178` and `:1679`); swept the rest
+      (`dashboard_http.c:582`, `backup_export.c:138` and `backup_import.c:1079`
+      -- both since split out of what was then `backup_http.c`);
+      swept the rest
       of the HTTP handler files and found no other plain `malloc` of a
       response/scratch buffer.
 - [x] **12 files exceed the 1500-line rule.** `autotune_engine.c` (4120),
@@ -1231,11 +1234,13 @@ Four defects, each verified against source:
 
 1. **`ok` cannot fail.** `apply_pairs()` returns true when the send returns
    `ESP_OK` (`safety_cfg_http.c:434/446/472`), but SET_PARAM and COMMIT_CONFIG
-   both go out as broadcasts (`safety_link.c:2944/3027`) and
+   both go out as broadcasts (`safety_link_commands.c:862` and `:950`; that
+   code lived in `safety_link.c` at the time, since split out) and
    `uart_protocol.c:795` returns `ESP_OK` for "the local UART accepted the
    bytes" — no ack wait, no retry.
 2. **The rejection is caught in a ~144 ms race and then thrown away.**
-   `safety_link.c:3045-3059` waits `SAFETY_LINK_REPLY_TIMEOUT_MS`; a late
+   `safety_link_commands.c:968-969` (was `safety_link.c` before the split)
+   waits `SAFETY_LINK_REPLY_TIMEOUT_MS`; a late
    REJECTED frame reaches `safety_drain_inbox_ex()` and is counted and
    dropped, with no stash slot the way CONFIG_PAGE has one. Silence was
    defined as acceptance.
