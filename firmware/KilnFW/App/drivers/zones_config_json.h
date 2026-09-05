@@ -728,10 +728,33 @@ typedef struct {
 _Static_assert(sizeof(zone_cfg_v18_t) == 200,
                "zone_cfg_v18_t must match the on-flash v18 layout byte-for-byte (200 bytes)"); /* v18 -- predates per-zone error_band_c/rate_band_c_per_s */
 
-/* Per-field offsetof assertions for zone_cfg_v18_t -- binds each field to its
- * frozen byte offset so a future mid-struct insertion (which the sizeof
- * assert above cannot catch, since total size can stay unchanged) fails
- * loudly instead of silently reinterpreting stored flash bytes. */
+/* Per-field offsetof assertions for zone_cfg_v18_t. CORRECTION (2026-09-04
+ * review): these do NOT guard against a mid-struct insertion into the LIVE
+ * zone_cfg_t -- zone_cfg_v18_t is a frozen, hand-copied snapshot that by
+ * definition never changes again, so nothing can insert a field into it.
+ * What these actually pin is this FROZEN COPY against an accidental edit to
+ * itself (a future maintainer "cleaning up" this block, or copy-pasting the
+ * wrong version's fields into it) -- if that ever reordered or resized a
+ * field here, the sizeof assert above could stay green (same total size)
+ * while a per-field offset silently moved; these catch that.
+ *
+ * The failure mode the original commit message described -- a field
+ * inserted mid-struct into the LIVE zone_cfg_t, corrupting
+ * zones_config_migrate.c's per-zone memcpy(&out->zones[i], &src.zones[i],
+ * sizeof(src.zones[i])) -- is instead caught by the v9..v18 migration tests
+ * in test_zones_http.c: each stages an old-version blob and asserts on
+ * several zone fields spanning the struct (model_k_dc, coupling_diag_k_dc,
+ * ease_off_window_mult, approach_rate_cap_c_per_hr, pid_kp/ki/kd, etc.).
+ * Verified directly (2026-09-04): inserting an extra float field into the
+ * live zone_cfg_t between model_dead_time_s and fuzzy_strength_pct broke
+ * essentially every v9->v19 migration test with "got 0.0000, want <real
+ * value>" failures, with none of the zone_cfg_vNN_t offsetof asserts below
+ * needing to fire at all. zone_cfg_t itself carries no offsetof asserts of
+ * its own on purpose: it legitimately grows every version (a new field is
+ * appended at its tail on every bump), so pinning its interior offsets
+ * would need a maintenance edit on every single version bump for no
+ * additional coverage beyond what the migration tests already give for
+ * free. */
 _Static_assert(offsetof(zone_cfg_v18_t, name) == 0,
                "zone_cfg_v18_t::name must stay at byte offset 0");
 _Static_assert(offsetof(zone_cfg_v18_t, cal_offset_c) == 16,
@@ -900,10 +923,11 @@ typedef struct {
 _Static_assert(sizeof(zone_cfg_v17_t) == 196,
                "zone_cfg_v17_t must match the on-flash v17 layout byte-for-byte (196 bytes)"); /* v17 -- predates per-zone approach_rate_cap_c_per_hr */
 
-/* Per-field offsetof assertions for zone_cfg_v17_t -- binds each field to its
- * frozen byte offset so a future mid-struct insertion (which the sizeof
- * assert above cannot catch, since total size can stay unchanged) fails
- * loudly instead of silently reinterpreting stored flash bytes. */
+/* Per-field offsetof assertions for zone_cfg_v17_t -- same corrected purpose
+ * as zone_cfg_v18_t's own block above (see its comment for the full
+ * explanation): these guard this FROZEN snapshot against an accidental
+ * future edit to itself, not a mid-struct insertion into the live
+ * zone_cfg_t -- that failure mode is caught by the migration tests instead. */
 _Static_assert(offsetof(zone_cfg_v17_t, name) == 0,
                "zone_cfg_v17_t::name must stay at byte offset 0");
 _Static_assert(offsetof(zone_cfg_v17_t, cal_offset_c) == 16,
@@ -1075,10 +1099,11 @@ typedef struct {
 _Static_assert(sizeof(zone_cfg_v16_t) == 192,
                "zone_cfg_v16_t must match the on-flash v16 layout byte-for-byte (192 bytes)"); /* v16 -- predates per-zone ease_off_window_mult */
 
-/* Per-field offsetof assertions for zone_cfg_v16_t -- binds each field to its
- * frozen byte offset so a future mid-struct insertion (which the sizeof
- * assert above cannot catch, since total size can stay unchanged) fails
- * loudly instead of silently reinterpreting stored flash bytes. */
+/* Per-field offsetof assertions for zone_cfg_v16_t -- same corrected purpose
+ * as zone_cfg_v18_t's own block above (see its comment for the full
+ * explanation): these guard this FROZEN snapshot against an accidental
+ * future edit to itself, not a mid-struct insertion into the live
+ * zone_cfg_t -- that failure mode is caught by the migration tests instead. */
 _Static_assert(offsetof(zone_cfg_v16_t, name) == 0,
                "zone_cfg_v16_t::name must stay at byte offset 0");
 _Static_assert(offsetof(zone_cfg_v16_t, cal_offset_c) == 16,

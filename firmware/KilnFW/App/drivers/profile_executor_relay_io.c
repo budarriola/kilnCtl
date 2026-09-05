@@ -146,24 +146,8 @@ float profile_executor_guard_commanded_duty(bool heat_blocked, float intended_du
     return heat_blocked ? 0.0f : intended_duty;
 }
 
-/* Guard 1's own effective rate requirement for THIS tick -- factored out of
- * the apply-relays-and-guards loop for the same reason profile_executor_
- * guard_commanded_duty() was (direct unit-testability), see that loop's own
- * comment on review defect 2 for the full "a fixed absolute rate has no
- * knowledge of the commanded ramp" reasoning.
- *
- * configured_rate_c_per_min is the zone's own guard_cfg.sanity_rate_c_per_min
- * (0 meaning "not configured" -- substituted with thermal_guard.c's own
- * 0.5 C/min default here so the min() below always compares two real
- * numbers, mirroring effective_f()'s convention in that file without
- * needing to export it). target_rate_c_per_s is s_exec.target_rate_c_per_s,
- * exactly 0.0f during a dwell/step-segment/ramp-lock tick (see that field's
- * own comment) -- deliberately left AT the configured rate in that case
- * (returned unchanged), not capped to zero, so a lagging DWELL still has to
- * catch up at the zone's full configured rate; the cap only ever narrows
- * the requirement while a ramp is genuinely still moving. */
 /* THIS ZONE's own commanded setpoint rate, for feeding into profile_executor_
- * guard_sanity_rate() above -- the fix for a real gap opened by the per-zone
+ * guard_sanity_rate() below -- the fix for a real gap opened by the per-zone
  * approach-rate cap (ZONES_CFG_VERSION 17->18, d800a60, PER_ZONE_TARGET_
  * DESIGN_STUDY.md option (b)).
  *
@@ -212,6 +196,22 @@ float profile_executor_guard_zone_ramp_rate(float shared_rate_c_per_s, float cap
     return (shared_abs < cap_c_per_s) ? shared_abs : cap_c_per_s;
 }
 
+/* Guard 1's own effective rate requirement for THIS tick -- factored out of
+ * the apply-relays-and-guards loop for the same reason profile_executor_
+ * guard_commanded_duty() was (direct unit-testability), see that loop's own
+ * comment on review defect 2 for the full "a fixed absolute rate has no
+ * knowledge of the commanded ramp" reasoning.
+ *
+ * configured_rate_c_per_min is the zone's own guard_cfg.sanity_rate_c_per_min
+ * (0 meaning "not configured" -- substituted with thermal_guard.c's own
+ * 0.5 C/min default here so the min() below always compares two real
+ * numbers, mirroring effective_f()'s convention in that file without
+ * needing to export it). target_rate_c_per_s is s_exec.target_rate_c_per_s,
+ * exactly 0.0f during a dwell/step-segment/ramp-lock tick (see that field's
+ * own comment) -- deliberately left AT the configured rate in that case
+ * (returned unchanged), not capped to zero, so a lagging DWELL still has to
+ * catch up at the zone's full configured rate; the cap only ever narrows
+ * the requirement while a ramp is genuinely still moving. */
 float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float target_rate_c_per_s)
 {
     float configured = (configured_rate_c_per_min > 0.0f) ? configured_rate_c_per_min : 0.5f;
