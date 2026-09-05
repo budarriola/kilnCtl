@@ -38,6 +38,8 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+
+#include "zones_config_query.h"
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -349,10 +351,10 @@ static inline float zone_required_window_ms(float min_on_ms)
  * check feasibility," not as a ceiling of 0. */
 bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr);
 
-/* How many of the MAX31856_CHANNEL_COUNT channels currently have a zone
- * configured -- profiles_http.c uses this to reject a profile targeting a
- * zone that doesn't exist. */
-uint8_t zones_config_get_thermo_count(void);
+/* zones_config_get_thermo_count() moved to zones_config_query.h (included
+ * above, HW_ABSTRACTION_PLAN.md item 11, 2026-09-05) -- it is the one
+ * accessor a caller can need without the rest of this persist-tier surface
+ * (sim_backend.c and, transitively, everything below still reach it). */
 
 /* How many of the KILN_IO_RELAY_COUNT relays are currently configured on
  * this board -- the same bound parse_zone_fields()'s z%u_relay_mask

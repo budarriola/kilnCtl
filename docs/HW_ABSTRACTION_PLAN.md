@@ -920,6 +920,15 @@ proposed fixes in `tools/drivers_reorg/DRYRUN.md` rather than repeated here:
     holds both; `wifi_provision_http.h` includes it back, and both
     switched. `sim_backend.c` used only `wifi_provision_http_get_server()`
     too, so it switched to the narrow header as well.
+11. DONE (2026-09-05): DRYRUN.md section 5 proposal `zones_config_query.h` --
+    `sim_backend.c` included the 1300+ line persist-tier
+    `zones_config_accessors.h` for one accessor,
+    `zones_config_get_thermo_count()`. New narrow `zones_config_query.h`
+    holds just that declaration; `zones_config_accessors.h` includes it
+    back, and `sim_backend.c` switched. Grepped every other
+    `zones_config_accessors.h` includer for the same single-accessor
+    pattern -- none qualified, all use additional accessors (relay_mask,
+    control_mode, PID/model getters, etc.) so they keep the full header.
 
 All placements ambiguous under the original plan are now resolved in
 `mapping.csv` (coordinator decisions, third round): the zones_http family
