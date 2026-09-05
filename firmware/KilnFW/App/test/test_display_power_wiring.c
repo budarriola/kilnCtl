@@ -32,6 +32,7 @@
 // fields+gate ui_page_home.c's own safety-trip strip keys off) rather than
 // a placeholder that always reads false/true or a variable nothing else
 // writes.
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,27 +71,67 @@ static char *read_file_any(const char *const *candidates, size_t count)
 }
 
 // Extracts the body of a function from its exact declaration/signature
-// substring (must be unique and include the opening paren, e.g.
-// "static bool screen_idle_run_policy_locked(") through the first "\n}"
-// after the opening brace -- this codebase's own functions close at column
-// 0, same assumption SaftyFW's test_safety_core_s8_wiring.c and test_
-// safety_core_stack_budget.c make.
+// substring (must include the opening paren, e.g. "static bool screen_idle_
+// run_policy_locked(") through the first "\n}" after the opening brace --
+// this codebase's own functions close at column 0, same assumption
+// SaftyFW's test_safety_core_s8_wiring.c and test_safety_core_stack_
+// budget.c make.
+//
+// Skips a bare PROTOTYPE match (the same signature substring followed by
+// ");" rather than a "{") and keeps searching for a later occurrence that is
+// actually a definition -- ui_page_network.c/ui_page_network_manage.c both
+// forward-declare their refresh_cb() ahead of building the page, and the
+// first version of sections 7/8's registration-site scans (2026-09-04)
+// matched that PROTOTYPE line, walked forward to the next "{" it could find
+// (the START of some LATER, unrelated function in the same file), and
+// scanned that unrelated function's body instead of refresh_cb()'s real one
+// -- a real deleted/hardware-relevant call injected into refresh_cb() for
+// this file went completely unseen. Caught by hand while writing this
+// file's own negative test (see the "if it does not fire" bar this file's
+// top comment sets), not by any pre-existing check.
 static const char *find_function_body(const char *text, const char *sig, size_t *out_len)
 {
-    const char *s = strstr(text, sig);
-    if (!s) {
-        return NULL;
+    const char *s = text;
+    for (;;) {
+        s = strstr(s, sig);
+        if (!s) {
+            return NULL;
+        }
+        // Walk from the end of `sig` (which stops right after the opening
+        // paren) forward, tracking paren depth, to find where THIS
+        // signature's own parameter list actually ends.
+        const char *p = s + strlen(sig);
+        int depth = 1; // sig already consumed the opening '('
+        while (*p && depth > 0) {
+            if (*p == '(') depth++;
+            else if (*p == ')') depth--;
+            p++;
+        }
+        if (depth != 0) {
+            return NULL; // unbalanced parens -- malformed input, fail closed
+        }
+        while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r') p++;
+        if (*p == ';') {
+            // A prototype, not a definition -- keep looking.
+            s = p + 1;
+            continue;
+        }
+        if (*p != '{') {
+            // Neither ';' nor '{' right after the parameter list -- not a
+            // shape this scan understands (e.g. a K&R-style parameter
+            // block, or something between the paren and the brace this
+            // codebase does not actually use). Fail closed rather than
+            // guessing.
+            return NULL;
+        }
+        const char *open = p;
+        const char *close = strstr(open, "\n}");
+        if (!close) {
+            return NULL;
+        }
+        *out_len = (size_t)(close - open);
+        return open;
     }
-    const char *open = strchr(s, '{');
-    if (!open) {
-        return NULL;
-    }
-    const char *close = strstr(open, "\n}");
-    if (!close) {
-        return NULL;
-    }
-    *out_len = (size_t)(close - open);
-    return open;
 }
 
 static char *dup_range(const char *start, size_t len)
@@ -740,6 +781,483 @@ static void run_section6_wake_invalidate_not_in_flush_cb(void)
     free(text);
 }
 
+// ---------------------------------------------------------------------------
+// Sections 7-9, 2026-09-04 opus review of the display path's execution
+// contexts (UI_PLAN.md "Context rules for the display path"): four defects
+// landed in one day because five different execution contexts all look like
+// ordinary C and nothing at the call site says which one you are in. This
+// review's own explicit conclusion is that documentation is not the
+// mechanism -- every one of the four bugs had a CORRECT comment sitting
+// beside the wrong code -- so these three scans make the context table's
+// rules EXECUTABLE instead of merely written down. Each is generalised over
+// a REGISTRATION SITE (who calls lv_display_set_flush_cb()/
+// lv_indev_set_read_cb()/lv_timer_create(), who calls screen_idle_lock()) so
+// a NEW callback or a NEW lock span is covered automatically, the same
+// "discovery, not a list" principle tools/run_all_checks.ps1's own top
+// comment states for guard scripts in general.
+// ---------------------------------------------------------------------------
+
+/* Finds the next occurrence of `call_prefix` (e.g. "lv_display_set_flush_cb(")
+ * at or after `from`, and returns a heap-allocated copy of the LAST
+ * comma-separated argument inside that call's parentheses, trimmed of
+ * whitespace/semicolon -- i.e. the registered callback function's bare name
+ * for a `lv_display_set_flush_cb(disp, FUNC)` / `lv_indev_set_read_cb(indev,
+ * FUNC)` / `lv_timer_create(FUNC, period, user_data)` call site (FUNC is the
+ * first arg for lv_timer_create, so callers needing that pass arg_index=0;
+ * everything else here uses the LAST arg, arg_index=-1). Advances *cursor
+ * past the match so a caller can loop over every occurrence in one file.
+ * Returns NULL once no more occurrences exist. */
+static char *find_next_registered_callback(const char *text, const char *call_prefix,
+                                            int arg_index, const char **cursor)
+{
+    const char *p = strstr(*cursor, call_prefix);
+    if (!p) return NULL;
+    const char *args_start = p + strlen(call_prefix);
+    const char *close = strchr(args_start, ')');
+    if (!close) return NULL;
+    *cursor = close + 1;
+
+    // Split args on top-level commas (none of this codebase's registration
+    // call sites nest a parenthesised expression as an argument, so a plain
+    // comma split is sufficient -- no need for a full paren-depth parser).
+    const char *arg_starts[4] = {args_start, NULL, NULL, NULL};
+    int n_args = 1;
+    for (const char *q = args_start; q < close && n_args < 4; q++) {
+        if (*q == ',') {
+            arg_starts[n_args] = q + 1;
+            n_args++;
+        }
+    }
+    int idx = (arg_index < 0) ? (n_args - 1) : arg_index;
+    if (idx < 0 || idx >= n_args) return NULL;
+    const char *seg_start = arg_starts[idx];
+    const char *seg_end = (idx + 1 < n_args) ? strchr(seg_start, ',') : close;
+    if (!seg_end || seg_end > close) seg_end = close;
+
+    while (seg_start < seg_end && (*seg_start == ' ' || *seg_start == '\n' || *seg_start == '\t')) seg_start++;
+    while (seg_end > seg_start &&
+           (seg_end[-1] == ' ' || seg_end[-1] == '\n' || seg_end[-1] == '\t' || seg_end[-1] == ';')) seg_end--;
+    if (seg_end <= seg_start) return NULL;
+
+    // A bare function name must be a valid C identifier -- rejects an
+    // argument like "&s_relay_ctx[r]" or "mbox" that happens to occupy the
+    // slot this scan is not looking at (defensive; today's call sites never
+    // hit this, but a future registration with extra args should fail
+    // closed -- return NULL, which the caller treats as "could not resolve",
+    // not silently scan the wrong text).
+    for (const char *c = seg_start; c < seg_end; c++) {
+        if (!(isalnum((unsigned char)*c) || *c == '_')) return NULL;
+    }
+    return dup_range(seg_start, (size_t)(seg_end - seg_start));
+}
+
+/* Finds FUNC's body (see find_function_body()) trying several signature
+ * shapes, since a registered callback may be `static void`, `static bool`,
+ * or plain `void` (declared in a header, defined in a different .c file --
+ * e.g. ui_home_refresh_cb()). Returns NULL if none match, same fail-closed
+ * contract as find_function_body(). */
+static const char *find_function_body_any_sig(const char *text, const char *func_name, size_t *out_len)
+{
+    static const char *const PREFIXES[] = {"static void ", "static bool ", "void "};
+    char sig[256];
+    for (size_t i = 0; i < sizeof(PREFIXES) / sizeof(PREFIXES[0]); i++) {
+        int n = snprintf(sig, sizeof(sig), "%s%s(", PREFIXES[i], func_name);
+        if (n <= 0 || (size_t)n >= sizeof(sig)) continue;
+        const char *body = find_function_body(text, sig, out_len);
+        if (body) return body;
+    }
+    return NULL;
+}
+
+static const char *const LVGL_MUTATOR_DENYLIST[] = {
+    "lv_obj_invalidate(", "lv_obj_del(",     "lv_obj_del_async(",
+    "lv_screen_load(",    "lv_scr_load(",    "lv_refr_now(",
+};
+
+static void run_section7_flush_and_indev_cb_mutator_denylist(void)
+{
+    TEST_SECTION("every lv_display_set_flush_cb()/lv_indev_set_read_cb() registration in "
+                 "lvgl_port.c -- generalised over the REGISTRATION SITE, not one hardcoded "
+                 "function name -- has a comment-stripped body free of lv_* mutators. Context "
+                 "rule: 'ili9488_flush_cb() ... may NOT do any lv_* mutator ... reads only' "
+                 "(51e1ef5's lv_obj_invalidate()-from-inside-flush task-watchdog kill, and "
+                 "7fc17cc's second instance of the exact same defect the same day). Unlike the "
+                 "old section 6 check, which named ili9488_flush_cb() literally, a SECOND "
+                 "display or a SECOND indev registered anywhere in this file is covered "
+                 "automatically -- nobody has to remember to add a new hardcoded name here.");
+
+    char *text = read_file_any(LVGL_PORT_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/lvgl_port.c");
+        return;
+    }
+    char *stripped = strip_c_comments(text);
+    TEST_CHECK(stripped != NULL, "malloc for the comment-stripped copy of lvgl_port.c succeeded");
+    if (!stripped) {
+        free(text);
+        return;
+    }
+
+    static const char *const REG_PREFIXES[] = {
+        "lv_display_set_flush_cb(",
+        "lv_indev_set_read_cb(",
+    };
+
+    int total_checked = 0;
+    for (size_t r = 0; r < sizeof(REG_PREFIXES) / sizeof(REG_PREFIXES[0]); r++) {
+        const char *cursor = stripped;
+        char *func_name;
+        while ((func_name = find_next_registered_callback(stripped, REG_PREFIXES[r], -1, &cursor)) != NULL) {
+            size_t body_len = 0;
+            const char *body = find_function_body_any_sig(text, func_name, &body_len);
+            if (!body) {
+                TEST_CHECK(false, "found a registration of a callback via a source-text match "
+                                   "but could not locate its function body -- either the scan's "
+                                   "signature guesses are stale, or the registered symbol is not "
+                                   "a plain named function this scan can extract; update "
+                                   "find_function_body_any_sig()'s PREFIXES list.");
+                free(func_name);
+                continue;
+            }
+            char *fn = dup_range(body, body_len);
+            if (fn) {
+                char *fn_stripped = strip_c_comments(fn);
+                if (fn_stripped) {
+                    for (size_t d = 0; d < sizeof(LVGL_MUTATOR_DENYLIST) / sizeof(LVGL_MUTATOR_DENYLIST[0]); d++) {
+                        bool clean = strstr(fn_stripped, LVGL_MUTATOR_DENYLIST[d]) == NULL;
+                        char msg[320];
+                        snprintf(msg, sizeof(msg),
+                                 "%s (registered via %s) must not call the lv_* mutator '%s' -- "
+                                 "this callback runs INSIDE lv_timer_handler()'s own active "
+                                 "refresh/indev-read, and mutating the widget tree or invalid-"
+                                 "area list from there is the exact reentrancy that killed the "
+                                 "lvgl task with a task-watchdog reset (51e1ef5/7fc17cc). If a "
+                                 "redraw belongs anywhere, it is lvgl_port_task()'s own loop "
+                                 "BEFORE lv_timer_handler() runs, not here.",
+                                 func_name, REG_PREFIXES[r], LVGL_MUTATOR_DENYLIST[d]);
+                        TEST_CHECK(clean, msg);
+                    }
+                    free(fn_stripped);
+                }
+                free(fn);
+            }
+            total_checked++;
+            free(func_name);
+        }
+    }
+    TEST_CHECK(total_checked >= 2,
+               "expected to find and check at least 2 registered callbacks (the flush cb and "
+               "the indev read cb) -- found fewer, which means either the registration calls "
+               "were removed/renamed (update REG_PREFIXES) or this scan's parser regressed.");
+
+    free(stripped);
+    free(text);
+}
+
+/* Page-refresh timer callbacks (lv_timer_create(), the third row of the
+ * context table) must not block for long -- this codebase's own known
+ * violation is calling dashboard_get_status() (five MAX31856 SPI reads, a
+ * kiln_io_owner round trip that can block 200ms, interrupts-disabled heap
+ * walks) directly from the lvgl task's 1-2 Hz page timers. Fixing that is
+ * explicitly NOT this task's job (the right fix is a cross-page snapshot
+ * cache other agents are mid-implementing) -- allowlisted here, by exact
+ * function+file, with the TODO below, rather than silently excluded from
+ * the scan. A NEW page's refresh_cb calling one of these is NOT allowlisted
+ * and fails. */
+static const char *const BLOCKING_TIMER_DENYLIST[] = {
+    "dashboard_get_status(", "heap_caps_", "nvs_", "spi_device_", "i2c_master_", "kiln_io_owner_command_",
+};
+
+typedef struct {
+    const char *func_name;
+    /* Substring of the DEFINING file's path -- matched against the
+     * candidate-array entry the body was actually found in, never the
+     * bare function name alone. "refresh_cb" is reused as a static
+     * function name in several of these page files (ui_page_network.c/
+     * ui_page_network_manage.c both have their OWN clean "refresh_cb" that
+     * must NOT be silently allowlisted just because the name matches one of
+     * the two genuinely-allowlisted "refresh_cb"s below) -- keying on name
+     * alone was this scan's own first-draft bug, caught while writing it,
+     * before any hardware or CI ever saw it. */
+    const char *defining_file_substr;
+    const char *reason;
+} allowlisted_blocking_cb_t;
+
+/* TODO(display-power context rules, UI_PLAN.md 2026-09-04 opus review): all
+ * three of these call dashboard_get_status() straight from an lv_timer
+ * callback on the lvgl task -- the exact "page-refresh timers must not
+ * block" violation this scan exists to catch. Reviewed and left in place
+ * deliberately, not missed: fixing it means a shared snapshot cache other
+ * agents are actively building pages against (see UI_PLAN.md's open items),
+ * and duplicating that work here would conflict with theirs. Remove an
+ * entry the day its file adopts the snapshot cache instead of calling
+ * dashboard_get_status() directly -- if this scan still fails after that, it
+ * caught a regression, not a stale allowlist. */
+static const allowlisted_blocking_cb_t BLOCKING_TIMER_ALLOWLIST[] = {
+    {"refresh_cb", "ui_page_diagnostics.c", "2s timer, dashboard_get_status() -- see TODO above"},
+    {"refresh_cb", "ui_page_temperature.c", "1s timer, dashboard_get_status() -- see TODO above"},
+    {"ui_home_refresh_cb", "ui_page_home_refresh.c",
+     "1s timer, dashboard_get_status()+profile_executor_get_status() -- same class, found by "
+     "THIS scan (not called out by name in the opus review's own text, which only named "
+     "diagnostics/temperature) -- see TODO above"},
+};
+
+static bool is_allowlisted_blocking_cb(const char *func_name, const char *defining_file_path)
+{
+    for (size_t i = 0; i < sizeof(BLOCKING_TIMER_ALLOWLIST) / sizeof(BLOCKING_TIMER_ALLOWLIST[0]); i++) {
+        if (strcmp(BLOCKING_TIMER_ALLOWLIST[i].func_name, func_name) == 0 &&
+            strstr(defining_file_path, BLOCKING_TIMER_ALLOWLIST[i].defining_file_substr) != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void run_section8_timer_refresh_cb_blocking_denylist(void)
+{
+    TEST_SECTION("every lv_timer_create() page-refresh callback across the LCD page files -- "
+                 "generalised over the REGISTRATION SITE within each listed file -- has a "
+                 "comment-stripped body free of the blocking-call denylist (dashboard_get_"
+                 "status()/heap_caps_*/nvs_*/SPI+I2C entry points), except the three "
+                 "explicitly allowlisted below with a TODO. Context rule: 'lv_timer page-"
+                 "refresh callbacks ... may NOT ... block for long'.");
+
+    static const char *const PAGE_FILE_CANDIDATES[][3] = {
+        {"../drivers/ui_page_diagnostics.c", "App/drivers/ui_page_diagnostics.c",
+         "firmware/KilnFW/App/drivers/ui_page_diagnostics.c"},
+        {"../drivers/ui_page_temperature.c", "App/drivers/ui_page_temperature.c",
+         "firmware/KilnFW/App/drivers/ui_page_temperature.c"},
+        {"../drivers/ui_page_home.c", "App/drivers/ui_page_home.c",
+         "firmware/KilnFW/App/drivers/ui_page_home.c"},
+        {"../drivers/ui_page_home_refresh.c", "App/drivers/ui_page_home_refresh.c",
+         "firmware/KilnFW/App/drivers/ui_page_home_refresh.c"},
+        {"../drivers/ui_page_network.c", "App/drivers/ui_page_network.c",
+         "firmware/KilnFW/App/drivers/ui_page_network.c"},
+        {"../drivers/ui_page_network_manage.c", "App/drivers/ui_page_network_manage.c",
+         "firmware/KilnFW/App/drivers/ui_page_network_manage.c"},
+    };
+    const size_t n_files = sizeof(PAGE_FILE_CANDIDATES) / sizeof(PAGE_FILE_CANDIDATES[0]);
+
+    // KNOWN LIMITATION, stated plainly rather than implied: this candidate
+    // list is the current set of LCD page files known to register an
+    // lv_timer_create() refresh callback. A NEW page file added later is
+    // covered for what happens INSIDE it automatically -- but only once its
+    // path is added to PAGE_FILE_CANDIDATES above. This scan cannot discover
+    // a wholly new .c file on its own (no portable directory-glob available
+    // to a host-test C file without pulling in platform-specific headers);
+    // that is a real gap in "generalised automatically" versus scan #7's
+    // full generality within lvgl_port.c, and is exactly why this comment
+    // exists instead of a silent assumption.
+    char *texts[6] = {0};
+    char *stripped_texts[6] = {0};
+    for (size_t i = 0; i < n_files; i++) {
+        texts[i] = read_file_any(PAGE_FILE_CANDIDATES[i], 3);
+        if (!texts[i]) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "could not locate %s from the host test's working "
+                                        "directory -- update PAGE_FILE_CANDIDATES if it moved",
+                     PAGE_FILE_CANDIDATES[i][2]);
+            TEST_CHECK(false, msg);
+            continue;
+        }
+        stripped_texts[i] = strip_c_comments(texts[i]);
+    }
+
+    int total_checked = 0;
+    for (size_t i = 0; i < n_files; i++) {
+        if (!stripped_texts[i]) continue;
+        const char *cursor = stripped_texts[i];
+        char *func_name;
+        while ((func_name = find_next_registered_callback(stripped_texts[i], "lv_timer_create(", 0, &cursor)) !=
+               NULL) {
+            // Try the REGISTERING file (i) first -- "refresh_cb" is reused
+            // as a distinct static function name in several of these files,
+            // so searching in candidate-array order regardless of which
+            // file is being scanned would resolve every "refresh_cb" lookup
+            // to whichever file happens to come first in
+            // PAGE_FILE_CANDIDATES (ui_page_diagnostics.c), silently
+            // checking that file's own body over and over instead of the
+            // one actually registered by ui_page_network.c/ui_page_network_
+            // manage.c's own distinct refresh_cb() -- caught by hand
+            // negative-testing this scan (see this file's top comment): an
+            // injected dashboard_get_status() call in ui_page_network.c's
+            // refresh_cb() went completely unseen until this ordering fix.
+            // Only fall back to the other candidate files for the genuine
+            // cross-file case (ui_home_refresh_cb(): registered in
+            // ui_page_home.c, DEFINED in ui_page_home_refresh.c).
+            size_t body_len = 0;
+            const char *body = NULL;
+            size_t defining_file = n_files;
+            if (texts[i]) {
+                body = find_function_body_any_sig(texts[i], func_name, &body_len);
+                if (body) defining_file = i;
+            }
+            for (size_t j = 0; j < n_files && !body; j++) {
+                if (!texts[j]) continue;
+                body = find_function_body_any_sig(texts[j], func_name, &body_len);
+                if (body) defining_file = j;
+            }
+            if (!body) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "registered lv_timer_create() callback '%s' has no locatable function "
+                         "body across the candidate files -- update PAGE_FILE_CANDIDATES or "
+                         "find_function_body_any_sig()'s signature guesses.",
+                         func_name);
+                TEST_CHECK(false, msg);
+                free(func_name);
+                continue;
+            }
+            total_checked++;
+            // Keyed on (func_name, DEFINING file) -- not func_name alone. See
+            // allowlisted_blocking_cb_t's own field comment for why: several
+            // of these files reuse "refresh_cb" as their own clean, unrelated
+            // static function.
+            if (is_allowlisted_blocking_cb(func_name, PAGE_FILE_CANDIDATES[defining_file][2])) {
+                free(func_name);
+                continue;
+            }
+            char *fn = dup_range(body, body_len);
+            if (fn) {
+                char *fn_stripped = strip_c_comments(fn);
+                if (fn_stripped) {
+                    for (size_t d = 0; d < sizeof(BLOCKING_TIMER_DENYLIST) / sizeof(BLOCKING_TIMER_DENYLIST[0]);
+                         d++) {
+                        bool clean = strstr(fn_stripped, BLOCKING_TIMER_DENYLIST[d]) == NULL;
+                        char msg[384];
+                        snprintf(msg, sizeof(msg),
+                                 "lv_timer callback '%s' calls the blocking denylist entry '%s' "
+                                 "and is not allowlisted -- page-refresh timers run on the lvgl "
+                                 "task and must not block it for the multi-hundred-ms this class "
+                                 "of call can take (ui_page_diagnostics.c/ui_page_temperature.c "
+                                 "already do this and are deliberately allowlisted with a TODO; "
+                                 "if this is a NEW page hitting the same pattern, either avoid "
+                                 "the blocking call or add it to BLOCKING_TIMER_ALLOWLIST with "
+                                 "the same TODO reasoning -- do not silently exclude it).",
+                                 func_name, BLOCKING_TIMER_DENYLIST[d]);
+                        TEST_CHECK(clean, msg);
+                    }
+                    free(fn_stripped);
+                }
+                free(fn);
+            }
+            free(func_name);
+        }
+    }
+    TEST_CHECK(total_checked >= 3,
+               "expected to find and check at least 3 registered lv_timer_create() page-"
+               "refresh callbacks across the candidate files -- found fewer, which means either "
+               "a registration was removed/renamed or this scan's parser regressed.");
+
+    for (size_t i = 0; i < n_files; i++) {
+        free(stripped_texts[i]);
+        free(texts[i]);
+    }
+}
+
+/* screen_idle.c's own load-bearing invariant, stated once in UI_PLAN.md:
+ * "idle->lock may only ever be held across pure computation and plain
+ * struct field access -- never across SPI, I2C, a queue wait, a heap walk,
+ * an NVS access, or any lv_* call." 7a8594d was exactly this: a lock held
+ * across five SPI reads, a 200ms queue wait, and interrupts-disabled heap
+ * walks. Generalised over every screen_idle_lock()/screen_idle_unlock()
+ * SPAN in the file (not one hardcoded function) by pairing each lock with
+ * the LAST unlock encountered before the next lock -- a deliberate superset
+ * when a scope has more than one exit path (screen_idle_touch_swallow()'s
+ * early-return-on-release branch unlocks once, then the pressed path
+ * continues under the SAME still-held lock to a second, final unlock). That
+ * superset can only ever flag a false positive (a few bytes of genuinely
+ * unlocked glue code between two unlocks, if it happened to call something
+ * denylisted -- it does not, today), never a false negative that misses
+ * real locked code -- the safe direction for a scan whose job is "prove
+ * nothing bad happens under this lock". */
+static void run_section9_idle_lock_scope_denylist(void)
+{
+    TEST_SECTION("every screen_idle_lock()->screen_idle_unlock() span in screen_idle.c -- "
+                 "generalised over every lock/unlock PAIR in the file, not one hardcoded "
+                 "function -- calls nothing from the denylist (*_get_status, heap_caps_*, "
+                 "*_command_*, nvs_*, lv_*, SPI/I2C entry points). Pins UI_PLAN.md's stated "
+                 "invariant: 'idle->lock may only ever be held across pure computation and "
+                 "plain struct field access'. Regression test for 7a8594d.");
+
+    char *text = read_file_any(SCREEN_IDLE_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/screen_idle.c");
+        return;
+    }
+    char *stripped = strip_c_comments(text);
+    TEST_CHECK(stripped != NULL, "malloc for the comment-stripped copy of screen_idle.c succeeded");
+    if (!stripped) {
+        free(text);
+        return;
+    }
+
+    static const char *const LOCK_TOK = "screen_idle_lock(";
+    static const char *const UNLOCK_TOK = "screen_idle_unlock(";
+
+    static const char *const LOCK_SCOPE_DENYLIST[] = {
+        "_get_status(", "heap_caps_", "_command_", "nvs_", "lv_", "spi_device_", "i2c_master_",
+    };
+
+    int span_count = 0;
+    const char *lock_pos = strstr(stripped, LOCK_TOK);
+    while (lock_pos) {
+        const char *next_lock = strstr(lock_pos + 1, LOCK_TOK);
+        // The last unlock() strictly between this lock() and the NEXT
+        // lock() (or end of text, for the final span) is this span's true
+        // end -- see this function's top comment for why "last", not
+        // "first", is the correct (conservative) pairing.
+        const char *scan_limit = next_lock ? next_lock : (stripped + strlen(stripped));
+        const char *unlock_pos = NULL;
+        for (const char *u = strstr(lock_pos, UNLOCK_TOK); u && u < scan_limit;
+             u = strstr(u + 1, UNLOCK_TOK)) {
+            unlock_pos = u;
+        }
+        if (!unlock_pos) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "found screen_idle_lock() at offset %ld with no matching screen_idle_"
+                     "unlock() before the next lock (or end of file) -- either a lock is never "
+                     "released (a real bug this scan should not paper over) or this scan's "
+                     "pairing heuristic needs revisiting for a genuinely new lock usage shape.",
+                     (long)(lock_pos - stripped));
+            TEST_CHECK(false, msg);
+            lock_pos = next_lock;
+            continue;
+        }
+
+        size_t span_len = (size_t)(unlock_pos - lock_pos);
+        char *span = dup_range(lock_pos, span_len);
+        if (span) {
+            for (size_t d = 0; d < sizeof(LOCK_SCOPE_DENYLIST) / sizeof(LOCK_SCOPE_DENYLIST[0]); d++) {
+                bool clean = strstr(span, LOCK_SCOPE_DENYLIST[d]) == NULL;
+                char msg[320];
+                snprintf(msg, sizeof(msg),
+                         "the screen_idle_lock()..screen_idle_unlock() span starting at offset "
+                         "%ld calls the denylisted pattern '%s' -- idle->lock may only ever be "
+                         "held across pure computation and plain field access; SPI/I2C/NVS/a "
+                         "heap walk/an lv_* call under this lock is exactly 7a8594d's defect "
+                         "(a lock held across five SPI reads, a 200ms queue wait, and "
+                         "interrupts-disabled heap walks) reopening.",
+                         (long)(lock_pos - stripped), LOCK_SCOPE_DENYLIST[d]);
+                TEST_CHECK(clean, msg);
+            }
+            free(span);
+        }
+        span_count++;
+        lock_pos = next_lock;
+    }
+    TEST_CHECK(span_count >= 4,
+               "expected to find and check at least 4 screen_idle_lock()/screen_idle_unlock() "
+               "spans in screen_idle.c (screen_idle_refresh_inputs(), screen_idle_task(), "
+               "screen_idle_touch_swallow(), screen_idle_get_state()) -- found fewer, which "
+               "means either lock usage was removed/restructured or this scan's pairing "
+               "regressed.");
+
+    free(stripped);
+    free(text);
+}
+
 void run_test_display_power_wiring(void)
 {
     run_section1_screen_idle_calls_policy();
@@ -749,4 +1267,7 @@ void run_test_display_power_wiring(void)
     run_section4_screen_idle_init_takes_recovery_mode();
     run_section5_screen_idle_stack_sized_for_dashboard();
     run_section6_wake_invalidate_not_in_flush_cb();
+    run_section7_flush_and_indev_cb_mutator_denylist();
+    run_section8_timer_refresh_cb_blocking_denylist();
+    run_section9_idle_lock_scope_denylist();
 }
