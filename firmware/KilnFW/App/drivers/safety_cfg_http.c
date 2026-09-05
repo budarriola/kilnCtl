@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 
 #include "http_form.h"
@@ -282,7 +283,12 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
     uint32_t fetched = safety_cfg_store_fetched_ms_ago();
     snap.fetched_ms_ago_or_neg1 = (fetched == UINT32_MAX) ? -1 : (int64_t)fetched;
 
-    static char json[SAFETY_CFG_JSON_MAX];
+    /* 2026-09-05 DRAM_PSRAM_PLAN.md: no NVS/flash call anywhere in this file
+     * (safety config is pushed over the safety UART link, not stored via
+     * NVS locally), so this scratch buffer is safe to move off internal
+     * DRAM -- it is never a source/dest for a flash write, and this handler
+     * runs on httpd_worker, whose own stack stays internal. */
+    static EXT_RAM_BSS_ATTR char json[SAFETY_CFG_JSON_MAX];
     size_t len = build_commissioning_json(&snap, json, sizeof(json));
     if (len == 0) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "commissioning JSON build failed");
@@ -705,13 +711,16 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
 
 static esp_err_t commissioning_post_handler(httpd_req_t *req)
 {
-    static char body[SAFETY_CFG_BODY_MAX];
+    /* 2026-09-05 DRAM_PSRAM_PLAN.md: same rationale as commissioning_get_
+     * handler's json[] above -- no NVS/flash call in this file, so these
+     * scratch buffers are safe to move off internal DRAM. */
+    static EXT_RAM_BSS_ATTR char body[SAFETY_CFG_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
         return ESP_OK;
     }
 
-    static safety_cfg_post_pair_t pairs[SAFETY_CFG_POST_MAX_PAIRS];
+    static EXT_RAM_BSS_ATTR safety_cfg_post_pair_t pairs[SAFETY_CFG_POST_MAX_PAIRS];
     bool commit = false;
     int n = parse_set_param_body(body, pairs, SAFETY_CFG_POST_MAX_PAIRS, &commit);
     if (n < 0) {
