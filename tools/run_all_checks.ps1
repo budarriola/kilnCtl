@@ -58,6 +58,22 @@ $checks = Get-ChildItem -Path $repoRoot -Filter "check_*.ps1" -Recurse -File |
     } |
     Sort-Object FullName
 
+# test_check_hal_include_boundary.ps1 is a negative test, not a guard --
+# it proves check_hal_include_boundary.ps1's scan can actually detect a
+# violation (HW_ABSTRACTION_PLAN.md Phase 4's "negative test -- a new
+# precedent, none of the existing checks has one"). It is named test_*, not
+# check_*, so the glob above does not pick it up on its own; it is added
+# here explicitly rather than renamed, since firmware/KilnFW/App/test/ is
+# where every other test_*.ps1/.c in this repo lives and it belongs there,
+# not under tools/.
+$halBoundaryNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_check_hal_include_boundary.ps1"
+if (Test-Path $halBoundaryNegativeTest) {
+    $checks += Get-Item $halBoundaryNegativeTest
+    $checks = $checks | Sort-Object FullName
+} else {
+    Write-Host "WARNING: expected negative test $halBoundaryNegativeTest not found -- has it moved?" -ForegroundColor Yellow
+}
+
 # As of 2026-08-28 there are several: some under tools/, two under
 # firmware/SaftyFW/tools/, and the floor is set below the real count on
 # purpose. It exists to catch "the glob found nothing", not to assert an

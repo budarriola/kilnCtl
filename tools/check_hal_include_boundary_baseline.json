@@ -1,0 +1,7 @@
+{
+    "driver/": 36,
+    "hardware/": 16,
+    "nvs.h": 23,
+    "nvs_flash.h": 24,
+    "esp_timer.h": 23
+}

@@ -1,0 +1,304 @@
+# check_hal_include_boundary.ps1 -- HAL_ABSTRACTION_PLAN.md Phase 4
+# enforcement. Two-stage check, per that plan's "Phase 4 -- enforcement"
+# section:
+#
+#   1. RATCHET (active now, every phase). Counts every KilnFW/App file
+#      (excluding test/, stubs/, build/) and SaftyFW/src file that
+#      #includes driver/, hardware/, nvs.h, nvs_flash.h or esp_timer.h
+#      outside firmware/hwAbstraction/. Fails if the count for any one of
+#      those headers/prefixes rises above the recorded baseline below --
+#      same idea as check_stack_margin_baseline.ps1: a number that must
+#      never go up, refreshed deliberately with -UpdateBaseline, never
+#      crept upward by an unnoticed edit.
+#
+#   2. STRICT, from day one, for two small self-contained sets that are
+#      auditable file-by-file right now (unlike the count-only set above,
+#      which the plan says would be 60-75 decorative allowlist entries if
+#      done that way today):
+#        - esp_ota_ops.h: exactly the files on $OtaOpsAllowlist below.
+#        - esp_wifi.h / esp_netif.h: wifi_prov family only (also an
+#          explicit allowlist, so a new non-wifi_prov file that reaches
+#          for esp_wifi.h is caught immediately rather than waiting for
+#          the count-based ratchet to notice).
+#      A file that includes one of these two headers and is NOT on its
+#      allowlist is a hard failure regardless of the ratchet baseline.
+#
+# Mechanics are copied, not reinvented, from two existing checks:
+#   - Comment stripping: check_isolation.ps1's Get-CodeOnlyLines (its
+#     #include-line handling is load-bearing -- an #include inside a /*
+#     */ block must not be counted, and this function already gets that
+#     right, so it is reproduced here rather than re-derived).
+#   - File enumeration: check_c_files_in_cmakelists.ps1's filter
+#     (exclude test/, build/ -- extended here to .h as well as .c, and to
+#     also exclude stubs/, which that check does not need to skip but
+#     this one does since firmware/KilnFW/App/test/stubs/nvs.h is a host
+#     test double, not a real firmware file).
+#
+# Hard floor: if the combined file count this check scans falls below
+# 200, something is broken (wrong root, empty glob, moved directory) and
+# this check must not report a quiet, meaningless pass.
+#
+# Usage:
+#   powershell -File tools\check_hal_include_boundary.ps1
+#   powershell -File tools\check_hal_include_boundary.ps1 -UpdateBaseline
+#
+# -UpdateBaseline overwrites check_hal_include_boundary_baseline.json with
+# today's counts (only ever lowers the ratchet, or raises it after a
+# deliberate, reviewed increase -- never run this to silence a failure you
+# have not looked at).
+
+param(
+    [switch]$UpdateBaseline
+)
+
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$baselinePath = Join-Path $PSScriptRoot "check_hal_include_boundary_baseline.json"
+
+# --- Comment stripper, reproduced from firmware/SaftyFW/tools/check_isolation.ps1
+# Get-CodeOnlyLines. Kept byte-for-byte equivalent in behavior: block-comment
+# state carries across lines, line comments (//) are stripped, and an
+# #include line survives because #include never appears after a // or
+# inside a /* */ span in any file this check scans -- the same property
+# check_isolation.ps1 relies on. No shared PowerShell module exists in this
+# repo to import this from instead (see check_c_files_in_cmakelists.ps1's
+# header for the same note about its own comment stripper). ---
+function Get-CodeOnlyLines {
+    param([string]$Path)
+    $inBlockComment = $false
+    $lines = Get-Content -Path $Path
+    $result = @()
+    foreach ($line in $lines) {
+        $code = $line
+        if ($inBlockComment) {
+            $endIdx = $code.IndexOf("*/")
+            if ($endIdx -ge 0) {
+                $code = $code.Substring($endIdx + 2)
+                $inBlockComment = $false
+            } else {
+                $result += ""
+                continue
+            }
+        }
+        $lineCommentIdx = $code.IndexOf("//")
+        if ($lineCommentIdx -ge 0) {
+            $code = $code.Substring(0, $lineCommentIdx)
+        }
+        while ($true) {
+            $startIdx = $code.IndexOf("/*")
+            if ($startIdx -lt 0) { break }
+            $endIdx = $code.IndexOf("*/", $startIdx)
+            if ($endIdx -ge 0) {
+                $code = $code.Substring(0, $startIdx) + $code.Substring($endIdx + 2)
+            } else {
+                $code = $code.Substring(0, $startIdx)
+                $inBlockComment = $true
+                break
+            }
+        }
+        $result += $code
+    }
+    return $result
+}
+
+# --- File enumeration, extending check_c_files_in_cmakelists.ps1's filter
+# to .h as well as .c, and adding stubs/ to the excluded directory names
+# (a host-test double, not a real firmware file). Returns repo-root-relative
+# paths, forward slashes only. ---
+function Get-ScanFiles {
+    param([string]$Dir, [string]$RepoRoot)
+    if (-not (Test-Path $Dir)) { return @() }
+    Get-ChildItem -Path $Dir -Recurse -File |
+        Where-Object {
+            ($_.Extension -ieq ".c" -or $_.Extension -ieq ".h") -and
+            $_.FullName -notmatch '[\\/]test[\\/]' -and
+            $_.FullName -notmatch '[\\/]stubs[\\/]' -and
+            $_.FullName -notmatch '[\\/]build[\\/]'
+        } |
+        ForEach-Object {
+            ($_.FullName.Substring($RepoRoot.Length + 1) -replace '\\', '/')
+        } |
+        Sort-Object
+}
+
+# --- The set of headers the ratchet counts. Keys are a short label used in
+# the baseline file and in output; Pattern is matched against a
+# comment-stripped #include line. ---
+$RatchetHeaders = [ordered]@{
+    "driver/"      = '^\s*#include\s*["<]driver/'
+    "hardware/"    = '^\s*#include\s*["<]hardware/'
+    "nvs.h"        = '^\s*#include\s*["<]nvs\.h[">]'
+    "nvs_flash.h"  = '^\s*#include\s*["<]nvs_flash\.h[">]'
+    "esp_timer.h"  = '^\s*#include\s*["<]esp_timer\.h[">]'
+}
+
+# --- Strict, per-file allowlists. Full repo-relative paths only -- never a
+# directory prefix (SaftyFW has no espInterfaces/-style subdirectory to
+# anchor one, and KilnFW's hwAbstraction/ boundary is handled separately
+# below by simply excluding that tree from the scan, same as the ratchet
+# does). Each entry names the header it is allowlisted for, so a file that
+# is allowlisted for esp_wifi.h but somehow also picked up esp_ota_ops.h
+# still fails on the latter. ---
+
+# esp_ota_ops.h -- measured 2026-09-05 against the current tree: 8 files,
+# matching HW_ABSTRACTION_PLAN.md's Phase 4 estimate exactly.
+$OtaOpsAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/dashboard_http.c";      Header = "esp_ota_ops.h"; Reason = "reads running/next-boot partition info for the dashboard status card"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/ota_http.c";            Header = "esp_ota_ops.h"; Reason = "OTA HTTP handler orchestration -- direct partition/OTA-write owner"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/ota_http_esp.c";        Header = "esp_ota_ops.h"; Reason = "ESP-side OTA write/verify/set-boot-partition implementation"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/ota_http_pico.c";       Header = "esp_ota_ops.h"; Reason = "relays an OTA image to the Pico; still touches the ESP-side esp_ota_ops API for its own state"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/ota_http_recovery.c";   Header = "esp_ota_ops.h"; Reason = "recovery-mode OTA rollback path -- reads/sets boot partition"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/partition_info_http.c"; Header = "esp_ota_ops.h"; Reason = "GET /api/partitions -- reports the RUNNING partition marker used by flash_firmware() verification"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/ui_page_diagnostics.c"; Header = "esp_ota_ops.h"; Reason = "diagnostics LCD page displays running partition/build info"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/main_network_http.c";           Header = "esp_ota_ops.h"; Reason = "wires the OTA HTTP handlers into the httpd instance at boot"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+)
+
+# esp_wifi.h / esp_netif.h -- wifi_prov family only, per the plan
+# ("Deliberately out of scope: ... wifi_prov is already a sole owner").
+$WifiAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov.c";          Header = "esp_wifi.h";  Reason = "wifi_prov family -- sole Wi-Fi driver owner"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov.c";          Header = "esp_netif.h"; Reason = "wifi_prov family -- sole Wi-Fi driver owner"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov_api.c";      Header = "esp_wifi.h";  Reason = "wifi_prov family"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov_link.c";     Header = "esp_wifi.h";  Reason = "wifi_prov family"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov_internal.h"; Header = "esp_netif.h"; Reason = "wifi_prov family -- shared internal header"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+)
+
+$StrictHeaders = [ordered]@{
+    "esp_ota_ops.h" = @{ Pattern = '^\s*#include\s*["<]esp_ota_ops\.h[">]'; Allowlist = $OtaOpsAllowlist }
+    "esp_wifi.h"    = @{ Pattern = '^\s*#include\s*["<]esp_wifi\.h[">]';    Allowlist = $WifiAllowlist }
+    "esp_netif.h"   = @{ Pattern = '^\s*#include\s*["<]esp_netif\.h[">]';  Allowlist = $WifiAllowlist }
+}
+
+# Excludes firmware/hwAbstraction/ (the boundary this check exists to
+# enforce -- HAL backend code is exempt by definition) from a repo-relative
+# path.
+function Test-InsideHal {
+    param([string]$RelPath)
+    return ($RelPath -match '(^|/)firmware/hwAbstraction/')
+}
+
+# --- Core scan function. Takes a list of repo-relative file paths (so the
+# negative test below can hand it a synthetic path list without touching
+# the real tree) and returns a hashtable:
+#   RatchetCounts   = @{ "driver/" = <int>; ... }
+#   StrictViolations = @( "relpath: header not allowlisted", ... )
+# $FileRoot is the absolute directory those relative paths are rooted at
+# (defaults to the repo root; the negative test overrides it to point at
+# the scratch copy). ---
+function Invoke-HalBoundaryScan {
+    param(
+        [string[]]$RelPaths,
+        [string]$FileRoot
+    )
+
+    $ratchetCounts = [ordered]@{}
+    foreach ($label in $RatchetHeaders.Keys) { $ratchetCounts[$label] = 0 }
+    $strictViolations = @()
+
+    foreach ($rel in $RelPaths) {
+        if (Test-InsideHal -RelPath $rel) { continue }
+
+        $full = Join-Path $FileRoot ($rel -replace '/', '\')
+        if (-not (Test-Path $full)) { continue }
+        $codeLines = Get-CodeOnlyLines -Path $full
+
+        foreach ($label in $RatchetHeaders.Keys) {
+            $pattern = $RatchetHeaders[$label]
+            $hit = $false
+            foreach ($line in $codeLines) {
+                if ($line -match $pattern) { $hit = $true; break }
+            }
+            if ($hit) { $ratchetCounts[$label] += 1 }
+        }
+
+        foreach ($headerName in $StrictHeaders.Keys) {
+            $entry = $StrictHeaders[$headerName]
+            $hit = $false
+            foreach ($line in $codeLines) {
+                if ($line -match $entry.Pattern) { $hit = $true; break }
+            }
+            if (-not $hit) { continue }
+            $allowed = $false
+            foreach ($a in $entry.Allowlist) {
+                if ($a.RelPath -ieq $rel -and $a.Header -ieq $headerName) { $allowed = $true; break }
+            }
+            if (-not $allowed) {
+                $strictViolations += "${rel}: includes $headerName outside hwAbstraction/ and is not on its allowlist"
+            }
+        }
+    }
+
+    return @{ RatchetCounts = $ratchetCounts; StrictViolations = $strictViolations }
+}
+
+# ---------------------------------------------------------------------
+# Real-tree run starts here. Everything above is reusable by the negative
+# test (dot-sourced).
+# ---------------------------------------------------------------------
+
+if ($MyInvocation.InvocationName -eq '.') {
+    # Dot-sourced by the negative test -- define functions/data only, run
+    # nothing else.
+    return
+}
+
+$appDir = Join-Path $repoRoot "firmware\KilnFW\App"
+$saftySrcDir = Join-Path $repoRoot "firmware\SaftyFW\src"
+
+if (-not (Test-Path $appDir)) { throw "check_hal_include_boundary: $appDir not found -- has it moved?" }
+if (-not (Test-Path $saftySrcDir)) { throw "check_hal_include_boundary: $saftySrcDir not found -- has it moved?" }
+
+$repoRootResolved = (Resolve-Path $repoRoot).Path
+$allFiles = @()
+$allFiles += Get-ScanFiles -Dir (Resolve-Path $appDir).Path -RepoRoot $repoRootResolved
+$allFiles += Get-ScanFiles -Dir (Resolve-Path $saftySrcDir).Path -RepoRoot $repoRootResolved
+
+if ($allFiles.Count -lt 200) {
+    throw "check_hal_include_boundary: only found $($allFiles.Count) candidate files -- expected 200+. The glob is probably broken or a directory moved; this check has gone blind, not found a shrunk tree."
+}
+
+$scan = Invoke-HalBoundaryScan -RelPaths $allFiles -FileRoot $repoRootResolved
+$counts = $scan.RatchetCounts
+$violations = $scan.StrictViolations
+
+# --- Baseline load / update ---
+if (-not (Test-Path $baselinePath)) {
+    throw "check_hal_include_boundary: baseline file $baselinePath not found -- run with -UpdateBaseline once to create it after reviewing the counts it would record."
+}
+
+if ($UpdateBaseline) {
+    $counts | ConvertTo-Json | Set-Content -Path $baselinePath -Encoding utf8
+    Write-Host "Baseline updated at $baselinePath :"
+    foreach ($label in $counts.Keys) {
+        Write-Host ("  {0,-14} {1}" -f $label, $counts[$label])
+    }
+    exit 0
+}
+
+$baselineRaw = Get-Content -Path $baselinePath -Raw | ConvertFrom-Json
+$ratchetFailures = @()
+foreach ($label in $counts.Keys) {
+    $baselineVal = $baselineRaw.$label
+    if ($null -eq $baselineVal) {
+        $ratchetFailures += "$label : no baseline entry recorded (baseline file is missing this key -- run -UpdateBaseline after reviewing)"
+        continue
+    }
+    if ($counts[$label] -gt [int]$baselineVal) {
+        $ratchetFailures += "$label : count rose to $($counts[$label]) (baseline $baselineVal) -- a file outside firmware/hwAbstraction/ started including $label. Move it behind the HAL, or if this is a deliberate, reviewed increase, rerun with -UpdateBaseline."
+    }
+}
+
+if ($ratchetFailures.Count -gt 0 -or $violations.Count -gt 0) {
+    Write-Host "HAL INCLUDE BOUNDARY CHECK FAILED:" -ForegroundColor Red
+    foreach ($f in $ratchetFailures) { Write-Host "  RATCHET: $f" -ForegroundColor Red }
+    foreach ($v in $violations) { Write-Host "  STRICT:  $v" -ForegroundColor Red }
+    throw "$($ratchetFailures.Count) ratchet failure(s), $($violations.Count) strict allowlist violation(s) -- see HW_ABSTRACTION_PLAN.md Phase 4."
+}
+
+Write-Host "HAL include boundary check passed ($($allFiles.Count) files scanned):"
+foreach ($label in $counts.Keys) {
+    Write-Host ("  {0,-14} {1} (baseline {2})" -f $label, $counts[$label], $baselineRaw.$label)
+}
+Write-Host "  esp_ota_ops.h and esp_wifi.h/esp_netif.h strict allowlists: OK"
+exit 0
