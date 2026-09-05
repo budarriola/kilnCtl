@@ -21,7 +21,7 @@
 #include "test_common.h"
 
 #include "../drivers/profile_feasibility.h"
-#include "../drivers/zones_http.h"
+#include "../drivers/zones_config_accessors.h"
 
 // ---------------------------------------------------------------------------
 // Stubs for the three zones_http.c getters profile_feasibility.c calls.

@@ -13,7 +13,7 @@
                                  * (ROADMAP.md M13). */
 #include "ui_theme.h"
 #include "ui_topbar.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 // TODO.md 10.3's real "Temperature" page -- individual per-zone live
 // temperature plus manual relay control for whichever relays are NOT owned

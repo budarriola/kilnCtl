@@ -10,7 +10,7 @@
 #include "nvs_flash.h"
 
 #include "ota_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 static const char *TAG = "kiln_cfg_store";
 

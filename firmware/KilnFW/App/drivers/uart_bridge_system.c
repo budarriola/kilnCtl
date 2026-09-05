@@ -31,7 +31,7 @@
 #include "thermo_owner.h"
 #include "uart_task_ids.h"
 #include "wifi_prov.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 #include "uart_bridge_internal.h"
 
 static const char *TAG = "uart_bridge";

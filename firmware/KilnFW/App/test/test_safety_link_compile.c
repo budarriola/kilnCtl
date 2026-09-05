@@ -64,7 +64,7 @@
 #include "kiln_io.h"
 #include "profile_executor.h"
 #include "thermo_owner.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 #include "safety_cfg_store.h"
 
 uint32_t esp_random(void) { return 0; }

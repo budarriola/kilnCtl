@@ -47,7 +47,7 @@
 #include "MAX31856.h"
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
 #include "profiles_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
 {

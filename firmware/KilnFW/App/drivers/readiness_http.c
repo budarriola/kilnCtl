@@ -15,7 +15,7 @@
 #include "web_encoding.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 static const char *TAG = "readiness_http";
 

@@ -16,7 +16,7 @@
 #include "dashboard_json.h"
 #include "http_form.h"
 #include "profile_executor.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 /* autotune_state_name()/autotune_rule_name()/autotune_refusal_name() and the
  * response body itself moved to dashboard_json.c's

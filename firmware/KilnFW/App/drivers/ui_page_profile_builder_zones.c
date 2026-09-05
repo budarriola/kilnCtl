@@ -10,7 +10,7 @@
 #include "ui_page_profile_builder_segment.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 /* Arithmetic (same style as every other page in this pass), against the real
  * ~267px content budget:

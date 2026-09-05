@@ -9,7 +9,7 @@
 
 #include "esp_log.h"
 
-#include "zones_http.h" // zones_config_get_pid/set_pid
+#include "zones_config_accessors.h" // zones_config_get_pid/set_pid
 
 // ---------------------------------------------------------------------
 // Integral (Ki) diagnosis -- pure classification (host-tested directly)

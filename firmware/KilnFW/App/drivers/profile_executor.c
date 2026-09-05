@@ -40,7 +40,7 @@
                            * hardware. */
 #include "thermo_combine.h"
 #include "zone_coupling_solve.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 /* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option
  * (b): declared here rather than pulled in via zones_config_json.h (this

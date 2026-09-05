@@ -12,7 +12,7 @@
 
 #include "esp_log.h"
 
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 /* zones_config_get_ease_off_window_mult() (zones_config_json.h/
  * zones_config_accessors.c) and its ZONE_EASE_OFF_WINDOW_MULT_DEFAULT

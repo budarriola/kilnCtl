@@ -80,7 +80,7 @@
 #include "sim_backend.h"
 #include "stack_margin.h"
 #include "thermo_combine.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 /* uart_bridge_ext.c's flash-safe executor (bx_flash_worker) -- see this
  * file's coupling_persist_job()/autotune_finalize_fit() comments below for why
  * autotune_finalize_fit()'s NVS write is routed through it rather than executed

@@ -16,7 +16,7 @@
 #include "relay_cycles.h"
 #include "run_state.h"
 #include "stack_margin.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
                                   SafetyLinkClass *safety_or_null)

@@ -17,7 +17,7 @@
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
 #include "wifi_provision_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 #include "profiles_http_internal.h"
 

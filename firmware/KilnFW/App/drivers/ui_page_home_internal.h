@@ -58,7 +58,7 @@
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "wifi_status_ui.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 #ifdef __cplusplus
 extern "C" {

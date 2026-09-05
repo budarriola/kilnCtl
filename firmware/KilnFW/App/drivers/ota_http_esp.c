@@ -44,7 +44,7 @@
 #include "sim_backend.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 // --- POST /api/ota/esp progress (ota_http.h's ota_http_get_esp_progress()) -
 // Single writer (ota_esp_post_handler(), one at a time -- s_update_claim

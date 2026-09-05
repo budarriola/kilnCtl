@@ -38,7 +38,7 @@
 #include <stdint.h>
 
 #include "MAX31856.h" /* MAX31856_CHANNEL_COUNT */
-#include "zones_http.h" /* zone_control_mode_t, zones_config_get_coupling() */
+#include "zones_config_accessors.h" /* zone_control_mode_t, zones_config_get_coupling() */
 
 #ifdef __cplusplus
 extern "C" {

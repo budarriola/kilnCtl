@@ -73,7 +73,7 @@
  * the only one, as a local static, and main.c is off-limits this pass), so
  * the poll task that already runs here and already knows link_up/down
  * transitions is the natural place to pull the desired setting from instead. */
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 /* TODO owner-report (2026-08-21 follow-up), docs/COMMISSIONING.md sec 3: the
  * ESP-side commissioning cache. Same real, deliberate cross-module dependency

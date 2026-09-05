@@ -2546,7 +2546,7 @@ same document's own 2026-08-29/30 bench sections contradict.
       looks at `fuzzy_strength_pct` at all. The live board's `GET
       /api/zones` reports `control_mode:2` (`ZONE_CONTROL_MODE_PID`) on
       all three zones, not `3` (`ZONE_CONTROL_MODE_PID_FUZZY`,
-      `zones_http.h:849-852`) — and both campaign presets,
+      `zones_config_accessors.h:850-853`) — and both campaign presets,
       `tools/PcTools/config_presets/fuzzy_ab_strength50_20260903.json` and
       `..._baseline_20260903.json`, set `"control_mode": 2` for every zone.
       The strength-50 preset's own description ("applying this preset

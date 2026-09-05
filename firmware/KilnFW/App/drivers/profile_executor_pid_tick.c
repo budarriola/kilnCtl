@@ -12,7 +12,7 @@
 #include <math.h>
 
 #include "pid_fuzzy.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 #include "zones_config_json.h" /* zones_config_get_error_band_c()/_rate_band_c_per_s() */
 
 /* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option

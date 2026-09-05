@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "MAX31856.h"
-#include "zones_http.h" /* ZONE_SETTINGS_SOURCE_CUSTOM */
+#include "zones_config_accessors.h" /* ZONE_SETTINGS_SOURCE_CUSTOM */
 
 /* Shared implementation of the settings_source inheritance-chain walk.
  *

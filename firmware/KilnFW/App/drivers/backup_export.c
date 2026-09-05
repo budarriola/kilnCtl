@@ -32,7 +32,7 @@
 #include "profiles_http.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
  * App/drivers/CMakeLists.txt -- same convention as every other *_page.html

@@ -16,7 +16,7 @@
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 void profile_executor_halt(void)
 {

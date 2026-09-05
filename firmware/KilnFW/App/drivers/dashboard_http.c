@@ -39,7 +39,7 @@
 #include "unit_pref.h"
 #include "watchdog_cfg.h"
 #include "wifi_provision_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 const char *DASH_TAG = "dashboard_http";
 /* application/x-www-form-urlencoded, "relay=4&on=1" plus headroom -- same

@@ -21,7 +21,7 @@
 #include "kiln_io_owner.h"
 #include "relay_authority.h"
 #include "sim_backend.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 void apply_relay(uint8_t zi, bool want_on)
 {

@@ -50,7 +50,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
-#include "zones_http.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
+#include "zones_config_accessors.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
                          // this file now writes the opt-in flag here too (U2) and reads/writes
                          // gains directly for adaptive_tune_revert() (U1)
 

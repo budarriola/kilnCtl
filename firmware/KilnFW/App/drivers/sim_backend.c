@@ -14,7 +14,7 @@
 #include "http_form.h"
 #include "uart_task_ids.h" /* THERMO_FAULT_* */
 #include "wifi_provision_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 /* The model itself lives in App/test/ and is compiled into this build by
  * App/drivers/CMakeLists.txt when CONFIG_KILNCTL_SIM_PLANT is set. Deliberately

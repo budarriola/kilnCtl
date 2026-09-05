@@ -44,7 +44,7 @@
 #include "sim_backend.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 
 // --- POST /api/ota/esp/recovery_exit -- boot_guard.h's "a way out of

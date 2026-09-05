@@ -11,7 +11,7 @@
 #include "MAX31856.h"
 #include "http_form.h"
 #include "profiles_builtin.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 
 /* ---- POST /api/profile ----------------------------------------------------

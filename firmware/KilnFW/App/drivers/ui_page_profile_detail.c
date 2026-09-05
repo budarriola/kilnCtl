@@ -19,7 +19,7 @@
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 static const char *TAG = "ui_page_profile_detail";
 

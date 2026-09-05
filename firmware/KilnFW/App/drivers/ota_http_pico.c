@@ -44,7 +44,7 @@
 #include "sim_backend.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 // Same static-not-stack reasoning as OTA_ESP_CHUNK_SIZE/s_ota_esp_chunk
 // above. A SEPARATE buffer rather than reusing s_ota_esp_chunk: the two

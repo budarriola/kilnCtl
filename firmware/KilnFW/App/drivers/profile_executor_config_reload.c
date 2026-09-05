@@ -13,7 +13,7 @@
 
 #include "esp_log.h"
 
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 bool reload_zone_config(uint8_t zi)
 {

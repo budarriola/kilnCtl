@@ -782,9 +782,13 @@ direction is strictly downward: ui/http/bridge → control/safety/persist →
 owners/hw → hwAbstraction. Six upward-include patterns exist today and must
 be untangled before the move, otherwise the reorg just relabels the tangle:
 
-1. 18 control/safety files include zones_http.h for what are really config
-   accessors. Split those accessors into zones_config_accessors.h (persist);
-   zones_http.h keeps only handler registration.
+1. DONE (2026-09-05): 18+ control/safety/persist files included zones_http.h
+   for what are really config accessors. Split into zones_config_accessors.h
+   (persist; holds every zones_config_*()/zones_current_sweep_*()/zones_ct_*()
+   accessor and the ZONE_*_MAX bound constants) — zones_http.h now includes it
+   and keeps only zones_http_start() and zones_http_set_hw(). 51 includers
+   switched; zones_config_json.h's own zones_http.h include (for the same
+   bound macros) switched too, breaking that circularity.
 2. DONE: ota_http.h leaked into kiln_io_owner.c:17, profile_executor.c:25 and
    profile_executor_run.c:21. `ota_http_heat_blocked_by_update()`'s
    declaration moved to new `ota_state.h`; ota_http.h includes it, the three

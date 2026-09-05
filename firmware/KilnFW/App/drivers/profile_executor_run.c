@@ -23,7 +23,7 @@
 #include "safety_trip_words.h"
 #include "sim_backend.h"
 #include "thermo_combine.h"
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 
 /* 2026-09-01 multi-zone history fix: s_exec.history is now heap-allocated
  * from PSRAM instead of an inline .bss array (see its own doc comment in

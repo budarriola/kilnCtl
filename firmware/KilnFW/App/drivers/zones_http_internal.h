@@ -37,7 +37,7 @@
  * can be `extern`-declared here -- the original anonymous
  * `static struct { ... } s_zones;` has no name a header could reference. */
 
-#include "zones_http.h"
+#include "zones_config_accessors.h"
 #include "zones_config_json.h"
 
 #include <stdbool.h>

@@ -17,7 +17,7 @@
                                   // module's this file calls; never edited here (see PID_EXPANSION_PLAN.md
                                   // 3.3 and this file's coupled-fit comments for why reusing its conditioning
                                   // check is load-bearing, not cosmetic)
-#include "zones_http.h" // zones_config_get_model/set_model/get_pid/set_pid/get_coupling/set_coupling_cell
+#include "zones_config_accessors.h" // zones_config_get_model/set_model/get_pid/set_pid/get_coupling/set_coupling_cell
 
 // ---------------------------------------------------------------------
 // Layer 2/3 -- batch fit, blend, guard, and apply -- called only from
