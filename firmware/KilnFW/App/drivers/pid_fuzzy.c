@@ -42,12 +42,28 @@
 // FALLING extremes. "Large" on this axis now means, physically, a rate of
 // change no ordinary ramp produces, only a genuine disturbance or fault.
 //
-// logs/coupling/fuzzy_bands_envelope_20260904e_report.md (29 firings,
-// 37,008 zone-samples): this rig has NEVER left the centre rule cell on
-// EITHER axis at these widths (peak |error| 5.72 degC, 29% of ERROR_BAND_C;
-// peak |rate| 0.165 degC/s, 33% of RATE_BAND_C_PER_S) -- at this rig's own
-// envelope the fuzzy layer is a near-constant gain rescale, not adaptive
-// control. Whether to rescale these two numbers to the measured envelope,
+// logs/coupling/fuzzy_bands_envelope_20260904e_report.md: its headline
+// "29 firings, 37,008 zone-samples" claim is WITHDRAWN -- 28 of those 29
+// captures ran at control_mode 2, where this fuzzy layer is never invoked,
+// so those 34,830 samples characterise the rig's PID tracking envelope and
+// say nothing about this rule table. Only one capture,
+// fuzzy_ab_20260904d_s50_run1.jsonl (726 rows, 2178 zone-samples), ran
+// control_mode 3 and actually exercised pid_fuzzy_adjust(). What holds, at
+// that n=1 run / 2178 zone-samples, independently recomputed with rate as
+// pid_d/bd_kd_effective (the exact internal signal, not a finite-difference
+// proxy): 100% of samples land in the centre rule cell on both axes (peak
+// |error| 5.55 degC, 28% of ERROR_BAND_C; peak |rate| 0.110 degC/s, 22% of
+// RATE_BAND_C_PER_S) -- at this rig's own envelope the fuzzy layer is a
+// near-constant gain rescale, not adaptive control, for that one run. An
+// offline replay of the same triangular-membership math against stored
+// traces (no kiln time) gives the actual gain deltas a rescale would
+// produce -- the metric that matters, since cell occupancy can stay
+// ZERO/STEADY while the continuous membership blend still moves the gains:
+// at strength_pct=50, error/rate bands of 8.0/0.25, 7.0/0.22, 6.0/0.20 and
+// 5.0/0.15 degC(/s) give maximum fractional kp/ki/kd deltas of
+// 0.187/0.129/0.129, 0.231/0.159/0.159, 0.290/0.186/0.186 and
+// 0.373/0.265/0.265 respectively, against a max possible nudge of +-25%.
+// Whether to rescale these two numbers to the measured envelope,
 // relabel the experiment, or drop the layer is an owner decision
 // (PID_EXPANSION_PLAN.md sec 3.6g) -- NOT made by this pass. What THIS pass
 // does is make the two numbers below a per-zone config value instead of a

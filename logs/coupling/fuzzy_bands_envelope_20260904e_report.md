@@ -1,5 +1,57 @@
 # Fuzzy-PID membership bands vs. this kiln's measured envelope (2026-09-04)
 
+> **CORRECTION (2026-09-04, later pass) -- §2's archive-wide claim is
+> WITHDRAWN.** Grepping `control_mode` out of every raw capture referenced
+> below shows **28 of the 29 files enumerated in §2 ran at `control_mode: 2`,
+> where `pid_fuzzy_adjust()` is never invoked at all.** Those 28 captures
+> (34,830 of the 37,008 zone-samples) characterise this rig's PID tracking
+> envelope, not this rule table's cell occupancy -- they say nothing about
+> whether the fuzzy layer ever leaves ZERO/STEADY, because the fuzzy layer
+> never ran during them. Only `fuzzy_ab_20260904d_s50_run1.jsonl` (726 rows,
+> 2178 zone-samples) ran `control_mode: 3` and actually exercised the fuzzy
+> layer. **§1's single-arm finding is unaffected and still holds at its
+> true weight: n=1 run / 2178 zone-samples, not n=29 runs / 37,008
+> samples.** §2 below is left in place for the record but its conclusion
+> should be read as refuted by this note, not relied on. The offline
+> gain-delta computation in the correction below is the useful surviving
+> output: it recomputes actual controller behavior for candidate bands from
+> stored traces, at zero kiln-time cost, rather than counting cell
+> occupancy (a discontinuous, coarser signal that can stay ZERO/STEADY while
+> the continuous triangular membership blend still moves the gains
+> materially).
+>
+> **The trap that produced the error:** two files in this directory differ
+> by one character --  `fuzzy_ab_20260904_s50_run1.jsonl` (no `d`,
+> `control_mode: 2`) and `fuzzy_ab_20260904d_s50_run1.jsonl` (with `d`,
+> `control_mode: 3`, the only real fuzzy-mode capture). §2's file
+> enumeration included the mode-2 twin without checking its `control_mode`,
+> and the near-identical name made that easy to miss on a read-through.
+> Anyone re-deriving this evidence should grep `control_mode` per file
+> first, before trusting a filename pattern.
+>
+> **Offline gain-delta recomputation (the useful surviving result):** the
+> rule table is a pure function of `(error, error_rate)`, so cell occupancy
+> and resulting gains can be recomputed from the one legitimate mode-3 trace
+> for any candidate band setting, with no kiln time. Replicating
+> `pid_fuzzy_adjust()`'s triangular-membership Mamdani math against today's
+> bands, at `strength_pct=50` (max possible nudge +-25%), gives these
+> maximum fractional gain deltas (kp/ki/kd):
+>
+> | error band (degC) | rate band (degC/s) | kp | ki | kd |
+> |---|---|---|---|---|
+> | 8.0 | 0.25 | 0.187 | 0.129 | 0.129 |
+> | 7.0 | 0.22 | 0.231 | 0.159 | 0.159 |
+> | 6.0 | 0.20 | 0.290 | 0.186 | 0.186 |
+> | 5.0 | 0.15 | 0.373 | 0.265 | 0.265 |
+>
+> Cell-crossing is the wrong metric here; gain output is the right one, for
+> the reason stated above. Recommended envelope for the owner's decision:
+> `error_band_c` 6-8 degC, `rate_band_c_per_s` 0.20-0.25 degC/s (the
+> mode-3 run's observed maxima were 5.55 degC and 0.110 degC/s -- see §1).
+> These are per-zone config values as of `904db54`, so applying them is a
+> config POST, not a firmware change -- this correction does not apply them;
+> that remains the owner's call, unchanged from §5.1/§6 below.
+
 **Question:** the single above-zero fuzzy capture (§3.6f,
 `fuzzy_behavior_20260904d_report.md`) found error and rate confined to one
 membership cell for the whole run. Is that arm unusual, or is it what this
@@ -55,7 +107,7 @@ closer to ±0.02-0.03). This independently confirms the existing report's
 finding exactly: not "mostly" ZERO/STEADY, **all of it**, by a comfortable
 margin on both axes.
 
-## 2. Archive-wide envelope, n=29 captures / n=37,008 zone-samples
+## 2. Archive-wide envelope, n=29 captures / n=37,008 zone-samples -- WITHDRAWN, see correction at top of document (28/29 of these files ran control_mode 2, not the fuzzy-active control_mode 3)
 
 Widened past the one arm to every usable three-zone profile-7 capture in
 `logs/coupling/` (`zone_mask==7`, `exec.profile_id==7`, `exec.state ==
