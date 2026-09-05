@@ -43,6 +43,18 @@
 
 #include "hal_status.h"
 
+/* Alignment keyword: C11 `_Alignas` is not valid C++ syntax (the standard
+ * keyword there is `alignas`, unadorned). Every opaque-storage header in
+ * this interface picks the keyword that matches the including language
+ * rather than wrapping extern "C" more narrowly, so this #if/else pattern
+ * is repeated verbatim in hal_i2c.h and hal_spi.h -- keep all three in sync
+ * if it ever changes. */
+#ifdef __cplusplus
+#define HAL_ALIGNAS8 alignas(8)
+#else
+#define HAL_ALIGNAS8 _Alignas(8)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,16 +65,28 @@ extern "C" {
 #define HAL_UART_STORAGE_BYTES 64
 
 typedef struct {
-    _Alignas(8) uint8_t storage[HAL_UART_STORAGE_BYTES];
+    HAL_ALIGNAS8 uint8_t storage[HAL_UART_STORAGE_BYTES];
 } hal_uart_t;
 
 typedef struct {
+    int port;          /* backend port/instance number -- ESP UART_NUM_*,
+                         * pico uart0/uart1 index. Two ports are live on this
+                         * board today (main.c's PC link and safety_link.c's
+                         * safety link); without this field two hal_uart_t
+                         * instances would be indistinguishable to a shared
+                         * backend that dispatches on port number. */
     int tx_io;
     int rx_io;
     uint32_t baud;
 } hal_uart_cfg_t;
 
 hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg);
+
+/* Symmetric with hal_uart_init; releases backend resources (ESP:
+ * uart_driver_delete). Not called on any hot path today -- added for
+ * lifecycle symmetry (bring-up/teardown pairs elsewhere in this interface
+ * all have both halves) and for host/test teardown between cases. */
+hal_status_t hal_uart_deinit(hal_uart_t *u);
 
 /* Non-blocking, whole-buffer-or-HAL_BUSY. ESP: uart_write_bytes without a
  * wait. */

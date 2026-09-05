@@ -34,6 +34,14 @@
 
 #include "hal_status.h"
 
+/* See hal_uart.h for why this exists: `_Alignas` is C11-only, `alignas` is
+ * the C++ spelling. Kept in sync across hal_uart.h/hal_i2c.h/hal_spi.h. */
+#ifdef __cplusplus
+#define HAL_ALIGNAS8 alignas(8)
+#else
+#define HAL_ALIGNAS8 _Alignas(8)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -48,11 +56,11 @@ extern "C" {
 #define HAL_SPI_DEVICE_STORAGE_BYTES 32
 
 typedef struct {
-    _Alignas(8) uint8_t storage[HAL_SPI_BUS_STORAGE_BYTES];
+    HAL_ALIGNAS8 uint8_t storage[HAL_SPI_BUS_STORAGE_BYTES];
 } hal_spi_bus_t;
 
 typedef struct {
-    _Alignas(8) uint8_t storage[HAL_SPI_DEVICE_STORAGE_BYTES];
+    HAL_ALIGNAS8 uint8_t storage[HAL_SPI_DEVICE_STORAGE_BYTES];
 } hal_spi_device_t;
 
 #define HAL_CS_NONE (-1)
@@ -71,7 +79,36 @@ typedef struct {
     int cs_pin;                /* bit-banged CS around each transfer, or HAL_CS_NONE */
 } hal_spi_device_cfg_t;
 
-typedef void (*hal_spi_async_cb_t)(hal_status_t result, void *ctx);
+/* Argument order matches every real callback in this tree (panel_spi_blit.c's
+ * spi_owner_async_done_cb_t: `done_cb(cb_ctx, result)`), ctx first -- not
+ * hal_status_t first as Phase 0 originally had it. */
+typedef void (*hal_spi_async_cb_t)(void *ctx, hal_status_t result);
+
+/* Bus-level config, carrying both the pins AND the owner-task parameters
+ * esp_spi_owner.h's spi_owner_init() takes from callers today (see
+ * MAX31856.c:375's call). A bare (sck,mosi,miso) tuple, Phase 0's original
+ * shape, would have dropped queue_len/task_priority/stack_depth/core_id --
+ * caller control over the owner task and its registration for stack-margin
+ * reporting (CLAUDE.md "Register every new task for stack-margin reporting")
+ * must survive the HAL wrap, not just the pins. */
+typedef struct {
+    int sck_pin;
+    int mosi_pin;
+    int miso_pin;
+    size_t queue_len;         /* ESP: spi_owner_init's queue_len (8 today,
+                                * MAX31856.c:375). Pico ignores. */
+    int task_priority;        /* ESP: spi_owner_init's task_priority (5
+                                * today). Pico ignores (no owner task). */
+    uint32_t stack_depth;     /* ESP: spi_owner_init's stack_depth (4096
+                                * today). MUST still be registered for
+                                * stack-margin reporting by the backend that
+                                * creates the task -- this struct only carries
+                                * the value, it does not do the registration. */
+    int core_id;               /* ESP: spi_owner_init's core_id (tskNO_AFFINITY
+                                 * today, i.e. -1). Pico ignores. */
+    bool dma_use_psram;        /* DISPLAY_ST7796_PLAN.md 9.3; ESP only. */
+    bool async_flush;          /* DISPLAY_ST7796_PLAN.md 9.6; ESP only. */
+} hal_spi_bus_cfg_t;
 
 /* ALREADY_INIT decision (Phase 0, per the plan's open question at
  * "Bus-init semantics"): hal_spi_bus_init() on a bus that is already up
@@ -86,7 +123,7 @@ typedef void (*hal_spi_async_cb_t)(hal_status_t result, void *ctx);
  * first hal_spi_bus_init() on a shared bus applies the configuration that
  * needs to win (the display's, on the KilnFW thermo/display shared bus). */
 hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id,
-                               int sck_pin, int mosi_pin, int miso_pin);
+                               const hal_spi_bus_cfg_t *cfg);
 hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus);
 bool         hal_spi_bus_is_wedged(const hal_spi_bus_t *bus);
 

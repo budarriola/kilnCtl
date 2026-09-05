@@ -605,7 +605,12 @@ every fake (prove it can fail). Prefix-rename every symbol widened from
 static even when grep is clean. Land Phase 1a and the hal_kv migration alone,
 when no other session is mid-edit in drivers/.
 
-**Phase 0 — scaffold + contract. DONE, commit `<PENDING_COMMIT_HASH>`.** Tree,
+**Phase 0 — scaffold + contract. DONE, commit `c626727`.** Fixed per opus
+review on that commit: hal_uart_cfg_t port field + hal_uart_deinit,
+hal_i2c_probe, hal_spi_bus_init's cfg struct (owner-task params folded in)
+and hal_spi_async_cb_t's ctx-first argument order, alignas/`_Alignas`
+consistency across all three headers, and compile_headers.ps1's vswhere-based
+vcvars discovery. Tree,
 hal_status.h (full table above, plus hal_status_to_name), interface headers
 for spi/i2c/uart/gpio/adc with the opaque-storage pattern and
 threading/ownership contracts doc-commented per header (single-writer,

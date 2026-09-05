@@ -20,6 +20,10 @@
 #      the build. This proves the ABI guarantee is real, not decorative.
 #
 # Usage: powershell -ExecutionPolicy Bypass -File compile_headers.ps1
+#
+# Manual-only for now: this script is not yet wired into run_all_checks.ps1
+# (Phase 0's commit notes this belongs in Phase 1a). Run it by hand after
+# touching any interface header.
 $ErrorActionPreference = "Stop"
 
 $here = $PSScriptRoot
@@ -28,10 +32,33 @@ $workDir = Join-Path $here "_work"
 if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
 New-Item -ItemType Directory -Path $workDir | Out-Null
 
-$vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
-if (-not (Test-Path $vcvars)) {
-    throw "vcvarsall.bat not found at $vcvars -- update this path if MSVC Build Tools moved/were reinstalled."
+# Discover vcvarsall.bat via vswhere rather than a hardcoded VS-version path
+# (opus review on c626727: the original literal named "18" and would break
+# on a different BuildTools install/machine). App/test/build_host_tests.ps1
+# still hardcodes that same "18" path today -- this is a deliberate
+# improvement over that script, not a copy of its (also-hardcoded) approach.
+$vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+$vcvars = $null
+if (Test-Path $vswhere) {
+    $installPath = & $vswhere -latest -products * `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -property installationPath 2>$null
+    if ($installPath) {
+        $candidate = Join-Path $installPath "VC\Auxiliary\Build\vcvarsall.bat"
+        if (Test-Path $candidate) { $vcvars = $candidate }
+    }
 }
+if (-not $vcvars) {
+    # Fallback: the path this repo's other MSVC-invoking script
+    # (build_host_tests.ps1) hardcodes today, in case vswhere is absent or
+    # found no VC-Tools-bearing install.
+    $fallback = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+    if (Test-Path $fallback) { $vcvars = $fallback }
+}
+if (-not $vcvars) {
+    throw "vcvarsall.bat not found via vswhere or the known fallback path -- install MSVC Build Tools with the C++ workload, or update this script's fallback path."
+}
+Write-Host "Using vcvarsall.bat: $vcvars"
 
 $headers = @("hal_status.h", "hal_spi.h", "hal_i2c.h", "hal_uart.h", "hal_gpio.h", "hal_adc.h")
 $failures = @()

@@ -25,6 +25,14 @@
 
 #include "hal_status.h"
 
+/* See hal_uart.h for why this exists: `_Alignas` is C11-only, `alignas` is
+ * the C++ spelling. Kept in sync across hal_uart.h/hal_i2c.h/hal_spi.h. */
+#ifdef __cplusplus
+#define HAL_ALIGNAS8 alignas(8)
+#else
+#define HAL_ALIGNAS8 _Alignas(8)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,11 +44,11 @@ extern "C" {
 #define HAL_I2C_DEVICE_STORAGE_BYTES 16
 
 typedef struct {
-    _Alignas(8) uint8_t storage[HAL_I2C_BUS_STORAGE_BYTES];
+    HAL_ALIGNAS8 uint8_t storage[HAL_I2C_BUS_STORAGE_BYTES];
 } hal_i2c_bus_t;
 
 typedef struct {
-    _Alignas(8) uint8_t storage[HAL_I2C_DEVICE_STORAGE_BYTES];
+    HAL_ALIGNAS8 uint8_t storage[HAL_I2C_DEVICE_STORAGE_BYTES];
 } hal_i2c_device_t;
 
 /* Same ALREADY_INIT decision as hal_spi_bus_init (see hal_spi.h): a bus
@@ -58,6 +66,15 @@ hal_status_t hal_i2c_transfer(hal_i2c_device_t *dev,
                                const uint8_t *tx, size_t tx_len,
                                uint8_t *rx, size_t rx_len,
                                uint32_t timeout_ms);
+
+/* Probes for a device at addr with no transaction beyond the ACK itself.
+ * Returns HAL_NOT_FOUND on no ACK -- this is the documented reason
+ * HAL_NOT_FOUND exists in hal_status.h's table. ESP: i2c_master_probe.
+ * SX1509.c:532/585 and i2c_scan.c:30 are today's callers of the pre-HAL
+ * equivalent; both probe-before-attach to avoid turning an absent part into
+ * a bus-reset-and-retry per transfer (see SX1509.c's probe comment). */
+hal_status_t hal_i2c_probe(hal_i2c_bus_t *bus, uint8_t addr,
+                            uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }
