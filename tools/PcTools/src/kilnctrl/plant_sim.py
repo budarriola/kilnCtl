@@ -1280,7 +1280,16 @@ def _pwm_render(state: _PwmZoneState, duty: float, window_ms: float, min_on_ms: 
     if not state.window_started or state.window_elapsed_ms >= window_ms:
         state.window_started = True
         state.window_elapsed_ms = 0.0
-        on_ms = duty * window_ms
+        # heater_output.c computes this as
+        # ``(uint32_t)(duty * (float)cfg->window_ms)`` -- a truncating cast
+        # to whole milliseconds, not the float product itself. Skipping the
+        # truncation here is exactly the divergence
+        # heater_output_pwm_drift_check.py was written to catch: a duty
+        # that lands a hair below an integer-ms quantization threshold
+        # (e.g. 10000/60000 = 0.16666...) truncates DOWN to that threshold
+        # in C but stays fractionally above it in raw Python float math,
+        # flipping the on/off decision at that window boundary.
+        on_ms = float(int(duty * window_ms))
         if on_ms < eff_min_on_ms:
             on_ms = 0.0
         elif window_ms - on_ms < min_off_ms:
