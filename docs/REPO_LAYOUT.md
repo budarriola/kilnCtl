@@ -123,13 +123,17 @@ kilnCtl/
 |  |- mykicadMcp/                 <- submodule, moved 2026-08-28
 |  \- pdfMcp/                     <- moved 2026-08-28; a copy, see the note above
 |- docs/                          <- system-level, spans both halves
-|  |- SYSTEM_ARCHITECTURE.md      <- TODO
-|  |- SAFETY_CASE.md              <- TODO
+|  |- SYSTEM_ARCHITECTURE.md      <- written (spot-checked current, sixth-pass stale-claim audit)
+|  |- SAFETY_CASE.md              <- written (spot-checked current, sixth-pass stale-claim audit)
 |  \- REPO_LAYOUT.md              <- this file
 |- CLAUDE.md
 |- ROADMAP.md
-\- README.md                      <- TODO: there is still no root README
+\- README.md                      <- written
 ```
+
+All three items marked TODO in the original version of this diagram have
+since shipped — this section is a proposal snapshot from the 2026-08-16 move
+and was never updated once the docs it called out actually landed.
 
 ### The `docs/` directory is the part that earns its keep
 

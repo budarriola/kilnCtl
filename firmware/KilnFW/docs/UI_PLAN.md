@@ -474,30 +474,31 @@ indistinguishable during bring-up.
 
 ## Section 5 — owner requests, 2026-08-30
 
-### 5.1 Zone names on the dashboard instead of "Channel N" — IN PROGRESS
+### 5.1 Zone names on the dashboard instead of "Channel N" — SHIPPED (STILL TRUE 2026-09-04)
 
-`renderChannels()` in `main_page.html` labels each live row `Channel 0`…
-`Channel 4`. The operator has already named their zones on the Thermocouples
-& Zones page; the dashboard should use those names.
+Built. `renderChannels()` in `main_page.html` labels each live row via
+`zoneIndexForChannel(ch.channel)` (`main_page.html:580-586`, iterates zones
+lowest-index-first and returns on the first `thermo_mask` bit match — the
+overlapping-mask tie-break resolves to the lowest zone index, as specified)
+and `zoneName(zi)` (`:1050-1052`). All four required states hold: an
+unclaimed channel (`zi === null`) falls back to `'Channel ' + ch.channel`;
+`zoneName()`'s own `||` fallback renders `Zone N` for an empty name string;
+`zonesCache` not yet loaded is covered (`zoneIndexForChannel` reads an empty
+`zones` array and returns `null`, same as the unclaimed-channel path); and
+the channel number stays visible either way — as a `title` tooltip when a
+zone name is shown, inline in the `Channel N` fallback otherwise.
 
-The join is `zone.thermo_mask` — bit *i* set means channel *i* feeds that
-zone — and the page already does exactly this kind of mask lookup in
-`relayStatusHtml()`. `zoneName(zi)` already exists (`main_page.html:951`),
-is already 0-based, and already HTML-escapes, so reuse it rather than adding
-a second name lookup.
+### 5.2 Everything is 0-based, everywhere — FIXED (verified 2026-09-04)
 
-Four states must each render sensibly, none of them as blank or `undefined`:
-an unclaimed channel (falls back to `Channel N` — a wired-but-unassigned
-thermocouple is a real state), an empty zone name (falls back to `Zone N`),
-two zones claiming one channel via overlapping masks (pick the lowest zone
-index, deterministically), and `zonesCache` not yet loaded (`loadZones()` is
-async and `renderChannels()` can run first).
-
-Keep the channel number visible somewhere on the row — an operator
-diagnosing wiring still needs to know which physical channel a reading came
-from.
-
-### 5.2 Everything is 0-based, everywhere — AUDIT IN PROGRESS
+Every display violation the 2026-08-30 audit named below has been corrected
+at source: `zones_page.html:778` now reads `'Channel ' + tch` (no `+ 1`),
+`:792` reads `'CT ' + cti`, `:1496`/`:1832` read `'Zone ' + i`, and
+`ui_page_temperature.c`'s relay-tile `snprintf` calls (lines 252/261/275/478)
+all print `(unsigned)r` with no offset. The mixed-convention cases called
+out below (relay tiles vs. toasts, `zones_page.html`'s CT warning vs. its
+zone cards) are resolved the same way — 0-based throughout. Kept below for
+the record of what was found and the two 1-based-on-purpose exceptions,
+which still apply unchanged.
 
 Zones, relays, thermocouple channels and CT channels are all indexed from 0
 in the firmware, and every operator-facing label must say so too. No
@@ -535,7 +536,9 @@ Audit complete 2026-08-30. Findings:
   key their handlers on the real 1-based wire number while display-shifting
   only the printed label. Any further 0-basing must stay display-only; moving
   the wire numbering breaks the SX1509 `SET_RELAY` opcode.
-- `zones_http.c:1522` writes `"Zone %c", '0' + p + 1` as the **persisted NVS**
+- `zones_config_migrate.c:251` (this was in `zones_http.c` around line 1522
+  before the v8→v9 migration code was split out) writes
+  `"Zone %c", '0' + p + 1` as the **persisted NVS**
   default timing-profile name during the v8→v9 migration. Existing boards
   already carry those names. Renaming is a data migration, not a display fix.
 
