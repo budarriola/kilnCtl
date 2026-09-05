@@ -69,8 +69,10 @@ an RP2040 safety processor (`firmware/SaftyFW`).
   previously read all-zero before the parts existed.
 - **Display: attached and working** — the on-device LVGL UI runs against real
   hardware.
-- **Relay/SX1509 expander: not confirmed attached** as of the last session
-  that checked.
+- **Relay/SX1509 expander: confirmed attached (2026-09-04, doc audit).**
+  `io_read()` over the live PC-link returns a plausible register state
+  (`data 0x78D0 dir 0x3FD0`, DRDY0/1/2 all high) — the part is present and
+  answering, not merely wired per schematic.
 - **RP2040 safety processor: link proven end to end (2026-08-23).**
   `SaftyFW` now runs and the isolated link has carried real traffic for the
   first time — `safety_get_status()` returns live telemetry (link up, safety
@@ -83,23 +85,30 @@ an RP2040 safety processor (`firmware/SaftyFW`).
   digital isolator on 2026-08-25 and the baud sweep is now complete — see
   `CONFIG_KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
   committed value, not the 9600 figure above.
-  The safety thermocouple IC itself is not fitted on this bench unit yet, so
-  guard S5 (`SAFETY_TRIP_SENSOR_INVALID`) is expected to trip roughly a
-  minute after boot once nothing else trips first — that is "sensor still
-  absent" being reported correctly, not a regression. Before
+  **Update (2026-09-04, doc audit): the safety thermocouple IC is now fitted.**
+  `safety_get_status()` over the live link reads "safety thermocouple valid |
+  29.75 C (CJ 29.84 C)" — plausible room temperature, no fault — so the S5
+  paragraph below (guard tripping roughly a minute after boot on an absent
+  sensor) is stale and no longer describes this bench unit; it is kept for
+  history since S5's absent-sensor behavior itself is unchanged and still
+  correct when a sensor genuinely isn't present. Before
   `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT` defaulted off (see `SAFETY_MODEL.md`
   §3), S6a fired within five seconds and latched, which stopped guard
   evaluation before S5 ever got a chance to run; with S6a gone by default, S5
   becoming the reported trip on this board is the expected outcome.
-- **PC↔ESP UART link (command/telemetry): found dead 2026-08-19.** A
-  different fault from the Pi↔ESP safety link (`ROADMAP.md` M0/M1) — this is
-  the USB-serial link `pc_tools`/MCP use. With the board present, powered, and
+- **PC↔ESP UART link (command/telemetry): found dead 2026-08-19, working
+  again as of 2026-09-04 (doc audit).** A different fault from the Pi↔ESP
+  safety link (`ROADMAP.md` M0/M1) — this is the USB-serial link
+  `pc_tools`/MCP use. At the time, with the board present, powered, and
   answering normally over JTAG/OpenOCD, every UART command timed out even
-  after reconnect and a JTAG reset. **Read every "flashed"/"verified" claim
-  anywhere in this repo's history as build-verified plus, at most, a
-  JTAG-observed liveness check, not a UART-confirmed round-trip, until this is
-  fixed** — this is the single fact most likely to make an older status claim
-  read as more verified than it actually was.
+  after reconnect and a JTAG reset. Confirmed live now via `link_status()`
+  (`connected: True`, port COM14, 921600 baud) plus a round trip
+  (`io_read()`, `safety_get_status()`) — this specific link is UART-confirmed
+  again, not just build/JTAG-verified. No commit in this repo's history was
+  found that root-caused the original dead-link report, so treat any
+  "verified" claim dated between 2026-08-19 and whenever this was actually
+  fixed with the same caution the paragraph above used to recommend for
+  everything after it.
 
 ## What has run on real silicon vs. what has not
 
