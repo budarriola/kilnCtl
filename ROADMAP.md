@@ -80,6 +80,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
+| XL | **Source layering + hardware abstraction** — planned in full, plan-only by owner decision 2026-09-05. Startable once the dirty KilnFW working-tree files (`profiles_builtin*`, `main.c`, `sdkconfig.defaults`, `test/stubs/nvs.h`) land: first step is six small include-untangling commits, no directory move yet | M16; `docs/HW_ABSTRACTION_PLAN.md` |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
 
 ### Blocked on hardware that does not exist yet
@@ -113,6 +114,7 @@ open is short:
 | [`firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md`](firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md) | Internal SRAM reclamation — allocator threshold, stack sizing, PSRAM relocation |
 | [`firmware/KilnFW/docs/WEB_UI_RESPONSIVE.md`](firmware/KilnFW/docs/WEB_UI_RESPONSIVE.md) | Browser UI across display sizes: token consolidation, shell layout, the responsive sweep |
 | [`firmware/KilnFW/docs/ARCHITECTURE.md`](firmware/KilnFW/docs/ARCHITECTURE.md) | Tasks, priorities, owner-task queues, single-writer ownership doctrine |
+| [`docs/HW_ABSTRACTION_PLAN.md`](docs/HW_ABSTRACTION_PLAN.md) | KilnFW `drivers/` layering into role directories, and the `firmware/hwAbstraction/` tree (interface/esp/pico/host) for both firmwares — M16 |
 | [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–10 |
 | [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
 | [`firmware/SaftyFW/docs/ARCHITECTURE.md`](firmware/SaftyFW/docs/ARCHITECTURE.md) | Tasks, priorities, core affinity, logging transports |
@@ -1357,6 +1359,43 @@ practice (fails closed and visibly, not a defect). Full per-item detail,
 file maps and the "patterns worth copying" list:
 [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m15-architecture-hardening-findings-full-detail).
 
+---
+
+## M16 — Source layering and hardware abstraction · *opened 2026-09-05, plan only*
+
+Two related reorganisations of the firmware trees, planned in full in
+[`docs/HW_ABSTRACTION_PLAN.md`](docs/HW_ABSTRACTION_PLAN.md) and not yet
+started. Owner decisions taken 2026-09-05: target layout approved, order of
+work fixed, no code changes until the dirty KilnFW files in the working tree
+land.
+
+1. **KilnFW `drivers/` layering** (KilnFW only). `App/drivers/` holds 332
+   files, most of them not drivers. Target:
+   `App/{hw,owners,control,safety,persist,net,http,ui,bridge,sim}/` with
+   include direction strictly downward. Six upward-include patterns must be
+   untangled first (the largest: 18 control/safety files include
+   `zones_http.h` for config accessors), each as its own build-green commit;
+   then one move commit that also rewrites the 185 literal `SRCS` in
+   CMakeLists and re-greps every `check_*.ps1` for old paths. Plan section
+   "drivers/ layering".
+2. **`firmware/hwAbstraction/{interface,esp,pico,host}`** — link-time
+   backends for spi/i2c/uart/gpio/adc/kv/flash/scratch/time/wdt/pwm/sysinfo
+   over ESP-IDF and pico-sdk, with host fakes replacing the stub-header
+   include trick interface by interface. Phase 0 (headers, sizes, MSVC
+   compile) through Phase 4 (include-direction check goes strict). Phase 1a
+   moves `espInterfaces/` only after item 1 so paths move once.
+
+Sequence: untangle includes, reorg, then HAL Phase 1a. Open owner decisions
+before Phase 1: tree location/naming, the opaque-storage pattern (option a),
+the hal_uart two-primitive shape. `firmware/UnitTestFw` stays untouched
+throughout (decision 2026-09-05).
+
+Gates: `build_kilnfw` + all 23 host executables green after every commit;
+every check script proven able to go red after the move (nine of twelve
+prior splits broke one silently); safety-link reply timing re-measured on
+hardware after Phase 1b. Land-alone diffs — coordinate with any other
+session on the tree, and rebase the `s14-cal-gate` worktree before any
+SaftyFW move touching `safety_core.c`.
 
 ---
 
