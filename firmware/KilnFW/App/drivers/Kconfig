@@ -446,7 +446,7 @@ menu "KilnCtrl Hardware Configuration"
     menu "Backlight PWM (flying-wire bodge, DISPLAY_ST7796_PLAN.md 3.4.1)"
         config KILNCTL_BACKLIGHT_PWM_ENABLE
             bool "Drive the panel backlight via LEDC PWM"
-            default n
+            default y
             help
                 DISPLAY_ST7796_PLAN.md 3.4.1: neither panel this board has
                 ever run (ILI9488 or the anticipated ST7796/MSP4031 module)

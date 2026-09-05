@@ -61,6 +61,7 @@ uint8_t backlight_duty_percent_for_state(bool screen_on, uint8_t on_percent, uin
 #if CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE
 
 #include "screen_idle.h"
+#include "display_power_cfg.h"
 
 static uint32_t duty_for_percent(uint8_t pct)
 {
@@ -91,20 +92,35 @@ static void backlight_pwm_task(void *arg)
             continue; /* lock timeout on screen_idle's side -- retry next poll */
         }
 
-        if (bl->have_last_screen_on && bl->last_screen_on == screen_on) {
-            continue; /* no change: skip the LEDC call */
+        /* The ON duty is the operator's stored brightness, not a compile-time
+         * constant -- that setting has persisted and round-tripped since the
+         * display-power feature landed but drove nothing until the flying
+         * wire to CONFIG_KILNCTL_BACKLIGHT_GPIO was fitted (owner confirmed
+         * 2026-09-04). IDLE stays a Kconfig constant: it is the blanked
+         * state, not something the brightness slider addresses. */
+        uint8_t pct = backlight_duty_percent_for_state(
+            screen_on, display_power_cfg_brightness_percent(),
+            CONFIG_KILNCTL_BACKLIGHT_IDLE_PERCENT);
+
+        /* Gate on the DUTY, not on screen_on alone. Gating on screen_on made
+         * a brightness change invisible until the next blank/wake edge --
+         * i.e. the slider would appear dead for exactly as long as nobody
+         * touched the screen. */
+        if (bl->have_last_pct && bl->last_pct == pct &&
+            bl->have_last_screen_on && bl->last_screen_on == screen_on) {
+            continue; /* nothing to write: skip the LEDC call */
         }
 
-        uint8_t pct = backlight_duty_percent_for_state(
-            screen_on, CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT, CONFIG_KILNCTL_BACKLIGHT_IDLE_PERCENT);
         esp_err_t err = apply_duty(pct);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "apply_duty(%u%%) failed: %s", (unsigned)pct, esp_err_to_name(err));
-            continue; /* leave last_screen_on unset so the next tick retries */
+            continue; /* leave last_* unset so the next tick retries */
         }
 
         bl->last_screen_on = screen_on;
         bl->have_last_screen_on = true;
+        bl->last_pct = pct;
+        bl->have_last_pct = true;
         ESP_LOGI(TAG, "screen_on=%d -> backlight %u%%", (int)screen_on, (unsigned)pct);
     }
 }

@@ -75,6 +75,11 @@ typedef struct {
     bool ready;
     bool last_screen_on;    /* last state actually written to the LEDC channel */
     bool have_last_screen_on;
+    uint8_t last_pct;       /* last duty actually written, so a brightness
+                             * change with no screen-state change still
+                             * reaches the panel (the operator moving the
+                             * slider is exactly that case) */
+    bool have_last_pct;
 } backlight_pwm_t;
 
 // `idle` (a `const screen_idle_t *`, typed `const void *` here -- see this
