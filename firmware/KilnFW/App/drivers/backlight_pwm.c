@@ -124,7 +124,7 @@ static void backlight_pwm_task(void *arg)
 
 esp_err_t backlight_pwm_init(backlight_pwm_t *bl, backlight_pwm_query_fn query_fn, void *query_ctx)
 {
-    if (!bl || !query_fn) return ESP_ERR_INVALID_ARG;
+    if (!bl || !query_fn || !query_ctx) return ESP_ERR_INVALID_ARG;
     memset(bl, 0, sizeof(*bl));
     bl->query_fn = query_fn;
     bl->query_ctx = query_ctx;

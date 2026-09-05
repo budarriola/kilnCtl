@@ -1,11 +1,25 @@
 #include "autotune_engine_internal.h"
 #include "heat_enable.h"
+#include "profile_feasibility.h"
 
 /* Shared low-level plumbing (relay apply/release, escalate/abort, threshold
  * scaling, trace unpack, "is a run in progress") plus the two persistence
  * entry points, autotune_engine_abort()/accept(). See autotune_engine_
  * internal.h's top comment for the full five-way split this file is one
  * piece of. */
+
+/* profile_feasibility.h's FEASIBILITY_TUNING_METHOD_STEP is a literal copy
+ * of AUTOTUNE_METHOD_STEP (autotune_engine.h) kept out of that module to
+ * avoid pulling in this whole state machine for one enumerator -- pinned
+ * here, in the one .c that already includes both, so the two cannot drift
+ * silently. Portable compile-time assert (not _Static_assert): this file is
+ * #included directly by test_autotune_engine_prestart.c's host-test
+ * executable, which (unlike most of this repo's host-test executables) is
+ * NOT built with /std:c11 -- see kiln_cfg_store.c's identical-pattern
+ * comment for the same reasoning. A negative array size is a hard error in
+ * every C standard this file has ever been built under. */
+typedef char autotune_method_step_matches_feasibility_check
+    [(AUTOTUNE_METHOD_STEP == FEASIBILITY_TUNING_METHOD_STEP) ? 1 : -1];
 
 float autotune_scale_threshold_c(float base_c, float probe_k_rough)
 {

@@ -448,7 +448,7 @@ and the `0x00`–`0x0F` compatibility floor are all built and host/build-verifie
       DONE — `safety_core.c` now derives a single `context_valid` fact from
       `DEGRADED_NO_CONTEXT`/stale/never-received/clock-stalled and
       `safety_guards.c` uses it to disable the context-dependent guards
-      (S6a/S6b, S11/S13, S14 all cite it, e.g. `safety_guards.c:931`).
+      (S6a/S6b, S11/S13, S14 all cite it, e.g. `safety_guards.c:804`).
       disable (same dependency as Phase 7's S2/S6/S10). Also, Phase 0.6's full
       redefinition (dead-link fault, not just version mismatch) is still
       unbuilt on the ESP side — this phase reused the pre-existing

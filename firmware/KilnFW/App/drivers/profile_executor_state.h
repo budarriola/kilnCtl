@@ -10,7 +10,8 @@
 // about the type/function definitions themselves changes -- their real
 // definitions still live in profile_executor.c/profile_executor_status.c,
 // this only relocates the declarations a pure state query needs.
-#pragma once
+#ifndef PROFILE_EXECUTOR_STATE_H
+#define PROFILE_EXECUTOR_STATE_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -405,3 +406,5 @@ void profile_executor_get_status(profile_exec_status_t *out);
 #ifdef __cplusplus
 }
 #endif
+
+#endif // PROFILE_EXECUTOR_STATE_H

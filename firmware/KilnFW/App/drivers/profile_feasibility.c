@@ -33,7 +33,12 @@
  * zone_tuning_quality_t fields read as, so a bound starting at 0 could not
  * tell a real (if unusually cold) reading apart from that sentinel -- see
  * get_persisted_ambient_c()'s own comment for the record this was written
- * against (7e632e8's review finding 1). */
+ * against (7e632e8's review finding 1). A genuinely sub-5C shop is
+ * implausible (this is a kiln autotune baseline, not an outdoor sensor), so
+ * such a record is treated as untrustworthy and falls back to
+ * FEASIBILITY_AMBIENT_C (20.0f) -- which raises the computed ceiling rather
+ * than lowering it. Accepted: a shop that cold is not a case this module
+ * needs to serve correctly. */
 #define FEASIBILITY_AMBIENT_MIN_C 5.0f
 #define FEASIBILITY_AMBIENT_MAX_C 60.0f
 
@@ -70,14 +75,14 @@
  * FEASIBILITY_AMBIENT_C. Pure config lookup -- no I/O, no lock, no
  * cached/stale state to reason about.
  *
- * The raw 0 below is autotune_method_t's AUTOTUNE_METHOD_STEP
- * (autotune_engine.h) -- used as a literal rather than pulling that header's
- * whole state-machine/FreeRTOS-handle surface into this module just for one
- * enumerator. zone_tuning_quality_t::method's own doc comment (zones_http.h)
- * documents this exact encoding ("autotune_method_t raw value: 0=STEP,
- * 1=RELAY") for the same reason. */
-#define FEASIBILITY_TUNING_METHOD_STEP 0u
-
+ * FEASIBILITY_TUNING_METHOD_STEP (used just below) is autotune_method_t's
+ * AUTOTUNE_METHOD_STEP (autotune_engine.h) as a literal, declared in
+ * profile_feasibility.h rather than pulling that header's whole
+ * state-machine/FreeRTOS-handle surface into this module just for one
+ * enumerator -- see the header for the compile-time assert that keeps the two
+ * pinned together. zone_tuning_quality_t::method's own doc comment
+ * (zones_http.h) documents this exact encoding ("autotune_method_t raw
+ * value: 0=STEP, 1=RELAY") for the same reason. */
 static float get_persisted_ambient_c(uint8_t zone_index)
 {
     zone_tuning_quality_t q;

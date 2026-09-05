@@ -109,7 +109,7 @@ esp_err_t board_temps_get(board_temps_t *out, const MAX31856Reading *readings, s
  *
  * Unlike board_temps_get() above (which only accepts readings the caller
  * already has), this does the live MAX31856_read_all() call itself, against
- * whichever bus pointer the most recent board_temps_http_start() call was
+ * whichever bus pointer the most recent board_temps_bind_thermo_bus() call was
  * given -- the same "read the bus this module already borrowed a pointer to"
  * shape api_board_temps_get_handler() used before this was extracted from it.
  * Safe to call even if board_temps_http_start() was never reached (reads as

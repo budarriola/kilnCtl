@@ -31,6 +31,17 @@
 extern "C" {
 #endif
 
+/* autotune_method_t's AUTOTUNE_METHOD_STEP (autotune_engine.h) as a literal,
+ * so profile_feasibility.c does not have to pull in that header's whole
+ * state-machine/FreeRTOS-handle surface for one enumerator. Pinned to the
+ * real enumerator by a portable compile-time assert in
+ * autotune_engine_guard.c (the one .c that already includes both
+ * autotune_engine.h, transitively via autotune_engine_internal.h, and this
+ * header) -- if the two ever drift the build fails instead of
+ * get_persisted_ambient_c() silently misreading RELAY-method records as
+ * STEP or vice versa. */
+#define FEASIBILITY_TUNING_METHOD_STEP 0u
+
 typedef enum {
     PROFILE_SEG_OK = 0,      /* the model says this segment is achievable */
     PROFILE_SEG_UNKNOWN,     /* no model for this zone -- cannot answer, do not guess */
