@@ -52,7 +52,7 @@ default (K) rather than shipping disabled, but is *also* required for
 | `firing_margin_c` | 100 | °C | S1 | 🟠 | Added to the profile's peak. **`CHAMBER_AGREED` only** |
 | `overshoot_margin_c` | 75 | °C | S2 | 🟠 | Generous on purpose — ramp-end overshoot and TC placement spread both live inside this |
 | `overshoot_time_s` | 120 | s | S2 | 🟠 | Two minutes of sustained excess, not a transient |
-| `max_rate_c_per_min` | **0 = off** | °C/min | S8 | 🟠 | **Ships disabled.** Enable only after logging a real full-power ramp; set at ~2× the measured maximum |
+| `max_rate_c_per_min` | **333.3** (2026-09-05, was 0/off) | °C/min | S8 | 🟠 | Compiled record default is **2× the fastest `ramp_c_per_hr` in any of KilnFW's 28 built-in profiles** (`profiles_builtin_table.inc`): max is 9999.0 C/hr (four tied crystalline-glaze crash-cool segments, e.g. `FSCGCL` "Shimbo Crystal Celestite Schedule"), so 9999.0 / 60 × 2 = 333.3 C/min — permissive by construction, no shipped profile can trip it. **Still fields_set-gated** (`safety_core.c`'s `safety_core_load_guard_cfg()`): on an uncommissioned board the guard stays forced OFF (0.0f) exactly as before — this default only becomes the *armed* value once `0x0204` is explicitly written through commissioning, or is otherwise just the record's at-rest value. A bench rig should still commission its own tighter, measured value rather than rely on this one — see `COMMISSIONING.md` |
 | `rate_window_s` | 60 | s | S8 | 🟠 | |
 | `blind_grace_s` | 60 | s | S5 | 🔴🟠 | WARN immediately, TRIP after this. Long enough for a connector wiggle, short enough that a whole firing cannot run blind |
 | `frozen_window_s` | 600 | s | S11 | 🟠 | Matches `thermal_guard.c`'s `FROZEN_WINDOW_S`. Only armed while heat is happening |
@@ -179,9 +179,13 @@ someone forgets to update.
 ## 7. Rules for the config system
 
 **No default may be a guess dressed as a value.** Where there is no defensible
-default the field ships unset and its guard ships disabled — `max_rate_c_per_min`
-and `mains_voltage_v` are the examples, and `thermal_guard.h:67-75` is the
-precedent in this project.
+default the field ships unset and its guard ships disabled — `mains_voltage_v`
+is the example, and `thermal_guard.h:67-75` is the precedent in this project.
+`max_rate_c_per_min` (section 2) is a partial exception since 2026-09-05: its
+*compiled record value* is a defensible, derived default (2× the fastest
+shipped built-in profile ramp) rather than a guess, but the guard it feeds
+still ships fields_set-gated OFF like the rest of this section — see section
+2's row for the exact mechanism.
 
 **A guard that is off must say so.** The diagnostic frame carries which guards
 are active; the GUI shows it. A disabled guard that looks enabled is worse than

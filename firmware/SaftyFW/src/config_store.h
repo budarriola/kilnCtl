@@ -169,6 +169,20 @@ extern "C" {
                                             // DOES know about max31856.h)
                                             // asserts the two agree.
 
+// S8 sanity-rate guard code default -- 2x the fastest ramp_c_per_hr found
+// across all 28 KilnFW built-in profiles (firmware/KilnFW/App/drivers/
+// profiles_builtin_table.inc), converted to C/min: max is 9999.0 C/hr (four
+// crystalline-glaze crash-cool segments tie for it, e.g. "FSCGCL" -- Shimbo
+// Crystal Celestite Schedule), so 9999.0 / 60 * 2 = 333.3 C/min. Unlike
+// CONFIG_STORE_DEFAULT_TC_TYPE this is NOT a "safe, documented default" in
+// the same sense -- it is deliberately permissive (every shipped profile
+// ramp, at 2x, cannot trip it), decided 2026-09-05 to replace the previous
+// "ships disabled" (0.0f) default. Still overridable through the normal
+// commissioning path (0x0204 / CONFIG_STORE_SET_MAX_RATE_C_PER_MIN); a bench
+// rig with a real measured max heating rate should commission its own
+// tighter value rather than rely on this one.
+#define CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN 333.3f
+
 // Highest tc_type/borrowed_type_expected byte that is a real, linearized
 // MAX31856 thermocouple type (MAX31856_TC_TYPE_T) -- duplicated as a literal
 // for the same dependency-free reason CONFIG_STORE_DEFAULT_TC_TYPE's comment

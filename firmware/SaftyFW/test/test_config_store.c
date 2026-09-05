@@ -202,6 +202,25 @@ static void test_default(void)
                "default format_version is current");
     TEST_CHECK(rec.seq == 0, "default seq is 0");
     TEST_CHECK(rec.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE, "default tc_type is K");
+    // S8 sanity-rate guard (2026-09-05): the compiled record default must be
+    // exactly 2x the fastest ramp_c_per_hr among KilnFW's built-in profiles
+    // (9999.0 C/hr, four tied crystalline-glaze crash-cool segments),
+    // converted to C/min -- 9999.0 / 60 * 2 = 333.3. This does NOT arm S8 by
+    // itself (safety_core_load_guard_cfg() still forces 0.0f unless
+    // CONFIG_STORE_SET_MAX_RATE_C_PER_MIN is set -- see
+    // test_safety_core_s8_wiring.c), it only checks the at-rest record value
+    // documented in CONFIG_REFERENCE.md section 2.
+    {
+        const float max_shipped_ramp_c_per_hr = 9999.0f;
+        const float expected_default = max_shipped_ramp_c_per_hr / 60.0f * 2.0f;
+        TEST_CHECK(rec.max_rate_c_per_min == expected_default,
+                   "default max_rate_c_per_min is 2x the max shipped built-in profile ramp "
+                   "(333.3 C/min)");
+        // Negative test: prove this check can actually fail. A deliberately
+        // wrong "old" constant (the previous 0.0f/off default) must NOT match.
+        TEST_CHECK(rec.max_rate_c_per_min != 0.0f,
+                   "default max_rate_c_per_min is no longer the old 0.0f/off value");
+    }
     TEST_CHECK(rec.calibration_missing == true, "default calibration_missing is true");
     TEST_CHECK(rec.safety_tc_installed == 1u,
                "default safety_tc_installed is 1 -- \"I expect a sensor and will trip if "

@@ -754,7 +754,13 @@ void config_store_default(config_store_record_t *out)
     out->firing_margin_c = 100.0f;
     out->overshoot_margin_c = 75.0f;
     out->overshoot_time_s = 120u;
-    out->max_rate_c_per_min = 0.0f; // "0 = off"; genuinely UNSET (fields_set clear)
+    out->max_rate_c_per_min = CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN; // 2x max
+                                      // shipped built-in profile ramp; see the
+                                      // macro's doc comment in config_store.h.
+                                      // Still genuinely UNSET (fields_set
+                                      // clear) -- a real commissioning pass
+                                      // can override it, e.g. to a tighter
+                                      // bench-measured value.
     out->rate_window_s = 60u;
     out->blind_grace_s = 60u;
     out->frozen_window_s = 600u;
