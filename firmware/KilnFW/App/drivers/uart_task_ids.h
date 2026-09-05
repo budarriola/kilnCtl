@@ -1565,8 +1565,8 @@
  *   0x03 ABORT      (no args) -- QUERY-style reply, always ok
  *   0x04 ACCEPT     (no args) -- QUERY-style reply, see below. No
  *                    adopt_ceiling option on this wire path -- it calls
- *                    autotune_engine_accept() (adopt_ceiling always false),
- *                    never autotune_engine_accept_ex()/_ex2(). Adopting the
+ *                    autotune_engine_accept() with opts->adopt_ceiling
+ *                    always false. Adopting the
  *                    predicted ramp ceiling into max_ramp_c_per_hr is web-UI
  *                    only, via POST /api/autotune/accept's adopt_ceiling
  *                    form field (dashboard_autotune_http.c).

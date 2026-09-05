@@ -346,8 +346,8 @@ void autotune_finalize_fit(void)
      * estimator to K*u_max/tau*3600, dropping the (T_now - T_ambient) term):
      * the rate the plant can sustain from a cold start, not the smallest
      * rate left at the hottest point this run reached. This is the value
-     * autotune_engine_accept_ex() adopts into the zone's ramp ceiling --
-     * see autotune_engine.h's field comment. */
+     * autotune_engine_accept() (with opts->adopt_ceiling true) adopts into
+     * the zone's ramp ceiling -- see autotune_engine.h's field comment. */
 
     /* TODO.md 6A.5(b): fill row zone_index of the coupling matrix -- the
      * direct cell (i==i) is this same model, every other configured zone

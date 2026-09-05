@@ -675,7 +675,7 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return s_stub_set_pid_result;
 }
 
-/* TODO.md 6A.4 -- autotune_engine_accept_ex()'s opt-in ceiling-adopt write.
+/* TODO.md 6A.4 -- autotune_engine_accept()'s opt-in ceiling-adopt write.
  * Call-count/last-args capture, same convention as
  * s_stub_set_coupling_diag_k_dc_* above, so a test can prove both the
  * positive (called with exactly the run's predicted_max_ramp_c_per_hr, only
@@ -697,7 +697,7 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
 }
 
 /* Companion getter for the "never silently tighten" check in autotune_
- * engine_accept_ex2()'s ceiling-adoption path: the stored ceiling it reads
+ * engine_accept()'s ceiling-adoption path: the stored ceiling it reads
  * back before deciding ADOPTED vs SKIPPED_WOULD_TIGHTEN. Default 0.0f/true
  * ("no ceiling configured yet") so every pre-existing adopt-ceiling test
  * above, written before this getter existed, keeps adopting exactly as
@@ -3503,13 +3503,13 @@ static void test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method
     s_stub_set_model_result = false;
 }
 
-/* TODO.md 6A.4 positive proof: autotune_engine_accept_ex(ack, true) on a
+/* TODO.md 6A.4 positive proof: autotune_engine_accept(opts={ack_unsettled=ack, adopt_ceiling=true}) on a
  * successful STEP accept with a real predicted ceiling must adopt it into
  * max_ramp_c_per_hr via zones_config_set_max_ramp(), with exactly this
  * run's zone and predicted value. */
-static void test_autotune_engine_accept_ex_adopts_ceiling_when_requested(void)
+static void test_autotune_engine_accept_adopts_ceiling_when_requested(void)
 {
-    TEST_SECTION("autotune_engine_accept_ex(.., adopt_ceiling=true) writes zones_config_set_max_ramp() "
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) writes zones_config_set_max_ramp() "
                  "with this run's predicted ceiling, on a successful STEP accept");
     static MAX31856BusClass bus;
     static SafetyLinkClass safety;
@@ -3570,9 +3570,9 @@ static void test_autotune_engine_accept_ex_adopts_ceiling_when_requested(void)
  * zone ceiling. A stored ceiling already at or below the new ambient
  * estimate is left untouched and the outcome reports SKIPPED_WOULD_TIGHTEN,
  * not ADOPTED. */
-static void test_autotune_engine_accept_ex2_skips_when_it_would_tighten(void)
+static void test_autotune_engine_accept_skips_when_it_would_tighten(void)
 {
-    TEST_SECTION("autotune_engine_accept_ex2(.., adopt_ceiling=true) skips adoption -- "
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) skips adoption -- "
                  "SKIPPED_WOULD_TIGHTEN -- when the stored ceiling is already tighter than the new estimate");
     static MAX31856BusClass bus;
     static SafetyLinkClass safety;
@@ -3717,9 +3717,17 @@ static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
               "zones_config_set_max_ramp() is still attempted exactly once");
     TEST_CHECK(result.adoption == AUTOTUNE_CEILING_FAILED_TO_PERSIST, "reported outcome is FAILED_TO_PERSIST, "
               "not ADOPTED, even though the estimate itself was adoptable");
-    TEST_CHECK_NEAR(result.new_ceiling_c_per_hr, 0.0f, 1e-4,
-                    "reported new ceiling stays at the function's own reset value -- the write never "
-                    "actually landed");
+    /* Review fix: zones_config_set_max_ramp() writes RAM and bumps
+     * s_config_generation BEFORE it calls nvs_save() -- so on an NVS
+     * failure the new ceiling IS live in RAM for this boot. new_ceiling
+     * must report that live value (not stay at the function's reset 0.0f),
+     * so a caller can tell the operator what is actually running right now
+     * versus what will come back after a reboot (old_ceiling_c_per_hr). */
+    TEST_CHECK_NEAR(result.new_ceiling_c_per_hr, 123.5f, 1e-4,
+                    "reported new ceiling is the value now live in RAM for this boot, even though it "
+                    "was not persisted");
+    TEST_CHECK_NEAR(result.old_ceiling_c_per_hr, 0.0f, 1e-4,
+                    "reported old ceiling is what a reboot will revert to");
 
     s_stub_set_pid_result = false;
     s_stub_set_model_result = false;
@@ -3730,9 +3738,9 @@ static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
 
 /* Review fix: an out-of-range predicted ceiling is REJECTED, never clamped.
  * ZONE_MAX_RAMP_C_PER_HR_MAX is 1000.0f (zones_http.h). */
-static void test_autotune_engine_accept_ex2_rejects_out_of_range_not_clamped(void)
+static void test_autotune_engine_accept_rejects_out_of_range_not_clamped(void)
 {
-    TEST_SECTION("autotune_engine_accept_ex2(.., adopt_ceiling=true) rejects (does not clamp) a "
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) rejects (does not clamp) a "
                  "predicted ceiling above ZONE_MAX_RAMP_C_PER_HR_MAX");
     static MAX31856BusClass bus;
     static SafetyLinkClass safety;
@@ -3824,9 +3832,9 @@ static void test_autotune_engine_accept_does_not_adopt_ceiling_by_default(void)
  * from) must not be adopted even when adopt_ceiling=true -- 0 is zone_
  * cfg_t::max_ramp_c_per_hr's own "never configured" encoding, so adopting
  * it would silently CLEAR an existing operator-set ceiling. */
-static void test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling(void)
+static void test_autotune_engine_accept_does_not_adopt_a_zero_ceiling(void)
 {
-    TEST_SECTION("autotune_engine_accept_ex(.., adopt_ceiling=true) does NOT write zones_config_set_max_ramp() "
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) does NOT write zones_config_set_max_ramp() "
                  "when predicted_max_ramp_c_per_hr is 0 (never computed)");
     static MAX31856BusClass bus;
     static SafetyLinkClass safety;
@@ -3868,9 +3876,9 @@ static void test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling(void)
 /* Negative proof 3: a RELAY-method accept measures no FOPDT model, so there
  * is no predicted ceiling to adopt either -- same reasoning as the
  * coupling-diag and tuning-quality RELAY skips above. */
-static void test_autotune_engine_accept_ex_does_not_adopt_ceiling_on_relay_method(void)
+static void test_autotune_engine_accept_does_not_adopt_ceiling_on_relay_method(void)
 {
-    TEST_SECTION("autotune_engine_accept_ex(.., adopt_ceiling=true) does NOT write zones_config_set_max_ramp() "
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) does NOT write zones_config_set_max_ramp() "
                  "on the RELAY path");
     static MAX31856BusClass bus;
     static SafetyLinkClass safety;
@@ -5775,14 +5783,14 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_writes_coupling_diag_k_dc_on_step_success();
     test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_persist_fails();
     test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method();
-    test_autotune_engine_accept_ex_adopts_ceiling_when_requested();
+    test_autotune_engine_accept_adopts_ceiling_when_requested();
     test_autotune_engine_accept_does_not_adopt_ceiling_by_default();
-    test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling();
-    test_autotune_engine_accept_ex_does_not_adopt_ceiling_on_relay_method();
-    test_autotune_engine_accept_ex2_skips_when_it_would_tighten();
+    test_autotune_engine_accept_does_not_adopt_a_zero_ceiling();
+    test_autotune_engine_accept_does_not_adopt_ceiling_on_relay_method();
+    test_autotune_engine_accept_skips_when_it_would_tighten();
     test_autotune_engine_accept_skips_ceiling_adoption_when_read_fails();
     test_autotune_engine_accept_reports_ceiling_persist_failure();
-    test_autotune_engine_accept_ex2_rejects_out_of_range_not_clamped();
+    test_autotune_engine_accept_rejects_out_of_range_not_clamped();
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();
     test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start();

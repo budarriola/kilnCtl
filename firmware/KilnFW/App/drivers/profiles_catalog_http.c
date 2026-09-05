@@ -390,8 +390,18 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
     for (size_t si = 0; si < PROFILE_MAX_SEGMENTS; si++) {
         per_seg[si] = PROFILE_SEG_UNKNOWN;
     }
-    profile_seg_verdict_t rollup =
-        profile_feasibility_profile_mask(p->zone_mask, p, per_seg, PROFILE_MAX_SEGMENTS);
+    /* Review fix: a user-slot profile with zone_mask == 0 targets no zones
+     * at all -- the executor refuses it outright ("targets no zones"), so
+     * calling profile_feasibility_profile_mask() with that mask would get
+     * an optimistic coupled verdict for a profile that can never actually
+     * run. Report unknown instead of asking feasibility a question that
+     * does not apply. */
+    profile_seg_verdict_t rollup;
+    if (p->zone_mask == 0) {
+        rollup = PROFILE_SEG_UNKNOWN;
+    } else {
+        rollup = profile_feasibility_profile_mask(p->zone_mask, p, per_seg, PROFILE_MAX_SEGMENTS);
+    }
 
     char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
     json_escape(p->name, name_escaped, sizeof(name_escaped));

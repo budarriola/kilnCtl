@@ -811,8 +811,8 @@ no thermocouple is attached in this environment.
       strongly temperature-dependent (radiative loss ~T^4). v1 ships a single
       band per zone, by design — `zone_cfg_t`/the NVS blob would need a band
       array to add this without a storage migration, and don't carry one yet.
-- [x] DONE: predicted ramp ceiling adoption. `autotune_engine_accept_ex(ack_unsettled, adopt_ceiling)`
-      (sibling of `autotune_engine_accept()`, autotune_engine.c/.h) writes `max_ramp_c_per_hr` via the
+- [x] DONE: predicted ramp ceiling adoption. `autotune_engine_accept(opts, out)`, with
+      `opts->adopt_ceiling` set (autotune_engine.c/.h), writes `max_ramp_c_per_hr` via the
       existing `zones_config_set_max_ramp()` when requested; `POST /api/autotune/accept`'s optional
       `adopt_ceiling=1` form field and a checkbox next to the Accept button on `/settings/zones` opt in,
       default false.

@@ -517,7 +517,7 @@ across a band twice this wide)</label>
      default so an operator who just wants the gains sees today's behavior.
      Sent as the accept POST body's adopt_ceiling=1. No separate disabled
      state of its own: harmless to check on a relay-test result or a result
-     with no predicted ceiling, since autotune_engine_accept_ex() ignores it
+     with no predicted ceiling, since autotune_engine_accept() ignores it
      in both cases (see that function's own comment). -->
 <label id="atAdoptCeilingLabel">
   <input type="checkbox" id="atAdoptCeiling"/>
@@ -2967,9 +2967,10 @@ document.getElementById('atAcceptBtn').addEventListener('click', function () {
                                 'was not adopted or clamped.',
         SKIPPED_READ_FAILED: 'Accepted. Ceiling NOT adopted -- the currently stored ceiling could not be ' +
                               'read, so a new one was not written over an unknown value.',
-        FAILED_TO_PERSIST: 'Accepted. Ceiling adoption FAILED -- the predicted rate was rejected or ' +
-                            'failed to save; the stored ceiling (' + data.ceiling_old_c_per_hr +
-                            ' °C/hr) is unchanged.',
+        FAILED_TO_PERSIST: 'Accepted. Ceiling adoption FAILED to save -- new ceiling (' +
+                            data.ceiling_new_c_per_hr + ' °C/hr) is live in RAM for this boot but was ' +
+                            'not persisted; will revert to ' + data.ceiling_old_c_per_hr +
+                            ' °C/hr on reboot.',
       };
       document.getElementById('atStatus').textContent = msgs[data.ceiling_adoption] || 'Accepted.';
     }).catch(function () {});

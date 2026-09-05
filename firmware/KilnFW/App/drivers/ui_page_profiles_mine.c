@@ -66,7 +66,14 @@ static void render_page(void)
             /* Feasibility colouring, matching the web dashboard: too_fast/
              * unreachable get a dark-red border, unknown gets no marking, ok
              * is ordinary. */
-            profile_seg_verdict_t v = profile_feasibility_profile_mask(prof.zone_mask, &prof, NULL, 0);
+            /* Review fix: a user-slot profile with zone_mask == 0 targets no
+             * zones -- the executor refuses it outright ("targets no
+             * zones") -- so feasibility() would get an optimistic coupled
+             * verdict for a profile that can never run. Report unknown
+             * instead. */
+            profile_seg_verdict_t v = (prof.zone_mask == 0)
+                ? PROFILE_SEG_UNKNOWN
+                : profile_feasibility_profile_mask(prof.zone_mask, &prof, NULL, 0);
             if (v == PROFILE_SEG_TOO_FAST || v == PROFILE_SEG_UNREACHABLE) {
                 lv_obj_set_style_border_width(cell, 3, 0);
                 lv_obj_set_style_border_color(cell, UI_THEME_ACCENT_5, 0);

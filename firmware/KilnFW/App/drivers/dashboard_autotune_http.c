@@ -308,7 +308,7 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
      * of this field, gets exactly today's behavior (gains/model only,
      * max_ramp_c_per_hr untouched) -- only an explicit "1"/"true" opts in
      * to also adopting the run's predicted ramp ceiling. See autotune_
-     * engine_accept_ex()'s own comment (autotune_engine.h) for what
+     * engine_accept()'s own comment (autotune_engine.h) for what
      * "adopt" does and does not overwrite. */
     bool ack_unsettled = false;
     bool adopt_ceiling = false;
@@ -379,13 +379,14 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
     /* Sized to the longest actual response rather than a round number (this
      * task stack has been within 64 B of overflow before -- see
      * check_stack_margin_baseline.ps1). Longest pieces: the format's fixed
-     * text is 81 bytes including the NUL-terminator's slot; the longest
-     * outcome name is "SKIPPED_MODEL_NOT_PERSISTED" (27 bytes); both
-     * ceiling values are validated to [0, ZONE_MAX_RAMP_C_PER_HR_MAX] =
-     * [0, 1000.0] before ever reaching here (zones_config_set_max_ramp()'s
-     * own range check, and the READ_FAILED/out-of-range paths above never
-     * populate a nonzero value), so "%.1f" of either is at most 6 bytes
-     * ("1000.0"). 81 + 27 + 6 + 6 = 120; rounded up to a clean 128. */
+     * text is 81 bytes EXCLUDING the NUL terminator; the longest outcome
+     * name is "SKIPPED_MODEL_NOT_PERSISTED" (27 bytes); both ceiling values
+     * are validated to [0, ZONE_MAX_RAMP_C_PER_HR_MAX] = [0, 1000.0] before
+     * ever reaching here (zones_config_set_max_ramp()'s own range check,
+     * and the READ_FAILED/out-of-range paths above never populate a
+     * nonzero value), so "%.1f" of either is at most 6 bytes ("1000.0").
+     * Worst case both ceilings print at 6 bytes: 81 + 27 + 6 + 6 + 1 (NUL)
+     * = 121; rounded up to a clean 128. */
     char json[128];
     int n = snprintf(json, sizeof(json),
                       "{\"ok\":true,\"ceiling_adoption\":\"%s\",\"ceiling_old_c_per_hr\":%.1f,"

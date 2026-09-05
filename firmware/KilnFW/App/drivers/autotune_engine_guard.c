@@ -511,11 +511,12 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                               "degC/hr -- rejected, not clamped, max_ramp_c_per_hr left unchanged",
                          zone, (double)predicted_max_ramp_ambient_c_per_hr, (double)ZONE_MAX_RAMP_C_PER_HR_MAX);
             } else if (old_ceiling_c_per_hr > 0.0f &&
-                predicted_max_ramp_ambient_c_per_hr < old_ceiling_c_per_hr) {
+                predicted_max_ramp_ambient_c_per_hr <= old_ceiling_c_per_hr) {
                 /* Never silently tighten: adopting a new estimate SMALLER
-                 * than the stored, nonzero ceiling would make the zone's
-                 * ramp ceiling more restrictive without being asked -- skip
-                 * instead of overwriting a looser (or equal) value. */
+                 * than (or equal to) the stored, nonzero ceiling would make
+                 * the zone's ramp ceiling more restrictive (or a no-op)
+                 * without being asked -- skip instead of overwriting a
+                 * looser (or equal) value. */
                 if (out != NULL) {
                     out->adoption = AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN;
                 }
@@ -537,11 +538,18 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                  * caller. Now reported distinctly. */
                 if (out != NULL) {
                     out->adoption = AUTOTUNE_CEILING_FAILED_TO_PERSIST;
+                    out->new_ceiling_c_per_hr = predicted_max_ramp_ambient_c_per_hr;
                 }
+                /* zones_config_set_max_ramp() writes the new ceiling into
+                 * RAM and bumps s_config_generation BEFORE it calls
+                 * nvs_save() -- so on an nvs_save() failure the new ceiling
+                 * is already live in RAM for this boot, it just did not
+                 * make it to flash. Say that, not "left unchanged". */
                 ESP_LOGW(AT_TAG,
-                         "autotune zone %u: gains and model accepted but predicted ramp ceiling (%.1f degC/hr) "
-                         "was rejected or failed to persist -- max_ramp_c_per_hr left unchanged",
-                         zone, (double)predicted_max_ramp_ambient_c_per_hr);
+                         "autotune zone %u: gains and model accepted; predicted ramp ceiling (%.1f degC/hr) "
+                         "is live in RAM for this boot but was not persisted -- will revert to %.1f degC/hr "
+                         "on reboot",
+                         zone, (double)predicted_max_ramp_ambient_c_per_hr, (double)old_ceiling_c_per_hr);
             } else {
                 if (out != NULL) {
                     out->adoption = AUTOTUNE_CEILING_ADOPTED;

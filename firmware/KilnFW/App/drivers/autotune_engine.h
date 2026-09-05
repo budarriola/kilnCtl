@@ -154,9 +154,10 @@ typedef struct {
                                                     * the plant can sustain from a cold start, which is what a
                                                     * caller checking "can this profile ever start" (profile_
                                                     * executor_run.c, profile_feasibility.c, profiles_edit_http.c)
-                                                    * actually needs. This is the field autotune_engine_accept_ex()
-                                                    * adopts into zones_config_set_max_ramp(), never the end-of-step
-                                                    * field above. */
+                                                    * actually needs. This is the field autotune_engine_accept()
+                                                    * (with opts->adopt_ceiling true) adopts into
+                                                    * zones_config_set_max_ramp(), never the end-of-step field
+                                                    * above. */
 } autotune_engine_status_t;
 
 #define AUTOTUNE_ENGINE_TICK_MS 1000u        /* same 1Hz as profile_executor */
@@ -381,13 +382,16 @@ typedef enum {
     AUTOTUNE_CEILING_SKIPPED_RELAY_METHOD,    /* relay test has no FOPDT model to derive a ceiling from */
     AUTOTUNE_CEILING_SKIPPED_MODEL_NOT_PERSISTED, /* zones_config_set_model() failed for this run */
     AUTOTUNE_CEILING_SKIPPED_ZERO,            /* predicted_max_ramp_ambient_c_per_hr <= 0 -- nothing to adopt */
-    AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN,   /* stored ceiling is nonzero and already <= the new estimate */
+    AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN,   /* stored ceiling is nonzero and looser than the new estimate --
+                                                * adoption never auto-tightens */
     AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE,   /* new estimate > ZONE_MAX_RAMP_C_PER_HR_MAX -- refused, not clamped */
     AUTOTUNE_CEILING_SKIPPED_READ_FAILED,     /* zones_config_get_max_ramp() failed -- never adopt over a value
                                                 * we could not read, even though that reads the same as "no old
                                                 * value" would */
-    AUTOTUNE_CEILING_FAILED_TO_PERSIST,       /* zones_config_set_max_ramp() itself failed -- the estimate was
-                                                * good and adoptable, but nothing was actually written */
+    AUTOTUNE_CEILING_FAILED_TO_PERSIST,       /* zones_config_set_max_ramp() itself failed -- but that function
+                                                * writes RAM and bumps s_config_generation BEFORE it calls
+                                                * nvs_save(), so the new ceiling IS live in RAM for this boot;
+                                                * it just was not persisted and will revert on reboot */
 } autotune_ceiling_adoption_t;
 
 /* Result of autotune_engine_accept() below: what happened to the
@@ -460,9 +464,9 @@ typedef struct {
  *     ceiling) fails -- never adopt over a value that could not be read,
  *     even though a failed read and "nothing configured yet" would
  *     otherwise look identical, or
- *   - the currently stored ceiling is nonzero and already tighter than (or
- *     equal to) the new estimate -- adoption never silently tightens an
- *     existing, deliberately-set ceiling.
+ *   - the currently stored ceiling is nonzero and looser than the new
+ *     estimate -- adoption never auto-tightens an existing,
+ *     deliberately-set ceiling.
  * An out-of-range estimate (> ZONE_MAX_RAMP_C_PER_HR_MAX) is REJECTED, never
  * clamped. A persist failure on the ceiling write itself is reported as
  * AUTOTUNE_CEILING_FAILED_TO_PERSIST.
