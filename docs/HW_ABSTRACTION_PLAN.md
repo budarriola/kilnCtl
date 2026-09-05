@@ -800,7 +800,12 @@ drivers. Census by role (2026-09-05):
 | misc | 5 | event_log |
 
 Target: `App/{hw,owners,control,safety,persist,net,http,ui,bridge,sim}/`
-with `misc` folded into whichever layer owns each file. Allowed include
+with `misc` folded into whichever layer owns each file. Preparation for this
+move (full 358-file mapping with proposed answers for every ambiguous
+placement, a `git mv` + CMakeLists-rewrite script, and a dry-run report
+naming the 18 path-keyed check scripts and 73 remaining upward includes)
+lives in `tools/drivers_reorg/` -- see `tools/drivers_reorg/DRYRUN.md`.
+Nothing has been applied yet. Allowed include
 direction is strictly downward: ui/http/bridge → control/safety/persist →
 owners/hw → hwAbstraction. Six upward-include patterns exist today and must
 be untangled before the move, otherwise the reorg just relabels the tangle:
