@@ -1,7 +1,14 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep audit +
-> third sweep — verified the two prior sweeps (M10/M11/M12a/M13/M14 closed
+> fourth sweep — found two stale open items that were actually already
+> answered/fixed and never removed: "physical zone arrangement" was
+> owner-confirmed 2026-09-03 (`firmware/KilnFW/docs/HARDWARE.md`) but still
+> listed open in two places here and in `KilnFW/TODO.md`; the "HTTP
+> concurrency reset" diagnosis bullet was already root-caused and fixed
+> (`CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` 6→16) with full detail already in
+> `docs/COMPLETED_2026-09.md`, but the pointer-back bullet here was never
+> deleted. Both corrected in place; no code changed. + third sweep — verified the two prior sweeps (M10/M11/M12a/M13/M14 closed
 > narrative moved to `docs/COMPLETED_2026-09.md`) moved nothing that wasn't
 > actually finished, dropped no durable lesson, and left both "verified by
 > READING THE BOARD" operational notes and every open item's text untouched;
@@ -90,7 +97,6 @@ What is still genuinely open is short:
 | **XL** | **Whether to fit CTs, 2026-09-04.** Topology is now written down (`9e3bd1f`, `9f9bf7c`, `docs/CONTACTOR_FEEDBACK_OPTIONS.md`): mains is staged contactor → SSRs, so a single relay weld is tolerated and only a *double* failure (contactor **and** its SSR) is dangerous — but nothing today detects a welded contactor, all five pilot relays are DPDT with the second pole unconnected, and `relay_owner_is_energized()` reports what was commanded, not what is sensed. Fitting CTs is the one check that would let either processor independently confirm actual current flow instead of trusting its own command; every other candidate (the second relay pole, wiring it up) was surveyed in `CONTACTOR_FEEDBACK_OPTIONS.md` and costs hardware anyway. Decide whether that check is worth ordering the parts (M5's Hammond 140QEX is already scoped) or whether the double-failure risk stays an accepted risk in `SAFETY_CASE.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5; `docs/SAFETY_CASE.md` |
 | **L** | **Approve or decline the high-temperature validation firing, 2026-09-04.** `4ec7387` scopes a ~4–5 h firing to exercise the coupled feedforward hold above ~62 °C, the one regime the matrix has never run in (infeasible ties to an offset, not a temperature — `68711df`) and that no capture has yet reached (max seen: 60 °C, `d5ae465`). Needs the owner's go-ahead before it's scheduled — it is the longest single firing proposed to date. | `PID_EXPANSION_PLAN.md` §3.6c |
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Four separate: (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) touch corner accuracy (`KILNCTL_TOUCH_CAP_*` defaults untried on glass); (4) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken, gating the backlight flying-wire and any future harness work at J2. | `DISPLAY_ST7796_PLAN.md` §4 |
-| S | Physical zone arrangement — which element is where | [What is actually left](#what-is-actually-left) |
 | S | The deferred sanity rate for S8 — S8 gained a pure-module implementation and is integrated (2026-09-03, `safety_guards.c`/`safety_core.c`, `SaftyFW/docs/GUARD_TEST_MATRIX.md`), but ships deliberately off (`max_rate_c_per_min` defaults to 0, same "no default by design" shape as S1), so commissioning that field is what will enable it | M3 |
 | S | `hardware/UnitTestFixture/` — delete or keep | M7 |
 | XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
@@ -226,7 +232,11 @@ them:
 
 Still genuinely unanswerable by the code:
 
-1. Physical zone arrangement (which element is where).
+1. ~~Physical zone arrangement (which element is where).~~ **Answered
+   2026-09-03, owner-confirmed, stale here — corrected 2026-09-04.** Stacked
+   vertically, zone 2 BOTTOM / zone 0 TOP (zone 1 middle); see
+   `firmware/KilnFW/docs/HARDWARE.md` "Physical zone arrangement (test
+   kiln)", which corroborates the coupling matrix's own measured asymmetry.
 2. The deferred sanity rate (S8's rate-of-rise ships disabled until a real
    kiln's ramp is measured — S8 itself gained a pure-module implementation
    and integration on 2026-09-03, so this is now a commissioning gap, the
@@ -294,9 +304,15 @@ now a short list, which is the point:
   something always follows it. Fixed by capping the touch-area extension at
   `UI_THEME_PADDING_PX/2` per side (`ui_theme_apply_touch_area()`) and
   registering the icon row as a touch group (`ui_topbar.c`).
-- Diagnose the HTTP concurrency reset above — it has a reproducer and two
-  ruled-out mechanisms, so the next step is instrumenting the failing
-  allocation, not more black-box testing.
+- ~~Diagnose the HTTP concurrency reset~~ — **stale, corrected 2026-09-04: this
+  shipped and was already moved out.** Root cause was
+  `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` defaulting to 6 — a fixed-size mailbox, not
+  a heap failure or the backlog/socket-table limits three prior passes chased.
+  Raised 6→16; reset rate 22.5%→0.0% at the same concurrency levels. This
+  bullet itself was left behind when the finding moved to
+  `docs/COMPLETED_2026-09.md#http-connection-resets-under-concurrency--root-cause-and-fix-2026-09-04`
+  on 2026-09-04 — the upkeep rule says a finished item leaves this file, and
+  the one-line pointer was missing until now.
 - ~~A guard that every `src/**.c` is in its CMakeLists or explicitly
   excluded.~~ **Stale, corrected 2026-09-03: this shipped**, predating this
   roadmap's last review — `tools/check_c_files_in_cmakelists.ps1`, wired

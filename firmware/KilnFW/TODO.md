@@ -950,9 +950,12 @@ alternate method.
       plant (the rule engine can drive a vent relay — if it does, the
       identified model is only valid for one vent state, which the autotune
       procedure must record and the docs must state).
-- [ ] Physical zone arrangement (stacked top/middle/bottom vs. side-by-side)
-      — sets the expected coupling structure and a sanity check on the
-      measured `K` matrix.
+- [x] ~~Physical zone arrangement~~ — **answered 2026-09-03, owner-confirmed.**
+      Stacked vertically as rings up the chamber wall; zone 2 is the BOTTOM
+      element, zone 0 the TOP (zone 1 middle). Corroborates the coupling
+      matrix's measured asymmetry (zone 1 leaks into zone 0 harder than the
+      reverse). See `firmware/KilnFW/docs/HARDWARE.md` "Physical zone
+      arrangement (test kiln)".
 - [ ] The sanity rate the request deferred ("I will determine later"), plus
       first-pass values for every other threshold in 6A.3 — the current
       defaults are engineering guesses, explicitly labeled as such.
