@@ -793,10 +793,17 @@ be untangled before the move, otherwise the reorg just relabels the tangle:
    file. The httpd handler/registration moved to new board_temps_http.c;
    board_temps.c gained board_temps_bind_thermo_bus() so it no longer reaches
    into esp_http_server.h/wifi_provision_http.h itself.
-4. gpio_probe.c:32 and boot_button.c:11 include profile_executor.h from
-   bridge/hw; invert via a small callback or status accessor in control/.
-5. backlight_pwm.c:63-64 includes screen_idle and display_power_cfg (ui/
-   persist) from hw; pass the values in instead.
+4. DONE: gpio_probe.c:32 and boot_button.c:11 included profile_executor.h
+   from bridge/hw for the pure status query (`profile_exec_status_t` +
+   `profile_executor_get_status()`). Both now include new, narrow
+   `profile_executor_state.h` instead.
+5. DONE: backlight_pwm.c:63-64 included screen_idle and display_power_cfg
+   (ui/persist) from hw. Replaced the stored `const void *idle` with a
+   caller-supplied `backlight_pwm_query_fn` (screen_on/idle_ms/brightness_pct
+   out-params); main_boot_early.c's new
+   backlight_pwm_query_screen_and_brightness() shim (which already includes
+   both headers) is passed to backlight_pwm_init() instead of
+   backlight_pwm.c reaching into screen_idle.h/display_power_cfg.h itself.
 6. safety_link*/danger_mode include profile_executor.h; safety needs a
    narrow "executor state" accessor, not the whole control header.
 

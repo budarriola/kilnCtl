@@ -9,13 +9,13 @@
 
 #include "stack_margin.h"
 
-// screen_idle.h (needed only by the CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE
-// branch below, for the `const screen_idle_t *` cast) is included from
-// inside that #if, not here -- it pulls in panel_spi.h/NS2009.h, which pull
-// in real ESP-IDF SPI/I2C driver headers that this project's host-test
-// build cannot compile (confirmed while adding this file). The flag is off
-// in the host build (see backlight_pwm.h's header comment), so the #else
-// branch below -- the only one host-compiled -- never needs the real type.
+// No screen_idle.h/display_power_cfg.h include here at all any more
+// (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 5) -- this hw-layer file
+// reads screen state and brightness only through the backlight_pwm_query_fn
+// the caller supplies to backlight_pwm_init() (see backlight_pwm.h). That
+// also keeps the host-test build simple: it compiles the
+// CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE-off (#else) branch below, which never
+// calls query_fn at all.
 
 static const char *TAG = "backlight_pwm";
 
@@ -60,9 +60,6 @@ uint8_t backlight_duty_percent_for_state(bool screen_on, uint8_t on_percent, uin
 
 #if CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE
 
-#include "screen_idle.h"
-#include "display_power_cfg.h"
-
 static uint32_t duty_for_percent(uint8_t pct)
 {
     if (pct >= 100) return BACKLIGHT_LEDC_DUTY_MAX;
@@ -87,9 +84,10 @@ static void backlight_pwm_task(void *arg)
 
         bool screen_on = true;
         uint32_t idle_ms = 0;
-        const screen_idle_t *idle = (const screen_idle_t *)bl->idle;
-        if (screen_idle_get_state(idle, &screen_on, &idle_ms) != ESP_OK) {
-            continue; /* lock timeout on screen_idle's side -- retry next poll */
+        uint8_t brightness_pct = 0;
+        if (bl->query_fn(bl->query_ctx, &screen_on, &idle_ms, &brightness_pct) != ESP_OK) {
+            continue; /* caller's query_fn declined this tick (e.g. a lock
+                       * timeout on screen_idle's side) -- retry next poll */
         }
 
         /* The ON duty is the operator's stored brightness, not a compile-time
@@ -99,8 +97,7 @@ static void backlight_pwm_task(void *arg)
          * 2026-09-04). IDLE stays a Kconfig constant: it is the blanked
          * state, not something the brightness slider addresses. */
         uint8_t pct = backlight_duty_percent_for_state(
-            screen_on, display_power_cfg_brightness_percent(),
-            CONFIG_KILNCTL_BACKLIGHT_IDLE_PERCENT);
+            screen_on, brightness_pct, CONFIG_KILNCTL_BACKLIGHT_IDLE_PERCENT);
 
         /* Gate on the DUTY, not on screen_on alone. Gating on screen_on made
          * a brightness change invisible until the next blank/wake edge --
@@ -125,11 +122,12 @@ static void backlight_pwm_task(void *arg)
     }
 }
 
-esp_err_t backlight_pwm_init(backlight_pwm_t *bl, const void *idle)
+esp_err_t backlight_pwm_init(backlight_pwm_t *bl, backlight_pwm_query_fn query_fn, void *query_ctx)
 {
-    if (!bl || !idle) return ESP_ERR_INVALID_ARG;
+    if (!bl || !query_fn) return ESP_ERR_INVALID_ARG;
     memset(bl, 0, sizeof(*bl));
-    bl->idle = idle;
+    bl->query_fn = query_fn;
+    bl->query_ctx = query_ctx;
 
     ledc_timer_config_t timer_cfg = {
         .speed_mode = BACKLIGHT_LEDC_MODE,
@@ -192,11 +190,12 @@ esp_err_t backlight_pwm_start(backlight_pwm_t *bl)
  * built image beyond these two trivial stubs. Matches spi_owner_transfer_
  * async()'s ESP_ERR_NOT_SUPPORTED-when-disabled convention (9.6 in the same
  * plan doc) rather than silently pretending to succeed. */
-esp_err_t backlight_pwm_init(backlight_pwm_t *bl, const void *idle)
+esp_err_t backlight_pwm_init(backlight_pwm_t *bl, backlight_pwm_query_fn query_fn, void *query_ctx)
 {
     if (!bl) return ESP_ERR_INVALID_ARG;
     memset(bl, 0, sizeof(*bl));
-    bl->idle = idle;
+    bl->query_fn = query_fn;
+    bl->query_ctx = query_ctx;
     bl->ready = false;
     return ESP_ERR_NOT_SUPPORTED;
 }

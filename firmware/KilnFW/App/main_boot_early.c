@@ -39,6 +39,7 @@
 #include "SX1509_internal.h"
 #include "screen_idle.h"
 #include "backlight_pwm.h"
+#include "display_power_cfg.h"
 #include "i2c_scan.h"
 #include "thermo_owner.h"
 #include "mdns.h"
@@ -58,6 +59,28 @@ static bool main_kiln_drdy_provider(uint8_t channel, bool *out_asserted, void *c
 {
     kiln_io_t *io = (kiln_io_t *)ctx;
     return kiln_io_get_drdy(io, channel, out_asserted) == ESP_OK;
+}
+
+/* backlight_pwm.h's backlight_pwm_query_fn adapter (HW_ABSTRACTION_PLAN.md
+ * "drivers/ layering" item 5): backlight_pwm.c is a hw-layer driver and must
+ * not itself include screen_idle.h (ui) or display_power_cfg.h (persist), so
+ * this boot-glue file -- which already knows both -- reads them on its
+ * behalf. Same shape as main_kiln_drdy_provider() just above: a small
+ * adapter that closes a plain-C-typed `ctx` back over its real type. `ctx`
+ * is always `&ctx->screen_idle` here (see backlight_pwm_init()'s call site
+ * below), matching what backlight_pwm.c used to cast `bl->idle` back to
+ * directly before this inversion. */
+static esp_err_t backlight_pwm_query_screen_and_brightness(void *ctx, bool *out_screen_on,
+                                                            uint32_t *out_idle_ms,
+                                                            uint8_t *out_brightness_pct)
+{
+    const screen_idle_t *idle = (const screen_idle_t *)ctx;
+    esp_err_t err = screen_idle_get_state(idle, out_screen_on, out_idle_ms);
+    if (err != ESP_OK) {
+        return err; /* lock timeout on screen_idle's side -- caller retries next poll */
+    }
+    *out_brightness_pct = display_power_cfg_brightness_percent();
+    return ESP_OK;
 }
 
 /* TODO.md section 14: the HTTP-connection-reset investigation has a
@@ -690,7 +713,8 @@ void main_boot_early(main_boot_ctx_t *ctx)
     // flying wire not fitted. Reads screen_idle's screen_on flag; needs
     // screen_idle_ready, not just display_ready.
     if (ctx->screen_idle_ready) {
-        esp_err_t bl_err = backlight_pwm_init(&ctx->backlight, &ctx->screen_idle);
+        esp_err_t bl_err = backlight_pwm_init(&ctx->backlight, backlight_pwm_query_screen_and_brightness,
+                                               &ctx->screen_idle);
         if (bl_err == ESP_OK) {
             if (backlight_pwm_start(&ctx->backlight) != ESP_OK) {
                 ESP_LOGE(MAIN_TAG, "Failed to start backlight_pwm task -- backlight stays as bring-up left it");

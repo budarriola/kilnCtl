@@ -39,14 +39,14 @@
 
 #include "esp_err.h"
 
-// Deliberately NOT #include "screen_idle.h" here (only backlight_pwm.c
-// includes it). screen_idle_t's own header pulls in panel_spi.h/NS2009.h,
-// which pull in real ESP-IDF SPI/I2C driver headers that do not compile in
-// this project's host-test environment (confirmed while adding this file --
-// panel_spi.h fails outright against the host-test stub set). This header
-// only ever needs a POINTER to a screen_idle_t, so `idle` below is typed
-// `const void *` and cast back to `const screen_idle_t *` inside
-// backlight_pwm.c, which does include the real header. Keeps
+// Deliberately NOT #include "screen_idle.h" or "display_power_cfg.h" here,
+// and backlight_pwm.c does not include them either any more
+// (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 5: this is a hw-layer
+// driver and must not reach up into screen_idle.c (ui) or
+// display_power_cfg.c (persist) itself). Instead the caller -- which already
+// knows both modules, e.g. main_boot_early.c -- supplies a
+// `backlight_pwm_query_fn` at init time that reads screen_idle's state and
+// display_power_cfg's brightness setting on this driver's behalf. Keeps
 // backlight_duty_percent_for_state() (the pure logic under host test)
 // reachable without dragging the whole display stack into the host build --
 // same reason boot_button.c/.h keep profile_executor.h out of the pure
@@ -70,8 +70,20 @@ uint8_t backlight_duty_percent_for_state(bool screen_on, uint8_t on_percent, uin
 
 // --- Hardware driver ---------------------------------------------------------
 
+// Supplied by the caller at init time (see backlight_pwm_init()). Fills
+// *out_screen_on/*out_idle_ms/*out_brightness_pct from whatever the caller's
+// own screen-state and brightness-setting modules currently report --
+// exactly what backlight_pwm_task() used to read directly via
+// screen_idle_get_state()/display_power_cfg_brightness_percent() before this
+// was inverted (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 5). Returning
+// anything other than ESP_OK causes the poll tick to skip (same as a
+// screen_idle_get_state() lock-timeout used to), retried next poll.
+typedef esp_err_t (*backlight_pwm_query_fn)(void *ctx, bool *out_screen_on, uint32_t *out_idle_ms,
+                                            uint8_t *out_brightness_pct);
+
 typedef struct {
-    const void *idle; /* really `const screen_idle_t *` -- see this header's comment above; read-only, this driver never mutates it */
+    backlight_pwm_query_fn query_fn; /* NULL until backlight_pwm_init(); read-only after that */
+    void *query_ctx;                 /* opaque, passed back to query_fn verbatim */
     bool ready;
     bool last_screen_on;    /* last state actually written to the LEDC channel */
     bool have_last_screen_on;
@@ -82,17 +94,21 @@ typedef struct {
     bool have_last_pct;
 } backlight_pwm_t;
 
-// `idle` (a `const screen_idle_t *`, typed `const void *` here -- see this
-// header's comment above) must already be screen_idle_init()'d
-// (screen_idle_start() need not have run yet, but usually has). Configures
-// the LEDC timer/channel on CONFIG_KILNCTL_BACKLIGHT_GPIO and immediately
-// drives ON-percent duty (matches screen_idle's own "on" boot state,
-// panel_spi.c leaving the panel lit after bring-up). Returns
-// ESP_ERR_NOT_SUPPORTED without touching any peripheral if
-// CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE is off -- callers should treat that as
-// "no bodge fitted, nothing to do" rather than an error to surface loudly,
-// same as NS2009_start's ESP_ERR_NOT_FOUND convention.
-esp_err_t backlight_pwm_init(backlight_pwm_t *bl, const void *idle);
+// `query_fn`/`query_ctx`: the caller's screen-state + brightness accessor
+// (see backlight_pwm_query_fn's doc comment above) -- typically a small
+// shim in main_boot_early.c that closes over a `const screen_idle_t *` and
+// calls screen_idle_get_state()/display_power_cfg_brightness_percent().
+// Whatever query_ctx points to must already be initialized (e.g.
+// screen_idle_init()'d; screen_idle_start() need not have run yet, but
+// usually has) before backlight_pwm_start() runs. Configures the LEDC
+// timer/channel on CONFIG_KILNCTL_BACKLIGHT_GPIO and immediately drives
+// ON-percent duty (matches screen_idle's own "on" boot state, panel_spi.c
+// leaving the panel lit after bring-up). Returns ESP_ERR_NOT_SUPPORTED
+// without touching any peripheral if CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE is
+// off -- callers should treat that as "no bodge fitted, nothing to do"
+// rather than an error to surface loudly, same as NS2009_start's
+// ESP_ERR_NOT_FOUND convention.
+esp_err_t backlight_pwm_init(backlight_pwm_t *bl, backlight_pwm_query_fn query_fn, void *query_ctx);
 
 // Starts the poll task that keeps LEDC duty in sync with screen_idle's
 // screen_on flag. No-op / ESP_ERR_INVALID_STATE if backlight_pwm_init() did

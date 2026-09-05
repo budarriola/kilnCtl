@@ -54,12 +54,12 @@ static void test_percent_clamped_to_100(void)
 
 static void test_disabled_build_init_and_start_report_not_supported(void)
 {
-    // init() must not crash on a NULL `idle` here even though it stores the
-    // pointer -- the disabled branch never dereferences it -- and both
-    // calls must report the "no flying wire fitted" outcome rather than
-    // pretending to succeed.
+    // init() must not crash on a NULL query_fn/query_ctx here even though it
+    // stores them -- the disabled branch never calls/dereferences either --
+    // and both calls must report the "no flying wire fitted" outcome rather
+    // than pretending to succeed.
     backlight_pwm_t bl;
-    esp_err_t init_err = backlight_pwm_init(&bl, NULL);
+    esp_err_t init_err = backlight_pwm_init(&bl, NULL, NULL);
     TEST_CHECK(init_err == ESP_ERR_NOT_SUPPORTED, "disabled build: init() reports ESP_ERR_NOT_SUPPORTED");
     TEST_CHECK(!bl.ready, "disabled build: init() leaves ready == false");
 
