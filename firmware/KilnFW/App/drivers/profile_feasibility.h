@@ -44,6 +44,19 @@ typedef enum {
 profile_seg_verdict_t profile_feasibility_segment(uint8_t zone_index, float start_c,
                                                   const profile_segment_t *seg);
 
+/* Same, but judged as part of a run that drives every zone in zone_mask at
+ * once. The zones share a chamber, so a zone's reachable ceiling with its
+ * neighbours firing alongside it is higher than the solo k_dc autotune fitted
+ * for it: this variant adds the persisted coupling matrix's contribution from
+ * the OTHER zones in the mask (see effective_k_dc() in the .c) and uses that
+ * effective gain for both the ceiling test and the heating-headroom rate
+ * test. Cooling is unaffected -- no zone helps another cool. A mask naming
+ * only zone_index is exactly profile_feasibility_segment() above; an absent
+ * or zero coupling matrix likewise reduces to it. */
+profile_seg_verdict_t profile_feasibility_segment_in_mask(uint8_t zone_index, uint8_t zone_mask,
+                                                          float start_c,
+                                                          const profile_segment_t *seg);
+
 /* Whole-profile roll-up for one zone: walks the segments in order carrying the
  * running start temperature, and returns the WORST verdict seen, ordered
  * UNREACHABLE > TOO_FAST > UNKNOWN > OK. UNKNOWN outranks OK so that a profile
@@ -55,10 +68,19 @@ profile_seg_verdict_t profile_feasibility_profile(uint8_t zone_index, const prof
                                                   profile_seg_verdict_t *out_segments,
                                                   size_t out_cap);
 
+/* Whole-profile roll-up for one zone, judged as part of a multi-zone run --
+ * profile_feasibility_segment_in_mask() applied over the segment walk. */
+profile_seg_verdict_t profile_feasibility_profile_in_mask(uint8_t zone_index, uint8_t zone_mask,
+                                                          const profile_t *p,
+                                                          profile_seg_verdict_t *out_segments,
+                                                          size_t out_cap);
+
 /* Same roll-up across a zone_mask (every participating zone must be able to do
  * it, matching profiles_http.c's existing multi-zone ceiling rule). A mask of
  * 0 -- which is what a zone-agnostic builtin catalogue entry carries -- means
- * "every configured zone". */
+ * "every configured zone", for the coupling contribution as well as for the
+ * set of zones judged. Each zone is judged with the coupling help of the
+ * other zones in the (resolved) mask, since they are all being driven. */
 profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const profile_t *p,
                                                        profile_seg_verdict_t *out_segments,
                                                        size_t out_cap);

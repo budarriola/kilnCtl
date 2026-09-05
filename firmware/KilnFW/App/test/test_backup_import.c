@@ -551,9 +551,31 @@ bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct)
     return true;
 }
 
+/* Cleared to "the getter answers" by this file's stub reset; test_profile_
+ * feasibility.c flips it through test_stub_zones_set_coupling() below to
+ * exercise profile_feasibility.c's "no coupling matrix at all" path. */
+static bool s_coupling_getter_answers[STUB_ZONE_COUNT] = { true, true, true };
+
+/* Cross-file hook for test_profile_feasibility.c -- same arrangement, and the
+ * same reason, as test_stub_zones_set_max_ramp() in the other direction: this
+ * file owns the only definition of zones_config_get_coupling() linked into the
+ * host-test binary, so the feasibility tests drive that state from here rather
+ * than defining a second (multiply-defined) body of their own. */
+void test_stub_zones_set_coupling(uint8_t zone_index, bool answers,
+                                  const float row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= STUB_ZONE_COUNT) {
+        return;
+    }
+    s_coupling_getter_answers[zone_index] = answers;
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        s_writes[zone_index].coupling_coeff[j] = row ? row[j] : 0.0f;
+    }
+}
+
 bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
 {
-    if (!out_row || zone_index >= STUB_ZONE_COUNT) {
+    if (!out_row || zone_index >= STUB_ZONE_COUNT || !s_coupling_getter_answers[zone_index]) {
         return false;
     }
     memcpy(out_row, s_writes[zone_index].coupling_coeff, sizeof(s_writes[zone_index].coupling_coeff));

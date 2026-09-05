@@ -65,8 +65,66 @@ static profile_seg_verdict_t worse(profile_seg_verdict_t a, profile_seg_verdict_
     return verdict_rank(b) > verdict_rank(a) ? b : a;
 }
 
+/* Effective full-power steady-state gain for zone `zone_index` when the run
+ * drives every zone in `zone_mask` at once.
+ *
+ * WHY THIS EXISTS: zones_config_get_model()'s k_dc was fitted by stepping ONE
+ * zone with the others idle, so T_ss - T_amb = k_dc describes a solo firing
+ * only. The zones share a chamber and heat each other, which the persisted
+ * coupling matrix measures: zones_config_get_coupling(i, row) fills row[j]
+ * with the steady-state rise in degrees C seen by zone i (the AFFECTED zone)
+ * per unit of actuation applied to zone j (the STEPPED zone). At u = 1 for
+ * every zone in the mask, zone i therefore settles at
+ *
+ *   T_ss(i) = T_amb + k_dc[i] + sum over j in mask, j != i, of c[i][j]
+ *
+ * so k_eff = k_dc + that sum is the gain both the ceiling test and the
+ * heating-headroom rate test must use. Judging a three-zone profile on solo
+ * k_dc alone marked genuinely firable schedules UNREACHABLE -- `cplval70`
+ * (70 C, zone_mask 7) was flagged red because zones 1 and 2 each top out near
+ * 52 C on their own, while all three together reach 108/88/72 C.
+ *
+ * The diagonal is skipped (it is k_dc's own job) and zones outside the mask
+ * contribute nothing -- they are not being driven. A missing matrix, a getter
+ * that cannot answer, or a non-finite cell contributes zero, which reproduces
+ * exactly the pre-coupling behaviour: this can only ever raise the ceiling,
+ * never lower it below what the solo model already promised.
+ *
+ * tau_s is deliberately NOT adjusted: the coupling row's own tau
+ * (zones_config_get_coupling_tau()) describes how fast a neighbour's heat
+ * arrives, which shifts the transient, while this module's only question is
+ * the sustained rate a segment needs. Same reasoning as dead_time_s below. */
+static float effective_k_dc(uint8_t zone_index, uint8_t zone_mask, float k_dc)
+{
+    float row[MAX31856_CHANNEL_COUNT];
+    if (!zones_config_get_coupling(zone_index, row)) {
+        return k_dc;
+    }
+    float k_eff = k_dc;
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        if (j == zone_index || !(zone_mask & (1u << j))) {
+            continue;
+        }
+        if (!isfinite(row[j]) || row[j] <= 0.0f) {
+            continue;
+        }
+        k_eff += row[j];
+    }
+    return k_eff;
+}
+
 profile_seg_verdict_t profile_feasibility_segment(uint8_t zone_index, float start_c,
                                                   const profile_segment_t *seg)
+{
+    /* Solo judgement: the mask names only this zone, so no neighbour is
+     * driven and no coupling contribution applies. */
+    return profile_feasibility_segment_in_mask(zone_index, (uint8_t)(1u << zone_index), start_c,
+                                               seg);
+}
+
+profile_seg_verdict_t profile_feasibility_segment_in_mask(uint8_t zone_index, uint8_t zone_mask,
+                                                          float start_c,
+                                                          const profile_segment_t *seg)
 {
     if (!seg) {
         return PROFILE_SEG_UNKNOWN;
@@ -92,8 +150,12 @@ profile_seg_verdict_t profile_feasibility_segment(uint8_t zone_index, float star
      * tuning), but it cannot make an achievable ramp rate unachievable, which
      * is the only question this module answers. */
 
+    /* Gain the whole run actually delivers to this zone, neighbours included
+     * -- see effective_k_dc() above for the model and why it matters. */
+    const float k_eff = effective_k_dc(zone_index, zone_mask, k_dc);
+
     const float t_amb = FEASIBILITY_AMBIENT_C;
-    const float ceiling_c = t_amb + k_dc; /* steady state at u = 1: T - T_amb = K */
+    const float ceiling_c = t_amb + k_eff; /* steady state at u = 1: T - T_amb = K_eff */
 
     float target = seg->target_c;
     if (!isfinite(target) || !isfinite(start_c)) {
@@ -150,7 +212,7 @@ profile_seg_verdict_t profile_feasibility_segment(uint8_t zone_index, float star
 
     float max_rate_c_per_s;
     if (heating) {
-        float headroom = k_dc - (worst_t - t_amb);
+        float headroom = k_eff - (worst_t - t_amb);
         if (headroom <= 0.0f) {
             return PROFILE_SEG_UNREACHABLE; /* belt-and-braces; the ceiling test above caught this */
         }
@@ -233,6 +295,15 @@ profile_seg_verdict_t profile_feasibility_profile(uint8_t zone_index, const prof
                                                   profile_seg_verdict_t *out_segments,
                                                   size_t out_cap)
 {
+    return profile_feasibility_profile_in_mask(zone_index, (uint8_t)(1u << zone_index), p,
+                                               out_segments, out_cap);
+}
+
+profile_seg_verdict_t profile_feasibility_profile_in_mask(uint8_t zone_index, uint8_t zone_mask,
+                                                          const profile_t *p,
+                                                          profile_seg_verdict_t *out_segments,
+                                                          size_t out_cap)
+{
     if (!p || p->segment_count == 0) {
         return PROFILE_SEG_UNKNOWN;
     }
@@ -244,7 +315,8 @@ profile_seg_verdict_t profile_feasibility_profile(uint8_t zone_index, const prof
     profile_seg_verdict_t rollup = PROFILE_SEG_OK;
 
     for (uint8_t i = 0; i < p->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
-        profile_seg_verdict_t v = profile_feasibility_segment(zone_index, start_c, &p->segments[i]);
+        profile_seg_verdict_t v =
+            profile_feasibility_segment_in_mask(zone_index, zone_mask, start_c, &p->segments[i]);
         if (out_segments && i < out_cap) {
             out_segments[i] = v;
         }
@@ -287,7 +359,10 @@ profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const 
         }
         any = true;
         profile_seg_verdict_t per_zone[PROFILE_MAX_SEGMENTS];
-        profile_seg_verdict_t v = profile_feasibility_profile(zi, p, per_zone, PROFILE_MAX_SEGMENTS);
+        /* `mask`, not `zone_mask`: a builtin's 0 has already been resolved to
+         * every configured zone above, and those zones do couple into zi. */
+        profile_seg_verdict_t v =
+            profile_feasibility_profile_in_mask(zi, mask, p, per_zone, PROFILE_MAX_SEGMENTS);
         rollup = worse(rollup, v);
         if (out_segments) {
             for (uint8_t i = 0; i < p->segment_count && i < out_cap && i < PROFILE_MAX_SEGMENTS; i++) {

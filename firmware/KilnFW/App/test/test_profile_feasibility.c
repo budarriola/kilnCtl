@@ -41,6 +41,19 @@ typedef struct {
 static stub_zone_t s_zones[STUB_MAX_ZONES];
 static uint8_t s_thermo_count;
 
+/* zones_config_get_coupling()'s only definition in this binary lives in
+ * test_backup_import.c (it stubs the whole zones_http.h surface for the import
+ * validator); these two hooks reach that state, mirroring the way that file
+ * reaches THIS one's thermo-count/max-ramp stubs. */
+void test_stub_zones_set_coupling(uint8_t zone_index, bool answers,
+                                  const float row[MAX31856_CHANNEL_COUNT]);
+
+static void stub_zone_coupling_clear(uint8_t zi)
+{
+    const float zero[MAX31856_CHANNEL_COUNT] = { 0 };
+    test_stub_zones_set_coupling(zi, true, zero);
+}
+
 /* A zone with the hand-checkable model above and a ceiling high enough that
  * the policy check never fires -- so a verdict is attributable to the physics
  * alone unless a test deliberately lowers it. */
@@ -52,6 +65,7 @@ static void stub_zone_tuned(uint8_t zi)
     s_zones[zi].dead_time_s = 30.0f;
     s_zones[zi].max_ramp_getter_answers = true;
     s_zones[zi].max_ramp_c_per_hr = 100000.0f;
+    stub_zone_coupling_clear(zi);
 }
 
 /* The "never autotuned" state zones_http.c documents: zeros in all three
@@ -648,6 +662,94 @@ static void test_flat_segment_above_ceiling_is_unreachable(void)
                "target == start_c is neither strictly heating nor cooling");
 }
 
+
+// ---------------------------------------------------------------------------
+// 14. Coupling: a zone's ceiling rises when its neighbours fire alongside it.
+// ---------------------------------------------------------------------------
+
+static void test_coupling_raises_ceiling_in_mask(void)
+{
+    TEST_SECTION("multi-zone runs judge each zone with the coupling help of the other zones "
+                 "in the mask, not on its solo k_dc alone");
+
+    // Two zones, each solo K = 32 C -> solo ceiling 52 C, UNREACHABLE above
+    // 47 C. Coupling 20 C each way, so with BOTH driven each zone's effective
+    // gain is 32 + 20 = 52 C -> ceiling 72 C, threshold 67 C. A 60 C target
+    // therefore flips from UNREACHABLE (solo) to OK (both zones firing) --
+    // the real-hardware `cplval70` case in miniature.
+    stub_reset();
+    s_thermo_count = 2;
+    for (uint8_t z = 0; z < 2; z++) {
+        s_zones[z].k_dc = 32.0f;
+    }
+    const float row0[MAX31856_CHANNEL_COUNT] = { 0.0f, 20.0f, 0.0f };
+    const float row1[MAX31856_CHANNEL_COUNT] = { 20.0f, 0.0f, 0.0f };
+    test_stub_zones_set_coupling(0, true, row0);
+    test_stub_zones_set_coupling(1, true, row1);
+
+    const profile_segment_t segs[] = { seg_of(60.0f, 5.0f) };
+    profile_t p = profile_of(0x03, segs, 1);
+
+    // (a) single-zone verdict vs masked verdict.
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &segs[0]) == PROFILE_SEG_UNREACHABLE,
+               "solo: 60 C is above zone 0's own 52 C ceiling, so UNREACHABLE");
+    TEST_CHECK(profile_feasibility_segment(1, 20.0f, &segs[0]) == PROFILE_SEG_UNREACHABLE,
+               "solo: 60 C is above zone 1's own 52 C ceiling too");
+    TEST_CHECK(profile_feasibility_profile_mask(0x03, &p, NULL, 0) == PROFILE_SEG_OK,
+               "with both zones in the mask each one's effective gain is 32 + 20 = 52 C, so "
+               "60 C is comfortably under the 67 C threshold and the profile is OK");
+
+    // The same conclusion through the segment-level entry point, so the fix
+    // is not only visible via the roll-up.
+    TEST_CHECK(profile_feasibility_segment_in_mask(0, 0x03, 20.0f, &segs[0]) == PROFILE_SEG_OK,
+               "segment_in_mask with both zones driven is OK for zone 0");
+
+    // The headroom rate test must use the same effective gain: at 60 C the
+    // solo headroom is negative, while the coupled headroom is
+    // 52 - (60 - 20) = 12 C, i.e. 12 C/hr max at tau = 3600 s. 20 C/hr is
+    // over that, 5 C/hr is under it -- so the rate test is live and reading
+    // k_eff, not merely passing because the ceiling test stopped failing.
+    const profile_segment_t fast[] = { seg_of(60.0f, 20.0f) };
+    profile_t p_fast = profile_of(0x03, fast, 1);
+    TEST_CHECK(profile_feasibility_profile_mask(0x03, &p_fast, NULL, 0) == PROFILE_SEG_TOO_FAST,
+               "20 C/hr exceeds 90% of the 12 C/hr the coupled headroom allows at 60 C");
+
+    // (b) a mask naming only one of the two zones ignores coupling entirely.
+    TEST_CHECK(profile_feasibility_profile_mask(0x01, &p, NULL, 0) == PROFILE_SEG_UNREACHABLE,
+               "a mask of zone 0 alone gets no help from an idle zone 1 -- still UNREACHABLE");
+    TEST_CHECK(profile_feasibility_profile_mask(0x02, &p, NULL, 0) == PROFILE_SEG_UNREACHABLE,
+               "same for a mask of zone 1 alone");
+
+    // (c) an all-zero coupling matrix leaves the verdict exactly as it was
+    // before this feature existed.
+    stub_reset();
+    s_thermo_count = 2;
+    for (uint8_t z = 0; z < 2; z++) {
+        s_zones[z].k_dc = 32.0f;
+    }
+    TEST_CHECK(profile_feasibility_profile_mask(0x03, &p, NULL, 0) == PROFILE_SEG_UNREACHABLE,
+               "zero coupling matrix: the multi-zone verdict is unchanged from the solo one");
+
+    // ...and so does a coupling getter that cannot answer at all.
+    test_stub_zones_set_coupling(0, false, NULL);
+    test_stub_zones_set_coupling(1, false, NULL);
+    TEST_CHECK(profile_feasibility_profile_mask(0x03, &p, NULL, 0) == PROFILE_SEG_UNREACHABLE,
+               "a coupling getter that returns false contributes nothing, same as zeros");
+
+    // Cooling is untouched: no zone helps another cool, so the coupled and
+    // solo verdicts for a descending segment must agree.
+    stub_reset();
+    s_thermo_count = 2;
+    const float hot0[MAX31856_CHANNEL_COUNT] = { 0.0f, 500.0f, 0.0f };
+    const float hot1[MAX31856_CHANNEL_COUNT] = { 500.0f, 0.0f, 0.0f };
+    test_stub_zones_set_coupling(0, true, hot0);
+    test_stub_zones_set_coupling(1, true, hot1);
+    profile_segment_t cool = seg_of(120.0f, 200.0f); /* from 220 C down */
+    TEST_CHECK(profile_feasibility_segment_in_mask(0, 0x03, 220.0f, &cool) ==
+                   profile_feasibility_segment(0, 220.0f, &cool),
+               "a cooling segment's verdict is identical with and without coupling");
+}
+
 void run_test_profile_feasibility(void)
 {
     test_no_model_is_never_ok_and_never_red();
@@ -663,4 +765,5 @@ void run_test_profile_feasibility(void)
     test_profile_mask();
     test_ceiling_test_gated_to_rising_segments();
     test_flat_segment_above_ceiling_is_unreachable();
+    test_coupling_raises_ceiling_in_mask();
 }
