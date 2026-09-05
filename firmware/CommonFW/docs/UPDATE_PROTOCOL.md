@@ -707,6 +707,20 @@ during development will be driven by an agent:
       landed in `LINK_PROTOCOL.md` §4, protocol 9+. This bullet's own
       deviation note is now stale — corrected here rather than deleted, so
       the "why it was missing" history stays legible.
+      **Hazard, 2026-09-04**: `ota_rollback_esp()` rolls the running image back
+      to `factory`, but the `zones_cfg` NVS blob is not versioned per-partition
+      — it is whatever was last written. If `zones_cfg` has ever been saved by
+      v19 firmware (`ZONES_CFG_VERSION` 19, `904db54` — adds per-zone
+      `error_band_c`/`rate_band_c_per_s`) and the board is then rolled back to
+      v18, `zones_config_store.c`'s `ZONES_DECODE_NEWER` path refuses the
+      newer-than-firmware blob and falls back to **firmware defaults for that
+      boot** — including default PID gains, not the tuned ones — while leaving
+      the on-flash blob untouched (`zones_config_store.c:116-128`). Nothing is
+      lost: flashing v19 again re-reads the same untouched blob and every
+      tuned value comes back. But a session that rolls back and then fires
+      without noticing is firing on default gains. Check `GET
+      /api/zones/config` (or `kiln_call(name="control_get_zones")`) reads back
+      the expected gains before heating after any rollback.
 - [x] Every push tool's board-reported result (including refusals) is
       returned verbatim to the caller. **Not yet true**: neither tool
       computes or logs a local SHA-256 of the image before sending — the doc

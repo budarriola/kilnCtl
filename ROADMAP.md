@@ -34,12 +34,16 @@
 > Phases 1/2/3/5 landed, Phases 4/6 in progress; ramp assist landed end to end
 > default OFF; board reflashed 2026-09-03 07:36:20; the coupling-matrix A/B has
 > been superseded by the fuzzy-PID A/B `fuzzy_ab_20260904c`; the kiln is now
-> IDLE and that campaign is STOPPED — `778ad64` found all 37,008/37,008
-> samples across 29 firings never leave the fuzzy layer's centre rule cell on
-> this rig, so it was measuring a fixed gain rescale, not fuzzy adaptation;
-> see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these)
-> for the rescale-vs-relabel-vs-drop decision and the explicit recommendation
-> against a blind restart)
+> IDLE and that campaign is STOPPED — `778ad64` originally reported
+> 37,008/37,008 samples across 29 firings never leaving the fuzzy layer's
+> centre rule cell, but that figure was withdrawn 2026-09-04 (`50d62ee`,
+> `1584597`): 28 of those 29 captures ran `control_mode: 2`, where the fuzzy
+> layer never executes; real n is one run, 2178 samples. The single-run
+> finding stands, the bands are now per-zone configurable (`904db54`), and an
+> offline probe tool answers band questions without kiln time
+> (`tools/PcTools/src/kilnctrl/fuzzy_band_probe.py`) — see
+> [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these) for
+> the recommended envelope and what's being asked)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -92,7 +96,7 @@ What is still genuinely open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| **XL** | **Fuzzy-PID membership bands, 2026-09-04.** `778ad64`: 37,008/37,008 samples across all 29 real firings never leave the fuzzy layer's centre rule cell — its error/rate bands (tuned for a much larger kiln) don't span this rig's measured envelope (~6–8 °C error, ~0.2–0.25 °C/s rate). On this rig the layer is a constant gain rescale, not the adaptive behaviour it was built for. Three ways forward, owner's call: (a) rescale the membership bands to the measured envelope and re-run; (b) keep the bands, relabel the experiment honestly as "fixed gain rescale" and judge it on that basis; (c) drop the fuzzy layer for this rig. **Recommendation: do not blind-restart the ~10 h `fuzzy_ab_20260904c` campaign under either (a) or (b) without a decision first** — a restart under the same bands repeats the same null result. | `PID_EXPANSION_PLAN.md` §3.6 |
+| **M** | **Fuzzy-PID membership bands — set the values, 2026-09-04.** The open question is resolved, not just re-scoped: `778ad64`'s "37,008 samples, 29 firings, never leaves the centre cell" was withdrawn (`50d62ee`, `1584597`) — 28 of those 29 captures ran `control_mode: 2`, where the fuzzy layer never executes; real evidence is one run, 2178 samples, and it still shows the shipped bands (20.0 °C / 0.5 °C/s) never span this rig's envelope. Two blockers that used to require a decision-before-action are gone: bands are now per-zone config (`904db54`, `ZONES_CFG_VERSION` 19 — a config POST, not a reflash), and `tools/PcTools/src/kilnctrl/fuzzy_band_probe.py` (`28685c3`) answers band questions offline from an existing capture, no kiln time. Recommended envelope from that tool: `error_band_c` 6–8 °C, `rate_band_c_per_s` 0.20–0.25 °C/s (observed maxima 5.55 °C / 0.110 °C/s); narrowing to 6.0/0.20 moves the gains 13–29% against the ±25% ceiling. **Ask: set the per-zone bands to a value in that range (or explicitly decline to) before the next `fuzzy_ab` campaign** — the campaign itself no longer needs a restart-vs-relabel-vs-drop call, only the band number. | `PID_EXPANSION_PLAN.md` §3.6 |
 | **M** | **Tighten `abs_max_temp_c`, 2026-09-04.** Armed and committed at 80 °C (`5a4ddfc` — the earlier "value 0" report was stale), but 80 °C is also the ESP-side `max_temp_c` ceiling, so the "independent" safety ceiling currently enforces nothing the primary controller wasn't already enforcing. Recommend commissioning it down to roughly 70 °C so the Pico's ceiling is genuinely tighter than the ESP's. No capture to date has exceeded 60 °C (`d5ae465`, 27 captures), so 70 °C leaves headroom without narrowing the room firings actually use. | `SaftyFW/docs/COMMISSIONING.md`; `docs/SAFETY_CASE.md` |
 | **XL** | **Whether to fit CTs, 2026-09-04.** Topology is now written down (`9e3bd1f`, `9f9bf7c`, `docs/CONTACTOR_FEEDBACK_OPTIONS.md`): mains is staged contactor → SSRs, so a single relay weld is tolerated and only a *double* failure (contactor **and** its SSR) is dangerous — but nothing today detects a welded contactor, all five pilot relays are DPDT with the second pole unconnected, and `relay_owner_is_energized()` reports what was commanded, not what is sensed. Fitting CTs is the one check that would let either processor independently confirm actual current flow instead of trusting its own command; every other candidate (the second relay pole, wiring it up) was surveyed in `CONTACTOR_FEEDBACK_OPTIONS.md` and costs hardware anyway. Decide whether that check is worth ordering the parts (M5's Hammond 140QEX is already scoped) or whether the double-failure risk stays an accepted risk in `SAFETY_CASE.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5; `docs/SAFETY_CASE.md` |
 | **L** | **Approve or decline the high-temperature validation firing, 2026-09-04.** `4ec7387` scopes a ~4–5 h firing to exercise the coupled feedforward hold above ~62 °C, the one regime the matrix has never run in (infeasible ties to an offset, not a temperature — `68711df`) and that no capture has yet reached (max seen: 60 °C, `d5ae465`). Needs the owner's go-ahead before it's scheduled — it is the longest single firing proposed to date. | `PID_EXPANSION_PLAN.md` §3.6c |

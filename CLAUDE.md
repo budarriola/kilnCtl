@@ -61,6 +61,17 @@ success while the board keeps running the OLD code (a change you added — a log
 line, say — looks like it "vanished"). Fix: `ota_rollback_esp()` to restore the
 factory boot target.
 
+`ota_rollback_esp()` itself has a hazard, 2026-09-04: rolling back past a
+`zones_cfg` schema bump (e.g. v19, `ZONES_CFG_VERSION` in
+`firmware/KilnFW/App/drivers/zones_config_store.c`) makes the older firmware
+refuse the newer-than-it-knows blob and run that boot on **firmware-default
+PID gains**, not the tuned ones — flash is left untouched, so reflashing the
+newer firmware restores everything, but a firing started right after the
+rollback and before reflashing runs on defaults with no separate warning.
+Read back `control_get_zones` (or `GET /api/zones/config`) after any rollback
+before heating. Full detail: `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
+("`ota_rollback(processor)`" bullet).
+
 `flash_firmware()` now checks this **automatically** after every flash (the
 `verify` parameter, default `True`): it polls the board's own HTTP API for the
 running partition (`/api/partitions`'s RUNNING marker) and for its reported
