@@ -37,6 +37,17 @@ extern "C" {
  * field already is. */
 #define PROFILE_BUILTIN_ID_BASE 128
 
+/* Sentinel for "the source page states no cone number at all" (as opposed to
+ * a low/unusual-but-real cone). Chosen as INT8_MIN so it can never collide
+ * with a real cone (the printed Orton range is roughly 022..42, i.e. -22..42
+ * in this field's encoding -- see the .cone comment below). Owner decision
+ * 2026-09-05: the ten entries this repo's original pass marked UNRESOLVED
+ * (a memory-derived, unverified guess standing in for a number the source
+ * simply does not publish) get this sentinel instead of that guess.
+ * profiles_builtin_cone_label() prints it as "Unrated", and the browse list
+ * sorts it after every real cone within its firing-type group. */
+#define PROFILES_BUILTIN_CONE_UNRATED INT8_MIN
+
 /* What a potter actually picks a schedule by (see ui_page_profiles_family.c,
  * which despite its filename is now a firing-TYPE picker, not a publisher
  * picker). "Other" is deliberately not folded into Bisque or Glaze -- a
@@ -105,8 +116,9 @@ const builtin_profile_t *profiles_builtin_entry(uint8_t id);
 
 /* Display helpers for the two new browse fields. */
 const char *profiles_builtin_firing_type_label(profile_firing_type_t type); /* "Bisque" / "Glaze" / "Other" */
-/* Formats a cone field into its printed form ("04", "6", "10") into buf.
- * buf must be at least 4 bytes. */
+/* Formats a cone field into its printed form ("04", "6", "10") into buf, or
+ * "Unrated" for PROFILES_BUILTIN_CONE_UNRATED. buf must be at least 8 bytes
+ * (strlen("Unrated") + NUL). */
 void profiles_builtin_cone_label(int8_t cone, char *buf, size_t buf_len);
 
 /* Hidden mask -- "removed by the user", persisted. Hiding is per entry and

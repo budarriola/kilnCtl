@@ -312,12 +312,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "fscg1",
         .family = "Crystalline",
         .firing_type = PROFILE_FIRING_GLAZE,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/fscg1 does
-         * not state a cone number anywhere on the page (crystalline glaze
-         * schedules are driven by peak temperature/hold, not a cone rating).
-         * Value below is the unverified memory-derived estimate carried over
-         * from the original pass -- treat as not authoritative. */
-        .cone = 9,
+        /* No cone: digitalfire.com/schedule/fscg1 does not state one (crystalline glaze, peak-temp/hold driven). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 5,
         .segments = {
             { .target_c = 250.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -333,11 +329,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "fscgb1",
         .family = "Crystalline",
         .firing_type = PROFILE_FIRING_GLAZE,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/fscgb1 does
-         * not state a cone number (crystalline glaze, no stated cone rating).
-         * Value below is the unverified memory-derived estimate carried over
-         * from the original pass -- treat as not authoritative. */
-        .cone = 8,
+        /* No cone: digitalfire.com/schedule/fscgb1 does not state one (crystalline glaze, no stated cone rating). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 8,
         .segments = {
             { .target_c = 200.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -356,11 +349,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "fscgcl",
         .family = "Crystalline",
         .firing_type = PROFILE_FIRING_GLAZE,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/fscgcl does
-         * not state a cone number (crystalline glaze, no stated cone rating).
-         * Value below is the unverified memory-derived estimate carried over
-         * from the original pass -- treat as not authoritative. */
-        .cone = 8,
+        /* No cone: digitalfire.com/schedule/fscgcl does not state one (crystalline glaze, no stated cone rating). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 5,
         .segments = {
             { .target_c = 250.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -376,11 +366,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "fscgwm",
         .family = "Crystalline",
         .firing_type = PROFILE_FIRING_GLAZE,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/fscgwm does
-         * not state a cone number (crystalline glaze, no stated cone rating).
-         * Value below is the unverified memory-derived estimate carried over
-         * from the original pass -- treat as not authoritative. */
-        .cone = 9,
+        /* No cone: digitalfire.com/schedule/fscgwm does not state one (crystalline glaze, no stated cone rating). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 5,
         .segments = {
             { .target_c = 200.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -396,13 +383,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "fscrgl",
         .family = "Crystalline",
         .firing_type = PROFILE_FIRING_GLAZE,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/fscrgl
-         * does not itself state a cone number; the page's *related-recipe*
-         * link (GC106, a different page) says "Cone 8-10", which is not the
-         * same as this schedule stating a cone. Value below is the
-         * unverified memory-derived estimate carried over from the original
-         * pass -- treat as not authoritative. */
-        .cone = 9,
+        /* No cone: digitalfire.com/schedule/fscrgl does not itself state one (a related-recipe link's "Cone 8-10" is not this schedule stating a cone). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 5,
         .segments = {
             { .target_c = 200.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -418,11 +400,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "fshp1",
         .family = "Crystalline",
         .firing_type = PROFILE_FIRING_GLAZE,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/fshp1 does
-         * not state a cone number (crystalline glaze, no stated cone rating).
-         * Value below is the unverified memory-derived estimate carried over
-         * from the original pass -- treat as not authoritative. */
-        .cone = 6,
+        /* No cone: digitalfire.com/schedule/fshp1 does not state one (crystalline glaze, no stated cone rating). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 8,
         .segments = {
             { .target_c = 250.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -441,11 +420,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "fshp3",
         .family = "Crystalline",
         .firing_type = PROFILE_FIRING_GLAZE,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/fshp3 does
-         * not state a cone number (crystalline glaze, no stated cone rating).
-         * Value below is the unverified memory-derived estimate carried over
-         * from the original pass -- treat as not authoritative. */
-        .cone = 6,
+        /* No cone: digitalfire.com/schedule/fshp3 does not state one (crystalline glaze, no stated cone rating). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 8,
         .segments = {
             { .target_c = 250.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -464,13 +440,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "fsnm5",
         .family = "Crystalline",
         .firing_type = PROFILE_FIRING_GLAZE,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/fsnm5 does
-         * not itself state a cone number or firing purpose; a *related*
-         * recipe link (FAC5, a different page) says "Cone 8-9", which is not
-         * the same as this schedule stating a cone. Value below is the
-         * unverified memory-derived estimate carried over from the original
-         * pass -- treat as not authoritative. */
-        .cone = 8,
+        /* No cone: digitalfire.com/schedule/fsnm5 does not itself state one (a related-recipe link's "Cone 8-9" is not this schedule stating a cone). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 4,
         .segments = {
             { .target_c = 200.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -485,14 +456,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "mddcl",
         .family = "General",
         .firing_type = PROFILE_FIRING_OTHER,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/mddcl does
-         * not state a cone number anywhere (it's a decal-firing schedule --
-         * decals fire well below any bisque/glaze cone and are not rated by
-         * cone at all). -15 is the unverified memory-derived estimate
-         * carried over from the original pass -- treat as not authoritative.
-         * firing_type = Other IS confirmed by the source ("Medalta Decal
-         * Firing", explicitly neither bisque nor glaze). */
-        .cone = -15,
+        /* No cone: digitalfire.com/schedule/mddcl does not state one (decal firing -- decals are not rated by cone at all). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 4,
         .segments = {
             { .target_c = 43.0f, .ramp_c_per_hr = 111.0f, .dwell_min = 30 },
@@ -538,14 +503,8 @@ const builtin_profile_t g_builtin_profiles[] = {
         .slug = "qica",
         .family = "General",
         .firing_type = PROFILE_FIRING_OTHER,
-        /* UNRESOLVED 2026-09-04: https://digitalfire.com/schedule/qica does
-         * not state a cone number -- it's explicitly "not a standard bisque
-         * or glaze firing schedule tied to a specific cone" (quartz-
-         * inversion crack avoidance is temperature-window-driven, not cone-
-         * rated). 6 is the unverified memory-derived estimate carried over
-         * from the original pass -- treat as not authoritative. firing_type
-         * = Other IS confirmed by the source. */
-        .cone = 6,
+        /* No cone: digitalfire.com/schedule/qica does not state one (explicitly not tied to a specific cone; temperature-window-driven). */
+        .cone = PROFILES_BUILTIN_CONE_UNRATED,
         .segment_count = 8,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 138.0f, .dwell_min = 60 },

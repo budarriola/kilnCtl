@@ -166,6 +166,10 @@ void profiles_builtin_cone_label(int8_t cone, char *buf, size_t buf_len)
     if (!buf || buf_len == 0) {
         return;
     }
+    if (cone == PROFILES_BUILTIN_CONE_UNRATED) {
+        snprintf(buf, buf_len, "Unrated");
+        return;
+    }
     /* Negative encoding stores the "0N" cones (see profiles_builtin.h) --
      * print the magnitude with the leading zero restored, not the sign. */
     if (cone < 0) {

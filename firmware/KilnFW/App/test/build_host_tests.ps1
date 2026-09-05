@@ -120,7 +120,7 @@ $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
 # only, so an on-target build is unaffected.
 $stubDir = Join-Path $testDir "stubs"
 $commonInc = Join-Path $testDir "..\..\..\CommonFW\include"
-$cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$commonInc`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
+$cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
 
 # ---- build/run bookkeeping -------------------------------------------------
 #
@@ -240,7 +240,7 @@ New-Item -ItemType Directory -Force -Path $peObjDir | Out-Null
 # cone_table_heat_work_weight() -- link the real module (already host-tested
 # by test_cone_table.c, own executable) into $cmd4 below rather than faking
 # it, same reasoning as pid.c/thermal_guard.c already linked there.
-$cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$peObjDir\\`" /Fe:`"$exe4`" " +
         "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
@@ -641,17 +641,36 @@ $cmd22 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDi
 
 Invoke-HostTestExe -Name "adaptive_tune_http" -ExePath $exe22 -BuildCmd $cmd22
 
+# ---- test_profiles_builtin.c: its own 23rd, separate executable -----------
+# Added 2026-09-05 for the PROFILES_BUILTIN_CONE_UNRATED sentinel (owner
+# decision: the 10 catalogue entries whose source page states no cone get
+# "Unrated" instead of an invented number, and sort last). #includes
+# profiles_builtin.c directly to get the REAL generated
+# profiles_builtin_table.inc, unlike test_profiles_http.c's own builtin
+# stand-in a few executables up (that one deliberately fakes an EMPTY
+# catalogue -- it doesn't exercise this table at all). Own executable so its
+# real profiles_builtin_get()/profiles_builtin_entry() bodies never collide
+# with test_profiles_http.c's fakes of the same names.
+$exe23 = Join-Path $outDir "kilnctl_host_tests_profiles_builtin.exe"
+$pbObjDir = Join-Path $outDir "pb"
+New-Item -ItemType Directory -Force -Path $pbObjDir | Out-Null
+$cmd23 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" /I`"$driversDir`" " +
+        "/Fo:`"$pbObjDir\\`" /Fe:`"$exe23`" `"$(Join-Path $testDir 'test_profiles_builtin.c')`""
+
+Invoke-HostTestExe -Name "profiles_builtin" -ExePath $exe23 -BuildCmd $cmd23
+
 # ---- summary ----------------------------------------------------------
 #
-# 21 executables are attempted above (main + zones_http + safety_cfg_http +
+# 22 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
 # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
-# zone_coupling_solve + partition_info_http + adaptive_tune_http).
+# zone_coupling_solve + partition_info_http + adaptive_tune_http +
+# profiles_builtin).
 # Report how many of those were even built, separately from how many of the
 # built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 21
+$totalExpected = 22
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {
