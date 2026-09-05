@@ -2,7 +2,8 @@
 
 > **Status:** planning · **Last reviewed:** 2026-09-05, roadmap-upkeep audit
 > (seventh sweep) — landed the cone-unrated bucket (`1501f0c`+`3b0c82e`), the
-> `safety_cfg_http.c` PSRAM move (`541b357`, flashed, re-baseline pending),
+> `safety_cfg_http.c` PSRAM move (`541b357`, flashed and re-baselined —
+> `af17e3d` plus the follow-up dram_margin.h/doc pass),
 > S8's compiled default (`c43323a`+`ea69efa`, bench value still gated on a
 > GRACE-window write), and the >62 °C ff_hold-infeasible confirmation
 > (`94b1a2a`); fuzzy bands are live on the board. Also recorded eight owner
@@ -67,7 +68,6 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | **XL** | CTs — deferred, 2026-09-05. Analysis lives in `docs/CONTACTOR_FEEDBACK_OPTIONS.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5 |
-| **M** | Internal DRAM floor — `541b357` moved 12,826 B of `safety_cfg_http.c` buffers to PSRAM, flashed 2026-09-05; post-flash DRAM re-measure and `dram_margin.h` re-baseline still pending. | `DRAM_PSRAM_PLAN.md` |
 | S | S8 sanity rate — `c43323a`+`ea69efa` set compiled default 33.3 C/min (2x fastest shipped ramp), fields_set-gated. Bench commission of 14.85 C/min NOT yet applied: Pico refuses config writes while ARMED, write must land during the 60 s GRACE window after a Pico reset. | M3 |
 | — | High-temperature validation firing — closed 2026-09-05, `94b1a2a` confirms ff_hold infeasible above 62 °C on hardware. | `PID_EXPANSION_PLAN.md` §3.6i |
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |

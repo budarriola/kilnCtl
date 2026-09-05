@@ -109,13 +109,20 @@
  * "heap stage app_main_done  largest= 18432 delta=  +0 dram_free= 46083".
  * The immediately-preceding trough (untracked here, ~18323 B free at
  * app_main_done) plus 541b357's 12826 B predicts ~31.1 kB, not the 46.1 kB
- * measured -- a ~15 kB gap this change alone does not explain. Not chased
- * down further here (out of scope for this pass); flagged in case it turns
- * out to be a second, uncredited win rather than measurement noise. Both
- * figures are still genuine new peaks (well clear of the 20480 floor), so
- * recorded per this file's own "move on genuine improvement" rule -- if the
- * extra ~15 kB reverts later, that regression will now be visible instead of
- * silently absorbed into slack. */
+ * measured -- the extra ~15 kB is explained, not noise. 541b357 also flipped
+ * CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY on, which made the linker
+ * script (build/esp-idf/esp_system/ld/sections.ld's .ext_ram.bss rule)
+ * additionally place *liblwip.a, *libnet80211.a, *libpp.a and
+ * *libwpa_supplicant.a .bss/.COMMON into PSRAM alongside the annotated
+ * safety_cfg_http.c buffers -- CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y (on
+ * since 2026-08-20) had no effect on .bss placement until this option joined
+ * it. KilnCtrl.map's .ext_ram.bss section totals 0x6ca4 = 27812 B; the three
+ * annotated safety_cfg_http.c buffers account for 12826 B of that, leaving
+ * 14986 B (~15 kB) for the lwIP/Wi-Fi .bss now riding along. 18323 + 27812 =
+ * 46135, matching the measured 46083 to within normal jitter. Consequence:
+ * turning CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY back off would silently
+ * cost ~15 kB of this gain -- the regression line above would fire, and this
+ * option is the cause to check first. */
 #define KILN_DRAM_LARGEST_KNOWN_BYTES ((size_t)18432)
 #define KILN_DRAM_FREE_KNOWN_BYTES    ((size_t)46083)
 
@@ -143,9 +150,10 @@
  * observed" and "we have eaten into the buffer we said we would keep", and
  * the second is supposed to be the early warning for the first.
  *
- * 20480, against a measured trough of 23111 -- about 2.6 kB of room. If a
- * future change pushes below this the boot log says so while there is still
- * evidence-backed headroom left to spend. */
+ * 20480, against the current measured trough of 46083 (app_main_done,
+ * 2026-09-05) -- about 25.6 kB of room. If a future change pushes below this
+ * the boot log says so while there is still evidence-backed headroom left to
+ * spend. */
 #define KILN_DRAM_FREE_FLOOR_BYTES ((size_t)20480)
 
 typedef struct {

@@ -116,9 +116,12 @@ void main_heap_stage(const char *stage)
                  (unsigned)KILN_DRAM_FREE_KNOWN_BYTES,
                  margin.free_regressed ? ", WORSE" : "");
     } else if (margin.tripped) {
-        /* Standing condition, true on every boot today: `largest` at the
-         * uart_bridges_1 stage is already below the documented failure figure.
-         * Deliberately WARNING, not ERROR -- it is real and must stay visible,
+        /* No longer a standing condition since 2026-08-27 (dram_margin.h):
+         * that pass moved four task stacks off internal DRAM and pushed
+         * `largest` above KILN_DRAM_LARGEST_ALARM_BYTES for the first time, so
+         * this branch firing today is a real, non-recurring event, not the
+         * every-boot noise it used to be. Deliberately WARNING, not ERROR
+         * even so -- it is real and must stay visible,
          * but an ERROR that fires every single boot is one everybody learns to
          * scroll past, and then the DRAM REGRESSION line above would arrive
          * inside a message that has been ignored for months. See

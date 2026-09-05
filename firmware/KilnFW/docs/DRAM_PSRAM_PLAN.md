@@ -70,9 +70,10 @@ host-test executables pass (one new stub needed:
 `App/test/stubs/esp_attr.h`, since the host build has no real ESP-IDF
 `esp_attr.h` — `EXT_RAM_BSS_ATTR` and its siblings are no-ops there, which is
 correct since host tests don't test memory placement); `run_all_checks.ps1`
-44/44. **Not yet flashed** — per `KILN_DRAM_*_KNOWN_BYTES`'s own baseline
-convention, those constants are intentionally left untouched here for the
-coordinator to re-measure on hardware after flashing.
+44/44. **Flashed and re-baselined 2026-09-05 (`af17e3d`)** —
+`KILN_DRAM_*_KNOWN_BYTES` now read 18432/46083 (dram_margin.h); the extra
+~15 kB beyond the attributed 12,826 B is `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY`
+additionally relocating lwIP/Wi-Fi `.bss` into PSRAM, see dram_margin.h.
 
 **Still open for a future pass:** `s_at` relocation (traced clean, not
 moved — see above); `ctx$0` (`main.c`, 4384 B, not traced); every §6/§7.3

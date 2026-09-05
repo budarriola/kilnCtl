@@ -360,7 +360,8 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 # (safety_cfg_http.c's three httpd-handler scratch buffers, ~12.8 kB) rather
 # than silently keeping it internal. sdkconfig is gitignored (see this file's
 # own top-of-file note) -- this line is the only place a clean clone learns
-# to turn this on.
+# to turn this on. Also relocates lwIP/Wi-Fi .bss into PSRAM (~15 kB, see
+# dram_margin.h) -- do not turn off casually, that gain silently regresses.
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 
 # CONFIG_PARTITION_TABLE_CUSTOM: found the hard way 2026-08-20, same audit
