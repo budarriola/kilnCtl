@@ -50,6 +50,21 @@ block only the tripping zone's relays rather than the whole board, layered
 still describes the global gate correctly; treat "the only place" in the
 paragraph above as historical.
 
+**Danger mode is a deliberate, explicit bypass of this gate.**
+`App/drivers/kiln_io_owner.c`'s `relay_on_blocked()` — the single choke point
+every manual relay-ON command reaches — checks `danger_mode_active()`
+(`App/drivers/danger_mode.c`) first, and if the operator has entered that
+mode (an explicit accept-the-risk action from the diagnostics page, time-
+boxed and auto-released on idle timeout — see `danger_mode.h`'s top comment)
+it skips both `relay_authority_on_blocked()` and the OTA heat-interlock
+check entirely, logging a warning whenever one of them would otherwise have
+blocked. This is intentional, not a gap: the mode exists so an operator can
+bench-test a relay/contactor with nothing fighting the test, and it bypasses
+only this ESP's own relay-on gate — it never reaches, and cannot touch,
+SaftyFW's independent contactor authority on the RP2040, which stays outside
+this board's reach either way. Confirmed current as of 2026-09-04 (`kiln_io_owner.c:179-209`'s
+`relay_on_blocked()`, `danger_mode.c:174-209`'s `danger_mode_active()`).
+
 ### 2. The fault-source mask (`App/drivers/safety_link.c`)
 
 `safety_link_set_fault_source(mask, assert)` OR's named reasons into

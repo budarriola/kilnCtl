@@ -440,11 +440,14 @@ severity.
       (removing the three entries makes all three checks fail, confirmed and
       reverted).
 - [ ] **Docs contradicting code:** `KilnFW/docs/HARDWARE.md` records neither
-      the thermocouple channel rotation nor the relay 2<->4 swap, while
-      `MAX31856.c` cites it as ground truth; `SAFETY_MODEL.md`'s guard-5 row
-      needs a "when configured" qualifier; this file's own claim that a
-      relay-authority block "is final regardless of ownership" is no longer
-      true with danger mode present.
+      the thermocouple channel rotation (`MAX31856.c:676` cites the J6/J5 pin
+      table as ground truth, but the table doesn't show the rotation) nor the
+      relay 2<->4 swap (`kiln_io.h:36`) -- still open. Two related claims are
+      now fixed (2026-09-04): `SAFETY_MODEL.md`'s guard-5 row already carried
+      a "when configured" qualifier as of the seventh audit pass, and this
+      file's own "final regardless of ownership" claim at 6A.6 above now
+      carries the danger-mode correction, and `SAFETY_MODEL.md` gained its
+      own section describing the same bypass -- see both docs.
 
 ---
 
@@ -864,7 +867,17 @@ a reply (`kiln_io_owner.c`'s `relay_authority_manual_blocked_by_owner()` ->
 `uart_bridge.c`'s `bridge_reply_reject(..., "owned")`, same wording as the
 existing `PROFILE` case), not silently dropped. Safety keeps precedence:
 `relay_authority_zone_blocked()`/`relay_authority_on_blocked()` are checked
-first and their block is final regardless of ownership. Host-tested in
+first and their block is final regardless of ownership. **2026-09-04
+correction: no longer true when danger mode is active.**
+`kiln_io_owner.c`'s `relay_on_blocked()` checks `danger_mode_active()` first
+and, if set, skips both `relay_authority_on_blocked()` and the OTA
+heat-interlock check entirely (still logging a warning when one of them
+would otherwise have blocked) — deliberately, per `danger_mode.c`'s and
+`danger_mode.h`'s top comments, so an operator who has explicitly accepted
+the risk can bench-test a relay/contactor with nothing fighting the test.
+This is this ESP's own relay-on gate only; it does not touch SaftyFW's
+independent contactor authority, which stays outside this board's reach
+either way (`danger_mode.h`'s top comment). Host-tested in
 `test_autotune_engine_prestart.c` (claim-on-start, release-on-guard-trip,
 release-on-manual-abort, each proven able to fail by temporarily disabling
 the release call and watching the new checks fail). Not host-tested: the
@@ -1250,11 +1263,15 @@ entirely until it reports idle), progress bars, and an ESP rollback button
 (`POST /api/ota/esp/rollback`, its own HMAC context so a push-authorization
 signature can never double as a rollback authorization).
 
-- [ ] **Pico build commit/dirty flag/build date are not retrievable** — a
-      real protocol gap, not an oversight: `safety_parse_fw_version()` parses
-      past those bytes to reach `boot_id` but never stores them. Needs a
-      `safety_link.h`/`.c` change (new fields + getter), out of scope for the
-      pass that built this page.
+- [x] **Pico build commit/dirty flag/build date are not retrievable.** DONE
+      (found shipped, eighth audit pass, 2026-09-04): `safety_link.h` now
+      carries `peer_build_known`/`peer_build_dirty`/`peer_build_commit[64]`/
+      `peer_build_commit_len`/`peer_build_datetime[32]`/`peer_build_datetime_len`
+      (`safety_link.h:1145-1155`), populated by the FW_VERSION parse and read
+      via `safety_link_get_peer_build_status()` (`safety_link.h:1349`,
+      `safety_link.c:832-841`). Surfaced through `dashboard_http.c`'s
+      `safety_build_*` fields (`GET /api/status`) and rendered on the OTA
+      page's `renderPicoInfo()` (`ota_page.html:490-494`).
 - [x] **Pico rollback button is a disabled placeholder** ("not yet
       available") — no HTTP route exists; a Pico rollback trigger is
       expected to go over the safety UART link (`SAFETY_CMD_ROLLBACK`, 0x17,

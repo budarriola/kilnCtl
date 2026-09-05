@@ -627,10 +627,13 @@ below — and a real end-to-end update crossing the isolated link.
       run — untested, and a lower baud with any nonzero frame loss turns a
       35 s update at 115200 into something much longer, because retries still
       cost 200 ms each up to ten times. Hardware-gated.
-- [ ] Signature/public-key reservation (`BOOTLOADER.md` §6) is designed
-      (768 B pubkey slot, `slot[2].signature[64]`, `sig_required`) but not yet
-      in code — `flash_layout.h`/`metadata.h` have neither field. Signature
-      algorithm and key-rotation support are both still undecided.
+- [x] Signature/public-key reservation (`BOOTLOADER.md` §6). DONE (found
+      shipped, eighth audit pass, 2026-09-04) — both fields exist now, as
+      pure reservations with nothing reading or verifying them yet:
+      the 768 B pubkey region (`flash_layout.h:46-54`) and per-slot
+      `signature[64]`/`sig_required` (`metadata.h:101-116`). Signature
+      algorithm and key-rotation support remain undecided, and no code
+      packs, unpacks, or checks either field — signing itself is still off.
 - [x] **`*** MANUAL SYNC HAZARD ***`** closed 2026-08-22:
       `tools/check_flash_layout_sync.cmake` parses `flash_layout.h` and
       asserts `app_slot.ld.in`'s `FLASH LENGTH` and `CMakeLists.txt`'s two
