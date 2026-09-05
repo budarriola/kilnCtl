@@ -35,13 +35,23 @@
 # discusses a `.uri = "..."` line -- as this project's own comment history
 # does more than once -- is not counted as a route.
 #
-# Usage: powershell -File tools\check_uri_handler_cap.ps1
+# Usage: powershell -File tools\check_uri_handler_cap.ps1 [-DriversDir <path>]
+# -DriversDir is for smoke-testing against a simulated post-layer-move tree
+# (or any other alternate root); normal use omits it and gets the real repo
+# path.
+param(
+    [string]$DriversDir
+)
 $ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
-$driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
-$driversDir = (Resolve-Path $driversDir).Path
-$capFile = Join-Path $driversDir "wifi_provision_http.c"
+if ($DriversDir) {
+    $driversDir = (Resolve-Path $DriversDir).Path
+} else {
+    $driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
+    $driversDir = (Resolve-Path $driversDir).Path
+}
+$capFile = (Get-ChildItem -Path $driversDir -Filter "wifi_provision_http.c" -File -Recurse | Select-Object -First 1).FullName
 
 # Same comment-stripping helper as check_bridge_reject_reason.ps1 and
 # check_uart_version_independence.ps1 (duplicated rather than imported -- this
@@ -85,7 +95,7 @@ function Get-CodeOnlyLines {
 }
 
 $uriPattern = '\.uri\s*=\s*"'
-$sourceFiles = Get-ChildItem -Path $driversDir -Filter "*.c" -File
+$sourceFiles = Get-ChildItem -Path $driversDir -Filter "*.c" -File -Recurse
 if ($sourceFiles.Count -lt 5) {
     throw "check_uri_handler_cap.ps1: only $($sourceFiles.Count) .c file(s) found under $driversDir -- has the routing code moved? Update this script's target directory."
 }
@@ -113,8 +123,8 @@ if ($totalRoutes -lt 80) {
     throw "check_uri_handler_cap.ps1: only counted $totalRoutes total '.uri = ""..""' routes under $driversDir, which is implausibly low (85+ expected as of 2026-08-24) -- the registration style has probably changed and this script has gone blind. Update its pattern before trusting its result."
 }
 
-if (-not (Test-Path $capFile)) {
-    throw "check_uri_handler_cap.ps1: expected cap file not found at $capFile -- has wifi_provision_http.c moved? Update this script's path."
+if ([string]::IsNullOrEmpty($capFile) -or -not (Test-Path $capFile)) {
+    throw "check_uri_handler_cap.ps1: expected cap file wifi_provision_http.c not found anywhere under $driversDir -- has it moved? Update this script's path."
 }
 $capLines = Get-CodeOnlyLines -Path $capFile
 $capDefinePattern = 'config\.max_uri_handlers\s*=\s*(\d+)\s*;'

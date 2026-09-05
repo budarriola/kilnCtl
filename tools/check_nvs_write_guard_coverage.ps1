@@ -35,12 +35,22 @@
 # future pass adds the guard to one of those files, add its path to
 # $guardedFiles in the same commit so this check starts covering it too.
 #
-# Usage: powershell -File tools\check_nvs_write_guard_coverage.ps1
+# Usage: powershell -File tools\check_nvs_write_guard_coverage.ps1 [-DriversDir <path>]
+# -DriversDir is for smoke-testing against a simulated post-layer-move tree
+# (or any other alternate root); normal use omits it and gets the real repo
+# path.
+param(
+    [string]$DriversDir
+)
 $ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
-$driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
-$driversDir = (Resolve-Path $driversDir).Path
+if ($DriversDir) {
+    $driversDir = (Resolve-Path $DriversDir).Path
+} else {
+    $driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
+    $driversDir = (Resolve-Path $driversDir).Path
+}
 
 # Same comment-stripping helper as check_stack_margin_registration.ps1 /
 # check_uri_handler_cap.ps1 (duplicated rather than imported -- this project
@@ -99,12 +109,30 @@ $writePattern = 'nvs_set_\w+\s*\(|nvs_commit\s*\(|esp_partition_write\s*\(|esp_p
 $guardCallPattern = 'caller_stack_is_external\s*\('
 $signaturePattern = '([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*$'
 
+# Resolve a bare basename to a file anywhere under $driversDir. This makes the
+# check agnostic to an upcoming move of every drivers/*.c file into layer
+# subdirectories (drivers/<layer>/<file>) -- $guardedFiles below stays a list
+# of basenames either way. Fails loud (not silently picks one) if a name is
+# missing or ambiguous.
+function Resolve-DriverFile {
+    param([string]$DriversDir, [string]$BaseName)
+    $matches = Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse
+    if ($matches.Count -eq 0) {
+        throw "check_nvs_write_guard_coverage.ps1: expected file '$BaseName' not found anywhere under $DriversDir -- has it moved or been renamed? Update `$guardedFiles."
+    }
+    if ($matches.Count -gt 1) {
+        $paths = ($matches | ForEach-Object { $_.FullName }) -join ", "
+        throw "check_nvs_write_guard_coverage.ps1: '$BaseName' matched more than one file under $DriversDir ($paths) -- this script cannot tell which one is the guarded module. Disambiguate."
+    }
+    return $matches[0].FullName
+}
+
 $failures = @()
 $filesChecked = 0
 $functionsScanned = 0
 
 foreach ($name in $guardedFiles) {
-    $path = Join-Path $driversDir $name
+    $path = Resolve-DriverFile -DriversDir $driversDir -BaseName $name
     if (-not (Test-Path $path)) {
         throw "check_nvs_write_guard_coverage.ps1: expected file not found at $path -- has it moved or been renamed? Update `$guardedFiles."
     }

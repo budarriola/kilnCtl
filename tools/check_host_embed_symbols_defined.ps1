@@ -38,12 +38,19 @@
 # zones_http did, at the LINK step, which this static check catches without
 # needing to invoke the (slow, compiler-dependent) host build itself.
 #
-# Usage: powershell -File tools\check_host_embed_symbols_defined.ps1
+# Usage: powershell -File tools\check_host_embed_symbols_defined.ps1 [-DriversDir <path>] [-TestDir <path>]
+# -DriversDir/-TestDir are for smoke-testing against a simulated
+# post-layer-move tree (or other alternate roots); normal use omits them and
+# gets the real repo paths.
+param(
+    [string]$DriversDir,
+    [string]$TestDir
+)
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
-$driversDir = Join-Path $root "firmware\KilnFW\App\drivers"
-$testDir = Join-Path $root "firmware\KilnFW\App\test"
+if ($DriversDir) { $driversDir = $DriversDir } else { $driversDir = Join-Path $root "firmware\KilnFW\App\drivers" }
+if ($TestDir) { $testDir = $TestDir } else { $testDir = Join-Path $root "firmware\KilnFW\App\test" }
 
 if (-not (Test-Path $driversDir)) {
     throw "check_host_embed_symbols_defined: $driversDir not found -- has it moved? This check is now blind."
@@ -65,7 +72,7 @@ if ($testFiles.Count -lt 5) {
 $includedDriverFiles = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($tf in $testFiles) {
     foreach ($line in (Get-Content -Path $tf.FullName)) {
-        foreach ($m in [regex]::Matches($line, '#include\s+"\.\./drivers/([A-Za-z0-9_]+\.c)"')) {
+        foreach ($m in [regex]::Matches($line, '#include\s+"\.\./drivers/(?:[A-Za-z0-9_]+/)?([A-Za-z0-9_]+\.c)"')) {
             [void]$includedDriverFiles.Add($m.Groups[1].Value)
         }
     }
@@ -78,12 +85,30 @@ if ($includedDriverFiles.Count -lt 10) {
 # Matches both `extern ... X[] asm("_binary_X_start");` (the convention every
 # current call site uses) and a bare `asm("_binary_X_start")` anywhere else,
 # so a future reference written slightly differently is still caught.
+# Resolve a bare basename to a file anywhere under $driversDir. This makes the
+# check agnostic to an upcoming move of every drivers/*.c file into layer
+# subdirectories (drivers/<layer>/<file>) -- $includedDriverFiles is parsed
+# from #include lines as bare basenames either way. Fails loud (not silently
+# picks one) if a name is missing or ambiguous.
+function Resolve-DriverFile {
+    param([string]$DriversDir, [string]$BaseName)
+    $found = Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse
+    if ($found.Count -eq 0) {
+        return $null
+    }
+    if ($found.Count -gt 1) {
+        $paths = ($found | ForEach-Object { $_.FullName }) -join ", "
+        throw "check_host_embed_symbols_defined: '$BaseName' matched more than one file under $DriversDir ($paths) -- this script cannot tell which one is the referenced driver file. Disambiguate."
+    }
+    return $found[0].FullName
+}
+
 $refPattern = 'asm\(\s*"_binary_([A-Za-z0-9_]+)_(start|end)"\s*\)'
 $referencedSymbols = New-Object 'System.Collections.Generic.HashSet[string]'
 $symbolSource = @{}
 foreach ($driverFileName in $includedDriverFiles) {
-    $path = Join-Path $driversDir $driverFileName
-    if (-not (Test-Path $path)) { continue }
+    $path = Resolve-DriverFile -DriversDir $driversDir -BaseName $driverFileName
+    if ($null -eq $path) { continue }
     foreach ($line in (Get-Content -Path $path)) {
         foreach ($m in [regex]::Matches($line, $refPattern)) {
             $sym = "$($m.Groups[1].Value)_$($m.Groups[2].Value)"
