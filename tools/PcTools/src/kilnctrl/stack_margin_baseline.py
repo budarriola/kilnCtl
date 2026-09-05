@@ -37,6 +37,18 @@ A task's TRUE worst case is the maximum HWM-shrinkage (i.e. minimum
 hwm_bytes) across whichever of these conditions were actually captured --
 see :func:`worst_case_across_conditions`. Capturing only one condition and
 calling it "the" baseline is exactly the mistake section 4.3 warns against.
+
+Why ``load`` exists (2026-09-04 finding, tools/check_stack_margin_baseline.py):
+the first checked-in baseline was captured on a fully idle bench (no firing,
+no autotune) but nothing in the file said so structurally -- only the
+filename and the freeform ``notes`` string said "idle", and the ``condition``
+argument above is exactly one typo away from lying (a caller can pass
+"mid_firing" while the board sits idle and nothing catches it). ``load`` is
+filled in by the CALLER from the board's OWN reported state
+(ProfileExecStatus/AutotuneStatus, not an argument), so a capture's load
+condition is what the board says it was doing, not what the operator meant
+to be doing. See :class:`LoadSnapshot` and ``check_stack_margin_baseline.py``
+for how a checked-in idle-only ``load`` is now treated.
 """
 from __future__ import annotations
 
@@ -56,6 +68,56 @@ LOAD_CONDITIONS: tuple[str, ...] = ("idle", "mid_firing", "web_ui_open")
 
 
 @dataclass(frozen=True)
+class LoadSnapshot:
+    """What the board itself was doing at the moment a stack-margin reading
+    was taken, read from ProfileExecStatus/AutotuneStatus -- never from a
+    caller-supplied flag, which is one typo from lying (exactly what let the
+    idle_2bcdc2d capture read as if the LOW tasks it saw might already be a
+    worst case).
+
+    ``firing_active``: profile_exec_status_t.state is RUNNING or PAUSED
+        (system_uart_bridge's SYSTEM_CMD_FACTORY_RESET chain and
+        telemetry_log's per-zone/AUTOTUNE_ENGINE_DONE snprintf chain are only
+        reachable in the neighbourhood of a real firing or autotune run --
+        see check_stack_margin_baseline.py's KNOWN_LOW_ALLOWLIST entries).
+    ``autotune_active``: autotune_engine_status_t.state != IDLE.
+    ``zones_heating``: count of ZoneExecStatus entries with
+        relay_commanded_on True -- 0 whenever nothing is actually calling for
+        heat even if a profile happens to be RUNNING (e.g. between segments).
+    ``observations``: sample_count from whichever engine is live
+        (autotune's sample_count if autotune_active, else the profile's own
+        segment_elapsed_s-derived tick count) -- 0 on a genuinely idle board,
+        which is the field this finding's "observations=0" note refers to.
+    """
+
+    firing_active: bool
+    autotune_active: bool
+    zones_heating: int
+    observations: int
+
+    @property
+    def is_idle(self) -> bool:
+        """True only when nothing the deep call chains above depend on was
+        happening: no firing, no autotune, no zone actually calling for
+        heat. This -- not the freeform ``condition`` string -- is what
+        check_stack_margin_baseline.py now grades a checked-in LOW/OK entry
+        against."""
+        return not self.firing_active and not self.autotune_active and self.zones_heating == 0
+
+    def to_json_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_json_dict(d: dict) -> "LoadSnapshot":
+        return LoadSnapshot(
+            firing_active=bool(d["firing_active"]),
+            autotune_active=bool(d["autotune_active"]),
+            zones_heating=int(d["zones_heating"]),
+            observations=int(d["observations"]),
+        )
+
+
+@dataclass(frozen=True)
 class StackMarginBaselineRecord:
     """One capture: every registered task's HWM under one load condition,
     tagged with the firmware build it was taken against so a later reader
@@ -68,12 +130,18 @@ class StackMarginBaselineRecord:
     fw_built: str
     notes: str
     entries: tuple[StackMarginEntry, ...]
+    #: Structured load condition (see LoadSnapshot). Optional only for
+    #: backward compatibility with baseline files captured before this field
+    #: existed -- a NEW capture always fills it in from the board's own
+    #: state; see capture_stack_margin_baseline.py.
+    load: Optional[LoadSnapshot] = None
 
     def to_json_dict(self) -> dict:
         d = asdict(self)
         d["entries"] = [
             {**asdict(e), "level": e.level.name} for e in self.entries
         ]
+        d["load"] = self.load.to_json_dict() if self.load is not None else None
         return d
 
 
@@ -83,6 +151,7 @@ def build_record(
     fw_version: FirmwareVersion,
     notes: str = "",
     *,
+    load: Optional[LoadSnapshot] = None,
     now: Optional[datetime] = None,
 ) -> StackMarginBaselineRecord:
     """Pure: turns an already-fetched entry list + firmware version into a
@@ -90,7 +159,12 @@ def build_record(
     ``KilnInfo.get_stack_margin()``/``get_fw_version()`` returned; a test
     passes hand-built ``StackMarginEntry``/``FirmwareVersion`` objects --
     neither this function nor anything else in this module ever touches a
-    link."""
+    link.
+
+    ``load``, if given, must be a :class:`LoadSnapshot` built by the caller
+    from the board's own ProfileExecStatus/AutotuneStatus -- never construct
+    one from the ``condition`` string or any other caller intent; that
+    defeats the entire point of recording it separately."""
     if condition not in LOAD_CONDITIONS:
         raise ValueError(
             f"unknown load condition {condition!r} -- must be one of {LOAD_CONDITIONS} "
@@ -106,6 +180,7 @@ def build_record(
         fw_built=fw_version.built,
         notes=notes,
         entries=tuple(entries),
+        load=load,
     )
 
 
@@ -147,6 +222,8 @@ def load_records(out_dir: Path) -> list[StackMarginBaselineRecord]:
                 )
                 for e in raw["entries"]
             )
+            raw_load = raw.get("load")
+            load = LoadSnapshot.from_json_dict(raw_load) if raw_load else None
             records.append(
                 StackMarginBaselineRecord(
                     condition=raw["condition"],
@@ -156,6 +233,7 @@ def load_records(out_dir: Path) -> list[StackMarginBaselineRecord]:
                     fw_built=raw["fw_built"],
                     notes=raw.get("notes", ""),
                     entries=entries,
+                    load=load,
                 )
             )
         except Exception:  # noqa: BLE001 -- one bad file must not sink the report

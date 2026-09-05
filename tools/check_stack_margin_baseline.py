@@ -25,6 +25,13 @@ WHAT THIS CHECKS, OFFLINE, WITH NO BOARD ATTACHED:
      that is the "chain got deeper and nobody resized it" case this scan
      exists for.
 
+  4. No entry names a task as OK (cleared) in KNOWN_LOW_ALLOWLIST using ONLY
+     idle-condition evidence. An idle capture is a FLOOR (stack_margin_
+     baseline.py's own docstring: "the SMALLEST plausible worst case"), so an
+     idle-only "OK" for a task whose known deep call chain runs only under a
+     firing/autotune is not evidence the task is safe -- it is evidence the
+     deep chain never executed. See check #4 below and CHECK_4_REQUIRES_LOAD.
+
 WHAT THIS CANNOT CATCH, AND WHY:
   - A regression that happened on hardware SINCE the last capture. This
     script only ever sees whatever JSON was last checked in under
@@ -35,13 +42,16 @@ WHAT THIS CANNOT CATCH, AND WHY:
     firing/config/reset needed) and writing a fresh baseline file is a
     manual step; nothing here reminds anyone to do it after a change that
     plausibly deepens one of these poll-tick call chains.
-  - Anything about WHICH load condition was captured. A single "idle"
-    capture (this repo's first checked-in one) is, by
+  - Anything about WHICH load condition was captured, BEYOND what a file's
+    own structured `load` field (kilnctrl.stack_margin_baseline.LoadSnapshot
+    -- firing_active/autotune_active/zones_heating/observations, read from
+    the board's own ProfileExecStatus/AutotuneStatus, never a caller flag)
+    says. A single "idle" capture (this repo's first checked-in one) is, by
     tools/PcTools/src/kilnctrl/stack_margin_baseline.py's own docstring, a
     floor -- "the SMALLEST plausible worst case" -- not proof a task
-    survives mid_firing or web_ui_open. This script does not know or
-    enforce that all three conditions have ever been captured; it only
-    grades whatever baseline files exist.
+    survives mid_firing or web_ui_open. This script does not enforce that
+    all three DRAM_PSRAM_PLAN.md conditions have ever been captured; it only
+    grades whatever baseline files exist, now load-aware via check #4.
   - A task that was never registered with stack_margin_register() in the
     first place (see tools/check_stack_margin_registration.ps1, a
     different, source-text-only check for that gap).
@@ -67,17 +77,44 @@ LOW_PCT = 30
 # this list defeats the whole point of check #3 in this file's docstring.
 KNOWN_LOW_ALLOWLIST = {
     # Both first observed LOW in the 2026-09-04 idle capture
-    # (stack_margin_idle_2bcdc2d_20260904T215500Z.json) captured for this
-    # task. Neither has a known deep call chain behind it the way screen_
-    # idle/lvgl do (system_uart_bridge/telemetry_log are plain UART framing
-    # and ring-buffer writers) -- flagged here as pre-existing so this
-    # script's own first run is not a false alarm, not because either has
-    # been individually investigated and cleared. Follow-up: measure under
-    # mid_firing/web_ui_open too (stack_margin_baseline.py's three
-    # conditions) before trusting either number long-term.
-    "system_uart_bridge": "pre-existing LOW at first capture, not this pass's regression -- not yet investigated",
-    "telemetry_log": "pre-existing LOW at first capture, not this pass's regression -- not yet investigated",
+    # (stack_margin_idle_2bcdc2d_20260904T215500Z.json). Investigated
+    # 2026-09-04 (opus review) -- the "no known deep call chain" note this
+    # allowlist originally carried was WRONG for both:
+    #
+    #   system_uart_bridge (3072 B configured): reachable path
+    #   SYSTEM_CMD_FACTORY_RESET -> factory_reset_execute() ->
+    #   execute_scope() -> ESP-IDF's nvs_flash_erase_partition(), a library
+    #   call whose internal stack cost has never been measured. The idle
+    #   capture that produced this LOW reading never took that path (no
+    #   factory-reset command was in flight), so its 900 B free / 28.8%
+    #   headroom number says nothing about that chain's real cost.
+    #
+    #   telemetry_log (4096 B configured, PSRAM stack): holds a 320-byte
+    #   `line` buffer and, ONLY while a firing or autotune is active, chains
+    #   several float snprintf() calls per zone plus the longest format
+    #   string in the file on AUTOTUNE_ENGINE_DONE. The idle capture ran
+    #   with observations=0 (no firing, no autotune), so that deep chain
+    #   never executed either -- the 1064 B free / 25.6% headroom number is
+    #   a floor, not this task's worst case.
+    #
+    # Both stay LOW-allowlisted (not resized -- an unmeasured increase just
+    # moves memory around) until a baseline captured with `load.firing_active`
+    # or `load.autotune_active` true exists for each. check_file()'s check #4
+    # below refuses to let either be marked OK using idle-only evidence, so a
+    # future capture cannot silently "clear" them without actually exercising
+    # the deep chain.
+    "system_uart_bridge": "LOW under idle; real chain is SYSTEM_CMD_FACTORY_RESET -> nvs_flash_erase_partition(), unmeasured -- needs a mid_firing/web_ui_open (or a captured factory-reset) load baseline before trusting this number long-term",
+    "telemetry_log": "LOW under idle (observations=0); real chain is the per-zone/AUTOTUNE_ENGINE_DONE snprintf cascade, only reachable with load.firing_active or load.autotune_active true -- needs a mid_firing baseline before trusting this number long-term",
 }
+
+# Tasks whose allowlist reason above documents a chain reachable only when
+# load.firing_active or load.autotune_active is true. Check #4 (see
+# check_file()) refuses to accept an idle-only "OK" reading for these as
+# clearing them off the allowlist -- listed separately from
+# KNOWN_LOW_ALLOWLIST's keys so a name can be dropped from the allowlist
+# (task fixed/resized) without silently also dropping this requirement, and
+# vice versa, until both are updated deliberately together.
+REQUIRES_LOAD_EVIDENCE_TO_CLEAR = frozenset(KNOWN_LOW_ALLOWLIST)
 
 
 def classify(hwm_bytes: int, configured_stack_bytes: int) -> str:
@@ -93,8 +130,45 @@ def classify(hwm_bytes: int, configured_stack_bytes: int) -> str:
     return "OK"
 
 
-def check_file(path: Path) -> list[str]:
-    """Returns a list of failure strings (empty means the file is clean)."""
+def _file_load_is_idle(data: dict) -> bool:
+    """True if this file's structured `load` (kilnctrl.stack_margin_baseline.
+    LoadSnapshot) says nothing was actually running, i.e. it cannot exercise
+    any deep call chain gated on a firing/autotune/heating zone. Falls back
+    to the freeform `condition` string for a baseline captured before `load`
+    existed -- `condition == "idle"` is the only legacy signal available, and
+    treating anything else as "unknown, assume loaded" avoids a false
+    positive against an old mid_firing/web_ui_open file that never got the
+    new field backfilled."""
+    load = data.get("load")
+    if isinstance(load, dict) and "firing_active" in load:
+        return (
+            not load.get("firing_active")
+            and not load.get("autotune_active")
+            and int(load.get("zones_heating", 0) or 0) == 0
+        )
+    return data.get("condition") == "idle"
+
+
+def _file_has_load_evidence(data: dict) -> bool:
+    """True if this file's `load` shows a firing or autotune actually
+    running -- the minimum needed for a reading in it to say anything about
+    a load-gated deep call chain. The inverse of _file_load_is_idle() for a
+    file that HAS structured load data; a legacy file with no `load` key
+    never counts as evidence (its `condition` string is caller-asserted, the
+    exact thing this whole feature exists to stop trusting)."""
+    load = data.get("load")
+    if isinstance(load, dict) and "firing_active" in load:
+        return bool(load.get("firing_active")) or bool(load.get("autotune_active"))
+    return False
+
+
+def check_file(path: Path, has_load_evidence: "set[str]") -> list[str]:
+    """Returns a list of failure strings (empty means the file is clean).
+
+    ``has_load_evidence`` is the set of task names for which SOME baseline
+    file (any of them, not necessarily this one) shows load.firing_active or
+    load.autotune_active true -- see check #4 below and main()'s first pass
+    that computes it."""
     failures: list[str] = []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -104,6 +178,8 @@ def check_file(path: Path) -> list[str]:
     entries = data.get("entries")
     if not isinstance(entries, list) or not entries:
         return [f"{path}: no 'entries' list -- an empty/malformed baseline proves nothing"]
+
+    file_is_idle = _file_load_is_idle(data)
 
     for e in entries:
         name = e.get("name", "<unnamed>")
@@ -148,6 +224,32 @@ def check_file(path: Path) -> list[str]:
                 f"this script with a reason, the same way test_display_power_wiring.c's source "
                 f"scans require an explicit TODO for an allowlisted violation."
             )
+        elif (
+            recomputed == "OK"
+            and name in REQUIRES_LOAD_EVIDENCE_TO_CLEAR
+            and file_is_idle
+            and name not in has_load_evidence
+        ):
+            # Check #4: a task on the LOW allowlist because its known deep
+            # call chain only runs under load must not be waved through as
+            # OK/cleared by an idle-only reading -- exactly the "idle
+            # capture mistaken for a worst case" bug this whole feature
+            # exists to close. This does not fail merely because a LOW
+            # allowlisted task is idle-LOW (that is the expected, honest
+            # state today); it fails only when someone tries to report the
+            # SAME task OK using ONLY idle evidence anywhere in the checked-in
+            # set, which would silently look like the task got fixed when
+            # nothing exercised the chain that made it risky.
+            failures.append(
+                f"{path}: entry '{name}' reads OK ({hwm}B free of {configured}B) but this "
+                f"capture's load is idle-only (no firing_active, no autotune_active, no "
+                f"zone heating) and no OTHER checked-in baseline shows load evidence for "
+                f"'{name}' either -- KNOWN_LOW_ALLOWLIST documents a deep call chain for "
+                f"this task that only runs under a firing/autotune, so an idle 'OK' proves "
+                f"the chain never executed, not that the task is safe. Capture a "
+                f"mid_firing/web_ui_open baseline (or one taken while the relevant command "
+                f"is actually in flight) before treating this as clearing the allowlist entry."
+            )
 
     return failures
 
@@ -169,9 +271,36 @@ def main() -> int:
               "passing one; capture at least one before trusting this script's exit code.")
         return 2
 
-    all_failures: list[str] = []
+    # First pass: which tasks have SOME checked-in baseline showing real load
+    # (a firing or autotune actually running)? check_file()'s check #4 needs
+    # this computed ACROSS every file, not just the one it's grading, since
+    # the load evidence that clears a task might live in a different capture
+    # than the OK reading being judged.
+    has_load_evidence: "set[str]" = set()
+    parsed: list[dict] = []
     for f in files:
-        all_failures.extend(check_file(f))
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 -- check_file() reports the parse failure properly below
+            continue
+        parsed.append(data)
+        if _file_has_load_evidence(data):
+            for e in data.get("entries", []):
+                if e.get("alive", True):
+                    has_load_evidence.add(e.get("name", ""))
+
+    all_failures: list[str] = []
+    idle_only_low_notes: list[str] = []
+    for f, data in zip(files, parsed):
+        all_failures.extend(check_file(f, has_load_evidence))
+        if _file_load_is_idle(data):
+            low_here = sorted(
+                e.get("name")
+                for e in data.get("entries", [])
+                if e.get("alive", True) and e.get("level") == "LOW"
+            )
+            if low_here:
+                idle_only_low_notes.append(f"{f.name}: {', '.join(low_here)}")
 
     if all_failures:
         print(f"FAILED: {len(all_failures)} problem(s) across {len(files)} baseline file(s):")
@@ -182,6 +311,16 @@ def main() -> int:
     print(f"PASSED: {len(files)} baseline file(s) under {baseline_dir}, "
           f"{sum(len(json.loads(f.read_text(encoding='utf-8'))['entries']) for f in files)} "
           "total task entries, no CRITICAL and no unexplained LOW.")
+    if idle_only_low_notes:
+        print(
+            "PROVISIONAL: the following LOW entries are backed ONLY by idle-condition "
+            "captures (load.firing_active/autotune_active both false, or a legacy file with "
+            "condition==\"idle\") -- allowlisted and passing, but NOT yet proven safe under "
+            "the load their own known call chain actually needs. See KNOWN_LOW_ALLOWLIST's "
+            "comments for what each chain requires:"
+        )
+        for note in idle_only_low_notes:
+            print(f"  - {note}")
     print("NOTE: this only grades what was last captured and checked in -- see this script's "
           "own top comment for what it cannot catch (a regression since the last capture, an "
           "un-measured load condition). It is a gate on a stale number, not a live sensor.")

@@ -6,6 +6,7 @@ docstring for why that split exists.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -14,6 +15,7 @@ from kilnctrl.devices_info import FirmwareVersion, StackMarginEntry
 from kilnctrl.protocol import StackMarginLevel
 from kilnctrl.stack_margin_baseline import (
     LOAD_CONDITIONS,
+    LoadSnapshot,
     build_record,
     load_records,
     render_markdown_table,
@@ -166,6 +168,75 @@ def test_render_markdown_table_marks_not_running_tasks():
     rec = build_record("idle", [_entry("dead_task", 3072, 0, alive=False)], _FW, now=_NOW)
     table = render_markdown_table([rec])
     assert "not running" in table
+
+
+def test_load_snapshot_is_idle_true_only_when_nothing_is_running():
+    """The 2026-09-04 finding: an idle capture must be identifiable from
+    structured data, not a caller-typed string. is_idle is false the moment
+    ANY of the three signals says otherwise."""
+    assert LoadSnapshot(firing_active=False, autotune_active=False, zones_heating=0, observations=0).is_idle
+    assert not LoadSnapshot(firing_active=True, autotune_active=False, zones_heating=0, observations=0).is_idle
+    assert not LoadSnapshot(firing_active=False, autotune_active=True, zones_heating=0, observations=12).is_idle
+    assert not LoadSnapshot(firing_active=False, autotune_active=False, zones_heating=1, observations=0).is_idle
+
+
+def test_load_snapshot_json_round_trips():
+    snap = LoadSnapshot(firing_active=True, autotune_active=False, zones_heating=2, observations=340)
+    back = LoadSnapshot.from_json_dict(snap.to_json_dict())
+    assert back == snap
+
+
+def test_build_record_persists_load_snapshot_through_write_and_load(tmp_path):
+    """A record built with a real LoadSnapshot (as the board reported it, not
+    a caller flag) must survive the JSON round trip -- this is the field
+    check_stack_margin_baseline.py's check #4 depends on existing at all."""
+    load = LoadSnapshot(firing_active=True, autotune_active=False, zones_heating=1, observations=90)
+    rec = build_record(
+        "mid_firing", [_entry("profile_executor", 4096, 3000)], _FW, load=load, now=_NOW,
+    )
+    assert rec.load == load
+
+    path = write_record(rec, tmp_path)
+    loaded = load_records(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0].load == load
+
+
+def test_build_record_load_defaults_to_none_for_backward_compatibility():
+    """A caller that has not been taught about LoadSnapshot yet (or a legacy
+    baseline written before this field existed) must not be forced to
+    fabricate one -- load stays None, and load_records() must not choke on
+    the resulting JSON (no 'load' key at all, the exact shape of the
+    checked-in idle_2bcdc2d baseline predating this feature)."""
+    rec = build_record("idle", [_entry("t", 4096, 2000)], _FW, now=_NOW)
+    assert rec.load is None
+    d = rec.to_json_dict()
+    assert d["load"] is None
+
+
+def test_load_records_tolerates_a_file_with_no_load_key(tmp_path):
+    """Simulates a pre-existing baseline file (like the real
+    stack_margin_idle_2bcdc2d_... capture) written before the `load` field
+    existed: no 'load' key in the JSON at all, not even null."""
+    (tmp_path / "stack_margin_idle_legacy.json").write_text(
+        json.dumps(
+            {
+                "condition": "idle",
+                "captured_at_utc": "2026-09-01T00:00:00Z",
+                "fw_commit": "legacy1",
+                "fw_dirty": False,
+                "fw_built": "2026-09-01 00:00:00Z",
+                "notes": "",
+                "entries": [
+                    {"name": "t", "configured_stack_bytes": 4096, "hwm_bytes": 2000, "alive": True, "level": "OK"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_records(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0].load is None
 
 
 def test_load_records_skips_unparseable_file_without_raising(tmp_path):

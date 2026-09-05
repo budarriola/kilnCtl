@@ -46,11 +46,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from kilnctrl import mcp_server as m  # noqa: E402
 from kilnctrl.stack_margin_baseline import (  # noqa: E402
     LOAD_CONDITIONS,
+    LoadSnapshot,
     build_record,
     load_records,
     render_markdown_table,
     write_record,
 )
+
+
+def _read_load_snapshot() -> LoadSnapshot:
+    """Reads the board's OWN reported state -- never a caller-supplied flag,
+    which is one typo from lying about what condition a capture was actually
+    taken under (2026-09-04 finding: the first checked-in baseline's filename
+    said "idle" but nothing structural on the file did). Uses the same
+    ProfileExecStatus/AutotuneStatus UART queries the GUI and MCP tools
+    already use -- both are read-only, no firing/config/reset side effects."""
+    exec_status = m._profiles.get_exec_status()
+    autotune_status = m._autotune.get_status()
+
+    firing_active = exec_status.state in (1, 2)  # PROFILE_EXEC_RUNNING, PROFILE_EXEC_PAUSED
+    autotune_active = autotune_status.state != 0  # AUTOTUNE_ENGINE_IDLE
+    zones_heating = sum(1 for z in exec_status.zones if z.relay_commanded_on)
+    observations = autotune_status.sample_count if autotune_active else 0
+
+    return LoadSnapshot(
+        firing_active=firing_active,
+        autotune_active=autotune_active,
+        zones_heating=zones_heating,
+        observations=observations,
+    )
 
 DEFAULT_OUT_DIR = (
     Path(__file__).resolve().parents[3] / "firmware" / "KilnFW" / "docs" / "stack_margin_baseline"
@@ -61,9 +85,27 @@ def capture(condition: str, out_dir: Path, notes: str) -> Path:
     print(m.connect())
     entries = m._info.get_stack_margin()
     fw_version = m._info.get_fw_version()
-    record = build_record(condition, entries, fw_version, notes=notes)
+    load = _read_load_snapshot()
+    if condition == "idle" and not load.is_idle:
+        print(
+            f"WARNING: --condition idle was requested but the board reports "
+            f"firing_active={load.firing_active} autotune_active={load.autotune_active} "
+            f"zones_heating={load.zones_heating} -- this is NOT an idle capture. "
+            f"Recording the board's real state in 'load' regardless of the requested label."
+        )
+    elif condition in ("mid_firing", "web_ui_open") and load.is_idle:
+        print(
+            f"WARNING: --condition {condition!r} was requested but the board reports "
+            f"no firing, no autotune, and no zone heating -- this looks like an IDLE "
+            f"capture mislabelled as loaded. Recording the board's real (idle) state in "
+            f"'load' regardless of the requested label."
+        )
+    record = build_record(condition, entries, fw_version, notes=notes, load=load)
     path = write_record(record, out_dir)
-    print(f"captured {len(entries)} task(s) under condition={condition!r}, fw={fw_version.describe()}")
+    print(
+        f"captured {len(entries)} task(s) under condition={condition!r}, fw={fw_version.describe()}, "
+        f"load={load.to_json_dict()}"
+    )
     print(f"wrote {path}")
     return path
 
