@@ -489,9 +489,18 @@ if the Pico's diagnostics are too stale to trust.</p>
     var parts = [];
     if (state.notInstalled) parts.push('declared NOT INSTALLED -- heat is refused. To clear: commission ' +
       'the safety thermocouple in the Advanced section of the Safety Commissioning page');
+    // Injection is NOT a config parameter -- it is armed over the wire by
+    // SAFETY_CMD_INJECT_TC (0x21) from the bench tooling, and SaftyFW exposes
+    // no clear command (thermo_task_inject_clear() has no caller). The two
+    // things that actually end it are the structural gate in
+    // thermo_task_get_snapshot() (safety_tc_installed back to 1 deactivates
+    // the override on the very next read) and a safety-processor reboot (the
+    // state is RAM-only, never persisted). So the remedy must NOT promise a
+    // "remove injection" control on the Commissioning page -- there isn't one.
     if (state.injected) parts.push('reading is a bench-injected synthetic value, not the real part. ' +
-      'To clear: remove the bench injection override in the Advanced section of the Safety ' +
-      'Commissioning page');
+      'To clear: commission the safety thermocouple (safety_tc_installed) in the Advanced ' +
+      'section of the Safety Commissioning page -- that drops the override on the next read. ' +
+      'Rebooting the safety processor also clears it; there is no separate "remove injection" control');
     el.textContent = parts.length ? ('Safety TC status: ' + parts.join('; ') + '.') : '';
   }
 
