@@ -90,7 +90,7 @@
 #include "nvs_flash.h"
 
 #include "settings.h"
-#include "wifi_provision_http.h"
+#include "wifi_provision_state.h"
 
 const char *WIFI_PROV_TAG = "wifi_prov";
 

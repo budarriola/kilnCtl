@@ -1,21 +1,47 @@
-// ota_state.h -- the one OTA state query non-http layers are allowed to
-// depend on: "is an update in progress on either processor, and if so
-// refuse this heat-causing action". Split out of ota_http.h (an http-layer
-// header) per docs/HW_ABSTRACTION_PLAN.md's "drivers/ layering" item 2 --
-// kiln_io_owner.c, profile_executor.c and profile_executor_run.c only ever
-// needed this one accessor, not the whole HTTP-handler surface. ota_http.h
-// includes this header so existing http-layer callers are unaffected; the
-// implementation stays in ota_http.c, which already owns the update-mutex
-// state this reads.
+// ota_state.h -- the OTA state/interlock query API non-http layers are
+// allowed to depend on: "is an update in progress on either processor, and
+// if so refuse this heat-causing action", plus the interlock/auth/progress
+// accessors non-httpd callers need. Split out of ota_http.h (an http-layer
+// header) per docs/HW_ABSTRACTION_PLAN.md's "drivers/ layering" items 2 and
+// 8 -- item 2 moved ota_http_heat_blocked_by_update() here for
+// kiln_io_owner.c/profile_executor.c/profile_executor_run.c; item 8 moved
+// the rest of this file's declarations here for autotune_engine_internal.h,
+// factory_reset.c, kiln_cfg_store.c, ota_pico_relay.c and
+// zones_current_sweep_task.c, none of which register httpd routes. ota_http.h
+// includes this header so existing http-layer callers are unaffected; every
+// implementation stays in ota_http.c, which already owns the update-mutex/
+// auth/progress state these read.
 #ifndef OTA_STATE_H
 #define OTA_STATE_H
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+
+#include "ota_interlock.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// The context a client authenticates for -- CommonFW/docs/UPDATE_PROTOCOL.md
+// section 2 step 2's literal "esp"/"pico"/"esp-rollback"/"recovery" HMAC
+// context string, and also which of the four independent per-endpoint
+// lockout states applies. See ota_http.c for the full per-value rationale
+// (this type moved here from ota_http.h per item 8 above; the doc comment
+// stayed there since it also documents ota_http_verify_request(), which is
+// httpd-only and did not move).
+typedef enum {
+    OTA_HTTP_CONTEXT_ESP = 0,
+    OTA_HTTP_CONTEXT_PICO,
+    OTA_HTTP_CONTEXT_ESP_ROLLBACK,
+    OTA_HTTP_CONTEXT_RECOVERY_EXIT,
+    OTA_HTTP_CONTEXT_FACTORY_RESET,
+    OTA_HTTP_CONTEXT_PICO_ROLLBACK,
+} ota_http_context_t;
 
 // --- Heat interlock, the OTHER direction (TODO.md 9.4/ROADMAP.md M8's
 // mutual interlock: "updates are not allowed while the heaters are on or a
@@ -35,6 +61,56 @@ extern "C" {
 // be refused because an update is in progress on either processor; false
 // if it may proceed.
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap);
+
+// --- Interlock/auth/progress accessors non-httpd callers need (item 8) ----
+// Moved verbatim from ota_http.h; see ota_http.c for the implementation and
+// ota_http.h's git history for the original, fuller doc comments (still
+// accurate -- only the declaration site moved).
+
+// Exported so a caller OUTSIDE ota_http.c can run the exact same
+// "X-Ota-Mac header present and exactly 64 hex chars -> hex-decode ->
+// ota_http_verify_request()" sequence every mutating OTA route runs, without
+// duplicating that header-parsing logic. factory_reset.c's POST
+// /api/factory_reset uses this.
+bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, char ip_out[46]);
+
+// Releases whatever update-mutex claim is held, if any. Idempotent.
+void ota_http_update_end(void);
+
+// Gathers a live interlock snapshot and calls ota_interlock_check()
+// (ota_interlock.h) -- see that header for OTA_INTERLOCK_* result meanings.
+// reason_out/reason_cap: filled with a specific, human-readable refusal
+// reason on OTA_INTERLOCK_REFUSED, untouched on OTA_INTERLOCK_OK. May be
+// NULL/0. ack_no_safety_processor: pass ota_http_req_ack_no_safety()'s
+// result through, or false where there is no request to read it from.
+ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out,
+                                                 size_t reason_cap);
+
+// True when this request carries the "X-Ota-Ack-No-Safety: 1" header. Feed
+// the result straight into ota_http_check_interlocks()'s first argument.
+bool ota_http_req_ack_no_safety(httpd_req_t *req);
+
+// Sends the correct refusal for a non-OK ota_http_check_interlocks() result:
+// 428 Precondition Required for OTA_INTERLOCK_REFUSED_NEEDS_ACK, 409
+// Conflict for every other refusal. Body is `reason` as text/plain.
+esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result_t r,
+                                          const char *reason);
+
+// Phase of the most recent (or currently in-flight) POST /api/ota/esp
+// transfer -- see ota_http_get_esp_progress() below.
+typedef enum {
+    OTA_HTTP_ESP_PHASE_IDLE = 0,   // no transfer has been attempted since boot
+    OTA_HTTP_ESP_PHASE_VERIFYING,  // reading/checking the image header, before esp_ota_begin()
+    OTA_HTTP_ESP_PHASE_WRITING,    // streaming the body into the OTA partition
+    OTA_HTTP_ESP_PHASE_FINALIZING, // esp_ota_end() / esp_ota_set_boot_partition()
+    OTA_HTTP_ESP_PHASE_DONE,       // the last transfer succeeded; boot partition set
+    OTA_HTTP_ESP_PHASE_FAILED,     // the last transfer failed, or was refused/aborted
+} ota_http_esp_phase_t;
+
+// Reads back the in-RAM progress snapshot ota_esp_post_handler() updates as
+// it goes. *phase_out and *percent_out (0-100) are always written if
+// non-NULL. Safe to call from any task (single-writer, `static volatile`).
+void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent_out);
 
 #ifdef __cplusplus
 }

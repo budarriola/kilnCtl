@@ -12,7 +12,7 @@
 #include "MAX31856.h"
 #include "autotune_engine.h"
 #include "kiln_io.h"
-#include "ota_http.h"
+#include "ota_state.h"
 #include "profile_executor.h"
 #include "safety_trip_words.h"
 #include "relay_authority.h"

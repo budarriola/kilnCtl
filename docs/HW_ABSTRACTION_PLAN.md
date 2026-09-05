@@ -900,6 +900,26 @@ proposed fixes in `tools/drivers_reorg/DRYRUN.md` rather than repeated here:
    `profile_executor.h`; it now includes `profiles_http.h` directly, same
    pattern as every other `.c` file (`backup_export.c`, `dashboard_http.c`,
    etc.) that already calls that accessor.
+9. DONE (2026-09-05): DRYRUN.md section 5 "Fix 2" -- `autotune_engine_internal.h`,
+   `factory_reset.c`, `kiln_cfg_store.c`, `ota_pico_relay.c` and
+   `zones_current_sweep_task.c` included the whole httpd-handler
+   `ota_http.h` for a handful of interlock/auth/progress query functions
+   (none register httpd routes). `ota_http_context_t`,
+   `ota_http_authenticate_request()`, `ota_http_update_end()`,
+   `ota_http_check_interlocks()`, `ota_http_req_ack_no_safety()`,
+   `ota_http_send_interlock_refusal()`, `ota_http_esp_phase_t` and
+   `ota_http_get_esp_progress()` moved into the existing `ota_state.h`
+   (already net-tier, already home to item 2's `ota_http_heat_blocked_by_
+   update()`); `ota_http.h` includes it back so httpd-layer callers are
+   unaffected, and all five switched their include to `ota_state.h`.
+   Implementations stayed in `ota_http.c`.
+10. DONE (2026-09-05): DRYRUN.md section 5 "Fix 3" -- `factory_reset.c` and
+    `wifi_prov.c` included the whole `wifi_provision_http.h` for one
+    accessor apiece (`wifi_provision_http_get_server()` and
+    `wifi_provision_http_start()`). New narrow `wifi_provision_state.h`
+    holds both; `wifi_provision_http.h` includes it back, and both
+    switched. `sim_backend.c` used only `wifi_provision_http_get_server()`
+    too, so it switched to the narrow header as well.
 
 All placements ambiguous under the original plan are now resolved in
 `mapping.csv` (coordinator decisions, third round): the zones_http family

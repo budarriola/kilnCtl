@@ -66,7 +66,7 @@
 
 #include "kilnlink/kilnlink_version.h"
 
-#include "ota_http.h"
+#include "ota_state.h"
 #include "ota_record.h"
 #include "uart_task_ids.h"
 
