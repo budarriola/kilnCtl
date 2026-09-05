@@ -120,7 +120,11 @@ const char *profiles_builtin_firing_type_label(profile_firing_type_t type); /* "
  * "Unrated" for PROFILES_BUILTIN_CONE_UNRATED. buf must be at least 8 bytes
  * (strlen("Unrated") + NUL). */
 void profiles_builtin_cone_label(int8_t cone, char *buf, size_t buf_len);
+#ifdef __cplusplus
+static_assert(sizeof("Unrated") <= 8, "profiles_builtin_cone_label()'s documented 8-byte buf_len contract must fit \"Unrated\"");
+#else
 _Static_assert(sizeof("Unrated") <= 8, "profiles_builtin_cone_label()'s documented 8-byte buf_len contract must fit \"Unrated\"");
+#endif
 
 /* Widened sort key: every real cone (int8_t range) sorts by its ordinary
  * signed value, but PROFILES_BUILTIN_CONE_UNRATED maps to INT16_MAX so it

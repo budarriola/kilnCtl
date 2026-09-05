@@ -138,12 +138,48 @@ static void test_unrated_sorts_after_every_real_cone_same_firing_type(void)
     TEST_CHECK(any_other_unrated_checked, "at least one Other Unrated entry was actually compared");
 }
 
+// SaftyFW's S8 sanity-rate guard ships with a compiled default of
+// 33.3 C/min = 2x the fastest RISING ramp_c_per_hr across every built-in
+// profile (999.0 C/hr, two tied steps in FSCGB1 -- see
+// firmware/SaftyFW/src/config_store.h's CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN
+// comment). That "no shipped profile's rising ramp can trip S8" claim is
+// only true if every RISING segment actually declares a positive, bounded
+// rate -- the table header's convention is that ramp_c_per_hr <= 0 means
+// "unlimited rate" (the executor jumps the setpoint immediately), which
+// would trip S8 instantly regardless of window sizing. This walks every
+// built-in profile and asserts that invariant directly, rather than relying
+// on eyeballing the table.
+static void test_every_rising_segment_has_bounded_positive_ramp(void)
+{
+    TEST_SECTION("g_builtin_profiles -- every RISING segment (target above the previous target, or "
+                 "above 0 for a profile's first segment) has 0 < ramp_c_per_hr <= 999.0 C/hr, so none "
+                 "can produce SaftyFW S8's modeled \"unlimited rate\" (ramp_c_per_hr <= 0) behavior "
+                 "and none exceeds the fastest rate the 33.3 C/min default was sized against");
+    for (size_t i = 0; i < g_builtin_profile_count; i++) {
+        const builtin_profile_t *b = &g_builtin_profiles[i];
+        float prev_target = 0.0f;
+        for (uint8_t s = 0; s < b->segment_count; s++) {
+            const profile_segment_t *seg = &b->segments[s];
+            bool rising = seg->target_c > prev_target;
+            if (rising) {
+                TEST_CHECK(seg->ramp_c_per_hr > 0.0f,
+                           "rising segment declares a positive (bounded) ramp, not \"unlimited\"");
+                TEST_CHECK(seg->ramp_c_per_hr <= 999.0f,
+                           "rising segment's ramp does not exceed the fastest rate the S8 default "
+                           "was sized against (999.0 C/hr, FSCGB1)");
+            }
+            prev_target = seg->target_c;
+        }
+    }
+}
+
 void run_test_profiles_builtin(void)
 {
     test_cone_label_unrated();
     test_cone_label_real_cone_unaffected();
     test_exactly_the_ten_named_entries_are_unrated();
     test_unrated_sorts_after_every_real_cone_same_firing_type();
+    test_every_rising_segment_has_bounded_positive_ramp();
 }
 
 int main(void)

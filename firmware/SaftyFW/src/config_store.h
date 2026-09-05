@@ -190,10 +190,11 @@ extern "C" {
 // segment (target_c dropping) must be excluded even though its number is
 // large. The four tied 9999.0 C/hr segments (e.g. "FSCGCL" -- Shimbo Crystal
 // Celestite Schedule) are all crash-COOL segments (target_c below the
-// previous segment's), so none of them qualify. The fastest RISING segment
-// across all 28 profiles is 999.0 C/hr, "FSCGB1" (Shimbo Crystal Holding
-// Pattern 2) stepping its holding-pattern target back up from 1075 C to
-// 1100 C -- so 999.0 / 60 * 2 = 33.3 C/min. Unlike CONFIG_STORE_DEFAULT_TC_TYPE
+// previous segment's), so none of them qualify. The fastest RISING segments
+// across all 28 profiles are two tied 999.0 C/hr steps in "FSCGB1" (Shimbo
+// Crystal Holding Pattern 2), both part of its holding-pattern dwell
+// cycling: 1050 C to 1075 C, and 1075 C to 1100 C -- so 999.0 / 60 * 2 =
+// 33.3 C/min. Unlike CONFIG_STORE_DEFAULT_TC_TYPE
 // this is NOT a "safe, documented default" in the same sense -- it is
 // deliberately permissive (every shipped profile's actual rising ramp, at
 // 2x, cannot trip it), decided 2026-09-05 to replace the previous "ships
