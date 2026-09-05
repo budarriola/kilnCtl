@@ -512,6 +512,17 @@ across a band twice this wide)</label>
        visible error. -->
   <span id="atUnsettledReason">This fit is not fully trustworthy -- accept it anyway?</span>
 </label>
+<!-- TODO.md 6A.4: the predicted ramp ceiling (shown above as "Predicted max
+     ramp") is opt-in to adopt, same as ack_unsettled above -- unchecked by
+     default so an operator who just wants the gains sees today's behavior.
+     Sent as the accept POST body's adopt_ceiling=1. No separate disabled
+     state of its own: harmless to check on a relay-test result or a result
+     with no predicted ceiling, since autotune_engine_accept_ex() ignores it
+     in both cases (see that function's own comment). -->
+<label id="atAdoptCeilingLabel">
+  <input type="checkbox" id="atAdoptCeiling"/>
+  <span>Also adopt predicted ramp ceiling into max_ramp_c_per_hr</span>
+</label>
 <button id="atAcceptBtn" type="button" disabled>Accept proposed gains</button>
 <!-- kc-live-value on the whole paragraph rather than per-field spans: while
      a test is running this line IS the live status (elapsed time, sample
@@ -2927,10 +2938,11 @@ document.getElementById('atAckUnsettled').addEventListener('change', function ()
 });
 document.getElementById('atAcceptBtn').addEventListener('click', function () {
   var ackUnsettled = document.getElementById('atAckUnsettled').checked;
+  var adoptCeiling = document.getElementById('atAdoptCeiling').checked;
   fetch('/api/autotune/accept', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'ack_unsettled=' + (ackUnsettled ? '1' : '0'),
+    body: 'ack_unsettled=' + (ackUnsettled ? '1' : '0') + '&adopt_ceiling=' + (adoptCeiling ? '1' : '0'),
   }).then(function (r) {
     if (r.ok) { loadCurrent(); pollAutotune(); }
     else document.getElementById('atStatus').textContent = 'Accept failed.';

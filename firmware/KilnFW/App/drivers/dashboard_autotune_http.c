@@ -303,9 +303,17 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
      * pattern autotune_start_post_handler() above already uses, not a new
      * one. A body is optional here (the common case, accepting a genuinely
      * settled fit, needs none), so a missing/empty body is not an error. */
+    /* adopt_ceiling (TODO.md 6A.4) is the same opt-in shape as ack_unsettled
+     * just below: an omitted body, or an older client that has never heard
+     * of this field, gets exactly today's behavior (gains/model only,
+     * max_ramp_c_per_hr untouched) -- only an explicit "1"/"true" opts in
+     * to also adopting the run's predicted ramp ceiling. See autotune_
+     * engine_accept_ex()'s own comment (autotune_engine.h) for what
+     * "adopt" does and does not overwrite. */
     bool ack_unsettled = false;
-    if (req->content_len > 0 && req->content_len < 64) {
-        char body[64];
+    bool adopt_ceiling = false;
+    if (req->content_len > 0 && req->content_len < 96) {
+        char body[96];
         size_t received = 0;
         bool read_ok = true;
         while (received < (size_t)req->content_len) {
@@ -321,10 +329,13 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
             char ack_val[4];
             int ack_len = http_form_find_field(body, "ack_unsettled", ack_val, sizeof(ack_val));
             ack_unsettled = (ack_len > 0) && (strcmp(ack_val, "1") == 0 || strcmp(ack_val, "true") == 0);
+            char ceiling_val[4];
+            int ceiling_len = http_form_find_field(body, "adopt_ceiling", ceiling_val, sizeof(ceiling_val));
+            adopt_ceiling = (ceiling_len > 0) && (strcmp(ceiling_val, "1") == 0 || strcmp(ceiling_val, "true") == 0);
         }
     }
 
-    if (!autotune_engine_accept(ack_unsettled)) {
+    if (!autotune_engine_accept_ex(ack_unsettled, adopt_ceiling)) {
         /* The specific reason (never settled / extrapolation didn't
          * converge / tau inconsistent with the corrected gain) is in the
          * ESP_LOGW autotune_engine_accept() itself already emitted -- see

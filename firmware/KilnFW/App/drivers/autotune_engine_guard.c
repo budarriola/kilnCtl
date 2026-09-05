@@ -263,6 +263,11 @@ void autotune_engine_abort(const char *reason)
 
 bool autotune_engine_accept(bool ack_unsettled)
 {
+    return autotune_engine_accept_ex(ack_unsettled, false);
+}
+
+bool autotune_engine_accept_ex(bool ack_unsettled, bool adopt_ceiling)
+{
     /* See autotune_begin_run_locked()'s guard comment above. */
     if (s_at.lock == NULL) {
         ESP_LOGW(AT_TAG, "autotune_engine_accept() called before autotune_engine_start() -- refused");
@@ -344,6 +349,7 @@ bool autotune_engine_accept(bool ack_unsettled)
      * the model/gains rather than re-read from s_at after the lock is
      * released (a new run could already be starting by then). */
     float step_ambient_c = s_at.step_ambient_c;
+    float predicted_max_ramp_c_per_hr = s_at.predicted_max_ramp_c_per_hr;
     xSemaphoreGive(s_at.lock);
 
     if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
@@ -429,6 +435,36 @@ bool autotune_engine_accept(bool ack_unsettled)
                  "autotune zone %u: gains accepted but plant model (K=%.2f tau=%.1f L=%.1f) was rejected or "
                  "failed to persist -- feedforward will stay off for this zone",
                  zone, (double)m.k_gain_c_per_duty, (double)m.tau_s, (double)m.dead_time_s);
+    }
+    /* TODO.md 6A.4, "autotune's predicted ramp ceiling is shown but not
+     * wired into max_ramp_c_per_hr" -- opt-in only (adopt_ceiling defaults
+     * false everywhere: autotune_engine_accept() above, the HTTP handler,
+     * and the UART bridge), so an operator who has not asked for it sees
+     * exactly today's behavior. Gated on model_persisted for the same
+     * reason coupling_diag_k_dc is just below: the estimate came from `m`,
+     * the same fit that either did or didn't just get stored, and a ceiling
+     * outliving the model it was derived from would be worse than neither.
+     * Also requires predicted_max_ramp_c_per_hr > 0 -- pid_autotune_
+     * estimate_max_ramp_c_per_hr() leaves it at the pre-run reset value
+     * (0.0f, see autotune_begin_run_locked()) when it had nothing to
+     * extrapolate from, and 0 is zone_cfg_t::max_ramp_c_per_hr's own
+     * documented "never configured" encoding -- adopting it would silently
+     * CLEAR an operator's existing ceiling rather than replace it with a
+     * measurement. Logged, not propagated, on failure: same reasoning as
+     * model_persisted's own failure just above -- the gains (and model) the
+     * operator clicked Accept for are already live either way. */
+    if (adopt_ceiling && method == AUTOTUNE_METHOD_STEP && model_persisted &&
+        predicted_max_ramp_c_per_hr > 0.0f) {
+        if (!zones_config_set_max_ramp(zone, predicted_max_ramp_c_per_hr)) {
+            ESP_LOGW(AT_TAG,
+                     "autotune zone %u: gains and model accepted but predicted ramp ceiling (%.1f degC/hr) "
+                     "was rejected or failed to persist -- max_ramp_c_per_hr left unchanged",
+                     zone, (double)predicted_max_ramp_c_per_hr);
+        } else {
+            ESP_LOGI(AT_TAG, "autotune zone %u: adopted predicted ramp ceiling %.1f degC/hr into "
+                          "max_ramp_c_per_hr",
+                     zone, (double)predicted_max_ramp_c_per_hr);
+        }
     }
     /* PID_EXPANSION_PLAN.md section 3.2, "on-board identification pass" --
      * closes the last-named gap in that section: until now coupling_diag_k_dc

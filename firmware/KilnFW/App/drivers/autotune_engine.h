@@ -389,6 +389,35 @@ void autotune_engine_abort(const char *reason);
  * simply unused/ignored). */
 bool autotune_engine_accept(bool ack_unsettled);
 
+/* Sibling of autotune_engine_accept() that also lets the caller adopt the
+ * run's predicted_max_ramp_c_per_hr (TODO.md 6A.4: "the ceiling is shown but
+ * not wired into max_ramp_c_per_hr") into the zone's stored ramp ceiling
+ * (zones_config_set_max_ramp()) in the same accept action, rather than
+ * requiring a separate manual edit on /settings/zones. A sibling function,
+ * not a widened autotune_engine_accept(), because that signature is called
+ * from many existing sites (HTTP, UART bridge, and the host test suite)
+ * that must keep behaving exactly as before -- autotune_engine_accept()
+ * below is now a thin wrapper: autotune_engine_accept_ex(ack_unsettled,
+ * false).
+ *
+ * adopt_ceiling has no effect when:
+ *   - the method is RELAY (a relay test measures no FOPDT model, so there
+ *     is no predicted ceiling to adopt -- same reasoning as the model-write
+ *     skip above), or
+ *   - the STEP result's predicted_max_ramp_c_per_hr is <= 0 (never computed,
+ *     e.g. pid_autotune_estimate_max_ramp_c_per_hr() had no ambient headroom
+ *     to extrapolate from), or
+ *   - zones_config_set_model() itself was rejected/failed for this run (the
+ *     same model that produced the estimate did not persist, so adopting a
+ *     ceiling derived from it would outlive the model it depends on).
+ * In every case the gains (and model, if any) are still accepted/persisted
+ * exactly as autotune_engine_accept() would -- adopt_ceiling only ever adds
+ * a write, never blocks the ones this function already made. A failure to
+ * persist the ceiling itself (zones_config_set_max_ramp() returning false)
+ * is logged, not propagated, for the same reason the model-persist failure
+ * above is logged and not propagated: the gains are already live. */
+bool autotune_engine_accept_ex(bool ack_unsettled, bool adopt_ceiling);
+
 void autotune_engine_get_status(autotune_engine_status_t *out);
 
 /* Paged access to the raw trace, oldest-first, for a caller that wants to

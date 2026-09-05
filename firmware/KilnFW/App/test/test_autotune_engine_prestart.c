@@ -675,6 +675,27 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return s_stub_set_pid_result;
 }
 
+/* TODO.md 6A.4 -- autotune_engine_accept_ex()'s opt-in ceiling-adopt write.
+ * Call-count/last-args capture, same convention as
+ * s_stub_set_coupling_diag_k_dc_* above, so a test can prove both the
+ * positive (called with exactly the run's predicted_max_ramp_c_per_hr, only
+ * when adopt_ceiling was passed) and the negative (NOT called when
+ * adopt_ceiling is false/omitted -- the default -- or when the predicted
+ * ceiling is <=0, or on the RELAY path, or when the model itself failed to
+ * persist). Default true so a positive-path test does not also have to set
+ * this. */
+static bool s_stub_set_max_ramp_result = true;
+static int s_stub_set_max_ramp_call_count = 0;
+static uint8_t s_stub_set_max_ramp_zone = 0xFF;
+static float s_stub_set_max_ramp_value = -1.0f;
+bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
+{
+    s_stub_set_max_ramp_call_count++;
+    s_stub_set_max_ramp_zone = zone_index;
+    s_stub_set_max_ramp_value = c_per_hr;
+    return s_stub_set_max_ramp_result;
+}
+
 // ---------------------------------------------------------------------------
 // Pre-start tests -- autotune_engine_start() is DELIBERATELY never called by
 // any of these. s_at is a static struct with internal linkage in
@@ -3464,6 +3485,174 @@ static void test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method
     s_stub_set_model_result = false;
 }
 
+/* TODO.md 6A.4 positive proof: autotune_engine_accept_ex(ack, true) on a
+ * successful STEP accept with a real predicted ceiling must adopt it into
+ * max_ramp_c_per_hr via zones_config_set_max_ramp(), with exactly this
+ * run's zone and predicted value. */
+static void test_autotune_engine_accept_ex_adopts_ceiling_when_requested(void)
+{
+    TEST_SECTION("autotune_engine_accept_ex(.., adopt_ceiling=true) writes zones_config_set_max_ramp() "
+                 "with this run's predicted ceiling, on a successful STEP accept");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 3;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_c_per_hr = 123.5f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+    s_stub_set_max_ramp_zone = 0xFF;
+    s_stub_set_max_ramp_value = -1.0f;
+
+    bool accepted = autotune_engine_accept_ex(false, true);
+
+    TEST_CHECK(accepted, "a fully clean STEP fit accepts with adopt_ceiling requested");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == 1,
+              "zones_config_set_max_ramp() is called exactly once when adopt_ceiling is requested");
+    TEST_CHECK(s_stub_set_max_ramp_zone == 3, "written for the zone under test, not a hardcoded index");
+    TEST_CHECK_NEAR(s_stub_set_max_ramp_value, 123.5f, 1e-4,
+                    "written with exactly this run's predicted_max_ramp_c_per_hr, captured under the lock");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+    s_stub_set_max_ramp_result = true;
+}
+
+/* Negative proof 1 (the "default false does not adopt" requirement): the
+ * exact same DONE result as above, but through the plain autotune_engine_
+ * accept() wrapper (which always passes adopt_ceiling=false) must NOT touch
+ * max_ramp_c_per_hr at all -- proves the default preserves today's
+ * behavior. */
+static void test_autotune_engine_accept_does_not_adopt_ceiling_by_default(void)
+{
+    TEST_SECTION("autotune_engine_accept() (adopt_ceiling defaults false) does NOT write "
+                 "zones_config_set_max_ramp(), even when a predicted ceiling exists");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 3;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_c_per_hr = 123.5f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+
+    bool accepted = autotune_engine_accept(false);
+
+    TEST_CHECK(accepted, "the accept itself still succeeds -- adopt_ceiling only ever adds a write");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
+              "zones_config_set_max_ramp() must NOT be called via the default-false wrapper");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
+/* Negative proof 2: a predicted ceiling of exactly 0.0 (never computed --
+ * autotune_begin_run_locked() resets it there and pid_autotune_estimate_
+ * max_ramp_c_per_hr() leaves it there when it has nothing to extrapolate
+ * from) must not be adopted even when adopt_ceiling=true -- 0 is zone_
+ * cfg_t::max_ramp_c_per_hr's own "never configured" encoding, so adopting
+ * it would silently CLEAR an existing operator-set ceiling. */
+static void test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling(void)
+{
+    TEST_SECTION("autotune_engine_accept_ex(.., adopt_ceiling=true) does NOT write zones_config_set_max_ramp() "
+                 "when predicted_max_ramp_c_per_hr is 0 (never computed)");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 1;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_c_per_hr = 0.0f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+
+    bool accepted = autotune_engine_accept_ex(false, true);
+
+    TEST_CHECK(accepted, "the accept itself still succeeds");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
+              "zones_config_set_max_ramp() must NOT be called when the predicted ceiling is 0");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
+/* Negative proof 3: a RELAY-method accept measures no FOPDT model, so there
+ * is no predicted ceiling to adopt either -- same reasoning as the
+ * coupling-diag and tuning-quality RELAY skips above. */
+static void test_autotune_engine_accept_ex_does_not_adopt_ceiling_on_relay_method(void)
+{
+    TEST_SECTION("autotune_engine_accept_ex(.., adopt_ceiling=true) does NOT write zones_config_set_max_ramp() "
+                 "on the RELAY path");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_RELAY;
+    s_at.zone_index = 0;
+    s_at.relay.valid = true;
+    s_at.predicted_max_ramp_c_per_hr = 200.0f; /* should never be reachable on RELAY, but set anyway to
+                                                 * prove the method check, not just an incidental zero */
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+
+    bool accepted = autotune_engine_accept_ex(false, true);
+
+    TEST_CHECK(accepted, "a relay-method accept still succeeds -- gains only, no model, no ceiling");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
+              "zones_config_set_max_ramp() must NOT be called on the RELAY path");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
 static void test_min_excursion_refuses_a_fit_below_the_rise_floor(void)
 {
     TEST_SECTION("(B) minimum-excursion requirement -- a fit whose total rise is below the "
@@ -5338,6 +5527,10 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_writes_coupling_diag_k_dc_on_step_success();
     test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_persist_fails();
     test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method();
+    test_autotune_engine_accept_ex_adopts_ceiling_when_requested();
+    test_autotune_engine_accept_does_not_adopt_ceiling_by_default();
+    test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling();
+    test_autotune_engine_accept_ex_does_not_adopt_ceiling_on_relay_method();
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();
     test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start();
