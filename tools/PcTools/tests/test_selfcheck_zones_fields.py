@@ -161,7 +161,13 @@ class RealFirmwareSmokeTest(unittest.TestCase):
         # split doesn't break this test again.
         paths = sorted(drivers_dir.glob("zones_http_*.c"))
         if not paths:
-            self.skipTest(f"firmware source not found under {drivers_dir}")
+            self.fail(
+                f"no zones_http_*.c source found under {drivers_dir} -- "
+                "the firmware file was renamed/split/moved again and this "
+                "smoke test's glob no longer matches anything; update the "
+                "glob rather than letting this report green with zero "
+                "coverage"
+            )
         text = "\n".join(p.read_text(encoding="utf-8") for p in paths)
         get_keys = _extract_get_top_level_keys(text, paths[0])
         post_keys = _extract_post_top_level_keys(text, paths[0])
