@@ -46,8 +46,21 @@ typedef enum {
  * previously lived as oversized function locals and blew app_main's stack.
  * A slot too small to hold them just makes that path silently untestable
  * again. */
+/* 7168 -> 8192 (2026-09-04, ZONES_CFG_VERSION 18->19, PID_EXPANSION_PLAN.md
+ * sec 3.6g: pid_fuzzy.c's two membership-band widths promoted to per-zone
+ * config): ZONES_CONFIG_BLOB_MAX_SIZE 768->896 grows kiln_cfg_store_blob_t
+ * by another 128 bytes * KILN_CFG_MAX_COUNT (8) = 1024 bytes (now 7468
+ * bytes total, measured via sizeof() rather than hand-added -- see this
+ * bump's own commit for the exact number), which again no longer fits the
+ * old 7168-byte slot -- same failure mode as the 640->768 bump above,
+ * caught by test_kiln_cfg_store.c's test_nvs_load_store_current_version_
+ * full_size_happy_path() (three assertions there went red: nvs_set_blob()
+ * itself refused the now-oversized blob, so nothing downstream had real
+ * data to check). Rounded up to the next generous power-of-two-ish number
+ * rather than the exact 7468, same "loose headroom, not a tight fit"
+ * discipline the 6144->7168 bump used. */
 static bool s_stub_nvs_enabled = false;
-static uint8_t s_stub_nvs_blob[7168];
+static uint8_t s_stub_nvs_blob[8192];
 static size_t s_stub_nvs_blob_len = 0;
 static bool s_stub_nvs_has_blob = false;
 
