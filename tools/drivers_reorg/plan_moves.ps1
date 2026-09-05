@@ -71,8 +71,17 @@ if ($PreviewDir) {
 # -PreviewDir (repo-relative path) when set, regardless of -DryRun/-Apply --
 # that is the whole point of -PreviewDir. Only writes the real file when this
 # is an actual -Apply run.
-function Write-RewrittenFile([string]$RealPath, [string]$Content, [System.Text.Encoding]$Encoding) {
-    $rel = $RealPath.Substring($RepoRoot.Length + 1)
+#
+# finding 7: -PreviewRelOverride lets a caller mirror the file into the
+# preview tree at its POST-MOVE repo-relative path instead of $RealPath's
+# current (pre-move) one. Needed because section 1 (git mv) only actually
+# moves anything under -Apply -- under -DryRun/-PreviewDir the file is still
+# sitting at its old flat drivers/ location on disk, so section 4c's
+# espInterfaces/ include-strip would otherwise write its preview copy at the
+# OLD path even though section 1's plan says that file lands at a NEW path,
+# leaving the preview tree not actually mirroring what -Apply produces.
+function Write-RewrittenFile([string]$RealPath, [string]$Content, [System.Text.Encoding]$Encoding, [string]$PreviewRelOverride = $null) {
+    $rel = if ($PreviewRelOverride) { $PreviewRelOverride } else { $RealPath.Substring($RepoRoot.Length + 1) }
     if ($PreviewDir) {
         $dest = Join-Path $PreviewDir $rel
         $destDir = Split-Path $dest -Parent
@@ -256,7 +265,8 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 foreach ($cmakeFile in @($DriversCmake, $AppCmake)) {
     if (-not (Test-Path $cmakeFile)) { continue }
-    $text = Get-Content $cmakeFile -Raw
+    $text = Get-Content $cmakeFile -Raw -Encoding UTF8
+    $originalCmakeText = $text
 
     $gzipBlockMatch = [regex]::Match($text, $gzipBlockPattern)
     $gzipPlaceholder = "@@KILNCTL_GZIP_ASSETS_BLOCK_PLACEHOLDER@@"
@@ -309,13 +319,27 @@ foreach ($cmakeFile in @($DriversCmake, $AppCmake)) {
         continue
     }
 
-    # Preserve the file's original trailing-newline convention instead of
-    # always stripping it: Set-Content -NoNewline with no -Encoding writes
-    # the system ANSI codepage and drops the final newline. Write UTF-8
-    # without a BOM (matches how this repo's other generated scripts write
-    # text -- checked build_host_tests.ps1 and gen_build_info.cmake, neither
-    # emits a BOM) and keep whatever trailing newline the original had.
-    Write-RewrittenFile -RealPath $cmakeFile -Content $text -Encoding $utf8NoBom
+    # finding 1: a file with zero literal hits (App/CMakeLists.txt has no
+    # bare drivers/<file> SRCS entries) must not be written at all -- the
+    # round-trip must be byte-identical to the source, which a write-back
+    # through -Encoding/newline handling cannot guarantee is a no-op. Assert
+    # identity and skip the write rather than relying on that being true.
+    if ($hits -eq 0) {
+        if ($text -cne $originalCmakeText) {
+            Write-Error "$cmakeFile : 0 literal hits but rewritten text differs from source -- refusing to write (round-trip identity check failed)."
+            if (-not $DryRun) { exit 1 }
+        } else {
+            Write-Host "$cmakeFile : 0 hits -- left untouched (no write)."
+        }
+    } else {
+        # Preserve the file's original trailing-newline convention instead of
+        # always stripping it: Set-Content -NoNewline with no -Encoding writes
+        # the system ANSI codepage and drops the final newline. Write UTF-8
+        # without a BOM (matches how this repo's other generated scripts write
+        # text -- checked build_host_tests.ps1 and gen_build_info.cmake, neither
+        # emits a BOM) and keep whatever trailing newline the original had.
+        Write-RewrittenFile -RealPath $cmakeFile -Content $text -Encoding $utf8NoBom
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -334,7 +358,7 @@ if (Test-Path $DriversCmake) {
     # Chain onto the generic-literal-rewritten text from section 2 above
     # (not a fresh read from disk) so the two rewrites compose instead of
     # one clobbering the other.
-    $text2c = if ($driversCmakeRewrittenText) { $driversCmakeRewrittenText } else { Get-Content $DriversCmake -Raw }
+    $text2c = if ($driversCmakeRewrittenText) { $driversCmakeRewrittenText } else { Get-Content $DriversCmake -Raw -Encoding UTF8 }
     $assetBlockMatch = [regex]::Match($text2c, $gzipBlockPattern)
     if (-not $assetBlockMatch.Success) {
         Write-Error "Could not locate the KILNCTL_GZIP_ASSETS block in $DriversCmake -- refusing to apply this rewrite."
@@ -359,17 +383,23 @@ if (Test-Path $DriversCmake) {
             '        set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")' + "`r`n" +
             '        set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${kilnctl_gz_basename}.gz")'
 
+        # finding 4: the two old lines sit back-to-back in the source
+        # (kilnctl_gz_src then kilnctl_gz_out, one indented line each), so
+        # replace both together as a single verbatim block with $gzNewLines
+        # rather than replacing one and blanking the other -- that leaves no
+        # empty line behind at all, so no follow-up squeeze is needed
+        # (a whole-file blank-line squeeze previously deleted 7 unrelated
+        # blank lines elsewhere in drivers/CMakeLists.txt).
+        $gzOldBlock = '        ' + $gzSrcOldLine + "`r`n" + '        ' + $gzOutOldLine
         if ($text2c -notmatch [regex]::Escape($gzSrcOldLine) -or $text2c -notmatch [regex]::Escape($gzOutOldLine)) {
             Write-Error "Could not locate the kilnctl_gz_src/kilnctl_gz_out lines verbatim in $DriversCmake -- refusing to apply this rewrite (the file may have changed shape since this script was written)."
             if (-not $DryRun) { exit 1 }
+        } elseif (-not $text2c.Contains($gzOldBlock)) {
+            Write-Error "Could not locate the kilnctl_gz_src/kilnctl_gz_out lines as a single adjacent 8-space-indented block in $DriversCmake -- refusing to apply this scoped rewrite (the file's indentation/layout may have changed)."
+            if (-not $DryRun) { exit 1 }
         } else {
             $newText2c = $text2c.Replace($assetListText, $newAssetListText)
-            $newText2c = $newText2c.Replace($gzSrcOldLine, $gzNewLines).Replace($gzOutOldLine, '')
-            # The .Replace($gzOutOldLine, '') above just deletes the old
-            # out-line text since $gzNewLines already supplies the
-            # replacement kilnctl_gz_out line; strip the now-empty line it
-            # leaves behind so indentation stays tidy.
-            $newText2c = $newText2c -replace '(\r?\n)[ \t]*(\r?\n)', '$1'
+            $newText2c = $newText2c.Replace($gzOldBlock, $gzNewLines)
             Write-Host "kilnctl_gz_src will read the asset's own '<layer>/<basename>' entry; kilnctl_gz_out stays flat via get_filename_component(NAME)."
             # Update the running text, don't write yet -- 2b (INCLUDE_DIRS)
             # below still needs to chain onto this same text; a single write
@@ -404,7 +434,7 @@ if (-not (Test-Path $DriversCmake)) {
 } else {
     # Chain onto whatever section 2/2c already produced for this same file
     # rather than re-reading from disk, so all three rewrites compose.
-    $cmakeText = if ($driversCmakeRewrittenText) { $driversCmakeRewrittenText } else { Get-Content $DriversCmake -Raw }
+    $cmakeText = if ($driversCmakeRewrittenText) { $driversCmakeRewrittenText } else { Get-Content $DriversCmake -Raw -Encoding UTF8 }
     $m = [regex]::Match($cmakeText, $includeDirsPattern)
     if (-not $m.Success) {
         Write-Error "Could not locate an INCLUDE_DIRS clause in $DriversCmake -- refusing to apply (finding 2: -Apply must refuse rather than silently skip this edit)."
@@ -543,8 +573,16 @@ $mdRoots = @(
     "firmware"
 ) | Where-Object { Test-Path (Join-Path $RepoRoot $_) }
 $mdFiles = foreach ($d in $mdRoots) {
+    # finding 3: exclude every file under firmware/UnitTestFw/ by PATH, not
+    # just by the per-occurrence "does this line also say UnitTestFw" check
+    # in the rewrite loop below -- UnitTestFw's own docs (UART_PROTOCOL.md,
+    # HARDWARE.md, PCF8575.md, pc_tools/README.md) cite basenames that
+    # collide with moved KilnFW drivers/ files on lines that never happen to
+    # mention "UnitTestFw" themselves, so the line-scoped check alone lets
+    # those get falsely rewritten. Keep the line check too (defence in
+    # depth for any other out-of-scope tree that isn't fully path-excluded).
     Get-ChildItem -Path (Join-Path $RepoRoot $d) -Recurse -File -Include *.md |
-        Where-Object { $_.FullName -notmatch '\\\.git\\' }
+        Where-Object { $_.FullName -notmatch '\\\.git\\' -and $_.FullName -notmatch '\\UnitTestFw\\' }
 }
 $rootMdFiles = @('ROADMAP.md', 'CLAUDE.md', 'TODO.md') | ForEach-Object {
     $p = Join-Path $RepoRoot $_
@@ -613,8 +651,9 @@ $joinPathPattern = 'Join-Path\s+\$driversDir\s+([\x22\x27])([A-Za-z0-9_\-]+\.[A-
 
 $allRewriteTargets = @($candidateFiles) + @($mdFiles)
 foreach ($file in $allRewriteTargets) {
-    $raw = Get-Content -Path $file.FullName -Raw -ErrorAction SilentlyContinue
+    $raw = Get-Content -Path $file.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($null -eq $raw) { continue }
+    $originalRaw = $raw
     $hasSiteHits = ($raw -match [regex]::Escape('App/drivers/')) -or ($raw -match [regex]::Escape('../drivers/'))
     $hasJoinPathHits = $raw -match 'Join-Path\s+\$driversDir'
     if (-not $hasSiteHits -and -not $hasJoinPathHits) { continue }
@@ -649,14 +688,28 @@ foreach ($file in $allRewriteTargets) {
         [void]$jsb.Append($raw.Substring($jLastEnd))
         $raw = $jsb.ToString()
 
-        # Same file's `cl ... /I"$driversDir"` invocations need /I for every
-        # layer subdir too -- a bare #include that used to resolve via
-        # $driversDir's own directory (single flat dir) now needs one /I per
-        # layer, since the including and included file can land in
-        # different layer subdirs. Expand in place, once per literal
-        # occurrence of the flag.
-        $layerIncludeFlags = ($layerNames | ForEach-Object { '/I`"$driversDir\' + $_ + '`"' }) -join ' '
-        $raw = $raw -replace '/I`"\$driversDir`"', $layerIncludeFlags
+        # finding 2: every `cl` invocation in this file needs the drivers
+        # include path -- not just the 4 lines that already say
+        # `/I"$driversDir"` (cmd13/14/20/23). The other ~18 `cl` lines
+        # resolve their bare #includes via same-directory resolution today
+        # (the including .c and included .h both sit directly in the flat
+        # drivers/ dir), which breaks the moment drivers/ splits into layer
+        # subdirs. Every `cl` line gets ONE canonical flag set:
+        # `/I"$driversDir"` (kept, per finding 6's "." reasoning for
+        # INCLUDE_DIRS -- same logic applies here) plus one `/I"$driversDir\
+        # <layer>"` per layer, inserted right after the common
+        # `cl /nologo /W3 /EHsc[ /std:c11]` prefix that every invocation
+        # shares (some lines have /std:c11, some don't; none lack /EHsc).
+        # Any pre-existing lone `/I"$driversDir"` is stripped first so it
+        # isn't duplicated once the canonical flag set is inserted.
+        $driversIncFlags = (@('/I`"$driversDir`"') + ($layerNames | ForEach-Object { '/I`"$driversDir\' + $_ + '`"' })) -join ' '
+        $raw = $raw -replace '/I`"\$driversDir`"\s*', ''
+        # finding 5: use a MatchEvaluator (scriptblock), not a plain string,
+        # for the replacement -- $driversIncFlags contains literal
+        # "$driversDir" text that a string-form -replace/[regex]::Replace
+        # replacement would try to interpret as a $-substitution token.
+        $clPrefixPattern = 'cl /nologo /W3 /EHsc(?: /std:c11)?'
+        $raw = [regex]::Replace($raw, $clPrefixPattern, { param($cm) $cm.Value + ' ' + $driversIncFlags })
     }
 
     $rxMatches = [regex]::Matches($raw, $siteRewritePattern)
@@ -701,6 +754,14 @@ foreach ($file in $allRewriteTargets) {
         $rewriteFileCount++
         $rewriteLineCount += $fileLineHits
         Write-RewrittenFile -RealPath $file.FullName -Content $newRaw -Encoding $utf8NoBom
+    } elseif ($newRaw -cne $originalRaw) {
+        # finding 1: 0 site hits but the text changed anyway (should not
+        # happen -- every branch above either rewrites a matched span or
+        # appends it verbatim) -- fail loud rather than silently write a
+        # file that scored 0 hits.
+        $relPath = $file.FullName.Substring($RepoRoot.Length + 1) -replace '\\','/'
+        Write-Error "$relPath : 0 site hits but rewritten text differs from source -- refusing to write (round-trip identity check failed)."
+        if (-not $DryRun) { exit 1 }
     }
 }
 
@@ -717,12 +778,21 @@ foreach ($file in $allRewriteTargets) {
 #     same-tier bare include already works.
 # ---------------------------------------------------------------------------
 Write-Host "`n=== 4c. espInterfaces/ bare-include prefix strip ===" -ForegroundColor Cyan
+# finding 7: preview/apply divergence -- under -DryRun/-PreviewDir, section 1
+# (git mv) never actually runs, so these files are still sitting at their
+# OLD flat drivers/ path on disk when this section scans $driversDirAll.
+# Look up each file's post-move path from mapping.csv and mirror the
+# preview copy there, so the preview tree reflects the tree -Apply would
+# actually produce (files already found via their new path when this
+# section runs for real, post git-mv, so this is a no-op under -Apply).
+$oldToNewPath = @{}
+foreach ($r in $rows) { $oldToNewPath[$r.old_path] = $r.new_path }
 $espIncludePattern = '(#\s*include\s*")espInterfaces/([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)(")'
 $espHitFiles = 0
 $espHitLines = 0
 $driversSrcFilesForEsp = Get-ChildItem -Path $driversDirAll -Recurse -File -Include *.c,*.h
 foreach ($file in $driversSrcFilesForEsp) {
-    $raw = Get-Content -Path $file.FullName -Raw -ErrorAction SilentlyContinue
+    $raw = Get-Content -Path $file.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($null -eq $raw) { continue }
     if ($raw -notmatch 'espInterfaces/') { continue }
     $espMatches = [regex]::Matches($raw, $espIncludePattern)
@@ -732,7 +802,8 @@ foreach ($file in $driversSrcFilesForEsp) {
     $espHitFiles++
     $espHitLines += $espMatches.Count
     $newRaw = [regex]::Replace($raw, $espIncludePattern, '$1$2$3')
-    Write-RewrittenFile -RealPath $file.FullName -Content $newRaw -Encoding $utf8NoBom
+    $previewRel = if ($oldToNewPath.ContainsKey($relPath)) { $oldToNewPath[$relPath] } else { $relPath }
+    Write-RewrittenFile -RealPath $file.FullName -Content $newRaw -Encoding $utf8NoBom -PreviewRelOverride $previewRel
 }
 Write-Host "Total: $espHitLines espInterfaces/ include(s) across $espHitFiles file(s) $(if ($DryRun) {'would be rewritten'} else {'rewritten'})."
 

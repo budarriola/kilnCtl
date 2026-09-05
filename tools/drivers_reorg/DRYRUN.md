@@ -84,14 +84,12 @@ below and is byte-identical to HEAD afterward (`git diff` empty).
    New section 0a. Duplicate `old_path`/`new_path` rows are a pure
    data-authoring bug independent of repo state, so they fail on *every*
    invocation including `-DryRun` (negative-tested below). A nonexistent
-   `old_path` is allowed to be a *pending* row -- the coordinator explicitly
-   asked for a `profiles_store.h` mapping row "now" even though that file
-   was expected to land from another in-flight session -- so it only
-   hard-fails under `-Apply`; `-DryRun` reports it as a warning naming the
-   file. (As it happens, `profiles_store.h` had already landed on disk by
-   the time this pass ran, so the missing-old_path count is 0 in the
-   current dry run -- the -Apply-only gate is exercised by the mechanism,
-   not by this specific row, today.)
+   `old_path` is allowed to be a *pending* row (a mapping.csv entry for a
+   file another in-flight session is expected to add) so it only hard-fails
+   under `-Apply`; `-DryRun` reports it as a warning naming the file. The
+   missing-old_path count is 0 in the current dry run -- every mapped file
+   is on disk today -- so the -Apply-only gate is exercised by the
+   mechanism, not by any specific row, in this pass.
 8. **Section 5 (upward-include verifier) now hard-fails `-Apply`.**
    Previously it only printed the list. `if ($violations.Count -gt 0 -and
    $Apply) { exit 1 }` added -- negative-tested below by injecting a fake
@@ -102,12 +100,10 @@ below and is byte-identical to HEAD afterward (`git diff` empty).
    `$tierOf` -- a sim backend legitimately reads config the way
    control/persist/net do, not a bottom-tier device driver. `factory_reset.c`/
    `.h` move from `persist` to `http` in `mapping.csv` (it registers an
-   httpd route, same as the rest of the `*_http.c` family). A `mapping.csv`
-   row for `firmware/KilnFW/App/drivers/profiles_store.h` (persist) was
-   added per instruction, ahead of/alongside another agent's work on that
-   file -- see finding 7 above for how the old_path-existence check treats
-   a pending row. The `profile_executor_run.c -> profiles_http.h` residual
-   itself was deliberately left untouched, as instructed.
+   httpd route, same as the rest of the `*_http.c` family). `mapping.csv` has
+   a row for `firmware/KilnFW/App/drivers/profiles_store.h` (persist); the
+   `profile_executor_run.c -> profiles_http.h` residual itself was
+   deliberately left untouched, as instructed.
 10. **Section 6 `$already` scoping bug.** `$already`/`$missingEntries` are
     now computed once inside section 2b (from `$includeDirsEntries`, which
     includes `"."`) and exposed via `$script:includeDirsAlreadyCount` /
@@ -423,6 +419,16 @@ tools/check_uart_version_independence.ps1                             -> App/dri
 tools/check_uri_handler_cap.ps1                                       -> spans App/drivers/http/*
 ```
 
+**Hand-fix, not covered by the script's scan (finding 6):**
+`firmware/CommonFW/test/vectors/frame_vectors.json:2` cites
+`App/drivers/espInterfaces/uart_protocol.c`. `plan_moves.ps1`'s path-keyed
+site scan (section 4) only walks `*.ps1`/`*.py` (plus `*.c`/`*.h` under
+`App/test`) and `*.md` -- it does not scan `*.json`, so this citation is not
+rewritten automatically. Fix by hand in the same commit as the move:
+`App/drivers/espInterfaces/uart_protocol.c` -> `App/drivers/owners/uart_protocol.c`
+(the `espInterfaces/` segment is dropped, same as every other espInterfaces
+site -- section 4c of this doc).
+
 ### 4c. Host-test "mirror" scripts under App/test that #include a drivers/*.c file directly
 
 Same 12 scripts as the prior pass; each `#include "../drivers/X.c"` or path
@@ -636,11 +642,12 @@ rather than `persist -> http`.
 `http` (tier 0) is still strictly above `sim`'s new tier (1). This is the
 same real, narrow dependency Fix 3 already proposed a resolution for
 (`wifi_provision_http_get_server()`, one accessor); `wifi_provision_state.h`
-already exists with exactly that accessor (item 9's narrow-header family),
-but `sim_backend.c` itself has not been repointed at it -- left as-is per
-the coordinator's "do not chase" instruction for this pass (that specific
-residual was named as an exception; this one is the same shape but was not
-named, so it's reported here rather than silently fixed out of scope).
-Confirmed via `plan_moves.ps1 -DryRun`'s section 5 output and negative-test
-8 above (which temporarily added a second, injected violation on top of
-this real one, then reverted it).
+already exists with exactly that accessor (item 9's narrow-header family).
+Another agent is repointing `sim_backend.c` at `wifi_provision_state.h` in a
+parallel pass, so this residual is expected to resolve by that code change
+landing, not by this script's `$allowedUpwardIncludes` table -- do **not**
+add a `sim_backend.c|wifi_provision_http.h` entry there; that would paper
+over a real, fixable upward include instead of letting the in-flight fix
+close it. Confirmed via `plan_moves.ps1 -DryRun`'s section 5 output and
+negative-test 8 above (which temporarily added a second, injected violation
+on top of this real one, then reverted it).
