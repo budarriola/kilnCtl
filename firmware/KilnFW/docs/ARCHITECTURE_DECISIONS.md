@@ -274,11 +274,17 @@ already reached NVS.
 Import gates on `ota_http_check_interlocks()` (safety link must be up), not
 `heat_interlock` (the latter answers "may heat run during an update", the
 opposite question) — this is a deliberate reuse of the OTA gate, not a bug,
-but it means restore is refused whenever the safety link is down. Each
-exported zone object carries a `"_":0` sentinel (`backup_http.c:214`) used
-purely as a trailing-comma guard in the streaming writer — junk in an
-otherwise user-facing format that consumers must ignore; recorded here so
-nobody "fixes" it as a stray field without understanding why it's there.
+but it means restore is refused whenever the safety link is down.
+
+**FIXED 2026-09-04**: the `"_":0` trailing-comma-guard sentinel this
+paragraph used to describe is gone. `backup_http.c` has since split into
+`backup_export.c`/`backup_import.c`; `backup_export.c`'s own comment
+(`:327-335`) says the sentinel was removed 2026-08-21 — before this decisions
+doc was even written — because `settings_source` became the object's
+unconditionally-last key, leaving no trailing comma to guard against. Every
+exported zone object now just closes cleanly with no junk key. Nothing
+currently reads or ignores a `"_"` field; a future agent does not need to
+preserve one.
 
 ## NVS rollback-refusal vs. legacy-partition migration (TODO.md 8.1/8.2)
 

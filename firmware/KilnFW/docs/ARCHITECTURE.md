@@ -69,7 +69,7 @@ urgent.
 | `screen_idle` | 3 | **6144** (STALE — was 3072, corrected 2026-09-04) | LCD idle/screensaver timer | `App/drivers/screen_idle.c:326` |
 | `wifi_mode_ui` / `wifi_connect_ui` / `wifi_scan_ui` / `wifi_ap_id_ui` | 5 | 4096 | **STALE, corrected 2026-09-04**: `ui_page_network.c` split — `wifi_connect_ui`/`wifi_scan_ui` moved to `ui_page_network_manage.c`, `wifi_mode_ui` stayed, and a FOURTH task, `wifi_ap_id_ui` (AP-identity worker), was added and was missing from this inventory entirely. All four are still ad-hoc job-struct worker tasks predating and **not yet migrated onto** `wifi_prov_owner`'s queue — see §3 | `App/drivers/ui_page_network.c:271` (`wifi_mode_ui`), `:585` (`wifi_ap_id_ui`), `App/drivers/ui_page_network_manage.c:296` (`wifi_connect_ui`), `:378` (`wifi_scan_ui`) |
 | `ota_pico_relay` | task-supplied | `OTA_PICO_RELAY_TASK_STACK` | Relays an OTA image to the Pico safety processor over the link | `App/drivers/ota_pico_relay.c:672` |
-| `ota_confirm` | task-supplied | 3072 | One-shot: confirms an ESP-side OTA rollback candidate | `App/main.c:695` |
+| `ota_confirm` | task-supplied | 3072 | One-shot: confirms an ESP-side OTA rollback candidate | **STALE, corrected 2026-09-04**: `App/main.c` was itself split by boot phase the same day as the table-wide correction above; the task creation moved to `App/main_network_http.c:472` (`main_ota_rollback_confirm_task()`, defined `:131`) |
 | `factory_reset_reboot` | `tskIDLE_PRIORITY+1` | 2048 | One-shot: reboots after a factory-reset request | `App/drivers/factory_reset.c:104` |
 
 **`esp_http_server`'s single worker task** is not created by this codebase
@@ -179,15 +179,21 @@ callback.
 purpose.** Three call sites, all fail-safe/last-resort paths that must keep
 working even if the owner task itself is wedged:
 
-1. `uart_bridge.c`'s `link_watchdog_task` (`uart_bridge.c:1771`) — drops
-   relays when the PC link goes silent. "Must still run when every bridge
-   task is blocked."
-2. `profile_executor.c`'s `watchdog_task_entry` (guard 9,
-   `profile_executor.c:1548,1569,1583`) — drops relays on a stale control
-   tick or a 30 s-silent safety link. "Must still run if the main control
-   task is stuck."
-3. `main.c`'s `kiln_enter_safe_state()` (`main.c:79`) — the boot-failure/
-   panic shutdown path.
+1. `App/drivers/uart_bridge.c`'s `link_watchdog_task` (**STALE citation
+   corrected 2026-09-04**: function at `uart_bridge.c:311`, task creation
+   already correctly cited in §1's table at `:549`) — drops relays when the
+   PC link goes silent. "Must still run when every bridge task is blocked."
+2. `App/drivers/profile_executor.c`'s `watchdog_task_entry` (guard 9,
+   **STALE citation corrected 2026-09-04**: function at
+   `profile_executor.c:1282`, its `kiln_io_all_relays_off()` calls at
+   `:1397`, `:1448`, `:1469`) — drops relays on a stale control tick or a
+   30 s-silent safety link. "Must still run if the main control task is
+   stuck."
+3. `App/main.c`'s boot-failure/panic shutdown path (**STALE, corrected
+   2026-09-04**: this was cited as `kiln_enter_safe_state()` at `main.c:79`;
+   the function was renamed `main_kiln_enter_safe_state()` and moved to
+   `App/main.c:155` when `main.c` was split by boot phase the same day — see
+   `docs/SYSTEM_ARCHITECTURE.md` §6's boot-order section for that split).
 
 Routing any of these through `kiln_io_owner`'s queue would make them depend
 on the owner task *not* being the thing that's wedged — backwards for code
@@ -255,8 +261,11 @@ commands. Deliberately not built ahead of a real caller needing it.
 
 ### `ui_page_network.c`'s three ad-hoc job structs
 
-`scan_job_t`, `mode_job_t`, `connect_job_t` (`ui_page_network.c:251,535,628`
-— `wifi_mode_ui`/`wifi_connect_ui`/`wifi_scan_ui` tasks in §1's table) were
+`scan_job_t`, `mode_job_t`, `connect_job_t` (**STALE citation corrected
+2026-09-04**, consistent with §1's table note on the same split:
+`mode_job_t` is `App/drivers/ui_page_network.c:244`; `scan_job_t`/
+`connect_job_t` moved to `App/drivers/ui_page_network_manage.c:89`/`:179` —
+`wifi_mode_ui`/`wifi_scan_ui`/`wifi_connect_ui` tasks in §1's table) were
 each added as a same-session emergency fix for the LVGL-freeze bug, each
 its own worker-task-plus-mutex pair, polled from `refresh_cb()`. Now that
 `wifi_prov_owner` exists with a real queue and request/response producer
@@ -298,7 +307,11 @@ lands," not a separate phase — it landed piecemeal with Phases 1/2/4:
 
 `profile_executor_run()`/`_halt()`/`_pause()`/`_resume()` were read in full
 during the Phase 3 research pass and already wrap their entire bodies in
-`s_exec.lock` (`profile_executor.c:1707`/`:1989`/`:2039`/`:2067`) — a
+`s_exec.lock` (**STALE citation corrected 2026-09-04**: `profile_executor.c`
+has since split — `profile_executor_run()` is now
+`App/drivers/profile_executor_run.c:55`, `_halt()`/`_pause()`/`_resume()` are
+`App/drivers/profile_executor_status.c:21`/`:119`/`:164`; all four still take
+`s_exec.lock` around their body per those files' own `xSemaphoreTake`s) — a
 correct mutex-guarded API with no uncoordinated-writer bug of the kind
 Phase 1 fixed. Converting a safety-critical state machine to a queue buys
 no safety and adds regression risk, and trades a lock that makes callers
