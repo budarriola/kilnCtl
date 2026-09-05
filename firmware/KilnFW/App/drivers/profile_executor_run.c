@@ -19,7 +19,7 @@
 #include "heat_enable.h"
 #include "kiln_io_owner.h"
 #include "ota_state.h"
-#include "profiles_http.h"
+#include "profiles_store.h"
 #include "relay_authority.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"

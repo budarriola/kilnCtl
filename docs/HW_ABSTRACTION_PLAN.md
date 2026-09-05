@@ -945,6 +945,15 @@ proposed fixes in `tools/drivers_reorg/DRYRUN.md` rather than repeated here:
     `zones_config_accessors.h` includer for the same single-accessor
     pattern -- none qualified, all use additional accessors (relay_mask,
     control_mode, PID/model getters, etc.) so they keep the full header.
+12. DONE (2026-09-05): `profile_executor_run.c` (control) included http-tier
+    `profiles_http.h` for `profiles_http_get()`. New `profiles_store.h`
+    (persist) declares `profiles_http_get()`/`_save()`/`_delete()`;
+    `profiles_http.h` includes it back. Grepped every other `profiles_http.h`
+    includer: `backup_export.c`/`backup_import.c`/`dashboard_http.c`/
+    `dashboard_exec_http.c`/`readiness_http.c` are mapping.csv-forced http
+    tier despite non-`_http` names for two of them, and `uart_bridge_ext*.c`/
+    `ui_page_*` are bridge/ui (top) tier -- none needed switching;
+    `profile_executor_run.c` was the only non-top-tier includer.
 
 All placements ambiguous under the original plan are now resolved in
 `mapping.csv` (coordinator decisions, third round): the zones_http family
