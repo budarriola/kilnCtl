@@ -264,6 +264,50 @@ passes `use_ct_map_backup=True` (a host-test scenario, or a deliberate
 exercise of `commissioning_gate.c`'s accept path). The real map comes from the
 zone current-sweep on the zones page once CTs exist.
 
+## Gate fields -- config values that make a feature REACHABLE, not just configured
+
+`src/kilnctrl/gate_fields.py` is the checked-in inventory of **gate fields**:
+config values that skip a whole feature/subsystem for one of their values
+(`control_mode` gating the fuzzy PID layer is the archetype -- the fuzzy
+layer only runs under `control_mode == 3`; `ct_installed` gating the
+current-transformer-dependent safety guards S3/S4/S9/S11/S14 is another),
+as distinct from fields that merely **tune** a feature that is already
+running (`pid_kp` never skips the PID loop, at any value). Two incidents
+paid for this list: an analysis pooled 28 `control_mode: 2` captures with
+one `control_mode: 3` capture and reported a 37,008-sample conclusion whose
+real n was 2178; separately, two campaigns ran for hours believing the
+fuzzy layer was active because the readback checked `fuzzy_strength_pct`
+(a tuning field) instead of `control_mode` (the gate). The list is not
+exhaustive -- see the module docstring for what has and has not been
+confirmed by reading the actual gating code.
+
+Two consumers of that inventory:
+
+* **`_check_gate_fields_consistent` in `run_queue.py`** -- runs during
+  campaign preflight, before any board is touched (alongside the existing
+  B9 arms-differ check): refuses a preset that sets a gated feature's
+  tuning field without pinning that feature's gate to a reachable value in
+  the same zone. This is the authoring-time fix for the "checked the wrong
+  field" incident above. Every applied preset's gate values are also
+  snapshotted into the capture's `meta` header line
+  (`gate_fields.summarize_preset_gates`), so a capture answers "which
+  gated features were reachable during this run" from its own header.
+* **`capture_pool_provenance.py`** -- the general, N-file form of the
+  pooling incident above: given a list of capture `.jsonl` paths and a gate
+  field name, refuses (`assert_pool_gate_consistent`) or reports
+  (`check_pool_gate_consistency`) a pool that mixes files where the gate
+  was reachable with files where it was not, checked per zone from the
+  per-tick `exec.zones[].<field>` telemetry every HTTP capture already
+  records. Works for any gate field with per-sample telemetry (today:
+  `control_mode`), not only the fuzzy layer -- a new gated feature gets
+  this check for free rather than a bespoke pooling script. Complements
+  (does not duplicate) `fuzzy_band_probe.py`'s own per-file, per-tick
+  `control_mode` filtering for its membership-band math, and
+  `bd_reachability_check.py`'s two-arm `bd_*` telemetry comparison:
+  ```
+  python -m kilnctrl.capture_pool_provenance control_mode capture1.jsonl capture2.jsonl ...
+  ```
+
 ## Live-bench test harness (pytest)
 
 `tests/bench_fixture_session.py` is the reusable precondition the live tests

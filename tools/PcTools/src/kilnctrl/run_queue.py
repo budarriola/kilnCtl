@@ -86,6 +86,7 @@ import urllib.request
 from typing import Callable, Optional, Sequence
 
 from kilnctrl import capability_preflight, ramp_assist_http_client, zones_http_client
+from kilnctrl import gate_fields
 from kilnctrl import profile_stabilization as ps
 
 log = logging.getLogger(__name__)
@@ -1055,6 +1056,37 @@ def _check_arms_differ(presets_by_name: dict) -> None:
                 "field before retrying.")
 
 
+def _check_gate_fields_consistent(presets_by_name: dict) -> None:
+    """GATE-FIELD PREFLIGHT: refuse before any kiln hour is spent if a
+    preset tunes a gated feature (``gate_fields.GATE_FIELDS``'
+    ``tuning_fields``, e.g. ``fuzzy_strength_pct``) without pinning that
+    feature's gate to a reachable value (e.g. ``control_mode``) in the same
+    zone.
+
+    THE INCIDENT THIS EXISTS FOR: two campaigns ran for HOURS at
+    ``control_mode: 2`` while the operator believed the fuzzy layer was
+    active, because the readback/verification that ran checked
+    ``fuzzy_strength_pct`` (a value that only has any effect once the gate
+    is open) instead of ``control_mode`` (the gate itself) --
+    ``gate_fields.py``'s docstring. ``zones_http_client.apply_zone_preset()``
+    already reads back and asserts every field a preset NAMES
+    (``_verify_against_preset``), so a preset that correctly pins
+    ``control_mode: 3`` and fails to land it is already caught -- the gap
+    was authoring-time: nothing said a preset that tunes a gated feature
+    must also pin that feature's gate. This check is pure local data (the
+    preset dicts themselves, exactly like :func:`_check_arms_differ`), so it
+    runs before ANY board is touched -- see :func:`gate_fields.
+    check_preset_gate_consistency` for the per-zone logic."""
+    for preset_name, preset in presets_by_name.items():
+        problems = gate_fields.check_preset_gate_consistency(preset)
+        if problems:
+            raise RunQueueError(
+                f"refusing to start: preset {preset_name!r} tunes a gated feature without "
+                "opening its gate (see gate_fields.py for the full inventory and the "
+                "incident this check exists for):\n  " + "\n  ".join(problems)
+            )
+
+
 def _preflight_campaign(entries: Sequence[QueueEntry], cfg: RunQueueConfig,
                          apply_preset_fn=None,
                          preflight_fn: "Optional[Callable]" = None) -> None:
@@ -1112,6 +1144,10 @@ def _preflight_campaign(entries: Sequence[QueueEntry], cfg: RunQueueConfig,
     # so it is the cheapest possible refusal and never depends on the board
     # being reachable at all.
     _check_arms_differ(resolved)
+
+    # GATE-FIELD PREFLIGHT (see gate_fields.py) -- also pure local data, also
+    # before any HTTP probe.
+    _check_gate_fields_consistent(resolved)
 
     for preset_name, preset in resolved.items():
         log.info("[preflight] checking preset %s capabilities against %s",
@@ -1274,9 +1310,21 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     # raise before this point is ever reached, so in practice this is
     # always in sync with entry.stabilize once we get here, but the
     # variable it reads is the applied outcome, not the request.
+    # "gates" -- CLAUDE.md's capture-time-provenance item 1: which
+    # gate_fields.GATE_FIELDS this run's preset pinned, per zone, and
+    # whether that pinned value made the feature reachable. _preflight_
+    # campaign already refused (before any board was touched) a preset that
+    # tunes a gated feature without opening its gate; this is the
+    # complementary record of WHAT WAS ACTUALLY APPLIED, written into the
+    # capture header so a future pooling analysis (or a human) can answer
+    # "which features were reachable during this run" from the capture
+    # itself -- see capture_pool_provenance.py, which checks exactly this
+    # across a pool of captures using the per-tick telemetry as a
+    # cross-check against what this header claims was applied.
     meta_line = json.dumps({"meta": {
         "stabilized": stabilized_applied,
         "min_segment_index": ps.STABILIZATION_SEGMENT_INDEX if stabilized_applied else 0,
+        "gates": gate_fields.summarize_preset_gates(preset),
     }})
     fh.write(meta_line + "\n")
     fh.flush()
