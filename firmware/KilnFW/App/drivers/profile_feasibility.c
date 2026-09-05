@@ -3,22 +3,125 @@
 #include <math.h>
 
 #include "MAX31856.h"
+#include "thermo_owner.h"
 #include "zones_http.h"
 
-/* Ambient reference for the plant model. profile_executor.c captures a real
- * one from the MAX31856 cold junction at firing start, but this module is
- * asked its question at *edit* time -- on a web page, possibly with the kiln
- * cold and the thermocouples unread -- so it uses the same constant
- * profile_executor.c falls back to (FALLBACK_AMBIENT_C, 20 C). The verdict is
- * insensitive to a few degrees of error here: every kiln temperature that
- * matters is hundreds of degrees above ambient, so a 5 C mis-estimate moves
- * the computed headroom by well under 1%.
+#include "esp_timer.h"
+
+/* Fallback ambient for the plant model, used whenever no live cold-junction
+ * reading is available (bench never wired, every channel faulted, or the
+ * first call before the throttled cache below has ever refreshed). Also the
+ * value profile_executor.c falls back to when its own step_ambient_c capture
+ * never happened.
  *
- * Not read from the live cold junction on purpose: that value drifts upward
- * as the board warms, and a feasibility colour that changed while the user
- * was looking at it, with no edit having been made, would be worse than a
- * slightly stale one. */
+ * Kept as a named constant rather than folded into get_live_ambient_c()
+ * because zero-tuned/no-thermocouple boards need SOME number, and the old
+ * hardcoded 20 C is a reasonable room-temperature guess for that case. On a
+ * bench that is actually warmer than 20 C (see get_live_ambient_c() below),
+ * using the live reading instead of this constant is exactly the fix for the
+ * false UNREACHABLE this module used to report: at true bench ambient (e.g.
+ * 30 C+, this shop runs warm), a zone's coupled k_eff of 52.4 C gives a
+ * ceiling of ambient + 52.4, comfortably above a 70 C target once ambient
+ * is read correctly instead of assumed at 20. */
 #define FEASIBILITY_AMBIENT_C 20.0f
+
+/* Live ambient is clamped to this range before use -- a MAX31856 cold
+ * junction reads the IC's own local temperature, not the room, and a bad
+ * fault/decode that still limped past thermo_owner's own checks should not
+ * be allowed to hand this module something like -40 or 150 that would
+ * silently make every profile look reachable or nothing look reachable. */
+#define FEASIBILITY_AMBIENT_MIN_C 0.0f
+#define FEASIBILITY_AMBIENT_MAX_C 60.0f
+
+/* thermo_owner_command_read_all() does real SPI I/O through the thermo owner
+ * task (bounded by THERMO_OWNER_WAIT_MS, no lock held across the call by this
+ * module -- see thermo_owner.h) -- it is the cheapest available producer for
+ * a fresh cold-junction reading in this codebase today; nothing exposes a
+ * pre-existing zero-I/O cached snapshot (dashboard_http.c/board_temps.c/
+ * thermo_owner.c all either do the SPI themselves on every call or require a
+ * caller-supplied MAX31856Reading array that only exists inside another
+ * module's own I/O call). Since this module answers from httpd (profile
+ * edit/preview) and LCD paths, it must not turn every keystroke or every
+ * frame into a bus transaction, so the result is cached here and refreshed
+ * at most once per FEASIBILITY_AMBIENT_REFRESH_US -- ordinary calls just
+ * read the cache. */
+#define FEASIBILITY_AMBIENT_REFRESH_US ((int64_t)30 * 1000 * 1000) /* 30 s */
+
+static bool s_ambient_override_active = false;
+static float s_ambient_override_c = FEASIBILITY_AMBIENT_C;
+
+/* Forces get_live_ambient_c() to return `ambient_c` without touching
+ * thermo_owner at all -- test-only. Declared here rather than in the public
+ * header (production code never calls it); test_profile_feasibility.c
+ * forward-declares these two the same way it already stubs
+ * zones_config_get_model()/get_coupling(). */
+void profile_feasibility_test_set_ambient_c(float ambient_c)
+{
+    s_ambient_override_active = true;
+    s_ambient_override_c = ambient_c;
+}
+
+void profile_feasibility_test_clear_ambient_override(void)
+{
+    s_ambient_override_active = false;
+    s_ambient_override_c = FEASIBILITY_AMBIENT_C;
+}
+
+static float s_ambient_cache_c = FEASIBILITY_AMBIENT_C;
+static int64_t s_ambient_cache_last_us = -(FEASIBILITY_AMBIENT_REFRESH_US);
+
+/* Live ambient reference for the plant model: the MINIMUM cold-junction
+ * reading across every channel thermo_owner answers for. Minimum, not mean
+ * or the reading from channel 0, because a channel sitting near an active
+ * heater or a warm enclosure wall reads hotter than the room -- the coolest
+ * channel is the best available proxy for the ambient the kiln shell itself
+ * will cool toward, which is what T_amb in the FOPDT model actually means.
+ * Non-finite/faulted channels are ignored outright; if none answer, or
+ * thermo_owner itself cannot answer (never started, no bus, timeout), this
+ * falls back to FEASIBILITY_AMBIENT_C exactly as before this live reading
+ * existed.
+ *
+ * Throttled by s_ambient_cache_* -- see FEASIBILITY_AMBIENT_REFRESH_US above
+ * for why a fresh SPI round trip is not done on every call. */
+static float get_live_ambient_c(void)
+{
+    if (s_ambient_override_active) {
+        return s_ambient_override_c;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if (now_us - s_ambient_cache_last_us < FEASIBILITY_AMBIENT_REFRESH_US) {
+        return s_ambient_cache_c;
+    }
+    s_ambient_cache_last_us = now_us;
+
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    size_t count = 0;
+    float ambient = FEASIBILITY_AMBIENT_C;
+    if (thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &count) == ESP_OK &&
+        count > 0) {
+        float min_cj = NAN;
+        for (size_t i = 0; i < count; i++) {
+            if (readings[i].spi_failed || !isfinite(readings[i].cj_temperature_c)) {
+                continue;
+            }
+            float cj = readings[i].cj_temperature_c;
+            if (!isfinite(min_cj) || cj < min_cj) {
+                min_cj = cj;
+            }
+        }
+        if (isfinite(min_cj)) {
+            if (min_cj < FEASIBILITY_AMBIENT_MIN_C) {
+                min_cj = FEASIBILITY_AMBIENT_MIN_C;
+            } else if (min_cj > FEASIBILITY_AMBIENT_MAX_C) {
+                min_cj = FEASIBILITY_AMBIENT_MAX_C;
+            }
+            ambient = min_cj;
+        }
+    }
+    s_ambient_cache_c = ambient;
+    return ambient;
+}
 
 /* A rate within this fraction of the modelled maximum is still called OK.
  * The maximum is the *asymptotic open-loop* rate at full power; a real closed
@@ -167,7 +270,7 @@ profile_seg_verdict_t profile_feasibility_segment_in_mask(uint8_t zone_index, ui
      * -- see effective_k_dc() above for the model and why it matters. */
     const float k_eff = effective_k_dc(zone_index, zone_mask, k_dc);
 
-    const float t_amb = FEASIBILITY_AMBIENT_C;
+    const float t_amb = get_live_ambient_c();
     const float ceiling_c = t_amb + k_eff; /* steady state at u = 1: T - T_amb = K_eff */
 
     float target = seg->target_c;
@@ -324,7 +427,7 @@ profile_seg_verdict_t profile_feasibility_profile_in_mask(uint8_t zone_index, ui
     /* The run starts from the room, then each segment starts where the
      * previous one's target left it -- the same walk profile_executor.c does
      * with real setpoints. */
-    float start_c = FEASIBILITY_AMBIENT_C;
+    float start_c = get_live_ambient_c();
     profile_seg_verdict_t rollup = PROFILE_SEG_OK;
 
     for (uint8_t i = 0; i < p->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {

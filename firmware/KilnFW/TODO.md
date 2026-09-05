@@ -625,6 +625,23 @@ model (`dT/dt = (K*u - (T - T_amb)) / tau`): max heating/cooling rate, an
 (never a false OK or false red). Verified on hardware that the badge agrees with
 what `profiles_start()` actually refuses. DONE and hardware-verified 2026-08-20.
 
+- [x] **`T_amb` is now a live reading, not a hardcoded 20 C (2026-09-05).**
+      `get_live_ambient_c()` in `profile_feasibility.c` takes the minimum
+      cold-junction reading across every channel `thermo_owner_command_read_all()`
+      answers for (clamped to `[0, 60]` C), and falls back to the
+      `FEASIBILITY_AMBIENT_C` constant (still 20 C) only when no live reading is
+      available. Root cause of the bug this fixes: a bench that actually sits
+      well above 20 C (this shop runs warm) made zone 2's coupled ceiling
+      (`20 + 52.4 = 72.4`, minus the 5 C margin = 67.4) report a 70 C profile
+      `UNREACHABLE`, while the fixture was observed reaching 80 C on the bench.
+      Since this module answers from httpd (profile edit/preview) and LCD
+      render paths and must not turn every request into a fresh SPI
+      transaction, the reading is cached and refreshed at most once per 30 s
+      (`FEASIBILITY_AMBIENT_REFRESH_US`) rather than read live on every call.
+      Tests drive `profile_feasibility_test_set_ambient_c()`/
+      `_clear_ambient_override()` (test-only hooks, not in the public header)
+      instead of exercising the real timer/thermo_owner path.
+
 - [ ] **One global bridge stall in a 25-minute soak (2026-08-20), cause not
       found.** 78 polling ticks, 77 clean; at t=1031s EVERY bridge surface
       (control/profiles/autotune/wifi/touch) failed in the same tick — "ACKed but

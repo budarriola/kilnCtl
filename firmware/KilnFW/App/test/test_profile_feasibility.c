@@ -115,6 +115,36 @@ uint8_t zones_config_get_thermo_count(void)
     return s_thermo_count;
 }
 
+// thermo_owner_command_read_all() is thermo_owner.c's real production
+// producer for profile_feasibility.c's live-ambient reading (see
+// get_live_ambient_c() there); thermo_owner.c itself is not compiled into
+// the host-test binary (it is a FreeRTOS task with a real SPI-bus owner
+// loop), so this is the ONE definition of that symbol the linker sees here --
+// same "plain C stand-in for the real symbol" shape as the zones_http.c
+// getters above. Answering "not found, no readings" reproduces exactly the
+// pre-live-ambient behaviour (fallback to FEASIBILITY_AMBIENT_C) for every
+// existing test in this file that never calls
+// profile_feasibility_test_set_ambient_c() -- see that hook below for the
+// tests that exercise the live path instead.
+esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_readings,
+                                        size_t *out_count)
+{
+    (void)out;
+    (void)max_readings;
+    if (out_count) {
+        *out_count = 0;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+// ---------------------------------------------------------------------------
+// Test-only ambient hooks -- defined in profile_feasibility.c, not declared
+// in profile_feasibility.h since production code never calls them (see that
+// file's comment on profile_feasibility_test_set_ambient_c()).
+// ---------------------------------------------------------------------------
+void profile_feasibility_test_set_ambient_c(float ambient_c);
+void profile_feasibility_test_clear_ambient_override(void);
+
 // ---------------------------------------------------------------------------
 // Cross-file control hooks for test_backup_import.c
 // ---------------------------------------------------------------------------
@@ -808,6 +838,69 @@ static void test_segment_in_mask_zone_not_in_mask_is_unknown(void)
                "and not silently skipped as OK");
 }
 
+// ---------------------------------------------------------------------------
+// 17. Live ambient: a warmer bench raises the ceiling and can flip a verdict
+// from UNREACHABLE to OK, matching the owner's bench observation (a 70 C
+// target reported UNREACHABLE at the old hardcoded 20 C ambient, on a kiln
+// that actually reaches 80 C).
+// ---------------------------------------------------------------------------
+
+static void test_live_ambient_raises_ceiling(void)
+{
+    TEST_SECTION("a live ambient of 30 C reaches a target that the 20 C fallback calls "
+                 "UNREACHABLE -- ambient + k_eff is the ceiling, so raising ambient raises it");
+
+    stub_reset();
+    s_zones[0].k_dc = 50.0f;      // ceiling = t_amb + 50
+    s_zones[0].tau_s = 3600.0f;   // so C/s * 3600 == C/hr, arithmetic stays hand-checkable
+    profile_feasibility_test_clear_ambient_override();
+
+    // At the 20 C fallback: ceiling 70, threshold 65 C -- a 70 C target sits
+    // inside the margin (70 > 65) and is UNREACHABLE, same shape as the real
+    // zone-2 bench case (72.4 C ceiling, 67.4 C threshold, 70 C target).
+    profile_segment_t target70 = seg_of(70.0f, 1.0f); // slow rate -- only the ceiling matters
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &target70) == PROFILE_SEG_UNREACHABLE,
+               "at the 20 C fallback ambient, 70 C is inside the 65 C threshold -> UNREACHABLE");
+
+    // The SAME segment, judged with a live ambient of 30 C: ceiling 80,
+    // threshold 75 C -- 70 C is now comfortably outside the margin.
+    profile_feasibility_test_set_ambient_c(30.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &target70) == PROFILE_SEG_OK,
+               "at a live 30 C ambient, the same 70 C target clears the 75 C threshold -> OK");
+
+    profile_feasibility_test_clear_ambient_override();
+}
+
+// ---------------------------------------------------------------------------
+// 18. No live reading (thermo_owner cannot answer, or the reading it gives
+// is unusable) falls back to FEASIBILITY_AMBIENT_C (20 C), reproducing every
+// verdict this module gave before a live ambient existed.
+// ---------------------------------------------------------------------------
+
+static void test_no_live_ambient_falls_back_to_20(void)
+{
+    TEST_SECTION("no usable live reading -> falls back to 20 C, old verdicts unchanged");
+
+    stub_reset();
+    profile_feasibility_test_clear_ambient_override();
+    // thermo_owner_command_read_all() is stubbed above to always answer
+    // ESP_ERR_NOT_FOUND/count==0 -- exactly "thermo_owner cannot answer" --
+    // so every test in this file that never touches the ambient override
+    // already exercises this path. This test pins the two boundary verdicts
+    // from test_ceiling_unreachable() explicitly, so a regression that made
+    // the fallback silently drift off 20 C would be caught here even if the
+    // ceiling-specific test above changed its own stub setup first.
+    profile_segment_t inside_margin = seg_of(1016.0f, 1.0f);  // ceiling 1020, threshold 1015
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
+               "with no live reading, ambient is still 20 C -- 1016 C stays inside the 1015 C "
+               "threshold, UNREACHABLE exactly as before this feature existed");
+
+    profile_segment_t outside_margin = seg_of(1014.0f, 1.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &outside_margin) != PROFILE_SEG_UNREACHABLE,
+               "and 1014 C still clears it -> not UNREACHABLE, same boundary as the 20 C "
+               "fallback always gave");
+}
+
 void run_test_profile_feasibility(void)
 {
     test_no_model_is_never_ok_and_never_red();
@@ -826,4 +919,6 @@ void run_test_profile_feasibility(void)
     test_coupling_raises_ceiling_in_mask();
     test_mask_zero_is_judged_coupled_across_configured_zones();
     test_segment_in_mask_zone_not_in_mask_is_unknown();
+    test_live_ambient_raises_ceiling();
+    test_no_live_ambient_falls_back_to_20();
 }
