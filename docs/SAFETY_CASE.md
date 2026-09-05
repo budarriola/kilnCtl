@@ -88,16 +88,16 @@ here; none is copied from an unverified summary.
    independently of the ESP32-S3. The commissioning-gate interlock
    (`GUARD_TEST_MATRIX.md` §8, closed 2026-08-28) is presumably what caused
    this to get set, though this pass did not trace exactly when/how it was
-   commissioned — only that it now is. **Owner decision needed:** the
+   commissioned — only that it now is. The
    commissioned ceiling (80°C) is identical to, not tighter than, the
    ESP-side zones' own `max_temp_c` (80°C) — real backstop against the ESP
-   continuing to command heat, but not a second, lower line of defense. This
-   rig has never been recorded firing above 60°C. Recommend commissioning
-   `abs_max_temp_c` down to roughly 70°C (60°C highest recorded + headroom,
-   comfortably under the fixture's 80°C wiring/component rating) so S1
-   becomes a genuinely independent, tighter ceiling rather than a mirror of
-   the primary controller's own limit. This is an OWNER DECISION — no
-   safety configuration was written as part of this verification pass.
+   continuing to command heat, but not a second, lower line of defense.
+   **Decided by the owner, 2026-09-05: `abs_max_temp_c` STAYS at 80°C, by
+   design.** Intent stated directly: the Pico's ceiling is meant to be the
+   same as or looser than the ESP's — a second set of eyes on the same
+   limit, never a tighter envelope of its own. This closes the item; do not
+   re-raise it as a gap that S1 "only mirrors" the ESP — that is the
+   intended relationship, not an oversight.
 
 2. **S8 (rate-of-rise), S13 (borrowed-TC-stale) and S14 (overcurrent) remain
    commissioned OFF today**, confirmed by the same live read: `max_rate_c_per_min`=0

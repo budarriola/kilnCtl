@@ -1280,10 +1280,11 @@ writes are refused whenever the relay owner is `ARMED` (steady state ~60 s
 after boot), so the only write window is the boot GRACE period — nothing in
 the UI, API or error text said so before this was found.
 
-## M7 — repo reorganisation, closed items full detail, moved 2026-09-04
+## M7 — repo reorganisation, CLOSED 2026-09-05
 
-Moved from `ROADMAP.md` M7. Both items below are done; the one remaining
-open item (`hardware/UnitTestFixture` still unopened) stayed in `ROADMAP.md`.
+Moved from `ROADMAP.md` M7, which is now removed from that file entirely —
+all three items are done: the two moves below, plus `hardware/UnitTestFixture`
+which the owner decided to KEEP (2026-09-05, no code/hardware action taken).
 
 - [x] `pdfMcp/` moved under `tools/` — 2026-08-28. Its own running `pdf-mcp.exe`
       process blocked a plain rename the same way `mykicadMcp`'s would, so

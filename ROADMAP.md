@@ -1,15 +1,14 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep audit
-> (fifth sweep) — absorbed the day's LCD/display session (backlight wire
-> fitted and brightness-driven, touch Y-mirror + display-switch defaults,
-> four UI polish landings, the LVGL wake-invalidate watchdog fix, and the
-> builtin-catalogue cone/firing-type source check — 3 fixed, 15 confirmed,
-> 10 left as an owner decision). Recorded internal DRAM now below its
-> 20480 B floor, and the >62 °C validation firing moved from "needs
-> approval" to "approved and running". Full detail for every closed item
-> lives in `docs/COMPLETED_2026-09.md`, per this file's own upkeep rule;
-> earlier sweeps' audit trail lives in that file's edit history, not here.
+> **Status:** planning · **Last reviewed:** 2026-09-05, roadmap-upkeep audit
+> (sixth sweep) — recorded eight owner decisions from 2026-09-05 (fuzzy
+> bands set, `abs_max_temp_c` closed at 80 °C by design, CTs deferred,
+> DRAM/cone/S8 items handed to agents in progress, `UnitTestFixture` kept,
+> M8's field-update exercise approved) and absorbed the previous sweep's
+> LCD/display session plus a batch of review-finding fixes and a stack-
+> margin capture. Full detail for every closed item lives in
+> `docs/COMPLETED_2026-09.md`, per this file's own upkeep rule; earlier
+> sweeps' audit trail lives in that file's edit history, not here.
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -56,21 +55,20 @@ time away from being startable.
 
 | Size | Item | Where |
 |---|---|---|
-Six of the nine questions in this section were answered on 2026-08-28 and have
-become work rather than questions — see [M12](#m12--commissioning-the-operator-can-actually-do--opened-2026-08-28).
-What is still genuinely open is short:
+Six of the nine questions from 2026-08-28 became work rather than questions —
+see [M12](#m12--commissioning-the-operator-can-actually-do--opened-2026-08-28).
+Eight more were decided by the owner on 2026-09-05. What is still genuinely
+open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| **M** | **Fuzzy-PID membership bands — set the values, 2026-09-04.** The open question is resolved, not just re-scoped: `778ad64`'s "37,008 samples, 29 firings, never leaves the centre cell" was withdrawn (`50d62ee`, `1584597`) — 28 of those 29 captures ran `control_mode: 2`, where the fuzzy layer never executes; real evidence is one run, 2178 samples, and it still shows the shipped bands (20.0 °C / 0.5 °C/s) never span this rig's envelope. Two blockers that used to require a decision-before-action are gone: bands are now per-zone config (`904db54`, `ZONES_CFG_VERSION` 19 — a config POST, not a reflash), and `tools/PcTools/src/kilnctrl/fuzzy_band_probe.py` (`28685c3`) answers band questions offline from an existing capture, no kiln time. Recommended envelope from that tool: `error_band_c` 6–8 °C, `rate_band_c_per_s` 0.20–0.25 °C/s (observed maxima 5.55 °C / 0.110 °C/s); narrowing to 6.0/0.20 moves the gains 13–29% against the ±25% ceiling. **Ask: set the per-zone bands to a value in that range (or explicitly decline to) before the next `fuzzy_ab` campaign** — the campaign itself no longer needs a restart-vs-relabel-vs-drop call, only the band number. | `PID_EXPANSION_PLAN.md` §3.6 |
-| **M** | **Tighten `abs_max_temp_c`, 2026-09-04.** Armed and committed at 80 °C (`5a4ddfc` — the earlier "value 0" report was stale), but 80 °C is also the ESP-side `max_temp_c` ceiling, so the "independent" safety ceiling currently enforces nothing the primary controller wasn't already enforcing. Recommend commissioning it down to roughly 70 °C so the Pico's ceiling is genuinely tighter than the ESP's. No capture to date has exceeded 60 °C (`d5ae465`, 27 captures), so 70 °C leaves headroom without narrowing the room firings actually use. | `SaftyFW/docs/COMMISSIONING.md`; `docs/SAFETY_CASE.md` |
-| **XL** | **Whether to fit CTs, 2026-09-04.** Topology is now written down (`9e3bd1f`, `9f9bf7c`, `docs/CONTACTOR_FEEDBACK_OPTIONS.md`): mains is staged contactor → SSRs, so a single relay weld is tolerated and only a *double* failure (contactor **and** its SSR) is dangerous — but nothing today detects a welded contactor, all five pilot relays are DPDT with the second pole unconnected, and `relay_owner_is_energized()` reports what was commanded, not what is sensed. Fitting CTs is the one check that would let either processor independently confirm actual current flow instead of trusting its own command; every other candidate (the second relay pole, wiring it up) was surveyed in `CONTACTOR_FEEDBACK_OPTIONS.md` and costs hardware anyway. Decide whether that check is worth ordering the parts (M5's Hammond 140QEX is already scoped) or whether the double-failure risk stays an accepted risk in `SAFETY_CASE.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5; `docs/SAFETY_CASE.md` |
+| **M** | Fuzzy-PID bands — set to `error_band_c` 6.0 °C / `rate_band_c_per_s` 0.20 °C/s, 2026-09-05. Will be applied by a config POST after the current firing. | `PID_EXPANSION_PLAN.md` §3.6 |
+| **XL** | CTs — deferred, 2026-09-05. Analysis lives in `docs/CONTACTOR_FEEDBACK_OPTIONS.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5 |
+| **M** | Internal DRAM floor — owner chose "move things out of internal RAM," 2026-09-05. In progress under `DRAM_PSRAM_PLAN.md`. | `DRAM_PSRAM_PLAN.md` |
+| S | S8 sanity rate — code default 2x max shipped-profile ramp (configurable), bench commissioned at 1.5x max observed, 2026-09-05. In progress. | M3 |
 | **L** | **High-temperature validation firing — APPROVED and RUNNING, 2026-09-04.** `4ec7387` scoped a ~4–5 h firing to exercise the coupled feedforward hold above ~62 °C, the one regime the matrix had never run in (infeasible ties to an offset, not a temperature — `68711df`) and that no capture had yet reached (max seen: 60 °C, `d5ae465`); go-ahead given and a firing to 70 °C is on the bench now. Result pending — do not treat the ff_hold-infeasible-above-62°C finding as retested until it reports. | `PID_EXPANSION_PLAN.md` §3.6c |
-| **M** | **Internal DRAM below the 20480 B floor, 2026-09-04.** `dram_free` ~18323 B at `app_main_done`, since the backlight task (now real hardware, see M1) became a genuine consumer rather than a no-op. The backlight task itself is measured at 29.4% stack headroom, so it cannot be shrunk. The one lever identified: disabling the bench-only `KILNCTL_ENABLE_GPIO_PROBE` (frees 6144 B) — owner decision on whether to give that up. | `DRAM_PSRAM_PLAN.md` |
-| **S** | **10 builtin schedules have no source-stated cone, 2026-09-04 (`9d73c8f`).** FSCG1/FSCGB1/FSCGCL/FSCGWM/FSCRGL/FSHP1/FSHP3/FSNM5/MDDCL/QICA's digitalfire pages state no cone (crystalline/specialty, not cone-rated); the prior guessed values were left in place marked `UNRESOLVED` rather than invented silently. Pick a cone for each, or add an "unrated" bucket so the LCD catalogue stops sorting them on invented numbers. Not yet flashed. | `firmware/KilnFW/App/drivers/profiles_builtin_table.inc` |
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |
-| S | The deferred sanity rate for S8 — S8 gained a pure-module implementation and is integrated (2026-09-03, `safety_guards.c`/`safety_core.c`, `SaftyFW/docs/GUARD_TEST_MATRIX.md`), but ships deliberately off (`max_rate_c_per_min` defaults to 0, same "no default by design" shape as S1), so commissioning that field is what will enable it | M3 |
-| S | `hardware/UnitTestFixture/` — delete or keep | M7 |
+| **M** | **Field-update hardware exercise — approved, pending, 2026-09-05.** ESP OTA into `ota_0` + rollback, and the Pico bootloader update over UART1, will run on the bench after the current firing. | M8 |
 | XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
 | — | **Guard evidence is mostly host-tested, not hardware-verified.** Of ~20 tracked guard-level claims, 19 are host-tested and only **3** are hardware-verified (S5's sensor fit/masking finding, KilnFW thermal_guard guard 6, the E-stop polarity fix) — everything else, including all of S1–S4/S6–S14's trip logic and KilnFW guards 1/2/3/4/5/7/9, has never been provoked on real silicon | `docs/SAFETY_CASE.md` §4 rollup; `GUARD_TEST_MATRIX.md` §3 |
 
@@ -93,7 +91,7 @@ What is still genuinely open is short:
 | M | **HW changes:** relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector. (LCD backlight control's flying wire is fitted and confirmed — see M1, closed 2026-09-04.) | M1 |
 | S | **Blocking, before the MSP4031 touches J2 at all**: meter module pins 10/12 (CTP_SCL/CTP_SDA) at 5V — confirms or clears a hazard that can back-feed the SX1509/ESP32-S3 through the shared I2C bus. `DISPLAY_ST7796_PLAN.md` §4 | M1 |
 | M | DEBUG header and GP16/GP17 access before A1 is soldered down | M0 |
-| L | Field updates exercised against real hardware: Pico bootloader over a live UART1, an actual OTA into `ota_0`/`ota_1` (a JTAG flash boots `factory` and never runs the rollback machinery), a real version mismatch | M8 |
+| L | Field updates exercised against real hardware — **approved, pending, 2026-09-05**: Pico bootloader over a live UART1, an actual OTA into `ota_0`/`ota_1` (a JTAG flash boots `factory` and never runs the rollback machinery), a real version mismatch. Will run on the bench after the current firing | M8 |
 | L | `GUARD_TEST_MATRIX.md` §3 — every enabled guard's real trip, safe-state power-on, sensor open-circuit, current-mapping commissioning | M4 |
 
 ---
@@ -202,20 +200,10 @@ them:
   and to warn when it is not.
 - The twelve stale `display_*` MCP tools were left to my judgement: delete.
 
-Still genuinely unanswerable by the code:
-
-1. ~~Physical zone arrangement (which element is where).~~ **Answered
-   2026-09-03, owner-confirmed, stale here — corrected 2026-09-04.** Stacked
-   vertically, zone 2 BOTTOM / zone 0 TOP (zone 1 middle); see
-   `firmware/KilnFW/docs/HARDWARE.md` "Physical zone arrangement (test
-   kiln)", which corroborates the coupling matrix's own measured asymmetry.
-2. The deferred sanity rate (S8's rate-of-rise ships disabled until a real
-   kiln's ramp is measured — S8 itself gained a pure-module implementation
-   and integration on 2026-09-03, so this is now a commissioning gap, the
-   same class as S1's `abs_max_temp_c`, not a missing guard).
-3. `hardware/UnitTestFixture/` — delete it or keep it. `firmware/UnitTestFw`
-   went on 2026-08-23; its embedded KiCad project was out of that change's
-   scope. Board files are off-limits without your say-so.
+All three items once listed here as still unanswerable are now closed: physical
+zone arrangement (owner-confirmed 2026-09-03), the deferred S8 sanity rate
+(decided 2026-09-05 — see the table above), and `hardware/UnitTestFixture/`
+(owner said KEEP, 2026-09-05).
 
 **Blocked on hardware that does not exist yet.** All of this is scripted and
 waiting, not unwritten:
@@ -971,17 +959,11 @@ in `firmware/KilnFW/TODO.md` and `docs/UI_PLAN.md`; two hazards worth reuse
 were promoted to the decisions table below (internal-SRAM exhaustion at task
 creation, and the UART owner's per-transfer heap churn).
 
-## M7 — Repo reorganisation · *done 2026-08-16, one item open*
+## M7 — Repo reorganisation · CLOSED 2026-09-05
 
-Owned by [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md). Tree split into
-`hardware/`/`firmware/`/`tools/`/`docs/`, library tables and submodule paths
-fixed, fresh-clone `mainBoard` open confirmed 2026-08-19. `pdfMcp/` and
-`mykicadMcp/` both moved under `tools/` (2026-08-28); full detail, including
-the submodule-move gitdir/allowlist fixes:
-[`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m7--repo-reorganisation-closed-items-full-detail-moved-2026-09-04).
-
-- [ ] `hardware/UnitTestFixture` KiCad project still unopened (the other three
-      projects were confirmed clean 2026-08-16)
+Owned by [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md). All items done,
+including `hardware/UnitTestFixture` (owner decision: KEEP, 2026-09-05). Full
+detail: [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m7--repo-reorganisation-closed-2026-09-05).
 
 ## M8 — Field updates
 
