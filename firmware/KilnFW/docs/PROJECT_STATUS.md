@@ -63,6 +63,33 @@ an RP2040 safety processor (`firmware/SaftyFW`).
 
 ## Hardware present on this bench unit (2026-08-20)
 
+- **Local sdkconfig overrides (2026-09-04, doc audit).** `firmware/KilnFW/sdkconfig`
+  is gitignored, so a clean clone builds only the Kconfig `default`s below, not
+  whatever this bench's own `sdkconfig` currently has set. Two deliberate
+  differences on this bench, confirmed against the code that consumes each
+  symbol so a future session doesn't "fix" them back to matching the repo
+  default:
+  - `CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y` here vs. Kconfig default `n`. This is
+    the raw GPIO-probe-over-UART debug facility (`gpio_probe.c`,
+    `UART_TASK_ID_GPIO_PROBE`) — deny-listed against SPI/I2C/SX1509/display/
+    safety-link pins and refused while a profile is running, but still a
+    debug-only surface with no role in normal operation. Left on locally for
+    active bring-up/debug work on this unit; the repo default stays `n` since
+    nothing in the design needs it enabled by default.
+  - `CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY=y` here vs. Kconfig default `n`. This
+    knob only feeds the legacy NS2009 (resistive) uncalibrated-touch path in
+    `lvgl_port.c`/`touch_dev.c`, gated by `!self_calibrating`. This bench's
+    panel is the FT6336U capacitive touch controller, which is
+    `self_calibrating = true` (see the "touch self-calibrating -- touch_cal_store's
+    per-board fit does not apply" boot log line, `lvgl_port.c` around
+    `lvgl_port_touch_is_self_calibrating()`), so `TOUCH_CAL_SWAP_XY` is never
+    read at all on this hardware — it is inert, not a real per-board
+    calibration value. The FT6336U's own axis orientation is controlled by
+    the separate, panel-conditional `KILNCTL_TOUCH_CAP_SWAP_XY` /
+    `_CAP_INVERT_X` / `_CAP_INVERT_Y` family added in `f028e2f`, which already
+    defaults correctly for `KILNCTL_DISPLAY_PANEL_ST7796`. No Kconfig change
+    needed for `CAL_SWAP_XY`; the local `y` is stale/harmless, most likely a
+    leftover from before this board moved to the capacitive panel.
 - **MAX31856 thermocouple ICs: fitted.** Three channels populated via the J6
   daughterboard; channels 0/1/2 read plausible room temperature with tracking
   cold junctions and no faults; `CR1` reads back the configured value where it
