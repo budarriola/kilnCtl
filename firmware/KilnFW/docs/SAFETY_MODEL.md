@@ -209,35 +209,51 @@ either, so a fault-gated check alone would miss the "already-on relay gets
 stuck on" failure mode). See `TODO.md` section 6A.6 for the implementation
 note.
 
-**`SAFETY_FAULT_SRC_APP` latches forever once guard 9 sets it for a
-transient control-task stall.** Found by code inspection of the trigger path
-(see the summary-table row below and the disagreement note under it) — not by
-deliberately stalling the control task on the bench. No commit or
-`PROJECT_STATUS.md`/`ROADMAP.md` entry around 2026-08-25, or any other date,
-records a genuine bench-provoked control-task stall; that date's actual bench
-work (`8c2bba6`, the commit that added this paragraph) was the safety-link
-230400 baud sweep, unrelated to this defect. A prior revision of this
-paragraph said "found on the bench 2026-08-25", which this correction
-retracts as unsupported. Guard 9
-(`profile_executor.c:1653`) asserts `SAFETY_FAULT_SRC_APP` when the control
-task's tick has been stale longer than `WATCHDOG_TICK_DEAD_MS` (10 s,
-`profile_executor.c:75`). Nothing ever clears it. The only
-`safety_link_set_fault_source(..., false)` call sites in `KilnFW` are
-`profile_executor.c:613` (which only clears the `THERMO`/`THERMAL_SANITY`
-sources tracked in `s_exec.global_fault_source`) and `safety_link.c:2852`
-(`SAFETY_LINK`), plus `uart_bridge.c`'s `PC_LINK` pair — none of them touch
-the bit guard 9 sets. So a control-task stall that fully recovers on its own
-still leaves GPIO6 driven high until the ESP reboots: the safety processor
-keeps seeing a main-processor fault that no longer exists, and optocoupler
-U1's LED — now U6, but the same continuous-drive concern — stays lit
-indefinitely, which is an aging concern the board owner has specifically
-asked about. This is distinct from the boot-time `SAFETY_FAULT_SRC_APP`
-assertions in `kiln_enter_safe_state()` (`App/main.c`), which **are**
-documented as deliberately reboot-latched hard faults (see "4. Boot-time
-fault assertion" above) — the open question is only whether guard 9's
-runtime, self-recovering-stall case was meant to inherit that same
-latch-until-reboot behavior, and it looks like it did so by accident rather
-than by decision.
+**RESOLVED, docs previously lagged the fix.** A prior revision of this
+section claimed `SAFETY_FAULT_SRC_APP` latches forever once guard 9 sets it
+for a transient control-task stall, clearing only on reboot, and separately
+claimed this was "found on the bench 2026-08-25" — that bench-discovery claim
+was already retracted as unsupported (no commit or `PROJECT_STATUS.md`/
+`ROADMAP.md` entry near that date records a genuine bench-provoked
+control-task stall; 2026-08-25's actual bench work, `8c2bba6`, was the
+safety-link 230400 baud sweep). Re-checking the underlying "nothing ever
+clears it" claim against the current tree (2026-09-04) shows it is also
+stale: the fault-clear path was added in `0d85dbb` (2026-08-27, "Report the
+channel that failed, not the one after it") — **two days after** the paragraph
+above was originally written — and this file was never revisited once the
+fix landed.
+
+As implemented today: guard 9's stale-tick branch
+(`profile_executor.c:1386` for the `tick_stale` check,
+`WATCHDOG_TICK_DEAD_MS` = 10 s at `profile_executor.c:61`) calls
+`guard9_assert_stale_tick_fault()` (`profile_executor_relay_io.c:600`), whose
+own doc comment cites this exact defect ("Audit 2026-08-27 item 2 ... a
+single stale control-task tick left `SAFETY_FAULT_SRC_APP` latched
+board-wide until reboot"). It now ORs `SAFETY_FAULT_SRC_APP` into
+`s_exec.global_fault_source` (not a bare, unpaired
+`safety_link_set_fault_source(..., true)` call) and transitions the run to
+`PROFILE_EXEC_FAULTED`. `profile_executor_halt()` (`profile_executor_status.c:76`)
+calls `clear_this_runs_faults()`, which deasserts the *entire*
+`global_fault_source` mask — `SAFETY_FAULT_SRC_APP` included — via one
+`safety_link_set_fault_source(..., false)` call. Host-tested directly:
+`App/test/test_profile_executor_prestart.c`, section "`guard9_assert_stale_tick_fault()`
+then `profile_executor_halt()` -- the operator's halt deasserts
+`SAFETY_FAULT_SRC_APP`, closing the loop this defect left open" (also proves
+the OR-not-overwrite behavior against a pre-existing global fault).
+
+So the remaining behavior is: a stalled control task drops every relay and
+raises `SAFETY_FAULT_SRC_APP` immediately (unchanged, and correct — this is
+guard 9 doing its job), and clearing it requires an operator
+acknowledgment (Stop / halt) rather than clearing itself the instant the
+tick resumes. That is the same acknowledgment-required pattern every other
+`thermal_guard` trip uses (`clear_this_runs_faults()` is the shared clear
+path), not a defect specific to guard 9 — GPIO6 does not stay driven forever
+short of a reboot; it stays driven until the operator halts the run, then
+drops. No hardware trial of this path is on record (see the summary table
+below), so the trip-and-recover sequence itself is host-tested + argued
+against real functions, not hardware-verified — but the "nothing ever clears
+it" defect this section used to describe does not exist in the current
+code.
 
 ## Summary table
 
@@ -265,7 +281,7 @@ exercised on hardware.
 | Zone reading exceeds configured `max_temp_c`/`min_temp_c` (guard 5) | **Yes**, while a profile runs that zone | Yes (`THERMAL_SANITY`, global) | Yes, every zone | **host-tested** (`App/test/test_thermal_guard.c`, `"guard 5 max_temp trips on the very first over-limit tick"`, `"guard 5 min_temp trips"`); **also inert/dormant per-zone whenever that zone's `max_temp_c`/`min_temp_c` is left at its 0 default** — same test file proves it explicitly (`"max_temp_c==0 disables guard 5's ceiling"`) — an uncommissioned zone has no ceiling in force, the KilnFW-side twin of `SaftyFW`'s S1; **not hardware-verified** |
 | Frozen/stuck sensor reading while duty > 0 (guard 7) | **Yes**, while a profile runs that zone | Yes, per-zone | Yes, that zone only | **host-tested**, including the `frozen_window_s` override (`App/test/test_thermal_guard.c`, `"guard 7 trips when the reading never changes while duty > 0"`, `"frozen_window_s override=20 trips guard 7 well before the 600s default would"`); **not hardware-verified** |
 | Cross-zone plausibility (guard 8) | No — needs concurrent multi-zone execution (TODO.md 6A.5), unbuilt | **No** | **No** | **not built** — no code exists to argue, host-test, or hardware-verify |
-| Profile-executor control task itself stalls (guard 9) | Yes — independent `profile_exec_wdt` task, 10 s staleness | Yes (`APP`) | Yes, every zone | **host-tested** — the tick-stale fault path and its priority over other reasons are real-function tests, not stubs (`App/test/test_safety_watchdog.c::test_tick_stale_still_faults_running_and_takes_priority`); the fault-clearing defect above ("`SAFETY_FAULT_SRC_APP` latches forever…") was found by code inspection of the trigger path, **not** by deliberately stalling the control task on real hardware (see disagreement note below re: that section's own "found on the bench" wording) — treat guard 9's trigger mechanism as **host-tested + argued**, not hardware-verified, until a real stall is provoked on the bench |
+| Profile-executor control task itself stalls (guard 9) | Yes — independent `profile_exec_wdt` task, 10 s staleness | Yes (`APP`) | Yes, every zone | **host-tested** — the tick-stale fault path and its priority over other reasons are real-function tests, not stubs (`App/test/test_safety_watchdog.c::test_tick_stale_still_faults_running_and_takes_priority`); the fault-clear path (`guard9_assert_stale_tick_fault()` → operator `profile_executor_halt()` → `clear_this_runs_faults()`) is likewise a real-function host test, not a stub (`App/test/test_profile_executor_prestart.c`, "the operator's halt deasserts `SAFETY_FAULT_SRC_APP`, closing the loop this defect left open") — the section above previously claimed this never clears; that was true only before `0d85dbb` (2026-08-27) landed the fix, and this row is now corrected to match. Treat guard 9's trip-and-clear mechanism as **host-tested + argued**, not hardware-verified, until a real stall is provoked on the bench |
 | Safety processor link down | Yes (once Pico firmware exists) | Yes (`SAFETY_LINK`) | No — only blocks new "on" | **host-tested** for the staleness/liveness logic itself (`firmware/CommonFW/docs/LINK_PROTOCOL.md` §8, `test/test_safety_link.c:77-92`, pinned 2026-09-04); the link genuinely exists and has carried real traffic (`docs/SAFETY_LINK.md`, 2026-08-23) but **nobody has held the link down on the bench and watched the fault assert with a stopwatch** — `docs/SAFETY_CASE.md` §4/§2 and `ROADMAP.md` both say so explicitly; do not read "Yes (once Pico firmware exists)" as hardware-verified |
 | Safety processor reports E-stop/fault | Surfaced in `GET_STATUS`, not acted on | **No** | **No** | **not a guard — open gap**, one-directional link (see "Nothing on the main board reacts…" above); nothing to cite beyond that design gap |
 | Manual assert via `SET_FAULT_OUT` | Yes | Yes (`MANUAL`) | No — only blocks new "on" | **argued only** — mask-OR logic is simple and code-reviewed; no host test or bench record specifically provoking `SET_FAULT_OUT` was found |

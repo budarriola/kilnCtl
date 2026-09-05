@@ -282,12 +282,23 @@ here; none is copied from an unverified summary.
    A thermocouple physically shared or routed through the same failure point
    for both processors is not designed against.
 
-9. **`SAFETY_FAULT_SRC_APP` latches forever** on a transient control-task
-   stall recovering on its own (guard 9, found on the bench 2026-08-25) — the
-   board shows a permanent fault requiring a reboot even after the underlying
-   condition clears. Availability bug, not a missed-trip risk, but it trains
-   operators to expect false-permanent faults, which erodes trust in real
-   ones.
+9. **RESOLVED, corrected 2026-09-04 (was stale, not open).** This item
+   previously claimed `SAFETY_FAULT_SRC_APP` latches forever on a transient
+   control-task stall recovering on its own (guard 9, "found on the bench
+   2026-08-25" — that bench-discovery claim was already retracted elsewhere
+   in this document as unsupported). Re-checking the underlying claim itself
+   against the current tree shows it is also stale: the fix
+   (`guard9_assert_stale_tick_fault()` ORing into `s_exec.global_fault_source`,
+   cleared by `profile_executor_halt()` → `clear_this_runs_faults()`) landed
+   in `0d85dbb` on 2026-08-27, two days after this item was written, and this
+   document was never revisited. It is host-tested against the real
+   functions (`App/test/test_profile_executor_prestart.c`, "the operator's
+   halt deasserts `SAFETY_FAULT_SRC_APP`, closing the loop this defect left
+   open"). The remaining behavior — the fault requires an operator halt to
+   clear rather than self-clearing the instant the tick resumes — matches
+   every other `thermal_guard` trip's acknowledgment-required pattern and is
+   not treated as a defect elsewhere in this document; see
+   `firmware/KilnFW/docs/SAFETY_MODEL.md` for the full correction.
 
 10. **Refusal of a relay-on command is invisible on the wire** — a refused
     `SET_RELAY` produces no reply; a GUI infers it only from state not
@@ -337,7 +348,7 @@ given).
 | KilnFW thermal_guard guards 1,2,4,5,7 | **host-tested, not hardware-verified** | `App/test/test_thermal_guard.c` exercises the real `thermal_guard_tick()` (not a stub) for each of these, including override/arming/regression cases (e.g. `"guard 1 trips when commanded heat produces far less than sanity_rate_c_per_min"`, `"guard 4 eventually trips a zone that starts hot and never settles"`); no bench provocation of any of these five is on record (`SAFETY_MODEL.md` summary table, corrected 2026-09-04 — a previous pass of this row read "not yet live-tested" as "not tested at all" and understated the coverage; see `SAFETY_MODEL.md`'s own disagreement note) |
 | KilnFW thermal_guard guard 6 (sensor validity) | hardware-verified | live-verified end to end, no TC attached, trip fired after exactly 3 bad reads, board relay stayed off (`SAFETY_MODEL.md`); also host-tested against the real function (`App/test/test_thermal_guard.c`) |
 | KilnFW thermal_guard guard 3 (relay welded, thermal sanity) | host-tested, not hardware-verified | `App/test/test_thermal_guard.c`, including a named hardware-motivated regression case ("found on hardware 2026-08-12 against the simulated…") and the `runaway_margin_c` override; the only hardware contact this guard has had is the false-positive it was tuned against, not a genuine positive trip |
-| KilnFW thermal_guard guard 9 (control-task stall) | host-tested (trip/priority logic) + argued (fault-clear defect), not hardware-verified | the tick-stale fault path itself is a real-function test, not a stub (`App/test/test_safety_watchdog.c::test_tick_stale_still_faults_running_and_takes_priority`); the separate `SAFETY_FAULT_SRC_APP`-never-clears defect was found by code inspection of the trigger path, not by deliberately stalling the control task on real hardware — no commit or bench record around 2026-08-25 (or any other date) shows a genuinely provoked control-task stall; see `SAFETY_MODEL.md`'s own disagreement note, which resolves the "found on the bench" wording the same way |
+| KilnFW thermal_guard guard 9 (control-task stall) | host-tested (trip/priority AND fault-clear), not hardware-verified | the tick-stale fault path itself is a real-function test, not a stub (`App/test/test_safety_watchdog.c::test_tick_stale_still_faults_running_and_takes_priority`); the `SAFETY_FAULT_SRC_APP` fault-clear path is also a real-function test, not a stub (`App/test/test_profile_executor_prestart.c`, "the operator's halt deasserts `SAFETY_FAULT_SRC_APP`, closing the loop this defect left open") — the "never clears" defect this row used to describe was fixed in `0d85dbb` (2026-08-27), before this table's most recent correction pass, but that pass missed it; corrected 2026-09-04. No commit or bench record around 2026-08-25 (or any other date) shows a genuinely provoked control-task stall on real hardware — see `SAFETY_MODEL.md`'s own correction, which resolves the "found on the bench" wording the same way |
 | KilnFW thermal_guard guard 8 (cross-zone plausibility) | **not built** | unimplemented, needs concurrent multi-zone execution |
 | Link-loss 30s firing-abort (KilnFW side) | host-tested | `test_safety_link.c:77-92`, pinned 2026-09-04 |
 | Link-loss 30s firing-abort, real bench | **not done** | ROADMAP.md: "Code is flashed; nobody has held the link down" |
@@ -347,19 +358,20 @@ given).
 | `virtual_dut`/SimFW cross-check evidence generally | **withdrawn** | tool deleted 2026-08-28; every "Yes" reachability verdict that cited it now rests on source-reading alone (method 1), re-confirmed independently in §6c |
 
 **Rollup (guard-level rows above, S1–S14 plus the two KilnFW-side items called
-out separately):** roughly 20 discrete claims tracked here — **19
+out separately):** roughly 20 discrete claims tracked here — **20
 host-tested** (S1–S14's logic rows plus KilnFW guards 1,2,3,4,5,6,7, and
-guard 9's trip/priority path), **3 hardware-verified** (S5's fit/masking
-finding, KilnFW guard 6, E-stop polarity fix), and the remaining **~8
-explicitly marked "not done"** for hardware. What remains **argued only** is
-narrower than a previous pass of this table claimed: S6a's permanent
-hardware-only status, the E-stop jumper/button claim, and guard 9's
-fault-clear defect specifically (its trip/priority mechanism is host-tested;
-only the "never clears" defect's trigger path is code-inspection-only).
-KilnFW guards 1/2/3/4/5/6/7 are **not** argued-only — see the corrected rows
-above. No claim in this document is stronger than its weakest supporting
-sentence in the source docs; where a source hedges, this table hedges
-identically.
+guard 9's trip/priority path **and** its fault-clear path, corrected
+2026-09-04 — see the guard 9 row above), **3 hardware-verified** (S5's
+fit/masking finding, KilnFW guard 6, E-stop polarity fix), and the remaining
+**~8 explicitly marked "not done"** for hardware. What remains **argued
+only** is narrower than a previous pass of this table claimed: S6a's
+permanent hardware-only status and the E-stop jumper/button claim. Guard 9's
+fault-clear path is no longer argued-only — the underlying "never clears"
+defect it used to describe was fixed in `0d85dbb` (2026-08-27) and is now
+host-tested against the real function. KilnFW guards 1/2/3/4/5/6/7 are
+**not** argued-only — see the corrected rows above. No claim in this
+document is stronger than its weakest supporting sentence in the source
+docs; where a source hedges, this table hedges identically.
 
 ---
 
@@ -437,6 +449,18 @@ Reviewed section by section (§1–§10) against this file's claims above.
    entry near that date records a genuine bench-provoked control-task stall;
    the defect was found by code inspection, corrected in `SAFETY_MODEL.md`
    alongside this pass.
+
+6. **Corrected again 2026-09-04 (same day, later pass):** the above still
+   treated guard 9's `SAFETY_FAULT_SRC_APP`-never-clears defect as open and
+   argued-only. It is not — the fix landed in `0d85dbb` on 2026-08-27, two
+   days *before* this file's original hazard-list item 9 was even written,
+   and is host-tested (`App/test/test_profile_executor_prestart.c`, "the
+   operator's halt deasserts `SAFETY_FAULT_SRC_APP`, closing the loop this
+   defect left open"). Every prior correction pass re-litigated the "found
+   on the bench" phrasing without re-checking whether the underlying defect
+   still existed in code; it did not. See §3 item 9 and the §4 guard 9 row,
+   both corrected in this same pass, and `SAFETY_MODEL.md`'s matching
+   correction.
 
 ---
 
