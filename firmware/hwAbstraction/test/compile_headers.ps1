@@ -127,6 +127,12 @@ $badObj = Join-Path $workDir "dummy_backend_oversized.obj"
 $r = Invoke-Cl -SourceFile $badSrc -OutObj $badObj
 if ($r.ExitCode -eq 0) {
     $failures += "NEGATIVE TEST FAILED: an oversized backend struct compiled clean -- the _Static_assert opaque-storage guarantee is not actually enforced."
+} elseif ($r.Output -notmatch [regex]::Escape("dummy_spi_bus_impl_oversized must fit")) {
+    # A nonzero exit alone proves nothing -- a typo, a missing header, or any
+    # other unrelated compile error also exits nonzero and would let this
+    # check pass vacuously. Require the specific _Static_assert message so a
+    # generic compile failure still fails the check.
+    $failures += "NEGATIVE TEST INCONCLUSIVE: dummy_backend_oversized.c failed to compile, but not with the expected _Static_assert message -- cannot confirm the opaque-storage guarantee is what fired.`n$($r.Output)"
 } else {
     Write-Host "OK   oversized dummy backend correctly fails the build (_Static_assert fired)"
 }

@@ -34,13 +34,8 @@
 
 #include "hal_status.h"
 
-/* See hal_uart.h for why this exists: `_Alignas` is C11-only, `alignas` is
- * the C++ spelling. Kept in sync across hal_uart.h/hal_i2c.h/hal_spi.h. */
-#ifdef __cplusplus
-#define HAL_ALIGNAS8 alignas(8)
-#else
-#define HAL_ALIGNAS8 _Alignas(8)
-#endif
+/* HAL_ALIGNAS8 is defined in hal_status.h (included above) so it is shared
+ * across hal_uart.h/hal_i2c.h/hal_spi.h instead of copied in each. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -108,6 +103,21 @@ typedef struct {
                                  * today, i.e. -1). Pico ignores. */
     bool dma_use_psram;        /* DISPLAY_ST7796_PLAN.md 9.3; ESP only. */
     bool async_flush;          /* DISPLAY_ST7796_PLAN.md 9.6; ESP only. */
+    size_t max_transfer_sz;    /* ESP: spi_bus_config_t.max_transfer_sz --
+                                 * largest single transfer the bus DMA must
+                                 * support. MAX31856.c:344-355 initializes
+                                 * this bus first with a thermocouple-sized
+                                 * value; the display shares the same bus_id
+                                 * and needs a larger value for full-frame
+                                 * blits. Since only the first init's config
+                                 * wins (see ALREADY_INIT below), whichever
+                                 * caller initializes first must pass the
+                                 * larger of the two requirements. 0 lets the
+                                 * backend pick its own default. Pico ignores. */
+    int dma_chan;              /* ESP: spi_bus_initialize()'s dma_chan
+                                 * (SPI_DMA_CH_AUTO == -1 to let the driver
+                                 * pick, or 0 to disable DMA entirely).
+                                 * Pico ignores. */
 } hal_spi_bus_cfg_t;
 
 /* ALREADY_INIT decision (Phase 0, per the plan's open question at
@@ -121,7 +131,12 @@ typedef struct {
  * should not have to special-case a second return value. Only the first
  * init's DMA configuration takes effect, so callers must still ensure the
  * first hal_spi_bus_init() on a shared bus applies the configuration that
- * needs to win (the display's, on the KilnFW thermo/display shared bus). */
+ * needs to win (the display's, on the KilnFW thermo/display shared bus).
+ * This applies field-by-field to the whole cfg struct, including
+ * max_transfer_sz and dma_chan: whichever caller's hal_spi_bus_init() runs
+ * first on a shared bus_id fixes those values for every later attach on
+ * that bus, so the first caller must request the largest max_transfer_sz
+ * any sharer will need (the display's, not the thermocouple driver's). */
 hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id,
                                const hal_spi_bus_cfg_t *cfg);
 hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus);

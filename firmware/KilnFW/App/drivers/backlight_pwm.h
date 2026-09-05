@@ -98,6 +98,10 @@ typedef struct {
 // (see backlight_pwm_query_fn's doc comment above) -- typically a small
 // shim in main_boot_early.c that closes over a `const screen_idle_t *` and
 // calls screen_idle_get_state()/display_power_cfg_brightness_percent().
+// When CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE is on, both query_fn and
+// query_ctx must be non-NULL -- this is enforced by the enabled build path.
+// The disabled branch below (bodge not fitted) deliberately does NOT
+// validate either argument, since it returns before touching them.
 // Whatever query_ctx points to must already be initialized (e.g.
 // screen_idle_init()'d; screen_idle_start() need not have run yet, but
 // usually has) before backlight_pwm_start() runs. Configures the LEDC

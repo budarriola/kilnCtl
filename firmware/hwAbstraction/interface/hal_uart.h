@@ -43,17 +43,8 @@
 
 #include "hal_status.h"
 
-/* Alignment keyword: C11 `_Alignas` is not valid C++ syntax (the standard
- * keyword there is `alignas`, unadorned). Every opaque-storage header in
- * this interface picks the keyword that matches the including language
- * rather than wrapping extern "C" more narrowly, so this #if/else pattern
- * is repeated verbatim in hal_i2c.h and hal_spi.h -- keep all three in sync
- * if it ever changes. */
-#ifdef __cplusplus
-#define HAL_ALIGNAS8 alignas(8)
-#else
-#define HAL_ALIGNAS8 _Alignas(8)
-#endif
+/* HAL_ALIGNAS8 is defined in hal_status.h (included above) so it is shared
+ * across hal_uart.h/hal_i2c.h/hal_spi.h instead of copied in each. */
 
 #ifdef __cplusplus
 extern "C" {

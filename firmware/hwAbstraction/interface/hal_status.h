@@ -11,6 +11,15 @@
 extern "C" {
 #endif
 
+/* `_Alignas` is C11-only, `alignas` is the C++ spelling. Hoisted here so
+ * hal_uart.h/hal_i2c.h/hal_spi.h (all of which include this header) share a
+ * single definition instead of three copies that could drift. */
+#ifdef __cplusplus
+#define HAL_ALIGNAS8 alignas(8)
+#else
+#define HAL_ALIGNAS8 _Alignas(8)
+#endif
+
 typedef enum {
     HAL_OK = 0,
     HAL_TIMEOUT,        /* operation did not complete within the given budget */

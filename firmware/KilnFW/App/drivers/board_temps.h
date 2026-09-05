@@ -112,7 +112,7 @@ esp_err_t board_temps_get(board_temps_t *out, const MAX31856Reading *readings, s
  * whichever bus pointer the most recent board_temps_bind_thermo_bus() call was
  * given -- the same "read the bus this module already borrowed a pointer to"
  * shape api_board_temps_get_handler() used before this was extracted from it.
- * Safe to call even if board_temps_http_start() was never reached (reads as
+ * Safe to call even if board_temps_bind_thermo_bus() was never reached (reads as
  * thermo_bus NULL, so thermo_count comes back 0) or before board_temps_start()
  * (esp32_valid comes back false) -- same "safe to call any time" convention
  * as dashboard_get_status(). Not free (it hits the SPI bus), but exactly as

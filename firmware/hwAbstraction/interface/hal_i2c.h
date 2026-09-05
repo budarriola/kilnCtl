@@ -25,13 +25,8 @@
 
 #include "hal_status.h"
 
-/* See hal_uart.h for why this exists: `_Alignas` is C11-only, `alignas` is
- * the C++ spelling. Kept in sync across hal_uart.h/hal_i2c.h/hal_spi.h. */
-#ifdef __cplusplus
-#define HAL_ALIGNAS8 alignas(8)
-#else
-#define HAL_ALIGNAS8 _Alignas(8)
-#endif
+/* HAL_ALIGNAS8 is defined in hal_status.h (included above) so it is shared
+ * across hal_uart.h/hal_i2c.h/hal_spi.h instead of copied in each. */
 
 #ifdef __cplusplus
 extern "C" {
