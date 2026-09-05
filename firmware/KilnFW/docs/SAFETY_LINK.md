@@ -292,7 +292,7 @@ got both wrong:
 See `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for this same
 table kept next to the default it justifies.
 
-### Open defect found after the sweep: `SAFETY_INBOX_LEN` overflows at 230400, and the 60 s soak did not catch it (2026-08-25)
+### RESOLVED (fixed 2026-08-25, confirmed live 2026-09-04): `SAFETY_INBOX_LEN` overflow at 230400 that the 60 s soak did not catch
 
 The sweep above passed at 230400 because it only measured the four
 physical-layer counters and status cadence, and those stayed clean for 60 s.
@@ -300,28 +300,42 @@ Left running for three minutes after an ESP reset, the link itself came
 apart: `link_up` flapped (up at 80 s, down 100-140 s, up again at 160 s)
 while `broadcast dropped` climbed continuously at about 2.8/s (78 -> 450 over
 160 s) — with crc/framing, length mismatch, crc mismatch and resync all
-staying at zero new counts the entire time. The bytes are arriving intact;
-something above the wire is failing to keep up with them.
+staying at zero new counts the entire time. The bytes were arriving intact;
+something above the wire was failing to keep up with them.
 
-Mechanism: `SAFETY_INBOX_LEN` is 4 (`safety_link.c:83`). `safety_poll_task`
-blocks for seconds at a time inside the failing `safety_cfg_store_refetch()`
-calls documented above (263 `config_page` requests observed, all timing out —
-this is that same pre-existing defect, not a new one). Four inbox slots
-overflow long before the task returns to drain them. At 9600 baud the peer's
-broadcast rate was slow enough that four slots were plenty; at 230400 it
-is not — raising the baud converted a latent, wire-throttled bug into an
-active one that destabilises the link.
+Mechanism at the time: `SAFETY_INBOX_LEN` is 4 (`safety_link.c:83`).
+`safety_poll_task` blocks for seconds at a time inside the failing
+`safety_cfg_store_refetch()` calls documented above (263 `config_page`
+requests observed, all timing out — that is the separate pre-existing
+defect described next, not this one). Four inbox slots overflowed long
+before the task returned to drain them. At 9600 baud the peer's broadcast
+rate was slow enough that four slots were plenty; at 230400 it was not —
+raising the baud converted a latent, wire-throttled bug into an active one
+that destabilised the link.
 
-**This is why the 60 s soak windows above did not catch it**: they measure
-physical-layer counters and status rate, and both still look healthy inside
-one minute. Anyone re-running this sweep needs a longer window (multiple
-minutes) if they want to see this failure mode.
+**Fix landed 2026-08-25 (`da1cc16` measured the two candidate directions
+below and picked the second one; the chunked drain itself is in
+`safety_link_poll.c`, in the task's per-poll sleep loop around lines
+460-499)**: rather than one flat `vTaskDelay()` that left the inbox unread
+for up to ~450 ms at a time, the same total wait is now chunked into
+`SAFETY_LINK_IDLE_TICK_MS`-sized pieces, each followed by an opportunistic,
+non-blocking drain of the inbox (`xSemaphoreTake(link->xact_lock, 0)` then
+`safety_drain_inbox(link, 0)` if the lock was free — skipped, not blocked
+on, when a real exchange is in progress, since that exchange's own drain
+already empties the queue). Total elapsed time per poll cycle is unchanged;
+only how often the inbox gets emptied changed. Raising `SAFETY_INBOX_LEN`
+itself was measured and rejected (see `da1cc16`'s commit message): the Pico
+sustains ~3.7x overproduction against a single per-poll drain, so a deeper
+queue only delays the same drops rather than preventing them.
 
-Candidate directions, not yet implemented: raise `SAFETY_INBOX_LEN` (buys
-headroom, changes no timing), or stop the failing refetch from monopolising
-the transaction lock. **Warning:** two previous attempts to fix the
-`config_page` refetch defect panicked `safety_poll_task` and were reverted —
-that path must not be changed casually.
+**Confirmed live via `safety_get_link_stats()` (2026-09-04):** `broadcast
+dropped 0`, `frames deframed 39803` vs `dequeued 39802` (one frame `routed
+nowhere`, not dropped) — the flood is gone. If this regresses, the likely
+culprit is the same one named above: something reintroducing a long
+uninterrupted block inside `safety_poll_task` between drains.
+
+This was previously logged here as an open defect with two undecided
+candidate fixes; both statements are now superseded by the above.
 
 **A static GPIO high/low test across this link passes at any baud rate**,
 because both an optocoupler and a digital isolator carry a DC level perfectly
