@@ -30,10 +30,10 @@ from pathlib import Path
 
 from kilnctrl import protocol
 
+from _drivers_layout import resolve_driver_file
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_UART_TASK_IDS_H = (
-    _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "uart_task_ids.h"
-)
+_UART_TASK_IDS_H = resolve_driver_file(_REPO_ROOT, "uart_task_ids.h")
 _KILNLINK_VERSION_H = (
     _REPO_ROOT
     / "firmware"

@@ -25,14 +25,14 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from kilnctrl import cone_table as ct  # noqa: E402
+from _drivers_layout import resolve_driver_file  # noqa: E402
 
 # Path to the C source this module mirrors, from the repo root.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-_CONE_TABLE_C_PATH = os.path.join(
-    _REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "cone_table.c"
-)
+_CONE_TABLE_C_PATH = str(resolve_driver_file(_REPO_ROOT, "cone_table.c"))
 
 # Matches one s_cones[] entry, e.g.  {"022", 586.1f},
 _C_ENTRY_RE = re.compile(r'\{\s*"([^"]+)"\s*,\s*(-?\d+(?:\.\d+)?)f\s*\}')

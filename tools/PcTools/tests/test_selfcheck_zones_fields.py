@@ -158,8 +158,10 @@ class RealFirmwareSmokeTest(unittest.TestCase):
         # zones_http_handlers.c was split into zones_http_get.c /
         # zones_http_post.c (and possibly further siblings later) -- glob
         # for the family instead of hardcoding one filename so the next
-        # split doesn't break this test again.
-        paths = sorted(drivers_dir.glob("zones_http_*.c"))
+        # split doesn't break this test again. rglob (not glob) so this
+        # keeps finding the family once drivers/ splits into layer
+        # subdirectories and these files are no longer direct children.
+        paths = sorted(drivers_dir.rglob("zones_http_*.c"))
         if not paths:
             self.fail(
                 f"no zones_http_*.c source found under {drivers_dir} -- "

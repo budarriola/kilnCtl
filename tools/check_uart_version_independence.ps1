@@ -44,11 +44,30 @@
 #   - kilnlink_version.h itself, or any file other than uart_task_ids.h
 #
 # Usage: powershell -File tools\check_uart_version_independence.ps1
+#        (-DriversDir <path> to smoke-test against a simulated tree)
+param(
+    [string]$DriversDir
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
-$targetFile = Join-Path $root "..\firmware\KilnFW\App\drivers\uart_task_ids.h"
-$targetFile = (Resolve-Path $targetFile).Path
+if ($DriversDir) {
+    $driversDir = (Resolve-Path $DriversDir).Path
+} else {
+    $driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
+    $driversDir = (Resolve-Path $driversDir).Path
+}
+
+$targetMatches = @(Get-ChildItem -Path $driversDir -Filter "uart_task_ids.h" -File -Recurse)
+if ($targetMatches.Count -eq 0) {
+    throw "check_uart_version_independence.ps1: uart_task_ids.h not found anywhere under $driversDir -- has it moved or been renamed?"
+}
+if ($targetMatches.Count -gt 1) {
+    $paths = ($targetMatches | ForEach-Object { $_.FullName }) -join ", "
+    throw "check_uart_version_independence.ps1: uart_task_ids.h matched more than one file under $driversDir ($paths) -- cannot tell which one is the real header."
+}
+$targetFile = $targetMatches[0].FullName
 
 # Same comment-stripping helper as check_link_impl_isolation.ps1 (duplicated
 # rather than imported -- this project has no shared PowerShell module

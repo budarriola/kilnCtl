@@ -35,11 +35,19 @@
 # discussing the NULL shape and its history -- comments are stripped first.
 #
 # Usage: powershell -File tools\check_bridge_reject_reason.ps1
+param(
+    [string]$DriversDir
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
-$driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
-$driversDir = (Resolve-Path $driversDir).Path
+if ($DriversDir) {
+    $driversDir = (Resolve-Path $DriversDir).Path
+} else {
+    $driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
+    $driversDir = (Resolve-Path $driversDir).Path
+}
 
 # 2026-09-01: uart_bridge.c was split (commit b268377) into per-task
 # translation units -- uart_bridge.c now keeps only the shared helpers and
@@ -52,7 +60,7 @@ $driversDir = (Resolve-Path $driversDir).Path
 # hardcoded name, so a future re-split doesn't quietly blind this check again;
 # uart_log_bridge.c is a different, unrelated log-shipping link and is
 # excluded by the name filter below (it does not start with "uart_bridge").
-$targetFiles = Get-ChildItem -Path $driversDir -Filter "uart_bridge*.c" -File |
+$targetFiles = Get-ChildItem -Path $driversDir -Filter "uart_bridge*.c" -File -Recurse |
     Where-Object { $_.Name -notlike "uart_log_bridge*" }
 if ($targetFiles.Count -lt 5) {
     throw "check_bridge_reject_reason.ps1: only $($targetFiles.Count) uart_bridge*.c file(s) found under $driversDir -- has the bridge code moved or been re-merged? Update this script's target."

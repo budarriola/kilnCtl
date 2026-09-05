@@ -32,8 +32,10 @@ from pathlib import Path
 
 import pytest
 
+from _drivers_layout import resolve_driver_file
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_ZONES_PAGE_HTML = _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "zones_page.html"
+_ZONES_PAGE_HTML = resolve_driver_file(_REPO_ROOT, "zones_page.html")
 
 _NODE = shutil.which("node")
 

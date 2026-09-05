@@ -38,16 +38,16 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from kilnctrl import cone_table as ct  # noqa: E402
 from kilnctrl import ramp_assist as ra  # noqa: E402
+from _drivers_layout import resolve_driver_file  # noqa: E402
 
 # Path to the C source DEFAULT_LAG_BAND_C mirrors, from the repo root --
 # same pattern as test_cone_table.py's ConeTableCrossLanguagePinTest.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-_PROFILE_EXECUTOR_H_PATH = os.path.join(
-    _REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "profile_executor.h"
-)
+_PROFILE_EXECUTOR_H_PATH = str(resolve_driver_file(_REPO_ROOT, "profile_executor.h"))
 _C_RAMP_LOCK_BAND_RE = re.compile(
     r'#define\s+PROFILE_EXECUTOR_RAMP_LOCK_BAND_C\s+([0-9]+(?:\.[0-9]+)?)f?'
 )

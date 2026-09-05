@@ -37,19 +37,17 @@ from pathlib import Path
 from kilnctrl import devices
 from kilnctrl.devices import AUTOTUNE_CMD_GET_STATUS
 
+from _drivers_layout import resolve_driver_file
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_UART_BRIDGE_EXT_C = (
-    _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "uart_bridge_ext.c"
-)
+_UART_BRIDGE_EXT_C = resolve_driver_file(_REPO_ROOT, "uart_bridge_ext.c")
 # uart_bridge_ext.c (2026-09-04, ROADMAP.md's 1500-line rule) was split into
 # uart_bridge_ext.c plus three siblings; autotune_build_status() -- the exact
 # function this file exists to regression-test -- moved into
 # uart_bridge_ext_autotune.c. A path still pointed at uart_bridge_ext.c alone
 # would silently find nothing (see _load_layout()'s own assert) rather than
 # comparing against the function's real, current text.
-_UART_BRIDGE_EXT_AUTOTUNE_C = (
-    _REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "uart_bridge_ext_autotune.c"
-)
+_UART_BRIDGE_EXT_AUTOTUNE_C = resolve_driver_file(_REPO_ROOT, "uart_bridge_ext_autotune.c")
 
 # Fixed-size wire writers this function uses, and how many bytes each
 # advances `o` by. Mirrors uart_bridge_ext_put_*_le()'s own definitions

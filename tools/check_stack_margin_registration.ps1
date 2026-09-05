@@ -49,14 +49,39 @@
 # cap.ps1's route count is expected to move with wifi_provision_http.c.
 #
 # Usage: powershell -File tools\check_stack_margin_registration.ps1
+#        (-DriversDir <path> to smoke-test against a simulated tree)
+param(
+    [string]$DriversDir
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
-$driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
-$driversDir = (Resolve-Path $driversDir).Path
+if ($DriversDir) {
+    $driversDir = (Resolve-Path $DriversDir).Path
+} else {
+    $driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
+    $driversDir = (Resolve-Path $driversDir).Path
+}
 $appDir = Join-Path $root "..\firmware\KilnFW\App"
 $appDir = (Resolve-Path $appDir).Path
-$capFile = Join-Path $driversDir "stack_margin.h"
+
+# Resolve a bare basename anywhere under $driversDir -- agnostic to the
+# upcoming move of every drivers/*.c/.h file into layer subdirectories.
+function Resolve-DriverFile {
+    param([string]$DriversDir, [string]$BaseName)
+    $found = @(Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse)
+    if ($found.Count -eq 0) {
+        throw "check_stack_margin_registration.ps1: expected file '$BaseName' not found anywhere under $DriversDir -- has it moved or been renamed?"
+    }
+    if ($found.Count -gt 1) {
+        $paths = ($found | ForEach-Object { $_.FullName }) -join ", "
+        throw "check_stack_margin_registration.ps1: '$BaseName' matched more than one file under $DriversDir ($paths) -- cannot tell which one is the real header."
+    }
+    return $found[0].FullName
+}
+
+$capFile = Resolve-DriverFile -DriversDir $driversDir -BaseName "stack_margin.h"
 
 # main.c itself was split into several main_*.c files (main_boot_early.c,
 # main_bridges_bringup.c, main_control_bringup.c, main_network_http.c) --

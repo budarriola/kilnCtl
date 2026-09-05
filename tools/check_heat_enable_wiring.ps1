@@ -59,14 +59,24 @@
 #      cannot make checks 1-3 pass over calls that no longer reach the wire.
 #
 # Usage: powershell -ExecutionPolicy Bypass -File tools\check_heat_enable_wiring.ps1
+#        (-DriversDir <path> to smoke-test against a simulated tree)
+param(
+    [string]$DriversDir
+)
+
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$driversDir = Join-Path $repoRoot "firmware\KilnFW\App\drivers"
+if ($DriversDir) {
+    $driversDir = $DriversDir
+} else {
+    $driversDir = Join-Path $repoRoot "firmware\KilnFW\App\drivers"
+}
 
 if (-not (Test-Path $driversDir)) {
     throw "check_heat_enable_wiring: $driversDir not found -- the tree moved and this check has gone blind."
 }
+$driversDir = (Resolve-Path $driversDir).Path
 
 $violations = @()
 
@@ -87,7 +97,7 @@ $heatModules = @(
 )
 foreach ($mod in $heatModules) {
     $name = $mod.Name
-    $files = @(Get-ChildItem -Path $driversDir -Filter $mod.Glob -File)
+    $files = @(Get-ChildItem -Path $driversDir -Filter $mod.Glob -File -Recurse)
     if ($files.Count -lt $mod.MinFiles) {
         $violations += "$name -- expected at least $($mod.MinFiles) file(s) matching '$($mod.Glob)' under $driversDir, found $($files.Count). It was renamed, removed, or merged back down and this check has gone blind."
         continue
@@ -125,10 +135,15 @@ foreach ($mod in $heatModules) {
 }
 
 # ---- check 4: the blindness guard -----------------------------------------
-$hePath = Join-Path $driversDir "heat_enable.c"
-if (-not (Test-Path $hePath)) {
-    throw "check_heat_enable_wiring: heat_enable.c not found -- the module this check is built around is gone. Update this check before trusting its result."
+$heMatches = @(Get-ChildItem -Path $driversDir -Filter "heat_enable.c" -File -Recurse)
+if ($heMatches.Count -eq 0) {
+    throw "check_heat_enable_wiring: heat_enable.c not found anywhere under $driversDir -- the module this check is built around is gone. Update this check before trusting its result."
 }
+if ($heMatches.Count -gt 1) {
+    $paths = ($heMatches | ForEach-Object { $_.FullName }) -join ", "
+    throw "check_heat_enable_wiring: heat_enable.c matched more than one file under $driversDir ($paths) -- cannot tell which one is the real module."
+}
+$hePath = $heMatches[0].FullName
 $heLines = Get-Content -Path $hePath
 $heWireCalls = @($heLines | Where-Object { $_ -match 'safety_link_request_enable\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
 $heTrue  = @($heWireCalls | Where-Object { $_ -match 'request_enable\s*\(\s*[A-Za-z0-9_.\->]+\s*,\s*true\s*\)' })

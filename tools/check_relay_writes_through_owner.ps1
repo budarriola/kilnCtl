@@ -138,11 +138,15 @@ if ($sourceFiles.Count -lt 50) {
     throw "check_relay_writes_through_owner: only $($sourceFiles.Count) .c file(s) found under $appDirResolved (excluding test/) -- implausibly low, has the tree moved? This check would pass vacuously."
 }
 
-$ownerFile = Join-Path $appDirResolved "drivers\kiln_io_owner.c"
-if (-not (Test-Path $ownerFile)) {
-    throw "check_relay_writes_through_owner: $ownerFile not found -- has kiln_io_owner.c moved or been renamed? This check is now blind."
+$ownerMatches = @(Get-ChildItem -Path (Join-Path $appDirResolved "drivers") -Filter "kiln_io_owner.c" -File -Recurse -ErrorAction SilentlyContinue)
+if ($ownerMatches.Count -eq 0) {
+    throw "check_relay_writes_through_owner: kiln_io_owner.c not found anywhere under $appDirResolved\drivers -- has it moved or been renamed? This check is now blind."
 }
-$ownerFileResolved = (Resolve-Path $ownerFile).Path
+if ($ownerMatches.Count -gt 1) {
+    $paths = ($ownerMatches | ForEach-Object { $_.FullName }) -join ", "
+    throw "check_relay_writes_through_owner: kiln_io_owner.c matched more than one file under $appDirResolved\drivers ($paths) -- cannot tell which one is the real owner module."
+}
+$ownerFileResolved = $ownerMatches[0].FullName
 
 $violations = @()
 $ownerCallsSeen = 0

@@ -33,18 +33,40 @@
 #        powershell -File tools\check_heartbeat_contract.ps1 -DebugValues
 
 param(
-    [switch]$DebugValues
+    [switch]$DebugValues,
+    [string]$DriversDir
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $linkHub = Join-Path $repoRoot "tools\PcTools\src\kilnctrl\link_hub.py"
-$bridgeHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\uart_bridge.h"
+if ($DriversDir) {
+    $driversDir = (Resolve-Path $DriversDir).Path
+} else {
+    $driversDir = (Resolve-Path (Join-Path $repoRoot "firmware\KilnFW\App\drivers")).Path
+}
 
-foreach ($f in @($linkHub, $bridgeHeader)) {
-    if (-not (Test-Path $f)) {
-        throw "check_heartbeat_contract: $f not found -- did it move? This check is now blind, which is worse than the bug it looks for."
+# Resolve a bare basename to a file anywhere under $driversDir -- agnostic to
+# the upcoming move of every drivers/*.c/.h file into layer subdirectories
+# (drivers/<layer>/<file>). Fails loud rather than silently going blind if a
+# name is missing or ambiguous.
+function Resolve-DriverFile {
+    param([string]$DriversDir, [string]$BaseName)
+    $found = @(Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse)
+    if ($found.Count -eq 0) {
+        throw "check_heartbeat_contract: expected file '$BaseName' not found anywhere under $DriversDir -- has it moved or been renamed?"
     }
+    if ($found.Count -gt 1) {
+        $paths = ($found | ForEach-Object { $_.FullName }) -join ", "
+        throw "check_heartbeat_contract: '$BaseName' matched more than one file under $DriversDir ($paths) -- this script cannot tell which one is the real header."
+    }
+    return $found[0].FullName
+}
+
+$bridgeHeader = Resolve-DriverFile -DriversDir $driversDir -BaseName "uart_bridge.h"
+
+if (-not (Test-Path $linkHub)) {
+    throw "check_heartbeat_contract: $linkHub not found -- did it move? This check is now blind, which is worse than the bug it looks for."
 }
 
 $hubText = Get-Content $linkHub -Raw
@@ -128,7 +150,7 @@ if (-not $taskIdMatch.Success) {
 }
 else {
     $heartbeatTaskId = [int]$taskIdMatch.Groups[1].Value
-    $taskIdsHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\uart_task_ids.h"
+    $taskIdsHeader = Resolve-DriverFile -DriversDir $driversDir -BaseName "uart_task_ids.h"
     if (Test-Path $taskIdsHeader) {
         $realIds = [regex]::Matches((Get-Content $taskIdsHeader -Raw), '#define\s+UART_TASK_ID_\w+\s+(\d+)') |
                    ForEach-Object { [int]$_.Groups[1].Value }
