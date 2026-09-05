@@ -277,6 +277,26 @@ _ZONE_FIELD_FORM_KEY = {
     # NUL). Omitted-on-POST preserves the current per-zone value, same
     # convention as ease_off_window_mult/coupling_diag_k_dc above.
     "approach_rate_cap_c_per_hr": "approachratecap",
+    # ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g, 2026-09-04):
+    # pid_fuzzy.c's two triangular-membership half-widths, promoted from
+    # compile-time constants to per-zone config -- logs/coupling/
+    # fuzzy_bands_envelope_20260904e_report.md found this rig has never once
+    # left the centre rule cell at the shipped 20.0/0.5 widths (peak error
+    # 29% of band, peak rate 33% of band), which makes trying a rescaled,
+    # relabeled, or dropped fuzzy layer an owner decision -- this mapping is
+    # what lets that decision be tried as a config POST instead of a
+    # reflash. 0.0 = "use the firmware default" (20.0 degC / 0.5 degC/s),
+    # same sentinel convention as ease_off_window_mult's own 0 above (NOT
+    # approach_rate_cap_c_per_hr's "0 = off" convention just above it).
+    # zones_http_post_parse.c: snprintf(key, ..., "z%u_errorband"/
+    # "z%u_rateband", i) -- same JSON key on the GET side (zones_http_get.c),
+    # a shorter form-key suffix on POST, same split as ease_off_window_mult/
+    # approach_rate_cap_c_per_hr's own name splits above (both comfortably
+    # inside char key[24]: "z0_errorband"/"z0_rateband" are 12/11 chars + a
+    # NUL). Omitted-on-POST preserves the current per-zone value, same
+    # convention as every other field in this dict.
+    "error_band_c": "errorband",
+    "rate_band_c_per_s": "rateband",
 }
 #: Integer-valued zone fields -- posted as a plain int string (parse_u8_field()
 #: on the firmware side), never a float repr like "2.0".
@@ -556,6 +576,17 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # scalar) -- it was per-zone from the day it was introduced, so there is
     # no _apply_legacy_top_level_*() counterpart needed here.
     "approach_rate_cap_c_per_hr",
+    # ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g, 2026-09-04):
+    # error_band_c/rate_band_c_per_s, same scalar-override class as
+    # ease_off_window_mult/approach_rate_cap_c_per_hr just above -- a preset
+    # zone entry naming either sets THAT zone's own fuzzy-PID membership
+    # band for an A/B arm (e.g. a z0-only rescale to the measured envelope
+    # while z1/z2 stay at the 20.0/0.5 firmware default). No legacy
+    # top-level equivalent exists for either field -- both were per-zone
+    # from the day they were introduced, so no _apply_legacy_top_level_*()
+    # counterpart is needed here, same as approach_rate_cap_c_per_hr's own
+    # note just above.
+    "error_band_c", "rate_band_c_per_s",
 }
 
 #: coupling_coeff is handled OUTSIDE _PRESET_ZONE_OVERRIDE_FIELDS on purpose:

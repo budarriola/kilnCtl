@@ -1080,7 +1080,16 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c);
  * this bump's 128 bytes of headroom. Existing kiln_cfg_store.c entries
  * already on a board's flash keep their old (smaller) blob size until
  * re-saved, same discipline as every prior ZONES_CFG_VERSION migration. */
-#define ZONES_CONFIG_BLOB_MAX_SIZE 768
+/* 768 -> 896 (2026-09-04, ZONES_CFG_VERSION 18->19, PID_EXPANSION_PLAN.md
+ * sec 3.6g: pid_fuzzy.c's two membership-band widths promoted to per-zone
+ * config): two new floats (error_band_c, rate_band_c_per_s) per zone_cfg_t
+ * element adds 8 bytes per zone across MAX31856_CHANNEL_COUNT (3) zones, 24
+ * bytes total -- comfortably inside this bump's 128 bytes of headroom, same
+ * generous-round-number discipline as the 12->13 bump just above. Existing
+ * kiln_cfg_store.c entries already on a board's flash keep their old
+ * (smaller) blob size until re-saved, same discipline as every prior
+ * ZONES_CFG_VERSION migration. */
+#define ZONES_CONFIG_BLOB_MAX_SIZE 896
 
 /* Runtime size of the internal zones_cfg_t struct THIS firmware build
  * stores -- what zones_config_export_blob() below actually writes, and the

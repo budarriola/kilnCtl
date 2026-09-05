@@ -41,8 +41,38 @@
 // unstuck and is snapping toward ambient -- reaches toward the RISING/
 // FALLING extremes. "Large" on this axis now means, physically, a rate of
 // change no ordinary ramp produces, only a genuine disturbance or fault.
-#define ERROR_BAND_C 20.0f
-#define RATE_BAND_C_PER_S 0.5f
+//
+// logs/coupling/fuzzy_bands_envelope_20260904e_report.md (29 firings,
+// 37,008 zone-samples): this rig has NEVER left the centre rule cell on
+// EITHER axis at these widths (peak |error| 5.72 degC, 29% of ERROR_BAND_C;
+// peak |rate| 0.165 degC/s, 33% of RATE_BAND_C_PER_S) -- at this rig's own
+// envelope the fuzzy layer is a near-constant gain rescale, not adaptive
+// control. Whether to rescale these two numbers to the measured envelope,
+// relabel the experiment, or drop the layer is an owner decision
+// (PID_EXPANSION_PLAN.md sec 3.6g) -- NOT made by this pass. What THIS pass
+// does is make the two numbers below a per-zone config value instead of a
+// compile-time constant, so trying any of those three options costs a
+// config POST, not a firmware flash. The values themselves, and the
+// firmware-default fallback every existing board's 0 sentinel resolves to,
+// are UNCHANGED: 20.0f and 0.5f, exactly as before this pass.
+//
+// See zones_config_json.h's ZONE_ERROR_BAND_C_MIN/MAX/DEFAULT and
+// ZONE_RATE_BAND_C_PER_S_MIN/MAX/DEFAULT for the bounds and the 0-sentinel
+// convention (same shape as ease_off_window_mult's own 0 == "use the
+// firmware default", ZONES_CFG_VERSION 18->19). Per-zone, not board-wide,
+// because these bands describe the fuzzy layer's expectation of the PLANT
+// under THIS zone's own thermocouple, and this board's three zones do not
+// share one plant: z0's model_k_dc runs ~23% higher than its peers and its
+// identified dead time is 21-56% longer (see coupling_matrix_resolved.md) --
+// a genuine disturbance on z0 physically looks different, in both
+// magnitude and rate, than the same disturbance on z1 or z2. A single
+// board-wide pair would force whichever zone needs the tightest band to
+// also constrain the other two, exactly the same "one number cannot serve
+// zones with different plants" argument that already justified z0's own
+// approach_rate_cap_c_per_hr and ease_off_window_mult reach (both per-zone,
+// both ZONES_CFG_VERSION additions this pass follows).
+#define ERROR_BAND_C_DEFAULT 20.0f
+#define RATE_BAND_C_PER_S_DEFAULT 0.5f
 
 // Maximum fractional nudge any single gain may receive at strength_pct=100
 // and full rule membership (degree 1.0). 0.5 == the fuzzy layer may at most
@@ -133,6 +163,7 @@ static float sanitize_base(float base)
 }
 
 void pid_fuzzy_adjust(float error_c, float error_rate_c_per_s,
+                      float error_band_c, float rate_band_c_per_s,
                       float base_kp, float base_ki, float base_kd,
                       uint8_t strength_pct,
                       float *out_kp, float *out_ki, float *out_kd)
@@ -190,10 +221,23 @@ void pid_fuzzy_adjust(float error_c, float error_rate_c_per_s,
     float error = error_c;
     float rate = error_rate_c_per_s;
 
+    /* error_band_c/rate_band_c_per_s come from a caller-resolved per-zone
+     * config value (zones_config_get_error_band_c()/_rate_band_c_per_s(),
+     * which already turn the 0 sentinel and anything out of bounds into the
+     * firmware default before calling here -- see those accessors' own
+     * comments). This is still the last line of defense, the same
+     * discipline sanitize_base()/the isfinite(error_c) check above already
+     * apply: a non-positive or non-finite band would divide-by-zero or
+     * propagate NaN in triangular_memberships(), so a bad value reaching
+     * this function -- however it got here -- falls back to the documented
+     * firmware default rather than corrupting the membership math. */
+    float band_e = (isfinite(error_band_c) && error_band_c > 0.0f) ? error_band_c : ERROR_BAND_C_DEFAULT;
+    float band_r = (isfinite(rate_band_c_per_s) && rate_band_c_per_s > 0.0f) ? rate_band_c_per_s : RATE_BAND_C_PER_S_DEFAULT;
+
     float e_neg, e_zero, e_pos;
     float r_neg, r_zero, r_pos;
-    triangular_memberships(error, ERROR_BAND_C, &e_neg, &e_zero, &e_pos);
-    triangular_memberships(rate, RATE_BAND_C_PER_S, &r_neg, &r_zero, &r_pos);
+    triangular_memberships(error, band_e, &e_neg, &e_zero, &e_pos);
+    triangular_memberships(rate, band_r, &r_neg, &r_zero, &r_pos);
 
     float e_deg[3] = {e_neg, e_zero, e_pos};
     float r_deg[3] = {r_neg, r_zero, r_pos};

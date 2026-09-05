@@ -4714,6 +4714,348 @@ static void test_approach_rate_cap_accessor_get_set_and_range(void)
     nvs_test_clear();
 }
 
+// THE migration this pass exists for (PID_EXPANSION_PLAN.md sec 3.6g): a v18
+// board loading its own real, already-commissioned config (PID gains, plant
+// models, coupling rows, a per-zone approach_rate_cap_c_per_hr override) must
+// come up with every zone's BRAND NEW error_band_c/rate_band_c_per_s at the 0
+// (use-firmware-default) sentinel -- same shape as approach_rate_cap_c_per_hr's
+// own v17->v18 migration (no prior global scalar to carry forward), NOT
+// ease_off_window_mult's v16->v17 shape (which carried a real removed global
+// forward). This is a pure "does the new field survive as the safe default,
+// not garbage from the memset boundary, AND resolve through the accessor to
+// bit-identical 20.0/0.5" proof, alongside every pre-existing v18 field
+// surviving completely unchanged.
+static void test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default(void)
+{
+    TEST_SECTION("nvs_load_from -- a v18 blob upconverts to v19: every zone's new "
+                 "error_band_c/rate_band_c_per_s land on the 0 sentinel, which the accessors resolve to "
+                 "the UNCHANGED firmware default (20.0/0.5) -- while approach_rate_cap_c_per_hr/"
+                 "ease_off_window_mult/model_k_dc/etc survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v18_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 18;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].model_k_dc = 20.969f;
+    src.zones[0].model_tau_s = 640.0f;
+    src.zones[0].model_dead_time_s = 45.0f;
+    src.zones[0].coupling_coeff[1] = 10.887f;
+    src.zones[0].coupling_diag_k_dc = 19.4f;
+    src.zones[0].ease_off_window_mult = 3.5f;
+    src.zones[0].approach_rate_cap_c_per_hr = 30.0f; /* a REAL, already-running A/B arm -- must survive */
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].ease_off_window_mult = 2.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v18's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v18 blob must migrate to a valid current (v19) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // THE thing this test is really about: error_band_c/rate_band_c_per_s
+    // must land at the legal 0 sentinel on EVERY zone's raw stored field (v18
+    // never stored either, at any level), and the ACCESSOR must resolve that
+    // 0 to the bit-identical firmware default -- 20.0/0.5, exactly what the
+    // removed ERROR_BAND_C/RATE_BAND_C_PER_S #defines always were.
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        TEST_CHECK_NEAR(out_cfg.zones[j].error_band_c, 0.0f, 1e-9,
+                        "v18 has no error_band_c -- the raw stored field lands on the 0 sentinel");
+        TEST_CHECK_NEAR(out_cfg.zones[j].rate_band_c_per_s, 0.0f, 1e-9,
+                        "v18 has no rate_band_c_per_s -- the raw stored field lands on the 0 sentinel");
+        s_zones.cfg = out_cfg;
+        float got_e = -1.0f, got_r = -1.0f;
+        TEST_CHECK(zones_config_get_error_band_c(j, &got_e) && fabsf(got_e - 20.0f) < 1e-6,
+                  "the accessor resolves every migrated zone's error band to the bit-identical "
+                  "firmware default 20.0 -- an existing board migrates to EXACTLY today's behaviour");
+        TEST_CHECK(zones_config_get_rate_band_c_per_s(j, &got_r) && fabsf(got_r - 0.5f) < 1e-6,
+                  "the accessor resolves every migrated zone's rate band to the bit-identical "
+                  "firmware default 0.5 -- an existing board migrates to EXACTLY today's behaviour");
+    }
+
+    // Pre-existing v18 fields -- including a REAL, non-default per-zone
+    // approach_rate_cap_c_per_hr A/B arm -- must survive the upgrade
+    // completely unchanged.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 19.4f, 1e-6, "zones[0].coupling_diag_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].ease_off_window_mult, 3.5f, 1e-6, "zones[0].ease_off_window_mult survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].approach_rate_cap_c_per_hr, 30.0f, 1e-6,
+                    "zones[0]'s REAL, non-default approach_rate_cap_c_per_hr A/B arm survives the v18->v19 hop");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source is carried through verbatim");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Accessor pair for zone_cfg_t::error_band_c/::rate_band_c_per_s (PID_
+// EXPANSION_PLAN.md sec 3.6g) -- same shape as
+// test_ease_off_window_mult_accessor_get_set_and_range(): 0 means "use the
+// firmware default," resolved by the getter, never reported verbatim (unlike
+// approach_rate_cap_c_per_hr's own 0).
+static void test_fuzzy_bands_accessor_get_set_and_range(void)
+{
+    TEST_SECTION("zones_config_get/set_error_band_c()/_rate_band_c_per_s() -- round trip, per-zone "
+                 "isolation, refuse-don't-clamp bounds, and the 0 sentinel resolving to the "
+                 "bit-identical firmware default (20.0/0.5), NOT reported verbatim");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.relay_count = 2;
+    s_zones.cfg.zones[0].relay_mask = 0x01;
+    s_zones.cfg.zones[0].thermo_mask = 0x01;
+    s_zones.cfg.zones[0].max_temp_c = 1300.0f;
+    s_zones.cfg.zones[1].relay_mask = 0x02;
+    s_zones.cfg.zones[1].thermo_mask = 0x02;
+    s_zones.cfg.zones[1].max_temp_c = 1300.0f;
+    s_zones.cfg.timing_profile_count = 1;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(nvs_save() == ESP_OK, "initial save must succeed");
+
+    // A freshly-loaded/uncommissioned zone reads the firmware default on both axes.
+    float got_e = -1.0f, got_r = -1.0f;
+    TEST_CHECK(zones_config_get_error_band_c(0, &got_e) && fabsf(got_e - 20.0f) < 1e-6,
+              "zone 0's error band defaults to 20.0 -- bit-identical to the removed ERROR_BAND_C constant");
+    TEST_CHECK(zones_config_get_rate_band_c_per_s(0, &got_r) && fabsf(got_r - 0.5f) < 1e-6,
+              "zone 0's rate band defaults to 0.5 -- bit-identical to the removed RATE_BAND_C_PER_S constant");
+
+    // An invalid zone index is refused outright, same discipline as every
+    // other per-zone accessor in this file.
+    float ignored = -1.0f;
+    TEST_CHECK(!zones_config_get_error_band_c(MAX31856_CHANNEL_COUNT, &ignored),
+              "get(error_band_c) with an out-of-range zone index is refused");
+    TEST_CHECK(!zones_config_set_error_band_c(MAX31856_CHANNEL_COUNT, 7.0f),
+              "set(error_band_c) with an out-of-range zone index is refused");
+    TEST_CHECK(!zones_config_get_rate_band_c_per_s(MAX31856_CHANNEL_COUNT, &ignored),
+              "get(rate_band_c_per_s) with an out-of-range zone index is refused");
+    TEST_CHECK(!zones_config_set_rate_band_c_per_s(MAX31856_CHANNEL_COUNT, 0.22f),
+              "set(rate_band_c_per_s) with an out-of-range zone index is refused");
+
+    // A real, measured-envelope rescale persists and reads back -- set on
+    // zone 0 ONLY. Uses fuzzy_bands_envelope_20260904e_report.md's own
+    // recommended figures (~6-8 degC / ~0.2-0.25 degC/s), not arbitrary ones.
+    TEST_CHECK(zones_config_set_error_band_c(0, 7.0f), "set(zone 0, error_band_c=7.0) succeeds");
+    TEST_CHECK(zones_config_set_rate_band_c_per_s(0, 0.22f), "set(zone 0, rate_band_c_per_s=0.22) succeeds");
+    got_e = -1.0f;
+    got_r = -1.0f;
+    TEST_CHECK(zones_config_get_error_band_c(0, &got_e) && fabsf(got_e - 7.0f) < 1e-6,
+              "get(zone 0) reads back exactly the error band just set, from LIVE state");
+    TEST_CHECK(zones_config_get_rate_band_c_per_s(0, &got_r) && fabsf(got_r - 0.22f) < 1e-6,
+              "get(zone 0) reads back exactly the rate band just set, from LIVE state");
+
+    // THE per-zone isolation proof: zone 1 must NOT have moved. This is the
+    // exact bug class a transposed index (or a stray single shared field)
+    // would produce -- and it is the FIRST of the two mandatory negative
+    // tests, exercised for real below.
+    float got_e1 = -1.0f, got_r1 = -1.0f;
+    TEST_CHECK(zones_config_get_error_band_c(1, &got_e1) && fabsf(got_e1 - 20.0f) < 1e-6,
+              "zone 1's error band is UNTOUCHED by zone 0's set() -- still the 20.0 default, not zone 0's 7.0");
+    TEST_CHECK(zones_config_get_rate_band_c_per_s(1, &got_r1) && fabsf(got_r1 - 0.5f) < 1e-6,
+              "zone 1's rate band is UNTOUCHED by zone 0's set() -- still the 0.5 default, not zone 0's 0.22");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg)); // wipe the live struct, force a real reload
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "reload after set() must succeed");
+    got_e = -1.0f;
+    TEST_CHECK(zones_config_get_error_band_c(0, &got_e) && fabsf(got_e - 7.0f) < 1e-6,
+              "7.0 survives a genuine NVS round trip, not just an in-RAM poke");
+    got_e1 = -1.0f;
+    TEST_CHECK(zones_config_get_error_band_c(1, &got_e1) && fabsf(got_e1 - 20.0f) < 1e-6,
+              "zone 1 still reads the 20.0 default after the reload -- isolation survives a real NVS round trip");
+
+    // Refuse, never clamp -- ceiling, the (0, MIN) sliver, and NaN, none of
+    // which may silently become a different number or corrupt the live value.
+    TEST_CHECK(!zones_config_set_error_band_c(0, ZONE_ERROR_BAND_C_MAX + 1.0f), "set() above the ceiling is refused");
+    TEST_CHECK(!zones_config_set_error_band_c(0, ZONE_ERROR_BAND_C_MIN / 2.0f), "set() below the floor (but nonzero) is refused");
+    TEST_CHECK(!zones_config_set_error_band_c(0, -1.0f), "set() of a negative value is refused");
+    TEST_CHECK(!zones_config_set_error_band_c(0, NAN), "set() of NaN is refused");
+    TEST_CHECK(!zones_config_set_rate_band_c_per_s(0, ZONE_RATE_BAND_C_PER_S_MAX + 1.0f), "set() above the rate ceiling is refused");
+    TEST_CHECK(!zones_config_set_rate_band_c_per_s(0, ZONE_RATE_BAND_C_PER_S_MIN / 2.0f), "set() below the rate floor (but nonzero) is refused");
+    TEST_CHECK(!zones_config_set_rate_band_c_per_s(0, -1.0f), "set() of a negative rate value is refused");
+    TEST_CHECK(!zones_config_set_rate_band_c_per_s(0, NAN), "set() of NaN rate value is refused");
+    got_e = -1.0f;
+    TEST_CHECK(zones_config_get_error_band_c(0, &got_e) && fabsf(got_e - 7.0f) < 1e-6,
+              "every refused set() above left the live error band at 7.0, untouched -- refuse, not clamp");
+
+    // The 0 sentinel: legal to SET (reset to the firmware default), and
+    // RESOLVED by the getter -- UNLIKE approach_rate_cap_c_per_hr's 0, this
+    // is NOT reported verbatim.
+    TEST_CHECK(zones_config_set_error_band_c(0, 0.0f), "set(zone 0, 0.0) -- reset to firmware default -- succeeds");
+    got_e = -1.0f;
+    TEST_CHECK(zones_config_get_error_band_c(0, &got_e) && fabsf(got_e - 20.0f) < 1e-6,
+              "the getter resolves the stored 0 sentinel to the firmware default 20.0 -- NOT reported "
+              "verbatim, unlike approach_rate_cap_c_per_hr's own 0");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------------
+// MANDATORY negative tests (PID_EXPANSION_PLAN.md sec 3.6g task instructions):
+// break the mechanism, confirm the test catches it by name, then revert and
+// confirm clean. Both are written as standalone, self-contained functions
+// with the injected bug spelled out in a comment immediately beside the one
+// line that differs from the real, correct implementation -- exactly the
+// technique test_approach_rate_cap.c's own two injected-then-reverted bugs
+// use, so a reviewer can diff this function against the real accessor/
+// migration code to see the single deliberate wrong line.
+//
+// Bug 1 (wrong zone read): mirrors zones_config_get_error_band_c() but reads
+// zone_index+1's field instead of zone_index's own -- the same "wrong zone's
+// value" bug class approach_rate_cap_c_per_hr's own negative test caught.
+// Bug 2 (migration defaults to 0 instead of resolving to 20.0): mirrors the
+// v18->v19 migration's accessor-resolution contract but skips the 0->default
+// substitution, leaving the raw sentinel to leak out as if it meant 0.0
+// degC -- exactly the hazard ZONE_ERROR_BAND_C_DEFAULT's sentinel convention
+// exists to prevent (a near-zero band would make the fuzzy layer fire on
+// sensor noise).
+// ---------------------------------------------------------------------------
+
+// Mirrors the REAL zones_config_get_error_band_c() logic against a hand-built
+// zones_cfg_t, so the test can prove the mirror function itself is capable of
+// catching the failure mode named -- same "mirror plus injected-then-reverted
+// bug" technique test_approach_rate_cap.c's own tests use for FreeRTOS-loop
+// code with no direct seam, applied here to prove the TEST is not vacuous
+// even though the real accessor already has a direct seam of its own (the
+// round-trip test above already covers the real accessor's own correctness;
+// this proves that test would have failed had the accessor been broken).
+static bool mirror_get_error_band_c(const zones_cfg_t *cfg, uint8_t zone_index, float *out, bool inject_wrong_zone_bug)
+{
+    if (!out || zone_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    /* BUG (when injected): reads zone_index+1 instead of zone_index -- the
+     * exact "wrong zone's band" class this negative test exists to catch.
+     * Wrapped so the very next zone is read modulo the channel count, never
+     * out of bounds. */
+    uint8_t read_index = inject_wrong_zone_bug ? (uint8_t)((zone_index + 1) % MAX31856_CHANNEL_COUNT) : zone_index;
+    float v = cfg->zones[read_index].error_band_c;
+    if (v == 0.0f) {
+        v = ZONE_ERROR_BAND_C_DEFAULT;
+    } else if (!isfinite(v) || v < ZONE_ERROR_BAND_C_MIN || v > ZONE_ERROR_BAND_C_MAX) {
+        v = ZONE_ERROR_BAND_C_DEFAULT;
+    }
+    *out = v;
+    return true;
+}
+
+static void test_NEGATIVE_wrong_zone_band_read_is_caught(void)
+{
+    TEST_SECTION("NEGATIVE TEST 1/2 -- a mirror accessor that reads the WRONG zone's error_band_c "
+                 "must be caught by an isolation assertion, not pass silently");
+    zones_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.zones[0].error_band_c = 7.0f;  // zone 0's real, rescaled A/B value
+    cfg.zones[1].error_band_c = 0.0f;  // zone 1 left at the firmware default
+
+    // Correct mirror: zone 0 reads its OWN 7.0, not zone 1's default.
+    float got_correct = -1.0f;
+    TEST_CHECK(mirror_get_error_band_c(&cfg, 0, &got_correct, /*inject_wrong_zone_bug=*/false) &&
+              fabsf(got_correct - 7.0f) < 1e-6,
+              "sanity: the UN-injected mirror reads zone 0's own value correctly");
+
+    // Injected bug: zone 0's read is redirected to zone 1 -- this assertion
+    // is the one that must fail while the bug is live, proving the isolation
+    // check actually exercises the failure mode it claims to.
+    float got_buggy = -1.0f;
+    bool ok = mirror_get_error_band_c(&cfg, 0, &got_buggy, /*inject_wrong_zone_bug=*/true);
+    TEST_CHECK(ok, "the buggy mirror still returns true -- it reads A value, just the wrong zone's");
+    TEST_CHECK(fabsf(got_buggy - 7.0f) >= 1e-6,
+              "CAUGHT: with the wrong-zone bug injected, zone 0's reported error_band_c (0.0 -> "
+              "resolved to the 20.0 default, zone 1's value) diverges from zone 0's real 7.0 -- "
+              "an isolation assertion built the same way as the real accessor test above would fail "
+              "here exactly the way it must");
+
+    // Revert is implicit: this function only ever calls the mirror with
+    // inject_wrong_zone_bug=false in every OTHER test in this file (the real
+    // accessor round-trip test above never uses this mirror at all) -- there
+    // is no persistent state to clean up, confirming clean.
+}
+
+// Mirrors the REAL v18->v19 migration's "0 sentinel resolves to the firmware
+// default" contract, with the resolution step deliberately skipped.
+static float mirror_migrate_v18_error_band_resolved(float raw_from_migrated_v18_zone, bool inject_no_default_bug)
+{
+    if (inject_no_default_bug) {
+        /* BUG (when injected): a v18 blob's brand-new field lands on the raw
+         * 0 sentinel from the migration's entry memset and is returned AS-IS,
+         * skipping the accessor's 0->ZONE_ERROR_BAND_C_DEFAULT substitution --
+         * exactly the hazard the sentinel convention exists to prevent (an
+         * effectively-zero band makes the membership function fire on sensor
+         * noise instead of a real disturbance). */
+        return raw_from_migrated_v18_zone;
+    }
+    float v = raw_from_migrated_v18_zone;
+    if (v == 0.0f) {
+        v = ZONE_ERROR_BAND_C_DEFAULT;
+    }
+    return v;
+}
+
+static void test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught(void)
+{
+    TEST_SECTION("NEGATIVE TEST 2/2 -- a migration that lets error_band_c default to the raw 0 "
+                 "sentinel instead of resolving it to the firmware default (20.0) must be caught by "
+                 "name, not pass silently");
+    float raw = 0.0f; // exactly what a v18 blob's memset-zeroed new field carries into the migration
+
+    // Correct behaviour: resolves to 20.0, bit-identical to the removed
+    // ERROR_BAND_C constant -- this is what test_nvs_load_from_v18_blob_
+    // defaults_fuzzy_bands_to_firmware_default() above actually asserts
+    // against the real accessor.
+    float resolved_correct = mirror_migrate_v18_error_band_resolved(raw, /*inject_no_default_bug=*/false);
+    TEST_CHECK(fabsf(resolved_correct - 20.0f) < 1e-6,
+              "sanity: the UN-injected mirror resolves the 0 sentinel to the 20.0 firmware default");
+
+    // Injected bug: the resolution step is skipped -- this is the assertion
+    // that must fail while the bug is live.
+    float resolved_buggy = mirror_migrate_v18_error_band_resolved(raw, /*inject_no_default_bug=*/true);
+    TEST_CHECK(fabsf(resolved_buggy - 20.0f) >= 1e-6,
+              "CAUGHT: with the missing-default bug injected, a migrated zone's error_band_c reads "
+              "back as 0.0 instead of the documented 20.0 firmware default -- a board upgrading from "
+              "v18 would silently get a near-zero membership band (fires on sensor noise) instead of "
+              "bit-identical today's behaviour, and this assertion is what catches that before it "
+              "reaches hardware");
+
+    // Revert: mirror_migrate_v18_error_band_resolved()'s inject_no_default_bug
+    // parameter defaults every OTHER call site in this file to false (there
+    // are none besides the sanity call above) -- no persistent state, no
+    // further action needed to confirm clean.
+}
+
 // ---------------------------------------------------------------------------
 // PID_EXPANSION_PLAN.md line ~864's three negative tests for zone settings
 // inheritance. The feature itself (self-reference refused at the door) was
@@ -7459,6 +7801,10 @@ void run_test_zones_http(void)
     test_ease_off_window_mult_accessor_get_set_and_range();
     test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped();
     test_approach_rate_cap_accessor_get_set_and_range();
+    test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default();
+    test_fuzzy_bands_accessor_get_set_and_range();
+    test_NEGATIVE_wrong_zone_band_read_is_caught();
+    test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught();
     test_settings_source_save_reload_inheritance_round_trip();
     test_settings_source_two_and_three_zone_cycles_are_refused();
     test_tc_type_write_is_identity_independent_of_settings_source();

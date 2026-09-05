@@ -82,6 +82,25 @@ extern "C" {
 // at its most conservative setting it is indistinguishable from classic
 // PID. 100 allows the full bounded nudge documented above.
 //
+// error_band_c / rate_band_c_per_s: the triangular-membership half-widths
+// for the two axes above (ZONES_CFG_VERSION 18->19, PID_EXPANSION_PLAN.md
+// sec 3.6g) -- per-zone config, resolved by the caller via
+// zones_config_get_error_band_c()/zones_config_get_rate_band_c_per_s()
+// BEFORE calling here (this function does not read zones config itself,
+// same "no globals" discipline as the rest of this file). Must be > 0 and
+// finite; a bad value is defended against internally (falls back to the
+// documented firmware default, 20.0 degC / 0.5 degC/s) but callers should
+// always pass an already-resolved value, not a raw possibly-zero-sentinel
+// field. This is the width of the membership functions ONLY -- it does not
+// change which rule fires for a given (error, rate) *within* whatever cell
+// the rescaled axes land in; see pid_fuzzy.c's own header comment on
+// ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT for why this is per-zone
+// and not board-wide, and for why the rule TABLE itself (this header's
+// comment above) stays a compile-time constant while these two numbers do
+// not: the bands describe this zone's own measured plant envelope, the
+// rules describe a control-law choice this project does not want re-opened
+// per installation.
+//
 // error_c / error_rate_c_per_s: this zone's own signals only (setpoint -
 // measurement, and that error's rate of change) -- see the header comment
 // above for why a neighbor zone's state is never an input here.
@@ -99,6 +118,7 @@ extern "C" {
 // a hazard, not a style concern, so this function defends against it rather
 // than trusting the caller to have already sanitized error_c/error_rate.
 void pid_fuzzy_adjust(float error_c, float error_rate_c_per_s,
+                      float error_band_c, float rate_band_c_per_s,
                       float base_kp, float base_ki, float base_kd,
                       uint8_t strength_pct,
                       float *out_kp, float *out_ki, float *out_kd);

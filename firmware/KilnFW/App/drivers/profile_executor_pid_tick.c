@@ -13,6 +13,7 @@
 
 #include "pid_fuzzy.h"
 #include "zones_http.h"
+#include "zones_config_json.h" /* zones_config_get_error_band_c()/_rate_band_c_per_s() */
 
 /* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option
  * (b): declared locally, same convention profile_executor_feedforward.c
@@ -336,8 +337,30 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
                           : (strength_pct_f > 100.0f) ? 100
                           : (uint8_t)(strength_pct_f + 0.5f);
 
+    /* ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g): the
+     * membership-band widths are now per-zone config, not pid_fuzzy.c's own
+     * compile-time constants -- resolved here, the same tick this zone's
+     * fuzzy strength is resolved.
+     *
+     * The (void)-discarded bool return is deliberately safe, not a
+     * "consumer without producer" gap: these getters can only return false
+     * for zi >= MAX31856_CHANNEL_COUNT (zi is this loop's own zone index,
+     * always in range by construction, never user input), and the 0.0f the
+     * locals are pre-initialized to on that unreachable path is NOT a raw
+     * unhandled zero -- it is pid_fuzzy_adjust()'s OWN documented "non-
+     * positive band" sentinel (pid_fuzzy.c's `> 0.0f` check), which that
+     * function resolves to ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT
+     * (20.0/0.5) internally before touching the membership math. So even a
+     * hypothetical failed lookup here still reaches pid_fuzzy_adjust() with
+     * the documented firmware default, by the same mechanism the accessors
+     * themselves use, never with an unvalidated 0. */
+    float error_band_c = 0.0f, rate_band_c_per_s = 0.0f;
+    (void)zones_config_get_error_band_c(zi, &error_band_c);
+    (void)zones_config_get_rate_band_c_per_s(zi, &rate_band_c_per_s);
+
     float adj_kp = z->pid_cfg.kp, adj_ki = z->pid_cfg.ki, adj_kd = z->pid_cfg.kd;
-    pid_fuzzy_adjust(error_c, error_rate_c_per_s, z->pid_cfg.kp, z->pid_cfg.ki, z->pid_cfg.kd,
+    pid_fuzzy_adjust(error_c, error_rate_c_per_s, error_band_c, rate_band_c_per_s,
+                     z->pid_cfg.kp, z->pid_cfg.ki, z->pid_cfg.kd,
                      strength_pct, &adj_kp, &adj_ki, &adj_kd);
 
     /* Hazard 3's bump transfer, via pid.c's own pid_rescale_integral_for_new_ki()

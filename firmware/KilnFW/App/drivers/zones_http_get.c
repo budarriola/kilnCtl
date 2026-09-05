@@ -349,6 +349,17 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * why 0 is answered verbatim, not substituted). Always emitted, same
          * always-emit/read-back-and-repost reasoning as every field above. */
         APPEND("\"approach_rate_cap_c_per_hr\":%.3f,", (double)z->approach_rate_cap_c_per_hr);
+        /* ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g): the
+         * fuzzy-PID membership-band widths -- z%u_errorband/z%u_rateband on
+         * the POST side (parse_zone_fields()). Emits the RAW stored value
+         * (including the legal 0 sentinel), same "the page shows what is
+         * actually stored, not the resolved default" convention ease_off_
+         * window_mult above uses (0 means "use the firmware default", see
+         * zones_config_get_error_band_c()'s own comment). Always emitted,
+         * same always-emit/read-back-and-repost reasoning as every field
+         * above. */
+        APPEND("\"error_band_c\":%.3f,\"rate_band_c_per_s\":%.4f,",
+               (double)z->error_band_c, (double)z->rate_band_c_per_s);
         /* 2026-08-30 (ZONES_CFG_VERSION 10->11): the coupling row, one
          * indexed key per cell (z%u_coupling_c%u is the matching POST-side
          * wire name -- see parse_zone_fields()) rather than a JSON array, so

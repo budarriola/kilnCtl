@@ -37,7 +37,19 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
      * inclusive) needs nothing extra: this function's entry memset already
      * zeroes the field, and 0 is this field's own "uncapped" sentinel (see
      * ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN's own comment) -- exactly today's
-     * behaviour, unchanged, for every zone of every upgrading board. */
+     * behaviour, unchanged, for every zone of every upgrading board.
+     *
+     * ZONES_CFG_VERSION 18->19: error_band_c/rate_band_c_per_s are ALSO
+     * brand new (PID_EXPANSION_PLAN.md sec 3.6g) -- same "no prior global
+     * scalar to carry forward" shape as approach_rate_cap_c_per_hr just
+     * above, not ease_off_window_mult's "carry the removed global verbatim"
+     * shape, so again EVERY case below needs nothing extra: this function's
+     * entry memset already zeroes both fields, and 0 IS each field's
+     * documented "use the firmware default" sentinel (see ZONE_ERROR_BAND_
+     * C_MIN/MAX/DEFAULT's own comment) -- zones_config_get_error_band_c()/
+     * zones_config_get_rate_band_c_per_s() resolve that sentinel to 20.0f/
+     * 0.5f, bit-identical to the removed ERROR_BAND_C/RATE_BAND_C_PER_S
+     * #defines, for every zone of every upgrading board. */
     switch (version) {
     case 1: {
         zones_cfg_v1_t src;
@@ -497,6 +509,40 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         }
         /* src.crc32 deliberately NOT carried over -- it covered the v17
          * shape; nvs_save() stamps a fresh one over the current (v18)
+         * struct. */
+        return true;
+    }
+    case 18: {
+        /* v18 -> v19 (THIS pass, PID_EXPANSION_PLAN.md sec 3.6g): error_
+         * band_c/rate_band_c_per_s are brand new -- see this function's own
+         * top-of-function comment for why every zone simply lands on the 0
+         * (use-firmware-default) sentinel via the entry memset, with no
+         * explicit per-zone assignment needed. zone_cfg_v18_t (frozen in
+         * zones_config_json.h) is byte-for-byte identical to what
+         * zone_cfg_t was at v18, so a per-element memcpy of that prefix is
+         * exactly equivalent to a whole-array memcpy, just typed against
+         * the smaller historical shape -- same technique case 17 uses
+         * against zone_cfg_v17_t. */
+        zones_cfg_v18_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v18 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].error_band_c/rate_band_c_per_s already 0 (use
+             * firmware default) from this function's entry memset --
+             * brand-new mechanism, no prior global opinion to carry
+             * forward, same as approach_rate_cap_c_per_hr's own v17->v18
+             * migration just above. */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v18
+         * shape; nvs_save() stamps a fresh one over the current (v19)
          * struct. */
         return true;
     }

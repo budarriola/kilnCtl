@@ -69,6 +69,13 @@ def _sample_zone(index: int, **overrides) -> dict:
         # above. 0.0 = uncapped, the board default for every zone until an
         # operator opts one in.
         "approach_rate_cap_c_per_hr": 0.0,
+        # ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g): the
+        # fuzzy-PID membership-band widths, always emitted alongside
+        # approach_rate_cap_c_per_hr above. 20.0/0.5 are the firmware
+        # defaults every zone reports until an operator (or an A/B campaign)
+        # overrides one -- bit-identical to the removed ERROR_BAND_C/
+        # RATE_BAND_C_PER_S compile-time constants.
+        "error_band_c": 20.0, "rate_band_c_per_s": 0.5,
         # Coupling row: MAX31856_CHANNEL_COUNT (3, uart_task_ids.h's
         # THERMO_CHANNEL_COUNT) cells, diagonal (j == index) always 0 --
         # zones_http.c always emits the full row for every zone regardless
@@ -927,6 +934,76 @@ class ApplyZonePresetTest(unittest.TestCase):
             result = zh.apply_zone_preset("kiln.local", preset)
         self.assertFalse(result.ok)
         self.assertTrue(any("approach_rate_cap_c_per_hr" in m for m in result.mismatches), result.mismatches)
+
+    def test_fuzzy_bands_preset_lands_on_named_zone_only_end_to_end(self):
+        """WHOLE-CHAIN test for the per-zone fuzzy-PID membership bands
+        (PID_EXPANSION_PLAN.md sec 3.6g): a preset naming z0's own
+        error_band_c/rate_band_c_per_s override must POST z0's rescaled
+        bands as the PRESET's values, while z1/z2 -- not named by the
+        preset -- still echo their own CURRENT (board-reported, firmware-
+        default) values, same as every other scalar field build_post_body()
+        always posts for every zone regardless of which one a preset
+        overrides. Uses the measured envelope's own recommended rescale
+        (fuzzy_bands_envelope_20260904e_report.md's ~6-8 degC / ~0.2-0.25
+        degC/s), not arbitrary numbers, so this test doubles as a record of
+        what an actual owner-approved rescale command would look like."""
+        current = _sample_get_response()
+        for z in current["zones"]:
+            self.assertEqual(z["error_band_c"], 20.0)
+            self.assertEqual(z["rate_band_c_per_s"], 0.5)
+        preset = {"name": "p", "zones": [{"index": 0, "error_band_c": 7.0, "rate_band_c_per_s": 0.22}]}
+        after = _sample_get_response()
+        after["zones"][0]["error_band_c"] = 7.0  # what a correctly-applied board would report
+        after["zones"][0]["rate_band_c_per_s"] = 0.22
+        captured = {}
+
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(json.dumps(current).encode())
+            if calls["n"] == 2:
+                captured["body"] = req.data
+                return _fake_response(b"ok")
+            return _fake_response(json.dumps(after).encode())
+
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = zh.apply_zone_preset("kiln.local", preset)
+        self.assertTrue(result.ok, result.describe())
+        posted = urllib.parse.parse_qs(captured["body"].decode())
+        self.assertEqual(posted["z0_errorband"], ["7.0"],
+                          "zone 0: the POST body must carry the preset's own rescaled error band")
+        self.assertEqual(posted["z0_rateband"], ["0.22"],
+                          "zone 0: the POST body must carry the preset's own rescaled rate band")
+        self.assertEqual(posted["z1_errorband"], ["20.0"],
+                          "zone 1 was not named by the preset -- it must echo its CURRENT "
+                          "(board-reported, firmware-default) value, not silently drop the "
+                          "field or inherit zone 0's rescale")
+        self.assertEqual(posted["z1_rateband"], ["0.5"],
+                          "zone 1 was not named by the preset -- same reasoning as z1_errorband above")
+        self.assertEqual(posted["z2_errorband"], ["20.0"],
+                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
+        self.assertEqual(posted["z2_rateband"], ["0.5"],
+                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
+
+    def test_fuzzy_bands_NOT_landing_is_caught(self):
+        """NEGATIVE TEST proving the write path is real: if the board's
+        read-back still shows the firmware-default bands on the zone the
+        preset named (exactly what a broken translation -- e.g. the field
+        silently dropped as 'unknown', the same incident class approach_
+        rate_cap_c_per_hr hit earlier today -- would produce),
+        apply_zone_preset() must report ok=False naming the field, not a
+        silent pass."""
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{"index": 0, "error_band_c": 7.0, "rate_band_c_per_s": 0.22}]}
+        after = _sample_get_response()  # still 20.0/0.5 on zone 0 -- write did not land
+        fake_urlopen, _ = self._mock_get_then_post_then_get(current, b"ok", after)
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = zh.apply_zone_preset("kiln.local", preset)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("error_band_c" in m for m in result.mismatches), result.mismatches)
+        self.assertTrue(any("rate_band_c_per_s" in m for m in result.mismatches), result.mismatches)
 
     def test_non_ok_post_body_raises(self):
         current = _sample_get_response()

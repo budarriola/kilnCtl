@@ -44,7 +44,7 @@ static float fuzzy_tick(pid_state_t *state, const pid_cfg_t *base_cfg, uint8_t s
     float error_c = setpoint - measurement;
     float error_rate_c_per_s = state->d_filtered;
     float kp, ki, kd;
-    pid_fuzzy_adjust(error_c, error_rate_c_per_s, base_cfg->kp, base_cfg->ki, base_cfg->kd,
+    pid_fuzzy_adjust(error_c, error_rate_c_per_s, 20.0f, 0.5f, base_cfg->kp, base_cfg->ki, base_cfg->kd,
                      strength_pct, &kp, &ki, &kd);
     pid_rescale_integral_for_new_ki(state, *prev_ki, ki);
     *prev_ki = ki;

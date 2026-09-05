@@ -628,6 +628,31 @@ bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_
     return true;
 }
 
+/* ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g): pid_fuzzy_
+ * prepare_gains() now reads the per-zone fuzzy-PID membership bands through
+ * these two getters. 0 (the arrays' own zero-init default) means "use the
+ * firmware default" for BOTH -- same resolved-not-verbatim sentinel
+ * convention as g_stub_ease_off_window_mult above, not
+ * g_stub_approach_rate_cap_c_per_hr's verbatim one -- so every pre-existing
+ * test in this file that predates these fields sees every zone at the
+ * bit-identical 20.0/0.5 firmware default, i.e. unchanged behaviour. */
+static float g_stub_error_band_c[MAX31856_CHANNEL_COUNT];
+bool zones_config_get_error_band_c(uint8_t zone_index, float *out_band_c)
+{
+    if (!out_band_c || zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    float v = g_stub_error_band_c[zone_index];
+    *out_band_c = (v == 0.0f) ? 20.0f : v;
+    return true;
+}
+static float g_stub_rate_band_c_per_s[MAX31856_CHANNEL_COUNT];
+bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_per_s)
+{
+    if (!out_band_c_per_s || zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    float v = g_stub_rate_band_c_per_s[zone_index];
+    *out_band_c_per_s = (v == 0.0f) ? 0.5f : v;
+    return true;
+}
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     (void)zone_index;

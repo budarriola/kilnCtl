@@ -1032,6 +1032,74 @@ bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c
     return nvs_save() == ESP_OK;
 }
 
+/* ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g): per-zone
+ * fuzzy-PID membership-band widths. Gated on MAX31856_CHANNEL_COUNT, same
+ * reasoning as zones_config_get_ease_off_window_mult() above.
+ *
+ * Like that getter (and UNLIKE zones_config_get_approach_rate_cap_c_per_hr()
+ * just above), 0 -- and anything else outside [MIN, MAX] -- resolves to the
+ * field's own firmware DEFAULT: there is no "no band" answer a fuzzy
+ * membership function can give the way "uncapped" is a real answer for a
+ * rate limiter, so this getter always hands the caller a finite, positive
+ * width it can pass straight to pid_fuzzy_adjust(). */
+bool zones_config_get_error_band_c(uint8_t zone_index, float *out_band_c)
+{
+    if (!out_band_c || zone_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    float v = s_zones.cfg.zones[zone_index].error_band_c;
+    if (v == 0.0f) {
+        v = ZONE_ERROR_BAND_C_DEFAULT; /* the sentinel */
+    } else if (!isfinite(v) || v < ZONE_ERROR_BAND_C_MIN || v > ZONE_ERROR_BAND_C_MAX) {
+        v = ZONE_ERROR_BAND_C_DEFAULT; /* defensive: not a value that should ever be on flash */
+    }
+    *out_band_c = v;
+    return true;
+}
+
+/* Writer for the getter above. Refused, never clamped, matching every other
+ * setter in this file. 0 is accepted as an explicit "reset to the firmware
+ * default." Setting one zone's value never touches any other zone's. */
+bool zones_config_set_error_band_c(uint8_t zone_index, float band_c)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(band_c) ||
+        (band_c != 0.0f && (band_c < ZONE_ERROR_BAND_C_MIN || band_c > ZONE_ERROR_BAND_C_MAX))) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].error_band_c = band_c;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
+/* Same shape as zones_config_get_error_band_c()/_set_error_band_c() just
+ * above, for the rate axis. */
+bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_per_s)
+{
+    if (!out_band_c_per_s || zone_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    float v = s_zones.cfg.zones[zone_index].rate_band_c_per_s;
+    if (v == 0.0f) {
+        v = ZONE_RATE_BAND_C_PER_S_DEFAULT; /* the sentinel */
+    } else if (!isfinite(v) || v < ZONE_RATE_BAND_C_PER_S_MIN || v > ZONE_RATE_BAND_C_PER_S_MAX) {
+        v = ZONE_RATE_BAND_C_PER_S_DEFAULT; /* defensive: not a value that should ever be on flash */
+    }
+    *out_band_c_per_s = v;
+    return true;
+}
+
+bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(band_c_per_s) ||
+        (band_c_per_s != 0.0f &&
+         (band_c_per_s < ZONE_RATE_BAND_C_PER_S_MIN || band_c_per_s > ZONE_RATE_BAND_C_PER_S_MAX))) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].rate_band_c_per_s = band_c_per_s;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 /* Bundled setter, same "reject nothing half-written" discipline as every
  * bundled setter above. Each of the 8 fields checked against its own
  * independent bound (matching which ceiling parse_zone_fields() applies to

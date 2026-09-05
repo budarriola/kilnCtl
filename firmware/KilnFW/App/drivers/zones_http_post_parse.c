@@ -651,6 +651,46 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
             z->approach_rate_cap_c_per_hr = current_z->approach_rate_cap_c_per_hr;
         }
     }
+    /* ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g): the
+     * fuzzy-PID membership-band widths. Same OPTIONAL/omit-PRESERVES
+     * convention as z%u_easeoffmult/z%u_approachratecap just above (an
+     * owner testing a rescaled band on one zone need not resubmit the whole
+     * form, and a client that predates this field must not silently reset
+     * whichever band is currently in effect on THIS zone just by saving the
+     * zones page).
+     *
+     * Parsed against [0, MAX] first -- 0 is the legal "reset to the
+     * firmware default" sentinel -- then the (0, MIN) sliver
+     * zones_config_json_parse_float_field()'s single contiguous range
+     * cannot express on its own is rejected here. Same effective bound as
+     * the accessor setters/zones_config_json_validate()'s per-zone check,
+     * split the same way z%u_easeoffmult's is. */
+    snprintf(key, sizeof(key), "z%u_errorband", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_ERROR_BAND_C_MAX,
+                                   &z->error_band_c) ||
+                (z->error_band_c != 0.0f && z->error_band_c < ZONE_ERROR_BAND_C_MIN)) {
+                *err_reason = "zone error_band_c out of range (0 = firmware default)";
+                return false;
+            }
+        } else {
+            z->error_band_c = current_z->error_band_c;
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_rateband", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_RATE_BAND_C_PER_S_MAX,
+                                   &z->rate_band_c_per_s) ||
+                (z->rate_band_c_per_s != 0.0f && z->rate_band_c_per_s < ZONE_RATE_BAND_C_PER_S_MIN)) {
+                *err_reason = "zone rate_band_c_per_s out of range (0 = firmware default)";
+                return false;
+            }
+        } else {
+            z->rate_band_c_per_s = current_z->rate_band_c_per_s;
+        }
+    }
     /* 2026-08-30 (ZONES_CFG_VERSION 10->11): one indexed key per cell,
      * z%u_coupling_c%u -- e.g. z1_coupling_c0 is zone 1's measured response
      * to zone 0's heater. Same per-cell "omit preserves the currently-stored
