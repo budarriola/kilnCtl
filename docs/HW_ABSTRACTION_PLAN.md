@@ -954,6 +954,28 @@ proposed fixes in `tools/drivers_reorg/DRYRUN.md` rather than repeated here:
     tier despite non-`_http` names for two of them, and `uart_bridge_ext*.c`/
     `ui_page_*` are bridge/ui (top) tier -- none needed switching;
     `profile_executor_run.c` was the only non-top-tier includer.
+13. DONE (2026-09-05): `sim_backend.c` (mid/sim) included http-tier
+    `wifi_provision_http.h` for one accessor, `wifi_provision_http_get_server()`.
+    IDF's `esp_http_server.h` defines `httpd_handle_t` as a plain
+    `typedef void *httpd_handle_t;`, so a second local typedef of the same
+    name would conflict wherever both headers are included -- instead the
+    real state accessor moved to `wifi_provision_state.h` as
+    `wifi_provision_get_httpd_handle()`, returning untyped `void *`.
+    `wifi_provision_http_get_server()` stays declared (plain `extern`, not
+    `static inline`) in `wifi_provision_http.h`, now defined in
+    `wifi_provision_http.c` as a one-line cast over
+    `wifi_provision_get_httpd_handle()` -- kept a real, non-header-defined
+    function because six host tests (`test_ota_http.c`,
+    `test_partition_info_http.c`, `test_profiles_http.c`,
+    `test_profile_executor_prestart.c`, `test_safety_cfg_http.c`,
+    `test_wifi_prov.c`) each provide their own definition of this exact
+    symbol instead of linking `wifi_provision_http.c`; a `static inline` body
+    in the header collided with every one of them (found by the standard
+    host-test rebuild, not by inspection). `sim_backend.c` switched to
+    `wifi_provision_state.h` (plus a direct `esp_http_server.h` include, which
+    it already needed for `httpd_uri_t`/`httpd_register_uri_handler()` and
+    was previously getting transitively). `factory_reset.c` is http tier and
+    needed no change -- kept `wifi_provision_http.h`.
 
 All placements ambiguous under the original plan are now resolved in
 `mapping.csv` (coordinator decisions, third round): the zones_http family

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -13,7 +14,7 @@
 
 #include "http_form.h"
 #include "uart_task_ids.h" /* THERMO_FAULT_* */
-#include "wifi_provision_http.h"
+#include "wifi_provision_state.h" /* wifi_provision_get_httpd_handle() -- item 13 */
 #include "zones_config_query.h"
 
 /* The model itself lives in App/test/ and is compiled into this build by
@@ -329,7 +330,7 @@ static esp_err_t sim_post_handler(httpd_req_t *req)
 
 esp_err_t sim_backend_register_http(void)
 {
-    httpd_handle_t server = wifi_provision_http_get_server();
+    httpd_handle_t server = (httpd_handle_t)wifi_provision_get_httpd_handle();
     if (!server) {
         ESP_LOGW(TAG, "no httpd running -- /api/sim not registered");
         return ESP_ERR_INVALID_STATE;

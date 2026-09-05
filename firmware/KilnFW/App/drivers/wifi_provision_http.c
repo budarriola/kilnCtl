@@ -1116,7 +1116,12 @@ esp_err_t wifi_provision_http_start(void)
     return ESP_OK;
 }
 
-httpd_handle_t wifi_provision_http_get_server(void)
+void *wifi_provision_get_httpd_handle(void)
 {
     return s_server;
+}
+
+httpd_handle_t wifi_provision_http_get_server(void)
+{
+    return (httpd_handle_t)wifi_provision_get_httpd_handle();
 }

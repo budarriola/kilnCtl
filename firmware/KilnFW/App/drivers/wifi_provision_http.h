@@ -18,6 +18,16 @@
 // it returns an httpd_handle_t, so every caller already needs
 // esp_http_server.h regardless -- unlike wifi_provision_http_start(), moving
 // it would not have removed anyone's httpd dependency.
+//
+// Item 13: the underlying state (the httpd instance pointer) is now
+// exposed untyped via wifi_provision_state.h's
+// wifi_provision_get_httpd_handle() -- see that header's comment -- for
+// callers that don't otherwise need esp_http_server.h. This declaration
+// stays a plain extern (not `static inline`): several host tests provide
+// their own definition of this exact symbol in place of linking
+// wifi_provision_http.c, so a body here would collide with theirs. The .c
+// file's definition is now a one-line cast over
+// wifi_provision_get_httpd_handle().
 #ifndef WIFI_PROVISION_HTTP_H
 #define WIFI_PROVISION_HTTP_H
 
