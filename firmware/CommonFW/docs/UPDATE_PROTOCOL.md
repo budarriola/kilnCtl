@@ -1133,3 +1133,58 @@ and "Pico update" sections below for what each actually covers.
 - [ ] SWD recovery from a deliberately bricked Pico. **Blocked**: needs a
       physical debug probe and a deliberately-bricked board; no hardware
       access this pass.
+
+---
+
+## Hardware exercise 2026-09-05
+
+Bench test kiln, idle, no firing. `kiln_call`/`kiln_batch` (kilnctrl MCP,
+192.168.1.156). AP password used: the Kconfig default (`password`) — no
+override had been set.
+
+**ESP OTA into `ota_0` + rollback — done, passed.**
+
+- Baseline: `factory` running, `fw_build` "Sep 5 2026 08:30:52", zone gains
+  Kp/Ki/Kd = (0.0318/0.00010/0.8401), (0.0485/0.00020/1.0548),
+  (0.0631/0.00020/1.0690), no crash report.
+- `ota_update_esp(firmware/KilnFW/build/KilnCtrl.bin, "password")`: 2,018,720
+  bytes written to `ota_0` in ~7 s (10%-step log timestamps), version string
+  `V1.0_Purchased_This_Board-1210-`. Reboot via `debug_reset(peer="esp")`
+  (JTAG reset, not a flash — the board's own bootloader/rollback machinery
+  does the rest).
+- Post-boot: `RUNNING=ota_0` confirmed (`GET /api/partitions`), `fw_build`
+  unchanged (same source build as `factory`, flashed same day), zone gains
+  byte-identical to baseline, `safety_get_status` link up, thermocouple
+  valid, currents 0 A.
+- `ota_rollback_esp("password")`: board rebooted, `RUNNING=factory`
+  confirmed, `fw_build` unchanged, gains still byte-identical (no
+  `ZONES_CFG_VERSION` mismatch hazard here — same firmware build both
+  sides), safety link up.
+- **Anomaly, unresolved, pre-existing (not caused by this exercise):**
+  `GET /api/crash_report` shows an unacknowledged panic
+  (`exc_task=safety_poll`, `IllegalInstruction`, `exc_pc=0x4037fe09`,
+  `exc_addr=0x0`) that was **absent from the pre-OTA baseline**
+  `get_heap_status` call but present, byte-for-byte identical (same PC,
+  same backtrace), after the `ota_0` boot, after the rollback boot, and
+  after one further `debug_reset`. Identical content across three
+  consecutive boots means this is a persisted coredump/NVS record, not a
+  fresh crash on each boot — most likely the same `safety_poll` /
+  `IllegalInstruction` class already root-caused and fixed by `51e1ef5`
+  (see CLAUDE.md), surfacing here because nothing in this session's path
+  acknowledges/clears the stored report. Board state itself is healthy
+  throughout (safety link up, relay off, ambient temperature, gains
+  correct) — this is a stale reporting artifact, not a live fault, but it
+  was never cleared and should be looked at before trusting `get_heap_status`
+  "healthy" output at face value on this board.
+
+**Pico bootloader update over UART1 — skipped.**
+
+No packaged SaftyFW update image exists: `firmware/SaftyFW/build/` has only
+`SaftyFW.elf`/`SaftyFW_slotA.elf`/`SaftyFW_slotB.elf`, no `.bin`/`.uf2` with
+the `UPDATE_BEGIN` header this doc's §4 describes (magic/target/
+header_version/protocol_version/min_compatible/length/crc32). Packaging one
+correctly is more than a formatting exercise (wrong magic/target erases
+nothing per §4's own design, but a malformed length/CRC either gets refused
+or, worse, silently accepted with the wrong content) and was out of scope
+for this pass's time budget. Deferred — needs a build/packaging step added
+before this can run, tracked in ROADMAP.md M8.
