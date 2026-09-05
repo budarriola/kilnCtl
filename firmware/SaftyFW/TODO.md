@@ -426,11 +426,10 @@ real wire** — the pi↔ESP UART link is currently dead on the bench
       change"). No wire-format change: `tc_type` was already in every
       `PUSH_CONTEXT` zone block.
 - [ ] Enable **S3** / **S4** once phase 5's mapping check has passed.
-- [ ] Develop the parser against a **PC-side stub emitting context frames**
-      before `KilnFW` can send any — the reverse of the stub already described
-      in `firmware/KilnFW/docs/SAFETY_LINK.md`. (Note: `tools/PcTools`'s
-      `fake_peer.py` now provides exactly this stub in both directions —
-      confirm it covers this item before reopening work here.)
+- [x] PC-side stub emitting context frames: done, `tools/PcTools/src/kilnctrl/fake_peer.py`
+      (`FakeEspPeer.send_broadcast`/`request_with_retry` stands in for KilnFW emitting
+      PUSH_CONTEXT-shaped frames; `FakeSaftyPeer.send_telemetry` covers the reverse
+      direction), with fault injection via `FaultInjector`.
 
 ## Phase 7b — Mutual version compatibility
 
@@ -611,6 +610,23 @@ mode when no valid slot metadata exists. Flashing `SaftyFW.elf` directly over
 SWD and running the application works fine. What is still unproven is booting
 the application *through* the bootloader from a slot — see the open item
 below — and a real end-to-end update crossing the isolated link.
+
+**2026-09-06, first live attempt at the isolated-link half**
+(`firmware/CommonFW/docs/UPDATE_PROTOCOL.md` "Hardware exercise 2026-09-05"):
+`ota_update_pico()` staged a real `SaftyFW_slotA.elf`-derived `.bin`
+(95,020 bytes, `arm-none-eabi-objcopy -O binary`, no hand-built header
+needed) and started the relay, but the Pico refused `UPDATE_BEGIN` with "a
+safety trip is pending" before a single byte reached flash — the ESP's own
+cached safety status showed no trip at the same moment, so this is the
+Pico's independent precondition check working, not a bug. The actual
+UART1 transfer this phase's checklist items (10.0's error-rate measurement,
+10.8c's round-cap timing) are about was not reached. Also relevant given
+10.9 below: this bench Pico is still running `SaftyFW.elf` directly (not
+booted through the bootloader), consistent with a `debug_read_memory` scan
+of the metadata sector (`0x10010000`) reading back as ordinary code rather
+than a `"KLN1"`-magic record — so even a transfer that clears the
+precondition and passes CRC today would stage a slot the current boot
+vector does not consult, on top of 10.9's own hand-off bug.
 
 - [x] **10.0 Measure the isolated link's error rate — done 2026-08-23, and
       it was not 115200 at the time.** The TCMT1109 optocoupler pair then

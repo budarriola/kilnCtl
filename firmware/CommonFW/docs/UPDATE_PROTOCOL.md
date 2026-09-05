@@ -1177,14 +1177,85 @@ override had been set.
   was never cleared and should be looked at before trusting `get_heap_status`
   "healthy" output at face value on this board.
 
-**Pico bootloader update over UART1 — skipped.**
+**Pico bootloader update over UART1 — attempted 2026-09-06, refused by the
+Pico before any flash write.**
 
-No packaged SaftyFW update image exists: `firmware/SaftyFW/build/` has only
-`SaftyFW.elf`/`SaftyFW_slotA.elf`/`SaftyFW_slotB.elf`, no `.bin`/`.uf2` with
-the `UPDATE_BEGIN` header this doc's §4 describes (magic/target/
-header_version/protocol_version/min_compatible/length/crc32). Packaging one
-correctly is more than a formatting exercise (wrong magic/target erases
-nothing per §4's own design, but a malformed length/CRC either gets refused
-or, worse, silently accepted with the wrong content) and was out of scope
-for this pass's time budget. Deferred — needs a build/packaging step added
-before this can run, tracked in ROADMAP.md M8.
+The earlier "skipped, no packaged image" note above is now stale. A `.bin`
+does not need hand-packaging at all: `ota_pico_relay.c` builds the
+36-byte `UPDATE_BEGIN` header itself (magic/target/`header_version` are
+compile-time constants, `protocol_version` is the ESP's own
+`KILNLINK_PROTOCOL_VERSION`, `length`/`crc32` are computed from whatever
+raw app image is uploaded) — the PC-side tool only has to supply a raw
+application binary, not a pre-formed image-with-header. `firmware/SaftyFW/build/`
+already had `SaftyFW_slotA.elf`/`SaftyFW_slotB.elf` (linked to run from
+`BOOTLOADER_SLOT_A_FLASH_OFFSET`/`_B_FLASH_OFFSET` respectively, per
+`bootloader/flash_layout.h`) alongside the monolithic `SaftyFW.elf` —
+`arm-none-eabi-objcopy -O binary` (the same `14.2 rel1` toolchain
+`CMakeCache.txt` already names as `CMAKE_OBJCOPY`) on `SaftyFW_slotA.elf`
+produced a 95,020-byte raw image. Confirmed the two slot ELFs are genuinely
+position-dependent, not interchangeable: the slot A and slot B `.bin`s are
+identical in length but differ in every CRC32 (`0xc02711a8` vs `0xb86018a8`,
+zlib CRC32 over the raw bytes) — sending the wrong one to whichever slot the
+Pico actually chooses would boot corrupt code, not merely fail a check, so
+this is a real hazard this exercise carried, not a hypothetical one.
+
+Preconditions confirmed idle first: `profiles_get_exec_status` state=0,
+segment 0/0, no dwell; ambient thermocouples (~23.8 °C); all relays off;
+`safety_get_status` link up, thermocouple valid, currents 0 A. AP password
+was the Kconfig default (`"password"`), same as the ESP exercise above.
+
+`ota_update_pico(image_path=".../SaftyFW_slotA.bin", password="password")`:
+staged successfully — `95020` bytes accepted, ESP-computed CRC32
+`0x02F15704` (a different value from the host-side zlib CRC32 above; the two
+sides are not using the same CRC32 variant/parameters, which is at least
+worth reconciling before trusting a CRC match as proof of a correct
+transfer) — "relay started", **202**-style async response per this doc's
+own design.
+
+Polling `ota_status()` immediately after: `phase='failed' percent=0
+last_error='Pico refused UPDATE_BEGIN: a safety trip is pending'`, and the
+ESP's own `ota_record` agrees (`success=False`,
+`reason='Pico refused UPDATE_BEGIN: a safety trip is pending'`). **No flash
+write was attempted** — the refusal came from `update_task.c`'s own
+precondition check, exactly this doc's §1 invariant working as designed:
+the ESP's *own* cached `safety_get_status()` at the same moment showed
+`fault_status=0`, link up, no visible trip — the Pico refused on information
+the ESP's own view did not surface, which is the entire point of "the Pico
+enforces the last three [preconditions] itself... for the same reason the
+whole safety processor exists." Per this task's own ground rules, this
+refusal was **not** worked around (no `safety_clear_trip()` call to force
+the update through) — the refusal itself is the finding.
+
+**A structural gap surfaces investigating this, worth flagging before the
+next attempt**: `firmware/SaftyFW/TODO.md`'s own Phase 10 checklist records
+the bootloader itself — the metadata log, per-boot CRC check, and
+`boot_attempts` slot-fallback logic that would actually make a successfully
+relayed image *run* — as built and host-tested but "not flashed or exercised
+over a live UART1 link" (Phase 0/TODO.md's own `[~]` line), and 10.9 ("application
+booted through the bootloader stops...") is still open. A `debug_read_memory`
+scan of `BOOTLOADER_METADATA_FLASH_OFFSET` (`0x10010000`, over SWD) on this
+bench Pico read back what looks like ordinary Thumb code (repeated `b672`/
+`e7fe` self-branch patterns, RAM-range literal pool values), not a
+`"KLN1"`-magic metadata log — consistent with the currently-flashed image
+being the monolithic `SaftyFW.elf` rather than a build running under the
+two-slot bootloader. If that reading is right, even a transfer that clears
+every precondition and passes its post-write CRC check today would stage a
+slot the current boot vector never consults, and "the update succeeded"
+would silently not change what the board runs on its next reset. That is a
+prerequisite gap to close, separately from the trip-pending refusal, before
+this path is retried for real. Not itself confirmed by flashing anything —
+inferred from the memory read plus TODO.md's own status, not proven by
+forcing a transfer through.
+
+**Version-mismatch path (step 4 of this pass's brief) — not exercised, and
+not fakeable with today's tooling.** `ota_pico_relay.c` always sends the
+ESP's own live `KILNLINK_PROTOCOL_VERSION` in the header it builds; nothing
+in `ota_update_pico()`/`ota_http_client.py` accepts a caller-supplied
+override, so there is no way to push a deliberately-incompatible
+`protocol_version` without editing and rebuilding the ESP firmware itself
+(out of scope here). Noted as an honest gap rather than simulated.
+
+Board state at the end of this pass: Pico still on whatever firmware was
+running before (no write attempted), safety link up, relays off, ambient
+temperature, no firing — unchanged by this exercise except for the `pico`
+`ota_record` entry above. Tracked in ROADMAP.md M8.
