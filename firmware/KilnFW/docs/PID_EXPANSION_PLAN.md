@@ -3287,12 +3287,28 @@ question stays exactly as open as before.
 
 §3.6f's single arm never left the ZERO/STEADY cell. Verified independently
 here (`error_c`/`error_rate_c_per_s` recomputed from the raw capture, not
-taken on faith) and widened to **every** usable three-zone profile-7
-capture in `logs/coupling/`: **n=29 runs, n=37,008 zone-samples, 100.000%
-in ZERO/STEADY.** Max recorded error 5.72 °C of a ±20 °C band (28.6%); max
-recorded rate 0.165 °C/s of a ±0.5 °C/s band (33%). This rig has never been
-recorded leaving the center cell under any captured profile-7 firing —
-across ramps and dwell-entries, not just steady dwells. The bands
+taken on faith).
+
+**Correction (2026-09-04, later pass):** this section originally widened
+the finding to "every usable three-zone profile-7 capture in
+`logs/coupling/`: n=29 runs, n=37,008 zone-samples, 100.000% in
+ZERO/STEADY." That archive-wide claim is **withdrawn** — grepping
+`control_mode` out of the raw captures shows 28 of those 29 files ran
+`control_mode: 2`, where `pid_fuzzy_adjust()` is never invoked, so those
+34,830 samples characterise this rig's PID tracking envelope and say
+nothing about this rule table's cell occupancy. Only
+`fuzzy_ab_20260904d_s50_run1.jsonl` (726 rows, 2178 zone-samples) ran
+`control_mode: 3` and actually exercised the fuzzy layer. What holds, at
+that true weight of **n=1 run / 2178 zone-samples**: 100% of samples land
+in ZERO/STEADY, max recorded error 5.55 °C of a ±20 °C band (28%), max
+recorded rate 0.110 °C/s of a ±0.5 °C/s band (22%). This is the same
+single-arm result §3.6f already reported, independently re-derived; it
+does not generalize past that one run — this rig has *not* been shown to
+stay in the center cell "under any captured profile-7 firing," only under
+this one. See `logs/coupling/fuzzy_bands_envelope_20260904e_report.md`'s
+own correction note for the full detail, including the offline gain-delta
+recomputation for candidate band settings and the near-identical-filename
+trap that caused the miscount. The bands
 (`ERROR_BAND_C=20`, `RATE_BAND_C_PER_S=0.5`, `pid_fuzzy.c`) trace to a
 "mid-size kiln" heuristic and a ramp-*capability* rescale
 (0.05→0.5, 2026-08-30, to stop an ordinary ramp reading as a disturbance),
