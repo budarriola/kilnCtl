@@ -1,6 +1,6 @@
 # The Safety Thermocouple
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-09-04
 > **Keep this file current.** If the driver, the register setup or the type
 > guidance changes, update it in the same commit. If it disagrees with the code,
 > **the code wins.** Checklist at the bottom.
@@ -406,12 +406,16 @@ sensor reading low tells you nothing at all.
 
 **Configuration**
 - [x] `tc_type` a commissioning field (runtime parameter of
-      `max31856_configure()`), not a compile-time constant — currently
-      supplied by `main.c` as `MAX31856_TC_TYPE_PLACEHOLDER` (type K) because
-      no `config_store` exists yet (Phase 9) to source the real
-      per-installation decision from §2. **This is not a decision that K is
-      correct for this kiln** — whoever wires `config_store` must replace
-      that call site
+      `max31856_configure()`), not a compile-time constant — **FIXED, no
+      longer a placeholder** (verified 2026-09-04): `main.c` now calls
+      `max31856_configure(config_store_get_tc_type())`, reading the real
+      per-installation value `config_store_boot_load()` populated (or the
+      safe-default K if never commissioned). `config_params.c`'s `0x0105`
+      handler stages a real write (`CHECK_U8_MAX(7u)`, `CONFIG_STORE_SET_TC_TYPE`),
+      and `KilnFW`'s commissioning page (`safety_commissioning_page.html`,
+      field id 261) submits it over `POST /api/safety/commissioning`, so a
+      non-default type can be commissioned end to end — this checklist item's
+      old "whoever wires `config_store` must replace that call site" is done.
 - [x] **`MASK` (02h) set explicitly** — `MAX31856_DEFAULT_FAULT_MASK` (0xFC:
       OPEN + OVUV unmasked, the four threshold faults masked; TCRANGE/CJRANGE
       have no mask bit at all, so they are unmaskable by construction) —
