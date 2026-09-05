@@ -644,7 +644,8 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_TOUCH_CAP_SWAP_XY
             bool "Capacitive touch (FT6336U): swap raw X/Y axes before mapping to pixels"
-            default y
+            default y if KILNCTL_DISPLAY_PANEL_ST7796
+            default n
             help
                 Separate from KILNCTL_TOUCH_CAL_SWAP_XY above on purpose: the
                 FT6336U (MSP4031) reports coordinates already in panel space
@@ -680,11 +681,36 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_TOUCH_CAP_INVERT_X
             bool "Capacitive touch (FT6336U): invert raw X axis"
+            default n if KILNCTL_DISPLAY_PANEL_ST7796
             default n
 
         config KILNCTL_TOUCH_CAP_INVERT_Y
             bool "Capacitive touch (FT6336U): invert raw Y axis"
+            default y if KILNCTL_DISPLAY_PANEL_ST7796
             default n
+            help
+                Like every other panel-specific knob in this menu, the
+                capacitive touch orientation belongs to the DISPLAY TYPE, not
+                to the board -- the film's orientation under the glass is a
+                property of the module. Each default above is therefore
+                written "default <v> if KILNCTL_DISPLAY_PANEL_<panel>", so
+                selecting a panel selects its touch orientation with it and a
+                future second panel gets its own line rather than silently
+                inheriting this one's.
+
+                ST7796 (LCDWIKI/Elecrow MSP4031, FT6336U), confirmed by a real
+                finger on the glass 2026-09-04: swap_xy=y, invert_x=n,
+                invert_y=y. Before invert_y was set, pressing the BOTTOM-right
+                corner activated the menu button drawn at the TOP-right corner
+                -- X landed correctly, Y was mirrored. touch_dev.c's
+                touch_dev_map_uncalibrated() derives out_py from ay (the
+                post-swap axis) through invert_y, which is why the vertical
+                mirror is this knob and not invert_x.
+
+                Verify all four corners plus centre after changing any of
+                these -- a single point can look correct by coincidence on a
+                symmetric layout.
+
     endmenu
 
     menu "Safety Processor Link (opto-isolated UART to the RP2040)"

@@ -25,11 +25,16 @@
 //     (CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS == 0, auto-blank disabled) is
 //     "never blank"; this module's default must not silently start blanking
 //     a board that never asked for it.
-//   - keep_on_while_firing = false -- matches "never blank" already being
-///    the default; this switch only matters once a real timeout is chosen.
-//   - display_on_error = false -- an error-driven wake is a new behaviour;
-//     it must be opted into, not silently enabled for a board that never
-//     asked for it.
+//   - keep_on_while_firing = true -- OWNER DECISION 2026-09-04. The earlier
+//     reasoning (false, because it "only matters once a real timeout is
+//     chosen") was about internal consistency with DISPLAY_TIMEOUT_NEVER,
+//     not about what the operator wants. The owner wants a firing kiln to
+//     keep its display up, so that this switch is already correct on the
+//     day a timeout IS chosen rather than needing to be found and flipped.
+//   - display_on_error = true -- OWNER DECISION 2026-09-04, same reasoning.
+//     An error that nobody sees is the case this feature exists for; making
+//     it opt-in defeats it. It self-dismisses on the next touch and resumes
+//     the previous timeout, so the cost of it being on is one touch.
 //
 // BRIGHTNESS IS CURRENTLY INERT. CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE is off
 // by default (backlight_pwm.h's header comment: no flying wire fitted from

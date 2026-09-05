@@ -35,8 +35,8 @@ typedef struct {
 // behaviour until the owner opts in).
 static uint8_t s_brightness_percent = 100;
 static display_timeout_setting_t s_timeout_setting = DISPLAY_TIMEOUT_NEVER;
-static bool s_keep_on_while_firing = false;
-static bool s_display_on_error = false;
+static bool s_keep_on_while_firing = true;
+static bool s_display_on_error = true;
 
 // Copied verbatim from unit_pref.c/ramp_assist_cfg.c's identical
 // nvs_partition_init() -- same partition, same rationale, same erase-only-
@@ -59,8 +59,8 @@ static void apply_defaults(void)
 {
     s_brightness_percent = 100;
     s_timeout_setting = DISPLAY_TIMEOUT_NEVER;
-    s_keep_on_while_firing = false;
-    s_display_on_error = false;
+    s_keep_on_while_firing = true;
+    s_display_on_error = true;
 }
 
 esp_err_t display_power_cfg_start(void)
