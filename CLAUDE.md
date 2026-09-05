@@ -46,6 +46,13 @@ and must be running. If a call fails to connect:
 The same four actions are status-bar buttons in `kilnCtl.code-workspace`, and
 the servers auto-start when the workspace opens.
 
+Both servers are long-running and keep serving whatever code they started
+with — restart after editing server source (`kiln_help()`/`kicad_help()` and
+`mcp_servers.ps1 status` self-report `fresh`/`stale` off `/health`, which also
+carries `changed_files` and `commit`). `flash_firmware()`'s verification fix
+(`06ea366`) sat inert for a while this way. Full detail: `docs/MCP_SERVERS.md`
+"Stale-server self-announcing".
+
 Firmware builds and host tests are tools too — `build_kilnfw`,
 `build_saftyfw_host_tests`, `run_pctools_tests` — so
 the toolchain invocations do not have to be rediscovered. Flashing is
@@ -121,7 +128,10 @@ if the camera moved and the crop needs re-measuring) — display rendering can
 be checked without a human at the bench. Judge colors by **numeric pixel
 sampling**, never by eye or by matching theme source constants:
 `ffmpeg -i img.jpg -vf "crop=W:H:X:Y,scale=1:1" -f rawvideo -pix_fmt rgb24 - | od -An -tu1`.
-Always sample an off-screen bezel region too, as a neutral reference.
+Always sample an off-screen bezel region too, as a neutral reference. If it
+fails with ffmpeg exit `-5`, check for another process holding the C920
+first — the device still enumerates fine (`ffmpeg -list_devices true -f dshow
+-i dummy`), it is just busy.
 
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
@@ -244,6 +254,11 @@ Symbolize a crash against the ELF that matches the RUNNING image, not
 produces confident, wrong line numbers once the board is running an older
 flash. Use `build/elf_archive/KilnCtrl-<hash>.elf`, matched by embedded build
 timestamp against the board's `fw_build`.
+
+`KILNCTL_TOUCH_CAL_SWAP_XY` is inert on this board's FT6336U capacitive
+panel — it only feeds the legacy resistive NS2009 path; the live knob is the
+`KILNCTL_TOUCH_CAP_*` family. See `firmware/KilnFW/docs/PROJECT_STATUS.md`
+"Hardware present on this bench unit" for the full explanation.
 
 Run `tools/run_all_checks.ps1` with `-ExecutionPolicy Bypass`. Without it the
 script fails to load, and the Bash tool still reports exit 0 for the wrapper

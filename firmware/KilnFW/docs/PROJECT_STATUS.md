@@ -283,6 +283,25 @@ it died with the board, so the board's live zone config may not currently
 match `fuzzy_ab_baseline_20260903` — flagged for whoever is handling that
 recovery.
 
+### 2026-09-04 — Backlight PWM enabled; DRAM floor now breached at boot
+
+`be02d34` flipped `KILNCTL_BACKLIGHT_PWM_ENABLE` to `y` (the flying wire from
+`CONFIG_KILNCTL_BACKLIGHT_GPIO` to the panel backlight input was fitted but
+reading flat, because with the flag off `backlight_pwm_init()`/`_start()` are
+no-ops that never touch the GPIO). Turning it on actually allocates the
+`backlight_pwm` task's 3072 B stack, which had never been counted against the
+`dram_margin.h` floor before. Measured live: `dram_free` at `app_main_done`
+drops from 22123 to ~18323 B (below the owner's `KILN_DRAM_FREE_FLOOR_BYTES`
+= 20480), and largest free block from 13824 to 10240.
+
+The task itself is not oversized — it uses 2168 of its 3072 B stack (29.4%
+headroom) — so shrinking it is not the fix, and per `dram_margin.h`'s own
+policy the floor is not to be moved just to silence the alarm. The one lever
+identified so far is `KILNCTL_ENABLE_GPIO_PROBE` (6144 B stack, debug-only,
+currently `y` only in the gitignored bench sdkconfig per the mismatch this
+file already records above) — freeing it would more than cover the breach,
+but that is an owner decision, not yet taken. Left open.
+
 ### 2026-08-24 — Stack high-water-mark reporting added (the section 13 blocker's measurement, not its fix)
 
 Follow-up to the entry immediately below. That investigation named six
