@@ -24,23 +24,54 @@
 static const char *TAG = "ui_page_profile_detail";
 
 /* Arithmetic (same style as every other page in this pass), against the real
- * ~267px content budget:
+ * ~267px content budget (UI_THEME_PAGE_CONTENT_BUDGET_PX, computed to 268 --
+ * see ui_theme.h's own derivation comment): the top bar (title + back/home
+ * icons) is ui_topbar.c's own object, already outside this budget, so
+ * scr's flex children here are only the three listed below, joined by
+ * scr's own UI_THEME_PADDING_PX/2 (4px) pad_gap:
  *
- *     title line (LV_SIZE_CONTENT, ~20px) ....... ~20px
- *     gap ......................................... 4px
  *     info card (name/family/segments, ~64px) ... ~64px
  *     gap ......................................... 4px
- *     planned-curve preview chart (fixed) ........ 90px
+ *     planned-curve preview chart: lv_obj_set_flex_
+ *       grow(s_plan_chart, 1) -- absorbs whatever is
+ *       left after the fixed-height siblings below,
+ *       rather than a hardcoded height that rots when
+ *       the info card or action row change ........ (flex-grow, absorbs the remainder)
  *     gap ......................................... 4px
- *     action row: Segments + Edit + Start,      .. 72px
- *       three flex_grow(1) buttons in one 72px row
- *       (row height is unchanged by adding a third
- *       button -- only each button's width shrinks,
- *       and even a three-way split of ~480px content
- *       width leaves each button comfortably over the
- *       72px touch-width minimum)
+ *     action row: Segments + Edit + Start, each a
+ *       UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX
+ *       (40px) button, flex_grow(1) horizontally .. 40px
  *                                                 ------
- *                                                 ~258px  <= 267px  OK
+ *                                          ~108px fixed, chart takes the rest
+ *                                          108px <= 267px  OK with room to
+ *                                          spare for the chart itself
+ *
+ * Button touch area: shrinking the DRAWN button from the old
+ * UI_THEME_MIN_TOUCH_TARGET_PX (72px) to 40px still goes through
+ * ui_theme_apply_touch_area(btn, false) (see build_action_button() below),
+ * the sanctioned way to keep the EFFECTIVE touch square at/above the 72px
+ * minimum without growing the visible button -- see that function's own
+ * comment in ui_theme.h for why compact_layout=false is right here (this is
+ * a sparse 3-button row, not a dense grid). ui_theme.c's non-compact branch
+ * always extends by the "generous" margin (UI_THEME_PADDING_PX * 3 = 24px)
+ * whenever the button's smaller edge is >= 24px, which 40px clears, so all
+ * three buttons get a uniform 24px click-area extension on all four sides
+ * via lv_obj_set_ext_click_area() (LVGL 9 has no per-axis extension -- one
+ * scalar, all four sides). That extension is symmetric, so it grows
+ * SIDEWAYS into the gap between adjacent buttons exactly as much as it
+ * grows up/down into empty space -- unlike up/down (nothing else touchable
+ * lives above the row (the chart isn't clickable) or below it (screen
+ * edge)), sideways is where two buttons' extended boxes can actually
+ * collide, and LVGL's hit-test is z-order-first-match, not
+ * nearest-center, when that happens (ui_theme.h's own touch-group-
+ * arbitration comment names this exact hazard). Non-overlap requires
+ * action_row's pad_gap >= 2 * 24 = 48px, so this row's gap is raised from
+ * scr's usual UI_THEME_PADDING_PX/2 (4px) to
+ * UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX (48px) -- see that constant's own
+ * comment. At 48px gap the two boxes' extended edges exactly touch (share a
+ * boundary) rather than cross it, which is the safe, non-overlapping case.
+ * Effective per-button touch box: 40 + 2*24 = 88px tall (comfortably over
+ * the 72px minimum) by (visual width + 48px) wide.
  *
  * The nav row's Back button moved into the shared top bar (ui_topbar.c) in
  * the 2026-08-21 icon-topbar pass, freeing the 44px + 4px gap it used to
@@ -102,6 +133,27 @@ static ui_topbar_t s_tb;
  * kept as its own constant per that file's own comment on why each caller
  * owns its copy rather than sharing one #include. */
 #define UI_PAGE_PROFILE_DETAIL_PLAN_PREVIEW_AMBIENT_C 20.0f
+
+/* ---- Action-row button sizing -- see the file header comment's arithmetic
+ * block for the full derivation of both of these. */
+/* Drawn button height. Smaller than UI_THEME_MIN_TOUCH_TARGET_PX on purpose
+ * -- ui_theme_apply_touch_area() below is what keeps the EFFECTIVE touch
+ * target at/above that minimum without the button looking oversized. */
+#define UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX 40
+/* Gap between the three action-row buttons. Wider than scr's usual
+ * UI_THEME_PADDING_PX/2 specifically so the buttons' extended (post-
+ * ui_theme_apply_touch_area()) click areas cannot overlap each other: that
+ * helper's non-compact branch extends every side by a fixed "generous"
+ * margin (ui_theme.c: UI_THEME_PADDING_PX * 3 = 24px) whenever the button's
+ * smaller edge is >= 24px, and LVGL 9's lv_obj_set_ext_click_area() takes
+ * one scalar for all four sides -- there is no way to ask for a smaller
+ * sideways extension than up/down. Two neighbouring buttons' extended boxes
+ * therefore need a gap of at least 2 * 24 = 48px between their VISUAL edges
+ * to avoid colliding in the gap (LVGL's hit-test is z-order-first-match on
+ * overlap, not nearest-center -- see ui_theme.h's touch-group-arbitration
+ * comment). 48px makes the two extended edges exactly meet rather than
+ * cross. */
+#define UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX 48
 
 static lv_obj_t *s_plan_chart;
 static lv_chart_series_t *s_plan_series;
@@ -411,7 +463,7 @@ static void start_btn_cb(lv_event_t *e)
 static lv_obj_t *build_action_button(lv_obj_t *parent, const char *text, lv_color_t bg, lv_event_cb_t cb)
 {
     lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_set_height(btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_height(btn, UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX);
     lv_obj_set_flex_grow(btn, 1);
     lv_obj_set_style_bg_color(btn, bg, 0);
     lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
@@ -473,7 +525,12 @@ lv_obj_t *ui_page_profile_detail_build(void)
 
     s_plan_chart = lv_chart_create(scr);
     lv_obj_set_width(s_plan_chart, lv_pct(100));
-    lv_obj_set_height(s_plan_chart, 90);
+    /* flex-grow, not a fixed height -- absorbs whatever the info card and
+     * action row leave over, so the chart gets larger automatically as
+     * those siblings shrink instead of a hardcoded number that has to be
+     * hand-updated (and can rot) whenever they change. See the file header
+     * comment's arithmetic block. */
+    lv_obj_set_flex_grow(s_plan_chart, 1);
     lv_obj_set_style_bg_color(s_plan_chart, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_bg_opa(s_plan_chart, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_plan_chart, 0, 0);
@@ -517,7 +574,10 @@ lv_obj_t *ui_page_profile_detail_build(void)
     lv_obj_set_style_border_width(action_row, 0, 0);
     lv_obj_set_style_pad_all(action_row, 0, 0);
     lv_obj_set_flex_flow(action_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_gap(action_row, UI_THEME_PADDING_PX / 2, 0);
+    /* Wider than scr's usual gap -- required so the buttons' extended touch
+     * areas cannot overlap. See UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX's
+     * own comment. */
+    lv_obj_set_style_pad_gap(action_row, UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX, 0);
     lv_obj_remove_flag(action_row, LV_OBJ_FLAG_SCROLLABLE);
 
     build_action_button(action_row, "Segments", UI_THEME_COLOR_CARD, segments_nav_cb);
