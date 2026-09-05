@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import json
 import math
-import os
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -71,8 +72,8 @@ class ModeTwoGuardTests(unittest.TestCase):
     """Group 1: the single most valuable behavior of this tool."""
 
     def setUp(self):
-        self.tmp_dir = Path(os.environ.get("TMPDIR", ".")) / "fuzzy_band_probe_test_fixtures"
-        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="fuzzy_band_probe_test_"))
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
         self.base_gains = {0: (0.02, 0.02, 0.02)}
         self.strength = {0: 50}
 
