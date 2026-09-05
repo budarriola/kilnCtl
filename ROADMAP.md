@@ -1,10 +1,14 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-05, roadmap-upkeep audit
-> (sixth sweep) — recorded eight owner decisions from 2026-09-05 (fuzzy
-> bands set, `abs_max_temp_c` closed at 80 °C by design, CTs deferred,
-> DRAM/cone/S8 items handed to agents in progress, `UnitTestFixture` kept,
-> M8's field-update exercise approved) and absorbed the previous sweep's
+> (seventh sweep) — landed the cone-unrated bucket (`1501f0c`+`3b0c82e`), the
+> `safety_cfg_http.c` PSRAM move (`541b357`, flashed, re-baseline pending),
+> S8's compiled default (`c43323a`+`ea69efa`, bench value still gated on a
+> GRACE-window write), and the >62 °C ff_hold-infeasible confirmation
+> (`94b1a2a`); fuzzy bands are live on the board. Also recorded eight owner
+> decisions from 2026-09-05 (`abs_max_temp_c` closed at 80 °C by design, CTs
+> deferred, `UnitTestFixture` kept, M8's field-update exercise approved) and
+> absorbed the previous sweep's
 > LCD/display session plus a batch of review-finding fixes and a stack-
 > margin capture. Full detail for every closed item lives in
 > `docs/COMPLETED_2026-09.md`, per this file's own upkeep rule; earlier
@@ -62,11 +66,10 @@ open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| **M** | Fuzzy-PID bands — set to `error_band_c` 6.0 °C / `rate_band_c_per_s` 0.20 °C/s, 2026-09-05. Will be applied by a config POST after the current firing. | `PID_EXPANSION_PLAN.md` §3.6 |
 | **XL** | CTs — deferred, 2026-09-05. Analysis lives in `docs/CONTACTOR_FEEDBACK_OPTIONS.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5 |
-| **M** | Internal DRAM floor — owner chose "move things out of internal RAM," 2026-09-05. In progress under `DRAM_PSRAM_PLAN.md`. | `DRAM_PSRAM_PLAN.md` |
-| S | S8 sanity rate — code default 2x max shipped-profile ramp (configurable), bench commissioned at 1.5x max observed, 2026-09-05. In progress. | M3 |
-| **L** | **High-temperature validation firing — APPROVED and RUNNING, 2026-09-04.** `4ec7387` scoped a ~4–5 h firing to exercise the coupled feedforward hold above ~62 °C, the one regime the matrix had never run in (infeasible ties to an offset, not a temperature — `68711df`) and that no capture had yet reached (max seen: 60 °C, `d5ae465`); go-ahead given and a firing to 70 °C is on the bench now. Result pending — do not treat the ff_hold-infeasible-above-62°C finding as retested until it reports. | `PID_EXPANSION_PLAN.md` §3.6c |
+| **M** | Internal DRAM floor — `541b357` moved 12,826 B of `safety_cfg_http.c` buffers to PSRAM, flashed 2026-09-05; post-flash DRAM re-measure and `dram_margin.h` re-baseline still pending. | `DRAM_PSRAM_PLAN.md` |
+| S | S8 sanity rate — `c43323a`+`ea69efa` set compiled default 33.3 C/min (2x fastest shipped ramp), fields_set-gated. Bench commission of 14.85 C/min NOT yet applied: Pico refuses config writes while ARMED, write must land during the 60 s GRACE window after a Pico reset. | M3 |
+| — | High-temperature validation firing — closed 2026-09-05, `94b1a2a` confirms ff_hold infeasible above 62 °C on hardware. | `PID_EXPANSION_PLAN.md` §3.6i |
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |
 | **M** | **Field-update hardware exercise — approved, pending, 2026-09-05.** ESP OTA into `ota_0` + rollback, and the Pico bootloader update over UART1, will run on the bench after the current firing. | M8 |
 | XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
@@ -266,8 +269,9 @@ now a short list, which is the point:
   verification~~ **all CLOSED 2026-09-04** (`1cf200f`, `445a78e`, `0470185`,
   `70ef683`, `9d73c8f`) — owner-feedback fixes on the real panel plus a
   source-checked correction of the builtin catalogue's cone metadata (3
-  fixed, 15 confirmed, 10 unresolved — see
-  [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these)).
+  fixed, 15 confirmed). The remaining 10 unrated cones closed 2026-09-05
+  (`1501f0c`+`3b0c82e`): `PROFILES_BUILTIN_CONE_UNRATED`, LCD catalogue
+  "Unrated" bucket sorted last (owner decision).
   Full detail: `docs/COMPLETED_2026-09.md`. Not yet flashed.
 - **`screen_idle` held its own lock across the producer reads, 2026-09-04
   (`7a8594d`).** The policy tick called `dashboard_get_status()` (five
@@ -366,8 +370,6 @@ above:
 | DRAM/PSRAM allocator-threshold work | A full soak (cold firing through cooldown) plus a Pico OTA relay-path measurement that has never been taken | `DRAM_PSRAM_PLAN.md` §5/§6/§9 |
 | Second LCD panel (ST7796/MSP4031) | The physical panel, and its pre-power STOP-block 5V I2C hazard check before the module ever touches J2 | `DISPLAY_ST7796_PLAN.md` §0/§4 |
 | Ramp assist default (OFF → ON) | A real firing at cone temperatures — everything measured so far is bench-range (0–80 °C), well below where the cone table's heat-work weighting matters | `PID_EXPANSION_PLAN.md` §7 |
-| Fuzzy-PID membership bands | Owner decision: rescale to this rig's measured envelope, relabel as a gain-rescale test, or drop it — see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these) | `PID_EXPANSION_PLAN.md` §3.6 |
-| High-temperature (>62 °C) coupled-hold validation | Owner approval of a ~4–5 h firing — never yet run, see [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these) | `PID_EXPANSION_PLAN.md` §3.6c |
 
 **Two operational facts a future session must not miss (verified by READING
 THE BOARD, 2026-09-04 — not inferred from commit messages):**
