@@ -23,20 +23,26 @@
 <style>
   /* Page-local palette tokens only -- see settings_page.html's own comment on
      this same block for why it exists (every real rule lives in /theme.css;
-     these are just the --bg/--fg/etc names theme.css's shared rules read). */
+     these are just the --bg/--fg/etc names theme.css's shared rules read).
+     --input-bg/--input-border/--hint added to match zones_page.html's own
+     token set: the controls below (select, checkboxes) now reuse that
+     page's shared label/input idiom instead of a page-local one, so they
+     need the same tokens that idiom reads. */
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
-    --card-bg: #f7f7f7;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
       --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
     }
   }
   :root[data-theme="dark"] {
     --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
   }
   *, *::before, *::after { box-sizing: border-box; }
   /* WEB_UI_RESPONSIVE.md sec 6: min() shrink-to-fit stays, fixed 640px
@@ -47,15 +53,31 @@
   h1 { font-size: 1.2em; }
   p { color: var(--muted); }
   h2 { font-size: 1em; margin-top: 1.6em; }
-  .kc-dp-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px;
-                padding: 0.8em 1em; margin: 0.6em 0; }
-  .kc-dp-row { display: flex; align-items: center; justify-content: space-between; gap: 1em;
-               padding: 0.5em 0; }
-  .kc-dp-row label { flex: 1 1 auto; }
-  .kc-dp-row input[type="range"] { flex: 1 1 auto; min-height: var(--ui-touch); }
-  .kc-dp-row select { padding: 0.3em; min-height: var(--ui-touch); }
-  .kc-dp-note { font-size: 0.85em; color: var(--muted); margin: 0.3em 0 0.8em; }
-  .kc-dp-save { margin-top: 0.5em; }
+  /* Owner report 2026-09-04: "the display power save button does not match
+     the style of any of the others." This card used to hand-roll its own
+     .kc-dp-card/.kc-dp-row/.kc-dp-note/.kc-dp-status classes -- a one-off
+     flex-row layout no other page used. Replaced with the same idiom
+     zones_page.html already uses for its own label+select/checkbox rows
+     (label{display:block;...} + full-width select/input, .hint for helper
+     text, plain <button> for Save) plus theme.css's shared .card for the
+     container, instead of inventing a page-local card style. See this
+     page's <body> markup for the class-by-class swap. */
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  select {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em; min-height: 2.4em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  input[type="range"] { width: 100%; box-sizing: border-box; min-height: var(--ui-touch); }
+  .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }
+  /* Checkbox rows: same inline-flex-label-wraps-checkbox idiom as
+     zones_page.html's #continueOnZoneTrip (32px floor is that row's own
+     tap-target fix, not a page-local invention). Overrides the block
+     `label` rule above for just these two labels via the more specific
+     selector, same as zones_page.html does inline. */
+  .kc-dp-check { display: inline-flex; align-items: center; min-height: 32px; gap: 0.4em;
+                 font-weight: normal; margin-top: 0.6em; }
+  .kc-dp-check input[type="checkbox"] { width: auto; margin: 0; }
   .kc-dp-status { font-size: 0.85em; margin-left: 0.6em; }
 </style>
 </head>
@@ -78,38 +100,30 @@ browser only.</p>
      settings drive the LCD's own on/off behaviour, so a phone changing them
      must not disagree with what the board next to the kiln does. -->
 <h2>Display power</h2>
-<div class="kc-dp-card">
-  <div class="kc-dp-row">
-    <label for="kcDpBrightness">Brightness</label>
-    <input type="range" id="kcDpBrightness" min="10" max="100" step="5" value="100">
-    <span id="kcDpBrightnessVal">100%</span>
-  </div>
-  <p class="kc-dp-note" id="kcDpBrightnessNote">Inert on this board today: the backlight has no
+<!-- theme.css's shared .card, same container every other settings-style
+     group uses (diagnostics/safety/backup's own .card sections) -- not the
+     page-local .kc-dp-card this used to be. -->
+<div class="card">
+  <label for="kcDpBrightness">Brightness (<span id="kcDpBrightnessVal">100%</span>)</label>
+  <input type="range" id="kcDpBrightness" min="10" max="100" step="5" value="100">
+  <p class="hint" id="kcDpBrightnessNote">Inert on this board today: the backlight has no
     hardware control line fitted yet (see docs/UI_PLAN.md). The setting is saved and will take
     effect once that hardware is verified.</p>
 
-  <div class="kc-dp-row">
-    <label for="kcDpTimeout">Turn off after</label>
-    <select id="kcDpTimeout">
-      <option value="0">1 minute</option>
-      <option value="1">5 minutes</option>
-      <option value="2">10 minutes</option>
-      <option value="3">15 minutes</option>
-      <option value="4">60 minutes</option>
-      <option value="5" selected>Never</option>
-    </select>
-  </div>
+  <label for="kcDpTimeout">Turn off after</label>
+  <select id="kcDpTimeout">
+    <option value="0">1 minute</option>
+    <option value="1">5 minutes</option>
+    <option value="2">10 minutes</option>
+    <option value="3">15 minutes</option>
+    <option value="4">60 minutes</option>
+    <option value="5" selected>Never</option>
+  </select>
 
-  <div class="kc-dp-row">
-    <label for="kcDpKeepOnFiring">Keep display on while firing</label>
-    <input type="checkbox" id="kcDpKeepOnFiring">
-  </div>
-  <div class="kc-dp-row">
-    <label for="kcDpOnError">Turn display on when an error occurs</label>
-    <input type="checkbox" id="kcDpOnError">
-  </div>
+  <label class="kc-dp-check"><input type="checkbox" id="kcDpKeepOnFiring">Keep display on while firing</label>
+  <label class="kc-dp-check"><input type="checkbox" id="kcDpOnError">Turn display on when an error occurs</label>
 
-  <button type="button" id="kcDpSave" class="kc-dp-save">Save</button>
+  <button type="button" id="kcDpSave">Save</button>
   <span id="kcDpStatus" class="kc-dp-status"></span>
 </div>
 

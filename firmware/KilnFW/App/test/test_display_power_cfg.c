@@ -26,11 +26,13 @@ static void simulate_reboot(void)
 {
     // Deliberately the WRONG values -- proves display_power_cfg_start()
     // actually overwrites them rather than the test happening to already
-    // hold the expected result before start() runs.
+    // hold the expected result before start() runs. f028e2f flipped both
+    // switches' empty-NVS default to true, so "wrong" for them is now false
+    // (it used to be true, back when the default was false).
     s_brightness_percent = 3;
     s_timeout_setting = DISPLAY_TIMEOUT_1_MIN;
-    s_keep_on_while_firing = true;
-    s_display_on_error = true;
+    s_keep_on_while_firing = false;
+    s_display_on_error = false;
 }
 
 static void test_defaults_on_empty_nvs(void)
@@ -43,8 +45,9 @@ static void test_defaults_on_empty_nvs(void)
     TEST_CHECK(err == ESP_OK, "display_power_cfg_start() succeeds against an empty stub");
     TEST_CHECK(display_power_cfg_brightness_percent() == 100, "empty NVS: brightness defaults to 100%");
     TEST_CHECK(display_power_cfg_timeout_setting() == DISPLAY_TIMEOUT_NEVER, "empty NVS: timeout defaults to Never");
-    TEST_CHECK(display_power_cfg_keep_on_while_firing() == false, "empty NVS: keep-on-while-firing defaults to false");
-    TEST_CHECK(display_power_cfg_display_on_error() == false, "empty NVS: display-on-error defaults to false");
+    // f028e2f (owner decision, 2026-09-04): both switches now default ON.
+    TEST_CHECK(display_power_cfg_keep_on_while_firing() == true, "empty NVS: keep-on-while-firing defaults to true");
+    TEST_CHECK(display_power_cfg_display_on_error() == true, "empty NVS: display-on-error defaults to true");
 }
 
 static void test_persistence_round_trip(void)
