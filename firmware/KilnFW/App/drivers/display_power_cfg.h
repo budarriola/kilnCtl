@@ -42,12 +42,15 @@
 // backlight_pwm.c's on/idle duty follows this module's brightness_percent
 // (via display_power_cfg_brightness_percent()) rather than the old fixed
 // CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT/IDLE_PERCENT constants. The flying wire
-// from a spare ESP32 GPIO to the backlight LED input still has to actually be
-// soldered and KILNCTL_BACKLIGHT_GPIO pointed at it for any of this to reach
-// real hardware -- on an unmodified board the LEDC calls are no-ops (see
-// backlight_pwm.h) -- but the setting, its API, its UI, and the duty-follows-
-// brightness wiring are no longer the missing piece; only the physical wire
-// (and confirming it on a board that has it) is.
+// from a spare ESP32 GPIO to the backlight LED input IS fitted on THIS bench
+// unit -- GPIO15, confirmed with a meter (be02d34's commit message), which is
+// why the default flipped to y for it. A different board that does NOT have
+// that wire soldered must override this option off in its own local
+// sdkconfig -- leaving the y default on such a board drives LEDC PWM onto
+// whatever KILNCTL_BACKLIGHT_GPIO points at even though nothing is wired
+// there, instead of the safe ESP_ERR_NOT_SUPPORTED no-op this option used to
+// guarantee unconditionally (see KILNCTL_BACKLIGHT_PWM_ENABLE's own Kconfig
+// help).
 #ifndef DISPLAY_POWER_CFG_H
 #define DISPLAY_POWER_CFG_H
 

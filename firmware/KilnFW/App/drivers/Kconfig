@@ -459,19 +459,21 @@ menu "KilnCtrl Hardware Configuration"
                 preferred) straight to that pin, through the module's own
                 3.3V push-pull / 10k-pulled-up MOSFET gate.
 
-                That wire is NOT fitted on the bench board as of this
-                writing, even though this option now defaults to y (duty
-                now follows display_power_cfg's brightness_percent, see
-                that header's BRIGHTNESS note): a board with the wire not
-                yet soldered still needs this turned OFF, or left off via a
-                local sdkconfig override, until KILNCTL_BACKLIGHT_GPIO below
-                is set to whichever pin the wire actually landed on --
-                turning it on before that miswires the LEDC peripheral to
-                whatever KILNCTL_BACKLIGHT_GPIO currently defaults to. With
-                this off, backlight_pwm.c's init/start calls are no-ops that
-                return ESP_ERR_NOT_SUPPORTED and never touch a GPIO or the
-                LEDC peripheral -- an unmodified board's boot is bit-for-bit
-                unaffected by this option existing.
+                That wire IS fitted on this bench unit -- GPIO15, confirmed
+                with a meter (be02d34's commit message) -- which is why this
+                option now defaults to y, with duty following
+                display_power_cfg's brightness_percent (see that header's
+                BRIGHTNESS note). A DIFFERENT board that does NOT have the
+                wire soldered must override this off in its own local
+                sdkconfig, and leave it off until KILNCTL_BACKLIGHT_GPIO
+                below is set to whichever pin its own wire actually lands
+                on -- leaving the y default on such a board drives LEDC PWM
+                onto whatever KILNCTL_BACKLIGHT_GPIO points at even though
+                nothing is wired there. With this off, backlight_pwm.c's
+                init/start calls are no-ops that return
+                ESP_ERR_NOT_SUPPORTED and never touch a GPIO or the LEDC
+                peripheral -- a board with this overridden off is
+                bit-for-bit unaffected by this option existing.
 
                 When on, backlight_pwm.c polls screen_idle_get_state() (the
                 same screen_on flag TOUCH_CMD_GET_STATE already reports) and
