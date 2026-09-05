@@ -487,8 +487,11 @@ if the Pico's diagnostics are too stale to trust.</p>
       return;
     }
     var parts = [];
-    if (state.notInstalled) parts.push('declared NOT INSTALLED -- heat is refused');
-    if (state.injected) parts.push('reading is a bench-injected synthetic value, not the real part');
+    if (state.notInstalled) parts.push('declared NOT INSTALLED -- heat is refused. To clear: commission ' +
+      'the safety thermocouple in the Advanced section of the Safety Commissioning page');
+    if (state.injected) parts.push('reading is a bench-injected synthetic value, not the real part. ' +
+      'To clear: remove the bench injection override in the Advanced section of the Safety ' +
+      'Commissioning page');
     el.textContent = parts.length ? ('Safety TC status: ' + parts.join('; ') + '.') : '';
   }
 
