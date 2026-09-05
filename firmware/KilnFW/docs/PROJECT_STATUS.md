@@ -250,6 +250,14 @@ sections above, but move anything with lasting design value out to
 `ARCHITECTURE.md`/`ARCHITECTURE_DECISIONS.md`/`BRINGUP_HAZARDS.md` once it
 lands, rather than letting it grow indefinitely.
 
+### 2026-09-05 — crash_report.c dump_id was hashing uninitialized stack padding
+
+`crash_report_init()`'s `dump_id` CRC covered the raw (unzeroed) stack-allocated
+`esp_core_dump_summary_t`, so padding bytes made an operator's ack fail to
+survive a reboot; fixed to zero the struct and hash only the identifying
+fields. Re-verify on hardware: ack a crash record, then `debug_reset()` twice
+and confirm it stays acknowledged.
+
 ### 2026-09-04 — Display-power hardware verification, then a task-watchdog reset mid-firing; root-caused and fixed
 
 An agent hardware-verified `docs/UI_PLAN.md`'s Display power feature on a

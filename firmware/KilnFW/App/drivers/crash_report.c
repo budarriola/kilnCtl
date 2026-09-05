@@ -165,6 +165,49 @@ static void fill_from_summary(crash_report_record_t *out, const esp_core_dump_su
     copy_str(out->reset_reason, sizeof(out->reset_reason), reset_reason_name);
 }
 
+/* Identity hash for "which coredump is this" (crash_report_record_t.dump_id).
+ *
+ * Deliberately NOT a CRC over the raw esp_core_dump_summary_t: that struct is
+ * stack-allocated by the caller and esp_core_dump_get_summary() only writes
+ * the fields it knows about, so any compiler padding between them (real IDF
+ * layout, e.g. esp_core_dump_bt_info_t's trailing `bool corrupted` followed
+ * by 3 padding bytes, and app_elf_sha256[66] followed by 2 padding bytes
+ * before the next 4-byte field) is whatever garbage happened to be on the
+ * stack that boot. Hashing the whole struct therefore hashed that garbage
+ * too, so an identical crash produced a different dump_id on every boot --
+ * observed on hardware: an acknowledged record read back as unacknowledged,
+ * with identical PC/backtrace, on three consecutive boots after an OTA.
+ * Hashing only the fields that actually identify a crash (exception PC, the
+ * faulting task's name, and the backtrace bounded to its own depth) is both
+ * deterministic across boots AND immune to a future esp_core_dump_summary_t
+ * layout change adding/reordering fields -- no explicit memset of caller
+ * memory can protect against that, only pinning down what "identity" means. */
+static uint32_t crash_report_dump_id(const esp_core_dump_summary_t *summary)
+{
+    uint32_t crc = 0;
+    crc = esp_crc32_le(crc, (const uint8_t *)&summary->exc_pc, sizeof(summary->exc_pc));
+
+    /* exc_task is itself a fixed-size buffer holding a NUL-terminated task
+     * name -- only strnlen() bytes of it are meaningful. Bytes after the NUL
+     * are exactly the same kind of "never explicitly written" filler as the
+     * struct padding this function exists to ignore, so normalize them to a
+     * fixed value (0) before hashing rather than hashing the buffer verbatim. */
+    char task_buf[sizeof(summary->exc_task)];
+    memset(task_buf, 0, sizeof(task_buf));
+    size_t task_len = strnlen(summary->exc_task, sizeof(summary->exc_task));
+    memcpy(task_buf, summary->exc_task, task_len);
+    crc = esp_crc32_le(crc, (const uint8_t *)task_buf, sizeof(task_buf));
+
+    uint32_t depth = summary->exc_bt_info.depth;
+    uint32_t bt_max = (uint32_t)(sizeof(summary->exc_bt_info.bt) / sizeof(summary->exc_bt_info.bt[0]));
+    if (depth > bt_max) {
+        depth = bt_max;
+    }
+    crc = esp_crc32_le(crc, (const uint8_t *)&depth, sizeof(depth));
+    crc = esp_crc32_le(crc, (const uint8_t *)summary->exc_bt_info.bt, depth * sizeof(summary->exc_bt_info.bt[0]));
+    return crc;
+}
+
 /* ---------------------------------------------------------------------------
  * NVS I/O -- same shape as run_state.c's persist_locked()/loader, minus the
  * lock (this module has no periodic-refresh writer to race with: it writes
@@ -242,7 +285,12 @@ void crash_report_init(void)
         return;
     }
 
+    /* Zeroed before the fill, not just for cleanliness: esp_core_dump_get_summary()
+     * only writes the fields it knows about, leaving any struct padding (and
+     * any field it doesn't populate) as whatever was already on the stack.
+     * See crash_report_dump_id()'s comment for why that matters. */
     esp_core_dump_summary_t summary;
+    memset(&summary, 0, sizeof(summary));
     esp_err_t sum_err = esp_core_dump_get_summary(&summary);
     if (sum_err != ESP_OK) {
         ESP_LOGW(TAG, "coredump present but esp_core_dump_get_summary failed: %s -- no crash record captured",
@@ -250,7 +298,7 @@ void crash_report_init(void)
         return;
     }
 
-    uint32_t dump_id = esp_crc32_le(0, (const uint8_t *)&summary, sizeof(summary));
+    uint32_t dump_id = crash_report_dump_id(&summary);
 
     crash_report_record_t existing;
     if (load(&existing) && existing.dump_id == dump_id) {

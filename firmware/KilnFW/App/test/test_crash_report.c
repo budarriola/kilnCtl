@@ -247,6 +247,54 @@ static void test_get_with_no_record(void)
                "caller's poisoned buffer");
 }
 
+// ---------------------------------------------------------------------------
+// crash_report_dump_id() -- padding-immune identity hash (bug: a plain CRC
+// over the raw esp_core_dump_summary_t hashed uninitialized struct padding
+// too, so an identical crash got a different dump_id every boot and an
+// acknowledged record never stayed acknowledged across a reboot)
+// ---------------------------------------------------------------------------
+
+static void test_dump_id_ignores_padding_bytes(void)
+{
+    TEST_SECTION("crash_report_dump_id -- two summaries, identical meaningful fields, "
+                 "different garbage in the gaps between them, must hash equal");
+
+    esp_core_dump_summary_t a;
+    memset(&a, 0x00, sizeof(a));
+    strncpy(a.exc_task, "IDLE0", sizeof(a.exc_task) - 1);
+    a.exc_pc = 0x40080123u;
+    a.exc_bt_info.depth = 3;
+    a.exc_bt_info.bt[0] = 0x40001111u;
+    a.exc_bt_info.bt[1] = 0x40002222u;
+    a.exc_bt_info.bt[2] = 0x40003333u;
+    a.exc_bt_info.corrupted = false;
+
+    esp_core_dump_summary_t b;
+    memset(&b, 0xA5, sizeof(b)); // simulates uninitialized stack garbage in every byte
+    strncpy(b.exc_task, "IDLE0", sizeof(b.exc_task) - 1);
+    b.exc_task[strlen("IDLE0")] = '\0'; // memset(0xA5) left no NUL terminator -- match a's content exactly
+    b.exc_pc = 0x40080123u;
+    b.exc_bt_info.depth = 3;
+    b.exc_bt_info.bt[0] = 0x40001111u;
+    b.exc_bt_info.bt[1] = 0x40002222u;
+    b.exc_bt_info.bt[2] = 0x40003333u;
+    b.exc_bt_info.corrupted = false;
+    // bt[3..15] (beyond depth) and ex_info are left as 0xA5 "garbage" in b,
+    // 0x00 in a -- crash_report_dump_id() must not look at them.
+
+    uint32_t id_a = crash_report_dump_id(&a);
+    uint32_t id_b = crash_report_dump_id(&b);
+    TEST_CHECK(id_a == id_b,
+               "dump_id depends only on exc_pc/exc_task/backtrace-up-to-depth -- garbage "
+               "elsewhere in the struct (standing in for uninitialized padding/fields) "
+               "does not change it");
+
+    esp_core_dump_summary_t c = a;
+    c.exc_pc = 0x40080999u; // a genuinely different crash
+    uint32_t id_c = crash_report_dump_id(&c);
+    TEST_CHECK(id_a != id_c, "a real difference (exc_pc) still changes dump_id");
+}
+
 void run_test_crash_report(void)
 {
     test_crc_round_trip();
@@ -256,6 +304,7 @@ void run_test_crash_report(void)
     test_acknowledge_with_no_record_fails();
     test_second_boot_same_dump_id_does_not_overwrite();
     test_get_with_no_record();
+    test_dump_id_ignores_padding_bytes();
 
     nvs_test_enable(false); // leave shared stub state as every other test file in this binary expects
     nvs_test_clear();
