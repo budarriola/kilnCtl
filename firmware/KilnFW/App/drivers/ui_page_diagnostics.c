@@ -144,6 +144,63 @@
 //     board_health_refresh_cb() below reads through unchanged (same getter,
 //     same validity bit ui_page_board_health.c always used); this page does
 //     not re-derive validity from the raw fault bits a second time.
+//
+// 2026-09-04 SECOND CONSOLIDATION (owner request: combine the three
+// Thermocouple Faults pages into one; combine Safety Processor and Board
+// Health into one, using Board Health's visual treatment where they
+// differ). Down from 9 paged screens to 6:
+//
+//   - Thermocouple Faults (UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS): the
+//     three per-channel pages the 2026-08-28 P4-C split created are back to
+//     ONE page, three compact rows -- but not by undoing P4-C's fix. What
+//     made three-cards-on-one-page overflow before was the ~123-char prose
+//     remedy sentence per channel (~60px) plus a separate "Channel N" title
+//     row (~20px). Both are cut here: the remedy collapses to a fixed short
+//     phrase ("check wiring/power" / "check TC wiring", each well under one
+///    wrapped line), and the title folds into the fault line itself ("Ch0:
+//     <faults>") instead of its own row -- exactly the "one header, three
+//     rows, not three headers stacked" shape the owner asked for (the
+//     topbar's own title is the page's one header; these three rows don't
+//     need a second one each). Worst case per row is now the fault line (up
+//     to the same 100-char all-8-bits-asserted string this file has always
+//     used, plus a 3-char "ChN:" prefix, ~2 wrapped lines/~40px) plus the
+//     short status line (bounded ~45 chars, 1 line/~20px) plus the row's own
+//     8px pad = ~68px; three rows plus two 4px gaps = ~212px, comfortably
+//     under the ~267px budget even before allowing margin for a channel
+//     whose fault line wraps to a pessimistic 3rd line (that case: ~248px,
+//     still under budget -- see the arithmetic this consolidation's own
+//     commit message/report carries in full). The ABSENT-vs-FAULTED
+//     distinction and the by-.channel indexing are untouched.
+//
+//   - Safety & Board Health (UI_PAGE_DIAGNOSTICS_PAGE_SAFETY_BOARD_HEALTH):
+//     the Safety Processor page's 5 rows and the Board Health page's
+//     cold-junction rows now share one page. Two things changed to make
+//     that fit and to give the owner's stated preference (Board Health's
+//     look) real effect where the two pages actually differed:
+//       1. Board Health's own "ESP32-S3 die temp" row is dropped from this
+//          merged page -- it was always a duplicate of the PSRAM & storage
+//          page's s_esp32_temp_label (see this file's original 2026-08-27
+//          comment above, which already chose not to show that fact twice);
+//          folding two more pages together is exactly the moment to stop
+//          carrying that duplication into a third place.
+//       2. Where the two source pages' presentation differed, Board
+//          Health's wins: it used build_stat_row()'s colored left-border
+//          accent per row, where the old Safety Processor page's
+//          build_full_text_row() rows had no accent at all (see that
+//          function's own header comment -- "reused here verbatim" from
+//          ui_page_safety.c, plain sentences with no color cue). The
+//          Safety rows are still free-text sentences, not clean name/value
+//          pairs, so they can't become build_stat_row()s outright -- instead
+//          build_full_text_row() grew an `accent` parameter and now paints
+//          the same 3px colored left border Board Health's rows always had.
+//     The Link Version and State sentences were also shortened (state drops
+//     its "last trip, age ago" tail -- that history is not lost, it is the
+//     Trip Detail page's whole job, one page over) so this page's worst-case
+//     height (5 accent rows + 3 cold-junction rows, one inter-block gap)
+//     comes to ~237-257px depending on whether the Link row's borderline
+//     43-50 char sentence wraps to one line or two -- either way under the
+//     ~267px budget. See the consolidation's own report for the full
+//     character-count arithmetic.
 static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
 
 #define UI_PAGE_DIAGNOSTICS_REFRESH_MS 2000
@@ -180,31 +237,14 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
 #define UI_PAGE_DIAGNOSTICS_PAGE_FIRMWARE 0
 #define UI_PAGE_DIAGNOSTICS_PAGE_INTERNAL_RAM 1
 #define UI_PAGE_DIAGNOSTICS_PAGE_PSRAM_STORAGE 2
-/* 2026-08-27 fold -- see this file's header comment for the content
- * inventory each of these three carries over. */
-#define UI_PAGE_DIAGNOSTICS_PAGE_SAFETY 3
-#define UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH 4
-/* One page PER thermocouple channel (see this block's header comment above
- * for why one page holding all MAX31856_CHANNEL_COUNT channels no longer
- * fits). UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch) is the page slot for
- * channel `ch`; there are MAX31856_CHANNEL_COUNT of them starting right
- * after Board Health, so every page number from here on is an expression
- * over MAX31856_CHANNEL_COUNT rather than a literal -- this stays correct
- * if that constant ever changes, instead of silently under/over-allocating
- * s_pages[] the way three separately hand-numbered macros would. */
-#define UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch) \
-    (UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH + 1 + (ch))
-/* 2026-08-27, owner scope change ("all faults... come with instructions on
- * how to fix them... what was detected wrong"): a dedicated page rather than
- * growing the Safety Processor page's existing 5 rows, which already sit
- * close to the ~267px no-scroll budget and use variable-height wrapped
- * labels -- appending a multi-line cause+remedy+source block to one of them
- * risked clipping content on hardware with no way to notice from a desktop
- * build. A new page is the same "grow past budget -> add a page" rule this
- * file's own header comment already documents for the safety/board-health/
- * thermo-fault fold. */
-#define UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL \
-    UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(MAX31856_CHANNEL_COUNT)
+/* 2026-09-04 second consolidation -- see this file's header comment for the
+ * arithmetic. Safety Processor and Board Health now share one page; all
+ * MAX31856_CHANNEL_COUNT Thermocouple Faults channels are back on one page
+ * (P4-C's one-channel-per-page split is no longer needed once the per-row
+ * content is trimmed -- see that comment). */
+#define UI_PAGE_DIAGNOSTICS_PAGE_SAFETY_BOARD_HEALTH 3
+#define UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS 4
+#define UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL 5
 #define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL + 1)
 
 static ui_topbar_t s_topbar;
@@ -239,29 +279,29 @@ static lv_obj_t *s_psram_total_label;
 static lv_obj_t *s_nvs_stats_label;
 static lv_obj_t *s_esp32_temp_label;
 
-/* --- Page 4: Safety Processor -- carried over verbatim from
- * ui_page_safety.c (see this file's header comment's content inventory). */
+/* --- Page 4: Safety & Board Health -- merged 2026-09-04 (see this file's
+ * header comment). The Safety Processor rows are free-text sentences styled
+ * with build_full_text_row()'s new accent border (Board Health's visual
+ * treatment, per the owner's stated preference); the cold-junction rows are
+ * carried over from Board Health as-is (build_stat_row(), same accent
+ * style). Board Health's own "ESP32-S3 die temp" row is deliberately NOT
+ * carried over -- it duplicated s_esp32_temp_label above (PSRAM & storage
+ * page); see the header comment for why dropping it now is the honest call. */
 static lv_obj_t *s_safety_temp_label;
 static lv_obj_t *s_enclosure_temp_label;
 static lv_obj_t *s_safety_power_label;
 static lv_obj_t *s_link_version_label;
 static lv_obj_t *s_trip_label;
-
-/* --- Page 5: Board Health -- carried over verbatim from
- * ui_page_board_health.c. s_esp32_temp_label above (PSRAM & storage page) is
- * a DIFFERENT label showing the same underlying fact; this page's own
- * cold-junction rows are what that page never had. */
-static lv_obj_t *s_bh_esp32_label;
 static lv_obj_t *s_bh_cj_label[MAX31856_CHANNEL_COUNT];
 
-/* --- Pages 6-8: Thermocouple Faults -- carried over from
- * ui_page_thermo_faults.c, including its ABSENT-vs-FAULTED distinction (see
- * this file's header comment), then split one-channel-per-page 2026-08-28
- * (P4-C, see UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch)'s header comment). */
+/* --- Page 5: Thermocouple Faults -- one page again as of 2026-09-04 (see
+ * this file's header comment for why the 2026-08-28 P4-C one-channel-per-
+ * page split is no longer needed), still carrying the ABSENT-vs-FAULTED
+ * distinction and the by-.channel indexing P4-C's own comment documents. */
 static lv_obj_t *s_tf_fault_label[MAX31856_CHANNEL_COUNT];
 static lv_obj_t *s_tf_status_label[MAX31856_CHANNEL_COUNT];
 
-/* --- Page 9: Trip Detail -- new, 2026-08-27 (owner scope change, see this
+/* --- Page 6: Trip Detail -- new, 2026-08-27 (owner scope change, see this
  * file's UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL comment). What was detected,
  * what to do about it, and (S6a only) which of this board's own fault
  * sources actually caused it. */
@@ -275,9 +315,7 @@ static void update_title(void)
 {
     static const char *page_names[UI_PAGE_DIAGNOSTICS_PAGE_COUNT] = {
         "Firmware", "Internal RAM", "PSRAM & storage",
-        "Safety Processor", "Board Health",
-        "Thermocouple Faults: Ch0", "Thermocouple Faults: Ch1", "Thermocouple Faults: Ch2",
-        "Trip Detail",
+        "Safety & Board Health", "Thermocouple Faults", "Trip Detail",
     };
     char buf[48];
     snprintf(buf, sizeof(buf), "Diagnostics: %s  %u of %u", page_names[s_page_index],
@@ -575,48 +613,45 @@ static void refresh_cb(lv_timer_t *timer)
     } else {
         lv_label_set_text(s_safety_power_label, "Power: ---");
     }
+    /* 2026-09-04 consolidation: shortened to a compact "ESP99/Pico99" form
+     * (no spaces around the slash, no "is older" clause -- the remedy is
+     * always "update ESP" regardless of which side is older, so naming the
+     * older side added length without adding an actionable fact) so this
+     * sentence stays a single wrapped line even at two-digit protocol
+     * versions -- see this file's header comment for the character count. */
     if (!ds.link_version_known) {
-        lv_label_set_text(s_link_version_label, "Link version: ---");
+        lv_label_set_text(s_link_version_label, "Link: ---");
     } else if (ds.link_version_compatible) {
-        snprintf(buf, sizeof(buf), "Link version: ESP %u / Pico %u (OK)",
+        snprintf(buf, sizeof(buf), "Link: ESP %u / Pico %u (OK)",
                  (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version);
         lv_label_set_text(s_link_version_label, buf);
     } else {
-        char vbuf[112];
-        const char *older = (ds.peer_protocol_version < ds.self_protocol_version) ? "Pico"
-                            : (ds.peer_protocol_version > ds.self_protocol_version) ? "ESP"
-                                                                                     : "neither";
-        snprintf(vbuf, sizeof(vbuf),
-                 "Link version: ESP %u / Pico %u -- INCOMPATIBLE, %s is older. Update ESP first.",
-                 (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version, older);
+        char vbuf[80];
+        snprintf(vbuf, sizeof(vbuf), "Link: ESP%u/Pico%u INCOMPATIBLE, update ESP",
+                 (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version);
         lv_label_set_text(s_link_version_label, vbuf);
     }
-    char trip_tail[40];
-    if (!ds.trip_event_ever_received) {
-        snprintf(trip_tail, sizeof(trip_tail), "no trip recorded");
-    } else {
-        snprintf(trip_tail, sizeof(trip_tail), "last %s, %lus ago",
-                 safety_trip_words_short(ds.trip_reason),
-                 (unsigned long)(ds.trip_event_age_ms / 1000u));
-    }
-    char trip_buf[96];
+    /* 2026-09-04 consolidation: drops the "last <reason>, <age>s ago" tail
+     * the standalone Safety Processor page used to append to every state
+     * word -- that history (reason, detected cause, remedy, fault source,
+     * latch warning) is the Trip Detail page's entire job one page over, so
+     * repeating an abbreviated form of it here was the redundancy this fold
+     * was told to drop, not information unique to this page. What remains
+     * is the LIVE state word only, which is this page's own fact. */
+    char trip_buf[64];
     if (!ds.diag_ever_received || ds.diag_age_ms >= SAFETY_LINK_STALE_MS) {
-        snprintf(trip_buf, sizeof(trip_buf), "State: UNKNOWN (no fresh diagnostics) -- %s", trip_tail);
+        snprintf(trip_buf, sizeof(trip_buf), "State: UNKNOWN (no fresh diagnostics)");
     } else {
-        const char *state_word;
         switch (ds.diag_state) {
-        case SAFETY_LINK_DIAG_STATE_INIT:    state_word = "starting up"; break;
-        case SAFETY_LINK_DIAG_STATE_GRACE:   state_word = "startup grace"; break;
-        case SAFETY_LINK_DIAG_STATE_ARMED:   state_word = "ARMED"; break;
-        case SAFETY_LINK_DIAG_STATE_WARN:    state_word = "ARMED (warning)"; break;
-        case SAFETY_LINK_DIAG_STATE_TRIPPED: state_word = "TRIPPED"; break;
-        default:                             state_word = "unrecognised"; break;
-        }
-        if (ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
+        case SAFETY_LINK_DIAG_STATE_INIT:  snprintf(trip_buf, sizeof(trip_buf), "State: starting up"); break;
+        case SAFETY_LINK_DIAG_STATE_GRACE: snprintf(trip_buf, sizeof(trip_buf), "State: startup grace"); break;
+        case SAFETY_LINK_DIAG_STATE_ARMED: snprintf(trip_buf, sizeof(trip_buf), "State: ARMED"); break;
+        case SAFETY_LINK_DIAG_STATE_WARN:  snprintf(trip_buf, sizeof(trip_buf), "State: ARMED (warning)"); break;
+        case SAFETY_LINK_DIAG_STATE_TRIPPED:
             snprintf(trip_buf, sizeof(trip_buf), "State: TRIPPED NOW -- %s",
                      safety_trip_words_short(ds.diag_trip_reason));
-        } else {
-            snprintf(trip_buf, sizeof(trip_buf), "State: %s -- %s", state_word, trip_tail);
+            break;
+        default: snprintf(trip_buf, sizeof(trip_buf), "State: unrecognised"); break;
         }
     }
     lv_label_set_text(s_trip_label, trip_buf);
@@ -742,18 +777,12 @@ static void refresh_cb(lv_timer_t *timer)
                            "refused while the cause is still present.");
     }
 
-    /* ---- Board Health (folded from ui_page_board_health.c) -------------- */
+    /* ---- Board Health (folded from ui_page_board_health.c; the ESP32-S3
+     * die temp row is NOT repeated here -- see this file's header comment
+     * and s_bh_cj_label's own comment for why: s_esp32_temp_label on the
+     * PSRAM & storage page already shows this exact fact.) ---------------- */
     board_temps_t bt2;
     board_temps_get_live(&bt2);
-    if (bt2.esp32_valid) {
-        snprintf(buf, sizeof(buf), "%.1f %s", (double)unit_pref_convert(bt2.esp32_c, unit_pref_get(), UNIT_PREF_KIND_ABSOLUTE),
-                 unit_pref_suffix(unit_pref_get()));
-        lv_obj_set_style_text_color(s_bh_esp32_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    } else {
-        snprintf(buf, sizeof(buf), "n/a");
-        lv_obj_set_style_text_color(s_bh_esp32_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    }
-    lv_label_set_text(s_bh_esp32_label, buf);
     for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
         bool valid = (ch < bt2.thermo_count) && bt2.thermo_cj_valid[ch];
         if (valid) {
@@ -799,9 +828,14 @@ static void refresh_cb(lv_timer_t *timer)
          * match main_page.html's FAULT_BITS table verbatim (same reasoning
          * as safety_trip_words.h's own header comment: two independently
          * maintained copies, C and JS, kept in sync by hand since this
-         * firmware cannot #include a C header into a web page) plus a
-         * remedy line the web page did not have either. */
-        char fault_buf[160];
+         * firmware cannot #include a C header into a web page).
+         *
+         * 2026-09-04: "ChN: " prefixed onto this line rather than a separate
+         * title row -- with all MAX31856_CHANNEL_COUNT channels back on one
+         * page (see this file's header comment), a per-channel title row is
+         * exactly the repeated chrome the consolidation was told to drop in
+         * favor of one header (the topbar) and compact rows. */
+        char fault_buf[168];
         static const struct { uint8_t mask; const char *word; } bits[] = {
             { MAX31856_MASK_OPEN,     "open circuit" },   { MAX31856_MASK_OVUV,   "over/under voltage" },
             { MAX31856_MASK_TCLOW,    "TC low" },         { MAX31856_MASK_TCHIGH, "TC high" },
@@ -809,10 +843,10 @@ static void refresh_cb(lv_timer_t *timer)
             { MAX31856_FAULT_TCRANGE, "TC out of range" }, { MAX31856_FAULT_CJRANGE, "CJ out of range" },
         };
         uint8_t fs = readings[i].fault_status;
+        size_t prefix_len = (size_t)snprintf(fault_buf, sizeof(fault_buf), "Ch%u: ", (unsigned)ch);
         if (fs == 0) {
-            snprintf(fault_buf, sizeof(fault_buf), "OK");
+            snprintf(fault_buf + prefix_len, sizeof(fault_buf) - prefix_len, "OK");
         } else {
-            fault_buf[0] = '\0';
             bool first = true;
             for (size_t b = 0; b < sizeof(bits) / sizeof(bits[0]); b++) {
                 if (fs & bits[b].mask) {
@@ -827,7 +861,14 @@ static void refresh_cb(lv_timer_t *timer)
         lv_obj_set_style_text_color(s_tf_fault_label[ch],
                                      faulted ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_PRIMARY, 0);
 
-        char status_buf[160];
+        /* 2026-09-04: shortened from a ~123-char instructional sentence to a
+         * fixed short phrase -- see this file's header comment for the row
+         * arithmetic this was required to make fit once three channels
+         * shared one page again. The distinction that mattered (wiring/
+         * power fault vs. thermocouple/wiring fault) is kept; the generic
+         * "it should clear on its own" prose is not, since it was the same
+         * sentence regardless of which specific bit fired. */
+        char status_buf[64];
         if (readings[i].spi_failed) {
             /* Not a reading at all -- the SPI transaction itself failed, so
              * this is NOT the same thing as a decoded SR fault bit above
@@ -836,16 +877,14 @@ static void refresh_cb(lv_timer_t *timer)
              * must not be worded like one that reported and found a
              * problem). */
             snprintf(status_buf, sizeof(status_buf),
-                     "FAULT pin: %s   SPI: FAILED -- check wiring/power to this MAX31856, not the "
-                     "thermocouple itself.",
+                     "FAULT pin: %s  SPI: FAILED (check wiring/power)",
                      readings[i].fault_pin_asserted ? "yes" : "no");
         } else if (fs != 0) {
             snprintf(status_buf, sizeof(status_buf),
-                     "FAULT pin: %s   SPI: ok -- check the thermocouple and its wiring for this "
-                     "channel, then the fault should clear on its own.",
+                     "FAULT pin: %s  SPI: ok (check TC wiring)",
                      readings[i].fault_pin_asserted ? "yes" : "no");
         } else {
-            snprintf(status_buf, sizeof(status_buf), "FAULT pin: %s   SPI: ok",
+            snprintf(status_buf, sizeof(status_buf), "FAULT pin: %s  SPI: ok",
                      readings[i].fault_pin_asserted ? "yes" : "no");
         }
         lv_label_set_text(s_tf_status_label[ch], status_buf);
@@ -891,11 +930,19 @@ static lv_obj_t *build_stat_row(lv_obj_t *parent, const char *name, lv_color_t a
 
 /* Full-width single-label row -- same shape ui_page_safety.c's
  * build_stat_label() used (one combined "name: value" string per row rather
- * than build_stat_row()'s separate name/value pair), reused here verbatim
- * for the folded Safety Processor page since its rows are already
- * pre-formatted sentences ("Link version: ESP 3 / Pico 3 (OK)"), not a
- * clean name/value split. */
-static lv_obj_t *build_full_text_row(lv_obj_t *parent, const char *initial_text)
+ * than build_stat_row()'s separate name/value pair), for a page whose rows
+ * are pre-formatted sentences ("Link: ESP 3 / Pico 3 (OK)"), not a clean
+ * name/value split.
+ *
+ * 2026-09-04: takes an `accent` color and paints the same 3px colored
+ * left-border build_stat_row() has always used, where the original
+ * ui_page_safety.c-derived version had none -- the owner's explicit "use
+ * Board Health's theme" call when the two pages merged (see this file's
+ * header comment). Trip Detail's 5 rows still want the old plain look (no
+ * accent, nothing about that page changed in this pass), so they go through
+ * build_full_text_row() below, which forwards UI_THEME_COLOR_CARD as the
+ * border color -- same color as the row's own background, i.e. invisible. */
+static lv_obj_t *build_full_text_row_accent(lv_obj_t *parent, const char *initial_text, lv_color_t accent)
 {
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_set_width(row, lv_pct(100));
@@ -905,6 +952,9 @@ static lv_obj_t *build_full_text_row(lv_obj_t *parent, const char *initial_text)
     lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_width(row, 3, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_color(row, accent, 0);
 
     lv_obj_t *label = lv_label_create(row);
     lv_obj_set_width(label, lv_pct(100));
@@ -914,14 +964,24 @@ static lv_obj_t *build_full_text_row(lv_obj_t *parent, const char *initial_text)
     return label;
 }
 
-/* One fixed-share channel card for the folded Thermocouple Faults page --
- * same shape ui_page_thermo_faults.c's build_channel_row() used: title,
- * fault summary (wraps), status line, each row sharing the page's remaining
- * height via flex_grow rather than a hard-coded per-row height (that file's
- * own header comment: three fixed 72px rows once overflowed and hid the
- * third channel). */
+static lv_obj_t *build_full_text_row(lv_obj_t *parent, const char *initial_text)
+{
+    return build_full_text_row_accent(parent, initial_text, UI_THEME_COLOR_CARD);
+}
+
+/* One fixed-share channel card for the merged Thermocouple Faults page --
+ * same shape ui_page_thermo_faults.c's build_channel_row() used: fault
+ * summary (wraps), status line, each row sharing the page's remaining
+ * height via flex_grow rather than a hard-coded per-row height.
+ *
+ * 2026-09-04: no separate "Channel N" title label any more -- refresh_cb()
+ * now prefixes the channel number directly onto the fault line ("Ch0: ...")
+ * so three cards sharing one page (see this file's header comment) don't
+ * each spend a row on chrome the topbar's own title already covers for the
+ * page as a whole. */
 static void build_thermo_fault_row(lv_obj_t *parent, uint8_t channel, lv_color_t accent)
 {
+    (void)channel;
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_set_width(row, lv_pct(100));
     lv_obj_set_flex_grow(row, 1);
@@ -935,12 +995,6 @@ static void build_thermo_fault_row(lv_obj_t *parent, uint8_t channel, lv_color_t
     lv_obj_set_style_border_color(row, accent, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-
-    lv_obj_t *title = lv_label_create(row);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    char title_buf[24];
-    snprintf(title_buf, sizeof(title_buf), "Channel %u", (unsigned)channel);
-    lv_label_set_text(title, title_buf);
 
     lv_obj_t *fault_label = lv_label_create(row);
     lv_obj_set_width(fault_label, lv_pct(100));
@@ -1038,20 +1092,21 @@ lv_obj_t *ui_page_diagnostics_build(void)
     s_nvs_stats_label = build_stat_row(psram_page, "NVS entries (used/free/total)", UI_THEME_ACCENT_1);
     s_esp32_temp_label = build_stat_row(psram_page, "ESP32-S3 die temp", UI_THEME_ACCENT_2);
 
-    /* Page 4: Safety Processor -- folded from ui_page_safety.c (2026-08-27,
-     * see this file's header comment's content inventory). 5 rows, same
-     * count/shape that page always had, well inside the ~267px budget. */
-    lv_obj_t *safety_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_SAFETY];
-    s_safety_temp_label = build_full_text_row(safety_page, "Safety temp: ---");
-    s_enclosure_temp_label = build_full_text_row(safety_page, "Enclosure temp: ---");
-    s_safety_power_label = build_full_text_row(safety_page, "Power: ---");
-    s_link_version_label = build_full_text_row(safety_page, "Link version: ---");
-    s_trip_label = build_full_text_row(safety_page, "State: ---");
-
-    /* Page 5: Board Health -- folded from ui_page_board_health.c. 1 +
-     * MAX31856_CHANNEL_COUNT rows (4 on this board), same as that page. */
-    lv_obj_t *board_health_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH];
-    s_bh_esp32_label = build_stat_row(board_health_page, "ESP32-S3 die temp", UI_THEME_ACCENT_1);
+    /* Page 4: Safety & Board Health -- merged 2026-09-04 (see this file's
+     * header comment). 5 accent-bordered sentence rows (Safety Processor,
+     * now using Board Health's border-accent treatment via
+     * build_full_text_row_accent()) plus MAX31856_CHANNEL_COUNT
+     * cold-junction stat rows (Board Health, unchanged) -- the duplicate
+     * "ESP32-S3 die temp" row Board Health used to also show is dropped
+     * here, see s_bh_cj_label's own comment. Worst case ~237-257px,
+     * comfortably inside the ~267px budget -- see the header comment and
+     * this consolidation's report for the full character-count arithmetic. */
+    lv_obj_t *safety_bh_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_SAFETY_BOARD_HEALTH];
+    s_safety_temp_label = build_full_text_row_accent(safety_bh_page, "Safety temp: ---", UI_THEME_ACCENT_1);
+    s_enclosure_temp_label = build_full_text_row_accent(safety_bh_page, "Enclosure temp: ---", UI_THEME_ACCENT_2);
+    s_safety_power_label = build_full_text_row_accent(safety_bh_page, "Power: ---", UI_THEME_ACCENT_3);
+    s_link_version_label = build_full_text_row_accent(safety_bh_page, "Link: ---", UI_THEME_ACCENT_4);
+    s_trip_label = build_full_text_row_accent(safety_bh_page, "State: ---", UI_THEME_ACCENT_5);
     for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
         char name[40];
         snprintf(name, sizeof(name), "MAX31856 ch %u cold-junction", (unsigned)ch);
@@ -1063,10 +1118,10 @@ lv_obj_t *ui_page_diagnostics_build(void)
         case 3: accent = UI_THEME_ACCENT_1; break;
         default: accent = UI_THEME_ACCENT_2; break;
         }
-        s_bh_cj_label[ch] = build_stat_row(board_health_page, name, accent);
+        s_bh_cj_label[ch] = build_stat_row(safety_bh_page, name, accent);
     }
 
-    /* Page 7: Trip Detail -- new, 2026-08-27 (see this file's
+    /* Page 6: Trip Detail -- new, 2026-08-27 (see this file's
      * UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL comment). 5 wrapped full-text
      * rows, same shape as the Safety Processor page's own rows. */
     lv_obj_t *trip_detail_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL];
@@ -1076,16 +1131,17 @@ lv_obj_t *ui_page_diagnostics_build(void)
     s_td_source_label = build_full_text_row(trip_detail_page, "Fault source: --");
     s_td_latch_label = build_full_text_row(trip_detail_page, "--");
 
-    /* Pages 6-8: Thermocouple Faults -- folded from ui_page_thermo_faults.c,
-     * ONE channel per page (P4-C, opus review 2026-08-28 -- see this file's
-     * UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch) header comment for why
-     * three channel cards no longer fit sharing a single page's flex_grow
-     * split). Each page's card gets the full page via flex_grow(1) with a
-     * single child, same call as before -- only the page each channel lands
-     * on changed. */
+    /* Page 5: Thermocouple Faults -- back to ONE page for all
+     * MAX31856_CHANNEL_COUNT channels as of 2026-09-04 (see this file's
+     * header comment for why the 2026-08-28 P4-C one-channel-per-page split
+     * is no longer needed: the per-row content that overflowed a shared
+     * page is trimmed now, not the row count). Each card still gets an
+     * equal flex_grow(1) share of the page, same as P4-C's per-page cards
+     * did within their own page -- the only change is three shares of one
+     * page instead of one share each of three pages. */
     lv_color_t tf_accents[3] = { UI_THEME_ACCENT_1, UI_THEME_ACCENT_2, UI_THEME_ACCENT_3 };
+    lv_obj_t *thermo_fault_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS];
     for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
-        lv_obj_t *thermo_fault_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch)];
         build_thermo_fault_row(thermo_fault_page, ch, tf_accents[ch % 3]);
     }
 
