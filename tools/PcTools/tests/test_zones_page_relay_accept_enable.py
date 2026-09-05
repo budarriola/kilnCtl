@@ -25,6 +25,7 @@ rather than adding a new hard dependency for the whole pytest run.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -149,4 +150,43 @@ def test_relay_done_leaves_accept_button_enabled(tmp_path):
     )
     assert results["step"]["acceptDisabled"] is False, (
         "sanity/regression guard: Accept must still be enabled for a clean step DONE result"
+    )
+
+
+def test_adopt_ceiling_checkbox_exists_and_is_wired_into_accept_body():
+    """Review finding (autotune adopt_ceiling): TODO.md 6A.4's "adopt ceiling"
+    checkbox must actually exist in the page and its checked state must
+    actually reach the /api/autotune/accept POST body -- a checkbox that
+    exists but is never read (or an accept body that hardcodes the flag)
+    would silently make the feature inert while looking complete in the
+    markup alone. Plain string checks against the real file, not a Node
+    harness -- this only needs to prove the wiring exists, not execute it."""
+    html = _ZONES_PAGE_HTML.read_text(encoding="utf-8")
+
+    assert 'id="atAdoptCeiling"' in html, (
+        "zones_page.html must contain an element with id=\"atAdoptCeiling\" -- "
+        "the adopt-ceiling checkbox the accept flow reads"
+    )
+    assert re.search(r'id="atAdoptCeiling"[^>]*type="checkbox"', html) or re.search(
+        r'type="checkbox"[^>]*id="atAdoptCeiling"', html
+    ), "atAdoptCeiling must actually be a checkbox input, not some other element reusing the id"
+
+    # The accept click handler must read atAdoptCeiling.checked and fold it
+    # into the fetch() body sent to /api/autotune/accept, under the
+    # adopt_ceiling form key the HTTP handler (dashboard_autotune_http.c)
+    # parses -- not just declared in the DOM and never consulted.
+    accept_handler_match = re.search(
+        r"atAcceptBtn['\"]\)\.addEventListener\('click', function \(\) \{(.*?)\}\);",
+        html,
+        re.DOTALL,
+    )
+    assert accept_handler_match, "could not locate the atAcceptBtn click handler in zones_page.html"
+    handler_body = accept_handler_match.group(1)
+
+    assert "atAdoptCeiling" in handler_body and ".checked" in handler_body, (
+        "the Accept click handler must read document.getElementById('atAdoptCeiling').checked"
+    )
+    assert "adopt_ceiling=" in handler_body, (
+        "the Accept click handler's fetch body must include an adopt_ceiling= field, matching the "
+        "form field name dashboard_autotune_http.c's autotune_accept_post_handler() parses"
     )

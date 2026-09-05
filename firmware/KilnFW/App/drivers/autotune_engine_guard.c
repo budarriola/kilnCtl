@@ -268,6 +268,23 @@ bool autotune_engine_accept(bool ack_unsettled)
 
 bool autotune_engine_accept_ex(bool ack_unsettled, bool adopt_ceiling)
 {
+    return autotune_engine_accept_ex2(ack_unsettled, adopt_ceiling, NULL, NULL, NULL);
+}
+
+bool autotune_engine_accept_ex2(bool ack_unsettled, bool adopt_ceiling,
+                                 autotune_ceiling_adoption_t *out_adoption,
+                                 float *out_old_ceiling_c_per_hr,
+                                 float *out_new_ceiling_c_per_hr)
+{
+    if (out_adoption != NULL) {
+        *out_adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED;
+    }
+    if (out_old_ceiling_c_per_hr != NULL) {
+        *out_old_ceiling_c_per_hr = 0.0f;
+    }
+    if (out_new_ceiling_c_per_hr != NULL) {
+        *out_new_ceiling_c_per_hr = 0.0f;
+    }
     /* See autotune_begin_run_locked()'s guard comment above. */
     if (s_at.lock == NULL) {
         ESP_LOGW(AT_TAG, "autotune_engine_accept() called before autotune_engine_start() -- refused");
@@ -349,7 +366,7 @@ bool autotune_engine_accept_ex(bool ack_unsettled, bool adopt_ceiling)
      * the model/gains rather than re-read from s_at after the lock is
      * released (a new run could already be starting by then). */
     float step_ambient_c = s_at.step_ambient_c;
-    float predicted_max_ramp_c_per_hr = s_at.predicted_max_ramp_c_per_hr;
+    float predicted_max_ramp_ambient_c_per_hr = s_at.predicted_max_ramp_ambient_c_per_hr;
     xSemaphoreGive(s_at.lock);
 
     if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
@@ -412,6 +429,7 @@ bool autotune_engine_accept_ex(bool ack_unsettled, bool adopt_ceiling)
         xSemaphoreGive(s_at.lock);
         ESP_LOGI(AT_TAG, "autotune zone %u: relay-test gains accepted (no plant model written -- a relay test "
                       "measures none; any model from a previous step test is left untouched)", zone);
+        if (adopt_ceiling && out_adoption) *out_adoption = AUTOTUNE_CEILING_SKIPPED_RELAY_METHOD;
         return true;
     }
     /* The model goes with the gains, through the same owner and at the same
@@ -453,17 +471,72 @@ bool autotune_engine_accept_ex(bool ack_unsettled, bool adopt_ceiling)
      * measurement. Logged, not propagated, on failure: same reasoning as
      * model_persisted's own failure just above -- the gains (and model) the
      * operator clicked Accept for are already live either way. */
-    if (adopt_ceiling && method == AUTOTUNE_METHOD_STEP && model_persisted &&
-        predicted_max_ramp_c_per_hr > 0.0f) {
-        if (!zones_config_set_max_ramp(zone, predicted_max_ramp_c_per_hr)) {
-            ESP_LOGW(AT_TAG,
-                     "autotune zone %u: gains and model accepted but predicted ramp ceiling (%.1f degC/hr) "
-                     "was rejected or failed to persist -- max_ramp_c_per_hr left unchanged",
-                     zone, (double)predicted_max_ramp_c_per_hr);
+    if (adopt_ceiling) {
+        if (method != AUTOTUNE_METHOD_STEP) {
+            if (out_adoption != NULL) {
+                *out_adoption = AUTOTUNE_CEILING_SKIPPED_RELAY_METHOD;
+            }
+        } else if (!model_persisted) {
+            if (out_adoption != NULL) {
+                *out_adoption = AUTOTUNE_CEILING_SKIPPED_MODEL_NOT_PERSISTED;
+            }
+        } else if (predicted_max_ramp_ambient_c_per_hr <= 0.0f) {
+            if (out_adoption != NULL) {
+                *out_adoption = AUTOTUNE_CEILING_SKIPPED_ZERO;
+            }
         } else {
-            ESP_LOGI(AT_TAG, "autotune zone %u: adopted predicted ramp ceiling %.1f degC/hr into "
-                          "max_ramp_c_per_hr",
-                     zone, (double)predicted_max_ramp_c_per_hr);
+            /* Old value read fresh here (not cached earlier) so it reflects
+             * whatever is actually stored right now, including a value an
+             * operator set on /settings/zones after this run started. */
+            float old_ceiling_c_per_hr = 0.0f;
+            bool have_old = zones_config_get_max_ramp(zone, &old_ceiling_c_per_hr);
+            if (out_old_ceiling_c_per_hr != NULL && have_old) {
+                *out_old_ceiling_c_per_hr = old_ceiling_c_per_hr;
+            }
+            if (predicted_max_ramp_ambient_c_per_hr > ZONE_MAX_RAMP_C_PER_HR_MAX) {
+                /* Out of range is a refusal, never a clamp -- adopting a
+                 * clamped value would silently misrepresent what the fit
+                 * actually predicted. Checked before the would-tighten
+                 * comparison below so an out-of-range estimate is always
+                 * reported as REJECTED_OUT_OF_RANGE, never masked by a
+                 * stored ceiling that happens to already be tighter. */
+                if (out_adoption != NULL) {
+                    *out_adoption = AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE;
+                }
+                ESP_LOGW(AT_TAG, "autotune zone %u: predicted ramp ceiling %.1f degC/hr exceeds max %.1f "
+                              "degC/hr -- rejected, not clamped, max_ramp_c_per_hr left unchanged",
+                         zone, (double)predicted_max_ramp_ambient_c_per_hr, (double)ZONE_MAX_RAMP_C_PER_HR_MAX);
+            } else if (have_old && old_ceiling_c_per_hr > 0.0f &&
+                predicted_max_ramp_ambient_c_per_hr < old_ceiling_c_per_hr) {
+                /* Never silently tighten: adopting a new estimate SMALLER
+                 * than the stored, nonzero ceiling would make the zone's
+                 * ramp ceiling more restrictive without being asked -- skip
+                 * instead of overwriting a looser (or equal) value. */
+                if (out_adoption != NULL) {
+                    *out_adoption = AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN;
+                }
+                ESP_LOGI(AT_TAG, "autotune zone %u: predicted ramp ceiling %.1f degC/hr not adopted -- "
+                              "stored ceiling %.1f degC/hr is already tighter or equal",
+                         zone, (double)predicted_max_ramp_ambient_c_per_hr, (double)old_ceiling_c_per_hr);
+            } else if (!zones_config_set_max_ramp(zone, predicted_max_ramp_ambient_c_per_hr)) {
+                if (out_adoption != NULL) {
+                    *out_adoption = AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE;
+                }
+                ESP_LOGW(AT_TAG,
+                         "autotune zone %u: gains and model accepted but predicted ramp ceiling (%.1f degC/hr) "
+                         "was rejected or failed to persist -- max_ramp_c_per_hr left unchanged",
+                         zone, (double)predicted_max_ramp_ambient_c_per_hr);
+            } else {
+                if (out_adoption != NULL) {
+                    *out_adoption = AUTOTUNE_CEILING_ADOPTED;
+                }
+                if (out_new_ceiling_c_per_hr != NULL) {
+                    *out_new_ceiling_c_per_hr = predicted_max_ramp_ambient_c_per_hr;
+                }
+                ESP_LOGI(AT_TAG, "autotune zone %u: adopted predicted ramp ceiling %.1f degC/hr (ambient-"
+                              "evaluated) into max_ramp_c_per_hr",
+                         zone, (double)predicted_max_ramp_ambient_c_per_hr);
+            }
         }
     }
     /* PID_EXPANSION_PLAN.md section 3.2, "on-board identification pass" --

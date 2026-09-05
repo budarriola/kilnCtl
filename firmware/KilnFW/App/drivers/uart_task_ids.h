@@ -1563,7 +1563,13 @@
  *                    HTTP form's optional fields defaulting server-side.
  *                    -- QUERY-style reply, see below
  *   0x03 ABORT      (no args) -- QUERY-style reply, always ok
- *   0x04 ACCEPT     (no args) -- QUERY-style reply, see below
+ *   0x04 ACCEPT     (no args) -- QUERY-style reply, see below. No
+ *                    adopt_ceiling option on this wire path -- it calls
+ *                    autotune_engine_accept() (adopt_ceiling always false),
+ *                    never autotune_engine_accept_ex()/_ex2(). Adopting the
+ *                    predicted ramp ceiling into max_ramp_c_per_hr is web-UI
+ *                    only, via POST /api/autotune/accept's adopt_ceiling
+ *                    form field (dashboard_autotune_http.c).
  *
  * GET_STATUS response payload:
  *   byte0        = AUTOTUNE_CMD_GET_STATUS (0x01)

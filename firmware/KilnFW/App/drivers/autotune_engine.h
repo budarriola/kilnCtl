@@ -140,7 +140,23 @@ typedef struct {
     fopdt_model_t    model;            /* step method only */
     relay_model_t    relay;            /* relay method only */
     autotune_gains_t proposed_gains;   /* .rule says which rule produced these */
-    float            predicted_max_ramp_c_per_hr; /* step method only -- needs tau, which a relay test never measures */
+    float            predicted_max_ramp_c_per_hr; /* step method only -- needs tau, which a relay test never measures.
+                                                    * Evaluated at t_now_c = end-of-step temperature (the hottest
+                                                    * point this run actually reached), so it is the SMALLEST
+                                                    * climb rate available from that point on, not a
+                                                    * temperature-independent ceiling. Kept for UI/status display
+                                                    * only -- see predicted_max_ramp_ambient_c_per_hr below for the
+                                                    * value that is actually safe to adopt as a hard ceiling. */
+    float            predicted_max_ramp_ambient_c_per_hr; /* step method only. Same estimator
+                                                    * (pid_autotune_estimate_max_ramp_c_per_hr()) evaluated at
+                                                    * t_now_c == t_ambient_c, i.e. the (T_now - T_ambient) term
+                                                    * drops out and this reduces to K*u_max/tau*3600 -- the rate
+                                                    * the plant can sustain from a cold start, which is what a
+                                                    * caller checking "can this profile ever start" (profile_
+                                                    * executor_run.c, profile_feasibility.c, profiles_edit_http.c)
+                                                    * actually needs. This is the field autotune_engine_accept_ex()
+                                                    * adopts into zones_config_set_max_ramp(), never the end-of-step
+                                                    * field above. */
 } autotune_engine_status_t;
 
 #define AUTOTUNE_ENGINE_TICK_MS 1000u        /* same 1Hz as profile_executor */
@@ -417,6 +433,40 @@ bool autotune_engine_accept(bool ack_unsettled);
  * is logged, not propagated, for the same reason the model-persist failure
  * above is logged and not propagated: the gains are already live. */
 bool autotune_engine_accept_ex(bool ack_unsettled, bool adopt_ceiling);
+
+/* Outcome of the ceiling-adoption attempt inside autotune_engine_accept_ex2()
+ * below, reported back to the caller instead of only to the log (review
+ * finding: an HTTP/UART caller had no way to tell "adopted" from "silently
+ * skipped" from "silently clamped"). Never a clamp: an out-of-range request
+ * is REJECTED_OUT_OF_RANGE, not adopted at a clamped value. */
+typedef enum {
+    AUTOTUNE_CEILING_ADOPTED = 0,
+    AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED,   /* adopt_ceiling was false */
+    AUTOTUNE_CEILING_SKIPPED_RELAY_METHOD,    /* relay test has no FOPDT model to derive a ceiling from */
+    AUTOTUNE_CEILING_SKIPPED_MODEL_NOT_PERSISTED, /* zones_config_set_model() failed for this run */
+    AUTOTUNE_CEILING_SKIPPED_ZERO,            /* predicted_max_ramp_ambient_c_per_hr <= 0 -- nothing to adopt */
+    AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN,   /* stored ceiling is nonzero and already <= the new estimate */
+    AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE,   /* new estimate > ZONE_MAX_RAMP_C_PER_HR_MAX -- refused, not clamped */
+} autotune_ceiling_adoption_t;
+
+/* Sibling of autotune_engine_accept_ex() that additionally reports what
+ * happened to the ceiling-adoption attempt (see autotune_ceiling_adoption_t
+ * above) and the old/new ceiling values involved, so an HTTP or UART caller
+ * can show the operator the actual outcome instead of inferring it from a
+ * log line. Any of the three out-params may be NULL if the caller does not
+ * need them. Adopts predicted_max_ramp_ambient_c_per_hr, never the
+ * end-of-step predicted_max_ramp_c_per_hr -- see that field's own comment
+ * in autotune_engine_status_t for why the end-of-step value is unsafe to
+ * use as a hard block. Never tightens an existing nonzero ceiling silently:
+ * if the currently stored ceiling is smaller than the new estimate already,
+ * adoption is skipped (AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN) rather than
+ * overwriting a tighter operator-set (or previously-measured) value with a
+ * looser one. autotune_engine_accept_ex() is a thin wrapper around this
+ * function that discards the three out-params. */
+bool autotune_engine_accept_ex2(bool ack_unsettled, bool adopt_ceiling,
+                                 autotune_ceiling_adoption_t *out_adoption,
+                                 float *out_old_ceiling_c_per_hr,
+                                 float *out_new_ceiling_c_per_hr);
 
 void autotune_engine_get_status(autotune_engine_status_t *out);
 

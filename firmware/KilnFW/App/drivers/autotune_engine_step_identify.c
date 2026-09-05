@@ -328,6 +328,28 @@ void autotune_finalize_fit(void)
     s_at.predicted_max_ramp_c_per_hr =
         pid_autotune_estimate_max_ramp_c_per_hr(&s_at.model, 1.0f, s_at.actual_valid ? s_at.actual_c : baseline_c,
                                                 baseline_c);
+    /* Review finding: the field above is evaluated at t_now_c = end-of-step
+     * temperature (the hottest point this run reached), which makes it the
+     * SMALLEST achievable rate from that point on -- but every consumer of
+     * a stored max_ramp_c_per_hr (profile_executor_run.c, profile_
+     * feasibility.c, profiles_edit_http.c) treats it as a temperature-
+     * independent hard block, checked from a cold start. Adopting the
+     * end-of-step value into that ceiling can refuse a genuinely startable
+     * profile. Evaluating at t_now_c == t_ambient_c makes the (T_now -
+     * T_ambient) term drop out of pid_autotune_estimate_max_ramp_c_per_hr(),
+     * reducing to K*u_max/tau*3600 -- the sustained rate available from a
+     * cold start, which is the only value safe to adopt as that ceiling.
+     * See autotune_engine_status_t::predicted_max_ramp_ambient_c_per_hr. */
+    s_at.predicted_max_ramp_ambient_c_per_hr =
+        pid_autotune_estimate_max_ramp_c_per_hr(&s_at.model, 1.0f, baseline_c, baseline_c);
+    /* Ambient-evaluated companion (t_now_c == t_ambient_c collapses the
+     * estimator to K*u_max/tau*3600, dropping the (T_now - T_ambient) term):
+     * the rate the plant can sustain from a cold start, not the smallest
+     * rate left at the hottest point this run reached. This is the value
+     * autotune_engine_accept_ex() adopts into the zone's ramp ceiling --
+     * see autotune_engine.h's field comment. */
+    s_at.predicted_max_ramp_ambient_c_per_hr =
+        pid_autotune_estimate_max_ramp_c_per_hr(&s_at.model, 1.0f, baseline_c, baseline_c);
 
     /* TODO.md 6A.5(b): fill row zone_index of the coupling matrix -- the
      * direct cell (i==i) is this same model, every other configured zone

@@ -796,6 +796,7 @@ typedef struct {
     fopdt_model_t    model;
     autotune_gains_t proposed_gains;
     float            predicted_max_ramp_c_per_hr;
+    float            predicted_max_ramp_ambient_c_per_hr; /* see autotune_engine_status_t's own field of this name */
 
     autotune_coupling_matrix_t coupling;
 } s_at_t;

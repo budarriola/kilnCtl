@@ -326,16 +326,28 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
         }
         if (read_ok) {
             body[received] = '\0';
-            char ack_val[4];
+            /* Sized [8], not [4]: http_form_url_decode() (http_form.h)
+             * requires o+1 < out_cap for every decoded byte it writes, so a
+             * 4-byte cap can NEVER hold "true" (4 chars + NUL = 5 bytes,
+             * and the o+1 < out_cap guard actually needs 6). A [4] buffer
+             * silently truncated "true" to "tru" (or refused to decode it
+             * at all, depending on where url_decode's write loop gave up),
+             * so a client sending the literal string "true" (rather than
+             * "1") could never opt in to either flag -- found in review. */
+            char ack_val[8];
             int ack_len = http_form_find_field(body, "ack_unsettled", ack_val, sizeof(ack_val));
             ack_unsettled = (ack_len > 0) && (strcmp(ack_val, "1") == 0 || strcmp(ack_val, "true") == 0);
-            char ceiling_val[4];
+            char ceiling_val[8];
             int ceiling_len = http_form_find_field(body, "adopt_ceiling", ceiling_val, sizeof(ceiling_val));
             adopt_ceiling = (ceiling_len > 0) && (strcmp(ceiling_val, "1") == 0 || strcmp(ceiling_val, "true") == 0);
         }
     }
 
-    if (!autotune_engine_accept_ex(ack_unsettled, adopt_ceiling)) {
+    autotune_ceiling_adoption_t ceiling_outcome = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED;
+    float ceiling_old_c_per_hr = 0.0f;
+    float ceiling_new_c_per_hr = 0.0f;
+    if (!autotune_engine_accept_ex2(ack_unsettled, adopt_ceiling, &ceiling_outcome, &ceiling_old_c_per_hr,
+                                     &ceiling_new_c_per_hr)) {
         /* The specific reason (never settled / extrapolation didn't
          * converge / tau inconsistent with the corrected gain) is in the
          * ESP_LOGW autotune_engine_accept() itself already emitted -- see
@@ -350,7 +362,27 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
                             "accept anyway");
         return ESP_OK;
     }
-    return httpd_resp_sendstr(req, "ok");
+    /* Review fix: report the ceiling-adoption outcome to the caller instead
+     * of only the ESP_LOGx lines inside autotune_engine_accept_ex2() --
+     * "adopted" vs "silently skipped" vs "rejected as out of range" were
+     * previously indistinguishable from this response alone. */
+    const char *outcome_name = "SKIPPED_NOT_REQUESTED";
+    switch (ceiling_outcome) {
+    case AUTOTUNE_CEILING_ADOPTED: outcome_name = "ADOPTED"; break;
+    case AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED: outcome_name = "SKIPPED_NOT_REQUESTED"; break;
+    case AUTOTUNE_CEILING_SKIPPED_RELAY_METHOD: outcome_name = "SKIPPED_RELAY_METHOD"; break;
+    case AUTOTUNE_CEILING_SKIPPED_MODEL_NOT_PERSISTED: outcome_name = "SKIPPED_MODEL_NOT_PERSISTED"; break;
+    case AUTOTUNE_CEILING_SKIPPED_ZERO: outcome_name = "SKIPPED_ZERO"; break;
+    case AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN: outcome_name = "SKIPPED_WOULD_TIGHTEN"; break;
+    case AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE: outcome_name = "REJECTED_OUT_OF_RANGE"; break;
+    }
+    char json[192];
+    int n = snprintf(json, sizeof(json),
+                      "{\"ok\":true,\"ceiling_adoption\":\"%s\",\"ceiling_old_c_per_hr\":%.1f,"
+                      "\"ceiling_new_c_per_hr\":%.1f}",
+                      outcome_name, (double)ceiling_old_c_per_hr, (double)ceiling_new_c_per_hr);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }
 
 /* Streamed the same way history_csv_get_handler() is, for the same reason

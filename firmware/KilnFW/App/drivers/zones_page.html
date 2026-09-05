@@ -2944,8 +2944,30 @@ document.getElementById('atAcceptBtn').addEventListener('click', function () {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'ack_unsettled=' + (ackUnsettled ? '1' : '0') + '&adopt_ceiling=' + (adoptCeiling ? '1' : '0'),
   }).then(function (r) {
-    if (r.ok) { loadCurrent(); pollAutotune(); }
-    else document.getElementById('atStatus').textContent = 'Accept failed.';
+    if (!r.ok) { document.getElementById('atStatus').textContent = 'Accept failed.'; return; }
+    loadCurrent();
+    pollAutotune();
+    // Review fix: surface the ceiling_adoption outcome the accept response
+    // now carries (ADOPTED / SKIPPED_* / REJECTED_OUT_OF_RANGE) rather than
+    // only "ok" -- an operator who ticked "adopt ceiling" had no way to
+    // tell adoption from a silent skip or refusal before this.
+    r.json().then(function (data) {
+      if (!data || !data.ceiling_adoption) return;
+      var msgs = {
+        ADOPTED: 'Accepted. Ramp ceiling adopted: ' + data.ceiling_old_c_per_hr + ' -> ' +
+                 data.ceiling_new_c_per_hr + ' °C/hr.',
+        SKIPPED_NOT_REQUESTED: 'Accepted.',
+        SKIPPED_RELAY_METHOD: 'Accepted. Ceiling not adopted -- a relay test measures no plant model.',
+        SKIPPED_MODEL_NOT_PERSISTED: 'Accepted. Ceiling not adopted -- the plant model failed to persist.',
+        SKIPPED_ZERO: 'Accepted. Ceiling not adopted -- no ramp rate could be predicted.',
+        SKIPPED_WOULD_TIGHTEN: 'Accepted. Ceiling NOT adopted -- the new estimate is tighter than the ' +
+                                'stored ceiling (' + data.ceiling_old_c_per_hr + ' °C/hr); adopting it ' +
+                                'would silently restrict this zone further, so it was left unchanged.',
+        REJECTED_OUT_OF_RANGE: 'Accepted. Ceiling REJECTED -- the predicted rate is out of range and ' +
+                                'was not adopted or clamped.',
+      };
+      document.getElementById('atStatus').textContent = msgs[data.ceiling_adoption] || 'Accepted.';
+    }).catch(function () {});
   }).catch(function () {});
 });
 

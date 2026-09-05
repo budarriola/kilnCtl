@@ -1070,6 +1070,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * never-tuned-yet state autotune_engine_start()'s memset() leaves. */
     s_at.proposed_gains = (autotune_gains_t){0};
     s_at.predicted_max_ramp_c_per_hr = 0.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 0.0f;
     /* Target-mode fields default off/zero for every run; autotune_engine_
      * run_to_target() sets target_mode/probe_phase/target_c right after this
      * function returns, exactly as it already does for method/step_duty --
@@ -1404,6 +1405,7 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
         out->relay = s_at.relay;
         out->proposed_gains = s_at.proposed_gains;
         out->predicted_max_ramp_c_per_hr = s_at.predicted_max_ramp_c_per_hr;
+        out->predicted_max_ramp_ambient_c_per_hr = s_at.predicted_max_ramp_ambient_c_per_hr;
     }
     xSemaphoreGive(s_at.lock);
 }

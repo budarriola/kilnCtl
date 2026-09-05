@@ -696,6 +696,24 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
     return s_stub_set_max_ramp_result;
 }
 
+/* Companion getter for the "never silently tighten" check in autotune_
+ * engine_accept_ex2()'s ceiling-adoption path: the stored ceiling it reads
+ * back before deciding ADOPTED vs SKIPPED_WOULD_TIGHTEN. Default 0.0f/true
+ * ("no ceiling configured yet") so every pre-existing adopt-ceiling test
+ * above, written before this getter existed, keeps adopting exactly as
+ * before -- a test that wants the tighten-skip path sets
+ * s_stub_get_max_ramp_value/s_stub_get_max_ramp_result explicitly. */
+static bool s_stub_get_max_ramp_result = true;
+static float s_stub_get_max_ramp_value = 0.0f;
+bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
+{
+    (void)zone_index;
+    if (out_c_per_hr) {
+        *out_c_per_hr = s_stub_get_max_ramp_value;
+    }
+    return s_stub_get_max_ramp_result;
+}
+
 // ---------------------------------------------------------------------------
 // Pre-start tests -- autotune_engine_start() is DELIBERATELY never called by
 // any of these. s_at is a static struct with internal linkage in
@@ -3510,7 +3528,12 @@ static void test_autotune_engine_accept_ex_adopts_ceiling_when_requested(void)
     s_at.model.k_gain_c_per_duty = 10.0f;
     s_at.model.tau_s = 100.0f;
     s_at.model.dead_time_s = 5.0f;
-    s_at.predicted_max_ramp_c_per_hr = 123.5f;
+    /* End-of-step field left at a DIFFERENT value than the ambient field on
+     * purpose: this proves the ambient-evaluated field is what actually
+     * gets adopted, not the (smaller, temperature-dependent) end-of-step
+     * one -- see autotune_engine.h's field comments. */
+    s_at.predicted_max_ramp_c_per_hr = 40.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 123.5f;
 
     s_stub_set_pid_result = true;
     s_stub_set_model_result = true;
@@ -3518,19 +3541,126 @@ static void test_autotune_engine_accept_ex_adopts_ceiling_when_requested(void)
     s_stub_set_max_ramp_call_count = 0;
     s_stub_set_max_ramp_zone = 0xFF;
     s_stub_set_max_ramp_value = -1.0f;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f; /* no ceiling configured yet -- adoption cannot tighten */
 
-    bool accepted = autotune_engine_accept_ex(false, true);
+    autotune_ceiling_adoption_t outcome = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED;
+    float old_c = -1.0f, new_c = -1.0f;
+    bool accepted = autotune_engine_accept_ex2(false, true, &outcome, &old_c, &new_c);
 
     TEST_CHECK(accepted, "a fully clean STEP fit accepts with adopt_ceiling requested");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 1,
               "zones_config_set_max_ramp() is called exactly once when adopt_ceiling is requested");
     TEST_CHECK(s_stub_set_max_ramp_zone == 3, "written for the zone under test, not a hardcoded index");
     TEST_CHECK_NEAR(s_stub_set_max_ramp_value, 123.5f, 1e-4,
-                    "written with exactly this run's predicted_max_ramp_c_per_hr, captured under the lock");
+                    "written with the AMBIENT-evaluated predicted_max_ramp_ambient_c_per_hr, not the "
+                    "end-of-step predicted_max_ramp_c_per_hr (40.0f)");
+    TEST_CHECK(outcome == AUTOTUNE_CEILING_ADOPTED, "reported outcome is ADOPTED");
+    TEST_CHECK_NEAR(new_c, 123.5f, 1e-4, "reported new ceiling matches what was written");
 
     s_stub_set_pid_result = false;
     s_stub_set_model_result = false;
     s_stub_set_max_ramp_result = true;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+}
+
+/* Review fix: adoption must never silently TIGHTEN an existing, nonzero
+ * zone ceiling. A stored ceiling already at or below the new ambient
+ * estimate is left untouched and the outcome reports SKIPPED_WOULD_TIGHTEN,
+ * not ADOPTED. */
+static void test_autotune_engine_accept_ex2_skips_when_it_would_tighten(void)
+{
+    TEST_SECTION("autotune_engine_accept_ex2(.., adopt_ceiling=true) skips adoption -- "
+                 "SKIPPED_WOULD_TIGHTEN -- when the stored ceiling is already tighter than the new estimate");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 2;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 50.0f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 150.0f; /* stored ceiling is LOOSER than the new 50.0f estimate --
+                                          * adopting the estimate would TIGHTEN it, so it must skip */
+
+    autotune_ceiling_adoption_t outcome = AUTOTUNE_CEILING_ADOPTED;
+    float old_c = -1.0f, new_c = -1.0f;
+    bool accepted = autotune_engine_accept_ex2(false, true, &outcome, &old_c, &new_c);
+
+    TEST_CHECK(accepted, "the accept itself still succeeds");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
+              "zones_config_set_max_ramp() must NOT be called when it would tighten the stored ceiling");
+    TEST_CHECK(outcome == AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN, "reported outcome is SKIPPED_WOULD_TIGHTEN");
+    TEST_CHECK_NEAR(old_c, 150.0f, 1e-4, "reported old ceiling is the stored (looser) value");
+    TEST_CHECK_NEAR(new_c, 0.0f, 1e-4, "reported new ceiling stays at its init value -- nothing was written");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+}
+
+/* Review fix: an out-of-range predicted ceiling is REJECTED, never clamped.
+ * ZONE_MAX_RAMP_C_PER_HR_MAX is 1000.0f (zones_http.h). */
+static void test_autotune_engine_accept_ex2_rejects_out_of_range_not_clamped(void)
+{
+    TEST_SECTION("autotune_engine_accept_ex2(.., adopt_ceiling=true) rejects (does not clamp) a "
+                 "predicted ceiling above ZONE_MAX_RAMP_C_PER_HR_MAX");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 4;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 5000.0f; /* well above the 1000.0f max */
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+
+    autotune_ceiling_adoption_t outcome = AUTOTUNE_CEILING_ADOPTED;
+    float old_c = -1.0f, new_c = -1.0f;
+    bool accepted = autotune_engine_accept_ex2(false, true, &outcome, &old_c, &new_c);
+
+    TEST_CHECK(accepted, "the accept itself still succeeds -- gains/model are already live");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
+              "zones_config_set_max_ramp() must NOT be called -- out of range is a refusal, not a clamp");
+    TEST_CHECK(outcome == AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE, "reported outcome is REJECTED_OUT_OF_RANGE");
+    TEST_CHECK_NEAR(new_c, 0.0f, 1e-4, "reported new ceiling stays at its init value -- nothing was written");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
 }
 
 /* Negative proof 1 (the "default false does not adopt" requirement): the
@@ -3603,10 +3733,13 @@ static void test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling(void)
     s_at.model.tau_s = 100.0f;
     s_at.model.dead_time_s = 5.0f;
     s_at.predicted_max_ramp_c_per_hr = 0.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 0.0f;
 
     s_stub_set_pid_result = true;
     s_stub_set_model_result = true;
     s_stub_set_max_ramp_call_count = 0;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
 
     bool accepted = autotune_engine_accept_ex(false, true);
 
@@ -5531,6 +5664,8 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_does_not_adopt_ceiling_by_default();
     test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling();
     test_autotune_engine_accept_ex_does_not_adopt_ceiling_on_relay_method();
+    test_autotune_engine_accept_ex2_skips_when_it_would_tighten();
+    test_autotune_engine_accept_ex2_rejects_out_of_range_not_clamped();
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();
     test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start();
