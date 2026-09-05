@@ -201,12 +201,32 @@ def get_fw_version() -> str:
         else f"NO - device speaks v{version.protocol_version}, pc_tools speaks "
         f"v{devices.UART_PROTOCOL_VERSION}; device commands will be refused"
     )
-    return (
-        f"protocol_version: {version.protocol_version}\n"
-        f"compatible: {compat}\n"
-        f"commit: {version.commit}\n"
-        f"tree: {'dirty' if version.dirty else 'clean'}\n"
-        f"built: {version.built}"
-    )
+    lines = [
+        f"protocol_version: {version.protocol_version}",
+        f"compatible: {compat}",
+        f"commit: {version.commit}",
+        f"tree: {'dirty' if version.dirty else 'clean'}",
+        f"built: {version.built}",
+    ]
+    # Board-vs-HEAD gap and last-refused-flash checks (added 2026-09-04: a
+    # refused flash -- the fix never reached the board -- went unnoticed for
+    # five hours because nothing compared what the board reports against
+    # what the tree actually has, and the refusal itself left no durable
+    # trace. Both checks are best-effort and must never break this tool.
+    from . import flash_provenance  # local import: avoids a circular import with mcp_server_flash.py
+    try:
+        lines.append(flash_provenance.describe_head_gap(version.commit))
+    except Exception as exc:  # noqa: BLE001 - this line is a bonus, not the tool's job
+        lines.append(f"board/HEAD comparison: error computing it ({exc})")
+    try:
+        prov = flash_provenance.read_provenance_json(
+            os.path.join(debug_probe._kiln_fw_root(), "build", "flash_provenance.json")
+        )
+        warning = flash_provenance.format_last_flash_warning(prov)
+        if warning:
+            lines.append(warning)
+    except Exception as exc:  # noqa: BLE001 - same, bonus info
+        lines.append(f"(could not check last flash outcome: {exc})")
+    return "\n".join(lines)
 
 

@@ -187,14 +187,44 @@ def format_report(state: TreeState) -> str:
     return "\n".join(lines)
 
 
-def write_provenance_json(state: TreeState, out_path: str) -> None:
+#: Values written to the persisted JSON's "outcome" field. A refused attempt
+#: and a successful flash used to be indistinguishable on disk -- both wrote
+#: the same fields, so a session reading flash_provenance.json after the fact
+#: had no way to tell "this is what got flashed" from "this is what got
+#: refused". Added 2026-09-04 after a refused flash (sensitive zones_config_*
+#: dirt riding along with an unrelated LVGL crash fix) sat unnoticed for five
+#: hours: the fix never reached the board, the board kept panicking on the
+#: bug the fix addressed, and nobody diagnosing it thought to doubt that the
+#: refusal even happened, because the provenance file looked exactly like a
+#: normal successful-flash record.
+OUTCOME_PENDING = "pending"                    # tree captured, guard decision not yet known
+OUTCOME_REFUSED_SENSITIVE_DIRTY = "refused_sensitive_dirty"
+OUTCOME_REFUSED_STALE_BINARY = "refused_stale_binary"
+OUTCOME_FLASHED_OK = "flashed_ok"
+OUTCOME_FLASH_FAILED = "flash_failed"
+
+REFUSED_OUTCOMES = frozenset({OUTCOME_REFUSED_SENSITIVE_DIRTY, OUTCOME_REFUSED_STALE_BINARY})
+
+
+def write_provenance_json(
+    state: TreeState,
+    out_path: str,
+    outcome: str = OUTCOME_PENDING,
+    detail: Optional[str] = None,
+) -> None:
     """Persists the capture alongside the build output (e.g.
     KilnFW/build/flash_provenance.json) so "what was actually on the board
     at 14:53" is answerable later from disk, not just from a chat
     transcript. Overwrites -- this is a point-in-time snapshot of the LAST
-    flash from this build dir, not a log; the session log captures the
-    running history via the normal _srv._session_log calls at each call
-    site. Best-effort: a write failure must not block or fail the flash."""
+    flash ATTEMPT from this build dir, not a log; the session log captures
+    the running history via the normal _srv._session_log calls at each call
+    site. Best-effort: a write failure must not block or fail the flash.
+
+    `outcome` is the one field that used to be missing entirely -- callers
+    are expected to write once per state transition (pending -> refused, or
+    pending -> flashed_ok/flash_failed) so the file on disk always names
+    what actually happened to the LAST attempt, not just what was dirty at
+    the time. See OUTCOME_* constants above."""
     try:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
@@ -205,9 +235,95 @@ def write_provenance_json(state: TreeState, out_path: str) -> None:
                     "dirty_files": state.dirty_files,
                     "sensitive_files": state.sensitive_files,
                     "git_available": state.git_available,
+                    "outcome": outcome,
+                    "detail": detail,
                 },
                 f,
                 indent=2,
             )
     except (OSError, ValueError):
         pass
+
+
+def read_provenance_json(path: str) -> Optional[dict]:
+    """Reads back a persisted provenance file, or None if it does not exist
+    or is not parseable JSON. Never raises -- a missing/corrupt file is
+    reported as "nothing recorded", not a tool failure."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def format_last_flash_warning(prov: Optional[dict]) -> Optional[str]:
+    """Given a parsed flash_provenance.json, returns a loud warning string
+    if the LAST recorded flash attempt was refused, else None. This is the
+    "make a refusal loud" half of the fix: the refusal used to only exist as
+    a return string handed back to whichever session asked, and a warning
+    line in that session's own log file -- both gone the moment that session
+    ended. Persisting the outcome (see write_provenance_json) means this can
+    now be checked from a totally different, later session, by whatever
+    reads board state next, rather than requiring anyone to have been
+    watching at the time."""
+    if not prov:
+        return None
+    outcome = prov.get("outcome")
+    if outcome not in REFUSED_OUTCOMES:
+        return None
+    age_s = time.time() - prov.get("timestamp", 0)
+    age_desc = f"{age_s / 3600:.1f}h ago" if age_s >= 0 else "at an unknown time"
+    return (
+        f"!!! LAST FLASH ATTEMPT WAS REFUSED ({outcome}) {age_desc}, head={prov.get('head')} !!!\n"
+        f"    {prov.get('detail') or '(no detail recorded)'}\n"
+        "    Whatever that flash was trying to put on the board never landed -- "
+        "the board is still running whatever it booted before this attempt. "
+        "Resolve the refusal (commit/stash the sensitive files, or rebuild) and "
+        "flash again; do not assume this refusal was already handled by someone else."
+    )
+
+
+def describe_head_gap(board_commit: Optional[str], repo_root: Optional[str] = None) -> str:
+    """Compares the firmware's self-reported git commit (from GET_FW_VERSION,
+    embedded at build time) against this working tree's current HEAD, and
+    says in one line whether they match, how far apart they are, or why that
+    could not be determined.
+
+    Nothing did this before: the board reports its own commit, the repo
+    knows its own HEAD, and no tool put the two side by side -- a fix could
+    sit committed on HEAD indefinitely while the board kept running the
+    commit before it, with no signal anywhere short of manually comparing
+    two hashes by hand. This is the cheap version of that comparison,
+    surfaced in get_fw_version() (the board-state read already made on every
+    tool call), not a new tool nobody would think to call.
+
+    Best-effort like the rest of this module: `git rev-list --count` fails
+    (short hash too short/long, board commit unknown to this clone, git
+    unavailable) degrades to a plain "could not compare" line rather than
+    raising -- a stale board is worse than an unclear one, but a crash here
+    must not take down get_fw_version().
+    """
+    root = repo_root or _repo_root()
+    head = _git(["rev-parse", "--short", "HEAD"], root)
+    head = head.strip() if head else None
+    if not board_commit or board_commit in ("?", ""):
+        return "board/HEAD comparison: board did not report a commit"
+    if head is None:
+        return f"board/HEAD comparison: could not read local HEAD (board reports {board_commit})"
+    if board_commit == head:
+        return f"board/HEAD comparison: OK, board is running HEAD ({head})"
+    # is board_commit an ancestor of HEAD? if so, count how far behind.
+    count_out = _git(["rev-list", "--count", f"{board_commit}..HEAD"], root)
+    if count_out is None:
+        return (
+            f"board/HEAD comparison: board reports {board_commit}, HEAD is {head} -- "
+            "could not determine how many commits apart (commit not found in this "
+            "clone's history, or ahead of HEAD -- check by hand)"
+        )
+    try:
+        n = int(count_out.strip())
+    except ValueError:
+        return f"board/HEAD comparison: board reports {board_commit}, HEAD is {head} (count unavailable)"
+    if n == 0:
+        return f"board/HEAD comparison: board reports {board_commit}, HEAD is {head} (0 commits apart -- likely a short-hash collision, verify by hand)"
+    return f"!!! board is {n} commit(s) behind HEAD: board={board_commit}, HEAD={head} !!!"

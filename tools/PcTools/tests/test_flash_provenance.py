@@ -159,6 +159,143 @@ class WriteProvenanceJsonTest(unittest.TestCase):
         except Exception as exc:  # noqa: BLE001
             self.fail(f"write_provenance_json raised on a bad path: {exc}")
 
+    def test_outcome_and_detail_are_persisted(self):
+        # 2026-09-04 fix: a refused flash used to write the exact same JSON
+        # shape as a successful one -- nothing on disk said "this didn't
+        # happen". outcome/detail are the fields that make the two
+        # distinguishable after the fact, from a different session.
+        state = fp.TreeState(timestamp=123.0, head="abc1234", dirty_files=["x"], sensitive_files=["x"])
+        with tempfile.TemporaryDirectory() as d:
+            out_path = os.path.join(d, "flash_provenance.json")
+            fp.write_provenance_json(
+                state, out_path, outcome=fp.OUTCOME_REFUSED_SENSITIVE_DIRTY, detail="refusing: x"
+            )
+            with open(out_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        self.assertEqual(data["outcome"], fp.OUTCOME_REFUSED_SENSITIVE_DIRTY)
+        self.assertEqual(data["detail"], "refusing: x")
+
+    def test_outcome_defaults_to_pending(self):
+        state = fp.TreeState(timestamp=123.0, head="abc1234")
+        with tempfile.TemporaryDirectory() as d:
+            out_path = os.path.join(d, "flash_provenance.json")
+            fp.write_provenance_json(state, out_path)
+            with open(out_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        self.assertEqual(data["outcome"], fp.OUTCOME_PENDING)
+        self.assertIsNone(data["detail"])
+
+
+class ReadProvenanceJsonTest(unittest.TestCase):
+    def test_missing_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(fp.read_provenance_json(os.path.join(d, "nope.json")))
+
+    def test_corrupt_json_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "flash_provenance.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{not valid json")
+            self.assertIsNone(fp.read_provenance_json(path))
+
+    def test_round_trips_a_written_record(self):
+        state = fp.TreeState(timestamp=123.0, head="abc1234", dirty_files=["x"], sensitive_files=["x"])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "flash_provenance.json")
+            fp.write_provenance_json(state, path, outcome=fp.OUTCOME_FLASHED_OK)
+            data = fp.read_provenance_json(path)
+        self.assertEqual(data["outcome"], fp.OUTCOME_FLASHED_OK)
+        self.assertEqual(data["head"], "abc1234")
+
+
+class FormatLastFlashWarningTest(unittest.TestCase):
+    """MANDATORY negative test: prove a refused record fires the warning,
+    and prove a clean/successful record does not -- both against synthetic
+    data, no board, no real flash."""
+
+    def test_none_input_is_silent(self):
+        self.assertIsNone(fp.format_last_flash_warning(None))
+
+    def test_refused_sensitive_dirty_fires_loudly(self):
+        prov = {
+            "timestamp": 1000.0,
+            "head": "51e1ef5",
+            "outcome": fp.OUTCOME_REFUSED_SENSITIVE_DIRTY,
+            "detail": "refusing: zones_config_migrate.c",
+        }
+        warning = fp.format_last_flash_warning(prov)
+        self.assertIsNotNone(warning)
+        self.assertIn("REFUSED", warning)
+        self.assertIn("51e1ef5", warning)
+        self.assertIn("zones_config_migrate.c", warning)
+
+    def test_refused_stale_binary_fires_loudly(self):
+        prov = {"timestamp": 1000.0, "head": "abc", "outcome": fp.OUTCOME_REFUSED_STALE_BINARY, "detail": "stale"}
+        self.assertIsNotNone(fp.format_last_flash_warning(prov))
+
+    def test_flashed_ok_is_silent(self):
+        prov = {"timestamp": 1000.0, "head": "abc1234", "outcome": fp.OUTCOME_FLASHED_OK, "detail": None}
+        self.assertIsNone(fp.format_last_flash_warning(prov))
+
+    def test_flash_failed_is_silent(self):
+        # A failed (not refused) flash attempt is already loud in its own
+        # return string / session log at the time -- this warning exists
+        # specifically for refusals, which used to leave no trace at all.
+        prov = {"timestamp": 1000.0, "head": "abc1234", "outcome": fp.OUTCOME_FLASH_FAILED, "detail": "openocd error"}
+        self.assertIsNone(fp.format_last_flash_warning(prov))
+
+    def test_pending_is_silent(self):
+        prov = {"timestamp": 1000.0, "head": "abc1234", "outcome": fp.OUTCOME_PENDING, "detail": None}
+        self.assertIsNone(fp.format_last_flash_warning(prov))
+
+    def test_missing_outcome_key_is_silent(self):
+        # Older provenance files written before this field existed.
+        prov = {"timestamp": 1000.0, "head": "abc1234"}
+        self.assertIsNone(fp.format_last_flash_warning(prov))
+
+
+class DescribeHeadGapTest(unittest.TestCase):
+    """Uses THIS repo's real git history (no board) since describe_head_gap
+    shells out to git -- still synthetic in the sense that no board or
+    flash is involved, just commit-graph arithmetic against known refs."""
+
+    def test_no_board_commit_reported(self):
+        self.assertIn("did not report a commit", fp.describe_head_gap(None))
+        self.assertIn("did not report a commit", fp.describe_head_gap(""))
+
+    def test_board_matches_head(self):
+        head = fp._git(["rev-parse", "--short", "HEAD"], fp._repo_root())
+        self.assertIsNotNone(head, "this test requires a real git checkout")
+        head = head.strip()
+        result = fp.describe_head_gap(head)
+        self.assertIn("OK", result)
+        self.assertIn(head, result)
+
+    def test_board_behind_head_is_loud(self):
+        head = fp._git(["rev-parse", "--short", "HEAD"], fp._repo_root())
+        older = fp._git(["rev-parse", "--short", "HEAD~3"], fp._repo_root())
+        self.assertIsNotNone(head, "this test requires a real git checkout")
+        self.assertIsNotNone(older, "this test requires at least 3 commits of history")
+        result = fp.describe_head_gap(older.strip())
+        self.assertIn("behind HEAD", result)
+        self.assertIn("!!!", result)
+
+    def test_unknown_commit_degrades_gracefully(self):
+        # Not in this clone's history at all -- must report uncertainty,
+        # not raise and not falsely claim a specific commit count.
+        result = fp.describe_head_gap("deadbee")
+        self.assertNotIn("!!!", result)
+        self.assertIn("could not determine", result)
+
+    def test_unavailable_repo_root_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Not a git repo at all.
+            try:
+                result = fp.describe_head_gap("abc1234", repo_root=d)
+            except Exception as exc:  # noqa: BLE001
+                self.fail(f"describe_head_gap raised outside a git repo: {exc}")
+            self.assertIn("could not read local HEAD", result)
+
 
 if __name__ == "__main__":
     unittest.main()

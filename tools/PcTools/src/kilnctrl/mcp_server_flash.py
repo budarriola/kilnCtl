@@ -115,7 +115,76 @@ _VERIFY_POLL_INTERVAL_S = 2.0
 _VERIFY_HTTP_TIMEOUT_S = 3.0
 
 
-def _verify_flash_landed(host: Optional[str], bin_path: str) -> str:
+def _resolve_verify_hosts(host: Optional[str], pre_flash_host: Optional[str] = None) -> "list[str]":
+    """Ordered list of addresses to try for the post-flash HTTP checks.
+
+    An EXPLICIT `host` is the only candidate -- if a caller named an
+    address, silently probing others would hide their mistake.
+
+    Otherwise, in order:
+      1. `pre_flash_host` -- the address the board was ACTUALLY answering
+         at moments before the flash (captured by _preflash_board_address()
+         while the old firmware was still up). This is first because it is
+         the only candidate backed by evidence rather than inference.
+      2. `_ota_resolve_host(None)` -- the package-wide resolution (STA IP
+         from wifi_get_status() over UART, else the AP fallback).
+      3. the AP fallback address itself.
+
+    WHY THIS IS A LIST AND NOT ONE ADDRESS (the 2026-09-04 defect): a
+    previous fix had verification call `_ota_resolve_host(host)` once. That
+    is the right resolution, at the wrong MOMENT -- it runs immediately
+    after the OpenOCD tcl sequence resets the board, when the board has not
+    re-associated with the AP yet, so wifi_get_status() reports
+    sta_connected=False and resolution falls through to the AP fallback
+    192.168.4.1. The board was on the LAN at 192.168.1.156 and answering
+    fine; verification polled an address nothing was listening on, timed
+    out, and emitted its soft "could not reach the board" WARNING -- which
+    is emitted identically whether the flash landed or not, i.e. it said
+    nothing in exactly the case it exists for. Trying an ordered list, and
+    re-resolving on every poll attempt (Wi-Fi may come back mid-poll),
+    fixes both halves of that. The AP address stays in the list because
+    during genuine bring-up it IS the correct address."""
+    candidates: "list[str]" = []
+
+    def _add(h: Optional[str]) -> None:
+        if h and h not in candidates:
+            candidates.append(h)
+
+    if host:
+        _add(host)
+        return candidates
+    _add(pre_flash_host)
+    from .mcp_server_ota import _ota_resolve_host  # local: avoids a circular import
+    try:
+        _add(_ota_resolve_host(None))
+    except Exception:  # pragma: no cover - resolution is best-effort here
+        pass
+    _add(partition_http_client.PARTITION_AP_DEFAULT_HOST)
+    return candidates
+
+
+def _preflash_board_address(host: Optional[str]) -> Optional[str]:
+    """Address the board is answering GET /api/partitions at RIGHT NOW,
+    before anything is flashed -- or None if nothing answers.
+
+    Two jobs. It gives post-flash verification an evidence-backed address
+    to try first (see _resolve_verify_hosts), and it is the observation
+    that makes the post-flash failure semantics meaningful: a board that
+    demonstrably served HTTP one minute ago and cannot be reached at any
+    candidate address afterwards is a HARD verification failure, not the
+    benign "HTTP isn't up yet during bring-up" case. Without this
+    observation the two are indistinguishable, which is what let a
+    misdirected verifier read as benign noise."""
+    for candidate in _resolve_verify_hosts(host):
+        try:
+            partition_http_client.get_partitions(candidate, timeout=_VERIFY_HTTP_TIMEOUT_S)
+            return candidate
+        except partition_http_client.PartitionHttpError:
+            continue
+    return None
+
+
+def _verify_flash_landed(host: Optional[str], bin_path: str, pre_flash_host: Optional[str] = None) -> str:
     """Post-flash confirmation that the binary just written to `factory` is
     the one actually RUNNING -- added after the recurring "flash reports OK
     but the board keeps running old code" failure mode (see this module's
@@ -147,41 +216,60 @@ def _verify_flash_landed(host: Optional[str], bin_path: str) -> str:
     except (OSError, esp_app_desc.AppDescError) as exc:
         return f"WARNING: post-flash verification skipped -- could not parse app descriptor from {bin_path}: {exc}"
 
-    # Use the SAME host resolution every other board-HTTP tool in this
-    # package uses (explicit host, else the board's current STA IP via
-    # wifi_get_status(), else the fallback-AP address) -- not a bare
-    # PARTITION_AP_DEFAULT_HOST. A board on home Wi-Fi does not answer at
-    # 192.168.4.1, so defaulting to the AP address made the normal
-    # `flash_firmware()` call (no host argument -- the form CLAUDE.md
-    # documents) poll an address nothing is listening on, time out, and
-    # return the "could not reach the board" WARNING every single time:
-    # the verification would never actually run on the very failure mode it
-    # was added to catch. Local import mirrors debug_check_partition_table()
-    # below -- it avoids a circular import with mcp_server_ota.py.
-    from .mcp_server_ota import _ota_resolve_host
-    resolved_host = _ota_resolve_host(host)
-
+    # Host resolution is a LIST tried in order, re-resolved on every poll
+    # attempt -- see _resolve_verify_hosts() for the full writeup of the
+    # 2026-09-04 defect (single resolution, taken at the one moment the
+    # board is guaranteed not to be on Wi-Fi yet, landing on the AP
+    # fallback while the board answered fine on the LAN).
     last_exc: Optional[Exception] = None
     partitions_data: Optional[dict] = None
+    resolved_host: Optional[str] = None
+    tried: "list[str]" = []
     for attempt in range(_VERIFY_POLL_ATTEMPTS):
         if attempt:
             time.sleep(_VERIFY_POLL_INTERVAL_S)
-        try:
-            partitions_data = partition_http_client.get_partitions(resolved_host, timeout=_VERIFY_HTTP_TIMEOUT_S)
-            last_exc = None
+        for candidate in _resolve_verify_hosts(host, pre_flash_host):
+            if candidate not in tried:
+                tried.append(candidate)
+            try:
+                partitions_data = partition_http_client.get_partitions(candidate, timeout=_VERIFY_HTTP_TIMEOUT_S)
+                resolved_host = candidate
+                last_exc = None
+                break
+            except partition_http_client.PartitionHttpError as exc:
+                last_exc = exc
+                continue
+        if partitions_data is not None:
             break
-        except partition_http_client.PartitionHttpError as exc:
-            last_exc = exc
-            continue
 
     if partitions_data is None:
+        addresses = ", ".join(tried) if tried else "(no candidate address)"
+        if pre_flash_host:
+            # The board answered HTTP at pre_flash_host minutes ago, with
+            # the OLD firmware. Silence now is not "bring-up, HTTP isn't up
+            # yet" -- something regressed across this flash (bad image,
+            # boot loop, Wi-Fi provisioning wiped). Failing loud here is the
+            # whole point: a soft warning in this case is indistinguishable
+            # from a verifier pointed at the wrong address, which is what
+            # made the 2026-09-04 defect read as benign noise for as long
+            # as it did.
+            raise RuntimeError(
+                "flash reported OK, but the board is NOT answering HTTP after the "
+                f"flash -- it was answering GET /api/partitions at {pre_flash_host} "
+                f"immediately BEFORE the flash, and now none of {addresses} answer "
+                f"after {_VERIFY_POLL_ATTEMPTS} attempts ({last_exc}). This is a "
+                "verification FAILURE, not a bring-up timeout: the board that just "
+                "served HTTP has stopped. Check the board is booting (serial/JTAG), "
+                "and if it is stuck consider ota_rollback_esp() / a reflash. Pass "
+                "verify=False only if you intend to skip this check entirely."
+            )
         return (
             "WARNING: post-flash verification skipped -- board did not answer "
-            f"GET /api/partitions at {resolved_host} after {_VERIFY_POLL_ATTEMPTS} "
-            f"attempts ({last_exc}). This does NOT confirm the flash landed -- "
-            "if HTTP normally comes up on this board, treat that as suspicious; "
-            "otherwise this is expected during early bring-up (pass verify=False "
-            "to silence this warning)."
+            f"GET /api/partitions at any of {addresses} after "
+            f"{_VERIFY_POLL_ATTEMPTS} attempts ({last_exc}). The board was not "
+            "answering HTTP before the flash either, so this is expected during "
+            "early bring-up (Wi-Fi not provisioned yet); pass verify=False to "
+            "silence this warning. It does NOT confirm the flash landed."
         )
 
     running = partitions_data.get("running")
@@ -270,17 +358,27 @@ def flash_firmware(
 
     `verify=False` is the escape hatch for bring-up when the board's HTTP
     stack is not expected to be up yet (e.g. Wi-Fi not provisioned) -- skips
-    verification entirely, no warning. When verify=True (the default) but the
-    board simply does not answer HTTP within a short poll, this is NOT
-    treated as a failure -- it's reported back as a WARNING line so the
-    caller knows verification did not happen and why, distinct from an
-    actual wrong-partition/wrong-build failure which always raises.
+    verification entirely, no warning.
 
-    `host`: board IP/hostname for the verification HTTP calls. Resolved
-    exactly like every ota_*/debug_check_partition_table tool
-    (`_ota_resolve_host`): the explicit argument if given, else the board's
-    current station IP from wifi_get_status(), else the fallback-AP address
-    192.168.4.1 for a board that is not on home Wi-Fi yet.
+    When verify=True (the default) and the board does not answer HTTP after
+    the flash, what happens depends on whether it was answering BEFORE it:
+    this tool probes the board's HTTP address once up front (no flashing
+    involved) and remembers it. If the board was NOT answering beforehand,
+    post-flash silence is the expected bring-up case and is reported as a
+    WARNING. If it WAS answering beforehand and is silent afterwards, that
+    is a hard FAILURE -- a board that was serving HTTP a minute ago and has
+    stopped is a real regression, and reporting it as a warning would make
+    it indistinguishable from a verifier looking at the wrong address (the
+    exact defect fixed 2026-09-04). Wrong-partition/wrong-build mismatches
+    always raise, as before.
+
+    `host`: board IP/hostname for the verification HTTP calls. If given, it
+    is the ONLY address probed. If omitted, an ordered candidate list is
+    tried and re-resolved on every poll attempt (see
+    `_resolve_verify_hosts`): the address the board was actually answering
+    at just before the flash, then `_ota_resolve_host(None)`'s answer (STA
+    IP via wifi_get_status()), then the fallback-AP address 192.168.4.1 for
+    a board that is not on home Wi-Fi yet.
 
     Provenance / dirty-tree guard (added 2026-09-04 after an agent flashing
     for an unrelated diagnosis carried another session's in-progress
@@ -318,14 +416,23 @@ def flash_firmware(
     if missing:
         return "error: missing build output(s), run `idf.py build` first: " + ", ".join(missing)
 
+    provenance_path = os.path.join(build_dir, "flash_provenance.json")
     tree_state = flash_provenance.capture_tree_state()
     guard_reason = flash_provenance.decide_guard(tree_state, allow_sensitive_dirty=allow_sensitive_dirty)
-    flash_provenance.write_provenance_json(
-        tree_state, os.path.join(build_dir, "flash_provenance.json")
-    )
     if guard_reason:
+        # Persist the REFUSAL itself, not just the tree snapshot that led to
+        # it -- see flash_provenance.OUTCOME_* / format_last_flash_warning.
+        # Before 2026-09-04 this file looked identical whether the flash
+        # landed or was refused, which is exactly how a refused flash went
+        # unnoticed for five hours: nothing on disk said "this didn't happen".
+        flash_provenance.write_provenance_json(
+            tree_state, provenance_path,
+            outcome=flash_provenance.OUTCOME_REFUSED_SENSITIVE_DIRTY,
+            detail=guard_reason,
+        )
         _srv._session_log.warning("flash_firmware: refused -- sensitive dirty files: %s", tree_state.sensitive_files)
         return "error: " + guard_reason + "\n\n" + flash_provenance.format_report(tree_state)
+    flash_provenance.write_provenance_json(tree_state, provenance_path, outcome=flash_provenance.OUTCOME_PENDING)
     provenance_note = flash_provenance.format_report(tree_state)
     _srv._session_log.info("flash_firmware: %s", provenance_note.replace("\n", " | "))
 
@@ -333,11 +440,24 @@ def flash_firmware(
     if stale.stale:
         _srv._session_log.warning("flash_firmware: stale binary detected: %s", stale.reason)
         if not allow_stale:
+            flash_provenance.write_provenance_json(
+                tree_state, provenance_path,
+                outcome=flash_provenance.OUTCOME_REFUSED_STALE_BINARY,
+                detail=stale.reason,
+            )
             return (
                 "error: refusing to flash a stale binary -- " + stale.reason + "\n\n"
                 "Rebuild with build_kilnfw first, or pass allow_stale=True to flash "
                 "this binary anyway."
             )
+
+    # Observe the board BEFORE touching it: if it is serving HTTP now, that
+    # address is both the best candidate for post-flash verification and the
+    # evidence that makes a post-flash silence a hard failure rather than a
+    # bring-up warning (see _preflash_board_address / _verify_flash_landed).
+    pre_flash_host = _preflash_board_address(host) if verify else None
+    if verify:
+        _srv._session_log.info("flash_firmware: pre-flash board HTTP address: %s", pre_flash_host or "(not answering)")
 
     kill_openocd_sessions()  # a stale session holding the JTAG interface looks identical to a flash failure
 
@@ -355,7 +475,7 @@ def flash_firmware(
         if not verify:
             return base_msg
         try:
-            landed_note = _verify_flash_landed(host, app_bin_path)
+            landed_note = _verify_flash_landed(host, app_bin_path, pre_flash_host)
         except RuntimeError as exc:
             _srv._session_log.warning("flash_firmware: post-flash verification FAILED: %s", exc)
             return f"error: {exc}\n\n(the OpenOCD write itself reported OK -- {base_msg})"
@@ -366,16 +486,23 @@ def flash_firmware(
 
     ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=kiln_fw_root, timeout_s=90)
     if ok:
+        flash_provenance.write_provenance_json(tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK)
         return _post_flash(stale_prefix + "flashed and verified OK (bootloader + partition table + app), board reset and running")
 
     if retry_once:
         _srv._session_log.warning("flash_firmware: first attempt failed, retrying once (known benign quirk)")
         ok2, output2 = _run_openocd(openocd_exe, board_cfg, tcl, cwd=kiln_fw_root, timeout_s=90)
         if ok2:
+            flash_provenance.write_provenance_json(tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK)
             return _post_flash("flashed and verified OK on retry (first attempt hit the known benign Verify-Failed quirk)")
         output = output2
 
     tail = "\n".join(output.strip().splitlines()[-25:])
+    flash_provenance.write_provenance_json(
+        tree_state, provenance_path,
+        outcome=flash_provenance.OUTCOME_FLASH_FAILED,
+        detail=tail,
+    )
     return (
         "error: flash failed" + (" twice" if retry_once else "") + f":\n{tail}\n\n"
         "Do not run a raw `flash erase_sector`/full-chip-erase recovery by hand -- "
