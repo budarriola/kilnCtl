@@ -1270,6 +1270,11 @@ def _pwm_render(state: _PwmZoneState, duty: float, window_ms: float, min_on_ms: 
     state to actually command (and drive the plant with) this tick; mutates
     ``state`` in place, including ``cycle_count`` for actuator-cost
     accounting."""
+    # heater_output_duty_ex() takes ``duty`` as a C ``float`` parameter, so
+    # every caller's double already gets narrowed to float32 on entry, BEFORE
+    # the clamp below. Narrow it here too so the clamp and (more importantly)
+    # the on_ms product below start from the same bits the firmware does.
+    duty = float(np.float32(duty))
     duty = min(max(duty, 0.0), 1.0)
 
     eff_min_on_ms = max(min_on_ms, HEATER_MIN_ON_MS_FLOOR)
@@ -1281,15 +1286,20 @@ def _pwm_render(state: _PwmZoneState, duty: float, window_ms: float, min_on_ms: 
         state.window_started = True
         state.window_elapsed_ms = 0.0
         # heater_output.c computes this as
-        # ``(uint32_t)(duty * (float)cfg->window_ms)`` -- a truncating cast
-        # to whole milliseconds, not the float product itself. Skipping the
-        # truncation here is exactly the divergence
-        # heater_output_pwm_drift_check.py was written to catch: a duty
-        # that lands a hair below an integer-ms quantization threshold
-        # (e.g. 10000/60000 = 0.16666...) truncates DOWN to that threshold
-        # in C but stays fractionally above it in raw Python float math,
-        # flipping the on/off decision at that window boundary.
-        on_ms = float(int(duty * window_ms))
+        # ``(uint32_t)(duty * (float)cfg->window_ms)`` -- both operands
+        # float32, the product evaluated in float32 (MSVC/x64 and GCC/clang
+        # on this target both keep float*float at single precision, no
+        # promotion to double), THEN truncated to whole milliseconds.
+        # Matching only the truncation and not the precision is itself a
+        # divergence: computing ``duty * window_ms`` as a Python (C double)
+        # product before truncating can land on a different integer than the
+        # float32 product does, right at the kind of near-integer threshold
+        # this function's callers care about (e.g. duty=0.5000166666...,
+        # window_ms=60000 -> float32 product truncates to 30001, double
+        # product truncates to 30000 -- a whole tick's difference in the
+        # on/off decision, confirmed against the harness). So narrow
+        # window_ms to float32 too and do the multiply in float32.
+        on_ms = float(int(np.float32(duty) * np.float32(window_ms)))
         if on_ms < eff_min_on_ms:
             on_ms = 0.0
         elif window_ms - on_ms < min_off_ms:

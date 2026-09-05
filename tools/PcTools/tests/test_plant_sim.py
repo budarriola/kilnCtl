@@ -1525,11 +1525,14 @@ def test_gain_search_noise_actually_changes_the_ranking():
 # PWM window model + actuator-cost objective (this task, 2026-09-03g).
 # ---------------------------------------------------------------------------
 
-def test_pwm_render_matches_heater_output_c_constant_duty():
-    """Line-for-line check of _pwm_render against heater_output_duty_ex's
-    documented behaviour at a constant mid-range duty: 0.5 duty on a 60 s
-    window with a 10 s min-on floor and 2 s min-off should render exactly
-    30 s on then 30 s off, repeating, with 2 transitions per window."""
+def test_pwm_render_constant_mid_duty_produces_expected_pattern():
+    """Property test against HAND-WRITTEN expected values, not the real C --
+    for a numeric check against the actual compiled heater_output.c, see
+    heater_output_pwm_drift_check.py under firmware/KilnFW/App/test/. At a
+    constant mid-range duty (0.5 duty on a 60 s window with a 10 s min-on
+    floor and 2 s min-off) _pwm_render should, per heater_output_duty_ex's
+    documented behaviour, render exactly 30 s on then 30 s off, repeating,
+    with 2 transitions per window."""
     st = ps._PwmZoneState()
     on_pattern = [ps._pwm_render(st, 0.5, 60000.0, 0.0, 0.0, 1000.0) for _ in range(180)]
     assert on_pattern[:30] == [True] * 30

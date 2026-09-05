@@ -2309,7 +2309,7 @@ rather than vaguely gestured at.
 No firmware change made here (constraint of this pass). Reproducible via
 `plant_sim.actuator_weight_sensitivity_sweep(rows_fit, weight_kind=
 'duty_chatter', grid=<...>)`; pinned by
-`test_pwm_render_matches_heater_output_c_constant_duty`,
+`test_pwm_render_constant_mid_duty_produces_expected_pattern`,
 `test_pwm_render_below_min_on_floor_renders_off_not_rounded_up`,
 `test_pwm_render_near_full_duty_renders_full_window_on`,
 `test_pwm_running_min_on_hold_survives_a_window_boundary`,

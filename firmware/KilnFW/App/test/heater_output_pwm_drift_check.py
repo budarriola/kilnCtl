@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""heater_output_pwm_drift_check.py -- proves that
+"""heater_output_pwm_drift_check.py -- checks that
 ``tools/PcTools/src/kilnctrl/plant_sim.py``'s ``_pwm_render()`` (documented
 in its own module as "a line-for-line port of ``heater_output_duty_ex``'s
 ordinary, non-``force_new_window`` path ... translated line for line from
-``heater_output.c``") still agrees NUMERICALLY, tick for tick, with the
-real, unmodified ``firmware/KilnFW/App/drivers/heater_output.c``'s
-``heater_output_duty()``.
+``heater_output.c``") agrees NUMERICALLY, tick for tick, with the real,
+unmodified ``firmware/KilnFW/App/drivers/heater_output.c``'s
+``heater_output_duty()`` -- ON THE VECTORS SAMPLED. This is a finite sample
+of a continuous input space (duty in particular), not a proof of agreement
+everywhere: it is only as strong as ``build_all_vectors()``'s coverage of
+that space, which is why that function mixes hand-picked boundary cases,
+a seeded adversarial search for float32-vs-double truncation mismatches, and
+seeded random fuzzing rather than round-duty hand-picks alone (see below --
+an earlier version of this check used only round duties and could not have
+caught the truncation-precision bug that motivated the adversarial block).
 
 WHY THIS CHECK DID NOT EXIST UNTIL NOW. ``_pwm_render`` is exactly the same
 class of mirror ``pid_fuzzy_drift_check.py`` was written to catch drift in
@@ -17,14 +24,17 @@ share (e.g. "a below-floor on-time renders as off"), never a byte-for-byte
 comparison against the real ``heater_output.c``. Unlike the fuzzy case this
 mirror does not (yet) feed a config-schema value that can silently change
 out from under it; the risk here is a translation bug in the port itself.
-One is already visible on inspection: ``heater_output.c`` computes
-``on_ms = (uint32_t)(duty * (float)cfg->window_ms)`` -- a truncating
-integer cast every window boundary -- while ``_pwm_render`` computes
-``on_ms = duty * window_ms`` in Python float and never truncates. This
-check's vectors are chosen specifically to land duty*window_ms on a
-non-integer value close to a quantization threshold, so that a real
-divergence from the missing truncation would fail LOUDLY rather than by
-coincidence agreeing at round numbers.
+Two have already been found and fixed this way: a missing truncating cast
+(``on_ms`` was never truncated to whole milliseconds in Python), and --
+found by review after the truncation fix landed -- a precision mismatch:
+``heater_output.c`` computes ``on_ms = (uint32_t)(duty * (float)cfg->window_ms)``
+with BOTH operands narrowed to float32 and the product evaluated at float32
+precision, while the fixed ``_pwm_render`` still truncated a product computed
+in C-double precision. The two only disagree within about one float32 ULP of
+an integer -- invisible to hand-picked round duties (0.5, 0.9666, ...), which
+is why this check's vectors now include a seeded adversarial search that
+manufactures duties landing in that ULP band (see ``_adversarial_duties``
+below), plus seeded random fuzzing, rather than round duties alone.
 
 CONSEQUENCE IF THIS DRIFTS UNCAUGHT. ``_pwm_render`` feeds
 ``plant_sim.run_profile``'s PWM-window model, which the gain search
@@ -67,6 +77,8 @@ Exit 1: the harness failed to build/run, or at least one tick diverged
 from __future__ import annotations
 
 import os
+import random
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -158,6 +170,109 @@ def build_all_vectors():
         n_ticks = int(3 * window_ms / 250.0)
         vecs.append((window_ms, min_on_ms, min_off_ms, d, 250.0, n_ticks))
 
+    # --- Adversarial + randomized duties -----------------------------------
+    # The hand-picked duties above are all round-ish (0.5, 0.9666, ...) and
+    # cannot see a precision mismatch: heater_output.c computes
+    # ``on_ms = (uint32_t)(duty * (float)cfg->window_ms)`` entirely in
+    # float32 (both operands narrowed, product evaluated at float32
+    # precision), then truncates. A Python port that truncates the same
+    # product computed in C-double precision agrees on every round duty --
+    # 0.5*60000 is exactly 30000 in both precisions -- and only disagrees
+    # when duty*window_ms lands within about one float32 ULP of an integer,
+    # which is a near-measure-zero, adversarially-findable set. A reviewer
+    # found one by hand: duty=0.5000166666666666, window_ms=60000 truncates
+    # to 30001 in float32 and 30000 in double -- a whole tick's difference in
+    # the on/off decision. The block below finds a seeded batch of such
+    # duties by construction (so it reproduces exactly on failure) rather
+    # than relying on hand-picked round numbers to stumble onto one.
+    rng = random.Random(20260904)  # fixed seed: failures must reproduce
+
+    def _f32(x: float) -> float:
+        return struct.unpack("<f", struct.pack("<f", float(x)))[0]
+
+    def _adversarial_duties(window_ms_: float, dt_ms_: float, count: int) -> list[float]:
+        """Duties where truncating ``duty*window_ms`` computed in float32
+        (matching the C side, including narrowing duty itself to float32
+        the way the ``float duty`` parameter does) disagrees with truncating
+        the same product computed in plain double precision -- exactly the
+        class of input the old, round-duty-only vector set could not see.
+
+        Disagreeing on ``on_ms`` alone is not enough to fail a tick-by-tick
+        replay: ``want_on = window_elapsed_ms < on_ms_this_window`` is only
+        sampled at ``dt_ms`` multiples, so a 1 ms difference in ``on_ms``
+        only flips an actual tick's relay decision when a ``dt_ms`` multiple
+        falls between the two candidate values. Require that too, or the
+        vector can "diverge" on paper while every sampled tick still
+        agrees."""
+        found: list[float] = []
+        attempts = 0
+        dt_i = int(dt_ms_)
+        n_boundaries = max(1, int(window_ms_) // dt_i - 1)
+        while len(found) < count and attempts < count * 4000:
+            attempts += 1
+            # Target a duty whose EXACT (double) on_ms sits right next to a
+            # dt_ms-multiple boundary -- that is the only place a 1 ms
+            # truncation difference can flip a *sampled* tick's relay
+            # decision, per the straddle requirement above. The perturbation
+            # has to be sized in DUTY units comparable to duty's own float32
+            # ULP (roughly duty * 2**-23, not a tiny fixed ms offset divided
+            # by window_ms) -- that is what actually changes which float32
+            # value duty rounds to and lets the two precisions disagree on
+            # which side of the boundary they land.
+            m = rng.randint(1, n_boundaries)
+            boundary = m * dt_i
+            duty_exact = boundary / window_ms_
+            rel = rng.uniform(1e-8, 2e-4) * rng.choice((1.0, -1.0))
+            duty = duty_exact + rel
+            if not (0.0 < duty < 1.0):
+                continue
+            duty32 = _f32(duty)
+            f32_prod = _f32(duty32 * _f32(window_ms_))
+            double_prod = duty * window_ms_
+            f32_i, double_i = int(f32_prod), int(double_prod)
+            if f32_i == double_i:
+                continue
+            lo, hi = (f32_i, double_i) if f32_i < double_i else (double_i, f32_i)
+            # A sampled tick's want_on = (elapsed < on_ms) only flips between
+            # the two precisions if some dt_ms-multiple T satisfies
+            # lo <= T < hi. Since hi - lo is typically 1, that requires lo
+            # ITSELF to be a dt_ms multiple -- floor-dividing lo and hi-1 by
+            # dt_ms and comparing is the exact, off-by-one-safe test (a
+            # naive ``lo // dt_i != hi // dt_i`` over-reports: it also fires
+            # when the only dt-multiple in range is hi itself, which the
+            # half-open interval excludes).
+            next_mult = -(-lo // dt_i) * dt_i  # ceil(lo / dt_i) * dt_i
+            if next_mult >= hi:
+                continue  # no dt-multiple actually falls in [lo, hi)
+            found.append(duty)
+        return found
+
+    for w in (window_ms, window_ms2):
+        for d in _adversarial_duties(w, dt_ms, 8):
+            n_ticks = int(3 * w / dt_ms)
+            vecs.append((w, min_on_ms if w == window_ms else min_on_ms2,
+                         min_off_ms if w == window_ms else min_off_ms2,
+                         d, dt_ms, n_ticks))
+
+    # Plain randomized fuzzing, seeded for reproducibility: covers the
+    # ordinary (non-adversarial) part of the input space the targeted block
+    # above deliberately skips, including odd window/min_on/min_off/dt
+    # combinations no one thought to hand-pick.
+    for _ in range(40):
+        # window_ms/min_on_ms/min_off_ms/dt_ms all cross the harness as C
+        # ``uint32_t`` (see heater_output_pwm_drift_harness.c's
+        # ``(uint32_t)window_ms`` etc.) -- keep them whole-millisecond
+        # integers here too, or the harness silently truncates a fractional
+        # value the Python side never truncates, which is a mismatch in
+        # what the two sides were even asked to compute, not a mirror bug.
+        w = float(rng.randint(5000, 120000))
+        mn = float(rng.randint(0, int(w * 0.4)))
+        mf = float(rng.randint(0, int(w * 0.4)))
+        d = rng.uniform(0.0, 1.0)
+        dtm = rng.choice((100.0, 250.0, 500.0, 1000.0))
+        n_ticks = max(1, int(3 * w / dtm))
+        vecs.append((w, mn, mf, d, dtm, n_ticks))
+
     return vecs
 
 
@@ -228,8 +343,10 @@ def main(argv=None):
                 )
                 return 1
 
-    print(f"HEATER_OUTPUT PWM DRIFT CHECK: {len(vectors)} vectors / {n_ticks_checked} ticks "
-          "agreed exactly (relay_on and cycle_count, every tick).")
+    print(f"HEATER_OUTPUT PWM DRIFT CHECK: {len(vectors)} sampled vectors / {n_ticks_checked} "
+          "ticks agreed exactly (relay_on and cycle_count, every tick) -- including a seeded "
+          "adversarial + randomized batch, not just hand-picked round duties. Not a proof over "
+          "the whole duty range; see module docstring.")
     return 0
 
 
