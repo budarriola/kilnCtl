@@ -1,0 +1,16 @@
+/* hal_esp_common.c -- see hal_esp_common.h for the mapping rationale. */
+#include "hal_esp_common.h"
+
+hal_status_t hal_esp_err_to_status(esp_err_t err) {
+    switch (err) {
+        case ESP_OK:                 return HAL_OK;
+        case ESP_ERR_TIMEOUT:        return HAL_TIMEOUT;
+        case ESP_ERR_INVALID_ARG:    return HAL_INVALID_ARG;
+        case ESP_ERR_INVALID_STATE:  return HAL_NOT_READY;
+        case ESP_ERR_INVALID_SIZE:   return HAL_INVALID_SIZE;
+        case ESP_ERR_NO_MEM:         return HAL_NO_MEM;
+        case ESP_ERR_NOT_FOUND:      return HAL_NOT_FOUND;
+        case ESP_ERR_NOT_SUPPORTED:  return HAL_NOT_SUPPORTED;
+        default:                     return HAL_IO;
+    }
+}

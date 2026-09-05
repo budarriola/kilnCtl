@@ -645,6 +645,18 @@ safety-link reply timing, display frame time, thermo read latency under a
 full-screen redraw. relay_owner becomes a hal_gpio client; hal_adc wraps
 current_task/current_sense.
 
+ESP-side gpio/adc bodies landed early (ahead of the Phase 1a move, not wired
+into CMakeLists yet, `firmware/hwAbstraction/esp/{gpio,adc,common}/`,
+syntax-checked by `firmware/hwAbstraction/test/compile_esp_backends.ps1`):
+hal_gpio_esp.c covers the real ESP consumers listed above under "hal_gpio".
+hal_adc_esp.c is speculative only -- relay_owner/current_task/current_sense
+above are all SaftyFW (RP2040) files; no ESP consumer exists for hal_adc
+(matching this section's header and title), and ESP-IDF's adc_oneshot/
+adc_cali model (unit handle, per-channel atten/bitwidth config, a separate
+calibration handle) does not fit hal_adc.h's pico-shaped, handle-less,
+raw-sample-only signature without widening it. See hal_adc_esp.c's
+INTERFACE MISMATCH comment for the four specific gaps.
+
 **Phase 2 — host backend.** Response file for the main cl invocation first.
 Implement hwAbstraction/host/ per the fake specs; switch both
 build_host_tests.ps1 to link fakes for migrated interfaces; retire the ten
