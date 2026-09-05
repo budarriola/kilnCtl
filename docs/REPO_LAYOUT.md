@@ -91,6 +91,29 @@ assessment (diff against `tools/mykicadMcp/`, check for anything not tracked
 by the submodule, then `git worktree remove` for the leftover worktree
 there if git still tracks it) before it can be removed either.
 
+**Update, 2026-09-04: swept every venv in the repo — `tools/mykicadMcp/.venv`
+was NOT actually clean, and one more stale-but-inert copy turned up.** Every
+`pyvenv.cfg` in the tree (found via `find . -iname pyvenv.cfg`, not a
+filesystem-root scan):
+
+| venv | `command =` target | launcher shebang (extracted from `Scripts/pip.exe` bytes) | verdict |
+|---|---|---|---|
+| `tools/pdfMcp/.venv` | `...kilnCtl\pdfMcp\.venv` | `...kilnCtl\pdfMcp\.venv\Scripts\python.exe` | stale (already documented above) |
+| `pdfMcp/.venv` (root) | `...kilnCtl\pdfMcp\.venv` | `...kilnCtl\pdfMcp\.venv\Scripts\python.exe` | self-consistent — this is the original |
+| `tools/mykicadMcp/.venv` | `...kilnCtl\.venv` (bare repo-root `.venv`, never a mykicadMcp path at all) | `c:\Users\budar\OneDrive\Desktop\kilnCtl\.venv\Scripts\python.exe` | **stale** — the earlier "checked out clean as a self-contained submodule with its own venv" note above was wrong; nobody had extracted a launcher shebang yet. The target `kilnCtl\.venv` does not exist on disk at all, so this venv's `pip.exe`/other console scripts cannot run today, though the MCP server itself is launched via `python kicad_mcp_server.py` (see `mcp_servers.ps1`), not via a `Scripts\` launcher, so the running server is unaffected |
+| `tools/PcTools/.venv` | uv-managed (`uv = 0.12.2` in `pyvenv.cfg`, no `command =` line) | `...kilnCtl\tools\PcTools\.venv\Scripts\python.exe` | self-consistent |
+| `firmware/KilnFW/.venv` | `...kilnCtl\UnitTest\UnitTestFw\UnitTest\.venv` | `c:\Users\budar\OneDrive\Desktop\kilnCtl\UnitTest\UnitTestFw\UnitTest\.venv\Scripts\python.exe` | **stale**, and orphaned rather than actively broken: that source path predates even the pre-this-move layout (`UnitTest/UnitTestFw/UnitTest/`, not today's `firmware/UnitTestFw/UnitTest/`) and no longer exists either. `git status --porcelain --ignored` shows it untracked/gitignored, and nothing in the repo (`grep -rn "KilnFW/\.venv"`) references it, so it looks like a dead leftover rather than something a running process depends on — but that has not been proven the way `pdfMcp`'s live-process check above was, so treat it as unconfirmed-safe, not confirmed-safe |
+
+All five were checked; the sweep did not find any others. `tools/mykicadMcp`'s
+false-clean note above is left in place rather than edited, since fixing it
+silently would hide that the original assessment was incomplete — this update
+is the correction.
+
+Also checked for hardcoded pre-move paths in non-venv files: `.mcp.json`,
+`kilnCtl.code-workspace`, `.vscode/`, and `tools/PcTools/scripts/mcp_servers.ps1`
+all reference current `tools/pdfMcp` / `tools/mykicadMcp` paths, not the old
+root-level ones — no further hardcoded-path defect found there.
+
 ### What the move taught that the plan did not anticipate
 
 - **Directory renames failed with "Permission denied"** on `KilnFW/`,
