@@ -4819,6 +4819,133 @@ static void test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default
     nvs_test_clear();
 }
 
+// PRE-FLIGHT for the actual v18->v19 flash still pending on the physical
+// board (2026-09-04, board still running commit 2bcdc2d / v18): the test
+// above proves the migration on a hand-picked synthetic blob. This one runs
+// the SAME real migration path against the board's OWN live config, read
+// off it via kiln_call(control_get_zones)/get_board_state() immediately
+// before this test was written (kilnCtl repo, this task) -- Kp/Ki/Kd, cal
+// offset, ramp ceiling, temperature range, relay_mask/control_mode, and the
+// live coupling_coeff matrix -- so the field this pass could most plausibly
+// corrupt (a real, non-default value only a commissioned board would ever
+// populate) is exercised with the actual number, not a stand-in.
+static void test_nvs_load_from_v18_blob_real_board_values_migration(void)
+{
+    TEST_SECTION("nvs_load_from -- the LIVE board's real v18 config (read via kiln_call "
+                 "control_get_zones/get_board_state, not synthesized) migrates to v19 with every "
+                 "pre-existing field byte-identical and both new fuzzy-band fields resolving to 20.0/0.5");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v18_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 18;
+    src.thermo_count = 3;
+    src.relay_count = 4;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    // Zone 0 -- board's actual reported values (control_get_zones, 2026-09-04)
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].control_mode = 3;
+    src.zones[0].cal_offset_c = 0.0f;
+    src.zones[0].pid_kp = 0.03180000185966492f;
+    src.zones[0].pid_ki = 9.999999747378752e-05f;
+    src.zones[0].pid_kd = 0.8400999903678894f;
+    src.zones[0].max_ramp_c_per_hr = 900.0f;
+    src.zones[0].max_temp_c = 80.0f;
+    src.zones[0].min_temp_c = 0.0f;
+    src.zones[0].coupling_coeff[1] = 27.32f;
+    src.zones[0].coupling_coeff[2] = 21.72f;
+
+    // Zone 1 -- board's actual reported values
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].control_mode = 3;
+    src.zones[1].cal_offset_c = 0.0f;
+    src.zones[1].pid_kp = 0.048500001430511475f;
+    src.zones[1].pid_ki = 0.00019999999494757503f;
+    src.zones[1].pid_kd = 1.054800033569336f;
+    src.zones[1].max_ramp_c_per_hr = 900.0f;
+    src.zones[1].max_temp_c = 80.0f;
+    src.zones[1].min_temp_c = 0.0f;
+    src.zones[1].coupling_coeff[0] = 14.30f;
+    src.zones[1].coupling_coeff[2] = 22.15f;
+
+    // Zone 2 -- board's actual reported values
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].control_mode = 3;
+    src.zones[2].cal_offset_c = 0.0f;
+    src.zones[2].pid_kp = 0.06310000270605087f;
+    src.zones[2].pid_ki = 0.00019999999494757503f;
+    src.zones[2].pid_kd = 1.069000005722046f;
+    src.zones[2].max_ramp_c_per_hr = 900.0f;
+    src.zones[2].max_temp_c = 80.0f;
+    src.zones[2].min_temp_c = 0.0f;
+    src.zones[2].coupling_coeff[0] = 8.33f;
+    src.zones[2].coupling_coeff[1] = 12.42f;
+
+    src.crc32 = 0; // v18's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "the board's real v18 blob must migrate to a valid current (v19) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // Every pre-existing field the board actually reported must survive
+    // byte-identically -- this is the failure mode being guarded against:
+    // a migration that works on all-defaults but corrupts a field only a
+    // real, commissioned config populates.
+    static const float kp[3] = {0.03180000185966492f, 0.048500001430511475f, 0.06310000270605087f};
+    static const float ki[3] = {9.999999747378752e-05f, 0.00019999999494757503f, 0.00019999999494757503f};
+    static const float kd[3] = {0.8400999903678894f, 1.054800033569336f, 1.069000005722046f};
+    static const uint8_t relay_mask[3] = {0x01, 0x02, 0x04};
+
+    for (uint8_t j = 0; j < 3; j++) {
+        TEST_CHECK(out_cfg.zones[j].relay_mask == relay_mask[j], "relay_mask survives unchanged");
+        TEST_CHECK(out_cfg.zones[j].control_mode == 3, "control_mode survives unchanged");
+        TEST_CHECK_NEAR(out_cfg.zones[j].cal_offset_c, 0.0f, 1e-9, "cal_offset_c survives unchanged");
+        TEST_CHECK_NEAR(out_cfg.zones[j].pid_kp, kp[j], 1e-9, "pid_kp survives byte-identically");
+        TEST_CHECK_NEAR(out_cfg.zones[j].pid_ki, ki[j], 1e-9, "pid_ki survives byte-identically");
+        TEST_CHECK_NEAR(out_cfg.zones[j].pid_kd, kd[j], 1e-9, "pid_kd survives byte-identically");
+        TEST_CHECK_NEAR(out_cfg.zones[j].max_ramp_c_per_hr, 900.0f, 1e-9, "max_ramp_c_per_hr survives unchanged");
+        TEST_CHECK_NEAR(out_cfg.zones[j].max_temp_c, 80.0f, 1e-9, "max_temp_c survives unchanged");
+        TEST_CHECK_NEAR(out_cfg.zones[j].min_temp_c, 0.0f, 1e-9, "min_temp_c survives unchanged");
+    }
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 27.32f, 1e-6, "zones[0].coupling_coeff[1] survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[2], 21.72f, 1e-6, "zones[0].coupling_coeff[2] survives");
+    TEST_CHECK_NEAR(out_cfg.zones[1].coupling_coeff[0], 14.30f, 1e-6, "zones[1].coupling_coeff[0] survives");
+    TEST_CHECK_NEAR(out_cfg.zones[1].coupling_coeff[2], 22.15f, 1e-6, "zones[1].coupling_coeff[2] survives");
+    TEST_CHECK_NEAR(out_cfg.zones[2].coupling_coeff[0], 8.33f, 1e-6, "zones[2].coupling_coeff[0] survives");
+    TEST_CHECK_NEAR(out_cfg.zones[2].coupling_coeff[1], 12.42f, 1e-6, "zones[2].coupling_coeff[1] survives");
+
+    // THE two new fields, on a REAL board config, not a synthetic one: must
+    // land on the 0 sentinel and resolve through the accessor to the
+    // bit-identical firmware default (20.0/0.5).
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        TEST_CHECK_NEAR(out_cfg.zones[j].error_band_c, 0.0f, 1e-9,
+                        "real board's migrated zone lands error_band_c on the 0 sentinel");
+        TEST_CHECK_NEAR(out_cfg.zones[j].rate_band_c_per_s, 0.0f, 1e-9,
+                        "real board's migrated zone lands rate_band_c_per_s on the 0 sentinel");
+        s_zones.cfg = out_cfg;
+        float got_e = -1.0f, got_r = -1.0f;
+        TEST_CHECK(zones_config_get_error_band_c(j, &got_e) && fabsf(got_e - 20.0f) < 1e-6,
+                  "accessor resolves the real board's migrated error band to 20.0");
+        TEST_CHECK(zones_config_get_rate_band_c_per_s(j, &got_r) && fabsf(got_r - 0.5f) < 1e-6,
+                  "accessor resolves the real board's migrated rate band to 0.5");
+    }
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // Accessor pair for zone_cfg_t::error_band_c/::rate_band_c_per_s (PID_
 // EXPANSION_PLAN.md sec 3.6g) -- same shape as
 // test_ease_off_window_mult_accessor_get_set_and_range(): 0 means "use the
@@ -7802,6 +7929,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped();
     test_approach_rate_cap_accessor_get_set_and_range();
     test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default();
+    test_nvs_load_from_v18_blob_real_board_values_migration();
     test_fuzzy_bands_accessor_get_set_and_range();
     test_NEGATIVE_wrong_zone_band_read_is_caught();
     test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught();
