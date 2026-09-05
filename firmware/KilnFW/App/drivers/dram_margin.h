@@ -100,9 +100,24 @@
  * uart_owner quartet resized 4096 -> 3072 on measurement. Note that `largest`
  * is now ABOVE KILN_DRAM_LARGEST_ALARM_BYTES for the first time, so the
  * standing alarm below stops being a standing condition; if it ever fires
- * again it is an event, which is what it was always meant to be. */
-#define KILN_DRAM_LARGEST_KNOWN_BYTES ((size_t)13824)
-#define KILN_DRAM_FREE_KNOWN_BYTES    ((size_t)22123)
+ * again it is an event, which is what it was always meant to be.
+ *
+ * 2026-09-05 (commit 3b0c82e, after 541b357 moved 12826 B of
+ * safety_cfg_http.c's httpd scratch buffers to PSRAM via EXT_RAM_BSS_ATTR):
+ * 13824/22123 -> 18432/46083. Measured live off the board's own boot log
+ * (get_device_log, grep "heap stage app_main_done") right after flashing --
+ * "heap stage app_main_done  largest= 18432 delta=  +0 dram_free= 46083".
+ * The immediately-preceding trough (untracked here, ~18323 B free at
+ * app_main_done) plus 541b357's 12826 B predicts ~31.1 kB, not the 46.1 kB
+ * measured -- a ~15 kB gap this change alone does not explain. Not chased
+ * down further here (out of scope for this pass); flagged in case it turns
+ * out to be a second, uncredited win rather than measurement noise. Both
+ * figures are still genuine new peaks (well clear of the 20480 floor), so
+ * recorded per this file's own "move on genuine improvement" rule -- if the
+ * extra ~15 kB reverts later, that regression will now be visible instead of
+ * silently absorbed into slack. */
+#define KILN_DRAM_LARGEST_KNOWN_BYTES ((size_t)18432)
+#define KILN_DRAM_FREE_KNOWN_BYTES    ((size_t)46083)
 
 /* Boot-to-boot slack. The figures above are single-boot measurements, and the
  * late stages depend on Wi-Fi association and DHCP timing, so a few hundred
