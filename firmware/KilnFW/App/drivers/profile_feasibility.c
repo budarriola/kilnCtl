@@ -90,6 +90,13 @@ static profile_seg_verdict_t worse(profile_seg_verdict_t a, profile_seg_verdict_
  * exactly the pre-coupling behaviour: this can only ever raise the ceiling,
  * never lower it below what the solo model already promised.
  *
+ * The sum assumes u = 1 on every OTHER masked zone too, so k_eff is an UPPER
+ * bound on the real coupling contribution, not a guarantee: a neighbour that
+ * throttles back once it reaches its own dwell setpoint stops delivering its
+ * row[j] share, so a profile whose verdict sits close to this ceiling may
+ * still fail to hold it in practice. Advisory, not a promise -- the same way
+ * the solo k_dc ceiling always has been.
+ *
  * tau_s is deliberately NOT adjusted: the coupling row's own tau
  * (zones_config_get_coupling_tau()) describes how fast a neighbour's heat
  * arrives, which shifts the transient, while this module's only question is
@@ -127,6 +134,12 @@ profile_seg_verdict_t profile_feasibility_segment_in_mask(uint8_t zone_index, ui
                                                           const profile_segment_t *seg)
 {
     if (!seg) {
+        return PROFILE_SEG_UNKNOWN;
+    }
+    if (!(zone_mask & (1u << zone_index))) {
+        /* zone_index isn't even in the mask being judged -- it is not being
+         * driven at all, so there is nothing to answer about it. See the
+         * header for why this is UNKNOWN rather than OK or a hard error. */
         return PROFILE_SEG_UNKNOWN;
     }
 
@@ -334,6 +347,7 @@ profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const 
         return PROFILE_SEG_UNKNOWN;
     }
 
+    bool zone_agnostic = (zone_mask == 0);
     uint8_t mask = zone_mask;
     if (mask == 0) {
         /* Zone-agnostic (a builtin catalogue entry): judge it against every
@@ -360,9 +374,17 @@ profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const 
         any = true;
         profile_seg_verdict_t per_zone[PROFILE_MAX_SEGMENTS];
         /* `mask`, not `zone_mask`: a builtin's 0 has already been resolved to
-         * every configured zone above, and those zones do couple into zi. */
-        profile_seg_verdict_t v =
-            profile_feasibility_profile_in_mask(zi, mask, p, per_zone, PROFILE_MAX_SEGMENTS);
+         * every configured zone above, and those zones do couple into zi --
+         * EXCEPT when the incoming mask was itself 0 (a zone-agnostic
+         * builtin catalogue entry): such an entry names no particular set of
+         * zones to run together, so it must not be credited with coupling
+         * help from zones it is not known to actually run alongside. Judge
+         * each zone SOLO (matches pre-coupling-aware behaviour) while still
+         * iterating every configured zone via `mask`. An explicit nonzero
+         * zone_mask keeps the coupled judgement. */
+        uint8_t coupling_mask = zone_agnostic ? (uint8_t)(1u << zi) : mask;
+        profile_seg_verdict_t v = profile_feasibility_profile_in_mask(zi, coupling_mask, p,
+                                                                      per_zone, PROFILE_MAX_SEGMENTS);
         rollup = worse(rollup, v);
         if (out_segments) {
             for (uint8_t i = 0; i < p->segment_count && i < out_cap && i < PROFILE_MAX_SEGMENTS; i++) {

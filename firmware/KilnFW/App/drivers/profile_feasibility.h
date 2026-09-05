@@ -40,7 +40,14 @@ typedef enum {
 
 /* Verdict for one segment, starting from start_c (the temperature the kiln is
  * at when this segment begins -- for segment 0 of a profile that is ambient,
- * thereafter it is the previous segment's target). */
+ * thereafter it is the previous segment's target).
+ *
+ * Solo-zone entry point: judges zone_index as if it alone were firing, with
+ * no coupling help from any neighbour. Production code (profiles_http.c,
+ * dashboard_http.c) goes through profile_feasibility_segment_in_mask()/
+ * profile_feasibility_profile_mask() instead, since a real run always has a
+ * zone_mask naming every zone actually driven; this entry point remains for
+ * tests that want the pre-coupling solo behaviour directly. */
 profile_seg_verdict_t profile_feasibility_segment(uint8_t zone_index, float start_c,
                                                   const profile_segment_t *seg);
 
@@ -52,7 +59,9 @@ profile_seg_verdict_t profile_feasibility_segment(uint8_t zone_index, float star
  * effective gain for both the ceiling test and the heating-headroom rate
  * test. Cooling is unaffected -- no zone helps another cool. A mask naming
  * only zone_index is exactly profile_feasibility_segment() above; an absent
- * or zero coupling matrix likewise reduces to it. */
+ * or zero coupling matrix likewise reduces to it. If zone_mask does not even
+ * include zone_index, that zone is not being driven at all and the verdict
+ * is UNKNOWN. */
 profile_seg_verdict_t profile_feasibility_segment_in_mask(uint8_t zone_index, uint8_t zone_mask,
                                                           float start_c,
                                                           const profile_segment_t *seg);
@@ -63,7 +72,12 @@ profile_seg_verdict_t profile_feasibility_segment_in_mask(uint8_t zone_index, ui
  * containing even one unanswerable segment never reports a clean bill of
  * health, but ranks below the two real failures so that a genuine problem is
  * not masked by an untuned neighbour. Also writes each segment's own verdict
- * to out_segments[0..segment_count-1] if non-NULL. */
+ * to out_segments[0..segment_count-1] if non-NULL.
+ *
+ * Solo-zone entry point, same relationship to profile_feasibility_profile_in_mask()
+ * as profile_feasibility_segment() has to profile_feasibility_segment_in_mask()
+ * above: production goes through the _in_mask/_mask variants, this one is
+ * kept for tests. */
 profile_seg_verdict_t profile_feasibility_profile(uint8_t zone_index, const profile_t *p,
                                                   profile_seg_verdict_t *out_segments,
                                                   size_t out_cap);

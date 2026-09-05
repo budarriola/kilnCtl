@@ -750,6 +750,59 @@ static void test_coupling_raises_ceiling_in_mask(void)
                "a cooling segment's verdict is identical with and without coupling");
 }
 
+// ---------------------------------------------------------------------------
+// 15. A zone-agnostic builtin (mask 0) must be judged SOLO per zone, not
+// against the resolved all-zones coupling mask -- review finding on 96bcc43.
+// ---------------------------------------------------------------------------
+
+static void test_mask_zero_is_judged_solo_not_coupled(void)
+{
+    TEST_SECTION("profile_feasibility_profile_mask(0, ...) judges each configured zone SOLO "
+                 "for coupling purposes, even though it still iterates every zone");
+
+    // Same two-zone, k_dc=32, coupling 20-each-way setup as the coupled test
+    // above: solo ceiling is 52 C (UNREACHABLE above 47 C), coupled ceiling
+    // is 72 C (UNREACHABLE above 67 C). A 60 C target sits between the two.
+    stub_reset();
+    s_thermo_count = 2;
+    for (uint8_t z = 0; z < 2; z++) {
+        s_zones[z].k_dc = 32.0f;
+    }
+    const float row0[MAX31856_CHANNEL_COUNT] = { 0.0f, 20.0f, 0.0f };
+    const float row1[MAX31856_CHANNEL_COUNT] = { 20.0f, 0.0f, 0.0f };
+    test_stub_zones_set_coupling(0, true, row0);
+    test_stub_zones_set_coupling(1, true, row1);
+
+    const profile_segment_t segs[] = { seg_of(60.0f, 5.0f) };
+    profile_t p = profile_of(0, segs, 1); /* zone-agnostic: zone_mask field unused by _mask() */
+
+    TEST_CHECK(profile_feasibility_profile_mask(0, &p, NULL, 0) == PROFILE_SEG_UNREACHABLE,
+               "mask 0 resolves to both configured zones, but each must be judged against its "
+               "own SOLO 52 C ceiling (60 C is above it) -- not the coupled 72 C ceiling a "
+               "builtin has no business being credited with, since it names no zone set");
+
+    // Same profile with an explicit nonzero mask naming both zones keeps the
+    // coupled judgement: this is the behaviour 96bcc43 was for, unchanged.
+    TEST_CHECK(profile_feasibility_profile_mask(0x03, &p, NULL, 0) == PROFILE_SEG_OK,
+               "an explicit mask of both zones still gets the coupled 72 C ceiling -> OK");
+}
+
+// ---------------------------------------------------------------------------
+// 16. A zone_index outside zone_mask is UNKNOWN, not judged at all.
+// ---------------------------------------------------------------------------
+
+static void test_segment_in_mask_zone_not_in_mask_is_unknown(void)
+{
+    TEST_SECTION("profile_feasibility_segment_in_mask: zone_index absent from zone_mask -> "
+                 "UNKNOWN, since that zone isn't being driven");
+
+    stub_reset();
+    const profile_segment_t seg = seg_of(60.0f, 5.0f);
+    TEST_CHECK(profile_feasibility_segment_in_mask(2, 0x03, 20.0f, &seg) == PROFILE_SEG_UNKNOWN,
+               "zone 2 is well-tuned but not named in mask 0x03 -- UNKNOWN, not judged solo "
+               "and not silently skipped as OK");
+}
+
 void run_test_profile_feasibility(void)
 {
     test_no_model_is_never_ok_and_never_red();
@@ -766,4 +819,6 @@ void run_test_profile_feasibility(void)
     test_ceiling_test_gated_to_rising_segments();
     test_flat_segment_above_ceiling_is_unreachable();
     test_coupling_raises_ceiling_in_mask();
+    test_mask_zero_is_judged_solo_not_coupled();
+    test_segment_in_mask_zone_not_in_mask_is_unknown();
 }
