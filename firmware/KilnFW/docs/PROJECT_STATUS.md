@@ -250,6 +250,30 @@ sections above, but move anything with lasting design value out to
 `ARCHITECTURE.md`/`ARCHITECTURE_DECISIONS.md`/`BRINGUP_HAZARDS.md` once it
 lands, rather than letting it grow indefinitely.
 
+### 2026-09-05 — Pending owner live test: fixture reconnect swapped a zone/TC pairing, plus three unexplained bench events
+
+Owner disconnected and reconnected the fixture 2026-09-05. Zone 0 (relay 1)
+now heats thermocouple channel 2, and zone 1 (relay 2) heats channel 1
+(correct); zone 2 untested. Bench rotation in code is `cs_pins = {THERMO_CS2_IO,
+THERMO_CS0_IO, THERMO_CS1_IO}` (`MAX31856.c` ~line 687). A `cpl_z0` run tripped
+guard 1 HEATING_FAILED at 61 s because of this mismatch. Either swap the zone
+0/zone 2 thermocouple plugs or update the rotation, then verify before any
+firing.
+
+Thermocouple polarity confirmed rising-with-heat on channels 1 and 2 and on
+the safety thermocouple; channel 0 unverified.
+
+Three unexplained events from the owner's own firing attempt, parked:
+- Web UI reported the safety relay did not close; the board had a POWERON
+  reset at that time, cause unknown. No trip latched (`trip_event` count 0).
+- A `debug_reset` took over 4 minutes to come back and needed a third reset;
+  not reproduced.
+- Pico (running `d179132`) refused `UPDATE_BEGIN` with a trip-pending
+  precondition during an OTA attempt, while no trip was latched.
+
+Heating runs are on hold until the owner's live test (owner instruction
+2026-09-05).
+
 ### 2026-09-05 — crash_report.c dump_id was hashing uninitialized stack padding
 
 `crash_report_init()`'s `dump_id` CRC covered the raw (unzeroed) stack-allocated
