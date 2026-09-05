@@ -11,11 +11,15 @@ commit `c43323a` unless marked otherwise. No prior HAL doc exists.
 
 Owner decision taken 2026-09-05: keep firmware/UnitTestFw untouched (it has
 no build or flash consumers and its espInterfaces copy has diverged by
-786/576/225 lines, but it stays). Owner decisions still needed before Phase 1
-starts: approve the tree location and naming; approve the opaque-storage
-pattern (option a, below); approve the hal_uart two-primitive shape; approve
-the drivers/ layering (section below) and whether it lands before or with
-Phase 1a.
+786/576/225 lines, but it stays).
+
+Owner decisions taken 2026-09-05 (second round): the drivers/ layering
+target layout is approved as written; order of work is untangle the six
+upward includes, then the directory reorg, then HAL Phase 1a; no move starts
+until the currently dirty KilnFW files land (wait, do not commit them from
+this pass); plan only for now — no code changes yet. Still open before Phase
+1 starts: approve the tree location and naming, the opaque-storage pattern
+(option a, below) and the hal_uart two-primitive shape.
 
 ## Goal
 
