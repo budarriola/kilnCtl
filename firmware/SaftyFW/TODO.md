@@ -626,7 +626,9 @@ booted through the bootloader), consistent with a `debug_read_memory` scan
 of the metadata sector (`0x10010000`) reading back as ordinary code rather
 than a `"KLN1"`-magic record — so even a transfer that clears the
 precondition and passes CRC today would stage a slot the current boot
-vector does not consult, on top of 10.9's own hand-off bug.
+vector does not consult — a real prerequisite gap, but see 10.9 below: the
+bootloader hand-off itself is not the blocker, only this bench Pico's
+current image is.
 
 - [x] **10.0 Measure the isolated link's error rate — done 2026-08-23, and
       it was not 115200 at the time.** The TCMT1109 optocoupler pair then
@@ -662,16 +664,25 @@ vector does not consult, on top of 10.9's own hand-off bug.
       backstop, but one "round" can take far longer in practice than
       `UPDATE_PROTOCOL.md`'s throughput section seems to assume — not measured
       against a real link (blocked on 10.0).
-- [ ] **10.9 Open: application booted through the bootloader stops
-      transmitting on the isolated link.** Measured 2026-08-23: when the
-      application is booted from slot A via the bootloader hand-off, it runs
-      (`xTickCount` advances) but never gets a frame onto UART1 — the RP2040's
-      `s_status_tx_ok_count` freezes and the ESP's received-frame counter
-      stops climbing while its sent-frame counter keeps going. Flashing
-      `SaftyFW.elf` directly over SWD (bypassing the bootloader entirely)
-      works fine, so this is specific to something about the hand-off itself,
-      not the application's UART1 setup in general. Root cause unknown;
-      hardware-gated, unstarted.
+- [x] **10.9 RESOLVED 2026-08-25 — bootloader hand-off was never broken; the
+      slot-A image tested on 2026-08-23 was stale.** Re-tested with a
+      freshly built slot-A image: 60 s window, ESP frames-deframed +195,
+      received +36, zero crc/framing/length-mismatch/resync errors,
+      `safety_get_status` link up; recovery mode verified separately at
+      230400 baud (deframed +61 in 61 s). Root cause: the original image
+      predated the isolated link's baud change (9600 → 230400) and the
+      removal of both ends' TX line inversions, so the bootloader was
+      faithfully booting an application built for a different wire
+      configuration — a stale-artifact bug, not a hand-off defect. Always
+      rebuild slot images in the same pass as any link-config change.
+      **Remaining blocker for a bench Pico update is separate and still
+      open**: this bench Pico is currently running the monolithic
+      `SaftyFW.elf` directly, not booted through the bootloader from a slot
+      (`debug_read_memory` at the metadata sector reads ordinary code, not a
+      `"KLN1"` record — see the 2026-09-06 exercise note above). The
+      prerequisite next step is flashing the bootloader + a freshly built
+      `SaftyFW_slotA` image via `debug_program(peer="pico")` — not done as
+      part of this pass.
 - [ ] 10.10 Verification: power cut during erase, during streaming, and during
       the metadata write; corrupt slot rejected; bad-but-booting image rolled
       back; both slots invalidated and recovered over the link with no probe.
