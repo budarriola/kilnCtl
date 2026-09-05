@@ -804,8 +804,10 @@ be untangled before the move, otherwise the reorg just relabels the tangle:
    backlight_pwm_query_screen_and_brightness() shim (which already includes
    both headers) is passed to backlight_pwm_init() instead of
    backlight_pwm.c reaching into screen_idle.h/display_power_cfg.h itself.
-6. safety_link*/danger_mode include profile_executor.h; safety needs a
-   narrow "executor state" accessor, not the whole control header.
+6. DONE: safety_link*/danger_mode included profile_executor.h; switched to
+   the same narrow `profile_executor_state.h` (safety_link_frames.c uses the
+   full `profile_exec_status_t` snapshot for SAFETY_CMD_PUSH_CONTEXT, still a
+   pure query, no start/stop/command surface pulled in).
 
 Ambiguous placements to decide during the move, not before: the zones_http
 family (persist vs http after item 1), zones_current_sweep_* (control vs

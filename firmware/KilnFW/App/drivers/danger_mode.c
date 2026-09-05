@@ -9,7 +9,7 @@
 #include "freertos/task.h"
 
 #include "kiln_io_owner.h"
-#include "profile_executor.h"
+#include "profile_executor_state.h"
 #include "stack_margin.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED */
 

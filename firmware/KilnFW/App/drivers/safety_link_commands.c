@@ -80,7 +80,7 @@
  * types. */
 #include "MAX31856.h"
 #include "kiln_io.h"
-#include "profile_executor.h"
+#include "profile_executor_state.h"
 #include "thermo_owner.h"
 
 /* Real build identity (git commit/dirty/build timestamp), generated fresh
