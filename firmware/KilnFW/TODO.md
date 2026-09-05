@@ -645,12 +645,10 @@ what `profiles_start()` actually refuses. DONE and hardware-verified 2026-08-20.
 
 ### 5A.2 Still open
 
-- [ ] **Known edge in the UNREACHABLE test (minor).** The steady-state ceiling
-      test applies to *cooling* segments too, though a cooling target is reachable
-      by construction. Only bites within 5°C of the ceiling on a descending
-      segment, which no real schedule does. Left alone deliberately (already
-      conservative in the safe direction); fix if it ever matters is to gate on
-      `target > start_c`.
+- [x] **UNREACHABLE test edge fixed.** The steady-state ceiling test is now
+      gated on `target > start_c` (rising only) in `profile_feasibility.c`;
+      see `test_ceiling_test_gated_to_rising_segments` in
+      `test_profile_feasibility.c`.
 
 LCD profile access (browse/select/start) and the flash-headroom constraint
 that used to block it are both done — see `docs/ARCHITECTURE_DECISIONS.md`

@@ -603,35 +603,34 @@ static void test_profile_mask(void)
 // Documented quirk -- TODO.md 5A.2. NOT an endorsement.
 // ---------------------------------------------------------------------------
 
-static void test_documented_quirk_ceiling_applies_to_cooling_segments(void)
+static void test_ceiling_test_gated_to_rising_segments(void)
 {
-    TEST_SECTION("DOCUMENTED QUIRK (TODO.md 5A.2): the ceiling test also fires on cooling segments");
+    TEST_SECTION("FIXED (TODO.md 5A.2): the ceiling test is gated on target > start_c, so a "
+                 "cooling segment near the ceiling is no longer misreported UNREACHABLE");
 
-    // profile_feasibility_segment() applies the steady-state ceiling test to
-    // EVERY segment, including descending ones -- but a cooling target is
-    // arrived at by cooling, so it is reachable by construction. The quirk
-    // only bites within FEASIBILITY_CEILING_MARGIN_C (5 C) of the ceiling AND
-    // on a descending segment, which no real schedule does.
-    //
-    // This test asserts the CURRENT behaviour so the quirk is pinned rather
-    // than silently drifting. TODO.md 5A.2 records the fix, if it ever
-    // matters, as gating the ceiling test on `target > start_c`. If someone
-    // makes that change, THIS TEST SHOULD FAIL -- and the right response is to
-    // update it deliberately (expected verdict becomes OK), not to work
-    // around it.
+    // profile_feasibility_segment() used to apply the steady-state ceiling
+    // test to EVERY segment, including descending ones -- but a cooling
+    // target is arrived at by cooling, so it is reachable by construction.
+    // The gate `target > start_c` confines the ceiling test to rising
+    // segments, which is the only direction it can legitimately apply to.
     stub_reset(); /* ceiling 1020 C, UNREACHABLE threshold 1015 C */
 
     profile_segment_t cool_near_ceiling = seg_of(1016.0f, 50.0f);
-    TEST_CHECK(profile_feasibility_segment(0, 1018.0f, &cool_near_ceiling) == PROFILE_SEG_UNREACHABLE,
-               "cooling 1018 -> 1016 C reports UNREACHABLE today, because the ceiling test runs "
-               "before the direction is considered (documented quirk, not intended behaviour)");
+    TEST_CHECK(profile_feasibility_segment(0, 1018.0f, &cool_near_ceiling) != PROFILE_SEG_UNREACHABLE,
+               "cooling 1018 -> 1016 C is no longer UNREACHABLE now that the ceiling test is "
+               "gated on target > start_c (rising only)");
 
-    // Immediately outside the margin the same descending segment behaves
-    // sensibly, which is what confines the quirk to a 5 C band.
+    // A rising segment landing in the same margin band must still be caught.
+    profile_segment_t heat_near_ceiling = seg_of(1016.0f, 50.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &heat_near_ceiling) == PROFILE_SEG_UNREACHABLE,
+               "the same target approached by HEATING is still correctly UNREACHABLE -- the gate "
+               "only excludes descending segments, not the check itself");
+
+    // Immediately outside the margin the descending segment behaves sensibly
+    // either way, confirming the gate does not merely widen a passing band.
     profile_segment_t cool_below_margin = seg_of(1010.0f, 50.0f);
     TEST_CHECK(profile_feasibility_segment(0, 1014.0f, &cool_below_margin) != PROFILE_SEG_UNREACHABLE,
-               "a descending segment 5 C further down is not affected -- the quirk is confined "
-               "to the ceiling margin band");
+               "a descending segment 5 C further down is not UNREACHABLE either");
 }
 
 void run_test_profile_feasibility(void)
@@ -647,5 +646,5 @@ void run_test_profile_feasibility(void)
     test_profile_carries_start_temperature();
     test_rollup_ordering();
     test_profile_mask();
-    test_documented_quirk_ceiling_applies_to_cooling_segments();
+    test_ceiling_test_gated_to_rising_segments();
 }
