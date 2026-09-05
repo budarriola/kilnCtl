@@ -245,5 +245,6 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 - [ ] Live-hardware verification (no board exercised yet)
 
 **Integrity**
-- [ ] Python codec checked against `firmware/CommonFW/test/vectors/`
+- [x] Python codec checked against `firmware/CommonFW/test/vectors/` --
+      `tools/PcTools/tests/test_kilnlink_commonfw_vectors.py`
 - [ ] No relay path here bypasses `relay_authority_on_blocked()`
