@@ -1410,3 +1410,20 @@ the real ST7796 panel unless noted.
   both switches after their default flipped to `true`, and the test's
   "deliberately wrong" seed values no longer proved an override once `true`
   became the real default.
+- **Builtin-catalogue cone/firing-type metadata checked against its cited
+  source — `9d73c8f`.** `0470185`'s `.cone`/`.firing_type` values came from
+  an Orton chart reconstructed from memory and a guessed bisque/glaze/other
+  split, not from the `digitalfire.com/schedule/<slug>` page each entry
+  cites. Checked all 28 against their source pages: `04DSDH` states "cone
+  04" explicitly (was `-5`, now `-4`); `BQ1000` says "about cone 05" (was
+  `-6`, now `-5`); `C6PLST` states its bars are unbisqued/unglazed test bars
+  (was `Glaze`, now `Other`). 15 entries already matched and are unchanged.
+  10 — `FSCG1`/`FSCGB1`/`FSCGCL`/`FSCGWM`/`FSCRGL`/`FSHP1`/`FSHP3`/`FSNM5`/
+  `MDDCL`/`QICA` — have source pages stating no cone at all (crystalline/
+  specialty schedules, or a related-but-different page's cone was being
+  conflated with this one); their prior guessed value was left in place
+  marked `UNRESOLVED` with an inline comment naming the page checked and
+  why it doesn't resolve, rather than invented silently. No segment
+  (`target_c`/`ramp_c_per_hr`/`dwell_min`/`segment_count`) was touched.
+  Owner decision needed on the 10 unresolved entries — see ROADMAP.md
+  "Blocked on you". Not yet flashed (firing in progress).

@@ -1,61 +1,15 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-04, roadmap-upkeep audit
-> (fifth sweep) — absorbed the day's LCD/display session: backlight wire
-> fitted and driven from the brightness setting (`be02d34`, M1 item closed),
-> touch Y-mirror fixed and both display switches default on (`f028e2f`),
-> four owner-feedback UI polish items closed (diagnostics 9→6 pages,
-> profile-detail layout, builtin catalogue by cone, settings-page restyle),
-> and the LVGL wake-invalidate watchdog fix (`51e1ef5`) that killed a live
-> firing. Recorded three new open facts: internal DRAM now below its 20480 B
-> floor, a cone-value verification pass in flight, and the >62 °C validation
-> firing now approved and running (moved out of "blocked on you" into
-> in-progress). Full detail for everything closed this sweep moved to
-> `docs/COMPLETED_2026-09.md` per this file's own upkeep rule; no open
-> item's substance was changed beyond reflecting today's landings.
-> + fourth sweep — found two stale open items that were actually already
-> answered/fixed and never removed: "physical zone arrangement" was
-> owner-confirmed 2026-09-03 (`firmware/KilnFW/docs/HARDWARE.md`) but still
-> listed open in two places here and in `KilnFW/TODO.md`; the "HTTP
-> concurrency reset" diagnosis bullet was already root-caused and fixed
-> (`CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` 6→16) with full detail already in
-> `docs/COMPLETED_2026-09.md`, but the pointer-back bullet here was never
-> deleted. Both corrected in place; no code changed. + third sweep — verified the two prior sweeps (M10/M11/M12a/M13/M14 closed
-> narrative moved to `docs/COMPLETED_2026-09.md`) moved nothing that wasn't
-> actually finished, dropped no durable lesson, and left both "verified by
-> READING THE BOARD" operational notes and every open item's text untouched;
-> then moved M7's two closed submodule/tool-move items out the same way,
-> leaving its one open item (`hardware/UnitTestFixture` unopened) inline.
-> Cross-reference anchors into `docs/COMPLETED_2026-09.md` checked against its
-> section headings. (Prior review: closed/struck-through narrative moved to
-> `docs/COMPLETED_2026-09.md` per this file's own "a finished item leaves this
-> plan" rule: the "Software, doable now" table, the "What is actually left"
-> closeout paragraphs, M12a, M10, M11 and M13/M14's landed checklists (M13's
-> standing rule and clearing-semantics note kept verbatim); no open item's
-> text was changed.) (Prior review: M15 CLOSED — all 22
-> architecture-review findings landed same day, full detail in
-> `docs/COMPLETED_2026-09.md`; §1 nuisance-rejection coverage (S3/S4/S6a/S7/S9/
-> S10) and payload-decoder fuzzing closed against `GUARD_TEST_MATRIX.md`;
-> `SAFETY_CASE.md` written and then corrected the same day — see its two
-> ACCEPTED RISKS and evidence rollup in
-> [What is actually left](#what-is-actually-left); `SYSTEM_ARCHITECTURE.md`
-> written) (reconciled
-> against
-> the five KilnFW plan docs; M11 closed; M12a opened
-> and closed the same day; M12/M13 in progress; `DISPLAY_ST7796_PLAN.md`
-> Phases 1/2/3/5 landed, Phases 4/6 in progress; ramp assist landed end to end
-> default OFF; board reflashed 2026-09-03 07:36:20; the coupling-matrix A/B has
-> been superseded by the fuzzy-PID A/B `fuzzy_ab_20260904c`; the kiln is now
-> IDLE and that campaign is STOPPED — `778ad64` originally reported
-> 37,008/37,008 samples across 29 firings never leaving the fuzzy layer's
-> centre rule cell, but that figure was withdrawn 2026-09-04 (`50d62ee`,
-> `1584597`): 28 of those 29 captures ran `control_mode: 2`, where the fuzzy
-> layer never executes; real n is one run, 2178 samples. The single-run
-> finding stands, the bands are now per-zone configurable (`904db54`), and an
-> offline probe tool answers band questions without kiln time
-> (`tools/PcTools/src/kilnctrl/fuzzy_band_probe.py`) — see
-> [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these) for
-> the recommended envelope and what's being asked)
+> (fifth sweep) — absorbed the day's LCD/display session (backlight wire
+> fitted and brightness-driven, touch Y-mirror + display-switch defaults,
+> four UI polish landings, the LVGL wake-invalidate watchdog fix, and the
+> builtin-catalogue cone/firing-type source check — 3 fixed, 15 confirmed,
+> 10 left as an owner decision). Recorded internal DRAM now below its
+> 20480 B floor, and the >62 °C validation firing moved from "needs
+> approval" to "approved and running". Full detail for every closed item
+> lives in `docs/COMPLETED_2026-09.md`, per this file's own upkeep rule;
+> earlier sweeps' audit trail lives in that file's edit history, not here.
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -113,6 +67,7 @@ What is still genuinely open is short:
 | **XL** | **Whether to fit CTs, 2026-09-04.** Topology is now written down (`9e3bd1f`, `9f9bf7c`, `docs/CONTACTOR_FEEDBACK_OPTIONS.md`): mains is staged contactor → SSRs, so a single relay weld is tolerated and only a *double* failure (contactor **and** its SSR) is dangerous — but nothing today detects a welded contactor, all five pilot relays are DPDT with the second pole unconnected, and `relay_owner_is_energized()` reports what was commanded, not what is sensed. Fitting CTs is the one check that would let either processor independently confirm actual current flow instead of trusting its own command; every other candidate (the second relay pole, wiring it up) was surveyed in `CONTACTOR_FEEDBACK_OPTIONS.md` and costs hardware anyway. Decide whether that check is worth ordering the parts (M5's Hammond 140QEX is already scoped) or whether the double-failure risk stays an accepted risk in `SAFETY_CASE.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5; `docs/SAFETY_CASE.md` |
 | **L** | **High-temperature validation firing — APPROVED and RUNNING, 2026-09-04.** `4ec7387` scoped a ~4–5 h firing to exercise the coupled feedforward hold above ~62 °C, the one regime the matrix had never run in (infeasible ties to an offset, not a temperature — `68711df`) and that no capture had yet reached (max seen: 60 °C, `d5ae465`); go-ahead given and a firing to 70 °C is on the bench now. Result pending — do not treat the ff_hold-infeasible-above-62°C finding as retested until it reports. | `PID_EXPANSION_PLAN.md` §3.6c |
 | **M** | **Internal DRAM below the 20480 B floor, 2026-09-04.** `dram_free` ~18323 B at `app_main_done`, since the backlight task (now real hardware, see M1) became a genuine consumer rather than a no-op. The backlight task itself is measured at 29.4% stack headroom, so it cannot be shrunk. The one lever identified: disabling the bench-only `KILNCTL_ENABLE_GPIO_PROBE` (frees 6144 B) — owner decision on whether to give that up. | `DRAM_PSRAM_PLAN.md` |
+| **S** | **10 builtin schedules have no source-stated cone, 2026-09-04 (`9d73c8f`).** FSCG1/FSCGB1/FSCGCL/FSCGWM/FSCRGL/FSHP1/FSHP3/FSNM5/MDDCL/QICA's digitalfire pages state no cone (crystalline/specialty, not cone-rated); the prior guessed values were left in place marked `UNRESOLVED` rather than invented silently. Pick a cone for each, or add an "unrated" bucket so the LCD catalogue stops sorting them on invented numbers. Not yet flashed. | `firmware/KilnFW/App/drivers/profiles_builtin_table.inc` |
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |
 | S | The deferred sanity rate for S8 — S8 gained a pure-module implementation and is integrated (2026-09-03, `safety_guards.c`/`safety_core.c`, `SaftyFW/docs/GUARD_TEST_MATRIX.md`), but ships deliberately off (`max_rate_c_per_min` defaults to 0, same "no default by design" shape as S1), so commissioning that field is what will enable it | M3 |
 | S | `hardware/UnitTestFixture/` — delete or keep | M7 |
@@ -319,12 +274,13 @@ now a short list, which is the point:
   This is the root cause behind the `safety_poll` panic/`configASSERT`
   chain; full postmortem in `CLAUDE.md` "Firmware gotchas".
 - ~~LCD diagnostics 9 pages, profile-detail layout, builtin-catalogue
-  browse-by-family, web display-settings styling~~ **all CLOSED 2026-09-04**
-  (`1cf200f`, `445a78e`, `0470185`, `70ef683`) — four separate owner-feedback
-  fixes on the real panel. Full detail: `docs/COMPLETED_2026-09.md`.
-- **The 11 derived cone values in `profiles_builtin_table.inc` are being
-  verified against digitalfire.com by another agent as of 2026-09-04** — in
-  flight, no result to record yet.
+  browse-by-family, web display-settings styling, cone/firing-type
+  verification~~ **all CLOSED 2026-09-04** (`1cf200f`, `445a78e`, `0470185`,
+  `70ef683`, `9d73c8f`) — owner-feedback fixes on the real panel plus a
+  source-checked correction of the builtin catalogue's cone metadata (3
+  fixed, 15 confirmed, 10 unresolved — see
+  [Blocked on you](#blocked-on-you--nothing-in-the-code-can-answer-these)).
+  Full detail: `docs/COMPLETED_2026-09.md`. Not yet flashed.
 - **`screen_idle` held its own lock across the producer reads, 2026-09-04
   (`7a8594d`).** The policy tick called `dashboard_get_status()` (five
   MAX31856 SPI bursts), `kiln_io_owner_command_read()` (blocks up to 200 ms on
