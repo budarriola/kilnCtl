@@ -9,8 +9,8 @@
  * the profile editor page -- would be worse than a slightly stale one: it
  * teaches the operator that the colour is noise, not a verdict, and the
  * whole point of this module is that the colour can be trusted. This is why
- * the ambient this module uses is the ZONE'S OWN PERSISTED
- * tuning_step_ambient_c (get_persisted_ambient_c() below), not a fresh live
+ * the ambient this module uses is the ZONE'S OWN PERSISTED tuning-quality
+ * baseline_c (get_persisted_ambient_c() below), not a fresh live
  * reading: it only changes when that zone is re-autotuned, which is a
  * deliberate, infrequent, operator-visible event, never a background poll
  * racing the page the user is reading.
@@ -28,33 +28,64 @@
 /* Persisted ambient is required to fall in this range before it is trusted --
  * a corrupt or pre-migration record handing this module something like -40
  * or 150 should not be allowed to silently make every profile look reachable
- * or nothing look reachable. */
-#define FEASIBILITY_AMBIENT_MIN_C 0.0f
+ * or nothing look reachable. The lower bound is deliberately above 0: 0.0 is
+ * also the C zero-init value every non-autotuned/relay-only zone's
+ * zone_tuning_quality_t fields read as, so a bound starting at 0 could not
+ * tell a real (if unusually cold) reading apart from that sentinel -- see
+ * get_persisted_ambient_c()'s own comment for the record this was written
+ * against (7e632e8's review finding 1). */
+#define FEASIBILITY_AMBIENT_MIN_C 5.0f
 #define FEASIBILITY_AMBIENT_MAX_C 60.0f
 
 /* Persisted per-zone ambient the fitted model (zones_config_get_model()) is
- * actually relative to: the room temperature autotune measured before that
- * zone's identification step began (zone_tuning_quality_t::step_ambient_c,
- * zones_config_get_tuning_quality()), NOT a live cold-junction reading. A
- * cold junction measures the board itself, which self-heats during a
- * firing -- autotune_engine_step_identify.c deliberately does not use it as
- * an absolute reference for exactly that reason, and this module must not
- * either: using a self-heated board temperature as "ambient" would inflate
- * the computed ceiling precisely when a firing is running and the check
- * matters most.
+ * actually relative to: q.baseline_c, the settled chamber temperature
+ * autotune measured immediately before that zone's identification step began
+ * (fopdt_model_t::baseline_c, pid_autotune.h) -- NOT q.step_ambient_c, which
+ * is a cold-junction reading of the board itself. The two are close but not
+ * identical (the CJ sits 1.6-2.0 C below chamber per
+ * autotune_engine_step_identify.c:920) and, critically, baseline_c is the
+ * SAME reference frame k_dc was fitted relative to
+ * (autotune_finalize_fit()/pid_autotune_fit_fopdt(): raw_rise_c = final_c -
+ * baseline_c). Using step_ambient_c here would silently mix two different
+ * zero points into "T_amb + k_dc" and skew the ceiling by that 1.6-2.0 C gap.
+ * A self-heated live cold-junction reading is rejected for the same reason
+ * documented previously: it would inflate the computed ceiling precisely
+ * when a firing is running and the check matters most, and this module
+ * intentionally never reads live temperature at all.
  *
- * Requires q.valid (a zone that has never been autotuned reads step_ambient_c
- * as 0, which is inside the sane range below and would otherwise be
- * mistaken for a real cold-room reading) as well as a finite, in-range
- * value; any failure of either falls back to FEASIBILITY_AMBIENT_C. Pure
- * config lookup -- no I/O, no lock, no cached/stale state to reason about. */
+ * Requires q.valid AND q.method == AUTOTUNE_METHOD_STEP: zones_config_
+ * set_tuning_quality() is (today) only ever called from the STEP-method
+ * accept path (autotune_engine_guard.c -- the RELAY branch returns before
+ * that call is reached, since a relay test fits no FOPDT model to attach a
+ * quality record to), so this check is currently always true for any record
+ * with valid=true. It is kept anyway as defence in depth against a relay (or
+ * future non-STEP) method ever reaching that call site with baseline_c left
+ * at its 0.0f struct-init value (autotune_engine.c zeroes step_ambient_c at
+ * run start, ~line 1090, and only the SETTLING->STEPPING transition for a
+ * STEP run, ~line 597, ever gives it a real value) -- 0.0 passes the
+ * MIN/MAX range check above as easily as a genuine near-zero reading would,
+ * so the method gate is the only thing standing between that sentinel and a
+ * ceiling that is silently 20 C too low. Also requires baseline_c itself to
+ * be finite and in range; any failure of any of these falls back to
+ * FEASIBILITY_AMBIENT_C. Pure config lookup -- no I/O, no lock, no
+ * cached/stale state to reason about.
+ *
+ * The raw 0 below is autotune_method_t's AUTOTUNE_METHOD_STEP
+ * (autotune_engine.h) -- used as a literal rather than pulling that header's
+ * whole state-machine/FreeRTOS-handle surface into this module just for one
+ * enumerator. zone_tuning_quality_t::method's own doc comment (zones_http.h)
+ * documents this exact encoding ("autotune_method_t raw value: 0=STEP,
+ * 1=RELAY") for the same reason. */
+#define FEASIBILITY_TUNING_METHOD_STEP 0u
+
 static float get_persisted_ambient_c(uint8_t zone_index)
 {
     zone_tuning_quality_t q;
     if (zones_config_get_tuning_quality(zone_index, &q) && q.valid &&
-        isfinite(q.step_ambient_c) && q.step_ambient_c >= FEASIBILITY_AMBIENT_MIN_C &&
-        q.step_ambient_c <= FEASIBILITY_AMBIENT_MAX_C) {
-        return q.step_ambient_c;
+        q.method == FEASIBILITY_TUNING_METHOD_STEP &&
+        isfinite(q.baseline_c) && q.baseline_c >= FEASIBILITY_AMBIENT_MIN_C &&
+        q.baseline_c <= FEASIBILITY_AMBIENT_MAX_C) {
+        return q.baseline_c;
     }
     return FEASIBILITY_AMBIENT_C;
 }

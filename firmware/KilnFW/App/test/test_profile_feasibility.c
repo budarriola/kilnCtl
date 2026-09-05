@@ -38,7 +38,10 @@ typedef struct {
     float max_ramp_c_per_hr;
     bool ambient_getter_answers; /* false = zones_config_get_tuning_quality() cannot answer */
     bool ambient_valid;          /* zone_tuning_quality_t::valid */
-    float ambient_c;             /* zone_tuning_quality_t::step_ambient_c */
+    uint8_t ambient_method;      /* zone_tuning_quality_t::method (0=STEP, 1=RELAY) */
+    float ambient_c;             /* zone_tuning_quality_t::baseline_c -- the production ambient
+                                   * source since the 7e632e8 review fix; see
+                                   * get_persisted_ambient_c() */
 } stub_zone_t;
 
 static stub_zone_t s_zones[STUB_MAX_ZONES];
@@ -62,14 +65,25 @@ static void stub_zone_coupling_clear(uint8_t zi)
  * s_zones state the stub definition below reads. Only used within this
  * file (no other test file needs a zone's ambient), so unlike the coupling
  * hook it is not forward-declared/exported -- it just has to exist before
- * stub_zone_tuned() below, which every test's stub_reset() calls. */
-static void stub_zone_ambient(uint8_t zi, bool answers, bool valid, float ambient_c)
+ * stub_zone_tuned() below, which every test's stub_reset() calls.
+ *
+ * method defaults to STEP (0) via stub_zone_ambient_step() below for every
+ * existing caller; stub_zone_ambient_method() is the one used by the
+ * relay-method fallback test to set a non-STEP method explicitly. */
+static void stub_zone_ambient_method(uint8_t zi, bool answers, bool valid, uint8_t method,
+                                     float baseline_c)
 {
     if (zi < STUB_MAX_ZONES) {
         s_zones[zi].ambient_getter_answers = answers;
         s_zones[zi].ambient_valid = valid;
-        s_zones[zi].ambient_c = ambient_c;
+        s_zones[zi].ambient_method = method;
+        s_zones[zi].ambient_c = baseline_c;
     }
+}
+
+static void stub_zone_ambient(uint8_t zi, bool answers, bool valid, float baseline_c)
+{
+    stub_zone_ambient_method(zi, answers, valid, 0u /* AUTOTUNE_METHOD_STEP */, baseline_c);
 }
 
 /* A zone with the hand-checkable model above and a ceiling high enough that
@@ -143,12 +157,12 @@ uint8_t zones_config_get_thermo_count(void)
 
 // zones_config_get_tuning_quality() is profile_feasibility.c's real
 // production source for a zone's persisted ambient (get_persisted_ambient_c()
-// there reads out->valid and out->step_ambient_c); zones_config_accessors.c
-// itself is not compiled into the host-test binary, so this is the ONE
-// definition of that symbol the linker sees here -- same "plain C stand-in
-// for the real symbol" shape as the other zones_http.c getters above. Every
-// field besides valid/step_ambient_c is zeroed -- profile_feasibility.c does
-// not read them.
+// there reads out->valid, out->method and out->baseline_c);
+// zones_config_accessors.c itself is not compiled into the host-test binary,
+// so this is the ONE definition of that symbol the linker sees here -- same
+// "plain C stand-in for the real symbol" shape as the other zones_http.c
+// getters above. Every field besides valid/method/baseline_c is zeroed --
+// profile_feasibility.c does not read them.
 bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *out)
 {
     if (!out) {
@@ -159,7 +173,8 @@ bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *
         return false;
     }
     out->valid = s_zones[zone_index].ambient_valid;
-    out->step_ambient_c = s_zones[zone_index].ambient_c;
+    out->method = s_zones[zone_index].ambient_method;
+    out->baseline_c = s_zones[zone_index].ambient_c;
     return true;
 }
 
@@ -895,11 +910,15 @@ static void test_persisted_ambient_raises_ceiling(void)
 // ---------------------------------------------------------------------------
 // 18. No usable persisted ambient falls back to FEASIBILITY_AMBIENT_C (20 C),
 // reproducing every verdict this module gave before a persisted ambient
-// existed. Three ways the persisted value can be unusable: the getter itself
-// cannot answer, tuning_valid is false (the "never autotuned" encoding, whose
-// step_ambient_c reads 0 -- inside the sane range, so this must be an
-// explicit valid check, not just a range/finite check), and a stored value
-// that is finite but out of the sane [0, 60] range.
+// existed. Ways the persisted value can be unusable: the getter itself
+// cannot answer, tuning_valid is false (the "never autotuned"/zero-init
+// encoding, whose baseline_c reads 0 -- which is now OUTSIDE the sane
+// [5, 60] range on its own, but the explicit valid check stays required
+// rather than relying on the range alone, per get_persisted_ambient_c()'s
+// own comment), method is not STEP (the relay-tune fallback -- 7e632e8
+// review finding 1: a record with a real in-range baseline_c but the wrong
+// method must still fall back), and a stored value that is finite but out
+// of the sane [5, 60] range.
 // ---------------------------------------------------------------------------
 
 static void test_no_persisted_ambient_falls_back_to_20(void)
@@ -928,22 +947,50 @@ static void test_no_persisted_ambient_falls_back_to_20(void)
     TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
                "NaN persisted ambient -> falls back to 20 C, same UNREACHABLE boundary");
 
-    // (c) getter answers, valid, but out of the sane [0, 60] range.
+    // (c) getter answers, valid, but out of the sane [5, 60] range.
     stub_reset();
     stub_zone_ambient(0, true, true, 80.0f);
     TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
                "out-of-range (80 C) persisted ambient -> falls back to 20 C, same UNREACHABLE "
                "boundary");
 
-    // (d) getter answers with a value that IS in range, but tuning_valid is
-    // false (the real shape of a never-autotuned zone: step_ambient_c reads
-    // 0, which sits inside [0, 60] and would be mistaken for a real cold-room
-    // reading if valid weren't checked separately).
+    // (d) getter answers with an in-range value, but tuning_valid is false
+    // (the never-autotuned/zero-init shape). baseline_c 0 is itself now
+    // outside [5, 60], but valid is still checked explicitly rather than
+    // relying on that -- exercised here with an in-range baseline_c (30) so
+    // the valid check is what is actually caught failing, not the range one.
     stub_reset();
-    stub_zone_ambient(0, true, false, 0.0f);
+    stub_zone_ambient(0, true, false, 30.0f);
     TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
-               "tuning_valid == false -> falls back to 20 C even though step_ambient_c (0) is "
-               "technically in range");
+               "tuning_valid == false -> falls back to 20 C even though baseline_c (30) is "
+               "in range");
+
+    // (e) 7e632e8 review finding 1: a STEP-shaped record whose baseline_c was
+    // never actually populated (autotune_engine.c zeroes it to 0.0f at run
+    // start and only a completed STEP run's SETTLING->STEPPING transition
+    // ever gives it a real value) must not be trusted just because valid ==
+    // true -- 0.0 is now outside [5, 60], so this is caught by the range
+    // check alone, but pinned here as its own case since it is the exact
+    // review-reported hole (a genuine 0.0f sentinel, not merely "some
+    // out-of-range number").
+    stub_reset();
+    stub_zone_ambient(0, true, true, 0.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
+               "valid == true but baseline_c == 0.0f (the un-populated sentinel) -> falls back "
+               "to 20 C, not trusted as a real cold-room reading");
+
+    // (f) 7e632e8 review finding 1, the other half: a RELAY-method record
+    // (method != STEP) must fall back even when baseline_c happens to be a
+    // plausible in-range value -- zones_config_set_tuning_quality() is only
+    // ever called from the STEP-method accept path today (the RELAY branch
+    // in autotune_engine_guard.c returns before that call), so this defends
+    // against that changing (or against a stub/future caller reaching this
+    // getter with such a record) rather than a currently-reachable board
+    // state.
+    stub_reset();
+    stub_zone_ambient_method(0, true, true, 1u /* AUTOTUNE_METHOD_RELAY */, 30.0f);
+    TEST_CHECK(profile_feasibility_segment(0, 20.0f, &inside_margin) == PROFILE_SEG_UNREACHABLE,
+               "method == RELAY -> falls back to 20 C even with an in-range baseline_c (30)");
 }
 
 // ---------------------------------------------------------------------------

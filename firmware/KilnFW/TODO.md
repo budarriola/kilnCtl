@@ -629,19 +629,49 @@ what `profiles_start()` actually refuses. DONE and hardware-verified 2026-08-20.
       cold-junction reading (2026-09-05, reworked — the 2026-09-05
       live-cold-junction version below was reviewed and rejected same day).**
       `get_persisted_ambient_c()` in `profile_feasibility.c` reads
-      `zone_tuning_quality_t::step_ambient_c` via
-      `zones_config_get_tuning_quality()` — the room temperature autotune
-      measured before that zone's identification step, i.e. the ambient the
-      fitted model (`k_dc`/`tau_s`) is actually relative to — and falls back
-      to the `FEASIBILITY_AMBIENT_C` constant (20 C) whenever
-      `tuning_valid` is false, the getter cannot answer, or the stored value
-      is non-finite or outside `[0, 60]` C. Sampled once per public entry
+      `zone_tuning_quality_t::baseline_c` via `zones_config_get_tuning_quality()`
+      — the settled chamber temperature autotune measured immediately before
+      that zone's identification step began (`fopdt_model_t::baseline_c`,
+      `pid_autotune.h`) — and falls back to the `FEASIBILITY_AMBIENT_C`
+      constant (20 C) whenever `tuning_valid` is false, `method` is not
+      `AUTOTUNE_METHOD_STEP`, the getter cannot answer, or the stored value
+      is non-finite or outside `[5, 60]` C. Sampled once per public entry
       point (`profile_feasibility_segment_in_mask()`,
       `profile_feasibility_profile_in_mask()`) and threaded down as a
       parameter, so every segment of one profile walk sees the identical
       value even though `start_c` and `t_amb` used to be sampled at two
       separate call sites. Pure config lookup — no I/O, no lock, no cache,
       nothing that can go stale between calls.
+
+      **2026-09-05 Opus review fix (of the `baseline_c`/`step_ambient_c`
+      choice above, and of the `[0, 60]`/no-method-gate range check):** the
+      field originally read here was `step_ambient_c` (a cold-junction
+      reading), documented as "the ambient the fitted model is relative to"
+      — which was wrong. `k_dc` is fitted in `autotune_finalize_fit()` as
+      `raw_rise_c = final_c - baseline_c`, i.e. relative to `baseline_c`
+      (the settled *chamber* reading), not the cold junction, which sits
+      1.6-2.0 C below chamber per `autotune_engine_step_identify.c:920`.
+      Mixing the two zero points skewed every ceiling by that gap. Switched
+      to `baseline_c`, the field the fit is actually relative to.
+
+      Separately, MAJOR: `zone_tuning_quality_t::step_ambient_c` (and
+      `baseline_c`) is zeroed to `0.0f` at the start of every autotune run
+      (`autotune_engine.c` ~line 1090) and is only ever given a real value at
+      the SETTLING→STEPPING transition of a STEP-method run (~line 597); the
+      old `[0, 60]` range check let that `0.0f` sentinel pass as a plausible
+      cold-room reading, silently dropping the computed ceiling by 20 C.
+      Fixed two ways: the range floor moved to `[5, 60]` (0.0 no longer
+      passes on its own), and `q.method == AUTOTUNE_METHOD_STEP` is now
+      required explicitly as defence in depth — `zones_config_
+      set_tuning_quality()` is, as of this review, only ever called from the
+      STEP-method accept path in `autotune_engine_guard.c` (the RELAY branch
+      returns before that call, since a relay test fits no FOPDT model to
+      attach a quality record to), so today the method check is always true
+      for any `valid` record; it guards against that call site ever changing,
+      or a stub/future caller reaching the getter with a RELAY-shaped record.
+      Both breaks (dropping the `valid` check; dropping the `method`+range
+      check) were confirmed to redden `test_profile_feasibility.c` by hand
+      before being reverted — see that file's own tests for the receipts.
 
       **Why the live cold-junction version (below) was wrong, not just
       differently implemented:** Opus review the same day rejected it on
@@ -665,26 +695,41 @@ what `profiles_start()` actually refuses. DONE and hardware-verified 2026-08-20.
       behavior that actually changed shipped unverified.
 
       Bench check 2026-09-05: `GET /api/zones` on the live board shows all
-      three zones with `tuning_valid: false` / `tuning_step_ambient_c: 0.0`
-      — no zone has ever been autotuned with this field populated, so today
-      every zone still gets the 20 C fallback in practice. The fix is
-      correct and in place regardless; it starts mattering as soon as a
-      zone is next autotuned and this field gets a real, non-zero value.
+      three zones with `tuning_valid: false` (baseline/ambient fields
+      unpopulated) — no zone has ever been autotuned with this record
+      populated, so today every zone still gets the 20 C fallback in
+      practice. The fix is correct and in place regardless; it starts
+      mattering as soon as a zone is next STEP-autotuned and this record
+      gets a real `baseline_c`.
 
-      Tests drive `test_stub_zones_set_coupling()`-style stub hooks (a new
-      `stub_zone_ambient()` local to `test_profile_feasibility.c`, backing
-      the file's own `zones_config_get_tuning_quality()` stand-in) covering:
-      a persisted 30 C ambient reaching a 70 C target the 20 C fallback
-      calls `UNREACHABLE`; getter failure, NaN, and out-of-range (80 C) all
-      falling back to 20 C, plus the `tuning_valid == false` case
-      specifically (step_ambient_c reads 0 for a never-tuned zone, which is
-      *inside* the sane range and would be mistaken for a real cold-room
-      reading if valid weren't checked separately — exactly today's bench
-      state); and two zones in the same profile judged independently against
-      their own persisted ambients. Negative-tested by temporarily reducing
-      `get_persisted_ambient_c()` to `return FEASIBILITY_AMBIENT_C;`
-      unconditionally and confirming the ceiling-raising and per-zone tests
-      go red, then restoring it.
+      **Also documented here (not itself a code change):** any later write
+      to a zone's PID gains — an accepted autotune of either method, an
+      adaptive-tune adjustment during a normal firing, a backup import, or a
+      manual edit — clears `tuning_valid` unconditionally
+      (`zones_config_set_pid()`, `zones_config_accessors.c` ~line 401), which
+      reverts that zone's feasibility ambient to the 20 C fallback until the
+      next accepted STEP autotune. This is expected, conservative behaviour
+      (an unreachable ambient is safer than a stale one) and is deliberately
+      not being changed here — see this task's own constraints.
+
+      Tests drive `test_stub_zones_set_coupling()`-style stub hooks
+      (`stub_zone_ambient()`/`stub_zone_ambient_method()` local to
+      `test_profile_feasibility.c`, backing the file's own
+      `zones_config_get_tuning_quality()` stand-in) covering: a persisted
+      30 C ambient reaching a 70 C target the 20 C fallback calls
+      `UNREACHABLE`; getter failure, NaN, and out-of-range (80 C) all
+      falling back to 20 C; `tuning_valid == false` with an otherwise
+      in-range `baseline_c` (30) falling back; the `baseline_c == 0.0f`
+      sentinel specifically falling back even with `valid == true` (the
+      2026-09-05 review's MAJOR finding, now caught by the `[5, 60]` floor);
+      a RELAY-method record with an in-range `baseline_c` falling back (the
+      method-gate defence in depth); and two zones in the same profile
+      judged independently against their own persisted ambients.
+      Negative-tested two ways: reducing `get_persisted_ambient_c()` to
+      `return FEASIBILITY_AMBIENT_C;` unconditionally (confirms the
+      ceiling-raising and per-zone tests go red), and separately dropping
+      just the `valid` check and just the `method`+range check (each
+      confirmed, by hand, to redden a distinct test before being reverted).
 
 - [ ] **One global bridge stall in a 25-minute soak (2026-08-20), cause not
       found.** 78 polling ticks, 77 clean; at t=1031s EVERY bridge surface
