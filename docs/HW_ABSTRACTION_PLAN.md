@@ -785,9 +785,14 @@ be untangled before the move, otherwise the reorg just relabels the tangle:
 1. 18 control/safety files include zones_http.h for what are really config
    accessors. Split those accessors into zones_config_accessors.h (persist);
    zones_http.h keeps only handler registration.
-2. ota_http.h leaks into kiln_io_owner.c:17, profile_executor.c:25 and
-   profile_executor_run.c:21. Move the state query they use into net/ota.h.
-3. board_temps.c:8,12 includes http and net headers from what is a hw file.
+2. DONE: ota_http.h leaked into kiln_io_owner.c:17, profile_executor.c:25 and
+   profile_executor_run.c:21. `ota_http_heat_blocked_by_update()`'s
+   declaration moved to new `ota_state.h`; ota_http.h includes it, the three
+   callers include ota_state.h instead. Implementation stayed in ota_http.c.
+3. DONE: board_temps.c:8,12 included http and net headers from what is a hw
+   file. The httpd handler/registration moved to new board_temps_http.c;
+   board_temps.c gained board_temps_bind_thermo_bus() so it no longer reaches
+   into esp_http_server.h/wifi_provision_http.h itself.
 4. gpio_probe.c:32 and boot_button.c:11 include profile_executor.h from
    bridge/hw; invert via a small callback or status accessor in control/.
 5. backlight_pwm.c:63-64 includes screen_idle and display_power_cfg (ui/

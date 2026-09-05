@@ -119,23 +119,15 @@ esp_err_t board_temps_get(board_temps_t *out, const MAX31856Reading *readings, s
  * expensive as GET /api/board_temps always was. */
 void board_temps_get_live(board_temps_t *out);
 
-/* Registers GET /api/board_temps on the httpd instance
- * wifi_provision_http.c already started -- same "server must already exist"
- * precondition and non-fatal-to-app_main failure convention as
- * readiness_http_start()/dashboard_http_start(). `thermo_bus_or_null` is
- * read the same way dashboard_http_start() takes it: NULL if the bus never
- * came up this boot (readiness handler then just reports thermo_cj_c: []),
- * otherwise the handler calls MAX31856_read_all() itself each request --
- * this module does not own the bus, it only borrows the pointer to read it.
- *
- * TODO.md 10.7: registers the JSON API. It used to also serve a styled GET
- * /board_temps page (board_temps_page.html); that page was removed
- * 2026-08-27 (owner request, "the board health page should be folded into
- * the diagnostics page") since it was a byte-for-byte duplicate of
- * diagnostics_page.html's own "Board health" card -- see this .c file's
- * board_temps_http_start() comment. No LCD/LVGL menu item -- that stays out
- * of scope for this pass. */
-esp_err_t board_temps_http_start(MAX31856BusClass *thermo_bus_or_null);
+/* Sets which MAX31856 bus board_temps_get_live() borrows a pointer to read
+ * each call. `thermo_bus_or_null` is NULL if the bus never came up this boot
+ * (get_live() then just reports thermo_count 0) -- this module does not own
+ * the bus, it only borrows the pointer. Extracted so this hw-layer module
+ * has no dependency on the HTTP/net stack (HW_ABSTRACTION_PLAN.md "drivers/
+ * layering", item 3): board_temps_http.c's board_temps_http_start() calls
+ * this once at bring-up instead of board_temps.c reaching up into
+ * esp_http_server.h/wifi_provision_http.h itself. */
+void board_temps_bind_thermo_bus(MAX31856BusClass *thermo_bus_or_null);
 
 #ifdef __cplusplus
 }

@@ -26,6 +26,7 @@
 #include "boot_guard.h"
 #include "dashboard_http.h"
 #include "board_temps.h"
+#include "board_temps_http.h"
 #include "diagnostics_http.h"
 #include "partition_info_http.h"
 #include "backup_http.h"

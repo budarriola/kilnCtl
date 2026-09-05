@@ -50,37 +50,13 @@ int g_test_count = 0;
 
 #undef asm
 
-// ---- Embedded-page symbols board_temps_page_get_handler() references ------
-// Never actually sent by these tests (that handler is never called), but
-// must exist for the linker.
-const uint8_t board_temps_page_html_gz_start[1] = { 0 };
-const uint8_t board_temps_page_html_gz_end[1] = { 0 };
-
 // ---- link-time stub bodies for board_temps.c's non-pure half --------------
-// None of these is reachable from board_temps_get() (the only function
-// under test here), but every symbol the file references must resolve at
-// link time -- same "wider stub surface than the test itself touches"
-// reasoning test_zones_http.c/test_backup_import.c already document.
-httpd_handle_t wifi_provision_http_get_server(void) { return (httpd_handle_t)1; }
-esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri)
-{
-    (void)handle; (void)uri; return ESP_OK;
-}
-esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
-esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
-{
-    (void)r; (void)field; (void)value; return ESP_OK;
-}
-esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
-{
-    (void)r; (void)buf; (void)buf_len; return ESP_OK;
-}
-bool web_client_accepts_gzip(httpd_req_t *req) { (void)req; return true; }
-esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const char *page)
-{
-    (void)req; (void)tag; (void)page; return ESP_OK;
-}
-void web_set_asset_cache_headers(httpd_req_t *req) { (void)req; }
+// 2026-09-05 (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 3):
+// board_temps.c's httpd handler/registration moved out to
+// board_temps_http.c, so board_temps.c no longer includes
+// esp_http_server.h/wifi_provision_http.h at all -- the httpd_*/
+// wifi_provision_http_get_server()/web_*() stub bodies that used to live
+// here for the linker are gone along with that dependency, not just unused.
 
 // board_temps_get_live() calls this, but no test here calls
 // board_temps_get_live() -- only board_temps_get() directly, with a
