@@ -5744,3 +5744,53 @@ not just a wash.
      sensitivity fit — the segment-index convention differs and neither
      `compare_runs` nor `fit_start_temp_sensitivity` can detect the
      mismatch for you.
+
+### 3.6i First above-62°C validation firing, `cplval70` (2026-09-05)
+
+Runs the firing scoped (not scheduled) by
+`logs/coupling/hightemp_validation_proposal_20260904.md`: profile #0
+`cplval70`, all 3 zones, ramp 26→70 °C at 60 °C/hr then 60 min dwell at
+70 °C. Completed clean (`state=3`/done, no fault_guard, no ramp_lock).
+
+**No PC-side capture ran for this firing** (no `.jsonl` under `logs/coupling/`
+or elsewhere matches `cplval70`; `get_device_log_json(n=500)` covers the
+whole run and contains only `monitor_task` heartbeats — the
+`ff_hold_infeasible` transition log lines, which do fire on toggle
+per `profile_executor_feedforward.c`, have already scrolled out of the
+firmware's own log ring). So only the final on-board snapshot is available,
+not a tick-by-tick tracking series — **no ramp/dwell mean/max tracking-error
+table can be produced from this run**; that requires a repeat with a PC
+capture attached.
+
+**What the final snapshot (`GET /api/control`, end of the 60 min dwell) shows:**
+
+| Zone | actual_c | target_c | offset | duty (bd_final_commanded) | ff_hold_used_matrix | ff_hold_infeasible |
+|---|---|---|---|---|---|---|
+| z0 (top) | 69.77 | 70.00 | -0.23 | 0.178 | true | **true** |
+| z1 | 69.95 | 70.00 | -0.05 | 0.503 | true | **true** |
+| z2 (bottom) | 69.96 | 70.00 | -0.04 | 0.849 | true | **true** |
+
+All three final offsets are sub-0.5 °C — per standing practice, noted and
+not chased. Live-observed duty at end of dwell (0.17/0.51/0.86) matches
+`bd_final_commanded` closely; z2 at 0.86 is close to its ceiling, i.e. **at
+60 °C/hr the bottom zone is nearly saturated by 70 °C** — the headroom fact
+this run was also meant to surface.
+
+**`ff_hold_infeasible` verdict: feasibility claim confirmed on hardware for
+the first time, direct flag evidence, not inferred.** All three zones read
+`ff_hold_infeasible: true` simultaneously with `ff_hold_used_matrix: true`
+at the end of the 70 °C dwell — per `profile_executor.h`'s own field
+comment, that combination means the coupled solve is active *and* needed to
+clamp at least one zone's duty into `[0,1]`, i.e. the commanded setpoint
+combination is not achievable as specified. This is the first tracking-panel
+data point above the `ambient + 38 °C` boundary established in §3.6e's
+verification pass (30 prior files, uniformly `false`/`true` below that
+line) — the >62 °C infeasibility claim from §3.2's math is no longer purely
+theoretical, though it is confirmed only via the flag, not via a measured
+tracking-error degradation (no capture, see above).
+
+**Open follow-up:** repeat `cplval70` (or an equivalent >62 °C profile) with
+`run_queue.py`/PC capture attached so the ramp/dwell tracking-error table
+this section wants can actually be built, and so the `ff_hold_infeasible`
+transition tick (when each zone first flips, vs. temperature) can be read
+from the capture instead of inferred from a single end-of-run snapshot.
