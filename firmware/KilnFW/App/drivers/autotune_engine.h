@@ -362,79 +362,15 @@ bool autotune_engine_run_relay(uint8_t zone_index, float setpoint_c, float relay
  * no-op from IDLE/DONE/ABORTED. */
 void autotune_engine_abort(const char *reason);
 
-/* Writes proposed_gains into this zone's stored PID config via
- * zones_config_set_pid() (TODO.md 6A.4: "results are proposed, never
- * auto-applied... only then does it get written through zones_http's
- * config"). Only valid from DONE; returns false otherwise. Resets the
- * engine to IDLE on success.
- *
- * A step-test acceptance also writes the fitted FOPDT model. A relay-test
- * acceptance writes gains ONLY, and deliberately leaves any stored model
- * alone -- see the .c for the reasoning, which is the difference between
- * "this run measured no model" and "this run measured that there is no
- * model".
- *
- * 2026-09-01 review fix, extended 2026-09-02 (round-3 follow-up):
- * fopdt_model_t::settled used to be write-only -- set by finalize_fit(),
- * read by nothing but one log line, so a fit that reached DONE via the
- * AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S backstop (never genuinely settled,
- * and so lower-confidence -- see that field's own comment) was written
- * through to zones_config_set_model()/set_pid() and used by
- * zone_feedforward() byte-identically to a fully-settled one. This
- * parameter closes that: for a STEP-method result, acceptance is refused
- * UNLESS ack_unsettled is true whenever ANY of THREE independent
- * trustworthiness signals reads false --
- *   - model.settled (the STEPPING-phase relative-slope detector never
- *     genuinely fired; ended via the max-duration backstop instead),
- *   - model.extrapolation_converged (the asymptote-correction loop hit its
- *     iteration cap or safety ceiling without settling to within its own
- *     convergence tolerance), or
- *   - model.tau_consistent_with_gain (tau_s/dead_time_s could not be
- *     re-fitted to match the corrected k_gain_c_per_duty, so they describe
- *     an earlier, less-corrected rise than the gain does)
- * -- so an operator (or automated caller) must make a deliberate, distinct
- * choice to persist a lower-confidence fit rather than it happening
- * silently by default. ONE acknowledgement covers all three; the refused
- * autotune_engine_accept() call's ESP_LOGW names exactly which one(s)
- * tripped, and all three are surfaced distinctly (not collapsed into one
- * bit) through autotune_engine_get_status()/the dashboard JSON/the wire
- * status so a caller can show the operator WHY before they tick the box.
- * Has no effect on a RELAY-method result (relay_model_t has none of these
- * three concepts -- see this function's own relay-vs-step split) or on a
- * STEP result where all three already read true/settled (ack_unsettled is
- * simply unused/ignored). */
-bool autotune_engine_accept(bool ack_unsettled);
+/* Options for autotune_engine_accept() below. A zeroed struct (or opts ==
+ * NULL) means the original default behavior: refuse an unsettled fit,
+ * never touch the ramp ceiling. */
+typedef struct {
+    bool ack_unsettled;  /* see autotune_engine_accept()'s doc comment on the three fit-confidence signals */
+    bool adopt_ceiling;  /* see autotune_engine_accept()'s doc comment on ceiling adoption */
+} autotune_accept_opts_t;
 
-/* Sibling of autotune_engine_accept() that also lets the caller adopt the
- * run's predicted_max_ramp_c_per_hr (TODO.md 6A.4: "the ceiling is shown but
- * not wired into max_ramp_c_per_hr") into the zone's stored ramp ceiling
- * (zones_config_set_max_ramp()) in the same accept action, rather than
- * requiring a separate manual edit on /settings/zones. A sibling function,
- * not a widened autotune_engine_accept(), because that signature is called
- * from many existing sites (HTTP, UART bridge, and the host test suite)
- * that must keep behaving exactly as before -- autotune_engine_accept()
- * below is now a thin wrapper: autotune_engine_accept_ex(ack_unsettled,
- * false).
- *
- * adopt_ceiling has no effect when:
- *   - the method is RELAY (a relay test measures no FOPDT model, so there
- *     is no predicted ceiling to adopt -- same reasoning as the model-write
- *     skip above), or
- *   - the STEP result's predicted_max_ramp_c_per_hr is <= 0 (never computed,
- *     e.g. pid_autotune_estimate_max_ramp_c_per_hr() had no ambient headroom
- *     to extrapolate from), or
- *   - zones_config_set_model() itself was rejected/failed for this run (the
- *     same model that produced the estimate did not persist, so adopting a
- *     ceiling derived from it would outlive the model it depends on).
- * In every case the gains (and model, if any) are still accepted/persisted
- * exactly as autotune_engine_accept() would -- adopt_ceiling only ever adds
- * a write, never blocks the ones this function already made. A failure to
- * persist the ceiling itself (zones_config_set_max_ramp() returning false)
- * is logged, not propagated, for the same reason the model-persist failure
- * above is logged and not propagated: the gains are already live. */
-bool autotune_engine_accept_ex(bool ack_unsettled, bool adopt_ceiling);
-
-/* Outcome of the ceiling-adoption attempt inside autotune_engine_accept_ex2()
+/* Outcome of the ceiling-adoption attempt inside autotune_engine_accept()
  * below, reported back to the caller instead of only to the log (review
  * finding: an HTTP/UART caller had no way to tell "adopted" from "silently
  * skipped" from "silently clamped"). Never a clamp: an out-of-range request
@@ -447,26 +383,94 @@ typedef enum {
     AUTOTUNE_CEILING_SKIPPED_ZERO,            /* predicted_max_ramp_ambient_c_per_hr <= 0 -- nothing to adopt */
     AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN,   /* stored ceiling is nonzero and already <= the new estimate */
     AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE,   /* new estimate > ZONE_MAX_RAMP_C_PER_HR_MAX -- refused, not clamped */
+    AUTOTUNE_CEILING_SKIPPED_READ_FAILED,     /* zones_config_get_max_ramp() failed -- never adopt over a value
+                                                * we could not read, even though that reads the same as "no old
+                                                * value" would */
+    AUTOTUNE_CEILING_FAILED_TO_PERSIST,       /* zones_config_set_max_ramp() itself failed -- the estimate was
+                                                * good and adoptable, but nothing was actually written */
 } autotune_ceiling_adoption_t;
 
-/* Sibling of autotune_engine_accept_ex() that additionally reports what
- * happened to the ceiling-adoption attempt (see autotune_ceiling_adoption_t
- * above) and the old/new ceiling values involved, so an HTTP or UART caller
- * can show the operator the actual outcome instead of inferring it from a
- * log line. Any of the three out-params may be NULL if the caller does not
- * need them. Adopts predicted_max_ramp_ambient_c_per_hr, never the
- * end-of-step predicted_max_ramp_c_per_hr -- see that field's own comment
- * in autotune_engine_status_t for why the end-of-step value is unsafe to
- * use as a hard block. Never tightens an existing nonzero ceiling silently:
- * if the currently stored ceiling is smaller than the new estimate already,
- * adoption is skipped (AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN) rather than
- * overwriting a tighter operator-set (or previously-measured) value with a
- * looser one. autotune_engine_accept_ex() is a thin wrapper around this
- * function that discards the three out-params. */
-bool autotune_engine_accept_ex2(bool ack_unsettled, bool adopt_ceiling,
-                                 autotune_ceiling_adoption_t *out_adoption,
-                                 float *out_old_ceiling_c_per_hr,
-                                 float *out_new_ceiling_c_per_hr);
+/* Result of autotune_engine_accept() below: what happened to the
+ * ceiling-adoption attempt (see autotune_ceiling_adoption_t above) and the
+ * old/new ceiling values involved, so an HTTP or UART caller can show the
+ * operator the actual outcome instead of inferring it from a log line.
+ * Meaningful only when opts->adopt_ceiling was true; otherwise adoption
+ * reads AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED and both ceilings are 0. */
+typedef struct {
+    autotune_ceiling_adoption_t adoption;
+    float old_ceiling_c_per_hr;
+    float new_ceiling_c_per_hr;
+} autotune_accept_result_t;
+
+/* Writes proposed_gains into this zone's stored PID config via
+ * zones_config_set_pid() (TODO.md 6A.4: "results are proposed, never
+ * auto-applied... only then does it get written through zones_http's
+ * config"). Only valid from DONE; returns false otherwise. Resets the
+ * engine to IDLE on success.
+ *
+ * opts may be NULL, meaning {ack_unsettled=false, adopt_ceiling=false} --
+ * the original, most conservative behavior. out may be NULL when the caller
+ * does not need the ceiling-adoption outcome.
+ *
+ * opts->ack_unsettled: for a STEP-method result, acceptance is refused
+ * unless this is true whenever ANY of THREE independent trustworthiness
+ * signals reads false -- model.settled (the STEPPING-phase relative-slope
+ * detector never genuinely fired; ended via the max-duration backstop
+ * instead), model.extrapolation_converged (the asymptote-correction loop
+ * hit its iteration cap or safety ceiling without converging), or
+ * model.tau_consistent_with_gain (tau_s/dead_time_s could not be re-fitted
+ * to match the corrected k_gain_c_per_duty) -- so an operator (or automated
+ * caller) must make a deliberate, distinct choice to persist a
+ * lower-confidence fit rather than it happening silently by default. ONE
+ * acknowledgement covers all three; a refused call's ESP_LOGW names exactly
+ * which one(s) tripped, and all three are surfaced distinctly (not
+ * collapsed into one bit) through autotune_engine_get_status()/the
+ * dashboard JSON/the wire status so a caller can show the operator WHY
+ * before they tick the box. Has no effect on a RELAY-method result
+ * (relay_model_t has none of these three concepts) or on a STEP result
+ * where all three already read true/settled.
+ *
+ * A step-test acceptance also writes the fitted FOPDT model. A relay-test
+ * acceptance writes gains ONLY, and deliberately leaves any stored model
+ * alone -- see the .c for the reasoning, which is the difference between
+ * "this run measured no model" and "this run measured that there is no
+ * model".
+ *
+ * opts->adopt_ceiling additionally lets the caller adopt the run's
+ * predicted_max_ramp_ambient_c_per_hr (TODO.md 6A.4: "the ceiling is shown
+ * but not wired into max_ramp_c_per_hr") into the zone's stored ramp
+ * ceiling (zones_config_set_max_ramp()) in the same accept action, rather
+ * than requiring a separate manual edit on /settings/zones. Adopts
+ * predicted_max_ramp_ambient_c_per_hr, never the end-of-step
+ * predicted_max_ramp_c_per_hr -- see that field's own comment in
+ * autotune_engine_status_t for why the end-of-step value is unsafe to use
+ * as a hard block.
+ *
+ * Adoption is skipped (out->adoption names which condition, never a silent
+ * no-op) when:
+ *   - the method is RELAY (a relay test measures no FOPDT model, so there
+ *     is no predicted ceiling to adopt),
+ *   - the STEP result's predicted_max_ramp_ambient_c_per_hr is <= 0 (never
+ *     computed, e.g. pid_autotune_estimate_max_ramp_c_per_hr() had no
+ *     ambient headroom to extrapolate from),
+ *   - zones_config_set_model() itself was rejected/failed for this run (the
+ *     same model that produced the estimate did not persist, so adopting a
+ *     ceiling derived from it would outlive the model it depends on),
+ *   - zones_config_get_max_ramp() (the fresh read of the currently stored
+ *     ceiling) fails -- never adopt over a value that could not be read,
+ *     even though a failed read and "nothing configured yet" would
+ *     otherwise look identical, or
+ *   - the currently stored ceiling is nonzero and already tighter than (or
+ *     equal to) the new estimate -- adoption never silently tightens an
+ *     existing, deliberately-set ceiling.
+ * An out-of-range estimate (> ZONE_MAX_RAMP_C_PER_HR_MAX) is REJECTED, never
+ * clamped. A persist failure on the ceiling write itself is reported as
+ * AUTOTUNE_CEILING_FAILED_TO_PERSIST.
+ *
+ * In every case the gains (and model, if any) are still accepted/persisted
+ * regardless of adopt_ceiling's outcome -- adopt_ceiling only ever adds a
+ * write, never blocks the ones this function already made. */
+bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_result_t *out);
 
 void autotune_engine_get_status(autotune_engine_status_t *out);
 

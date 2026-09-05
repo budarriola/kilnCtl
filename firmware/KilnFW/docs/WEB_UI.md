@@ -610,10 +610,36 @@ and `zone missing or invalid` are still plain `httpd_resp_send_err()`.
 `POST /api/autotune/abort` — no body, always 200 `ok`, records the abort
 reason `aborted from web UI`.
 
-`POST /api/autotune/accept` — no body. 200 `ok`, or 400 `no completed
-autotune result to accept` (which covers both "not DONE" and "DONE but this
-method's result isn't valid"). This is the **only** path that writes tuning,
-through `zones_config_set_pid()`; results are proposed, never auto-applied.
+`POST /api/autotune/accept` — body is optional form-encoded
+`ack_unsettled=0|1` and `adopt_ceiling=0|1` (also accepts `true`/`false`; an
+absent field, or an older client that predates either one, defaults to `0`).
+Both funnel into the single on-target `autotune_engine_accept()` call
+(`autotune_accept_opts_t{ack_unsettled, adopt_ceiling}`).
+
+- `ack_unsettled` opts in to persisting a STEP-method fit that reached DONE
+  without genuinely settling (or without its extrapolation converging, or
+  without tau/L staying consistent with the corrected gain) — see the
+  page's own display of the three flags before this is ticked.
+- `adopt_ceiling` opts in to also writing the run's predicted ramp ceiling
+  (`predicted_max_ramp_ambient_c_per_hr`) into the zone's
+  `max_ramp_c_per_hr`, in the same accept action, instead of requiring a
+  separate manual edit on this page.
+
+200 response is now `{"ok":true,"ceiling_adoption":"<outcome>",
+"ceiling_old_c_per_hr":<float>,"ceiling_new_c_per_hr":<float>}` — the two
+ceiling fields are only meaningful when `adopt_ceiling=1` was sent.
+`ceiling_adoption` is one of: `ADOPTED`, `SKIPPED_NOT_REQUESTED`,
+`SKIPPED_RELAY_METHOD`, `SKIPPED_MODEL_NOT_PERSISTED`, `SKIPPED_ZERO`,
+`SKIPPED_WOULD_TIGHTEN` (a stored nonzero ceiling is never silently
+tightened), `SKIPPED_READ_FAILED` (the currently stored ceiling could not be
+read, so nothing was adopted over an unknown value), `REJECTED_OUT_OF_RANGE`
+(the estimate exceeds `ZONE_MAX_RAMP_C_PER_HR_MAX` — refused, never
+clamped), or `FAILED_TO_PERSIST` (the estimate was adoptable but the write
+itself failed). Or 400 `no completed autotune result to accept` (which
+covers both "not DONE" and "DONE but this method's result isn't valid", or
+an unsettled STEP fit without `ack_unsettled=1`). This is the **only** path
+that writes tuning, through `zones_config_set_pid()`; results are proposed,
+never auto-applied.
 
 What gets written depends on the method:
 

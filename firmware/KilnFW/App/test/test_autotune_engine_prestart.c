@@ -755,7 +755,7 @@ static void test_abort_is_a_silent_noop_before_start(void)
 static void test_accept_refuses_before_start(void)
 {
     TEST_SECTION("autotune_engine_accept() before start() -- refused, no crash");
-    TEST_CHECK(!autotune_engine_accept(false), "accept must return false, not crash");
+    TEST_CHECK(!autotune_engine_accept(NULL, NULL), "accept must return false, not crash");
 }
 
 static void test_is_active_false_before_start(void)
@@ -1166,7 +1166,7 @@ static void write_defeat_case_trace_for_zone(uint8_t zone, float baseline_c, flo
  * synthetic trace (int16 tenths-of-a-degree, exactly what record_trace_
  * sample()/autotune_unpack_zone_trace() produce on real hardware) through
  * autotune_finalize_fit() (which calls the real pid_autotune_fit_fopdt()) and then
- * through the real autotune_engine_accept(false) -- no field is hand-set.
+ * through the real autotune_engine_accept(NULL, NULL) -- no field is hand-set.
  * The trace is a clean K=100/tau=200/L=20 response run for 8*tau (1600s,
  * matching the reviewer's own repro), quantized-flat at the end, with the
  * FINAL sample dithered by -0.1, 0.0 and +0.1 degC in turn (the exact
@@ -1244,7 +1244,7 @@ static void run_one_dither_case_end_to_end(float dither_c, const char *label)
 
     s_stub_set_pid_result = true;
     int clear_ki_baseline_calls_before = g_clear_ki_baseline_calls;
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
     snprintf(msg, sizeof(msg),
             "%s: a well-converged 8*tau fit must ACCEPT WITHOUT ack_unsettled (converged=%d "
             "tau_ok=%d) -- quantization noise on the last sample must not gate acceptance",
@@ -1266,7 +1266,7 @@ static void run_one_dither_case_end_to_end(float dither_c, const char *label)
 
 static void test_accept_succeeds_end_to_end_regardless_of_last_sample_quantization_dither(void)
 {
-    TEST_SECTION("FINAL REVIEW: autotune_engine_accept(false) must succeed end-to-end on a clean "
+    TEST_SECTION("FINAL REVIEW: autotune_engine_accept(NULL, NULL) must succeed end-to-end on a clean "
                  "8*tau fit whether the last (quantized) sample dithers -0.1, 0.0, or +0.1 degC");
     run_one_dither_case_end_to_end(-0.1f, "dither -0.1C");
     run_one_dither_case_end_to_end(0.0f, "dither 0.0C");
@@ -3118,11 +3118,11 @@ static void test_autotune_engine_accept_gates_on_settled(void)
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true; /* so a would-be-successful accept has something to report */
-    bool refused = autotune_engine_accept(false);
+    bool refused = autotune_engine_accept(NULL, NULL);
     TEST_CHECK(!refused, "an unsettled STEP result must be refused without ack_unsettled");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a refused accept must not have reset the engine to IDLE");
 
-    bool accepted = autotune_engine_accept(true);
+    bool accepted = autotune_engine_accept(&(autotune_accept_opts_t){.ack_unsettled = true}, NULL);
     TEST_CHECK(accepted, "the SAME unsettled result must be accepted once ack_unsettled=true");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
     s_stub_set_pid_result = false; /* restore this file's default for every other test */
@@ -3157,12 +3157,12 @@ static void test_autotune_engine_accept_gates_on_extrapolation_converged(void)
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    bool refused = autotune_engine_accept(false);
+    bool refused = autotune_engine_accept(NULL, NULL);
     TEST_CHECK(!refused, "an unconverged extrapolation must be refused without ack_unsettled, even "
                          "though settled and tau_consistent are both true");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a refused accept must not have reset the engine to IDLE");
 
-    bool accepted = autotune_engine_accept(true);
+    bool accepted = autotune_engine_accept(&(autotune_accept_opts_t){.ack_unsettled = true}, NULL);
     TEST_CHECK(accepted, "the SAME result must be accepted once ack_unsettled=true");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
     s_stub_set_pid_result = false;
@@ -3196,12 +3196,12 @@ static void test_autotune_engine_accept_gates_on_tau_consistent(void)
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    bool refused = autotune_engine_accept(false);
+    bool refused = autotune_engine_accept(NULL, NULL);
     TEST_CHECK(!refused, "a tau-inconsistent fit must be refused without ack_unsettled, even though "
                          "settled and extrapolation_converged are both true");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a refused accept must not have reset the engine to IDLE");
 
-    bool accepted = autotune_engine_accept(true);
+    bool accepted = autotune_engine_accept(&(autotune_accept_opts_t){.ack_unsettled = true}, NULL);
     TEST_CHECK(accepted, "the SAME result must be accepted once ack_unsettled=true");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
     s_stub_set_pid_result = false;
@@ -3238,7 +3238,7 @@ static void test_autotune_engine_accept_does_not_block_a_fully_clean_fit(void)
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
     TEST_CHECK(accepted, "a fully clean fit must be accepted with ack_unsettled=false -- the common, "
                          "healthy path must never require the acknowledgement checkbox");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
@@ -3286,7 +3286,7 @@ static void test_autotune_engine_accept_writes_tuning_quality_on_step_success(vo
     s_stub_tuning_quality_zone = 0xFF;
     memset(&s_stub_tuning_quality_written, 0, sizeof(s_stub_tuning_quality_written));
 
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
 
     TEST_CHECK(accepted, "a fully clean STEP fit accepts");
     TEST_CHECK(s_stub_tuning_quality_call_count == 1,
@@ -3338,7 +3338,7 @@ static void test_autotune_engine_accept_skips_tuning_quality_when_model_persist_
     s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
     s_stub_tuning_quality_call_count = 0;
 
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
 
     TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live, per this "
                          "function's own comment on why a model-persist failure is logged, not propagated");
@@ -3372,7 +3372,7 @@ static void test_autotune_engine_accept_skips_tuning_quality_on_relay_method(voi
     s_stub_set_model_result = true;
     s_stub_tuning_quality_call_count = 0;
 
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
 
     TEST_CHECK(accepted, "a relay-method accept still succeeds -- gains only, no model");
     TEST_CHECK(s_stub_tuning_quality_call_count == 0,
@@ -3417,7 +3417,7 @@ static void test_autotune_engine_accept_writes_coupling_diag_k_dc_on_step_succes
     s_stub_set_coupling_diag_k_dc_zone = 0xFF;
     s_stub_set_coupling_diag_k_dc_value = 0.0f;
 
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
 
     TEST_CHECK(accepted, "a fully clean STEP fit accepts");
     TEST_CHECK(s_stub_set_coupling_diag_k_dc_call_count == 1,
@@ -3461,7 +3461,7 @@ static void test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_pers
     s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
     s_stub_set_coupling_diag_k_dc_call_count = 0;
 
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
 
     TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live");
     TEST_CHECK(s_stub_set_coupling_diag_k_dc_call_count == 0,
@@ -3493,7 +3493,7 @@ static void test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method
     s_stub_set_model_result = true;
     s_stub_set_coupling_diag_k_dc_call_count = 0;
 
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
 
     TEST_CHECK(accepted, "a relay-method accept still succeeds -- gains only, no model");
     TEST_CHECK(s_stub_set_coupling_diag_k_dc_call_count == 0,
@@ -3544,9 +3544,10 @@ static void test_autotune_engine_accept_ex_adopts_ceiling_when_requested(void)
     s_stub_get_max_ramp_result = true;
     s_stub_get_max_ramp_value = 0.0f; /* no ceiling configured yet -- adoption cannot tighten */
 
-    autotune_ceiling_adoption_t outcome = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED;
-    float old_c = -1.0f, new_c = -1.0f;
-    bool accepted = autotune_engine_accept_ex2(false, true, &outcome, &old_c, &new_c);
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED,
+                                        .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
+    bool accepted = autotune_engine_accept(&opts, &result);
 
     TEST_CHECK(accepted, "a fully clean STEP fit accepts with adopt_ceiling requested");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 1,
@@ -3555,8 +3556,8 @@ static void test_autotune_engine_accept_ex_adopts_ceiling_when_requested(void)
     TEST_CHECK_NEAR(s_stub_set_max_ramp_value, 123.5f, 1e-4,
                     "written with the AMBIENT-evaluated predicted_max_ramp_ambient_c_per_hr, not the "
                     "end-of-step predicted_max_ramp_c_per_hr (40.0f)");
-    TEST_CHECK(outcome == AUTOTUNE_CEILING_ADOPTED, "reported outcome is ADOPTED");
-    TEST_CHECK_NEAR(new_c, 123.5f, 1e-4, "reported new ceiling matches what was written");
+    TEST_CHECK(result.adoption == AUTOTUNE_CEILING_ADOPTED, "reported outcome is ADOPTED");
+    TEST_CHECK_NEAR(result.new_ceiling_c_per_hr, 123.5f, 1e-4, "reported new ceiling matches what was written");
 
     s_stub_set_pid_result = false;
     s_stub_set_model_result = false;
@@ -3599,19 +3600,130 @@ static void test_autotune_engine_accept_ex2_skips_when_it_would_tighten(void)
     s_stub_get_max_ramp_value = 150.0f; /* stored ceiling is LOOSER than the new 50.0f estimate --
                                           * adopting the estimate would TIGHTEN it, so it must skip */
 
-    autotune_ceiling_adoption_t outcome = AUTOTUNE_CEILING_ADOPTED;
-    float old_c = -1.0f, new_c = -1.0f;
-    bool accepted = autotune_engine_accept_ex2(false, true, &outcome, &old_c, &new_c);
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_ADOPTED,
+                                        .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
+    bool accepted = autotune_engine_accept(&opts, &result);
 
     TEST_CHECK(accepted, "the accept itself still succeeds");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
               "zones_config_set_max_ramp() must NOT be called when it would tighten the stored ceiling");
-    TEST_CHECK(outcome == AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN, "reported outcome is SKIPPED_WOULD_TIGHTEN");
-    TEST_CHECK_NEAR(old_c, 150.0f, 1e-4, "reported old ceiling is the stored (looser) value");
-    TEST_CHECK_NEAR(new_c, 0.0f, 1e-4, "reported new ceiling stays at its init value -- nothing was written");
+    TEST_CHECK(result.adoption == AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN, "reported outcome is SKIPPED_WOULD_TIGHTEN");
+    TEST_CHECK_NEAR(result.old_ceiling_c_per_hr, 150.0f, 1e-4, "reported old ceiling is the stored (looser) value");
+    TEST_CHECK_NEAR(result.new_ceiling_c_per_hr, 0.0f, 1e-4, "reported new ceiling stays at its init value -- nothing was written");
 
     s_stub_set_pid_result = false;
     s_stub_set_model_result = false;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+}
+
+/* Review fix: a failed read of the currently stored ceiling must never be
+ * treated as "no old value" -- that would let adoption proceed and silently
+ * overwrite a ceiling we could not actually confirm the value of.
+ * s_stub_get_max_ramp_result = false models zones_config_get_max_ramp()
+ * failing (see that stub just above); the accept must report
+ * AUTOTUNE_CEILING_SKIPPED_READ_FAILED and never call
+ * zones_config_set_max_ramp() at all. */
+static void test_autotune_engine_accept_skips_ceiling_adoption_when_read_fails(void)
+{
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) skips adoption -- SKIPPED_READ_FAILED -- "
+                 "when zones_config_get_max_ramp() fails, never falling through to adopt as if unconfigured");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 2;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 50.0f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+    s_stub_get_max_ramp_result = false; /* forces the read to fail */
+    s_stub_get_max_ramp_value = 999.0f; /* must never surface -- the read failed */
+
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_ADOPTED,
+                                        .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
+    bool accepted = autotune_engine_accept(&opts, &result);
+
+    TEST_CHECK(accepted, "the accept itself still succeeds -- gains/model are already live");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
+              "zones_config_set_max_ramp() must NOT be called when the old ceiling could not be read");
+    TEST_CHECK(result.adoption == AUTOTUNE_CEILING_SKIPPED_READ_FAILED, "reported outcome is SKIPPED_READ_FAILED");
+    TEST_CHECK_NEAR(result.old_ceiling_c_per_hr, 0.0f, 1e-4,
+                    "reported old ceiling stays at the function's own reset value -- the failed read's "
+                    "999.0f value must never surface");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+}
+
+/* Review fix: a failed persist of the new ceiling (zones_config_set_max_ramp()
+ * returning false) used to be silently discarded -- the caller had no way to
+ * tell it apart from ADOPTED. Must now report AUTOTUNE_CEILING_FAILED_TO_
+ * PERSIST distinctly. */
+static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
+{
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) reports FAILED_TO_PERSIST -- not ADOPTED -- "
+                 "when zones_config_set_max_ramp() itself fails");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 2;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 123.5f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+    s_stub_set_max_ramp_result = false; /* forces the persist to fail */
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f; /* no ceiling configured yet -- would otherwise be adoptable */
+
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED,
+                                        .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
+    bool accepted = autotune_engine_accept(&opts, &result);
+
+    TEST_CHECK(accepted, "the accept itself still succeeds -- gains/model are already live");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == 1,
+              "zones_config_set_max_ramp() is still attempted exactly once");
+    TEST_CHECK(result.adoption == AUTOTUNE_CEILING_FAILED_TO_PERSIST, "reported outcome is FAILED_TO_PERSIST, "
+              "not ADOPTED, even though the estimate itself was adoptable");
+    TEST_CHECK_NEAR(result.new_ceiling_c_per_hr, 0.0f, 1e-4,
+                    "reported new ceiling stays at the function's own reset value -- the write never "
+                    "actually landed");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+    s_stub_set_max_ramp_result = true;
     s_stub_get_max_ramp_result = true;
     s_stub_get_max_ramp_value = 0.0f;
 }
@@ -3647,15 +3759,16 @@ static void test_autotune_engine_accept_ex2_rejects_out_of_range_not_clamped(voi
     s_stub_get_max_ramp_result = true;
     s_stub_get_max_ramp_value = 0.0f;
 
-    autotune_ceiling_adoption_t outcome = AUTOTUNE_CEILING_ADOPTED;
-    float old_c = -1.0f, new_c = -1.0f;
-    bool accepted = autotune_engine_accept_ex2(false, true, &outcome, &old_c, &new_c);
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_ADOPTED,
+                                        .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
+    bool accepted = autotune_engine_accept(&opts, &result);
 
     TEST_CHECK(accepted, "the accept itself still succeeds -- gains/model are already live");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
               "zones_config_set_max_ramp() must NOT be called -- out of range is a refusal, not a clamp");
-    TEST_CHECK(outcome == AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE, "reported outcome is REJECTED_OUT_OF_RANGE");
-    TEST_CHECK_NEAR(new_c, 0.0f, 1e-4, "reported new ceiling stays at its init value -- nothing was written");
+    TEST_CHECK(result.adoption == AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE, "reported outcome is REJECTED_OUT_OF_RANGE");
+    TEST_CHECK_NEAR(result.new_ceiling_c_per_hr, 0.0f, 1e-4, "reported new ceiling stays at its init value -- nothing was written");
 
     s_stub_set_pid_result = false;
     s_stub_set_model_result = false;
@@ -3695,7 +3808,7 @@ static void test_autotune_engine_accept_does_not_adopt_ceiling_by_default(void)
     s_stub_set_model_result = true;
     s_stub_set_max_ramp_call_count = 0;
 
-    bool accepted = autotune_engine_accept(false);
+    bool accepted = autotune_engine_accept(NULL, NULL);
 
     TEST_CHECK(accepted, "the accept itself still succeeds -- adopt_ceiling only ever adds a write");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
@@ -3741,7 +3854,8 @@ static void test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling(void)
     s_stub_get_max_ramp_result = true;
     s_stub_get_max_ramp_value = 0.0f;
 
-    bool accepted = autotune_engine_accept_ex(false, true);
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    bool accepted = autotune_engine_accept(&opts, NULL);
 
     TEST_CHECK(accepted, "the accept itself still succeeds");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
@@ -3776,7 +3890,8 @@ static void test_autotune_engine_accept_ex_does_not_adopt_ceiling_on_relay_metho
     s_stub_set_model_result = true;
     s_stub_set_max_ramp_call_count = 0;
 
-    bool accepted = autotune_engine_accept_ex(false, true);
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    bool accepted = autotune_engine_accept(&opts, NULL);
 
     TEST_CHECK(accepted, "a relay-method accept still succeeds -- gains only, no model, no ceiling");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 0,
@@ -5665,6 +5780,8 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_ex_does_not_adopt_a_zero_ceiling();
     test_autotune_engine_accept_ex_does_not_adopt_ceiling_on_relay_method();
     test_autotune_engine_accept_ex2_skips_when_it_would_tighten();
+    test_autotune_engine_accept_skips_ceiling_adoption_when_read_fails();
+    test_autotune_engine_accept_reports_ceiling_persist_failure();
     test_autotune_engine_accept_ex2_rejects_out_of_range_not_clamped();
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();

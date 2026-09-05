@@ -323,12 +323,16 @@ STEPPING (records the response every 5s, up to 4h) -> DONE | ABORTED`) ->
 -> `pid_autotune_tune_from_fopdt()` computes SIMC gains (`lambda = 3*L`
 default, "robust" per TODO.md 6A.4's own recommendation for a kiln) ->
 `GET /api/autotune` shows the proposed `{Kp,Ki,Kd}` and predicted max ramp
-rate -> operator reviews -> `POST /api/autotune/accept` is the *only* path
-that writes anything, through `zones_config_set_pid()` (new setter,
-`zones_http.c` stays the sole NVS owner — neither autotune module ever
-touches NVS itself). `POST /api/autotune/abort` works at any point; the
-engine also self-aborts on a guard trip or on hitting the 4h budget without
-a fittable trace.
+rate -> operator reviews -> `POST /api/autotune/accept` (optionally with
+`adopt_ceiling=1`) is the *only* path that writes anything, through
+`zones_config_set_pid()` (new setter, `zones_http.c` stays the sole NVS
+owner — neither autotune module ever touches NVS itself). `POST
+/api/autotune/abort` works at any point; the engine also self-aborts on a
+guard trip or on hitting the 4h budget without a fittable trace. The
+adopted ceiling is the theoretical ambient maximum `K*u_max/tau*3600`
+(`predicted_max_ramp_ambient_c_per_hr`) and ignores dead time entirely, so
+the real achievable ramp on hardware is somewhat lower than what gets
+written to `max_ramp_c_per_hr`.
 
 **Guard coverage during STEPPING with no `max_temp_c` configured (fixed
 2026-08-24).** The step test has no real setpoint, so `thermal_guard`'s

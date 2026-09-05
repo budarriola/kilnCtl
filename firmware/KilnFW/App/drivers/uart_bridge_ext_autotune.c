@@ -177,7 +177,8 @@ static void autotune_handle_message(void *vargs)
                  * (autotune_engine.h) for why a short payload correctly
                  * defaults to false. */
                 bool ack_unsettled = (msg.length >= 2) && (msg.payload[1] != 0);
-                bool ok = autotune_engine_accept(ack_unsettled);
+                autotune_accept_opts_t accept_opts = {.ack_unsettled = ack_unsettled, .adopt_ceiling = false};
+                bool ok = autotune_engine_accept(&accept_opts, NULL);
                 uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_AUTOTUNE, subcmd, ok,
                                              ok ? NULL : "no completed autotune result to accept, or it never settled "
                                                          "and needs the ack_unsettled byte set to accept anyway");

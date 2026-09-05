@@ -343,11 +343,9 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
         }
     }
 
-    autotune_ceiling_adoption_t ceiling_outcome = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED;
-    float ceiling_old_c_per_hr = 0.0f;
-    float ceiling_new_c_per_hr = 0.0f;
-    if (!autotune_engine_accept_ex2(ack_unsettled, adopt_ceiling, &ceiling_outcome, &ceiling_old_c_per_hr,
-                                     &ceiling_new_c_per_hr)) {
+    autotune_accept_opts_t accept_opts = {.ack_unsettled = ack_unsettled, .adopt_ceiling = adopt_ceiling};
+    autotune_accept_result_t accept_result = {0};
+    if (!autotune_engine_accept(&accept_opts, &accept_result)) {
         /* The specific reason (never settled / extrapolation didn't
          * converge / tau inconsistent with the corrected gain) is in the
          * ESP_LOGW autotune_engine_accept() itself already emitted -- see
@@ -363,11 +361,11 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
     /* Review fix: report the ceiling-adoption outcome to the caller instead
-     * of only the ESP_LOGx lines inside autotune_engine_accept_ex2() --
+     * of only the ESP_LOGx lines inside autotune_engine_accept() --
      * "adopted" vs "silently skipped" vs "rejected as out of range" were
      * previously indistinguishable from this response alone. */
     const char *outcome_name = "SKIPPED_NOT_REQUESTED";
-    switch (ceiling_outcome) {
+    switch (accept_result.adoption) {
     case AUTOTUNE_CEILING_ADOPTED: outcome_name = "ADOPTED"; break;
     case AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED: outcome_name = "SKIPPED_NOT_REQUESTED"; break;
     case AUTOTUNE_CEILING_SKIPPED_RELAY_METHOD: outcome_name = "SKIPPED_RELAY_METHOD"; break;
@@ -375,12 +373,25 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
     case AUTOTUNE_CEILING_SKIPPED_ZERO: outcome_name = "SKIPPED_ZERO"; break;
     case AUTOTUNE_CEILING_SKIPPED_WOULD_TIGHTEN: outcome_name = "SKIPPED_WOULD_TIGHTEN"; break;
     case AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE: outcome_name = "REJECTED_OUT_OF_RANGE"; break;
+    case AUTOTUNE_CEILING_SKIPPED_READ_FAILED: outcome_name = "SKIPPED_READ_FAILED"; break;
+    case AUTOTUNE_CEILING_FAILED_TO_PERSIST: outcome_name = "FAILED_TO_PERSIST"; break;
     }
-    char json[192];
+    /* Sized to the longest actual response rather than a round number (this
+     * task stack has been within 64 B of overflow before -- see
+     * check_stack_margin_baseline.ps1). Longest pieces: the format's fixed
+     * text is 81 bytes including the NUL-terminator's slot; the longest
+     * outcome name is "SKIPPED_MODEL_NOT_PERSISTED" (27 bytes); both
+     * ceiling values are validated to [0, ZONE_MAX_RAMP_C_PER_HR_MAX] =
+     * [0, 1000.0] before ever reaching here (zones_config_set_max_ramp()'s
+     * own range check, and the READ_FAILED/out-of-range paths above never
+     * populate a nonzero value), so "%.1f" of either is at most 6 bytes
+     * ("1000.0"). 81 + 27 + 6 + 6 = 120; rounded up to a clean 128. */
+    char json[128];
     int n = snprintf(json, sizeof(json),
                       "{\"ok\":true,\"ceiling_adoption\":\"%s\",\"ceiling_old_c_per_hr\":%.1f,"
                       "\"ceiling_new_c_per_hr\":%.1f}",
-                      outcome_name, (double)ceiling_old_c_per_hr, (double)ceiling_new_c_per_hr);
+                      outcome_name, (double)accept_result.old_ceiling_c_per_hr,
+                      (double)accept_result.new_ceiling_c_per_hr);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }

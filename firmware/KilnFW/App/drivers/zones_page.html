@@ -2965,6 +2965,11 @@ document.getElementById('atAcceptBtn').addEventListener('click', function () {
                                 'would silently restrict this zone further, so it was left unchanged.',
         REJECTED_OUT_OF_RANGE: 'Accepted. Ceiling REJECTED -- the predicted rate is out of range and ' +
                                 'was not adopted or clamped.',
+        SKIPPED_READ_FAILED: 'Accepted. Ceiling NOT adopted -- the currently stored ceiling could not be ' +
+                              'read, so a new one was not written over an unknown value.',
+        FAILED_TO_PERSIST: 'Accepted. Ceiling adoption FAILED -- the predicted rate was rejected or ' +
+                            'failed to save; the stored ceiling (' + data.ceiling_old_c_per_hr +
+                            ' °C/hr) is unchanged.',
       };
       document.getElementById('atStatus').textContent = msgs[data.ceiling_adoption] || 'Accepted.';
     }).catch(function () {});

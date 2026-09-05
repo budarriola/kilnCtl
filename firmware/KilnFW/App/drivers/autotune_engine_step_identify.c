@@ -348,8 +348,6 @@ void autotune_finalize_fit(void)
      * rate left at the hottest point this run reached. This is the value
      * autotune_engine_accept_ex() adopts into the zone's ramp ceiling --
      * see autotune_engine.h's field comment. */
-    s_at.predicted_max_ramp_ambient_c_per_hr =
-        pid_autotune_estimate_max_ramp_c_per_hr(&s_at.model, 1.0f, baseline_c, baseline_c);
 
     /* TODO.md 6A.5(b): fill row zone_index of the coupling matrix -- the
      * direct cell (i==i) is this same model, every other configured zone
