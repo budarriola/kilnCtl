@@ -582,6 +582,27 @@ class SafetyFwVersion:
         commissioned."""
         return self.config_crc != 0
 
+    @property
+    def known(self) -> bool:
+        """False when the Pico has never reported a build identity -- an
+        empty ``commit`` (see the class docstring: this, not ``dirty``, is
+        the "unknown" signal)."""
+        return bool(self.commit)
+
+    def describe(self) -> str:
+        if not self.known:
+            identity = "unknown (Pico has not reported a build identity)"
+        else:
+            dirty = " (dirty)" if self.dirty else ""
+            identity = f"{self.commit}{dirty} built {self.built or 'unknown time'}"
+        commissioned = "commissioned" if self.commissioned else "NOT commissioned (default config)"
+        return (
+            f"Pico build: {identity}, boot_id={self.boot_id}, "
+            f"config_version={self.config_version}, "
+            f"config_crc=0x{self.config_crc:04X} ({commissioned}), "
+            f"protocol v{self.protocol_version} (min compatible v{self.min_compatible})"
+        )
+
 
 @dataclass(frozen=True)
 class SafetyCtCalChannel:

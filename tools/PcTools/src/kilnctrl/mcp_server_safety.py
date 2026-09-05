@@ -106,6 +106,26 @@ def safety_get_link_stats() -> str:
 
 
 @_srv._tool()
+def safety_get_fw_version() -> str:
+    """Read the ESP's cache of the Pico's own build identity (FW_VERSION /
+    Frame C): commit, build datetime, dirty bit, boot_id, and the active
+    config version/CRC on the safety processor.
+
+    This is the Pico-side counterpart to get_fw_version() (which reports the
+    ESP's own build) -- the only place today that surfaces which firmware the
+    RP2040 safety processor is actually running. Cache-only, like
+    safety_get_status/safety_get_diag: never a live round trip to the Pico.
+    An empty/unknown commit means the Pico has never reported a build
+    identity (no Pico firmware attached, or link never up), not an error.
+    """
+    try:
+        version = _srv._safety.get_fw_version()
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    return version.describe()
+
+
+@_srv._tool()
 def safety_request_enable(enable: bool) -> str:
     """Ask the safety processor to permit (or drop) heating.
 

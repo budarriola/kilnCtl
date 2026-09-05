@@ -196,5 +196,45 @@ class SafetyFwVersionParseTests(unittest.TestCase):
         self.assertFalse(value.commissioned)
 
 
+class SafetyFwVersionDescribeTests(unittest.TestCase):
+    """describe() backs the new safety_get_fw_version MCP tool
+    (mcp_server_safety.py) -- these check its text directly rather than
+    going through the tool wrapper, since the wrapper is a one-line
+    passthrough."""
+
+    def test_known_identity_is_reported(self):
+        vector = _build_vector(
+            commit=b"a1b2c3d",
+            datetime=b"2026-08-21 12:00:00Z",
+            boot_id=9,
+            config_version=2,
+            config_crc=0xBEEF,
+            dirty=0,
+        )
+        _subcommand, value = devices.parse_safety_response(vector)
+        text = value.describe()
+        self.assertIn("a1b2c3d", text)
+        self.assertIn("2026-08-21 12:00:00Z", text)
+        self.assertIn("commissioned", text)
+        self.assertNotIn("unknown (Pico has not reported", text)
+
+    def test_unknown_identity_reports_unknown_not_the_empty_string(self):
+        # Negative test: prove describe() actually branches on `known` --
+        # without the `if not self.known` guard, an empty commit would
+        # silently render as "Pico build: " with nothing after it instead of
+        # naming the state explicitly.
+        vector = _build_vector(commit=b"", datetime=b"", dirty=1)
+        _subcommand, value = devices.parse_safety_response(vector)
+        self.assertFalse(value.known)
+        text = value.describe()
+        self.assertIn("unknown (Pico has not reported a build identity)", text)
+
+    def test_not_commissioned_is_named_explicitly(self):
+        vector = _build_vector(commit=b"abc", datetime=b"2026", config_crc=0)
+        _subcommand, value = devices.parse_safety_response(vector)
+        text = value.describe()
+        self.assertIn("NOT commissioned", text)
+
+
 if __name__ == "__main__":
     unittest.main()

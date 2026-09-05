@@ -229,6 +229,7 @@ def get_board_state() -> str:
         "io": _snapshot_section(_srv._io.read),
         "safety_status": _snapshot_section(_srv._safety.get_status),
         "safety_link_stats": _snapshot_section(_srv._safety.get_link_stats),
+        "safety_fw_version": _snapshot_section(_srv._safety.get_fw_version),
         "wifi_status": _snapshot_section(_srv._wifi.get_status),
         "control_zones": _snapshot_section(_control_zones_dict),
         "profiles_exec_status": _snapshot_section(_srv._profiles.get_exec_status),

@@ -348,6 +348,8 @@ __all__ = [
     "SafetyLinkStats",
     "SafetyResponseError",
     "safety_get_status",
+    "safety_get_fw_version",
+    "SafetyFwVersion",
     "safety_request_enable",
     "safety_ping",
     "safety_get_link_stats",
