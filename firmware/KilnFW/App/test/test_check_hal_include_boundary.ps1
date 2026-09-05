@@ -18,8 +18,17 @@
 #      label) and zero strict violations (driver/gpio.h is not one of the
 #      two strictly-enforced headers).
 #   3. Proves the ratchet itself can fail: takes the REAL tree's current
-#      "driver/" count and calls the scan/compare logic with a baseline
-#      set one below that real count -- expects a ratchet failure.
+#      "driver/" count and calls the PRODUCTION Test-HalRatchet function
+#      (the same one check_hal_include_boundary.ps1's main body calls) with
+#      a synthetic baseline set one below that real count -- expects exactly
+#      one violation naming "driver/". 3b confirms a baseline at the real
+#      count does NOT trip it.
+#   4. Proves the strict allowlist has teeth: injects
+#      `#include "esp_ota_ops.h"` into a non-allowlisted scratch copy --
+#      expects exactly one strict violation.
+#   5. The same injected include on an allowlisted path (dashboard_http.c)
+#      -- expects zero strict violations, proving the allowlist is checked
+#      by path, not just by header name.
 #
 # This does not touch the real repo tree or the real baseline file; it
 # dot-sources tools/check_hal_include_boundary.ps1 (which, per its own
@@ -93,12 +102,13 @@ if ($dirtyScan.StrictViolations.Count -ne 0) {
 }
 
 # --- Assertion 3: the ratchet itself can fail. Scan the REAL tree, take
-# the real "driver/" count, and confirm that a baseline set one below it
-# is flagged as exceeded by the same comparison check_hal_include_boundary.ps1
-# uses. This reproduces that comparison inline (rather than re-invoking the
-# whole script with a swapped-out baseline file, which would mean writing
-# to a file outside the scratchpad) so the assertion is about the ratchet
-# LOGIC being able to fail, not about file I/O plumbing. ---
+# the real "driver/" count, and call the PRODUCTION Test-HalRatchet function
+# (the exact same function check_hal_include_boundary.ps1's main body calls
+# against the real baseline file) with a synthetic baseline set one below
+# that real count. Expect exactly one ratchet violation, naming "driver/".
+# This calls the real comparison, not a reimplementation of it -- a bug in
+# Test-HalRatchet itself would be caught here, which the old inline
+# `$count -gt $count-1` tautology could never do. ---
 $appDirReal = Join-Path $repoRoot "firmware\KilnFW\App"
 $saftyDirReal = Join-Path $repoRoot "firmware\SaftyFW\src"
 $realFiles = @()
@@ -109,17 +119,64 @@ $realScan = Invoke-HalBoundaryScan -RelPaths $realFiles -FileRoot $repoRoot
 $realDriverCount = $realScan.RatchetCounts["driver/"]
 $tooLowBaseline = $realDriverCount - 1
 
-if ($realDriverCount -le $tooLowBaseline) {
-    $failures += "Assertion 3 FAILED: test arithmetic error, realDriverCount=$realDriverCount tooLowBaseline=$tooLowBaseline."
-} elseif (-not ($realDriverCount -gt $tooLowBaseline)) {
-    $failures += "Assertion 3 FAILED: expected real 'driver/' count ($realDriverCount) to exceed a baseline set one below it ($tooLowBaseline), i.e. expected the ratchet comparison to trip -- it did not."
+$syntheticBaseline = [ordered]@{}
+foreach ($label in $realScan.RatchetCounts.Keys) { $syntheticBaseline[$label] = $realScan.RatchetCounts[$label] }
+$syntheticBaseline["driver/"] = $tooLowBaseline
+
+$ratchetResult = Test-HalRatchet -Counts $realScan.RatchetCounts -Baseline $syntheticBaseline
+$driverViolations = @($ratchetResult | Where-Object { $_ -like "driver/*" })
+
+if ($ratchetResult.Count -ne 1) {
+    $failures += "Assertion 3 FAILED: expected exactly 1 ratchet violation from Test-HalRatchet with a baseline one below the real 'driver/' count ($realDriverCount vs baseline $tooLowBaseline), got $($ratchetResult.Count): $($ratchetResult -join ' | ')"
+} elseif ($driverViolations.Count -ne 1) {
+    $failures += "Assertion 3 FAILED: the single ratchet violation did not name 'driver/': $($ratchetResult -join ' | ')"
 } else {
-    Write-Host "Assertion 3 OK: real 'driver/' count is $realDriverCount; a baseline of $tooLowBaseline would correctly trip the ratchet ($realDriverCount -gt $tooLowBaseline)."
+    Write-Host "Assertion 3 OK: Test-HalRatchet (production function) flagged 'driver/' with baseline $tooLowBaseline vs real count $realDriverCount -- $($driverViolations[0])"
+}
+
+# --- Assertion 3b: negate the check -- a baseline AT or ABOVE the real count
+# must NOT trip the ratchet. Proves Test-HalRatchet isn't just always-fail. ---
+$syntheticBaselineOk = [ordered]@{}
+foreach ($label in $realScan.RatchetCounts.Keys) { $syntheticBaselineOk[$label] = $realScan.RatchetCounts[$label] }
+$ratchetResultOk = Test-HalRatchet -Counts $realScan.RatchetCounts -Baseline $syntheticBaselineOk
+if ($ratchetResultOk.Count -ne 0) {
+    $failures += "Assertion 3b FAILED: baseline equal to the real counts should produce 0 ratchet violations, got $($ratchetResultOk.Count): $($ratchetResultOk -join ' | ')"
+}
+
+# --- Assertion 4: strict allowlist has teeth. Copy a non-allowlisted file
+# (pid.c, same clean copy from assertion 1) and inject
+# `#include "esp_ota_ops.h"`. Since scratch_pid_clean.c is not on
+# $OtaOpsAllowlist, this must produce exactly one strict violation. ---
+$otaDirtyRel = "scratch_pid_ota_dirty.c"
+$otaDirtyFull = Join-Path $scratchDir $otaDirtyRel
+$otaInjected = @('#include "esp_ota_ops.h"') + $content
+Set-Content -Path $otaDirtyFull -Value $otaInjected -Encoding utf8
+
+$otaDirtyScan = Invoke-HalBoundaryScan -RelPaths @($otaDirtyRel) -FileRoot $scratchDir
+if ($otaDirtyScan.StrictViolations.Count -ne 1) {
+    $failures += "Assertion 4 FAILED: non-allowlisted file with injected esp_ota_ops.h scored $($otaDirtyScan.StrictViolations.Count) strict violation(s), expected exactly 1."
+}
+
+# --- Assertion 5: the SAME injected include, on an allowlisted path, must
+# score ZERO strict violations -- proves the allowlist is consulted by path,
+# not just by header name. dashboard_http.c is on $OtaOpsAllowlist for
+# esp_ota_ops.h. ---
+$allowlistedRel = "firmware/KilnFW/App/drivers/dashboard_http.c"
+$allowlistedScanDir = Join-Path $scratchDir "allowlisted_root"
+$allowlistedFull = Join-Path $allowlistedScanDir ($allowlistedRel -replace '/', '\')
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $allowlistedFull) | Out-Null
+Set-Content -Path $allowlistedFull -Value $otaInjected -Encoding utf8
+
+$allowlistedScan = Invoke-HalBoundaryScan -RelPaths @($allowlistedRel) -FileRoot $allowlistedScanDir
+if ($allowlistedScan.StrictViolations.Count -ne 0) {
+    $failures += "Assertion 5 FAILED: allowlisted path ($allowlistedRel) with injected esp_ota_ops.h scored $($allowlistedScan.StrictViolations.Count) strict violation(s), expected 0."
 }
 
 # Cleanup scratch copies (best-effort; scratchpad is session-scoped anyway).
 Remove-Item -Path $cleanFull -Force -ErrorAction SilentlyContinue
 Remove-Item -Path $dirtyFull -Force -ErrorAction SilentlyContinue
+Remove-Item -Path $otaDirtyFull -Force -ErrorAction SilentlyContinue
+Remove-Item -Path $allowlistedScanDir -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($failures.Count -gt 0) {
     Write-Host "TEST_CHECK_HAL_INCLUDE_BOUNDARY FAILED:" -ForegroundColor Red
@@ -127,5 +184,5 @@ if ($failures.Count -gt 0) {
     throw "$($failures.Count) assertion(s) failed."
 }
 
-Write-Host "test_check_hal_include_boundary: all assertions passed (clean=0 violations, injected=1 ratchet hit, ratchet-fail-detection confirmed)." -ForegroundColor Green
+Write-Host "test_check_hal_include_boundary: all assertions passed (clean=0 violations, injected=1 ratchet hit, ratchet-fail-detection confirmed via production Test-HalRatchet, strict allowlist negative/positive confirmed)." -ForegroundColor Green
 exit 0

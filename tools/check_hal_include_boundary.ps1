@@ -38,6 +38,13 @@
 # 200, something is broken (wrong root, empty glob, moved directory) and
 # this check must not report a quiet, meaningless pass.
 #
+# Scan roots are firmware/KilnFW/App and firmware/SaftyFW/src only.
+# firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/ is deliberately
+# NOT scanned: owner decision is that UnitTestFw is kept as-is (see
+# project memory "Keep UnitTestFw for now", 2026-09-05) and is not part of
+# the HAL boundary this check enforces -- it is a separate test-fixture
+# tree, not production KilnFW/SaftyFW code.
+#
 # Usage:
 #   powershell -File tools\check_hal_include_boundary.ps1
 #   powershell -File tools\check_hal_include_boundary.ps1 -UpdateBaseline
@@ -126,11 +133,11 @@ function Get-ScanFiles {
 # the baseline file and in output; Pattern is matched against a
 # comment-stripped #include line. ---
 $RatchetHeaders = [ordered]@{
-    "driver/"      = '^\s*#include\s*["<]driver/'
-    "hardware/"    = '^\s*#include\s*["<]hardware/'
-    "nvs.h"        = '^\s*#include\s*["<]nvs\.h[">]'
-    "nvs_flash.h"  = '^\s*#include\s*["<]nvs_flash\.h[">]'
-    "esp_timer.h"  = '^\s*#include\s*["<]esp_timer\.h[">]'
+    "driver/"      = '^\s*#\s*include\s*["<]driver/'
+    "hardware/"    = '^\s*#\s*include\s*["<]hardware/'
+    "nvs.h"        = '^\s*#\s*include\s*["<]nvs\.h[">]'
+    "nvs_flash.h"  = '^\s*#\s*include\s*["<]nvs_flash\.h[">]'
+    "esp_timer.h"  = '^\s*#\s*include\s*["<]esp_timer\.h[">]'
 }
 
 # --- Strict, per-file allowlists. Full repo-relative paths only -- never a
@@ -165,9 +172,9 @@ $WifiAllowlist = @(
 )
 
 $StrictHeaders = [ordered]@{
-    "esp_ota_ops.h" = @{ Pattern = '^\s*#include\s*["<]esp_ota_ops\.h[">]'; Allowlist = $OtaOpsAllowlist }
-    "esp_wifi.h"    = @{ Pattern = '^\s*#include\s*["<]esp_wifi\.h[">]';    Allowlist = $WifiAllowlist }
-    "esp_netif.h"   = @{ Pattern = '^\s*#include\s*["<]esp_netif\.h[">]';  Allowlist = $WifiAllowlist }
+    "esp_ota_ops.h" = @{ Pattern = '^\s*#\s*include\s*["<]esp_ota_ops\.h[">]'; Allowlist = $OtaOpsAllowlist }
+    "esp_wifi.h"    = @{ Pattern = '^\s*#\s*include\s*["<]esp_wifi\.h[">]';    Allowlist = $WifiAllowlist }
+    "esp_netif.h"   = @{ Pattern = '^\s*#\s*include\s*["<]esp_netif\.h[">]';  Allowlist = $WifiAllowlist }
 }
 
 # Excludes firmware/hwAbstraction/ (the boundary this check exists to
@@ -195,12 +202,13 @@ function Invoke-HalBoundaryScan {
     $ratchetCounts = [ordered]@{}
     foreach ($label in $RatchetHeaders.Keys) { $ratchetCounts[$label] = 0 }
     $strictViolations = @()
+    $skippedFiles = @()
 
     foreach ($rel in $RelPaths) {
         if (Test-InsideHal -RelPath $rel) { continue }
 
         $full = Join-Path $FileRoot ($rel -replace '/', '\')
-        if (-not (Test-Path $full)) { continue }
+        if (-not (Test-Path $full)) { $skippedFiles += $rel; continue }
         $codeLines = Get-CodeOnlyLines -Path $full
 
         foreach ($label in $RatchetHeaders.Keys) {
@@ -229,7 +237,35 @@ function Invoke-HalBoundaryScan {
         }
     }
 
-    return @{ RatchetCounts = $ratchetCounts; StrictViolations = $strictViolations }
+    return @{ RatchetCounts = $ratchetCounts; StrictViolations = $strictViolations; SkippedFiles = $skippedFiles }
+}
+
+# --- The ratchet comparison itself, extracted so the negative test can call
+# the SAME logic the main body below uses (instead of reimplementing it
+# inline, which would only prove the test's own copy can fail, not the
+# production comparison). $Counts is a ratchet-counts hashtable/ordered-dict
+# (label -> int, e.g. Invoke-HalBoundaryScan's .RatchetCounts). $Baseline is
+# whatever ConvertFrom-Json produced from the baseline file (a PSCustomObject
+# with one property per label) -- or, for the negative test, a synthetic
+# hashtable/PSCustomObject built the same shape. Returns an array of
+# human-readable violation strings; empty means no ratchet failure. ---
+function Test-HalRatchet {
+    param(
+        $Counts,
+        $Baseline
+    )
+    $failures = @()
+    foreach ($label in $Counts.Keys) {
+        $baselineVal = $Baseline.$label
+        if ($null -eq $baselineVal) {
+            $failures += "$label : no baseline entry recorded (baseline file is missing this key -- run -UpdateBaseline after reviewing)"
+            continue
+        }
+        if ($Counts[$label] -gt [int]$baselineVal) {
+            $failures += "$label : count rose to $($Counts[$label]) (baseline $baselineVal) -- a file outside firmware/hwAbstraction/ started including $label. Move it behind the HAL, or if this is a deliberate, reviewed increase, rerun with -UpdateBaseline."
+        }
+    }
+    return $failures
 }
 
 # ---------------------------------------------------------------------
@@ -262,6 +298,10 @@ $scan = Invoke-HalBoundaryScan -RelPaths $allFiles -FileRoot $repoRootResolved
 $counts = $scan.RatchetCounts
 $violations = $scan.StrictViolations
 
+if ($scan.SkippedFiles.Count -gt 0) {
+    throw "check_hal_include_boundary: $($scan.SkippedFiles.Count) file(s) enumerated by Get-ScanFiles could not be found/read during the scan (Test-Path failed) -- this check must not silently skip real files: $($scan.SkippedFiles -join ', ')"
+}
+
 # --- Baseline load / update ---
 if (-not (Test-Path $baselinePath)) {
     throw "check_hal_include_boundary: baseline file $baselinePath not found -- run with -UpdateBaseline once to create it after reviewing the counts it would record."
@@ -277,17 +317,7 @@ if ($UpdateBaseline) {
 }
 
 $baselineRaw = Get-Content -Path $baselinePath -Raw | ConvertFrom-Json
-$ratchetFailures = @()
-foreach ($label in $counts.Keys) {
-    $baselineVal = $baselineRaw.$label
-    if ($null -eq $baselineVal) {
-        $ratchetFailures += "$label : no baseline entry recorded (baseline file is missing this key -- run -UpdateBaseline after reviewing)"
-        continue
-    }
-    if ($counts[$label] -gt [int]$baselineVal) {
-        $ratchetFailures += "$label : count rose to $($counts[$label]) (baseline $baselineVal) -- a file outside firmware/hwAbstraction/ started including $label. Move it behind the HAL, or if this is a deliberate, reviewed increase, rerun with -UpdateBaseline."
-    }
-}
+$ratchetFailures = Test-HalRatchet -Counts $counts -Baseline $baselineRaw
 
 if ($ratchetFailures.Count -gt 0 -or $violations.Count -gt 0) {
     Write-Host "HAL INCLUDE BOUNDARY CHECK FAILED:" -ForegroundColor Red
