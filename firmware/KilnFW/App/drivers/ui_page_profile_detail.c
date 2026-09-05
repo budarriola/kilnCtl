@@ -39,24 +39,32 @@ static const char *TAG = "ui_page_profile_detail";
  *       the info card or action row change ........ (flex-grow, absorbs the remainder)
  *     gap ......................................... 4px
  *     action row: Segments + Edit + Start, each a
- *       UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX
- *       (40px) button, flex_grow(1) horizontally .. 40px
+ *       UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX (40px) drawn button,
+ *       flex_grow(1) horizontally, inside action_row which carries
+ *       pad_ver = (72-40)/2 = 16px top+bottom so the row's own raw
+ *       coords are 72px tall (see the touch-area note just below) .. 72px
  *                                                 ------
- *                                          ~108px fixed, chart takes the rest
- *                                          108px <= 267px  OK with room to
+ *                                          ~140px fixed, chart takes the rest
+ *                                          140px <= 267px  OK with room to
  *                                          spare for the chart itself
  *
- * Button touch area: shrinking the DRAWN button from the old
- * UI_THEME_MIN_TOUCH_TARGET_PX (72px) to 40px still goes through
+ * Button touch area: the DRAWN button is smaller than
+ * UI_THEME_MIN_TOUCH_TARGET_PX (72px) -- 40px -- and still goes through
  * ui_theme_apply_touch_area(btn, false) (see build_action_button() below),
- * the sanctioned way to keep the EFFECTIVE touch square at/above the 72px
- * minimum without growing the visible button -- see that function's own
- * comment in ui_theme.h for why compact_layout=false is right here (this is
- * a sparse 3-button row, not a dense grid). ui_theme.c's non-compact branch
- * always extends by the "generous" margin (UI_THEME_PADDING_PX * 3 = 24px)
- * whenever the button's smaller edge is >= 24px, which 40px clears, so all
- * three buttons get a uniform 24px click-area extension on all four sides
- * via lv_obj_set_ext_click_area() (LVGL 9 has no per-axis extension -- one
+ * which extends each button's OWN ext_click_area. That alone is NOT
+ * sufficient: LVGL 9's lv_indev_search_obj() (components/lvgl/src/indev/
+ * lv_indev.c) only recurses into a widget's children if the tap point is
+ * already inside the PARENT's raw (un-extended) obj->coords, so a parent
+ * exactly as tall as the drawn button makes the child's vertical
+ * ext_click_area unreachable dead space. action_row's pad_ver above is what
+ * makes the row's own raw coords 72px tall, so the extension is actually
+ * reachable -- see that function's own comment in ui_theme.h for why
+ * compact_layout=false is right here (this is a sparse 3-button row, not a
+ * dense grid). ui_theme.c's non-compact branch always extends by the
+ * "generous" margin (UI_THEME_PADDING_PX * 3 = 24px) whenever the button's
+ * smaller edge is >= 24px, which 40px clears, so all three buttons get a
+ * uniform 24px click-area extension on all four sides via
+ * lv_obj_set_ext_click_area() (LVGL 9 has no per-axis extension -- one
  * scalar, all four sides). That extension is symmetric, so it grows
  * SIDEWAYS into the gap between adjacent buttons exactly as much as it
  * grows up/down into empty space -- unlike up/down (nothing else touchable
@@ -137,8 +145,17 @@ static ui_topbar_t s_tb;
 /* ---- Action-row button sizing -- see the file header comment's arithmetic
  * block for the full derivation of both of these. */
 /* Drawn button height. Smaller than UI_THEME_MIN_TOUCH_TARGET_PX on purpose
- * -- ui_theme_apply_touch_area() below is what keeps the EFFECTIVE touch
- * target at/above that minimum without the button looking oversized. */
+ * -- ui_theme_apply_touch_area() below extends each button's OWN
+ * ext_click_area, but that extension is reachable only if the point is
+ * already inside action_row's raw lv_obj coords: LVGL 9's
+ * lv_indev_search_obj() (components/lvgl/src/indev/lv_indev.c) tests
+ * containment against the PARENT's un-extended obj->coords before it will
+ * even recurse into children, so a parent exactly as tall as the drawn
+ * button (LV_SIZE_CONTENT + pad_all(0)) makes the child's vertical
+ * extension dead space no tap can ever reach. action_row's own
+ * pad_ver (see ui_page_profile_detail_build() below) is what makes the
+ * row's raw coords tall enough to cover that extension -- this constant
+ * alone does not guarantee the effective target. */
 #define UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX 40
 /* Gap between the three action-row buttons. Wider than scr's usual
  * UI_THEME_PADDING_PX/2 specifically so the buttons' extended (post-
@@ -578,6 +595,14 @@ lv_obj_t *ui_page_profile_detail_build(void)
      * areas cannot overlap. See UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX's
      * own comment. */
     lv_obj_set_style_pad_gap(action_row, UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX, 0);
+    /* Vertical padding so action_row's own raw coords (what
+     * lv_indev_search_obj() gates descending into children on -- see
+     * UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX's comment) cover each button's
+     * ext_click_area extension, not just its drawn 40px. Split evenly so the
+     * row's effective height reaches UI_THEME_MIN_TOUCH_TARGET_PX (72px)
+     * while the drawn button stays 40px. */
+    lv_obj_set_style_pad_ver(action_row,
+                              (UI_THEME_MIN_TOUCH_TARGET_PX - UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX) / 2, 0);
     lv_obj_remove_flag(action_row, LV_OBJ_FLAG_SCROLLABLE);
 
     build_action_button(action_row, "Segments", UI_THEME_COLOR_CARD, segments_nav_cb);

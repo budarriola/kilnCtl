@@ -131,17 +131,23 @@ static esp_err_t settings_tz_post_handler(httpd_req_t *req)
  * keep-on-while-firing/display-on-error settings, owner request 2026-09-04.
  * Read side only: this settings page's JS fetches this once on load to
  * populate the form, same "one-time initial read" shape as app.js's own
- * GET /api/status fetch for kcUnit. brightness_percent is round-tripped
- * here even though nothing yet acts on it on real hardware -- see
- * display_power_cfg.h's BRIGHTNESS IS CURRENTLY INERT note: brightness_pwm
- * (CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE) is off by default pending the
- * backlight flying-wire bodge and its own hardware verification. */
+ * GET /api/status fetch for kcUnit. brightness_inert now follows
+ * CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE (be02d34 turned the Kconfig symbol on
+ * and wired the ON duty to follow the brightness setting -- see
+ * backlight_pwm.c's own #if CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE block) rather
+ * than the hardcoded `true` this used to be from when the backlight
+ * flying-wire bodge and its hardware verification were still pending. */
+#if CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE
+#define SETTINGS_HTTP_BRIGHTNESS_INERT_JSON "false"
+#else
+#define SETTINGS_HTTP_BRIGHTNESS_INERT_JSON "true"
+#endif
 static esp_err_t settings_display_power_get_handler(httpd_req_t *req)
 {
     char json[160];
     int n = snprintf(json, sizeof(json),
                      "{\"brightness_percent\":%u,\"timeout_setting\":%u,\"keep_on_while_firing\":%s,"
-                     "\"display_on_error\":%s,\"brightness_inert\":true}",
+                     "\"display_on_error\":%s,\"brightness_inert\":" SETTINGS_HTTP_BRIGHTNESS_INERT_JSON "}",
                      (unsigned)display_power_cfg_brightness_percent(),
                      (unsigned)display_power_cfg_timeout_setting(),
                      display_power_cfg_keep_on_while_firing() ? "true" : "false",

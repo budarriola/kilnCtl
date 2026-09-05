@@ -295,7 +295,21 @@ void ui_theme_apply_card_shadow(lv_obj_t *card, int level);
  * a thin helper over exactly that call. It is NOT an answer to the
  * *arbitration* half: if two widgets' expanded boxes ever overlap, z-order
  * decides, not proximity. See ui_theme.c for the extension amounts chosen
- * per density case, and TODO.md 10.4 for the open item this leaves. */
+ * per density case, and TODO.md 10.4 for the open item this leaves.
+ *
+ * This does NOT guarantee that calling ui_theme_apply_touch_area() on a
+ * widget alone makes its full extended area tappable. lv_indev_search_obj()
+ * (lv_indev.c) only recurses from a parent into its children if the tap
+ * point is inside the PARENT's raw, un-extended obj->coords (lv_area_is_
+ * point_on() against obj->coords, not the click-area-expanded box) --
+ * ext_click_area is read only once search has already descended to the
+ * widget itself. A parent sized exactly to its child's drawn box (e.g.
+ * LV_SIZE_CONTENT with pad_all(0)) therefore makes that child's extension
+ * unreachable dead space on the side(s) the parent doesn't cover. Callers
+ * relying on ui_theme_apply_touch_area() to reach UI_THEME_MIN_TOUCH_TARGET_PX
+ * on a widget smaller than that must independently ensure the parent's own
+ * box is at least as large as the extended child box -- see
+ * ui_page_profile_detail.c's action_row pad_ver for a worked example. */
 
 /**
  * Set `widget`'s ext_click_area (see lv_obj_set_ext_click_area() above) to a

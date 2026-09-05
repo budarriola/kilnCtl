@@ -383,6 +383,28 @@ static void format_uptime(char *buf, size_t buf_len)
     }
 }
 
+/* Trip Detail's Reason row age suffix -- 2026-09-04 P2 fix: 1cf200f's
+ * consolidation dropped the "last %s, %lus ago" tail from the Safety & Board
+ * Health page's State row (see that comment above trip_buf) on the theory
+ * that the Trip Detail page one page over already carries the full trip
+ * history -- but it didn't carry the AGE, only reason/cause/remedy/source,
+ * so trip_event_age_ms (safety_link.h) became dead: no LCD page showed it
+ * any more (dashboard_status_http.c's JSON export is the only remaining
+ * consumer). h/m/s, same style as format_uptime() above, rather than raw
+ * seconds -- a trip minutes or hours old reading "3612s ago" is harder to
+ * parse at a glance than "1h00m ago". */
+static void format_trip_age(uint32_t age_ms, char *buf, size_t buf_len)
+{
+    uint32_t age_s = age_ms / 1000u;
+    if (age_s < 60u) {
+        snprintf(buf, buf_len, "%lus ago", (unsigned long)age_s);
+    } else if (age_s < 3600u) {
+        snprintf(buf, buf_len, "%lum%02lus ago", (unsigned long)(age_s / 60u), (unsigned long)(age_s % 60u));
+    } else {
+        snprintf(buf, buf_len, "%luh%02lum ago", (unsigned long)(age_s / 3600u), (unsigned long)((age_s % 3600u) / 60u));
+    }
+}
+
 static const char *reset_reason_str(esp_reset_reason_t r)
 {
     switch (r) {
@@ -663,8 +685,8 @@ static void refresh_cb(lv_timer_t *timer)
      * "evidence survives" reasoning as safety_link.h's trip_event_* fields
      * themselves). "No trip recorded" only means this ESP has never received
      * a TRIP_EVENT frame this boot's cache lifetime -- NOT that nothing is
-     * currently tripped; the State row on the Safety Processor page is the
-     * live truth for that. */
+     * currently tripped; the State row on the Safety & Board Health page is
+     * the live truth for that. */
     if (!ds.trip_event_ever_received) {
         lv_label_set_text(s_td_reason_label, "Reason: no trip recorded");
         lv_label_set_text(s_td_cause_label, "Detected: --");
@@ -672,8 +694,16 @@ static void refresh_cb(lv_timer_t *timer)
         lv_label_set_text(s_td_source_label, "Fault source: --");
         lv_label_set_text(s_td_latch_label, ""); /* N5 fix: no claim of a latch with no trip on record */
     } else {
-        char td_buf[64];
-        snprintf(td_buf, sizeof(td_buf), "Reason: %s", safety_trip_words_short(ds.trip_reason));
+        /* Worst case measured against lv_font_montserrat_14.c's adv_w table
+         * (P2 fix, 2026-09-04): longest safety_trip_words_short() string
+         * ("S13 borrowed TC dead") plus "Reason: " is ~217px; the longest
+         * age suffix (hours case, e.g. " (1193h59m ago)") is ~112px more,
+         * ~329px combined -- comfortably one line in this row's ~445px
+         * width, so no wrap-budget change is needed here. */
+        char age_buf[24];
+        format_trip_age(ds.trip_event_age_ms, age_buf, sizeof(age_buf));
+        char td_buf[96];
+        snprintf(td_buf, sizeof(td_buf), "Reason: %s (%s)", safety_trip_words_short(ds.trip_reason), age_buf);
         lv_label_set_text(s_td_reason_label, td_buf);
 
         /* 2026-08-28: numbered cause (safety_trip_words_cause_numbered()) --

@@ -106,6 +106,10 @@ browser only.</p>
 <div class="card">
   <label for="kcDpBrightness">Brightness (<span id="kcDpBrightnessVal">100%</span>)</label>
   <input type="range" id="kcDpBrightness" min="10" max="100" step="5" value="100">
+  <!-- Text is set from JS, keyed off /api/settings/display_power's
+       brightness_inert field (settings_http.c derives that from
+       CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE) -- this markup default only
+       shows if that fetch hasn't landed yet. -->
   <p class="hint" id="kcDpBrightnessNote">Inert on this board today: the backlight has no
     hardware control line fitted yet (see docs/UI_PLAN.md). The setting is saved and will take
     effect once that hardware is verified.</p>
@@ -140,6 +144,7 @@ browser only.</p>
   var onError = document.getElementById('kcDpOnError');
   var saveBtn = document.getElementById('kcDpSave');
   var status = document.getElementById('kcDpStatus');
+  var brightnessNote = document.getElementById('kcDpBrightnessNote');
 
   brightness.addEventListener('input', function () {
     brightnessVal.textContent = brightness.value + '%';
@@ -154,6 +159,15 @@ browser only.</p>
         timeout.value = String(d.timeout_setting);
         keepOnFiring.checked = !!d.keep_on_while_firing;
         onError.checked = !!d.display_on_error;
+        // brightness_inert reflects CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE
+        // (settings_http.c) -- since be02d34 that's on and the ON duty
+        // follows this setting, so only show the "no hardware line" hint
+        // on a board actually built without it.
+        brightnessNote.textContent = d.brightness_inert
+          ? 'Inert on this board today: the backlight has no hardware control line fitted yet ' +
+            '(see docs/UI_PLAN.md). The setting is saved and will take effect once that hardware ' +
+            'is verified.'
+          : 'Applies live to the panel backlight.';
       })
       .catch(function () {
         // Best-effort, same convention as app.js's initial kcUnit fetch --
