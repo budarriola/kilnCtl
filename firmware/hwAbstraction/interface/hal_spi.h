@@ -114,11 +114,32 @@ typedef struct {
                                  * caller initializes first must pass the
                                  * larger of the two requirements. 0 lets the
                                  * backend pick its own default. Pico ignores. */
-    int dma_chan;              /* ESP: spi_bus_initialize()'s dma_chan
-                                 * (SPI_DMA_CH_AUTO == -1 to let the driver
-                                 * pick, or 0 to disable DMA entirely).
+    int dma_chan;              /* HAL-defined sentinel, NOT the raw ESP
+                                 * spi_common_dma_t enum -- that enum is
+                                 * SPI_DMA_DISABLED=0, SPI_DMA_CH1=1,
+                                 * SPI_DMA_CH2=2, SPI_DMA_CH_AUTO=3 (see
+                                 * esp-idf/components/esp_driver_spi/include/
+                                 * driver/spi_common.h), so 0 means DISABLED
+                                 * there, not "auto". A zero-initialized
+                                 * hal_spi_bus_cfg_t must default to letting
+                                 * the backend pick (auto), not silently kill
+                                 * DMA on the ST7796 blit path this field was
+                                 * added for -- hence HAL_SPI_DMA_AUTO == 0
+                                 * here instead. Use HAL_SPI_DMA_AUTO,
+                                 * HAL_SPI_DMA_NONE, or an explicit positive
+                                 * channel (1..2). The ESP backend maps
+                                 * AUTO -> SPI_DMA_CH_AUTO(3) and
+                                 * NONE -> SPI_DMA_DISABLED(0); an explicit
+                                 * channel N maps to the raw enum value N.
                                  * Pico ignores. */
 } hal_spi_bus_cfg_t;
+
+/* Sentinels for hal_spi_bus_cfg_t.dma_chan -- deliberately NOT the same
+ * numbering as ESP-IDF's spi_common_dma_t (see the field comment above).
+ * HAL_SPI_DMA_AUTO == 0 so a zero-initialized cfg struct defaults to
+ * "let the backend pick", never "disabled". */
+#define HAL_SPI_DMA_AUTO 0
+#define HAL_SPI_DMA_NONE (-1)
 
 /* ALREADY_INIT decision (Phase 0, per the plan's open question at
  * "Bus-init semantics"): hal_spi_bus_init() on a bus that is already up

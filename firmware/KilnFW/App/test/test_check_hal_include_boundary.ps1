@@ -53,7 +53,7 @@ if (-not (Test-Path $checkScript)) {
 # Get-CodeOnlyLines / Invoke-HalBoundaryScan / etc. and runs nothing else.
 . $checkScript
 
-$scratchDir = "C:\Users\budar\AppData\Local\Temp\claude\c--Users-budar-OneDrive-Desktop-kilnCtl\7750d99a-89c2-44c9-aacd-c71d7e18e7dc\scratchpad"
+$scratchDir = Join-Path $env:TEMP "hal_boundary_test_$PID"
 if (-not (Test-Path $scratchDir)) {
     New-Item -ItemType Directory -Force -Path $scratchDir | Out-Null
 }
@@ -64,6 +64,8 @@ if (-not (Test-Path $sourcePid)) {
 }
 
 $failures = @()
+
+try {
 
 # --- Assertion 1: unmodified copy -> zero violations. ---
 $cleanRel = "scratch_pid_clean.c"
@@ -117,6 +119,18 @@ $realFiles += Get-ScanFiles -Dir (Resolve-Path $saftyDirReal).Path -RepoRoot $re
 
 $realScan = Invoke-HalBoundaryScan -RelPaths $realFiles -FileRoot $repoRoot
 $realDriverCount = $realScan.RatchetCounts["driver/"]
+
+# Guard against a broken glob (e.g. a moved directory returning an empty
+# file list) making assertions 3/3b pass vacuously: with $realFiles.Count
+# at 0, $realDriverCount would be 0, $tooLowBaseline would be -1, and
+# Test-HalRatchet would still legitimately report "count rose" -- a false
+# positive that looks like a real, meaningful pass but proves nothing about
+# the actual tree. Fail loudly here instead of building the synthetic
+# baseline off a hollow scan.
+if ($realFiles.Count -lt 200 -or $realDriverCount -lt 1) {
+    throw "test_check_hal_include_boundary: real-tree scan looks broken (realFiles.Count=$($realFiles.Count), driver/ count=$realDriverCount) -- expected at least 200 files and at least 1 driver/ include. The glob is probably pointed at the wrong directory; assertions 3/3b would pass vacuously against this scan."
+}
+
 $tooLowBaseline = $realDriverCount - 1
 
 $syntheticBaseline = [ordered]@{}
@@ -172,11 +186,15 @@ if ($allowlistedScan.StrictViolations.Count -ne 0) {
     $failures += "Assertion 5 FAILED: allowlisted path ($allowlistedRel) with injected esp_ota_ops.h scored $($allowlistedScan.StrictViolations.Count) strict violation(s), expected 0."
 }
 
-# Cleanup scratch copies (best-effort; scratchpad is session-scoped anyway).
-Remove-Item -Path $cleanFull -Force -ErrorAction SilentlyContinue
-Remove-Item -Path $dirtyFull -Force -ErrorAction SilentlyContinue
-Remove-Item -Path $otaDirtyFull -Force -ErrorAction SilentlyContinue
-Remove-Item -Path $allowlistedScanDir -Recurse -Force -ErrorAction SilentlyContinue
+} finally {
+    # Cleanup: remove the whole per-PID scratch directory now that the test
+    # is done with it (this test owns $scratchDir exclusively -- it is
+    # created above, named with this process's PID). In `finally` so it
+    # still runs if an assertion block throws instead of just recording a
+    # failure. Best-effort: a failure here must not mask real assertion
+    # failures or replace whatever exception is already propagating.
+    Remove-Item -Path $scratchDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 if ($failures.Count -gt 0) {
     Write-Host "TEST_CHECK_HAL_INCLUDE_BOUNDARY FAILED:" -ForegroundColor Red

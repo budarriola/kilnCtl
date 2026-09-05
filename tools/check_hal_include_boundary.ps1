@@ -66,8 +66,10 @@ $baselinePath = Join-Path $PSScriptRoot "check_hal_include_boundary_baseline.jso
 # --- Comment stripper, reproduced from firmware/SaftyFW/tools/check_isolation.ps1
 # Get-CodeOnlyLines. Kept byte-for-byte equivalent in behavior: block-comment
 # state carries across lines, line comments (//) are stripped, and an
-# #include line survives because #include never appears after a // or
-# inside a /* */ span in any file this check scans -- the same property
+# include directive survives because none of the patterns below (which match
+# the widened `#\s*include` form, tolerating whitespace between `#` and
+# `include`, e.g. `#  include <foo.h>`) ever appear after a // or inside a
+# /* */ span in any file this check scans -- the same property
 # check_isolation.ps1 relies on. No shared PowerShell module exists in this
 # repo to import this from instead (see check_c_files_in_cmakelists.ps1's
 # header for the same note about its own comment stripper). ---
