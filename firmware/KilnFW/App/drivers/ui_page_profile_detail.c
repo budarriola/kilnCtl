@@ -78,8 +78,13 @@ static const char *TAG = "ui_page_profile_detail";
  * UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX (48px) -- see that constant's own
  * comment. At 48px gap the two boxes' extended edges exactly touch (share a
  * boundary) rather than cross it, which is the safe, non-overlapping case.
- * Effective per-button touch box: 40 + 2*24 = 88px tall (comfortably over
- * the 72px minimum) by (visual width + 48px) wide.
+ * Effective per-button touch box, vertically: the 24px ext_click_area
+ * extension is only reachable through action_row's own raw coords (see
+ * above), and those are only UI_THEME_MIN_TOUCH_TARGET_PX (72px) tall --
+ * action_row's pad_ver covers 16px of the 24px extension on each side, not
+ * the full 24. Effective height is therefore 40 + 2*16 = 72px tall (exactly
+ * the minimum -- the parent row, not the ext_click_area, is the binding
+ * constraint) by (visual width + 48px) wide.
  *
  * The nav row's Back button moved into the shared top bar (ui_topbar.c) in
  * the 2026-08-21 icon-topbar pass, freeing the 44px + 4px gap it used to
@@ -643,10 +648,14 @@ lv_obj_t *ui_page_profile_detail_build(void)
     lv_obj_set_style_pad_gap(action_row, UI_PAGE_PROFILE_DETAIL_ACTION_ROW_GAP_PX, 0);
     /* Vertical padding so action_row's own raw coords (what
      * lv_indev_search_obj() gates descending into children on -- see
-     * UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX's comment) cover each button's
-     * ext_click_area extension, not just its drawn 40px. Split evenly so the
-     * row's effective height reaches UI_THEME_MIN_TOUCH_TARGET_PX (72px)
-     * while the drawn button stays 40px. */
+     * UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX's comment) reach down into each
+     * button's ext_click_area extension, not just its drawn 40px -- but only
+     * 16px of each button's 24px extension, since this pad_ver is split
+     * evenly to bring the row's own effective height up to exactly
+     * UI_THEME_MIN_TOUCH_TARGET_PX (72px), not to the full 40 + 2*24 = 88px
+     * the extension alone would want. Split evenly so the row's effective
+     * height reaches UI_THEME_MIN_TOUCH_TARGET_PX (72px) while the drawn
+     * button stays 40px. */
     lv_obj_set_style_pad_ver(action_row,
                               (UI_THEME_MIN_TOUCH_TARGET_PX - UI_PAGE_PROFILE_DETAIL_BUTTON_HEIGHT_PX) / 2, 0);
     lv_obj_remove_flag(action_row, LV_OBJ_FLAG_SCROLLABLE);

@@ -3,8 +3,8 @@
 // 2026-09-04, docs/UI_PLAN.md). This module owns ONLY the persisted values
 // and their NVS round trip -- it does not itself decide when the display
 // turns on or off (that is display_power_policy.c's pure step function) and
-// it does not itself drive the backlight (that is backlight_pwm.c, currently
-// inert -- see this header's BRIGHTNESS note below).
+// it does not itself drive the backlight (that is backlight_pwm.c -- see
+// this header's BRIGHTNESS note below).
 //
 // PERSISTENCE: same single-scalar-in-the-existing-namespace pattern as
 // unit_pref.c/ramp_assist_cfg.c -- kiln_nvs partition, "kiln_cfg" namespace
@@ -36,19 +36,18 @@
 //     it opt-in defeats it. It self-dismisses on the next touch and resumes
 //     the previous timeout, so the cost of it being on is one touch.
 //
-// BRIGHTNESS IS CURRENTLY INERT. CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE is off
-// by default (backlight_pwm.h's header comment: no flying wire fitted from
-// an ESP32 GPIO to the backlight LED input, another agent is mid-
-// investigation on that hardware). This module persists brightness_percent
-// and exposes it via display_power_cfg_brightness_percent() so the setting,
-// its API, and its UI all exist and round-trip correctly today -- but until
-// that Kconfig flag is enabled and the wiring is verified on real hardware,
-// nothing reads this value to actually change panel brightness (see
-// backlight_pwm.h -- with the flag off, backlight_pwm_init()/_start() are
-// no-ops that touch no peripheral at all). Wiring this value into
-// backlight_pwm.c's on/idle duty (replacing its current
-// CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT/IDLE_PERCENT Kconfig constants) is
-// follow-up work for whoever verifies that hardware, not done here.
+// BRIGHTNESS: no longer inert as of be02d34.
+// CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE now defaults to y (Kconfig, "Backlight
+// PWM (flying-wire bodge, DISPLAY_ST7796_PLAN.md 3.4.1)"), and
+// backlight_pwm.c's on/idle duty follows this module's brightness_percent
+// (via display_power_cfg_brightness_percent()) rather than the old fixed
+// CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT/IDLE_PERCENT constants. The flying wire
+// from a spare ESP32 GPIO to the backlight LED input still has to actually be
+// soldered and KILNCTL_BACKLIGHT_GPIO pointed at it for any of this to reach
+// real hardware -- on an unmodified board the LEDC calls are no-ops (see
+// backlight_pwm.h) -- but the setting, its API, its UI, and the duty-follows-
+// brightness wiring are no longer the missing piece; only the physical wire
+// (and confirming it on a board that has it) is.
 #ifndef DISPLAY_POWER_CFG_H
 #define DISPLAY_POWER_CFG_H
 
