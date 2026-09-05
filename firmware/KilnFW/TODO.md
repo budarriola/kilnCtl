@@ -121,11 +121,9 @@ text, and the safety-link config-page hardening. Still open:
       -- Python's `urllib` does by default. Worth either storing an identity
       fallback or documenting it where someone scripting against the board
       will find it.
-- [ ] **Boot logs an internal-DRAM regression at every stage**: largest free
-      block 4608 (was 7680), free 6179 (was 10015) at `app_main_done`. The
-      firmware's own guard is calling this out as an error on every boot; it
-      is close to the exhaustion that has already caused truncated `/app.js`
-      responses in the past.
+- [x] **Internal-DRAM regression: superseded.** Re-baselined (`af17e3d`,
+      `f426ec6`); `dram_margin.h`'s known-good figures are now largest=18432,
+      free=46083 at `app_main_done`, with no regression logged on boot.
 
 ---
 
@@ -439,15 +437,10 @@ severity.
       called from `gpio_probe.c`), negative-tested in `test_gpio_probe.c`
       (removing the three entries makes all three checks fail, confirmed and
       reverted).
-- [ ] **Docs contradicting code:** `KilnFW/docs/HARDWARE.md` records neither
-      the thermocouple channel rotation (`MAX31856.c:676` cites the J6/J5 pin
-      table as ground truth, but the table doesn't show the rotation) nor the
-      relay 2<->4 swap (`kiln_io.h:36`) -- still open. Two related claims are
-      now fixed (2026-09-04): `SAFETY_MODEL.md`'s guard-5 row already carried
-      a "when configured" qualifier as of the seventh audit pass, and this
-      file's own "final regardless of ownership" claim at 6A.6 above now
-      carries the danger-mode correction, and `SAFETY_MODEL.md` gained its
-      own section describing the same bypass -- see both docs.
+- [x] **Docs contradicting code: fixed.** `KilnFW/docs/HARDWARE.md` now
+      records both the thermocouple channel rotation and the relay 2<->4
+      swap, in the SX1509/relay section and the thermocouple daughterboard
+      section respectively.
 
 ---
 
@@ -818,11 +811,11 @@ no thermocouple is attached in this environment.
       strongly temperature-dependent (radiative loss ~T^4). v1 ships a single
       band per zone, by design — `zone_cfg_t`/the NVS blob would need a band
       array to add this without a storage migration, and don't carry one yet.
-- [~] **Autotune's predicted ramp ceiling is shown but not wired into
-      `max_ramp_c_per_hr`.** `pid_autotune_estimate_max_ramp_c_per_hr()` is
-      computed and displayed on `/settings/zones`; there is no one-click
-      "adopt this ceiling" action — `autotune_accept()` only writes
-      Kp/Ki/Kd, not the ramp field.
+- [x] DONE: predicted ramp ceiling adoption. `autotune_engine_accept_ex(ack_unsettled, adopt_ceiling)`
+      (sibling of `autotune_engine_accept()`, autotune_engine.c/.h) writes `max_ramp_c_per_hr` via the
+      existing `zones_config_set_max_ramp()` when requested; `POST /api/autotune/accept`'s optional
+      `adopt_ceiling=1` form field and a checkbox next to the Accept button on `/settings/zones` opt in,
+      default false.
 
 ### 6A.5 Multi-zone interaction — "they are not really separate"
 

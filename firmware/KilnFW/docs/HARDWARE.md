@@ -88,6 +88,16 @@ Two consequences worth stating plainly:
   `Relay3` is K2, `Relay4` is K5. The firmware exposes the schematic's
   `Relay1..4` numbering and documents the K/J mapping rather than silently
   renumbering.
+- **Relay 2 and relay 4's physical outputs are swapped vs. this table.**
+  Bench testing 2026-08-27 found a real PCB-level miswire (Relay1/Relay3 read
+  correctly): the terminal block that this table's `Relay2` row names (K1/J3)
+  is actually driven by IO3, and the one this table's `Relay4` row names
+  (K5/J11) is actually driven by IO1. `kiln_io.c`
+  (`kiln_relay_logical_to_pin_bit`/`kiln_io_remap_relay_bits`) compensates in
+  software so that `kiln_io_set_relay(io, 2, ...)` energizes IO3/K5/J11 and
+  `kiln_io_set_relay(io, 4, ...)` energizes IO1/K1/J3 -- i.e. the firmware's
+  relay 2/4 numbering matches the panel silkscreen, not this table's raw net
+  names. See `firmware/KilnFW/App/drivers/kiln_io.h` for the full detail.
 - **The display's D/C and reset are on I2C.** Every command/data transition on
   the ILI9488 costs an I2C transfer to the expander. The display driver batches
   each command's payload into one SPI transaction to keep the number of
@@ -118,6 +128,17 @@ these two horizontal parts — every signal lines up:
 
 The board carries three MAX31856s (U2/U3/U4) on `CS0`/`CS1`/`CS2`, each with its
 own `~DRDY`/`~FAULT` pair, and an LT1962-3.3 analog regulator.
+
+**The screw-terminal-to-chip mapping is rotated one position vs. the table
+above.** Confirmed on the bench by unplugging each terminal in turn and
+noting which logical channel faulted: terminal 2 faults ch1, terminal 1
+faults ch0, terminal 0 faults ch2 -- a fixed rotation, not a random miswire.
+Firmware (`MAX31856.c`'s `cs_pins`/`fault_pins` arrays) compensates in
+software so logical channel index *i* always reads the chip actually fed by
+terminal *i* (`{THERMO_CS2_IO, THERMO_CS0_IO, THERMO_CS1_IO}` for CS, same
+rotation for fault); every downstream consumer (zone `thermo_mask` bits, the
+dashboard, LCD, MCP tools) sees the corrected, terminal-accurate numbering
+and needs no compensating remap of its own.
 
 ### Physical zone arrangement (test kiln)
 
