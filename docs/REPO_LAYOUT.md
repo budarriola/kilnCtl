@@ -45,6 +45,52 @@ than guess). Verified: `git submodule status` resolves all three submodules,
 the `kicad` server restarted clean from the new path and answered a real
 `kicad_call`, and the submodule's own 110-test suite passed unchanged.
 
+**Update, 2026-09-04: the stale root-level copies are still present, and
+`pdfMcp/` cannot simply be deleted.** A week after the move, both root-level
+`pdfMcp/` (full `.venv`, hundreds of files) and root-level `mykicadMcp/`
+(including the leftover `.claude/worktrees/` noted above) were still there.
+`tools/mykicadMcp/` checked out clean as a self-contained submodule with its
+own venv — not assessed further because the `pdfMcp/` check below stopped the
+pass first, so root-level `mykicadMcp/` remains unassessed.
+
+`tools/pdfMcp/.venv` turned out not to be self-contained: its console-script
+launcher `.exe` files (built by pip/distlib) embed the absolute path to the
+interpreter *at venv-creation time*, inside the launcher itself, not resolved
+relative to the script's own location at run time. Extracting the bytes of
+`tools/pdfMcp/.venv/Scripts/pdf-mcp.exe` shows its embedded shebang is:
+
+```
+#!C:\Users\budar\OneDrive\Desktop\kilnCtl\pdfMcp\.venv\Scripts\python.exe
+```
+
+— the root-level path. Both `tools/pdfMcp/.venv/pyvenv.cfg` and root
+`pdfMcp/.venv/pyvenv.cfg` confirm this: both record
+`command = C:\Python314\python.exe -m venv C:\Users\budar\...\kilnCtl\pdfMcp\.venv`,
+meaning `tools/pdfMcp/.venv` was file-copied from the root venv rather than
+freshly created, carrying the old absolute path into every launcher in its
+`Scripts\` directory. Live process listings confirmed this in practice:
+`pdf-mcp.exe` processes invoked as `tools/pdfMcp/.venv/Scripts/pdf-mcp.exe`
+were running with their actual `python.exe` resolved to the root-level
+`pdfMcp\.venv\Scripts\python.exe` — i.e. the "moved" copy was silently still
+depending on the "stale" one to run at all.
+
+**Consequence: deleting root-level `pdfMcp/` now would break `tools/pdfMcp`**,
+including any currently-running `pdf-mcp` server and every future launch via
+`.mcp.json`, the moment the OS tries to exec that baked-in shebang path and
+finds it gone.
+
+**The fix, when someone next has a window with no `pdf-mcp` process running**
+(a rebuild while the `Scripts\` files are open/locked by a running process
+would fail partway or leave the venv half-replaced — worse than the current
+stable-but-messy state): rebuild `tools/pdfMcp/.venv` fresh (e.g.
+`python -m venv tools/pdfMcp/.venv` plus reinstalling from its
+requirements/package so the new launchers bake in the `tools/pdfMcp` path),
+verify the rebuilt server answers a real call, and only then delete the
+root-level `pdfMcp/` copy. Root-level `mykicadMcp/` still needs its own
+assessment (diff against `tools/mykicadMcp/`, check for anything not tracked
+by the submodule, then `git worktree remove` for the leftover worktree
+there if git still tracks it) before it can be removed either.
+
 ### What the move taught that the plan did not anticipate
 
 - **Directory renames failed with "Permission denied"** on `KilnFW/`,
