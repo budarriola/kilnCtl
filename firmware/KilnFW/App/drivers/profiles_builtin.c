@@ -11,6 +11,7 @@
 // at this file by mistake fails loudly instead of silently.)
 #include "profiles_builtin.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -148,6 +149,30 @@ const builtin_profile_t *profiles_builtin_entry(uint8_t id)
         return NULL;
     }
     return &g_builtin_profiles[idx];
+}
+
+const char *profiles_builtin_firing_type_label(profile_firing_type_t type)
+{
+    switch (type) {
+    case PROFILE_FIRING_BISQUE: return "Bisque";
+    case PROFILE_FIRING_GLAZE:  return "Glaze";
+    case PROFILE_FIRING_OTHER:  return "Other";
+    default:                    return "?";
+    }
+}
+
+void profiles_builtin_cone_label(int8_t cone, char *buf, size_t buf_len)
+{
+    if (!buf || buf_len == 0) {
+        return;
+    }
+    /* Negative encoding stores the "0N" cones (see profiles_builtin.h) --
+     * print the magnitude with the leading zero restored, not the sign. */
+    if (cone < 0) {
+        snprintf(buf, buf_len, "0%d", -cone);
+    } else {
+        snprintf(buf, buf_len, "%d", cone);
+    }
 }
 
 bool profiles_builtin_get(uint8_t id, profile_t *out)

@@ -1,8 +1,8 @@
 // ui_page_profiles -- the LCD "Profiles" hub (reached from ui_page_config.c's
 // Config hub). Three destinations:
 //   - My Profiles     -- the 8 user slots (ui_page_profiles_mine.c)
-//   - Built-ins (28)   -- family picker (ui_page_profiles_family.c) -> a
-//                         per-family list (ui_page_profiles_builtin_list.c)
+//   - Built-ins (28)   -- firing-type picker (ui_page_profiles_family.c) -> a
+//                         cone-sorted list for that type (ui_page_profiles_builtin_list.c)
 //   - Restore hidden   -- profiles_builtin_restore_all(), direct call
 //
 // This closes the LCD gap the user asked about: today's home page Start

@@ -424,7 +424,7 @@ const char *profile_feasibility_verdict_str(profile_seg_verdict_t v)
 // ---- profiles_builtin.h -- empty catalogue: these tests only care about
 // user-slot behaviour, so the builtin loop in profiles_list_get_handler()/
 // builtin_list_get_handler() simply iterates zero times.
-const builtin_profile_t g_builtin_profiles[1] = { { { 0 }, NULL, NULL, NULL, 0, { { 0 } } } };
+const builtin_profile_t g_builtin_profiles[1] = { { { 0 }, NULL, NULL, NULL, PROFILE_FIRING_BISQUE, 0, 0, { { 0 } } } };
 const size_t g_builtin_profile_count = 0;
 
 bool profiles_builtin_id_valid(uint8_t id)

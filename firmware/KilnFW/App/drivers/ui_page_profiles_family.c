@@ -1,11 +1,14 @@
 #include "ui_page_profiles_family.h"
 
+#include <stdint.h>
+
 #include "kiln_ui.h"
+#include "profiles_builtin.h"
 #include "ui_page_profiles_builtin_list.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 
-/* Single-page 2x2 grid, same arithmetic as ui_page_profiles.c's hub:
+/* Single-page grid, same arithmetic as ui_page_profiles.c's hub:
  *
  *     grid: 2 rows x 72px + 1 gap ............... 148px
  *                                                 ------
@@ -15,28 +18,30 @@
  * the 2026-08-21 icon-topbar pass, freeing the 44px + 4px gap it used to
  * cost here.
  *
- * Exactly four families -- one page, no paging needed. */
+ * Exactly three firing types (Bisque/Glaze/Other) -- one page, no paging
+ * needed; they wrap 2-per-row same as the old 4-family grid, just with the
+ * last row holding one cell instead of two. */
 #define GRID_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 2 + UI_THEME_PADDING_PX / 2)
 
-static void family_clicked_cb(lv_event_t *e)
+static void firing_type_clicked_cb(lv_event_t *e)
 {
-    const char *family = (const char *)lv_event_get_user_data(e);
-    ui_page_profiles_builtin_list_set_family(family);
+    profile_firing_type_t type = (profile_firing_type_t)(uintptr_t)lv_event_get_user_data(e);
+    ui_page_profiles_builtin_list_set_firing_type(type);
     kiln_ui_show("profiles_builtin_list");
 }
 
-static void build_cell(lv_obj_t *parent, const char *family)
+static void build_cell(lv_obj_t *parent, profile_firing_type_t type)
 {
     lv_obj_t *cell = lv_button_create(parent);
     lv_obj_set_width(cell, lv_pct(48));
     lv_obj_set_height(cell, UI_THEME_MIN_TOUCH_TARGET_PX);
     lv_obj_set_style_bg_color(cell, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(cell, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(cell, family_clicked_cb, LV_EVENT_CLICKED, (void *)family);
+    lv_obj_add_event_cb(cell, firing_type_clicked_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)type);
 
     lv_obj_t *label = lv_label_create(cell);
     lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(label, family);
+    lv_label_set_text(label, profiles_builtin_firing_type_label(type));
     lv_obj_center(label);
 
     lv_obj_update_layout(cell);
@@ -70,14 +75,9 @@ lv_obj_t *ui_page_profiles_family_build(void)
     lv_obj_set_style_pad_gap(grid, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* String literals, not copies -- same lifetime as this translation unit,
-     * matching profiles_builtin_table.inc's own .family string literals so a
-     * pointer comparison-free strcmp() in ui_page_profiles_builtin_list.c
-     * always sees identical byte content either way. */
-    build_cell(grid, "Bartlett");
-    build_cell(grid, "Plainsman");
-    build_cell(grid, "Crystalline");
-    build_cell(grid, "General");
+    build_cell(grid, PROFILE_FIRING_BISQUE);
+    build_cell(grid, PROFILE_FIRING_GLAZE);
+    build_cell(grid, PROFILE_FIRING_OTHER);
 
     ui_topbar_raise(&tb);
 

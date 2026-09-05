@@ -1,7 +1,7 @@
 #include "ui_page_profiles_builtin_list.h"
 
 #include <stdint.h>
-#include <string.h>
+#include <stdio.h>
 
 #include "kiln_ui.h"
 #include "profile_feasibility.h"
@@ -11,18 +11,27 @@
 #include "ui_topbar.h"
 
 /* Paged 2-column grid, identical arithmetic to ui_page_profiles_mine.c (see
- * that file's header comment for the full derivation): 4 cells/page, up to
- * 2 pages for a family's at-most-8 entries. Back/Prev/Next used to be a
- * fourth in-content nav row (44px + 4px gap); they moved into the shared
- * top bar (ui_topbar.c) in the 2026-08-21 icon-topbar pass -- see
- * ui_page_profiles_mine.c's header comment for the identical rationale.
- * Only the "N of M" indicator still lives in content. */
+ * that file's header comment for the full derivation): 4 cells/page.
+ * Back/Prev/Next used to be a fourth in-content nav row (44px + 4px gap);
+ * they moved into the shared top bar (ui_topbar.c) in the 2026-08-21
+ * icon-topbar pass -- see ui_page_profiles_mine.c's header comment for the
+ * identical rationale. Only the "N of M" indicator still lives in content.
+ *
+ * Unlike the old 4-way family split (at most 8 entries each, so at most 2
+ * pages), the 3-way firing-type split is uneven -- Glaze alone holds up to
+ * 23 of the 28 entries as of 2026-09-04, i.e. up to 6 pages. The per-page
+ * content is unchanged (still 4 cells at the full touch-target size), so the
+ * existing GRID_HEIGHT_PX arithmetic still fits the 267px no-scroll budget;
+ * only the page COUNT grows, which the "N of M" indicator and Prev/Next
+ * already handle generically. Bound the id array at the full catalogue size
+ * rather than a per-category constant, since one category can hold nearly
+ * all of it. */
 #define ENTRIES_PER_PAGE 4
-#define MAX_FAMILY_ENTRIES 8 /* largest family in this pass's FAMILIES split (Plainsman/Crystalline) */
+#define MAX_ENTRIES 32 /* >= g_builtin_profile_count (28); one static array covers every category */
 #define GRID_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 2 + UI_THEME_PADDING_PX / 2)
 
-static const char *s_family = "Bartlett";
-static uint8_t s_ids[MAX_FAMILY_ENTRIES];
+static profile_firing_type_t s_type = PROFILE_FIRING_BISQUE;
+static uint8_t s_ids[MAX_ENTRIES];
 static uint8_t s_id_count;
 static uint8_t s_page;
 static uint8_t s_page_count;
@@ -31,15 +40,15 @@ static lv_obj_t *s_grid;
 static lv_obj_t *s_indicator;
 static ui_topbar_t s_tb;
 
-static void render_page(void); /* forward decl -- set_family() below needs it */
+static void render_page(void); /* forward decl -- set_firing_type() below needs it */
 
 static void reload_ids(void)
 {
     s_id_count = 0;
-    for (size_t i = 0; i < g_builtin_profile_count && s_id_count < MAX_FAMILY_ENTRIES; i++) {
+    for (size_t i = 0; i < g_builtin_profile_count && s_id_count < MAX_ENTRIES; i++) {
         uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
         const builtin_profile_t *b = profiles_builtin_entry(id);
-        if (!b || !b->family || strcmp(b->family, s_family) != 0) {
+        if (!b || b->firing_type != s_type) {
             continue;
         }
         if (profiles_builtin_is_hidden(id)) {
@@ -51,18 +60,39 @@ static void reload_ids(void)
         }
         s_ids[s_id_count++] = id;
     }
+
+    /* Sort ascending by cone (see builtin_profile_t.cone's comment in
+     * profiles_builtin.h for why plain signed comparison already matches
+     * ascending heat-work). Small n (<= 28), insertion sort is plenty. */
+    for (uint8_t i = 1; i < s_id_count; i++) {
+        uint8_t key_id = s_ids[i];
+        const builtin_profile_t *key = profiles_builtin_entry(key_id);
+        int8_t key_cone = key ? key->cone : 0;
+        int8_t j = (int8_t)(i - 1);
+        while (j >= 0) {
+            const builtin_profile_t *cur = profiles_builtin_entry(s_ids[j]);
+            int8_t cur_cone = cur ? cur->cone : 0;
+            if (cur_cone <= key_cone) {
+                break;
+            }
+            s_ids[j + 1] = s_ids[j];
+            j--;
+        }
+        s_ids[j + 1] = key_id;
+    }
+
     s_page_count = (uint8_t)((s_id_count + ENTRIES_PER_PAGE - 1) / ENTRIES_PER_PAGE);
     if (s_page_count == 0) {
         s_page_count = 1;
     }
 }
 
-void ui_page_profiles_builtin_list_set_family(const char *family)
+void ui_page_profiles_builtin_list_set_firing_type(profile_firing_type_t type)
 {
-    s_family = family ? family : "Bartlett";
+    s_type = type;
     s_page = 0;
     reload_ids();
-    ui_topbar_set_title(&s_tb, s_family);
+    ui_topbar_set_title(&s_tb, profiles_builtin_firing_type_label(s_type));
     /* Grid may not exist yet on the very first call (screen not built) --
      * render_page() itself already guards on s_grid being non-NULL, and
      * ui_page_profiles_builtin_list_build() calls reload_ids()+render_page()
@@ -116,7 +146,17 @@ static void render_page(void)
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-        lv_label_set_text(label, b ? b->code : "?");
+        if (b) {
+            /* Cone visible in the row so the ascending-cone sort is legible,
+             * not just implied by list order. */
+            char cone_buf[8];
+            profiles_builtin_cone_label(b->cone, cone_buf, sizeof(cone_buf));
+            char text[40];
+            snprintf(text, sizeof(text), "%s\nCone %s", b->code, cone_buf);
+            lv_label_set_text(label, text);
+        } else {
+            lv_label_set_text(label, "?");
+        }
         lv_obj_center(label);
 
         lv_obj_update_layout(cell);
@@ -160,7 +200,7 @@ lv_obj_t *ui_page_profiles_builtin_list_build(void)
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     ui_topbar_create(scr, &(ui_topbar_cfg_t){
-        .title = s_family,
+        .title = profiles_builtin_firing_type_label(s_type),
         .back_page = "profiles_family",
         .show_home = true,
         .prev_cb = prev_cb,
