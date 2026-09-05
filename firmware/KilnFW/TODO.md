@@ -373,11 +373,15 @@ severity.
       source on the next autotune start, and
       `profile_executor_relay_io.c:555-568`'s `clear_this_runs_faults()`
       deasserts `s_exec.global_fault_source` on every exit from a run.
-- [ ] **Guard 5's absolute ceiling is off by default.** `max_temp_c == 0` means
+- [x] **Guard 5's absolute ceiling is off by default.** `max_temp_c == 0` means
       "no ceiling", and a zone never saved through `/settings/zones` fires with
       none -- while `autotune_engine` and `SAFETY_MODEL.md` both already assume
       the guard is armed. Either substitute a hard ceiling or refuse to start a
-      firing on such a zone.
+      firing on such a zone. DONE -- `profile_executor_start.c`'s
+      `profile_zones_have_ceiling()` now refuses to start a firing on any
+      zone that can command heat and has `max_temp_c == 0`, matching
+      `autotune_engine_run_relay()`'s existing guard-5 refusal for the same
+      reason (host-tested in `test_profile_executor_prestart.c`).
 - [x] **A completed run never releases its relay ownership** (only
       `profile_executor_halt()` does), so after a normal finish every manual
       relay command is refused as "owned by a profile" when none is running.
@@ -405,10 +409,12 @@ severity.
       `ui_page_thermo_faults.c` already does. DONE -- `board_temps.c:90-129`
       now indexes `thermo_cj_valid[]`/`thermo_cj_c[]` by `r->channel`, never
       by loop position.
-- [ ] **A CJRANGE fault NaNs only the cold junction**, but the hot-junction
+- [x] **A CJRANGE fault NaNs only the cold junction**, but the hot-junction
       value is cold-junction-compensated in hardware -- so an out-of-range cold
       junction yields a wrong hot-junction temperature reported as a plausible
-      number.
+      number. DONE -- `max31856_fault_invalidates_tc()` (`max31856_codec.h`)
+      now also NaNs `tc_temperature_c` on a CJRANGE fault; see
+      `MAX31856.c`'s read path (~line 1121) and its 2026-08-27 doc comment.
 - [x] **`dashboard_get_status()` calls `kiln_io_read()` from the LVGL task**,
       bypassing `kiln_io_owner` and consuming the SX1509 interrupt latch that
       another reader may be waiting for. DONE (not one of the original 12 in
@@ -879,11 +885,15 @@ per-field bumpless-transfer/cold-restart/immediate-apply rules; an
 unowned-relay sweep; and the mid-firing `max_ramp_c_per_hr` re-check (warns,
 doesn't block or re-run feasibility).
 
-- [ ] **The tick must not block** — both bus accesses go through the
+- [x] **The tick must not block** — both bus accesses go through the
       existing `i2c_owner`/`esp_spi_owner` queues with bounded timeouts, but
       whether a timeout is actually treated as a bad read (feeding guard 6's
       debounce) rather than skipping guard evaluation was never confirmed by
-      reading `MAX31856_read_all()`'s timeout contract.
+      reading `MAX31856_read_all()`'s timeout contract. CONFIRMED 2026-09-04
+      by reading the code: a channel lock timeout surfaces as
+      `MAX31856Reading.spi_failed`, and `profile_executor_run.c` (e.g.
+      lines 601-602, 645) treats `spi_failed`/`isnan()` readings as bad --
+      feeding guard evaluation rather than being skipped.
 
 ### 6A.8 Verification — how any of this gets trusted
 

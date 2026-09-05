@@ -247,7 +247,7 @@ real hardware** — no RP2040 attached to any machine this has been built on.
 - [ ] Blink-equivalent proof of life over SWD/RTT, and the physical heartbeat
       LED's toggle logic — **neither verified**; no RP2040/debug probe attached
       to any build machine.
-- [ ] Runtime log-level command over the link. ⚠️ **Blocked on a decision, not
+- [x] Runtime log-level command over the link. ⚠️ **Blocked on a decision, not
       on code**: `log_task_set_level()`/`_get_level()` exist and work
       internally, but `CommonFW` allocates **no wire command id** for this —
       grepped end to end 2026-08-22 for `log_level`/`LOG_LEVEL`/`SET_LOG`,
@@ -255,7 +255,10 @@ real hardware** — no RP2040 attached to any machine this has been built on.
       both firmwares plus `pc_tools`), so it is the owner's call rather than
       something `link_task.c` can decide unilaterally. Low risk when it
       happens — additive, and an older peer ignores an unknown id — with
-      `0x1B` the next free id.
+      `0x1B` the next free id. DONE — `SAFETY_CMD_SET_LOG_LEVEL` (0x1B) is
+      now a real wire command (`kilnlink_set_log_level.h`), handled by
+      `link_task.c`'s `link_task_handle_set_log_level()`
+      (`KILNLINK_SET_LOG_LEVEL_CMD` case, ~line 2179).
 - [ ] RTT as `SaftyFW`'s secondary log transport — needs the debug probe wiring
       on the bench.
 
@@ -440,9 +443,13 @@ send/receive on both sides, the `FW_VERSION` version-fields-first parse,
 bidirectional compatibility evaluation, telemetry-keeps-flowing-on-mismatch,
 and the `0x00`–`0x0F` compatibility floor are all built and host/build-verified.
 
-- [ ] 7b.5, remaining half: **on a version mismatch, the Pico side has the
+- [x] 7b.5, remaining half: **on a version mismatch, the Pico side has the
       mechanism (`DEGRADED_NO_CONTEXT` tracked correctly) but nothing yet to
       discard/disable** — no context-dependent guard exists yet for it to
+      DONE — `safety_core.c` now derives a single `context_valid` fact from
+      `DEGRADED_NO_CONTEXT`/stale/never-received/clock-stalled and
+      `safety_guards.c` uses it to disable the context-dependent guards
+      (S6a/S6b, S11/S13, S14 all cite it, e.g. `safety_guards.c:931`).
       disable (same dependency as Phase 7's S2/S6/S10). Also, Phase 0.6's full
       redefinition (dead-link fault, not just version mismatch) is still
       unbuilt on the ESP side — this phase reused the pre-existing
