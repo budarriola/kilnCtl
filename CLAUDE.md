@@ -21,8 +21,9 @@ links to the per-area plans that own the detail.
 
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
-cannot see a tool for it — each server publishes about six tools and keeps the
-rest behind a search facade (140 tools for `kilnctrl`, 86 for `kicad`).
+cannot see a tool for it — each server publishes six or seven tools and keeps
+the rest behind a search facade (141 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-04).
 
 ```
 kiln_help()                      # kilnctrl: main board (ESP32-S3) + RP2040 safety processor
@@ -63,7 +64,7 @@ factory boot target.
 
 `ota_rollback_esp()` itself has a hazard, 2026-09-04: rolling back past a
 `zones_cfg` schema bump (e.g. v19, `ZONES_CFG_VERSION` in
-`firmware/KilnFW/App/drivers/zones_config_store.c`) makes the older firmware
+`firmware/KilnFW/App/drivers/zones_config_json.h`) makes the older firmware
 refuse the newer-than-it-knows blob and run that boot on **firmware-default
 PID gains**, not the tuned ones — flash is left untouched, so reflashing the
 newer firmware restores everything, but a firing started right after the
@@ -127,9 +128,12 @@ server stopped, submodule remounted at the new `.gitmodules` path, every
 `.claude/settings.json` allowlist entry walked one at a time rather than bulk-
 edited). `pdfMcp/` moved to `tools/pdfMcp/` the same day — its own running
 server process couldn't be moved out from under itself mid-session, so that
-directory was copied rather than renamed; the stale root-level copy cleans up
-on the next session restart, once that old process exits. Paths in this file
-reflect where things are **now**.
+directory was copied rather than renamed. As of 2026-09-04 the stale
+root-level `pdfMcp/` (full `.venv` and all) and a leftover `mykicadMcp/` (an
+agent worktree under `.claude/worktrees/`) are both **still present** —
+the old process has not exited, so the promised cleanup has not happened.
+Do not treat either root-level copy as current; the paths in this file
+reflect `tools/mykicadMcp/` and `tools/pdfMcp/` only.
 
 All main-board KiCad project files live under **hardware/mainBoard/** (paths below are relative to that
 directory unless noted). A second, independent board — the 5-channel thermocouple daughterboard —
@@ -272,10 +276,11 @@ forces the other side's dependent state to be revisited. Both sides stay
 internally consistent afterward — no crash, no assertion — so only the
 *relationship* is broken, and it fails silently: health counters on the
 stalled side often read perfectly clean (`evt_seq_gap_count: 0`) precisely
-*because* nothing downstream of the break ever ran again. Comparing against
-a maintained reference model (`tools/virtual_simfw`'s
-`reset_client_evt_cursors()`, which the real firmware lacked) is a cheap way
-to spot the gap by hand.
+*because* nothing downstream of the break ever ran again. (One example fix,
+`reset_client_evt_cursors()`, lived in the SimFW/`kilnsim` reference model
+before that tree was deleted 2026-08-28 — no replacement reference model
+exists today, so this class currently has to be spotted by inspection, not
+by diffing against a maintained comparison implementation.)
 
 This was evaluated for a mechanical `check_*` and rejected: the four
 instances have no unifying syntactic shape (a per-connection PC/firmware
