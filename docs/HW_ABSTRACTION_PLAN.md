@@ -880,6 +880,26 @@ proposed fixes in `tools/drivers_reorg/DRYRUN.md` rather than repeated here:
    the same narrow `profile_executor_state.h` (safety_link_frames.c uses the
    full `profile_exec_status_t` snapshot for SAFETY_CMD_PUSH_CONTEXT, still a
    pure query, no start/stop/command surface pulled in).
+7. DONE (2026-09-05): log_store_mount.c included all of uart_bridge.h for
+   one dispatch call. New narrow `flash_worker.h` (common tier) declares
+   only `uart_bridge_ext_run_on_flash_worker()`; log_store_mount.c and
+   uart_bridge.h itself now include it. Same pass reverted decision D (`sim`
+   back to the bottom tier with owners/hw, resolving 4 upward includes for
+   free) and added a verifier allowlist for kiln_io_owner/relay_authority's
+   five deliberate interlock includes -- see `tools/drivers_reorg/DRYRUN.md`
+   section 5's 2026-09-05 update for detail and the two new sim_backend.c
+   findings it surfaced (proposed, not yet implemented).
+8. DONE (2026-09-05): DRYRUN.md section 5 "Fix 1" -- five control/persist
+   headers (`profiles_builtin.h`, `profile_executor.h`,
+   `profile_executor_state.h`, `profile_feasibility.h`, `run_state.h`)
+   included `profiles_http.h` for `profile_t`'s shape alone. New
+   `profiles_types.h` (persist, alongside `profiles_builtin.h`) holds just
+   the types/constants; `profiles_http.h` includes it back for its own use,
+   and the five switched. `profile_executor_run.c` had been relying on
+   `profiles_http_get()`'s declaration arriving transitively through
+   `profile_executor.h`; it now includes `profiles_http.h` directly, same
+   pattern as every other `.c` file (`backup_export.c`, `dashboard_http.c`,
+   etc.) that already calls that accessor.
 
 All placements ambiguous under the original plan are now resolved in
 `mapping.csv` (coordinator decisions, third round): the zones_http family

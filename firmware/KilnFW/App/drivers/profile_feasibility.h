@@ -25,7 +25,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "profiles_http.h"
+#include "profiles_types.h"
 
 #ifdef __cplusplus
 extern "C" {

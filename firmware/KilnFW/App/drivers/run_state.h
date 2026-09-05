@@ -43,7 +43,7 @@
 
 #include "esp_err.h"
 
-#include "profiles_http.h" /* PROFILE_NAME_MAX_LEN */
+#include "profiles_types.h" /* PROFILE_NAME_MAX_LEN */
 
 #ifdef __cplusplus
 extern "C" {

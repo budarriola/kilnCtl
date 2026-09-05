@@ -177,6 +177,7 @@ firmware/KilnFW/App/drivers/profile_feasibility.c,firmware/KilnFW/App/drivers/co
 firmware/KilnFW/App/drivers/profile_feasibility.h,firmware/KilnFW/App/drivers/control/profile_feasibility.h,plan census control example (profile_feasibility)
 firmware/KilnFW/App/drivers/profiles_builtin.c,firmware/KilnFW/App/drivers/persist/profiles_builtin.c,plan census persist example (profiles_builtin)
 firmware/KilnFW/App/drivers/profiles_builtin.h,firmware/KilnFW/App/drivers/persist/profiles_builtin.h,plan census persist example (profiles_builtin)
+firmware/KilnFW/App/drivers/profiles_types.h,firmware/KilnFW/App/drivers/persist/profiles_types.h,"item 7 split: pure profile types out of profiles_http.h, home persist alongside profiles_builtin.h (DRYRUN.md section 5 Fix 1)"
 firmware/KilnFW/App/drivers/profiles_builtin_table.inc,firmware/KilnFW/App/drivers/persist/profiles_builtin_table.inc,plan census persist example (profiles_builtin)
 firmware/KilnFW/App/drivers/profiles_catalog_http.c,firmware/KilnFW/App/drivers/http/profiles_catalog_http.c,plan census: *_http.c handler family
 firmware/KilnFW/App/drivers/profiles_edit_http.c,firmware/KilnFW/App/drivers/http/profiles_edit_http.c,plan census: *_http.c handler family
@@ -357,3 +358,4 @@ firmware/KilnFW/App/drivers/zones_http_pid.c,firmware/KilnFW/App/drivers/http/zo
 firmware/KilnFW/App/drivers/zones_http_post.c,firmware/KilnFW/App/drivers/http/zones_http_post.c,plan ambiguous-placement zones_http family resolved to http: thin registration (zones_http.c) plus its get/post/pid handler splits are httpd surface; config accessors already split out to persist/zones_config_accessors.*
 firmware/KilnFW/App/drivers/zones_http_post_parse.c,firmware/KilnFW/App/drivers/http/zones_http_post_parse.c,plan ambiguous-placement zones_http family resolved to http: thin registration (zones_http.c) plus its get/post/pid handler splits are httpd surface; config accessors already split out to persist/zones_config_accessors.*
 firmware/KilnFW/App/drivers/zones_page.html,firmware/KilnFW/App/drivers/http/zones_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/flash_worker.h,firmware/KilnFW/App/drivers/common/flash_worker.h,"New narrow header (item 10): sole declaration of uart_bridge_ext_run_on_flash_worker() for consumers (log_store_mount.c) that need only the flash-worker dispatch call, not the full UART bridge API. Includes only esp_err.h -- nothing above common -- so it goes in common per the persist-consumer note, not bridge."

@@ -25,7 +25,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
-#include "profiles_http.h"
+#include "profiles_types.h"
 
 #ifdef __cplusplus
 extern "C" {

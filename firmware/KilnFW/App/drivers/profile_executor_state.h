@@ -20,7 +20,7 @@
 #include "MAX31856.h"
 #include "kiln_io.h"
 #include "pid.h"
-#include "profiles_http.h"
+#include "profiles_types.h"
 #include "safety_link.h"
 #include "thermal_guard.h"
 
