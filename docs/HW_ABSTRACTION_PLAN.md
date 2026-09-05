@@ -1,14 +1,21 @@
 # Hardware Abstraction Tree — Plan
 
-Status: proposed 2026-09-05. Four research/verification rounds the same day
-(7 + 6 + 10 + 6 sonnet agents: structural surveys, call-site censuses,
+Status: proposed 2026-09-05. Five research/verification rounds the same day
+(7 + 6 + 10 + 6 + 7 sonnet agents: structural surveys, call-site censuses,
 boot-order and RAM audits, header drafts, error-code mapping, host-build
-shape, enforcement-check census). Every number below is measured against the tree at commit `c43323a`
-unless marked otherwise. No prior HAL doc exists.
+shape, enforcement-check census, then a "what has not been double-checked"
+pass that compiled the header drafts on MSVC, re-censused NVS and scratch
+use, read the IDF GPIO driver source, recomputed the link budget and audited
+the drivers/ directory). Every number below is measured against the tree at
+commit `c43323a` unless marked otherwise. No prior HAL doc exists.
 
-Owner decisions needed before Phase 1 starts: approve the tree location and
-naming; approve the opaque-storage pattern (option a, below); approve the
-hal_uart two-primitive shape.
+Owner decision taken 2026-09-05: keep firmware/UnitTestFw untouched (it has
+no build or flash consumers and its espInterfaces copy has diverged by
+786/576/225 lines, but it stays). Owner decisions still needed before Phase 1
+starts: approve the tree location and naming; approve the opaque-storage
+pattern (option a, below); approve the hal_uart two-primitive shape; approve
+the drivers/ layering (section below) and whether it lands before or with
+Phase 1a.
 
 ## Goal
 
@@ -37,8 +44,18 @@ firmware/hwAbstraction/
 
 Builds: `esp/` becomes an ESP-IDF component added to `EXTRA_COMPONENT_DIRS`
 (firmware/KilnFW/CMakeLists.txt:10). `pico/` a plain CMake static lib pulled
-by firmware/SaftyFW/CMakeLists.txt (today's source lists at :62 and :120,
-plus the `target_link_libraries` of all three executables). `host/` is
+by firmware/SaftyFW/CMakeLists.txt. Verified shape (2026-09-05): SaftyFW
+builds three app executables — `SaftyFW` (:149), `SaftyFW_slotA` and
+`SaftyFW_slotB` (:414-415 via `saftyfw_add_slot_executable` :334-403) — with
+identical link lists (:199-214 vs :364-379) and one FreeRTOSConfig.h, so a
+single `add_library(hwabstraction_pico STATIC ...)` with
+`target_link_libraries(... PUBLIC hardware_gpio hardware_irq hardware_uart
+hardware_spi hardware_adc hardware_flash pico_flash pico_multicore
+FreeRTOS-Kernel FreeRTOS-Kernel-Heap4)` is linked by all three. A STATIC lib
+is safe because the only runtime registration is `irq_set_exclusive_handler`
+(uart_owner.c:259), called from init, not a constructor. The bootloader has
+its own CMakeLists and no FreeRTOS; it is excluded and keeps its raw SDK
+calls. `host/` is
 compiled by both build_host_tests.ps1 scripts (Option A below), replacing the
 stub-header include-path trick interface by interface.
 
@@ -94,12 +111,19 @@ handles. Reservations: spi bus 64 / device 32; i2c bus 128 (headroom for a
 future static per-call semaphore) / device 16; uart 64. Pico backends have no
 per-instance struct at all (file-scope statics) and simply under-fill.
 
-Host toolchain: KilnFW's build_host_tests.ps1 passes `/std:c11` on most but
-not all of its 23 `cl` invocations; SaftyFW's main build passes no `/std:`
-(only the fuzz build uses `/std:c17`). `_Static_assert` already compiles on
-host (run_state.c, SaftyFW spi_owner.c:29); `alignas` is a first use in
-first-party code. Phase 0 sets `/std:c11` on every invocation that includes
-an interface header — do not assume MSVC's default.
+Verified: no struct that contains an owner (SX1509Class, FT6336UClass,
+NS2009Class, MAX31856BusClass) is memcpy'd, memcmp'd, written to NVS or a
+backup, or sent over the bridge — every memcpy in those drivers is on
+register byte buffers. The storage size is therefore a build-time ABI only.
+
+Host toolchain, verified by compiling the drafts: `alignas` from
+<stdalign.h> compiles under `/std:c11` and `/std:c17` and fails with no
+`/std:` flag (`error C2061: syntax error: identifier 'alignas'`). The
+`_Alignas(8)` keyword form also compiles under `/std:c11`. Use the keyword
+form in the headers. KilnFW's build_host_tests.ps1 passes `/std:c11` on most
+but not all of its 23 `cl` invocations; SaftyFW's main build passes no
+`/std:` (only the fuzz build uses `/std:c17`). Phase 0 sets `/std:c11` on
+every invocation that includes an interface header.
 
 ### hal_spi
 
@@ -147,9 +171,12 @@ frame in 1440 B chunks, DMA scratch in internal RAM; the flush callback must
 never call an lv_* mutator (51e1ef5). One FIFO owner queue is shared by
 display and thermo with no priority — the safety-link thermo read
 (safety_link_frames.c:392) transits it inside the ~345 ms reply budget, and
-SPI_OWNER_TRANSFER_TIMEOUT_MS is 1000. The interface adds no per-call
-overhead beyond a status translation; measure frame time on hardware after
-Phase 1b, not just host.
+SPI_OWNER_TRANSFER_TIMEOUT_MS is 1000. All ~214 calls funnel through
+panel_spi.c:345 with the owner passed by pointer; esp_spi_owner.c:418 builds
+exactly one ~56 B `spi_owner_request_t` per call for the queue. The wrapper
+keeps the handle pointer-passed and must not build a HAL-level request
+struct that is then translated into the owner's — one request build per
+call, not two. Measure frame time on hardware after Phase 1b, not just host.
 
 ### hal_i2c
 
@@ -187,14 +214,37 @@ hal_uart_get_rx_error_count / get_tx_dropped / hal_uart_restart
 ```
 
 Backends: ESP `send_blocking` = today's write + wait_tx_done, unchanged; ESP
-`send` = uart_write_bytes without the wait. Pico `send_blocking` = enqueue,
-then poll `get_tx_used()==0` (uart_owner.c:464-471) plus the FIFO-empty flag.
-Host fake: instant. Consequences: only uart_protocol.c:107 changes its call;
-the ACK timer is untouched; SAFETY_LINK_REPLY_TIMEOUT_MS
-(safety_link.h:560-562, ≈345 ms) is not re-budgeted — its ×2 request-flight
-term is slack. The Pico never originates ACK-timed sends (link_task.c:2125).
-The only `uart_owner_transfer` callers pass rx=NULL (uart_protocol.c:107 and
-the UnitTestFw mirror), so the reply-read path is dead and is dropped.
+`send` = uart_write_bytes without the wait. Pico `send_blocking` = `send`
+plus a drain of the software ring (`get_tx_used()==0`, uart_owner.c:464-471,
+race-free under `save_and_disable_interrupts`), documented as
+ring-drained-not-wire-complete: the Pico never originates an ACK-timed send
+(link_task.c:2124-2125 — it answers BROADCAST with BROADCAST, fire-and-
+forget), so no pico consumer needs true wire completion. If one ever does,
+the primitive is the PL011 `UARTFR.BUSY` bit, not TXFE — TXFE clears while
+the last byte is still shifting out. No such check exists in SaftyFW today.
+Host fake: instant.
+
+Reply budget, recomputed: FRAME_STUFFED_MAX = (8+253+2)×2+2 = 528 B;
+baud 230400 (Kconfig:749-751 default, no sdkconfig.defaults override,
+check_safety_baud_sync.ps1:25-31 reads the Kconfig default);
+528×10×1000×2/230400 + 300 = 345 ms exactly. The ESP's blocking send
+completes before the reply clock starts (uart_protocol.c:751-755
+`xSemaphoreTake` after `frame_and_send`; same shape in
+safety_link_commands.c:513-538), so the ~23 ms send is outside the window.
+Inside it: Pico poll ≤10 ms (LINK_TASK_POLL_MS, link_task.c:163), no SPI on
+the Pico reply path, reply flight ≈23 ms — worst case ≈40 ms against 345.
+Consequently only uart_protocol.c:107 changes its call and nothing is
+re-budgeted. The only `uart_owner_transfer` callers pass rx=NULL
+(uart_protocol.c:107 and the UnitTestFw mirror), so the reply-read path is
+dead and is dropped.
+
+Reset pairing, verified: `uart_owner_restart` has one caller
+(uart_bridge_system.c:66) and is deliberately RX-only (UART_PROTOCOL.md:577-
+587); the dedup ring records only CRC-valid frames (uart_protocol.c:321) and
+framing resyncs on the next 0x7E, so no protocol state derives from what the
+flush discards. The Pico has no runtime RX reset at all (init-time zero only,
+uart_owner.c:255-256). `hal_uart_restart` inherits the same contract and the
+same doc comment.
 
 uart_protocol.c (framing, CRC16, ACK/retry/dedup, broadcast; 2867 lines with
 its header) stays ABOVE the interface. Its RX loop's
@@ -226,13 +276,21 @@ SX1509.c:459-478 configures the pin as a polled input and uart_bridge_io owns
 the ISR). Both stay raw, with Phase 4 allowlist entries. Trigger for adding
 `hal_gpio_irq_attach`: a second pico consumer.
 
-Init ordering audit: pico src/main.c:151-153 does put-then-set_dir (correct).
-bootloader/main.c:189-191 does set_dir-then-put — REVERSED; out of scope for
-this plan but flagged for the bootloader pass. ESP panel_spi_bringup.c does
-config-then-level with no latch-first discipline, so the ESP
-`hal_gpio_init_out` must use a two-step recipe: direction IN, set level,
-direction OUT (the ESP-IDF output latch is not honoured until the pin is an
-output).
+Init ordering audit. Pico src/main.c:151-153 does put-then-set_dir
+(correct). bootloader/main.c:189-191 does set_dir-then-put — REVERSED; out
+of scope here, flagged for the bootloader pass. ESP: read against IDF
+v6.0.2 (`C:\esp\v6.0.2\esp-idf`), `gpio_set_level` writes `out_w1ts`
+unconditionally (esp_driver_gpio/src/gpio.c:248-253 →
+gpio_ll_set_level, gpio_ll.h:310-318) and `gpio_set_direction` never
+touches the OUT register, so level-then-config is glitch-free on its own —
+no "direction IN first" step needed. The ESP `hal_gpio_init_out` is simply
+set_level then config. Three ESP sites do it the wrong way round today and
+have a brief CS-asserted window at boot: panel_spi_bringup.c CS (:219 then
+:224), panel reset (:263 then :268), MAX31856.c CS (:517 then :523).
+SX1509.c reset (:437 then :445) is already correct; safety_link.c:409/414
+drives 0 onto a register that resets to 0, benign. These three sites are
+fixed by adopting `hal_gpio_init_out`, which is a behavior change to note in
+the Phase 3 item 6 commit, not a silent one.
 
 gpio_probe.c needs a runtime pin number plus set_direction/set_pull/set/get;
 its pin denylist stays above the HAL.
@@ -252,19 +310,30 @@ adc_owner is still a TODO; hal_adc is where it lands.
 
 ### hal_kv — ESP-only, wraps NVS. Pico explicitly excluded.
 
-NVS census: 19 files call `nvs_open` (21 modules counting headers-only
-users); namespaces kiln_cfg (dominant, 13 modules) / wifi_cfg / boot_guard /
-fire_stats / touch_cal / watchdog_cfg, plus named partitions (profiles, zones
-load-from). flash_worker_lint.py's allowlist has 22 entries. API covering
-100% of observed use:
+NVS census, re-done function by function: `nvs_open_from_partition` ~25
+files, plain `nvs_open` (default partition) in relay_cycles.c:96 and
+run_state.c:131, `nvs_get/set_blob` ~20 files (size-probe form at
+kiln_cfg_store.c:207), `nvs_get/set_str` in time_sync.c and wifi_prov_nvs.c,
+`nvs_erase_key` in crash_report.c:335 and profiles_http.c:596,
+`nvs_flash_init_partition`/`erase_partition` ~13 files + factory_reset.c:125,
+`nvs_get_stats` in ui_page_diagnostics.c:570. Zero production callers of
+the scalar `nvs_get/set_u8/u32/i16/i32`, iterators, `nvs_erase_all`,
+`nvs_find_key` or `nvs_flash_deinit`. Namespaces: kiln_cfg (13 files),
+boot_guard, touch_cal, watchdog_cfg, wifi_cfg. Partitions: kiln_nvs,
+wifi_nvs, profiles_nvs — note touch_cal_store.c:17 has its own local
+`#define NVS_PARTITION "kiln_nvs"`, easy to miss. flash_worker_lint.py's
+allowlist has 22 entries. API covering 100% of observed use:
 
 ```c
-hal_kv_open(namespace, mode, partition_or_NULL) / close / commit
-hal_kv_get/set_u8, _u32, _str, _blob   // get_blob(NULL buf) = size probe
+hal_kv_open(namespace, mode, partition_or_NULL) / close / commit   // NULL = default partition
+hal_kv_get/set_str, _blob              // get_blob(NULL buf) = size probe
+hal_kv_erase_key(h, key)               // crash_report, profiles_http
 hal_kv_init_partition(name)            // idempotent, with erase-retry
 hal_kv_erase_partition(name)           // factory_reset's scoped erase
 hal_kv_stats(partition, ...)           // nvs_report's enumeration
 ```
+
+The round-1 draft listed `_u8/_u32` and omitted `erase_key`; both corrected.
 
 Write-context safety is part of the contract: expose
 `hal_kv_write_safe_here()` (today's caller_stack_is_external predicate) so
@@ -309,7 +378,16 @@ checkpoint. Registry: static claim table {slot, owner, tag} with a
 compile-time uniqueness assert; slot 4 hard-reserved in code; typed accessors
 write_u32/read_u32(&magic_ok)/clear supporting both access modes. The four
 direct pokers (main.c, boot_reason.c, watchdog_overdue_diag.c,
-clear_trip_diag.c) become clients.
+clear_trip_diag.c) become clients. Slot map re-verified against every
+`watchdog_hw->scratch` access (boot_reason.c:28-50, main.c:127/439/440,
+watchdog_overdue_diag.c:23-48, clear_trip_diag.c:17-35, startup_diag.h:111
+macro); slot 4's pico-sdk claim confirmed at hardware_watchdog/watchdog.c:82.
+Slot 5's two writers are cross-documented in code (main.c:84-89). Hazard the
+registry must also own: pico-sdk `watchdog_reboot(pc, sp, delay)` writes
+scratch[4..7] whenever `pc != 0` (watchdog.c:90-112). SaftyFW's single call
+(update_task.c:998) passes `pc = 0`, so nothing is stomped today; hal_wdt's
+reboot wrapper takes no pc/sp arguments so the non-zero path cannot be
+reached.
 
 ### hal_time / hal_wdt / hal_pwm / hal_sysinfo
 
@@ -410,8 +488,21 @@ paths. Moving to ctest would break every path-keyed check at once. Command-
 line length is the real constraint: KilnFW's 81-entry main source list is
 already ≈7,054 characters of cmd.exe's 8,191 limit at the normal checkout
 path (≈10,780 at a worktree path — the documented overflow). Adding 5-10 fake
-files crosses the limit at the normal path. Phase 2 therefore switches the
-main invocation to a response file (`cl @sources.rsp`) first.
+files crosses the limit at the normal path. Verified empirically: a 90-file
+inline line (18,209 chars) through the same `cmd /c vcvarsall && cl` wrapper
+is silently truncated mid-argument (`LNK1104: cannot open file '>.obj'`),
+while `cl @sources.rsp` with one quoted path per line — including paths with
+spaces — builds clean. Phase 2 therefore switches the main invocation to a
+response file first.
+
+What is host-compiled today, verified against both scripts: esp_spi_owner.c
+is compiled into the main KilnFW executable via test_esp_spi_owner.c:41's
+direct `#include` of the `.c` (build_host_tests.ps1:79), and
+owner_slot_pool.c is in two executables (:108, :394). i2c_owner.c,
+uart_owner.c and uart_protocol.c are host-compiled nowhere. SaftyFW's
+build_host_tests.ps1 compiles uart_owner_tx_policy.c (:83) but neither
+spi_owner.c nor uart_owner.c. The script's `$totalExpected` comment says 22
+executables; 23 exist (exe23 added 2026-09-05) — fix the count in Phase 2.
 
 Stub headers retired by Phase 2: driver/spi_master.h, driver/i2c_master.h,
 driver/uart.h, driver/gpio.h, nvs.h, nvs_flash.h, esp_timer.h,
@@ -601,9 +692,13 @@ allowlist literals already listed under Phase 1).
 - time_sync (SNTP), ota_pico_relay, OTA partition writes, mdns (unused).
 - No vtables/function pointers. Link-time backend selection, one backend per
   build.
-- UnitTestFw's espInterfaces copy: all seven files have diverged from
-  KilnFW's. Whether it is live or dead is decided in its own pass;
-  check_no_duplicate_crc's exclusion entries for it stay.
+- firmware/UnitTestFw stays untouched (owner decision 2026-09-05). Its
+  espInterfaces copy has diverged from KilnFW's by 786/576/225 lines on the
+  exact files Phase 1a moves, it has no build/flash consumer in tools/ or
+  run_all_checks, and ROADMAP.md:92,222 disclaims it — none of that changes
+  the decision. No move, no fold into hwAbstraction/, and
+  check_no_duplicate_crc's exclusion entries for it stay. Do not re-propose
+  deletion.
 - SaftyFW bootloader (bare-metal, ~64K budget, no flash_safe_execute, raw
   uart1 putc/getc): same treatment later, separate pass; shares only
   flash_layout.h. Its reversed GPIO init order is noted above.
@@ -625,8 +720,86 @@ allowlist literals already listed under Phase 1).
 - Fake fidelity trap: a fake that models no lock and no quantization
   re-creates the documented host-test blind-spot classes. The fake specs are
   requirements.
-- Concurrent sessions share this tree; Phase 1a and the hal_kv migration are
-  the two land-alone diffs.
-- Reset-one-side class: hal_uart_restart clears the RX ring and error count
-  on one side; uart_protocol's dedup ring and ACK cache must be revisited in
-  the same edit (the four documented instances are the checklist).
+- Concurrent sessions share this tree; Phase 1a, the drivers/ reorg and the
+  hal_kv migration are land-alone diffs. State on 2026-09-05: stash empty;
+  worktree `s14-cal-gate` holds 7289cc8 (safety_core.c +7, unmerged) and must
+  be rebased before any SaftyFW move that touches safety_core.c; the other
+  worktrees (agent-a082f1859f1d7800a, C:/wt/merge, C:/wt/sfck) carry nothing
+  relevant. Uncommitted KilnFW edits at the time — drivers/dram_margin.h,
+  profiles_builtin.h, profiles_builtin_table.inc, main.c, test/stubs/nvs.h,
+  test/test_profiles_builtin.c, sdkconfig.defaults — would collide with a
+  drivers/ reorg; wait for them to land or coordinate. SaftyFW's dirty files
+  (config_store.h, safety_guards.c/h, test_safety_guards.c) are outside the
+  HAL move set.
+- Reset-one-side class: verified paired for hal_uart_restart (single caller
+  uart_bridge_system.c:66, RX-only by design per UART_PROTOCOL.md:577-587,
+  and uart_protocol's dedup only records CRC-valid frames, so a ring flush
+  cannot strand it). Re-run the four-instance checklist if the restart ever
+  grows a TX side or the Pico gains a runtime RX reset (it has none today).
+- hal_wdt reboot: `watchdog_reboot(pc, sp, delay)` with pc≠0 overwrites
+  scratch[4..7], which hal_scratch's slot map owns (slot 5 has two writers,
+  main.c:84-89). The only caller today passes pc=0 (update_task.c:998); the
+  wrapper takes no pc/sp arguments so the hazard cannot be reintroduced.
+- GPIO boot glitch: three ESP sites set direction before level today
+  (panel_spi_bringup.c:219/224 CS, :263/268 reset; MAX31856.c:517/523 CS),
+  briefly driving the line low. hal_gpio's level-then-config contract fixes
+  them on migration; that is a deliberate behaviour change, so check the
+  MAX31856 and panel bring-up on hardware after Phase 1b rather than assuming
+  "same as before".
+- drivers/ reorg: 185 literal SRCS in CMakeLists (no glob) and every
+  filename-keyed check script move at once. Loud failure (build breaks) for
+  CMake; silent failure for checks — same mitigation as Phase 1a.
+
+## drivers/ layering (KilnFW only)
+
+firmware/KilnFW/App/drivers/ holds 332 files and most of them are not
+drivers. Census by role (2026-09-05):
+
+| Role | Files | Examples |
+|---|---|---|
+| hw (real device drivers) | 24 | MAX31856, SX1509, FT6336U, NS2009, panel_spi*, backlight_pwm |
+| owners (bus/IO arbitration) | 15 | espInterfaces/*, kiln_io_owner, owner_slot_pool |
+| control | 36 | profile_executor*, pid*, autotune*, feedforward*, thermal_guard |
+| safety | 26 | safety_link*, safety_cfg*, danger_mode, crash_report |
+| persist | 22 | zones_config*, profiles_store*, touch_cal_store, boot_guard |
+| net | 19 | wifi_prov*, time_sync, ota_* |
+| http | 34 | *_http.c handlers |
+| ui | 48 | ui_page_*, lvgl_port, theme |
+| bridge | 17 | uart_bridge_*, gpio_probe |
+| sim | 2 | |
+| misc | 5 | event_log |
+
+Target: `App/{hw,owners,control,safety,persist,net,http,ui,bridge,sim}/`
+with `misc` folded into whichever layer owns each file. Allowed include
+direction is strictly downward: ui/http/bridge → control/safety/persist →
+owners/hw → hwAbstraction. Six upward-include patterns exist today and must
+be untangled before the move, otherwise the reorg just relabels the tangle:
+
+1. 18 control/safety files include zones_http.h for what are really config
+   accessors. Split those accessors into zones_config_accessors.h (persist);
+   zones_http.h keeps only handler registration.
+2. ota_http.h leaks into kiln_io_owner.c:17, profile_executor.c:25 and
+   profile_executor_run.c:21. Move the state query they use into net/ota.h.
+3. board_temps.c:8,12 includes http and net headers from what is a hw file.
+4. gpio_probe.c:32 and boot_button.c:11 include profile_executor.h from
+   bridge/hw; invert via a small callback or status accessor in control/.
+5. backlight_pwm.c:63-64 includes screen_idle and display_power_cfg (ui/
+   persist) from hw; pass the values in instead.
+6. safety_link*/danger_mode include profile_executor.h; safety needs a
+   narrow "executor state" accessor, not the whole control header.
+
+Ambiguous placements to decide during the move, not before: the zones_http
+family (persist vs http after item 1), zones_current_sweep_* (control vs
+safety), danger_mode (safety), wifi_status_ui (ui), settings.h (persist),
+event_log (misc → persist).
+
+Sequencing: untangle the six include patterns as ordinary commits first
+(each is a small behaviour-preserving edit that builds and passes on its
+own); then the directory move as one planned tree, with CMakeLists' 185
+literal SRCS rewritten in the same commit and every check_*.ps1 grepped for
+old paths; then HAL Phase 1a moves espInterfaces/ out of owners/ into
+hwAbstraction/. Doing the reorg before Phase 1a means the HAL move touches
+paths that are already final. The Phase 4 include-direction check (ratchet
+now, strict after Phase 3) is what keeps the layering honest afterwards.
+SaftyFW's src/ is 48 files (23 .c, 25 .h) and flat by choice; it is not
+part of this.
