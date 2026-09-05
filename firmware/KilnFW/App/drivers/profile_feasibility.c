@@ -347,7 +347,6 @@ profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const 
         return PROFILE_SEG_UNKNOWN;
     }
 
-    bool zone_agnostic = (zone_mask == 0);
     uint8_t mask = zone_mask;
     if (mask == 0) {
         /* Zone-agnostic (a builtin catalogue entry): judge it against every
@@ -373,16 +372,16 @@ profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const 
         }
         any = true;
         profile_seg_verdict_t per_zone[PROFILE_MAX_SEGMENTS];
-        /* `mask`, not `zone_mask`: a builtin's 0 has already been resolved to
-         * every configured zone above, and those zones do couple into zi --
-         * EXCEPT when the incoming mask was itself 0 (a zone-agnostic
-         * builtin catalogue entry): such an entry names no particular set of
-         * zones to run together, so it must not be credited with coupling
-         * help from zones it is not known to actually run alongside. Judge
-         * each zone SOLO (matches pre-coupling-aware behaviour) while still
-         * iterating every configured zone via `mask`. An explicit nonzero
-         * zone_mask keeps the coupled judgement. */
-        uint8_t coupling_mask = zone_agnostic ? (uint8_t)(1u << zi) : mask;
+        /* `mask`, not `zone_mask`: a builtin's incoming zone_mask of 0 has
+         * already been resolved to every configured zone above. That
+         * resolved set is also the set the executor will actually run the
+         * profile on: profiles_http.c resolves a builtin's mask to
+         * (1u<<thermo_count)-1 before invoking the executor, so a builtin
+         * always runs on every configured zone together, never solo. The
+         * coupled judgement is therefore correct for mask 0 exactly as it is
+         * for an explicit nonzero zone_mask -- there is no zone-agnostic
+         * case that should be judged SOLO. */
+        uint8_t coupling_mask = mask;
         profile_seg_verdict_t v = profile_feasibility_profile_in_mask(zi, coupling_mask, p,
                                                                       per_zone, PROFILE_MAX_SEGMENTS);
         rollup = worse(rollup, v);
