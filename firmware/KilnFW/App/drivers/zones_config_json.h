@@ -59,7 +59,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 18
+#define ZONES_CFG_VERSION 19
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -141,6 +141,54 @@ extern "C" {
 #define ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN 1.0f
 #define ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX ZONE_MAX_RAMP_C_PER_HR_MAX
 
+/* Bounds for zone_cfg_t::error_band_c / ::rate_band_c_per_s (ZONES_CFG_
+ * VERSION 18->19, 2026-09-04, PID_EXPANSION_PLAN.md sec 3.6g): the
+ * triangular-membership half-widths pid_fuzzy.c's pid_fuzzy_adjust() uses on
+ * its error/error-rate axes -- see pid_fuzzy.c's own ERROR_BAND_C_DEFAULT/
+ * RATE_BAND_C_PER_S_DEFAULT comment for the full rationale (why these were
+ * compile-time constants, what logs/coupling/fuzzy_bands_envelope_20260904e_
+ * report.md found, and why the owner's decision on whether/how to rescale
+ * them is out of scope for this pass -- this pass only removes the reflash
+ * that decision used to cost).
+ *
+ * Same "0 = use the firmware default" sentinel convention as
+ * ease_off_window_mult (NOT approach_rate_cap_c_per_hr's "0 = off with no
+ * substitute" convention -- there is no meaningful "no band" answer for a
+ * membership function the way there is a meaningful "no cap" answer for a
+ * rate limiter; some finite band width always applies). zones_config_json_
+ * validate() accepts 0 explicitly, and zones_config_get_error_band_c()/
+ * zones_config_get_rate_band_c_per_s() substitute ZONE_ERROR_BAND_C_DEFAULT/
+ * ZONE_RATE_BAND_C_PER_S_DEFAULT for it, at read time, same as
+ * zones_config_get_ease_off_window_mult() does for its own field.
+ *
+ * error_band_c MIN 1.0f / MAX 100.0f: the measured envelope
+ * (fuzzy_bands_envelope_20260904e's peak of 5.72 degC) sits comfortably
+ * inside this range, as does the unchanged 20.0 default and a plausible
+ * rescale toward the report's ~6-8 degC recommendation; 1.0 is small enough
+ * that a caller who genuinely wants the fuzzy layer to leave its centre cell
+ * on ordinary noise can ask for that (not this pass's call to forbid), while
+ * anything below it collapses to a width no real kiln thermocouple noise
+ * floor could stay inside, and 100.0 is far past any error this board's own
+ * guards would tolerate before tripping (guard_runaway_margin_c and
+ * max_temp_c/min_temp_c bound the physically survivable range well below
+ * that) -- a value near the ceiling is far more likely a units slip than a
+ * deliberate choice.
+ *
+ * rate_band_c_per_s MIN 0.01f / MAX 5.0f: 0.01 is below the slowest
+ * meaningful zone_taper/ramp signal this board's own d_filtered can report
+ * without drowning in sensor quantization noise; 5.0 is an order of
+ * magnitude past the already-generous 0.5 default (itself ~6x this kiln's
+ * fastest commanded ramp, see pid_fuzzy.c) and well past anything but a
+ * thermocouple that has come unstuck -- a value that high stops
+ * distinguishing "disturbance" from "everything," which is the same failure
+ * mode the original RATE_BAND_C_PER_S rescale (0.05 -> 0.5) fixed once
+ * already. */
+#define ZONE_ERROR_BAND_C_MIN 1.0f
+#define ZONE_ERROR_BAND_C_MAX 100.0f
+#define ZONE_ERROR_BAND_C_DEFAULT 20.0f
+#define ZONE_RATE_BAND_C_PER_S_MIN 0.01f
+#define ZONE_RATE_BAND_C_PER_S_MAX 5.0f
+#define ZONE_RATE_BAND_C_PER_S_DEFAULT 0.5f
 
 /* MAX31856 CR1.TC[3:0] nibble values 0x00-0x07 name a real thermocouple type
  * (B/E/J/K/N/R/S/T); 0x08-0x0F are the part's voltage-input modes, not
@@ -571,7 +619,219 @@ typedef struct {
      * above -- so a v17 board's on-flash zone_cfg_v17_t layout (frozen
      * below) stays an exact byte-for-byte prefix of this shape. */
     float approach_rate_cap_c_per_hr;
+    /* ---- ZONES_CFG_VERSION 18->19 (2026-09-04, PID_EXPANSION_PLAN.md sec
+     * 3.6g: "the bands should be a config change, not a firmware change").
+     * pid_fuzzy.c's two triangular-membership half-widths, promoted from
+     * ERROR_BAND_C/RATE_BAND_C_PER_S compile-time #defines to per-zone
+     * config -- see ZONE_ERROR_BAND_C_MIN/MAX/DEFAULT's own comment just
+     * above for the full rationale (the measured-envelope finding that
+     * motivated this, the bounds, and why the actual rescale decision is
+     * explicitly NOT made by this pass).
+     *
+     * 0.0f in either field is the "use the firmware default" sentinel, same
+     * convention as ease_off_window_mult (NOT approach_rate_cap_c_per_hr's
+     * "0 = off" convention -- there is no "no band" state for a membership
+     * function). zones_config_get_error_band_c()/zones_config_get_rate_
+     * band_c_per_s() resolve 0 (and anything outside [MIN, MAX]) into
+     * ZONE_ERROR_BAND_C_DEFAULT/ZONE_RATE_BAND_C_PER_S_DEFAULT at read time
+     * -- 20.0f and 0.5f, bit-identical to the removed #defines' own values,
+     * so every existing board migrates to EXACTLY today's fuzzy-PID
+     * behaviour with no operator action required.
+     *
+     * Per-zone, not board-wide: these bands describe the fuzzy layer's
+     * expectation of THIS zone's own plant (how far its error/rate can
+     * drift before a value should be called "large"), and this board's
+     * three zones do not share one plant -- z0's model_k_dc runs ~23%
+     * higher than its peers and its identified dead time is 21-56% longer
+     * (coupling_matrix_resolved.md). A genuine disturbance looks different,
+     * in both magnitude and rate, on z0 than on z1/z2, the same reasoning
+     * that already justified giving z0 its own reach on ease_off_window_
+     * mult and approach_rate_cap_c_per_hr above rather than a shared
+     * board-wide scalar for either of those.
+     *
+     * Bounded by [ZONE_ERROR_BAND_C_MIN, ZONE_ERROR_BAND_C_MAX] /
+     * [ZONE_RATE_BAND_C_PER_S_MIN, ZONE_RATE_BAND_C_PER_S_MAX] or exactly
+     * 0.0f -- refused, never clamped, same discipline as every other
+     * setter in this codebase. Appended at zone_cfg_t's own true tail, the
+     * same safe-growth spot approach_rate_cap_c_per_hr used at v17->v18
+     * just above -- so a v18 board's on-flash zone_cfg_v18_t layout (frozen
+     * below) stays an exact byte-for-byte prefix of this shape. */
+    float error_band_c;
+    float rate_band_c_per_s;
 } zone_cfg_t;
+
+/* Frozen v18 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 18->19), per-zone approach_rate_cap_c_per_hr
+ * and all, predating error_band_c/rate_band_c_per_s. Same discipline as
+ * zone_cfg_v17_t just above it in this file: field order hand-copied from
+ * v18's actual shape, never derived from the live struct -- critically,
+ * NEVER the bare `zone_cfg_t` name for this purpose, since that name now
+ * refers to the v19 (bigger) shape. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+} zone_cfg_v18_t;
+
+/* 200 = 196 (zone_cfg_v17_t's own byte-for-byte size, per that struct's
+ * assert comment) + 4 (approach_rate_cap_c_per_hr, already 4-byte aligned so
+ * no further tail padding). Hand-computed, same discipline as every other
+ * frozen zone_cfg_vN_t assert in this file -- never sizeof(zone_cfg_t),
+ * which by the time this pass lands is already the v19 shape, not v18's. */
+_Static_assert(sizeof(zone_cfg_v18_t) == 200,
+               "zone_cfg_v18_t must match the on-flash v18 layout byte-for-byte (200 bytes)"); /* v18 -- predates per-zone error_band_c/rate_band_c_per_s */
+
+/* Per-field offsetof assertions for zone_cfg_v18_t -- binds each field to its
+ * frozen byte offset so a future mid-struct insertion (which the sizeof
+ * assert above cannot catch, since total size can stay unchanged) fails
+ * loudly instead of silently reinterpreting stored flash bytes. */
+_Static_assert(offsetof(zone_cfg_v18_t, name) == 0,
+               "zone_cfg_v18_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v18_t, cal_offset_c) == 16,
+               "zone_cfg_v18_t::cal_offset_c must stay at byte offset 16");
+_Static_assert(offsetof(zone_cfg_v18_t, pid_kp) == 20,
+               "zone_cfg_v18_t::pid_kp must stay at byte offset 20");
+_Static_assert(offsetof(zone_cfg_v18_t, pid_ki) == 24,
+               "zone_cfg_v18_t::pid_ki must stay at byte offset 24");
+_Static_assert(offsetof(zone_cfg_v18_t, pid_kd) == 28,
+               "zone_cfg_v18_t::pid_kd must stay at byte offset 28");
+_Static_assert(offsetof(zone_cfg_v18_t, max_ramp_c_per_hr) == 32,
+               "zone_cfg_v18_t::max_ramp_c_per_hr must stay at byte offset 32");
+_Static_assert(offsetof(zone_cfg_v18_t, sanity_rate_c_per_min) == 36,
+               "zone_cfg_v18_t::sanity_rate_c_per_min must stay at byte offset 36");
+_Static_assert(offsetof(zone_cfg_v18_t, max_temp_c) == 40,
+               "zone_cfg_v18_t::max_temp_c must stay at byte offset 40");
+_Static_assert(offsetof(zone_cfg_v18_t, min_temp_c) == 44,
+               "zone_cfg_v18_t::min_temp_c must stay at byte offset 44");
+_Static_assert(offsetof(zone_cfg_v18_t, heater_window_ms) == 48,
+               "zone_cfg_v18_t::heater_window_ms must stay at byte offset 48");
+_Static_assert(offsetof(zone_cfg_v18_t, heater_min_on_ms) == 52,
+               "zone_cfg_v18_t::heater_min_on_ms must stay at byte offset 52");
+_Static_assert(offsetof(zone_cfg_v18_t, heater_min_off_ms) == 56,
+               "zone_cfg_v18_t::heater_min_off_ms must stay at byte offset 56");
+_Static_assert(offsetof(zone_cfg_v18_t, guard_wrong_dir_window_s) == 60,
+               "zone_cfg_v18_t::guard_wrong_dir_window_s must stay at byte offset 60");
+_Static_assert(offsetof(zone_cfg_v18_t, guard_wrong_dir_rate_c_per_min) == 64,
+               "zone_cfg_v18_t::guard_wrong_dir_rate_c_per_min must stay at byte offset 64");
+_Static_assert(offsetof(zone_cfg_v18_t, guard_off_settle_s) == 68,
+               "zone_cfg_v18_t::guard_off_settle_s must stay at byte offset 68");
+_Static_assert(offsetof(zone_cfg_v18_t, guard_runaway_rate_c_per_min) == 72,
+               "zone_cfg_v18_t::guard_runaway_rate_c_per_min must stay at byte offset 72");
+_Static_assert(offsetof(zone_cfg_v18_t, guard_runaway_margin_c) == 76,
+               "zone_cfg_v18_t::guard_runaway_margin_c must stay at byte offset 76");
+_Static_assert(offsetof(zone_cfg_v18_t, guard_drift_period_s) == 80,
+               "zone_cfg_v18_t::guard_drift_period_s must stay at byte offset 80");
+_Static_assert(offsetof(zone_cfg_v18_t, guard_sensor_fault_debounce_ticks) == 84,
+               "zone_cfg_v18_t::guard_sensor_fault_debounce_ticks must stay at byte offset 84");
+_Static_assert(offsetof(zone_cfg_v18_t, guard_frozen_window_s) == 88,
+               "zone_cfg_v18_t::guard_frozen_window_s must stay at byte offset 88");
+_Static_assert(offsetof(zone_cfg_v18_t, cross_zone_max_delta_c) == 92,
+               "zone_cfg_v18_t::cross_zone_max_delta_c must stay at byte offset 92");
+_Static_assert(offsetof(zone_cfg_v18_t, model_k_dc) == 96,
+               "zone_cfg_v18_t::model_k_dc must stay at byte offset 96");
+_Static_assert(offsetof(zone_cfg_v18_t, model_tau_s) == 100,
+               "zone_cfg_v18_t::model_tau_s must stay at byte offset 100");
+_Static_assert(offsetof(zone_cfg_v18_t, model_dead_time_s) == 104,
+               "zone_cfg_v18_t::model_dead_time_s must stay at byte offset 104");
+_Static_assert(offsetof(zone_cfg_v18_t, fuzzy_strength_pct) == 108,
+               "zone_cfg_v18_t::fuzzy_strength_pct must stay at byte offset 108");
+_Static_assert(offsetof(zone_cfg_v18_t, coupling_coeff) == 112,
+               "zone_cfg_v18_t::coupling_coeff must stay at byte offset 112");
+_Static_assert(offsetof(zone_cfg_v18_t, coupling_tau_s) == 124,
+               "zone_cfg_v18_t::coupling_tau_s must stay at byte offset 124");
+_Static_assert(offsetof(zone_cfg_v18_t, coupling_dead_time_s) == 136,
+               "zone_cfg_v18_t::coupling_dead_time_s must stay at byte offset 136");
+_Static_assert(offsetof(zone_cfg_v18_t, relay_mask) == 148,
+               "zone_cfg_v18_t::relay_mask must stay at byte offset 148");
+_Static_assert(offsetof(zone_cfg_v18_t, control_mode) == 149,
+               "zone_cfg_v18_t::control_mode must stay at byte offset 149");
+_Static_assert(offsetof(zone_cfg_v18_t, tc_type) == 150,
+               "zone_cfg_v18_t::tc_type must stay at byte offset 150");
+_Static_assert(offsetof(zone_cfg_v18_t, thermo_mask) == 151,
+               "zone_cfg_v18_t::thermo_mask must stay at byte offset 151");
+_Static_assert(offsetof(zone_cfg_v18_t, ct_mask) == 152,
+               "zone_cfg_v18_t::ct_mask must stay at byte offset 152");
+_Static_assert(offsetof(zone_cfg_v18_t, timing_profile) == 153,
+               "zone_cfg_v18_t::timing_profile must stay at byte offset 153");
+_Static_assert(offsetof(zone_cfg_v18_t, settings_source) == 154,
+               "zone_cfg_v18_t::settings_source must stay at byte offset 154");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_valid) == 155,
+               "zone_cfg_v18_t::tuning_valid must stay at byte offset 155");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_method) == 156,
+               "zone_cfg_v18_t::tuning_method must stay at byte offset 156");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_rule) == 157,
+               "zone_cfg_v18_t::tuning_rule must stay at byte offset 157");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_settled) == 158,
+               "zone_cfg_v18_t::tuning_settled must stay at byte offset 158");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_extrapolation_converged) == 159,
+               "zone_cfg_v18_t::tuning_extrapolation_converged must stay at byte offset 159");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_tau_consistent) == 160,
+               "zone_cfg_v18_t::tuning_tau_consistent must stay at byte offset 160");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_baseline_c) == 164,
+               "zone_cfg_v18_t::tuning_baseline_c must stay at byte offset 164");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_step_ambient_c) == 168,
+               "zone_cfg_v18_t::tuning_step_ambient_c must stay at byte offset 168");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_raw_rise_c) == 172,
+               "zone_cfg_v18_t::tuning_raw_rise_c must stay at byte offset 172");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_rise_inf_c) == 176,
+               "zone_cfg_v18_t::tuning_rise_inf_c must stay at byte offset 176");
+_Static_assert(offsetof(zone_cfg_v18_t, tuning_seq) == 180,
+               "zone_cfg_v18_t::tuning_seq must stay at byte offset 180");
+_Static_assert(offsetof(zone_cfg_v18_t, adaptive_tune_enabled) == 184,
+               "zone_cfg_v18_t::adaptive_tune_enabled must stay at byte offset 184");
+_Static_assert(offsetof(zone_cfg_v18_t, coupling_diag_k_dc) == 188,
+               "zone_cfg_v18_t::coupling_diag_k_dc must stay at byte offset 188");
+_Static_assert(offsetof(zone_cfg_v18_t, ease_off_window_mult) == 192,
+               "zone_cfg_v18_t::ease_off_window_mult must stay at byte offset 192");
+_Static_assert(offsetof(zone_cfg_v18_t, approach_rate_cap_c_per_hr) == 196,
+               "zone_cfg_v18_t::approach_rate_cap_c_per_hr must stay at byte offset 196");
 
 /* Frozen v17 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 17->18), per-zone ease_off_window_mult and
@@ -639,6 +899,109 @@ typedef struct {
  * which by the time this pass lands is already the v18 shape, not v17's. */
 _Static_assert(sizeof(zone_cfg_v17_t) == 196,
                "zone_cfg_v17_t must match the on-flash v17 layout byte-for-byte (196 bytes)"); /* v17 -- predates per-zone approach_rate_cap_c_per_hr */
+
+/* Per-field offsetof assertions for zone_cfg_v17_t -- binds each field to its
+ * frozen byte offset so a future mid-struct insertion (which the sizeof
+ * assert above cannot catch, since total size can stay unchanged) fails
+ * loudly instead of silently reinterpreting stored flash bytes. */
+_Static_assert(offsetof(zone_cfg_v17_t, name) == 0,
+               "zone_cfg_v17_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v17_t, cal_offset_c) == 16,
+               "zone_cfg_v17_t::cal_offset_c must stay at byte offset 16");
+_Static_assert(offsetof(zone_cfg_v17_t, pid_kp) == 20,
+               "zone_cfg_v17_t::pid_kp must stay at byte offset 20");
+_Static_assert(offsetof(zone_cfg_v17_t, pid_ki) == 24,
+               "zone_cfg_v17_t::pid_ki must stay at byte offset 24");
+_Static_assert(offsetof(zone_cfg_v17_t, pid_kd) == 28,
+               "zone_cfg_v17_t::pid_kd must stay at byte offset 28");
+_Static_assert(offsetof(zone_cfg_v17_t, max_ramp_c_per_hr) == 32,
+               "zone_cfg_v17_t::max_ramp_c_per_hr must stay at byte offset 32");
+_Static_assert(offsetof(zone_cfg_v17_t, sanity_rate_c_per_min) == 36,
+               "zone_cfg_v17_t::sanity_rate_c_per_min must stay at byte offset 36");
+_Static_assert(offsetof(zone_cfg_v17_t, max_temp_c) == 40,
+               "zone_cfg_v17_t::max_temp_c must stay at byte offset 40");
+_Static_assert(offsetof(zone_cfg_v17_t, min_temp_c) == 44,
+               "zone_cfg_v17_t::min_temp_c must stay at byte offset 44");
+_Static_assert(offsetof(zone_cfg_v17_t, heater_window_ms) == 48,
+               "zone_cfg_v17_t::heater_window_ms must stay at byte offset 48");
+_Static_assert(offsetof(zone_cfg_v17_t, heater_min_on_ms) == 52,
+               "zone_cfg_v17_t::heater_min_on_ms must stay at byte offset 52");
+_Static_assert(offsetof(zone_cfg_v17_t, heater_min_off_ms) == 56,
+               "zone_cfg_v17_t::heater_min_off_ms must stay at byte offset 56");
+_Static_assert(offsetof(zone_cfg_v17_t, guard_wrong_dir_window_s) == 60,
+               "zone_cfg_v17_t::guard_wrong_dir_window_s must stay at byte offset 60");
+_Static_assert(offsetof(zone_cfg_v17_t, guard_wrong_dir_rate_c_per_min) == 64,
+               "zone_cfg_v17_t::guard_wrong_dir_rate_c_per_min must stay at byte offset 64");
+_Static_assert(offsetof(zone_cfg_v17_t, guard_off_settle_s) == 68,
+               "zone_cfg_v17_t::guard_off_settle_s must stay at byte offset 68");
+_Static_assert(offsetof(zone_cfg_v17_t, guard_runaway_rate_c_per_min) == 72,
+               "zone_cfg_v17_t::guard_runaway_rate_c_per_min must stay at byte offset 72");
+_Static_assert(offsetof(zone_cfg_v17_t, guard_runaway_margin_c) == 76,
+               "zone_cfg_v17_t::guard_runaway_margin_c must stay at byte offset 76");
+_Static_assert(offsetof(zone_cfg_v17_t, guard_drift_period_s) == 80,
+               "zone_cfg_v17_t::guard_drift_period_s must stay at byte offset 80");
+_Static_assert(offsetof(zone_cfg_v17_t, guard_sensor_fault_debounce_ticks) == 84,
+               "zone_cfg_v17_t::guard_sensor_fault_debounce_ticks must stay at byte offset 84");
+_Static_assert(offsetof(zone_cfg_v17_t, guard_frozen_window_s) == 88,
+               "zone_cfg_v17_t::guard_frozen_window_s must stay at byte offset 88");
+_Static_assert(offsetof(zone_cfg_v17_t, cross_zone_max_delta_c) == 92,
+               "zone_cfg_v17_t::cross_zone_max_delta_c must stay at byte offset 92");
+_Static_assert(offsetof(zone_cfg_v17_t, model_k_dc) == 96,
+               "zone_cfg_v17_t::model_k_dc must stay at byte offset 96");
+_Static_assert(offsetof(zone_cfg_v17_t, model_tau_s) == 100,
+               "zone_cfg_v17_t::model_tau_s must stay at byte offset 100");
+_Static_assert(offsetof(zone_cfg_v17_t, model_dead_time_s) == 104,
+               "zone_cfg_v17_t::model_dead_time_s must stay at byte offset 104");
+_Static_assert(offsetof(zone_cfg_v17_t, fuzzy_strength_pct) == 108,
+               "zone_cfg_v17_t::fuzzy_strength_pct must stay at byte offset 108");
+_Static_assert(offsetof(zone_cfg_v17_t, coupling_coeff) == 112,
+               "zone_cfg_v17_t::coupling_coeff must stay at byte offset 112");
+_Static_assert(offsetof(zone_cfg_v17_t, coupling_tau_s) == 124,
+               "zone_cfg_v17_t::coupling_tau_s must stay at byte offset 124");
+_Static_assert(offsetof(zone_cfg_v17_t, coupling_dead_time_s) == 136,
+               "zone_cfg_v17_t::coupling_dead_time_s must stay at byte offset 136");
+_Static_assert(offsetof(zone_cfg_v17_t, relay_mask) == 148,
+               "zone_cfg_v17_t::relay_mask must stay at byte offset 148");
+_Static_assert(offsetof(zone_cfg_v17_t, control_mode) == 149,
+               "zone_cfg_v17_t::control_mode must stay at byte offset 149");
+_Static_assert(offsetof(zone_cfg_v17_t, tc_type) == 150,
+               "zone_cfg_v17_t::tc_type must stay at byte offset 150");
+_Static_assert(offsetof(zone_cfg_v17_t, thermo_mask) == 151,
+               "zone_cfg_v17_t::thermo_mask must stay at byte offset 151");
+_Static_assert(offsetof(zone_cfg_v17_t, ct_mask) == 152,
+               "zone_cfg_v17_t::ct_mask must stay at byte offset 152");
+_Static_assert(offsetof(zone_cfg_v17_t, timing_profile) == 153,
+               "zone_cfg_v17_t::timing_profile must stay at byte offset 153");
+_Static_assert(offsetof(zone_cfg_v17_t, settings_source) == 154,
+               "zone_cfg_v17_t::settings_source must stay at byte offset 154");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_valid) == 155,
+               "zone_cfg_v17_t::tuning_valid must stay at byte offset 155");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_method) == 156,
+               "zone_cfg_v17_t::tuning_method must stay at byte offset 156");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_rule) == 157,
+               "zone_cfg_v17_t::tuning_rule must stay at byte offset 157");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_settled) == 158,
+               "zone_cfg_v17_t::tuning_settled must stay at byte offset 158");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_extrapolation_converged) == 159,
+               "zone_cfg_v17_t::tuning_extrapolation_converged must stay at byte offset 159");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_tau_consistent) == 160,
+               "zone_cfg_v17_t::tuning_tau_consistent must stay at byte offset 160");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_baseline_c) == 164,
+               "zone_cfg_v17_t::tuning_baseline_c must stay at byte offset 164");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_step_ambient_c) == 168,
+               "zone_cfg_v17_t::tuning_step_ambient_c must stay at byte offset 168");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_raw_rise_c) == 172,
+               "zone_cfg_v17_t::tuning_raw_rise_c must stay at byte offset 172");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_rise_inf_c) == 176,
+               "zone_cfg_v17_t::tuning_rise_inf_c must stay at byte offset 176");
+_Static_assert(offsetof(zone_cfg_v17_t, tuning_seq) == 180,
+               "zone_cfg_v17_t::tuning_seq must stay at byte offset 180");
+_Static_assert(offsetof(zone_cfg_v17_t, adaptive_tune_enabled) == 184,
+               "zone_cfg_v17_t::adaptive_tune_enabled must stay at byte offset 184");
+_Static_assert(offsetof(zone_cfg_v17_t, coupling_diag_k_dc) == 188,
+               "zone_cfg_v17_t::coupling_diag_k_dc must stay at byte offset 188");
+_Static_assert(offsetof(zone_cfg_v17_t, ease_off_window_mult) == 192,
+               "zone_cfg_v17_t::ease_off_window_mult must stay at byte offset 192");
 
 /* Frozen v16 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 16->17), coupling_diag_k_dc and all,
@@ -711,6 +1074,107 @@ typedef struct {
  * which by the time this pass lands is already the v17 shape, not v16's. */
 _Static_assert(sizeof(zone_cfg_v16_t) == 192,
                "zone_cfg_v16_t must match the on-flash v16 layout byte-for-byte (192 bytes)"); /* v16 -- predates per-zone ease_off_window_mult */
+
+/* Per-field offsetof assertions for zone_cfg_v16_t -- binds each field to its
+ * frozen byte offset so a future mid-struct insertion (which the sizeof
+ * assert above cannot catch, since total size can stay unchanged) fails
+ * loudly instead of silently reinterpreting stored flash bytes. */
+_Static_assert(offsetof(zone_cfg_v16_t, name) == 0,
+               "zone_cfg_v16_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v16_t, cal_offset_c) == 16,
+               "zone_cfg_v16_t::cal_offset_c must stay at byte offset 16");
+_Static_assert(offsetof(zone_cfg_v16_t, pid_kp) == 20,
+               "zone_cfg_v16_t::pid_kp must stay at byte offset 20");
+_Static_assert(offsetof(zone_cfg_v16_t, pid_ki) == 24,
+               "zone_cfg_v16_t::pid_ki must stay at byte offset 24");
+_Static_assert(offsetof(zone_cfg_v16_t, pid_kd) == 28,
+               "zone_cfg_v16_t::pid_kd must stay at byte offset 28");
+_Static_assert(offsetof(zone_cfg_v16_t, max_ramp_c_per_hr) == 32,
+               "zone_cfg_v16_t::max_ramp_c_per_hr must stay at byte offset 32");
+_Static_assert(offsetof(zone_cfg_v16_t, sanity_rate_c_per_min) == 36,
+               "zone_cfg_v16_t::sanity_rate_c_per_min must stay at byte offset 36");
+_Static_assert(offsetof(zone_cfg_v16_t, max_temp_c) == 40,
+               "zone_cfg_v16_t::max_temp_c must stay at byte offset 40");
+_Static_assert(offsetof(zone_cfg_v16_t, min_temp_c) == 44,
+               "zone_cfg_v16_t::min_temp_c must stay at byte offset 44");
+_Static_assert(offsetof(zone_cfg_v16_t, heater_window_ms) == 48,
+               "zone_cfg_v16_t::heater_window_ms must stay at byte offset 48");
+_Static_assert(offsetof(zone_cfg_v16_t, heater_min_on_ms) == 52,
+               "zone_cfg_v16_t::heater_min_on_ms must stay at byte offset 52");
+_Static_assert(offsetof(zone_cfg_v16_t, heater_min_off_ms) == 56,
+               "zone_cfg_v16_t::heater_min_off_ms must stay at byte offset 56");
+_Static_assert(offsetof(zone_cfg_v16_t, guard_wrong_dir_window_s) == 60,
+               "zone_cfg_v16_t::guard_wrong_dir_window_s must stay at byte offset 60");
+_Static_assert(offsetof(zone_cfg_v16_t, guard_wrong_dir_rate_c_per_min) == 64,
+               "zone_cfg_v16_t::guard_wrong_dir_rate_c_per_min must stay at byte offset 64");
+_Static_assert(offsetof(zone_cfg_v16_t, guard_off_settle_s) == 68,
+               "zone_cfg_v16_t::guard_off_settle_s must stay at byte offset 68");
+_Static_assert(offsetof(zone_cfg_v16_t, guard_runaway_rate_c_per_min) == 72,
+               "zone_cfg_v16_t::guard_runaway_rate_c_per_min must stay at byte offset 72");
+_Static_assert(offsetof(zone_cfg_v16_t, guard_runaway_margin_c) == 76,
+               "zone_cfg_v16_t::guard_runaway_margin_c must stay at byte offset 76");
+_Static_assert(offsetof(zone_cfg_v16_t, guard_drift_period_s) == 80,
+               "zone_cfg_v16_t::guard_drift_period_s must stay at byte offset 80");
+_Static_assert(offsetof(zone_cfg_v16_t, guard_sensor_fault_debounce_ticks) == 84,
+               "zone_cfg_v16_t::guard_sensor_fault_debounce_ticks must stay at byte offset 84");
+_Static_assert(offsetof(zone_cfg_v16_t, guard_frozen_window_s) == 88,
+               "zone_cfg_v16_t::guard_frozen_window_s must stay at byte offset 88");
+_Static_assert(offsetof(zone_cfg_v16_t, cross_zone_max_delta_c) == 92,
+               "zone_cfg_v16_t::cross_zone_max_delta_c must stay at byte offset 92");
+_Static_assert(offsetof(zone_cfg_v16_t, model_k_dc) == 96,
+               "zone_cfg_v16_t::model_k_dc must stay at byte offset 96");
+_Static_assert(offsetof(zone_cfg_v16_t, model_tau_s) == 100,
+               "zone_cfg_v16_t::model_tau_s must stay at byte offset 100");
+_Static_assert(offsetof(zone_cfg_v16_t, model_dead_time_s) == 104,
+               "zone_cfg_v16_t::model_dead_time_s must stay at byte offset 104");
+_Static_assert(offsetof(zone_cfg_v16_t, fuzzy_strength_pct) == 108,
+               "zone_cfg_v16_t::fuzzy_strength_pct must stay at byte offset 108");
+_Static_assert(offsetof(zone_cfg_v16_t, coupling_coeff) == 112,
+               "zone_cfg_v16_t::coupling_coeff must stay at byte offset 112");
+_Static_assert(offsetof(zone_cfg_v16_t, coupling_tau_s) == 124,
+               "zone_cfg_v16_t::coupling_tau_s must stay at byte offset 124");
+_Static_assert(offsetof(zone_cfg_v16_t, coupling_dead_time_s) == 136,
+               "zone_cfg_v16_t::coupling_dead_time_s must stay at byte offset 136");
+_Static_assert(offsetof(zone_cfg_v16_t, relay_mask) == 148,
+               "zone_cfg_v16_t::relay_mask must stay at byte offset 148");
+_Static_assert(offsetof(zone_cfg_v16_t, control_mode) == 149,
+               "zone_cfg_v16_t::control_mode must stay at byte offset 149");
+_Static_assert(offsetof(zone_cfg_v16_t, tc_type) == 150,
+               "zone_cfg_v16_t::tc_type must stay at byte offset 150");
+_Static_assert(offsetof(zone_cfg_v16_t, thermo_mask) == 151,
+               "zone_cfg_v16_t::thermo_mask must stay at byte offset 151");
+_Static_assert(offsetof(zone_cfg_v16_t, ct_mask) == 152,
+               "zone_cfg_v16_t::ct_mask must stay at byte offset 152");
+_Static_assert(offsetof(zone_cfg_v16_t, timing_profile) == 153,
+               "zone_cfg_v16_t::timing_profile must stay at byte offset 153");
+_Static_assert(offsetof(zone_cfg_v16_t, settings_source) == 154,
+               "zone_cfg_v16_t::settings_source must stay at byte offset 154");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_valid) == 155,
+               "zone_cfg_v16_t::tuning_valid must stay at byte offset 155");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_method) == 156,
+               "zone_cfg_v16_t::tuning_method must stay at byte offset 156");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_rule) == 157,
+               "zone_cfg_v16_t::tuning_rule must stay at byte offset 157");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_settled) == 158,
+               "zone_cfg_v16_t::tuning_settled must stay at byte offset 158");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_extrapolation_converged) == 159,
+               "zone_cfg_v16_t::tuning_extrapolation_converged must stay at byte offset 159");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_tau_consistent) == 160,
+               "zone_cfg_v16_t::tuning_tau_consistent must stay at byte offset 160");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_baseline_c) == 164,
+               "zone_cfg_v16_t::tuning_baseline_c must stay at byte offset 164");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_step_ambient_c) == 168,
+               "zone_cfg_v16_t::tuning_step_ambient_c must stay at byte offset 168");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_raw_rise_c) == 172,
+               "zone_cfg_v16_t::tuning_raw_rise_c must stay at byte offset 172");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_rise_inf_c) == 176,
+               "zone_cfg_v16_t::tuning_rise_inf_c must stay at byte offset 176");
+_Static_assert(offsetof(zone_cfg_v16_t, tuning_seq) == 180,
+               "zone_cfg_v16_t::tuning_seq must stay at byte offset 180");
+_Static_assert(offsetof(zone_cfg_v16_t, adaptive_tune_enabled) == 184,
+               "zone_cfg_v16_t::adaptive_tune_enabled must stay at byte offset 184");
+_Static_assert(offsetof(zone_cfg_v16_t, coupling_diag_k_dc) == 188,
+               "zone_cfg_v16_t::coupling_diag_k_dc must stay at byte offset 188");
 
 
 /* A named, reusable bundle of the nine thermal-timing numbers that used to be
@@ -1640,6 +2104,30 @@ typedef struct {
                      * pass; predates the per-zone approach_rate_cap_c_per_hr
                      * addition. */
 
+/* Frozen v18 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 18->19): zones[] is the per-zone shape that
+ * predates this pass's error_band_c/rate_band_c_per_s addition
+ * (zone_cfg_v18_t, frozen above). Same shape as v17's own wrapper -- no
+ * wrapper-level scalar removed here either, just zones[] pinned to the
+ * smaller, historical per-zone type. This is what a LIVE, already-
+ * commissioned v18 board looks like on flash right now -- the exact blob a
+ * v18->v19 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v18_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v18_t; /* v18 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates the per-zone error_band_c/rate_band_c_per_s
+                     * addition. */
+
 
 
 typedef enum {
@@ -1780,6 +2268,28 @@ bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult);
  * -- refused, never clamped, same discipline as every setter in this file. */
 bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_cap_c_per_hr);
 bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr);
+
+/* Runtime accessor pairs for zone_cfg_t::error_band_c / ::rate_band_c_per_s
+ * (ZONES_CFG_VERSION 18->19, PID_EXPANSION_PLAN.md sec 3.6g) -- same
+ * declaration placement/rationale as the ease_off_window_mult and
+ * approach_rate_cap_c_per_hr pairs just above. `zone_index` bounds-checked
+ * against MAX31856_CHANNEL_COUNT, same as every other per-zone accessor.
+ *
+ * Like zones_config_get_ease_off_window_mult() (and UNLIKE
+ * zones_config_get_approach_rate_cap_c_per_hr()), 0 and anything outside
+ * [MIN, MAX] resolve to the field's own firmware DEFAULT -- there is no
+ * "no band" state a fuzzy membership function can mean the way "uncapped"
+ * is a real state for a rate limiter, so every caller always gets back a
+ * usable, finite, positive band width.
+ *
+ * zones_config_set_error_band_c()/zones_config_set_rate_band_c_per_s()
+ * reject (false, no write, no NVS save) a non-finite value or one outside
+ * {0.0f} union [MIN, MAX] for that field -- refused, never clamped, same
+ * discipline as every setter in this file. */
+bool zones_config_get_error_band_c(uint8_t zone_index, float *out_band_c);
+bool zones_config_set_error_band_c(uint8_t zone_index, float band_c);
+bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_per_s);
+bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s);
 
 #ifdef __cplusplus
 }
