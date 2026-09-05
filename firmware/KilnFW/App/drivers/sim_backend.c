@@ -13,7 +13,7 @@
 
 #include "http_form.h"
 #include "uart_task_ids.h" /* THERMO_FAULT_* */
-#include "wifi_provision_state.h"
+#include "wifi_provision_http.h"
 #include "zones_config_query.h"
 
 /* The model itself lives in App/test/ and is compiled into this build by

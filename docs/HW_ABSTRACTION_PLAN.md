@@ -904,22 +904,38 @@ proposed fixes in `tools/drivers_reorg/DRYRUN.md` rather than repeated here:
    `factory_reset.c`, `kiln_cfg_store.c`, `ota_pico_relay.c` and
    `zones_current_sweep_task.c` included the whole httpd-handler
    `ota_http.h` for a handful of interlock/auth/progress query functions
-   (none register httpd routes). `ota_http_context_t`,
-   `ota_http_authenticate_request()`, `ota_http_update_end()`,
-   `ota_http_check_interlocks()`, `ota_http_req_ack_no_safety()`,
-   `ota_http_send_interlock_refusal()`, `ota_http_esp_phase_t` and
-   `ota_http_get_esp_progress()` moved into the existing `ota_state.h`
-   (already net-tier, already home to item 2's `ota_http_heat_blocked_by_
-   update()`); `ota_http.h` includes it back so httpd-layer callers are
-   unaffected, and all five switched their include to `ota_state.h`.
-   Implementations stayed in `ota_http.c`.
+   (none register httpd routes). `ota_http_context_t`, `ota_http_update_
+   end()`, `ota_http_check_interlocks()`, `ota_http_heat_blocked_by_
+   update()`, `ota_http_esp_phase_t` and `ota_http_get_esp_progress()`
+   moved into the existing `ota_state.h` (already net-tier, already home to
+   item 2's `ota_http_heat_blocked_by_update()`); `ota_http.h` includes it
+   back so httpd-layer callers are unaffected. The three httpd_req_t-shaped
+   accessors originally moved here too (`ota_http_authenticate_request()`,
+   `ota_http_req_ack_no_safety()`, `ota_http_send_interlock_refusal()`) were
+   moved back to `ota_http.h` on review (2026-09-05 follow-up): every
+   caller of those three already holds a live `httpd_req_t` and includes
+   `esp_http_server.h` regardless, so keeping them in `ota_state.h` bought
+   nothing but forced `esp_http_server.h` on the callers (kiln_io_owner.c,
+   profile_executor.c et al) that this split exists to keep httpd-free.
+   `factory_reset.c` -- the one caller of those three among the five --
+   switched its include to `ota_http.h`; the other four (which use none of
+   the three) stayed on `ota_state.h`. `zones_current_sweep_task.c`'s
+   include turned out to be dead (no `ota_http_*` call in the file at all)
+   and was deleted rather than switched. Implementations stayed in
+   `ota_http.c`.
 10. DONE (2026-09-05): DRYRUN.md section 5 "Fix 3" -- `factory_reset.c` and
     `wifi_prov.c` included the whole `wifi_provision_http.h` for one
     accessor apiece (`wifi_provision_http_get_server()` and
     `wifi_provision_http_start()`). New narrow `wifi_provision_state.h`
-    holds both; `wifi_provision_http.h` includes it back, and both
-    switched. `sim_backend.c` used only `wifi_provision_http_get_server()`
-    too, so it switched to the narrow header as well.
+    holds only `wifi_provision_http_start()` -- `wifi_provision_http_get_
+    server()` stays in `wifi_provision_http.h` since it returns an
+    `httpd_handle_t`, so every caller needs `esp_http_server.h` regardless
+    and moving it would have dropped no one's dependency (2026-09-05
+    follow-up correction). `wifi_prov.c` (which only calls `_start()`)
+    switched to the narrow header; `factory_reset.c` and `sim_backend.c`
+    (which call `_get_server()`) stayed on/switched to `wifi_provision_http.h`.
+    `wifi_provision_http.h` includes the narrow header back so existing
+    callers of the wider header are unaffected.
 11. DONE (2026-09-05): DRYRUN.md section 5 proposal `zones_config_query.h` --
     `sim_backend.c` included the 1300+ line persist-tier
     `zones_config_accessors.h` for one accessor,

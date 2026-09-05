@@ -114,7 +114,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 // context above. It gets its own context string ("pico-rollback") and its
 // own lockout state.
 // ota_http_context_t itself moved to ota_state.h (docs/HW_ABSTRACTION_PLAN.md
-// item 8) -- non-httpd callers (factory_reset.c and friends) need it for the
+// item 9) -- non-httpd callers (factory_reset.c and friends) need it for the
 // accessors that moved there too. Included above via ota_state.h.
 
 typedef enum {
@@ -178,9 +178,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
 // verify_result_str()'s message otherwise), and the caller's only remaining
 // job is to return ESP_OK without sending anything else.
 //
-// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 8) --
-// factory_reset.c is the non-httpd caller. Included above so existing
-// callers of this header are unaffected.
+bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, char ip_out[46]);
 
 // True when this board's OTA auth is currently a no-op: the AP password
 // (wifi_prov_get_ap_password()) is empty. Every ota_http_verify_request()
@@ -224,7 +222,7 @@ bool ota_http_update_try_begin(ota_http_context_t ctx);
 // call it unconditionally rather than tracking whether it actually won the
 // claim.
 //
-// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 8) --
+// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 9) --
 // ota_pico_relay.c is the non-httpd caller. Included above so existing
 // callers of this header are unaffected.
 
@@ -271,7 +269,7 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // behaviour exactly, and the resulting OTA_INTERLOCK_REFUSED_NEEDS_ACK is
 // still a refusal to every caller that only tests `!= OTA_INTERLOCK_OK`.
 //
-// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 8) --
+// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 9) --
 // factory_reset.c and kiln_cfg_store.c are the non-httpd callers. Included
 // above so existing callers of this header are unaffected.
 
@@ -285,19 +283,15 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // (POST /api/kiln_configs/apply), JSON (POST /api/backup/import), or a raw
 // firmware image (POST /api/ota/esp) -- and so a route that checks the
 // interlock BEFORE reading its body, as several do, can still see it.
-//
-// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 8) --
-// factory_reset.c is the non-httpd caller. Included above so existing
-// callers of this header are unaffected.
+bool ota_http_req_ack_no_safety(httpd_req_t *req);
 
 // Sends the correct refusal for a non-OK ota_http_check_interlocks() result:
 // 428 Precondition Required for OTA_INTERLOCK_REFUSED_NEEDS_ACK (the caller
 // may retry with the header above after warning the operator), 409 Conflict
 // for every other refusal (nothing to acknowledge -- the kiln is busy or
 // hot). Body is `reason` as text/plain in both cases.
-//
-// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 8).
-// Included above so existing callers of this header are unaffected.
+esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result_t r,
+                                          const char *reason);
 
 // --- Heat interlock, the OTHER direction (TODO.md 9.4/ROADMAP.md M8's
 // mutual interlock: "updates are not allowed while the heaters are on or a
@@ -356,7 +350,7 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // below, which TODO.md 9.6's future web page can call on an interval.
 //
 // ota_http_esp_phase_t and ota_http_get_esp_progress() below are declared in
-// ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 8) -- ota_pico_relay.c
+// ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 9) -- ota_pico_relay.c
 // is the non-httpd caller. Included above so existing callers of this
 // header are unaffected.
 

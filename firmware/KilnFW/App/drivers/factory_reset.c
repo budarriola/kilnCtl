@@ -11,9 +11,9 @@
 #include "nvs_flash.h"
 
 #include "http_form.h"
-#include "ota_state.h" /* interlocks + challenge/response auth -- see reset_post_handler() */
+#include "ota_http.h" /* interlocks + challenge/response auth -- see reset_post_handler() */
 #include "profiles_builtin.h"
-#include "wifi_provision_state.h"
+#include "wifi_provision_http.h"
 
 static const char *TAG = "factory_reset";
 

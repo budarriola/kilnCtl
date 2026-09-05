@@ -3,6 +3,10 @@
 
 #include "esp_err.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Narrow header for the shared flash-safe executor dispatch function, split
  * out of uart_bridge.h so a consumer that only needs this one call (e.g.
  * log_store_mount.c) does not have to pull in the whole UART bridge API.
@@ -28,5 +32,9 @@
  * check uart_bridge_ext_is_on_flash_worker() (declared in uart_bridge.h)
  * first and run their work inline instead of dispatching again. */
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KILNFW_FLASH_WORKER_H */

@@ -68,6 +68,17 @@
 #include "freertos/task.h"
 
 #include "adaptive_tune.h" /* adaptive_tune_clear_ki_baseline() -- see this file's accept-path call site */
+#include "flash_worker.h" /* uart_bridge_ext_run_on_flash_worker() -- see this
+ * file's coupling_persist_job()/autotune_finalize_fit() comments below for why
+ * autotune_finalize_fit()'s NVS write is routed through it rather than executed
+ * directly on task_entry()'s own PSRAM-stacked task. Same mechanism, same
+ * precedent as safety_cfg_store.c's nvs_save_store_job(), and the exact
+ * hazard uart_bridge_ext.c:104-127's HAZARD block documents.
+ *
+ * Narrow header (esp_err.h only), not #include "uart_bridge.h" -- that
+ * header pulls in hardware dependencies (ILI9488.h/screen_idle.h/kiln_io.h)
+ * this file neither needs nor wants, and which are not part of this file's
+ * host-test stub surface. */
 #include "heat_enable.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
@@ -81,20 +92,6 @@
 #include "stack_margin.h"
 #include "thermo_combine.h"
 #include "zones_config_accessors.h"
-/* uart_bridge_ext.c's flash-safe executor (bx_flash_worker) -- see this
- * file's coupling_persist_job()/autotune_finalize_fit() comments below for why
- * autotune_finalize_fit()'s NVS write is routed through it rather than executed
- * directly on task_entry()'s own PSRAM-stacked task. Same mechanism, same
- * precedent as safety_cfg_store.c's nvs_save_store_job(), and the exact
- * hazard uart_bridge_ext.c:104-127's HAZARD block documents.
- *
- * Declared here by hand rather than via #include "uart_bridge.h", for the
- * same reason safety_cfg_store.c gives: that header pulls in hardware
- * dependencies (ILI9488.h/screen_idle.h/kiln_io.h) this file neither needs
- * nor wants, and which are not part of this file's host-test stub surface.
- * The real declaration and its full doc comment live in uart_bridge.h; this
- * one must be kept in sync with it by hand if that signature ever changes. */
-esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 
 extern const char *AT_TAG;
 

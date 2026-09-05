@@ -39,10 +39,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-// uart_bridge_ext.c's internal-SRAM-stack flash-write executor -- see
-// adaptive_tune.c's top comment for the full reasoning (declared by hand,
-// same as safety_cfg_store.c's identical declaration, for the same reason).
-esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+#include "flash_worker.h" /* uart_bridge_ext_run_on_flash_worker() -- see
+ * adaptive_tune.c's top comment for the full reasoning. Narrow header
+ * (esp_err.h only), not the hand-declaration this used to carry. */
 
 // True iff the calling task IS bx_flash_worker already -- see
 // adaptive_tune.c's adaptive_tune_clear_ki_baseline() for why this matters:
