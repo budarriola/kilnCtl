@@ -37,12 +37,29 @@ or via the installed console script ``kilnctrl-console-capture``. Either
 source may be omitted (``--no-esp`` / omit ``--safety-port``) to capture just
 one processor. Ctrl+C stops cleanly and closes all three files.
 
+Every event also carries a **transport** tag (`TRANSPORT_ESP_USB_CDC` /
+`TRANSPORT_SAFETY_PROBE_UART`), separate from the source-processor tag.
+Today the two are 1:1 -- each processor has exactly one transport wired up --
+but the field exists so a later relay or RTT path slots in as a new
+transport value under the *same* source, rather than forcing a second
+tagging scheme in later. :func:`check_transport_availability` reports which
+transports are actually present right now (by USB VID:PID via
+`serial_link.list_debug_probe_ports`, not by description text -- see that
+function's docstring for why), including an honest "absent" for a transport
+that firmware has never emitted at all.
+
 Not yet done, because it needs firmware or protocol changes this task is not
 scoped to touch (`tools/PcTools/TODO.md` "Logging and consoles" tracks these):
-per-line transport tagging (relayed vs probe-UART vs RTT) beyond the
-source-processor tag this module already applies, an RTT-over-SWD console
-path, and reading the Pico's log over the wire-protocol relay once
-`Frame`/`LogLine` carry a source device.
+an RTT-over-SWD console path, and reading the Pico's log over the
+wire-protocol relay once `Frame`/`LogLine` carry a source device (today's
+`kilnlink` `Frame` has no source-device field, so a relayed Pico LOG line
+cannot yet be distinguished from the ESP's own -- see LINK_PROTOCOL.md). The
+per-frame drop counters that already exist on the wire
+(`tx_frames_dropped`/`tx_dropped_sat`, see `devices_safety.py`) count the
+isolated link's shared TX ring, not LOG frames specifically -- there is no
+way to attribute a drop to "a LOG frame was dropped" until the LOG-frame
+relay above exists to carry LOG traffic over that ring in the first place.
+That item stays firmware-blocked, not implemented here.
 """
 
 from __future__ import annotations
@@ -63,7 +80,7 @@ import serial
 from .device_log import LogClient
 from .devices import LogLine
 from .protocol import DEFAULT_BAUD_RATE
-from .serial_link import UartLink
+from .serial_link import DEBUG_PROBE_VID_PID, UartLink, list_debug_probe_ports, list_ports
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +99,29 @@ FLUSH_INTERVAL_S = 0.25
 SOURCE_ESP = "ESP"
 SOURCE_SAFETY = "SAFETY"
 
+#: Per-line transport tags. Kept distinct from SOURCE_* (the processor) so a
+#: later second transport for the same processor -- the LOG-frame relay or
+#: RTT-over-SWD paths tracked as open in TODO.md -- adds a new value here
+#: rather than overloading the source tag. Today each source has exactly one
+#: transport wired up in this module.
+TRANSPORT_ESP_USB_CDC = "ESP_USB_CDC"
+TRANSPORT_SAFETY_PROBE_UART = "SAFETY_PROBE_UART"
+
+#: Transports named in TODO.md's "Logging and consoles" section that this
+#: module knows about but cannot open, because the firmware/protocol side
+#: they depend on does not exist yet. Reported by
+#: :func:`check_transport_availability` as explicitly absent rather than
+#: silently missing from the list.
+TRANSPORT_SAFETY_LOG_RELAY = "SAFETY_LOG_RELAY"  # kilnlink LOG frames, relayed by the ESP
+TRANSPORT_RTT_SWD = "RTT_SWD"  # RTT-over-SWD fallback console
+#: The Pico's own native USB CDC stdio (a third, distinct transport from the
+#: Debug Probe's UART bridge above -- see module docstring). Gated at
+#: firmware build time by `SAFTYFW_ENABLE_USB_STDIO`; this PC-side module has
+#: no way to query that build flag remotely, so it is reported unconditionally
+#: absent rather than probed for -- TODO.md's "Pico USB CDC explicitly
+#: reported as absent unless SAFTYFW_ENABLE_USB_STDIO was built in".
+TRANSPORT_SAFETY_NATIVE_USB_CDC = "SAFETY_NATIVE_USB_CDC"
+
 
 # ---------------------------------------------------------------------------
 # pure logic -- testable with synthetic events, no serial ports involved
@@ -94,17 +134,19 @@ class ConsoleEvent:
     source: str  # SOURCE_ESP or SOURCE_SAFETY
     text: str
     level: str = "I"  # single-char level tag, ESP-IDF convention ('?' if unknown)
+    transport: str = TRANSPORT_ESP_USB_CDC  # one of the TRANSPORT_* constants above
 
 
 def format_event(evt: ConsoleEvent, *, tag_source: bool) -> str:
     """Render one event as a log line.
 
-    ``tag_source=True`` (the interleaved file) prefixes ``[SOURCE]``; the
-    per-processor files already say which processor they are via the
-    filename, so they omit it.
+    ``tag_source=True`` (the interleaved file) prefixes ``[SOURCE/TRANSPORT]``;
+    the per-processor files already say which processor they are via the
+    filename, so they omit the source but keep the transport tag (it is not
+    otherwise implied once a source can have more than one transport).
     """
     stamp = datetime.fromtimestamp(evt.pc_time).strftime(LINE_TIME_FORMAT)[:-3]
-    prefix = f"[{evt.source}] " if tag_source else ""
+    prefix = f"[{evt.source}/{evt.transport}] " if tag_source else f"[{evt.transport}] "
     return f"{stamp} {evt.level} {prefix}{evt.text}"
 
 
@@ -167,7 +209,13 @@ class MultiConsoleCapture:
 
         def on_line(line: LogLine) -> None:
             self._queue.put(
-                ConsoleEvent(pc_time=time.time(), source=SOURCE_ESP, text=line.text, level=line.letter)
+                ConsoleEvent(
+                    pc_time=time.time(),
+                    source=SOURCE_ESP,
+                    text=line.text,
+                    level=line.letter,
+                    transport=TRANSPORT_ESP_USB_CDC,
+                )
             )
 
         client = LogClient(link, on_line=on_line)
@@ -197,7 +245,13 @@ class MultiConsoleCapture:
                 if not text:
                     continue
                 self._queue.put(
-                    ConsoleEvent(pc_time=time.time(), source=SOURCE_SAFETY, text=text, level="?")
+                    ConsoleEvent(
+                        pc_time=time.time(),
+                        source=SOURCE_SAFETY,
+                        text=text,
+                        level="?",
+                        transport=TRANSPORT_SAFETY_PROBE_UART,
+                    )
                 )
 
         thread = threading.Thread(target=read_loop, name="safety-console-rx", daemon=True)
@@ -265,6 +319,98 @@ class MultiConsoleCapture:
 
 
 # ---------------------------------------------------------------------------
+# transport availability -- honest present/absent reporting
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class TransportStatus:
+    """One transport's availability, plus why -- never just a bare bool.
+
+    ``candidate_ports`` is the enumerated port device name(s) that make this
+    transport ``present`` (empty when absent). ``detail`` explains an absent
+    result rather than leaving the caller to infer it from silence.
+    """
+
+    transport: str
+    present: bool
+    candidate_ports: "tuple[str, ...]" = ()
+    detail: str = ""
+
+
+def check_transport_availability() -> "list[TransportStatus]":
+    """Report every transport this module knows about, present or not.
+
+    This is the PC-side half of TODO.md's "Transport availability shown
+    honestly as build-time capability, not a toggle" / "Pico USB CDC
+    explicitly reported as absent unless SAFTYFW_ENABLE_USB_STDIO was built
+    in". A transport this module cannot open at all (the LOG-frame relay,
+    RTT-over-SWD) is reported ``present=False`` unconditionally, with a
+    ``detail`` naming the firmware/protocol work it is blocked on, rather
+    than being omitted from the report -- an omitted row and an unavailable
+    one look identical to a caller unless both are stated every time.
+
+    ``TRANSPORT_SAFETY_PROBE_UART`` is detected by USB VID:PID
+    (:data:`~kilnctrl.serial_link.DEBUG_PROBE_VID_PID`) via
+    :func:`~kilnctrl.serial_link.list_debug_probe_ports`, never by matching
+    port description text -- Windows reports a composite USB device's
+    *interface* string there, and pyserial strips the `MI_xx` interface
+    index pyserial-side, so two interfaces of the same physical probe can
+    carry identical or misleading description strings (see that function's
+    docstring, and the project memory note on Windows USB names vs
+    descriptors).
+    """
+    esp_ports = [p for p in list_ports() if p.recommended]
+    probe_ports = list_debug_probe_ports()
+
+    return [
+        TransportStatus(
+            transport=TRANSPORT_ESP_USB_CDC,
+            present=bool(esp_ports),
+            candidate_ports=tuple(p.device for p in esp_ports),
+            detail="" if esp_ports else "no USB-UART bridge port found (see serial_link.list_ports())",
+        ),
+        TransportStatus(
+            transport=TRANSPORT_SAFETY_PROBE_UART,
+            present=bool(probe_ports),
+            candidate_ports=tuple(p.device for p in probe_ports),
+            detail=(
+                ""
+                if probe_ports
+                else f"no Debug Probe (VID:PID {DEBUG_PROBE_VID_PID}) enumerated"
+            ),
+        ),
+        TransportStatus(
+            transport=TRANSPORT_SAFETY_LOG_RELAY,
+            present=False,
+            detail="firmware side pending: kilnlink Frame carries no source-device field yet, "
+            "and the Pico has no LOG-frame relay path (see TODO.md 'Logging and consoles')",
+        ),
+        TransportStatus(
+            transport=TRANSPORT_RTT_SWD,
+            present=False,
+            detail="firmware side pending: no RTT console path implemented",
+        ),
+        TransportStatus(
+            transport=TRANSPORT_SAFETY_NATIVE_USB_CDC,
+            present=False,
+            detail="not offered: gated by firmware build flag SAFTYFW_ENABLE_USB_STDIO, "
+            "which this PC-side tool cannot query remotely -- reported absent rather than "
+            "silently unavailable if opened",
+        ),
+    ]
+
+
+def format_transport_availability(statuses: "list[TransportStatus]") -> str:
+    """Human-readable multi-line report, one transport per line."""
+    lines = []
+    for s in statuses:
+        state = "present" if s.present else "ABSENT"
+        ports = f" ({', '.join(s.candidate_ports)})" if s.candidate_ports else ""
+        why = f" -- {s.detail}" if s.detail else ""
+        lines.append(f"  {s.transport}: {state}{ports}{why}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -289,12 +435,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=f"ESP link baud rate (default {DEFAULT_BAUD_RATE}).",
     )
     parser.add_argument("--log-dir", default=None, help="Override the log directory (default tools/PcTools/logs/console/).")
+    parser.add_argument(
+        "--transports", action="store_true",
+        help="Print honest per-transport availability (present/absent + why) and exit -- no capture started.",
+    )
     return parser
 
 
 def main(argv: Optional[list] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     args = _build_arg_parser().parse_args(argv)
+
+    if args.transports:
+        print(format_transport_availability(check_transport_availability()))
+        return 0
 
     if args.no_esp and not args.safety_port:
         print("error: --no-esp given with no --safety-port -- nothing to capture", file=sys.stderr)

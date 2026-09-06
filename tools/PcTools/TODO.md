@@ -64,10 +64,20 @@ also documents that **this line fails de-asserted**.
 decoder built against zero real captures risks one nobody has validated.
 Needs a board and analyzer on the bench at once.
 
-### 3. Everything reachable headlessly
+### 3. Everything reachable headlessly — DONE 2026-09-05
 
-- [ ] A page-by-page audit of `gui.py` against `mcp_server.py` is still open —
-      the pass done so far diffed client instantiations, not every control.
+Page-by-page audit of every `gui_*.py` popup against `mcp_server.py` +
+`actions.py`'s `press_button`/`list_buttons` registry. Every control had a
+headless equivalent except one: the Danger Zone popup's "Factory Reset..."
+button (`gui_danger_zone.py`'s `danger_zone_confirm`, wire command
+`SYSTEM_CMD_FACTORY_RESET`/`devices.system_factory_reset`) had no bare
+headless path — only `load_config_preset()`'s factory-reset-then-apply-a-
+preset flow (`mcp_server_ui_test.py`) touched it, always applying a preset
+afterward. Closed by adding a `"System: Factory Reset"` action
+(`actions.py`, scope 0-3 = wifi/kiln/profiles/all) alongside the existing
+watchdog-panic get/set actions, reachable via `press_button`/`list_buttons`
+the same way every other GUI-only control already was. Covered by
+`selfcheck_actions.py`'s live virtual-link exercise.
 
 ### 4. One-call board snapshot — DONE
 
@@ -133,22 +143,39 @@ the full numbers and the shared-queue starvation risk from OTHER log
 traffic.
 
 - [ ] Pico logs emitted as `kilnlink` LOG frames (device `SAFETY`, task 5),
-      relayed by the ESP — the primary path once the link is up; still needs
-      the link itself
-- [ ] RTT-over-SWD console as the fallback path
-- [ ] Pico USB CDC explicitly reported as absent unless
-      `SAFTYFW_ENABLE_USB_STDIO` was built in
-- [ ] Transport marked per line (relayed / probe-UART / RTT) — today only the
-      source processor is tagged, since only one transport per processor
-      exists in code
-- [ ] Per-peer level filter
+      relayed by the ESP — **firmware side pending**: needs the relay itself
+      and a source-device field on `Frame`; the primary path once the link
+      is up
+- [ ] RTT-over-SWD console as the fallback path — **firmware side pending**
+- [x] Pico USB CDC explicitly reported as absent unless
+      `SAFTYFW_ENABLE_USB_STDIO` was built in — PC side done:
+      `console_capture.check_transport_availability()` reports
+      `TRANSPORT_SAFETY_NATIVE_USB_CDC` unconditionally absent (this tool
+      cannot query the build flag remotely), rather than silently offering a
+      port that isn't there
+- [x] Transport marked per line (relayed / probe-UART / RTT) — done for the
+      transports that exist today: `ConsoleEvent.transport`
+      (`TRANSPORT_ESP_USB_CDC` / `TRANSPORT_SAFETY_PROBE_UART`), separate
+      from the source-processor tag, shown in both per-source and
+      interleaved log lines. Relayed/RTT values slot in once those
+      transports exist (firmware side pending, see above)
+- [ ] Per-peer level filter — **firmware side pending**
 - [ ] Runtime log-level control for the safety processor over the link,
-      default warnings+errors
-- [ ] Transport availability shown honestly as build-time capability, not a
-      toggle
-- [ ] Dropped-log-frame counter surfaced from the diagnostic frame
+      default warnings+errors — **firmware side pending**
+- [x] Transport availability shown honestly as build-time capability, not a
+      toggle — `console_capture.check_transport_availability()`, tested in
+      `tests/test_console_capture_transport.py`. `TRANSPORT_SAFETY_PROBE_UART`
+      is detected by USB VID:PID (`serial_link.DEBUG_PROBE_VID_PID`,
+      `list_debug_probe_ports()`), not by description text, since Windows
+      exposes composite interface strings there and pyserial strips `MI_xx`.
+- [ ] Dropped-log-frame counter surfaced from the diagnostic frame —
+      **firmware side pending**: the wire already carries `tx_frames_dropped`/
+      `tx_dropped_sat` (`devices_safety.py`), but those count the isolated
+      link's shared TX ring generally, not LOG frames specifically — there is
+      nothing to attribute a drop to "a LOG frame" until the LOG-frame relay
+      above exists to carry LOG traffic over that ring at all
 - [ ] Pico log emission best-effort and droppable — never blocking, per
-      no-hang rule 3
+      no-hang rule 3 — **firmware side pending**
 
 ## Firmware updates from here
 
@@ -215,22 +242,23 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
       driven tool-call by tool-call.
 - [ ] 2. `kilnlink` frame decoding for a Saleae capture — not built,
       deliberately, until a board + analyzer are on the bench together.
-- [ ] 3. GUI-vs-MCP capability audit — not exhaustive; a full page-by-page
-      pass is still open.
+- [x] 3. GUI-vs-MCP capability audit — DONE 2026-09-05, full page-by-page
+      pass (see "3. Everything reachable headlessly" above): one real gap
+      (bare factory reset), closed via a new `press_button` action.
 - [x] 4. `get_board_state()` — both processors reported (`safety_status`/
       `safety_link_stats` alongside the ESP sections); this closed for free
       once the isolated link's baud fix landed.
 
 **Logging and consoles**
-- [ ] Pico logs emitted as `kilnlink` LOG frames, relayed by the ESP
-- [ ] RTT-over-SWD console as the fallback path
-- [ ] Pico USB CDC **not** offered as a transport; reported as absent unless built in
-- [ ] Transport marked per line (relayed / probe-UART / RTT)
-- [ ] Per-peer level filter
-- [ ] Runtime log-level control for the safety processor over the link, default warnings+errors
-- [ ] Transport availability shown honestly
-- [ ] Dropped-log-frame counter surfaced from the diagnostic frame
-- [ ] Pico log emission best-effort and droppable — never blocking
+- [ ] Pico logs emitted as `kilnlink` LOG frames, relayed by the ESP — firmware side pending
+- [ ] RTT-over-SWD console as the fallback path — firmware side pending
+- [x] Pico USB CDC **not** offered as a transport; reported as absent unless built in
+- [x] Transport marked per line (relayed / probe-UART / RTT) — for the transports that exist today
+- [ ] Per-peer level filter — firmware side pending
+- [ ] Runtime log-level control for the safety processor over the link, default warnings+errors — firmware side pending
+- [x] Transport availability shown honestly
+- [ ] Dropped-log-frame counter surfaced from the diagnostic frame — firmware side pending (no LOG-frame relay to attribute a drop to yet)
+- [ ] Pico log emission best-effort and droppable — never blocking — firmware side pending
 
 **Firmware updates**
 - [x] `ota_status`, `ota_update_esp`, `ota_update_pico`

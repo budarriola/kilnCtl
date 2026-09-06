@@ -169,6 +169,32 @@ def _score_port(port) -> int:
     return score
 
 
+#: USB VID:PID of the Raspberry Pi Debug Probe (the CMSIS-DAP unit
+#: `debug_probe.py` pins by serial for SWD/JTAG). It also exposes a UART
+#: bridge CDC interface -- that's the port `console_capture.py` reads the
+#: Pico's bench console from. Matched against `hwid`'s "VID:PID=XXXX:XXXX"
+#: substring, never against `description`/`product`: Windows reports a
+#: composite USB device's *interface* string there (and pyserial strips the
+#: `MI_xx` interface-index token from it), so two different logical ports on
+#: the same physical probe -- the DAP interface and the UART bridge -- can
+#: carry the same, or a misleadingly generic, description. VID:PID survives
+#: that; the interface number does not need to, since only one of the
+#: probe's CDC interfaces will open as a working UART bridge in practice
+#: (see `add_safety_probe_uart`'s caller, which is told the port explicitly).
+DEBUG_PROBE_VID_PID = "2E8A:000C"
+
+
+def list_debug_probe_ports() -> list[PortInfo]:
+    """Every enumerated port belonging to the Raspberry Pi Debug Probe
+    (any interface), identified by VID:PID rather than by description text.
+
+    Used for honest transport-availability reporting: "is the SAFETY probe's
+    UART bridge even plugged in" is a VID:PID question, not a string-match
+    one -- see :data:`DEBUG_PROBE_VID_PID`'s comment.
+    """
+    return [p for p in list_ports() if DEBUG_PROBE_VID_PID in p.hwid.upper()]
+
+
 def list_ports() -> list[PortInfo]:
     """All serial ports, best candidate first (score desc, then device name)."""
     infos = [
