@@ -14,7 +14,9 @@
 #include "dashboard_http.h"
 #include "http_form.h"
 #include "kiln_io.h"
+#include "lvgl_port.h"
 #include "ramp_assist_cfg.h"
+#include "relay_cycles.h" /* relay_cycles_reset_post_handler() below needs RELAY_CYCLES_COUNT */
 #include "thermo_owner.h"
 #include "watchdog_cfg.h"
 #include "web_encoding.h"
@@ -402,6 +404,72 @@ static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
 }
 #undef WATCHDOG_CFG_BODY_MAX
 
+/* POST /api/relay_cycles/reset {relay: N} -- RELAY_LIFE_BUDGET_PLAN.md step 4.
+ * The web diagnostics page's "Reset count" button (diagnostics_page.html,
+ * gated by window.kcConfirm()) posts here after the operator has physically
+ * replaced the relay.
+ *
+ * relay_cycles.h (step 1, 75b338c) has no "reset one slot's count to zero"
+ * API -- relay_cycles_add()/relay_cycles_note_safety_edge() only ever
+ * increment, by design (they're the wear counters). Rather than add one to
+ * that file out of this step's scope (relay_cycles.* is owned by the step-1
+ * agent), this handler validates the index and everything else it can,
+ * then answers 501 Not Implemented with a message naming exactly the
+ * missing API -- so the front end above is fully testable (bad index -> 400,
+ * good index -> a clean, diagnosable 501) today, and swapping in a real
+ * relay_cycles_reset(relay) call plus the flash-worker dispatch below is a
+ * one-function change once that API lands, not a rewrite of this handler. */
+#define RELAY_CYCLES_RESET_BODY_MAX 32
+static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > RELAY_CYCLES_RESET_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[RELAY_CYCLES_RESET_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char val[8];
+    int val_len = http_form_find_field(body, "relay", val, sizeof(val));
+    if (val_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"relay\" field");
+        return ESP_OK;
+    }
+    char *endp = NULL;
+    long relay = strtol(val, &endp, 10);
+    if (endp == val || *endp != '\0' || relay < 0 || relay >= (long)RELAY_CYCLES_COUNT) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay out of range 0..4");
+        return ESP_OK;
+    }
+
+    /* Log before answering, same "old count, before the reset" intent the
+     * plan asks for even though the reset itself is not yet implemented --
+     * this is exactly the number a real reset would need to have logged. */
+    relay_cycles_budget_t before;
+    relay_cycles_budget((uint8_t)relay, &before);
+    ESP_LOGI(TAG, "relay_cycles reset requested for relay %ld (old count %lu) -- REFUSED, "
+             "relay_cycles.h has no reset-one-slot API yet", relay, (unsigned long)before.cycles);
+
+    char json[192];
+    int n = snprintf(json, sizeof(json),
+        "{\"ok\":false,\"error\":\"not implemented: relay_cycles.h has no reset-one-slot API yet "
+        "(RELAY_LIFE_BUDGET_PLAN.md step 4)\",\"relay\":%ld,\"cycles\":%lu}",
+        relay, (unsigned long)before.cycles);
+    httpd_resp_set_status(req, "501 Not Implemented");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+#undef RELAY_CYCLES_RESET_BODY_MAX
+
 /* GET /api/ramp_assist -- current state of the kiln-wide ramp-assist toggle
  * (ramp_assist_cfg.h). Also carried in GET /api/status (dashboard_http.c)
  * for the persistent indicator; this endpoint exists so the diagnostics
@@ -465,6 +533,38 @@ static esp_err_t ramp_assist_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }
 #undef RAMP_ASSIST_BODY_MAX
+
+/* GET /api/diagnostics/timing -- HW_ABSTRACTION.md "Still open": display
+ * flush time and thermocouple read latency, previously un-verifiable because
+ * the board exposed no timing metrics at all. Both blocks come from
+ * single-writer volatile counters kept where the work actually happens
+ * (lvgl_port.c's ili9488_flush_cb(), MAX31856.c's MAX31856_read_all()) --
+ * this handler only reads and formats them, same "no allocation, no lock
+ * held across a device transfer" shape those two already had. Fixed-size
+ * stack buffer, well under the httpd task's stack budget (project_httpd_
+ * stack_near_overflow: 64 B free was seen after real load once -- this is a
+ * small snapshot of six uint32_t's, not a growing buffer). */
+static esp_err_t diagnostics_timing_get_handler(httpd_req_t *req)
+{
+    uint32_t d_last, d_min, d_max, d_count, d_mean;
+    lvgl_port_get_flush_stats_ex(&d_last, &d_min, &d_max, &d_count, &d_mean);
+
+    uint32_t t_last, t_min, t_max, t_count, t_mean;
+    MAX31856_get_read_all_stats(&t_last, &t_min, &t_max, &t_count, &t_mean);
+
+    char json[320];
+    int n = snprintf(json, sizeof(json),
+                     "{\"display_flush_us\":{\"count\":%lu,\"last\":%lu,\"min\":%lu,\"max\":%lu,"
+                     "\"mean\":%lu},"
+                     "\"thermo_read_us\":{\"count\":%lu,\"last\":%lu,\"min\":%lu,\"max\":%lu,"
+                     "\"mean\":%lu}}",
+                     (unsigned long)d_count, (unsigned long)d_last, (unsigned long)d_min,
+                     (unsigned long)d_max, (unsigned long)d_mean,
+                     (unsigned long)t_count, (unsigned long)t_last, (unsigned long)t_min,
+                     (unsigned long)t_max, (unsigned long)t_mean);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, (n < 0) ? 0 : (size_t)n);
+}
 
 /* --- danger_mode.h's diagnostics-page section: status/start/stop/relay --- */
 
@@ -707,6 +807,9 @@ esp_err_t diagnostics_http_start(void)
     static const httpd_uri_t lwip_stats_get_uri = {
         .uri = "/api/debug/lwip_stats", .method = HTTP_GET, .handler = lwip_stats_get_handler,
     };
+    static const httpd_uri_t diagnostics_timing_get_uri = {
+        .uri = "/api/diagnostics/timing", .method = HTTP_GET, .handler = diagnostics_timing_get_handler,
+    };
     static const httpd_uri_t watchdog_cfg_get_uri = {
         .uri = "/api/watchdog_cfg", .method = HTTP_GET, .handler = watchdog_cfg_get_handler,
     };
@@ -718,6 +821,9 @@ esp_err_t diagnostics_http_start(void)
     };
     static const httpd_uri_t ramp_assist_post_uri = {
         .uri = "/api/ramp_assist", .method = HTTP_POST, .handler = ramp_assist_post_handler,
+    };
+    static const httpd_uri_t relay_cycles_reset_uri = {
+        .uri = "/api/relay_cycles/reset", .method = HTTP_POST, .handler = relay_cycles_reset_post_handler,
     };
     static const httpd_uri_t danger_get_uri = {
         .uri = "/api/diagnostics/danger", .method = HTTP_GET, .handler = danger_get_handler,
@@ -760,6 +866,11 @@ esp_err_t diagnostics_http_start(void)
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/debug/lwip_stats) failed: %s", esp_err_to_name(err));
         return err;
     }
+    err = httpd_register_uri_handler(server, &diagnostics_timing_get_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/timing) failed: %s", esp_err_to_name(err));
+        return err;
+    }
     err = httpd_register_uri_handler(server, &crash_report_ack_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report/ack) failed: %s", esp_err_to_name(err));
@@ -788,6 +899,11 @@ esp_err_t diagnostics_http_start(void)
     err = httpd_register_uri_handler(server, &ramp_assist_post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/ramp_assist) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &relay_cycles_reset_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/relay_cycles/reset) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &danger_get_uri);

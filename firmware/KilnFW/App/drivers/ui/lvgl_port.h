@@ -198,6 +198,13 @@ void lvgl_port_get_timer_handler_calls(uint32_t *calls);
  * out-param may be NULL if the caller doesn't want that one. */
 void lvgl_port_get_flush_stats(uint32_t *last_us, uint32_t *max_us, uint32_t *count);
 
+/* Extended form adding min_us/mean_us (HW_ABSTRACTION.md "Still open") --
+ * see lvgl_port.c's definition comment. count == 0 means "never flushed
+ * yet"; min_us/mean_us only meaningful once count > 0. Any out-param may be
+ * NULL. */
+void lvgl_port_get_flush_stats_ex(uint32_t *last_us, uint32_t *min_us, uint32_t *max_us,
+                                  uint32_t *count, uint32_t *mean_us);
+
 #ifdef __cplusplus
 }
 #endif

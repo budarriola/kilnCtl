@@ -861,11 +861,18 @@ Invoke-HostTestExe -Name "ft6336u" -ExePath $exe24 -BuildCmd $cmd24
 $exe25 = Join-Path $outDir "kilnctl_host_tests_max31856_hal_spi.exe"
 $max31856ObjDir = Join-Path $outDir "max31856hs"
 New-Item -ItemType Directory -Force -Path $max31856ObjDir | Out-Null
+# fake_time.c added 2026-09-06: HW_ABSTRACTION.md "Still open"'s thermocouple
+# read-cycle-latency instrumentation added a hal_time_now_us() call inside
+# MAX31856_read_all() itself (same interface/hal_time.h lvgl_port.c's flush
+# stats already use) -- MAX31856.c is now a real caller of that symbol, so
+# this executable needs the host fake for it, same as every other target in
+# this script that links a TU calling hal_time_now_us().
 $cmd25 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$max31856ObjDir\\`" /Fe:`"$exe25`" " +
         "`"$(Join-Path $testDir 'test_max31856_hal_spi.c')`" " +
         "`"$(Join-Path $driversDir 'hw/MAX31856.c')`" `"$(Join-Path $driversDir 'hw/max31856_codec.c')`" " +
-        "`"$(Join-Path $hwAbsDir 'host/fake_spi.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+        "`"$(Join-Path $hwAbsDir 'host/fake_spi.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
 
 Invoke-HostTestExe -Name "max31856_hal_spi" -ExePath $exe25 -BuildCmd $cmd25
 

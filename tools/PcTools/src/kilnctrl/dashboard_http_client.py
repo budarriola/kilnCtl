@@ -130,6 +130,29 @@ def get_crash_report(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> di
             f"GET /api/crash_report response was not valid JSON: {body_text!r}") from exc
 
 
+def get_diagnostics_timing(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/diagnostics/timing (diagnostics_http.c:
+    diagnostics_timing_get_handler) -- HW_ABSTRACTION.md "Still open": display
+    flush time and thermocouple read-cycle latency, made reportable rather
+    than requiring a bench session with a scope. Returns
+    ``{"display_flush_us": {...}, "thermo_read_us": {...}}``, each with
+    count/last/min/max/mean in microseconds; count == 0 means that path has
+    not run yet on this boot (min/mean are 0 until then, not a real
+    measurement)."""
+    req = urllib.request.Request(_url(host, "/api/diagnostics/timing"), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise DashboardHttpError(f"GET /api/diagnostics/timing failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise DashboardHttpError(
+            f"GET /api/diagnostics/timing response was not valid JSON: {body_text!r}") from exc
+
+
 def get_heap_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
     """GET /api/status and return the heap_internal/heap_spiram/heap_dma
     sub-objects (each {free, largest_free_block, min_free, total} in bytes),
@@ -146,7 +169,10 @@ def get_heap_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dic
     exhaustion this plan exists to measure. A missing/unreachable
     /api/crash_report endpoint (older firmware) is NOT treated as fatal for
     this call -- heap figures must still be reported -- but shows up as
-    ``unacknowledged_crash_check_error`` rather than being silently dropped."""
+    ``unacknowledged_crash_check_error`` rather than being silently dropped.
+    Same non-fatal treatment for GET /api/diagnostics/timing (older firmware
+    without it reports ``diagnostics_timing_check_error`` instead of the two
+    timing blocks)."""
     status = get_status(host, timeout=timeout)
     result: dict = {}
     missing = []
@@ -171,4 +197,14 @@ def get_heap_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dic
     else:
         if isinstance(crash, dict) and crash.get("present") and not crash.get("acknowledged", True):
             result["unacknowledged_crash"] = crash
+
+    try:
+        timing = get_diagnostics_timing(host, timeout=timeout)
+    except DashboardHttpError as exc:
+        result["diagnostics_timing_check_error"] = str(exc)
+    else:
+        if isinstance(timing, dict):
+            result["display_flush_us"] = timing.get("display_flush_us")
+            result["thermo_read_us"] = timing.get("thermo_read_us")
+
     return result

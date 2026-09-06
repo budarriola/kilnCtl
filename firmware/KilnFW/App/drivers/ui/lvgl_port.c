@@ -1,5 +1,6 @@
 #include "lvgl_port.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -137,14 +138,50 @@ static void lv_tick_timer_cb(void *arg)
  * exactly what "worst chunked flush this board has actually pushed" needs to
  * mean for a decision like 9.2/9.6's. */
 static volatile uint32_t s_last_flush_us;
+static volatile uint32_t s_min_flush_us = UINT32_MAX;
 static volatile uint32_t s_max_flush_us;
 static volatile uint32_t s_flush_count;
+static volatile uint64_t s_flush_sum_us; /* for the running mean */
 
 void lvgl_port_get_flush_stats(uint32_t *last_us, uint32_t *max_us, uint32_t *count)
 {
     if (last_us) *last_us = s_last_flush_us;
     if (max_us) *max_us = s_max_flush_us;
     if (count) *count = s_flush_count;
+}
+
+/* Extended form of the above, adding min/mean (HW_ABSTRACTION.md "Still
+ * open") -- kept as a second getter rather than widening the original so
+ * every existing caller of lvgl_port_get_flush_stats() stays untouched.
+ * count == 0 means "never flushed yet"; min_us/mean_us only meaningful once
+ * count > 0 (both read back 0 until then). Any out-param may be NULL. */
+void lvgl_port_get_flush_stats_ex(uint32_t *last_us, uint32_t *min_us, uint32_t *max_us,
+                                  uint32_t *count, uint32_t *mean_us)
+{
+    uint32_t n = s_flush_count;
+    if (last_us) *last_us = s_last_flush_us;
+    if (min_us) *min_us = (n == 0) ? 0 : s_min_flush_us;
+    if (max_us) *max_us = s_max_flush_us;
+    if (count) *count = n;
+    if (mean_us) *mean_us = (n == 0) ? 0 : (uint32_t)(s_flush_sum_us / n);
+}
+
+/* Single bookkeeping helper so every one of ili9488_flush_cb()'s three
+ * completion paths (sync success/failure, async success via
+ * ili9488_flush_async_done(), async begin-failure) updates the exact same set
+ * of stats the exact same way -- see this file's earlier comment on why these
+ * are single-writer, lock-free volatiles. */
+static void flush_stats_record(uint32_t flush_us)
+{
+    s_last_flush_us = flush_us;
+    if (flush_us < s_min_flush_us) {
+        s_min_flush_us = flush_us;
+    }
+    if (flush_us > s_max_flush_us) {
+        s_max_flush_us = flush_us;
+    }
+    s_flush_sum_us += flush_us;
+    s_flush_count++;
 }
 
 #if KILNCTL_SPI_ASYNC_FLUSH
@@ -179,11 +216,7 @@ static void ili9488_flush_async_done(void *ctx, esp_err_t result)
     }
 
     uint32_t flush_us = (uint32_t)((int64_t)hal_time_now_us() - actx->flush_start_us);
-    s_last_flush_us = flush_us;
-    if (flush_us > s_max_flush_us) {
-        s_max_flush_us = flush_us;
-    }
-    s_flush_count++;
+    flush_stats_record(flush_us);
 
     lv_display_flush_ready(actx->lv_disp);
 }
@@ -273,11 +306,7 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
          * exactly as the synchronous path below does on any failure. */
         ESP_LOGW(TAG, "flush [%u,%u %ux%u] failed: %s", x, y, w, h, esp_err_to_name(err));
         uint32_t flush_us = (uint32_t)((int64_t)hal_time_now_us() - flush_start_us);
-        s_last_flush_us = flush_us;
-        if (flush_us > s_max_flush_us) {
-            s_max_flush_us = flush_us;
-        }
-        s_flush_count++;
+        flush_stats_record(flush_us);
         lv_display_flush_ready(disp);
         return;
 #else
@@ -300,11 +329,7 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
         }
 
         uint32_t flush_us = (uint32_t)((int64_t)hal_time_now_us() - flush_start_us);
-        s_last_flush_us = flush_us;
-        if (flush_us > s_max_flush_us) {
-            s_max_flush_us = flush_us;
-        }
-        s_flush_count++;
+        flush_stats_record(flush_us);
 #endif /* KILNCTL_SPI_ASYNC_FLUSH */
     }
 

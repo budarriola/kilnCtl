@@ -503,6 +503,14 @@ esp_err_t MAX31856_read_all(MAX31856BusClass *bus,
                             size_t max_readings,
                             size_t *out_count);
 
+/* HW_ABSTRACTION.md "Still open": one full read-all-channels cycle's SPI
+ * latency, measured inside MAX31856_read_all() itself -- see that function's
+ * definition comment (MAX31856.c) for scope and thread-safety. count == 0
+ * means "never called yet"; min_us/mean_us are only meaningful once count > 0
+ * (both read back 0 until then). Any out-param may be NULL. */
+void MAX31856_get_read_all_stats(uint32_t *last_us, uint32_t *min_us, uint32_t *max_us,
+                                 uint32_t *count, uint32_t *mean_us);
+
 /* SR and the MASK shadow, for the READ_FAULTS reply. Either pointer may be
  * NULL. */
 esp_err_t MAX31856_read_faults(MAX31856Class *ch, uint8_t *out_sr, uint8_t *out_mask);

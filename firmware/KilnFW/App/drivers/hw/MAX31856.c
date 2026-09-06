@@ -5,6 +5,7 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "hal_time.h"
 #include "max31856_codec.h"
 #include "settings.h"
 
@@ -1272,6 +1273,39 @@ esp_err_t MAX31856_read(MAX31856Class *ch, MAX31856Reading *out)
     return ESP_OK;
 }
 
+/* HW_ABSTRACTION.md "Still open": thermocouple read-cycle latency, made
+ * reportable the same way lvgl_port.c's flush stats are -- measured here
+ * because MAX31856_read_all() is the one place every caller (thermo_owner's
+ * CMD_READ_ALL, profile_executor.c, dashboard_http.c, autotune_engine.c)
+ * converges on for "read every channel", so instrumenting it once covers all
+ * of them rather than duplicating a timer at each call site. Spans exactly
+ * the loop of per-channel MAX31856_read() SPI transactions below (the actual
+ * conversion-register burst reads), not any conversion-wait/backoff sleeping
+ * -- MAX31856_read() itself does not block on conversion time (see its own
+ * `stale` comment above), so this is already "the read, not the wait".
+ * Single-writer stats (bus->lock only guards per-channel register access, not
+ * this whole-bus loop), same volatile-plain-read/write convention as
+ * lvgl_port.c's s_last_flush_us/s_max_flush_us -- worst case one caller reads
+ * a value mid-update from a concurrent MAX31856_read_all() on another task,
+ * which is the same staleness every other pull-based diagnostic in this
+ * codebase already accepts. */
+static volatile uint32_t s_read_all_last_us;
+static volatile uint32_t s_read_all_min_us = UINT32_MAX;
+static volatile uint32_t s_read_all_max_us;
+static volatile uint32_t s_read_all_count;
+static volatile uint64_t s_read_all_sum_us; /* for the running mean */
+
+void MAX31856_get_read_all_stats(uint32_t *last_us, uint32_t *min_us, uint32_t *max_us,
+                                 uint32_t *count, uint32_t *mean_us)
+{
+    uint32_t n = s_read_all_count;
+    if (last_us) *last_us = s_read_all_last_us;
+    if (min_us) *min_us = (n == 0) ? 0 : s_read_all_min_us;
+    if (max_us) *max_us = s_read_all_max_us;
+    if (count) *count = n;
+    if (mean_us) *mean_us = (n == 0) ? 0 : (uint32_t)(s_read_all_sum_us / n);
+}
+
 esp_err_t MAX31856_read_all(MAX31856BusClass *bus,
                             MAX31856Reading *out,
                             size_t max_readings,
@@ -1286,6 +1320,7 @@ esp_err_t MAX31856_read_all(MAX31856BusClass *bus,
 
     size_t count = 0;
     esp_err_t first_err = ESP_OK;
+    uint64_t start_us = hal_time_now_us();
 
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT && count < max_readings; ++i) {
         MAX31856Class *ch = MAX31856_bus_channel(bus, i);
@@ -1298,6 +1333,17 @@ esp_err_t MAX31856_read_all(MAX31856BusClass *bus,
         }
         ++count;
     }
+
+    uint32_t elapsed_us = (uint32_t)(hal_time_now_us() - start_us);
+    s_read_all_last_us = elapsed_us;
+    if (elapsed_us < s_read_all_min_us) {
+        s_read_all_min_us = elapsed_us;
+    }
+    if (elapsed_us > s_read_all_max_us) {
+        s_read_all_max_us = elapsed_us;
+    }
+    s_read_all_sum_us += elapsed_us;
+    s_read_all_count++;
 
     if (out_count) {
         *out_count = count;

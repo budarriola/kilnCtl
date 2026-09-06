@@ -178,6 +178,26 @@ def get_heap_status(host: Optional[str] = None) -> str:
             f"{key}: free={h['free']} B, largest_free_block={h['largest_free_block']} B, "
             f"min_free={h['min_free']} B (low-water since boot), total={h['total']} B"
         )
+    timing_err = heap.get("diagnostics_timing_check_error")
+    if timing_err:
+        lines.append(f"(could not check /api/diagnostics/timing: {timing_err})")
+    else:
+        # HW_ABSTRACTION.md "Still open": display flush time and thermocouple
+        # read-cycle latency, both in microseconds -- see diagnostics_http.c's
+        # diagnostics_timing_get_handler(). count==0 means that path has not
+        # run yet on this boot (min/mean report as 0 until then, not a real
+        # zero-length measurement).
+        for label, key in (("display_flush_us", "display_flush_us"), ("thermo_read_us", "thermo_read_us")):
+            t = heap.get(key)
+            if not t:
+                continue
+            if t.get("count", 0) == 0:
+                lines.append(f"{label}: no samples yet")
+            else:
+                lines.append(
+                    f"{label}: count={t['count']} last={t['last']} min={t['min']} "
+                    f"max={t['max']} mean={t['mean']} (us)"
+                )
     return "\n".join(lines)
 
 
