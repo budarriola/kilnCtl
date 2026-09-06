@@ -19,11 +19,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "FT6336U.h"
+#include "hal_esp_common.h"
+#include "hal_gpio.h"
 #include "NS2009.h"
 #include "panel_codec.h"
 #include "panel_detect.h"
@@ -122,7 +123,7 @@ static esp_err_t panel_spi_hard_reset(ILI9488Class *disp)
      * (active-low ~RESET). Direct-GPIO mode has no "line doesn't exist"
      * uncertainty -- unlike the expander path, a bench-wired reset GPIO is
      * unambiguously real. */
-    esp_err_t err = disp->reset_gpio >= 0 ? gpio_set_level((gpio_num_t)disp->reset_gpio, 0)
+    esp_err_t err = disp->reset_gpio >= 0 ? hal_status_to_esp_err(hal_gpio_set(disp->reset_gpio, false))
                                           : kiln_io_lcd_reset(disp->io, true);
     if (err != ESP_OK) {
         ESP_LOGW(PANEL_SPI_TAG, "asserting ~RESET failed: %s", esp_err_to_name(err));
@@ -130,7 +131,7 @@ static esp_err_t panel_spi_hard_reset(ILI9488Class *disp)
     }
     vTaskDelay(pdMS_TO_TICKS(ILI9488_RESET_PULSE_MS));  /* datasheet minimum is 10us */
 
-    err = disp->reset_gpio >= 0 ? gpio_set_level((gpio_num_t)disp->reset_gpio, 1)
+    err = disp->reset_gpio >= 0 ? hal_status_to_esp_err(hal_gpio_set(disp->reset_gpio, true))
                                 : kiln_io_lcd_reset(disp->io, false);
     if (err != ESP_OK) {
         ESP_LOGE(PANEL_SPI_TAG, "releasing ~RESET failed: %s", esp_err_to_name(err));
@@ -165,10 +166,15 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
      * (like ILI9488_get_panel_desc() briefly was in Phase 2) would otherwise
      * either init a display with no bring-up sequence or divide by zero in
      * the chunk-pixels arithmetic. */
+    /* GPIO pin-number validity (cs_gpio always, dc_gpio/reset_gpio when
+     * bench-wired >= 0) is no longer pre-checked here with the ESP-specific
+     * GPIO_IS_VALID_OUTPUT_GPIO macro -- hal_gpio.h has no portable
+     * equivalent. hal_gpio_init_out() below performs the same validation
+     * (ESP-IDF's gpio_config() rejects an out-of-range/input-only pin with
+     * ESP_ERR_INVALID_ARG, mapped to HAL_INVALID_ARG) and this function
+     * still fails before any SPI traffic, just slightly later in the call. */
     if (!disp || !owner || (dc_gpio < 0 && !io) || panel_width == 0 || panel_height == 0 ||
-        rotation > 3 || clock_hz <= 0 || !GPIO_IS_VALID_OUTPUT_GPIO(cs_gpio) ||
-        (dc_gpio >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(dc_gpio)) ||
-        (reset_gpio >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(reset_gpio)) ||
+        rotation > 3 || clock_hz <= 0 ||
         !panel || !panel->init_seq || panel->init_len == 0 || panel->bytes_per_pixel == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -209,19 +215,14 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
     /* CS is bit-banged by spi_owner around each transfer (spics_io_num = -1
      * below), so it must idle high whenever no transfer is in flight -- the
      * same arrangement the MAX31856 channels use on this bus. */
-    gpio_config_t cs_conf = {
-        .pin_bit_mask = (1ULL << cs_gpio),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    err = gpio_config(&cs_conf);
+    /* Idle high (deselected) BEFORE switching to output -- hal_gpio_init_out()
+     * latches the level first, see hal_gpio.h's latch-before-direction
+     * contract. */
+    err = hal_status_to_esp_err(hal_gpio_init_out(cs_gpio, true));
     if (err != ESP_OK) {
-        ESP_LOGE(PANEL_SPI_TAG, "gpio_config(cs) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(PANEL_SPI_TAG, "gpio init(cs) failed: %s", esp_err_to_name(err));
         return err;
     }
-    gpio_set_level((gpio_num_t)cs_gpio, 1);
 #else
     /* DISPLAY_ST7796_PLAN.md 9.4, CONFIG_KILNCTL_SPI_HARDWARE_CS: the SPI
      * peripheral drives this pin via spics_io_num below, so it must NOT also
@@ -239,33 +240,23 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
      * the first explicit pulse; D/C's initial level doesn't matter because
      * dc_valid starts false and forces a write on the first command anyway. */
     if (dc_gpio >= 0) {
-        gpio_config_t dc_conf = {
-            .pin_bit_mask = (1ULL << dc_gpio),
-            .mode = GPIO_MODE_OUTPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-        err = gpio_config(&dc_conf);
+        /* Initial level doesn't matter -- dc_valid starts false and forces a
+         * write on the first command anyway (see doc comment above). */
+        err = hal_status_to_esp_err(hal_gpio_init_out(dc_gpio, false));
         if (err != ESP_OK) {
-            ESP_LOGE(PANEL_SPI_TAG, "gpio_config(dc) failed: %s", esp_err_to_name(err));
+            ESP_LOGE(PANEL_SPI_TAG, "gpio init(dc) failed: %s", esp_err_to_name(err));
             return err;
         }
     }
     if (reset_gpio >= 0) {
-        gpio_config_t reset_conf = {
-            .pin_bit_mask = (1ULL << reset_gpio),
-            .mode = GPIO_MODE_OUTPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-        err = gpio_config(&reset_conf);
+        /* Idles high (deasserted, not held in reset) -- see doc comment
+         * above. hal_gpio_init_out() latches this level before switching
+         * the pin to output. */
+        err = hal_status_to_esp_err(hal_gpio_init_out(reset_gpio, true));
         if (err != ESP_OK) {
-            ESP_LOGE(PANEL_SPI_TAG, "gpio_config(reset) failed: %s", esp_err_to_name(err));
+            ESP_LOGE(PANEL_SPI_TAG, "gpio init(reset) failed: %s", esp_err_to_name(err));
             return err;
         }
-        gpio_set_level((gpio_num_t)reset_gpio, 1);
     }
 
     /* DMA-capable because every pixel push goes through it and the SPI

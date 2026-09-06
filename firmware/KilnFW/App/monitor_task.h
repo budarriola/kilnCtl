@@ -3,12 +3,11 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/gpio.h"
 #include "settings.h"
 
 typedef struct {
     TaskHandle_t *task_handle;
-    gpio_num_t led_gpio;
+    int led_gpio; /* hal_gpio pin number; -1 == no heartbeat LED, see monitor_task.c */
     TickType_t on_ticks;
     TickType_t off_ticks;
 } monitor_task_config_t;

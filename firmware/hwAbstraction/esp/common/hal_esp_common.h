@@ -47,6 +47,15 @@ extern "C" {
  */
 hal_status_t hal_esp_err_to_status(esp_err_t err);
 
+/* Reverse of the above, for App-level callers that still expose an
+ * esp_err_t-shaped API (e.g. panel_spi_bringup.c's ILI9488_init()) but now
+ * get their GPIO status from hal_gpio.h. Approximate by construction: the
+ * forward map is lossy (HAL_IO absorbs every uncommon esp_err_t), so this
+ * side only reconstructs the codes callers actually branch/log on; anything
+ * without a specific home (HAL_IO, HAL_BUSY, HAL_WEDGED, HAL_VERIFY_FAILED,
+ * HAL_NOT_SUPPORTED's rarer callers) comes back as ESP_FAIL. */
+esp_err_t hal_status_to_esp_err(hal_status_t status);
+
 #ifdef __cplusplus
 }
 #endif

@@ -4,6 +4,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "freertos/idf_additions.h"
+#include "hal_gpio.h"
 #include "rtc_watchdog.h"
 
 static const char *TAG = "monitor_task";
@@ -22,22 +23,17 @@ static void monitor_task_entry(void *arg)
     bool have_led = (monitor->config.led_gpio >= 0);
 
     if (have_led) {
-        gpio_config_t io_conf = {
-            .pin_bit_mask = (1ULL << (int)monitor->config.led_gpio),
-            .mode = GPIO_MODE_OUTPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-        /* Not ESP_ERROR_CHECK: that aborts, and abort() here would reboot a
-         * kiln controller mid-firing because an *indicator LED* would not
-         * configure. Degrade to the no-LED path instead -- the heartbeat still
-         * reports over the log link, which is where anyone is actually
-         * watching. */
-        esp_err_t err = gpio_config(&io_conf);
-        if (err != ESP_OK) {
+        /* hal_gpio_init_out() latches the idle level (off/low) BEFORE
+         * switching direction -- see hal_gpio.h's latch-before-direction
+         * contract. Not treated as fatal: that would abort/reboot a kiln
+         * controller mid-firing because an *indicator LED* would not
+         * configure. Degrade to the no-LED path instead -- the heartbeat
+         * still reports over the log link, which is where anyone is
+         * actually watching. */
+        hal_status_t st = hal_gpio_init_out(monitor->config.led_gpio, false);
+        if (st != HAL_OK) {
             ESP_LOGE(TAG, "heartbeat LED gpio %d config failed: %s -- reporting over the log link "
-                          "instead", (int)monitor->config.led_gpio, esp_err_to_name(err));
+                          "instead", monitor->config.led_gpio, hal_status_to_name(st));
             have_led = false;
         }
     }
@@ -79,9 +75,9 @@ static void monitor_task_entry(void *arg)
         rtc_watchdog_feed();
 
         if (have_led) {
-            gpio_set_level(monitor->config.led_gpio, 1);
+            hal_gpio_set(monitor->config.led_gpio, true);
             vTaskDelay(on);
-            gpio_set_level(monitor->config.led_gpio, 0);
+            hal_gpio_set(monitor->config.led_gpio, false);
             vTaskDelay(off);
         } else {
             vTaskDelay(on + off);
@@ -100,7 +96,7 @@ void monitor_task_init(monitor_task_t *monitor, TaskHandle_t *task_handle)
     }
 
     monitor->config.task_handle = task_handle;
-    monitor->config.led_gpio = (gpio_num_t)HEARTBEAT_LED_GPIO;
+    monitor->config.led_gpio = HEARTBEAT_LED_GPIO;
     monitor->config.on_ticks = pdMS_TO_TICKS(150);
     monitor->config.off_ticks = pdMS_TO_TICKS(150);
 }

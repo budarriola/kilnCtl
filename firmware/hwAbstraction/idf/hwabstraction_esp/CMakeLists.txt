@@ -22,10 +22,11 @@ idf_component_register(SRCS "../../esp/spi/esp_spi_owner.c"
                              "../../esp/uart/uart_owner.c"
                              "../../esp/uart/uart_protocol.c"
                              "../../esp/uart/hal_uart_esp.c"
+                             "../../esp/gpio/hal_gpio_esp.c"
                              "../../esp/common/hal_esp_common.c"
                              "../../common/hal_status.c"
                        INCLUDE_DIRS "../../esp/spi" "../../esp/i2c" "../../esp/uart"
-                                    "../../esp/common" "../../interface"
+                                    "../../esp/gpio" "../../esp/common" "../../interface"
                        REQUIRES esp_driver_spi esp_driver_i2c esp_driver_uart esp_driver_gpio
                                 freertos esp_timer kilnlink
                        PRIV_REQUIRES drivers)

@@ -20,7 +20,6 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 
 #include <string.h>
 
-#include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -29,6 +28,7 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 #include "freertos/task.h"
 
 #include "gpio_probe_denylist.h"
+#include "hal_gpio.h"
 #include "profile_executor_state.h"
 #include "settings.h"
 #include "stack_margin.h"
@@ -143,13 +143,13 @@ static void gp_reply_fail(uart_protocol_t *proto, const uart_proto_message_t *ms
     gp_reply(proto, msg, subcmd, body, 2 + rlen);
 }
 
-static bool gp_mode_to_esp(uint8_t mode, gpio_mode_t *out_dir, gpio_pull_mode_t *out_pull)
+static bool gp_mode_to_hal(uint8_t mode, hal_gpio_dir_t *out_dir, hal_gpio_pull_t *out_pull)
 {
     switch (mode) {
-        case GPIO_PROBE_MODE_INPUT:          *out_dir = GPIO_MODE_INPUT;  *out_pull = GPIO_FLOATING;     return true;
-        case GPIO_PROBE_MODE_INPUT_PULLUP:   *out_dir = GPIO_MODE_INPUT;  *out_pull = GPIO_PULLUP_ONLY;  return true;
-        case GPIO_PROBE_MODE_INPUT_PULLDOWN: *out_dir = GPIO_MODE_INPUT;  *out_pull = GPIO_PULLDOWN_ONLY; return true;
-        case GPIO_PROBE_MODE_OUTPUT:         *out_dir = GPIO_MODE_OUTPUT; *out_pull = GPIO_FLOATING;     return true;
+        case GPIO_PROBE_MODE_INPUT:          *out_dir = HAL_GPIO_DIR_IN;  *out_pull = HAL_GPIO_PULL_NONE; return true;
+        case GPIO_PROBE_MODE_INPUT_PULLUP:   *out_dir = HAL_GPIO_DIR_IN;  *out_pull = HAL_GPIO_PULL_UP;   return true;
+        case GPIO_PROBE_MODE_INPUT_PULLDOWN: *out_dir = HAL_GPIO_DIR_IN;  *out_pull = HAL_GPIO_PULL_DOWN; return true;
+        case GPIO_PROBE_MODE_OUTPUT:         *out_dir = HAL_GPIO_DIR_OUT; *out_pull = HAL_GPIO_PULL_NONE; return true;
         default: return false;
     }
 }
@@ -174,8 +174,8 @@ static void gpio_probe_task(void *arg)
                 if (msg.length < 3) { ESP_LOGW(TAG, "SET_MODE: short payload"); break; }
                 uint8_t gpio_num = msg.payload[1];
                 uint8_t mode = msg.payload[2];
-                gpio_mode_t dir; gpio_pull_mode_t pull;
-                if (!gp_mode_to_esp(mode, &dir, &pull)) {
+                hal_gpio_dir_t dir; hal_gpio_pull_t pull;
+                if (!gp_mode_to_hal(mode, &dir, &pull)) {
                     gp_reply_fail(ctx->proto, &msg, subcmd, "unknown mode"); break;
                 }
                 if (gpio_probe_is_denied(gpio_num)) {
@@ -185,12 +185,16 @@ static void gpio_probe_task(void *arg)
                     gp_reply_fail(ctx->proto, &msg, subcmd, "refused: a profile is running or paused");
                     break;
                 }
-                esp_err_t err = gpio_set_direction((gpio_num_t)gpio_num, dir);
-                if (err == ESP_OK) {
-                    err = gpio_set_pull_mode((gpio_num_t)gpio_num, pull);
+                /* Runtime-pin escape hatch -- see hal_gpio.h's contract note:
+                 * hal_gpio_set_direction/set_pull exist specifically for this
+                 * module's arbitrary-pin scanning, ordinary drivers must not
+                 * reach for them. */
+                hal_status_t st = hal_gpio_set_direction(gpio_num, dir);
+                if (st == HAL_OK) {
+                    st = hal_gpio_set_pull(gpio_num, pull);
                 }
-                if (err != ESP_OK) {
-                    gp_reply_fail(ctx->proto, &msg, subcmd, esp_err_to_name(err)); break;
+                if (st != HAL_OK) {
+                    gp_reply_fail(ctx->proto, &msg, subcmd, hal_status_to_name(st)); break;
                 }
                 gpio_probe_track_set(ctx, gpio_num, mode);
                 ESP_LOGI(TAG, "gpio%u set_mode %u", gpio_num, mode);
@@ -215,9 +219,9 @@ static void gpio_probe_task(void *arg)
                                   "pin not configured OUTPUT via SET_MODE first");
                     break;
                 }
-                esp_err_t err = gpio_set_level((gpio_num_t)gpio_num, level ? 1 : 0);
-                if (err != ESP_OK) {
-                    gp_reply_fail(ctx->proto, &msg, subcmd, esp_err_to_name(err)); break;
+                hal_status_t st = hal_gpio_set(gpio_num, level ? true : false);
+                if (st != HAL_OK) {
+                    gp_reply_fail(ctx->proto, &msg, subcmd, hal_status_to_name(st)); break;
                 }
                 ESP_LOGI(TAG, "gpio%u write %u", gpio_num, level);
                 uint8_t ok = 1;
@@ -230,7 +234,7 @@ static void gpio_probe_task(void *arg)
                 if (gpio_probe_is_denied(gpio_num)) {
                     gp_reply_fail(ctx->proto, &msg, subcmd, "pin is on the deny-list"); break;
                 }
-                int level = gpio_get_level((gpio_num_t)gpio_num);
+                bool level = hal_gpio_get(gpio_num);
                 uint8_t body[2] = {1, (uint8_t)(level ? 1 : 0)};
                 gp_reply(ctx->proto, &msg, subcmd, body, 2);
                 break;
@@ -243,7 +247,7 @@ static void gpio_probe_task(void *arg)
                     if (!ctx->tracked[i].in_use) {
                         continue;
                     }
-                    int level = gpio_get_level((gpio_num_t)ctx->tracked[i].gpio_num);
+                    bool level = hal_gpio_get(ctx->tracked[i].gpio_num);
                     body[1 + o] = ctx->tracked[i].gpio_num; o++;
                     body[1 + o] = ctx->tracked[i].mode; o++;
                     body[1 + o] = (uint8_t)(level ? 1 : 0); o++;

@@ -2,8 +2,8 @@
 
 #include <string.h>
 
-#include "driver/gpio.h"
 #include "esp_log.h"
+#include "hal_gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -23,7 +23,7 @@ static TaskHandle_t s_task_handle; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_ma
 // never instantiated by this board's ILI9488 display path). Same pin the
 // bootloader itself samples at reset -- see boot_button.h's ROM-download-
 // mode caveat for why that matters here.
-#define BOOT_BUTTON_GPIO GPIO_NUM_0
+#define BOOT_BUTTON_GPIO 0
 
 #define BOOT_BUTTON_POLL_MS 100u
 
@@ -133,7 +133,7 @@ static void boot_button_task(void *arg)
     (void)arg;
     for (;;) {
         // ACTIVE LOW: pulled up internally, pulled to ground by the button.
-        bool pressed = (gpio_get_level(BOOT_BUTTON_GPIO) == 0);
+        bool pressed = !hal_gpio_get(BOOT_BUTTON_GPIO);
         boot_button_event_t ev = boot_button_step(&s_bb.press, pressed, now_ms());
         if (ev == BOOT_BUTTON_EVENT_OPEN_REQUESTED) {
             handle_open_requested();
@@ -155,18 +155,12 @@ void boot_button_start(void)
         return;
     }
 
-    gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << BOOT_BUTTON_GPIO,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE, /* polled, not ISR-driven -- see boot_button.h */
-    };
-    esp_err_t err = gpio_config(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "gpio_config(GPIO0) failed: %s -- boot-button recovery hatch will not be "
+    /* Polled, not ISR-driven -- see boot_button.h. */
+    hal_status_t st = hal_gpio_init_in(BOOT_BUTTON_GPIO, HAL_GPIO_PULL_UP);
+    if (st != HAL_OK) {
+        ESP_LOGE(TAG, "gpio init(GPIO0) failed: %s -- boot-button recovery hatch will not be "
                       "available this boot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(st));
         return;
     }
 
