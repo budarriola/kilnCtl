@@ -116,15 +116,15 @@ $signaturePattern = '([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*$'
 # missing or ambiguous.
 function Resolve-DriverFile {
     param([string]$DriversDir, [string]$BaseName)
-    $matches = Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse
-    if ($matches.Count -eq 0) {
+    $found = Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse
+    if ($found.Count -eq 0) {
         throw "check_nvs_write_guard_coverage.ps1: expected file '$BaseName' not found anywhere under $DriversDir -- has it moved or been renamed? Update `$guardedFiles."
     }
-    if ($matches.Count -gt 1) {
-        $paths = ($matches | ForEach-Object { $_.FullName }) -join ", "
+    if ($found.Count -gt 1) {
+        $paths = ($found | ForEach-Object { $_.FullName }) -join ", "
         throw "check_nvs_write_guard_coverage.ps1: '$BaseName' matched more than one file under $DriversDir ($paths) -- this script cannot tell which one is the guarded module. Disambiguate."
     }
-    return $matches[0].FullName
+    return $found[0].FullName
 }
 
 $failures = @()
@@ -133,9 +133,6 @@ $functionsScanned = 0
 
 foreach ($name in $guardedFiles) {
     $path = Resolve-DriverFile -DriversDir $driversDir -BaseName $name
-    if (-not (Test-Path $path)) {
-        throw "check_nvs_write_guard_coverage.ps1: expected file not found at $path -- has it moved or been renamed? Update `$guardedFiles."
-    }
     $filesChecked++
     $codeLines = Get-CodeOnlyLines -Path $path
 

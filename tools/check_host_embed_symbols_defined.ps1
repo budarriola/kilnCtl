@@ -94,7 +94,7 @@ function Resolve-DriverFile {
     param([string]$DriversDir, [string]$BaseName)
     $found = Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse
     if ($found.Count -eq 0) {
-        return $null
+        throw "check_host_embed_symbols_defined: expected driver file '$BaseName' not found anywhere under $DriversDir -- has it moved or been renamed? Update this script or the #include line it comes from."
     }
     if ($found.Count -gt 1) {
         $paths = ($found | ForEach-Object { $_.FullName }) -join ", "
@@ -106,9 +106,10 @@ function Resolve-DriverFile {
 $refPattern = 'asm\(\s*"_binary_([A-Za-z0-9_]+)_(start|end)"\s*\)'
 $referencedSymbols = New-Object 'System.Collections.Generic.HashSet[string]'
 $symbolSource = @{}
+$resolvedFileCount = 0
 foreach ($driverFileName in $includedDriverFiles) {
     $path = Resolve-DriverFile -DriversDir $driversDir -BaseName $driverFileName
-    if ($null -eq $path) { continue }
+    $resolvedFileCount++
     foreach ($line in (Get-Content -Path $path)) {
         foreach ($m in [regex]::Matches($line, $refPattern)) {
             $sym = "$($m.Groups[1].Value)_$($m.Groups[2].Value)"
@@ -158,6 +159,16 @@ if ($violations.Count -gt 0) {
     Write-Host "  1-byte placeholder definition to the relevant test/*.c file, same convention" -ForegroundColor Red
     Write-Host "  test_zones_http.c's header comment documents." -ForegroundColor Red
     throw "$($violations.Count) embed symbol(s) referenced from the host build have no host-side definition"
+}
+
+if ($resolvedFileCount -lt $includedDriverFiles.Count) {
+    throw "check_host_embed_symbols_defined: only resolved $resolvedFileCount of $($includedDriverFiles.Count) host-included drivers/*.c file(s) -- see errors above."
+}
+if ($resolvedFileCount -eq 0) {
+    throw "check_host_embed_symbols_defined: resolved 0 drivers/*.c files -- this check has gone blind (hollow run) and cannot be trusted to have checked anything."
+}
+if ($referencedSymbols.Count -eq 0) {
+    throw "check_host_embed_symbols_defined: found 0 referenced _binary_* embed symbols across $resolvedFileCount host-included drivers/*.c file(s) -- implausible given known EMBED_FILES usage (e.g. tuning_recommendations_json). The reference pattern has probably gone blind rather than there genuinely being none."
 }
 
 Write-Host "Host embed symbols check passed: $($referencedSymbols.Count) _binary_* symbol(s) referenced from $($includedDriverFiles.Count) host-included drivers/*.c file(s), all defined under test/*.c."

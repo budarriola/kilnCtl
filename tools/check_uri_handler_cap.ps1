@@ -51,7 +51,25 @@ if ($DriversDir) {
     $driversDir = Join-Path $root "..\firmware\KilnFW\App\drivers"
     $driversDir = (Resolve-Path $driversDir).Path
 }
-$capFile = (Get-ChildItem -Path $driversDir -Filter "wifi_provision_http.c" -File -Recurse | Select-Object -First 1).FullName
+# Resolve a bare basename to a file anywhere under $driversDir. Fails loud (not
+# silently picks one) if a name is missing or ambiguous -- same shape as the
+# Resolve-DriverFile helper in check_host_embed_symbols_defined.ps1 and
+# check_nvs_write_guard_coverage.ps1 (duplicated rather than imported -- this
+# project has no shared PowerShell module mechanism).
+function Resolve-DriverFile {
+    param([string]$DriversDir, [string]$BaseName)
+    $found = Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse
+    if ($found.Count -eq 0) {
+        throw "check_uri_handler_cap.ps1: expected cap file '$BaseName' not found anywhere under $DriversDir -- has it moved or been renamed? Update this script's path."
+    }
+    if ($found.Count -gt 1) {
+        $paths = ($found | ForEach-Object { $_.FullName }) -join ", "
+        throw "check_uri_handler_cap.ps1: '$BaseName' matched more than one file under $DriversDir ($paths) -- this script cannot tell which one is the cap file. Disambiguate."
+    }
+    return $found[0].FullName
+}
+
+$capFile = Resolve-DriverFile -DriversDir $driversDir -BaseName "wifi_provision_http.c"
 
 # Same comment-stripping helper as check_bridge_reject_reason.ps1 and
 # check_uart_version_independence.ps1 (duplicated rather than imported -- this
@@ -123,9 +141,6 @@ if ($totalRoutes -lt 80) {
     throw "check_uri_handler_cap.ps1: only counted $totalRoutes total '.uri = ""..""' routes under $driversDir, which is implausibly low (85+ expected as of 2026-08-24) -- the registration style has probably changed and this script has gone blind. Update its pattern before trusting its result."
 }
 
-if ([string]::IsNullOrEmpty($capFile) -or -not (Test-Path $capFile)) {
-    throw "check_uri_handler_cap.ps1: expected cap file wifi_provision_http.c not found anywhere under $driversDir -- has it moved? Update this script's path."
-}
 $capLines = Get-CodeOnlyLines -Path $capFile
 $capDefinePattern = 'config\.max_uri_handlers\s*=\s*(\d+)\s*;'
 $capValue = $null
