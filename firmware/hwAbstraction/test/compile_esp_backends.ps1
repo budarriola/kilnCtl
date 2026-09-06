@@ -1,16 +1,12 @@
 # compile_esp_backends.ps1 -- syntax-only compile check for the ESP-IDF
-# hwAbstraction backends (esp/gpio/hal_gpio_esp.c, esp/adc/hal_adc_esp.c,
-# esp/common/hal_esp_common.c).
+# hwAbstraction backends (esp/gpio/hal_gpio_esp.c, esp/common/hal_esp_common.c).
 #
 # Phase 1a is move-only: these backends are NOT wired into any CMakeLists
 # yet, so there is no real build target to compile them through. This
 # script stands in for that -- it invokes the same xtensa-esp32s3 gcc IDF
 # uses, with -fsyntax-only, using the include-path list derived from
 # firmware/KilnFW/build/compile_commands.json (an existing driver TU for
-# the driver/gpio.h include set, plus the project_elf TU for esp_adc's
-# include set, since no existing KilnFW source currently pulls in
-# esp_adc/adc_oneshot.h -- see hal_adc_esp.c's "INTERFACE MISMATCH" note for
-# why there is no ADC consumer to borrow a compile command from directly).
+# the driver/gpio.h include set).
 #
 # Requires an existing firmware/KilnFW/build/compile_commands.json (run
 # build_kilnfw once if it is missing).
@@ -39,14 +35,9 @@ function Get-CommandFor([string]$suffix) {
 }
 
 $gpioConsumerCmd = Get-CommandFor "MAX31856.c"
-$adcRefCmd = Get-CommandFor "project_elf_src_esp32s3.c"
 
 if (-not $gpioConsumerCmd) {
     Write-Error "Could not find a compile command for MAX31856.c in compile_commands.json"
-    exit 1
-}
-if (-not $adcRefCmd) {
-    Write-Error "Could not find a compile command for project_elf_src_esp32s3.c in compile_commands.json"
     exit 1
 }
 
@@ -68,19 +59,8 @@ function Get-BaseArgs([string]$command) {
     return $stripped
 }
 
-function Get-IncludeDirs([string]$command) {
-    $m = [regex]::Matches($command, '-I(\S+)')
-    return $m | ForEach-Object { $_.Groups[1].Value }
-}
-
 $compilerExe = Get-CompilerExe $gpioConsumerCmd
 $baseArgsLine = Get-BaseArgs $gpioConsumerCmd
-
-# esp_adc's include dirs are absent from the MAX31856.c command (no current
-# KilnFW source pulls in esp_adc/adc_oneshot.h -- see hal_adc_esp.c's
-# INTERFACE MISMATCH note #1), so they are appended from the project_elf
-# reference command, which does have them.
-$adcIncludeDirs = Get-IncludeDirs $adcRefCmd | Where-Object { $_ -match 'esp_adc' } | Select-Object -Unique
 
 $HalDir = Join-Path $RepoRoot "firmware\hwAbstraction"
 $ownIncludes = @(
@@ -94,11 +74,9 @@ $ownIncludes = @(
 # paths already embedded in $baseArgsLine (CMake emits those with "/").
 $extraArgs = @()
 $extraArgs += ($ownIncludes | ForEach-Object { "-I" + ($_ -replace '\\', '/') })
-$extraArgs += ($adcIncludeDirs | ForEach-Object { "-I$_" })
 
 $sources = @(
     (Join-Path $HalDir "esp\gpio\hal_gpio_esp.c"),
-    (Join-Path $HalDir "esp\adc\hal_adc_esp.c"),
     (Join-Path $HalDir "esp\common\hal_esp_common.c")
 )
 

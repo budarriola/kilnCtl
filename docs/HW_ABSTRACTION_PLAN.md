@@ -315,6 +315,24 @@ ONLY off-target route to S3/S4/S9/S11/S14 — no CTs are fitted on the bench
 board, so those guards cannot be exercised on hardware. main.c:327-336's
 adc_owner is still a TODO; hal_adc is where it lands.
 
+A speculative `hal_adc_esp.c` was written ahead of Phase 1a (no real ESP
+consumer exists for this interface) and was deleted 2026-09-05 once that
+was confirmed — kept here as a note so the four gaps it found are not lost:
+(1) no ESP consumer at all, so the file had nothing real to validate
+against; (2) no unit selection — ESP32-S3 has two independent ADC units
+(ADC_UNIT_1/ADC_UNIT_2) and this interface's calls take no unit parameter,
+so a real backend would have to hardcode one and fail closed on the other;
+(3) no per-channel attenuation/bitwidth config call — ESP-IDF requires
+`adc_oneshot_config_channel(unit, channel, {atten, bitwidth})` before a
+channel can be read, and this interface has no call shaped like that; (4)
+no calibration handle — ESP-IDF's curve-fitting/line-fitting calibration
+(`adc_cali_handle_t`) needs a separate handle and its own
+mV-returning read path, and `hal_adc_read_raw()` is documented to return
+exactly one raw sample with no calibration hook. None of the pico-sdk
+backend's real callers (current_task.c/current_sense.c) need any of this,
+so it is not a blocker today — only relevant again if an ESP consumer for
+hal_adc is ever proposed.
+
 ### hal_kv — ESP-only, wraps NVS. Pico explicitly excluded.
 
 NVS census, re-done function by function: `nvs_open_from_partition` ~25
@@ -642,13 +660,7 @@ is already up return `HAL_OK` with an INFO log, not `HAL_BUSY` — this is a
 benign, expected re-entry (JTAG-reset case) rather than caller error or a
 retry signal; documented in both headers' doc comments.
 
-check_c_files_in_cmakelists.ps1 was NOT extended: its scan roots are
-`firmware/KilnFW/App/*.c` and `firmware/SaftyFW/src/**/*.c` only, so
-`firmware/hwAbstraction/**/*.c` is out of its charter as written and the new
-files aren't referenced by it either way. Revisit this in Phase 1a, when
-`esp/`/`pico/` sources actually need to land in a real CMakeLists and this
-check's scan rule (or an equivalent) should start covering
-`firmware/hwAbstraction/`.
+check_c_files_in_cmakelists.ps1 now also scans `firmware/hwAbstraction/**/*.c`, treating a basename referenced by one of its three test scripts as covered and flagging interface/'s pre-existing hal_status.c (allowlisted, see the script) plus anything referenced by none — negative-tested 2026-09-05.
 
 **Phase 1a — move only.** The move set above, byte-identical bodies,
 header renames, include fixups, CMake, the MUST-change scripts, the doc
@@ -663,17 +675,23 @@ safety-link reply timing, display frame time, thermo read latency under a
 full-screen redraw. relay_owner becomes a hal_gpio client; hal_adc wraps
 current_task/current_sense.
 
-ESP-side gpio/adc bodies landed early (ahead of the Phase 1a move, not wired
-into CMakeLists yet, `firmware/hwAbstraction/esp/{gpio,adc,common}/`,
+ESP-side gpio body landed early (ahead of the Phase 1a move, not wired
+into CMakeLists yet, `firmware/hwAbstraction/esp/{gpio,common}/`,
 syntax-checked by `firmware/hwAbstraction/test/compile_esp_backends.ps1`):
 hal_gpio_esp.c covers the real ESP consumers listed above under "hal_gpio".
-hal_adc_esp.c is speculative only -- relay_owner/current_task/current_sense
-above are all SaftyFW (RP2040) files; no ESP consumer exists for hal_adc
-(matching this section's header and title), and ESP-IDF's adc_oneshot/
-adc_cali model (unit handle, per-channel atten/bitwidth config, a separate
-calibration handle) does not fit hal_adc.h's pico-shaped, handle-less,
-raw-sample-only signature without widening it. See hal_adc_esp.c's
-INTERFACE MISMATCH comment for the four specific gaps.
+A speculative hal_adc_esp.c was also written this way and then deleted
+2026-09-05: relay_owner/current_task/current_sense above are all SaftyFW
+(RP2040) files, no ESP consumer exists for hal_adc (matching this section's
+header and title), and ESP-IDF's adc_oneshot/adc_cali model (unit handle,
+per-channel atten/bitwidth config, a separate calibration handle) does not
+fit hal_adc.h's pico-shaped, handle-less, raw-sample-only signature without
+widening it -- see the "hal_adc -- pico-only" section above for the four
+specific gaps it found, kept as a note now that the file itself is gone.
+Real pico-side gpio/adc bodies (`firmware/hwAbstraction/pico/{gpio,adc}/`)
+landed the same day against the real SaftyFW consumers, syntax-checked by
+`firmware/hwAbstraction/test/compile_pico_backends.ps1`; no interface
+mismatch found for either -- the pico-sdk calls are exactly the shape both
+interfaces were written for.
 
 **Phase 2 — host backend.** Response file for the main cl invocation first.
 Implement hwAbstraction/host/ per the fake specs; switch both
