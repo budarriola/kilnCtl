@@ -94,6 +94,28 @@ foreach ($name in $hwAbstractionScripts) {
 }
 $checks = $checks | Sort-Object FullName
 
+# tools/PcTools/selfcheck.py is not a check_*.ps1 -- it's a standalone Python
+# script -- so the glob above never finds it, and run_all_checks.ps1 had been
+# reporting a clean sweep of every *.ps1 guard while selfcheck.py itself was
+# hard-failing (a stale hardcoded path left by a directory reorg -- see
+# tools/PcTools/TODO.md's 2026-09-05 GUI-vs-MCP audit entry). Added
+# explicitly, same pattern as the hal boundary negative test and the
+# hwAbstraction scripts above. Run via the project venv's own interpreter,
+# never `python`/`uv run` from PATH -- this also sidesteps `uv run`'s sync
+# step colliding with a live kilnctrl MCP server holding its own venv's
+# console-script .exe open.
+$pcToolsDir = Join-Path $repoRoot "tools\PcTools"
+$selfcheckPy = Join-Path $pcToolsDir "selfcheck.py"
+$selfcheckPython = Join-Path $pcToolsDir ".venv\Scripts\python.exe"
+if ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython)) {
+    # A synthetic entry: the main loop below special-cases .py files to run
+    # under $selfcheckPython instead of `powershell -File`.
+    $checks += Get-Item $selfcheckPy
+    $checks = $checks | Sort-Object FullName
+} else {
+    Write-Host "WARNING: expected $selfcheckPy (or its venv $selfcheckPython) not found -- has it moved?" -ForegroundColor Yellow
+}
+
 # As of 2026-08-28 there are several: some under tools/, two under
 # firmware/SaftyFW/tools/, and the floor is set below the real count on
 # purpose. It exists to catch "the glob found nothing", not to assert an
@@ -150,7 +172,13 @@ foreach ($c in $checks) {
         # first failure is a runner that hides every failure after it.
         $prev = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $c.FullName 2>&1
+        if ($c.Extension -eq ".py") {
+            # selfcheck.py (see above) -- run under the PcTools venv's own
+            # interpreter, not `powershell -File`, which cannot execute it.
+            $output = & $selfcheckPython $c.FullName 2>&1
+        } else {
+            $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $c.FullName 2>&1
+        }
         $code = $LASTEXITCODE
         $ErrorActionPreference = $prev
     } finally {

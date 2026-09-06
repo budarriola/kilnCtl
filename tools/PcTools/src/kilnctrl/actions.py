@@ -27,7 +27,6 @@ from .display import BlitError, DisplayClient, DisplayQueryError
 from .info import InfoClient, InfoQueryError
 from .io_expander import IoClient, IoQueryError
 from .protocol import (
-    FACTORY_RESET_SCOPE_WIFI,
     THERMO_CHANNEL_ALL,
     UART_TASK_ID_DISPLAY,
     UART_TASK_ID_IO,
@@ -732,15 +731,20 @@ _register(
 _register(
     "System: Factory Reset",
     "Erase NVS-backed configuration and reboot the device (SYSTEM_CMD_FACTORY_RESET). "
-    "scope: 0=wifi (saved networks, AP identity), 1=kiln (zones, PID), "
-    "2=profiles (fire profiles), 3=all. Mirrors the GUI's Danger Zone button, minus "
-    "its confirmation dialogs -- this sends immediately. No reply frame; the device "
-    "reboots ~500ms after the ACK, so poll \"INFO: Get FW Version\" (or get_fw_version) "
-    "to confirm it came back up. Unlike load_config_preset()'s factory-reset path, this "
+    "scope (required, no default -- pick deliberately): 0=wifi (saved networks, AP "
+    "identity), 1=kiln (zones, PID), 2=profiles (fire profiles), 3=all. The GUI's "
+    "Danger Zone button gates this behind an askyesno dialog plus typing RESET; "
+    "confirm=True is this path's equivalent -- confirm=False (the default) is refused "
+    "so a bare call can never erase anything. No reply frame; the device reboots "
+    "~500ms after the ACK, so poll \"INFO: Get FW Version\" (or get_fw_version) to "
+    "confirm it came back up. Unlike load_config_preset()'s factory-reset path, this "
     "does NOT apply any preset afterward -- it only erases.",
-    {"scope": int},
-    lambda ctx, scope=FACTORY_RESET_SCOPE_WIFI: _send(
-        ctx, UART_TASK_ID_SYSTEM, devices.system_factory_reset(scope)
+    {"scope": int, "confirm": bool},
+    lambda ctx, scope, confirm=False: (
+        "error: factory reset refused without confirm=True -- this erases NVS-backed "
+        "configuration and reboots the device"
+        if not confirm
+        else _send(ctx, UART_TASK_ID_SYSTEM, devices.system_factory_reset(scope))
     ),
 )
 _register(
@@ -761,11 +765,16 @@ _register(
     "System: Set Watchdog Panic Disabled",
     "Enable/disable the ESP task-watchdog's PANIC half. Development-only -- with it "
     "disabled a hung task leaves the board sitting hung with relays in whatever state "
-    "they were last commanded instead of rebooting. No reply frame; poll "
-    "\"System: Get Watchdog Panic Disabled\" afterward to confirm the applied value.",
-    {"disabled": bool},
-    lambda ctx, disabled: _send(
-        ctx, UART_TASK_ID_SYSTEM, devices.system_set_watchdog_panic_disabled(disabled)
+    "they were last commanded instead of rebooting. The GUI gates this behind an "
+    "askyesno dialog; confirm=True is this path's equivalent -- confirm=False (the "
+    "default) is refused. No reply frame; poll \"System: Get Watchdog Panic Disabled\" "
+    "afterward to confirm the applied value.",
+    {"disabled": bool, "confirm": bool},
+    lambda ctx, disabled, confirm=False: (
+        "error: watchdog panic change refused without confirm=True -- this changes "
+        "whether a hung task reboots the board"
+        if not confirm
+        else _send(ctx, UART_TASK_ID_SYSTEM, devices.system_set_watchdog_panic_disabled(disabled))
     ),
 )
 

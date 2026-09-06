@@ -66,6 +66,7 @@ def actions_checks() -> None:
     from kilnctrl.protocol import (
         INFO_CMD_GET_FW_VERSION,
         INFO_CMD_GET_PIN_CONFIG,
+        SYSTEM_CMD_FACTORY_RESET,
         UART_TASK_ID_DISPLAY,
         UART_TASK_ID_INFO,
         UART_TASK_ID_IO,
@@ -125,7 +126,8 @@ def actions_checks() -> None:
         stop, safety_inbox, esp, UART_TASK_ID_SAFETY,
         lambda p: safety_status_reply if p[0] == 0x01 else None,
     )
-    _responder(stop, system_inbox, esp, UART_TASK_ID_SYSTEM, lambda p: None)
+    system_seen: list[bytes] = []
+    _responder(stop, system_inbox, esp, UART_TASK_ID_SYSTEM, lambda p: None, seen=system_seen)
 
     info_client = InfoClient(host)
     thermo_client = ThermoClient(host)
@@ -187,7 +189,30 @@ def actions_checks() -> None:
         check("Display: Test Pattern streams", result.startswith("ok"), True)
 
         result = actions.ACTIONS["System: Factory Reset"].run(ctx, scope=0)
-        check("System: Factory Reset succeeds", result.startswith("ok"), True)
+        check(
+            "System: Factory Reset refused without confirm=True",
+            result.startswith("error: factory reset refused"),
+            True,
+        )
+        check("System: Factory Reset did not send without confirm", len(system_seen), 0)
+
+        result = actions.ACTIONS["System: Factory Reset"].run(ctx, scope=0, confirm=True)
+        check("System: Factory Reset succeeds with confirm=True", result.startswith("ok"), True)
+        deadline = time.time() + 2.0
+        while not system_seen and time.time() < deadline:
+            time.sleep(0.02)
+        check(
+            "System: Factory Reset sent the right wire payload",
+            system_seen[-1:] == [bytes([SYSTEM_CMD_FACTORY_RESET, 0])],
+            True,
+        )
+
+        result = actions.ACTIONS["System: Set Watchdog Panic Disabled"].run(ctx, disabled=True)
+        check(
+            "System: Set Watchdog Panic Disabled refused without confirm=True",
+            result.startswith("error: watchdog panic change refused"),
+            True,
+        )
 
         pin_text = actions.ACTIONS["INFO: Get Pin Config"].run(ctx)
         check("INFO: Get Pin Config returns entries", "GPIO8" in pin_text, True)
