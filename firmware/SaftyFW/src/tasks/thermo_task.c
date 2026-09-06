@@ -23,7 +23,7 @@
 #include "semphr.h"
 #include "task.h"
 
-#include "hardware/gpio.h"
+#include "hardware/gpio.h" // permanent holdout: DRDY, one of the two raw GPIO IRQ owners (shared per-core dispatcher, a second registrant would clobber it) -- see firmware/hwAbstraction/README.md "Permanent holdouts"
 
 #include "board_pins.h"
 #include "config_store.h" // safety_tc_installed (0x0211) -- the structural injection gate, see thermo_task.h

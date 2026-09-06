@@ -6,8 +6,8 @@
 
 #include <string.h>
 
-#include "hardware/gpio.h"
-#include "hardware/uart.h"
+#include "hardware/gpio.h" // permanent holdout: write-only diagnostic UART, no IRQ, kept dependency-free by design -- see firmware/hwAbstraction/README.md "Permanent holdouts"
+#include "hardware/uart.h" // permanent holdout: same rationale as hardware/gpio.h above
 
 #include "board_pins.h"
 

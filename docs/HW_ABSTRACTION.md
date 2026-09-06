@@ -35,8 +35,26 @@ the goal, tree shape, decisions, changelog, and remaining open items.
   timing; no lvgl/display diagnostics tool exists in this server's 147
   tools). No measurement path via kilnctrl MCP today — still open, and would
   need either a new diagnostic endpoint or saleae/logic-analyzer capture.
-- **Remaining SaftyFW hardware/ includes**: `main.c`, `console_uart.c`,
-  `thermo_task.c` (see `firmware/hwAbstraction/README.md`).
+- ~~Remaining SaftyFW hardware/ includes~~ — closed 2026-09-06:
+  `main.c`, `console_uart.c`, `thermo_task.c` re-reviewed line by line.
+  `main.c`'s GPIO6-low latch/direction pair matches `hal_gpio_init_out()`'s
+  shape exactly, but `relay_owner.h`/`.c` already document *why* it stays
+  raw: it runs before the scheduler (and hal_gpio's own client list) exist,
+  and `relay_owner_start()` re-asserts the same fail-safe default through
+  `hal_gpio_init_out()` once the task starts, which is what makes the
+  de-energized-at-init property host-testable at all. `main.c`'s
+  TIMER_DBGPAUSE register and watchdog boot-reason/scratch[5] reads, and
+  `thermo_task.c`'s DRDY IRQ registration, have no HAL primitive that fits
+  without widening `hal_wdt.h`/`hal_scratch.h`/`hal_gpio.h` past what any
+  real second consumer needs (`hal_gpio.h` is explicitly "clean-room, no
+  IRQ surface in v1"). `console_uart.c` stays a tiny, dependency-free
+  write-only diagnostic by design. All three files' allowlist entries in
+  `tools/check_hal_include_boundary.ps1` are unchanged and each raw
+  `#include "hardware/..."` now carries an inline one-line justification
+  comment pointing at `firmware/hwAbstraction/README.md`'s "Permanent
+  holdouts" list, which already named all three. Negative-tested: removing
+  `thermo_task.c`'s allowlist entry makes the checker fail as expected;
+  entry restored.
 
 Everything else named in this doc as a deliberate, permanent holdout
 (`firmware/hwAbstraction/README.md`'s "Permanent holdouts" list — Wi-Fi/

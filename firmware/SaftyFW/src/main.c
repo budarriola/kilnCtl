@@ -22,10 +22,10 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "hardware/gpio.h"
-#include "hardware/regs/timer.h" // TIMER_DBGPAUSE_BITS, see step 1b below
-#include "hardware/timer.h" // timer_hw->dbgpause, see step 1b below
-#include "hardware/watchdog.h"
+#include "hardware/gpio.h" // permanent holdout: GPIO6-low is the literal first statement of main(), deliberately raw and ahead of hal_gpio (see relay_owner.h/.c) -- see firmware/hwAbstraction/README.md "Permanent holdouts"
+#include "hardware/regs/timer.h" // TIMER_DBGPAUSE_BITS, see step 1b below -- permanent holdout, no hal_wdt/hal_scratch primitive covers this register
+#include "hardware/timer.h" // timer_hw->dbgpause, see step 1b below -- permanent holdout, no hal_wdt/hal_scratch primitive covers this register
+#include "hardware/watchdog.h" // permanent holdout: watchdog_caused_reboot()/watchdog_enable_caused_reboot() boot-reason reads and vApplicationStackOverflowHook()'s raw scratch[5] write are not expressible through hal_wdt.h/hal_scratch.h -- see firmware/hwAbstraction/README.md "Permanent holdouts"
 
 #include "board_pins.h"
 #include "boot_reason.h"
