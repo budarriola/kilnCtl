@@ -35,28 +35,38 @@ static const char *TAG = "FT6336U";
  * bus gets to quietly re-rate the wires for everyone else. */
 #define FT6336U_I2C_CLK_HZ I2C_MASTER_FREQ_HZ
 
+/* hal_status_t -> esp_err_t. This driver's public API is esp_err_t (unchanged
+ * by the HAL migration, so main_boot_early.c's `== ESP_OK` checks and log
+ * lines needed no ripple); hal_i2c.h speaks hal_status_t. No shared
+ * hal_status_t->esp_err_t mapping exists yet anywhere in App/ (this is the
+ * first App/ consumer of a hal_* interface) so this is deliberately local
+ * and narrow rather than a speculative shared utility. Only the codes
+ * hal_i2c.c/fake_i2c.c can actually return here are mapped explicitly. */
+static esp_err_t ft6336u_hal_err(hal_status_t status)
+{
+    switch (status) {
+        case HAL_OK: return ESP_OK;
+        case HAL_TIMEOUT: return ESP_ERR_TIMEOUT;
+        case HAL_INVALID_ARG: return ESP_ERR_INVALID_ARG;
+        case HAL_NO_MEM: return ESP_ERR_NO_MEM;
+        case HAL_NOT_READY: return ESP_ERR_INVALID_STATE;
+        case HAL_NOT_FOUND: return ESP_ERR_NOT_FOUND;
+        case HAL_NOT_SUPPORTED: return ESP_ERR_NOT_SUPPORTED;
+        default: return ESP_FAIL; /* HAL_BUSY, HAL_IO, HAL_WEDGED, HAL_VERIFY_FAILED, HAL_INVALID_SIZE */
+    }
+}
+
 static esp_err_t ft6336u_add_device(FT6336UClass *t)
 {
-    i2c_device_config_t dev_config = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = FT6336U_ADDR,
-        .scl_speed_hz = FT6336U_I2C_CLK_HZ,
-    };
-    return i2c_master_bus_add_device(t->bus, &dev_config, &t->dev);
+    hal_status_t st = hal_i2c_device_attach(t->bus, &t->dev, FT6336U_ADDR, FT6336U_I2C_CLK_HZ);
+    if (st == HAL_OK) t->dev_attached = true;
+    return ft6336u_hal_err(st);
 }
 
 static esp_err_t ft6336u_transfer(FT6336UClass *t, const uint8_t *tx, size_t tx_len, uint8_t *rx,
                                   size_t rx_len)
 {
-    if (t->owner_initialized) {
-        return i2c_owner_transfer(&t->owner, t->dev, tx, tx_len, rx, rx_len, FT6336U_TIMEOUT_MS);
-    }
-    /* Fallback for an instance whose owner task failed to start -- same
-     * fallback NS2009/SX1509 use. */
-    if (tx && tx_len > 0 && rx && rx_len > 0) {
-        return i2c_master_transmit_receive(t->dev, tx, tx_len, rx, rx_len, FT6336U_TIMEOUT_MS);
-    }
-    return i2c_master_transmit(t->dev, tx, tx_len, FT6336U_TIMEOUT_MS);
+    return ft6336u_hal_err(hal_i2c_transfer(&t->dev, tx, tx_len, rx, rx_len, FT6336U_TIMEOUT_MS));
 }
 
 /* One register block read: write the 1-byte register address, then read
@@ -77,22 +87,21 @@ static esp_err_t ft6336u_read_reg(FT6336UClass *t, uint8_t reg, uint8_t *buf, si
 /* PRECONDITION (opus review, J4b): `t` must be zero-initialized (static/
  * global storage, which the .bss segment zeroes for free, or an explicit
  * `= {0}` initializer) before the very first call. The already-up guard
- * right below reads t->dev/t->owner_initialized BEFORE this function's own
- * memset() runs -- deliberately, because the guard exists to stop a
- * double-init call from silently overwriting (and thereby leaking the I2C
- * device handle and orphaning the owner task of) an already-LIVE instance,
- * which memset-first would defeat. That means those two fields must already
- * be known-zero coming in on a genuinely fresh instance; reading them off
- * uninitialized stack memory instead is undefined behavior, not merely
- * "probably works" -- this is the file's caller contract, not a bug this
- * function can fix internally without an extra field. (NS2009.c has this
- * exact same shape/contract; left untouched here on purpose -- it is the
- * live driver on the only hardware this board has.) */
-esp_err_t FT6336U_init(FT6336UClass *t, i2c_master_bus_handle_t bus)
+ * right below reads t->dev_attached BEFORE this function's own memset() runs
+ * -- deliberately, because the guard exists to stop a double-init call from
+ * silently overwriting (and thereby leaking the I2C device handle of) an
+ * already-LIVE instance, which memset-first would defeat. That means the
+ * field must already be known-zero coming in on a genuinely fresh instance;
+ * reading it off uninitialized stack memory instead is undefined behavior,
+ * not merely "probably works" -- this is the file's caller contract, not a
+ * bug this function can fix internally without an extra field. (NS2009.c has
+ * this exact same shape/contract; left untouched here on purpose -- it is
+ * the live driver on the only hardware this board has.) */
+esp_err_t FT6336U_init(FT6336UClass *t, hal_i2c_bus_t *bus)
 {
     if (!t || !bus) return ESP_ERR_INVALID_ARG;
 
-    if (t->dev || t->owner_initialized) {
+    if (t->dev_attached) {
         ESP_LOGE(TAG, "init called on an instance that is already up");
         return ESP_ERR_INVALID_STATE;
     }
@@ -100,24 +109,16 @@ esp_err_t FT6336U_init(FT6336UClass *t, i2c_master_bus_handle_t bus)
     memset(t, 0, sizeof(*t));
     t->bus = bus;
 
+    /* No owner/queue setup here any more: hal_i2c_bus_init() (the caller's
+     * job -- see this file's header comment) already brought up the backend's
+     * owner task on `bus`. hal_i2c_device_attach() is this driver's only
+     * remaining transport setup step. */
     esp_err_t err = ft6336u_add_device(t);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2c_master_bus_add_device(0x%02X) failed: %s", FT6336U_ADDR,
+        ESP_LOGE(TAG, "hal_i2c_device_attach(0x%02X) failed: %s", FT6336U_ADDR,
                  esp_err_to_name(err));
         return err;
     }
-
-    /* Independent i2c_owner on the same (already-existing) bus handle --
-     * this driver never creates or destroys the bus itself, same as
-     * NS2009/SX1509. */
-    err = i2c_owner_init(&t->owner, bus, 8, 5, 3072, tskNO_AFFINITY);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2c_owner_init failed: %s", esp_err_to_name(err));
-        i2c_master_bus_rm_device(t->dev);
-        t->dev = NULL;
-        return err;
-    }
-    t->owner_initialized = true;
 
     ESP_LOGI(TAG, "FT6336U initialized addr=0x%02X (UNVALIDATED ON HARDWARE)", FT6336U_ADDR);
     return ESP_OK;
@@ -126,22 +127,27 @@ esp_err_t FT6336U_init(FT6336UClass *t, i2c_master_bus_handle_t bus)
 esp_err_t FT6336U_deinit(FT6336UClass *t)
 {
     if (!t) return ESP_ERR_INVALID_ARG;
-    esp_err_t err = ESP_OK;
 
-    i2c_master_dev_handle_t dev = t->dev;
-    t->dev = NULL;
-
-    if (t->owner_initialized) {
-        esp_err_t sub = i2c_owner_deinit(&t->owner);
-        if (sub != ESP_OK) err = sub;
-        t->owner_initialized = false;
-    }
-    if (dev) {
-        esp_err_t sub = i2c_master_bus_rm_device(dev);
-        if (sub != ESP_OK) err = sub;
-    }
-    /* The bus belongs to whoever created it; never delete it here. */
-    return err;
+    /* INTERFACE MISMATCH: hal_i2c.h has no device-detach primitive (only
+     * hal_i2c_device_attach(), never a hal_i2c_device_detach() /
+     * i2c_master_bus_rm_device() equivalent) -- see
+     * docs/HW_ABSTRACTION_PLAN.md Phase 1b note added alongside this
+     * migration. The pre-HAL driver called i2c_master_bus_rm_device(t->dev)
+     * here; that ESP-IDF call needs the raw i2c_master_dev_handle_t, which
+     * hal_i2c_device_t (interface/hal_i2c.h) deliberately keeps opaque to
+     * app-layer code. FT6336U_deinit() is reachable in practice only from
+     * FT6336U_start()'s identity-check failure path (this part has never been
+     * connected to any board -- see this file's top-of-file UNVALIDATED
+     * note), so the underlying ESP-IDF device slot is leaked on that one
+     * cold path rather than adding a detach call to the shared interface for
+     * a code path nothing exercises today. If a real re-init/hot-unplug path
+     * needs this, add hal_i2c_device_detach() to hal_i2c.h (and hal_spi.h's
+     * equivalent gap, if it has one) rather than reaching around the HAL
+     * here. */
+    t->dev_attached = false;
+    memset(&t->dev, 0, sizeof(t->dev));
+    /* The bus belongs to whoever created it; never touch it here. */
+    return ESP_OK;
 }
 
 /* Vendor reference driver's reset() (Demo_ESP32/FT6336-arduino/FT6336.cpp)
@@ -192,11 +198,11 @@ static esp_err_t ft6336u_verify_id(FT6336UClass *t)
     return ESP_OK;
 }
 
-esp_err_t FT6336U_start(FT6336UClass *t, i2c_master_bus_handle_t bus)
+esp_err_t FT6336U_start(FT6336UClass *t, hal_i2c_bus_t *bus)
 {
     if (!t || !bus) return ESP_ERR_INVALID_ARG;
 
-    esp_err_t probe_err = i2c_master_probe(bus, FT6336U_ADDR, FT6336U_PROBE_TIMEOUT_MS);
+    esp_err_t probe_err = ft6336u_hal_err(hal_i2c_probe(bus, FT6336U_ADDR, FT6336U_PROBE_TIMEOUT_MS));
     if (probe_err == ESP_OK) {
         esp_err_t err = FT6336U_init(t, bus);
         if (err != ESP_OK) {
@@ -233,7 +239,7 @@ esp_err_t FT6336U_start(FT6336UClass *t, i2c_master_bus_handle_t bus)
 esp_err_t FT6336U_read(FT6336UClass *t, bool *out_pressed, uint16_t *out_x, uint16_t *out_y,
                         uint16_t *out_z1)
 {
-    if (!t || !t->dev || !out_pressed || !out_x || !out_y) return ESP_ERR_INVALID_ARG;
+    if (!t || !t->dev_attached || !out_pressed || !out_x || !out_y) return ESP_ERR_INVALID_ARG;
 
     uint8_t status = 0;
     esp_err_t err = ft6336u_read_reg(t, FT6336U_REG_TD_STATUS, &status, 1);

@@ -63,6 +63,18 @@
 #define CONFIG_KILNCTL_THERMO_FAULT2_IO 47
 #define CONFIG_KILNCTL_I2C_SCL_IO 19
 #define CONFIG_KILNCTL_I2C_SDA_IO 20
+/* Needed once settings.h is included by a host test that pulls in MAX31856.c
+ * (THERMO_SPI_CLOCK_HZ, KILN_SPI_HOST) -- first hit by
+ * test_max31856_hal_spi.c's HAL Phase 1b host test. 4000000 matches
+ * MAX31856.c's own MAX31856_SPI_MAX_CLOCK_HZ cap. CONFIG_KILNCTL_SPI_HOST_SPI3
+ * left undefined (0/false), same as every #if CONFIG_KILNCTL_* boolean below
+ * that this stub leaves unset -- KILN_SPI_HOST resolves to SPI2_HOST. */
+#define CONFIG_KILNCTL_THERMO_SPI_CLOCK_HZ 4000000
+/* Needed once settings.h is included by a host test that pulls in an I2C
+ * device driver (FT6336U.c/NS2009.c/SX1509.c reference I2C_MASTER_FREQ_HZ
+ * unconditionally, not just under an `#if`) -- first hit by
+ * test_ft6336u.c's HAL-migration host test. */
+#define CONFIG_I2C_MASTER_FREQUENCY 100000
 #define CONFIG_KILNCTL_SX1509_IRQ_IO 33
 #define CONFIG_KILNCTL_SX1509_RESET_IO 34
 #define CONFIG_KILNCTL_DISPLAY_CS_IO 35

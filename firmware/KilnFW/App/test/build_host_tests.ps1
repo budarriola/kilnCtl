@@ -162,6 +162,7 @@ $hostTestsRspLines = @(
     "/I`"$hwAbsDir\esp\i2c`""
     "/I`"$hwAbsDir\esp\uart`""
     "/I`"$hwAbsDir\interface`""
+    "/I`"$hwAbsDir\host`""
 )
 [System.IO.File]::WriteAllText($hostTestsRsp, ($hostTestsRspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
@@ -313,7 +314,7 @@ Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $c
 $exe5 = Join-Path $outDir "kilnctl_host_tests_autotune_engine.exe"
 $aeObjDir = Join-Path $outDir "ae"
 New-Item -ItemType Directory -Force -Path $aeObjDir | Out-Null
-$cmd5 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" " +
+$cmd5 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$aeObjDir\\`" /Fe:`"$exe5`" " +
         "`"$(Join-Path $testDir 'test_autotune_engine_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'control/thermal_guard.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
@@ -637,7 +638,7 @@ Invoke-HostTestExe -Name "run_state_relay_cycles" -ExePath $exe19 -BuildCmd $cmd
 $exe20 = Join-Path $outDir "kilnctl_host_tests_zone_coupling_solve.exe"
 $zcsObjDir = Join-Path $outDir "zcs"
 New-Item -ItemType Directory -Force -Path $zcsObjDir | Out-Null
-$cmd20 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" " +
+$cmd20 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$zcsObjDir\\`" /Fe:`"$exe20`" `"$(Join-Path $testDir 'test_zone_coupling_solve.c')`" " +
         "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`""
 
@@ -704,18 +705,63 @@ $cmd23 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 
 Invoke-HostTestExe -Name "profiles_builtin" -ExePath $exe23 -BuildCmd $cmd23
 
+# ---- test_ft6336u.c: its own 24th, separate executable --------------------
+# HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md): FT6336U.c was rewritten to go
+# through interface/hal_i2c.h instead of driver/i2c_master.h + i2c_owner.c
+# directly -- see FT6336U.c/.h's own header comments. This links FT6336U.c
+# as a real translation unit (own seam is entirely public API, no need to
+# #include it) against the host hal_i2c backend
+# (firmware/hwAbstraction/host/fake_i2c.c) plus hal_status.c (the
+# hal_status_to_name() table, backend-independent). Own executable so
+# fake_i2c.c's hal_i2c_bus_t/hal_i2c_device_t definitions never collide with
+# any other test file linking a different hal_i2c backend (there is only one
+# today, but every other *_http.c-direct test here follows the same
+# one-executable-per-fake-surface convention).
+$exe24 = Join-Path $outDir "kilnctl_host_tests_ft6336u.exe"
+$ft6336uObjDir = Join-Path $outDir "ft6336u"
+New-Item -ItemType Directory -Force -Path $ft6336uObjDir | Out-Null
+$cmd24 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+        "/Fo:`"$ft6336uObjDir\\`" /Fe:`"$exe24`" " +
+        "`"$(Join-Path $testDir 'test_ft6336u.c')`" " +
+        "`"$(Join-Path $driversDir 'hw/FT6336U.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_i2c.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+
+Invoke-HostTestExe -Name "ft6336u" -ExePath $exe24 -BuildCmd $cmd24
+
+# ---- test_max31856_hal_spi.c: its own 25th, separate executable -----------
+# HAL Phase 1b CORRECTED (docs/HW_ABSTRACTION_PLAN.md, 2026-09-05): MAX31856.c
+# was rewritten to go through interface/hal_spi.h instead of driving
+# esp_spi_owner.c's spi_owner_t directly -- see MAX31856.c/.h's own header
+# comments (this was the fix for hal_spi_esp.c duplicating esp_spi_owner.c's
+# whole queue/pool/wedge design instead of adapting it -- Phase 2 status,
+# commit 26b16a6). Links MAX31856.c and max31856_codec.c (the decode
+# functions MAX31856_read() calls) as real translation units against the
+# host hal_spi backend (firmware/hwAbstraction/host/fake_spi.c) plus
+# hal_status.c -- same one-executable-per-fake-surface convention as
+# test_ft6336u.c above.
+$exe25 = Join-Path $outDir "kilnctl_host_tests_max31856_hal_spi.exe"
+$max31856ObjDir = Join-Path $outDir "max31856hs"
+New-Item -ItemType Directory -Force -Path $max31856ObjDir | Out-Null
+$cmd25 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+        "/Fo:`"$max31856ObjDir\\`" /Fe:`"$exe25`" " +
+        "`"$(Join-Path $testDir 'test_max31856_hal_spi.c')`" " +
+        "`"$(Join-Path $driversDir 'hw/MAX31856.c')`" `"$(Join-Path $driversDir 'hw/max31856_codec.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_spi.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+
+Invoke-HostTestExe -Name "max31856_hal_spi" -ExePath $exe25 -BuildCmd $cmd25
+
 # ---- summary ----------------------------------------------------------
 #
-# 22 executables are attempted above (main + zones_http + safety_cfg_http +
+# 24 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
 # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
 # zone_coupling_solve + partition_info_http + adaptive_tune_http +
-# profiles_builtin).
+# profiles_builtin + ft6336u + max31856_hal_spi).
 # Report how many of those were even built, separately from how many of the
 # built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 22
+$totalExpected = 24
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {

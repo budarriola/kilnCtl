@@ -16,7 +16,9 @@
 # component's location one directory deeper.
 idf_component_register(SRCS "../../esp/spi/esp_spi_owner.c"
                              "../../esp/spi/owner_slot_pool.c"
+                             "../../esp/spi/hal_spi_esp.c"
                              "../../esp/i2c/i2c_owner.c"
+                             "../../esp/i2c/hal_i2c_esp.c"
                              "../../esp/uart/uart_owner.c"
                              "../../esp/uart/uart_protocol.c"
                              "../../esp/uart/hal_uart_esp.c"

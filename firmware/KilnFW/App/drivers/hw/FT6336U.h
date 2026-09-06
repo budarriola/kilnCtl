@@ -21,10 +21,12 @@
 // vendor-documentation-derived, not bench-proven, until it is.
 //
 // Shaped like NS2009.c on purpose (see that file's own header comment) --
-// same division of labour: the caller passes in an already-created I2C bus
-// handle, FT6336U_start attaches this device to it via
-// i2c_master_bus_add_device() and creates its own i2c_owner_t wrapping the
-// same bus handle for an independent FIFO-ordered transfer queue.
+// same division of labour: the caller passes in an already-initialized
+// hal_i2c_bus_t (interface/hal_i2c.h), FT6336U_start attaches this device to
+// it via hal_i2c_device_attach(). This is the HAL Phase 1b migration of this
+// driver (docs/HW_ABSTRACTION_PLAN.md) -- it no longer touches
+// driver/i2c_master.h or i2c_owner.c directly; the ESP backend
+// (hal_i2c_esp.c) is the one still wrapping i2c_owner.c underneath.
 //
 // Unlike NS2009, this part reports coordinates ALREADY IN PANEL SPACE (its
 // own on-chip touch processor does the analog-to-pixel work) rather than
@@ -37,9 +39,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "driver/i2c_master.h"
 #include "esp_err.h"
-#include "i2c_owner.h"
+#include "hal_i2c.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -97,15 +98,16 @@ extern "C" {
 #define FT6336U_MAX_VALID_TOUCH_COUNT 2u
 
 typedef struct {
-    i2c_master_bus_handle_t bus;
-    i2c_master_dev_handle_t dev;
-    i2c_owner_t owner;
-    bool owner_initialized;
+    hal_i2c_bus_t *bus;
+    hal_i2c_device_t dev;
+    bool dev_attached;
 } FT6336UClass;
 
 /* Same division of labour as NS2009_init: brings up the transport only,
- * touches no touch-controller state. */
-esp_err_t FT6336U_init(FT6336UClass *t, i2c_master_bus_handle_t bus);
+ * touches no touch-controller state. `bus` must already be
+ * hal_i2c_bus_init'd by the caller -- this driver never creates or destroys
+ * the bus itself. */
+esp_err_t FT6336U_init(FT6336UClass *t, hal_i2c_bus_t *bus);
 esp_err_t FT6336U_deinit(FT6336UClass *t);
 
 /* Single-call bootstrap, same shape as NS2009_start: probes FT6336U_ADDR
@@ -113,7 +115,7 @@ esp_err_t FT6336U_deinit(FT6336UClass *t);
  * FT6336U_init's if it answers. Logs and returns ESP_ERR_NOT_FOUND rather
  * than asserting if it does not -- expected outcome on every board that
  * exists today, since the MSP4031 module is not connected. */
-esp_err_t FT6336U_start(FT6336UClass *t, i2c_master_bus_handle_t bus);
+esp_err_t FT6336U_start(FT6336UClass *t, hal_i2c_bus_t *bus);
 
 /* One register-read cycle: TD_STATUS, then (if a valid point count) the
  * first touch point's 4-byte block. The second touch point is deliberately

@@ -410,7 +410,14 @@ esp_err_t SX1509_init(SX1509Class *e, i2c_master_bus_handle_t bus, uint8_t addr,
     }
 
     /* Independent i2c_owner on the same (already-existing) bus handle -- this
-     * driver never creates or destroys the bus itself. */
+     * driver never creates or destroys the bus itself.
+     * TODO (HAL Phase 1b): still calls i2c_owner_* directly instead of
+     * hal_i2c.h -- see docs/HW_ABSTRACTION_PLAN.md's FT6336U.c writeup for
+     * why that file went first (this one is the live relay-safety-critical
+     * expander driver, not a zero-blast-radius one) and the device-detach
+     * interface gap this migration would have to solve first
+     * (SX1509_deinit()/SX1509_set_address() both call
+     * i2c_master_bus_rm_device(), which hal_i2c.h has no equivalent for). */
     err = i2c_owner_init(&e->owner, bus, 8, 5, 4096, tskNO_AFFINITY);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2c_owner_init failed: %s", esp_err_to_name(err));

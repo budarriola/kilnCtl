@@ -32,6 +32,7 @@
 #include "MAX31856.h"
 #include "NS2009.h"
 #include "FT6336U.h"
+#include "hal_i2c.h"
 #include "touch_dev.h"
 /* ROADMAP.md M15 A1: this is one of the SX1509 write/config owners
  * (SX1509_start()) -- see SX1509_internal.h's top comment. */
@@ -647,6 +648,20 @@ void main_boot_early(main_boot_ctx_t *ctx)
     // find its mapping.
 #if CONFIG_KILNCTL_TOUCH_FT6336U
     static FT6336UClass ft6336u_touch;
+    // FT6336U.c is now a HAL Phase 1b consumer (hal_i2c.h), not a raw
+    // driver/i2c_master.h one -- see FT6336U.h's header comment and
+    // docs/HW_ABSTRACTION_PLAN.md. ctx->i2c_bus above is a raw
+    // i2c_master_bus_handle_t shared with SX1509/ILI9488/NS2009, which have
+    // not migrated yet, so this hal_i2c_bus_t wraps the SAME already-created
+    // I2C_NUM_0 port rather than owning a second one: hal_i2c_bus_init()'s
+    // ALREADY_INIT recovery path (hal_i2c_esp.c) exists for exactly this --
+    // it detects the port is already up via i2c_new_master_bus's
+    // ESP_ERR_INVALID_STATE, recovers the existing handle, and still gives
+    // THIS hal_i2c_bus_t its own owner queue/task, independent of whatever
+    // else is queued on the port. scl/sda are only consulted on the
+    // NOT-already-initialized path, so passing zero here is fine.
+    static hal_i2c_bus_t ft6336u_hal_bus;
+    bool ft6336u_hal_bus_ready = false;
 #else
     static NS2009Class touch;
 #endif
@@ -654,7 +669,23 @@ void main_boot_early(main_boot_ctx_t *ctx)
     ctx->touch_dev = (touch_dev_t){0};
     if (ctx->i2c_bus) {
 #if CONFIG_KILNCTL_TOUCH_FT6336U
-        esp_err_t touch_err = FT6336U_start(&ft6336u_touch, ctx->i2c_bus);
+        hal_i2c_bus_cfg_t ft6336u_bus_cfg = {
+            .scl_pin = I2C_MASTER_SCL_IO,
+            .sda_pin = I2C_MASTER_SDA_IO,
+            .queue_len = 8,
+            .task_priority = 5,
+            .stack_depth = 3072,
+            .core_id = HAL_CORE_ANY,
+        };
+        hal_status_t hal_bus_err = hal_i2c_bus_init(&ft6336u_hal_bus, I2C_NUM_0, &ft6336u_bus_cfg);
+        ft6336u_hal_bus_ready = (hal_bus_err == HAL_OK);
+        esp_err_t touch_err = ft6336u_hal_bus_ready
+                                   ? FT6336U_start(&ft6336u_touch, &ft6336u_hal_bus)
+                                   : ESP_FAIL;
+        if (!ft6336u_hal_bus_ready) {
+            ESP_LOGE(MAIN_TAG, "hal_i2c_bus_init for FT6336U failed: %s",
+                     hal_status_to_name(hal_bus_err));
+        }
         ctx->touch_ready = (touch_err == ESP_OK);
         if (ctx->touch_ready) {
             ctx->touch_dev.ctx = &ft6336u_touch;

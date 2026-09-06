@@ -842,6 +842,34 @@ fit hal_adc.h's pico-shaped, handle-less, raw-sample-only signature without
 widening it -- see the "hal_adc -- pico-only" section above for the four
 specific gaps it found, kept as a note now that the file itself is gone.
 ESP-side uart/spi/i2c bodies (`firmware/hwAbstraction/esp/{uart,spi,i2c}/`) landed the same way 2026-09-05, grounded in uart_owner.c/esp_spi_owner.c/i2c_owner.c against their real KilnFW consumers; no interface mismatch for hal_spi.h (hal_spi_bus_cfg_t already carries every owner-task-sizing field spi_owner_init() takes), but hal_uart.h and hal_i2c.h have no such fields at all, so both backends hardcode stack/priority/queue-length constants -- see each file's own INTERFACE MISMATCH comment.
+
+`hal_i2c_esp.c` follow-up (2026-09-05): the file above was a bodies-only
+transcription of i2c_owner.c's task/queue/retry logic directly against
+`driver/i2c_master.h`, not a call INTO i2c_owner.c -- the opposite of what
+"the owner IS the backend body" (this section's own framing) means. Rewritten
+as a thin adapter: `hal_i2c_bus_init()` now owns only the
+`i2c_master_bus_handle_t` lifecycle (create/ALREADY_INIT-recover/delete) and
+calls `i2c_owner_init()`/`i2c_owner_deinit()`/`i2c_owner_transfer()` for
+everything else; the earlier hardcoded-stack/priority/queue-length note above
+no longer applies to i2c -- `hal_i2c_bus_cfg_t` already had those fields and
+they now flow straight through to `i2c_owner_init()`'s matching parameters.
+One new interface mismatch found doing this: `hal_i2c.h` has no
+device-detach primitive (`hal_i2c_device_attach()` with no counterpart), so a
+caller that used to call `i2c_master_bus_rm_device()` on deinit/re-address
+cannot do the equivalent through the HAL -- see `FT6336U_deinit()`'s
+INTERFACE MISMATCH comment (App/drivers/hw/FT6336U.c), the first App/-layer
+consumer migrated onto `hal_i2c.h`. FT6336U.c was chosen over SX1509.c/
+NS2009.c because it is unreachable dead code today (`FT6336U_start`'s only
+caller is behind `CONFIG_KILNCTL_TOUCH_FT6336U`, default off, and the MSP4031
+module has never been connected to any board -- see FT6336U.h's own
+UNVALIDATED note) rather than SX1509.c's six-incident relay-safety history or
+NS2009.c's status as this board's only live touch controller: same
+device-detach gap exists in all three, but exercising it first on the file
+with zero blast radius is the honest place to find it.
+`firmware/KilnFW/App/test/test_ft6336u.c` is the first host test to link a
+`hal_i2c` backend (`firmware/hwAbstraction/host/fake_i2c.c`) against a real
+App/ driver; SX1509.c/NS2009.c remain on `i2c_owner_*` directly, marked
+`// TODO (HAL Phase 1b)` at their call sites.
 ESP-side kv/time bodies (`firmware/hwAbstraction/esp/{kv,time}/`) landed the same way 2026-09-05, grounded in kiln_cfg_store.c/profiles_http.c/crash_report.c/boot_guard.c/factory_reset.c/ui_page_diagnostics.c and the 44-site esp_timer/vTaskDelay census: hal_kv_esp.c implements `hal_kv_write_safe_here()` as the real `caller_stack_is_external()`/`esp_ptr_external_ram()` predicate and finds one interface mismatch -- `hal_esp_common.c`'s shared mapper only covers generic driver `esp_err_t` codes, not NVS-specific ones (`ESP_ERR_NVS_NOT_FOUND` et al.) that real callers branch on, so hal_kv_esp.c maps those locally rather than widening the shared mapper; hal_time_esp.c finds no mismatch.
 Real pico-side gpio/adc bodies (`firmware/hwAbstraction/pico/{gpio,adc}/`)
 landed the same day against the real SaftyFW consumers, syntax-checked by
@@ -996,6 +1024,43 @@ against `current_sense.c`, the only real ADC-reading producer of
 linked into `build_host_tests.ps1`; `safety_guards.c`, the only guard-level
 consumer, is off-limits to this pass, so the API boundary is the correct and
 already-complete stopping point -- no new test added here.
+
+Status (2026-09-05, pico SPI closed): the "neither pico owner is such a
+client" finding above is now stale for SPI (still accurate for
+`pico/uart/uart_owner.c`, which stays as-is per that correction).
+`firmware/hwAbstraction/pico/spi/hal_spi_pico.c` now exists -- a thin
+adapter matching the ESP-side `hal_spi_esp.c` collapse shape, mapping every
+`interface/hal_spi.h` call directly onto the existing `spi_owner_*` API
+(no second request-queue/state; see that file's own top comment for the
+INTERFACE MISMATCH notes: one hardwired clock/mode/CS, one device ever,
+tx_len must equal rx_len when rx is requested). Wired into
+`hwabstraction_pico` (`firmware/SaftyFW/CMakeLists.txt`) and into
+`compile_pico_backends.ps1`. The real consumer migrated is
+`firmware/SaftyFW/src/max31856.c` (the MAX31856 thermocouple driver): it no
+longer calls `spi_owner_transfer()` directly, instead going through
+`hal_spi_transfer_polling()` against a `hal_spi_bus_t`/`hal_spi_device_t`
+pair it owns and brings up in its own new `max31856_bus_init()`, which
+`main.c` now calls in place of the old direct `spi_owner_init()` call --
+same boot slot, same byte-identical `spi_owner.c` body underneath, no
+timing/retry change. Host-tested for real:
+`firmware/SaftyFW/test/test_max31856_hal_spi.c` links the actual
+`max31856.c` against `firmware/hwAbstraction/host/fake_spi.c` (a
+`hardware/gpio.h` stub, `stubs/hardware_gpio_min/`, covers max31856.c's
+unrelated CS/~FAULT GPIO calls, which stayed out of scope), scripting
+realistic CR1-readback/CJ/LTCB/SR register bytes and asserting the decoded
+temperature, fault flags, and fake_spi's ordered transfer-sequence log; a
+negative test (temporarily disabling max31856.c's OPEN-fault
+invalidation branch) confirmed the new OPEN-fault test actually fails
+before the line was restored. `build_host_tests.ps1` needed one real fix
+to get here, not just new sources: its main `cl` invocation had no
+`/std:c17`, so `interface/hal_status.h`'s `HAL_ALIGNAS8` (`_Alignas(8)`,
+C11) was an unrecognized identifier the moment any host TU first pulled in
+a header using it -- latent since Phase 0, newly hit because this is that
+first TU. Remaining pico SPI-adjacent gap, unchanged from before: no
+`hardware/spi.h` host stub exists, so `spi_owner.c` itself (below
+`hal_spi_pico.c`) is still only exercised on-target, not host-tested
+directly -- this pass tests the adapter and its one real client, not
+`spi_owner.c`'s own SPI0 bring-up code.
 
 Status (2026-09-05, KilnFW-half pass): verified KilnFW's
 build_host_tests.ps1 already carries the response-file (Option A) and
