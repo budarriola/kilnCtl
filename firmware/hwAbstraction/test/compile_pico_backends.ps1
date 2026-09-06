@@ -105,13 +105,7 @@ $rspPath = Join-Path $env:TEMP "hal_pico_backend_compile.rsp"
 foreach ($src in $sources) {
     Write-Host "== syntax-checking $src =="
     $srcFwd = $src -replace '\\', '/'
-    # -Wno-error=comment: hal_wdt.h's doc comment contains a literal "App/
-    # drivers/*.c" substring, which reads as a nested "/*" to -Werror=comment
-    # (inherited from SaftyFW's own build flags here). Pre-existing in the
-    # interface header (out of scope for this pass -- interface headers are
-    # not touched by the pico backend work); demoted to non-fatal here only,
-    # same way this script already treats -fsyntax-only as a stand-in build.
-    $rspContent = "$defines $includes $flags $($ownIncludes -join ' ') -Wno-error=comment -fsyntax-only `"$srcFwd`""
+    $rspContent = "$defines $includes $flags $($ownIncludes -join ' ') -fsyntax-only `"$srcFwd`""
     Set-Content -Path $rspPath -Value $rspContent -Encoding ascii -NoNewline
     & $compilerExe "@$rspPath"
     if ($LASTEXITCODE -ne 0) {

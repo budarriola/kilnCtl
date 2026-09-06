@@ -5,7 +5,7 @@
  *
  * Consumer census, both sides:
  *  - ESP task-WDT reconfigure: watchdog_cfg.c is the SOLE production caller
- *    of esp_task_wdt_* (re-verified: no other App/drivers/*.c includes
+ *    of esp_task_wdt_* (re-verified: no other App/drivers file includes
  *    esp_task_wdt.h). It persists a `panic_disabled` bool to NVS
  *    (independent of this header -- that stays hal_kv's job) and applies it
  *    by reconfiguring the task-WDT's panic behavior.
