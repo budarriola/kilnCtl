@@ -900,12 +900,15 @@ menu "KilnCtrl Hardware Configuration"
                 than negotiating it.
 
         config KILNCTL_UART_OWNER_QUEUE_LEN
-            int "uart_owner request queue length"
+            int "uart_owner request queue length (unused)"
             default 8
             help
-                How many in-flight uart_owner_transfer() requests (from any
-                caller sharing this owner) can be queued before a caller
-                blocks.
+                Historical: sized uart_owner_transfer()'s request queue.
+                That queue/worker-task pair was deleted 2026-09-06 (uart
+                collapse -- uart_owner_transfer() had zero real callers left,
+                see uart_owner.h). This value is now accepted but ignored by
+                uart_owner_init(); kept only so existing sdkconfigs don't
+                need editing.
 
         config KILNCTL_UART_OWNER_TASK_PRIORITY
             int "uart_owner task priority"
@@ -915,7 +918,12 @@ menu "KilnCtrl Hardware Configuration"
             int "uart_owner task stack size (bytes)"
             # 4096 -> 3072 (2026-08-27), on measurement rather than by feel.
             # This one number sizes FOUR tasks: main.c's PC-link uart_owner
-            # pair and safety_link.c's safety-link pair. All four are now
+            # pair and safety_link.c's safety-link pair. (2026-09-06 uart
+            # collapse deleted the request-queue worker half of each pair --
+            # each owner is now just one event task -- but this stack size
+            # still gates that surviving event task and the margin numbers
+            # below were measured against the four-task era, so they remain
+            # a valid, if now generous, floor.) All four are now
             # registered for high-water reporting (they were not before -- the
             # safety pair, the one carrying the telemetry that gates heating,
             # was measured by nobody), and after a firing that ran to

@@ -603,19 +603,20 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                               SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
                               "the PC link UART could not be opened");
     } else {
-        /* TODO.md section 13: these two are internal-only (plain
-         * xTaskCreatePinnedToCore(), no MALLOC_CAP_SPIRAM) and named
-         * candidates for the DRAM-trough investigation. Registering here,
-         * against the SAME &ctx->uart_owner.task_handle/&ctx->uart_owner.
-         * event_task_handle fields uart_owner_init() just filled in, not a
-         * copy -- see stack_margin.h's registration comment for why that
-         * indirection matters. The safety-link UART also runs this same
+        /* TODO.md section 13: internal-only (plain xTaskCreatePinnedToCore(),
+         * no MALLOC_CAP_SPIRAM) and a named candidate for the DRAM-trough
+         * investigation. Registering here, against the SAME
+         * &ctx->uart_owner.event_task_handle field uart_owner_init() just
+         * filled in, not a copy -- see stack_margin.h's registration comment
+         * for why that indirection matters. (2026-09-06 uart collapse:
+         * uart_owner_task()/task_handle -- the request-queue worker -- were
+         * deleted, since uart_owner_transfer() had zero real callers; only
+         * the event task remains.) The safety-link UART also runs this same
          * uart_owner.c code (safety_link.c's uart_owner_init() call) but is
-         * deliberately NOT registered here: same task names, different
+         * deliberately NOT registered here: same task name, different
          * instance, and disambiguating them needs its own naming scheme --
          * left for whoever picks that up next rather than silently
          * conflated with the PC-link pair below. */
-        stack_margin_register("uart_owner_task", &ctx->uart_owner.task_handle, UART_OWNER_STACK_SIZE);
         stack_margin_register("uart_owner_evt_task", &ctx->uart_owner.event_task_handle, UART_OWNER_STACK_SIZE);
     }
 

@@ -107,8 +107,8 @@ confirmed on-chip, not just source.
   | `thermo_owner` | 2684 B | 4096 B | 65.5% | yes (thermocouple reads) |
   | `i2c_owner` (2nd instance) | 1856 B | 3072 B | 60.4% | idle-class — see anomaly note below |
   | `screen_idle` | 2300 B | 3072 B | 74.9% | idle-class (screen-blank timer) |
-  | `safety_owner_task` | 2168 B | 3072 B | 70.6% | yes (safety link) |
-  | `safety_owner_evt` | 2348 B | 3072 B | 76.4% | yes (safety link) |
+  | `safety_owner_task` | 2168 B | 3072 B | 70.6% | yes (safety link) — since deleted; surviving safety-link tasks: `uart_owner_event_task`, `uart_protocol_rx_task` |
+  | `safety_owner_evt` | 2348 B | 3072 B | 76.4% | yes (safety link) — since deleted |
   | `safety_proto_rx` | 4632 B | 8192 B | 56.5% | yes (safety link) |
   | `safety_poll` | 4328 B | 8192 B | 52.8% | yes (safety link) |
   | `danger_mode` | 2464 B | 3072 B | 80.2% | idle-class (fault only) |
@@ -117,8 +117,8 @@ confirmed on-chip, not just source.
   | `profile_exec_wdt` | 1840 B | 4096 B | 44.9% | yes (guard 9) |
   | `autotune_engine` | 3316 B | 4096 B | 81.0% | no (autotune not running) |
   | `bx_flash_worker` | 5180 B | 8192 B | 63.2% | yes (NVS persistence during run) |
-  | `uart_owner_task` | 2160 B | 3072 B | 70.3% | yes (PC link) |
-  | `uart_owner_evt_task` | 2340 B | 3072 B | 76.2% | yes (PC link) |
+  | `uart_owner_task` | 2160 B | 3072 B | 70.3% | yes (PC link) — since deleted; surviving PC-link tasks: `uart_owner_event_task`, `uart_protocol_rx_task` |
+  | `uart_owner_evt_task` | 2340 B | 3072 B | 76.2% | yes (PC link) — since deleted |
   | `uart_proto_rx` | 3960 B | 8192 B | 48.3% | yes (PC link) |
   | `info_uart_bridge` | 596 B | 3072 B | 19.4% — **LOW** | yes (MCP polling over UART) |
   | `system_uart_bridge` | 880 B | 3072 B | 28.6% — **LOW** | yes |
@@ -606,15 +606,15 @@ comparison:
 | task | free at worst | allocated | headroom |
 |---|---|---|---|
 | `httpd_worker` | 2772 B | 8192 B | 33.8% |
-| `safety_owner_task` | 2164 B | 3072 B | 70.4% |
-| `safety_owner_evt` | 2336 B | 3072 B | 76.0% |
+| `safety_owner_task` (since deleted) | 2164 B | 3072 B | 70.4% |
+| `safety_owner_evt` (since deleted) | 2336 B | 3072 B | 76.0% |
 | `safety_proto_rx` | 4632 B | 8192 B | 56.5% |
 | `safety_poll` | 4920 B | 8192 B | 60.1% |
 | `profile_executor` | 1388 B | 4096 B | 33.9% |
 | `profile_exec_wdt` | **368 B** | 2560 B | **14.4% — CRITICAL (pre-fix)** |
 | `bx_flash_worker` | 3676 B | 8192 B | 44.9% |
-| `uart_owner_task` | 2164 B | 3072 B | 70.4% |
-| `uart_owner_evt_task` | 2344 B | 3072 B | 76.3% |
+| `uart_owner_task` (since deleted) | 2164 B | 3072 B | 70.4% |
+| `uart_owner_evt_task` (since deleted) | 2344 B | 3072 B | 76.3% |
 
 All 26 long-lived tasks are now instrumented (§4.2, `a698dc0`) and all 26
 have a real HWM reading as of the sixth pass (mid-firing condition only —
@@ -761,6 +761,12 @@ relocates. Ordered before the relocation phase deliberately: it is strictly
 safer, and shrinking a stack before moving it means there is less to move.
 
 Candidates from 3.1, all sitting at 70% or more headroom.
+
+**Since superseded: `uart_owner_task`/`uart_owner_evt_task` and
+`safety_owner_task`/`safety_owner_evt` (the uart_owner request-queue tasks)
+were deleted from firmware.** Surviving tasks are `uart_owner_event_task`
+(one instance per link — PC and safety) and `uart_protocol_rx_task`; the
+trim/sizing discussion below is kept for historical context only.
 
 **These are four distinct tasks, not two under two names.** `uart_owner_init()`
 has two call sites — `safety_link.c:395` (isolated safety link) and

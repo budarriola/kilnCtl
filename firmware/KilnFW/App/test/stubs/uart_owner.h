@@ -32,8 +32,7 @@ esp_err_t uart_owner_init(uart_owner_t *owner, uart_port_t port, int tx_io, int 
                            uint32_t stack_depth, int core_id);
 esp_err_t uart_owner_deinit(uart_owner_t *owner);
 uint32_t uart_owner_get_rx_error_count(const uart_owner_t *owner);
-esp_err_t uart_owner_transfer(uart_owner_t *owner, const uint8_t *tx_buffer, size_t tx_length,
-                               uint8_t *rx_buffer, size_t rx_length, size_t *rx_length_out,
-                               uint32_t timeout_ms);
+/* uart_owner_transfer() deleted 2026-09-06 (uart collapse) -- zero real
+ * callers remained; see espInterfaces/uart_owner.h's own header comment. */
 
 #endif // TEST_STUB_UART_OWNER_H

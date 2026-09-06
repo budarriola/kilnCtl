@@ -93,11 +93,6 @@ esp_err_t uart_owner_init(uart_owner_t *owner, uart_port_t port, int tx_io, int 
   (void)task_priority; (void)stack_depth; (void)core_id; return ESP_FAIL; }
 esp_err_t uart_owner_deinit(uart_owner_t *owner) { (void)owner; return ESP_OK; }
 uint32_t uart_owner_get_rx_error_count(const uart_owner_t *owner) { (void)owner; return 0; }
-esp_err_t uart_owner_transfer(uart_owner_t *owner, const uint8_t *tx_buffer, size_t tx_length,
-                               uint8_t *rx_buffer, size_t rx_length, size_t *rx_length_out,
-                               uint32_t timeout_ms)
-{ (void)owner; (void)tx_buffer; (void)tx_length; (void)rx_buffer; (void)rx_length;
-  (void)rx_length_out; (void)timeout_ms; return ESP_FAIL; }
 
 esp_err_t uart_protocol_init(uart_protocol_t *proto, uart_owner_t *owner,
                               uart_proto_device_t own_device, unsigned task_priority,

@@ -437,7 +437,9 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * link, not just the role. Kept under STACK_MARGIN_NAME_MAX (20) so
      * the report does not truncate them into near-identical strings, which
      * would reintroduce the very ambiguity these names exist to remove. */
-    stack_margin_register("safety_owner_task", &link->owner.task_handle, UART_OWNER_STACK_SIZE);
+    /* safety_owner_task (the request-queue worker) deleted 2026-09-06 (uart
+     * collapse) along with uart_owner_task()/uart_owner_transfer() --
+     * uart_owner_t no longer has a task_handle field, only event_task_handle. */
     stack_margin_register("safety_owner_evt", &link->owner.event_task_handle, UART_OWNER_STACK_SIZE);
 
     /* No line inversion on this link any more -- deliberately, on both ends.
@@ -525,8 +527,9 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * first iteration, not merely by the time start() returns. */
     link->initialized = true;
     /* 2026-08-22: PSRAM stack. safety_poll_task talks to the RP2040 only
-     * through uart_owner_transfer() (uart_owner.c owns the actual UART
-     * driver call and keeps its own internal stack for it); this task itself
+     * through uart_protocol.c's hal_uart_attach()/hal_uart_send_blocking
+     * path (uart_owner.c owns the actual UART driver install and keeps its
+     * own internal stack/task for the RX event side); this task itself
      * never calls into flash/NVS -- per this file's own top-of-file comment,
      * "nothing reaches its flash until safety_link_send_commit_config()",
      * which is called by an HTTP handler, not from this poll loop. */

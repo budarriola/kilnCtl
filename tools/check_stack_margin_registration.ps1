@@ -148,11 +148,17 @@ $requiredNames = @(
     "i2c_owner_sx1509", "i2c_owner_ns2009",
     "gpio_probe", "kiln_io_owner", "lvgl", "recovery_exit", "ota_rollback_reboot",
     "ota_pico_rollback", "profile_executor", "profile_exec_wdt",
-    "safety_owner_task", "safety_owner_evt", "safety_proto_rx", "safety_poll",
+    "safety_owner_evt", "safety_proto_rx", "safety_poll",
     "screen_idle", "telemetry_log", "thermo_owner", "link_watchdog",
     "bx_flash_worker", "info_uart_bridge", "system_uart_bridge", "httpd_worker",
-    "uart_owner_task", "uart_owner_evt_task", "uart_proto_rx"
+    "uart_owner_evt_task", "uart_proto_rx"
 )
+# safety_owner_task / uart_owner_task (the uart_owner request-queue worker
+# task, one per owner instance) were deleted 2026-09-06 (uart collapse):
+# uart_owner_transfer() -- the only caller that ever reached that task -- had
+# zero real callers left in KilnFW, so the whole request-queue/worker-task
+# pair was dead code. Only each owner's event task (*_owner_evt/*_evt_task)
+# remains and stays required above.
 
 # HAL Phase 1a (WP1) moved esp_spi_owner.c/i2c_owner.c/uart_owner.c/
 # uart_protocol.c out of drivers/ entirely, into firmware/hwAbstraction/esp/

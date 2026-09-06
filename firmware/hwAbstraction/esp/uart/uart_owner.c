@@ -104,94 +104,15 @@ static void uart_owner_event_task(void *arg)
     }
 }
 
-static void uart_owner_task(void *arg)
-{
-    uart_owner_t *owner = (uart_owner_t *)arg;
-    uart_owner_request_t request;
-
-    while (true) {
-        if (xQueueReceive(owner->request_queue, &request, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-
-        if (request.shutdown) {
-            break;
-        }
-
-        esp_err_t result = ESP_OK;
-
-        if (request.tx_buffer && request.tx_length > 0) {
-            // TODO (HAL Phase 1b, updated 2026-09-05): not converted to
-            // hal_uart_send_blocking, and per a 2026-09-05 grep-confirmed
-            // audit, unreachable in production for a reason stronger than
-            // "not yet converted" -- uart_owner_transfer() (the only way
-            // anything reaches this queue+task at all) now has ZERO real
-            // callers in KilnFW: uart_protocol.c's frame_and_send() (the
-            // historical caller uart_owner.h's doc comment still names) was
-            // switched to hal_uart_attach()/hal_uart_send_blocking on
-            // proto->hal_uart this same phase, and safety_link.c's one
-            // remaining textual match (line ~528) is a comment describing
-            // the old design, not a call site. That means this whole
-            // uart_owner_task() request/reply loop -- this TX branch AND the
-            // already-refused RX branch just below it -- is now dead code
-            // for every port in this firmware, not merely for the frame path.
-            // Not deleted here (Phase 1b's scope is the one caller-side
-            // switch, not this pass); scheduled for actual removal in
-            // docs/HW_ABSTRACTION_PLAN.md's Phase 2/3 item list alongside
-            // hal_uart_attach's own planned deletion once uart_protocol_t
-            // owns a real (not attached) hal_uart_t and uart_owner_transfer
-            // has no reason to exist at all.
-            int written = uart_write_bytes(owner->port, (const char *)request.tx_buffer, request.tx_length);
-            if (written != (int)request.tx_length) {
-                result = ESP_FAIL;
-            } else if (uart_wait_tx_done(owner->port, pdMS_TO_TICKS(request.timeout_ms)) != ESP_OK) {
-                result = ESP_ERR_TIMEOUT;
-            }
-        }
-
-        if (result == ESP_OK && request.rx_buffer && request.rx_length > 0) {
-            /* This used to be a fixed-length blocking uart_read_bytes() --
-             * the exact pattern behind a past 100%-timeout incident (that
-             * blocking read stalls this task, and this task is the sole
-             * server of EVERY uart_owner_transfer() caller on the port, so
-             * one stuck RX-only request wedges every other bridge sharing
-             * the owner). uart_protocol.h:34-37 already documents that once
-             * a uart_protocol_t is attached to a uart_owner_t (true for
-             * every port this firmware brings up), that owner's RX path
-             * "should no longer be used directly" -- uart_protocol_rx_task()
-             * is the sole consumer of incoming bytes, and LINK_PROTOCOL.md
-             * sec 3 states the same rule for the wire protocol itself: reads
-             * happen only in that dedicated RX task, which never blocks
-             * fixed-length (it polls what's already buffered). No caller
-             * passes rx_buffer/rx_length today (uart_protocol.c's own
-             * uart_owner_transfer() call passes NULL, 0 -- grep confirms it
-             * is the only caller), so this is now a defined, loud failure
-             * instead of a silent trap for the next caller who reaches for
-             * it. Fail fast rather than resurrect the blocking read. */
-            ESP_LOGE(TAG, "uart%d: rejecting direct RX request -- read the owning uart_protocol_t's "
-                          "RX task instead (see uart_protocol.h and LINK_PROTOCOL.md sec 3)",
-                     owner->port);
-            result = ESP_ERR_NOT_SUPPORTED;
-        }
-
-        if (!request.tx_buffer && !request.rx_buffer) {
-            result = ESP_ERR_INVALID_ARG;
-        }
-
-        if (request.result_out) {
-            *request.result_out = result;
-        }
-
-        if (request.done_sem) {
-            xSemaphoreGive(request.done_sem);
-        }
-    }
-
-    if (owner->shutdown_done) {
-        xSemaphoreGive(owner->shutdown_done);
-    }
-    vTaskDelete(NULL);
-}
+/* uart_owner_task() (the request-queue worker) and uart_owner_transfer()
+ * were deleted 2026-09-06 (uart collapse, docs/HW_ABSTRACTION_PLAN.md): a
+ * 2026-09-05 grep-confirmed audit found uart_owner_transfer() had zero real
+ * callers left in KilnFW -- uart_protocol.c's frame_and_send() (its
+ * historical caller) was switched onto hal_uart_attach()/hal_uart_send_
+ * blocking, and safety_link.c's one remaining textual match was a comment
+ * describing the old design, not a call site. See git history (this
+ * function's prior body) for the full TX/RX request-queue implementation
+ * that was removed. */
 
 esp_err_t uart_owner_init(uart_owner_t *owner,
                            uart_port_t port,
@@ -240,38 +161,10 @@ esp_err_t uart_owner_init(uart_owner_t *owner,
         return err;
     }
 
-    owner->request_queue = xQueueCreate(queue_len, sizeof(uart_owner_request_t));
-    if (!owner->request_queue) {
-        ESP_LOGE(TAG, "failed to create request queue");
-        uart_driver_delete(port);
-        return ESP_ERR_NO_MEM;
-    }
-
-    owner->shutdown_done = xSemaphoreCreateBinary();
-    if (!owner->shutdown_done) {
-        ESP_LOGE(TAG, "failed to create shutdown semaphore");
-        vQueueDelete(owner->request_queue);
-        owner->request_queue = NULL;
-        uart_driver_delete(port);
-        return ESP_ERR_NO_MEM;
-    }
-
-    BaseType_t task_created = xTaskCreatePinnedToCore(uart_owner_task,
-                                                       "uart_owner_task",
-                                                       stack_depth,
-                                                       owner,
-                                                       task_priority,
-                                                       &owner->task_handle,
-                                                       core_id);
-    if (task_created != pdPASS) {
-        vQueueDelete(owner->request_queue);
-        owner->request_queue = NULL;
-        vSemaphoreDelete(owner->shutdown_done);
-        owner->shutdown_done = NULL;
-        uart_driver_delete(port);
-        ESP_LOGE(TAG, "failed to create owner task");
-        return ESP_ERR_NO_MEM;
-    }
+    /* queue_len is unused now that the request-queue worker task is gone
+     * (see this file's header comment above uart_owner_init) -- kept as a
+     * parameter for source compatibility with existing call sites. */
+    (void)queue_len;
 
     BaseType_t event_task_created = xTaskCreatePinnedToCore(uart_owner_event_task,
                                                              "uart_owner_evt_task",
@@ -282,15 +175,6 @@ esp_err_t uart_owner_init(uart_owner_t *owner,
                                                              core_id);
     if (event_task_created != pdPASS) {
         ESP_LOGE(TAG, "failed to create event task");
-        uart_owner_request_t shutdown_request;
-        memset(&shutdown_request, 0, sizeof(shutdown_request));
-        shutdown_request.shutdown = true;
-        xQueueSend(owner->request_queue, &shutdown_request, portMAX_DELAY);
-        xSemaphoreTake(owner->shutdown_done, pdMS_TO_TICKS(2000));
-        vSemaphoreDelete(owner->shutdown_done);
-        owner->shutdown_done = NULL;
-        vQueueDelete(owner->request_queue);
-        owner->request_queue = NULL;
         uart_driver_delete(port);
         return ESP_ERR_NO_MEM;
     }
@@ -305,30 +189,6 @@ esp_err_t uart_owner_deinit(uart_owner_t *owner)
         return ESP_ERR_INVALID_ARG;
     }
 
-    uart_owner_request_t shutdown_request;
-    memset(&shutdown_request, 0, sizeof(shutdown_request));
-    shutdown_request.shutdown = true;
-
-    if (owner->request_queue) {
-        xQueueSend(owner->request_queue, &shutdown_request, portMAX_DELAY);
-    }
-
-    /* Wait for the worker to actually confirm it drained the queue and is
-     * about to exit before freeing the queue out from under it -- a fixed
-     * delay can't account for a backlog of in-flight requests ahead of the
-     * shutdown sentinel, each potentially taking up to their own
-     * timeout_ms. */
-    if (owner->shutdown_done) {
-        if (xSemaphoreTake(owner->shutdown_done, pdMS_TO_TICKS(2000)) != pdTRUE) {
-            ESP_LOGW(TAG, "worker did not confirm shutdown in time; deleting queue anyway");
-        }
-        vSemaphoreDelete(owner->shutdown_done);
-    }
-
-    if (owner->request_queue) {
-        vQueueDelete(owner->request_queue);
-    }
-
     /* The event task has no sentinel of its own -- it just blocks on the
      * driver's event queue -- so it must be torn down before
      * uart_driver_delete() frees that queue out from under it. */
@@ -338,11 +198,8 @@ esp_err_t uart_owner_deinit(uart_owner_t *owner)
 
     uart_driver_delete(owner->port);
 
-    owner->request_queue = NULL;
-    owner->task_handle = NULL;
     owner->event_task_handle = NULL;
     owner->event_queue = NULL;
-    owner->shutdown_done = NULL;
     owner->initialized = false;
     return ESP_OK;
 }
@@ -365,63 +222,4 @@ esp_err_t uart_owner_restart(uart_owner_t *owner)
         owner->rx_error_count = 0;
     }
     return err;
-}
-
-esp_err_t uart_owner_transfer(uart_owner_t *owner,
-                               const uint8_t *tx_buffer,
-                               size_t tx_length,
-                               uint8_t *rx_buffer,
-                               size_t rx_length,
-                               size_t *rx_length_out,
-                               uint32_t timeout_ms)
-{
-    if (!owner || !owner->initialized || !owner->request_queue) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    /* 2026-08-19: was xSemaphoreCreateBinary()/vSemaphoreDelete() -- a heap
-     * allocation from internal SRAM on every single transfer. Every bridge
-     * task (touch, display, log, wifi, control, profiles, autotune, ...)
-     * shares this one owner and calls this function constantly (a touch
-     * sample or an LVGL flush is one call each), so under real interactive
-     * load (bench-observed: touching the screen while the AP/Wi-Fi bridge
-     * was also active) many of these could be transiently alive at once,
-     * competing for the same internal-SRAM heap this file's sibling
-     * uart_protocol.c already documents as scarce and easy to starve (see
-     * its uart_protocol_register_task() comment on the same pool). Switched
-     * to a stack-resident static semaphore -- zero heap allocation for the
-     * single most frequently called path in the whole UART stack. */
-    StaticSemaphore_t done_sem_storage;
-    SemaphoreHandle_t done_sem = xSemaphoreCreateBinaryStatic(&done_sem_storage);
-    if (!done_sem) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    esp_err_t result = ESP_FAIL;
-    uart_owner_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.tx_buffer = tx_buffer;
-    request.tx_length = tx_length;
-    request.rx_buffer = rx_buffer;
-    request.rx_length = rx_length;
-    request.rx_length_out = rx_length_out;
-    request.timeout_ms = timeout_ms;
-    request.done_sem = done_sem;
-    request.result_out = &result;
-
-    if (xQueueSend(owner->request_queue, &request, portMAX_DELAY) != pdTRUE) {
-        vSemaphoreDelete(done_sem);
-        return ESP_ERR_TIMEOUT;
-    }
-
-    /* The worker enforces timeout_ms internally on each phase (TX flush, RX
-     * read); wait unbounded here so a TX+RX transaction isn't cut off by the
-     * queue wait before the worker has finished both phases. */
-    if (xSemaphoreTake(done_sem, portMAX_DELAY) != pdTRUE) {
-        vSemaphoreDelete(done_sem);
-        return ESP_ERR_TIMEOUT;
-    }
-
-    vSemaphoreDelete(done_sem);
-    return result;
 }

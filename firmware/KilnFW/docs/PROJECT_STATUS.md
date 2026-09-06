@@ -358,6 +358,9 @@ Registered all six stacks named in the entry below: `uart_owner_task`/
 only**; `safety_link.c` runs the identical code for the isolated Pico link
 under the same task names and is deliberately NOT registered here, to avoid
 conflating the two links' readings under one name), `rules_task`/
+(historical: `uart_owner_task`/`uart_owner_evt_task` were since deleted along
+with the uart_owner request-queue path; the surviving PC-link tasks are
+`uart_owner_event_task` and `uart_protocol_rx_task`.)
 `rules_watchdog` (`rules_task.c`), `system_uart_bridge` (`uart_bridge.c`,
 which also needed its task handle actually captured — the existing call
 site passed `NULL` for it).
@@ -419,7 +422,9 @@ delta= +0 dram_free= 12483` — a ~35KB drop in `dram_free` since the
 `executor+autotune` stage. Itemized as far as static analysis honestly goes:
 ~20.5KB is attributable to internal-only (plain `xTaskCreatePinnedToCore`,
 not `*WithCaps(MALLOC_CAP_SPIRAM)`) task stacks created in that window —
-`uart_owner_task`+`uart_owner_evt_task` (4096B each), `uart_proto_rx`
+`uart_owner_task`+`uart_owner_evt_task` (4096B each, since deleted — see the
+2026-09 uart_owner collapse; surviving PC-link tasks are
+`uart_owner_event_task` and `uart_protocol_rx_task`), `uart_proto_rx`
 (4096B), `rules_task`+`rules_watchdog` (3072+2048B), `system_uart_bridge`
 (3072B). `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384` means every one of
 these lands internal regardless of PSRAM being present, since none of them
