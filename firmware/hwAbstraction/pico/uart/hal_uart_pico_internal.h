@@ -53,17 +53,32 @@
 extern "C" {
 #endif
 
+// HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md, "close the upward include"):
+// the TX/RX pins used to come straight from SaftyFW's own board_pins.h via a
+// same-name #include reaching upward across the hwAbstraction/SaftyFW
+// boundary. They are now handed in by the caller at init time instead --
+// SaftyFW's own callers (main.c, and hal_uart_pico.c's hal_uart_init() from
+// its cfg) still read board_pins.h and pass its values through here, but
+// this file no longer includes that header at all. Baud is unaffected --
+// UART_OWNER_BAUD_RATE was never sourced from board_pins.h and stays a
+// private constant in uart_owner.c.
+typedef struct {
+    uint8_t tx_pin;
+    uint8_t rx_pin;
+} uart_owner_pins_t;
+
 // Brings up UART1 8N1 at UART_OWNER_BAUD_RATE (matching CONFIG_KILNCTL_SAFETY_BAUD_RATE's
-// default on the ESP side), configures GPIO4/5 for UART function, and
-// installs the shared UART1 IRQ handler for both RX collection and TX
-// draining. Must be called once, from main(), before link_task_start() --
-// link_task assumes the UART and both rings already exist. Returns false
-// only if the underlying pico-sdk calls themselves would not indicate
-// failure any other way; in practice uart_init()/gpio_set_function() do not
-// fail on this hardware, so this is here for symmetry with the other _init()
+// default on the ESP side), configures pins->{tx_pin,rx_pin} for UART
+// function, and installs the shared UART1 IRQ handler for both RX
+// collection and TX draining. Must be called once, from main(), before
+// link_task_start() -- link_task assumes the UART and both rings already
+// exist. Returns false if pins is NULL, or -- in principle -- if the
+// underlying pico-sdk calls themselves would not indicate failure any other
+// way; in practice uart_init()/gpio_set_function() do not fail on this
+// hardware, so the latter case is here for symmetry with the other _init()
 // return-value convention (spi_owner_init(), etc.) rather than because a
 // realistic failure mode exists today.
-bool uart_owner_init(void);
+bool uart_owner_init(const uart_owner_pins_t *pins);
 
 // Non-blocking send: copies `len` bytes into the TX ring and enables the TX
 // IRQ so they drain into the hardware FIFO as space frees up. If the ring

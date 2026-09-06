@@ -95,6 +95,17 @@ typedef struct {
     int sck_pin;
     int mosi_pin;
     int miso_pin;
+    int cs0_pin;               /* Pico only, HAL Phase 1b "close the upward
+                                 * include": the bit-banged CS0 GPIO,
+                                 * brought up as a plain output inside
+                                 * hal_spi_bus_init() itself (this board's
+                                 * single-device bus has no per-device hw_cs
+                                 * to attach it to later, unlike hal_spi_device_
+                                 * cfg_t.cs_pin on a shared/multi-device bus).
+                                 * Required (HAL_CS_NONE is rejected) on the
+                                 * pico backend; ESP ignores it -- its real CS
+                                 * lives in hal_spi_device_cfg_t.cs_pin/hw_cs
+                                 * instead. */
     size_t queue_len;         /* ESP: spi_owner_init's queue_len (8 today,
                                 * MAX31856.c:375). Pico ignores. */
     int task_priority;        /* ESP: spi_owner_init's task_priority (5

@@ -24,26 +24,28 @@
  *    core_id/dma_use_psram/async_flush/max_transfer_sz/dma_chan -- all of
  *    these are ESP-owner-task sizing/DMA knobs (hal_spi.h's own field
  *    comments already say "Pico ignores" for every one of them), so this
- *    backend does not validate or use them. sck_pin/mosi_pin/miso_pin ARE
- *    checked against board_pins.h's SAFTYFW_PIN_SPI0_{SCK,MOSI,MISO}
- *    constants -- spi_owner_init() has no parameter to route a different
- *    pin set to, so a caller asking for different pins would silently get
- *    the wrong ones without this check.
+ *    backend does not validate or use them. sck_pin/mosi_pin/miso_pin/cs0_pin
+ *    are forwarded to spi_owner_init() as-is (HAL Phase 1b "close the
+ *    upward include": this backend no longer has its own compile-time
+ *    notion of the right pins to compare cfg against -- board_pins.h moved
+ *    out of this file entirely, and the caller, which does still read it,
+ *    is now the one source of truth). cs0_pin == HAL_CS_NONE is rejected
+ *    (there is no default to fall back to).
  * 2. hal_spi_device_attach()'s cfg (clock_hz/mode/hw_cs/cs_pin/queue_size/
  *    input_delay_ns) describes a per-device configuration spi_owner.c has
  *    no way to honor: SPI0 runs at one hardwired clock/mode
  *    (SPI_OWNER_BAUDRATE_HZ, SPI_CPOL_0/SPI_CPHA_1) and CS is bit-banged
- *    internally on the one fixed SAFTYFW_PIN_SPI0_CS0 line -- there is no
- *    per-transfer cs_pin parameter to spi_owner_transfer() at all (unlike
- *    the ESP owner, which takes cs_pin per call because it serializes
- *    several devices through one queue). This backend therefore validates
- *    cfg matches that single hardwired device (clock_hz ==
- *    SPI_OWNER_BAUDRATE_HZ, mode == HAL_SPI_MODE_1, cs_pin ==
- *    SAFTYFW_PIN_SPI0_CS0, hw_cs == HAL_CS_NONE) and fails HAL_INVALID_ARG
- *    otherwise, and only ever supports ONE attached device (a second
- *    hal_spi_device_attach() call, even with matching cfg, returns HAL_BUSY
- *    -- spi_owner.c has exactly one CS line, so a second concurrent device
- *    would silently collide on the wire).
+ *    internally on the one CS line cfg->cs0_pin named at hal_spi_bus_init()
+ *    time -- there is no per-transfer cs_pin parameter to
+ *    spi_owner_transfer() at all (unlike the ESP owner, which takes cs_pin
+ *    per call because it serializes several devices through one queue).
+ *    This backend therefore validates cfg matches that single hardwired
+ *    device (clock_hz == SPI_OWNER_BAUDRATE_HZ, mode == HAL_SPI_MODE_1,
+ *    cs_pin == the bus's own recorded cs0_pin, hw_cs == HAL_CS_NONE) and
+ *    fails HAL_INVALID_ARG otherwise, and only ever supports ONE attached
+ *    device (a second hal_spi_device_attach() call, even with matching cfg,
+ *    returns HAL_BUSY -- spi_owner.c has exactly one CS line, so a second
+ *    concurrent device would silently collide on the wire).
  * 3. hal_spi_transfer()/_polling() take independent tx_len/rx_len;
  *    spi_owner_transfer(tx, rx, len) takes ONE len applied to both buffers
  *    (rx may be NULL to skip read-back, matching spi_write_read_blocking's
@@ -76,29 +78,46 @@
 
 #include "spi_owner.h"
 
-/* TEMPORARY (HAL Phase 1b), same as spi_owner.c's own top-of-file note:
- * board_pins.h is a SaftyFW header, resolved via the private include dir
- * SaftyFW's CMakeLists.txt gives hwabstraction_pico. */
-#include "board_pins.h"
+/* HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION_PLAN.md):
+ * this used to #include "board_pins.h" (a SaftyFW header), same as
+ * spi_owner.c's former top-of-file note. Pin values now arrive via
+ * hal_spi_bus_cfg_t/hal_spi_device_cfg_t at init/attach time instead --
+ * see the INTERFACE MISMATCH notes above. */
 
 #define HAL_SPI_PICO_BAUDRATE_HZ 4000000u /* mirrors spi_owner.c's SPI_OWNER_BAUDRATE_HZ */
+
+/* RP2040 GPIO count -- valid pin numbers are 0..29 inclusive. */
+#define HAL_SPI_PICO_MAX_GPIO 29
+
+/* The one-device-per-physical-bus fact belongs to the underlying spi_owner.c
+ * singleton, not to any single hal_spi_bus_t handle: an OWNED bus and an
+ * ADOPTED bus (hal_spi_bus_adopt()) both refer to the same real hardware, so
+ * "is a device already attached" must be answered the same way through
+ * either one. Making this a per-handle field (as it was before) let an
+ * attach through an adopted handle race past an attach already done through
+ * the owning handle, since each handle's memset()-zeroed storage started
+ * device_attached false independently -- two devices, one bit-banged CS.
+ * Named per CLAUDE.md's "reset one side of a pair" checklist: this is now
+ * the single owning fact, module-static so every handle onto the one
+ * physical bus shares it. hal_spi_bus_deinit() is HAL_NOT_SUPPORTED today
+ * for an OWNED bus (note 6 below) so this is never cleared at runtime yet --
+ * if a real deinit is ever added, it MUST clear this alongside the bus impl
+ * state it is now decoupled from. */
+static bool s_spi_owner_device_attached = false;
 
 typedef struct {
     uint32_t magic;
     bool     initialized;
-    /* Reset-one-side hazard, named per CLAUDE.md's checklist: this flag and
-     * hal_spi_pico_device_impl_t::attached below are two sides of the same
-     * fact (spi_owner.c has exactly one CS line, so at most one hal_spi
-     * device may ever be attached to it). Owning it HERE, on the bus impl
-     * that hal_spi_bus_init()'s memset() already zeroes on every (re-)init,
-     * means it cannot go stale independently of the bus the way a
-     * file-scope global could -- there is no second reset path that clears
-     * the bus but forgets this flag, because there is no other reset path
-     * at all. hal_spi_bus_deinit() is HAL_NOT_SUPPORTED today (note 6 below)
-     * so this is never exercised at runtime yet -- if a real deinit is ever
-     * added, it MUST clear this alongside `initialized`, exactly the class
-     * of pairing CLAUDE.md's "reset one side of a pair" section warns about. */
-    bool     device_attached;
+    /* The one CS0 GPIO this bus's spi_owner_init() brought up -- recorded so
+     * hal_spi_device_attach() can validate a device cfg's cs_pin against
+     * what THIS bus actually initialized, instead of a compile-time
+     * board_pins.h constant (HAL Phase 1b, "close the upward include"). */
+    uint8_t  cs0_pin;
+    /* False when adopted via hal_spi_bus_adopt(): this hal_spi_bus_t
+     * instance shares the singleton spi_owner.c bus another instance
+     * already brought up, and must not re-run spi_owner_init() or claim any
+     * teardown rights over it. Mirrors hal_spi_esp.c's owner_owned. */
+    bool     owner_owned;
 } hal_spi_pico_bus_impl_t;
 
 #define HAL_SPI_PICO_BUS_MAGIC 0x53504942u /* "SPIB" */
@@ -132,10 +151,25 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id, const hal_spi_bus_
     if (!bus || !cfg) {
         return HAL_INVALID_ARG;
     }
-    if (cfg->sck_pin != SAFTYFW_PIN_SPI0_SCK || cfg->mosi_pin != SAFTYFW_PIN_SPI0_MOSI ||
-        cfg->miso_pin != SAFTYFW_PIN_SPI0_MISO) {
-        /* See INTERFACE MISMATCH note 1 -- spi_owner_init() has no parameter
-         * to route a different pin set to. */
+    if (cfg->cs0_pin == HAL_CS_NONE) {
+        /* See INTERFACE MISMATCH note 1 -- spi_owner_init() has no default
+         * CS0 pin to fall back to; the caller must name one. */
+        return HAL_INVALID_ARG;
+    }
+    if (cfg->sck_pin < 0 || cfg->sck_pin > HAL_SPI_PICO_MAX_GPIO ||
+        cfg->mosi_pin < 0 || cfg->mosi_pin > HAL_SPI_PICO_MAX_GPIO ||
+        cfg->miso_pin < 0 || cfg->miso_pin > HAL_SPI_PICO_MAX_GPIO ||
+        cfg->cs0_pin < 0 || cfg->cs0_pin > HAL_SPI_PICO_MAX_GPIO) {
+        /* Out-of-range pin numbers would otherwise be silently truncated by
+         * the int-to-uint8_t narrowing below. */
+        return HAL_INVALID_ARG;
+    }
+    if (cfg->sck_pin == cfg->mosi_pin || cfg->sck_pin == cfg->miso_pin ||
+        cfg->sck_pin == cfg->cs0_pin || cfg->mosi_pin == cfg->miso_pin ||
+        cfg->mosi_pin == cfg->cs0_pin || cfg->miso_pin == cfg->cs0_pin) {
+        /* A zeroed (or otherwise degenerate) cfg must not drive multiple
+         * SPI0 roles off the same GPIO -- e.g. an all-zero cfg would
+         * otherwise pass with sck/mosi/miso/cs0 all on GPIO0. */
         return HAL_INVALID_ARG;
     }
 
@@ -143,18 +177,63 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id, const hal_spi_bus_
     memset(impl, 0, sizeof(*impl));
     impl->magic = HAL_SPI_PICO_BUS_MAGIC;
 
-    if (!spi_owner_init()) {
+    spi_owner_pins_t pins = {
+        .sck_pin = (uint8_t)cfg->sck_pin,
+        .mosi_pin = (uint8_t)cfg->mosi_pin,
+        .miso_pin = (uint8_t)cfg->miso_pin,
+        .cs0_pin = (uint8_t)cfg->cs0_pin,
+    };
+    if (!spi_owner_init(&pins)) {
         return HAL_IO;
     }
     impl->initialized = true;
+    impl->owner_owned = true;
+    impl->cs0_pin = pins.cs0_pin;
+    /* A fresh spi_owner_init() call means a fresh bring-up of the singleton
+     * bus -- nothing can already be attached to it. This also gives host
+     * tests, which run many bus_init() calls in one process, a real reset
+     * point for s_spi_owner_device_attached instead of it leaking state
+     * across otherwise-independent test cases. */
+    s_spi_owner_device_attached = false;
+    return HAL_OK;
+}
+
+hal_status_t hal_spi_bus_adopt(hal_spi_bus_t *bus, int bus_id, hal_spi_bus_t *existing)
+{
+    (void)bus_id; /* spi_owner.c is hardwired to SPI0; nothing else exists on this board */
+    if (!bus || !existing) {
+        return HAL_INVALID_ARG;
+    }
+    hal_spi_pico_bus_impl_t *existing_impl = bus_impl_of(existing);
+    if (existing_impl->magic != HAL_SPI_PICO_BUS_MAGIC || !existing_impl->initialized) {
+        return HAL_NOT_READY;
+    }
+
+    hal_spi_pico_bus_impl_t *impl = bus_impl_of(bus);
+    memset(impl, 0, sizeof(*impl));
+    impl->magic = HAL_SPI_PICO_BUS_MAGIC;
+    impl->initialized = true;
+    impl->cs0_pin = existing_impl->cs0_pin;
+    impl->owner_owned = false; /* adopted -- never re-init or tear down the singleton */
     return HAL_OK;
 }
 
 hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus)
 {
-    (void)bus;
+    if (!bus) {
+        return HAL_INVALID_ARG;
+    }
+    hal_spi_pico_bus_impl_t *impl = bus_impl_of(bus);
+    if (!impl->owner_owned) {
+        /* Adopted bus: this instance never created spi_owner.c's singleton
+         * state, so it must not claim any teardown rights over it -- some
+         * other hal_spi_bus_t (whoever's hal_spi_bus_init() actually ran)
+         * still uses it. Only this instance's own local storage is cleared. */
+        memset(impl, 0, sizeof(*impl));
+        return HAL_OK;
+    }
     /* See INTERFACE MISMATCH note 6 -- spi_owner.h has no teardown entry
-     * point at all. */
+     * point at all for the real, owning instance. */
     return HAL_NOT_SUPPORTED;
 }
 
@@ -181,13 +260,17 @@ hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
         return HAL_NOT_READY;
     }
     if (cfg->clock_hz != HAL_SPI_PICO_BAUDRATE_HZ || cfg->mode != HAL_SPI_MODE_1 ||
-        cfg->cs_pin != SAFTYFW_PIN_SPI0_CS0 || cfg->hw_cs != HAL_CS_NONE) {
+        cfg->cs_pin != bus_impl->cs0_pin || cfg->hw_cs != HAL_CS_NONE) {
         /* See INTERFACE MISMATCH note 2 -- spi_owner.c has exactly one
          * hardwired clock/mode/CS; nothing else can be honored. */
         return HAL_INVALID_ARG;
     }
-    if (bus_impl->device_attached) {
-        /* See INTERFACE MISMATCH note 2 -- one CS line, one device, ever. */
+    if (s_spi_owner_device_attached) {
+        /* See INTERFACE MISMATCH note 2 -- one CS line, one device, ever.
+         * This is a module-level fact about the single spi_owner.c
+         * singleton, not a per-handle one, so an attach through an ADOPTED
+         * bus is refused just as surely as a second attach through the
+         * owning bus -- see s_spi_owner_device_attached's own comment. */
         return HAL_BUSY;
     }
 
@@ -195,7 +278,7 @@ hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
     memset(dev_impl, 0, sizeof(*dev_impl));
     dev_impl->magic = HAL_SPI_PICO_DEVICE_MAGIC;
     dev_impl->attached = true;
-    bus_impl->device_attached = true;
+    s_spi_owner_device_attached = true;
     return HAL_OK;
 }
 

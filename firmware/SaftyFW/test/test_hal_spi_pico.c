@@ -20,6 +20,7 @@ static void valid_bus_cfg(hal_spi_bus_cfg_t *cfg)
     cfg->sck_pin = SAFTYFW_PIN_SPI0_SCK;
     cfg->mosi_pin = SAFTYFW_PIN_SPI0_MOSI;
     cfg->miso_pin = SAFTYFW_PIN_SPI0_MISO;
+    cfg->cs0_pin = SAFTYFW_PIN_SPI0_CS0;
 }
 
 static void valid_device_cfg(hal_spi_device_cfg_t *cfg)
@@ -36,25 +37,99 @@ static void reset(void)
     spi_owner_stub_reset();
 }
 
-static void test_bus_init_pin_mismatch_rejected(void)
+static void test_bus_init_missing_cs0_pin_rejected(void)
 {
-    TEST_SECTION("hal_spi_bus_init() -- pin mismatch against board_pins.h -> HAL_INVALID_ARG");
+    // HAL Phase 1b, "close the upward include": hal_spi_pico.c no longer
+    // knows the "right" pin values (board_pins.h moved out of this file
+    // entirely) -- it forwards whatever cfg says straight into
+    // spi_owner_init(). The one thing it still rejects locally is a caller
+    // that provides no CS0 pin at all, since there is no default to fall
+    // back to.
+    TEST_SECTION("hal_spi_bus_init() -- cfg->cs0_pin == HAL_CS_NONE -> HAL_INVALID_ARG, spi_owner_init() never called");
     reset();
     hal_spi_bus_t bus;
     hal_spi_bus_cfg_t cfg;
 
     valid_bus_cfg(&cfg);
-    cfg.sck_pin = SAFTYFW_PIN_SPI0_SCK + 1;
-    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG, "wrong sck_pin rejected");
+    cfg.cs0_pin = HAL_CS_NONE;
+    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG, "missing cs0_pin rejected");
     TEST_CHECK(spi_owner_stub_init_count() == 0, "spi_owner_init() never called on a rejected cfg");
+}
+
+static void test_bus_init_forwards_pins_to_owner(void)
+{
+    // Pins are no longer validated against a compile-time constant here --
+    // they are forwarded to spi_owner_init() verbatim, whatever the caller
+    // asks for (the caller, e.g. max31856.c, is now the one that reads
+    // board_pins.h and is responsible for passing the right values), as
+    // long as the four pins are distinct and in range (see the dedicated
+    // rejection tests below).
+    TEST_SECTION("hal_spi_bus_init() -- any distinct, in-range sck/mosi/miso/cs0 pin set is forwarded, not validated");
+    reset();
+    hal_spi_bus_t bus;
+    hal_spi_bus_cfg_t cfg;
 
     valid_bus_cfg(&cfg);
-    cfg.mosi_pin = SAFTYFW_PIN_SPI0_MOSI + 1;
-    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG, "wrong mosi_pin rejected");
+    // Four distinct valid pins, none colliding with each other or with the
+    // default cs0_pin (SAFTYFW_PIN_SPI0_CS0 == 1).
+    cfg.sck_pin = SAFTYFW_PIN_SPI0_SCK + 5;   // 7
+    cfg.mosi_pin = SAFTYFW_PIN_SPI0_MOSI + 5; // 8
+    cfg.miso_pin = SAFTYFW_PIN_SPI0_MISO + 5; // 5
+    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_OK,
+               "a non-default pin set is accepted -- this backend has no opinion about it anymore");
+    TEST_CHECK(spi_owner_stub_init_count() == 1, "spi_owner_init() was called exactly once");
+}
+
+static void test_bus_init_zeroed_cfg_rejected(void)
+{
+    // An all-zero hal_spi_bus_cfg_t (e.g. a caller that forgot to fill it
+    // in) would otherwise pass the old lone HAL_CS_NONE-only check with
+    // sck_pin == mosi_pin == miso_pin == cs0_pin == 0, driving all four SPI0
+    // roles off the same GPIO0.
+    TEST_SECTION("hal_spi_bus_init() -- all-zero cfg (sck==mosi==miso==cs0==GPIO0) -> HAL_INVALID_ARG");
+    reset();
+    hal_spi_bus_t bus;
+    hal_spi_bus_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG,
+               "a zeroed cfg with all pins colliding on GPIO0 is rejected");
+    TEST_CHECK(spi_owner_stub_init_count() == 0, "spi_owner_init() never called on a rejected cfg");
+}
+
+static void test_bus_init_duplicate_pin_rejected(void)
+{
+    TEST_SECTION("hal_spi_bus_init() -- any two of sck/mosi/miso/cs0 sharing a GPIO -> HAL_INVALID_ARG");
+    reset();
+    hal_spi_bus_t bus;
+    hal_spi_bus_cfg_t cfg;
 
     valid_bus_cfg(&cfg);
-    cfg.miso_pin = SAFTYFW_PIN_SPI0_MISO + 1;
-    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG, "wrong miso_pin rejected");
+    cfg.mosi_pin = cfg.sck_pin; // collide sck/mosi, cs0/miso stay distinct
+    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG, "sck == mosi rejected");
+    TEST_CHECK(spi_owner_stub_init_count() == 0, "spi_owner_init() never called");
+
+    valid_bus_cfg(&cfg);
+    cfg.cs0_pin = cfg.miso_pin; // collide cs0/miso
+    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG, "cs0 == miso rejected");
+    TEST_CHECK(spi_owner_stub_init_count() == 0, "spi_owner_init() never called");
+}
+
+static void test_bus_init_out_of_range_pin_rejected(void)
+{
+    TEST_SECTION("hal_spi_bus_init() -- a pin outside 0..29 (RP2040 GPIO count) -> HAL_INVALID_ARG");
+    reset();
+    hal_spi_bus_t bus;
+    hal_spi_bus_cfg_t cfg;
+
+    valid_bus_cfg(&cfg);
+    cfg.sck_pin = 30; // one past the last real RP2040 GPIO
+    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG, "sck_pin == 30 rejected");
+    TEST_CHECK(spi_owner_stub_init_count() == 0, "spi_owner_init() never called");
+
+    valid_bus_cfg(&cfg);
+    cfg.mosi_pin = 254; // would truncate to a plausible-looking uint8_t if uncaught
+    TEST_CHECK(hal_spi_bus_init(&bus, 0, &cfg) == HAL_INVALID_ARG, "mosi_pin == 254 rejected");
+    TEST_CHECK(spi_owner_stub_init_count() == 0, "spi_owner_init() never called");
 }
 
 static void test_bus_init_owner_failure_propagates(void)
@@ -219,9 +294,92 @@ static void test_async_not_supported(void)
     TEST_CHECK(spi_owner_stub_transfer_count() == 0, "spi_owner_transfer() was never called");
 }
 
+static void test_bus_adopt_before_init_not_ready(void)
+{
+    TEST_SECTION("hal_spi_bus_adopt() -- existing bus never initialized -> HAL_NOT_READY");
+    reset();
+    hal_spi_bus_t existing;
+    memset(&existing, 0, sizeof(existing)); /* zeroed storage -- magic never stamped */
+    hal_spi_bus_t bus;
+    TEST_CHECK(hal_spi_bus_adopt(&bus, 0, &existing) == HAL_NOT_READY,
+               "adopting an uninitialized bus fails NOT_READY, not a crash");
+}
+
+static void test_bus_adopt_null_args_rejected(void)
+{
+    TEST_SECTION("hal_spi_bus_adopt() -- NULL bus/existing -> HAL_INVALID_ARG");
+    reset();
+    hal_spi_bus_t bus, existing;
+    TEST_CHECK(hal_spi_bus_adopt(NULL, 0, &existing) == HAL_INVALID_ARG, "NULL bus rejected");
+    TEST_CHECK(hal_spi_bus_adopt(&bus, 0, NULL) == HAL_INVALID_ARG, "NULL existing rejected");
+}
+
+static void test_bus_adopt_shares_singleton_without_reinit(void)
+{
+    TEST_SECTION("hal_spi_bus_adopt() -- shares the already-initialized singleton, never calls spi_owner_init() again, and never owns it");
+    reset();
+    hal_spi_bus_t existing;
+    hal_spi_bus_cfg_t bus_cfg;
+    valid_bus_cfg(&bus_cfg);
+    TEST_CHECK(hal_spi_bus_init(&existing, 0, &bus_cfg) == HAL_OK, "real bus_init succeeds (setup)");
+    TEST_CHECK(spi_owner_stub_init_count() == 1, "spi_owner_init() called exactly once so far");
+
+    hal_spi_bus_t adopted;
+    TEST_CHECK(hal_spi_bus_adopt(&adopted, 0, &existing) == HAL_OK, "adopt succeeds against a live bus");
+    TEST_CHECK(spi_owner_stub_init_count() == 1,
+               "adopt does NOT call spi_owner_init() a second time -- same singleton, not a second bring-up");
+
+    // The adopted bus inherits the SAME cs0_pin the real bus recorded, so a
+    // device attach through it validates against that value, not a
+    // compile-time constant this file no longer has any notion of.
+    hal_spi_device_t dev;
+    hal_spi_device_cfg_t dev_cfg;
+    valid_device_cfg(&dev_cfg);
+    TEST_CHECK(hal_spi_device_attach(&adopted, &dev, &dev_cfg) == HAL_OK,
+               "device_attach through the adopted bus succeeds against the inherited cs0_pin");
+
+    // Deinit on the adopted bus must not report itself as tearing down the
+    // shared singleton -- it only clears its own local bookkeeping.
+    TEST_CHECK(hal_spi_bus_deinit(&adopted) == HAL_OK,
+               "deinit on an adopted (non-owning) bus succeeds locally, unlike the owning bus's HAL_NOT_SUPPORTED");
+}
+
+static void test_adopted_attach_busy_when_owner_already_attached(void)
+{
+    // The one-device-ever guard is a fact about the single spi_owner.c
+    // singleton bus, not about any one hal_spi_bus_t handle onto it: an
+    // OWNED bus and a bus obtained via hal_spi_bus_adopt() both refer to the
+    // same physical bus, so attaching through the adopted handle while the
+    // owner's device is already attached must be refused exactly like a
+    // second attach through the owning handle itself.
+    TEST_SECTION("hal_spi_device_attach() -- adopted-bus attach refused HAL_BUSY when the owner already has a device attached");
+    reset();
+    hal_spi_bus_t owner;
+    hal_spi_bus_cfg_t bus_cfg;
+    valid_bus_cfg(&bus_cfg);
+    TEST_CHECK(hal_spi_bus_init(&owner, 0, &bus_cfg) == HAL_OK, "owner bus_init succeeds (setup)");
+
+    hal_spi_device_t owner_dev;
+    hal_spi_device_cfg_t dev_cfg;
+    valid_device_cfg(&dev_cfg);
+    TEST_CHECK(hal_spi_device_attach(&owner, &owner_dev, &dev_cfg) == HAL_OK,
+               "owner attaches its device first (setup)");
+
+    hal_spi_bus_t adopted;
+    TEST_CHECK(hal_spi_bus_adopt(&adopted, 0, &owner) == HAL_OK, "adopt succeeds against the owning bus");
+
+    hal_spi_device_t adopted_dev;
+    TEST_CHECK(hal_spi_device_attach(&adopted, &adopted_dev, &dev_cfg) == HAL_BUSY,
+               "attach through the adopted handle is refused -- the owner's device already claims the one CS line");
+}
+
 void run_test_hal_spi_pico(void)
 {
-    test_bus_init_pin_mismatch_rejected();
+    test_bus_init_missing_cs0_pin_rejected();
+    test_bus_init_forwards_pins_to_owner();
+    test_bus_init_zeroed_cfg_rejected();
+    test_bus_init_duplicate_pin_rejected();
+    test_bus_init_out_of_range_pin_rejected();
     test_bus_init_owner_failure_propagates();
     test_device_attach_cfg_mismatches_rejected();
     test_device_attach_before_bus_init_not_ready();
@@ -230,4 +388,8 @@ void run_test_hal_spi_pico(void)
     test_rx_len_mismatch_rejected();
     test_transfer_success_and_owner_failure_propagate();
     test_async_not_supported();
+    test_bus_adopt_before_init_not_ready();
+    test_bus_adopt_null_args_rejected();
+    test_bus_adopt_shares_singleton_without_reinit();
+    test_adopted_attach_busy_when_owner_already_attached();
 }

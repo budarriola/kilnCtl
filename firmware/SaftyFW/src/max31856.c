@@ -95,6 +95,11 @@ bool max31856_bus_init(void)
     bus_cfg.sck_pin = SAFTYFW_PIN_SPI0_SCK;
     bus_cfg.mosi_pin = SAFTYFW_PIN_SPI0_MOSI;
     bus_cfg.miso_pin = SAFTYFW_PIN_SPI0_MISO;
+    // HAL Phase 1b, "close the upward include": hal_spi_pico.c no longer
+    // hardcodes/validates CS0 against board_pins.h itself -- this is now the
+    // one place (inside SaftyFW, which already owns board_pins.h) that reads
+    // SAFTYFW_PIN_SPI0_CS0 and forwards it down as an ordinary cfg field.
+    bus_cfg.cs0_pin = SAFTYFW_PIN_SPI0_CS0;
     // Every other hal_spi_bus_cfg_t field (queue_len/task_priority/
     // stack_depth/core_id/dma_use_psram/async_flush/max_transfer_sz/
     // dma_chan) is ESP-owner-task/DMA sizing hal_spi_pico.c does not use --

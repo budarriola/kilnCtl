@@ -26,24 +26,27 @@
  * 1. Single fixed instance, not N independent handles. hal_uart_cfg_t
  *    carries port/tx_io/rx_io/baud so a backend can in principle stand up
  *    multiple independent hal_uart_t instances distinguished by port
- *    number. uart_owner.c has no such parameterization: UART1_IRQ,
- *    GPIO4/GPIO5 and 230400 baud are all compile-time constants
- *    (SAFTYFW_PIN_UART1_TX/_RX in board_pins.h, UART_OWNER_BAUD_RATE in
- *    uart_owner.c), and every ring/counter is a file-scope static, not a
+ *    number. uart_owner.c has no such parameterization: UART1_IRQ and
+ *    230400 baud are compile-time constants (UART_OWNER_BAUD_RATE in
+ *    uart_owner.c) and every ring/counter is a file-scope static, not a
  *    per-instance struct -- there is exactly ONE real UART1 link on this
  *    board (docs/ARCHITECTURE.md: UART0 is the separate, raw, HAL-external
  *    console path; see console_uart.c). This backend cannot honor a cfg
  *    describing a second, independent port -- there is only one real link
- *    -- so hal_uart_init() VALIDATES cfg against the owner's own constants
- *    (port against the uart1 index, tx_io/rx_io against board_pins.h's
- *    SAFTYFW_PIN_UART1_TX/_RX, baud against a local literal mirroring
- *    uart_owner.c's private UART_OWNER_BAUD_RATE, since uart_owner.h
- *    exposes no accessor for it) and returns HAL_INVALID_ARG on any
- *    mismatch, rather than silently discarding cfg and letting a caller
- *    believe a different port/pin/baud was honored. hal_uart_init is still
- *    only ever correct to call once, for the one real link, and hal_uart.h
- *    has no ALREADY_INIT-style contract for hal_uart_init the way
- *    hal_spi_bus_init/hal_i2c_bus_init do.
+ *    -- so hal_uart_init() VALIDATES port and baud against the owner's own
+ *    constants (port against the uart1 index, baud against a local literal
+ *    mirroring uart_owner.c's private UART_OWNER_BAUD_RATE, since
+ *    uart_owner.h exposes no accessor for it) and returns HAL_INVALID_ARG on
+ *    any mismatch, rather than silently discarding cfg and letting a caller
+ *    believe a different port/baud was honored. tx_io/rx_io are NOT
+ *    validated against anything here (HAL Phase 1b, "close the upward
+ *    include": this backend no longer has its own compile-time notion of
+ *    the right pins -- board_pins.h moved out of this file entirely) -- they
+ *    are forwarded straight into uart_owner_init() as-is, so a cfg naming
+ *    the wrong pins is genuinely honored (and genuinely wrong), not silently
+ *    discarded. hal_uart_init is still only ever correct to call once, for
+ *    the one real link, and hal_uart.h has no ALREADY_INIT-style contract
+ *    for hal_uart_init the way hal_spi_bus_init/hal_i2c_bus_init do.
  * 2. hal_uart_get_rx_error_count() has no real backing counter. uart_owner.c
  *    tracks TX-side diagnostics in unusual depth (tx dropped, bytes to
  *    FIFO, bytes from ISR, self-start-failures, raw head/tail, priming
@@ -106,10 +109,12 @@
 #include "hal_uart_pico_internal.h"
 
 #include "hal_time.h"
-/* TEMPORARY (HAL Phase 1b): board_pins.h is a SaftyFW header
- * (firmware/SaftyFW/src/board/board_pins.h), not part of hwAbstraction/. See
- * uart_owner.c's identical note on this same include. */
-#include "board_pins.h"
+/* HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION_PLAN.md):
+ * this used to #include "board_pins.h" (a SaftyFW header), same as
+ * uart_owner.c's former identical note. Pin values now arrive via
+ * hal_uart_cfg_t at hal_uart_init() time instead and are forwarded straight
+ * to uart_owner_init(), never compared against a compile-time constant this
+ * file no longer has. */
 
 /* No per-instance struct: uart_owner.c's state is entirely file-scope
  * statics (one real UART1 link), matching the pico gpio/adc backends'
@@ -120,49 +125,52 @@
 hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
     (void)u;
     /* Per INTERFACE MISMATCH 1, uart_owner.c has exactly one real link and
-     * every parameter is a compile-time constant -- there is nothing to
-     * configure. But a cfg that does not describe THAT link is a caller
-     * bug (a second, imagined instance), not something to silently
-     * accept: validate cfg against the owner's own compile-time constants
-     * rather than discarding it outright. `uart1` and `UART_NUM_1`-style
-     * port identity is checked against pico-sdk's `uart1` global (the same
-     * object uart_owner.c's private UART_OWNER_INSTANCE macro names);
-     * tx_io/rx_io are checked against board_pins.h's
-     * SAFTYFW_PIN_UART1_TX/_RX, the same header uart_owner.c itself
-     * includes. Baud has no owner-exposed accessor (UART_OWNER_BAUD_RATE is
-     * a private #define inside uart_owner.c, not in uart_owner.h) --
-     * HAL_UART_PICO_EXPECTED_BAUD below duplicates that literal only
-     * because there is no accessor to reference instead; it must be kept
-     * equal to uart_owner.c's UART_OWNER_BAUD_RATE by hand until Phase 1a
-     * moves uart_owner.c into this tree and the two constants merge into
-     * one. */
+     * port/baud are compile-time constants -- there is nothing to configure
+     * for those two. But a cfg that does not describe THAT link's port/baud
+     * is a caller bug (a second, imagined instance), not something to
+     * silently accept: validate those two against the owner's own
+     * compile-time constants rather than discarding them outright. `uart1`
+     * and `UART_NUM_1`-style port identity is checked against pico-sdk's
+     * `uart1` global (the same object uart_owner.c's private
+     * UART_OWNER_INSTANCE macro names). Baud has no owner-exposed accessor
+     * (UART_OWNER_BAUD_RATE is a private #define inside uart_owner.c, not in
+     * uart_owner.h) -- HAL_UART_PICO_EXPECTED_BAUD below duplicates that
+     * literal only because there is no accessor to reference instead; it
+     * must be kept equal to uart_owner.c's UART_OWNER_BAUD_RATE by hand.
+     * tx_io/rx_io are NOT validated (see INTERFACE MISMATCH 1's updated
+     * text above) -- a non-NULL cfg is REQUIRED so this file has pins to
+     * forward at all; there is no compile-time default left to fall back
+     * to now that board_pins.h has moved out of this file. */
 #define HAL_UART_PICO_EXPECTED_PORT 1 /* uart1, per hal_uart_cfg_t's own doc
                                         * comment: "pico uart0/uart1 index" */
 #define HAL_UART_PICO_EXPECTED_BAUD 230400u
-    if (cfg != NULL) {
-        if (cfg->port != HAL_UART_PICO_EXPECTED_PORT) {
-            return HAL_INVALID_ARG;
-        }
-        if (cfg->tx_io != SAFTYFW_PIN_UART1_TX || cfg->rx_io != SAFTYFW_PIN_UART1_RX) {
-            return HAL_INVALID_ARG;
-        }
-        if (cfg->baud != HAL_UART_PICO_EXPECTED_BAUD) {
-            return HAL_INVALID_ARG;
-        }
-        /* Per INTERFACE MISMATCH 4: this backend has no owner task at all,
-         * so queue_len/task_priority/stack_depth must be left at "backend
-         * default" (0, per hal_uart_cfg_t's own doc comment) -- a nonzero
-         * value describes a task that will never be created. core_id is
-         * NOT gated here: hal_uart_cfg_t's own doc comment says "pico/host
-         * backends ignore this" (it is not a 0-means-default field, it is a
-         * HAL_CORE_ANY-or-explicit-core field the pico backend has no use
-         * for at all, same as hal_uart_get_task_handle() having no task to
-         * pin). */
-        if (cfg->queue_len != 0 || cfg->task_priority != 0 || cfg->stack_depth != 0) {
-            return HAL_INVALID_ARG;
-        }
+    if (cfg == NULL) {
+        return HAL_INVALID_ARG;
     }
-    if (!uart_owner_init()) {
+    if (cfg->port != HAL_UART_PICO_EXPECTED_PORT) {
+        return HAL_INVALID_ARG;
+    }
+    if (cfg->baud != HAL_UART_PICO_EXPECTED_BAUD) {
+        return HAL_INVALID_ARG;
+    }
+    /* Per INTERFACE MISMATCH 4: this backend has no owner task at all,
+     * so queue_len/task_priority/stack_depth must be left at "backend
+     * default" (0, per hal_uart_cfg_t's own doc comment) -- a nonzero
+     * value describes a task that will never be created. core_id is
+     * NOT gated here: hal_uart_cfg_t's own doc comment says "pico/host
+     * backends ignore this" (it is not a 0-means-default field, it is a
+     * HAL_CORE_ANY-or-explicit-core field the pico backend has no use
+     * for at all, same as hal_uart_get_task_handle() having no task to
+     * pin). */
+    if (cfg->queue_len != 0 || cfg->task_priority != 0 || cfg->stack_depth != 0) {
+        return HAL_INVALID_ARG;
+    }
+
+    const uart_owner_pins_t pins = {
+        .tx_pin = (uint8_t)cfg->tx_io,
+        .rx_pin = (uint8_t)cfg->rx_io,
+    };
+    if (!uart_owner_init(&pins)) {
         return HAL_IO;
     }
     return HAL_OK;

@@ -392,7 +392,15 @@ int main(void)
     // pico/spi/hal_spi_pico.c. Byte-identical timing/retry behavior.
     bool spi_owner_ok = max31856_bus_init();
     SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_SPI_UP);
-    bool uart_owner_ok = uart_owner_init();
+    // HAL Phase 1b, "close the upward include": uart_owner_init() no longer
+    // reads board_pins.h itself -- main.c (which already includes it, for
+    // the E-stop/relay pins above) passes SAFTYFW_PIN_UART1_{TX,RX} in
+    // explicitly instead.
+    const uart_owner_pins_t uart_owner_pins = {
+        .tx_pin = SAFTYFW_PIN_UART1_TX,
+        .rx_pin = SAFTYFW_PIN_UART1_RX,
+    };
+    bool uart_owner_ok = uart_owner_init(&uart_owner_pins);
     SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_UART_UP);
     (void)uart_owner_ok; // no log sink yet (Phase 8) to report this to
 

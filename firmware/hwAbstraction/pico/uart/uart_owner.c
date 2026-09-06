@@ -14,14 +14,12 @@
 #include "hardware/uart.h"
 #include "hardware/regs/uart.h"
 
-// TEMPORARY (HAL Phase 1b): board_pins.h is a SaftyFW header
-// (firmware/SaftyFW/src/board/board_pins.h), not part of hwAbstraction/. Left as
-// a same-name include resolved via SaftyFW's own include path (this file
-// is compiled into the hwabstraction_pico library, which SaftyFW's
-// CMakeLists.txt gives a private include dir on firmware/SaftyFW/src for
-// exactly this) until Phase 1b introduces a board-descriptor header inside
-// hwAbstraction/pico/ itself (see esp/board_kiln_s3.h's analogous role).
-#include "board_pins.h"
+// HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION_PLAN.md):
+// this used to #include "board_pins.h" (a SaftyFW header) straight across
+// the hwAbstraction/SaftyFW boundary. TX/RX pin values are now passed in by
+// the caller at uart_owner_init() time (uart_owner_pins_t,
+// hal_uart_pico_internal.h) instead -- SaftyFW's own callers still read
+// board_pins.h and forward its values here.
 #include "uart_owner_tx_policy.h"
 
 #define UART_OWNER_INSTANCE   uart1
@@ -232,11 +230,15 @@ static void uart_owner_irq_handler(void)
     }
 }
 
-bool uart_owner_init(void)
+bool uart_owner_init(const uart_owner_pins_t *pins)
 {
+    if (!pins) {
+        return false;
+    }
+
     uart_init(UART_OWNER_INSTANCE, UART_OWNER_BAUD_RATE);
-    gpio_set_function(SAFTYFW_PIN_UART1_TX, GPIO_FUNC_UART);
-    gpio_set_function(SAFTYFW_PIN_UART1_RX, GPIO_FUNC_UART);
+    gpio_set_function(pins->tx_pin, GPIO_FUNC_UART);
+    gpio_set_function(pins->rx_pin, GPIO_FUNC_UART);
 
     // NO line inversion on this pin -- deliberately, and it must stay that
     // way unless the part on the board changes back.

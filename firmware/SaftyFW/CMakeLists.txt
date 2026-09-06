@@ -193,15 +193,13 @@ target_include_directories(hwabstraction_pico PUBLIC
     ${HWABSTRACTION_PICO_DIR}/flash
     ${HWABSTRACTION_DIR}/interface
 )
-# TEMPORARY (HAL Phase 1b): spi_owner.c and uart_owner.c both still include
-# SaftyFW's own src/board/board_pins.h (a SaftyFW header, not part of
-# hwAbstraction/) -- see each file's own TEMPORARY comment on that include.
-# Given this private include dir instead of moving/duplicating board_pins.h.
-# Scoped to src/board (not all of src) so this library only ever sees the
-# one header it actually needs, not SaftyFW's whole private source tree.
-target_include_directories(hwabstraction_pico PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/src/board
-)
+# CLOSED 2026-09-06 (HAL Phase 1b, docs/HW_ABSTRACTION_PLAN.md): this used to
+# give hwabstraction_pico a PRIVATE include dir on src/board so spi_owner.c
+# and uart_owner.c could reach SaftyFW's own board_pins.h across the
+# hwAbstraction/SaftyFW boundary. Both files now take their pin values as
+# init-time parameters instead (spi_owner_pins_t/uart_owner_pins_t) --
+# neither includes board_pins.h any more, so this library needs no
+# visibility into SaftyFW's private src/ tree at all.
 # FreeRTOSConfig.h lives at the SaftyFW project root (same file SaftyFW's own
 # target_include_directories(SaftyFW PRIVATE ${CMAKE_CURRENT_LIST_DIR} ...)
 # exposes). Linking FreeRTOS-Kernel PUBLIC into this library means every

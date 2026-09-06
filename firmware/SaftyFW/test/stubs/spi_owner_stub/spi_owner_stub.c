@@ -41,8 +41,11 @@ const uint8_t *spi_owner_stub_last_tx(void) { return s_last_tx; }
 bool spi_owner_stub_last_rx_was_null(void) { return s_last_rx_was_null; }
 size_t spi_owner_stub_last_len_arg(void) { return s_last_len_arg; }
 
-bool spi_owner_init(void)
+bool spi_owner_init(const spi_owner_pins_t *pins)
 {
+    (void)pins; /* not needed by any current test -- hal_spi_pico.c's own
+                 * unit tests exercise pin PASS-THROUGH via hal_spi_bus_cfg_t,
+                 * not spi_owner.c's internal use of the value. */
     s_init_count++;
     return s_init_result;
 }

@@ -31,14 +31,28 @@
 extern "C" {
 #endif
 
+// HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md, "close the upward include"):
+// the pin values used to come straight from SaftyFW's own board_pins.h via a
+// same-name #include reaching upward across the hwAbstraction/SaftyFW
+// boundary. They are now handed in by the caller at init time instead --
+// SaftyFW's own callers (main.c/max31856.c) still read board_pins.h and pass
+// its values through here, but this file (and hal_spi_pico.c above it) no
+// longer includes that header at all.
+typedef struct {
+    uint8_t sck_pin;
+    uint8_t mosi_pin;
+    uint8_t miso_pin;
+    uint8_t cs0_pin;
+} spi_owner_pins_t;
+
 // Brings up SPI0 at 4 MHz / mode 1 (CPOL 0, CPHA 1 -- the datasheet's
 // "CPHA bit polarity must be set to 1", THERMOCOUPLE.md section 1) on
-// SAFTYFW_PIN_SPI0_{SCK,MOSI,MISO}, and configures SAFTYFW_PIN_SPI0_CS0 as a
+// pins->{sck_pin,mosi_pin,miso_pin}, and configures pins->cs0_pin as a
 // plain GPIO output, idling high (a CS left low would let the part latch
 // garbage the moment SCLK starts toggling for any other reason). Creates the
 // transfer mutex. Safe to call once; returns false (and leaves the mutex
-// unset) if the mutex allocation fails.
-bool spi_owner_init(void);
+// unset) if pins is NULL or the mutex allocation fails.
+bool spi_owner_init(const spi_owner_pins_t *pins);
 
 // One CS-low/transfer/CS-high transaction: tx and rx are both `len` bytes
 // (rx may be NULL if the caller does not need the read-back, matching
