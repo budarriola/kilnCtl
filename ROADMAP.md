@@ -73,7 +73,7 @@ open is short:
 |---|---|---|
 | **XL** | CTs — deferred, 2026-09-05. Analysis lives in `docs/CONTACTOR_FEEDBACK_OPTIONS.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5 |
 | **M** | **New CT hardware, 2026-09-05**: a real CT is now fitted on `Current3`/GPIO28-ADC2 (1A:1V, ~+59 mV DC offset, SUMMED across all heaters). (a) No firmware change needed — commissioning recipe in `firmware/SaftyFW/docs/CURRENT_SENSE.md` §5.2 (`zero_counts[2]`/`k_ct_v_per_a[2]`=0.989 via existing SET_PARAM ids); values not yet written to the Pico. (b) S9/S11 usable whole-board only, S3/S4/S14 still need per-zone CTs. | M4/M5; `firmware/SaftyFW/docs/CURRENT_SENSE.md` §5.2, `GUARD_TEST_MATRIX.md` |
-| **S** | **Safety TC display audit, 2026-09-05**: the safety processor's own thermocouple should show under "Thermocouple faults" on LCD/web/PcTools UI only when it is a SEPARATE physical TC (`tc_source == SAFETY_TC_SOURCE_OWN_J7` in `firmware/SaftyFW/src/safety_guards.h`) — hide/suppress it when safety is off or configured `BORROWED_ZONE`/`BOTH` (reusing a main TC). Audit every display site; no firmware changed yet. | `firmware/SaftyFW/src/safety_guards.h` (tc_source); `firmware/SaftyFW/docs/SAFETY_MODEL.md` §3 |
+| — | ~~Safety TC display audit, 2026-09-05~~ — done, `b90fcb3`: one predicate, `safety_tc_is_separate_physical_sensor()` (mirrored as `window.kcSafetyTcIsSeparate` in `app.js`), now gates the LCD diagnostics page, dashboard, zones page and `/api/status`; unknown/pre-protocol-10 status shows rather than hides. | `firmware/SaftyFW/src/safety_guards.h` (tc_source); `firmware/SaftyFW/docs/SAFETY_MODEL.md` §3 |
 | S | S8 sanity rate — `c43323a`+`ea69efa` set compiled default 33.3 C/min (2x fastest shipped ramp), fields_set-gated. Bench commission of 14.85 C/min NOT yet applied: Pico refuses config writes while ARMED, write must land during the 60 s GRACE window after a Pico reset. | M3 |
 | — | High-temperature validation firing — closed 2026-09-05, `94b1a2a` confirms ff_hold infeasible above 62 °C on hardware. | `PID_EXPANSION_PLAN.md` §3.6i |
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |
@@ -86,7 +86,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
-| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phase 1a still pending | M16; `docs/HW_ABSTRACTION_PLAN.md` |
+| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict). Open: a hardware timing re-check and `esp_random.h`'s hal_sysinfo classification — see `docs/HW_ABSTRACTION_PLAN.md` | M16; `docs/HW_ABSTRACTION_PLAN.md` |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
 
 ### Blocked on hardware that does not exist yet
@@ -1376,33 +1376,35 @@ file maps and the "patterns worth copying" list:
 
 ---
 
-## M16 — Source layering and hardware abstraction · *opened 2026-09-05, in progress*
+## M16 — Source layering and hardware abstraction · *opened 2026-09-05, HAL work done, two items open*
 
 Two related reorganisations of the firmware trees, planned in full in
-[`docs/HW_ABSTRACTION_PLAN.md`](docs/HW_ABSTRACTION_PLAN.md). The six
-upward-include untangles are DONE; the `firmware/hwAbstraction/` tree exists
-with all interface headers, ESP backends (common/gpio/uart/spi/i2c/kv/time/
-wdt/pwm/sysinfo), Pico backends (gpio/adc/uart/time/flash/scratch/wdt), and
-host fakes for every interface; nothing is wired into CMakeLists yet
-(Phase 1a, the actual move, has not started). The `drivers/` directory move
-itself was applied in `9f18ca5` (2026-09-05).
+[`docs/HW_ABSTRACTION_PLAN.md`](docs/HW_ABSTRACTION_PLAN.md). Both are done:
+the `drivers/` directory move (`9f18ca5`, 2026-09-05) and all five HAL
+phases (0-4 — every interface has a real ESP and/or Pico backend plus a
+host fake, every named production consumer is migrated, and
+`check_hal_include_boundary.ps1`'s enforcement is strict, not just a
+ratchet). Durable conventions and the holdout list moved to
+`firmware/hwAbstraction/README.md`. Two items remain open, tracked in the
+plan doc's "Open" section: a hardware timing re-check (safety-link reply,
+display frame time, thermo read latency — host tests can't see this) and
+classifying `esp_random.h` (10 files) into `hal_sysinfo`. Everything else
+named as unmigrated in the plan (Wi-Fi/httpd/LVGL, OTA partition writes,
+the SaftyFW bootloader, `firmware/UnitTestFw`) is an owner-decided
+permanent holdout, not open work.
 
 1. **KilnFW `drivers/` layering** (KilnFW only) — DONE (`9f18ca5`,
    2026-09-05). `App/drivers/` reorganised into
    `App/drivers/{hw,owners,control,safety,persist,net,http,ui,bridge,sim,
    common}/`, 359 renames, CMakeLists SRCS rewritten and `check_*.ps1`
-   scripts re-greped for old paths. Plan section "drivers/ layering".
-2. **`firmware/hwAbstraction/{interface,esp,pico,host}`** — link-time
+   scripts re-greped for old paths.
+2. **`firmware/hwAbstraction/{interface,esp,pico,host}`** — DONE. Link-time
    backends for spi/i2c/uart/gpio/adc/kv/flash/scratch/time/wdt/pwm/sysinfo
-   over ESP-IDF and pico-sdk, with host fakes replacing the stub-header
-   include trick interface by interface. Phase 0 (headers, sizes, MSVC
-   compile) through Phase 4 (include-direction check goes strict). Phase 1a
-   moves `espInterfaces/` only after item 1 so paths move once.
+   over ESP-IDF and pico-sdk, with host fakes replacing the old stub-header
+   include trick.
 
-Sequence: untangle includes (done), reorg (done, `9f18ca5`), then HAL Phase 1a.
-All owner decisions are taken (2026-09-05): tree location/naming as above,
-opaque-storage option a, hal_uart `send` + `send_blocking`.
-`firmware/UnitTestFw` stays untouched throughout.
+`firmware/UnitTestFw` stays untouched throughout (owner decision, do not
+re-propose folding it in).
 
 Gates: `build_kilnfw` + all 23 host executables green after every commit;
 every check script proven able to go red after the move (nine of twelve
