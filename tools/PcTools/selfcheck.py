@@ -78,7 +78,7 @@ from selfcheck_zones_fields import zones_field_table_checks  # noqa: F401
 # which is the failure actually worth detecting.
 _UART_TASK_IDS_H_PATH = (
     pathlib.Path(__file__).resolve().parents[2]
-    / "firmware" / "KilnFW" / "App" / "drivers" / "uart_task_ids.h"
+    / "firmware" / "KilnFW" / "App" / "drivers" / "common" / "uart_task_ids.h"
 )
 _UART_PROTOCOL_VERSION_RE = re.compile(
     r"#define\s+UART_PROTOCOL_VERSION\s+\(\(uint16_t\)\s*([0-9]+)\)"

@@ -27,6 +27,7 @@ from .display import BlitError, DisplayClient, DisplayQueryError
 from .info import InfoClient, InfoQueryError
 from .io_expander import IoClient, IoQueryError
 from .protocol import (
+    FACTORY_RESET_SCOPE_WIFI,
     THERMO_CHANNEL_ALL,
     UART_TASK_ID_DISPLAY,
     UART_TASK_ID_IO,
@@ -727,6 +728,20 @@ _register(
     "a recovery lever for a stuck/desynced link, without power-cycling the board.",
     {},
     lambda ctx: _send(ctx, UART_TASK_ID_SYSTEM, devices.system_restart_uart()),
+)
+_register(
+    "System: Factory Reset",
+    "Erase NVS-backed configuration and reboot the device (SYSTEM_CMD_FACTORY_RESET). "
+    "scope: 0=wifi (saved networks, AP identity), 1=kiln (zones, PID), "
+    "2=profiles (fire profiles), 3=all. Mirrors the GUI's Danger Zone button, minus "
+    "its confirmation dialogs -- this sends immediately. No reply frame; the device "
+    "reboots ~500ms after the ACK, so poll \"INFO: Get FW Version\" (or get_fw_version) "
+    "to confirm it came back up. Unlike load_config_preset()'s factory-reset path, this "
+    "does NOT apply any preset afterward -- it only erases.",
+    {"scope": int},
+    lambda ctx, scope=FACTORY_RESET_SCOPE_WIFI: _send(
+        ctx, UART_TASK_ID_SYSTEM, devices.system_factory_reset(scope)
+    ),
 )
 _register(
     "System: Get Watchdog Panic Disabled",

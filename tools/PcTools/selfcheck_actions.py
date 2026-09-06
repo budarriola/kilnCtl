@@ -70,6 +70,7 @@ def actions_checks() -> None:
         UART_TASK_ID_INFO,
         UART_TASK_ID_IO,
         UART_TASK_ID_SAFETY,
+        UART_TASK_ID_SYSTEM,
         UART_TASK_ID_THERMO,
     )
     from kilnctrl.safety import SafetyClient
@@ -81,13 +82,14 @@ def actions_checks() -> None:
         check(f"action {name!r} has a description", bool(action.description), True)
         check(f"action {name!r} is callable", callable(action.run), True)
 
-    _a, _b, host, esp, (info_inbox, thermo_inbox, io_inbox, display_inbox, safety_inbox) = _make_pair(
+    _a, _b, host, esp, (info_inbox, thermo_inbox, io_inbox, display_inbox, safety_inbox, system_inbox) = _make_pair(
         (
             UART_TASK_ID_INFO,
             UART_TASK_ID_THERMO,
             UART_TASK_ID_IO,
             UART_TASK_ID_DISPLAY,
             UART_TASK_ID_SAFETY,
+            UART_TASK_ID_SYSTEM,
         )
     )
 
@@ -123,6 +125,7 @@ def actions_checks() -> None:
         stop, safety_inbox, esp, UART_TASK_ID_SAFETY,
         lambda p: safety_status_reply if p[0] == 0x01 else None,
     )
+    _responder(stop, system_inbox, esp, UART_TASK_ID_SYSTEM, lambda p: None)
 
     info_client = InfoClient(host)
     thermo_client = ThermoClient(host)
@@ -182,6 +185,9 @@ def actions_checks() -> None:
 
         result = actions.ACTIONS["Display: Test Pattern"].run(ctx, width=8, height=4)
         check("Display: Test Pattern streams", result.startswith("ok"), True)
+
+        result = actions.ACTIONS["System: Factory Reset"].run(ctx, scope=0)
+        check("System: Factory Reset succeeds", result.startswith("ok"), True)
 
         pin_text = actions.ACTIONS["INFO: Get Pin Config"].run(ctx)
         check("INFO: Get Pin Config returns entries", "GPIO8" in pin_text, True)

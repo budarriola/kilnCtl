@@ -55,8 +55,8 @@ _DRIVERS_DIR = (
     pathlib.Path(__file__).resolve().parents[2]
     / "firmware" / "KilnFW" / "App" / "drivers"
 )
-_ZONES_GET_C_PATH = _DRIVERS_DIR / "zones_http_get.c"
-_ZONES_POST_C_PATH = _DRIVERS_DIR / "zones_http_post.c"
+_ZONES_GET_C_PATH = _DRIVERS_DIR / "http" / "zones_http_get.c"
+_ZONES_POST_C_PATH = _DRIVERS_DIR / "http" / "zones_http_post.c"
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: Between two adjacent (C-concatenated) string-literal fragments of one
