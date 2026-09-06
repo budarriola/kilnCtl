@@ -80,6 +80,7 @@ int main(void)
     CHECK(hal_spi_bus_init(&bus, 0, &bus_cfg) == HAL_OK);
     CHECK(fake_spi_bus_is_live(&bus) == true);
     CHECK(hal_spi_bus_is_wedged(&bus) == false);
+    CHECK(hal_spi_get_task_handle(&bus) == NULL); /* host fake has no owner task */
 
     hal_spi_device_t dev;
     memset(&dev, 0, sizeof(dev));

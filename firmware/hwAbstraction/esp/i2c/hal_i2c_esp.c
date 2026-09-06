@@ -7,18 +7,24 @@
  * calls. Not wired into any CMakeLists yet -- see
  * firmware/hwAbstraction/test/compile_esp_backends.ps1.
  *
- * INTERFACE MISMATCH (hal_i2c.h NOT widened to fix this): the real
- * i2c_owner_init() takes queue_len, task_priority, stack_depth and core_id
- * (SX1509.c:414 passes (bus, 8, 5, 4096, tskNO_AFFINITY); FT6336U.c:113 and
- * NS2009.c:83 both pass (bus, 8, 5, 3072, tskNO_AFFINITY)) so each attached
- * device's owner task can be sized independently and registered for
- * stack-margin reporting with a caller-known stack_depth. hal_i2c_bus_init()
- * takes only {bus, bus_id, scl_pin, sda_pin} -- no task-sizing knobs at all.
- * This backend hardcodes HAL_I2C_ESP_TASK_STACK/_PRIORITY/_QUEUE_LEN below
- * to the largest real call site's values (4096, matching SX1509's, so no
- * real caller is under-provisioned relative to today) since a caller cannot
- * request a smaller/larger size through this interface. Flagged here and in
- * the task report.
+ * 2026-09-05 review fix: hal_i2c_bus_cfg_t (interface/hal_i2c.h) now carries
+ * queue_len/task_priority/stack_depth/core_id, mirroring hal_spi_bus_cfg_t,
+ * so each attached device's owner task CAN be sized independently by its
+ * caller (SX1509.c:414's real call passes (8, 5, 4096, tskNO_AFFINITY);
+ * FT6336U.c:113/NS2009.c:83 both pass (8, 5, 3072, tskNO_AFFINITY)) and
+ * registered for stack-margin reporting via hal_i2c_get_task_handle() below.
+ * 0 in any cfg field means "backend default" -- HAL_I2C_ESP_DEFAULT_*
+ * below, matching SX1509's larger sizing so a caller that leaves a field at
+ * 0 is never under-provisioned relative to today.
+ *
+ * Also fixed 2026-09-05: the ALREADY_INIT branch (bus_id shared by two
+ * devices, e.g. SX1509 + touch on one i2c_port_num_t) used to return HAL_OK
+ * with impl->bus left NULL and no queue/task created for THIS hal_i2c_bus_t
+ * instance, so every later attach/transfer/probe on it returned
+ * HAL_NOT_READY forever. Now recovers the real handle via
+ * i2c_master_get_bus_handle() and falls through to create this bus_t's own
+ * queue/task, exactly as hal_spi_bus_init() already did for its identical
+ * ALREADY_INIT case.
  *
  * Two hard-won behaviors from i2c_owner.c this backend must preserve
  * (interface/hal_i2c.h's own contract comment, and
@@ -55,12 +61,16 @@
 
 static const char *TAG = "hal_i2c_esp";
 
-/* INTERFACE MISMATCH above: hardcoded because hal_i2c_bus_init() has no
- * task-sizing fields. Matches SX1509.c:414's call (the larger of the two
- * live stack_depth values in the tree today). */
-#define HAL_I2C_ESP_TASK_STACK    4096
-#define HAL_I2C_ESP_TASK_PRIORITY 5
-#define HAL_I2C_ESP_QUEUE_LEN     8
+/* Backend defaults used when hal_i2c_bus_cfg_t's corresponding field is 0
+ * ("backend default" per hal_i2c.h) -- matches SX1509.c:414's call (the
+ * larger of the two live stack_depth values in the tree today, so a caller
+ * that leaves this at 0 is never under-provisioned relative to today). A
+ * caller that needs FT6336U/NS2009's smaller 3072 sizing now passes it
+ * explicitly via cfg->stack_depth instead of being stuck with a hardcoded
+ * value -- this is the fix for the widened interface's whole point. */
+#define HAL_I2C_ESP_DEFAULT_TASK_STACK    4096
+#define HAL_I2C_ESP_DEFAULT_TASK_PRIORITY 5
+#define HAL_I2C_ESP_DEFAULT_QUEUE_LEN     8
 
 typedef struct {
     i2c_master_dev_handle_t device;
@@ -188,36 +198,59 @@ static void hal_i2c_esp_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-hal_status_t hal_i2c_bus_init(hal_i2c_bus_t *bus, int bus_id, int scl_pin, int sda_pin) {
-    if (!bus) {
+hal_status_t hal_i2c_bus_init(hal_i2c_bus_t *bus, int bus_id, const hal_i2c_bus_cfg_t *cfg) {
+    if (!bus || !cfg) {
         return HAL_INVALID_ARG;
     }
     hal_i2c_esp_bus_impl_t *impl = bus_impl_of(bus);
     memset(impl, 0, sizeof(*impl));
 
+    uint32_t queue_len = cfg->queue_len ? cfg->queue_len : HAL_I2C_ESP_DEFAULT_QUEUE_LEN;
+    int task_priority = cfg->task_priority ? cfg->task_priority : HAL_I2C_ESP_DEFAULT_TASK_PRIORITY;
+    uint32_t stack_depth = cfg->stack_depth ? cfg->stack_depth : HAL_I2C_ESP_DEFAULT_TASK_STACK;
+    BaseType_t core_id = (cfg->core_id == HAL_CORE_ANY) ? tskNO_AFFINITY : (BaseType_t)cfg->core_id;
+
     i2c_master_bus_config_t bus_config = {
         .i2c_port = (i2c_port_num_t)bus_id,
-        .sda_io_num = (gpio_num_t)sda_pin,
-        .scl_io_num = (gpio_num_t)scl_pin,
+        .sda_io_num = (gpio_num_t)cfg->sda_pin,
+        .scl_io_num = (gpio_num_t)cfg->scl_pin,
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
     esp_err_t err = i2c_new_master_bus(&bus_config, &impl->bus);
+    bool already_up = false;
     if (err == ESP_ERR_INVALID_STATE) {
         /* ALREADY_INIT per hal_i2c.h/hal_spi.h's shared decision: benign
-         * re-entry (e.g. a JTAG-reset re-bringup), not caller error. */
-        ESP_LOGI(TAG, "i2c bus %d already initialized; treating as OK", bus_id);
-        return HAL_OK;
-    }
-    if (err != ESP_OK) {
+         * re-entry (e.g. a JTAG-reset re-bringup), not caller error. BUT
+         * this hal_i2c_bus_t instance still has no bus handle, request
+         * queue or owner task yet -- returning HAL_OK here without
+         * recovering them (the pre-fix bug) left impl->bus/request_queue
+         * NULL, so every later attach/transfer/probe on THIS bus_t
+         * returned HAL_NOT_READY forever, even though the underlying port
+         * was fine (hit whenever two devices, e.g. SX1509 + touch, share
+         * one i2c_port_num_t). Recover the existing handle via
+         * i2c_master_get_bus_handle() and fall through to create this
+         * bus_t's own queue/task, exactly as hal_spi_bus_init() already
+         * does for the identical ALREADY_INIT case. */
+        err = i2c_master_get_bus_handle((i2c_port_num_t)bus_id, &impl->bus);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "i2c bus %d already initialized but i2c_master_get_bus_handle failed: %s",
+                     bus_id, esp_err_to_name(err));
+            return hal_esp_err_to_status(err);
+        }
+        ESP_LOGI(TAG, "i2c bus %d already initialized; recovered handle, treating as OK", bus_id);
+        already_up = true;
+    } else if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(err));
         return hal_esp_err_to_status(err);
     }
 
-    impl->request_queue = xQueueCreate(HAL_I2C_ESP_QUEUE_LEN, sizeof(hal_i2c_esp_request_t));
+    impl->request_queue = xQueueCreate(queue_len, sizeof(hal_i2c_esp_request_t));
     if (!impl->request_queue) {
-        i2c_del_master_bus(impl->bus);
+        if (!already_up) {
+            i2c_del_master_bus(impl->bus);
+        }
         impl->bus = NULL;
         return HAL_NO_MEM;
     }
@@ -226,27 +259,42 @@ hal_status_t hal_i2c_bus_init(hal_i2c_bus_t *bus, int bus_id, int scl_pin, int s
     if (!impl->shutdown_done) {
         vQueueDelete(impl->request_queue);
         impl->request_queue = NULL;
-        i2c_del_master_bus(impl->bus);
+        if (!already_up) {
+            i2c_del_master_bus(impl->bus);
+        }
         impl->bus = NULL;
         return HAL_NO_MEM;
     }
 
     BaseType_t task_created = xTaskCreatePinnedToCore(hal_i2c_esp_task, "hal_i2c_owner",
-                                                       HAL_I2C_ESP_TASK_STACK, impl,
-                                                       HAL_I2C_ESP_TASK_PRIORITY, &impl->task_handle,
-                                                       tskNO_AFFINITY);
+                                                       stack_depth, impl,
+                                                       task_priority, &impl->task_handle,
+                                                       core_id);
     if (task_created != pdPASS) {
         vQueueDelete(impl->request_queue);
         impl->request_queue = NULL;
         vSemaphoreDelete(impl->shutdown_done);
         impl->shutdown_done = NULL;
-        i2c_del_master_bus(impl->bus);
+        if (!already_up) {
+            i2c_del_master_bus(impl->bus);
+        }
         impl->bus = NULL;
         return HAL_NO_MEM;
     }
 
     impl->initialized = true;
     return HAL_OK;
+}
+
+void *hal_i2c_get_task_handle(const hal_i2c_bus_t *bus) {
+    if (!bus) {
+        return NULL;
+    }
+    const hal_i2c_esp_bus_impl_t *impl = (const hal_i2c_esp_bus_impl_t *)(const void *)bus->storage;
+    if (!impl->initialized) {
+        return NULL;
+    }
+    return (void *)impl->task_handle;
 }
 
 hal_status_t hal_i2c_bus_deinit(hal_i2c_bus_t *bus) {

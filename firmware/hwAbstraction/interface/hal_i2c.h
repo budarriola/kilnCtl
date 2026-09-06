@@ -46,13 +46,44 @@ typedef struct {
     HAL_ALIGNAS8 uint8_t storage[HAL_I2C_DEVICE_STORAGE_BYTES];
 } hal_i2c_device_t;
 
+/* Owner-task sizing, mirroring hal_spi_bus_cfg_t's field names/shape
+ * (interface/hal_spi.h) -- the real i2c_owner_init() takes queue_len,
+ * task_priority, stack_depth and core_id per call site (SX1509.c:414 passes
+ * (8, 5, 4096, tskNO_AFFINITY); FT6336U.c:113/NS2009.c:83 both pass (8, 5,
+ * 3072, tskNO_AFFINITY)) so each attached device's owner task can be sized
+ * independently and registered for stack-margin reporting with a
+ * caller-known stack_depth. 0 in any field means "backend default", equal
+ * to the real value for this instance class today (queue_len 8,
+ * task_priority 5, stack_depth 4096 -- the larger of the two live call
+ * sites, so no real caller is under-provisioned relative to today). core_id:
+ * HAL_CORE_ANY (hal_status.h) or an explicit core number. */
+typedef struct {
+    int scl_pin;
+    int sda_pin;
+    uint32_t queue_len;
+    int task_priority;
+    uint32_t stack_depth;
+    int core_id;
+} hal_i2c_bus_cfg_t;
+
 /* Same ALREADY_INIT decision as hal_spi_bus_init (see hal_spi.h): a bus
  * already initialized (e.g. re-entry after a soft reset) returns HAL_OK
  * with an INFO log, not HAL_BUSY, for the same reason -- benign re-entry,
- * not caller error, not a signal to retry. */
+ * not caller error, not a signal to retry. On this path the backend must
+ * still recover a usable bus handle and still create THIS hal_i2c_bus_t's
+ * own request queue/owner task -- a fresh hal_i2c_bus_t has neither yet
+ * even though the underlying peripheral is already up (mirrors
+ * hal_spi_bus_init's identical ALREADY_INIT handling). */
 hal_status_t hal_i2c_bus_init(hal_i2c_bus_t *bus, int bus_id,
-                               int scl_pin, int sda_pin);
+                               const hal_i2c_bus_cfg_t *cfg);
 hal_status_t hal_i2c_bus_deinit(hal_i2c_bus_t *bus);
+
+/* Returns the backend's owner-task handle (FreeRTOS TaskHandle_t on ESP,
+ * cast to void*) for stack-margin registration BY THE CALLER -- see
+ * hal_uart_get_task_handle's doc comment (hal_uart.h) for the full
+ * rationale, identical here. NULL if bus has no task (not initialized, or a
+ * backend with no owner task, e.g. host today). */
+void *hal_i2c_get_task_handle(const hal_i2c_bus_t *bus);
 
 hal_status_t hal_i2c_device_attach(hal_i2c_bus_t *bus, hal_i2c_device_t *dev,
                                     uint8_t addr, uint32_t clock_hz);

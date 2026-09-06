@@ -55,9 +55,18 @@
  *  - Buffer-copy-in/out: get_blob with a NULL buffer is a size probe only
  *    (writes *out_len, touches no caller buffer) -- the same two-call
  *    pattern kiln_cfg_store.c uses today.
- *  - Nothing is durable until hal_kv_commit(); callers that assume
- *    set-then-crash loses the write are relying on documented, not
- *    accidental, behavior.
+ *  - Durability: a hal_kv_set_blob/_str call MAY already be durable before
+ *    hal_kv_commit() returns -- real NVS's nvs_set_* writes to flash
+ *    immediately and nvs_commit() is close to a no-op on top of that, so
+ *    "nothing is durable until commit" does not hold for the ESP backend.
+ *    What IS guaranteed: hal_kv_commit() makes every write issued on that
+ *    handle before the call durable, unconditionally. Callers must not rely
+ *    on a set-then-crash (power loss / reset before commit) losing the
+ *    write -- that behavior is backend- and even call-specific (NVS page
+ *    write timing), not a portable guarantee this interface makes. A
+ *    caller that needs "not visible after a crash unless committed" as an
+ *    actual property must arrange it itself (e.g. a separate commit-flag
+ *    key), not lean on this contract.
  */
 #ifndef KILNCTL_HAL_KV_H
 #define KILNCTL_HAL_KV_H

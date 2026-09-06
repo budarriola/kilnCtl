@@ -78,11 +78,29 @@ int main(void)
     CHECK(hal_kv_get_blob(&h, "cal", got, &len) == HAL_OK);
     CHECK(len == sizeof(val) && memcmp(got, val, sizeof(val)) == 0);
 
-    /* --- durability: power loss before commit discards the write --- */
+    /* --- durability: power loss before commit KEEPS the write by default
+     * (hal_kv.h: a set MAY already be durable before commit -- real NVS
+     * writes to flash immediately) --- */
     fake_kv_simulate_power_loss();
     CHECK(fake_kv_has_uncommitted_writes("kiln_nvs") == false);
     len = sizeof(got);
-    CHECK(hal_kv_get_blob(&h, "cal", got, &len) == HAL_NOT_FOUND);
+    CHECK(hal_kv_get_blob(&h, "cal", got, &len) == HAL_OK);
+    CHECK(memcmp(got, val, sizeof(val)) == 0);
+
+    /* --- opt-in lossy mode: the OLD over-approximating behavior, power
+     * loss before commit discards the write. Reuses the already-committed
+     * "cal" key (rather than a new one) so this does not consume one of
+     * kiln_cfg's FAKE_KV_MAX_KEYS_PER_NS key slots, which the later
+     * "nospace" write-failure-injection test below depends on having free. */
+    uint8_t val2[4] = {9, 9, 9, 9};
+    CHECK(hal_kv_set_blob(&h, "cal", val2, sizeof(val2)) == HAL_OK); /* pending overwrite */
+    fake_kv_set_lossy_uncommitted(true);
+    fake_kv_simulate_power_loss();
+    CHECK(fake_kv_has_uncommitted_writes("kiln_nvs") == false);
+    len = sizeof(got);
+    CHECK(hal_kv_get_blob(&h, "cal", got, &len) == HAL_OK); /* reverts to the old committed value */
+    CHECK(memcmp(got, val, sizeof(val)) == 0);
+    fake_kv_set_lossy_uncommitted(false);
 
     /* --- durability: commit before power loss survives it --- */
     CHECK(hal_kv_set_blob(&h, "cal", val, sizeof(val)) == HAL_OK);
@@ -213,6 +231,18 @@ int main(void)
     CHECK(hal_kv_write_safe_here() == false);
     fake_kv_reset_all();
     CHECK(hal_kv_write_safe_here() == true); /* reset restores default */
+
+    /* --- fake_kv_set_lossy_uncommitted default is false (keep-on-power-loss),
+     * and reset_all restores it --- */
+    CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK);
+    hal_kv_handle_t h2;
+    memset(&h2, 0, sizeof(h2));
+    CHECK(hal_kv_open(&h2, "kiln_cfg", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK);
+    CHECK(hal_kv_set_blob(&h2, "cal", val, sizeof(val)) == HAL_OK);
+    fake_kv_simulate_power_loss(); /* default: kept */
+    len = sizeof(got);
+    CHECK(hal_kv_get_blob(&h2, "cal", got, &len) == HAL_OK);
+    fake_kv_reset_all();
 
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

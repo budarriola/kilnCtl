@@ -216,10 +216,10 @@ static void consume_rx_script(fake_i2c_addr_script_t *s, uint8_t *out, size_t ou
 }
 
 hal_status_t hal_i2c_bus_init(hal_i2c_bus_t *bus, int bus_id,
-                               int scl_pin, int sda_pin)
+                               const hal_i2c_bus_cfg_t *cfg)
 {
-    (void)bus_id; (void)scl_pin; (void)sda_pin;
-    if (bus == NULL) return HAL_INVALID_ARG;
+    (void)bus_id; (void)cfg;
+    if (bus == NULL || cfg == NULL) return HAL_INVALID_ARG;
 
     int free_slot = -1;
     for (int i = 0; i < FAKE_I2C_MAX_BUSES; i++) {
@@ -319,4 +319,11 @@ hal_status_t hal_i2c_probe(hal_i2c_bus_t *bus, uint8_t addr, uint32_t timeout_ms
     fake_i2c_addr_script_t *s = find_script(b, addr);
     if (s && s->nack) return HAL_NOT_FOUND;
     return HAL_OK;
+}
+
+void *hal_i2c_get_task_handle(const hal_i2c_bus_t *bus)
+{
+    /* Host fake has no owner task at all. */
+    (void)bus;
+    return NULL;
 }

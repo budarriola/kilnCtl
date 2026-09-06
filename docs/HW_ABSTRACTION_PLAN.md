@@ -337,6 +337,12 @@ hal_adc is ever proposed.
 
 ### hal_kv — ESP-only, wraps NVS. Pico explicitly excluded.
 
+2026-09-05 review fix: the durability contract was corrected from "nothing
+durable until commit" to "a set MAY already be durable before commit; commit
+guarantees everything before it" (real `nvs_set_*` writes to flash
+immediately) -- see hal_kv.h's threading/ownership contract and
+fake_kv_simulate_power_loss()/fake_kv_set_lossy_uncommitted() in fake_kv.h.
+
 NVS census, re-done function by function: `nvs_open_from_partition` ~25
 files, plain `nvs_open` (default partition) in relay_cycles.c:96 and
 run_state.c:131, `nvs_get/set_blob` ~20 files (size-probe form at

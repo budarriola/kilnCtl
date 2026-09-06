@@ -21,7 +21,11 @@ int main(void)
     /* --- init: NULL args -> HAL_INVALID_ARG --- */
     hal_i2c_bus_t bus;
     memset(&bus, 0, sizeof(bus));
-    CHECK(hal_i2c_bus_init(NULL, 0, 21, 22) == HAL_INVALID_ARG);
+    hal_i2c_bus_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.scl_pin = 21; cfg.sda_pin = 22;
+    CHECK(hal_i2c_bus_init(NULL, 0, &cfg) == HAL_INVALID_ARG);
+    CHECK(hal_i2c_bus_init(&bus, 0, NULL) == HAL_INVALID_ARG);
 
     /* --- uninitialized handles: every call -> HAL_NOT_READY --- */
     hal_i2c_bus_t garbage_bus;
@@ -38,8 +42,9 @@ int main(void)
     CHECK(fake_i2c_script_rx(&garbage_bus, 0x40, txb, 4) == HAL_NOT_READY);
 
     /* --- init succeeds --- */
-    CHECK(hal_i2c_bus_init(&bus, 0, 21, 22) == HAL_OK);
+    CHECK(hal_i2c_bus_init(&bus, 0, &cfg) == HAL_OK);
     CHECK(fake_i2c_bus_is_live(&bus) == true);
+    CHECK(hal_i2c_get_task_handle(&bus) == NULL); /* host fake has no owner task */
 
     /* --- probe: default (unscripted) address ACKs --- */
     CHECK(hal_i2c_probe(&bus, 0x3E, 200) == HAL_OK);
@@ -125,7 +130,7 @@ int main(void)
     {
         hal_i2c_bus_t b2;
         memset(&b2, 0, sizeof(b2));
-        CHECK(hal_i2c_bus_init(&b2, 0, 21, 22) == HAL_OK);
+        CHECK(hal_i2c_bus_init(&b2, 0, &cfg) == HAL_OK);
         hal_i2c_device_t devs[FAKE_I2C_MAX_DEVICES];
         for (int i = 0; i < FAKE_I2C_MAX_DEVICES; i++) {
             memset(&devs[i], 0, sizeof(devs[i]));
@@ -142,13 +147,13 @@ int main(void)
         hal_i2c_bus_t buses[FAKE_I2C_MAX_BUSES];
         for (int i = 0; i < FAKE_I2C_MAX_BUSES; i++) {
             memset(&buses[i], 0, sizeof(buses[i]));
-            CHECK(hal_i2c_bus_init(&buses[i], i, 21, 22) == HAL_OK);
+            CHECK(hal_i2c_bus_init(&buses[i], i, &cfg) == HAL_OK);
         }
         hal_i2c_bus_t one_too_many_bus;
         memset(&one_too_many_bus, 0, sizeof(one_too_many_bus));
-        CHECK(hal_i2c_bus_init(&one_too_many_bus, 99, 21, 22) == HAL_NO_MEM);
+        CHECK(hal_i2c_bus_init(&one_too_many_bus, 99, &cfg) == HAL_NO_MEM);
         CHECK(hal_i2c_bus_deinit(&buses[0]) == HAL_OK);
-        CHECK(hal_i2c_bus_init(&one_too_many_bus, 99, 21, 22) == HAL_OK);
+        CHECK(hal_i2c_bus_init(&one_too_many_bus, 99, &cfg) == HAL_OK);
     }
 
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);

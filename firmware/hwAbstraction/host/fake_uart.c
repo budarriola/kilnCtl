@@ -174,6 +174,17 @@ size_t hal_uart_recv(hal_uart_t *u, uint8_t *out, size_t max)
     return n;
 }
 
+size_t hal_uart_recv_blocking(hal_uart_t *u, uint8_t *buf, size_t cap, uint32_t timeout_ms)
+{
+    /* Host has no time model / no real blocking: whatever is already
+     * scripted via fake_uart_script_rx() is "immediately available", so
+     * this never actually waits. If nothing is scripted, this is the
+     * HAL_TIMEOUT-equivalent case -- returns 0 bytes, as documented in
+     * hal_uart.h. */
+    (void)timeout_ms;
+    return hal_uart_recv(u, buf, cap);
+}
+
 uint32_t hal_uart_get_rx_error_count(const hal_uart_t *u)
 {
     fake_uart_slot_t *s = get_slot(u);
@@ -197,4 +208,11 @@ hal_status_t hal_uart_restart(hal_uart_t *u)
     s->rx_dropped = 0;
     s->rx_error_count = 0;
     return HAL_OK;
+}
+
+void *hal_uart_get_task_handle(const hal_uart_t *u)
+{
+    /* Host fake has no owner/event task at all. */
+    (void)u;
+    return NULL;
 }

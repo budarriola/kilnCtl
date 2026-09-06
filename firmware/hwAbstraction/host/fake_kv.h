@@ -9,16 +9,31 @@
  * bookkeeping does not fit HAL_KV_HANDLE_STORAGE_BYTES on its own terms and
  * is easier to keep out-of-line.
  *
- * Durability model (hal_kv.h: "Nothing is durable until hal_kv_commit()"):
- * every key slot carries a COMMITTED value (survives fake_kv_reset_partition
- * / a simulated reboot) and a PENDING value (visible to get_* on the same or
- * any other handle immediately, exactly like real NVS's in-RAM page cache,
- * but discarded by fake_kv_simulate_power_loss() instead of being merged
- * into the committed value). hal_kv_commit() merges pending into committed
- * for every key in that handle's partition and clears pending -- matching
- * nvs_commit() flushing the whole partition's page, not just one handle's
- * writes. fake_kv_has_uncommitted_writes() reports whether any pending
- * write is outstanding on a partition.
+ * Durability model (hal_kv.h: a set MAY already be durable before commit;
+ * commit guarantees durability of everything before it -- real NVS writes
+ * to flash immediately and commit is close to a no-op on top of that): every
+ * key slot carries a COMMITTED value (survives fake_kv_reset_partition / a
+ * simulated reboot) and a PENDING value (visible to get_* on the same or any
+ * other handle immediately, exactly like real NVS's in-RAM page cache).
+ * hal_kv_commit() merges pending into committed for every key in that
+ * handle's partition and clears pending -- matching nvs_commit() flushing
+ * the whole partition's page, not just one handle's writes.
+ * fake_kv_has_uncommitted_writes() reports whether any pending write is
+ * outstanding on a partition.
+ *
+ * fake_kv_simulate_power_loss() DEFAULT behavior: pending writes are KEPT
+ * (merged into committed, same as a real commit would do) -- this models
+ * real NVS's immediate-write-to-flash behavior, where a set-then-crash
+ * before an explicit hal_kv_commit() call very often still survives, since
+ * the flash write already happened. A caller that wants the OLD
+ * (pre-2026-09-05) lossy behavior -- pending writes discarded on power
+ * loss, useful for over-approximating the worst case a caller must still
+ * tolerate -- opts in with fake_kv_set_lossy_uncommitted(true). That mode is
+ * explicitly labelled an OVER-approximation: real NVS does not actually
+ * lose an uncommitted write this reliably, so a test passing only in lossy
+ * mode is not proof of a bug, but a test that assumes pending writes are
+ * ALWAYS lost (the old default) no longer matches either this fake or real
+ * hardware.
  *
  * Type/error injection decisions (contract points hal_kv.h leaves to the
  * fake, since NVS's own byte-for-byte typing isn't part of the header):
@@ -72,12 +87,21 @@ bool fake_kv_handle_is_live(const hal_kv_handle_t *h);
  * initialized via hal_kv_init_partition(). */
 bool fake_kv_has_uncommitted_writes(const char *partition);
 
-/* Discards every pending (uncommitted) write across every partition,
- * without touching committed values -- models a reboot/power-loss between
- * set_* and commit(). Does not close handles (matching real NVS: handles
- * remain valid across a device reset, only their uncommitted writes are
- * gone). */
+/* Simulates a reboot/power-loss between set_* and commit(). Does not close
+ * handles (matching real NVS: handles remain valid across a device reset).
+ * DEFAULT: every pending write is KEPT (merged into committed, like a real
+ * commit) -- see the durability-model comment above for why this, not
+ * discard, is the accurate default given real NVS's immediate-write
+ * behavior. Call fake_kv_set_lossy_uncommitted(true) first to instead
+ * discard every pending write (the old, over-approximating behavior). */
 void fake_kv_simulate_power_loss(void);
+
+/* Selects fake_kv_simulate_power_loss()'s behavior: false (default) keeps
+ * pending writes across a simulated power loss; true discards them instead.
+ * The `true` mode is a deliberate OVER-approximation of real NVS (which
+ * does not reliably lose an uncommitted write) -- label any test relying on
+ * it accordingly. Reset to false by fake_kv_reset_all(). */
+void fake_kv_set_lossy_uncommitted(bool lossy);
 
 /* Marks the COMMITTED value at (partition, namespace, key) corrupted: every
  * get_blob/get_str on it (once no pending write shadows it) returns HAL_IO

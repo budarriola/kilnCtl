@@ -372,13 +372,13 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id, const hal_spi_bus_
 
     BaseType_t task_created = xTaskCreatePinnedToCore(
         hal_spi_esp_task, "hal_spi_owner", cfg->stack_depth, impl, cfg->task_priority,
-        &impl->task_handle, cfg->core_id == 0 ? tskNO_AFFINITY : cfg->core_id);
-    /* NOTE: cfg->core_id follows spi_owner_init()'s convention of passing
-     * tskNO_AFFINITY (-1) through directly; the `== 0 ? tskNO_AFFINITY :`
-     * guard above only protects a zero-initialized cfg struct (matching
-     * hal_spi_bus_cfg_t's other "0 means backend default" fields) from
-     * pinning to core 0 by accident -- every real caller sets core_id to
-     * tskNO_AFFINITY explicitly, same as today. */
+        &impl->task_handle, cfg->core_id == HAL_CORE_ANY ? tskNO_AFFINITY : (BaseType_t)cfg->core_id);
+    /* Fixed 2026-09-05: this used to test `cfg->core_id == 0`, which made
+     * ESP core 0 unrepresentable -- a caller who genuinely wanted core 0
+     * silently got tskNO_AFFINITY instead. HAL_CORE_ANY (hal_status.h, -1,
+     * numerically equal to FreeRTOS's tskNO_AFFINITY) is the sentinel now;
+     * 0 means core 0. Every real caller sets core_id to HAL_CORE_ANY
+     * explicitly, same as today's tskNO_AFFINITY usage. */
     if (task_created != pdPASS) {
         vQueueDelete(impl->request_queue);
         impl->request_queue = NULL;
@@ -445,7 +445,27 @@ bool hal_spi_bus_is_wedged(const hal_spi_bus_t *bus) {
         return false;
     }
     const hal_spi_esp_bus_impl_t *impl = bus_impl_of_const(bus);
+    /* Fixed 2026-09-05: this used to read impl->wedged unconditionally,
+     * including on a never-initialized (or already-deinitialized)
+     * hal_spi_bus_t, where storage is either zeroed (reads false, harmless
+     * today) or stale/garbage from a prior use of the same memory (could
+     * read true) -- neither is a meaningful "is this bus wedged" answer.
+     * Report false unless the bus is actually initialized. */
+    if (!impl->initialized) {
+        return false;
+    }
     return impl->wedged;
+}
+
+void *hal_spi_get_task_handle(const hal_spi_bus_t *bus) {
+    if (!bus) {
+        return NULL;
+    }
+    const hal_spi_esp_bus_impl_t *impl = bus_impl_of_const(bus);
+    if (!impl->initialized) {
+        return NULL;
+    }
+    return (void *)impl->task_handle;
 }
 
 hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,

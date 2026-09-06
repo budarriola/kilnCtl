@@ -20,6 +20,15 @@ extern "C" {
 #define HAL_ALIGNAS8 _Alignas(8)
 #endif
 
+/* Portable "no core affinity" sentinel for any hal_*_bus_cfg_t/hal_*_cfg_t
+ * core_id field. Hoisted here (rather than left to each backend to invent
+ * its own) after a 0-means-tskNO_AFFINITY convention in hal_spi_esp.c made
+ * ESP core 0 unrepresentable -- see hal_spi_bus_cfg_t.core_id and
+ * docs/HW_ABSTRACTION_PLAN.md. Numerically equal to FreeRTOS's
+ * tskNO_AFFINITY (-1) so ESP backends can pass it straight through; pico/
+ * host backends that have no affinity concept simply ignore it. */
+#define HAL_CORE_ANY (-1)
+
 typedef enum {
     HAL_OK = 0,
     HAL_TIMEOUT,        /* operation did not complete within the given budget */

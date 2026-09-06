@@ -54,6 +54,7 @@ static fake_kv_handle_slot_t  s_handles[FAKE_KV_MAX_HANDLES];
 static bool                   s_write_safe_here = true;
 static bool                   s_next_write_fail_armed = false;
 static hal_status_t           s_next_write_fail_status = HAL_OK;
+static bool                   s_lossy_uncommitted = false;
 
 static const char *norm_partition(const char *partition)
 {
@@ -109,6 +110,7 @@ void fake_kv_reset_all(void)
     s_write_safe_here = true;
     s_next_write_fail_armed = false;
     s_next_write_fail_status = HAL_OK;
+    s_lossy_uncommitted = false;
 }
 
 bool fake_kv_handle_is_live(const hal_kv_handle_t *h)
@@ -132,6 +134,11 @@ bool fake_kv_has_uncommitted_writes(const char *partition)
     return false;
 }
 
+void fake_kv_set_lossy_uncommitted(bool lossy)
+{
+    s_lossy_uncommitted = lossy;
+}
+
 void fake_kv_simulate_power_loss(void)
 {
     for (int p = 0; p < FAKE_KV_MAX_PARTITIONS; p++) {
@@ -140,6 +147,30 @@ void fake_kv_simulate_power_loss(void)
             if (!s_partitions[p].namespaces[n].in_use) continue;
             for (int k = 0; k < FAKE_KV_MAX_KEYS_PER_NS; k++) {
                 fake_kv_key_slot_t *ks = &s_partitions[p].namespaces[n].keys[k];
+                if (!ks->pending_set) continue;
+                if (s_lossy_uncommitted) {
+                    /* OVER-approximation, opt-in: discard the pending write
+                     * as if it never reached flash -- see fake_kv.h's
+                     * durability-model comment. */
+                    ks->pending_set = false;
+                    ks->pending_tombstone = false;
+                    ks->pending_len = 0;
+                    continue;
+                }
+                /* DEFAULT: keep it -- models real NVS's immediate write to
+                 * flash, which nvs_commit() merely acknowledges rather than
+                 * performs. Same merge hal_kv_commit() does. */
+                if (ks->pending_tombstone) {
+                    ks->committed_valid = false;
+                    ks->committed_len = 0;
+                    ks->committed_corrupted = false;
+                } else {
+                    ks->committed_valid = true;
+                    ks->committed_is_str = ks->pending_is_str;
+                    ks->committed_len = ks->pending_len;
+                    memcpy(ks->committed_data, ks->pending_data, ks->pending_len);
+                    ks->committed_corrupted = false;
+                }
                 ks->pending_set = false;
                 ks->pending_tombstone = false;
                 ks->pending_len = 0;

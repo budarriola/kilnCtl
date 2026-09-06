@@ -260,6 +260,13 @@ bool hal_spi_bus_is_wedged(const hal_spi_bus_t *bus)
     return b ? b->wedged : false;
 }
 
+void *hal_spi_get_task_handle(const hal_spi_bus_t *bus)
+{
+    /* Host fake has no owner task (single-threaded, synchronously pumped). */
+    (void)bus;
+    return NULL;
+}
+
 hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
                                     const hal_spi_device_cfg_t *cfg)
 {

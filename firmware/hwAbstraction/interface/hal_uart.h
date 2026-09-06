@@ -69,6 +69,22 @@ typedef struct {
     int tx_io;
     int rx_io;
     uint32_t baud;
+
+    /* Owner/event-task sizing, carried through from uart_owner_init()'s real
+     * call sites (safety_link.c:416-418, CONFIG_KILNCTL_UART_OWNER_* Kconfig
+     * values) so each of the two live ports can be sized/prioritized
+     * independently and so the backend's task can be registered for
+     * stack-margin reporting with a caller-known stack_depth (see
+     * hal_uart_get_task_handle below). 0 in any field means "backend
+     * default", and that default equals the real value for this instance
+     * class today (queue_len 16, task_priority 5, stack_depth 3072 per
+     * KILNCTL_UART_OWNER_STACK_SIZE) -- not an arbitrary backend pick.
+     * core_id: HAL_CORE_ANY (hal_status.h) or an explicit core number; pico/
+     * host backends ignore this. */
+    uint32_t queue_len;
+    int task_priority;
+    uint32_t stack_depth;
+    int core_id;
 } hal_uart_cfg_t;
 
 hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg);
@@ -93,11 +109,33 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data,
 /* Non-blocking; returns the number of bytes actually copied out, 0..max. */
 size_t hal_uart_recv(hal_uart_t *u, uint8_t *out, size_t max);
 
+/* Bounded blocking read: blocks until at least one byte is available or
+ * timeout_ms elapses, whichever comes first -- matching the real reader's
+ * fallback shape (uart_protocol.c's bounded 1-byte blocking
+ * uart_read_bytes() call behind its otherwise-nonblocking poll loop, used
+ * exactly when nothing was already buffered). Returns the number of bytes
+ * actually copied into buf, 0..cap: 0 means the timeout elapsed with
+ * nothing received (the moral equivalent of HAL_TIMEOUT for this
+ * size_t-returning sibling of hal_uart_recv). Ends the wait as soon as ANY
+ * bytes are available -- never waits to fill cap. 0 if u/buf is NULL or
+ * cap == 0. */
+size_t hal_uart_recv_blocking(hal_uart_t *u, uint8_t *buf, size_t cap,
+                               uint32_t timeout_ms);
+
 uint32_t hal_uart_get_rx_error_count(const hal_uart_t *u);
 uint32_t hal_uart_get_tx_dropped(const hal_uart_t *u);
 
 /* RX-only. See contract note above -- must never touch TX-side state. */
 hal_status_t hal_uart_restart(hal_uart_t *u);
+
+/* Returns the backend's owner/event task handle (FreeRTOS TaskHandle_t on
+ * ESP, cast to void*) for stack-margin registration BY THE CALLER --
+ * CLAUDE.md "Register every new task for stack-margin reporting" (the
+ * board has bricked into a permanent recovery loop twice from an
+ * unregistered task's stack overflow). NULL if u has no task (not
+ * initialized, or a backend with no owner task at all, e.g. host/pico
+ * today). This function does not itself register anything. */
+void *hal_uart_get_task_handle(const hal_uart_t *u);
 
 #ifdef __cplusplus
 }

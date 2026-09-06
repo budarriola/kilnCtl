@@ -38,8 +38,10 @@ int main(void)
     CHECK(fake_uart_script_rx(&garbage, (const uint8_t *)"x", 1) == HAL_NOT_READY);
     uint8_t rxbuf[8];
     CHECK(hal_uart_recv(&garbage, rxbuf, sizeof(rxbuf)) == 0);
+    CHECK(hal_uart_recv_blocking(&garbage, rxbuf, sizeof(rxbuf), 10) == 0);
     CHECK(hal_uart_get_rx_error_count(&garbage) == 0);
     CHECK(hal_uart_get_tx_dropped(&garbage) == 0);
+    CHECK(hal_uart_get_task_handle(&garbage) == NULL);
 
     /* --- init succeeds; handle becomes live --- */
     CHECK(hal_uart_init(&u, &cfg) == HAL_OK);
@@ -67,6 +69,20 @@ int main(void)
     CHECK(memcmp(rxbuf, "lo", 2) == 0);
     CHECK(fake_uart_rx_pending_count(&u) == 0);
     CHECK(hal_uart_recv(&u, rxbuf, sizeof(rxbuf)) == 0); /* nothing more buffered */
+
+    /* --- recv_blocking: host fake has no time model, so it's just recv()
+     * under the hood -- scripted bytes come back immediately, nothing
+     * scripted returns 0 (the HAL_TIMEOUT-equivalent case) --- */
+    CHECK(fake_uart_script_rx(&u, (const uint8_t *)"Q", 1) == HAL_OK);
+    memset(rxbuf, 0, sizeof(rxbuf));
+    CHECK(hal_uart_recv_blocking(&u, rxbuf, sizeof(rxbuf), 100) == 1);
+    CHECK(rxbuf[0] == 'Q');
+    CHECK(hal_uart_recv_blocking(&u, rxbuf, sizeof(rxbuf), 100) == 0);
+    CHECK(hal_uart_recv_blocking(&u, NULL, sizeof(rxbuf), 100) == 0);
+    CHECK(hal_uart_recv_blocking(&u, rxbuf, 0, 100) == 0);
+
+    /* --- get_task_handle: host fake has no owner task --- */
+    CHECK(hal_uart_get_task_handle(&u) == NULL);
 
     /* --- fake_uart_script_rx error paths --- */
     CHECK(fake_uart_script_rx(&u, NULL, 3) == HAL_INVALID_ARG);

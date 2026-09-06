@@ -12,11 +12,16 @@
  *    backends enforce it by mutex. Callers must not assume a second queued
  *    caller is safe without that serialization -- there is no reentrant
  *    fast path.
- *  - Buffer-copy-in: tx/rx buffers passed to hal_spi_transfer* are only
- *    guaranteed valid for the duration of the call. Async variants (where
- *    supported) copy request state into backend-owned storage (the ESP slot
- *    pool) rather than referencing the caller's stack -- a backend must
- *    never store request state on the caller's stack.
+ *  - Buffer-copy-in for the SYNCHRONOUS variants (hal_spi_transfer,
+ *    hal_spi_transfer_polling): tx/rx buffers are only guaranteed valid for
+ *    the duration of the call. For hal_spi_transfer_async, this does NOT
+ *    hold: the backend does not copy the tx bytes, only request BOOKKEEPING
+ *    state (the ESP slot pool holds the request struct/semaphore, never the
+ *    caller's stack) -- the caller's tx (and rx, if used) buffers must
+ *    remain valid and unmodified until the completion callback fires,
+ *    exactly as esp_spi_owner requires today. A caller that reuses or frees
+ *    an async buffer before its callback runs corrupts the in-flight
+ *    transfer.
  *  - Wedge semantics: hal_spi_bus_is_wedged() reports a latched, sticky
  *    failure that persists until the bus is re-initialized; it is distinct
  *    from a single transfer returning HAL_TIMEOUT/HAL_BUSY. pico/host
@@ -99,8 +104,13 @@ typedef struct {
                                 * stack-margin reporting by the backend that
                                 * creates the task -- this struct only carries
                                 * the value, it does not do the registration. */
-    int core_id;               /* ESP: spi_owner_init's core_id (tskNO_AFFINITY
-                                 * today, i.e. -1). Pico ignores. */
+    int core_id;               /* ESP: spi_owner_init's core_id. Use
+                                 * HAL_CORE_ANY (hal_status.h, -1, numerically
+                                 * equal to FreeRTOS's tskNO_AFFINITY -- every
+                                 * real caller today) or an explicit core
+                                 * number; 0 IS core 0, not "unset" -- see
+                                 * HAL_CORE_ANY's own comment for the bug this
+                                 * distinction fixes. Pico ignores. */
     bool dma_use_psram;        /* DISPLAY_ST7796_PLAN.md 9.3; ESP only. */
     bool async_flush;          /* DISPLAY_ST7796_PLAN.md 9.6; ESP only. */
     size_t max_transfer_sz;    /* ESP: spi_bus_config_t.max_transfer_sz --
@@ -162,6 +172,13 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id,
                                const hal_spi_bus_cfg_t *cfg);
 hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus);
 bool         hal_spi_bus_is_wedged(const hal_spi_bus_t *bus);
+
+/* Returns the backend's owner-task handle (FreeRTOS TaskHandle_t on ESP,
+ * cast to void*) for stack-margin registration BY THE CALLER -- see
+ * hal_uart_get_task_handle's doc comment (hal_uart.h) for the full
+ * rationale, identical here. NULL if bus has no task (not initialized, or a
+ * backend with no owner task, e.g. host/pico's mutex-based model today). */
+void *hal_spi_get_task_handle(const hal_spi_bus_t *bus);
 
 hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
                                     const hal_spi_device_cfg_t *cfg);
