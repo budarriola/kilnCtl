@@ -21,6 +21,21 @@
 # too, with its own negative test (erase-before-program AND-semantics
 # enforcement in fake_flash_program()).
 #
+# fake_scratch, fake_wdt, fake_pwm and fake_sysinfo (hal_scratch.h/hal_wdt.h/
+# hal_pwm.h/hal_sysinfo.h) are covered below too, each with its own negative
+# test: fake_scratch's slot-4 hard-reservation refusal, fake_wdt's
+# advance-past-timeout fired-latch, fake_pwm's out-of-range duty rejection,
+# fake_sysinfo's coredump-erase-clears-presence contract.
+#
+# NOTE (2026-09-05): attempting to add /WX (treat warnings as errors)
+# alongside the existing /W3 broke the build -- fake_kv.c (host/fake_kv.c,
+# lines 94/233/425) triggers C4996 on strncpy under MSVC's default runtime
+# checks, and C4996 becomes a hard error under /WX. fake_kv.c is an existing
+# file outside this pass's scope, so /WX was NOT added here; the four new
+# fakes/tests in this pass compile clean under /WX on their own, but the
+# script still passes only /W3 below since it builds every case with one
+# shared flag set.
+#
 # Usage: powershell -ExecutionPolicy Bypass -File test_host_fakes.ps1
 
 $ErrorActionPreference = "Stop"
@@ -100,7 +115,11 @@ $cases = @(
     @{ Name = "fake_i2c";  Fake = "fake_i2c.c";  Test = "test_fake_i2c.c" },
     @{ Name = "fake_kv";   Fake = "fake_kv.c";   Test = "test_fake_kv.c" },
     @{ Name = "fake_time"; Fake = "fake_time.c"; Test = "test_fake_time.c" },
-    @{ Name = "fake_flash"; Fake = "fake_flash.c"; Test = "test_fake_flash.c" }
+    @{ Name = "fake_flash"; Fake = "fake_flash.c"; Test = "test_fake_flash.c" },
+    @{ Name = "fake_scratch"; Fake = "fake_scratch.c"; Test = "test_fake_scratch.c" },
+    @{ Name = "fake_wdt"; Fake = "fake_wdt.c"; Test = "test_fake_wdt.c" },
+    @{ Name = "fake_pwm"; Fake = "fake_pwm.c"; Test = "test_fake_pwm.c" },
+    @{ Name = "fake_sysinfo"; Fake = "fake_sysinfo.c"; Test = "test_fake_sysinfo.c" }
 )
 
 foreach ($c in $cases) {
@@ -443,6 +462,225 @@ if (-not $flashOrigContent.Contains($flashGoodBlock)) {
             $failures += "NEGATIVE TEST FAILED: the plain-overwrite mutant passed test_fake_flash.c cleanly -- the erase-before-program AND-semantics assertion does not actually catch this bug."
         } else {
             Write-Host "OK   negative test: fake_flash plain-overwrite mutant correctly fails test_fake_flash.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
+            Write-Host "     mutant failure detail:`n$($run.Output)"
+        }
+    }
+}
+
+# --- 8) Negative test: mutate fake_scratch's slot-4 hard reservation ---
+# Proves test_fake_scratch.c's slot-4-refusal assertion can actually fail:
+# hal_scratch.h requires hal_scratch_write_u32() to refuse
+# HAL_SCRATCH_SLOT_WATCHDOG_ENABLE outright (pico-sdk's watchdog_enable()
+# owns that register). If the refusal is dropped, a caller could silently
+# stomp the watchdog's own register.
+Write-Host "`n--- Negative test: fake_scratch slot-4 hard reservation ---"
+
+$scratchGoodBlock = (@'
+hal_status_t hal_scratch_write_u32(uint8_t slot, uint32_t value) {
+    if (!slot_in_range(slot)) {
+        return HAL_INVALID_ARG;
+    }
+    if (slot == HAL_SCRATCH_SLOT_WATCHDOG_ENABLE) {
+        return HAL_INVALID_ARG;
+    }
+    s_slots[slot] = value;
+    return HAL_OK;
+}
+'@) -replace "`r`n", "`n"
+
+$scratchMutantBlock = (@'
+hal_status_t hal_scratch_write_u32(uint8_t slot, uint32_t value) {
+    if (!slot_in_range(slot)) {
+        return HAL_INVALID_ARG;
+    }
+    /* MUTANT: slot-4 hard reservation dropped. */
+    s_slots[slot] = value;
+    return HAL_OK;
+}
+'@) -replace "`r`n", "`n"
+
+$scratchOrigContent = (Get-Content (Join-Path $hostDir "fake_scratch.c") -Raw) -replace "`r`n", "`n"
+if (-not $scratchOrigContent.Contains($scratchGoodBlock)) {
+    $failures += "Negative test setup FAILED: expected slot-4-refusal block not found verbatim in fake_scratch.c -- source drifted from what this script mutates. Update scratchGoodBlock/scratchMutantBlock together with fake_scratch.c."
+} else {
+    $scratchMutantContent = $scratchOrigContent.Replace($scratchGoodBlock, $scratchMutantBlock)
+    $scratchMutantSrc = Join-Path $workDir "fake_scratch_mutant.c"
+    Set-Content -Path $scratchMutantSrc -Value $scratchMutantContent -Encoding ASCII -NoNewline
+
+    $scratchMutantExe = Join-Path $workDir "fake_scratch_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($scratchMutantSrc, (Join-Path $here "test_fake_scratch.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $scratchMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -ne 0) {
+        $failures += "Negative test: mutant fake_scratch.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
+    } else {
+        $run = Run-Exe -ExePath $scratchMutantExe
+        $parsed = Parse-Result -Output $run.Output
+        if (-not $parsed.Matched) {
+            $failures += "Negative test: mutant fake_scratch test binary produced no RESULT line:`n$($run.Output)"
+        } elseif ($run.ExitCode -eq 0 -and $parsed.Fail -eq 0) {
+            $failures += "NEGATIVE TEST FAILED: the dropped-slot-4-reservation mutant passed test_fake_scratch.c cleanly -- the slot-4 hard-reservation assertion does not actually catch this bug."
+        } else {
+            Write-Host "OK   negative test: fake_scratch dropped-slot-4-reservation mutant correctly fails test_fake_scratch.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
+            Write-Host "     mutant failure detail:`n$($run.Output)"
+        }
+    }
+}
+
+# --- 9) Negative test: mutate fake_wdt's advance-past-timeout fired latch ---
+# Proves test_fake_wdt.c's fired-latch assertion can actually fail: if
+# fake_wdt_advance_ms() stops latching fake_wdt_fired() on a lapsed feed, a
+# test relying on it to detect a missed check-in would see a healthy
+# watchdog that never actually fires.
+Write-Host "`n--- Negative test: fake_wdt advance-past-timeout fired latch ---"
+
+$wdtGoodBlock = (@'
+    s_elapsed_since_feed_ms += ms;
+    if (s_elapsed_since_feed_ms > s_timeout_ms) {
+        s_fired = true;
+    }
+'@) -replace "`r`n", "`n"
+
+$wdtMutantBlock = (@'
+    s_elapsed_since_feed_ms += ms;
+    /* MUTANT: fired latch never sets. */
+    if (s_elapsed_since_feed_ms > s_timeout_ms) {
+    }
+'@) -replace "`r`n", "`n"
+
+$wdtOrigContent = (Get-Content (Join-Path $hostDir "fake_wdt.c") -Raw) -replace "`r`n", "`n"
+if (-not $wdtOrigContent.Contains($wdtGoodBlock)) {
+    $failures += "Negative test setup FAILED: expected fired-latch block not found verbatim in fake_wdt.c -- source drifted from what this script mutates. Update wdtGoodBlock/wdtMutantBlock together with fake_wdt.c."
+} else {
+    $wdtMutantContent = $wdtOrigContent.Replace($wdtGoodBlock, $wdtMutantBlock)
+    $wdtMutantSrc = Join-Path $workDir "fake_wdt_mutant.c"
+    Set-Content -Path $wdtMutantSrc -Value $wdtMutantContent -Encoding ASCII -NoNewline
+
+    $wdtMutantExe = Join-Path $workDir "fake_wdt_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($wdtMutantSrc, (Join-Path $here "test_fake_wdt.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $wdtMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -ne 0) {
+        $failures += "Negative test: mutant fake_wdt.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
+    } else {
+        $run = Run-Exe -ExePath $wdtMutantExe
+        $parsed = Parse-Result -Output $run.Output
+        if (-not $parsed.Matched) {
+            $failures += "Negative test: mutant fake_wdt test binary produced no RESULT line:`n$($run.Output)"
+        } elseif ($run.ExitCode -eq 0 -and $parsed.Fail -eq 0) {
+            $failures += "NEGATIVE TEST FAILED: the never-fires mutant passed test_fake_wdt.c cleanly -- the advance-past-timeout fired-latch assertion does not actually catch this bug."
+        } else {
+            Write-Host "OK   negative test: fake_wdt never-fires mutant correctly fails test_fake_wdt.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
+            Write-Host "     mutant failure detail:`n$($run.Output)"
+        }
+    }
+}
+
+# --- 10) Negative test: mutate fake_pwm's out-of-range duty rejection ---
+# Proves test_fake_pwm.c's out-of-range assertion can actually fail: if
+# hal_pwm_set_duty() stops rejecting duty_percent > 100, a caller bug (a
+# miscomputed percentage) would silently be recorded as if valid instead of
+# surfacing HAL_INVALID_ARG.
+Write-Host "`n--- Negative test: fake_pwm out-of-range duty rejection ---"
+
+$pwmGoodBlock = (@'
+hal_status_t hal_pwm_set_duty(uint8_t duty_percent) {
+    if (!s_initialized) {
+        return HAL_NOT_READY;
+    }
+    if (duty_percent > 100) {
+        return HAL_INVALID_ARG;
+    }
+    if (s_duty_history_count < FAKE_PWM_MAX_DUTY_HISTORY) {
+        s_duty_history[s_duty_history_count++] = duty_percent;
+    }
+    return HAL_OK;
+}
+'@) -replace "`r`n", "`n"
+
+$pwmMutantBlock = (@'
+hal_status_t hal_pwm_set_duty(uint8_t duty_percent) {
+    if (!s_initialized) {
+        return HAL_NOT_READY;
+    }
+    /* MUTANT: out-of-range duty rejection dropped. */
+    if (s_duty_history_count < FAKE_PWM_MAX_DUTY_HISTORY) {
+        s_duty_history[s_duty_history_count++] = duty_percent;
+    }
+    return HAL_OK;
+}
+'@) -replace "`r`n", "`n"
+
+$pwmOrigContent = (Get-Content (Join-Path $hostDir "fake_pwm.c") -Raw) -replace "`r`n", "`n"
+if (-not $pwmOrigContent.Contains($pwmGoodBlock)) {
+    $failures += "Negative test setup FAILED: expected out-of-range-duty block not found verbatim in fake_pwm.c -- source drifted from what this script mutates. Update pwmGoodBlock/pwmMutantBlock together with fake_pwm.c."
+} else {
+    $pwmMutantContent = $pwmOrigContent.Replace($pwmGoodBlock, $pwmMutantBlock)
+    $pwmMutantSrc = Join-Path $workDir "fake_pwm_mutant.c"
+    Set-Content -Path $pwmMutantSrc -Value $pwmMutantContent -Encoding ASCII -NoNewline
+
+    $pwmMutantExe = Join-Path $workDir "fake_pwm_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($pwmMutantSrc, (Join-Path $here "test_fake_pwm.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $pwmMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -ne 0) {
+        $failures += "Negative test: mutant fake_pwm.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
+    } else {
+        $run = Run-Exe -ExePath $pwmMutantExe
+        $parsed = Parse-Result -Output $run.Output
+        if (-not $parsed.Matched) {
+            $failures += "Negative test: mutant fake_pwm test binary produced no RESULT line:`n$($run.Output)"
+        } elseif ($run.ExitCode -eq 0 -and $parsed.Fail -eq 0) {
+            $failures += "NEGATIVE TEST FAILED: the dropped-range-check mutant passed test_fake_pwm.c cleanly -- the out-of-range duty rejection assertion does not actually catch this bug."
+        } else {
+            Write-Host "OK   negative test: fake_pwm dropped-range-check mutant correctly fails test_fake_pwm.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
+            Write-Host "     mutant failure detail:`n$($run.Output)"
+        }
+    }
+}
+
+# --- 11) Negative test: mutate fake_sysinfo's coredump-erase-clears-presence ---
+# Proves test_fake_sysinfo.c's erase-clears-presence assertion can actually
+# fail: hal_sysinfo_coredump_erase() must clear the scripted presence flag
+# (matching real esp_core_dump_image_erase()'s effect on a later
+# esp_core_dump_image_check()) -- if it stops doing so, crash_report.c's
+# real "erase after the report is consumed" flow would never actually erase
+# on the fake, silently hiding that class of bug from host tests.
+Write-Host "`n--- Negative test: fake_sysinfo coredump-erase clears presence ---"
+
+$sysinfoGoodBlock = (@'
+hal_status_t hal_sysinfo_coredump_erase(void) {
+    s_coredump_present = false;
+    return HAL_OK;
+}
+'@) -replace "`r`n", "`n"
+
+$sysinfoMutantBlock = (@'
+hal_status_t hal_sysinfo_coredump_erase(void) {
+    /* MUTANT: erase no longer clears presence. */
+    return HAL_OK;
+}
+'@) -replace "`r`n", "`n"
+
+$sysinfoOrigContent = (Get-Content (Join-Path $hostDir "fake_sysinfo.c") -Raw) -replace "`r`n", "`n"
+if (-not $sysinfoOrigContent.Contains($sysinfoGoodBlock)) {
+    $failures += "Negative test setup FAILED: expected erase-clears-presence block not found verbatim in fake_sysinfo.c -- source drifted from what this script mutates. Update sysinfoGoodBlock/sysinfoMutantBlock together with fake_sysinfo.c."
+} else {
+    $sysinfoMutantContent = $sysinfoOrigContent.Replace($sysinfoGoodBlock, $sysinfoMutantBlock)
+    $sysinfoMutantSrc = Join-Path $workDir "fake_sysinfo_mutant.c"
+    Set-Content -Path $sysinfoMutantSrc -Value $sysinfoMutantContent -Encoding ASCII -NoNewline
+
+    $sysinfoMutantExe = Join-Path $workDir "fake_sysinfo_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($sysinfoMutantSrc, (Join-Path $here "test_fake_sysinfo.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $sysinfoMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -ne 0) {
+        $failures += "Negative test: mutant fake_sysinfo.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
+    } else {
+        $run = Run-Exe -ExePath $sysinfoMutantExe
+        $parsed = Parse-Result -Output $run.Output
+        if (-not $parsed.Matched) {
+            $failures += "Negative test: mutant fake_sysinfo test binary produced no RESULT line:`n$($run.Output)"
+        } elseif ($run.ExitCode -eq 0 -and $parsed.Fail -eq 0) {
+            $failures += "NEGATIVE TEST FAILED: the no-op-erase mutant passed test_fake_sysinfo.c cleanly -- the coredump-erase-clears-presence assertion does not actually catch this bug."
+        } else {
+            Write-Host "OK   negative test: fake_sysinfo no-op-erase mutant correctly fails test_fake_sysinfo.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
             Write-Host "     mutant failure detail:`n$($run.Output)"
         }
     }

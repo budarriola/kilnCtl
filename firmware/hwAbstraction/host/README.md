@@ -1,5 +1,6 @@
 Fake backends for MSVC host tests, shared by both firmwares (fake_spi,
-fake_i2c, fake_uart, fake_gpio, fake_adc, fake_kv, fake_time, fake_flash).
+fake_i2c, fake_uart, fake_gpio, fake_adc, fake_kv, fake_time, fake_flash,
+fake_scratch, fake_wdt, fake_pwm, fake_sysinfo).
 
 Filled in Phase 2 of docs/HW_ABSTRACTION_PLAN.md, replacing the stub-header
 include-path trick interface by interface. Empty as of Phase 0.
@@ -19,6 +20,19 @@ bits AND semantics since hal_flash.h does not pin erase-before-program
 enforcement at the interface level, per-sector erase counts for wear
 assertions, injectable per-operation failure, and
 fake_flash_simulate_power_loss_during() for a half-written page) landed once
-hal_flash.h existed. Standalone MSVC tests + negative tests for all eight
-live in ../test/test_host_fakes.ps1 (not yet wired into either firmware's
-build_host_tests.ps1 -- that's the Option A response-file switch still to do).
+hal_flash.h existed. fake_scratch (claim table keyed on (slot, tag), slot-4
+hard reservation, reset-vs-power-loss distinction -- watchdog resets keep
+slot values, power loss clears them), fake_wdt (records init cfg and feed
+count, fake_wdt_advance_ms() latches a sticky fired flag once feeds lapse
+past timeout, reboot request latch instead of an accurate never-returns),
+and fake_pwm (captures init cfg and a bounded duty-set history, rejects
+out-of-range duty) landed once hal_scratch.h/hal_wdt.h/hal_pwm.h existed;
+fake_sysinfo (scriptable reset reason/partition/build info/temperature/
+random sequence/coredump presence, with coredump erase clearing presence)
+landed the same way once hal_sysinfo.h existed. Standalone MSVC tests +
+negative tests for all twelve live in ../test/test_host_fakes.ps1 (not yet
+wired into either firmware's build_host_tests.ps1 -- that's the Option A
+response-file switch still to do); /WX was attempted alongside the
+existing /W3 and rejected -- host/fake_kv.c's strncpy triggers C4996,
+which /WX turns into a hard error, and fake_kv.c is outside this pass's
+scope.

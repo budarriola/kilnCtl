@@ -630,7 +630,25 @@ switch landed (`63e5689`: KilnFW's build_host_tests.ps1 now passes one
 `cl @host_tests_common_flags.rsp` to all 23 invocations); fake_flash and the
 rest of hwAbstraction/host/ are still not referenced by either
 build_host_tests.ps1 (`grep fake_` finds nothing) -- linking fakes into the
-main test executables remains open.
+main test executables remains open. fake_scratch/fake_wdt/fake_pwm/
+fake_sysinfo landed 2026-09-05 (267 more assertions + four more proven
+negative tests, 785 total across all twelve fakes): fake_scratch mirrors
+the pico backend's (slot, tag) claim table and slot-4 hard reservation
+exactly, distinguishing fake_scratch_simulate_reset() (claim table clears,
+slot values survive -- scratch's whole point) from
+fake_scratch_simulate_power_loss() (both clear); fake_wdt records init cfg/
+feed count and exposes fake_wdt_advance_ms() to latch a sticky fired flag
+once feeds lapse past the configured timeout, plus a reboot-request latch
+in place of hal_wdt_reboot()'s real never-returns contract; fake_pwm
+captures init cfg and a bounded duty-set history, mirroring the ESP
+backend's 1..20-bit resolution validation and 0..100 duty range;
+fake_sysinfo scripts reset reason/running partition/build info/temperature/
+random sequence/coredump presence, with hal_sysinfo_coredump_erase()
+clearing presence to match real esp_core_dump_image_erase(). Adding /WX
+alongside the existing /W3 was attempted and rejected: host/fake_kv.c's
+strncpy calls (lines 94/233/425) trigger C4996, a hard error under /WX, and
+fake_kv.c is outside this pass's scope -- the script still builds every
+case under /W3 only.
 
 ## Migration inventories (measured)
 
