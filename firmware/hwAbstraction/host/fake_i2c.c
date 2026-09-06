@@ -307,6 +307,15 @@ hal_status_t hal_i2c_device_attach(hal_i2c_bus_t *bus, hal_i2c_device_t *dev,
     return HAL_OK;
 }
 
+hal_status_t hal_i2c_device_detach(hal_i2c_device_t *dev)
+{
+    fake_i2c_device_slot_t *d = get_device(dev);
+    if (!d) return HAL_NOT_READY;
+    d->in_use = false;
+    memset(dev->storage, 0, sizeof(dev->storage));
+    return HAL_OK;
+}
+
 hal_status_t hal_i2c_transfer(hal_i2c_device_t *dev,
                                const uint8_t *tx, size_t tx_len,
                                uint8_t *rx, size_t rx_len,

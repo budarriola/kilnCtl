@@ -93,6 +93,11 @@ hal_status_t fake_i2c_script_rx(hal_i2c_bus_t *bus, uint8_t addr,
  * not a live bus, HAL_INVALID_ARG if either pointer is NULL. */
 hal_status_t fake_i2c_bus_adopt(hal_i2c_bus_t *bus, const hal_i2c_bus_t *existing);
 
+/* hal_i2c_device_detach() (interface/hal_i2c.h) is implemented in
+ * fake_i2c.c -- frees the device slot so fake_i2c_device_is_live() reports
+ * false afterward. Does not touch the bus or any per-address scripts
+ * (those are scripted on the bus/addr, not the device). */
+
 #ifdef __cplusplus
 }
 #endif

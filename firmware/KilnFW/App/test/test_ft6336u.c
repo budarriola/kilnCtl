@@ -105,6 +105,41 @@ static void test_start_rejects_wrong_identity(void)
     esp_err_t err = FT6336U_start(&t, &bus);
     TEST_CHECK(err == ESP_ERR_NOT_FOUND,
                "FT6336U_start refuses a device whose FOCALTECH_ID doesn't match");
+    TEST_CHECK(t.dev_attached == false,
+               "dev_attached is cleared on the identity-mismatch failure path");
+    TEST_CHECK(!fake_i2c_device_is_live(&t.dev),
+               "FT6336U_start's identity-check failure path detaches the device instead of "
+               "leaking it on the shared bus (INTERFACE MISMATCH comment, now fixed via "
+               "hal_i2c_device_detach())");
+}
+
+// Directly covers FT6336U_deinit()'s fixed leak: probe-succeeded/identity-
+// failed must release the device slot it attached during FT6336U_init(), so
+// a later consumer of the same address on the same bus (the realistic case:
+// re-probing after a module is connected/reconnected) can attach cleanly
+// instead of piling up dead slots on the shared bus.
+static void test_deinit_after_failed_identity_frees_the_slot(void)
+{
+    reset_all();
+    hal_i2c_bus_t bus = make_bus();
+    uint8_t wrong_id = 0x00;
+    fake_i2c_script_rx(&bus, FT6336U_ADDR, &wrong_id, 1);
+
+    FT6336UClass t;
+    memset(&t, 0, sizeof(t));
+    TEST_CHECK(FT6336U_start(&t, &bus) == ESP_ERR_NOT_FOUND,
+               "FT6336U_start fails identity check (setup)");
+    TEST_CHECK(!fake_i2c_device_is_live(&t.dev), "device slot freed after the failed start");
+
+    // A second attach at the same address on the same bus must succeed --
+    // if the first slot had leaked, this would still succeed under
+    // fake_i2c's generous FAKE_I2C_MAX_DEVICES cap, so also assert the
+    // device count didn't grow across the failed attempt to make the
+    // negative case meaningful.
+    hal_i2c_device_t probe_dev;
+    memset(&probe_dev, 0, sizeof(probe_dev));
+    TEST_CHECK(hal_i2c_device_attach(&bus, &probe_dev, FT6336U_ADDR, 100000) == HAL_OK,
+               "re-attaching at the same address after a freed detach succeeds");
 }
 
 static void test_start_absent_device_is_not_found(void)
@@ -194,6 +229,7 @@ int main(void)
 
     test_start_reads_identity_in_order();
     test_start_rejects_wrong_identity();
+    test_deinit_after_failed_identity_frees_the_slot();
     test_start_absent_device_is_not_found();
     test_read_decodes_touch_point();
     test_read_no_touch_skips_touch_block();

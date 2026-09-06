@@ -261,6 +261,22 @@ hal_status_t hal_i2c_device_attach(hal_i2c_bus_t *bus, hal_i2c_device_t *dev, ui
     return HAL_OK;
 }
 
+hal_status_t hal_i2c_device_detach(hal_i2c_device_t *dev) {
+    if (!dev) {
+        return HAL_INVALID_ARG;
+    }
+    hal_i2c_esp_device_impl_t *dev_impl = device_impl_of(dev);
+    if (!dev_impl->device) {
+        return HAL_NOT_READY;
+    }
+    /* i2c_master_bus_rm_device() is not queue-routed, matching
+     * i2c_master_bus_add_device() above -- attach/detach both sit outside
+     * i2c_owner.c's transfer queue (device management, not a transfer). */
+    esp_err_t err = i2c_master_bus_rm_device(dev_impl->device);
+    memset(dev_impl, 0, sizeof(*dev_impl));
+    return hal_esp_err_to_status(err);
+}
+
 hal_status_t hal_i2c_transfer(hal_i2c_device_t *dev, const uint8_t *tx, size_t tx_len, uint8_t *rx,
                                size_t rx_len, uint32_t timeout_ms) {
     if (!dev) {

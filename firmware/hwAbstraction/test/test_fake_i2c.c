@@ -40,6 +40,7 @@ int main(void)
     CHECK(hal_i2c_transfer(&garbage_dev, txb, 4, rxb, 4, 100) == HAL_NOT_READY);
     CHECK(hal_i2c_probe(&garbage_bus, 0x40, 200) == HAL_NOT_READY);
     CHECK(fake_i2c_script_rx(&garbage_bus, 0x40, txb, 4) == HAL_NOT_READY);
+    CHECK(hal_i2c_device_detach(&garbage_dev) == HAL_NOT_READY);
 
     /* --- init succeeds --- */
     CHECK(hal_i2c_bus_init(&bus, 0, &cfg) == HAL_OK);
@@ -139,6 +140,19 @@ int main(void)
         hal_i2c_device_t one_too_many;
         memset(&one_too_many, 0, sizeof(one_too_many));
         CHECK(hal_i2c_device_attach(&b2, &one_too_many, 0x7F, 100000) == HAL_NO_MEM);
+
+        /* --- hal_i2c_device_detach: frees the slot so a fresh attach can
+         * reuse it (this is the primitive FT6336U_deinit() now calls on its
+         * identity-check failure path instead of leaking the slot) --- */
+        CHECK(hal_i2c_device_detach(&devs[0]) == HAL_OK);
+        CHECK(fake_i2c_device_is_live(&devs[0]) == false);
+        CHECK(hal_i2c_device_attach(&b2, &one_too_many, 0x7F, 100000) == HAL_OK);
+        CHECK(fake_i2c_device_is_live(&one_too_many) == true);
+        /* detaching an already-detached (zeroed) handle is HAL_NOT_READY,
+         * not a crash */
+        CHECK(hal_i2c_device_detach(&devs[0]) == HAL_NOT_READY);
+        /* detaching does not disturb a sibling device on the same bus */
+        CHECK(fake_i2c_device_is_live(&devs[1]) == true);
     }
 
     /* --- bus pool exhaustion --- */

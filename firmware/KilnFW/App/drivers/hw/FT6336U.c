@@ -128,22 +128,21 @@ esp_err_t FT6336U_deinit(FT6336UClass *t)
 {
     if (!t) return ESP_ERR_INVALID_ARG;
 
-    /* INTERFACE MISMATCH: hal_i2c.h has no device-detach primitive (only
-     * hal_i2c_device_attach(), never a hal_i2c_device_detach() /
-     * i2c_master_bus_rm_device() equivalent) -- see
-     * docs/HW_ABSTRACTION_PLAN.md Phase 1b note added alongside this
-     * migration. The pre-HAL driver called i2c_master_bus_rm_device(t->dev)
-     * here; that ESP-IDF call needs the raw i2c_master_dev_handle_t, which
-     * hal_i2c_device_t (interface/hal_i2c.h) deliberately keeps opaque to
-     * app-layer code. FT6336U_deinit() is reachable in practice only from
-     * FT6336U_start()'s identity-check failure path (this part has never been
-     * connected to any board -- see this file's top-of-file UNVALIDATED
-     * note), so the underlying ESP-IDF device slot is leaked on that one
-     * cold path rather than adding a detach call to the shared interface for
-     * a code path nothing exercises today. If a real re-init/hot-unplug path
-     * needs this, add hal_i2c_device_detach() to hal_i2c.h (and hal_spi.h's
-     * equivalent gap, if it has one) rather than reaching around the HAL
-     * here. */
+    /* hal_i2c_device_detach() (interface/hal_i2c.h) now exists -- release
+     * the underlying device slot instead of leaking it. Reachable in
+     * practice only from FT6336U_start()'s identity-check failure path
+     * (this part has never been connected to any board -- see this file's
+     * top-of-file UNVALIDATED note), but the shared I2C bus is used by
+     * other devices too, so a leaked slot there is still worth avoiding.
+     * Tolerate HAL_NOT_READY (already detached / never attached, e.g. a
+     * caller that reaches FT6336U_deinit() before FT6336U_init() ever
+     * attached anything) -- only log a real backend failure. */
+    if (t->dev_attached) {
+        hal_status_t st = hal_i2c_device_detach(&t->dev);
+        if (st != HAL_OK && st != HAL_NOT_READY) {
+            ESP_LOGE(TAG, "hal_i2c_device_detach failed: %s", esp_err_to_name(ft6336u_hal_err(st)));
+        }
+    }
     t->dev_attached = false;
     memset(&t->dev, 0, sizeof(t->dev));
     /* The bus belongs to whoever created it; never touch it here. */

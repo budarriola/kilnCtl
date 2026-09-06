@@ -88,6 +88,14 @@ void *hal_i2c_get_task_handle(const hal_i2c_bus_t *bus);
 hal_status_t hal_i2c_device_attach(hal_i2c_bus_t *bus, hal_i2c_device_t *dev,
                                     uint8_t addr, uint32_t clock_hz);
 
+/* Reverses hal_i2c_device_attach(): releases the underlying device slot
+ * (ESP: i2c_master_bus_rm_device()) so a probe-succeeded/identity-failed
+ * cold path can back out cleanly instead of leaking a device handle on the
+ * shared bus. Safe to call on a dev that was never attached or already
+ * detached -- returns HAL_NOT_READY rather than crashing, mirroring
+ * hal_i2c_transfer()'s not-ready check. Never touches the bus itself. */
+hal_status_t hal_i2c_device_detach(hal_i2c_device_t *dev);
+
 hal_status_t hal_i2c_transfer(hal_i2c_device_t *dev,
                                const uint8_t *tx, size_t tx_len,
                                uint8_t *rx, size_t rx_len,
