@@ -44,7 +44,7 @@
 #include "tasks/relay_owner.h"
 #include "tasks/safety_core.h"
 #include "tasks/thermo_task.h"
-#include "tasks/uart_owner.h"
+#include "hal_uart_pico_internal.h"  // HAL Phase 1a: was tasks/uart_owner.h; moved+renamed to firmware/hwAbstraction/pico/uart/hal_uart_pico_internal.h
 #include "tasks/update_task.h"
 #include "tasks/watchdog_task.h"
 

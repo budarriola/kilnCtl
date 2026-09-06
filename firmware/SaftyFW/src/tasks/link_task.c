@@ -60,7 +60,7 @@
 #include "task_priorities.h"
 #include "watchdog_task.h"
 
-#include "uart_owner.h"
+#include "hal_uart_pico_internal.h"  // HAL Phase 1a: was uart_owner.h; moved+renamed to firmware/hwAbstraction/pico/uart/hal_uart_pico_internal.h
 #include "link_frame.h"
 
 #include "boot_reason.h"

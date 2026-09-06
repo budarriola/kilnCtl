@@ -1,3 +1,6 @@
+// Moved here from firmware/SaftyFW/src/ by HAL Phase 1a
+// (docs/HW_ABSTRACTION_PLAN.md), body byte-identical apart from include
+// paths.
 #include "spi_owner.h"
 
 #include "FreeRTOS.h"
@@ -6,6 +9,13 @@
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
 
+// TEMPORARY (HAL Phase 1b): board_pins.h is a SaftyFW header
+// (firmware/SaftyFW/src/board_pins.h), not part of hwAbstraction/. Left as
+// a same-name include resolved via SaftyFW's own include path (this file
+// is compiled into the hwabstraction_pico library, which SaftyFW's
+// CMakeLists.txt gives a private include dir on firmware/SaftyFW/src for
+// exactly this) until Phase 1b introduces a board-descriptor header inside
+// hwAbstraction/pico/ itself (see esp/board_kiln_s3.h's analogous role).
 #include "board_pins.h"
 
 // 4 MHz is a CEILING, not a default, and the assert below enforces it.

@@ -59,7 +59,6 @@ set(SAFTYFW_APP_SOURCES
     src/watchdog_overdue_diag.c
     src/watchdog_overdue_diag_codec.c
     src/safety_guards.c
-    src/spi_owner.c
     src/max31856.c
     # Pure CR1.TC TYPE[3:0] range predicate, split out of max31856.c so it is
     # host-testable (test/test_max31856_tc_type_policy.c) with no SPI/GPIO
@@ -77,6 +76,10 @@ set(SAFTYFW_APP_SOURCES
     # max31856_tc_range_policy.h.
     src/max31856_tc_range_policy.c
     src/current_sense.c
+    # NOTE: src/spi_owner.c, src/tasks/uart_owner.c and
+    # src/tasks/uart_owner_tx_policy.c moved to the hwabstraction_pico
+    # library below (HAL Phase 1a, docs/HW_ABSTRACTION_PLAN.md) and are no
+    # longer part of this source list.
     # Pure counts-domain presence decision, decoupled from k_ct_v_per_a, split
     # out of current_sense.c so it is host-testable (test/test_current_
     # presence_policy.c) with no hardware/adc.h stub -- see
@@ -117,8 +120,6 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/discrete_task.c
     src/tasks/thermo_task.c
     src/tasks/current_task.c
-    src/tasks/uart_owner.c
-    src/tasks/uart_owner_tx_policy.c
     src/tasks/console_uart.c
     src/tasks/link_frame.c
     src/tasks/link_task.c
@@ -145,6 +146,65 @@ set(SAFTYFW_APP_SOURCES
     bootloader/crc32.c
     bootloader/metadata.c
 )
+
+# hwabstraction_pico -- HAL Phase 1a (docs/HW_ABSTRACTION_PLAN.md move set):
+# src/spi_owner.c/h, src/tasks/uart_owner.c/h (renamed to
+# hal_uart_pico_internal.h to avoid colliding with the ESP-side
+# uart_owner.h moving into firmware/hwAbstraction/esp/uart/ under the same
+# effort) and src/tasks/uart_owner_tx_policy.c/h relocated here, byte-
+# identical apart from include paths, colocated in per-interface dirs
+# (pico/spi/, pico/uart/). One STATIC library, linked by all three
+# executables below (SaftyFW, SaftyFW_slotA, SaftyFW_slotB) -- their link
+# lists and FreeRTOSConfig.h are identical (see the plan's "Verified shape"
+# note), and the only runtime registration inside these sources is
+# irq_set_exclusive_handler (uart_owner.c), called from init rather than a
+# constructor, so a STATIC lib shared by all three is safe.
+#
+# This is move-only (Phase 1a): the interface/ + pico/*/hal_*_pico.c HAL
+# bodies (hal_uart_pico.c included) have no consumers yet and are
+# deliberately NOT added to this library or wired into these targets --
+# only the moved owner sources, which SaftyFW's real code already calls
+# directly (spi_owner_transfer, uart_owner_send, etc.), unchanged.
+set(HWABSTRACTION_PICO_DIR ${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction/pico)
+add_library(hwabstraction_pico STATIC
+    ${HWABSTRACTION_PICO_DIR}/spi/spi_owner.c
+    ${HWABSTRACTION_PICO_DIR}/uart/uart_owner.c
+    ${HWABSTRACTION_PICO_DIR}/uart/uart_owner_tx_policy.c
+)
+target_include_directories(hwabstraction_pico PUBLIC
+    ${HWABSTRACTION_PICO_DIR}/spi
+    ${HWABSTRACTION_PICO_DIR}/uart
+)
+# TEMPORARY (HAL Phase 1b): spi_owner.c and uart_owner.c both still include
+# SaftyFW's own src/board_pins.h (a SaftyFW header, not part of
+# hwAbstraction/) -- see each file's own TEMPORARY comment on that include.
+# Given this private include dir instead of moving/duplicating board_pins.h.
+target_include_directories(hwabstraction_pico PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/src
+)
+# FreeRTOSConfig.h lives at the SaftyFW project root (same file SaftyFW's own
+# target_include_directories(SaftyFW PRIVATE ${CMAKE_CURRENT_LIST_DIR} ...)
+# exposes). Linking FreeRTOS-Kernel PUBLIC into this library means every
+# pico-sdk source it pulls in gets compiled with
+# PICO_CONFIG_RTOS_ADAPTER_HEADER active (freertos_sdk_config.h -> "FreeRTOS
+# Config.h"), so this library needs the same include, not just SaftyFW's own
+# target.
+target_include_directories(hwabstraction_pico PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+target_link_libraries(hwabstraction_pico PUBLIC
+    hardware_gpio
+    hardware_irq
+    hardware_uart
+    hardware_spi
+    hardware_adc
+    hardware_flash
+    pico_flash
+    pico_multicore
+    FreeRTOS-Kernel
+    FreeRTOS-Kernel-Heap4
+)
+target_compile_options(hwabstraction_pico PRIVATE -Wall -Wextra -Werror)
 
 add_executable(SaftyFW ${SAFTYFW_APP_SOURCES})
 
@@ -211,6 +271,7 @@ target_link_libraries(SaftyFW PRIVATE
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
     kilnlink
+    hwabstraction_pico
 )
 
 # SaftyFW's own build-identity header (TODO.md Phase 8: "build_info.h-
@@ -376,6 +437,7 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
         kilnlink
+        hwabstraction_pico
     )
 
     pico_enable_stdio_usb(${TARGET_NAME} ${SAFTYFW_ENABLE_USB_STDIO})

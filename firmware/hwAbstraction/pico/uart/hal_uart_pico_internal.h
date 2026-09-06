@@ -1,6 +1,16 @@
-// uart_owner.h -- owns UART1 (GPIO4 TX / GPIO5 RX), the opto-isolated link to
-// the ESP (docs/ARCHITECTURE.md section 3's module table: "RX ring +
-// non-blocking TX ring. Drops on full, never blocks").
+// hal_uart_pico_internal.h -- owns UART1 (GPIO4 TX / GPIO5 RX), the
+// opto-isolated link to the ESP (docs/ARCHITECTURE.md section 3's module
+// table: "RX ring + non-blocking TX ring. Drops on full, never blocks").
+//
+// Renamed from uart_owner.h by HAL Phase 1a (docs/HW_ABSTRACTION_PLAN.md)
+// when this file moved here from firmware/SaftyFW/src/tasks/, to avoid
+// colliding with the ESP-side uart_owner.h moving into
+// firmware/hwAbstraction/esp/uart/ under the same effort -- both trees are
+// compiled by different builds, but host-test scripts and
+// check_duplicate_symbols could otherwise see both under the same name.
+// This is a PRIVATE header of the pico hal_uart backend
+// (pico/uart/hal_uart_pico.c) and of SaftyFW's link_task.c/main.c -- not
+// part of the hal_uart.h public interface.
 //
 // This is the hardware-owner layer only: raw bytes in, raw bytes out. It
 // knows nothing about kilnlink framing, frame types or payload layouts --

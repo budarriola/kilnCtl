@@ -23,6 +23,11 @@ $bootDir = Join-Path $testDir "..\bootloader"
 $updateDir = Join-Path $testDir "..\src\update"
 $commonSrcDir = Join-Path $testDir "..\..\CommonFW\src"
 $commonIncDir = Join-Path $testDir "..\..\CommonFW\include"
+# HAL Phase 1a (docs/HW_ABSTRACTION_PLAN.md) moved uart_owner_tx_policy.c/h
+# out of src/tasks/ into firmware/hwAbstraction/pico/uart/ (colocated with
+# the rest of the pico UART owner); it is still host-testable on its own
+# (no pico-sdk/FreeRTOS dependency), so this script now reaches it there.
+$hwAbstractionPicoUartDir = Join-Path $testDir "..\..\hwAbstraction\pico\uart"
 $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "saftyfw_host_tests.exe"
@@ -80,7 +85,7 @@ $sources = @(
     (Join-Path $commonSrcDir "kilnlink_commit_config_rejected.c"),
     (Join-Path $commonSrcDir "kilnlink_inject_tc.c"),
     (Join-Path $testDir "test_kilnlink_inject_tc.c"),
-    (Join-Path $srcDir "tasks\uart_owner_tx_policy.c"),
+    (Join-Path $hwAbstractionPicoUartDir "uart_owner_tx_policy.c"),
     (Join-Path $testDir "test_uart_owner_tx_policy.c"),
     (Join-Path $srcDir "tasks\clock_health.c"),
     (Join-Path $testDir "test_clock_health.c"),

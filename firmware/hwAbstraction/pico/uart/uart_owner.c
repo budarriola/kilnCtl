@@ -1,6 +1,12 @@
-// uart_owner.c -- see uart_owner.h. Raw-byte RX/TX rings over UART1, IRQ
-// driven both ways, never blocking a caller.
-#include "uart_owner.h"
+// uart_owner.c -- see hal_uart_pico_internal.h. Raw-byte RX/TX rings over
+// UART1, IRQ driven both ways, never blocking a caller.
+//
+// Moved here from firmware/SaftyFW/src/tasks/ by HAL Phase 1a
+// (docs/HW_ABSTRACTION_PLAN.md), body byte-identical apart from include
+// paths. uart_owner.h renamed to hal_uart_pico_internal.h in the same move
+// to avoid colliding with the ESP-side uart_owner.h moving into
+// firmware/hwAbstraction/esp/uart/ under the same Phase 1a effort.
+#include "hal_uart_pico_internal.h"
 
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
@@ -8,6 +14,13 @@
 #include "hardware/uart.h"
 #include "hardware/regs/uart.h"
 
+// TEMPORARY (HAL Phase 1b): board_pins.h is a SaftyFW header
+// (firmware/SaftyFW/src/board_pins.h), not part of hwAbstraction/. Left as
+// a same-name include resolved via SaftyFW's own include path (this file
+// is compiled into the hwabstraction_pico library, which SaftyFW's
+// CMakeLists.txt gives a private include dir on firmware/SaftyFW/src for
+// exactly this) until Phase 1b introduces a board-descriptor header inside
+// hwAbstraction/pico/ itself (see esp/board_kiln_s3.h's analogous role).
 #include "board_pins.h"
 #include "uart_owner_tx_policy.h"
 

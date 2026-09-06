@@ -89,10 +89,11 @@ void run_test_watchdog_budget_coverage(void)
 {
     TEST_SECTION("watchdog budget coverage (no core-1 bounded wait may exceed the 1 s hardware watchdog timeout)");
 
+    // HAL Phase 1a moved spi_owner.c from src/ to
+    // firmware/hwAbstraction/pico/spi/ (docs/HW_ABSTRACTION_PLAN.md).
     static const char *spi_owner_candidates[] = {
-        "../src/spi_owner.c",
-        "src/spi_owner.c",
-        "firmware/SaftyFW/src/spi_owner.c",
+        "../../hwAbstraction/pico/spi/spi_owner.c",
+        "firmware/hwAbstraction/pico/spi/spi_owner.c",
     };
     static const char *main_candidates[] = {
         "../src/main.c",
@@ -100,7 +101,7 @@ void run_test_watchdog_budget_coverage(void)
         "firmware/SaftyFW/src/main.c",
     };
 
-    char *spi_owner_text = read_file_any(spi_owner_candidates, 3);
+    char *spi_owner_text = read_file_any(spi_owner_candidates, 2);
     char *main_text = read_file_any(main_candidates, 3);
 
     if (!spi_owner_text || !main_text) {

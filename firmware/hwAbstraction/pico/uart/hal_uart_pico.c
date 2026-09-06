@@ -96,21 +96,19 @@
  */
 #include "hal_uart.h"
 
-/* TEMPORARY boundary violation: tasks/uart_owner.h is a SaftyFW header
- * (firmware/SaftyFW/src/tasks/), included here across the hwAbstraction/
- * pico boundary before uart_owner.c has actually moved into this tree. Per
- * docs/HW_ABSTRACTION_PLAN.md's "espInterfaces move set" / Phase 1a, the
- * SaftyFW move set (src/tasks/uart_owner.c/h, uart_owner_tx_policy.c/h)
- * relocates into firmware/hwAbstraction/pico/uart/ itself, at which point
- * this becomes a same-directory include and the violation disappears. Until
- * that move lands, this file wraps uart_owner.c's public API from outside
- * SaftyFW's own tree -- acceptable only as a stopgap; do not add further
- * SaftyFW-header includes to this backend on the strength of this
- * precedent. See docs/HW_ABSTRACTION_PLAN.md Phase 1a for the tracked
- * removal. */
-#include "tasks/uart_owner.h"
+/* HAL Phase 1a (docs/HW_ABSTRACTION_PLAN.md) moved uart_owner.c/h and
+ * uart_owner_tx_policy.c/h from firmware/SaftyFW/src/tasks/ into this same
+ * directory (uart_owner.h renamed to hal_uart_pico_internal.h to avoid
+ * colliding with the ESP-side uart_owner.h moving into
+ * firmware/hwAbstraction/esp/uart/ under the same effort), so the former
+ * TEMPORARY upward include of a SaftyFW header from outside SaftyFW's own
+ * tree is now an ordinary same-directory include. */
+#include "hal_uart_pico_internal.h"
 
 #include "hal_time.h"
+/* TEMPORARY (HAL Phase 1b): board_pins.h is a SaftyFW header
+ * (firmware/SaftyFW/src/board_pins.h), not part of hwAbstraction/. See
+ * uart_owner.c's identical note on this same include. */
 #include "board_pins.h"
 
 /* No per-instance struct: uart_owner.c's state is entirely file-scope

@@ -1,5 +1,6 @@
 // test_uart_owner_tx_policy.c -- host tests for the pure TX self-start-
-// failure classifier (src/tasks/uart_owner_tx_policy.c/.h), the 2026-08-23
+// failure classifier (firmware/hwAbstraction/pico/uart/uart_owner_tx_policy.c/.h,
+// moved from src/tasks/ by HAL Phase 1a), the 2026-08-23
 // root cause of the DIAG/POWER-went-dark hunt: a send whose priming write
 // got zero bytes into the hardware FIFO (because the FIFO was already full
 // from an immediately-preceding send) left its ENTIRE frame dependent on the
@@ -11,7 +12,7 @@
 // uart_owner.c itself it is directly host-testable here, same pattern
 // test_watchdog_gate.c already established for watchdog_gate.c.
 #include "test_common.h"
-#include "../src/tasks/uart_owner_tx_policy.h"
+#include "../../hwAbstraction/pico/uart/uart_owner_tx_policy.h"
 
 // The exact failure condition this whole investigation chased: nothing
 // primed, but bytes are still queued and depend on the ISR alone.
