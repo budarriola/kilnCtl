@@ -7,12 +7,10 @@ the goal, tree shape, decisions, changelog, and remaining open items.
 
 ## Still open
 
-- **Pico flash** of the full HAL tree on the real board. The ESP side is
-  done: `a410edd` flashed via `flash_firmware()` 2026-09-06, verified
-  running factory, tuned gains and coupling matrix read back intact. The
-  Pico has not been flashed since the SaftyFW gpio/wdt/flash migrations;
-  blocked until another session's uncommitted `safety_guards.c` S8 change
-  leaves the tree. Flash from a clean worktree.
+- ~~Pico flash~~ — done 2026-09-06: S8 committed as `1d6198e`, Pico
+  flashed `c7f0ed5` from a clean worktree (`C:/wt/pico-flash`,
+  `debug_program(peer="pico", elf_path=...)`), link up, protocol v10, no
+  trip. ESP side `a410edd` earlier the same day.
 - **Bench timing re-verification**, never confirmed after the Phase 1b/
   2026-09-06 uart collapse: safety-link reply timing, display frame time,
   thermo read latency under a full-screen redraw. Host tests cannot see
