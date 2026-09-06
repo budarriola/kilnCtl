@@ -934,24 +934,24 @@ static void link_task_send_diag(void)
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     bool warn_active = false;
     uint8_t diag_state = 0;
-    safety_core_get_diag_status(&trip_reason, &warn_active, &diag_state);
+    uint16_t warn_mask = 0u;
+    safety_core_get_diag_status(&trip_reason, &warn_active, &diag_state, &warn_mask);
 
-    // warn_mask/trip_mask: LINK_PROTOCOL.md documents these as "one bit per
-    // guard" across the full 13-guard suite. This build's safety_guards.c
-    // only tracks ONE is_tripped/reason pair for the whole module (5 of 13
-    // guards implemented, see safety_guards.h's own header comment) and,
-    // similarly, only an OR of the two WARN-capable guards' flags (S5/S12) --
-    // there is no per-guard bitmask anywhere in this codebase to report a
-    // real 13-bit mask from. Rather than inventing one, this synthesizes a
-    // single-bit degraded approximation: trip_mask sets bit (reason-1) when
-    // tripped (matching safety_trip_t's own numbering, so the one bit that IS
-    // set at least identifies the right guard), and warn_mask sets bit 0 as
-    // an aggregate "something is warning" signal when warn_active is true,
-    // since no per-guard identity is available for WARN at all. TODO.md
-    // records this as the honest state of Frame B, not a placeholder to
-    // silently upgrade later.
+    // trip_mask: this build's safety_guards.c only tracks ONE is_tripped/
+    // reason pair for the whole module (5 of 13 guards implemented, see
+    // safety_guards.h's own header comment), so this stays a single-bit
+    // degraded approximation of LINK_PROTOCOL.md's "one bit per guard"
+    // wording -- bit (reason-1) when tripped, matching safety_trip_t's own
+    // numbering, so the one bit that IS set at least identifies the right
+    // guard. TODO.md records this as the honest state of Frame B's trip_mask.
+    //
+    // warn_mask, by contrast, IS now the real per-guard mask (Opus review of
+    // 51c084f/c49bb0e, finding 1) -- safety_core_get_diag_status() derives it
+    // from safety_guards_warn_mask(), which has real per-guard identity for
+    // every WARN-capable guard in this build (S4/S5/S9/S10/S12/S13/S14/S15).
+    // See safety_guards.h's doc comment on that function for the bit
+    // numbering, and LINK_PROTOCOL.md's Frame B table for the wire spec.
     uint16_t trip_mask = link_frame_trip_mask_for_reason(trip_reason);
-    uint16_t warn_mask = warn_active ? 0x0001u : 0u;
 
     uint32_t uptime_ms = to_ms_since_boot(get_absolute_time());
 
@@ -1355,7 +1355,7 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
     s_clear_trip_rx_count++;
 
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
-    safety_core_get_diag_status(&trip_reason, NULL, NULL);
+    safety_core_get_diag_status(&trip_reason, NULL, NULL, NULL);
 
     // link_frame_decide_clear_trip() (src/tasks/link_frame.c) is the pure,
     // host-tested extraction of the two refusal checks documented above --

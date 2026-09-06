@@ -96,8 +96,12 @@ document, do not solve.
    (`normal_a[zone] = sum(with zone on) - sum(idle)`), skips the
    channel-map check, and S14 compares channel 3 against the sum of normals
    of commanded-on zones. `i_present_a` auto-derives as half the smallest
-   zone normal unless set by hand. Add an **under-current** warn (open
-   heater: commanded sum minus measured > 0.7x that zone's normal for 30 s),
+   NONZERO zone normal unless set by hand (a zone commissioned at 0 A is
+   skipped, never allowed to drive the shared threshold to 0). Add an
+   **under-current** warn (open heater: commanded sum minus measured > 0.7x
+   that zone's normal for 30 s) — the deficit is one shared-CT scalar
+   checked against each commanded zone's own threshold, so it identifies
+   "one of the commanded zones," not necessarily every zone whose bit sets.
    WARN-only like S4/S14 until it has been seen on hardware.
 
    **Pico side: done** (`safety_guards.c`/`.h`, `safety_core.c`,

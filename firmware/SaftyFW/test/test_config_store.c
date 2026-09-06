@@ -1878,6 +1878,46 @@ static void test_config_params_finalize_i_present_a(void)
                    "a manual i_present_a is never overwritten by finalize, even after i_normal_a changes");
     }
 
+    // Opus review of 51c084f/c49bb0e, finding 2: a zone commissioned at
+    // exactly 0.0A (CHECK_F32_NONNEG on 0x0301/0x031x allows 0 through --
+    // e.g. a zone measured with its element disconnected, or a mistake)
+    // must NOT win the smallest-search and drive i_present_a to 0.0f --
+    // current_sense.c:285's `conducting = (amps > i_present_a)` would then
+    // read "conducting" on pure ADC noise for every zone, since
+    // i_present_a is one shared scalar. Quantized-counts style values
+    // (not round numbers), matching this file's existing style.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 0.0f; // zone 0 commissioned at 0A -- must be skipped
+        TEST_CHECK(config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[0] = 0.0A");
+        v.f32_val = 6.07f; // zone 1's real, nonzero normal
+        TEST_CHECK(config_params_set(&rec, 0x031Bu, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[1] = 6.07A");
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(fabsf(rec.i_present_a - 3.035f) < 0.0005f,
+                   "a 0.0A zone normal is skipped; i_present_a derives from the smallest NONZERO normal instead");
+        TEST_CHECK(rec.i_present_a != 0.0f, "i_present_a is never driven to 0.0A by a 0A-commissioned zone");
+    }
+
+    // NEGATIVE TEST for the above: break the "skip <= 0.0f" gate (simulate
+    // the old buggy behavior, where a 0.0A zone was eligible to win the
+    // smallest-search) and confirm it would have produced a DIFFERENT,
+    // wrong answer -- proves the test above is not vacuous.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 0.0f;
+        config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v);
+        v.f32_val = 6.07f;
+        config_params_set(&rec, 0x031Bu, KILNLINK_PARAM_TYPE_F32, v);
+        float buggy_result = 0.0f * 0.5f; // what an ungated smallest-search would produce (0.0A wins)
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(rec.i_present_a != buggy_result,
+                   "the real function's result differs from what the pre-fix bug would have produced");
+    }
+
     // NEGATIVE TEST (required, negative-test-every-check discipline): break
     // the production "skip unmeasured/manual" comparison and confirm the
     // test above would actually have caught it -- proves this is not a

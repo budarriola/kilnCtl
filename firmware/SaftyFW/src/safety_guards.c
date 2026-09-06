@@ -1026,7 +1026,22 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
              * expected sum itself is known (sum_valid) and the shared CT
              * reading is fresh -- otherwise a deficit cannot be attributed
              * to any single zone and every zone's S15 stays inert, same
-             * "skip entirely, never a false pass" discipline as S14. */
+             * "skip entirely, never a false pass" discipline as S14.
+             *
+             * Opus review of 51c084f/c49bb0e, finding 3: `deficit_a` below
+             * is ONE global scalar (the shared CT's total shortfall), tested
+             * in this loop against EACH commanded zone's own, individually
+             * smaller, threshold. If one heater element opens, the resulting
+             * deficit can clear more than one commanded zone's 0.7x-normal
+             * bar at once -- s15_warn[z] setting for several zones does NOT
+             * mean several zones are faulty; it means one shared-CT deficit
+             * is consistent with the fault being in any one of the zones
+             * whose bar it cleared, and the guard cannot narrow further than
+             * that with only one CT. Read/report s15_warn as "one of these
+             * commanded zones" per-zone, never "each flagged zone" as
+             * independently faulty -- see GUARD_TEST_MATRIX.md/
+             * CURRENT_SENSE.md's S15 entries for the operator-facing
+             * wording this drives. */
             bool s15_base_active = !in->current_sensing_disabled && sum_valid &&
                                     in->amps_valid[CT_SUMMED_CHANNEL];
             float deficit_a = s15_base_active ? (expected_sum_a - in->amps[CT_SUMMED_CHANNEL]) : 0.0f;
@@ -1060,4 +1075,44 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
     state->s9_uncommissioned_warn = false;
 
     return false;
+}
+
+uint16_t safety_guards_warn_mask(const safety_guard_state_t *state)
+{
+    if (state == NULL) {
+        return 0u;
+    }
+
+    uint16_t mask = 0u;
+    if (state->s4_warn) {
+        mask |= (uint16_t)(1u << 3);
+    }
+    if (state->s5_warn) {
+        mask |= (uint16_t)(1u << 4);
+    }
+    if (state->s9_uncommissioned_warn) {
+        mask |= (uint16_t)(1u << 9);
+    }
+    if (state->s10_warn) {
+        mask |= (uint16_t)(1u << 10);
+    }
+    if (state->s12_warn) {
+        mask |= (uint16_t)(1u << 12);
+    }
+    if (state->s13_warn) {
+        mask |= (uint16_t)(1u << 13);
+    }
+    for (int z = 0; z < 3; z++) {
+        if (state->s14_warn[z]) {
+            mask |= (uint16_t)(1u << 14);
+            break;
+        }
+    }
+    for (int z = 0; z < 3; z++) {
+        if (state->s15_warn[z]) {
+            mask |= (uint16_t)(1u << 15);
+            break;
+        }
+    }
+    return mask;
 }

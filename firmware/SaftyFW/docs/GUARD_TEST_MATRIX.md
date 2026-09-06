@@ -230,10 +230,25 @@ and is *skipped* in summed mode — a single shared CT (channel 3/GPIO28)
 reads every zone, so there is no per-relay mapping to confirm. S14 instead
 compares channel 3 against the sum of `i_normal_a[]` for zones commanded on
 right now (channels 1-2 report not-fitted), and a new WARN-only guard,
-**S15**, flags a zone whose commanded-sum-minus-measured deficit exceeds
-`0.7×` its own normal for 30 s — the summed-CT substitute for "this
-particular zone's heater went open," which per_zone mode gets for free from
-its own dedicated channel.
+**S15**, flags that the shared CT's commanded-sum-minus-measured deficit is
+consistent with **one of the commanded zones** having an open heater — its
+threshold is checked per zone (`0.7×` that zone's own normal for 30 s), but
+the deficit itself is one shared-CT scalar, so a single open element can
+clear more than one commanded zone's threshold at once. Several zones'
+`s15_warn` bits set together means the fault could be in any one of them,
+never that all of them are independently faulty — the summed-CT substitute
+for "this particular zone's heater went open" is honest only down to "one of
+these," which per_zone mode's dedicated channels would resolve exactly.
+
+**`amps_valid[0]`/`[1]` are always false in `summed` mode** (`safety_core.c`:
+only channel index 2/"channel 3" has a CT behind it in this topology, same
+"not fitted, never a plausible 0.00 A" discipline as `ct_installed = no`).
+Because S3/S4/S9/S11 all gate on `in->amps_valid[ch]` per channel, this
+disarms those four guards' current-based checks on channels 0/1 specifically
+— identical in effect to `ct_installed = no` (§9), just scoped to two of the
+three channels instead of all three. S14/S15 do not need channels 0/1 valid
+in this topology (they read channel 2 / the shared deficit instead), so they
+are unaffected by this.
 
 ### 3.4 Trips — provoke each one that is enabled
 

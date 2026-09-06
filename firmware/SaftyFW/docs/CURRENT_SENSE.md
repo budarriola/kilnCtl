@@ -71,9 +71,23 @@ reasoning.
 channels 1-2 report not-fitted (never a plausible 0.00 A), S14 compares
 channel 3 against the sum of `i_normal_a[]` for zones commanded on right
 now, and a new guard, **S15** (WARN-only, per zone, commanded-sum-minus-
-measured `> 0.7×` that zone's normal for 30 s), flags a likely open heater
-that a shared CT alone cannot attribute to one zone the way three separate
-CTs could. ESP-side commissioning UI/display for this is still pending.
+measured `> 0.7×` that zone's normal for 30 s), flags that the shared CT's
+deficit is consistent with **one of the commanded zones** having an open
+heater. The deficit is a single shared-CT scalar tested against each
+commanded zone's own (smaller) threshold, so more than one zone's WARN bit
+can set from the same single fault — a shared CT alone cannot attribute the
+deficit to one zone the way three separate CTs could, and S15's per-zone
+bits must be read as "the fault is in one of these," never as every flagged
+zone being independently faulty. ESP-side commissioning UI/display for this
+is still pending.
+
+Channels 1-2 reporting not-fitted means `amps_valid[0]`/`[1]` are always
+false in `summed` mode (`safety_core.c`) — and since S3/S4/S9/S11 each gate
+their current-based checks on `in->amps_valid[ch]` per channel, this disarms
+those four guards' checks on channels 0/1 specifically, the same way
+answering "no CTs" disarms them on all three (see the "Answering *no*..."
+paragraph above) — just scoped to two of three channels here instead of all
+three. Channel 2 stays valid, so S3/S4/S9/S11 keep working on it normally.
 
 ---
 

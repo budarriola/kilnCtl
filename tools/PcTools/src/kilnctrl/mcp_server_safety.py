@@ -337,19 +337,28 @@ def safety_capture_ct_counts(seconds: float = 60.0, out_dir: Optional[str] = Non
     this tool. The wire only carries a NEW sample once per POWER frame
     (500 ms, LINK_PROTOCOL.md sec 2), so polling faster than that just
     re-reads the same cached value -- this tool polls at 0.2 s intervals
-    (comfortably under 500 ms without hammering the HTTP server) and reports
-    the ACHIEVED rate of genuinely NEW samples (by `ct_counts` value change,
-    not by poll count) rather than claim 20 Hz it cannot actually deliver.
-    Counts are per-channel u16 (0..4095) straight from GET /api/status's
-    `ct_counts` (dashboard_status_http.c, 2026-09-06) -- null/absent when the
-    Pico is running a pre-`KILNLINK_PROTOCOL_VERSION`-11 build or has never
-    sent a POWER frame; this tool fails (does not silently substitute 0) in
-    that case.
+    (comfortably under 500 ms without hammering the HTTP server).
 
-    A CSV (`ts_ms,ch0,ch1,ch2`, one row per genuinely new sample) is written
-    under `out_dir` if given (caller supplies the directory; this tool does
-    not invent one) -- the raw log CURRENT_SENSE.md sec 4 wants preserved for
-    the noise-floor writeup, not just the summary statistics. Without
+    Records EVERY poll at that fixed cadence, not only polls where
+    `ct_counts` changed from the previous one (Opus review of
+    51c084f/c49bb0e, finding 8: the original version discarded exactly the
+    quiet, unchanged-count samples a noise-floor measurement needs -- if the
+    ADC is genuinely quiet, "value didn't change" IS the noise-floor
+    observation, not a duplicate to drop). The returned/logged sample rate
+    is the ACHIEVED rate of GET /api/status calls that returned a valid
+    `ct_counts` (by poll count, not by value-change count) over the actual
+    wall-clock elapsed time -- this can run a little under the nominal
+    1/poll_interval_s if HTTP round-trips are slow, so it is measured, not
+    assumed. Counts are per-channel u16 (0..4095) straight from GET
+    /api/status's `ct_counts` (dashboard_status_http.c, 2026-09-06) --
+    null/absent when the Pico is running a pre-`KILNLINK_PROTOCOL_VERSION`-11
+    build or has never sent a POWER frame; this tool fails (does not
+    silently substitute 0) in that case.
+
+    A CSV (`ts_ms,ch0,ch1,ch2`, one row per poll) is written under `out_dir`
+    if given (caller supplies the directory; this tool does not invent one)
+    -- the raw log CURRENT_SENSE.md sec 4 wants preserved for the
+    noise-floor writeup, not just the summary statistics. Without
     `out_dir`, only the summary is returned.
 
     This is a different tool from noise_floor.py's PID run-to-run repeat
@@ -363,7 +372,6 @@ def safety_capture_ct_counts(seconds: float = 60.0, out_dir: Optional[str] = Non
 
     poll_interval_s = 0.2
     samples: "list[tuple[int, int, int, int]]" = []  # (ts_ms, ch0, ch1, ch2)
-    last_counts: "Optional[tuple[int, int, int]]" = None
     start = time.monotonic()
     deadline = start + seconds
     saw_valid_frame = False
@@ -377,9 +385,7 @@ def safety_capture_ct_counts(seconds: float = 60.0, out_dir: Optional[str] = Non
         if isinstance(counts, list) and len(counts) == 3:
             saw_valid_frame = True
             c0, c1, c2 = int(counts[0]), int(counts[1]), int(counts[2])
-            if (c0, c1, c2) != last_counts:
-                samples.append((int((time.monotonic() - start) * 1000), c0, c1, c2))
-                last_counts = (c0, c1, c2)
+            samples.append((int((time.monotonic() - start) * 1000), c0, c1, c2))
         elapsed = time.monotonic() - loop_start
         remaining = poll_interval_s - elapsed
         if remaining > 0:
@@ -389,7 +395,7 @@ def safety_capture_ct_counts(seconds: float = 60.0, out_dir: Optional[str] = Non
         return ("error: ct_counts never present in GET /api/status -- Pico is "
                 "either pre-protocol-11 or has never sent a POWER frame")
     if not samples:
-        return "error: no new ct_counts samples observed in the capture window"
+        return "error: no ct_counts samples observed in the capture window"
 
     per_channel = [[s[1] for s in samples], [s[2] for s in samples], [s[3] for s in samples]]
     stats = []
@@ -400,10 +406,11 @@ def safety_capture_ct_counts(seconds: float = 60.0, out_dir: Optional[str] = Non
         std = math.sqrt(variance)
         stats.append((ch, mean, std, min(values), max(values)))
 
-    achieved_hz = len(samples) / seconds
-    lines = [f"{n} new samples over {seconds:.1f} s ({achieved_hz:.2f} Hz achieved, "
-             f"limited by the 500 ms POWER cadence -- see this tool's docstring)"
-             for n in (len(samples),)]
+    actual_elapsed_s = max(time.monotonic() - start, 1e-9)
+    achieved_hz = len(samples) / actual_elapsed_s
+    lines = [f"{len(samples)} samples over {actual_elapsed_s:.1f} s "
+             f"({achieved_hz:.2f} Hz achieved -- every {poll_interval_s}s poll recorded, "
+             f"not just value changes)"]
     for ch, mean, std, lo, hi in stats:
         lines.append(f"ch{ch}: mean={mean:.2f} std={std:.3f} min={lo} max={hi}")
 

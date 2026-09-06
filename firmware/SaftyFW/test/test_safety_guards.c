@@ -3599,6 +3599,110 @@ static void test_ct_disabled_guards(void)
     }
 }
 
+static void test_warn_mask(void)
+{
+    TEST_SECTION("safety_guards_warn_mask() -- Opus review of 51c084f/c49bb0e finding 1: real "
+                 "per-guard DIAG warn bits, not the former single-bit approximation");
+
+    /* NULL is handled defensively, matching every other pure accessor in
+     * this module. */
+    TEST_CHECK(safety_guards_warn_mask(NULL) == 0u, "NULL state -> 0, not a crash");
+
+    /* A freshly reset state has nothing warning. */
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        TEST_CHECK(safety_guards_warn_mask(&st) == 0u, "freshly reset state -> mask 0");
+    }
+
+    /* Each bit, set one at a time, lands at the documented position and
+     * nowhere else -- proves the mapping is exact, not just "nonzero when
+     * something is warning". */
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s4_warn = true;
+        TEST_CHECK(safety_guards_warn_mask(&st) == (1u << 3), "s4_warn alone -> bit 3 only");
+    }
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s5_warn = true;
+        TEST_CHECK(safety_guards_warn_mask(&st) == (1u << 4), "s5_warn alone -> bit 4 only");
+    }
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s9_uncommissioned_warn = true;
+        TEST_CHECK(safety_guards_warn_mask(&st) == (1u << 9), "s9_uncommissioned_warn alone -> bit 9 only");
+    }
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s10_warn = true;
+        TEST_CHECK(safety_guards_warn_mask(&st) == (1u << 10), "s10_warn alone -> bit 10 only");
+    }
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s12_warn = true;
+        TEST_CHECK(safety_guards_warn_mask(&st) == (1u << 12), "s12_warn alone -> bit 12 only");
+    }
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s13_warn = true;
+        TEST_CHECK(safety_guards_warn_mask(&st) == (1u << 13), "s13_warn alone -> bit 13 only");
+    }
+    {
+        /* S14: any ONE of the 3 channels sets exactly bit 14, not a
+         * per-channel spread across multiple bits. */
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s14_warn[1] = true; /* middle channel, deliberately not index 0 */
+        TEST_CHECK(safety_guards_warn_mask(&st) == (1u << 14),
+                   "s14_warn[1] alone (any one of 3 channels) -> bit 14 only");
+    }
+    {
+        /* S15: same "any one of 3 zones -> one bit" collapse as S14. */
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s15_warn[2] = true; /* last zone, deliberately not index 0 */
+        TEST_CHECK(safety_guards_warn_mask(&st) == (1u << 15),
+                   "s15_warn[2] alone (any one of 3 zones) -> bit 15 only");
+    }
+
+    /* Several guards warning at once OR together, with no cross-talk. */
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s4_warn = true;
+        st.s10_warn = true;
+        st.s14_warn[0] = true;
+        st.s14_warn[2] = true; /* two channels of the SAME guard -> still just bit 14 */
+        uint16_t expected = (uint16_t)((1u << 3) | (1u << 10) | (1u << 14));
+        TEST_CHECK(safety_guards_warn_mask(&st) == expected,
+                   "S4+S10+S14(x2 channels) -> exactly bits 3,10,14, no double-count for S14's two channels");
+    }
+
+    /* NEGATIVE TEST (negative-test-every-check discipline): a mutated
+     * (buggy) reimplementation that swaps two guards' bits would be caught
+     * by the "each bit alone" checks above -- prove that concretely by
+     * showing the real function's S14-alone result does NOT equal what a
+     * bit-swapped bug (S14 wrongly reusing S13's bit 13 instead of 14, e.g.
+     * from a copy-paste of the S13 case) would have produced. */
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        st.s14_warn[0] = true;
+        uint16_t real = safety_guards_warn_mask(&st);
+        uint16_t buggy_bit13_instead = (uint16_t)(1u << 13); /* what a copy-paste-from-S13 bug would produce */
+        TEST_CHECK(real != buggy_bit13_instead,
+                   "S14's real bit (14) differs from a plausible copy-paste bug's bit (13)");
+        TEST_CHECK(real == (uint16_t)(1u << 14), "S14's real bit is exactly 14, confirming the above isn't a fluke");
+    }
+}
+
 void run_test_safety_guards(void)
 {
     test_s1();
@@ -3626,4 +3730,5 @@ void run_test_safety_guards(void)
     test_decide_clear_trip_outcome();
     test_deciding_threshold();
     test_ct_disabled_guards();
+    test_warn_mask();
 }

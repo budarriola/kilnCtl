@@ -1404,7 +1404,7 @@ void safety_core_get_output_status(bool *out_relay_energized, bool *out_heating_
 }
 
 void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_active,
-                                  uint8_t *out_diag_state)
+                                  uint8_t *out_diag_state, uint16_t *out_warn_mask)
 {
     // s_guard_state is this task's own local static -- safe to read from any
     // task the same way relay_owner's state is (single-word/small-struct
@@ -1412,13 +1412,25 @@ void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_
     // hazard worse than the volatile-read pattern relay_owner.h already
     // documents for the same reason, and a stale-by-one-tick (100ms) read is
     // immaterial for a diagnostic frame).
-    bool warn_active = s_guard_state.s5_warn || s_guard_state.s12_warn;
+    //
+    // Opus review of 51c084f/c49bb0e, finding 1: warn_active used to OR only
+    // s5_warn/s12_warn -- the two guards this function's own header comment
+    // used to (incorrectly, by the time S14/S15 existed) call "the only two
+    // guards in this build with a WARN concept". Now derived from the real
+    // per-guard mask (safety_guards_warn_mask(), safety_guards.h) so adding
+    // a ninth WARN-capable guard later cannot silently leave this OR behind
+    // the same way it already had.
+    uint16_t warn_mask = safety_guards_warn_mask(&s_guard_state);
+    bool warn_active = (warn_mask != 0u);
 
     if (out_trip_reason) {
         *out_trip_reason = s_guard_state.is_tripped ? s_guard_state.reason : SAFETY_TRIP_NONE;
     }
     if (out_warn_active) {
         *out_warn_active = warn_active;
+    }
+    if (out_warn_mask) {
+        *out_warn_mask = warn_mask;
     }
     if (out_diag_state) {
         relay_owner_state_t relay_state = relay_owner_get_state();

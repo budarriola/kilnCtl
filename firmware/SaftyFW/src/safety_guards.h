@@ -689,7 +689,14 @@ typedef struct {
      * false) whenever cfg->ct_topology_summed is false -- per_zone mode has
      * no shared-CT deficit to attribute to a single zone. Reset in the same
      * !in->context_valid block as S14 above, for the same reason (needs
-     * relay_commanded_now_for_zone, which is context). */
+     * relay_commanded_now_for_zone, which is context).
+     *
+     * Per-element array, but the deficit it is compared against is ONE
+     * shared-CT scalar (safety_guards.c): a single open heater can clear
+     * more than one commanded zone's own threshold at once, so s15_warn[z]
+     * true for several z does not mean several zones are faulty -- it means
+     * the fault is consistent with any one of them. Report/read it as "one
+     * of the commanded zones", never "each flagged zone", faulty. */
     float s15_under_elapsed_s[3];
     bool  s15_warn[3];
 } safety_guard_state_t;
@@ -783,6 +790,47 @@ safety_clear_trip_outcome_t safety_guards_decide_clear_trip_outcome(bool was_tri
 // computes internally and does not expose -- see the .c file's doc comment
 // on the SAFETY_TRIP_OVERTEMP case for the exact caveat.
 float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guard_cfg_t *cfg);
+
+// Opus review of 51c084f/c49bb0e, finding 1: s15_warn[]/s14_warn[] were read
+// nowhere outside this module -- no DIAG warn-mask bit, no telemetry -- even
+// though safety_core_get_diag_status()'s out_warn_active had already
+// documented (falsely, by the time S14/S15 existed) that S5/S12 were "the
+// only two guards in this build that have a WARN concept at all". This is
+// the real per-guard mask LINK_PROTOCOL.md's Frame B has always specified
+// ("one bit per guard currently warning"), replacing link_task_send_diag()'s
+// former single-bit (bit0) degraded approximation. Pure and host-tested here
+// (test_safety_guards.c) rather than in link_task.c/link_frame.c, since this
+// module already owns every field it reads and safety_core.c is structurally
+// forbidden from #include-ing anything link-shaped (docs/ARCHITECTURE.md
+// section 2) -- safety_core_get_diag_status() calls this directly.
+//
+// Bit numbering: for every guard that already has a safety_trip_t code, the
+// bit is (that code - 1), i.e. the exact same numbering link_frame_trip_mask_
+// for_reason() uses for trip_mask -- S4/S10's codes are reserved gaps (4 and
+// 11) specifically so a WARN-only guard has a slot here without colliding
+// with any TRIP guard's bit. S14 and S15 (both added after safety_trip_t was
+// written, CT_COMMISSIONING_PLAN.md) were never given a reserved trip code at
+// all -- codes 15/16 went to CONFIG_CORRUPT/SELF_TEST, unrelated future
+// guards -- so they take bits 14/15 directly: both bits have been 0 on every
+// frame ever sent (warn_mask was always the single-bit approximation before
+// this), so this is a genuinely unused-until-now pair of bits, not a reuse of
+// anything live. S14/S15 are 3-channel/3-zone arrays in safety_guard_state_t;
+// each gets exactly one mask bit (any channel/zone warning), matching
+// trip_mask's existing per-guard-not-per-channel granularity.
+//
+//   bit 3  (S4)  s4_warn
+//   bit 4  (S5)  s5_warn
+//   bit 9  (S9)  s9_uncommissioned_warn
+//   bit 10 (S10) s10_warn
+//   bit 12 (S12) s12_warn
+//   bit 13 (S13) s13_warn
+//   bit 14 (S14) any(s14_warn[0..2])
+//   bit 15 (S15) any(s15_warn[0..2])
+//
+// All other bits are always 0 in this build (no other guard has a WARN
+// concept yet). See firmware/CommonFW/docs/LINK_PROTOCOL.md's Frame B table
+// for the wire-level documentation of this same numbering.
+uint16_t safety_guards_warn_mask(const safety_guard_state_t *state);
 
 #ifdef __cplusplus
 }

@@ -10,16 +10,21 @@ produces byte-identical output to the C encoders for every payload codec
 that has host tests and test/vectors/ in CommonFW, not just the framing
 layer -- see commonfw_payload_vector_checks() in selfcheck.py.
 
-Deliberately minimal and encode-only: each function takes the same field
-dict shape the corresponding test/vectors/<name>_vectors.json "fields" (or,
-for the three older-style manifests, top-level vector) uses, and returns the
+Deliberately minimal, and mostly encode-only: each encoder takes the same
+field dict shape the corresponding test/vectors/<name>_vectors.json "fields"
+(or, for the older-style manifests, top-level vector) uses, and returns the
 exact wire bytes -- struct.pack calls whose field order and offsets are
 copied 1:1 from the matching firmware/CommonFW/src/kilnlink_<name>.c "Offsets"
-comment. No decode side: nothing in pc_tools parses these frames yet (they
-are not wired into either firmware's real dispatch either -- ROADMAP.md M2),
-so there is nothing here for a decoder to feed. Add one only when a real
-caller needs it, mirroring firmware/CommonFW/include/kilnlink/kilnlink_<name>.h
-field-for-field the way these encoders already do.
+comment. No decode side exists for most of these frames (they are not wired
+into either firmware's real dispatch either -- ROADMAP.md M2), so there is
+nothing here for a decoder to feed; add one only when a real caller needs
+it, mirroring firmware/CommonFW/include/kilnlink/kilnlink_<name>.h
+field-for-field the way the encoders already do. decode_power() is the one
+exception (Opus review of 51c084f/c49bb0e, finding 7) -- added purely so
+encode_power()'s new V1/V2 handling has a decoder to round-trip against in
+test_kilnlink_codec.py; nothing in pc_tools calls it on live traffic yet
+(safety_capture_ct_counts()/mcp_server_safety.py reads counts_avg via GET
+/api/status's JSON `ct_counts` field, not by parsing a raw kilnlink frame).
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ __all__ = [
     "encode_diag",
     "encode_trip",
     "encode_power",
+    "decode_power",
     "encode_ceiling",
     "encode_clear_trip",
     "encode_get_fw_version",
@@ -212,16 +218,46 @@ def encode_trip(f: dict) -> bytes:
 # 3 x (i_conducting_a(f32) conduction_fraction(f32)) 3 x p_avg_w(f32)
 # p_total_w(f32) energy_wh(f64) = 55 bytes.
 
+#: kilnlink_power.h: bit set in the flags byte whenever the frame carries a
+#: real counts_avg tail (V2, 61 bytes) -- distinguishes "counts_avg is real"
+#: from "counts_avg is zero-filled padding" for a peer that never learned to
+#: set it (an old V1 sender, or a V2-length frame from untrusted input that
+#: didn't set the bit).
+KILNLINK_POWER_FLAG_COUNTS_VALID = 0x08
+
+#: Fixed lengths, kilnlink_power.h.
+KILNLINK_POWER_LEN_V1 = 55
+KILNLINK_POWER_LEN_V2 = 61
+
+
 def encode_power(f: dict) -> bytes:
+    """Mirrors firmware/CommonFW/src/kilnlink_power.c's
+    kilnlink_power_encode() -- which, as of 2026-09-06, ALWAYS emits the
+    61-byte V2 layout (55-byte V1 body + 3x u16 LE counts_avg) and ALWAYS
+    forces KILNLINK_POWER_FLAG_COUNTS_VALID on in the flags byte, regardless
+    of what the caller passed in `f["flags"]` -- a caller never has to
+    remember the bit, same as the C encoder's own doc comment says. Opus
+    review of 51c084f/c49bb0e, finding 7: this function previously still
+    emitted the old 55-byte V1 layout unconditionally and never set the
+    flag, silently drifting from the real encoder with no vector coverage
+    to catch it (power_vectors.json predates the V2 extension and only
+    records the 55-byte V1 body -- see selfcheck_commonfw.py's power
+    special-case for how that older vector file is still honored).
+
+    `f["counts_avg"]` is optional (defaults to [0, 0, 0]) since the existing
+    vector file has no such field; a real caller normally supplies the
+    current_snapshot_t.counts_avg triple.
+    """
     i_conducting = _nums(f["i_conducting_a"])
     conduction = _nums(f["conduction_fraction"])
     p_avg = _nums(f["p_avg_w"])
+    flags = f["flags"] | KILNLINK_POWER_FLAG_COUNTS_VALID
     out = bytearray(
         struct.pack(
             "<BBBf",
             0x0E,
             f["power_window_s"],
-            f["flags"],
+            flags,
             _num(f["mains_voltage_v"]),
         )
     )
@@ -231,7 +267,63 @@ def encode_power(f: dict) -> bytes:
         out += struct.pack("<f", p_avg[ch])
     out += struct.pack("<f", _num(f["p_total_w"]))
     out += struct.pack("<d", f["energy_wh"])
+    counts_avg = f.get("counts_avg", [0, 0, 0])
+    for ch in range(3):
+        out += struct.pack("<H", counts_avg[ch])
     return bytes(out)
+
+
+def decode_power(payload: bytes) -> dict:
+    """Mirrors kilnlink_power_decode(): accepts EITHER the 55-byte V1 layout
+    or the 61-byte V2 layout (kilnlink_power.h's own "a receiver must accept
+    any of the lengths it knows" discipline, same family as every other
+    additive frame in this protocol -- LINK_PROTOCOL.md's V1/V2/V3 status
+    frame precedent). Returns a plain dict with the same field names
+    encode_power() takes. `counts_avg` decodes to [0, 0, 0] for a V1-length
+    frame, or for a V2-length frame whose COUNTS_VALID bit is clear --
+    never garbage from an unset region of the buffer, matching the C
+    decoder's explicit zero-fill for exactly those two cases.
+
+    Raises ValueError (not a specific exception type -- this module has no
+    decode error taxonomy yet, unlike kilnctrl.protocol's Frame/FrameError
+    for the framing layer) on a wrong command byte or a length that is
+    neither V1 nor V2.
+    """
+    if len(payload) not in (KILNLINK_POWER_LEN_V1, KILNLINK_POWER_LEN_V2):
+        raise ValueError(
+            f"kilnlink power payload must be {KILNLINK_POWER_LEN_V1} or "
+            f"{KILNLINK_POWER_LEN_V2} bytes, got {len(payload)}"
+        )
+    if payload[0] != 0x0E:
+        raise ValueError(f"kilnlink power payload has wrong cmd byte: {payload[0]:#04x}, expected 0x0e")
+
+    power_window_s, flags, mains_voltage_v = struct.unpack_from("<BBf", payload, 1)
+    i_conducting_a = []
+    conduction_fraction = []
+    for ch in range(3):
+        i_a, frac = struct.unpack_from("<ff", payload, 7 + ch * 8)
+        i_conducting_a.append(i_a)
+        conduction_fraction.append(frac)
+    p_avg_w = list(struct.unpack_from("<fff", payload, 31))
+    (p_total_w,) = struct.unpack_from("<f", payload, 43)
+    (energy_wh,) = struct.unpack_from("<d", payload, 47)
+
+    if len(payload) == KILNLINK_POWER_LEN_V2 and (flags & KILNLINK_POWER_FLAG_COUNTS_VALID):
+        counts_avg = list(struct.unpack_from("<HHH", payload, 55))
+    else:
+        counts_avg = [0, 0, 0]
+
+    return {
+        "power_window_s": power_window_s,
+        "flags": flags,
+        "mains_voltage_v": mains_voltage_v,
+        "i_conducting_a": i_conducting_a,
+        "conduction_fraction": conduction_fraction,
+        "p_avg_w": p_avg_w,
+        "p_total_w": p_total_w,
+        "energy_wh": energy_wh,
+        "counts_avg": counts_avg,
+    }
 
 
 # -- SAFETY_CMD_SET_FIRING_CEILING = 0x09 (ESP -> Pico) ----------------------

@@ -47,13 +47,19 @@ void safety_core_get_output_status(bool *out_relay_energized, bool *out_heating_
 //     tracks one reason for the whole module in this build (5 of 13 guards
 //     implemented, see safety_guards.h), so there is exactly one to report.
 //
-//   out_warn_active: true if S5 or S12 is currently in its WARN state
-//     (safety_guard_state_t.s5_warn / .s12_warn) without having tripped.
-//     This is an OR of the only two guards in this build that have a WARN
-//     concept at all -- it cannot say *which* guard is warning, because
-//     safety_guards.c has no per-guard identity to report beyond that,
-//     honesty preferred over inventing one (see link_frame.h's warn_mask
-//     doc comment for how the caller turns this into the wire field).
+//   out_warn_active: true if ANY guard with a WARN concept is currently in
+//     its WARN state without having tripped (an OR across all of them, used
+//     only to pick DIAG byte 24's aggregate state). As of the Opus review of
+//     51c084f/c49bb0e this covers S4/S5/S9(uncommissioned)/S10/S12/S13/S14/
+//     S15 -- the "only S5 or S12" wording here was stale by the time S14/S15
+//     existed; see out_warn_mask below for which guard(s) specifically.
+//
+//   out_warn_mask: the real per-guard DIAG warn_mask (LINK_PROTOCOL.md Frame
+//     B, "one bit per guard currently warning"), computed by
+//     safety_guards_warn_mask() -- see that function's doc comment in
+//     safety_guards.h for the bit numbering. Replaces the former single-bit
+//     (bit0-only) degraded approximation link_task_send_diag() used to
+//     synthesize on its own.
 //
 //   out_diag_state: DIAG byte 24 (LINK_PROTOCOL.md: 0 init/1 grace/2 armed/
 //     3 warn/4 tripped), computed here because only safety_core can see both
@@ -66,7 +72,7 @@ void safety_core_get_output_status(bool *out_relay_energized, bool *out_heating_
 // Any output pointer may be NULL if the caller does not need it. Safe to
 // call from any task.
 void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_active,
-                                  uint8_t *out_diag_state);
+                                  uint8_t *out_diag_state, uint16_t *out_warn_mask);
 
 // Explicit operator-acknowledged clear -- the only way out of a latched trip
 // (SAFETY_MODEL.md section 2).

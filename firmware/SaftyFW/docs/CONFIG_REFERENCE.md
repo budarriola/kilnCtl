@@ -107,7 +107,7 @@ breakers remain the electrical protection (`SAFETY_MODEL.md` §3/§4 S14/§7).
 
 | Field | Default | Unit | Guard | Risk | Notes |
 |---|---|---|---|---|---|
-| `i_present_a` | 2.0, or auto | A | S3, S4, S9 | 🟠 | A load-active threshold. Only has to separate noise from a conducting element — one to two orders of magnitude of slack. **2026-09-06:** auto-derives to half the smallest committed `i_normal_a[]` at `COMMIT_CONFIG` unless set directly by hand (a direct `SET_PARAM` on this field always wins, permanently) |
+| `i_present_a` | 2.0, or auto | A | S3, S4, S9 | 🟠 | A load-active threshold. Only has to separate noise from a conducting element — one to two orders of magnitude of slack. **2026-09-06:** auto-derives to half the smallest committed NONZERO `i_normal_a[]` at `COMMIT_CONFIG` (a zone committed at 0.0A is skipped, never allowed to drive this to 0) unless set directly by hand (a direct `SET_PARAM` on this field always wins, permanently — see `i_present_a_manual`'s own note below) |
 | `zero_counts[3]` | measured | ADC counts | S3, S4, S9 | 🟠 | Re-measured at runtime after ≥5 min idle. **Not zero** — single-supply offset |
 | `correlation_window_s` | 150 | s | S3, S4 | 🟠 | **≥ 2 × the ESP's 60 s heater window + decay.** Shortening this is the fastest way to make S4 fire on every healthy low-duty firing |
 | `stuck_on_time_s` | 20 | s | S3 | 🟠 | |
@@ -137,6 +137,19 @@ guard-irrelevant, matching the table above. `i_present_a`/`zero_counts`
 above were never affected by this bug — they always had real defaults and
 `current_task_reload_cal()` (`src/tasks/current_task.c`) is the code that
 now actually delivers them to `current_sense.c`.
+
+**`i_present_a_manual` has no clear-back path except a factory default
+(Opus review of 51c084f/c49bb0e, finding 6).** Once a direct `SET_PARAM` on
+`i_present_a` (0x0301) sets this marker true, `config_params_finalize_i_
+present_a()` permanently stops auto-deriving `i_present_a` from `i_normal_a[]`
+for that record — by design, per CT_COMMISSIONING_PLAN.md step 3 ("unless set
+by hand"), so a later `i_normal_a` commit never silently overwrites an
+operator's deliberate value. There is no `SET_PARAM`/command that clears
+`i_present_a_manual` back to false; the only way back to auto-derive mode is
+a full factory-default reset (`config_store_default()`), which also resets
+every other commissioning field. This is not a bug to fix here, just a real
+operational constraint worth knowing before writing to 0x0301: it is a
+one-way door for that record.
 
 ## 4. Link and liveness
 

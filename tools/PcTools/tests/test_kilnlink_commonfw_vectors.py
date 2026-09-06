@@ -67,11 +67,12 @@ def _load(name: str) -> dict:
 
 
 # name -> encoder, for the "flat" (top-level fields + payload_hex) files.
+# "power" is deliberately NOT here -- see test_power_vector_file_v1_body()
+# below for why it needs its own comparison, not the generic one.
 FLAT_CODECS = {
     "announce": kilnlink_codec.encode_announce,
     "context": kilnlink_codec.encode_context,
     "status": kilnlink_codec.encode_status,
-    "power": kilnlink_codec.encode_power,
 }
 
 # name -> encoder, for the "fields" (nested fields dict + bytes_hex) files.
@@ -148,3 +149,120 @@ def test_fw_version_response_hostile_vectors_all_rejected():
         payload = bytes.fromhex(vec["payload_hex"])
         with pytest.raises(SafetyResponseError):
             parse_safety_response(payload)
+
+
+# --- SAFETY_CMD_POWER (0x0E): V1/V2 coverage, Opus review of --------------
+# 51c084f/c49bb0e, finding 7. power_vectors.json predates the 2026-09-06 V2
+# extension (firmware/CommonFW/src/kilnlink_power.c: 61 bytes, +3x u16 LE
+# counts_avg, KILNLINK_POWER_FLAG_COUNTS_VALID always forced on) and only
+# records the 55-byte V1 body, so it cannot be run through the generic
+# FLAT_CODECS loop above -- kilnlink_codec.encode_power() now always
+# produces 61 bytes with the flag set, matching the real encoder.
+
+
+def test_power_vector_file_v1_body():
+    """The V1 (first 55) bytes of encode_power()'s output must still match
+    power_vectors.json's payload_hex, EXCEPT for the flags byte (index 2),
+    which the real C encoder (and now this mirror) always ORs
+    KILNLINK_POWER_FLAG_COUNTS_VALID (0x08) into."""
+    doc = _load("power")
+    for vec in doc["vectors"]:
+        fields = {k: v for k, v in vec.items() if k not in _FLAT_NON_FIELD_KEYS}
+        expected_v1 = bytearray(bytes.fromhex(vec["payload_hex"]))
+        expected_v1[2] |= kilnlink_codec.KILNLINK_POWER_FLAG_COUNTS_VALID
+        actual = kilnlink_codec.encode_power(fields)
+        assert len(actual) == kilnlink_codec.KILNLINK_POWER_LEN_V2, (
+            f"power_vectors.json vector {vec['name']!r}: encode_power() must always emit "
+            f"{kilnlink_codec.KILNLINK_POWER_LEN_V2} (V2) bytes"
+        )
+        assert actual[:55] == bytes(expected_v1), (
+            f"power_vectors.json vector {vec['name']!r}: V1 body mismatch (with COUNTS_VALID forced on): "
+            f"got {actual[:55].hex()}, expected {bytes(expected_v1).hex()}"
+        )
+        assert actual[2] & kilnlink_codec.KILNLINK_POWER_FLAG_COUNTS_VALID, (
+            f"power_vectors.json vector {vec['name']!r}: COUNTS_VALID must always be set"
+        )
+        # No counts_avg field in this older vector file -- must default to zero.
+        assert actual[55:] == b"\x00\x00\x00\x00\x00\x00", (
+            f"power_vectors.json vector {vec['name']!r}: counts_avg tail must default to zero"
+        )
+
+
+def test_power_v2_round_trips_through_decode():
+    """encode_power() -> decode_power() must recover the exact fields for a
+    real counts_avg payload -- the round-trip this pass added decode_power()
+    for in the first place."""
+    doc = _load("power")
+    vec = doc["vectors"][0]
+    fields = {k: v for k, v in vec.items() if k not in _FLAT_NON_FIELD_KEYS}
+    fields = dict(fields)
+    fields["counts_avg"] = [10, 2000, 4095]
+    encoded = kilnlink_codec.encode_power(fields)
+    assert len(encoded) == kilnlink_codec.KILNLINK_POWER_LEN_V2
+    decoded = kilnlink_codec.decode_power(encoded)
+    assert decoded["counts_avg"] == [10, 2000, 4095]
+    assert decoded["power_window_s"] == fields["power_window_s"]
+    assert decoded["flags"] & kilnlink_codec.KILNLINK_POWER_FLAG_COUNTS_VALID
+    assert decoded["p_total_w"] == pytest.approx(fields["p_total_w"])
+    assert decoded["energy_wh"] == pytest.approx(fields["energy_wh"])
+    for got, want in zip(decoded["i_conducting_a"], fields["i_conducting_a"]):
+        assert got == pytest.approx(want)
+    for got, want in zip(decoded["conduction_fraction"], fields["conduction_fraction"]):
+        assert got == pytest.approx(want)
+    for got, want in zip(decoded["p_avg_w"], fields["p_avg_w"]):
+        assert got == pytest.approx(want)
+
+
+def test_power_v1_55_byte_frame_decodes_with_zeroed_counts():
+    """A legacy 55-byte V1 frame (the exact bytes power_vectors.json already
+    records, before this pass's V2 tail existed) must still decode cleanly,
+    with counts_avg zeroed rather than raising or reading garbage --
+    mirrors kilnlink_power_decode()'s own V1 handling (test_power.c)."""
+    doc = _load("power")
+    vec = doc["vectors"][0]
+    v1_payload = bytes.fromhex(vec["payload_hex"])
+    assert len(v1_payload) == kilnlink_codec.KILNLINK_POWER_LEN_V1
+    decoded = kilnlink_codec.decode_power(v1_payload)
+    assert decoded["counts_avg"] == [0, 0, 0]
+    assert decoded["power_window_s"] == vec["power_window_s"]
+    assert decoded["p_total_w"] == pytest.approx(vec["p_total_w"])
+
+
+def test_power_v2_frame_with_counts_valid_clear_decodes_zeroed():
+    """A 61-byte frame whose COUNTS_VALID bit is clear (untrusted input, or
+    a peer that sends V2-length frames without ever setting the bit) must
+    decode with counts_avg zeroed, never the raw tail bytes -- mirrors the
+    C decoder's explicit 'never trust memory/bytes you didn't validate'
+    discipline (test_power.c's own coverage of this exact case)."""
+    doc = _load("power")
+    vec = doc["vectors"][0]
+    fields = {k: v for k, v in vec.items() if k not in _FLAT_NON_FIELD_KEYS}
+    fields = dict(fields)
+    fields["flags"] = 0  # base flags, before encode_power() forces COUNTS_VALID on
+    fields["counts_avg"] = [10, 2000, 4095]
+    encoded = bytearray(kilnlink_codec.encode_power(fields))
+    encoded[2] &= ~kilnlink_codec.KILNLINK_POWER_FLAG_COUNTS_VALID  # clear the bit post-encode
+    decoded = kilnlink_codec.decode_power(bytes(encoded))
+    assert decoded["counts_avg"] == [0, 0, 0]
+
+
+def test_power_negative_wrong_length_and_cmd():
+    """NEGATIVE TEST (negative-test-every-check discipline): decode_power()
+    must reject a length that is neither V1 nor V2, and a well-formed-length
+    buffer with the wrong command byte -- proves the length/cmd checks
+    actually gate, not just that the happy path returns something."""
+    doc = _load("power")
+    vec = doc["vectors"][0]
+    fields = {k: v for k, v in vec.items() if k not in _FLAT_NON_FIELD_KEYS}
+    good = bytearray(kilnlink_codec.encode_power(fields))
+
+    with pytest.raises(ValueError):
+        kilnlink_codec.decode_power(bytes(good) + b"\x00")  # 62 bytes, neither V1 nor V2
+
+    with pytest.raises(ValueError):
+        kilnlink_codec.decode_power(bytes(good[:60]))  # 60 bytes, neither V1 nor V2
+
+    wrong_cmd = bytearray(good)
+    wrong_cmd[0] = 0x01  # GET_STATUS's cmd id, not POWER's 0x0E
+    with pytest.raises(ValueError):
+        kilnlink_codec.decode_power(bytes(wrong_cmd))

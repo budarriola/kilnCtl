@@ -988,6 +988,41 @@ Everything the 23-byte frame has no room for. A `KilnFW` that has never heard of
 silently watchdog-resetting in a loop presents as a working system with an
 occasional inexplicable trip.
 
+**`warn_mask` bit numbering (real per-guard, since the Opus review of
+51c084f/c49bb0e).** For any guard that has a `SAFETY_TRIP_*` code, the bit is
+`(that code - 1)` — the same numbering `trip_mask` already uses, so a guard's
+warn bit and trip bit line up. S4 and S10 are WARN-only and were given
+reserved trip-code gaps (4 and 11) for exactly this reason, so they already
+had a collision-free slot (bits 3 and 10). S14 and S15
+(`CT_COMMISSIONING_PLAN.md`) were added after `safety_trip_t` was written and
+never got a reserved code — codes 15/16 went to the unrelated, not-yet-built
+CONFIG_CORRUPT/SELF_TEST guards — so they take bits 14/15 directly; both bits
+were always 0 on every frame sent before this (the mask was previously a
+single aggregate bit, bit 0, set whenever any WARN-capable guard was active),
+so this is a first use, not a reuse, of live wire bits — no
+`KILNLINK_PROTOCOL_VERSION` bump needed.
+
+| Bit | Guard | Field |
+|---|---|---|
+| 3 | S4 | commanded-load-should-be-off-but-current-present WARN |
+| 4 | S5 | sensor-invalid WARN (pre-trip) |
+| 9 | S9 | current-present-but-uncommissioned WARN (`s9_uncommissioned_warn`) |
+| 10 | S10 | safety-TC-disagrees-with-every-zone-TC WARN |
+| 12 | S12 | cold-junction/enclosure-over-temperature WARN (pre-trip) |
+| 13 | S13 | borrowed-channel-not-updating WARN (pre-trip) |
+| 14 | S14 | zone-current-above-measured-normal WARN (any of 3 channels) |
+| 15 | S15 | summed-topology zone-under-current ("open heater") WARN (any of 3 zones) |
+
+S14/S15 are tracked per-channel/per-zone in SaftyFW's `safety_guard_state_t`
+(`s14_warn[3]`/`s15_warn[3]`) but each collapses to exactly one mask bit here
+— any channel/zone warning sets the guard's bit — matching `trip_mask`'s
+existing per-guard-not-per-channel granularity. All bits not listed above are
+always 0 in this build (no other guard has a WARN concept yet); a future
+WARN-capable guard reuses this same "trip code minus one, or a fresh bit if
+none was reserved" rule. See `firmware/SaftyFW/src/safety_guards.h`'s
+`safety_guards_warn_mask()` doc comment for the source of truth this table
+mirrors.
+
 ### Frame C: `SAFETY_CMD_FW_VERSION` = `0x0B` — build identity
 
 Sent in reply to a request, **and pushed unsolicited once at boot**. The boot

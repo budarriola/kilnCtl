@@ -853,6 +853,19 @@ void config_params_finalize_i_present_a(config_store_record_t *rec)
         if (!isfinite(v) || v < 0.0f) {
             continue; // cannot happen via SET_PARAM's own CHECK_F32_NONNEG, defensive only
         }
+        // Opus review of 51c084f/c49bb0e, finding 2: a zone commissioned
+        // with i_normal_a == 0.0f (CHECK_F32_NONNEG allows exactly 0, e.g.
+        // a zone measured with its element disconnected, or a commissioning
+        // mistake) must not win this smallest-search -- it would drive
+        // i_present_a itself to 0.0f, and current_sense.c:285's
+        // `conducting = (amps > i_present_a)` then reads "conducting" on
+        // pure ADC noise for every other zone too, since i_present_a is a
+        // single shared scalar, not per-zone. Skip it exactly like an
+        // unset/negative/non-finite value above -- a 0 A "normal" carries no
+        // usable load-active threshold information.
+        if (v <= 0.0f) {
+            continue;
+        }
         if (!have_any || v < smallest) {
             smallest = v;
             have_any = true;

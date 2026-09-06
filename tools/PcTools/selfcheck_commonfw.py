@@ -166,6 +166,28 @@ def commonfw_payload_vector_checks() -> None:
             fields = v[fields_key] if fields_key else v
             expected = v[hex_key]
             got = encode(fields).hex()
+            if fn_name == "encode_power":
+                # power_vectors.json predates the 2026-09-06 V2 (61-byte,
+                # +3x u16 counts_avg) extension (firmware/CommonFW/src/
+                # kilnlink_power.c) and only records the 55-byte V1 body --
+                # kilnlink_codec.encode_power() now mirrors the real C
+                # encoder, which ALWAYS emits the 61-byte V2 layout and
+                # ALWAYS sets KILNLINK_POWER_FLAG_COUNTS_VALID (0x08) in the
+                # flags byte, so `got` here is 6 bytes (12 hex chars) longer
+                # than `expected` and its flags byte (index 2, hex chars
+                # 4:6) differs by that bit. Check the V1 body byte-for-byte
+                # against the vector, but with COUNTS_VALID re-added to the
+                # expected flags byte first (since the real encoder always
+                # sets it) -- and separately check the appended
+                # counts_avg tail defaults to zero when a vector supplies
+                # none, same as kilnlink_codec.encode_power()'s own default.
+                expected_flags = int(expected[4:6], 16) | 0x08
+                expected_v1_with_flag = expected[:4] + f"{expected_flags:02x}" + expected[6:]
+                check(f"{filename} {name}: V1 body bytes match {hex_key} (COUNTS_VALID forced on)",
+                      got[:110], expected_v1_with_flag)
+                check(f"{filename} {name}: V2 tail defaults to zero counts_avg when vector has none",
+                      got[110:], "000000000000")
+                continue
             check(f"{filename} {name}: bytes match {hex_key}", got, expected)
 
 

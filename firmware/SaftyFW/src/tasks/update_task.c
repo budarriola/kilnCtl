@@ -638,7 +638,7 @@ static void update_task_gather_preconditions(update_preconditions_t *out)
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     bool warn_active = false;
     uint8_t diag_state = 0;
-    safety_core_get_diag_status(&trip_reason, &warn_active, &diag_state);
+    safety_core_get_diag_status(&trip_reason, &warn_active, &diag_state, NULL);
     out->no_trip_pending = (trip_reason == SAFETY_TRIP_NONE);
 
     thermo_snapshot_t th;

@@ -357,18 +357,21 @@ extern "C" {
 // ct_topology (param 0x031F, CT_COMMISSIONING_PLAN.md step 3) and
 // i_present_a_manual are NOT fields_set bits -- fields_set is completely
 // full (the comment above CONFIG_STORE_SET_CT_INSTALLED is the last free
-// bit). Both instead use the same "improbable marker byte in a dedicated
-// record field" convention as safety_tc_installed_marker/ct_installed_marker
-// (config_store.c's REC_OFF_SAFETY_TC_INSTALLED/REC_OFF_CT_INSTALLED): a
-// plain 0/1 byte would make a legacy record's never-written reserved byte
-// (0xFF, config_store_pack()'s own fill -- see config_store.c's header
-// comment) decode as a nonzero, "summed"/"manual" value, silently changing
-// an old record's behaviour on a newer build. Only the specific marker byte
-// decodes as the non-default state; every other byte (0x00 legacy-zeroed,
-// 0xFF erased/never-written, anything else) decodes as the safe default
-// (per_zone / auto-derived) -- see config_store.c's unpack for the exact
-// decode and config_store_record_t::ct_topology/i_present_a_manual below
-// for the DECODED (not wire-marker) values guards and config_params.c see.
+// bit). Unlike safety_tc_installed_marker/ct_installed_marker
+// (config_store.c's REC_OFF_SAFETY_TC_INSTALLED/REC_OFF_CT_INSTALLED, which
+// DO use an improbable marker byte), these two are plain 0/1 bytes -- see
+// config_store.c's comment above REC_OFF_CT_TOPOLOGY for why a marker isn't
+// needed here: this build only ever writes 0 or 1 to them
+// (config_params.c's CHECK_U8_MAX(1u)/CHECK_TYPE(BOOL)), and both decoders
+// only special-case the value 1 (SUMMED / manual==true); any other byte,
+// including a legacy record's never-written 0xFF reserved-tail fill or an
+// old record's zeroed 0x00, already falls through to the safe default
+// (per_zone / auto-derive) without needing a distinct sentinel. (Fixed
+// 2026-09-06, Opus review of 51c084f/c49bb0e finding 4 -- this comment
+// previously claimed the marker-byte convention for both fields; the .c
+// side was always right.) See config_store.c's unpack for the exact decode
+// and config_store_record_t::ct_topology/i_present_a_manual below for the
+// DECODED values guards and config_params.c see.
 #define CONFIG_STORE_CT_TOPOLOGY_PER_ZONE 0u
 #define CONFIG_STORE_CT_TOPOLOGY_SUMMED   1u
 
