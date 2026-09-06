@@ -61,6 +61,19 @@ static const char *norm_partition(const char *partition)
     return partition ? partition : "";
 }
 
+/* Bounded copy, always NUL-terminated within dst_size bytes -- avoids MSVC's
+ * C4996 on strncpy (which would need _CRT_SECURE_NO_WARNINGS to silence
+ * under /WX) while keeping strncpy's truncate-and-terminate semantics. Every
+ * caller's dst buffer is already zero-filled (memset on the containing
+ * struct), so strncpy's zero-pad-the-remainder behavior is not needed here. */
+static void copy_bounded(char *dst, size_t dst_size, const char *src)
+{
+    size_t len = strlen(src);
+    if (len > dst_size - 1) len = dst_size - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
 static int find_partition_slot(const char *partition)
 {
     const char *name = norm_partition(partition);
@@ -91,7 +104,7 @@ static fake_kv_key_slot_t *find_key(fake_kv_namespace_t *ns, const char *key, bo
     if (!create || free_slot < 0) return NULL;
     memset(&ns->keys[free_slot], 0, sizeof(ns->keys[free_slot]));
     ns->keys[free_slot].in_use = true;
-    strncpy(ns->keys[free_slot].name, key, sizeof(ns->keys[free_slot].name) - 1);
+    copy_bounded(ns->keys[free_slot].name, sizeof(ns->keys[free_slot].name), key);
     return &ns->keys[free_slot];
 }
 
@@ -230,7 +243,7 @@ hal_status_t hal_kv_open(hal_kv_handle_t *h, const char *namespace_name,
         if (free_ns < 0) return HAL_NO_MEM;
         memset(&part->namespaces[free_ns], 0, sizeof(part->namespaces[free_ns]));
         part->namespaces[free_ns].in_use = true;
-        strncpy(part->namespaces[free_ns].name, namespace_name, sizeof(part->namespaces[free_ns].name) - 1);
+        copy_bounded(part->namespaces[free_ns].name, sizeof(part->namespaces[free_ns].name), namespace_name);
         ns_slot = free_ns;
     }
 
@@ -422,7 +435,7 @@ hal_status_t hal_kv_init_partition(const char *partition)
 
     memset(&s_partitions[free_slot], 0, sizeof(s_partitions[free_slot]));
     s_partitions[free_slot].initialized = true;
-    strncpy(s_partitions[free_slot].name, name, sizeof(s_partitions[free_slot].name) - 1);
+    copy_bounded(s_partitions[free_slot].name, sizeof(s_partitions[free_slot].name), name);
     return HAL_OK;
 }
 

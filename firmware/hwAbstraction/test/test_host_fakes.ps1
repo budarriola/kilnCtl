@@ -27,14 +27,11 @@
 # advance-past-timeout fired-latch, fake_pwm's out-of-range duty rejection,
 # fake_sysinfo's coredump-erase-clears-presence contract.
 #
-# NOTE (2026-09-05): attempting to add /WX (treat warnings as errors)
-# alongside the existing /W3 broke the build -- fake_kv.c (host/fake_kv.c,
-# lines 94/233/425) triggers C4996 on strncpy under MSVC's default runtime
-# checks, and C4996 becomes a hard error under /WX. fake_kv.c is an existing
-# file outside this pass's scope, so /WX was NOT added here; the four new
-# fakes/tests in this pass compile clean under /WX on their own, but the
-# script still passes only /W3 below since it builds every case with one
-# shared flag set.
+# NOTE (2026-09-05): /WX (treat warnings as errors) is now ON below. It was
+# previously blocked by C4996 on fake_kv.c's strncpy calls (host/fake_kv.c,
+# lines 94/233/425); those were replaced with a bounded memcpy+NUL helper
+# (copy_bounded()) that keeps strncpy's truncate-and-terminate semantics
+# without the deprecation warning, so no _CRT_SECURE_NO_WARNINGS was needed.
 #
 # Usage: powershell -ExecutionPolicy Bypass -File test_host_fakes.ps1
 
@@ -78,7 +75,7 @@ function Invoke-ClLink {
     param([string[]]$SourceFiles, [string]$OutExe, [string[]]$IncludeDirs)
     $incFlags = ($IncludeDirs | ForEach-Object { "/I`"$_`"" }) -join " "
     $srcList = ($SourceFiles | ForEach-Object { "`"$_`"" }) -join " "
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /std:c11 $incFlags $srcList /Fe:`"$OutExe`" /Fo:`"$workDir\\`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 $incFlags $srcList /Fe:`"$OutExe`" /Fo:`"$workDir\\`""
     $out = cmd /c $cmd 2>&1
     return @{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
 }

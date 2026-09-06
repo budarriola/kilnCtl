@@ -657,11 +657,10 @@ captures init cfg and a bounded duty-set history, mirroring the ESP
 backend's 1..20-bit resolution validation and 0..100 duty range;
 fake_sysinfo scripts reset reason/running partition/build info/temperature/
 random sequence/coredump presence, with hal_sysinfo_coredump_erase()
-clearing presence to match real esp_core_dump_image_erase(). Adding /WX
-alongside the existing /W3 was attempted and rejected: host/fake_kv.c's
-strncpy calls (lines 94/233/425) trigger C4996, a hard error under /WX, and
-fake_kv.c is outside this pass's scope -- the script still builds every
-case under /W3 only.
+clearing presence to match real esp_core_dump_image_erase(). /WX now builds
+alongside /W3: host/fake_kv.c's strncpy calls (formerly C4996 under /WX)
+were replaced with a bounded memcpy+NUL helper (copy_bounded()), and all 12
+fakes' negative tests still fire under it.
 
 ## Migration inventories (measured)
 

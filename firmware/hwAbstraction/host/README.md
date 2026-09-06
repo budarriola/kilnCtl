@@ -32,7 +32,7 @@ random sequence/coredump presence, with coredump erase clearing presence)
 landed the same way once hal_sysinfo.h existed. Standalone MSVC tests +
 negative tests for all twelve live in ../test/test_host_fakes.ps1 (not yet
 wired into either firmware's build_host_tests.ps1 -- that's the Option A
-response-file switch still to do); /WX was attempted alongside the
-existing /W3 and rejected -- host/fake_kv.c's strncpy triggers C4996,
-which /WX turns into a hard error, and fake_kv.c is outside this pass's
-scope.
+response-file switch still to do); the script now builds with /WX alongside
+/W3 -- host/fake_kv.c's strncpy calls (formerly C4996 under /WX) were
+replaced with a bounded memcpy+NUL helper (copy_bounded()), no
+_CRT_SECURE_NO_WARNINGS needed.
