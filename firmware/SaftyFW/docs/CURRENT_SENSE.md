@@ -502,6 +502,97 @@ firmware change needed.
 
 ---
 
+## 4. Measured noise floor 2026-09-06 — BLOCKED, not measured
+
+`CT_COMMISSIONING_PLAN.md` step 0 asked for a 60 s, 20 Hz raw-counts capture
+on channel 3 (GPIO28/ADC2, the only fitted probe) with all relays off and no
+heating. That capture was **not obtained**: no path from the running board
+to raw ADC counts exists today, on either the wire protocol or the debug
+(SWD/OpenOCD) side, so there is nothing to sample.
+
+**Pre-checks that did pass** (via `kilnctrl` MCP, no `SET_PARAM`/
+`COMMIT_CONFIG`, no flash):
+- `safety_get_status`: link up, SaftyFW armed, not tripped, `currents 0.00 A,
+  0.00 A, 0.00 A` (0.00 across all three because nothing is calibrated, not
+  because current is absent).
+- `io_read`: relays R1-R4 all 0 (off).
+- `profiles_get_exec_status`: `state=0`, no run in progress.
+- `safety_get_ct_cal`: all three channels **uncalibrated**.
+- `safety_get_commissioning`: `ct_installed=0` — the commissioning flow does
+  not yet know a CT is fitted at all (channel 3's 2026-09-05 fit, §5.2,
+  predates re-running commissioning), so S14 reads DORMANT.
+
+**Why no raw-counts path exists (traced in code, `current_sense.c`):**
+- `current_sense_sample()` (`src/current_sense.c:230-250`) computes
+  `counts_avg` via `cs_read_channel_counts()` as a **local variable inside
+  the sampling loop**. It is converted to `amps[n]` and `present[n]`
+  immediately and never written to any `static`/global storage — there is
+  no symbol a debug read could target.
+- `current_snapshot_t` (`src/snapshots.h:58-64`, the only thing
+  `current_task_get_snapshot()` publishes) carries `amps[3]`, `clipped[3]`,
+  `present[3]`, `calibrated` — **no counts field**.
+- The wire protocol's `SAFETY_CMD_POWER` frame (`link_task_send_power()`)
+  likewise only ever carries derived amps/watts (`current_sense_power_t`),
+  never counts.
+- With every channel uncalibrated (`k_ct_v_per_a == 0`), `amps[n]` reads a
+  hard `0.0f` (`cs_counts_to_amps()`'s documented behavior, §5's
+  2026-08-24 note) — so even the amps path carries no information to invert
+  back into counts. Computing counts from amps per the commissioning plan's
+  formula (`zero_counts = zero_mv/1000 * gain * 4096/3.3`) is not possible
+  either: there is no committed `zero_mv`/`k_ct` for channel 3 yet (§5.2
+  gives the intended values, `zero_counts[2]` from param `0x0304`,
+  `k_ct_v_per_a[2] = 0.989` from `0x030A`, but neither has been committed on
+  this board — `safety_get_ct_cal` reports channel 2 uncalibrated).
+- Setting a calibration value to unlock the amps path was in scope for this
+  task's task order **but was excluded by the task's own constraints** (no
+  `SET_PARAM`/`COMMIT_CONFIG`), since that is exactly the kind of
+  config-schema write CT_COMMISSIONING_PLAN.md step 1/2 wants done
+  deliberately, with refusal checks, not as a side effect of a noise-floor
+  measurement.
+
+No CSV was written under `firmware/SaftyFW/docs/data/` — there is no capture
+to save. The 3σ smallest-detectable-step figures for a 1 A and a 50 A probe
+cannot be computed without a real counts noise measurement; do not
+substitute a datasheet or theoretical estimate for one, since the whole
+reason this step exists (CT_COMMISSIONING_PLAN.md's "Facts below" §3) is
+that the ADC reference is the unregulated `3.3v_Safty` rail and the actual
+noise on this board has never been measured.
+
+See "Tooling gap" immediately below for what closes this.
+
+### Tooling gap
+
+To make CT_COMMISSIONING_PLAN.md step 0 (and the commissioning check in §5
+above) actually runnable, one of the following is needed — implementation
+intentionally NOT done as part of this pass:
+
+1. **Firmware**: publish `counts_avg[3]` (or the full pre-conversion
+   `uint32_t` per channel) into `current_snapshot_t` (`src/snapshots.h`)
+   alongside `amps[3]`, written by `current_sense_sample()`
+   (`src/current_sense.c:230-250`) the same tick it already computes
+   `counts_avg` locally. Cheap (3 more `uint32_t`, no new sampling), and it
+   is the only way to see the ADC's actual value independent of whether
+   `k_ct_v_per_a`/`zero_counts` have been committed.
+2. **Link protocol**: a way to get that value off the Pico — either add it
+   to the existing `SAFETY_CMD_POWER` frame, or a new lightweight
+   diagnostic/debug command (`CommonFW/docs/LINK_PROTOCOL.md`), since the
+   commissioning page and any future noise-floor tooling both need it live,
+   not just over SWD.
+3. **PcTools MCP**: a `kiln_call` tool (e.g. `safety_get_ct_raw_counts` or a
+   `current_sense` group) that polls whatever the above exposes at a known
+   rate and returns `{channel, counts, timestamp_ms}` per sample, so a
+   noise-floor capture script can log CSV rows without hand-rolling framing.
+   `tools/PcTools/src/kilnctrl/noise_floor.py` is a different, unrelated
+   tool (PID run-to-run repeat spread) — do not confuse the two; a CT
+   equivalent does not exist yet.
+
+Until one of these lands, CT_COMMISSIONING_PLAN.md step 0 cannot be executed
+against this board, and its downstream steps that depend on "is per-heater
+open detection viable on this bench" (step 3's under-current warn) remain
+undecided rather than merely unmeasured.
+
+---
+
 ## Completion checklist
 
 Sampling/conversion/snapshot-publishing built and build-verified 2026-08-16
