@@ -7,7 +7,7 @@
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h" /* esp_ota_get_state_partition()/esp_ota_img_states_t -- not covered by hal_sysinfo, see build_firmware_statics() */
 #include "esp_partition.h"
-#include "esp_timer.h"
+#include "hal_time.h" /* hal_time_now_us() -- format_uptime() below, was esp_timer_get_time() */
 
 #include <string.h>
 
@@ -427,7 +427,7 @@ static void next_cb(lv_event_t *e)
 
 static void format_uptime(char *buf, size_t buf_len)
 {
-    int64_t uptime_s = esp_timer_get_time() / 1000000;
+    int64_t uptime_s = (int64_t)hal_time_now_us() / 1000000;
     int64_t days = uptime_s / 86400;
     int hours = (int)((uptime_s % 86400) / 3600);
     int mins = (int)((uptime_s % 3600) / 60);
