@@ -107,6 +107,90 @@ Relays are 12 V coils (EE2-12NUH) switched low-side by BSS138 MOSFETs, so an
 expander pin high = relay energized. J3/J4/J8/J11 are 3-pin terminal blocks
 (NC/COM/NO). K4 is on the safety domain and belongs to the Pico, not the ESP32.
 
+### Relay type and contact-life budget
+
+`RELAY_LIFE_BUDGET_PLAN.md`. Each relay (the four heater relays K1/K2/K3/K5,
+plus the safety relay K4) has a **type** — `ssr | contactor | mercury` — that
+selects a rated contact-life budget. The board's own heater relays are the
+EE2-12NUH electromechanical parts above, but the type is a per-installation
+setting, not a fact about this schematic: a builder who re-fits SSRs in
+place of K1/K2/K3/K5 sets the zone's relay type to `ssr` and the budget
+indication turns off for those relays.
+
+- Heater-relay type is chosen per zone, in the zones page (`relay_type`
+  field, `ZONES_CFG_VERSION` 20), and applies to every relay in that zone's
+  `relay_mask`. Default `ssr`.
+- Safety-relay (K4) type is chosen in the safety/commissioning settings on
+  the ESP, options `contactor | mercury` only — `ssr` is not offered, since
+  K4 is a mechanical permit relay by design. Default `contactor`.
+
+**Rated-life table** (`relay_cycles.h`):
+
+| Type | Rated cycles |
+|---|---|
+| `ssr` | none — no budget, never shown as a percent |
+| `contactor` | 100,000 |
+| `mercury` | 1,000,000 |
+
+These are industry-typical placeholders, not datasheet numbers for a
+specific part — no contactor or mercury datasheet is in this tree. Each
+relay also has an optional `rated_override` (0 = use the table above) so a
+real datasheet figure can be typed in per relay without touching the table.
+
+**Counting.** The four heater relays are counted in `relay_cycles.c` from
+transitions `heater_output.c` already tracks per zone. The safety relay K4
+is counted on the **ESP**, not the Pico: the ESP observes K4's reported
+state on every safety-status frame and increments a fifth slot
+(`RELAY_CYCLES_SAFETY_INDEX`) on an observed edge. This can miss a
+transition that happens while the ESP is rebooting, which is acceptable for
+an indication against a 100,000+ cycle budget when a firing produces on the
+order of 10 K4 transitions — see
+`firmware/SaftyFW/docs/RELAY_WEAR_ANALYSIS.md` for why K4 itself still has
+no counter or persistence on the Pico side. Counts persist in NVS (`kiln_nvs`,
+blob `relay_cyc`), written at most once per 600 s plus a flush at firing
+stop / autotune end, same flash-wear discipline as the rest of this module.
+
+**Thresholds and indication — indication only, never blocks heating.**
+Budget percent is computed on read, never stored. At **≥ 80 %** used, a
+persistent WARNING appears; at **≥ 90 %**, a persistent ERROR. Firing,
+autotune, and every other operation stay allowed regardless of tier — this
+is purely informational. The persistence (shown continuously rather than
+once) is deliberate here even though it otherwise runs against this
+project's usual "an always-present warning is a warning nobody reads" rule.
+
+Where it shows up:
+- **LCD home page topbar** — a second warning-symbol icon next to the
+  existing topbar icons, using the existing warn/error accent colours (no
+  new LCD colour tokens). Hidden below 80 % on any relay, shown persistently
+  above.
+- **Web dashboard** — `#relayLifeIcon` next to the profile-feasibility icon
+  on the main page, tooltip naming the relay and percent; `.relay-life-error`
+  styling for the error tier.
+- **LCD Diagnostics → Relay Life** — a sub-page listing each relay's type,
+  cycle count, rated life, and percent.
+- **Web Diagnostics** — a table with the same per-relay type/cycles/rated/
+  percent columns, plus a reset control per relay.
+
+**Resetting a count after replacing a relay.** A reset only zeroes the
+cycle count — the configured type/override is left alone, since replacing a
+contact does not change what kind of relay is fitted.
+- Web: a "Reset count" button per relay in the diagnostics table, gated by
+  `kcConfirm()` (the same confirm dialog used elsewhere in the web UI).
+- LCD: no dialog widget exists on this page, so the LCD Diagnostics → Relay
+  Life page uses a two-tap confirm — pressing "Reset" turns the button into
+  "Confirm?" for 5 seconds; a second press within that window commits the
+  reset, otherwise it reverts to "Reset" with nothing changed.
+
+Both paths call `relay_cycles_reset()`, which writes through the same
+flash-worker-guarded persist path as the periodic write (never called
+directly from an LVGL callback on the PSRAM-backed task stack) and logs an
+INFO event naming the old count.
+
+Autotune's relay identification switches faster than a normal firing's PWM
+window, so a tuning campaign spends contact-life budget faster than the
+same wall-clock time spent firing — worth knowing when reading a percent
+that jumped after a tuning session.
+
 ## Thermocouple daughterboard (J6 -> J5)
 
 Main board **J6** is a 1x20 socket; thermocouple board **J5** is a 1x20 header.

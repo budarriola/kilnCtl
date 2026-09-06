@@ -85,17 +85,20 @@ periodic persist. Log an INFO event with the old count.
 
 ## Steps
 
-1. `relay_cycles`: fifth slot, type table, `relay_cycles_budget()`, blob
-   version 1→2 migration, host test with quantized counts crossing 79/80/89/90 %.
-2. Zones schema 19→20 (`relay_type`), `zones_http.c` round trip, select in
-   `zones_page.html`, migration test.
-3. Safety relay type in the ESP safety settings store + commissioning page
-   select without `ssr`; K4 edge counting in the safety-link status consumer.
-4. Dashboard JSON fields; web icon; diagnostics row and confirmed reset.
-5. LCD topbar icon; LCD diagnostics reset with two-tap confirm; 480x320,
-   no scroll; verify with `capture_lcd.ps1` numeric sampling.
-6. `HARDWARE.md` / `RELAY_WEAR_ANALYSIS.md` notes; `check_*` re-run; build
-   `build_kilnfw`, flash after an opus FLASH-SAFE review.
+1. DONE (`75b338c`). `relay_cycles`: fifth slot, type table,
+   `relay_cycles_budget()`, blob version 1→2 migration, host tests.
+2. DONE (`f348b56`). Zones schema 19→20 (`relay_type`), `zones_http.c`
+   round trip, select in `zones_page.html`, migration test.
+3. PENDING — in flight (another agent). Safety relay type in the ESP safety
+   settings store + commissioning page select without `ssr`; K4 edge
+   counting in the safety-link status consumer.
+4. DONE (`be67a2a`). Dashboard JSON fields; web icon; diagnostics row and
+   confirmed reset.
+5. DONE (`4a940b8`). LCD topbar icon; LCD diagnostics reset with two-tap
+   confirm; `relay_cycles_reset()`.
+6. DONE. `HARDWARE.md` / `RELAY_WEAR_ANALYSIS.md` notes. A review-fix pass
+   is also in flight (another agent); `build_kilnfw`/flash still to follow
+   once step 3 and the review land.
 
 Risks: NVS keys ≤ 15 chars; persist paths only from the flash worker (no
 re-entrant dispatch); autotune's relay identification switches faster than
