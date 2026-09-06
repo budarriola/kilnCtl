@@ -107,37 +107,17 @@ FIXTURE_JTAG_SERIAL = serial_link.FIXTURE_JTAG_SERIAL
 
 
 def _enumerated_jtag_serials() -> "list[str]":
-    """USB serial numbers of every enumerated 303A:1001 (ESP32-S3 native
-    USB-Serial-JTAG) interface currently plugged in, for the refusal message
-    below -- named so an operator sees exactly what IS present, not just
-    that the expected board wasn't found."""
-    out = []
-    for info in serial_link.list_ports():
-        if "303A:1001" in info.hwid.upper():
-            ser = serial_link.debug_probe_hwid_serial(info.hwid)
-            if ser:
-                out.append(ser)
-    return out
+    """Thin wrapper -- see serial_link.enumerated_303a_1001_serials() for the
+    single source of truth (shared with debug_probe.py's PEER_ESP path)."""
+    return serial_link.enumerated_303a_1001_serials()
 
 
 def _refuse_if_adapter_absent(expected_serial: str, board_label: str) -> Optional[str]:
-    """None if `expected_serial` is currently enumerated as a 303A:1001
-    interface; otherwise an error string naming what WAS seen instead, for
-    the caller to return immediately -- before OpenOCD is invoked at all, so
-    a missing/swapped board never silently flashes whatever unit OpenOCD
-    finds first."""
-    present = _enumerated_jtag_serials()
-    if expected_serial in present:
-        return None
-    return (
-        f"error: {board_label}'s debug-probe serial {expected_serial} is not "
-        "enumerated right now -- refusing to flash, since OpenOCD with no "
-        "`adapter serial` binds whichever 303A:1001 (ESP32-S3 native "
-        "USB-Serial-JTAG) unit it finds first, and both boards share that "
-        "VID:PID. "
-        + (f"303A:1001 serial(s) seen instead: {', '.join(present)}." if present
-           else "No 303A:1001 device is enumerated at all -- is the board plugged in?")
-    )
+    """Thin wrapper -- see serial_link.refuse_if_jtag_serial_absent() for the
+    single source of truth (case-insensitive serial comparison; shared with
+    debug_probe.py's PEER_ESP path) and the "before OpenOCD is invoked at
+    all" rationale."""
+    return serial_link.refuse_if_jtag_serial_absent(expected_serial, board_label)
 
 
 def _run_openocd(openocd_exe: str, board_cfg_relpath: str, tcl_commands: str, cwd: str, timeout_s: int) -> tuple[bool, str]:
@@ -582,12 +562,40 @@ def flash_firmware(
 
 
 @_srv._tool()
+def _reject_kiln_fw_build_path(path: str) -> Optional[str]:
+    """None if `path` does NOT resolve under the MAIN board's
+    (KilnFW's) build directory; otherwise an error string.
+
+    Guards against the easy mixup of pointing fixture_flash() at
+    `firmware/KilnFW/build/KilnCtrl.bin` (the main board's own app image) by
+    accident -- that would flash the MAIN board's firmware onto the
+    FIXTURE's chip, which happens to run fine (both are plain ESP32-S3s) and
+    so would not fail loudly; it would just leave the fixture running the
+    wrong firmware with no relay-control task. Resolved via realpath so a
+    relative path, a symlink, or `..` segments can't walk around this."""
+    kiln_build_root = os.path.realpath(os.path.join(_kiln_fw_root(), "build"))
+    real = os.path.realpath(path)
+    try:
+        common = os.path.commonpath([real, kiln_build_root])
+    except ValueError:  # different drives on Windows -- definitely not under it
+        return None
+    if common == kiln_build_root:
+        return (
+            f"error: {path!r} resolves under the MAIN board's build directory "
+            f"({kiln_build_root}) -- refusing to flash a KilnFW image onto the "
+            "fixture. Pass allow_cross_board_path=True only if this is "
+            "deliberate (e.g. testing that both boards run identical firmware)."
+        )
+    return None
+
+
 def fixture_flash(
     bootloader_bin: Optional[str] = None,
     partition_table_bin: Optional[str] = None,
     app_bin: Optional[str] = None,
     board_cfg: str = "board/esp32s3-builtin.cfg",
     retry_once: bool = True,
+    allow_cross_board_path: bool = False,
 ) -> str:
     """Flashes the UnitTestFixture board (also an ESP32-S3) over JTAG via
     OpenOCD, pinned to that board's own USB serial number
@@ -616,7 +624,15 @@ def fixture_flash(
     Deliberately does NOT do flash_firmware()'s post-flash HTTP verification
     (partition/build-timestamp check) -- the fixture firmware's HTTP surface
     (if any) is out of scope for this task; this tool only confirms the
-    OpenOCD write itself succeeded."""
+    OpenOCD write itself succeeded.
+
+    Refuses any image path that resolves under the MAIN board's
+    (`firmware/KilnFW/build/`) directory -- e.g. `KilnCtrl.bin` -- unless
+    `allow_cross_board_path=True` is passed explicitly: both boards are
+    plain ESP32-S3s, so a KilnFW image would flash and run "successfully" on
+    the fixture while silently not being the fixture's own firmware at all
+    (no relay-control task), a failure mode that would otherwise surface
+    only much later, on the bench, as "why doesn't fixture_set_relay work"."""
     openocd_exe = _find_openocd_exe()
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
@@ -633,6 +649,13 @@ def fixture_flash(
             "error: no image path given -- pass at least one of bootloader_bin, "
             "partition_table_bin, app_bin."
         )
+
+    if not allow_cross_board_path:
+        for path, _off in images:
+            cross_board_refusal = _reject_kiln_fw_build_path(path)
+            if cross_board_refusal:
+                return cross_board_refusal
+
     missing = [p for p, _off in images if not os.path.isfile(p)]
     if missing:
         return "error: missing build output(s): " + ", ".join(missing)

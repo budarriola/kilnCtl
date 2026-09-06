@@ -199,6 +199,52 @@ def is_fixture_port(info: "PortInfo") -> bool:
     return FIXTURE_JTAG_SERIAL.upper() in hwid or FIXTURE_UART_VID_PID in hwid
 
 
+def enumerated_303a_1001_serials() -> "list[str]":
+    """USB serial numbers of every enumerated 303A:1001 (ESP32-S3 native
+    USB-Serial-JTAG) interface currently plugged in -- both the main board's
+    and the fixture's share this VID:PID, so this is "every ESP32-S3 native
+    JTAG port on the bench right now", not just one board's. Named so a
+    refusal message can list exactly what IS present, not just that the
+    expected board wasn't found. Single source of truth for both
+    ``mcp_server_flash.py`` (flash_firmware/fixture_flash) and
+    ``debug_probe.py`` (PEER_ESP's program/reset/halt/... path) -- do not
+    duplicate this scan.
+    """
+    out = []
+    for info in list_ports():
+        if "303A:1001" in info.hwid.upper():
+            ser = debug_probe_hwid_serial(info.hwid)
+            if ser:
+                out.append(ser)
+    return out
+
+
+def refuse_if_jtag_serial_absent(expected_serial: str, board_label: str) -> Optional[str]:
+    """None if `expected_serial` is currently enumerated as a 303A:1001
+    interface; otherwise an error string naming what WAS seen instead, for
+    the caller to return/raise immediately -- before OpenOCD is invoked at
+    all, so a missing/swapped board never silently lets OpenOCD bind
+    whichever 303A:1001 unit it finds first.
+
+    Compares case-insensitively: USB serial strings' casing is not something
+    either enumeration side (Windows' USB stack, this codebase's own pinned
+    constants) is guaranteed to agree on byte-for-byte.
+    """
+    present = enumerated_303a_1001_serials()
+    present_upper = {p.upper() for p in present}
+    if expected_serial.upper() in present_upper:
+        return None
+    return (
+        f"error: {board_label}'s debug-probe serial {expected_serial} is not "
+        "enumerated right now -- refusing, since OpenOCD with no "
+        "`adapter serial` binds whichever 303A:1001 (ESP32-S3 native "
+        "USB-Serial-JTAG) unit it finds first, and more than one board on "
+        "this bench shares that VID:PID. "
+        + (f"303A:1001 serial(s) seen instead: {', '.join(present)}." if present
+           else "No 303A:1001 device is enumerated at all -- is the board plugged in?")
+    )
+
+
 def _score_port(port) -> int:
     haystack = " ".join(
         str(x or "") for x in (port.description, port.manufacturer, port.product, port.hwid)

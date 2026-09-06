@@ -59,6 +59,16 @@ class RefuseIfAdapterAbsentTest(unittest.TestCase):
             result = mf._refuse_if_adapter_absent(mf.MAIN_BOARD_JTAG_SERIAL, "main board")
         self.assertIn("No 303A:1001 device is enumerated", result)
 
+    def test_lowercase_enumerated_serial_still_matches(self) -> None:
+        """The hwid SER= value and the pinned constant must compare
+        case-insensitively -- Windows' USB stack is not guaranteed to report
+        a given adapter's serial with consistent casing, and the pinned
+        constants in this codebase use uppercase hex."""
+        lowercase_main_board = _port("COM3", "USB VID:PID=303A:1001 SER=1c:db:d4:92:f4:7c")
+        with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[lowercase_main_board]):
+            result = mf._refuse_if_adapter_absent(mf.MAIN_BOARD_JTAG_SERIAL, "main board")
+        self.assertIsNone(result)
+
     def test_negative_confirms_the_check_can_fail(self) -> None:
         """Break the production picker (accept any serial) and confirm the
         absent-board scenario above would then wrongly report present --
@@ -197,6 +207,44 @@ class FixtureFlashTest(unittest.TestCase):
             mf.fixture_flash(app_bin="fake/App.bin")
         _openocd_exe, _board_cfg, tcl = self.run_mock.call_args.args[:3]
         self.assertNotIn(mf.MAIN_BOARD_JTAG_SERIAL, tcl)
+
+    def test_refuses_kiln_fw_build_path_by_default(self) -> None:
+        """Reviewer finding: fixture_flash() accepted any path, including
+        the MAIN board's own KilnCtrl.bin -- both boards are plain
+        ESP32-S3s, so that would flash and 'succeed' while silently putting
+        the wrong firmware on the fixture."""
+        kiln_ctrl_bin = os.path.join(mf._kiln_fw_root(), "build", "KilnCtrl.bin")
+        with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):
+            result = mf.fixture_flash(app_bin=kiln_ctrl_bin)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("MAIN board", result)
+        self.run_mock.assert_not_called()
+
+    def test_refuses_kiln_fw_build_path_even_via_relative_dotdot(self) -> None:
+        """Resolved via realpath, so `..` segments can't walk around the
+        check."""
+        sneaky = os.path.join(
+            mf._kiln_fw_root(), "build", "..", "build", "KilnCtrl.bin"
+        )
+        with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):
+            result = mf.fixture_flash(app_bin=sneaky)
+        self.assertTrue(result.startswith("error:"))
+        self.run_mock.assert_not_called()
+
+    def test_allow_cross_board_path_overrides_the_refusal(self) -> None:
+        kiln_ctrl_bin = os.path.join(mf._kiln_fw_root(), "build", "KilnCtrl.bin")
+        with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):
+            result = mf.fixture_flash(app_bin=kiln_ctrl_bin, allow_cross_board_path=True)
+        self.assertIn("flashed and verified OK", result)
+        self.run_mock.assert_called_once()
+
+    def test_unit_test_fw_build_path_is_not_refused(self) -> None:
+        """A path under the fixture's OWN build directory must never trip
+        the KilnFW-path guard."""
+        own_bin = os.path.join(mf._unit_test_fixture_fw_root(), "build", "App.bin")
+        with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):
+            result = mf.fixture_flash(app_bin=own_bin)
+        self.assertIn("flashed and verified OK", result)
 
 
 if __name__ == "__main__":

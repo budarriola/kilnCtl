@@ -58,7 +58,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from . import openocd_util
+from . import openocd_util, serial_link
 
 PEER_ESP = "esp"
 PEER_PICO = "pico"
@@ -123,6 +123,18 @@ _PEERS = {
         # don't add one here either -- avoid changing existing ESP behavior.
         adapter_speed_khz=None,
         root=_kiln_fw_root(),
+        # Two ESP32-S3 boards are on the bench (2026-09-05: the main board
+        # and the UnitTestFixture), and both share USB VID:PID 303A:1001 on
+        # their native USB-Serial-JTAG interface -- `board/esp32s3-builtin.cfg`
+        # alone cannot tell them apart, so this MUST be pinned (an unpinned
+        # peer here would let debug_reset/halt/resume/step/read_memory/
+        # write_memory/read_symbol/read_registers bind whichever 303A:1001
+        # unit OpenOCD finds first -- e.g. `debug_reset(peer="esp")`
+        # resetting the FIXTURE instead of the main board, or vice versa).
+        # Imported from serial_link.py -- the same single source of truth
+        # mcp_server_flash.py's flash_firmware() pins its `adapter serial`
+        # to -- rather than a second copy of the literal.
+        adapter_serial=serial_link.MAIN_BOARD_JTAG_SERIAL,
     ),
     PEER_PICO: PeerConfig(
         cfg_args=["interface/cmsis-dap.cfg", "target/rp2040.cfg"],
@@ -131,10 +143,14 @@ _PEERS = {
         root=_safty_fw_root(),
         # Raspberry Pi Debug Probe, USB VID 2E8A PID 000C, serial recorded
         # 2026-08-23 from the bench this firmware is developed on. Pinned
-        # deliberately: the ESP is reached through the ESP32-S3's own built-in
-        # USB JTAG (VID 303A PID 1001) and so can never be confused with this
-        # one, but a SECOND CMSIS-DAP probe would be indistinguishable from
-        # this one to `interface/cmsis-dap.cfg` alone. See adapter_serial's
+        # deliberately: a SECOND CMSIS-DAP probe would be indistinguishable
+        # from this one to `interface/cmsis-dap.cfg` alone. (This probe's
+        # VID:PID is its own family, distinct from either ESP32-S3 board's
+        # 303A:1001 native JTAG, so nothing here can bind an ESP32-S3 board
+        # by mistake -- but as of 2026-09-05 there are now TWO 303A:1001
+        # boards on the bench, which is why PEER_ESP above also needs, and
+        # now has, its own adapter_serial pin; do not read this comment as
+        # implying the ESP side never needed one.) See adapter_serial's
         # comment on PeerConfig.
         adapter_serial="E66540F0A36C6E21",
         nm_tool="arm-none-eabi-nm",
@@ -273,8 +289,27 @@ def _adapter_prefix(peer_cfg: PeerConfig) -> str:
     return prefix
 
 
+def _refuse_if_esp_adapter_absent(peer: str, peer_cfg: PeerConfig) -> Optional[str]:
+    """None unless `peer` is PEER_ESP and its pinned adapter_serial is not
+    currently enumerated -- see serial_link.refuse_if_jtag_serial_absent()
+    (the single source of truth, shared with mcp_server_flash.py) for the
+    "why" and the case-insensitive comparison. Checked in `_run()` so every
+    ESP-peer command (program/reset/halt/resume/step/read_memory/
+    write_memory/read_symbol/read_registers) refuses BEFORE OpenOCD is
+    invoked, not just program()."""
+    if peer != PEER_ESP:
+        return None
+    serial = _adapter_serial(peer_cfg)
+    if not serial:
+        return None  # env override explicitly cleared the pin -- caller's choice
+    return serial_link.refuse_if_jtag_serial_absent(serial, "main board (ESP32-S3)")
+
+
 def _run(peer: str, tcl_commands: str, timeout_s: int = 30) -> "tuple[bool, str]":
     peer_cfg = resolve_peer(peer)
+    refusal = _refuse_if_esp_adapter_absent(peer, peer_cfg)
+    if refusal:
+        return False, refusal
     exe = _openocd_exe_or_raise()
     return openocd_util.run_openocd(exe, peer_cfg.cfg_args, tcl_commands, cwd=peer_cfg.root, timeout_s=timeout_s)
 
