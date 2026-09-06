@@ -35,7 +35,13 @@
 #   esp-idf/App/CMakeFiles/__idf_App.dir/          (firmware/KilnFW/App/*.c)
 #   esp-idf/drivers/CMakeFiles/__idf_drivers.dir/   (firmware/KilnFW/App/drivers/**/*.c)
 #   esp-idf/kilnlink/CMakeFiles/__idf_kilnlink.dir/ (firmware/CommonFW, our shared link code)
-# which are the three components this repository actually authors and edits.
+#   esp-idf/esp/CMakeFiles/__idf_esp.dir/           (firmware/hwAbstraction/esp, HAL Phase
+#                                                     1a's new idf_component_register --
+#                                                     esp_spi_owner.c/owner_slot_pool.c/
+#                                                     i2c_owner.c/uart_owner.c/uart_protocol.c,
+#                                                     added when this component started
+#                                                     producing its own linked objects)
+# which are the four components this repository actually authors and edits.
 #
 # SYMBOL FILTERING, why type letters and not names. `nm --defined-only`'s
 # second column is the symbol type: uppercase means external/global linkage,
@@ -91,7 +97,8 @@ $buildDir = Join-Path $repoRoot "firmware\KilnFW\build"
 $componentDirs = @(
     "esp-idf\App\CMakeFiles\__idf_App.dir",
     "esp-idf\drivers\CMakeFiles\__idf_drivers.dir",
-    "esp-idf\kilnlink\CMakeFiles\__idf_kilnlink.dir"
+    "esp-idf\kilnlink\CMakeFiles\__idf_kilnlink.dir",
+    "esp-idf\esp\CMakeFiles\__idf_esp.dir"
 )
 
 if (-not (Test-Path $buildDir)) {
@@ -100,11 +107,77 @@ if (-not (Test-Path $buildDir)) {
     exit 0
 }
 
+# Each component's .c.obj tree mirrors its source tree's relative layout
+# 1:1 (verified: drivers.dir/owners/uart_protocol.c.obj <-> App/drivers/
+# owners/uart_protocol.c). Used below to drop STALE objects -- .c.obj files
+# left behind by a previous build whose source .c no longer exists at that
+# path, which is exactly what a file move without an intervening clean
+# build leaves lying around. HAL Phase 1a moved esp_spi_owner.c/
+# owner_slot_pool.c/i2c_owner.c/uart_owner.c/uart_protocol.c OUT of
+# App/drivers/owners/ entirely (afbaa6e), but firmware/KilnFW/build/ is
+# generated, gitignored, per-machine output that a source-only move commit
+# cannot touch -- so a build directory from before that move still has
+# owners/*.c.obj for those five files sitting right next to the NEW esp/
+# component's objects for the very same symbols, reading as a duplicate-
+# symbol failure that has never existed in any single real link (nobody
+# links stale + fresh objects together; a real `idf.py build` recompiles
+# drivers/ and simply stops producing those five objects there). Comparing
+# each .c.obj's source path against the real tree, not just re-running nm
+# on whatever files happen to be sitting in build/, is what tells stale
+# build output apart from an actual same-symbol-two-live-objects collision.
+$componentSourceRoots = @{
+    "esp-idf\App\CMakeFiles\__idf_App.dir"          = "firmware\KilnFW\App"
+    "esp-idf\drivers\CMakeFiles\__idf_drivers.dir"   = "firmware\KilnFW\App\drivers"
+    "esp-idf\kilnlink\CMakeFiles\__idf_kilnlink.dir" = "firmware\CommonFW"
+    "esp-idf\esp\CMakeFiles\__idf_esp.dir"           = "firmware\hwAbstraction\esp"
+}
+
+# Matched by BASENAME against everything real under the component's source
+# root, not by reconstructing the object's exact relative path -- kilnlink's
+# component directory encodes its (out-of-component-tree) absolute source
+# paths into its .obj directory names (CMake's usual scheme for a source
+# file living outside the component dir), so an exact relative-path
+# rebuild breaks for it. A basename match is the same "agnostic to exactly
+# where under the tree it lives" contract this repo already uses elsewhere
+# (resolve_driver_file / Resolve-DriverFile) and is sufficient here: this
+# loop only needs to tell "some real .c by this name still exists in this
+# component's source tree" from "nothing does any more, this is leftover
+# build output" -- not to prove it is the same file byte-for-byte.
+$sourceBasenamesByRoot = @{}
+foreach ($sourceRoot in ($componentSourceRoots.Values | Select-Object -Unique)) {
+    $sourceFull = Join-Path $repoRoot $sourceRoot
+    $names = @{}
+    if (Test-Path $sourceFull) {
+        foreach ($f in (Get-ChildItem -Path $sourceFull -Recurse -File -Filter "*.c" -ErrorAction SilentlyContinue)) {
+            $names[$f.Name] = $true
+        }
+    }
+    $sourceBasenamesByRoot[$sourceRoot] = $names
+}
+
 $objFiles = @()
+$staleObjFiles = @()
 foreach ($c in $componentDirs) {
     $full = Join-Path $buildDir $c
     if (Test-Path $full) {
-        $objFiles += Get-ChildItem -Path $full -Recurse -File -Filter "*.c.obj" -ErrorAction SilentlyContinue
+        $candidates = @(Get-ChildItem -Path $full -Recurse -File -Filter "*.c.obj" -ErrorAction SilentlyContinue)
+        $sourceRoot = $componentSourceRoots[$c]
+        $knownNames = $sourceBasenamesByRoot[$sourceRoot]
+        foreach ($obj in $candidates) {
+            $expectedBaseName = $obj.Name -replace '\.obj$', ''
+            if ($sourceRoot -and $knownNames -and -not $knownNames.ContainsKey($expectedBaseName)) {
+                $staleObjFiles += [pscustomobject]@{ Obj = $obj; ExpectedBaseName = $expectedBaseName; SourceRoot = $sourceRoot }
+            } else {
+                $objFiles += $obj
+            }
+        }
+    }
+}
+
+if ($staleObjFiles.Count -gt 0) {
+    Write-Host "NOTE: ignoring $($staleObjFiles.Count) stale .c.obj file(s) whose source no longer exists anywhere under its component's source tree (leftover from a build directory predating a file move -- re-run build_kilnfw to clean these up):" -ForegroundColor Yellow
+    foreach ($s in $staleObjFiles) {
+        Write-Host "        $($s.Obj.FullName.Substring($buildDir.Length + 1)) -- no $($s.ExpectedBaseName) found under $($s.SourceRoot)"
     }
 }
 
@@ -186,7 +259,7 @@ if ($violations.Count -gt 0) {
     throw "$($violations.Count) duplicate externally-linked symbol(s) found -- see tools\check_duplicate_symbols.ps1's header"
 }
 
-Write-Host "Duplicate symbol check passed: $($objFiles.Count) object file(s) across App/drivers/kilnlink, no externally-linked symbol defined more than once."
+Write-Host "Duplicate symbol check passed: $($objFiles.Count) object file(s) across App/drivers/kilnlink/esp, no externally-linked symbol defined more than once."
 if ($allowlist.Count -gt 0) {
     Write-Host "  ($($allowlist.Count) allowlisted duplicate(s) -- see script header)"
 }

@@ -6,7 +6,11 @@
 #
 # The four sites:
 #   1. KilnFW      App/drivers/Kconfig            KILNCTL_SAFETY_BAUD_RATE default
-#   2. SaftyFW     src/tasks/uart_owner.c         UART_OWNER_BAUD_RATE
+#   2. SaftyFW     firmware/hwAbstraction/pico/uart/uart_owner.c
+#                                                 UART_OWNER_BAUD_RATE -- HAL
+#      Phase 1a (WP2) relocated this file byte-identical from SaftyFW's own
+#      src/tasks/uart_owner.c into hwAbstraction/pico/uart/; the #define
+#      itself did not move or change, only its file's path.
 #   3. SaftyFW     bootloader/main.c              enter_recovery()'s uart_init
 #   4. hwAbstraction firmware/hwAbstraction/pico/uart/hal_uart_pico.c
 #                                                 HAL_UART_PICO_EXPECTED_BAUD --
@@ -15,7 +19,13 @@
 #      (one-way boundary, same rule as the KilnFW-side hwAbstraction split).
 #      "hand until Phase 1a [accessor lands]" per that file's own comment --
 #      until then this script is the only thing keeping it from silently
-#      drifting from site 2.
+#      drifting from site 2. Sites 2 and 4 now live in the SAME directory
+#      after WP2's move (both under hwAbstraction/pico/uart/) but remain two
+#      textually separate #defines in two separate files -- the one-way
+#      #include boundary this script's own header explains is exactly why
+#      they were never merged into one, so this check's job (catching a
+#      textual drift between them) did not go away just because they got
+#      closer together on disk.
 #
 # WHY A SCRIPT AND NOT A _Static_assert: they live in two separate build
 # systems (ESP-IDF/Kconfig and the Pico SDK), so no compile-time assert can
@@ -38,10 +48,10 @@ if ($kconfig -notmatch '(?ms)config\s+KILNCTL_SAFETY_BAUD_RATE\b.*?^\s*default\s
 }
 $sites += [pscustomobject]@{ Name = 'KilnFW Kconfig default'; Baud = [int]$Matches[1]; Path = $kconfigPath }
 
-$ownerPath = Join-Path $repo 'firmware/SaftyFW/src/tasks/uart_owner.c'
+$ownerPath = Join-Path $repo 'firmware/hwAbstraction/pico/uart/uart_owner.c'
 $owner = Get-Content -Raw $ownerPath
 if ($owner -notmatch '#define\s+UART_OWNER_BAUD_RATE\s+(\d+)u') {
-    throw "check_safety_baud_sync: could not find UART_OWNER_BAUD_RATE in $ownerPath -- fix the check, do not delete it."
+    throw "check_safety_baud_sync: could not find UART_OWNER_BAUD_RATE in $ownerPath -- has uart_owner.c moved again or been renamed? Fix the check, do not delete it."
 }
 $sites += [pscustomobject]@{ Name = 'SaftyFW UART_OWNER_BAUD_RATE'; Baud = [int]$Matches[1]; Path = $ownerPath }
 

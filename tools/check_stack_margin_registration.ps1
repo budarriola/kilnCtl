@@ -154,7 +154,23 @@ $requiredNames = @(
     "uart_owner_task", "uart_owner_evt_task", "uart_proto_rx"
 )
 
-$sourceFiles = @(Get-ChildItem -Path $driversDir -Filter "*.c" -Recurse -File) + $mainFiles
+# HAL Phase 1a (WP1) moved esp_spi_owner.c/i2c_owner.c/uart_owner.c/
+# uart_protocol.c out of drivers/ entirely, into firmware/hwAbstraction/esp/
+# (colocated with the hal_*_esp.c backend files). Those owner files kept
+# their own stack_margin_register() call sites byte-identical (esp_spi_owner.c
+# registers "spi_owner" directly) -- they did not move to the accessor
+# pattern used by the hal_*_esp.c backends below, because they are the same
+# KilnFW-owned module the drivers/ scan always covered, just relocated. Miss
+# this directory and "spi_owner" silently drops off $registeredNames even
+# though the call site is still live at runtime -- scan it same as drivers/.
+$hwAbstractionEspOwnersDir = Join-Path $root "..\firmware\hwAbstraction\esp"
+$hwAbstractionOwnerSourceFiles = @()
+if (Test-Path $hwAbstractionEspOwnersDir) {
+    $hwAbstractionEspOwnersDir = (Resolve-Path $hwAbstractionEspOwnersDir).Path
+    $hwAbstractionOwnerSourceFiles = @(Get-ChildItem -Path $hwAbstractionEspOwnersDir -Filter "*.c" -Recurse -File)
+}
+
+$sourceFiles = @(Get-ChildItem -Path $driversDir -Filter "*.c" -Recurse -File) + $mainFiles + $hwAbstractionOwnerSourceFiles
 if ($sourceFiles.Count -lt 5) {
     throw "check_stack_margin_registration.ps1: only $($sourceFiles.Count) .c file(s) found -- has the drivers directory moved? Update this script's target directory."
 }
@@ -268,26 +284,53 @@ if ($headroom -lt 8) {
 
 # --- hwAbstraction extension ---------------------------------------------
 #
-# firmware/hwAbstraction/**'s ESP backends (esp/uart, esp/i2c, esp/spi)
-# create their own FreeRTOS tasks (xTaskCreate*) but hwAbstraction is a
-# one-way boundary -- it must never #include a KilnFW header such as
+# firmware/hwAbstraction/**'s ESP/Pico backends (hal_*_esp.c / hal_*_pico.c --
+# pure hardware plumbing, no pre-existing KilnFW/SaftyFW ties) create their
+# own FreeRTOS tasks (xTaskCreate*) but hwAbstraction is a one-way boundary
+# for THEM -- a backend must never #include a KilnFW header such as
 # stack_margin.h, so it cannot call stack_margin_register() itself. The
 # accessor pattern instead: each backend that creates a task exposes a
 # hal_<name>_get_task_handle() function in the SAME file, and a KilnFW-side
-# caller (outside hwAbstraction) is expected to register that handle. Two
-# things are enforced here:
+# caller (outside hwAbstraction) is expected to register that handle.
 #
-#   1. any file under firmware/hwAbstraction/ that calls xTaskCreate*()
-#      must define a function matching hal_[a-z0-9_]+_get_task_handle in
-#      the SAME file -- otherwise the task it creates has no way for
-#      KilnFW to ever reach its handle, and it fails naming the file.
-#   2. no file under firmware/hwAbstraction/ may #include stack_margin.h
-#      -- doing so would be the boundary violation this split exists to
-#      prevent (hwAbstraction reaching into KilnFW).
+# The files HAL Phase 1a (WP1/WP2) relocated INTO hwAbstraction --
+# esp_spi_owner.c/owner_slot_pool.c/i2c_owner.c/uart_owner.c/uart_protocol.c
+# under esp/, spi_owner.c/uart_owner.c/uart_owner_tx_policy.c under pico/ --
+# are a different thing: they are the same KilnFW/SaftyFW-owned owner
+# modules the drivers/ (or src/tasks/) scan always covered, just relocated
+# byte-identical by the move. They already call stack_margin_register()
+# directly (esp_spi_owner.c registers "spi_owner") and that is not a fresh
+# boundary violation to fix here -- it is pre-existing, accepted behavior
+# that predates the move and is out of scope for Phase 1a. Applying the
+# backend accessor rule to them would fail on every one of them the day
+# after the move, for code nobody touched. The two file families are told
+# apart by name: "owner" files match *_owner.c/.h, *_owner_*.c/.h,
+# owner_slot_pool.*, or uart_protocol.* (all pre-existing KilnFW/SaftyFW
+# modules); everything else under hwAbstraction/ -- the hal_*.c/.h backend
+# files -- is held to the accessor/no-include rule below. If a future pass
+# ever refactors an owner file itself onto the accessor pattern, drop it
+# from $ownerFileNamePattern in the same commit that removes its direct
+# stack_margin_register()/stack_margin.h use.
+#
+# Two things are enforced here, backend files only:
+#
+#   1. any backend file under firmware/hwAbstraction/ that calls
+#      xTaskCreate*() must define a function matching
+#      hal_[a-z0-9_]+_get_task_handle in the SAME file -- otherwise the
+#      task it creates has no way for KilnFW/SaftyFW to ever reach its
+#      handle, and it fails naming the file.
+#   2. no backend file under firmware/hwAbstraction/ may #include
+#      stack_margin.h -- doing so would be the boundary violation this
+#      split exists to prevent (hwAbstraction reaching into KilnFW).
 #
 # If the accessor has not landed in a given backend yet, this legitimately
 # fails naming that file -- that is not a false positive, it is exactly
 # what this check exists to report until the accessor call site is added.
+# Matched against the file's basename only (not full path): anything with
+# "owner" anywhere in the name (esp_spi_owner.c, owner_slot_pool.c,
+# i2c_owner.c, uart_owner.c, uart_owner_tx_policy.c, spi_owner.c, ...) or
+# named uart_protocol.*.
+$ownerFileNamePattern = 'owner|^uart_protocol\.(c|h)$'
 $hwAbstractionRoot = Join-Path $root "..\firmware\hwAbstraction"
 if (Test-Path $hwAbstractionRoot) {
     $hwAbstractionRootResolved = (Resolve-Path $hwAbstractionRoot).Path
@@ -299,6 +342,12 @@ if (Test-Path $hwAbstractionRoot) {
     $includePattern = '#\s*include\s*[<"]stack_margin\.h[>"]'
 
     foreach ($f in $hwAbstractionFiles) {
+        if ($f.Name -match $ownerFileNamePattern) {
+            # Pre-existing owner module relocated byte-identical by HAL
+            # Phase 1a/1b -- not held to the backend accessor/no-include
+            # rule. See this section's top comment.
+            continue
+        }
         $codeLines = Get-CodeOnlyLines -Path $f.FullName
         $relPath = "firmware/hwAbstraction/" + (($f.FullName.Substring($hwAbstractionRootResolved.Length + 1)) -replace '\\', '/')
 

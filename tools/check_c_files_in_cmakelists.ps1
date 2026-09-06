@@ -210,6 +210,37 @@ $violations = @()
 #        headers-only and any .c found there is an unconditional violation.
 $halRoot = Join-Path $root "firmware\hwAbstraction"
 $halCoveredNames = @()
+
+# Owner files moved INTO hwAbstraction by HAL Phase 1a/WP2 are no longer in
+# the "deliberately unwired" bucket the rest of this section's header talks
+# about -- they are wired into REAL build targets: the new
+# firmware/hwAbstraction/esp/CMakeLists.txt component (idf_component_register
+# SRCS, consumed by KilnFW) and firmware/SaftyFW/CMakeLists.txt's
+# add_library(hwabstraction_pico ...) source list (consumed by SaftyFW /
+# SaftyFW_slotA / SaftyFW_slotB). Their coverage comes from THOSE
+# CMakeLists, same mechanism as section 1/2/3 below -- not from the
+# hwAbstraction test scripts, which is the pre-Phase-1a-move state this
+# script's header still describes for the hal_*_esp.c / hal_*_pico.c backend
+# bodies (still genuinely unwired, still covered by the test scripts only).
+$halEspCMake = Join-Path $halRoot "esp\CMakeLists.txt"
+if (Test-Path $halEspCMake) {
+    foreach ($refPath in (Get-CMakeCSourceRefs -Path $halEspCMake)) {
+        $halCoveredNames += ($refPath -split '/' | Select-Object -Last 1)
+    }
+}
+$saftyCMakeForHal = Join-Path $root "firmware\SaftyFW\CMakeLists.txt"
+if (Test-Path $saftyCMakeForHal) {
+    $saftyRaw = Get-Content -Path $saftyCMakeForHal -Raw
+    $libBlock = [regex]::Match($saftyRaw, 'add_library\s*\(\s*hwabstraction_pico\s+STATIC\s*(.*?)\)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    if ($libBlock.Success) {
+        foreach ($m in [regex]::Matches($libBlock.Groups[1].Value, '([A-Za-z0-9_./\\${}-]+\.c)')) {
+            $halCoveredNames += (($m.Groups[1].Value -replace '\\', '/') -split '/' | Select-Object -Last 1)
+        }
+    } else {
+        Write-Host "WARNING: hwabstraction_pico add_library(...) block not found in $saftyCMakeForHal -- has it been renamed or reformatted? Its sources will read as uncovered." -ForegroundColor Yellow
+    }
+}
+
 if (Test-Path $halRoot) {
     # Built with string interpolation rather than Join-Path -- Join-Path's
     # literal second argument is exactly what check_source_path_drift.ps1
@@ -219,7 +250,6 @@ if (Test-Path $halRoot) {
     $halTestDir = Join-Path $halRoot "test"
     $halScriptNames = @("compile_esp_backends.ps1", "compile_pico_backends.ps1", "test_host_fakes.ps1")
     $halScripts = $halScriptNames | ForEach-Object { "$halTestDir\$_" }
-    $halCoveredNames = @()
     foreach ($script in $halScripts) {
         $halCoveredNames += (Get-CBasenamesReferencedInScript -Path $script)
     }
