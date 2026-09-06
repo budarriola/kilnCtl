@@ -520,6 +520,25 @@ def _describe_commissioning(data: dict) -> str:
             "S14 over-current (WARN only, per channel; ct_installed unknown)"
         lines.append(prefix + ": " + "; ".join(chan_bits))
 
+    ct_topology_p = params.get("ct_topology")
+    ct_topology_known = bool(ct_topology_p and ct_topology_p.get("set") and reliable)
+    ct_topology_summed = bool(ct_topology_p.get("value")) if ct_topology_known else False
+    if not ct_topology_known:
+        lines.append("S15 under-current (WARN only, per zone): DORMANT (ct_topology unknown -- not commissioned)")
+    elif not ct_topology_summed:
+        lines.append("S15 under-current (WARN only, per zone): DORMANT (ct_topology=per_zone)")
+    elif ct_installed_known and not ct_installed:
+        lines.append("S15 under-current (per zone): DORMANT (ct_installed=0 -- no CTs fitted)")
+    else:
+        zone_bits = []
+        for z in range(3):
+            i_norm, i_set = numeric(f"i_normal_a[{z}]")
+            if i_set and i_norm > 0.0:
+                zone_bits.append(f"z{z} i_normal_a={i_norm:g}A ARMED")
+            else:
+                zone_bits.append(f"z{z} DORMANT (i_normal_a not measured)")
+        lines.append("S15 under-current (WARN only, per zone, ct_topology=summed): " + "; ".join(zone_bits))
+
     if data.get("tc_not_installed"):
         lines.append("live flag: tc_not_installed (safety thermocouple reports not installed)")
     if data.get("tc_injected"):
@@ -542,8 +561,9 @@ def safety_get_commissioning(host: Optional[str] = None) -> str:
     Answers the question people actually ask ("which guards are ARMED right
     now, which are DORMANT, and why") rather than dumping raw JSON: reports
     S1 (abs_max_temp_c, the independent overtemp ceiling), S8
-    (max_rate_c_per_min), and S14 (per-channel over-current vs measured
-    normal, WARN-only) with their armed/dormant state, plus the
+    (max_rate_c_per_min), S14 (per-channel over-current vs measured
+    normal, WARN-only), and S15 (per-zone under-current vs measured normal
+    in summed-CT topology, WARN-only) with their armed/dormant state, plus the
     `commissioned` flag, config CRC staleness, tc_source and the live
     tc_not_installed/tc_injected/borrowed flags. Armed/dormant thresholds
     (0 = never trips) were verified against firmware/SaftyFW/src/

@@ -52,6 +52,7 @@ def _sample_get(commissioned: bool = False, reliable: bool = True, stale: bool =
         {"id": 794, "name": "i_normal_a[0]", "type": "f32"},
         {"id": 795, "name": "i_normal_a[1]", "type": "f32"},
         {"id": 796, "name": "i_normal_a[2]", "type": "f32"},
+        {"id": 799, "name": "ct_topology", "type": "u8"},
     ]
     for p in params:
         if p["name"] in set_values:
@@ -119,6 +120,36 @@ class CommissionedRenderTest(unittest.TestCase):
         self.assertIn("ch0 i_normal_a=4.2A ARMED", s14_line)
         self.assertIn("ch1 DORMANT", s14_line)
         self.assertIn("ch2 DORMANT", s14_line)
+
+    def test_ct_topology_unset_reports_s15_dormant(self):
+        data = _sample_get(commissioned=True, abs_max_temp_c=80.0, ct_installed=1)
+        out = mss._describe_commissioning(data)
+        s15_line = next(l for l in out.splitlines() if l.startswith("S15"))
+        self.assertIn("DORMANT", s15_line)
+        self.assertIn("ct_topology unknown", s15_line)
+
+    def test_ct_topology_per_zone_reports_s15_dormant(self):
+        data = _sample_get(commissioned=True, abs_max_temp_c=80.0, ct_installed=1, ct_topology=0)
+        out = mss._describe_commissioning(data)
+        s15_line = next(l for l in out.splitlines() if l.startswith("S15"))
+        self.assertIn("DORMANT", s15_line)
+        self.assertIn("ct_topology=per_zone", s15_line)
+
+    def test_ct_topology_summed_with_measured_normal_is_armed_per_zone(self):
+        data = _sample_get(commissioned=True, abs_max_temp_c=80.0, ct_installed=1, ct_topology=1,
+                            **{"i_normal_a[0]": 4.2, "i_normal_a[1]": 0.0})
+        out = mss._describe_commissioning(data)
+        s15_line = next(l for l in out.splitlines() if l.startswith("S15"))
+        self.assertIn("z0 i_normal_a=4.2A ARMED", s15_line)
+        self.assertIn("z1 DORMANT", s15_line)
+        self.assertIn("z2 DORMANT", s15_line)
+
+    def test_ct_topology_summed_but_ct_not_installed_is_dormant(self):
+        data = _sample_get(commissioned=True, abs_max_temp_c=80.0, ct_installed=0, ct_topology=1)
+        out = mss._describe_commissioning(data)
+        s15_line = next(l for l in out.splitlines() if l.startswith("S15"))
+        self.assertIn("DORMANT", s15_line)
+        self.assertIn("ct_installed=0", s15_line)
 
     def test_stale_crc_is_flagged(self):
         data = _sample_get(commissioned=True, abs_max_temp_c=80.0, ct_installed=0,

@@ -135,7 +135,7 @@ GATE_FIELDS: "tuple[GateField, ...]" = (
     ),
     GateField(
         name="ct_installed",
-        feature="current-transformer-dependent safety guards S3/S4/S9/S11/S14, and the "
+        feature="current-transformer-dependent safety guards S3/S4/S9/S11/S14/S15, and the "
                 "commissioning requirement for ct_channel_map[0..2] + the three "
                 "overcurrent_* params",
         reachable_when=lambda v: bool(v),
