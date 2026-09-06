@@ -27,8 +27,15 @@ class DefaultOutPathCwdIndependenceTests(unittest.TestCase):
     def _expected(self):
         # tools/PcTools/src/kilnctrl/tuning_campaign.py -> repo root is
         # four levels up, then back down to tools/PcTools/config_presets.
+        # Mirror production's Path(__file__).resolve(): plain __file__ can
+        # carry whatever drive-letter case the interpreter/collector used to
+        # import the module (e.g. a lowercase-drive checkout), while
+        # DEFAULT_OUT_PATH is built from the resolved (OS-canonical-case)
+        # path -- comparing unresolved to resolved makes this test flaky by
+        # drive-letter case alone, not by the CWD independence it means to
+        # check.
         return os.path.normpath(os.path.join(
-            os.path.dirname(tcamp.__file__), "..", "..", "..", "..",
+            os.path.dirname(os.path.realpath(tcamp.__file__)), "..", "..", "..", "..",
             "tools", "PcTools", "config_presets", "tuning_recommendations.json",
         ))
 

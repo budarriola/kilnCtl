@@ -27,8 +27,21 @@ class DefaultOutDirCwdIndependenceTests(unittest.TestCase):
 
     def _expected(self):
         # tools/PcTools/src/kilnctrl/logic_capture.py -> tools/PcTools
+        # Mirror production's Path(__file__).resolve(): plain __file__ can
+        # carry whatever drive-letter case the interpreter/collector used to
+        # import the module (e.g. a lowercase-drive checkout), while
+        # DEFAULT_OUT_DIR is built from the resolved (OS-canonical-case)
+        # path -- comparing unresolved to resolved makes this test flaky by
+        # drive-letter case alone, not by the CWD independence it means to
+        # check.
         return os.path.normpath(
-            os.path.join(os.path.dirname(lc.__file__), "..", "..", "logs", "saleae")
+            os.path.join(
+                os.path.dirname(os.path.realpath(lc.__file__)),
+                "..",
+                "..",
+                "logs",
+                "saleae",
+            )
         )
 
     def test_default_is_absolute(self):
