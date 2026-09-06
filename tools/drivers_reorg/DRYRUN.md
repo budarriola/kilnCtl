@@ -223,6 +223,197 @@ checks against the preview copy:
 - `ROADMAP.md`/`CLAUDE.md`/firmware doc citations rewritten in place
   (finding 12) -- 25 markdown files touched, 111 total scanned.
 
+## -2. Round-4 pre-apply review pass (2026-09-05, this session) -- 7 findings fixed
+
+A round-4 review of the state above found 3 CRITICAL, 1 MAJOR and 1 MINOR
+defect plus 2 verification gaps. All 7 fixed in `plan_moves.ps1`/
+`build_host_tests.ps1` this session, confirmed against a from-scratch tree
+reconstruction (see "Reconstruction build" below), never against `-Apply`.
+
+1. **CRITICAL -- `$gzNewLines`/`$gzOldBlock` hardcoded `` `r`n `` against an
+   LF-only file.** `firmware/KilnFW/App/drivers/CMakeLists.txt` has zero CRLF
+   bytes (confirmed: `data.count(b'\r\n') == 0`), so section 2c's old literal-
+   CRLF match never fired and the 16 `KILNCTL_GZIP_ASSETS` entries kept their
+   flat basenames -- the exact failure mode CMake reports as `failed to gzip
+   <name> for EMBED_TXTFILES`. Fixed: `$detectedNl` is computed once from the
+   actual file text (`` `r`n `` if present, else `` `n ``) and both the
+   inserted `get_filename_component`/`set` lines and the match against the
+   old `kilnctl_gz_src`/`kilnctl_gz_out` block now use `\r?\n`-tolerant
+   regexes instead of a literal CRLF. A new post-check
+   (`$section2cSubCount`/`$gzAssetHits` both zero after a successful block
+   match) makes the run fail loud naming section 2c if it would otherwise
+   silently no-op -- negative-tested below by removing the
+   `KILNCTL_GZIP_ASSETS` block from a working copy of the CMakeLists.txt and
+   confirming `plan_moves.ps1 -DryRun` exits non-zero naming "2c." Also fixed
+   in the same pass: the inserted `get_filename_component(...)` line was
+   missing its 8-space indent relative to its two sibling `set(...)` lines
+   (cosmetic, but fixed while already touching this code).
+2. **CRITICAL -- `build_host_tests.ps1`'s "main" `cl` line would overflow
+   cmd.exe's ~8191-char limit.** Confirmed by construction: appending the 11
+   layer `/I` flags the reorg needs to the pre-existing inline flag set grows
+   the "main" executable's command line from 7745 to 8688-8924 chars
+   (measured both ways), past the limit -- the build would fail with no
+   useful error (`The command line is too long.`, confirmed by reproducing it
+   directly). Fixed at HEAD, in `build_host_tests.ps1` itself, ahead of the
+   reorg: every one of the 22 `cl` invocations now reads its common
+   `/nologo /W3 /EHsc` + `/I` flags from one generated response file
+   (`cl @"$hostTestsRsp"`) instead of inlining them; `/std:c11` (which not
+   every invocation uses) stays on the command line itself. Measured new
+   "main" `cl` line length: **7659 chars** (was 7745 inline pre-reorg,
+   8688-8924 if the layer `/I`s had been inlined instead -- comfortably under
+   the limit either way now that only `/std:c11` + `/Fo`/`/Fe` + the source
+   list remain on the line). `build_host_tests.ps1` at HEAD still builds and
+   passes **22/22** with this change alone (verified before any reorg-related
+   edit was layered on). `plan_moves.ps1`'s own rewrite of this file no
+   longer touches any of the 22 `cl` lines at all (the old `driversIncFlags`/
+   `clPrefixPattern` block, which used to insert per-layer `/I` flags
+   directly into each `cl` line, was removed as dead/harmful code once the
+   response file existed) -- new section 4e instead appends the 11 layer `/I`
+   entries to the response-file array (`$hostTestsRspLines`) exactly once,
+   idempotently.
+3. **CRITICAL -- `esp_spi_owner.c`'s bare `../owner_slot_pool.h`/
+   `../stack_margin.h` includes.** Section 4c only stripped an
+   `espInterfaces/` *prefix*; these two are bare `"../<name>"` includes with
+   no `espInterfaces/` segment at all, one directory level up from the flat
+   `drivers/` root. A repo-wide grep for `#include "\.\./` under
+   `firmware/KilnFW/App/drivers/` found exactly 3 such lines total: the 2 in
+   `esp_spi_owner.c` and one more in `sim_backend.c` (finding 4, below). New
+   section 4d handles both classes: for a target basename that IS itself a
+   moved layer file (`owner_slot_pool.h` -> `owners`, `stack_margin.h` ->
+   `common`), the leading `../` is dropped entirely (resolved bare via
+   INCLUDE_DIRS, same as every other same-tier bare include); for a target
+   that moves ordinarily but reaches OUTSIDE the layer files (finding 4), an
+   extra `../` is prepended instead, to compensate for the includer itself
+   gaining one directory level. Confirmed via `-PreviewDir`:
+   `firmware/KilnFW/App/drivers/owners/esp_spi_owner.c` reads
+   `#include "owner_slot_pool.h"` / `#include "stack_margin.h"`, both bare.
+4. **MAJOR -- `sim_backend.c`'s `../test/sim_plant.h` becomes wrong once the
+   file is `sim/sim_backend.c`.** Same section 4d (finding 3's second half,
+   above): `sim_plant.h` is not a moved layer file, so 4d prepends an extra
+   `../`. Confirmed via `-PreviewDir`:
+   `firmware/KilnFW/App/drivers/sim/sim_backend.c` reads
+   `#include "../../test/sim_plant.h"`.
+5. **MINOR -- `$gzipBlockPattern` over-matched past the 16-asset list.** The
+   old `(?s)(set\(KILNCTL_GZIP_ASSETS.*?\r?\n\s*\))` pattern's lazy `.*?`
+   could in principle run past the intended closing `)` on line 104 depending
+   on incidental whitespace shape elsewhere in the block (the review's stated
+   failure mode: swallowing 22 literals across lines 96-114, the
+   `execute_process` block's own closing paren, instead of the 16 assets).
+   Anchored to `set\(KILNCTL_GZIP_ASSETS[^)]*\)` instead -- stops at the
+   first literal `)`, which is exactly the asset list's own close (confirmed:
+   the preview's rewritten block still shows exactly 16 entries, unchanged
+   count from the round-3 pass).
+6. **Verification gap -- no from-scratch tree reconstruction had been built
+   and actually compiled.** See "Reconstruction build" below: this is the
+   first pass that copies `firmware/KilnFW/App` + `firmware/CommonFW`
+   include/src to a scratch tree, applies every `mapping.csv` move as a plain
+   file move, overlays the `-PreviewDir` output on top, and then actually
+   *builds* the result (`build_host_tests.ps1`, `cmake -P` on
+   `drivers/CMakeLists.txt`, and a full bare-`#include` resolution sweep).
+   This caught two real defects neither the static review nor the flat
+   `-PreviewDir` diff could see, both fixed in this pass and re-verified
+   against a second reconstruction:
+   - `firmware/KilnFW/App/test/stubs/uart_protocol.h` (a host-test-only,
+     type-only stand-in) shares its exact basename with the real
+     `owners/uart_protocol.h`. The original finding-3 fix stripped
+     `espInterfaces/uart_protocol.h` all the way to a bare `uart_protocol.h`;
+     that bare form resolves against the response file's `/I` search order,
+     where `stubs/` (which must win over real ESP-IDF headers of the same
+     name) is listed *before* any `drivers/<layer>` dir -- so the stub
+     silently won instead of the real header, and `uart_log_bridge.c` failed
+     to build host-side with `error C2065:
+     'UART_PROTO_DEFAULT_ACK_TIMEOUT_MS': undeclared identifier`. Fixed:
+     section 4c now re-qualifies to the basename's *new layer*
+     (`"owners/uart_protocol.h"`) instead of a fully bare name -- unambiguous
+     regardless of search order, and no more costly than bare since both `.`
+     and every layer name are already on the include path.
+   - `build_host_tests.ps1`'s response file listed `/I"$driversDir"` (the
+     flat root) but not the 11 layer subdirs -- section 4e (finding 2, above)
+     was written to fix exactly this, but a first attempt at it collided with
+     the now-dead `driversIncFlags`/`clPrefixPattern` code from the pre-
+     response-file design (finding 2's block, still doing an unconditional
+     `-replace '/I`"\$driversDir`"\s*', ''` on the whole file), which
+     corrupted the response-file array literal itself
+     (`"/I`"$driversDir`""` -> `""`) before section 4e ever ran. Fixed by
+     deleting that now-obsolete block entirely (see finding 2's writeup);
+     section 4e is the only thing that touches the response-file array now.
+7. **Verification gap -- the 2c zero-substitution guard (finding 1's
+   guard) had never actually been made to fail.** Negative-tested by copying
+   `firmware/KilnFW/App/drivers/CMakeLists.txt`, stripping its
+   `KILNCTL_GZIP_ASSETS` block with the same `set\(KILNCTL_GZIP_ASSETS[^)]*\)`
+   pattern the script itself uses, running `plan_moves.ps1 -DryRun` against
+   the modified real file (restored byte-for-byte from a backup immediately
+   after -- `git status --porcelain -- .../CMakeLists.txt` empty afterward),
+   and confirming the script exits non-zero: `Could not locate the
+   KILNCTL_GZIP_ASSETS block in ...CMakeLists.txt -- refusing to apply this
+   rewrite`, naming section 2c by its own console header immediately above.
+
+### Reconstruction build (this session)
+
+Built twice (once before finding 6/7's fixes landed, to surface them; once
+after, to confirm green) at `C:\rc5` (a short path, avoiding the unrelated
+"long worktree path overflows the MSVC command line" failure class the
+scratch temp directory's own ~150-char depth was independently triggering
+for `main`'s source-list argument -- see CLAUDE.md's SaftyFW host-test note
+for the same class):
+
+1. Copied `firmware/KilnFW/App` and `firmware/CommonFW/{include,src}` to the
+   scratch tree.
+2. Applied all 359 `mapping.csv` moves as plain Python `shutil.move` calls
+   (0 skipped -- every `old_path` existed).
+3. Overlaid every file `plan_moves.ps1 -DryRun -PreviewDir <scratch>/preview`
+   wrote under `firmware/KilnFW/App/**` on top (Join-Path fixups, site
+   rewrites, the CMakeLists.txt rewrite, the 4c/4d/4e include fixes).
+4. `powershell -File build_host_tests.ps1`: **22/22 executables built and
+   passed** (first attempt: 4/22, then 21/22 after fixing finding 2's
+   response-file gap, then 22/22 after fixing finding 6's `uart_protocol.h`
+   collision).
+5. `cmake -P firmware/KilnFW/App/drivers/CMakeLists.txt`: parses cleanly
+   through the (now correctly layer-qualified) `KILNCTL_GZIP_ASSETS` loop and
+   stops exactly at `CMakeLists.txt:133 (idf_component_register): Unknown
+   CMake command` -- i.e. it never errors before reaching
+   `idf_component_register`, confirming the entire gzip/tuning-recommendations
+   block above it is syntactically and referentially correct against the
+   moved tree.
+6. A Python sweep of every bare `#include "X.h"` (no `/`) under the
+   reconstructed `drivers/**` against the 12 INCLUDE_DIRS entries: **1621
+   bare includes total, 1159 resolved to exactly one of the 12 dirs, 0
+   ambiguous (>1 dir), 462 unresolved** -- every one of the 462 is a genuine
+   external ESP-IDF/FreeRTOS system header (`esp_log.h`, `sdkconfig.h`,
+   `freertos/*.h`, etc.) that was never part of `drivers/` and is resolved by
+   the ESP-IDF component system separately, plus one same-directory `.inc`
+   file (`profiles_builtin_table.inc`, moved into `persist/` alongside its
+   only includer) that quote-include resolves via same-directory lookup
+   before INCLUDE_DIRS is ever consulted -- confirmed by checking both files
+   landed in the same layer directory.
+7. Re-ran `build_host_tests.ps1` at HEAD (unmodified reorg) after all fixes:
+   still **22/22**, confirming the response-file change is a no-op for the
+   current, unmoved tree.
+
+### Updated final dry-run summary (this session, after all 7 round-4 fixes)
+
+```
+=== 6. Dry-run diff preview (counts) ===
+  git mv                         : 359 file(s), 4 STAY (no-op)
+  CMakeLists SRCS rewrite        : 186 literal(s) in drivers/CMakeLists.txt, 0 in App/CMakeLists.txt
+  INCLUDE_DIRS rewrite           : 11 of 12 '.'+layer dir(s) to add (0 = already up to date)
+  Path-keyed site rewrite        : 622 line(s) across 180 file(s) (incl. markdown + Join-Path $driversDir sites)
+  espInterfaces/ include strip   : 4 line(s) across 4 file(s)
+  Unmapped 'drivers/<name>' hits : 32 (of which 0 would hard-fail -Apply)
+  Upward includes remaining      : 0
+  Missing old_path row(s)        : 0 (would hard-fail -Apply; benign in -DryRun -- see section 0a)
+```
+
+(The site-rewrite/unmapped counts differ slightly from the round-3 numbers
+above -- 622 vs. 641, 32 vs. 40 -- because this session's fixes touch some of
+the same lines the markdown/Join-Path scan counts, not because of any
+regression; re-run `plan_moves.ps1 -DryRun` for the authoritative live
+count.) New section 4d ("Bare '../<name>' include fixups") and 4e
+("build_host_tests.ps1 response-file layer /I expansion") both report 0
+errors in this run; 4c now reports "espInterfaces/ include prefix rewrite"
+(renamed from "...prefix strip" to reflect finding 6's fix -- it re-qualifies
+to the new layer name, it no longer strips to bare).
+
 ## 0. Coordinator decisions applied this pass
 
 ## 0. Coordinator decisions applied this pass

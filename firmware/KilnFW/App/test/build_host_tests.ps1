@@ -120,7 +120,36 @@ $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
 # only, so an on-target build is unaffected.
 $stubDir = Join-Path $testDir "stubs"
 $commonInc = Join-Path $testDir "..\..\..\CommonFW\include"
-$cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
+
+# Response file for the common /nologo /W3 /EHsc + /I include flags shared by
+# every `cl` invocation below (some also add /std:c11 on the command line
+# itself, since that flag is NOT common to every executable -- e.g. exe5/
+# exe20 build without it). Previously these flags were inlined into all 22
+# `cl` command-line strings; once the drivers/ layering reorg
+# (tools/drivers_reorg/) lands, each moved file's new layer subdir needs its
+# own /I entry, and adding 11 more `/I` flags to 22 already-long inline
+# command lines pushed the "main" executable's line from 7745 to 8924 chars
+# -- past cmd.exe's ~8191-char command-line limit, so the build failed with
+# no useful error. Routing the include flags through @file instead means
+# cmd.exe only ever sees the short `cl @"$hostTestsRsp" ...` form, and the
+# reorg's rewrite only has to append lines to this ONE file, not touch any of
+# the 22 `cl` invocations. /I`"$driversDir`" is included here even though a
+# few invocations (e.g. the main one) never referenced it directly before --
+# harmless: an extra include directory that resolves nothing today, and it is
+# exactly the directory tools/drivers_reorg/plan_moves.ps1 splits into layer
+# subdirs, whose /I entries land in this same file.
+$hostTestsRsp = Join-Path $outDir "host_tests_common_flags.rsp"
+$hostTestsRspLines = @(
+    "/nologo"
+    "/W3"
+    "/EHsc"
+    "/I`"$stubDir`""
+    "/I`"$commonInc`""
+    "/I`"$driversDir`""
+)
+[System.IO.File]::WriteAllText($hostTestsRsp, ($hostTestsRspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+$cmd = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
 
 # ---- build/run bookkeeping -------------------------------------------------
 #
@@ -200,7 +229,7 @@ Invoke-HostTestExe -Name "main" -ExePath $exe -BuildCmd $cmd
 $exe2 = Join-Path $outDir "kilnctl_host_tests_zones.exe"
 $exe2ObjDir = Join-Path $outDir "zones_obj\"
 if (-not (Test-Path $exe2ObjDir)) { New-Item -ItemType Directory -Path $exe2ObjDir | Out-Null }
-$cmd2 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd2 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
         "`"$(Join-Path $driversDir 'zones_config_json.c')`" " +
         "`"$(Join-Path $driversDir 'zones_config_convert.c')`" " +
@@ -217,7 +246,7 @@ Invoke-HostTestExe -Name "zones_http" -ExePath $exe2 -BuildCmd $cmd2
 # store.c, so linking both into one binary would multiply-define every
 # safety_cfg_store_* symbol.
 $exe3 = Join-Path $outDir "kilnctl_host_tests_safety_cfg_http.exe"
-$cmd3 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd3 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$outDir\\safety_cfg_http_`" /Fe:`"$exe3`" `"$(Join-Path $testDir 'test_safety_cfg_http.c')`""
 
 Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
@@ -240,7 +269,7 @@ New-Item -ItemType Directory -Force -Path $peObjDir | Out-Null
 # cone_table_heat_work_weight() -- link the real module (already host-tested
 # by test_cone_table.c, own executable) into $cmd4 below rather than faking
 # it, same reasoning as pid.c/thermal_guard.c already linked there.
-$cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd4 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$peObjDir\\`" /Fe:`"$exe4`" " +
         "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
@@ -268,7 +297,7 @@ Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $c
 $exe5 = Join-Path $outDir "kilnctl_host_tests_autotune_engine.exe"
 $aeObjDir = Join-Path $outDir "ae"
 New-Item -ItemType Directory -Force -Path $aeObjDir | Out-Null
-$cmd5 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd5 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" " +
         "/Fo:`"$aeObjDir\\`" /Fe:`"$exe5`" " +
         "`"$(Join-Path $testDir 'test_autotune_engine_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'thermal_guard.c')`" `"$(Join-Path $driversDir 'heater_output.c')`" " +
@@ -306,7 +335,7 @@ Invoke-HostTestExe -Name "autotune_engine_prestart" -ExePath $exe5 -BuildCmd $cm
 # for zones_http.h/profile_feasibility.h/profiles_builtin.h, never collide
 # with any other test file's definitions of those same symbols.
 $exe7 = Join-Path $outDir "kilnctl_host_tests_profiles_http.exe"
-$cmd7 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd7 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$outDir\\profiles_`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`""
 
 Invoke-HostTestExe -Name "profiles_http" -ExePath $exe7 -BuildCmd $cmd7
@@ -330,7 +359,7 @@ Invoke-HostTestExe -Name "profiles_http" -ExePath $exe7 -BuildCmd $cmd7
 $exe8 = Join-Path $outDir "kilnctl_host_tests_ota_http.exe"
 $otaObjDir = Join-Path $outDir "ota"
 New-Item -ItemType Directory -Force -Path $otaObjDir | Out-Null
-$cmd8 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd8 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$otaObjDir\\`" /Fe:`"$exe8`" " +
         "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
         "`"$(Join-Path $driversDir 'ota_auth.c')`" `"$(Join-Path $driversDir 'ota_interlock.c')`" " +
@@ -353,7 +382,7 @@ $exe9 = Join-Path $outDir "kilnctl_host_tests_uart_protocol_link_delegate.exe"
 $commonSrc = Join-Path $testDir "..\..\..\CommonFW\src"
 $linkObjDir = Join-Path $outDir "link"
 New-Item -ItemType Directory -Force -Path $linkObjDir | Out-Null
-$cmd9 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd9 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$linkObjDir\\`" /Fe:`"$exe9`" " +
         "`"$(Join-Path $testDir 'test_uart_protocol_link_delegate.c')`" " +
         "`"$(Join-Path $commonSrc 'kilnlink_frame.c')`" `"$(Join-Path $commonSrc 'kilnlink_crc.c')`""
@@ -370,7 +399,7 @@ Invoke-HostTestExe -Name "uart_protocol_link_delegate" -ExePath $exe9 -BuildCmd 
 $exe10 = Join-Path $outDir "kilnctl_host_tests_board_temps.exe"
 $btObjDir = Join-Path $outDir "bt"
 New-Item -ItemType Directory -Force -Path $btObjDir | Out-Null
-$cmd10 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd10 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$btObjDir\\`" /Fe:`"$exe10`" `"$(Join-Path $testDir 'test_board_temps.c')`""
 
 Invoke-HostTestExe -Name "board_temps" -ExePath $exe10 -BuildCmd $cmd10
@@ -388,7 +417,7 @@ Invoke-HostTestExe -Name "board_temps" -ExePath $exe10 -BuildCmd $cmd10
 $exe11 = Join-Path $outDir "kilnctl_host_tests_kiln_io_owner.exe"
 $kioObjDir = Join-Path $outDir "kio"
 New-Item -ItemType Directory -Force -Path $kioObjDir | Out-Null
-$cmd11 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd11 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
         "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'kiln_io.c')`" " +
         "`"$(Join-Path $driversDir 'owner_slot_pool.c')`" `"$(Join-Path $driversDir 'stack_margin.c')`""
@@ -406,7 +435,7 @@ Invoke-HostTestExe -Name "kiln_io_owner" -ExePath $exe11 -BuildCmd $cmd11
 $exe12 = Join-Path $outDir "kilnctl_host_tests_safety_trip_words.exe"
 $stwObjDir = Join-Path $outDir "stw"
 New-Item -ItemType Directory -Force -Path $stwObjDir | Out-Null
-$cmd12 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd12 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$stwObjDir\\`" /Fe:`"$exe12`" `"$(Join-Path $testDir 'test_safety_trip_words.c')`""
 
 Invoke-HostTestExe -Name "safety_trip_words" -ExePath $exe12 -BuildCmd $cmd12
@@ -429,7 +458,7 @@ Invoke-HostTestExe -Name "safety_trip_words" -ExePath $exe12 -BuildCmd $cmd12
 $exe13 = Join-Path $outDir "kilnctl_host_tests_safety_trip_decision.exe"
 $stdObjDir = Join-Path $outDir "std"
 New-Item -ItemType Directory -Force -Path $stdObjDir | Out-Null
-$cmd13 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driversDir`" " +
+$cmd13 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$stdObjDir\\`" /Fe:`"$exe13`" " +
         "`"$(Join-Path $testDir 'test_safety_trip_decision.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`""
 
@@ -470,7 +499,7 @@ $slExtra = @("kilnlink_config_page.c", "kilnlink_announce.c", "kilnlink_announce
              "kilnlink_rollback.c", "kilnlink_rollback_result.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
              "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",
              "kilnlink_param.c", "kilnlink_param_value.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
-$cmd14 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driversDir`" /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd14 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$slObjDir\\`" /Fe:`"$exe14`" " +
         "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +
         "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`" " +
@@ -497,7 +526,7 @@ Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
 $exe15 = Join-Path $outDir "kilnctl_host_tests_dashboard_json.exe"
 $djObjDir = Join-Path $outDir "dj"
 New-Item -ItemType Directory -Force -Path $djObjDir | Out-Null
-$cmd15 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd15 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$djObjDir\\`" /Fe:`"$exe15`" `"$(Join-Path $testDir 'test_dashboard_json.c')`""
 
 Invoke-HostTestExe -Name "dashboard_json" -ExePath $exe15 -BuildCmd $cmd15
@@ -514,7 +543,7 @@ Invoke-HostTestExe -Name "dashboard_json" -ExePath $exe15 -BuildCmd $cmd15
 $exe16 = Join-Path $outDir "kilnctl_host_tests_telemetry_format.exe"
 $tfObjDir = Join-Path $outDir "tf"
 New-Item -ItemType Directory -Force -Path $tfObjDir | Out-Null
-$cmd16 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd16 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$tfObjDir\\`" /Fe:`"$exe16`" `"$(Join-Path $testDir 'test_telemetry_format.c')`""
 
 Invoke-HostTestExe -Name "telemetry_format" -ExePath $exe16 -BuildCmd $cmd16
@@ -540,7 +569,7 @@ New-Item -ItemType Directory -Force -Path $atObjDir | Out-Null
 # module's OTHER (unused-by-this-file) functions still need at link time,
 # zones_config_get_coupling(), as a tiny fake table alongside its existing
 # zones_config_get/set_model/pid fakes.
-$cmd17 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd17 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$atObjDir\\`" /Fe:`"$exe17`" " +
         "`"$(Join-Path $testDir 'test_adaptive_tune.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`" " +
         "`"$(Join-Path $driversDir 'zone_coupling_solve.c')`""
@@ -557,7 +586,7 @@ Invoke-HostTestExe -Name "adaptive_tune" -ExePath $exe17 -BuildCmd $cmd17
 $exe18 = Join-Path $outDir "kilnctl_host_tests_event_log.exe"
 $elObjDir = Join-Path $outDir "el"
 New-Item -ItemType Directory -Force -Path $elObjDir | Out-Null
-$cmd18 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd18 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$elObjDir\\`" /Fe:`"$exe18`" `"$(Join-Path $testDir 'test_event_log.c')`" " +
         "`"$(Join-Path $driversDir 'event_log.c')`""
 
@@ -577,7 +606,7 @@ Invoke-HostTestExe -Name "event_log" -ExePath $exe18 -BuildCmd $cmd18
 $exe19 = Join-Path $outDir "kilnctl_host_tests_run_state_relay_cycles.exe"
 $rsObjDir = Join-Path $outDir "rs"
 New-Item -ItemType Directory -Force -Path $rsObjDir | Out-Null
-$cmd19 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd19 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$rsObjDir\\`" /Fe:`"$exe19`" `"$(Join-Path $testDir 'test_run_state.c')`" " +
         "`"$(Join-Path $testDir 'test_relay_cycles.c')`""
 
@@ -592,7 +621,7 @@ Invoke-HostTestExe -Name "run_state_relay_cycles" -ExePath $exe19 -BuildCmd $cmd
 $exe20 = Join-Path $outDir "kilnctl_host_tests_zone_coupling_solve.exe"
 $zcsObjDir = Join-Path $outDir "zcs"
 New-Item -ItemType Directory -Force -Path $zcsObjDir | Out-Null
-$cmd20 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$commonInc`" /I`"$driversDir`" " +
+$cmd20 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" " +
         "/Fo:`"$zcsObjDir\\`" /Fe:`"$exe20`" `"$(Join-Path $testDir 'test_zone_coupling_solve.c')`" " +
         "`"$(Join-Path $driversDir 'zone_coupling_solve.c')`""
 
@@ -611,7 +640,7 @@ Invoke-HostTestExe -Name "zone_coupling_solve" -ExePath $exe20 -BuildCmd $cmd20
 $exe21 = Join-Path $outDir "kilnctl_host_tests_partition_info_http.exe"
 $pihObjDir = Join-Path $outDir "pih"
 New-Item -ItemType Directory -Force -Path $pihObjDir | Out-Null
-$cmd21 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd21 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$pihObjDir\\`" /Fe:`"$exe21`" `"$(Join-Path $testDir 'test_partition_info_http.c')`""
 
 Invoke-HostTestExe -Name "partition_info_http" -ExePath $exe21 -BuildCmd $cmd21
@@ -636,7 +665,7 @@ Invoke-HostTestExe -Name "partition_info_http" -ExePath $exe21 -BuildCmd $cmd21
 $exe22 = Join-Path $outDir "kilnctl_host_tests_adaptive_tune_http.exe"
 $athObjDir = Join-Path $outDir "ath"
 New-Item -ItemType Directory -Force -Path $athObjDir | Out-Null
-$cmd22 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+$cmd22 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$athObjDir\\`" /Fe:`"$exe22`" `"$(Join-Path $testDir 'test_adaptive_tune_http.c')`""
 
 Invoke-HostTestExe -Name "adaptive_tune_http" -ExePath $exe22 -BuildCmd $cmd22
@@ -654,7 +683,7 @@ Invoke-HostTestExe -Name "adaptive_tune_http" -ExePath $exe22 -BuildCmd $cmd22
 $exe23 = Join-Path $outDir "kilnctl_host_tests_profiles_builtin.exe"
 $pbObjDir = Join-Path $outDir "pb"
 New-Item -ItemType Directory -Force -Path $pbObjDir | Out-Null
-$cmd23 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" /I`"$driversDir`" " +
+$cmd23 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$pbObjDir\\`" /Fe:`"$exe23`" `"$(Join-Path $testDir 'test_profiles_builtin.c')`""
 
 Invoke-HostTestExe -Name "profiles_builtin" -ExePath $exe23 -BuildCmd $cmd23

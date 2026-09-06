@@ -260,7 +260,7 @@ foreach ($r in $moveRows) {
 # must stay flat (unqualified basename) so the EMBED_TXTFILES
 # _binary_<name>_gz_start/_end symbol names don't change. Carve that block
 # out of $text before the generic pass runs, and splice it back in after.
-$gzipBlockPattern = '(?s)(set\(KILNCTL_GZIP_ASSETS.*?\r?\n\s*\))'
+$gzipBlockPattern = '(?s)(set\(KILNCTL_GZIP_ASSETS[^)]*\))'
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 foreach ($cmakeFile in @($DriversCmake, $AppCmake)) {
@@ -359,7 +359,13 @@ if (Test-Path $DriversCmake) {
     # (not a fresh read from disk) so the two rewrites compose instead of
     # one clobbering the other.
     $text2c = if ($driversCmakeRewrittenText) { $driversCmakeRewrittenText } else { Get-Content $DriversCmake -Raw -Encoding UTF8 }
+    # finding 1 (critical): don't hardcode "`r`n" -- drivers/CMakeLists.txt is
+    # LF-only, so a literal CRLF here never matches and section 2c silently
+    # no-ops. Match newlines with \r?\n and reuse whatever sequence the file
+    # actually uses for anything this rewrite emits.
+    $detectedNl = if ($text2c -match "`r`n") { "`r`n" } else { "`n" }
     $assetBlockMatch = [regex]::Match($text2c, $gzipBlockPattern)
+    $section2cSubCount = 0
     if (-not $assetBlockMatch.Success) {
         Write-Error "Could not locate the KILNCTL_GZIP_ASSETS block in $DriversCmake -- refusing to apply this rewrite."
         if (-not $DryRun) { exit 1 }
@@ -379,8 +385,8 @@ if (Test-Path $DriversCmake) {
 
         $gzSrcOldLine = 'set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")'
         $gzOutOldLine = 'set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${asset}.gz")'
-        $gzNewLines = 'get_filename_component(kilnctl_gz_basename "${asset}" NAME)' + "`r`n" +
-            '        set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")' + "`r`n" +
+        $gzNewLines = '        get_filename_component(kilnctl_gz_basename "${asset}" NAME)' + $detectedNl +
+            '        set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")' + $detectedNl +
             '        set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${kilnctl_gz_basename}.gz")'
 
         # finding 4: the two old lines sit back-to-back in the source
@@ -389,17 +395,24 @@ if (Test-Path $DriversCmake) {
         # rather than replacing one and blanking the other -- that leaves no
         # empty line behind at all, so no follow-up squeeze is needed
         # (a whole-file blank-line squeeze previously deleted 7 unrelated
-        # blank lines elsewhere in drivers/CMakeLists.txt).
-        $gzOldBlock = '        ' + $gzSrcOldLine + "`r`n" + '        ' + $gzOutOldLine
+        # blank lines elsewhere in drivers/CMakeLists.txt). Matched with a
+        # \r?\n-tolerant regex (not a literal-CRLF .Contains()) so this
+        # composes correctly against the LF-only file on disk.
+        $gzOldBlockPattern = '        ' + [regex]::Escape($gzSrcOldLine) + '\r?\n' + '        ' + [regex]::Escape($gzOutOldLine)
         if ($text2c -notmatch [regex]::Escape($gzSrcOldLine) -or $text2c -notmatch [regex]::Escape($gzOutOldLine)) {
             Write-Error "Could not locate the kilnctl_gz_src/kilnctl_gz_out lines verbatim in $DriversCmake -- refusing to apply this rewrite (the file may have changed shape since this script was written)."
             if (-not $DryRun) { exit 1 }
-        } elseif (-not $text2c.Contains($gzOldBlock)) {
+        } elseif ($text2c -notmatch $gzOldBlockPattern) {
             Write-Error "Could not locate the kilnctl_gz_src/kilnctl_gz_out lines as a single adjacent 8-space-indented block in $DriversCmake -- refusing to apply this scoped rewrite (the file's indentation/layout may have changed)."
             if (-not $DryRun) { exit 1 }
         } else {
             $newText2c = $text2c.Replace($assetListText, $newAssetListText)
-            $newText2c = $newText2c.Replace($gzOldBlock, $gzNewLines)
+            $newText2c = [regex]::Replace($newText2c, $gzOldBlockPattern, { param($mm) $gzNewLines })
+            if ($newText2c -eq $text2c) {
+                $section2cSubCount = 0
+            } else {
+                $section2cSubCount = 1
+            }
             Write-Host "kilnctl_gz_src will read the asset's own '<layer>/<basename>' entry; kilnctl_gz_out stays flat via get_filename_component(NAME)."
             # Update the running text, don't write yet -- 2b (INCLUDE_DIRS)
             # below still needs to chain onto this same text; a single write
@@ -407,6 +420,16 @@ if (Test-Path $DriversCmake) {
             # (2, 2c, 2b) compose into one file instead of clobbering.
             $driversCmakeRewrittenText = $newText2c
         }
+    }
+    # finding 1 (critical): a skipped/no-op 2c must not pass silently -- if
+    # the block was found but ended up with zero effective substitutions
+    # (neither the asset-list nor the gz_src/gz_out block actually changed),
+    # fail loud instead of letting the run report success while the 16
+    # KILNCTL_GZIP_ASSETS entries keep their flat basenames (which would make
+    # CMake die later with "failed to gzip <name> for EMBED_TXTFILES").
+    if ($assetBlockMatch.Success -and $gzAssetHits -eq 0 -and $section2cSubCount -eq 0) {
+        Write-Error "Section 2c made zero substitutions (0 KILNCTL_GZIP_ASSETS entries gained a layer prefix, and the kilnctl_gz_src/kilnctl_gz_out block was not rewritten) -- refusing to proceed. This must not silently pass."
+        if (-not $DryRun) { exit 1 }
     }
 }
 
@@ -688,28 +711,16 @@ foreach ($file in $allRewriteTargets) {
         [void]$jsb.Append($raw.Substring($jLastEnd))
         $raw = $jsb.ToString()
 
-        # finding 2: every `cl` invocation in this file needs the drivers
-        # include path -- not just the 4 lines that already say
-        # `/I"$driversDir"` (cmd13/14/20/23). The other ~18 `cl` lines
-        # resolve their bare #includes via same-directory resolution today
-        # (the including .c and included .h both sit directly in the flat
-        # drivers/ dir), which breaks the moment drivers/ splits into layer
-        # subdirs. Every `cl` line gets ONE canonical flag set:
-        # `/I"$driversDir"` (kept, per finding 6's "." reasoning for
-        # INCLUDE_DIRS -- same logic applies here) plus one `/I"$driversDir\
-        # <layer>"` per layer, inserted right after the common
-        # `cl /nologo /W3 /EHsc[ /std:c11]` prefix that every invocation
-        # shares (some lines have /std:c11, some don't; none lack /EHsc).
-        # Any pre-existing lone `/I"$driversDir"` is stripped first so it
-        # isn't duplicated once the canonical flag set is inserted.
-        $driversIncFlags = (@('/I`"$driversDir`"') + ($layerNames | ForEach-Object { '/I`"$driversDir\' + $_ + '`"' })) -join ' '
-        $raw = $raw -replace '/I`"\$driversDir`"\s*', ''
-        # finding 5: use a MatchEvaluator (scriptblock), not a plain string,
-        # for the replacement -- $driversIncFlags contains literal
-        # "$driversDir" text that a string-form -replace/[regex]::Replace
-        # replacement would try to interpret as a $-substitution token.
-        $clPrefixPattern = 'cl /nologo /W3 /EHsc(?: /std:c11)?'
-        $raw = [regex]::Replace($raw, $clPrefixPattern, { param($cm) $cm.Value + ' ' + $driversIncFlags })
+        # (Round-4 review, finding 2) build_host_tests.ps1 no longer inlines
+        # `/nologo /W3 /EHsc /I"..."` on each of its 22 `cl` lines -- every
+        # invocation now reads those common flags from ONE generated
+        # response file (`cl @"$hostTestsRsp"`), specifically to avoid
+        # pushing any single `cl` command line over cmd.exe's ~8191-char
+        # limit once this reorg's /I additions land. That response file's
+        # own eleven-layer /I expansion is handled by section 4e below
+        # (which edits the $hostTestsRspLines array once), so there is
+        # nothing left for this Join-Path block to do to the 22 `cl` lines
+        # themselves.
     }
 
     $rxMatches = [regex]::Matches($raw, $siteRewritePattern)
@@ -766,18 +777,32 @@ foreach ($file in $allRewriteTargets) {
 }
 
 # ---------------------------------------------------------------------------
-# 4c. espInterfaces/ bare-include prefix strip inside drivers/ itself
+# 4c. espInterfaces/ include prefix rewrite inside drivers/ itself
 #     (finding 3). Unlike the check/test-script sites above, these are real
 #     production #include lines with NO "App/drivers/"/"../drivers/" prefix
 #     at all -- gpio_probe.h:5, uart_bridge.h:6, uart_bridge_internal.h:30,
 #     uart_log_bridge.h:5 each say `#include "espInterfaces/uart_protocol.h"`
 #     bare, relative to the old flat drivers/ dir. Once espInterfaces/ is
-#     flattened into owners/ (mapping.csv), the segment must be dropped so
-#     the include becomes bare "uart_protocol.h", resolved via the new
-#     eleven-dir INCLUDE_DIRS (section 3) the same way every other
-#     same-tier bare include already works.
+#     flattened into owners/ (mapping.csv), the segment must become the
+#     basename's NEW layer -- "owners/uart_protocol.h" -- NOT a fully bare
+#     "uart_protocol.h". A -PreviewDir reconstruction build caught the
+#     difference: firmware/KilnFW/App/test/stubs/uart_protocol.h is a
+#     type-only host-test stand-in that has always shared this exact
+#     basename with the real firmware header, harmlessly, because the real
+#     header was only ever reached via the explicit "espInterfaces/..."
+#     subpath (quote-include always checks the includer's own directory
+#     first, subpath and all) -- never via a bare lookup that walks the
+#     `cl` /I search order. Stripping to a bare basename turns that into an
+#     ambiguous bare resolution, and since App/test/stubs is searched before
+#     any drivers/<layer> dir (stub headers must win over real ESP-IDF
+#     headers of the same name), the STUB silently wins instead of the real
+#     header -- UART_PROTO_DEFAULT_ACK_TIMEOUT_MS then reads as undeclared
+#     when uart_log_bridge.c is compiled host-side. Keeping the include
+#     qualified with its new layer name avoids this collision entirely
+#     (and is resolved by "." + "<layer>" both already being on
+#     INCLUDE_DIRS/the response file, so it costs nothing over bare).
 # ---------------------------------------------------------------------------
-Write-Host "`n=== 4c. espInterfaces/ bare-include prefix strip ===" -ForegroundColor Cyan
+Write-Host "`n=== 4c. espInterfaces/ include prefix rewrite ===" -ForegroundColor Cyan
 # finding 7: preview/apply divergence -- under -DryRun/-PreviewDir, section 1
 # (git mv) never actually runs, so these files are still sitting at their
 # OLD flat drivers/ path on disk when this section scans $driversDirAll.
@@ -798,14 +823,103 @@ foreach ($file in $driversSrcFilesForEsp) {
     $espMatches = [regex]::Matches($raw, $espIncludePattern)
     if ($espMatches.Count -eq 0) { continue }
     $relPath = $file.FullName.Substring($RepoRoot.Length + 1) -replace '\\','/'
-    Write-Host "$relPath : $($espMatches.Count) espInterfaces/ include(s) to strip"
+    Write-Host "$relPath : $($espMatches.Count) espInterfaces/ include(s) to re-qualify"
     $espHitFiles++
     $espHitLines += $espMatches.Count
-    $newRaw = [regex]::Replace($raw, $espIncludePattern, '$1$2$3')
+    $newRaw = [regex]::Replace($raw, $espIncludePattern, {
+        param($em)
+        $bn = $em.Groups[2].Value
+        $newLayer = if ($basenameLayer.ContainsKey($bn)) { $basenameLayer[$bn] } else { 'owners' }
+        $em.Groups[1].Value + $newLayer + '/' + $bn + $em.Groups[3].Value
+    })
     $previewRel = if ($oldToNewPath.ContainsKey($relPath)) { $oldToNewPath[$relPath] } else { $relPath }
     Write-RewrittenFile -RealPath $file.FullName -Content $newRaw -Encoding $utf8NoBom -PreviewRelOverride $previewRel
 }
 Write-Host "Total: $espHitLines espInterfaces/ include(s) across $espHitFiles file(s) $(if ($DryRun) {'would be rewritten'} else {'rewritten'})."
+
+# ---------------------------------------------------------------------------
+# 4d. Bare "../<name>" include fixups inside drivers/ (finding 3 continued,
+#     and finding 4). Extending 4c's espInterfaces/ strip: any file getting
+#     `#include "../<basename>"` where <basename> is itself one of the
+#     moved layer files (e.g. espInterfaces/esp_spi_owner.c's
+#     `#include "../owner_slot_pool.h"` / `"../stack_margin.h"`) must have
+#     the leading "../" dropped entirely -- once the includer lands under
+#     drivers/<layer>/ (or, for esp_spi_owner.c, drivers/owners/ after the
+#     espInterfaces/ flatten), the old "one level up from flat drivers/"
+#     relative reference is wrong; INCLUDE_DIRS (section 3) resolves the
+#     bare basename via the new eleven-dir list regardless of which layer
+#     the includer itself lives in.
+#
+#     Separately (finding 4), a file being MOVED one level deeper (flat
+#     drivers/<file> -> drivers/<layer>/<file>) whose "../<name>" target is
+#     NOT one of the moved layer files (e.g. sim_backend.c's
+#     `#include "../test/sim_plant.h"`, which reaches out to App/test/,
+#     completely outside drivers/) needs an EXTRA "../" prepended instead --
+#     the includer gained one directory level, so the old relative path
+#     under-counts by exactly one "../" once it moves.
+# ---------------------------------------------------------------------------
+Write-Host "`n=== 4d. Bare '../<name>' include fixups ===" -ForegroundColor Cyan
+$dotdotIncludePattern = '#\s*include\s*"(\.\./+)([A-Za-z0-9_\-./]+\.[A-Za-z0-9_\-]+)"'
+$dotdotHitFiles = 0
+$dotdotHitLines = 0
+$moveRowsByOldPath = @{}
+foreach ($r in $moveRows) { $moveRowsByOldPath[$r.old_path] = $r }
+foreach ($file in $driversSrcFilesForEsp) {
+    $relPath = $file.FullName.Substring($RepoRoot.Length + 1) -replace '\\','/'
+    # Only files this reorg actually relocates into a layer subdir are in
+    # scope for the "extra ../" half of this fixup; the "strip to bare"
+    # half applies to any includer (it only fires when the included
+    # basename is itself a moved layer file, regardless of whether the
+    # includer itself moves).
+    $isMoving = $moveRowsByOldPath.ContainsKey($relPath)
+
+    $raw = Get-Content -Path $file.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($null -eq $raw) { continue }
+    if ($raw -notmatch '#\s*include\s*"\.\./') { continue }
+
+    $ddMatches = [regex]::Matches($raw, $dotdotIncludePattern)
+    if ($ddMatches.Count -eq 0) { continue }
+
+    $fileHits = 0
+    $sb4d = New-Object System.Text.StringBuilder
+    $lastEnd4d = 0
+    foreach ($dm in $ddMatches) {
+        [void]$sb4d.Append($raw.Substring($lastEnd4d, $dm.Index - $lastEnd4d))
+        $rest = $dm.Groups[2].Value
+        $bn = $rest -replace '^.*/', ''
+        if ($basenameLayer.ContainsKey($bn)) {
+            # Strip the leading "../" entirely -- resolved bare via
+            # INCLUDE_DIRS regardless of which layer this includer is in.
+            [void]$sb4d.Append('#include "' + $rest + '"')
+            $fileHits++
+        } elseif ($isMoving) {
+            # Includer moved one level deeper and the target is outside the
+            # moved layer files (e.g. App/test/sim_plant.h) -- prepend one
+            # more "../" to compensate.
+            [void]$sb4d.Append('#include "../' + $dm.Groups[1].Value + $rest + '"')
+            $fileHits++
+        } else {
+            [void]$sb4d.Append($dm.Value)
+        }
+        $lastEnd4d = $dm.Index + $dm.Length
+    }
+    [void]$sb4d.Append($raw.Substring($lastEnd4d))
+    if ($fileHits -eq 0) { continue }
+    $newRaw4d = $sb4d.ToString()
+    Write-Host "$relPath : $fileHits '../<name>' include(s) fixed up"
+    $dotdotHitFiles++
+    $dotdotHitLines += $fileHits
+    $previewRel4d = if ($oldToNewPath.ContainsKey($relPath)) { $oldToNewPath[$relPath] } else { $relPath }
+    # Chain onto whatever 4c already wrote for this same file in preview
+    # mode by re-reading the just-written preview copy would be fragile;
+    # instead, if 4c already rewrote this exact file, re-run this pass's
+    # substitution against ITS output so both fixups compose. Practically,
+    # esp_spi_owner.c/.h (4c) and sim_backend.c (4d) are disjoint files
+    # today, so this is a straightforward independent write; guarded here
+    # so a future overlap does not silently clobber 4c's change.
+    Write-RewrittenFile -RealPath $file.FullName -Content $newRaw4d -Encoding $utf8NoBom -PreviewRelOverride $previewRel4d
+}
+Write-Host "Total: $dotdotHitLines '../<name>' include fixup(s) across $dotdotHitFiles file(s) $(if ($DryRun) {'would be rewritten'} else {'rewritten'})."
 
 # build_host_tests.ps1's own include-path handling, if any (finding 3, last
 # sentence) -- it is one of the $candidateFiles above (App/test), so it was
@@ -815,6 +929,64 @@ $buildHostTests = Join-Path $RepoRoot "firmware/KilnFW/App/test/build_host_tests
 if (Test-Path $buildHostTests) {
     $bhtHits = (Select-String -Path $buildHostTests -Pattern 'App/drivers/|\.\./drivers/' -AllMatches).Count
     Write-Host "build_host_tests.ps1: $bhtHits drivers/-path reference(s) (covered by the loop above, called out per coordinator instruction)."
+}
+
+# ---------------------------------------------------------------------------
+# 4e. build_host_tests.ps1's response-file layer /I expansion (round-4 review
+#     finding 2). build_host_tests.ps1 routes its common `cl` flags through a
+#     generated response file (@"$hostTestsRsp") instead of inlining them on
+#     every `cl` line -- see that file's own comment above $hostTestsRspLines
+#     for why (cmd.exe's ~8191-char line limit). That file lists a single
+#     "/I`"$driversDir`"" today; once drivers/ splits into layer subdirs, any
+#     bare #include (either a same-basename `#include "profiles_builtin.c"`
+#     with no path at all, or one of driversDir's own headers like
+#     MAX31856.h that a moved file transitively pulls in) needs ALL eleven
+#     layer subdirs on the include path, not just the flat root -- confirmed
+#     by a -PreviewDir reconstruction build that failed exactly this way
+#     (MAX31856.h under hw/, profiles_builtin.c under persist/) before this
+#     section existed. Insert one "/I`"$driversDir\<layer>`"" line per layer
+#     right after the existing driversDir line, idempotently (skipped if
+#     already present).
+# ---------------------------------------------------------------------------
+Write-Host "`n=== 4e. build_host_tests.ps1 response-file layer /I expansion ===" -ForegroundColor Cyan
+if (Test-Path $buildHostTests) {
+    # Chain onto whatever the main rewrite loop already produced for this
+    # exact file: under -PreviewDir, that loop wrote a composed copy at the
+    # preview path (Join-Path $driversDir fixups included) without touching
+    # the real file (still -DryRun); under -Apply, the real file itself was
+    # already rewritten. Read whichever of those reflects the latest state,
+    # falling back to the untouched source file for a plain -DryRun with no
+    # -PreviewDir (nothing to chain onto in that case).
+    $bhtRelPath = "firmware/KilnFW/App/test/build_host_tests.ps1"
+    $bhtReadPath = if ($PreviewDir -and (Test-Path (Join-Path $PreviewDir $bhtRelPath))) {
+        Join-Path $PreviewDir $bhtRelPath
+    } else {
+        $buildHostTests
+    }
+    $bhtText = Get-Content -Path $bhtReadPath -Raw -Encoding UTF8
+    $driversDirRspLine = '    "/I`"$driversDir`""'
+    if ($bhtText -notmatch [regex]::Escape($driversDirRspLine)) {
+        Write-Error "Could not locate the response-file '/I`"`$driversDir`"' line verbatim in build_host_tests.ps1 -- refusing to apply this rewrite (the file may have changed shape since this script was written)."
+        if (-not $DryRun) { exit 1 }
+    } else {
+        $alreadyHasLayerLines = $layerNames | Where-Object {
+            $layerLine = '"/I`"$driversDir\' + $_ + '`""'
+            $bhtText.Contains($layerLine)
+        }
+        if ($alreadyHasLayerLines.Count -eq $layerNames.Count) {
+            Write-Host "build_host_tests.ps1's response file already lists all eleven layer /I entries -- no change needed (idempotent)."
+        } else {
+            $layerRspLines = ($layerNames | Sort-Object | ForEach-Object { '    "/I`"$driversDir\' + $_ + '`""' }) -join "`r`n"
+            $newBhtText = $bhtText.Replace($driversDirRspLine, $driversDirRspLine + "`r`n" + $layerRspLines)
+            if ($newBhtText -eq $bhtText) {
+                Write-Error "build_host_tests.ps1 response-file /I expansion made zero substitutions -- refusing to proceed."
+                if (-not $DryRun) { exit 1 }
+            } else {
+                Write-Host "build_host_tests.ps1's response file will gain $($layerNames.Count) layer /I entries (bridge, common, control, http, hw, net, owners, persist, safety, sim, ui)."
+                Write-RewrittenFile -RealPath $buildHostTests -Content $newBhtText -Encoding $utf8NoBom -PreviewRelOverride $bhtRelPath
+            }
+        }
+    }
 }
 
 Write-Host "`nTotal: $rewriteLineCount site(s) across $rewriteFileCount file(s) $(if ($DryRun) {'would be rewritten'} else {'rewritten'})."
