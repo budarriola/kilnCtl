@@ -27,25 +27,47 @@ class DriverFileError(Exception):
 def resolve_driver_file(repo_root: Path, basename: str, *, drivers_dir: Path | None = None) -> Path:
     """Find ``basename`` anywhere under ``<repo_root>/firmware/KilnFW/App/drivers``
     (or under ``drivers_dir`` if given -- e.g. a simulated split-layout smoke
-    test rooted somewhere else entirely). Raises DriverFileError if it is
-    missing or ambiguous, never returns a nonexistent/wrong path silently.
+    test rooted somewhere else entirely), plus -- as of the WP1 hardware-
+    abstraction split (aa8581c moved uart_protocol.{c,h} out from under
+    drivers/owners/ to firmware/hwAbstraction/esp/uart/) -- under
+    ``firmware/hwAbstraction/esp/`` and ``firmware/hwAbstraction/pico/`` as
+    secondary roots. A caller that passes ``drivers_dir`` explicitly (the
+    simulated-layout smoke tests) opts out of the hwAbstraction roots too,
+    same as it always opted out of the real drivers/ root -- it is testing
+    a specific tree, not "wherever this basename happens to live today".
+    Raises DriverFileError if the name is missing or ambiguous *across all
+    searched roots combined*, never returns a nonexistent/wrong path
+    silently.
     """
-    base = drivers_dir if drivers_dir is not None else (
-        Path(repo_root) / "firmware" / "KilnFW" / "App" / "drivers"
-    )
-    if not base.is_dir():
+    if drivers_dir is not None:
+        roots = [drivers_dir]
+    else:
+        root = Path(repo_root)
+        roots = [
+            root / "firmware" / "KilnFW" / "App" / "drivers",
+            root / "firmware" / "hwAbstraction" / "esp",
+            root / "firmware" / "hwAbstraction" / "pico",
+        ]
+
+    existing_roots = [r for r in roots if r.is_dir()]
+    if not existing_roots:
         raise DriverFileError(
-            f"expected drivers directory not found: {base} -- has it moved or been renamed?"
+            f"expected drivers directory not found: {roots[0]} -- has it moved or been renamed?"
         )
-    matches = sorted(base.rglob(basename))
+
+    matches = []
+    for r in existing_roots:
+        matches.extend(r.rglob(basename))
+    matches = sorted(set(matches))
+
     if not matches:
         raise DriverFileError(
-            f"expected file {basename!r} not found anywhere under {base} -- "
+            f"expected file {basename!r} not found anywhere under {existing_roots} -- "
             "has it moved or been renamed?"
         )
     if len(matches) > 1:
         raise DriverFileError(
-            f"{basename!r} matched more than one file under {base}: {matches} -- "
+            f"{basename!r} matched more than one file under {existing_roots}: {matches} -- "
             "cannot tell which one is the real file."
         )
     return matches[0]
