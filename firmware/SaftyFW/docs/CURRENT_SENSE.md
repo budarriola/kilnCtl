@@ -485,6 +485,21 @@ firings and stay quiet on the failure it exists to catch. Steps 1 and 4 are
 also guard-relevant (zero, and decay behaviour). Step 3 is cosmetic.
 
 
+### 5.2 Channel 3 (Current3/GPIO28-ADC2): the summed-heater CT (2026-09-05)
+
+Fitted here only, reading **summed** current of all heaters (not per-zone):
+1 A/V, ~+59 mV pin offset. Same rectifier/peak-hold front end as channels 1/2
+(HARDWARE.md §9) — no new model needed. +59 mV is this channel's
+`zero_counts[2]` (measure per the Commissioning check step 1, not a manual
+mV-to-counts conversion); `k_ct_v_per_a[2] = 0.989` gives 1 A/V at the pin
+(0.715·√2 ≈ 1.011, so 1/1.011 ≈ 0.989). Commission via the existing
+`config_params.c` ids: `0x0304` (`zero_counts[2]`, U16) and `0x030Au`
+(`k_ct_v_per_a[2]`, F32). Both refused unconditionally while ARMED, no grace
+exception (`config_store_decide_write()`). Once committed,
+`current_presence_is_flowing()` (`current_presence_policy.h`) reads these
+same two fields, so S9/S11 whole-board presence works immediately — no
+firmware change needed.
+
 ---
 
 ## Completion checklist
