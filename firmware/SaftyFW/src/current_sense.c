@@ -38,7 +38,7 @@
 
 // --- Constants from docs/CURRENT_SENSE.md ----------------------------------
 
-#define CS_OVERSAMPLE_N        16u     // section 4: "16 back-to-back conversions"
+#define CS_OVERSAMPLE_N        CURRENT_SENSE_OVERSAMPLE_N // current_sense.h -- section 4: "16 back-to-back conversions"
 #define CS_ADC_VREF_V          3.3f    // 3.3v_Safty rail (unregulated-for-precision, section 4/5)
 #define CS_ADC_FULL_SCALE      4096.0f // 12-bit SAR, per section 5's formula denominator
 #define CS_ADC_MAX_COUNTS      4095u

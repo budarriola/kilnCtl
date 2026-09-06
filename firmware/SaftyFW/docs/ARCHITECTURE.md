@@ -303,13 +303,20 @@ bit in `watchdog_task.c`'s `s_checkin_mask`, that mask can then never equal
 `WATCHDOG_CHECKIN_ALL_MASK`, `watchdog_task_fn()` never feeds the hardware
 watchdog, and the board reboots in a 1 s loop with `start_failures` (and
 `boot_reason`) readable over SWD to say why. For `relay_owner_start()`
-specifically: GPIO6/K4's gate is left in whatever state its own
-`hal_gpio_set()`/`hal_gpio_set_direction()` calls actually reached before
-failing (LOW if only the direction call failed) and the relay can never be
-commanded ON, since `relay_owner_task()` — the only path that ever does
-that — never starts. This is the same "fail-safe by construction" property
-§4's watchdog section describes for a hung task, applied to a task that
-never starts in the first place.
+specifically: if only the direction call fails, the output latch was
+already written LOW but the pad itself is still an INPUT (high-Z) — a
+latch write does not by itself make a pin drive anything. Q4's gate
+(HARDWARE.md's GPIO6 row, high = energized) is then held LOW not by this
+pin, but by **R65, a 10k pull-down to `RelayGND`** (main schematic,
+`SSD.kicad_sch`'s SaftyRelay sub-sheet — drawn once as R34, instanced per
+relay channel; this channel's instance is R65), the same resistor that
+holds the gate low through RP2040 reset/boot before GPIO6 is configured at
+all. The relay can never be commanded ON regardless, since
+`relay_owner_task()` — the only path that ever does that — never starts.
+This is the same "fail-safe by construction" property §4's watchdog
+section describes for a hung task, applied to a task that never starts in
+the first place, with R65 as the concrete thing actually holding the gate
+low.
 
 ---
 

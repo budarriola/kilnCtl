@@ -265,7 +265,7 @@ Traced from `kiln.pdf` p.2. This table is authoritative for `SaftyFW`.
 | 5 | GPIO3 | `MOSI` | out | SPI0 TX |
 | 6 | GPIO4 | `PicoTx` | out | UART TX, no pad inversion (`gpio_set_outover(GPIO_OVERRIDE_INVERT)` was removed 2026-08-25 along with U2/U3) → U6 VIB input → U6 VOB output → ESP GPIO4 (`DataFromSafty`) |
 | 7 | GPIO5 | `PicoRx` | in | UART RX ← U6 VOA output, driven by ESP GPIO5 (`DataToSafty`) into U6 VIA. **R9 1k pull-up**, idles high |
-| 9 | GPIO6 | `saftyRelay` | out | Q4 gate → K4 coil. **High = relay energized** |
+| 9 | GPIO6 | `saftyRelay` | out | Q4 gate → K4 coil. **High = relay energized**. **R65 10k pull-down to RelayGND** (main schematic SSD.kicad_sch's SaftyRelay sub-sheet; R34 drawn once, instanced per channel -- this channel's instance is R65) holds the gate LOW whenever nothing is actively driving it (RP2040 reset, or the pad left high-Z) |
 | 10 | GPIO7 | `SDA` | i/o | I2C0 SDA, **R48 2.2k pull-up**, out to J7 pin 6. Nothing answers today |
 | 11 | GPIO8 | `SCL` | out | I2C0 SCL, **R49 2.2k pull-up**, out to J7 pin 8 |
 | 12 | GPIO9 | `estop` | in | J1 terminal. **R10 1k pull-up + C3 0.01uF**. See §5 |

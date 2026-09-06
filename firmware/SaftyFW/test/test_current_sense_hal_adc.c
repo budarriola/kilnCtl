@@ -6,14 +6,20 @@
 // driving current_sense_sample() for real against
 // firmware/hwAbstraction/host/fake_adc.c and checking, from fake_adc's own
 // event/read counters, that:
-//   1. exactly 17 hal_adc_read_raw() calls happen per channel per sample
-//      pass (1 discarded + CS_OVERSAMPLE_N=16 averaged), so 51 total across
-//      the three channels
+//   1. exactly (1 + CURRENT_SENSE_OVERSAMPLE_N) hal_adc_read_raw() calls
+//      happen per channel per sample pass (1 discarded + N averaged)
 //   2. the discarded first sample is NOT included in the reported average
 //      (proven by scripting a first sample far outside the rest of the
-//      series and checking the reported amps/counts reflect the other 16
+//      series and checking the reported amps/counts reflect the other N
 //      only)
 //   3. scripted samples use realistic 12-bit quantization (0..4095)
+//
+// This test uses current_sense.h's own CURRENT_SENSE_OVERSAMPLE_N constant
+// throughout -- NOT a test-local mirror -- so there is nothing here to
+// silently drift out of sync with the real oversample factor
+// cs_read_channel_counts() (current_sense.c) actually uses; a change to
+// the real constant changes what this test builds and checks too, in one
+// place.
 #include "test_common.h"
 
 #include "fake_adc.h"
@@ -22,11 +28,6 @@
 #include "../src/board/board_pins.h"
 #include "../src/current_sense.h"
 #include "../src/tasks/current_task.h"
-
-// Mirrors current_sense.c's own CS_OVERSAMPLE_N -- not included via header
-// (it is a private #define in the .c file), so restated here with a comment
-// pointing back at the source of truth.
-#define TEST_CS_OVERSAMPLE_N 16u
 
 // All-identical scripted samples were the original (weaker) version of this
 // test's series: current_sense.c averages with plain integer division
@@ -50,20 +51,20 @@ static uint32_t script_channel_dithered(int channel, uint16_t discard_value, uin
     // 16 dithered, realistic 12-bit samples: base + {0,1,2,3} repeating.
     // Sum of the dither term alone is 4*(0+1+2+3) = 24, so the true mean is
     // base + 24/16 = base + 1.5 -- non-integral, unlike a flat series.
-    uint16_t reals[TEST_CS_OVERSAMPLE_N];
+    uint16_t reals[CURRENT_SENSE_OVERSAMPLE_N];
     uint32_t sum = 0;
-    for (unsigned i = 0; i < TEST_CS_OVERSAMPLE_N; i++) {
+    for (unsigned i = 0; i < CURRENT_SENSE_OVERSAMPLE_N; i++) {
         uint16_t v = (uint16_t)(base + (i % 4));
         reals[i] = v;
         sum += v;
     }
-    TEST_CHECK(fake_adc_script_samples(channel, reals, TEST_CS_OVERSAMPLE_N) == HAL_OK,
+    TEST_CHECK(fake_adc_script_samples(channel, reals, CURRENT_SENSE_OVERSAMPLE_N) == HAL_OK,
                "scripting the 16 dithered oversampled reads succeeds");
 
     // current_sense.c's own integer-truncating average (sum / N), computed
     // independently here so the assertion doesn't just restate the
     // production formula.
-    return sum / TEST_CS_OVERSAMPLE_N;
+    return sum / CURRENT_SENSE_OVERSAMPLE_N;
 }
 
 // counts -> amps with gain=1/k_ct=1/zero_counts=0 (this test's calibration):
@@ -112,15 +113,14 @@ static void test_current_sense_discards_first_sample_and_oversamples_16x(void)
 
     current_sense_sample();
 
-    // 1 discard + 16 oversampled reads per channel, 3 channels = 51 total.
-    // Deliberately the LITERAL 16 here, not TEST_CS_OVERSAMPLE_N -- that
-    // local mirror of current_sense.c's private CS_OVERSAMPLE_N is only
-    // used above to size/generate the scripted series, and using it again
-    // here would make this specific assertion compare the mirror against
-    // itself instead of against the real, documented oversample factor
-    // (docs/CURRENT_SENSE.md section 4: "16 back-to-back conversions").
-    TEST_CHECK(fake_adc_read_count() == 3u * (1u + 16u),
-               "exactly (1 discard + 16 oversample) x 3 channels reads happened");
+    // 1 discard + CURRENT_SENSE_OVERSAMPLE_N oversampled reads per channel,
+    // 3 channels total. This is current_sense.h's real, public constant
+    // (not a test-local mirror -- see the file header comment), so this
+    // assertion is checking real production behavior against itself, not a
+    // separately-typed copy that could silently go stale.
+    TEST_CHECK(fake_adc_read_count() == 3u * (1u + CURRENT_SENSE_OVERSAMPLE_N),
+               "exactly (1 discard + CURRENT_SENSE_OVERSAMPLE_N oversample) x "
+               "3 channels reads happened");
 
     // Every scripted sample was consumed (none left pending) -- proves the
     // discard sample was actually read, not skipped/left in the queue.

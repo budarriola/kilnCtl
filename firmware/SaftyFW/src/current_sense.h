@@ -27,6 +27,16 @@
 extern "C" {
 #endif
 
+// docs/CURRENT_SENSE.md section 4: "16 back-to-back conversions" -- the
+// real oversample factor cs_read_channel_counts() (current_sense.c) uses.
+// Public (unlike current_sense.c's other CS_* constants, which stay
+// private #defines in the .c file) specifically so
+// test/test_current_sense_hal_adc.c can derive its scripted sample count
+// from the SAME constant the production code averages over, instead of
+// maintaining its own separately-typed mirror that could silently drift
+// from this value without either side's build failing.
+#define CURRENT_SENSE_OVERSAMPLE_N 16u
+
 // Per-channel calibration, docs/CURRENT_SENSE.md section 5 -- "measured
 // configuration, stored in flash, never compiled-in constants". Real values
 // come from config_store.c, which does not exist yet (TODO.md Phase 9), so

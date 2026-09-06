@@ -55,11 +55,25 @@ if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
         # stderr is not merged with 2>&1.
         cmake -G Ninja -B build .
         if ($LASTEXITCODE -ne 0) {
+            # A failed first-time configure can still leave a partial
+            # CMakeCache.txt behind (cmake writes it early, before every
+            # check passes) -- if left in place, the NEXT run of this
+            # script sees that CMakeCache.txt, takes the "already
+            # configured" fast path above instead of retrying the
+            # first-time configure, and reconfigures/builds against a
+            # poisoned cache that never actually succeeded once. Remove
+            # the whole build dir so the next run starts clean and retries
+            # first-time configure for real.
+            Write-Host "cmake first-time configure failed -- removing $buildDir so the next run retries cleanly instead of reusing a poisoned CMakeCache.txt"
+            Pop-Location
+            Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
             throw "cmake first-time configure failed with exit code $LASTEXITCODE"
         }
     }
     finally {
-        Pop-Location
+        if ((Get-Location).Path -eq $bootloaderDir) {
+            Pop-Location
+        }
     }
 }
 

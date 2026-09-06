@@ -194,13 +194,25 @@ bool relay_owner_start(void)
     // s_checkin_mask is never set, watchdog_task_fn() can never see every
     // task checked in, and the 1 s hardware watchdog reboots the board in
     // a loop -- with the relay pin left in whatever state the failed
-    // hal_gpio_set()/hal_gpio_set_direction() call above actually reached
-    // (LOW if only the direction call failed; whatever it was pre-boot if
-    // even the level call failed). That reboot loop is fail-safe by
-    // construction (ARCHITECTURE.md section 4's "Fail-safe by
-    // construction" note about watchdog reboots generally: a hung/failed
-    // task can never leave K4 energized because it can never reach ARMED),
-    // not by an explicit halt-with-relay-held-low path -- there isn't one.
+    // hal_gpio_set()/hal_gpio_set_direction() call above actually reached.
+    // If only the direction call fails, the output latch was already
+    // written LOW by the call above but the pad itself is still an INPUT
+    // (high-Z) -- hal_gpio_set()'s write to the latch does not by itself
+    // make the pin drive anything. Q4's gate (HARDWARE.md's GPIO6 row,
+    // high = energized) is then held LOW not by this pin at all, but by
+    // R65, a 10k pull-down to RelayGND (main schematic, SSD.kicad_sch's
+    // SaftyRelay sub-sheet -- drawn once as R34, instanced per relay
+    // channel; this channel's instance is R65), the same resistor that
+    // holds the gate low through RP2040 reset/boot before GPIO6 is ever
+    // configured at all. (If even the level call fails, the pin never
+    // reaches this function in a state to reason about -- pin range/
+    // direction checks failed before anything was written -- and the same
+    // R65 pull-down is what is holding the gate low regardless.) That
+    // reboot loop is fail-safe by construction (ARCHITECTURE.md section
+    // 4's "Fail-safe by construction" note about watchdog reboots
+    // generally: a hung/failed task can never leave K4 energized because
+    // it can never reach ARMED), not by an explicit halt-with-relay-held-
+    // low path -- there isn't one, and none is needed while R65 is fitted.
     if (hal_gpio_set(SAFTYFW_PIN_RELAY, false) != HAL_OK) {
         return false;
     }
