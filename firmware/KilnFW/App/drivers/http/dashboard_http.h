@@ -28,6 +28,7 @@
 #include "kiln_io.h"
 #include "MAX31856.h"
 #include "profile_executor.h"
+#include "relay_cycles.h" /* relay_cycles_budget_t/relay_type_t/relay_budget_tier_t -- relay_life below */
 #include "safety_link.h"
 #include "time_sync_tz.h" /* TIME_SYNC_TZ_MAX_LEN -- see time_tz below */
 #include "unit_pref.h"
@@ -101,6 +102,18 @@ typedef struct {
     bool     relay_on[KILN_IO_RELAY_COUNT];
     bool     io_read_failed;  /* only meaningful when io_ready */
     uint32_t relay_cycles[KILN_IO_RELAY_COUNT];
+
+    /* RELAY_LIFE_BUDGET_PLAN.md step 4: budget state for all five counted
+     * slots (the four heater relays plus RELAY_CYCLES_SAFETY_INDEX),
+     * computed on read via relay_cycles_budget() -- never stored. Kept as
+     * its own array rather than widening relay_cycles[] above, which stays
+     * KILN_IO_RELAY_COUNT-sized on purpose (relay_cycles_get()'s doc
+     * comment: existing callers pass a 4-entry buffer). relay_life_tier is
+     * relay_cycles_max_budget_tier(), the value the LCD/web indication
+     * actually gates on. */
+    relay_cycles_budget_t relay_life[RELAY_CYCLES_COUNT];
+    relay_type_t          relay_life_type[RELAY_CYCLES_COUNT];
+    relay_budget_tier_t   relay_life_tier;
 
     bool     thermo_ready;
     size_t   channel_count;   /* <= MAX31856_CHANNEL_COUNT, only this many of
@@ -188,6 +201,18 @@ typedef struct {
      * status frame has ever arrived, NaN before that. Index i = CT channel
      * i+1, matching zone_cfg_t::ct_mask's bit-N-1-is-channel-N convention. */
     float    ct_current_a[3];
+
+    /* Raw 16x-oversampled ADC counts per channel, independent of
+     * calibration -- LINK_PROTOCOL.md Frame E's counts_avg field
+     * (2026-09-06, safety_link_status_t::power_channel_counts_avg). Unlike
+     * ct_current_a[] above, this is never NaN-able (it's a uint16, not a
+     * float derived from an uncommissioned k_ct_v_per_a) -- validity is
+     * ct_counts_valid instead, false until at least one V2 POWER frame has
+     * arrived (never for a Pico that predates KILNLINK_PROTOCOL_VERSION 11).
+     * Closes CURRENT_SENSE.md sec 4's "no path from the running board to
+     * raw ADC counts" gap -- this is that path's ESP-side terminus. */
+    uint16_t ct_counts[3];
+    bool     ct_counts_valid;
 
     /* K4, the safety processor's OWN relay -- straight from safety_link_
      * status_t::flags (SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED), so the

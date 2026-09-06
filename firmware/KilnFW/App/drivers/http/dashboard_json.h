@@ -127,7 +127,15 @@
  * 4480 (same 128-byte-step convention as the earlier 4096->4224 bump) for
  * ~157 bytes of real, test-measured headroom rather than a folklore
  * figure. */
-#define DASHBOARD_JSON_STATUS_BUF_SIZE 4480
+/* RELAY_LIFE_BUDGET_PLAN.md step 4 added ",\"relay_life\":[...]" (5 entries,
+ * each up to `{"relay":N,"type":"contactor","cycles":4294967295,"rated":
+ * 4294967295,"percent":12345.68,"tier":"error"}` -- ~95B literal/field
+ * worst case per entry, ~475B for all five, plus a ~30B "relay_life_tier"
+ * field) on top of the existing 4480, which this file's own comment above
+ * says had only ~100B of headroom left. Grown to 5120 (+640) rather than
+ * shrinking that headroom to near zero -- re-run the standalone harness
+ * mentioned above before adding anything further. */
+#define DASHBOARD_JSON_STATUS_BUF_SIZE 5120
 
 /* Escapes '"' and '\\' for JSON string embedding. Truncates (never writes
  * past out_cap, always NUL-terminates) rather than overflow -- src is

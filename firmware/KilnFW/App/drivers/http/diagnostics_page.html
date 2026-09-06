@@ -545,7 +545,7 @@ here:</p>
       safetyBuildCard.innerHTML = buildRow('Not yet announced this boot', 'n/a');
     }
 
-    renderRelayWear(st.relay_cycles);
+    renderRelayWear(st.relay_cycles, st.relay_life);
 
     var nvsCard = document.getElementById('nvsCard');
     if (st.nvs_sections && st.nvs_sections.length) {
@@ -570,8 +570,35 @@ here:</p>
   // truth is the physical part, and this page's <p class="note"> above
   // already quotes and cites where the figure comes from.
   var RELAY_CYCLE_BUDGET_ORDER = 100000;
-  function renderRelayWear(cycles) {
+  // RELAY_LIFE_BUDGET_PLAN.md step 4: /api/status now carries "relay_life"
+  // (real per-relay type/rated/percent/tier, relay_cycles_budget()) --
+  // prefer that and only fall back to the old order-of-magnitude estimate
+  // off "relay_cycles" for a board whose firmware predates this field.
+  // Includes the 5th (safety, K4) slot relay_cycles[] never had.
+  function renderRelayWear(cycles, relayLife) {
     var card = document.getElementById('relayWearCard');
+    if (relayLife && relayLife.length) {
+      var rows = '';
+      for (var i = 0; i < relayLife.length; i++) {
+        var r = relayLife[i];
+        var name = (r.relay === 4) ? 'Relay 5 (safety, K4)' : ('Relay ' + (r.relay + 1));
+        var pctStr = (r.percent == null) ? 'n/a' : (r.percent.toFixed(1) + ' %');
+        var ratedStr = (r.rated == null) ? 'n/a (SSR: no rated life)' : r.rated.toLocaleString();
+        var tierColor = r.tier === 'error' ? 'var(--warn)' : (r.tier === 'warn' ? 'var(--warn)' : 'inherit');
+        rows += '<tr>' +
+          '<td>' + window.kcEscapeHtml(name) + '</td>' +
+          '<td>' + window.kcEscapeHtml(r.type) + '</td>' +
+          '<td>' + r.cycles.toLocaleString() + '</td>' +
+          '<td>' + ratedStr + '</td>' +
+          '<td style="color:' + tierColor + '">' + pctStr + '</td>' +
+          '<td><button type="button" class="relay-reset-btn" data-relay="' + r.relay + '">Reset count</button></td>' +
+          '</tr>';
+      }
+      card.innerHTML = '<table class="relay-life-table"><thead><tr>' +
+        '<th>Relay</th><th>Type</th><th>Cycles</th><th>Rated life</th><th>% of rated</th><th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>';
+      return;
+    }
     if (!cycles || !cycles.length) {
       card.innerHTML = '<div class="row"><span class="label">Relay wear</span><span class="value">n/a</span></div>';
       return;
@@ -585,6 +612,37 @@ here:</p>
     }
     card.innerHTML = html;
   }
+
+  // RELAY_LIFE_BUDGET_PLAN.md "Reset": event delegation on the card (rows
+  // are rebuilt wholesale by renderRelayWear() above, so a per-button
+  // listener would leak/re-attach every poll) -- same kcConfirm() gate the
+  // Danger Zone's dangerEnterBtn handler above uses, and a POST through the
+  // flash worker on the server side (relay_cycles_reset_http.c), never a
+  // direct NVS write from the httpd task.
+  document.getElementById('relayWearCard').addEventListener('click', function (e) {
+    var btn = e.target.closest('.relay-reset-btn');
+    if (!btn) return;
+    var relay = btn.getAttribute('data-relay');
+    if (!window.kcConfirm('Reset the lifetime contact-cycle count for relay ' + (Number(relay) + 1) +
+        '? This cannot be undone and does not replace the physical relay -- only use it after the relay ' +
+        'itself has actually been replaced.')) {
+      return;
+    }
+    btn.disabled = true;
+    fetch('/api/relay_cycles/reset', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'relay=' + encodeURIComponent(relay),
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+      });
+    }).then(function () {
+      poll();
+    }).catch(function (err) {
+      alert('Could not reset relay count: ' + err.message);
+      btn.disabled = false;
+    });
+  });
 
   // ESP32 die temp and each MAX31856's cold-junction reading are live board-
   // health temperatures -- both kc-live-value and run through kcUnit.fmt for

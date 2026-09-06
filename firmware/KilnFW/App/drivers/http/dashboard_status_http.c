@@ -183,6 +183,50 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     }
     APPEND("]");
 
+    /* RELAY_LIFE_BUDGET_PLAN.md step 4: budget state for all five counted
+     * slots (four heater relays + the safety relay, RELAY_CYCLES_SAFETY_INDEX),
+     * plus the overall tier the LCD/web indication gates on. percent/rated
+     * are JSON null for an SSR-typed relay (has_budget false) rather than 0,
+     * same "null means never/not-applicable" convention as age_ms/temps
+     * elsewhere on this endpoint. */
+    APPEND(",\"relay_life\":[");
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        const relay_cycles_budget_t *b = &ds.relay_life[r];
+        const char *type_str;
+        switch (ds.relay_life_type[r]) {
+        case RELAY_TYPE_CONTACTOR: type_str = "contactor"; break;
+        case RELAY_TYPE_MERCURY:   type_str = "mercury"; break;
+        default:                   type_str = "ssr"; break;
+        }
+        const char *tier_str;
+        switch (b->tier) {
+        case RELAY_BUDGET_TIER_WARN:  tier_str = "warn"; break;
+        case RELAY_BUDGET_TIER_ERROR: tier_str = "error"; break;
+        default:                      tier_str = "none"; break;
+        }
+        char rated_buf[16];
+        char percent_buf[16];
+        if (b->has_budget) {
+            snprintf(rated_buf, sizeof(rated_buf), "%lu", (unsigned long)b->rated);
+            snprintf(percent_buf, sizeof(percent_buf), "%.2f", (double)b->percent);
+        } else {
+            snprintf(rated_buf, sizeof(rated_buf), "null");
+            snprintf(percent_buf, sizeof(percent_buf), "null");
+        }
+        APPEND("%s{\"relay\":%u,\"type\":\"%s\",\"cycles\":%lu,\"rated\":%s,\"percent\":%s,\"tier\":\"%s\"}",
+               r == 0 ? "" : ",", r, type_str, (unsigned long)b->cycles, rated_buf, percent_buf, tier_str);
+    }
+    APPEND("]");
+    {
+        const char *overall_tier_str;
+        switch (ds.relay_life_tier) {
+        case RELAY_BUDGET_TIER_WARN:  overall_tier_str = "warn"; break;
+        case RELAY_BUDGET_TIER_ERROR: overall_tier_str = "error"; break;
+        default:                      overall_tier_str = "none"; break;
+        }
+        APPEND(",\"relay_life_tier\":\"%s\"", overall_tier_str);
+    }
+
     APPEND(",\"thermo_ready\":%s", ds.thermo_ready ? "true" : "false");
     /* opus review, commit f3a1600, G2b: operator-visible surface for the
      * shared SPI owner's wedged latch -- see dashboard_http.h's field
@@ -266,6 +310,20 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         }
     }
     APPEND("]");
+
+    /* dashboard_http.h's ct_counts comment -- raw ADC counts per channel,
+     * independent of calibration (LINK_PROTOCOL.md Frame E, 2026-09-06).
+     * Whole array is null (not per-element) when ct_counts_valid is false --
+     * unlike ct_current_a[] above, a legacy (pre-protocol-11) Pico never
+     * populates any of the three, so a per-element null would misleadingly
+     * suggest some channels might still be real. */
+    APPEND(",\"ct_counts\":%s", ds.ct_counts_valid ? "[" : "null");
+    if (ds.ct_counts_valid) {
+        for (unsigned ci = 0; ci < 3; ci++) {
+            APPEND("%s%u", ci == 0 ? "" : ",", (unsigned)ds.ct_counts[ci]);
+        }
+        APPEND("]");
+    }
 
     /* K4, the safety processor's own relay -- dashboard_http.h's field
      * comment. null (not a fabricated "false") until ds.safety_relay_known

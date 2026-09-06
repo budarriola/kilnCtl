@@ -172,6 +172,16 @@ void dashboard_get_status(dashboard_status_t *out)
         memcpy(out->relay_cycles, cycles, sizeof(cycles));
     }
 
+    /* RELAY_LIFE_BUDGET_PLAN.md step 4: budget state for all five counted
+     * slots, including the safety relay (RELAY_CYCLES_SAFETY_INDEX), which
+     * relay_cycles[] above deliberately excludes. */
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        relay_cycles_budget(r, &out->relay_life[r]);
+        uint32_t rated_override;
+        relay_cycles_get_type(r, &out->relay_life_type[r], &rated_override);
+    }
+    out->relay_life_tier = relay_cycles_max_budget_tier();
+
     /* thermo_bus->initialized only means the shared SPI bus came up -- it
      * says nothing about whether any MAX31856 actually answered on it (see
      * MAX31856_bus_init). A board-less bus reads back count == 0 from
@@ -269,6 +279,14 @@ void dashboard_get_status(dashboard_status_t *out)
             out->ct_current_a[1] = sl.current_a[1];
             out->ct_current_a[2] = sl.current_a[2];
 
+            /* dashboard_http.h's ct_counts comment -- straight passthrough
+             * from the POWER (Frame E) cache; false/0 until a V2 frame has
+             * arrived (never for a pre-11-protocol Pico). */
+            out->ct_counts_valid = sl.power_counts_valid;
+            out->ct_counts[0] = sl.power_channel_counts_avg[0];
+            out->ct_counts[1] = sl.power_channel_counts_avg[1];
+            out->ct_counts[2] = sl.power_channel_counts_avg[2];
+
             /* K4 -- see dashboard_http.h's field comment. safety_relay_known
              * set here (link answered this poll) rather than left to default
              * true -- Opus review 2026-08-27: these two were the only
@@ -359,6 +377,10 @@ void dashboard_get_status(dashboard_status_t *out)
         out->ct_current_a[0] = NAN;
         out->ct_current_a[1] = NAN;
         out->ct_current_a[2] = NAN;
+        out->ct_counts_valid = false;
+        out->ct_counts[0] = 0u;
+        out->ct_counts[1] = 0u;
+        out->ct_counts[2] = 0u;
     }
     if (!out->safety_temp_valid) {
         out->safety_temp_c = NAN;

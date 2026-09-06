@@ -305,6 +305,18 @@
                       line-height: 1; padding: 0 0.2em; vertical-align: middle; }
   #profileFeasIcon.feas-icon-warn { color: var(--bad); }
   #profileFeasIcon.feas-icon-unknown { color: var(--muted); }
+  /* RELAY_LIFE_BUDGET_PLAN.md step 4: same button-icon shape as
+     #profileFeasIcon above, next to it. Reuses .feas-icon-warn's colour
+     (var(--bad)) for BOTH the warn and error tiers -- "No new colours
+     (contrast memory)" is explicit in the plan, and this repo's status-
+     color audit (project_status_color_contrast_impossible) already
+     concluded no further colour can be added against the LCD/web palette
+     without breaking contrast elsewhere. The error tier is distinguished
+     by weight only, not colour. */
+  #relayLifeIcon { border: none; background: none; cursor: pointer; font-size: 1.3em;
+                   line-height: 1; padding: 0 0.2em; vertical-align: middle; }
+  #relayLifeIcon.feas-icon-warn { color: var(--bad); }
+  #relayLifeIcon.relay-life-error { color: var(--bad); font-weight: bold; }
 </style>
 </head>
 <body>
@@ -406,6 +418,7 @@
   <label for="profileSelect">Firing profile</label>
   <select id="profileSelect"></select>
   <button id="profileFeasIcon" type="button" hidden aria-label="Feasibility notice for this profile"></button>
+  <button id="relayLifeIcon" type="button" hidden aria-label="Relay contact-life warning" title=""></button>
   <button id="runBtn" type="button" class="run-btn primary">Start</button>
 </div>
 <!-- Kiln config: a named saved snapshot of the WHOLE zones configuration
@@ -3449,6 +3462,45 @@ function pollAutotune() {
 // status-only or exec-only hiccup still lets the other half's render run
 // and still runs updateChartMode() once, off whatever is cached from the
 // last successful fetch of the half that failed.
+// RELAY_LIFE_BUDGET_PLAN.md step 4: shown PERSISTENTLY (never auto-hides
+// itself back below the operator's attention once a tier is active) as long
+// as relay_life_tier is warn/error. This is deliberate and DOES contradict
+// this file's own pidPopupBumplessHazard() comment a few thousand lines up
+// ("a warning that is always present is a warning nobody reads") -- that
+// rule is right for a momentary, self-clearing condition an operator can
+// act on and dismiss; relay contact wear only ever increases within a
+// firing, so hiding it again before the underlying relay is replaced would
+// just teach operators to ignore it at the moment it matters most. Do not
+// "fix" this into an auto-hide without re-reading the plan.
+function renderRelayLife(data) {
+  var icon = document.getElementById('relayLifeIcon');
+  if (!data || !data.relay_life || data.relay_life_tier === 'none' || !data.relay_life_tier) {
+    icon.hidden = true;
+    icon.classList.remove('feas-icon-warn', 'relay-life-error');
+    return;
+  }
+  var worst = null;
+  (data.relay_life || []).forEach(function (r) {
+    if (r.tier === 'none') return;
+    if (!worst || (r.percent || 0) > (worst.percent || 0)) worst = r;
+  });
+  if (!worst) {
+    icon.hidden = true;
+    icon.classList.remove('feas-icon-warn', 'relay-life-error');
+    return;
+  }
+  var isError = data.relay_life_tier === 'error';
+  icon.hidden = false;
+  icon.classList.toggle('feas-icon-warn', !isError);
+  icon.classList.toggle('relay-life-error', isError);
+  icon.textContent = '⚠';
+  var num = worst.relay + 1;
+  var typeLabel = worst.type === 'contactor' ? 'contactor' : (worst.type === 'mercury' ? 'mercury' : worst.type);
+  icon.title = 'Relay ' + num + ' (' + typeLabel + '): ' +
+    (worst.percent != null ? worst.percent.toFixed(0) : '?') +
+    ' % of rated life. Autotune relay identification switches faster than a firing and eats budget faster.';
+}
+
 function poll() {
   Promise.all([
     fetch('/api/status').then(function (r) { return r.json(); }).catch(function () { return null; }),
@@ -3467,6 +3519,7 @@ function poll() {
       // other status-derived control on this page already uses.
       lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
       renderChannels(data);
+      renderRelayLife(data);
       renderSpiWedged(data);
       renderBootButtonBypass(data);
       renderSafetyTrip(data);
