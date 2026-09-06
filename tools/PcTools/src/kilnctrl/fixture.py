@@ -332,10 +332,21 @@ class FixtureClient:
         relay's coil actually energizing depends on drive-circuit polarity
         not yet designed; this is the firmware-level convention only.
 
-        If an energize (``on=True``) cannot be confirmed by read-back, this
-        makes a best-effort ``all_off()`` before raising -- never leave a
-        relay that might switch a heater/element in an unconfirmed, possibly
-        still-energized state.
+        Verification reads the field that is actually trustworthy for the
+        direction attempted (PCF8575.c: only a bit *written* 0 is guaranteed
+        to read back 0) -- an energize (``on=True``) is checked against the
+        live INPUT register (``pins``); a release (``on=False``) is checked
+        against the firmware's write ``shadow``, since a released pin's
+        INPUT reading depends on whatever is externally wired and can
+        legitimately read 0 on a populated board with nothing to do with
+        this write failing.
+
+        If an energize cannot be confirmed by read-back, this makes a
+        best-effort ``all_off()`` before raising -- never leave a relay that
+        might switch a heater/element in an unconfirmed, possibly still-
+        energized state. A non-OK send on an energize attempt is treated the
+        same way: TIMEOUT means retries were exhausted, not that the write
+        definitely never reached the device.
         """
         relay = self._resolve(name)
         self._ensure_address(relay.address)
@@ -343,13 +354,19 @@ class FixtureClient:
         payload = bytes((PCF8575_CMD_WRITE_PIN, relay.pin & 0xFF, level & 0xFF))
         result = self._send(payload)
         if result != SendResult.OK:
-            raise FixtureError(f"set_relay({name!r}, {on}) not delivered: {result.describe()}")
+            self._fail_safe_after(
+                on, f"set_relay({name!r}, {on}) not delivered: {result.describe()}"
+            )
+            return
         try:
-            pins, _addr = self._read_port_raw()
+            pins, shadow, _addr = self._read_port_raw()
         except FixtureError as exc:
             self._fail_safe_after(on, f"set_relay({name!r}, {on}) read-back failed: {exc}")
             return
-        energized = not bool(pins & (1 << relay.pin))
+        if on:
+            energized = not bool(pins & (1 << relay.pin))
+        else:
+            energized = not bool(shadow & (1 << relay.pin))
         if energized != on:
             self._fail_safe_after(
                 on,
@@ -370,12 +387,23 @@ class FixtureClient:
         raise FixtureError(message)
 
     def all_off(self) -> None:
-        """De-energize every mapped relay, verified by read-back per address.
+        """De-energize (release) every mapped relay, verified by read-back
+        per address.
+
+        This is a RELEASE, so it is verified against the firmware's write
+        ``shadow`` (== 0xFFFF), never against the live ``pins`` (INPUT)
+        register: PCF8575.c only guarantees a bit *written* 0 reads back 0,
+        so a pin released to the weak pull-up can legitimately read 0 on a
+        populated board (something externally holding that line low) with
+        nothing to do with this write failing. Checking ``pins`` here would
+        make all_off() raise spuriously on real hardware -- and since
+        connect() hard-fails on an all_off() it cannot confirm, that would
+        make the fixture unusable the moment anything is actually wired to
+        it. See module docstring / ``_read_port_raw``'s docstring.
 
         Raises (does not merely log) if a write isn't delivered, an address
-        switch doesn't confirm, or the read-back afterwards disagrees
-        (pins != 0xFFFF) -- see module docstring for why a bare ACK is not
-        proof of any of this.
+        switch doesn't confirm, or the shadow read back afterwards
+        disagrees.
         """
         addresses = sorted({relay.address for relay in self.relay_map.values()})
         for address in addresses:
@@ -383,11 +411,11 @@ class FixtureClient:
             result = self._send(bytes((PCF8575_CMD_WRITE_PORT, 0xFF, 0xFF)))
             if result != SendResult.OK:
                 raise FixtureError(f"all_off() on 0x{address:02X} not delivered: {result.describe()}")
-            pins, _addr = self._read_port_raw()
-            if pins != 0xFFFF:
+            _pins, shadow, _addr = self._read_port_raw()
+            if shadow != 0xFFFF:
                 raise FixtureError(
                     f"all_off() on 0x{address:02X} did not take - device reports "
-                    f"pins=0x{pins:04X}, expected 0xFFFF"
+                    f"shadow=0x{shadow:04X}, expected 0xFFFF"
                 )
 
     def _ensure_address(self, address: int) -> None:
@@ -405,7 +433,7 @@ class FixtureClient:
         if result != SendResult.OK:
             raise FixtureError(f"SET_ADDRESS(0x{address:02X}) not delivered: {result.describe()}")
         self._current_address = None  # unknown until confirmed below
-        _pins, confirmed = self._read_port_raw()
+        _pins, _shadow, confirmed = self._read_port_raw()
         if confirmed != address:
             raise FixtureError(
                 f"SET_ADDRESS(0x{address:02X}) did not take - firmware reports it is "
@@ -432,7 +460,7 @@ class FixtureClient:
         pins_by_address: "dict[int, int]" = {}
         for address in addresses:
             self._ensure_address(address)
-            pins, _addr = self._read_port_raw(timeout)
+            pins, _shadow, _addr = self._read_port_raw(timeout)
             pins_by_address[address] = pins
         out: "dict[str, bool]" = {}
         for name, relay in self.relay_map.items():
@@ -440,15 +468,47 @@ class FixtureClient:
             out[name] = not bool(pins & (1 << relay.pin))  # low == energized == True
         return out
 
-    def _read_port_raw(self, timeout: float = 2.0) -> "tuple[int, int]":
+    def _drain_inbox(self) -> None:
+        """Discard any frames already sitting in this task's inbox queue,
+        without blocking. Called right before a new query is armed so a
+        stale reply to an earlier, already-abandoned (timed-out) query can
+        never be mistaken for the answer to this one -- _Pending matches by
+        subcommand only, not by a per-request tag/sequence number."""
+        if self._inbox is None:
+            return
+        while True:
+            try:
+                self._inbox.get_nowait()
+            except queue.Empty:
+                return
+
+    def _read_port_raw(self, timeout: float = 2.0) -> "tuple[int, int, int]":
         """READ_PORT the currently-addressed expander; returns ``(pins,
-        addr)`` exactly as the firmware reports them (PCF8575.md's READ_PORT
-        response: pins u16 LE, then the address byte). Callers that care
-        whether ``addr`` matches what they expected check it themselves
-        (see ``_ensure_address``) -- this makes no assumption on their
-        behalf.
+        shadow, addr)`` exactly as the firmware reports them (PCF8575.md's
+        READ_PORT response: pins u16 LE, shadow u16 LE, then the address
+        byte).
+
+        ``pins`` is the live INPUT register -- PCF8575.c only guarantees a
+        bit *written* 0 reads back 0; a bit released to the weak pull-up
+        (written 1) reads back whatever is externally wired, which on a
+        populated board can legitimately be 0 (something holding that line
+        low). ``pins`` is therefore only trustworthy for confirming an
+        ENERGIZE (driven low), never a release. ``shadow`` is the firmware's
+        own record of the last value WRITTEN and is what a release must be
+        checked against instead. Callers that care whether ``addr`` matches
+        what they expected check it themselves (see ``_ensure_address``) --
+        this makes no assumption on their behalf.
         """
         with self._query_lock:
+            # Drain any already-buffered frame before starting a new query:
+            # _Pending matches by subcommand only, so a late reply to a
+            # PREVIOUS query that already timed out (its own _pending was
+            # cleared, so _handle_reply dropped it as "unsolicited") could
+            # otherwise still be sitting in the inbox queue and get consumed
+            # here as noise -- harmless on its own, but worth clearing so it
+            # can never coincide with the also-possible case of a stale
+            # frame arriving just as this new pending is registered below.
+            self._drain_inbox()
             pending = _Pending(PCF8575_CMD_READ_PORT)
             with self._pending_lock:
                 self._pending = pending
@@ -486,13 +546,15 @@ class FixtureClient:
             return
         subcommand = payload[0]
         if subcommand == PCF8575_CMD_READ_PORT:
-            # byte0 subcmd, 1-2 pins u16 LE, 3-4 shadow u16 LE, 5 address.
+            # byte0 subcmd, 1-2 pins (live INPUT register) u16 LE,
+            # 3-4 shadow (last value WRITTEN) u16 LE, 5 address.
             if len(payload) < 6:
                 log.warning("dropping short READ_PORT reply: %r", payload)
                 return
             pins = _unpack_u16_le(payload, 1)
+            shadow = _unpack_u16_le(payload, 3)
             address = payload[5]
-            value: object = (pins, address)
+            value: object = (pins, shadow, address)
         elif subcommand == PCF8575_CMD_SCAN:
             count = payload[1] if len(payload) > 1 else 0
             value = list(payload[2 : 2 + count])

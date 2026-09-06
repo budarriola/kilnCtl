@@ -417,15 +417,48 @@ class FixtureClientTest(unittest.TestCase):
     # -- BLOCKER 2: writes must be verified by read-back, not just ACKed ---
     def test_all_off_raises_when_readback_disagrees(self) -> None:
         """Negative test: WRITE_PORT is ACKed (delivered) but the simulated
-        I2C leg fails, so the pins never actually change. all_off() must
-        raise, not report success."""
+        I2C leg fails, so the write SHADOW never actually changes. all_off()
+        must raise, not report success. (all_off() verifies against shadow,
+        not the live pins register -- see the next two tests for why.)"""
         self.client.connect(port="COMFAKE6")
         fake = FakeFixtureSerial._by_port["COMFAKE6"]
-        # Force U4 off its rest state so the read-back inside all_off() (run
-        # again, this time rigged to fail) has something real to disagree
-        # with.
+        # Force U4's write shadow off its rest state so the read-back inside
+        # all_off() (run again, this time rigged to fail) has something
+        # real to disagree with.
+        fake.shadow[0x20] = 0x0000
         fake.pins[0x20] = 0x0000
         fake.refuse_write_port = True
+        with self.assertRaises(FixtureError):
+            self.client.all_off()
+
+    # -- BLOCKER: all_off()/set_relay(on=False) must verify against the
+    # write SHADOW, not the live pins/INPUT register -- PCF8575.c only
+    # guarantees a bit *written* 0 reads back 0 (PCF8575.md); a bit released
+    # to the weak pull-up legitimately reads whatever is externally wired,
+    # which on a populated board can be 0 with nothing to do with the write.
+    def test_all_off_tolerates_externally_held_low_input(self) -> None:
+        """A pin released (shadow bit = 1) but held low by something wired
+        to it (e.g. a relay's own feedback contact) must NOT make all_off()
+        raise -- only the shadow matters for confirming a release."""
+        self.client.connect(port="COMFAKE9")
+        fake = FakeFixtureSerial._by_port["COMFAKE9"]
+        # Shadow says fully released; the live INPUT register disagrees on
+        # one bit because something external is holding it low. This must
+        # not be mistaken for a failed release.
+        fake.shadow[0x20] = 0xFFFF
+        fake.pins[0x20] = 0xFFFE  # bit 0 held low externally
+        self.client.all_off()  # must not raise
+
+    def test_all_off_raises_when_shadow_bit_still_zero(self) -> None:
+        """The actual failure mode: the firmware's own record of what it
+        wrote (shadow) still has a bit driven low. This MUST raise,
+        regardless of what the (irrelevant, for a release) pins register
+        happens to read."""
+        self.client.connect(port="COMFAKE10")
+        fake = FakeFixtureSerial._by_port["COMFAKE10"]
+        fake.shadow[0x20] = 0xFFFE  # firmware still thinks bit 0 is driven low
+        fake.pins[0x20] = 0xFFFF  # even though the input register reads all-high
+        fake.refuse_write_port = True  # so all_off()'s own WRITE_PORT can't fix it
         with self.assertRaises(FixtureError):
             self.client.all_off()
 
