@@ -1018,6 +1018,24 @@ typedef struct {
     TickType_t           cached_tick; /* when `cached` arrived */
     bool                 ever_received;
 
+    /* RELAY_LIFE_BUDGET_PLAN.md step 3 -- K4 edge counting. Previous observed
+     * SAFETY_FLAG_RELAY bit off consecutive GET_STATUS frames, so
+     * safety_apply_status() can call relay_cycles_note_safety_edge() once per
+     * OBSERVED transition rather than once per frame. Deliberately starts
+     * "unknown" (safety_relay_state_known == false) rather than defaulting
+     * safety_relay_state to false/off: an unknown-to-known first observation
+     * must never itself be counted as an edge (same "reset one side of a
+     * pair" hazard the boot_id_changed block below already guards against for
+     * trip_last_seq -- a Pico reboot, or the ESP's own boot, must not
+     * fabricate a transition out of nothing). Cleared back to unknown by
+     * safety_apply_fw_version()'s boot_id_changed branch, since a Pico that
+     * just rebooted may have left K4 in either state before this ESP ever
+     * sees a fresh status frame from the new boot -- the first post-reboot
+     * observation must resync, not compare against a stale pre-reboot
+     * memory. */
+    bool                 safety_relay_state_known;
+    bool                 safety_relay_state;
+
     /* When the last SAFETY_CMD_TRIP_EVENT was applied -- separate from
      * cached_tick above, which only moves on GET_STATUS (Frame A). Read
      * under state_lock, same as cached_tick; safety_link_get_status() turns

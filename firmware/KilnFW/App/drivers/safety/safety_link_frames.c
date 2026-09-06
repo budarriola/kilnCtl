@@ -83,6 +83,12 @@
  * safety_sync_cfg_cache() below. */
 #include "safety_cfg_store.h"
 
+/* RELAY_LIFE_BUDGET_PLAN.md step 3: K4 edge counting off the observed
+ * SAFETY_FLAG_RELAY bit in safety_apply_status() below -- another real,
+ * deliberate cross-module dependency, same shape as safety_cfg_store.h just
+ * above (this driver otherwise knows nothing about relay-life accounting). */
+#include "relay_cycles.h"
+
 /* ROADMAP.md M5 -- SAFETY_CMD_PUSH_CONTEXT's live-state sources. safety_link.h
  * only forward-declares these as void* (kiln_io_t is an anonymous-struct
  * typedef, MAX31856BusClass a named one) to keep that header dependency-free;
@@ -294,6 +300,14 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
              * blanking it would erase evidence rather than refresh it. */
             link->cached.trip_event_ever_received = false;
             link->cached.trip_last_seq = 0u;
+            /* RELAY_LIFE_BUDGET_PLAN.md step 3: the Pico rebooting may have
+             * left K4 in either state before it ever comes up -- this ESP's
+             * last-observed safety_relay_state predates that reboot and must
+             * not be compared against the new boot's first status frame
+             * (same reset-one-side-of-a-pair hazard as trip_last_seq just
+             * above). Forget it; safety_apply_status() resyncs silently on
+             * the next frame, counting zero edges for that resync. */
+            link->safety_relay_state_known = false;
         }
     }
     /* TODO.md owner-report item 5: only overwrite the cached build/config
@@ -658,6 +672,22 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
         link->cached.borrowed = false;
         link->cached.borrowed_zone_index = SAFETY_LINK_BORROWED_ZONE_UNKNOWN;
     }
+    /* RELAY_LIFE_BUDGET_PLAN.md step 3: count an observed off->on or on->off
+     * transition of K4 (SAFETY_FLAG_RELAY). safety_relay_state_known starts
+     * false (this driver's own boot, or a just-applied Pico boot_id change --
+     * see safety_apply_fw_version() above) so the FIRST frame after either
+     * event only resyncs the tracked state and counts zero edges, never a
+     * fabricated one. relay_cycles_note_safety_edge() only marks the RAM
+     * counter dirty (relay_cycles.c) -- it does not touch flash itself, so
+     * calling it here, on whichever task drains this frame, is safe even
+     * though safety_poll_task's own stack is PSRAM. */
+    bool relay_now = (link->cached.flags & SAFETY_FLAG_RELAY) != 0;
+    if (link->safety_relay_state_known && relay_now != link->safety_relay_state) {
+        relay_cycles_note_safety_edge();
+    }
+    link->safety_relay_state = relay_now;
+    link->safety_relay_state_known = true;
+
     link->cached_tick = xTaskGetTickCount();
     link->ever_received = true;
     link->stats.frames_received++;

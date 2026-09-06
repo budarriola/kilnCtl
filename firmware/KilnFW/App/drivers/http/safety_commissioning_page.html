@@ -235,6 +235,11 @@
      pattern as label.bool-label above. */
   details#advancedDetails > summary { font-size: 1.05em; cursor: pointer;
     min-height: 32px; display: flex; align-items: center; }
+  /* Same 32px touch-target floor and fix shape as details#advancedDetails
+     just above, for the relay-type disclosure (RELAY_LIFE_BUDGET_PLAN.md
+     step 3). */
+  details#relayTypeDetails > summary { font-size: 1.05em; cursor: pointer;
+    min-height: 32px; display: flex; align-items: center; }
 </style>
 </head>
 <body>
@@ -270,6 +275,25 @@ form fields were last fetched at, shown purely so a mismatch is visible.</p>
 (or has never reported in) to say which fields below are genuinely unset -- every "set" badge on this
 page is UNKNOWN, not a real confirmation, until it reports a newer build.</p>
 
+
+<!-- RELAY_LIFE_BUDGET_PLAN.md step 3: the safety relay (K4) type. Deliberately
+     OUTSIDE the guided flow/Advanced-fields section below -- unlike every
+     field there, this is never a Pico param, never staged, and never part
+     of the SET_PARAM/COMMIT_CONFIG round trip; it is a local ESP setting
+     saved immediately, on its own, with its own tiny POST endpoint. -->
+<details id="relayTypeDetails">
+<summary>Safety relay (K4) type</summary>
+<p class="hint">Sets K4's rated contact-life budget for the dashboard/LCD relay-life
+indication (contactor: 100,000 cycles; mercury: 1,000,000 cycles) -- indication only,
+never enforced and never blocks firing. This is an ESP-only setting: the safety
+processor is never told and does not enforce it. The safety relay does not offer
+"ssr" -- only the zones/heater relays do.</p>
+<select id="relayTypeSelect">
+  <option value="contactor">Contactor</option>
+  <option value="mercury">Mercury</option>
+</select>
+<p id="relayTypeMsg" class="hint"></p>
+</details>
 
 <!-- ============================================================
      Guided flow (COMMISSIONING_UX.md sec 4): four questions writing six
@@ -1182,6 +1206,11 @@ function loadCommissioning() {
     setBodyFlags(data);
     renderCrcLine(data);
     renderGroups(data);
+    // RELAY_LIFE_BUDGET_PLAN.md step 3: reflect the stored safety relay
+    // type -- ESP-only, always present in this response (never gated on
+    // link_up/commissioned the way the Pico-fetched fields above are).
+    var relaySel = document.getElementById('relayTypeSelect');
+    if (relaySel && data.relay_type) { relaySel.value = data.relay_type; }
     gPrefill(data);
     if (typeof gRenderPreflight === 'function') gRenderPreflight(data);
     if (typeof gRenderLoadFailure === 'function') gRenderLoadFailure();
@@ -1228,6 +1257,24 @@ function applyContradictionRule() {
   srcSel.addEventListener('change', sync);
   sync();
 }
+
+// RELAY_LIFE_BUDGET_PLAN.md step 3: saved immediately on change, independent
+// of the guided flow's/Advanced section's own staged-and-committed writes --
+// see this control's own HTML comment for why. "ssr" is never an option in
+// this <select> at all, so there is nothing for this handler itself to
+// reject; the POST endpoint still validates server-side (safety_cfg_http.c's
+// relay_type_post_handler()) as the actual boundary.
+document.getElementById('relayTypeSelect').addEventListener('change', function () {
+  var sel = this, msg = document.getElementById('relayTypeMsg');
+  msg.textContent = 'Saving…';
+  fetch('/api/safety/commissioning/relay_type', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'type=' + encodeURIComponent(sel.value)
+  }).then(function (r) {
+    if (!r.ok) { throw new Error('save failed'); }
+    msg.textContent = 'Saved.';
+  }).catch(function () { msg.textContent = 'Save failed -- try again.'; });
+});
 
 document.getElementById('saveBtn').addEventListener('click', function () {
   var msg = document.getElementById('msg');

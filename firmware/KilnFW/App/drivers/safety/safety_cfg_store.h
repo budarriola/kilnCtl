@@ -55,6 +55,7 @@
 #include "esp_err.h"
 
 #include "kilnlink/kilnlink_param_value.h"
+#include "relay_cycles.h" /* relay_type_t -- safety_cfg_store_get/set_safety_relay_type() below */
 
 #ifdef __cplusplus
 extern "C" {
@@ -215,6 +216,39 @@ bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_
  * Exported so a future caller on any task can trigger a flush without ever
  * risking a direct nvs_save_store() call of its own. */
 esp_err_t safety_cfg_store_flush_if_dirty(void);
+
+/* RELAY_LIFE_BUDGET_PLAN.md step 3 -- the safety relay (K4) type. Lives in
+ * THIS store, next to the SAFETY_CFG_PARAM_TABLE answers above, but is not
+ * one of them: unlike every field in that table, it is never fetched from
+ * the Pico -- it is purely an ESP-side commissioning answer (the Pico drives
+ * K4 via relay_owner.c and has no notion of "contactor vs mercury"). Default
+ * RELAY_TYPE_CONTACTOR. Persisted separately from SAFETY_CFG_PARAM_TABLE's
+ * blob (own key, own version byte, same nvs_load-style current/migrate/
+ * refuse discipline) so this field's layout can evolve independently of the
+ * Pico param cache's own versioning.
+ *
+ * safety_cfg_store_init() loads the persisted value (or the default on first
+ * boot/unreadable blob) and calls relay_cycles_set_type(
+ * RELAY_CYCLES_SAFETY_INDEX, type, 0) so the budget calculation picks it up
+ * immediately, every boot -- not only after a fresh POST. */
+relay_type_t safety_cfg_store_get_safety_relay_type(void);
+
+/* Sets and persists the safety relay type -- POST /api/safety/commissioning's
+ * relay-type field. Calls relay_cycles_set_type(RELAY_CYCLES_SAFETY_INDEX,
+ * type, 0) on success, same as the load path.
+ *
+ * Refuses (nothing changed, returns false) RELAY_TYPE_SSR: the safety relay
+ * never offers ssr (RELAY_LIFE_BUDGET_PLAN.md's "Request" section) -- this is
+ * the second line of defense behind the HTTP POST validator's own check, so
+ * a future caller that reaches this function directly (an MCP tool, a
+ * backup restore path) cannot silently persist an invalid type either.
+ *
+ * Writes NVS directly on the calling task -- safe because, unlike
+ * safety_cfg_store_refetch() above, this is only ever reached from the httpd
+ * worker task's POST handler (internal-SRAM stack), never from
+ * safety_poll_task (PSRAM stack); see caller_stack_is_external()'s comment
+ * for why that distinction matters on this board. */
+bool safety_cfg_store_set_safety_relay_type(relay_type_t type);
 
 #ifdef __cplusplus
 }

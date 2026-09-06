@@ -41,6 +41,22 @@ static const char *TAG = "safety_cfg_store";
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_SAFETY_CFG "safetycfg"
 
+/* RELAY_LIFE_BUDGET_PLAN.md step 3 -- the safety relay type, stored
+ * separately from the SAFETY_CFG_PARAM_TABLE blob above (see
+ * safety_cfg_store_get_safety_relay_type()'s doc comment for why: it is not
+ * one of that table's Pico-fetched answers). Own key (<=15 chars, same NVS
+ * key-length rule every other kiln_nvs consumer in this tree follows), own
+ * version byte. */
+#define NVS_KEY_SAFETY_RELAY "safetyrelay"
+#define SAFETY_RELAY_TYPE_BLOB_VERSION 1u
+
+typedef struct {
+    uint8_t version;
+    uint8_t type; /* relay_type_t */
+} safety_relay_type_blob_t;
+
+static relay_type_t s_safety_relay_type = RELAY_TYPE_CONTACTOR;
+
 /* Bump whenever safety_cfg_store_blob_t's on-flash layout changes -- mirrors
  * ZONES_CFG_VERSION/KILN_CFG_STORE_VERSION's role in their own files.
  *
@@ -475,6 +491,102 @@ esp_err_t safety_cfg_store_flush_if_dirty(void)
     return save_err;
 }
 
+/* Three-outcome load, same discipline as nvs_load_store() above: a missing
+ * blob (first boot) or a version this build doesn't recognise falls back to
+ * the RELAY_TYPE_CONTACTOR default rather than guessing at a layout; a
+ * stored SSR value (should never happen -- the setter refuses it -- but a
+ * hand-edited or pre-validation blob is not impossible) is also normalized
+ * to the default rather than trusted, so this function can never hand back
+ * an invalid type. */
+static void load_safety_relay_type(void)
+{
+    s_safety_relay_type = RELAY_TYPE_CONTACTOR;
+
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return; /* never saved, or partition trouble -- default stands */
+    }
+    safety_relay_type_blob_t loaded;
+    size_t len = sizeof(loaded);
+    err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_RELAY, &loaded, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(loaded)) {
+        return; /* nothing stored, unreadable, or wrong size -- default stands */
+    }
+    if (loaded.version != SAFETY_RELAY_TYPE_BLOB_VERSION) {
+        ESP_LOGW(TAG, "safety relay type blob is version %u, this build knows only %u -- "
+                      "resetting to the default",
+                 (unsigned)loaded.version, (unsigned)SAFETY_RELAY_TYPE_BLOB_VERSION);
+        return;
+    }
+    if (loaded.type != (uint8_t)RELAY_TYPE_CONTACTOR && loaded.type != (uint8_t)RELAY_TYPE_MERCURY) {
+        ESP_LOGW(TAG, "safety relay type blob holds an invalid type (%u) -- resetting to the default",
+                 (unsigned)loaded.type);
+        return;
+    }
+    s_safety_relay_type = (relay_type_t)loaded.type;
+}
+
+/* Direct write, no flash-worker indirection -- see this function's own doc
+ * comment in safety_cfg_store.h for why that's safe here (httpd-worker-only
+ * caller). */
+static esp_err_t save_safety_relay_type(void)
+{
+    /* check_nvs_write_guard_coverage.ps1 requires every NVS write in a
+     * PSRAM-stack-guarded module to carry the same caller_stack_is_external()
+     * refusal nvs_save_store() above does -- this write is only ever reached
+     * from the httpd worker's POST handler in practice (see this function's
+     * own doc comment in safety_cfg_store.h), but a future caller reaching it
+     * from safety_poll_task (PSRAM stack) would abort the board exactly like
+     * a direct nvs_save_store() call would, so the belt-and-suspenders check
+     * applies here too, not only to the Pico-param cache's own write path. */
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "save_safety_relay_type: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). A flash/NVS write from here would abort the whole board -- see "
+                      "caller_stack_is_external()'s comment.");
+        return ESP_ERR_INVALID_STATE;
+    }
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
+    }
+    safety_relay_type_blob_t blob = {
+        .version = SAFETY_RELAY_TYPE_BLOB_VERSION,
+        .type = (uint8_t)s_safety_relay_type,
+    };
+    err = hal_kv_set_blob(&h, NVS_KEY_SAFETY_RELAY, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
+}
+
+relay_type_t safety_cfg_store_get_safety_relay_type(void)
+{
+    return s_safety_relay_type;
+}
+
+bool safety_cfg_store_set_safety_relay_type(relay_type_t type)
+{
+    if (type != RELAY_TYPE_CONTACTOR && type != RELAY_TYPE_MERCURY) {
+        /* Refuses RELAY_TYPE_SSR and any other value -- see this function's
+         * doc comment. */
+        return false;
+    }
+    s_safety_relay_type = type;
+    relay_cycles_set_type(RELAY_CYCLES_SAFETY_INDEX, type, 0);
+    esp_err_t err = save_safety_relay_type();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "safety_cfg_store_set_safety_relay_type: NVS write failed (%s) -- "
+                      "type applied live but will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    return true;
+}
+
 static int index_for_id(uint16_t id)
 {
     for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT; i++) {
@@ -514,6 +626,16 @@ esp_err_t safety_cfg_store_init(void)
         return part_err;
     }
     nvs_load_store();
+    /* RELAY_LIFE_BUDGET_PLAN.md step 3 -- load the safety relay type on every
+     * boot, not only after a fresh POST, and push it into relay_cycles.c
+     * immediately so the budget calculation is correct from the first
+     * dashboard/LCD read. relay_cycles_init() runs earlier in boot
+     * (main_control_bringup.c) than this function (main_network_http.c), so
+     * relay_cycles.c's own state already exists by the time this call lands;
+     * relay_cycles_set_type() is RAM-only regardless (see its own header
+     * comment), so the ordering isn't even load-bearing here. */
+    load_safety_relay_type();
+    relay_cycles_set_type(RELAY_CYCLES_SAFETY_INDEX, s_safety_relay_type, 0);
     /* 2026-08-27 audit fix (defect c): this used to stamp s_fetched_at_us =
      * hal_time_now_us() here whenever the loaded blob's config_crc != 0
      * ("a load from NVS counts as fetched"). That was a DIFFERENT and worse

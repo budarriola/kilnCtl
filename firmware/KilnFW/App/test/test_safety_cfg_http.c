@@ -157,6 +157,29 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t crc)
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t crc) { (void)link; (void)crc; return false; }
 esp_err_t safety_cfg_store_init(void) { return ESP_OK; }
 
+// RELAY_LIFE_BUDGET_PLAN.md step 3 -- this file's own fake, same convention
+// as every other safety_cfg_store_* stub above (this test #includes safety_
+// cfg_http.c directly, and the real safety_cfg_store.c is linked into the
+// OTHER host-test executable via test_safety_cfg_store.c's #include of it --
+// see this file's own header comment for why linking both here would
+// multiply-define every safety_cfg_store_* symbol). Controllable so
+// relay_type_post_handler()'s tests can exercise both accept and refuse.
+static relay_type_t s_stub_safety_relay_type = RELAY_TYPE_CONTACTOR;
+static bool s_stub_set_safety_relay_type_result = true;
+static int s_stub_set_safety_relay_type_calls = 0;
+static relay_type_t s_stub_set_safety_relay_type_last = RELAY_TYPE_SSR;
+relay_type_t safety_cfg_store_get_safety_relay_type(void) { return s_stub_safety_relay_type; }
+bool safety_cfg_store_set_safety_relay_type(relay_type_t type)
+{
+    s_stub_set_safety_relay_type_calls++;
+    s_stub_set_safety_relay_type_last = type;
+    if (!s_stub_set_safety_relay_type_result) {
+        return false;
+    }
+    s_stub_safety_relay_type = type;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // safety_link.h stub bodies -- controllable fakes.
 // ---------------------------------------------------------------------------

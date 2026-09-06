@@ -115,6 +115,24 @@ void safety_link_clear_stashed_config_page(SafetyLinkClass *link)
 // describes) without needing a real second task.
 // ---------------------------------------------------------------------------
 
+// relay_cycles_set_type() stub -- RELAY_LIFE_BUDGET_PLAN.md step 3.
+// safety_cfg_store.c now calls this (both at init/load and from
+// safety_cfg_store_set_safety_relay_type()) instead of linking the real
+// relay_cycles.c, same "fake the cross-module dependency, don't drag in its
+// own NVS machinery" convention as safety_link_get_config_page()'s stub
+// above -- this file already has its own hal_kv fake in play and relay_
+// cycles.c's persistence is out of scope for these tests.
+static int s_stub_relay_cycles_set_type_calls = 0;
+static uint8_t s_stub_relay_cycles_last_relay = 0xFF;
+static relay_type_t s_stub_relay_cycles_last_type = RELAY_TYPE_SSR;
+void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_override)
+{
+    (void)rated_override;
+    s_stub_relay_cycles_set_type_calls++;
+    s_stub_relay_cycles_last_relay = relay;
+    s_stub_relay_cycles_last_type = type;
+}
+
 static int s_stub_flash_worker_calls = 0;
 static esp_err_t s_stub_flash_worker_submit_err = ESP_OK; // returned instead of running the job, if != ESP_OK
 
@@ -140,6 +158,9 @@ static void stub_reset(void)
     s_stub_advance_us_per_call = 0;
     s_stub_flash_worker_calls = 0;
     s_stub_flash_worker_submit_err = ESP_OK;
+    s_stub_relay_cycles_set_type_calls = 0;
+    s_stub_relay_cycles_last_relay = 0xFF;
+    s_stub_relay_cycles_last_type = RELAY_TYPE_SSR;
 }
 
 // One page containing entries for the given (id, u16 value) pairs, `more`
@@ -821,6 +842,91 @@ static void test_version_refuse_older_layout_without_a_migration(void)
     fake_kv_reset_all();
 }
 
+// ---------------------------------------------------------------------------
+// RELAY_LIFE_BUDGET_PLAN.md step 3 -- the safety relay (K4) type.
+// ---------------------------------------------------------------------------
+
+static void test_safety_relay_type_defaults_to_contactor_and_pushes_to_relay_cycles(void)
+{
+    TEST_SECTION("safety_cfg_store_init -- no persisted safety relay type yet: defaults to "
+                 "RELAY_TYPE_CONTACTOR and pushes it into relay_cycles.c immediately, every "
+                 "boot (not only after a fresh POST)");
+
+    fake_kv_reset_all();
+    stub_reset();
+    esp_err_t err = safety_cfg_store_init();
+    TEST_CHECK(err == ESP_OK, "init succeeds with no relay-type blob on flash");
+    TEST_CHECK(safety_cfg_store_get_safety_relay_type() == RELAY_TYPE_CONTACTOR,
+               "first boot -- no blob -- defaults to contactor, never ssr");
+    TEST_CHECK(s_stub_relay_cycles_set_type_calls >= 1,
+               "safety_cfg_store_init() calls relay_cycles_set_type() so the budget calc is "
+               "correct from the very first dashboard/LCD read, not only after a commissioning POST");
+    TEST_CHECK(s_stub_relay_cycles_last_relay == RELAY_CYCLES_SAFETY_INDEX,
+               "the call targets the safety relay's own slot, not a heater relay's");
+    TEST_CHECK(s_stub_relay_cycles_last_type == RELAY_TYPE_CONTACTOR, "and reports the default type");
+
+    fake_kv_reset_all();
+}
+
+static void test_safety_relay_type_set_persists_and_roundtrips_after_reload(void)
+{
+    TEST_SECTION("safety_cfg_store_set_safety_relay_type -- mercury sticks in RAM immediately and "
+                 "survives a fresh safety_cfg_store_init() (a reboot)");
+
+    fake_kv_reset_all();
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup: first boot");
+
+    TEST_CHECK(safety_cfg_store_set_safety_relay_type(RELAY_TYPE_MERCURY) == true,
+               "mercury is accepted -- the safety relay may be a contactor or a mercury relay");
+    TEST_CHECK(safety_cfg_store_get_safety_relay_type() == RELAY_TYPE_MERCURY,
+               "live value updates immediately, before any reboot");
+    TEST_CHECK(s_stub_relay_cycles_last_type == RELAY_TYPE_MERCURY,
+               "relay_cycles_set_type() is called again on every successful set, not only at boot");
+
+    // Simulate a reboot: a fresh safety_cfg_store_init() must load mercury
+    // back off NVS, not silently fall back to the contactor default.
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "reload succeeds");
+    TEST_CHECK(safety_cfg_store_get_safety_relay_type() == RELAY_TYPE_MERCURY,
+               "the persisted type survives a reboot -- this is the whole point of the NVS write");
+    TEST_CHECK(s_stub_relay_cycles_last_type == RELAY_TYPE_MERCURY,
+               "the reloaded value is pushed into relay_cycles.c again on this boot too");
+
+    fake_kv_reset_all();
+}
+
+static void test_safety_relay_type_rejects_ssr(void)
+{
+    TEST_SECTION("safety_cfg_store_set_safety_relay_type -- RELAY_TYPE_SSR is REFUSED: the "
+                 "safety relay never offers ssr (RELAY_LIFE_BUDGET_PLAN.md's Request section) -- "
+                 "this is the second line of defense behind the HTTP POST validator");
+
+    fake_kv_reset_all();
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup: first boot, default contactor");
+    int calls_before = s_stub_relay_cycles_set_type_calls;
+
+    TEST_CHECK(safety_cfg_store_set_safety_relay_type(RELAY_TYPE_SSR) == false,
+               "ssr is refused -- returns false, nothing changed");
+    TEST_CHECK(safety_cfg_store_get_safety_relay_type() == RELAY_TYPE_CONTACTOR,
+               "the stored type is untouched by the refused call");
+    TEST_CHECK(s_stub_relay_cycles_set_type_calls == calls_before,
+               "a refused set never reaches relay_cycles_set_type() at all");
+
+    // NEGATIVE TEST (proves the check above can actually fail, per this
+    // codebase's "negative-test every check" rule): an out-of-range value
+    // that is neither a real relay_type_t member nor RELAY_TYPE_SSR must
+    // also be refused -- if safety_cfg_store_set_safety_relay_type() were
+    // accidentally written as "accept anything except literal 0", this
+    // would catch it.
+    TEST_CHECK(safety_cfg_store_set_safety_relay_type((relay_type_t)99) == false,
+               "an unrecognised value is refused the same way ssr is -- 'anything but ssr' would "
+               "be the wrong rule");
+
+    fake_kv_reset_all();
+}
+
 void run_test_safety_cfg_store(void)
 {
     test_index_for_id_finds_known_and_rejects_unknown();
@@ -843,4 +949,7 @@ void run_test_safety_cfg_store(void)
     test_version_refuse_newer_than_firmware();
     test_version_refuse_older_layout_without_a_migration();
     test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache();
+    test_safety_relay_type_defaults_to_contactor_and_pushes_to_relay_cycles();
+    test_safety_relay_type_set_persists_and_roundtrips_after_reload();
+    test_safety_relay_type_rejects_ssr();
 }

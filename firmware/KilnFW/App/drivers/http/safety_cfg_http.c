@@ -95,7 +95,21 @@ typedef struct {
     bool borrowed_known;
     bool borrowed;
     uint8_t borrowed_zone_index; /* SAFETY_LINK_BORROWED_ZONE_UNKNOWN if not commissioned on the Pico */
+
+    /* RELAY_LIFE_BUDGET_PLAN.md step 3 -- ESP-only, never fetched from the
+     * Pico (see safety_cfg_store_get_safety_relay_type()'s doc comment), so
+     * unlike every other field above this is always known/valid, never
+     * gated on link_up. */
+    relay_type_t relay_type;
 } safety_cfg_http_snapshot_t;
+
+/* "contactor"/"mercury" only -- ssr is never a legal safety relay type, so
+ * this never needs to represent it. Used both to render GET's JSON and to
+ * validate POST's submitted value. */
+static const char *relay_type_name(relay_type_t type)
+{
+    return (type == RELAY_TYPE_MERCURY) ? "mercury" : "contactor";
+}
 
 /* KILNLINK_CONFIG_PAGE_UNSET_BIT (the per-entry "this field is genuinely
  * unset" flag GET_CONFIG_PAGE replies carry) was added to the wire at
@@ -189,6 +203,7 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
             APPEND(",\"borrowed_zone_index\":%u", (unsigned)s->borrowed_zone_index);
         }
     }
+    APPEND(",\"relay_type\":\"%s\"", relay_type_name(s->relay_type));
     APPEND(",\"params\":[");
 
     size_t count = safety_cfg_store_param_count();
@@ -279,6 +294,7 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
                                                     &peer_protocol_version, NULL);
         snap.unset_reliable = peer_reports_unset_reliably(peer_version_known, peer_protocol_version);
     }
+    snap.relay_type = safety_cfg_store_get_safety_relay_type();
     snap.cached_crc = safety_cfg_store_cached_crc();
     uint32_t fetched = safety_cfg_store_fetched_ms_ago();
     snap.fetched_ms_ago_or_neg1 = (fetched == UINT32_MAX) ? -1 : (int64_t)fetched;
@@ -768,6 +784,61 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
 }
 
 /* ---------------------------------------------------------------------- */
+/* POST /api/safety/commissioning/relay_type                              */
+/* ---------------------------------------------------------------------- */
+
+/* RELAY_LIFE_BUDGET_PLAN.md step 3. Body: "type=contactor" or "type=mercury"
+ * (http_form's usual application/x-www-form-urlencoded shape) -- deliberately
+ * NOT routed through parse_set_param_body()/apply_pairs() above, since this
+ * is not a Pico param at all (see safety_cfg_store_get_safety_relay_type()'s
+ * doc comment): no safety_link involved, no commit round trip, just a local
+ * NVS write. "ssr" (and anything else unrecognised) is REJECTED with 400 --
+ * the safety relay never offers ssr, and safety_cfg_store_set_safety_relay_
+ * type() enforces the same rule as its own second line of defense, but the
+ * point of checking here too is to give the operator a specific 400 instead
+ * of a generic "nothing happened". */
+#define SAFETY_RELAY_TYPE_BODY_MAX 64
+
+static esp_err_t relay_type_post_handler(httpd_req_t *req)
+{
+    char body[SAFETY_RELAY_TYPE_BODY_MAX];
+    if (!read_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
+        return ESP_OK;
+    }
+
+    char value[16] = {0};
+    if (http_form_find_field(body, "type", value, sizeof(value)) < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing 'type' field");
+        return ESP_OK;
+    }
+
+    relay_type_t type;
+    if (strcmp(value, "contactor") == 0) {
+        type = RELAY_TYPE_CONTACTOR;
+    } else if (strcmp(value, "mercury") == 0) {
+        type = RELAY_TYPE_MERCURY;
+    } else {
+        /* Explicitly covers "ssr" -- the safety relay never offers it -- and
+         * any other unrecognised value. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                             "type must be 'contactor' or 'mercury' -- the safety relay "
+                             "does not offer 'ssr'");
+        return ESP_OK;
+    }
+
+    if (!safety_cfg_store_set_safety_relay_type(type)) {
+        /* Unreachable given the check above, but never claim success for a
+         * call that refused. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay type rejected");
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "safety relay type set to %s", relay_type_name(type));
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+/* ---------------------------------------------------------------------- */
 /* POST /api/safety/commissioning/bench_preset                            */
 /* ---------------------------------------------------------------------- */
 
@@ -922,6 +993,10 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null)
         .uri = "/api/safety/commissioning/bench_preset", .method = HTTP_POST,
         .handler = bench_preset_post_handler,
     };
+    static const httpd_uri_t relay_type_uri = {
+        .uri = "/api/safety/commissioning/relay_type", .method = HTTP_POST,
+        .handler = relay_type_post_handler,
+    };
 
     /* The HTML page. Registered alongside the API rather than in a separate
      * module because the two are useless apart -- and because a missing page
@@ -935,7 +1010,7 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null)
         .handler = commissioning_page_get_handler,
     };
 
-    const httpd_uri_t *uris[] = { &page_uri, &get_uri, &post_uri, &bench_uri };
+    const httpd_uri_t *uris[] = { &page_uri, &get_uri, &post_uri, &bench_uri, &relay_type_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, uris[i]);
         if (err != ESP_OK) {

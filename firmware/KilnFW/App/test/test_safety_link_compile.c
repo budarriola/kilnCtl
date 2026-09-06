@@ -84,6 +84,16 @@ esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_reading
 bool zones_config_get_safety_tc_type(uint8_t *out_tc_type) { (void)out_tc_type; return false; }
 bool zones_config_is_valid(void) { return true; }
 
+// relay_cycles_note_safety_edge() -- RELAY_LIFE_BUDGET_PLAN.md step 3.
+// safety_apply_status() (safety_link_frames.c) now calls this once per
+// OBSERVED K4 (SAFETY_FLAG_RELAY) transition. Faked as a plain counter, same
+// "cross-module dependency, don't drag in its own NVS machinery" convention
+// as safety_cfg_store_refetch()'s fake just above -- relay_cycles.c's own
+// persistence is tested by test_relay_cycles.c, not here; this file only
+// needs to prove safety_link_frames.c calls it the right NUMBER of times.
+static int s_stub_relay_cycles_safety_edge_calls = 0;
+void relay_cycles_note_safety_edge(void) { s_stub_relay_cycles_safety_edge_calls++; }
+
 esp_err_t uart_owner_init(uart_owner_t *owner, uart_port_t port, int tx_io, int rx_io,
                            int baud_rate, unsigned queue_len, unsigned task_priority,
                            uint32_t stack_depth, int core_id)
@@ -622,6 +632,122 @@ static void test_fw_version_known_and_dirty_roundtrips(void)
     TEST_CHECK(memcmp(datetime, datetime_in, 5) == 0, "datetime bytes match exactly");
     TEST_CHECK(config_version == 3, "config_version passes through");
     TEST_CHECK(config_crc == 0xBEEF, "config_crc passes through");
+}
+
+// ---------------------------------------------------------------------
+// RELAY_LIFE_BUDGET_PLAN.md step 3 -- K4 edge counting off consecutive
+// GET_STATUS frames. relay_cycles_note_safety_edge() is faked as a plain
+// counter above; these tests pin how many times safety_apply_status() (and
+// safety_apply_fw_version()'s boot_id_changed branch) call it.
+// ---------------------------------------------------------------------
+
+static void send_status_with_relay_bit(SafetyLinkClass *link, uart_proto_message_t *msg, bool relay_on)
+{
+    uint8_t flags = (uint8_t)(SAFETY_FLAG_TEMP_VALID | (relay_on ? SAFETY_FLAG_RELAY : 0));
+    set_status_frame(msg->payload, flags, 100.0f, 20.0f, 0, 0, 0, 0);
+    msg->length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_status(link, msg) == true, "status frame decodes");
+}
+
+static void test_k4_edge_counting_off_on_on_off_counts_two(void)
+{
+    TEST_SECTION("safety_apply_status -- K4 edge counting: off, on, on, off counts exactly "
+                 "TWO edges (one real transition each way; the repeated 'on' frame is not a "
+                 "second edge)");
+
+    s_stub_relay_cycles_safety_edge_calls = 0;
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    send_status_with_relay_bit(&link, &msg, false); // off
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 0, "off -> off (relative to the unknown start) is not an edge");
+
+    send_status_with_relay_bit(&link, &msg, true); // off -> on
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 1, "off -> on is the first edge");
+
+    send_status_with_relay_bit(&link, &msg, true); // on -> on (repeat)
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 1, "on -> on (same state repeated) counts nothing new");
+
+    send_status_with_relay_bit(&link, &msg, false); // on -> off
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 2, "on -> off is the second edge");
+}
+
+static void test_k4_edge_counting_first_frame_counts_zero(void)
+{
+    TEST_SECTION("safety_apply_status -- K4 edge counting: the very FIRST status frame this "
+                 "link ever sees counts ZERO edges, however K4 reads -- there is no prior "
+                 "observed state to compare against (RELAY_LIFE_BUDGET_PLAN.md step 3's "
+                 "'unknown, not off' starting state)");
+
+    s_stub_relay_cycles_safety_edge_calls = 0;
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    // First observation reads K4 ON. If the tracked "previous" state
+    // defaulted to false/off instead of genuinely unknown, this would be
+    // wrongly counted as an off->on edge.
+    send_status_with_relay_bit(&link, &msg, true);
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 0,
+               "first-ever frame resyncs silently, counting zero edges even though K4 reads ON");
+    TEST_CHECK(link.safety_relay_state_known == true, "state is now known, for the NEXT frame to compare against");
+    TEST_CHECK(link.safety_relay_state == true, "and it correctly remembers ON");
+}
+
+static void test_k4_edge_counting_boot_id_change_counts_zero(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- a Pico boot_id change forgets the tracked K4 "
+                 "state (same 'reset one side of a producer/consumer pair' hazard as "
+                 "trip_last_seq): the first status frame after the reboot must not be compared "
+                 "against a stale pre-reboot memory, so it counts zero edges regardless of "
+                 "whether K4's reported state actually changed across the reboot");
+
+    s_stub_relay_cycles_safety_edge_calls = 0;
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    // Establish a known state: K4 OFF.
+    send_status_with_relay_bit(&link, &msg, false);
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 0, "setup: first frame, zero edges");
+    TEST_CHECK(link.safety_relay_state_known == true, "setup: state now known (off)");
+
+    // The Pico reboots -- a FW_VERSION frame with a NEW boot_id arrives.
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(link.pico_boot_id_known == true && link.pico_boot_id == 42, "setup: boot_id learned");
+    TEST_CHECK(link.safety_relay_state_known == false,
+               "the FIRST FW_VERSION frame (pico_boot_id was not known before) already counts as "
+               "a 'boot_id changed' event and forgets the tracked K4 state -- correct, since this "
+               "ESP has no baseline to trust either way yet");
+
+    // Next status frame reads K4 ON -- must resync silently (zero edges),
+    // exactly like the very-first-frame case, not report an off->on edge
+    // just because the last REMEMBERED state (from before the reboot) was off.
+    send_status_with_relay_bit(&link, &msg, true);
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 0,
+               "post-reboot resync frame counts zero edges, even though K4 now reads ON and the "
+               "pre-reboot memory was OFF");
+
+    // Now establish this boot's baseline and change boot_id AGAIN, to prove
+    // the reset fires on a genuine SUBSEQUENT boot_id change too, not only
+    // the first-ever one.
+    send_status_with_relay_bit(&link, &msg, true); // on -> on, still resynced, no new edge
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 0, "second frame this boot: still just a repeat, no edge");
+
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/43,
+                                          /*config_version=*/0, /*config_crc=*/0); // a genuinely different boot_id
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(link.safety_relay_state_known == false, "a later, genuine boot_id change also resets tracking");
+
+    send_status_with_relay_bit(&link, &msg, false); // reads OFF this time
+    TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 0,
+               "resync after the SECOND reboot also counts zero edges, despite differing from the "
+               "immediately-prior remembered state (on)");
 }
 
 static void test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown(void)
@@ -1258,6 +1384,9 @@ int main(void)
     test_safety_tc_is_separate_physical_sensor_predicate();
     test_apply_status_temp_valid_flag_is_sole_authority();
     test_apply_status_ignores_peer_link_up_and_fault_bits();
+    test_k4_edge_counting_off_on_on_off_counts_two();
+    test_k4_edge_counting_first_frame_counts_zero();
+    test_k4_edge_counting_boot_id_change_counts_zero();
     test_fw_version_unknown_before_any_frame_arrives();
     test_fw_version_known_and_dirty_roundtrips();
     test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown();
