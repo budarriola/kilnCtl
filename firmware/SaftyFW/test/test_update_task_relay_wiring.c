@@ -12,9 +12,14 @@
 // update_task.c may command a relay ON or otherwise grant heat authority.
 // The one function on this processor that can actually energize the relay
 // is relay_owner_command_energize() (src/tasks/relay_owner.c: the only
-// caller of gpio_put(SAFTYFW_PIN_RELAY, ...) outside relay_owner_task()'s
+// caller of hal_gpio_set(SAFTYFW_PIN_RELAY, ...) outside relay_owner_task()'s
 // own internal state machine -- see relay_owner.c's own header comment,
-// "every gpio_put(SAFTYFW_PIN_RELAY, ...) call ... so the two can never").
+// "every hal_gpio_set(SAFTYFW_PIN_RELAY, ...) call ... so the two can never").
+// HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md) moved relay_owner.c from a raw
+// gpio_put(SAFTYFW_PIN_RELAY, ...) write to hal_gpio_set(SAFTYFW_PIN_RELAY,
+// ...) -- the scan target below was updated to match; see
+// test_relay_owner_gpio_init.c for the new hal_gpio-backed init-order test
+// this same phase added.
 // update_task.c today only READS output/thermo status
 // (thermo_task_get_snapshot()/current_task_get_snapshot()) to decide whether
 // to gate UPDATE_BEGIN -- ROADMAP.md's own words for the property this file
@@ -79,8 +84,8 @@ static void test_relay_owner_command_energize_exists_where_expected(void)
                "relay_owner_command_energize(bool) is defined in relay_owner.c with its "
                "expected signature -- this is the function update_task.c must never call");
 
-    TEST_CHECK(strstr(text, "gpio_put(SAFTYFW_PIN_RELAY") != NULL,
-               "relay_owner.c itself still contains the real gpio_put(SAFTYFW_PIN_RELAY, ...) "
+    TEST_CHECK(strstr(text, "hal_gpio_set(SAFTYFW_PIN_RELAY") != NULL,
+               "relay_owner.c itself still contains the real hal_gpio_set(SAFTYFW_PIN_RELAY, ...) "
                "write -- confirms this scan's target string actually means \"energize the relay\" "
                "on this hardware, not a stale symbol name");
 

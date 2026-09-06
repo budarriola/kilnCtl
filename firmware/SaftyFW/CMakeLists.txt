@@ -160,20 +160,31 @@ set(SAFTYFW_APP_SOURCES
 # irq_set_exclusive_handler (uart_owner.c), called from init rather than a
 # constructor, so a STATIC lib shared by all three is safe.
 #
-# This is move-only (Phase 1a): the interface/ + pico/*/hal_*_pico.c HAL
-# bodies (hal_uart_pico.c included) have no consumers yet and are
-# deliberately NOT added to this library or wired into these targets --
-# only the moved owner sources, which SaftyFW's real code already calls
-# directly (spi_owner_transfer, uart_owner_send, etc.), unchanged.
-set(HWABSTRACTION_PICO_DIR ${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction/pico)
+# This was move-only in Phase 1a: the interface/ + pico/*/hal_*_pico.c HAL
+# bodies (hal_uart_pico.c included) had no consumers and were deliberately
+# NOT added to this library or wired into these targets -- only the moved
+# owner sources, which SaftyFW's real code already calls directly
+# (spi_owner_transfer, uart_owner_send, etc.), unchanged. Phase 1b (below)
+# is the first exception: relay_owner.c is now a real hal_gpio consumer, so
+# hal_gpio_pico.c + hal_status.c are wired in for real.
+# hal_gpio (HAL Phase 1b, docs/HW_ABSTRACTION_PLAN.md "hal_gpio" section):
+# relay_owner.c is now a hal_gpio client (interface/hal_gpio.h), backed on
+# target by pico/gpio/hal_gpio_pico.c. common/hal_status.c is the shared,
+# vendor-neutral hal_status_t name table every backend links against.
+set(HWABSTRACTION_DIR ${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction)
+set(HWABSTRACTION_PICO_DIR ${HWABSTRACTION_DIR}/pico)
 add_library(hwabstraction_pico STATIC
     ${HWABSTRACTION_PICO_DIR}/spi/spi_owner.c
     ${HWABSTRACTION_PICO_DIR}/uart/uart_owner.c
     ${HWABSTRACTION_PICO_DIR}/uart/uart_owner_tx_policy.c
+    ${HWABSTRACTION_PICO_DIR}/gpio/hal_gpio_pico.c
+    ${HWABSTRACTION_DIR}/common/hal_status.c
 )
 target_include_directories(hwabstraction_pico PUBLIC
     ${HWABSTRACTION_PICO_DIR}/spi
     ${HWABSTRACTION_PICO_DIR}/uart
+    ${HWABSTRACTION_PICO_DIR}/gpio
+    ${HWABSTRACTION_DIR}/interface
 )
 # TEMPORARY (HAL Phase 1b): spi_owner.c and uart_owner.c both still include
 # SaftyFW's own src/board_pins.h (a SaftyFW header, not part of

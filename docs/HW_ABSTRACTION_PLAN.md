@@ -814,6 +814,25 @@ landed the same day against the real SaftyFW consumers, syntax-checked by
 mismatch found for either -- the pico-sdk calls are exactly the shape both
 interfaces were written for.
 
+relay_owner.c wired up as a real hal_gpio consumer 2026-09-05 (first
+package of Phase 1b's SaftyFW half): its three `gpio_put(SAFTYFW_PIN_RELAY,
+...)` sites became `hal_gpio_set(...)`, and `relay_owner_start()` now
+re-asserts the fail-safe default itself via
+`hal_gpio_init_out(SAFTYFW_PIN_RELAY, false)` before creating the task --
+main()'s own raw pico-sdk GPIO6-low at boot step 1 is unchanged and still
+runs first, so this is a redundant-but-harmless second latch-before-
+direction pass, not a behavior change. That second call is what makes the
+"de-energized + latch-before-direction at init" property host-testable
+against relay_owner.c itself (`test/test_relay_owner_gpio_init.c`, backed by
+`firmware/hwAbstraction/host/fake_gpio.c`) instead of living only in main()'s
+untestable boot code. `hwabstraction_pico` in `firmware/SaftyFW/CMakeLists.txt`
+now really links `pico/gpio/hal_gpio_pico.c` + `common/hal_status.c` (the
+Phase 1a comment's "no consumers yet" carve-out no longer applies to gpio).
+No interface mismatch found. Negative-tested (swapped the init call for a
+direction-then-level pair, confirmed 2 FAILED, restored, confirmed 2157/2157
+pass -- baseline was 2145). All three SaftyFW/SaftyFW_slotA/SaftyFW_slotB
+targets and `compile_pico_backends.ps1` still build/link clean.
+
 Real pico-side uart/time bodies (`firmware/hwAbstraction/pico/{uart,time}/`)
 landed 2026-09-05, same script extended to cover both: hal_uart_pico.c
 wraps tasks/uart_owner.c's real IRQ ring/drop contract (documented

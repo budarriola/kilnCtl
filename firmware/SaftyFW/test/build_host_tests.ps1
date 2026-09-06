@@ -28,6 +28,15 @@ $commonIncDir = Join-Path $testDir "..\..\CommonFW\include"
 # the rest of the pico UART owner); it is still host-testable on its own
 # (no pico-sdk/FreeRTOS dependency), so this script now reaches it there.
 $hwAbstractionPicoUartDir = Join-Path $testDir "..\..\hwAbstraction\pico\uart"
+# HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md "hal_gpio" section): relay_owner.c
+# is now a hal_gpio client. hal_gpio.h/hal_status.h live in interface/; the
+# host backend under test is fake_gpio.c (host/); relay_owner.c's own host
+# build additionally needs a minimal FreeRTOS stub (stubs\freertos_min\) --
+# see that directory's FreeRTOS.h for why it exists and its narrow scope.
+$hwAbstractionInterfaceDir = Join-Path $testDir "..\..\hwAbstraction\interface"
+$hwAbstractionHostDir = Join-Path $testDir "..\..\hwAbstraction\host"
+$hwAbstractionCommonDir = Join-Path $testDir "..\..\hwAbstraction\common"
+$freertosMinStubDir = Join-Path $testDir "stubs\freertos_min"
 $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "saftyfw_host_tests.exe"
@@ -115,11 +124,29 @@ $sources = @(
     (Join-Path $srcDir "discrete_pin_policy.c"),
     (Join-Path $testDir "test_discrete_pin_policy.c"),
     (Join-Path $srcDir "commissioning_gate.c"),
-    (Join-Path $testDir "test_commissioning_gate.c")
+    (Join-Path $testDir "test_commissioning_gate.c"),
+    # HAL Phase 1b -- relay_owner.c host build, see the hwAbstraction* dir
+    # variables above for the extra /I paths this pulls in.
+    (Join-Path $srcDir "tasks\relay_owner.c"),
+    (Join-Path $hwAbstractionHostDir "fake_gpio.c"),
+    (Join-Path $hwAbstractionCommonDir "hal_status.c"),
+    (Join-Path $testDir "test_relay_owner_gpio_init_stubs.c"),
+    (Join-Path $testDir "test_relay_owner_gpio_init.c")
 )
 
-$sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
-$cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /EHsc /I `"$srcDir`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
+# A response file for the cl invocation itself (not just $sources) -- this
+# grew past cmd.exe's ~8191-char command-line limit once the HAL Phase 1b
+# relay_owner.c sources/includes were added ("The command line is too
+# long."), so the compiler args and source list are written to a file and
+# passed as @rsp instead of inline on the cmd.exe command line.
+$rspContent = "/nologo /W4 /WX /EHsc /I `"$srcDir`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
+    "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" " +
+    "/Fo:`"$outDir\\`" /Fe:`"$exe`" " +
+    (($sources | ForEach-Object { '"' + $_ + '"' }) -join " ")
+$rspPath = Join-Path $outDir "saftyfw_host_tests_cl.rsp"
+Set-Content -Path $rspPath -Value $rspContent -Encoding ascii -NoNewline
+
+$cmd = "call `"$vcvars`" x64 >nul && cl @`"$rspPath`""
 
 cmd.exe /c $cmd
 if ($LASTEXITCODE -ne 0) {

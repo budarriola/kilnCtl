@@ -38,10 +38,14 @@ typedef enum {
     RELAY_OWNER_STATE_TRIPPED,
 } relay_owner_state_t;
 
-// Creates the relay_owner task at SAFTYFW_PRIO_RELAY_OWNER, pinned to
-// SAFTYFW_CORE_TRIP_PATH. Must be called after gpio6 has already been driven
-// low by main() (boot sequence step 1) -- this task takes over ownership from
-// that point, it does not perform the initial safe-state drive itself.
+// Re-asserts the fail-safe default (de-energized, latch-before-direction --
+// see hal_gpio.h's contract) via hal_gpio_init_out(SAFTYFW_PIN_RELAY, false),
+// then creates the relay_owner task at SAFTYFW_PRIO_RELAY_OWNER, pinned to
+// SAFTYFW_CORE_TRIP_PATH. main() (boot sequence step 1) still independently
+// drives GPIO6 low with raw pico-sdk calls before the scheduler exists --
+// that ordering guarantee is unchanged; the call here is what makes the
+// de-energized-at-init property host-testable against this file's own
+// hal_gpio usage rather than living only in main()'s untestable boot code.
 // Returns false if task creation failed.
 //
 // The GRACE timer starts the moment relay_owner_task itself begins running
@@ -112,7 +116,7 @@ relay_owner_state_t relay_owner_get_state(void);
 // True only while GPIO6 is actually being driven high right now -- distinct
 // from relay_owner_state_t, which answers "would an energize command be
 // honoured" (ARMED), not "has one landed and is it still in effect". Set the
-// instant gpio_put(SAFTYFW_PIN_RELAY, 1) actually executes and cleared on
+// instant hal_gpio_set(SAFTYFW_PIN_RELAY, true) actually executes and cleared on
 // every path that drives it low (GRACE refusal, TRIPPED refusal, an explicit
 // energize(false), or a trip). This is what lets safety_core answer "is K4
 // energized" for real instead of a caller inferring it from the state enum,

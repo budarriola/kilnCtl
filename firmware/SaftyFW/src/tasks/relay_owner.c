@@ -24,7 +24,10 @@
 #include "queue.h"
 #include "task.h"
 
-#include "hardware/gpio.h"
+#include "hal_gpio.h" // HAL Phase 1b -- relay_owner is a hal_gpio client now;
+                       // see docs/HW_ABSTRACTION_PLAN.md's "hal_gpio" section
+                       // and this file's own comments below for the ordering
+                       // contract (latch-before-direction) this relies on.
 
 #include "board_pins.h"
 #include "relay_grace.h" // pure GRACE-timeout/TRIP-latch decisions, host-tested separately
@@ -67,7 +70,7 @@ static TaskHandle_t s_task_handle = NULL;
 static volatile relay_owner_state_t s_state = RELAY_OWNER_STATE_INIT;
 // True only while GPIO6 is actually driven high -- see relay_owner_is_
 // energized()'s doc comment. Written only by relay_owner_task, alongside
-// every gpio_put(SAFTYFW_PIN_RELAY, ...) call below so the two can never
+// every hal_gpio_set(SAFTYFW_PIN_RELAY, ...) call below so the two can never
 // drift apart.
 static volatile bool s_energized = false;
 
@@ -89,7 +92,7 @@ static void relay_owner_task(void *arg)
                     // GPIO6 high = energized (docs/HARDWARE.md Pico I/O
                     // map). This is the single line in the whole build that
                     // is allowed to do this with a caller-requested "true".
-                    gpio_put(SAFTYFW_PIN_RELAY, cmd.energize);
+                    hal_gpio_set(SAFTYFW_PIN_RELAY, cmd.energize);
                     s_energized = cmd.energize;
                 } else {
                     // GRACE: command accepted/tracked but never actually
@@ -101,7 +104,7 @@ static void relay_owner_task(void *arg)
                     // runs. In every one of these cases GPIO6 must not go
                     // high, so it is driven/left low explicitly rather than
                     // relying on cmd.energize being false.
-                    gpio_put(SAFTYFW_PIN_RELAY, 0);
+                    hal_gpio_set(SAFTYFW_PIN_RELAY, false);
                     s_energized = false;
                 }
                 break;
@@ -114,7 +117,7 @@ static void relay_owner_task(void *arg)
                 // boot_reason_latch_trip() immediately after this command
                 // is posted) happens in the same switch case so no other
                 // command can be interleaved between "off" and "latched".
-                gpio_put(SAFTYFW_PIN_RELAY, 0);
+                hal_gpio_set(SAFTYFW_PIN_RELAY, false);
                 s_energized = false;
                 // Unconditional latch -- see relay_grace.h's doc comment on
                 // relay_trip_transition() for why this is not a bug.
@@ -155,6 +158,19 @@ static void relay_owner_task(void *arg)
 
 bool relay_owner_start(void)
 {
+    // HAL Phase 1b: re-assert the fail-safe default (de-energized) through
+    // the hal_gpio contract before this task's own command loop starts.
+    // main() (boot step 1) already drives GPIO6 low with raw pico-sdk calls
+    // before the scheduler exists -- that ordering guarantee is unchanged
+    // and out of scope here -- so this call is redundant on real hardware
+    // (gpio_init()+level-then-direction, done twice, is idempotent and
+    // still glitch-free per hal_gpio.h's latch-before-direction contract).
+    // What it buys: relay_owner itself, not main.c, now owns and can be
+    // host-tested against the "de-energized + latch-before-direction" init
+    // property via fake_gpio (test/test_relay_owner_gpio_init.c), instead
+    // of that property living only in main.c's untestable boot sequence.
+    hal_gpio_init_out(SAFTYFW_PIN_RELAY, false);
+
     s_cmd_queue = xQueueCreate(RELAY_OWNER_QUEUE_LEN, sizeof(relay_owner_cmd_t));
     if (s_cmd_queue == NULL) {
         return false;
