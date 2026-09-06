@@ -1,7 +1,7 @@
 # firmware/hwAbstraction
 
 One hardware-abstraction tree shared by KilnFW (ESP32-S3) and SaftyFW
-(RP2040). Full history and phase-by-phase record: `docs/HW_ABSTRACTION_PLAN.md`.
+(RP2040). Full history and phase-by-phase record: `docs/HW_ABSTRACTION.md`.
 
 ```
 hwAbstraction/

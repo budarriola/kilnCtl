@@ -11,7 +11,7 @@
 // persist_locked() directly and exercise it via fake_kv.h's RAM-backed
 // hal_kv fake, plus fake_kv_set_write_safe_here() to simulate a
 // PSRAM-stacked caller (run_state.c's caller_stack_is_external() is now
-// !hal_kv_write_safe_here() -- see HW_ABSTRACTION_PLAN.md Phase 3 item 3,
+// !hal_kv_write_safe_here() -- see HW_ABSTRACTION.md Phase 3 item 3,
 // the nvs.h -> hal_kv.h migration).
 // Own executable (build_host_tests.ps1's own build+run step, /std:c11):
 // run_state.c uses _Static_assert, which MSVC's cl.exe only recognizes under

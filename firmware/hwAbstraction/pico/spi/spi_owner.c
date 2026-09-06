@@ -1,5 +1,5 @@
 // Moved here from firmware/SaftyFW/src/ by HAL Phase 1a
-// (docs/HW_ABSTRACTION_PLAN.md), body byte-identical apart from include
+// (docs/HW_ABSTRACTION.md), body byte-identical apart from include
 // paths.
 #include "spi_owner.h"
 
@@ -9,7 +9,7 @@
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
 
-// HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION_PLAN.md):
+// HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION.md):
 // this used to #include "board_pins.h" (a SaftyFW header) straight across
 // the hwAbstraction/SaftyFW boundary. Pin values are now passed in by the
 // caller at spi_owner_init() time (spi_owner_pins_t, spi_owner.h) instead --

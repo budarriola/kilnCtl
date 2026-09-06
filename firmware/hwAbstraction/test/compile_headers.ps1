@@ -4,7 +4,7 @@
 # WHY THIS EXISTS. The interface headers use the C11 `_Alignas` keyword and
 # a fixed-size opaque-storage pattern whose whole point is that a backend
 # growing its impl struct past the reserved size is a BUILD ERROR, not a
-# runtime memory bug (docs/HW_ABSTRACTION_PLAN.md "Opaque handles"). That
+# runtime memory bug (docs/HW_ABSTRACTION.md "Opaque handles"). That
 # only holds if the headers actually compile under MSVC with /std:c11 (the
 # std flag Phase 0 mandates on every host cl invocation that includes an
 # interface header) and if a dummy backend's _Static_assert genuinely fires

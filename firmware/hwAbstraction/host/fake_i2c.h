@@ -1,6 +1,6 @@
 /* fake_i2c.h -- host fake backend for hal_i2c.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "Host fakes (Phase 2 specs)" -- fake_i2c
+ * See docs/HW_ABSTRACTION.md "Host fakes (Phase 2 specs)" -- fake_i2c
  * (must): ordered record/replay, NACK/timeout injection.
  *
  * Handle storage: hal_i2c_bus_t/hal_i2c_device_t opaque storage is stamped

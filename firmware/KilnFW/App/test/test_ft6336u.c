@@ -1,5 +1,5 @@
 // Host test for App/drivers/hw/FT6336U.c's HAL Phase 1b migration
-// (docs/HW_ABSTRACTION_PLAN.md) -- FT6336U.c no longer talks to
+// (docs/HW_ABSTRACTION.md) -- FT6336U.c no longer talks to
 // driver/i2c_master.h or i2c_owner.c directly, it goes through
 // interface/hal_i2c.h, whose host backend is
 // firmware/hwAbstraction/host/fake_i2c.c. This is the first App/ driver

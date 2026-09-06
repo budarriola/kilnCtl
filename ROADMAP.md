@@ -89,7 +89,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
-| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict). Open: a hardware timing re-check and `esp_random.h`'s hal_sysinfo classification — see `docs/HW_ABSTRACTION_PLAN.md` | M16; `docs/HW_ABSTRACTION_PLAN.md` |
+| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict). Open: a hardware timing re-check and `esp_random.h`'s hal_sysinfo classification — see `docs/HW_ABSTRACTION.md` | M16; `docs/HW_ABSTRACTION.md` |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
 
 ### Blocked on hardware that does not exist yet
@@ -123,7 +123,7 @@ open is short:
 | [`firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md`](firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md) | Internal SRAM reclamation — allocator threshold, stack sizing, PSRAM relocation |
 | [`firmware/KilnFW/docs/WEB_UI_RESPONSIVE.md`](firmware/KilnFW/docs/WEB_UI_RESPONSIVE.md) | Browser UI across display sizes: token consolidation, shell layout, the responsive sweep |
 | [`firmware/KilnFW/docs/ARCHITECTURE.md`](firmware/KilnFW/docs/ARCHITECTURE.md) | Tasks, priorities, owner-task queues, single-writer ownership doctrine |
-| [`docs/HW_ABSTRACTION_PLAN.md`](docs/HW_ABSTRACTION_PLAN.md) | KilnFW `drivers/` layering into role directories, and the `firmware/hwAbstraction/` tree (interface/esp/pico/host) for both firmwares — M16 |
+| [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md) | KilnFW `drivers/` layering into role directories, and the `firmware/hwAbstraction/` tree (interface/esp/pico/host) for both firmwares — M16 |
 | [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–10 |
 | [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
 | [`firmware/SaftyFW/docs/ARCHITECTURE.md`](firmware/SaftyFW/docs/ARCHITECTURE.md) | Tasks, priorities, core affinity, logging transports |
@@ -221,7 +221,7 @@ zone arrangement (owner-confirmed 2026-09-03), the deferred S8 sanity rate
 is a control device only** — a PcTools/MCP surface driving its I/O expanders
 to flip relays, for shorting/opening thermocouples, opening heater
 connections, and simulating SSR lock-ups. It stays excluded from the HAL
-boundary and the `drivers/` reorg (M16/`HW_ABSTRACTION_PLAN.md`). See
+boundary and the `drivers/` reorg (M16/`HW_ABSTRACTION.md`). See
 `docs/UNIT_TEST_FIXTURE_PLAN.md` for the relay inventory, wire protocol, and
 the MCP control surface.
 
@@ -1381,8 +1381,8 @@ file maps and the "patterns worth copying" list:
 
 ## M16 — Source layering and hardware abstraction · *opened 2026-09-05, HAL work done, two items open*
 
-Two related reorganisations of the firmware trees, planned in full in
-[`docs/HW_ABSTRACTION_PLAN.md`](docs/HW_ABSTRACTION_PLAN.md). Both are done:
+Two related reorganisations of the firmware trees, documented in full in
+[`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md). Both are done:
 the `drivers/` directory move (`9f18ca5`, 2026-09-05) and all five HAL
 phases (0-4 — every interface has a real ESP and/or Pico backend plus a
 host fake, every named production consumer is migrated, and

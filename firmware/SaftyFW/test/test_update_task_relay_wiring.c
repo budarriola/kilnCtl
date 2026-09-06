@@ -15,7 +15,7 @@
 // caller of hal_gpio_set(SAFTYFW_PIN_RELAY, ...) outside relay_owner_task()'s
 // own internal state machine -- see relay_owner.c's own header comment,
 // "every hal_gpio_set(SAFTYFW_PIN_RELAY, ...) call ... so the two can never").
-// HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md) moved relay_owner.c from a raw
+// HAL Phase 1b (docs/HW_ABSTRACTION.md) moved relay_owner.c from a raw
 // gpio_put(SAFTYFW_PIN_RELAY, ...) write to hal_gpio_set(SAFTYFW_PIN_RELAY,
 // ...) -- the scan target below was updated to match; see
 // test_relay_owner_gpio_init.c for the new hal_gpio-backed init-order test

@@ -123,7 +123,7 @@ void board_temps_get_live(board_temps_t *out);
  * each call. `thermo_bus_or_null` is NULL if the bus never came up this boot
  * (get_live() then just reports thermo_count 0) -- this module does not own
  * the bus, it only borrows the pointer. Extracted so this hw-layer module
- * has no dependency on the HTTP/net stack (HW_ABSTRACTION_PLAN.md "drivers/
+ * has no dependency on the HTTP/net stack (HW_ABSTRACTION.md "drivers/
  * layering", item 3): board_temps_http.c's board_temps_http_start() calls
  * this once at bring-up instead of board_temps.c reaching up into
  * esp_http_server.h/wifi_provision_http.h itself. */

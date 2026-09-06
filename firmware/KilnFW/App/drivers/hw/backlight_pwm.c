@@ -10,7 +10,7 @@
 #include "stack_margin.h"
 
 // No screen_idle.h/display_power_cfg.h include here at all any more
-// (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 5) -- this hw-layer file
+// (HW_ABSTRACTION.md "drivers/ layering" item 5) -- this hw-layer file
 // reads screen state and brightness only through the backlight_pwm_query_fn
 // the caller supplies to backlight_pwm_init() (see backlight_pwm.h). That
 // also keeps the host-test build simple: it compiles the

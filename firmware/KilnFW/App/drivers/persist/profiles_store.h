@@ -1,5 +1,5 @@
 // profiles_store -- catalog storage accessors for fire profiles, split out
-// of profiles_http.h (see drivers/ layering item 12, docs/HW_ABSTRACTION_PLAN.md).
+// of profiles_http.h (see drivers/ layering item 12, docs/HW_ABSTRACTION.md).
 //
 // These three functions are pure NVS-backed storage/validation calls with no
 // httpd dependency; they are implemented in profiles_http.c (which still

@@ -5,7 +5,7 @@
 // version before and after, result").
 //
 // ota_record_append()/ota_record_load() (the NVS I/O, now hal_kv_* per
-// HW_ABSTRACTION_PLAN.md Phase 3 item 3) are NOT exercised here -- this
+// HW_ABSTRACTION.md Phase 3 item 3) are NOT exercised here -- this
 // file's own header comment already explains why the module as a whole
 // isn't host-tested (run_state.c/relay_cycles.c precedent), and this file
 // never #includes ota_record.c or opens a real (fake_kv-backed) partition,

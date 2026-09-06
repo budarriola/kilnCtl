@@ -147,7 +147,7 @@ esp_err_t ota_record_append(const ota_record_t *rec);
 // ever called ota_record_append()) -- including the size-mismatch case
 // above, which is deliberately reported the same way -- or the mapped
 // equivalent of any other genuine read failure via hal_status_to_esp_err()
-// (HW_ABSTRACTION_PLAN.md Phase 3 item 3's nvs.h -> hal_kv.h migration:
+// (HW_ABSTRACTION.md Phase 3 item 3's nvs.h -> hal_kv.h migration:
 // this file no longer calls nvs_*() directly, but keeps returning this
 // SPECIFIC code for "no record yet" rather than collapsing it into a
 // generic ESP_FAIL, since that is the value this header has always

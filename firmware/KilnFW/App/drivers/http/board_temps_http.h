@@ -1,5 +1,5 @@
 // board_temps_http -- the HTTP/net side of board_temps.c, split out per
-// HW_ABSTRACTION_PLAN.md "drivers/ layering" item 3: board_temps.c is a
+// HW_ABSTRACTION.md "drivers/ layering" item 3: board_temps.c is a
 // hw-layer driver (ESP32-S3 internal temperature sensor + MAX31856
 // cold-junction aggregation) and must not itself depend on esp_http_server.h
 // or wifi_provision_http.h. This file owns that dependency instead, and

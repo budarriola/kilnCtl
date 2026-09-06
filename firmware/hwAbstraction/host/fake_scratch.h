@@ -1,6 +1,6 @@
 /* fake_scratch.h -- host fake backend for hal_scratch.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico watchdog-scratch
+ * See docs/HW_ABSTRACTION.md "hal_scratch -- pico watchdog-scratch
  * registry" and the pico backend (pico/scratch/hal_scratch_pico.c) this
  * fake mirrors: a static claim table keyed on (slot, tag), slot 4 hard-
  * reserved (HAL_SCRATCH_SLOT_WATCHDOG_ENABLE, refused outright on claim/

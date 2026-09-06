@@ -3,7 +3,7 @@
  * Phase 1b ("adapt"): implements the Phase-0 interface against ESP-IDF
  * v6.0.2 (C:\esp\v6.0.2\esp-idf, components/nvs_flash/include/nvs.h and
  * nvs_flash.h), grounded in the real KilnFW consumers named in hal_kv.h's
- * own header comment and docs/HW_ABSTRACTION_PLAN.md's "hal_kv" section:
+ * own header comment and docs/HW_ABSTRACTION.md's "hal_kv" section:
  * kiln_cfg_store.c (nvs_open_from_partition + get/set_blob size-probe
  * pattern, KILN_NVS_PARTITION), zones_config_*.c and profiles_*.c (the
  * same blob pattern, versioned migration chains built on top of

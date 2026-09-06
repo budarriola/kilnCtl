@@ -33,7 +33,7 @@
 #     charter: firmware/SaftyFW/src/, not the whole firmware tree)
 #   - firmware/hwAbstraction/**/*.c        -> Phase 1a deliberately does NOT
 #     wire esp/, pico/, host/ backends into any real CMakeLists (see
-#     docs/HW_ABSTRACTION_PLAN.md) -- they are compiled only by the three
+#     docs/HW_ABSTRACTION.md) -- they are compiled only by the three
 #     hwAbstraction test scripts (compile_esp_backends.ps1,
 #     compile_pico_backends.ps1, test_host_fakes.ps1, all under
 #     firmware/hwAbstraction/test/). For this root only, being referenced
@@ -262,7 +262,7 @@ if (Test-Path $halRoot) {
         $rel = "firmware/hwAbstraction/$relFromHal"
         if ($relFromHal -match '^interface[\\/]') {
             if (-not (Test-Allowlisted -RelPath $rel)) {
-                $violations += "${rel}: firmware/hwAbstraction/interface/ is headers-only (see docs/HW_ABSTRACTION_PLAN.md); this .c must move to a backend directory"
+                $violations += "${rel}: firmware/hwAbstraction/interface/ is headers-only (see docs/HW_ABSTRACTION.md); this .c must move to a backend directory"
             }
             continue
         }

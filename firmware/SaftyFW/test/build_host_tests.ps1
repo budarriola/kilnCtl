@@ -23,12 +23,12 @@ $bootDir = Join-Path $testDir "..\bootloader"
 $updateDir = Join-Path $testDir "..\src\update"
 $commonSrcDir = Join-Path $testDir "..\..\CommonFW\src"
 $commonIncDir = Join-Path $testDir "..\..\CommonFW\include"
-# HAL Phase 1a (docs/HW_ABSTRACTION_PLAN.md) moved uart_owner_tx_policy.c/h
+# HAL Phase 1a (docs/HW_ABSTRACTION.md) moved uart_owner_tx_policy.c/h
 # out of src/tasks/ into firmware/hwAbstraction/pico/uart/ (colocated with
 # the rest of the pico UART owner); it is still host-testable on its own
 # (no pico-sdk/FreeRTOS dependency), so this script now reaches it there.
 $hwAbstractionPicoUartDir = Join-Path $testDir "..\..\hwAbstraction\pico\uart"
-# HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md "hal_gpio" section): relay_owner.c
+# HAL Phase 1b (docs/HW_ABSTRACTION.md "hal_gpio" section): relay_owner.c
 # is now a hal_gpio client. hal_gpio.h/hal_status.h live in interface/; the
 # host backend under test is fake_gpio.c (host/); relay_owner.c's own host
 # build additionally needs a minimal FreeRTOS stub (stubs\freertos_min\) --
@@ -38,7 +38,7 @@ $hwAbstractionHostDir = Join-Path $testDir "..\..\hwAbstraction\host"
 $hwAbstractionCommonDir = Join-Path $testDir "..\..\hwAbstraction\common"
 $freertosMinStubDir = Join-Path $testDir "stubs\freertos_min"
 # HAL Phase 1b -- max31856.c host build, now a hal_spi client
-# (docs/HW_ABSTRACTION_PLAN.md pico spi_owner adapter). Its only pico-sdk
+# (docs/HW_ABSTRACTION.md pico spi_owner adapter). Its only pico-sdk
 # dependency left is the raw hardware/gpio.h CS/~FAULT bring-up in
 # max31856_init() (outside this migration's scope), stubbed to inert no-ops
 # by this dir's hardware/gpio.h -- see that file's own comment.
@@ -121,7 +121,7 @@ $sources = @(
     (Join-Path $testDir "test_clear_trip_diag_codec.c"),
     (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),
     (Join-Path $testDir "test_watchdog_overdue_diag_codec.c"),
-    # HAL Phase 3 item 1 (docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico
+    # HAL Phase 3 item 1 (docs/HW_ABSTRACTION.md "hal_scratch -- pico
     # watchdog-scratch registry"): boot_reason.c/clear_trip_diag.c/
     # watchdog_overdue_diag.c are now hal_scratch.h clients instead of
     # poking watchdog_hw->scratch[] directly, so all three are host-
@@ -159,7 +159,7 @@ $sources = @(
     (Join-Path $testDir "test_relay_owner_gpio_init_stubs.c"),
     (Join-Path $testDir "test_relay_owner_gpio_init.c"),
     # HAL Phase 1b -- current_sense.c host build, now a hal_adc client
-    # (docs/HW_ABSTRACTION_PLAN.md "hal_adc -- pico-only"). Only needs the
+    # (docs/HW_ABSTRACTION.md "hal_adc -- pico-only"). Only needs the
     # freertos_min stub's xTaskGetTickCount()/portTICK_PERIOD_MS (already
     # pulled in above for relay_owner.c) plus fake_adc.c as its backend --
     # no new stub file, unlike relay_owner.c's task-creation surface.

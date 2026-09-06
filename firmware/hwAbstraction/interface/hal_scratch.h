@@ -1,5 +1,5 @@
 /* hal_scratch.h -- RP2040 watchdog scratch-register registry. Pico-only.
- * See docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico watchdog-scratch
+ * See docs/HW_ABSTRACTION.md "hal_scratch -- pico watchdog-scratch
  * registry".
  *
  * WHY THIS EXISTS. All 8 watchdog_hw->scratch[] registers are already

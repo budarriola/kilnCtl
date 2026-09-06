@@ -5,8 +5,8 @@
  * interface/hal_spi.h, but the display driver (ILI9488_start(),
  * panel_spi_bringup.c) still takes a raw spi_owner_t* -- it shares the same
  * physical SPI bus/host as the thermocouples (one bus, four chip selects;
- * docs/HW_ABSTRACTION_PLAN.md "Bus-init semantics"), and per this migration's
- * scope (see MAX31856.c's own header comment / docs/HW_ABSTRACTION_PLAN.md
+ * docs/HW_ABSTRACTION.md "Bus-init semantics"), and per this migration's
+ * scope (see MAX31856.c's own header comment / docs/HW_ABSTRACTION.md
  * Phase 2 status) the display is left on spi_owner_t for now -- migrating it
  * too is a separate, listed follow-up, not folded into this SPI-arbiter-
  * duplication fix.

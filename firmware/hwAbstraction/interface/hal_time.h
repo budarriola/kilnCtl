@@ -1,5 +1,5 @@
 /* hal_time.h -- portable monotonic time interface. Both ESP and pico.
- * See docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm / hal_sysinfo".
+ * See docs/HW_ABSTRACTION.md "hal_time / hal_wdt / hal_pwm / hal_sysinfo".
  *
  * Consumer census: ESP side calls esp_timer_get_time() (microsecond
  * monotonic since boot) at 44 sites across 19 files, plus the ubiquitous

@@ -1,5 +1,5 @@
 // test_scratch_migration.c -- host tests for HAL Phase 3 item 1
-// (docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico watchdog-scratch
+// (docs/HW_ABSTRACTION.md "hal_scratch -- pico watchdog-scratch
 // registry"): boot_reason.c, clear_trip_diag.c and watchdog_overdue_diag.c
 // now go through hal_scratch_write_u32/read_u32/clear/claim instead of
 // poking watchdog_hw->scratch[] directly. This links the REAL production

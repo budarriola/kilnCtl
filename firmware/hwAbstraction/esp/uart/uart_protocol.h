@@ -161,7 +161,7 @@ typedef struct {
     /* Points at owner->hal -- uart_owner_t now embeds a real,
      * driver-installed hal_uart_t (2026-09-06 uart collapse) instead of this
      * layer attaching a second, non-owning handle to the same port
-     * (hal_uart_attach(), deleted -- see docs/HW_ABSTRACTION_PLAN.md's
+     * (hal_uart_attach(), deleted -- see docs/HW_ABSTRACTION.md's
      * "delete hal_uart_attach()" item). frame_and_send() sends through this
      * instead of uart_owner_transfer() (Phase 1b). One handle per port now:
      * never hal_uart_deinit'd here -- owner still owns the driver's

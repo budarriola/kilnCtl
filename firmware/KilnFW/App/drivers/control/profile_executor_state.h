@@ -1,5 +1,5 @@
 // profile_executor_state.h -- narrow, control-layer "executor state" query
-// surface split out of profile_executor.h (HW_ABSTRACTION_PLAN.md "drivers/
+// surface split out of profile_executor.h (HW_ABSTRACTION.md "drivers/
 // layering" items 4 and 6). Bridge/hw code (gpio_probe.c, boot_button.c) and
 // safety code (safety_link_frames.c, danger_mode.c) only ever need to ASK
 // "what is the executor doing right now" -- profile_exec_state_t/

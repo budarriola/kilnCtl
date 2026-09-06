@@ -1,5 +1,5 @@
 // zones_config_query -- narrow slice of zones_config_accessors.h
-// (HW_ABSTRACTION_PLAN.md pre-reorg layering item 11, 2026-09-05).
+// (HW_ABSTRACTION.md pre-reorg layering item 11, 2026-09-05).
 // zones_config_accessors.h is a 1300+ line persist-tier header; sim_backend.c
 // (a hardware-abstraction-boundary file) only ever needed one read-only
 // query out of it -- zones_config_get_thermo_count(). This header holds

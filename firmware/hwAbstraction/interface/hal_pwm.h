@@ -1,5 +1,5 @@
 /* hal_pwm.h -- PWM output. ESP LEDC only today. See
- * docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm / hal_sysinfo"
+ * docs/HW_ABSTRACTION.md "hal_time / hal_wdt / hal_pwm / hal_sysinfo"
  * ("hal_pwm: backlight LEDC only. Thin, last.").
  *
  * Consumer census: backlight_pwm.c is the ONLY LEDC user in this tree

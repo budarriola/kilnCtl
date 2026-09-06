@@ -111,7 +111,7 @@ $sources = @(
     (Join-Path $hwAbsDir "host/fake_sysinfo.c"),
     (Join-Path $hwAbsDir "host/fake_time.c"),
     (Join-Path $hwAbsDir "host/fake_wdt.c"),
-    # HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h migration):
+    # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration):
     # boot_guard.c/kiln_cfg_store.c/watchdog_cfg.c/ramp_assist_cfg.c (each
     # #included directly by its own test_*.c above) and ota_record.c (linked
     # as a real object further down this list) now call hal_kv_*() instead
@@ -128,7 +128,7 @@ $sources = @(
     (Join-Path $driversDir "control/iter_tune.c")
 )
 
-# hal_time migration (HW_ABSTRACTION_PLAN.md item 5) pushed the "main"
+# hal_time migration (HW_ABSTRACTION.md item 5) pushed the "main"
 # executable's inline source-file list back over cmd.exe's ~8191-char
 # command-line limit (same failure mode this file's own flags-.rsp comment
 # below already describes for the /I flags, just on the $sources side this
@@ -276,7 +276,7 @@ $cmd2 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
         "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
-# fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION_PLAN.md Phase 3
+# fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
 # item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
 # call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
 # test_zones_http.c's own nvs_test_enable()/nvs_test_clear() shims (see that
@@ -328,7 +328,7 @@ $cmd4 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $driversDir 'control/cone_table.c')`" " +
         "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
-# HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
+# HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
 # 4: control/, safety/, profiles_http.c, ui_page_diagnostics.c): this
 # executable links adaptive_tune.c/adaptive_tune_model.c/adaptive_tune_ki.c
 # for real (see above), and adaptive_tune.c now calls hal_kv_*() and
@@ -397,7 +397,7 @@ $cmd7 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
         "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
-# HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
+# HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
 # 4): profiles_http.c (#included directly above) now calls hal_kv_*() and
 # hal_status_to_esp_err() instead of nvs_*() directly, so this executable
 # needs the host hal_kv backend and the shared esp_err_t<->hal_status_t
@@ -438,14 +438,14 @@ $cmd8 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
         "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
-# hal_time migration (HW_ABSTRACTION_PLAN.md item 5): ota_http_pico.c, one of
+# hal_time migration (HW_ABSTRACTION.md item 5): ota_http_pico.c, one of
 # the files #included directly into test_ota_http.c above, now calls
 # hal_time_now_us() instead of esp_timer_get_time(); fake_time.c supplies it.
 # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): ota_http.c's
 # recovery-exit/rollback/pico-rollback reboot task starts now call
 # stack_margin_register() (registration only, no size change), and this
 # executable #includes ota_http.c directly.
-# fake_kv.c added HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h
+# fake_kv.c added HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h
 # migration): ota_record.c, linked in for real above, now calls hal_kv_*()
 # instead of nvs_*() directly. hal_esp_common.c added in the same pass's
 # flash-safety review follow-up: ota_record.c now also calls
@@ -597,10 +597,10 @@ $cmd14 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
         "$($slExtra -join ' ')"
-# hal_time migration (HW_ABSTRACTION_PLAN.md item 5): safety_link_commands.c,
+# hal_time migration (HW_ABSTRACTION.md item 5): safety_link_commands.c,
 # one of the files #included by test_safety_link_compile.c above, now calls
 # hal_time_now_us() instead of esp_timer_get_time(); fake_time.c supplies it.
-# esp_random.h migration (HW_ABSTRACTION_PLAN.md, 2026-09-06): safety_link.c
+# esp_random.h migration (HW_ABSTRACTION.md, 2026-09-06): safety_link.c
 # now calls hal_sysinfo_random_u32() instead of esp_random() for esp_boot_id
 # -- fake_sysinfo.c supplies it (unscripted, so this returns the fixed
 # 0xA5A5A5A5 fallback; the value itself is diagnostic-only, never asserted
@@ -675,7 +675,7 @@ $cmd17 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
         "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
-# HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
+# HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
 # 4): adaptive_tune.c (#included directly by test_adaptive_tune.c) now calls
 # hal_kv_*() and hal_status_to_esp_err() instead of nvs_*() directly, so this
 # executable needs the host hal_kv backend and the shared
@@ -719,10 +719,10 @@ $cmd19 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
         "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
-# hal_time migration (HW_ABSTRACTION_PLAN.md item 5): both run_state.c and
+# hal_time migration (HW_ABSTRACTION.md item 5): both run_state.c and
 # relay_cycles.c now call hal_time_now_us() instead of esp_timer_get_time();
 # fake_time.c supplies it.
-# fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION_PLAN.md Phase 3
+# fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
 # item 3 (nvs.h -> hal_kv.h migration): BOTH run_state.c and relay_cycles.c
 # now call hal_kv_*() instead of nvs_*() directly (test_run_state.c/
 # test_relay_cycles.c no longer use stubs/nvs.h at all), and both also call
@@ -811,7 +811,7 @@ $cmd23 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$pbObjDir\\`" /Fe:`"$exe23`" `"$(Join-Path $testDir 'test_profiles_builtin.c')`" " +
         "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
-# fake_kv.c/hal_status.c added HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h ->
+# fake_kv.c/hal_status.c added HW_ABSTRACTION.md Phase 3 item 3 (nvs.h ->
 # hal_kv.h migration): profiles_builtin.c's hidden-mask persistence now calls
 # hal_kv_get_u32()/hal_kv_set_u32()/hal_kv_init_partition() instead of
 # nvs_get_u32()/nvs_set_u32()/nvs_flash_init_partition() directly, so this
@@ -825,7 +825,7 @@ $cmd23 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 Invoke-HostTestExe -Name "profiles_builtin" -ExePath $exe23 -BuildCmd $cmd23
 
 # ---- test_ft6336u.c: its own 24th, separate executable --------------------
-# HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md): FT6336U.c was rewritten to go
+# HAL Phase 1b (docs/HW_ABSTRACTION.md): FT6336U.c was rewritten to go
 # through interface/hal_i2c.h instead of driver/i2c_master.h + i2c_owner.c
 # directly -- see FT6336U.c/.h's own header comments. This links FT6336U.c
 # as a real translation unit (own seam is entirely public API, no need to
@@ -848,7 +848,7 @@ $cmd24 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 Invoke-HostTestExe -Name "ft6336u" -ExePath $exe24 -BuildCmd $cmd24
 
 # ---- test_max31856_hal_spi.c: its own 25th, separate executable -----------
-# HAL Phase 1b CORRECTED (docs/HW_ABSTRACTION_PLAN.md, 2026-09-05): MAX31856.c
+# HAL Phase 1b CORRECTED (docs/HW_ABSTRACTION.md, 2026-09-05): MAX31856.c
 # was rewritten to go through interface/hal_spi.h instead of driving
 # esp_spi_owner.c's spi_owner_t directly -- see MAX31856.c/.h's own header
 # comments (this was the fix for hal_spi_esp.c duplicating esp_spi_owner.c's

@@ -268,7 +268,7 @@ def main(argv):
     # scans nothing and this lint reports "clean" no matter what any driver
     # file does, exactly the "splits break filename-keyed checks" class (see
     # project memory / b9a5112) this repo has hit before. Found and fixed
-    # 2026-09-06 auditing HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h ->
+    # 2026-09-06 auditing HW_ABSTRACTION.md Phase 3 item 3 (nvs.h ->
     # hal_kv.h migration) -- this lint had been vacuously passing since the
     # reorg landed.
     all_driver_files = sorted(drivers_dir.rglob("*.c"))

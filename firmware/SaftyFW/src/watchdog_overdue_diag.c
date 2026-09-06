@@ -6,7 +6,7 @@
 #include <stddef.h> // NULL, for the hal_scratch_read_u32() magic_ok arg below
 
 // HAL Phase 3 item 1: routed through hal_scratch.h instead of poking
-// watchdog_hw->scratch[] directly -- see docs/HW_ABSTRACTION_PLAN.md
+// watchdog_hw->scratch[] directly -- see docs/HW_ABSTRACTION.md
 // "hal_scratch -- pico watchdog-scratch registry". This module claims
 // slot 5 under tag 0xD9; main.c's vApplicationStackOverflowHook is slot 5's
 // other legitimate co-owner (tag 0xE3, claimed in main.c) but that write

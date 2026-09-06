@@ -1,6 +1,6 @@
 /* hal_status.h -- portable HAL status codes.
  *
- * Backend-independent. See docs/HW_ABSTRACTION_PLAN.md "hal_status_t" for
+ * Backend-independent. See docs/HW_ABSTRACTION.md "hal_status_t" for
  * the derivation of this table against every consumer that branches on a
  * specific error code (not just OK/fail).
  */
@@ -24,7 +24,7 @@ extern "C" {
  * core_id field. Hoisted here (rather than left to each backend to invent
  * its own) after a 0-means-tskNO_AFFINITY convention in hal_spi_esp.c made
  * ESP core 0 unrepresentable -- see hal_spi_bus_cfg_t.core_id and
- * docs/HW_ABSTRACTION_PLAN.md. Numerically equal to FreeRTOS's
+ * docs/HW_ABSTRACTION.md. Numerically equal to FreeRTOS's
  * tskNO_AFFINITY (-1) so ESP backends can pass it straight through; pico/
  * host backends that have no affinity concept simply ignore it. */
 #define HAL_CORE_ANY (-1)

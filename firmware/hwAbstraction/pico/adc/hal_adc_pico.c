@@ -7,7 +7,7 @@
  * move lands.
  *
  * This is the interface's real, validated consumer (hal_adc.h and
- * docs/HW_ABSTRACTION_PLAN.md's hal_adc section both describe it as
+ * docs/HW_ABSTRACTION.md's hal_adc section both describe it as
  * pico-only, wrapping current_task.c/current_sense.c): shape checked
  * against firmware/SaftyFW/src/tasks/current_task.c:98-104
  * (adc_init()/adc_gpio_init() x3 at bring-up) and

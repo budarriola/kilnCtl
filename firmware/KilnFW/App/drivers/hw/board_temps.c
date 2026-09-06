@@ -10,7 +10,7 @@
 
 static const char *TAG = "board_temps";
 
-/* 2026-09-06 migration (HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm
+/* 2026-09-06 migration (HW_ABSTRACTION.md "hal_time / hal_wdt / hal_pwm
  * / hal_sysinfo" item 4, "board_temps stays open" note): this module used to
  * own its own temperature_sensor_handle_t and call
  * temperature_sensor_install()/_enable()/_get_celsius() directly -- the same
@@ -116,7 +116,7 @@ static struct {
 } s_bt;
 
 /* board_temps.c is a hw-layer driver and must not depend on the HTTP/net
- * stack (HW_ABSTRACTION_PLAN.md "drivers/ layering", item 3) -- registering
+ * stack (HW_ABSTRACTION.md "drivers/ layering", item 3) -- registering
  * GET /api/board_temps and its JSON handler now lives in board_temps_http.c
  * instead, which calls this setter once at bring-up rather than this file
  * reaching up into esp_http_server.h/wifi_provision_http.h itself. Also

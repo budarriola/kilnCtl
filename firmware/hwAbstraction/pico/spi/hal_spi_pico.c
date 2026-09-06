@@ -17,7 +17,7 @@
  * thin "have I been initialized/attached" tag, not per-instance state, the
  * same shape hal_uart_pico.c uses for uart_owner.c's equally-singleton ring.
  *
- * INTERFACE MISMATCH notes (reported per docs/HW_ABSTRACTION_PLAN.md rather
+ * INTERFACE MISMATCH notes (reported per docs/HW_ABSTRACTION.md rather
  * than silently widening hal_spi.h):
  *
  * 1. hal_spi_bus_init()'s cfg carries queue_len/task_priority/stack_depth/
@@ -78,7 +78,7 @@
 
 #include "spi_owner.h"
 
-/* HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION_PLAN.md):
+/* HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION.md):
  * this used to #include "board_pins.h" (a SaftyFW header), same as
  * spi_owner.c's former top-of-file note. Pin values now arrive via
  * hal_spi_bus_cfg_t/hal_spi_device_cfg_t at init/attach time instead --

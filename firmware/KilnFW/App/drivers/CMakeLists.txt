@@ -321,7 +321,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/readiness_http.c"
                        "hw/board_temps.c"
                        # board_temps_http.c split out of board_temps.c 2026-09-05
-                       # (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 3): the
+                       # (HW_ABSTRACTION.md "drivers/ layering" item 3): the
                        # httpd handler/registration, kept apart from the hw-layer
                        # driver so board_temps.c has no esp_http_server.h/
                        # wifi_provision_http.h dependency.

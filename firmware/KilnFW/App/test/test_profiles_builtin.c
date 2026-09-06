@@ -28,7 +28,7 @@ int g_test_count = 0;
 
 // profiles_builtin.c's hidden-mask persistence (profiles_builtin_start()/
 // profiles_builtin_set_hidden()) now calls hal_kv_get_u32()/hal_kv_set_u32()
-// (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the nvs.h -> hal_kv.h migration)
+// (HW_ABSTRACTION.md Phase 3 item 3, the nvs.h -> hal_kv.h migration)
 // -- none of this file's tests exercise that path, but the symbols must
 // still resolve at link time, so this executable links the real fake_kv.c
 // backend (build_host_tests.ps1's exe23) rather than hand-rolling

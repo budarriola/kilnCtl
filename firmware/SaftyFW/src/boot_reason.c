@@ -5,7 +5,7 @@
 #include "boot_reason.h"
 
 // HAL Phase 3 item 1: routed through hal_scratch.h instead of poking
-// watchdog_hw->scratch[] directly -- see docs/HW_ABSTRACTION_PLAN.md
+// watchdog_hw->scratch[] directly -- see docs/HW_ABSTRACTION.md
 // "hal_scratch -- pico watchdog-scratch registry". This module owns
 // slots 0/1 (claimed in main.c alongside the other real owners).
 #include "hal_scratch.h"

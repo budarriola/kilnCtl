@@ -1,6 +1,6 @@
 /* fake_gpio.h -- host fake backend for hal_gpio.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "Host fakes (Phase 2 specs)" -- fake_gpio
+ * See docs/HW_ABSTRACTION.md "Host fakes (Phase 2 specs)" -- fake_gpio
  * (must): per-pin level AND direction history (order-checkable CS and
  * latch-before-direction sequencing), link-shared state instead of the old
  * static-per-TU counters.

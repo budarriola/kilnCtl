@@ -6,7 +6,7 @@
  * syntax-only compile check that stands in for that until Phase 1a's real
  * move lands.
  *
- * Clients this backend must serve unchanged (docs/HW_ABSTRACTION_PLAN.md
+ * Clients this backend must serve unchanged (docs/HW_ABSTRACTION.md
  * "hal_gpio" section, validated against firmware/SaftyFW/src): the relay
  * output pin (tasks/relay_owner.c writes it, main.c:151-153 brings it up),
  * SPI0 CS0 (spi_owner.c), MAX31856 CS + fault-input pins (max31856.c),
@@ -24,7 +24,7 @@
  * OE bit, never the output-data register. So calling gpio_put() BEFORE
  * gpio_set_dir(..., GPIO_OUT) is glitch-free on this backend, matching
  * every real SaftyFW call site already in the tree today (main.c:151-153
- * does put-then-set_dir; see docs/HW_ABSTRACTION_PLAN.md's "Init ordering
+ * does put-then-set_dir; see docs/HW_ABSTRACTION.md's "Init ordering
  * audit" -- bootloader/main.c's reversed order is a separate, already
  * flagged, out-of-scope bug). hal_gpio_init_out() below relies on exactly
  * this ordering.
@@ -92,7 +92,7 @@ hal_status_t hal_gpio_set_pull(int num, hal_gpio_pull_t pull) {
     return HAL_OK;
 }
 
-/* Interface-mismatch notes (docs/HW_ABSTRACTION_PLAN.md asks these to be
+/* Interface-mismatch notes (docs/HW_ABSTRACTION.md asks these to be
  * reported, not silently papered over by widening hal_gpio.h):
  *
  * 1. Pin-mux selection (gpio_set_function(), GPIO_FUNC_SPI/GPIO_FUNC_UART)

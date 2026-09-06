@@ -13,7 +13,7 @@
 // way.
 //
 // Uses fake_kv.h's RAM-backed hal_kv fake to simulate actual persistence
-// across simulated reboots (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the
+// across simulated reboots (HW_ABSTRACTION.md Phase 3 item 3, the
 // nvs.h -> hal_kv.h migration; this file previously used stubs/nvs.h's
 // opt-in "real" blob store, same as test_boot_guard.c's original form).
 #include <string.h>

@@ -1,6 +1,6 @@
 /* hal_i2c.h -- portable I2C bus/device interface. ESP-only today (SaftyFW
  * has no I2C); a pico backend is future work modeled on spi_owner's mutex
- * pattern. See docs/HW_ABSTRACTION_PLAN.md "hal_i2c".
+ * pattern. See docs/HW_ABSTRACTION.md "hal_i2c".
  *
  * Threading/ownership contract:
  *  - Single-writer per bus, same as hal_spi: one in-flight transfer per bus
@@ -32,7 +32,7 @@
 extern "C" {
 #endif
 
-/* Reservations per docs/HW_ABSTRACTION_PLAN.md "Opaque handles": bus 128 B
+/* Reservations per docs/HW_ABSTRACTION.md "Opaque handles": bus 128 B
  * (headroom for a future static per-call semaphore), device 16 B (measured
  * today: i2c_owner_t ~20 B on 32-bit -- bus reservation covers growth). */
 #define HAL_I2C_BUS_STORAGE_BYTES    128

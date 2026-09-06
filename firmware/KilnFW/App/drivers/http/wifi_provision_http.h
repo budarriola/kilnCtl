@@ -9,7 +9,7 @@
 // anything the client sent.  A malformed request gets a 4xx, not a crash.
 //
 // wifi_provision_http_start() moved to wifi_provision_state.h
-// (docs/HW_ABSTRACTION_PLAN.md "drivers/ layering" item 10) -- wifi_prov.c
+// (docs/HW_ABSTRACTION.md "drivers/ layering" item 10) -- wifi_prov.c
 // only ever needed that one accessor, not the whole httpd-handler header.
 // Included below so existing callers of this header are unaffected; the
 // implementation stays in wifi_provision_http.c.

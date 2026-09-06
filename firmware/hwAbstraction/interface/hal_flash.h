@@ -2,10 +2,10 @@
  * config_store_flash.c (SaftyFW's versioned, CRC'd configuration record).
  * ESP is explicitly out of scope here: KilnFW's own raw-flash touchpoints
  * are esp_partition_* / esp_ota_* (OTA slot writes, partition table reads),
- * which docs/HW_ABSTRACTION_PLAN.md's hal_sysinfo section states plainly
+ * which docs/HW_ABSTRACTION.md's hal_sysinfo section states plainly
  * are read-only there -- "OTA writes are out of scope". This header adds
  * nothing for that surface; it exists solely for the pico_flash_range_* /
- * XIP_BASE family SaftyFW uses. See docs/HW_ABSTRACTION_PLAN.md "hal_flash
+ * XIP_BASE family SaftyFW uses. See docs/HW_ABSTRACTION.md "hal_flash
  * -- pico backend for config_store_flash.c".
  *
  * WHAT THIS IS: the raw sector-erase / page-program / byte-read primitive,
@@ -24,7 +24,7 @@
  * (see hal_kv.h's own "why pico is excluded" comment): forcing that policy
  * down into this interface would bloat it with slot/seq/ARMED concepts no
  * other flash consumer needs. config_store_flash.c's eventual rebase onto
- * this header (docs/HW_ABSTRACTION_PLAN.md Phase 3 item 2) must keep the
+ * this header (docs/HW_ABSTRACTION.md Phase 3 item 2) must keep the
  * ARMED gate, the seq/CRC log, and the REFUSE policy intact at that layer,
  * not bypassed or generalized into a namespace/key store here.
  *
@@ -131,7 +131,7 @@ extern "C" {
 #define HAL_FLASH_ERASE_SIZE   4096u
 #define HAL_FLASH_PROGRAM_SIZE 256u
 
-/* Reservation per docs/HW_ABSTRACTION_PLAN.md "Opaque handles": this
+/* Reservation per docs/HW_ABSTRACTION.md "Opaque handles": this
  * interface is stateless per call (offset-addressed, not handle-addressed
  * like hal_kv's open/close pairing), so no handle type carries backend
  * state today. Reserved anyway, sized like hal_uart's 64 B bus-scale
@@ -192,7 +192,7 @@ hal_status_t hal_flash_read(hal_flash_region_t *r, uint32_t offset,
                              void *buf, size_t len);
 
 /* Zero-copy variant of hal_flash_read(), added for update_task.c's rebase
- * (docs/HW_ABSTRACTION_PLAN.md item 8's deferred "update_task.c's
+ * (docs/HW_ABSTRACTION.md item 8's deferred "update_task.c's
  * flash_range_erase()/_program()/XIP_BASE" note): the whole-slot read-back
  * CRC in UPDATE_END verification reads up to BOOTLOADER_SLOT_FLASH_SIZE
  * (832 KiB) in one pass to feed bootloader_crc32(), which takes a single

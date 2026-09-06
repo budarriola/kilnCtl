@@ -34,13 +34,13 @@ typedef struct {
 
 /* uart_owner_request_t and the request-queue/worker-task pair
  * (uart_owner_task()) it fed were deleted 2026-09-06 (uart collapse,
- * docs/HW_ABSTRACTION_PLAN.md): uart_owner_transfer() was their only
+ * docs/HW_ABSTRACTION.md): uart_owner_transfer() was their only
  * caller, and a 2026-09-05 grep-confirmed audit (see uart_owner.c's prior
  * header comment on this, reproduced in git history) already found
  * uart_owner_transfer() had zero real callers left in KilnFW -- every path
  * that used to reach it goes through uart_protocol.c's hal_uart_send_
  * blocking() instead, on this owner's own `hal` handle directly (hal_uart_
- * attach() deleted, docs/HW_ABSTRACTION_PLAN.md). `queue_len` is kept in
+ * attach() deleted, docs/HW_ABSTRACTION.md). `queue_len` is kept in
  * uart_owner_init's
  * signature for source compatibility with existing call sites but is no
  * longer used for anything. */

@@ -1,6 +1,6 @@
 /* fake_time.h -- host fake backend for hal_time.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "Host fakes (Phase 2 specs)" -- fake_time
+ * See docs/HW_ABSTRACTION.md "Host fakes (Phase 2 specs)" -- fake_time
  * (must): explicit advance; quantized/dithered inputs -- the idealized-input
  * bug class must not be reintroduced (project memory:
  * project_idealized_test_input_bug_class.md).

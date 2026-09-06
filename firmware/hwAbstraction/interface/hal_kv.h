@@ -1,5 +1,5 @@
 /* hal_kv.h -- opaque key/value store interface. ESP-only, wraps NVS. Pico
- * explicitly excluded. See docs/HW_ABSTRACTION_PLAN.md "hal_kv -- ESP-only,
+ * explicitly excluded. See docs/HW_ABSTRACTION.md "hal_kv -- ESP-only,
  * wraps NVS. Pico explicitly excluded."
  *
  * Why pico is excluded: SaftyFW's config_store is not a KV store -- it is a
@@ -81,7 +81,7 @@
 extern "C" {
 #endif
 
-/* Reservation per docs/HW_ABSTRACTION_PLAN.md "Opaque handles": sized to
+/* Reservation per docs/HW_ABSTRACTION.md "Opaque handles": sized to
  * comfortably exceed an nvs_handle_t (a 32-bit integer on ESP-IDF today)
  * plus bookkeeping (namespace/partition identity for close/commit),
  * matching hal_uart's 64 B bus-scale reservation. */

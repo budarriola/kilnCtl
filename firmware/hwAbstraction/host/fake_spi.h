@@ -1,6 +1,6 @@
 /* fake_spi.h -- host fake backend for hal_spi.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "Host fakes (Phase 2 specs)" -- fake_spi
+ * See docs/HW_ABSTRACTION.md "Host fakes (Phase 2 specs)" -- fake_spi
  * (must): ordered transfer record (buf/len/flags/cs/polling-vs-queued);
  * injectable enqueue-timeout, completion-timeout, pool exhaustion with
  * distinct side effects (wedge latch vs not, refcount invariants);

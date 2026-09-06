@@ -3,7 +3,7 @@
 // section 0.5 explicitly settled onto this same page rather than a
 // separate one.
 //
-// HW_ABSTRACTION_PLAN.md "drivers/ layering" item 1 (2026-09-05): this
+// HW_ABSTRACTION.md "drivers/ layering" item 1 (2026-09-05): this
 // header used to also carry every zones_config_*()/zones_current_sweep_*()/
 // zones_ct_*() persist-layer accessor, so the 18+ control/safety/persist
 // modules that only wanted those had to include an HTTP-page header to get

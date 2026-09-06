@@ -2,7 +2,7 @@
 // UART1, IRQ driven both ways, never blocking a caller.
 //
 // Moved here from firmware/SaftyFW/src/tasks/ by HAL Phase 1a
-// (docs/HW_ABSTRACTION_PLAN.md), body byte-identical apart from include
+// (docs/HW_ABSTRACTION.md), body byte-identical apart from include
 // paths. uart_owner.h renamed to hal_uart_pico_internal.h in the same move
 // to avoid colliding with the ESP-side uart_owner.h moving into
 // firmware/hwAbstraction/esp/uart/ under the same Phase 1a effort.
@@ -14,7 +14,7 @@
 #include "hardware/uart.h"
 #include "hardware/regs/uart.h"
 
-// HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION_PLAN.md):
+// HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION.md):
 // this used to #include "board_pins.h" (a SaftyFW header) straight across
 // the hwAbstraction/SaftyFW boundary. TX/RX pin values are now passed in by
 // the caller at uart_owner_init() time (uart_owner_pins_t,

@@ -60,7 +60,7 @@ $checks = Get-ChildItem -Path $repoRoot -Filter "check_*.ps1" -Recurse -File |
 
 # test_check_hal_include_boundary.ps1 is a negative test, not a guard --
 # it proves check_hal_include_boundary.ps1's scan can actually detect a
-# violation (HW_ABSTRACTION_PLAN.md Phase 4's "negative test -- a new
+# violation (HW_ABSTRACTION.md Phase 4's "negative test -- a new
 # precedent, none of the existing checks has one"). It is named test_*, not
 # check_*, so the glob above does not pick it up on its own; it is added
 # here explicitly rather than renamed, since firmware/KilnFW/App/test/ is

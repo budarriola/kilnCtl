@@ -10,7 +10,7 @@
 # straight out of this directory named it the bare, collision-prone "esp"
 # (asymmetric with SaftyFW's "hwabstraction_pico" static-library target).
 # Renaming this directory itself was rejected because firmware/hwAbstraction/
-# is a tree shared with other consumers (docs/HW_ABSTRACTION_PLAN.md, the
+# is a tree shared with other consumers (docs/HW_ABSTRACTION.md, the
 # pico/, host/, and test/ siblings) that key off this exact path -- so the
 # name fix is confined to one new wrapper directory instead of moving files.
 #

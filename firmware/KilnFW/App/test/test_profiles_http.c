@@ -68,7 +68,7 @@ esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size
 #define HTTPD_404_NOT_FOUND 404
 
 // ---------------------------------------------------------------------------
-// HAL_KV shim -- HW_ABSTRACTION_PLAN.md Phase 3 item 3 migrated
+// HAL_KV shim -- HW_ABSTRACTION.md Phase 3 item 3 migrated
 // profiles_http.c off nvs.h onto hal_kv.h, so this file no longer needs a
 // hand-rolled nvs_* stub: it links the REAL host hal_kv backend (fake_kv.c,
 // see build_host_tests.ps1's cmd7) and keeps only thin nvs_*()-named

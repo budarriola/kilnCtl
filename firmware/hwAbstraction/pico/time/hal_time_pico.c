@@ -5,7 +5,7 @@
  * firmware/hwAbstraction/test/compile_pico_backends.ps1 for the syntax-only
  * compile check that stands in for that until Phase 1a's real move lands.
  *
- * Consumer census (docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm
+ * Consumer census (docs/HW_ABSTRACTION.md "hal_time / hal_wdt / hal_pwm
  * / hal_sysinfo"): SaftyFW calls time_us_64()/get_absolute_time() (19+6
  * sites) and to_ms_since_boot() (18 sites) for monotonic elapsed-time
  * measurement, plus pico-sdk's sleep_ms() for blocking delay -- the same two

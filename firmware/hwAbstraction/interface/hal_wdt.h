@@ -1,5 +1,5 @@
 /* hal_wdt.h -- watchdog control. Both ESP and pico, deliberately thin.
- * See docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm /
+ * See docs/HW_ABSTRACTION.md "hal_time / hal_wdt / hal_pwm /
  * hal_sysinfo" ("hal_wdt: esp task-WDT reconfigure (watchdog_cfg.c sole
  * user), esp_restart, and pico watchdog_enable/update/reboot. Thin.").
  *

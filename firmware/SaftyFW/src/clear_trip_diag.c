@@ -6,7 +6,7 @@
 #include <stddef.h> // NULL, for the hal_scratch_read_u32() magic_ok arg below
 
 // HAL Phase 3 item 1: routed through hal_scratch.h instead of poking
-// watchdog_hw->scratch[] directly -- see docs/HW_ABSTRACTION_PLAN.md
+// watchdog_hw->scratch[] directly -- see docs/HW_ABSTRACTION.md
 // "hal_scratch -- pico watchdog-scratch registry". This module owns slot 7
 // (claimed in main.c alongside the other real owners). The packed word's
 // own magic tag (clear_trip_diag_codec.c) is unrelated to hal_scratch's

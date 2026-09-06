@@ -1,6 +1,6 @@
 // wifi_provision_state.h -- the one Wi-Fi-provisioning accessor non-http-tier
 // callers are allowed to depend on, split out of wifi_provision_http.h (an
-// http-layer header) per docs/HW_ABSTRACTION_PLAN.md's "drivers/ layering"
+// http-layer header) per docs/HW_ABSTRACTION.md's "drivers/ layering"
 // item 10 -- wifi_prov.c [net] only ever needed this one accessor, not the
 // rest of the httpd-handler surface, and unlike wifi_provision_http_get_
 // server() (which stays in wifi_provision_http.h -- see that header's
@@ -24,7 +24,7 @@ extern "C" {
  * the station link, or both. wifi_prov.c is the non-httpd-tier caller. */
 esp_err_t wifi_provision_http_start(void);
 
-/* Item 13 (docs/HW_ABSTRACTION_PLAN.md "drivers/ layering"): the mid-tier
+/* Item 13 (docs/HW_ABSTRACTION.md "drivers/ layering"): the mid-tier
  * accessor for the shared httpd instance wifi_provision_http_start() brings
  * up. Returns it as a plain `void *` -- IDF's esp_http_server.h defines
  * `typedef void *httpd_handle_t;`, and a second, compatible typedef of the

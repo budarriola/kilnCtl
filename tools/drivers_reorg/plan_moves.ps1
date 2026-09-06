@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Prepares (and, with -Apply, executes) the KilnFW App/drivers/ layering reorg
-  described in docs/HW_ABSTRACTION_PLAN.md ("drivers/ layering (KilnFW only)").
+  described in docs/HW_ABSTRACTION.md ("drivers/ layering (KilnFW only)").
 
 .DESCRIPTION
   Reads tools/drivers_reorg/mapping.csv (old_path,new_path,rationale) and:
@@ -174,7 +174,7 @@ Write-Host "All $($actualFiles.Count) files under firmware/KilnFW/App/drivers/**
 # Layer tiers per the plan's allowed include direction (decision A: layers
 # are subdirectories of the single `drivers` component,
 # firmware/KilnFW/App/drivers/<layer>/, not sibling App/<layer> components --
-# see HW_ABSTRACTION_PLAN.md's reorg section for the rationale).
+# see HW_ABSTRACTION.md's reorg section for the rationale).
 #   ui/http/bridge (tier 0, top)
 #     -> control/safety/persist/net/sim (tier 1, mid -- coordinator decision
 #       2026-09-05, item 9: sim moves back to MID, alongside

@@ -3,7 +3,7 @@ flash/ scratch/ wdt/ time/, plus the board descriptor
 (board_safety_rp2040.h).
 
 Filled starting Phase 1a (move) / Phase 1b (adapt) of
-docs/HW_ABSTRACTION_PLAN.md. Empty as of Phase 0.
+docs/HW_ABSTRACTION.md. Empty as of Phase 0.
 
 `gpio/hal_gpio_pico.c` and `adc/hal_adc_pico.c` landed ahead of Phase 1a as
 bodies-only, not wired into any CMakeLists; syntax-checked by
@@ -50,6 +50,6 @@ removed per review: it pulled a SaftyFW header (config_store.h) across the
 one-way hwAbstraction boundary and invented a third commit-durability
 model alongside NVS's and fake_kv's. config_store's real home is
 `hal_flash` (pico backend for config_store_flash.c) -- see
-docs/HW_ABSTRACTION_PLAN.md's `hal_flash` section, which now carries the
+docs/HW_ABSTRACTION.md's `hal_flash` section, which now carries the
 ARMED-interlock/seq-CRC-log/format-version-REFUSE design that file's header
 comment worked out, as prose for whoever writes that backend.

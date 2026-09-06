@@ -4,7 +4,7 @@
  * esp_spi_owner.c's whole design (queue, slot pool, wedge latch, timeout)
  * against driver/spi_master.h directly, so the firmware carried two
  * independent implementations of the same safety-relevant single-writer SPI
- * arbiter -- see docs/HW_ABSTRACTION_PLAN.md Phase 2 status (commit
+ * arbiter -- see docs/HW_ABSTRACTION.md Phase 2 status (commit
  * 26b16a6) and Phase 1b's own "esp owners implement hal_spi/hal_i2c/hal_uart
  * at the edge" line: the owner IS the backend body, not a second thing next
  * to it. This file is now a thin adapter: every hal_spi_* call maps directly
@@ -203,7 +203,7 @@ hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus) {
     /* spi_bus_free() is deliberately NOT called here: multiple hal_spi_bus_t
      * instances/devices can share one underlying host peripheral (the
      * display and thermo devices share one bus per
-     * docs/HW_ABSTRACTION_PLAN.md's "Bus-init semantics"), and freeing the
+     * docs/HW_ABSTRACTION.md's "Bus-init semantics"), and freeing the
      * host out from under a sibling hal_spi_bus_t this backend has no way to
      * see would be unsafe. This matches spi_owner_deinit()/MAX31856_bus_deinit(),
      * neither of which calls spi_bus_free() unconditionally either. */

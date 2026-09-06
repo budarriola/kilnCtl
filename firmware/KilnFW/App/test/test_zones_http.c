@@ -82,7 +82,7 @@ int g_test_count = 0;
 
 #undef asm
 
-// ---- HW_ABSTRACTION_PLAN.md Phase 3 item 3: nvs.h -> hal_kv.h migration ---
+// ---- HW_ABSTRACTION.md Phase 3 item 3: nvs.h -> hal_kv.h migration ---
 // zones_http.c/zones_config_store.c now call hal_kv_*() instead of nvs_*()
 // directly (production no longer includes nvs.h/nvs_flash.h at all), so
 // stubs/nvs.h's single-blob-slot stub (nvs_test_enable()/nvs_test_clear())

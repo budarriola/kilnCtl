@@ -33,7 +33,7 @@
 
 // HAL Phase 3 item 1: SAFTYFW_BOOT_STAGE() below is routed through
 // hal_scratch_write_u32() instead of poking watchdog_hw->scratch[]
-// directly -- see docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico
+// directly -- see docs/HW_ABSTRACTION.md "hal_scratch -- pico
 // watchdog-scratch registry". This module (slot 6, boot-stage marker) and
 // the SAFTYFW_STARTUP_DIAG_SCRATCH/_MAGIC_SCRATCH pair (slots 2/3, written
 // directly by main.c) are all claimed together in main.c alongside the

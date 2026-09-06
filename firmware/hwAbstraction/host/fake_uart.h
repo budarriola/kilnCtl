@@ -1,6 +1,6 @@
 /* fake_uart.h -- host fake backend for hal_uart.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "Host fakes (Phase 2 specs)" -- fake_uart
+ * See docs/HW_ABSTRACTION.md "Host fakes (Phase 2 specs)" -- fake_uart
  * (must): real ring fill/drain model -- backpressure and drop-counter
  * behavior testable; send_blocking completes instantly; synchronous drive
  * of the owner path. This is the "PRODUCTION SEAM MISSING" substitution

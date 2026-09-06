@@ -13,7 +13,7 @@
 #include "task.h"
 
 #include "hal_gpio.h" // HAL Phase 1b/4 -- discrete_task is a hal_gpio client now;
-                       // plain migration debt, see docs/HW_ABSTRACTION_PLAN.md's
+                       // plain migration debt, see docs/HW_ABSTRACTION.md's
                        // "hal_gpio" section and hal_gpio_pico.c's own header
                        // comment, which names this file's E-stop/main-fault
                        // inputs as clients this backend must serve unchanged.

@@ -1,6 +1,6 @@
 /* fake_adc.h -- host fake backend for hal_adc.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "Host fakes (Phase 2 specs)" -- fake_adc
+ * See docs/HW_ABSTRACTION.md "Host fakes (Phase 2 specs)" -- fake_adc
  * (must): scripted sample sequences with realistic quantization; the only
  * route to the current-sense guards (S3/S4/S9/S11/S14) since no CTs are
  * fitted on the bench board.

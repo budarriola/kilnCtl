@@ -70,7 +70,7 @@ static bool main_kiln_drdy_provider(uint8_t channel, bool *out_asserted, void *c
     return kiln_io_get_drdy(io, channel, out_asserted) == ESP_OK;
 }
 
-/* backlight_pwm.h's backlight_pwm_query_fn adapter (HW_ABSTRACTION_PLAN.md
+/* backlight_pwm.h's backlight_pwm_query_fn adapter (HW_ABSTRACTION.md
  * "drivers/ layering" item 5): backlight_pwm.c is a hw-layer driver and must
  * not itself include screen_idle.h (ui) or display_power_cfg.h (persist), so
  * this boot-glue file -- which already knows both -- reads them on its
@@ -673,7 +673,7 @@ void main_boot_early(main_boot_ctx_t *ctx)
     static FT6336UClass ft6336u_touch;
     // FT6336U.c is now a HAL Phase 1b consumer (hal_i2c.h), not a raw
     // driver/i2c_master.h one -- see FT6336U.h's header comment and
-    // docs/HW_ABSTRACTION_PLAN.md. ctx->i2c_bus above is a raw
+    // docs/HW_ABSTRACTION.md. ctx->i2c_bus above is a raw
     // i2c_master_bus_handle_t shared with SX1509/ILI9488/NS2009, which have
     // not migrated yet, so this hal_i2c_bus_t ADOPTS the SAME already-
     // created I2C_NUM_0 port and the SAME i2c_owner_t the SX1509 bring-up

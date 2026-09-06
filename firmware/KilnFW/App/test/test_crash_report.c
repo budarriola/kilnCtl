@@ -7,7 +7,7 @@
 // test_safety_cfg_store.c's #include of safety_cfg_store.c) so this file can
 // reach its static compute_crc()/record_valid()/seal_crc()/persist()/load()
 // helpers and exercise them for real, including a genuine round trip through
-// fake_kv.h's RAM-backed hal_kv fake (HW_ABSTRACTION_PLAN.md Phase 3 item 3
+// fake_kv.h's RAM-backed hal_kv fake (HW_ABSTRACTION.md Phase 3 item 3
 // migrated crash_report.c off nvs.h onto hal_kv.h) -- same mechanism
 // test_safety_cfg_store.c's version-refuse test uses.
 //

@@ -19,7 +19,7 @@ static const char *TAG = "uart_owner";
  * ever changes. */
 #define UART_OWNER_EVENT_QUEUE_LEN 16
 
-/* 2026-09-06 uart collapse (docs/HW_ABSTRACTION_PLAN.md "hal_uart_open()
+/* 2026-09-06 uart collapse (docs/HW_ABSTRACTION.md "hal_uart_open()
  * still unused on ESP" item): uart_owner_init() used to duplicate
  * hal_uart_esp.c's uart_driver_install/uart_param_config/uart_set_pin
  * sequence byte-for-byte, including its own copy of the FIFO_OVF/
@@ -33,7 +33,7 @@ static const char *TAG = "uart_owner";
  * This was neither a full migration (uart_protocol.c/safety_link.c still
  * reach the port through uart_owner_t, not a bare hal_uart_t of their own --
  * uart_protocol.c does now point directly at &owner->hal, per
- * HW_ABSTRACTION_PLAN.md's "delete hal_uart_attach()" item, which is done)
+ * HW_ABSTRACTION.md's "delete hal_uart_attach()" item, which is done)
  * nor a permanent allowlist exempting this file from the
  * HAL: uart_owner_t is now a thin wrapper whose only job is to own the
  * fields callers already reach directly (port, event_task_handle) and to

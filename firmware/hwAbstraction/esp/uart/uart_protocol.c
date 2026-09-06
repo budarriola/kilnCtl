@@ -104,7 +104,7 @@ static size_t frame_and_send(uart_protocol_t *proto, const uint8_t *raw, size_t 
         return 0;
     }
 
-    /* Phase 1b/2 (docs/HW_ABSTRACTION_PLAN.md "hal_uart -- two primitives, ESP
+    /* Phase 1b/2 (docs/HW_ABSTRACTION.md "hal_uart -- two primitives, ESP
      * backend unchanged" / "delete hal_uart_attach()"): was
      * uart_owner_transfer(proto->owner, out, o, NULL, 0, NULL, timeout_ms) --
      * TX-only (rx=NULL,0), the only real caller of that function (see
@@ -487,7 +487,7 @@ esp_err_t uart_protocol_init(uart_protocol_t *proto,
     proto->owner = owner;
     proto->own_device = own_device;
 
-    /* One handle per port (docs/HW_ABSTRACTION_PLAN.md "delete
+    /* One handle per port (docs/HW_ABSTRACTION.md "delete
      * hal_uart_attach()"): proto shares owner's real, driver-installed
      * hal_uart_t instead of attaching a second, non-owning handle to the same
      * port. owner->initialized is already checked above. */

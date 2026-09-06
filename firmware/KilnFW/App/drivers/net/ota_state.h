@@ -2,7 +2,7 @@
 // allowed to depend on: "is an update in progress on either processor, and
 // if so refuse this heat-causing action", plus the interlock/auth/progress
 // accessors non-httpd callers need. Split out of ota_http.h (an http-layer
-// header) per docs/HW_ABSTRACTION_PLAN.md's "drivers/ layering" items 2 and
+// header) per docs/HW_ABSTRACTION.md's "drivers/ layering" items 2 and
 // 8 -- item 2 moved ota_http_heat_blocked_by_update() here for
 // kiln_io_owner.c/profile_executor.c/profile_executor_run.c; item 9 moved
 // the rest of this file's declarations here for autotune_engine_internal.h,

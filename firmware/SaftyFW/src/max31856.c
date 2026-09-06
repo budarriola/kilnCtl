@@ -5,7 +5,7 @@
 // (hal_spi.h/pico's spi_owner.c backend instead of ESP-IDF's spi_master.h /
 // esp_spi_owner.h) and the multi-channel bookkeeping are gone.
 //
-// HAL Phase 1b migration (docs/HW_ABSTRACTION_PLAN.md): this module used to
+// HAL Phase 1b migration (docs/HW_ABSTRACTION.md): this module used to
 // call spi_owner_transfer() (firmware/hwAbstraction/pico/spi/spi_owner.h)
 // directly, with main.c calling spi_owner_init() as a separate boot step.
 // Both now go through interface/hal_spi.h, backed on-target by

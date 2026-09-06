@@ -1,6 +1,6 @@
 /* hal_esp_common.h -- shared esp_err_t -> hal_status_t mapping for ESP-IDF
  * hwAbstraction backends (hal_gpio_esp.c, hal_adc_esp.c, and any future
- * esp/ backend). See docs/HW_ABSTRACTION_PLAN.md Phase 1b.
+ * esp/ backend). See docs/HW_ABSTRACTION.md Phase 1b.
  *
  * Phase 1a/1b note: this header is a Phase-1b addition (Phase 0 shipped only
  * the portable interface/ headers), so it is ESP-IDF-facing on purpose --

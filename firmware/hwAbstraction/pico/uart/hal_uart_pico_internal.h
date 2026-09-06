@@ -2,7 +2,7 @@
 // opto-isolated link to the ESP (docs/ARCHITECTURE.md section 3's module
 // table: "RX ring + non-blocking TX ring. Drops on full, never blocks").
 //
-// Renamed from uart_owner.h by HAL Phase 1a (docs/HW_ABSTRACTION_PLAN.md)
+// Renamed from uart_owner.h by HAL Phase 1a (docs/HW_ABSTRACTION.md)
 // when this file moved here from firmware/SaftyFW/src/tasks/, to avoid
 // colliding with the ESP-side uart_owner.h moving into
 // firmware/hwAbstraction/esp/uart/ under the same effort -- both trees are
@@ -53,7 +53,7 @@
 extern "C" {
 #endif
 
-// HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md, "close the upward include"):
+// HAL Phase 1b (docs/HW_ABSTRACTION.md, "close the upward include"):
 // the TX/RX pins used to come straight from SaftyFW's own board_pins.h via a
 // same-name #include reaching upward across the hwAbstraction/SaftyFW
 // boundary. They are now handed in by the caller at init time instead --

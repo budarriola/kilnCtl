@@ -15,7 +15,7 @@
 
 #include "esp_err.h"
 #include "fake_kv.h" /* hal_kv.h's host fake -- safety_cfg_store.c now calls hal_kv_*() instead of
-                       * nvs_*() directly (HW_ABSTRACTION_PLAN.md Phase 3 item 3) */
+                       * nvs_*() directly (HW_ABSTRACTION.md Phase 3 item 3) */
 #include "fake_time.h" /* hal_time.h's host fake -- safety_cfg_store.c now calls hal_time_now_us()
                          * instead of esp_timer_get_time(); see reset_all()/the tests below that
                          * used to drive the old stub esp_timer via esp_timer_test_set_now_us(). */

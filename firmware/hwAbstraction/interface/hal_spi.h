@@ -3,7 +3,7 @@
  * Derived from esp_spi_owner (queued owner task, slot pool, wedge latch) and
  * SaftyFW's spi_owner (mutex + direct blocking call, deliberately no task).
  * This interface must NOT assume an owner task exists -- both models
- * implement it. See docs/HW_ABSTRACTION_PLAN.md "hal_spi".
+ * implement it. See docs/HW_ABSTRACTION.md "hal_spi".
  *
  * Threading/ownership contract:
  *  - Single-writer per bus: exactly one task/context may call
@@ -50,7 +50,7 @@ extern "C" {
  * caller (often embedded by value in a driver struct, e.g. MAX31856.h's
  * spi_owner_t member), sized generously so a backend growing its impl
  * struct is a build-time _Static_assert failure, never a memory-safety bug.
- * Reservations per docs/HW_ABSTRACTION_PLAN.md "Opaque handles": bus 64 B,
+ * Reservations per docs/HW_ABSTRACTION.md "Opaque handles": bus 64 B,
  * device 32 B (measured today: spi_owner_t ~48 B on 32-bit). */
 #define HAL_SPI_BUS_STORAGE_BYTES    64
 #define HAL_SPI_DEVICE_STORAGE_BYTES 32

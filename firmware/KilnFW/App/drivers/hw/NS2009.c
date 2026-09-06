@@ -81,7 +81,7 @@ esp_err_t NS2009_init(NS2009Class *t, i2c_master_bus_handle_t bus, uint8_t addr)
     /* Independent i2c_owner on the same (already-existing) bus handle --
      * this driver never creates or destroys the bus itself, same as SX1509. */
     // TODO (HAL Phase 1b): still calls i2c_owner_* directly instead of
-    // hal_i2c.h -- see docs/HW_ABSTRACTION_PLAN.md's FT6336U.c writeup;
+    // hal_i2c.h -- see docs/HW_ABSTRACTION.md's FT6336U.c writeup;
     // this is the board's only live touch controller, so it went after
     // FT6336U.c (unreachable dead code) proved the migration out.
     err = i2c_owner_init(&t->owner, bus, 8, 5, 3072, tskNO_AFFINITY);

@@ -1,5 +1,5 @@
 /* hal_sysinfo.h -- system/board identity queries. ESP-only today (SaftyFW
- * has no equivalent surface). See docs/HW_ABSTRACTION_PLAN.md
+ * has no equivalent surface). See docs/HW_ABSTRACTION.md
  * "hal_time / hal_wdt / hal_pwm / hal_sysinfo": "reset reason, running
  * partition, build descriptor, chip temperature, esp_random, core-dump
  * presence. Dedupes crash_report.c (which reads esp_core_dump),

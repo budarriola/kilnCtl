@@ -6,7 +6,7 @@
  * firmware/hwAbstraction/test/compile_esp_backends.ps1 for the syntax-only
  * compile check that stands in for that until Phase 1a's real move lands.
  *
- * Clients this backend must serve unchanged (docs/HW_ABSTRACTION_PLAN.md
+ * Clients this backend must serve unchanged (docs/HW_ABSTRACTION.md
  * "hal_gpio" section): CS/DC/reset/fault pins in panel_spi.c /
  * panel_spi_bringup.c, MAX31856.c (CS + fault), SX1509.c (reset + ~INT
  * pin), safety_link.c (fault line), boot_button.c, and gpio_probe.c's
@@ -17,7 +17,7 @@
  * if a future consumer needs them.
  *
  * Latch-before-direction (hal_gpio.h contract, and
- * docs/HW_ABSTRACTION_PLAN.md's "Init ordering audit"): on this IDF version
+ * docs/HW_ABSTRACTION.md's "Init ordering audit"): on this IDF version
  * gpio_set_level() writes out_w1ts/out_w1tc unconditionally
  * (esp_driver_gpio/src/gpio.c -> gpio_ll_set_level(), independent of the
  * pin's current direction) and gpio_set_direction() never touches the OUT
@@ -102,7 +102,7 @@ hal_status_t hal_gpio_set_pull(int num, hal_gpio_pull_t pull) {
     return hal_esp_err_to_status(err);
 }
 
-/* Interface-mismatch notes (docs/HW_ABSTRACTION_PLAN.md asks these to be
+/* Interface-mismatch notes (docs/HW_ABSTRACTION.md asks these to be
  * reported, not silently papered over by widening hal_gpio.h):
  *
  * 1. Open-drain (gpio_od_enable/gpio_od_disable) and non-default drive

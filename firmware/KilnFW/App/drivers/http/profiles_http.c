@@ -522,7 +522,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
  * and the httpd worker directly) already run on internal-stack tasks; this
  * refuses loudly instead of crashing the board if a future caller does not.
  *
- * HW_ABSTRACTION_PLAN.md Phase 3 item 3: now delegates to
+ * HW_ABSTRACTION.md Phase 3 item 3: now delegates to
  * hal_kv_write_safe_here() (this module's own negation of it) instead of
  * probing esp_ptr_external_ram() locally -- same predicate, one definition. */
 static bool caller_stack_is_external(void)

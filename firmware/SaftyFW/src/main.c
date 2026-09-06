@@ -232,7 +232,7 @@ int main(void)
     hw_clear_bits(&timer_hw->dbgpause, TIMER_DBGPAUSE_BITS);
 
     // --- hal_scratch claims for every real watchdog-scratch owner. ---------
-    // HAL Phase 3 item 1 (docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico
+    // HAL Phase 3 item 1 (docs/HW_ABSTRACTION.md "hal_scratch -- pico
     // watchdog-scratch registry"). Centralized here, once, before the first
     // real access (SAFTYFW_BOOT_STAGE() immediately below writes slot 6),
     // rather than one claim call per accessor module -- this is the single

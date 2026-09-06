@@ -1,5 +1,5 @@
 // zones_config_accessors -- persist-layer accessors for the zones config
-// blob (TODO.md section 3), split out of zones_http.h (HW_ABSTRACTION_PLAN.md
+// blob (TODO.md section 3), split out of zones_http.h (HW_ABSTRACTION.md
 // "drivers/ layering" item 1, 2026-09-05): 18+ control/safety/persist files
 // were including zones_http.h -- an HTTP-page module -- purely to reach these
 // zones_config_*()/zones_current_sweep_*()/zones_ct_*() accessors and the
@@ -352,7 +352,7 @@ static inline float zone_required_window_ms(float min_on_ms)
 bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr);
 
 /* zones_config_get_thermo_count() moved to zones_config_query.h (included
- * above, HW_ABSTRACTION_PLAN.md item 11, 2026-09-05) -- it is the one
+ * above, HW_ABSTRACTION.md item 11, 2026-09-05) -- it is the one
  * accessor a caller can need without the rest of this persist-tier surface
  * (sim_backend.c and, transitively, everything below still reach it). */
 

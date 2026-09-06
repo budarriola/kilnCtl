@@ -1,7 +1,7 @@
 /* hal_i2c_esp.c -- ESP-IDF backend for interface/hal_i2c.h.
  *
  * Phase 1b ("adapt"): thin adapter over i2c_owner.c (this directory),
- * exactly as docs/HW_ABSTRACTION_PLAN.md Phase 1b intends -- the owner IS
+ * exactly as docs/HW_ABSTRACTION.md Phase 1b intends -- the owner IS
  * the backend body. Earlier revisions of this file duplicated i2c_owner.c's
  * task/queue/retry logic directly against driver/i2c_master.h instead of
  * calling it; that duplication is gone. This file now only:
@@ -36,7 +36,7 @@
  *
  * i2c_owner.c already preserves the two hard-won behaviors this backend
  * must not regress (interface/hal_i2c.h's own contract comment, and
- * docs/HW_ABSTRACTION_PLAN.md "hal_i2c"): a STATIC per-call completion
+ * docs/HW_ABSTRACTION.md "hal_i2c"): a STATIC per-call completion
  * semaphore (2026-08-20 SRAM-starvation fix) and worker-enforced
  * timeout_ms with the caller waiting unbounded (use-after-free avoidance),
  * plus the bus-reset-then-retry-once recovery on a failed transfer. Nothing

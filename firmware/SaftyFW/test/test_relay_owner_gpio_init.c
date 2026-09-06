@@ -1,4 +1,4 @@
-// test_relay_owner_gpio_init.c -- HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md
+// test_relay_owner_gpio_init.c -- HAL Phase 1b (docs/HW_ABSTRACTION.md
 // "hal_gpio" section): relay_owner.c is now a hal_gpio client, and this is
 // the host-testable init-order property Phase 2 promised (fake_gpio.h's
 // header comment: "order-checkable ... latch-before-direction sequencing").

@@ -59,7 +59,7 @@ int g_test_count = 0;
 #undef asm
 
 // ---- link-time stub bodies for board_temps.c's non-pure half --------------
-// 2026-09-05 (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 3):
+// 2026-09-05 (HW_ABSTRACTION.md "drivers/ layering" item 3):
 // board_temps.c's httpd handler/registration moved out to
 // board_temps_http.c, so board_temps.c no longer includes
 // esp_http_server.h/wifi_provision_http.h at all -- the httpd_*/

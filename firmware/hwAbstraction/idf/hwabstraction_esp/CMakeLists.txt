@@ -4,7 +4,7 @@
 # lives in ESP-IDF's flat global namespace (all components, from every
 # project and every managed dependency, share one component-name space).
 # The real sources stay at firmware/hwAbstraction/esp/ (shared, non-ESP-IDF
-# tree used elsewhere too -- see docs/HW_ABSTRACTION_PLAN.md and
+# tree used elsewhere too -- see docs/HW_ABSTRACTION.md and
 # firmware/hwAbstraction/README.md); this directory exists only so the
 # component registers under the name "hwabstraction_esp" instead of the bare,
 # collision-prone "esp" (asymmetric with SaftyFW's "hwabstraction_pico"

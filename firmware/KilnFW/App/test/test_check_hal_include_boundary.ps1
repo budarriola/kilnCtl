@@ -1,5 +1,5 @@
 # test_check_hal_include_boundary.ps1 -- negative test for
-# tools/check_hal_include_boundary.ps1 (HW_ABSTRACTION_PLAN.md Phase 4).
+# tools/check_hal_include_boundary.ps1 (HW_ABSTRACTION.md Phase 4).
 #
 # A NEW PRECEDENT: no existing tools/check_*.ps1 has a negative test today
 # (see that plan's "Phase 4" section). Every one of them has been proven
@@ -205,7 +205,7 @@ if ($allowlistedScan.StrictViolations.Count -ne 0) {
 # --- Assertion 6: same shape as 4/5, but for the NEW driver/gpio.h strict
 # allowlist added in HAL Phase 4 step 1. Injecting driver/gpio.h into an
 # ALLOWLISTED path (uart_bridge_io.c, on $DriverGpioAllowlist as one of the
-# two raw IRQ owners named in HW_ABSTRACTION_PLAN.md's Phase 4 section) must
+# two raw IRQ owners named in HW_ABSTRACTION.md's Phase 4 section) must
 # score ZERO strict violations -- proves the driver/gpio.h allowlist is also
 # consulted by path, not just by header name (assertion 2 above already
 # proved the negative case: a NON-allowlisted path fails). ---
@@ -283,7 +283,7 @@ if ($nvsFlashAllowlistedScan.StrictViolations.Count -ne 0) {
 }
 
 # --- Assertion 9: esp_random.h strict allowlist, added 2026-09-06 when the
-# HW_ABSTRACTION_PLAN.md "esp_random.h was never classified" open item was
+# HW_ABSTRACTION.md "esp_random.h was never classified" open item was
 # closed -- every real call site migrated onto hal_sysinfo_random_u32()/
 # hal_sysinfo_fill_random() and no holdout remains, so $EspRandomAllowlist is
 # EMPTY. Unlike nvs.h/nvs_flash.h/esp_ota_ops.h (which pair a non-allowlisted

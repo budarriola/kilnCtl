@@ -1,6 +1,6 @@
 /* hal_uart.h -- portable UART interface, two send primitives.
  *
- * See docs/HW_ABSTRACTION_PLAN.md "hal_uart -- two primitives, ESP backend
+ * See docs/HW_ABSTRACTION.md "hal_uart -- two primitives, ESP backend
  * unchanged" for the full derivation. uart_protocol.c's frame_and_send()
  * relies on the send it uses blocking until the bytes are ON THE WIRE
  * (not just handed to a driver) because its ACK timer starts right after
@@ -50,7 +50,7 @@
 extern "C" {
 #endif
 
-/* Reservation per docs/HW_ABSTRACTION_PLAN.md "Opaque handles": 64 B
+/* Reservation per docs/HW_ABSTRACTION.md "Opaque handles": 64 B
  * (measured today: uart_owner_t ~32 B on 32-bit). Pico backends have no
  * per-instance struct at all (file-scope statics) and simply under-fill. */
 #define HAL_UART_STORAGE_BYTES 64

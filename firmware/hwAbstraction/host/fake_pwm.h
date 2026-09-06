@@ -1,6 +1,6 @@
 /* fake_pwm.h -- host fake backend for hal_pwm.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm /
+ * See docs/HW_ABSTRACTION.md "hal_time / hal_wdt / hal_pwm /
  * hal_sysinfo" and the real backend this fake mirrors (esp/pwm/
  * hal_pwm_esp.c): one timer/channel, init validates duty_resolution_bits
  * (1..20, matching LEDC_TIMER_BIT_MAX on this port's low-speed timers --

@@ -1,6 +1,6 @@
 /* fake_sysinfo.h -- host fake backend for hal_sysinfo.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm /
+ * See docs/HW_ABSTRACTION.md "hal_time / hal_wdt / hal_pwm /
  * hal_sysinfo" and the real backend this fake mirrors (esp/sysinfo/
  * hal_sysinfo_esp.c): reset reason, running-partition facts, build
  * descriptor, chip temperature (install/enable/get_celsius/uninstall

@@ -31,7 +31,7 @@
 extern "C" {
 #endif
 
-// HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md, "close the upward include"):
+// HAL Phase 1b (docs/HW_ABSTRACTION.md, "close the upward include"):
 // the pin values used to come straight from SaftyFW's own board_pins.h via a
 // same-name #include reaching upward across the hwAbstraction/SaftyFW
 // boundary. They are now handed in by the caller at init time instead --

@@ -374,7 +374,9 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         link->cached.power_channel_w[ch] = NAN;
         link->cached.power_channel_i_conducting_a[ch] = NAN;
         link->cached.power_channel_conduction_fraction[ch] = NAN;
+        link->cached.power_channel_counts_avg[ch] = 0u;
     }
+    link->cached.power_counts_valid = false;
     /* SAFETY_CMD_TRIP_EVENT (Frame D) -- same NaN-until-real-reading
      * reasoning; gated behind trip_event_ever_received either way, but a
      * caller that forgets to check it sees NaN, not a plausible-looking 0. */
@@ -527,7 +529,7 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
     /* 2026-08-22: PSRAM stack. safety_poll_task talks to the RP2040 only
      * through uart_protocol.c's hal_uart_send_blocking path, on the same
      * hal_uart_t owner->hal already installed (hal_uart_attach deleted,
-     * docs/HW_ABSTRACTION_PLAN.md); uart_owner.c owns the actual UART driver
+     * docs/HW_ABSTRACTION.md); uart_owner.c owns the actual UART driver
      * install and keeps its own internal stack/task for the RX event side.
      * This task itself
      * never calls into flash/NVS -- per this file's own top-of-file comment,

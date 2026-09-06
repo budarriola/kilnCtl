@@ -81,7 +81,7 @@
 #include "safety_link.h"
 #include "thermal_guard.h"
 
-/* HW_ABSTRACTION_PLAN.md "drivers/ layering" items 4/6: profile_exec_state_t,
+/* HW_ABSTRACTION.md "drivers/ layering" items 4/6: profile_exec_state_t,
  * profile_exec_status_t (and the structs it embeds) and
  * profile_executor_get_status() itself now live in this narrow header so
  * that bridge/hw and safety code can query executor state without pulling

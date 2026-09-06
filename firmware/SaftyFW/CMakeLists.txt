@@ -78,7 +78,7 @@ set(SAFTYFW_APP_SOURCES
     src/current_sense.c
     # NOTE: src/spi_owner.c, src/tasks/uart_owner.c and
     # src/tasks/uart_owner_tx_policy.c moved to the hwabstraction_pico
-    # library below (HAL Phase 1a, docs/HW_ABSTRACTION_PLAN.md) and are no
+    # library below (HAL Phase 1a, docs/HW_ABSTRACTION.md) and are no
     # longer part of this source list.
     # Pure counts-domain presence decision, decoupled from k_ct_v_per_a, split
     # out of current_sense.c so it is host-testable (test/test_current_
@@ -147,7 +147,7 @@ set(SAFTYFW_APP_SOURCES
     bootloader/metadata.c
 )
 
-# hwabstraction_pico -- HAL Phase 1a (docs/HW_ABSTRACTION_PLAN.md move set):
+# hwabstraction_pico -- HAL Phase 1a (docs/HW_ABSTRACTION.md move set):
 # src/spi_owner.c/h, src/tasks/uart_owner.c/h (renamed to
 # hal_uart_pico_internal.h to avoid colliding with the ESP-side
 # uart_owner.h moving into firmware/hwAbstraction/esp/uart/ under the same
@@ -167,11 +167,11 @@ set(SAFTYFW_APP_SOURCES
 # (spi_owner_transfer, uart_owner_send, etc.), unchanged. Phase 1b (below)
 # is the first exception: relay_owner.c is now a real hal_gpio consumer, so
 # hal_gpio_pico.c + hal_status.c are wired in for real.
-# hal_gpio (HAL Phase 1b, docs/HW_ABSTRACTION_PLAN.md "hal_gpio" section):
+# hal_gpio (HAL Phase 1b, docs/HW_ABSTRACTION.md "hal_gpio" section):
 # relay_owner.c is now a hal_gpio client (interface/hal_gpio.h), backed on
 # target by pico/gpio/hal_gpio_pico.c. common/hal_status.c is the shared,
 # vendor-neutral hal_status_t name table every backend links against.
-# hal_wdt (HAL Phase 4, docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt /
+# hal_wdt (HAL Phase 4, docs/HW_ABSTRACTION.md "hal_time / hal_wdt /
 # hal_pwm / hal_sysinfo" section): pico/wdt/hal_wdt_pico.c existed since the
 # Phase 1b syntax-only pass (compile_pico_backends.ps1) but was never linked
 # into a real target -- watchdog_task.c (feed) and update_task.c (reboot) are
@@ -200,7 +200,7 @@ target_include_directories(hwabstraction_pico PUBLIC
     ${HWABSTRACTION_PICO_DIR}/wdt
     ${HWABSTRACTION_DIR}/interface
 )
-# CLOSED 2026-09-06 (HAL Phase 1b, docs/HW_ABSTRACTION_PLAN.md): this used to
+# CLOSED 2026-09-06 (HAL Phase 1b, docs/HW_ABSTRACTION.md): this used to
 # give hwabstraction_pico a PRIVATE include dir on src/board so spi_owner.c
 # and uart_owner.c could reach SaftyFW's own board_pins.h across the
 # hwAbstraction/SaftyFW boundary. Both files now take their pin values as

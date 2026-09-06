@@ -48,7 +48,7 @@
 #include "zones_config_accessors.h" /* ZONE_NAME_MAX_LEN, TIMING_PROFILE_NAME_MAX_LEN, and
                          * every per-field bound (ZONE_*_MAX/MIN) validate_zones_cfg() and
                          * the field parsers below check against -- moved out of zones_http.h
-                         * (HW_ABSTRACTION_PLAN.md item 1, 2026-09-05) */
+                         * (HW_ABSTRACTION.md item 1, 2026-09-05) */
 
 #ifdef __cplusplus
 extern "C" {

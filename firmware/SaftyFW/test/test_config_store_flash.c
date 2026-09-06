@@ -1,6 +1,6 @@
 // Host tests for firmware/SaftyFW/src/config_store_flash.c -- the flash I/O
 // and ARMED-check glue, host-testable for the first time since its Phase 3
-// item 2 rebase onto hal_flash.h (docs/HW_ABSTRACTION_PLAN.md). Exercises
+// item 2 rebase onto hal_flash.h (docs/HW_ABSTRACTION.md). Exercises
 // the three things that rebase promised to keep intact: the ARMED write
 // gate (config_store_decide_write() against relay_owner_get_state(), here
 // driven by config_store_flash_host_stubs.c), the seq/CRC round-robin log

@@ -1,5 +1,5 @@
 // config_store_flash.c -- the flash I/O and ARMED-check glue for
-// config_store.h's pure record logic. Rebased (docs/HW_ABSTRACTION_PLAN.md
+// config_store.h's pure record logic. Rebased (docs/HW_ABSTRACTION.md
 // Phase 3 item 2, 2026-09-06) onto hal_flash.h: real flash access now goes
 // through hal_flash_read()/hal_flash_erase()/hal_flash_program()/
 // hal_flash_safe_execute() instead of pico-sdk's XIP_BASE pointer read /

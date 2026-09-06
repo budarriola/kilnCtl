@@ -1,5 +1,5 @@
 // Host test for App/drivers/hw/MAX31856.c's HAL Phase 1b migration
-// (docs/HW_ABSTRACTION_PLAN.md): MAX31856.c no longer talks to
+// (docs/HW_ABSTRACTION.md): MAX31856.c no longer talks to
 // esp_spi_owner.c's spi_owner_t directly, it goes through
 // interface/hal_spi.h, whose host backend is
 // firmware/hwAbstraction/host/fake_spi.c -- same convention as

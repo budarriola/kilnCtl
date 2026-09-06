@@ -41,7 +41,7 @@
 
 // Deliberately NOT #include "screen_idle.h" or "display_power_cfg.h" here,
 // and backlight_pwm.c does not include them either any more
-// (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 5: this is a hw-layer
+// (HW_ABSTRACTION.md "drivers/ layering" item 5: this is a hw-layer
 // driver and must not reach up into screen_idle.c (ui) or
 // display_power_cfg.c (persist) itself). Instead the caller -- which already
 // knows both modules, e.g. main_boot_early.c -- supplies a
@@ -75,7 +75,7 @@ uint8_t backlight_duty_percent_for_state(bool screen_on, uint8_t on_percent, uin
 // own screen-state and brightness-setting modules currently report --
 // exactly what backlight_pwm_task() used to read directly via
 // screen_idle_get_state()/display_power_cfg_brightness_percent() before this
-// was inverted (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 5). Returning
+// was inverted (HW_ABSTRACTION.md "drivers/ layering" item 5). Returning
 // anything other than ESP_OK causes the poll tick to skip (same as a
 // screen_idle_get_state() lock-timeout used to), retried next poll.
 typedef esp_err_t (*backlight_pwm_query_fn)(void *ctx, bool *out_screen_on, uint32_t *out_idle_ms,

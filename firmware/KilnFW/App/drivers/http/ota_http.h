@@ -113,7 +113,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 // must not double as authorization for the other, same reasoning as every
 // context above. It gets its own context string ("pico-rollback") and its
 // own lockout state.
-// ota_http_context_t itself moved to ota_state.h (docs/HW_ABSTRACTION_PLAN.md
+// ota_http_context_t itself moved to ota_state.h (docs/HW_ABSTRACTION.md
 // item 9) -- non-httpd callers (factory_reset.c and friends) need it for the
 // accessors that moved there too. Included above via ota_state.h.
 
@@ -222,7 +222,7 @@ bool ota_http_update_try_begin(ota_http_context_t ctx);
 // call it unconditionally rather than tracking whether it actually won the
 // claim.
 //
-// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 9) --
+// Declared in ota_state.h now (docs/HW_ABSTRACTION.md item 9) --
 // ota_pico_relay.c is the non-httpd caller. Included above so existing
 // callers of this header are unaffected.
 
@@ -269,7 +269,7 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // behaviour exactly, and the resulting OTA_INTERLOCK_REFUSED_NEEDS_ACK is
 // still a refusal to every caller that only tests `!= OTA_INTERLOCK_OK`.
 //
-// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 9) --
+// Declared in ota_state.h now (docs/HW_ABSTRACTION.md item 9) --
 // factory_reset.c and kiln_cfg_store.c are the non-httpd callers. Included
 // above so existing callers of this header are unaffected.
 
@@ -312,7 +312,7 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 // be refused because an update is in progress on either processor; false
 // if it may proceed.
 //
-// Declared in ota_state.h now (docs/HW_ABSTRACTION_PLAN.md "drivers/
+// Declared in ota_state.h now (docs/HW_ABSTRACTION.md "drivers/
 // layering" item 2) -- this is the one query control/owner code needs, and
 // they should include ota_state.h directly rather than this whole
 // http-layer header. Included above so existing callers of this header are
@@ -350,7 +350,7 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 // below, which TODO.md 9.6's future web page can call on an interval.
 //
 // ota_http_esp_phase_t and ota_http_get_esp_progress() below are declared in
-// ota_state.h now (docs/HW_ABSTRACTION_PLAN.md item 9) -- ota_pico_relay.c
+// ota_state.h now (docs/HW_ABSTRACTION.md item 9) -- ota_pico_relay.c
 // is the non-httpd caller. Included above so existing callers of this
 // header are unaffected.
 

@@ -1,6 +1,6 @@
 /* fake_flash.h -- host fake backend for hal_flash.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "Host fakes (Phase 2 specs)" -- fake_flash
+ * See docs/HW_ABSTRACTION.md "Host fakes (Phase 2 specs)" -- fake_flash
  * (must): sector model with erase-before-program enforcement and
  * safe_execute timeout injection. This unlocks config_store_flash.c's
  * seq/CRC/ARMED/format-REFUSE logic under host test for the first time once

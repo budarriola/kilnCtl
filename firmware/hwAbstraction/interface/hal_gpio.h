@@ -1,6 +1,6 @@
 /* hal_gpio.h -- portable GPIO interface. Clean-room; no IRQ surface in v1.
  *
- * See docs/HW_ABSTRACTION_PLAN.md "hal_gpio -- clean-room; no IRQ surface
+ * See docs/HW_ABSTRACTION.md "hal_gpio -- clean-room; no IRQ surface
  * in v1". Exactly two IRQ registrations exist today (pico DRDY via a
  * shared per-core dispatcher, ESP SX1509 ~INT via gpio_isr_handler_add) and
  * both stay raw, outside this interface, until a second pico consumer

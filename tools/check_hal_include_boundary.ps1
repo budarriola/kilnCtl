@@ -143,7 +143,7 @@ function Get-ScanFiles {
 
 # --- The count-ratchet is now empty: nvs.h/nvs_flash.h (the last two labels
 # on it) were promoted to strict per-file allowlists below (HAL Phase 4
-# enforcement, step 2, docs/HW_ABSTRACTION_PLAN.md "Phase 4 -- enforcement").
+# enforcement, step 2, docs/HW_ABSTRACTION.md "Phase 4 -- enforcement").
 # The mechanism is kept (rather than deleted) because the hwAbstraction
 # upward-scan (Invoke-HalUpwardScan) and the negative test both still call
 # Test-HalRatchet against RatchetHeaders/RatchetCounts, and the baseline file
@@ -188,7 +188,7 @@ $WifiAllowlist = @(
 
 # driver/*.h -- promoted from the count-ratchet to a strict per-file, per-
 # specific-header allowlist (HAL Phase 4 enforcement, step 1,
-# docs/HW_ABSTRACTION_PLAN.md "Phase 4 -- enforcement"). Every site below is
+# docs/HW_ABSTRACTION.md "Phase 4 -- enforcement"). Every site below is
 # a documented legitimate pin/type-only holdout, not a TEMPORARY placeholder
 # -- none of today's driver/* sites carry a `// TEMPORARY` marker in the
 # plan, so every entry's ExpiresAtPhase is "n/a", citing the plan section
@@ -242,7 +242,7 @@ $DriverUartAllowlist = @(
 )
 
 $DriverTempSensorAllowlist = @(
-    # board_temps.c migrated to hal_sysinfo_temp_* 2026-09-06 (HW_ABSTRACTION_PLAN.md
+    # board_temps.c migrated to hal_sysinfo_temp_* 2026-09-06 (HW_ABSTRACTION.md
     # "hal_time / hal_wdt / hal_pwm / hal_sysinfo" item 4) -- no remaining
     # driver/temperature_sensor.h include outside firmware/hwAbstraction/.
 )
@@ -270,7 +270,7 @@ $EspTimerAllowlist = @(
 )
 
 # nvs.h / nvs_flash.h -- promoted from the count-ratchet to strict per-file
-# allowlists (HAL Phase 4 enforcement, step 2, docs/HW_ABSTRACTION_PLAN.md
+# allowlists (HAL Phase 4 enforcement, step 2, docs/HW_ABSTRACTION.md
 # "Phase 4 -- enforcement"). Measured 2026-09-06 against the current tree
 # (production files only -- firmware/KilnFW/App/test/test_profiles_http.c
 # also includes nvs.h but is excluded from the scan by Get-ScanFiles's
@@ -288,7 +288,7 @@ $NvsFlashAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/persist/zones_config_store.c"; Header = "nvs_flash.h"; Reason = "NVS_DEFAULT_PART_NAME only -- see wifi_prov_nvs.c's holdout, actual NVS access goes through hal_kv"; ExpiresAtPhase = "n/a (constant-only holdout, see plan)" }
 )
 
-# esp_random.h -- classified 2026-09-06 (HW_ABSTRACTION_PLAN.md "Open" bullet
+# esp_random.h -- classified 2026-09-06 (HW_ABSTRACTION.md "Open" bullet
 # closed out): every real esp_random()/esp_fill_random() call site migrated
 # onto hal_sysinfo_random_u32()/hal_sysinfo_fill_random() (safety_link.c's
 # esp_boot_id, ota_http.c's OTA challenge nonce -- the only two real calls;
@@ -324,7 +324,7 @@ $StrictHeaders = [ordered]@{
 # boundary's OTHER direction: hwAbstraction code reaching back UP into
 # KilnFW/SaftyFW.
 #
-# CLOSED 2026-09-06 (HAL Phase 1b, docs/HW_ABSTRACTION_PLAN.md): the four
+# CLOSED 2026-09-06 (HAL Phase 1b, docs/HW_ABSTRACTION.md): the four
 # pico-side sites that used to #include "board_pins.h" straight across this
 # boundary --
 #   - firmware/hwAbstraction/pico/spi/spi_owner.c
@@ -594,7 +594,7 @@ if ($ratchetFailures.Count -gt 0 -or $violations.Count -gt 0 -or $halRatchetFail
     foreach ($v in $violations) { Write-Host "  STRICT:  $v" -ForegroundColor Red }
     foreach ($f in $halRatchetFailures) { Write-Host "  HAL-UPWARD RATCHET: $f" -ForegroundColor Red }
     foreach ($v in $halViolations) { Write-Host "  HAL-UPWARD STRICT:  $v" -ForegroundColor Red }
-    throw "$($ratchetFailures.Count) ratchet failure(s), $($violations.Count) strict allowlist violation(s), $($halRatchetFailures.Count) hwAbstraction ratchet failure(s), $($halViolations.Count) hwAbstraction upward-include violation(s) -- see HW_ABSTRACTION_PLAN.md Phase 4."
+    throw "$($ratchetFailures.Count) ratchet failure(s), $($violations.Count) strict allowlist violation(s), $($halRatchetFailures.Count) hwAbstraction ratchet failure(s), $($halViolations.Count) hwAbstraction upward-include violation(s) -- see HW_ABSTRACTION.md Phase 4."
 }
 
 Write-Host "HAL include boundary check passed ($($allFiles.Count) files scanned):"

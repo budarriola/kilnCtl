@@ -25,7 +25,7 @@
 # must also call caller_stack_is_external() somewhere in that same function
 # body. A function that writes without the guard fails the check by name.
 #
-# 2026-09-06: extended to the hal_kv_* forms once HW_ABSTRACTION_PLAN.md
+# 2026-09-06: extended to the hal_kv_* forms once HW_ABSTRACTION.md
 # Phase 3 item 3 (the nvs.h -> hal_kv.h migration) started landing in
 # $guardedFiles -- relay_cycles.c and run_state.c now write via
 # hal_kv_set_blob()/hal_kv_commit(), not nvs_set_blob()/nvs_commit()

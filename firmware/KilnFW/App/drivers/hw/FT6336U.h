@@ -24,7 +24,7 @@
 // same division of labour: the caller passes in an already-initialized
 // hal_i2c_bus_t (interface/hal_i2c.h), FT6336U_start attaches this device to
 // it via hal_i2c_device_attach(). This is the HAL Phase 1b migration of this
-// driver (docs/HW_ABSTRACTION_PLAN.md) -- it no longer touches
+// driver (docs/HW_ABSTRACTION.md) -- it no longer touches
 // driver/i2c_master.h or i2c_owner.c directly; the ESP backend
 // (hal_i2c_esp.c) is the one still wrapping i2c_owner.c underneath.
 //

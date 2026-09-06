@@ -19,7 +19,7 @@
  * resource -- `r` is accepted (matching the header's signature) and ignored,
  * exactly as hal_uart_pico.c's `u` parameter is documented to be.
  *
- * INTERFACE MISMATCH notes (docs/HW_ABSTRACTION_PLAN.md asks these to be
+ * INTERFACE MISMATCH notes (docs/HW_ABSTRACTION.md asks these to be
  * reported, not silently papered over by widening hal_flash.h):
  *
  * 1. hal_flash_geometry()'s flash_total_size has no pico-sdk runtime query --

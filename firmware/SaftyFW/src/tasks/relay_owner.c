@@ -25,7 +25,7 @@
 #include "task.h"
 
 #include "hal_gpio.h" // HAL Phase 1b -- relay_owner is a hal_gpio client now;
-                       // see docs/HW_ABSTRACTION_PLAN.md's "hal_gpio" section
+                       // see docs/HW_ABSTRACTION.md's "hal_gpio" section
                        // and this file's own comments below for the ordering
                        // contract (latch-before-direction) this relies on.
 

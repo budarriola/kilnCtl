@@ -1,6 +1,6 @@
 /* fake_wdt.h -- host fake backend for hal_wdt.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm /
+ * See docs/HW_ABSTRACTION.md "hal_time / hal_wdt / hal_pwm /
  * hal_sysinfo" and both real backends this fake mirrors
  * (pico/wdt/hal_wdt_pico.c, esp/wdt/hal_wdt_esp.c): hal_wdt_init() arms the
  * watchdog with a timeout and a panic-disabled flag, hal_wdt_feed()

@@ -1,6 +1,6 @@
 /* fake_kv.h -- host fake backend for hal_kv.h (Phase 2).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "Host fakes (Phase 2 specs)" -- fake_kv
+ * See docs/HW_ABSTRACTION.md "Host fakes (Phase 2 specs)" -- fake_kv
  * (must): RAM namespace/key store, reset between tests; error injection
  * (wrong-type, corruption, no-space).
  *
@@ -81,7 +81,7 @@ extern "C" {
 #define FAKE_KV_MAX_KEYS_PER_NS         12
 #define FAKE_KV_MAX_KEY_LEN            16
 #define FAKE_KV_MAX_NAME_LEN           16
-/* 256 -> 8192 (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the nvs.h -> hal_kv.h
+/* 256 -> 8192 (HW_ABSTRACTION.md Phase 3 item 3, the nvs.h -> hal_kv.h
  * migration): kiln_cfg_store.c's host test (test_kiln_cfg_store.c) round-
  * trips a REAL full-size kiln_cfg_store_blob_t (5420+ bytes, grows with
  * ZONES_CONFIG_BLOB_MAX_SIZE) and kiln_cfg_store_blob_v1_t (4396 bytes)

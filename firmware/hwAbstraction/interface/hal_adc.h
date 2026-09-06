@@ -1,6 +1,6 @@
 /* hal_adc.h -- portable ADC interface. Pico-only (current sense).
  *
- * See docs/HW_ABSTRACTION_PLAN.md "hal_adc -- pico-only". Wraps
+ * See docs/HW_ABSTRACTION.md "hal_adc -- pico-only". Wraps
  * current_task.c and current_sense.c's raw RP2040 ADC use. No ESP consumer
  * exists (the ESP path has no equivalent current-sense ADC), so this
  * interface has no opaque bus/device handle at all -- the RP2040 ADC is a

@@ -3,7 +3,7 @@
  * Phase 1b ("adapt"): implements the Phase-0 interface against the REAL
  * SaftyFW UART owner (firmware/SaftyFW/src/tasks/uart_owner.c/h): UART1 on
  * GPIO4 (TX) / GPIO5 (RX), 230400 baud, IRQ-driven RX ring + IRQ-drained TX
- * ring, never blocking a caller (docs/HW_ABSTRACTION_PLAN.md "hal_uart --
+ * ring, never blocking a caller (docs/HW_ABSTRACTION.md "hal_uart --
  * two primitives, ESP backend unchanged"). Not wired into any CMakeLists yet
  * -- see firmware/hwAbstraction/test/compile_pico_backends.ps1 for the
  * syntax-only compile check that stands in for that until Phase 1a's real
@@ -15,12 +15,12 @@
  * today (byte-identical body, per Phase 1a's move-only discipline; this file
  * is the Phase 1b adapter sitting in front of it) and keeps owning the real
  * hardware IRQ registration (irq_set_exclusive_handler(UART1_IRQ, ...)),
- * which per docs/HW_ABSTRACTION_PLAN.md's "hal_gpio -- clean-room; no IRQ
+ * which per docs/HW_ABSTRACTION.md's "hal_gpio -- clean-room; no IRQ
  * surface in v1" section and the tree-shape note ("uart_owner_tx_policy.c/h
  * stays with the pico backend as a PRIVATE include") is deliberately NOT
  * exposed through hal_uart.h.
  *
- * INTERFACE MISMATCH notes (docs/HW_ABSTRACTION_PLAN.md asks these to be
+ * INTERFACE MISMATCH notes (docs/HW_ABSTRACTION.md asks these to be
  * reported, not silently papered over by widening hal_uart.h):
  *
  * 1. Single fixed instance, not N independent handles. hal_uart_cfg_t
@@ -61,7 +61,7 @@
  *    module, out of scope for this backend, which per Phase 1a is
  *    byte-identical.
  * 3. hal_uart_restart() has no real implementation to call. Per
- *    docs/HW_ABSTRACTION_PLAN.md's "Reset pairing, verified" section: "The
+ *    docs/HW_ABSTRACTION.md's "Reset pairing, verified" section: "The
  *    Pico has no runtime RX reset at all (init-time zero only, uart_owner.c
  *    :255-256)." uart_owner.h/.c export no uart_owner_restart()-equivalent
  *    function whatsoever (unlike the ESP side's uart_owner_restart(), whose
@@ -74,7 +74,7 @@
  * is already exactly hal_uart_send's contract (non-blocking,
  * whole-buffer-or-drop, "the caller returns immediately"); send_blocking's
  * documented ring-drained-not-wire-complete semantics
- * (docs/HW_ABSTRACTION_PLAN.md, hal_uart.h's own header comment) are
+ * (docs/HW_ABSTRACTION.md, hal_uart.h's own header comment) are
  * implemented directly against uart_owner_get_tx_used() as specified there;
  * uart_owner_rx_read() is already exactly hal_uart_recv's contract
  * (non-blocking, returns 0..max bytes actually available); and
@@ -99,7 +99,7 @@
  */
 #include "hal_uart.h"
 
-/* HAL Phase 1a (docs/HW_ABSTRACTION_PLAN.md) moved uart_owner.c/h and
+/* HAL Phase 1a (docs/HW_ABSTRACTION.md) moved uart_owner.c/h and
  * uart_owner_tx_policy.c/h from firmware/SaftyFW/src/tasks/ into this same
  * directory (uart_owner.h renamed to hal_uart_pico_internal.h to avoid
  * colliding with the ESP-side uart_owner.h moving into
@@ -109,7 +109,7 @@
 #include "hal_uart_pico_internal.h"
 
 #include "hal_time.h"
-/* HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION_PLAN.md):
+/* HAL Phase 1b, "close the upward include" (docs/HW_ABSTRACTION.md):
  * this used to #include "board_pins.h" (a SaftyFW header), same as
  * uart_owner.c's former identical note. Pin values now arrive via
  * hal_uart_cfg_t at hal_uart_init() time instead and are forwarded straight
@@ -179,7 +179,7 @@ hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
 hal_status_t hal_uart_deinit(hal_uart_t *u) {
     (void)u;
     /* uart_owner.c exports no teardown -- the real link is brought up once
-     * at boot and lives for the process lifetime (docs/HW_ABSTRACTION_PLAN.md
+     * at boot and lives for the process lifetime (docs/HW_ABSTRACTION.md
      * boot-order section: uart_owner_init() runs from main() before the
      * scheduler starts, with no matching shutdown anywhere in SaftyFW). Not
      * an INTERFACE MISMATCH in the sense of "cannot be expressed" -- hal_uart
@@ -215,7 +215,7 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data,
     }
 
     /* Ring-drained-not-wire-complete, per hal_uart.h's own header comment
-     * and docs/HW_ABSTRACTION_PLAN.md: waits for uart_owner_get_tx_used()
+     * and docs/HW_ABSTRACTION.md: waits for uart_owner_get_tx_used()
      * to reach 0 (the TX ISR has drained every queued byte into the
      * hardware FIFO), NOT for the PL011 to finish shifting the last byte
      * out onto the wire (that would need UARTFR.BUSY, which uart_owner.c
