@@ -1,5 +1,7 @@
 # drivers/ reorg dry run (2026-09-05, revised)
 
+Reorg applied in `9f18ca5` (2026-09-05); status/provenance follow-up `c3d0e66`.
+
 ## -3. Round-6 Opus review pass (2026-09-05, this session) -- 6 findings fixed
 
 A round-6 review of the state above found 6 findings (1 real bug, 1 real
@@ -54,6 +56,20 @@ sandboxing rule -- `-Apply` itself was never invoked).
    rule engine, already in `$knownPlaceholders`), and
    `check_link_impl_isolation.ps1`'s own UnitTestFw line (deliberately
    excluded, finding 1 above). No genuine gap found.
+
+   **CORRECTED in round-7 review**: the "3 hits, no genuine gap" claim above
+   was grepped against `C:\rc7`, the `-PreviewDir` output -- not a fully
+   reconstructed tree with every mapped file actually moved and every
+   scanned-extension file rewritten. The fully applied tree instead has
+   **101 stale flat-path citations** (`App/drivers/<moved-basename>` with
+   no layer prefix) in `.c`/`.h`/`.html`/`.js`/`.css`/`.csv` comments --
+   extensions outside the mechanical scan's `*.ps1`/`*.py`/`*.c`/`*.h`/
+   `*.md` file list (the scan does reach `.c`/`.h`, but only inside the
+   directories it walks, not comment-only prose citations embedded in
+   files elsewhere in the tree, nor `.html`/`.js`/`.css`/`.csv` at all).
+   All 101 are comment/prose, not code the build or a check script
+   resolves, but they are a genuine gap, not "no genuine gap" as round-6
+   claimed. Fixed by hand in `eaaa10b`.
 3. **MEDIUM -- the upward-include verifier (section 5) ran AFTER section
    1's `git mv` and sections 2/4's rewrites**, so `-Apply` on a tree with a
    real, non-allowlisted upward include would already have moved all 359
@@ -85,18 +101,21 @@ sandboxing rule -- `-Apply` itself was never invoked).
    same relocated block, now unconditionally before section 1 regardless of
    `-DryRun`/`-Apply`.)
 4. **LOW -- claimed "main" `cl` line length was re-measured, not
-   corrected.** The round-6 task description asserted DRYRUN.md's existing
-   7659-char figure was stale (stating a real measurement of 7815).
-   Re-measured directly against the real repo path by extracting
-   `build_host_tests.ps1`'s literal source (through the `$cmd = ...`
-   assignment) into a throwaway copy placed IN `firmware/KilnFW/App/test/`
-   (so `$PSScriptRoot` resolves to the real directory, not a scratch path)
-   and running it: **7659 chars**, matching DRYRUN.md's existing number
-   exactly, not 7815. The throwaway file was deleted immediately after
-   (`git status --porcelain -- firmware/KilnFW/App/test/_measure_tmp.ps1`
-   empty). DRYRUN.md's number stands uncorrected; residual headroom to
-   cmd.exe's ~8191-char limit is **532 chars** (8191 - 7659), not the 376
-   the task description assumed.
+   corrected. CORRECTED in round-7 review**: the round-6 writeup above is
+   wrong. Re-measuring properly (against the real repo path, on the fully
+   post-move tree, not the pre-move one this finding actually checked)
+   gives **7815 chars**, not 7659. The 7659 figure was accurate only for
+   the pre-move `cl` line (matching DRYRUN.md's older number because it
+   measured the same, unmoved thing); post-move, with the response file
+   resolved against the real repo path rather than the scratch dir, the
+   line grows to **5127 chars in the scratch dir plus 84 root-path
+   occurrences at 32 chars each** (the scratch dir's shorter prefix vs.
+   the real repo's longer one), landing at 7815 -- a 156-char difference
+   from the pre-move 7659 figure that is exactly the sum of the newly
+   inserted layer-directory prefixes (`control/`, `hw/`, etc.) across the
+   source list. Residual headroom to cmd.exe's ~8191-char limit is
+   **376 chars** (8191 - 7815), not the 532 the round-6 finding claimed --
+   room for roughly four more host-test source files, not thirteen.
 5. **LOW -- `App/drivers/README.md` and
    `components/kilnlink/CMakeLists.txt` cited `espInterfaces/` and flat
    `App/drivers/<file>` paths the mechanical scan never reaches.**
