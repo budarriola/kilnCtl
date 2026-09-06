@@ -130,7 +130,6 @@ function Get-RealCFiles {
 # relative path of every file this check considers missing. ---
 $allowlist = @(
     # Example shape (not real): @{ RelPath = "firmware/KilnFW/App/drivers/foo.c"; Reason = "..." }
-    @{ RelPath = "firmware/hwAbstraction/interface/hal_status.c"; Reason = "Pre-existing Phase 0 shared status-to-name implementation landed beside hal_status.h (commit c626727), predating the interface/-is-headers-only note added when this check's scan was extended to hwAbstraction/ (2026-09-05). Genuinely violates that note; not moved here because this pass is scoped to the checker only. Tracked in docs/HW_ABSTRACTION_PLAN.md." }
 )
 
 function Test-Allowlisted {

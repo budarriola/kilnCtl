@@ -5,7 +5,8 @@ One hardware-abstraction tree shared by KilnFW (ESP32-S3) and SaftyFW
 
 ```
 hwAbstraction/
-  interface/   portable headers + hal_status.c (backend-independent). DONE (Phase 0).
+  interface/   portable headers only (backend-independent). DONE (Phase 0).
+  common/      vendor-neutral shared code (hal_status.c).
   esp/         ESP-IDF backends. Empty -- Phase 1a/1b.
   pico/        pico-sdk backends. Empty -- Phase 1a/1b.
   host/        fake backends for MSVC host tests. Empty -- Phase 2.

@@ -28,6 +28,7 @@ $ErrorActionPreference = "Stop"
 
 $here = $PSScriptRoot
 $ifaceDir = Join-Path (Split-Path -Parent $here) "interface"
+$commonDir = Join-Path (Split-Path -Parent $here) "common"
 $workDir = Join-Path $here "_work"
 if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
 New-Item -ItemType Directory -Path $workDir | Out-Null
@@ -89,7 +90,7 @@ int hal_test_unused_$($h -replace '[^a-zA-Z0-9]','_');
 
 # 2) hal_status.c compiles.
 $statusObj = Join-Path $workDir "hal_status.obj"
-$r = Invoke-Cl -SourceFile (Join-Path $ifaceDir "hal_status.c") -OutObj $statusObj
+$r = Invoke-Cl -SourceFile (Join-Path $commonDir "hal_status.c") -OutObj $statusObj
 if ($r.ExitCode -ne 0) {
     $failures += "hal_status.c failed to compile:`n$($r.Output)"
 } else {
