@@ -124,12 +124,16 @@ def press_button(name: str, params: Optional[dict[str, Any]] = None) -> str:
     press_button("IO: Set Relay", {"relay": 1, "on": true})
     or press_button("Thermo: Read All") for an action that takes none.
 
-    Every supplied value is checked against the action's declared param type
-    before dispatch (see _validate_param): a bool-typed param (e.g. a gated
-    action's `confirm`) must be a real JSON boolean, not "false"/"true"/0/1
-    -- those used to pass straight through to the action's own `if not
-    confirm` check, where a truthy string like "false" evaluates true and
-    defeats the gate entirely.
+    Every supplied value declared bool or int is checked against that exact
+    type before dispatch (see _validate_param) -- str/float-declared params
+    are NOT checked here and pass through as-is, same as before this
+    validation existed. The bool/int case is the one that mattered: a
+    bool-typed param (e.g. a gated action's `confirm`) must be a real JSON
+    boolean, not "false"/"true"/0/1 -- those used to pass straight through
+    to the action's own `if not confirm` check, where a truthy string like
+    "false" evaluates true and defeats the gate entirely. No gated action in
+    this registry uses a str/float confirm-style param today; if one ever
+    does, extend _validate_param first.
     """
     action = actions.ACTIONS.get(name)
     if action is None:
