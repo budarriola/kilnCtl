@@ -785,6 +785,17 @@ uart_owner_tx_policy.{c,h}, and `hal_uart_pico_internal.h` renamed from
 uart_owner.h) for WP2. Each processor's copy stays independent -- no shared
 `owners/` directory.
 
+Done (2026-09-05): the ESP-IDF component formerly registered under the bare,
+collision-prone name `esp` is now `hwabstraction_esp`, matching the
+`hwabstraction_pico` naming already used on the SaftyFW/pico side. Landed as
+a thin wrapper directory, `firmware/hwAbstraction/idf/hwabstraction_esp/`,
+rather than a rename of `firmware/hwAbstraction/esp/` itself -- that tree is
+shared with other consumers (this plan, the `pico/`/`host/`/`test/`
+siblings) that key off its exact path, so the real sources stayed put and
+only the `idf_component_register` call moved into the new wrapper (see
+`firmware/hwAbstraction/esp/CMakeLists.txt` and
+`firmware/hwAbstraction/idf/hwabstraction_esp/CMakeLists.txt`).
+
 **Phase 1b — adapt.** Each moved owner implements its Phase-0 interface:
 types change at the edge, bodies stay. hal_uart_send_blocking lands here and
 uart_protocol.c:107 switches to it -- DONE 2026-09-05: frame_and_send() now
@@ -794,7 +805,24 @@ uart_owner_transfer()'s TX path is left in place but unused by this caller
 (uart_owner.c's request-queue write is not converted -- see its TODO (HAL
 Phase 1b) comment on why). uart_protocol.c is still not host-compiled
 (Phase 2), so no host test exercises this path yet; build_kilnfw and
-run_all_checks.ps1 are the only current coverage. Measure on hardware after this phase:
+run_all_checks.ps1 are the only current coverage. **Phase 2/3 item (2026-09-05
+review): delete `hal_uart_attach()`.** It exists only because uart_protocol_t
+does not yet own a real, driver-installed `hal_uart_t` -- it shares
+`proto->owner`'s port instead, attaching to a driver `uart_owner_t` already
+installed. Once uart_owner_t's install/deinit responsibility itself moves
+onto hal_uart_init/hal_uart_deinit (the point of this whole migration),
+`hal_uart_attach` has no reason to exist: uart_protocol_init should call
+`hal_uart_init()` directly and own that `hal_uart_t` outright, and
+`hal_uart_attach` should be deleted from interface/hal_uart.h and every
+backend (esp/uart/hal_uart_esp.c, pico/uart/hal_uart_pico.c, host/fake_uart.c)
+along with its test coverage in firmware/hwAbstraction/test/test_fake_uart.c.
+2026-09-05 audit: `uart_owner_transfer()` itself is now unreachable in
+production (uart_protocol.c's frame_and_send() was its only real caller and
+no longer calls it; safety_link.c's remaining textual match is a comment, not
+a call site) -- scheduled for deletion in this same later pass, alongside the
+whole `uart_owner_task()` request/reply queue+worker (both its TX and its
+already-refused RX branch), once nothing depends on uart_owner_t owning the
+driver at all. Measure on hardware after this phase:
 safety-link reply timing, display frame time, thermo read latency under a
 full-screen redraw. relay_owner becomes a hal_gpio client; hal_adc wraps
 current_task/current_sense. hal_scratch/hal_wdt pico bodies landed the same
@@ -890,6 +918,24 @@ hal_kv.h's own "pico explicitly excluded." config_store's real home
 remains hal_flash (see that section above, now carrying this draft's
 ARMED/seq-CRC-log/format-version-REFUSE analysis as prose), not yet
 written.
+
+Open item (2026-09-05 review finding): three sites still `#include
+"board_pins.h"` (a SaftyFW header, `firmware/SaftyFW/src/board_pins.h`)
+straight from inside `firmware/hwAbstraction/pico/`, each marked
+`// TEMPORARY (HAL Phase 1b)` in the source --
+`pico/spi/spi_owner.c`, `pico/uart/uart_owner.c`, and
+`pico/uart/hal_uart_pico.c`. These compile today only because
+`firmware/SaftyFW/CMakeLists.txt`'s `hwabstraction_pico` target adds a
+PRIVATE include directory pointed at SaftyFW's own `src/` root -- the same
+coupling noted in `firmware/hwAbstraction/README.md`. To close this: narrow
+what's exposed, either by splitting the handful of pin assignments these
+three files actually need into their own small header under
+`firmware/hwAbstraction/pico/` (populated from SaftyFW at init rather than
+included directly), or by passing those pin values in as init-time
+parameters instead of a compile-time header. Until one of those lands,
+`check_hal_include_boundary.ps1`'s hwAbstraction upward-include stage keeps
+these three sites on an explicit, named allowlist rather than silently
+permitting the pattern.
 
 **Phase 2 — host backend.** Response file for the main cl invocation first.
 Implement hwAbstraction/host/ per the fake specs; switch both

@@ -12,6 +12,17 @@ hwAbstraction/
                  esp/spi/  esp_spi_owner.{c,h}, owner_slot_pool.{c,h}
                  esp/i2c/  i2c_owner.{c,h}
                  esp/uart/ uart_owner.{c,h}, uart_protocol.{c,h}
+               esp/CMakeLists.txt is comment-only, not a real ESP-IDF
+               component (a bare "esp" component name collides in IDF's flat
+               namespace) -- the real component is the thin wrapper at
+               idf/hwabstraction_esp/ below, which lists these same sources
+               with a "../../esp/" prefix.
+  idf/         ESP-IDF component-registration wrappers.
+                 idf/hwabstraction_esp/  the real idf_component_register for
+                                         esp/ above, named "hwabstraction_esp"
+                                         (symmetric with SaftyFW's
+                                         "hwabstraction_pico" library target)
+                                         instead of the bare "esp".
   pico/        pico-sdk backends (Phase 1b), plus the SPI/UART owners moved in
                from SaftyFW/src/ (Phase 1a WP2):
                  pico/spi/  spi_owner.{c,h}
@@ -27,3 +38,13 @@ interface's HAL backend, not under a separate owners/ subtree), with each
 processor's file staying in its own tree. Phase 1b backend files above are
 already landed for several interfaces. See the plan's "Phases" section for
 what each later phase adds.
+
+Known coupling: `firmware/SaftyFW/CMakeLists.txt`'s `hwabstraction_pico`
+target privately includes SaftyFW's own project root (for
+`FreeRTOSConfig.h`) and `SaftyFW/src/` (for `board_pins.h`, needed by three
+`// TEMPORARY (HAL Phase 1b)` sites -- `pico/spi/spi_owner.c`,
+`pico/uart/uart_owner.c`, `pico/uart/hal_uart_pico.c`). As a result
+`hwabstraction_pico` is **not buildable outside a SaftyFW-shaped project**:
+it depends on headers that live outside this tree, not just on the pico-sdk.
+See `docs/HW_ABSTRACTION_PLAN.md`'s Phase 1b section ("Open item
+(2026-09-05 review finding)") for the plan to narrow this.

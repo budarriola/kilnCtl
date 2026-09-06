@@ -330,7 +330,31 @@ if ($headroom -lt 8) {
 # "owner" anywhere in the name (esp_spi_owner.c, owner_slot_pool.c,
 # i2c_owner.c, uart_owner.c, uart_owner_tx_policy.c, spi_owner.c, ...) or
 # named uart_protocol.*.
-$ownerFileNamePattern = 'owner|^uart_protocol\.(c|h)$'
+#
+# Previously this was the loose regex 'owner|^uart_protocol\.(c|h)$', which
+# matches "owner" ANYWHERE in a basename -- broad enough to silently exempt
+# a future non-owner backend file that merely has "owner" in its name (e.g.
+# a hypothetical "screen_owner_button.c" hal backend) from the accessor/
+# no-include rule it should be held to. Replaced with an explicit basename
+# allowlist of the 8 owner .c files (and their .h counterparts) that exist
+# today, per this section's comment above:
+#   esp/:  esp_spi_owner.c, owner_slot_pool.c, i2c_owner.c, uart_owner.c,
+#          uart_protocol.c
+#   pico/: spi_owner.c, uart_owner.c, uart_owner_tx_policy.c
+# (esp's and pico's uart_owner.c share a basename and are both covered by
+# the single "uart_owner.c"/"uart_owner.h" entries below, matching the
+# pre-existing basename-only semantics.) A file added later must be named
+# exactly one of these to be treated as a pre-existing owner module --
+# adding "owner" to a new name no longer exempts it.
+$ownerFileNames = @(
+    "esp_spi_owner.c", "esp_spi_owner.h",
+    "owner_slot_pool.c", "owner_slot_pool.h",
+    "i2c_owner.c", "i2c_owner.h",
+    "uart_owner.c", "uart_owner.h",
+    "uart_protocol.c", "uart_protocol.h",
+    "spi_owner.c", "spi_owner.h",
+    "uart_owner_tx_policy.c", "uart_owner_tx_policy.h"
+)
 $hwAbstractionRoot = Join-Path $root "..\firmware\hwAbstraction"
 if (Test-Path $hwAbstractionRoot) {
     $hwAbstractionRootResolved = (Resolve-Path $hwAbstractionRoot).Path
@@ -342,7 +366,7 @@ if (Test-Path $hwAbstractionRoot) {
     $includePattern = '#\s*include\s*[<"]stack_margin\.h[>"]'
 
     foreach ($f in $hwAbstractionFiles) {
-        if ($f.Name -match $ownerFileNamePattern) {
+        if ($ownerFileNames -contains $f.Name) {
             # Pre-existing owner module relocated byte-identical by HAL
             # Phase 1a/1b -- not held to the backend accessor/no-include
             # rule. See this section's top comment.

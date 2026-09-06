@@ -214,15 +214,17 @@ $halCoveredNames = @()
 # Owner files moved INTO hwAbstraction by HAL Phase 1a/WP2 are no longer in
 # the "deliberately unwired" bucket the rest of this section's header talks
 # about -- they are wired into REAL build targets: the new
-# firmware/hwAbstraction/esp/CMakeLists.txt component (idf_component_register
-# SRCS, consumed by KilnFW) and firmware/SaftyFW/CMakeLists.txt's
+# firmware/hwAbstraction/idf/hwabstraction_esp/CMakeLists.txt component
+# (idf_component_register SRCS, consumed by KilnFW; the real sources live one
+# directory up under firmware/hwAbstraction/esp/, see that wrapper's own
+# header comment) and firmware/SaftyFW/CMakeLists.txt's
 # add_library(hwabstraction_pico ...) source list (consumed by SaftyFW /
 # SaftyFW_slotA / SaftyFW_slotB). Their coverage comes from THOSE
 # CMakeLists, same mechanism as section 1/2/3 below -- not from the
 # hwAbstraction test scripts, which is the pre-Phase-1a-move state this
 # script's header still describes for the hal_*_esp.c / hal_*_pico.c backend
 # bodies (still genuinely unwired, still covered by the test scripts only).
-$halEspCMake = Join-Path $halRoot "esp\CMakeLists.txt"
+$halEspCMake = Join-Path $halRoot "idf\hwabstraction_esp\CMakeLists.txt"
 if (Test-Path $halEspCMake) {
     foreach ($refPath in (Get-CMakeCSourceRefs -Path $halEspCMake)) {
         $halCoveredNames += ($refPath -split '/' | Select-Object -Last 1)
@@ -237,7 +239,7 @@ if (Test-Path $saftyCMakeForHal) {
             $halCoveredNames += (($m.Groups[1].Value -replace '\\', '/') -split '/' | Select-Object -Last 1)
         }
     } else {
-        Write-Host "WARNING: hwabstraction_pico add_library(...) block not found in $saftyCMakeForHal -- has it been renamed or reformatted? Its sources will read as uncovered." -ForegroundColor Yellow
+        throw "check_c_files_in_cmakelists: hwabstraction_pico add_library(...) block not found in $saftyCMakeForHal -- has it been renamed or reformatted? Its sources would silently read as uncovered, which this check must not let pass quietly."
     }
 }
 

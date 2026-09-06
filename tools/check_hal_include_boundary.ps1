@@ -179,6 +179,115 @@ $StrictHeaders = [ordered]@{
     "esp_netif.h"   = @{ Pattern = '^\s*#\s*include\s*["<]esp_netif\.h[">]';  Allowlist = $WifiAllowlist }
 }
 
+# --- Stage 3: firmware/hwAbstraction/** upward-include boundary. ---
+#
+# The two stages above deliberately exclude firmware/hwAbstraction/ entirely
+# (Test-InsideHal). That exclusion is correct for the ratchet's *purpose*
+# (catching KilnFW/SaftyFW app code that reaches for vendor headers instead
+# of going through the HAL) but it also means nobody was checking the HAL
+# boundary's OTHER direction: hwAbstraction code reaching back UP into
+# KilnFW/SaftyFW. Three "TEMPORARY (HAL Phase 1b)" sites do exactly that
+# today (board_pins.h is firmware/SaftyFW/src/board_pins.h, reached via
+# hwabstraction_pico's private SaftyFW/src include dir):
+#   - firmware/hwAbstraction/pico/spi/spi_owner.c
+#   - firmware/hwAbstraction/pico/uart/uart_owner.c
+#   - firmware/hwAbstraction/pico/uart/hal_uart_pico.c
+# and two files legitimately include stack_margin.h as pre-existing, ACCEPTED
+# (not temporary) behavior -- they are the same owner modules
+# check_stack_margin_registration.ps1 documents as relocated byte-identical
+# by the move and already calling stack_margin_register() directly:
+#   - firmware/hwAbstraction/esp/i2c/i2c_owner.c
+#   - firmware/hwAbstraction/esp/spi/esp_spi_owner.c
+# Both allowlists below are per-file/per-header, same shape as $OtaOpsAllowlist
+# above, and both are STRICT (any other hwAbstraction file including either
+# header is a hard failure, not a ratchet).
+$HalUpwardAllowlist = @(
+    @{ RelPath = "firmware/hwAbstraction/pico/spi/spi_owner.c";     Header = "board_pins.h";  Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
+    @{ RelPath = "firmware/hwAbstraction/pico/uart/uart_owner.c";   Header = "board_pins.h";  Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
+    @{ RelPath = "firmware/hwAbstraction/pico/uart/hal_uart_pico.c"; Header = "board_pins.h"; Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
+    @{ RelPath = "firmware/hwAbstraction/esp/i2c/i2c_owner.c";      Header = "stack_margin.h"; Reason = "pre-existing owner module relocated byte-identical by HAL Phase 1a; already calls stack_margin_register() directly (accepted, not temporary -- see check_stack_margin_registration.ps1)" }
+    @{ RelPath = "firmware/hwAbstraction/esp/spi/esp_spi_owner.c";  Header = "stack_margin.h"; Reason = "pre-existing owner module relocated byte-identical by HAL Phase 1a; already calls stack_margin_register() directly (accepted, not temporary -- see check_stack_margin_registration.ps1)" }
+)
+
+$HalUpwardHeaders = [ordered]@{
+    "board_pins.h"   = '^\s*#\s*include\s*["<]board_pins\.h[">]'
+    "stack_margin.h" = '^\s*#\s*include\s*["<]stack_margin\.h[">]'
+}
+
+# Any #include of a relative path that climbs out of firmware/hwAbstraction/
+# into ../../KilnFW/App or ../../SaftyFW/src (or similar) is always a hard
+# failure -- no allowlist, since none of today's known TEMPORARY sites use
+# this form (they rely on a private include-dir, not a relative path).
+$HalUpwardPathPattern = '^\s*#\s*include\s*"\.\./.*(App[/\\]drivers|SaftyFW[/\\]src)'
+
+function Get-HalScanFiles {
+    param([string]$Dir, [string]$RepoRoot)
+    if (-not (Test-Path $Dir)) { return @() }
+    Get-ChildItem -Path $Dir -Recurse -File |
+        Where-Object {
+            ($_.Extension -ieq ".c" -or $_.Extension -ieq ".h") -and
+            $_.FullName -notmatch '[\\/]test[\\/]'
+        } |
+        ForEach-Object {
+            ($_.FullName.Substring($RepoRoot.Length + 1) -replace '\\', '/')
+        } |
+        Sort-Object
+}
+
+function Invoke-HalUpwardScan {
+    param(
+        [string[]]$RelPaths,
+        [string]$FileRoot
+    )
+
+    $ratchetCounts = [ordered]@{}
+    foreach ($label in $RatchetHeaders.Keys) { $ratchetCounts[$label] = 0 }
+    $strictViolations = @()
+
+    foreach ($rel in $RelPaths) {
+        $full = Join-Path $FileRoot ($rel -replace '/', '\')
+        if (-not (Test-Path $full)) { continue }
+        $codeLines = Get-CodeOnlyLines -Path $full
+
+        # Ratchet: honest accounting of vendor/App headers used by
+        # hwAbstraction itself (mostly the relocated owner modules --
+        # this is what a2a1300 stopped counting when it excluded
+        # firmware/hwAbstraction/ from the main scan).
+        foreach ($label in $RatchetHeaders.Keys) {
+            $pattern = $RatchetHeaders[$label]
+            foreach ($line in $codeLines) {
+                if ($line -match $pattern) { $ratchetCounts[$label] += 1; break }
+            }
+        }
+
+        # Strict: upward includes into KilnFW/SaftyFW proper.
+        foreach ($headerName in $HalUpwardHeaders.Keys) {
+            $pattern = $HalUpwardHeaders[$headerName]
+            $hit = $false
+            foreach ($line in $codeLines) {
+                if ($line -match $pattern) { $hit = $true; break }
+            }
+            if (-not $hit) { continue }
+            $allowed = $false
+            foreach ($a in $HalUpwardAllowlist) {
+                if ($a.RelPath -ieq $rel -and $a.Header -ieq $headerName) { $allowed = $true; break }
+            }
+            if (-not $allowed) {
+                $strictViolations += "${rel}: includes $headerName (upward into KilnFW/SaftyFW) and is not on the hwAbstraction upward-include allowlist"
+            }
+        }
+
+        foreach ($line in $codeLines) {
+            if ($line -match $HalUpwardPathPattern) {
+                $strictViolations += "${rel}: includes a relative path that climbs into App/drivers or SaftyFW/src -- hwAbstraction must not reach upward by relative path"
+                break
+            }
+        }
+    }
+
+    return @{ RatchetCounts = $ratchetCounts; StrictViolations = $strictViolations }
+}
+
 # Excludes firmware/hwAbstraction/ (the boundary this check exists to
 # enforce -- HAL backend code is exempt by definition) from a repo-relative
 # path.
@@ -309,23 +418,40 @@ if (-not (Test-Path $baselinePath)) {
     throw "check_hal_include_boundary: baseline file $baselinePath not found -- run with -UpdateBaseline once to create it after reviewing the counts it would record."
 }
 
-if ($UpdateBaseline) {
-    $counts | ConvertTo-Json | Set-Content -Path $baselinePath -Encoding utf8
-    Write-Host "Baseline updated at $baselinePath :"
-    foreach ($label in $counts.Keys) {
-        Write-Host ("  {0,-14} {1}" -f $label, $counts[$label])
-    }
-    exit 0
-}
-
 $baselineRaw = Get-Content -Path $baselinePath -Raw | ConvertFrom-Json
 $ratchetFailures = Test-HalRatchet -Counts $counts -Baseline $baselineRaw
 
-if ($ratchetFailures.Count -gt 0 -or $violations.Count -gt 0) {
+# --- Stage 3: firmware/hwAbstraction/** upward-include boundary ---
+$hwAbstractionDir = Join-Path $repoRoot "firmware\hwAbstraction"
+if (-not (Test-Path $hwAbstractionDir)) { throw "check_hal_include_boundary: $hwAbstractionDir not found -- has it moved?" }
+$halFiles = Get-HalScanFiles -Dir (Resolve-Path $hwAbstractionDir).Path -RepoRoot $repoRootResolved
+$halScan = Invoke-HalUpwardScan -RelPaths $halFiles -FileRoot $repoRootResolved
+$halCounts = $halScan.RatchetCounts
+$halViolations = $halScan.StrictViolations
+
+if (-not $baselineRaw.hwAbstractionRatchet) {
+    throw "check_hal_include_boundary: baseline file has no hwAbstractionRatchet section -- run with -UpdateBaseline once to create it after reviewing the counts it would record."
+}
+$halRatchetFailures = Test-HalRatchet -Counts $halCounts -Baseline $baselineRaw.hwAbstractionRatchet
+
+if ($UpdateBaseline) {
+    # Handled above for the main counts; also refresh the hwAbstraction
+    # section here so a single -UpdateBaseline run keeps both honest.
+    $baselineObj = [ordered]@{ "_note" = $baselineRaw._note }
+    foreach ($label in $counts.Keys) { $baselineObj[$label] = $counts[$label] }
+    $baselineObj["hwAbstractionRatchet"] = $halCounts
+    $baselineObj | ConvertTo-Json | Set-Content -Path $baselinePath -Encoding utf8
+    Write-Host "Baseline updated (including hwAbstractionRatchet) at $baselinePath"
+    exit 0
+}
+
+if ($ratchetFailures.Count -gt 0 -or $violations.Count -gt 0 -or $halRatchetFailures.Count -gt 0 -or $halViolations.Count -gt 0) {
     Write-Host "HAL INCLUDE BOUNDARY CHECK FAILED:" -ForegroundColor Red
     foreach ($f in $ratchetFailures) { Write-Host "  RATCHET: $f" -ForegroundColor Red }
     foreach ($v in $violations) { Write-Host "  STRICT:  $v" -ForegroundColor Red }
-    throw "$($ratchetFailures.Count) ratchet failure(s), $($violations.Count) strict allowlist violation(s) -- see HW_ABSTRACTION_PLAN.md Phase 4."
+    foreach ($f in $halRatchetFailures) { Write-Host "  HAL-UPWARD RATCHET: $f" -ForegroundColor Red }
+    foreach ($v in $halViolations) { Write-Host "  HAL-UPWARD STRICT:  $v" -ForegroundColor Red }
+    throw "$($ratchetFailures.Count) ratchet failure(s), $($violations.Count) strict allowlist violation(s), $($halRatchetFailures.Count) hwAbstraction ratchet failure(s), $($halViolations.Count) hwAbstraction upward-include violation(s) -- see HW_ABSTRACTION_PLAN.md Phase 4."
 }
 
 Write-Host "HAL include boundary check passed ($($allFiles.Count) files scanned):"
@@ -333,4 +459,9 @@ foreach ($label in $counts.Keys) {
     Write-Host ("  {0,-14} {1} (baseline {2})" -f $label, $counts[$label], $baselineRaw.$label)
 }
 Write-Host "  esp_ota_ops.h and esp_wifi.h/esp_netif.h strict allowlists: OK"
+Write-Host "hwAbstraction/** upward-include check passed ($($halFiles.Count) files scanned):"
+foreach ($label in $halCounts.Keys) {
+    Write-Host ("  {0,-14} {1} (baseline {2})" -f $label, $halCounts[$label], $baselineRaw.hwAbstractionRatchet.$label)
+}
+Write-Host "  board_pins.h / stack_margin.h upward-include allowlist: OK"
 exit 0
