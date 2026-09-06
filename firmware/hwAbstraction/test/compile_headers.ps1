@@ -61,7 +61,7 @@ if (-not $vcvars) {
 }
 Write-Host "Using vcvarsall.bat: $vcvars"
 
-$headers = @("hal_status.h", "hal_spi.h", "hal_i2c.h", "hal_uart.h", "hal_gpio.h", "hal_adc.h", "hal_kv.h", "hal_time.h", "hal_flash.h")
+$headers = @("hal_status.h", "hal_spi.h", "hal_i2c.h", "hal_uart.h", "hal_gpio.h", "hal_adc.h", "hal_kv.h", "hal_time.h", "hal_flash.h", "hal_scratch.h", "hal_wdt.h", "hal_pwm.h", "hal_sysinfo.h")
 $failures = @()
 
 function Invoke-Cl {

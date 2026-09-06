@@ -430,6 +430,8 @@ generalized into a namespace/key store.
 
 ### hal_scratch — pico watchdog-scratch registry
 
+hal_scratch.h: header written (compile_headers.ps1 passes, negative test still fires).
+
 All 8 RP2040 scratch slots are claimed (startup_diag.h:13-28): [0]/[1] trip
 reason+magic, [2]/[3] startup diag+magic, [4] RESERVED by pico-sdk
 watchdog_enable (fenced by comment only), [5] shared by watchdog_overdue_diag
@@ -460,10 +462,15 @@ reached.
   (which reads esp_core_dump), ui_page_diagnostics.c:522, dashboard,
   partition_info and main_network_http's independent
   esp_ota_get_running_partition calls. esp_partition stays read-only here;
-  OTA writes are out of scope.
+  OTA writes are out of scope. hal_sysinfo.h: header written
+  (compile_headers.ps1 passes, negative test still fires).
 - hal_wdt: esp task-WDT reconfigure (watchdog_cfg.c sole user), `esp_restart`,
-  and pico watchdog_enable/update/reboot. Thin.
-- hal_pwm: backlight LEDC only. Thin, last.
+  and pico watchdog_enable/update/reboot. Thin. hal_wdt.h: header written
+  (compile_headers.ps1 passes, negative test still fires) — reboot wrapper
+  takes no pc/sp/delay_ms args so watchdog_reboot()'s scratch[4..7] stomp
+  hazard (pc != 0) is unreachable through the HAL.
+- hal_pwm: backlight LEDC only. Thin, last. hal_pwm.h: header written
+  (compile_headers.ps1 passes, negative test still fires).
 
 ### Board descriptors — forward, never freeze
 
