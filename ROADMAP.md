@@ -1361,17 +1361,22 @@ file maps and the "patterns worth copying" list:
 
 ---
 
-## M16 — Source layering and hardware abstraction · *opened 2026-09-05, plan only*
+## M16 — Source layering and hardware abstraction · *opened 2026-09-05, in progress*
 
 Two related reorganisations of the firmware trees, planned in full in
-[`docs/HW_ABSTRACTION_PLAN.md`](docs/HW_ABSTRACTION_PLAN.md) and not yet
-started. Owner decisions taken 2026-09-05: target layout approved, order of
-work fixed, no code changes until the dirty KilnFW files in the working tree
-land.
+[`docs/HW_ABSTRACTION_PLAN.md`](docs/HW_ABSTRACTION_PLAN.md). The six
+upward-include untangles are DONE; the `firmware/hwAbstraction/` tree exists
+with all interface headers, ESP backends (common/gpio/uart/spi/i2c/kv/time/
+wdt/pwm/sysinfo), Pico backends (gpio/adc/uart/time/flash/scratch/wdt), and
+host fakes for every interface; nothing is wired into CMakeLists yet
+(Phase 1a, the actual move, has not started) and the `drivers/` directory
+move itself has not been applied.
 
 1. **KilnFW `drivers/` layering** (KilnFW only). `App/drivers/` holds 332
-   files, most of them not drivers. Target:
-   `App/{hw,owners,control,safety,persist,net,http,ui,bridge,sim}/` with
+   files, most of them not drivers. Target (revised 2026-09-05, third round):
+   subdirectories of the existing `drivers/` component —
+   `App/drivers/{hw,owners,control,safety,persist,net,http,ui,bridge,sim,
+   common}/`, not sibling `App/<layer>/` components — with
    include direction strictly downward. Six upward-include patterns must be
    untangled first (the largest: 18 control/safety files include
    `zones_http.h` for config accessors), each as its own build-green commit;
@@ -1385,11 +1390,10 @@ land.
    compile) through Phase 4 (include-direction check goes strict). Phase 1a
    moves `espInterfaces/` only after item 1 so paths move once.
 
-Sequence: untangle includes, reorg, then HAL Phase 1a. All owner decisions
-are taken (2026-09-05): tree location/naming as above, opaque-storage
-option a, hal_uart `send` + `send_blocking`. `firmware/UnitTestFw` stays
-untouched throughout. Nothing blocks a start except the dirty-tree
-condition.
+Sequence: untangle includes (done), reorg (not started), then HAL Phase 1a.
+All owner decisions are taken (2026-09-05): tree location/naming as above,
+opaque-storage option a, hal_uart `send` + `send_blocking`.
+`firmware/UnitTestFw` stays untouched throughout.
 
 Gates: `build_kilnfw` + all 23 host executables green after every commit;
 every check script proven able to go red after the move (nine of twelve

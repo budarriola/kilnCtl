@@ -624,8 +624,13 @@ pattern rather than an error, matching real NOR flash), per-sector erase
 counts, per-primitive one-shot failure
 injection, and fake_flash_simulate_power_loss_during() leaving a half-
 written page (program) or a partially-completed multi-sector erase.
-Still not wired into build_host_tests.ps1 (the response-file switch above is
-still open).
+`fa3dec6` added hal_flash_region_init() (bounds-checked, NOT_READY without
+it) and pinned AND-programming in the header itself. The response-file
+switch landed (`63e5689`: KilnFW's build_host_tests.ps1 now passes one
+`cl @host_tests_common_flags.rsp` to all 23 invocations); fake_flash and the
+rest of hwAbstraction/host/ are still not referenced by either
+build_host_tests.ps1 (`grep fake_` finds nothing) -- linking fakes into the
+main test executables remains open.
 
 ## Migration inventories (measured)
 
