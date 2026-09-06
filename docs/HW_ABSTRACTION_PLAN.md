@@ -523,8 +523,20 @@ the host list today at all (zero off-target coverage until fake_spi).
 Progress 2026-09-05: fake_gpio/fake_adc/fake_uart implemented and standalone
 MSVC-tested (133 assertions + one proven negative test) at
 firmware/hwAbstraction/host/ and firmware/hwAbstraction/test/test_host_fakes.ps1;
-not yet wired into build_host_tests.ps1 (the response-file switch above is
-still open), and fake_spi/fake_i2c/fake_kv/fake_time/fake_flash are unstarted.
+fake_spi and fake_i2c landed the same day (152 more assertions + two more
+proven negative tests, 285 total) -- fake_spi's transfer_async never fires
+its callback inline, only via a test-driven fake_spi_pump(), and separates
+enqueue-timeout (unlogged, request never accepted) from completion-timeout
+(logged, fires HAL_TIMEOUT via pump) from async-pool exhaustion (latches
+hal_spi_bus_is_wedged() until re-init); fake_i2c scripts ack/nack per address
+on the bus so hal_i2c_probe is testable independent of any attached device.
+fake_kv/fake_time/fake_flash remain unstarted: interface/ has no
+hal_kv.h/hal_time.h/hal_flash.h today (contrary to this section's original
+wording, which assumed all eight headers already existed), and a host fake
+must follow an existing interface header rather than invent one -- those
+three wait on Phase 0/1 landing the missing interface headers first.
+Still not wired into build_host_tests.ps1 (the response-file switch above is
+still open).
 
 ## Migration inventories (measured)
 
