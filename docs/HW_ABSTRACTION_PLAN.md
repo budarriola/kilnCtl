@@ -939,11 +939,46 @@ permitting the pattern.
 
 **Phase 2 — host backend.** Response file for the main cl invocation first.
 Implement hwAbstraction/host/ per the fake specs; switch both
-build_host_tests.ps1 to link fakes for migrated interfaces; retire the ten
-stub headers; port test_esp_spi_owner.c off g_stub_* onto fake_spi's records.
+build_host_tests.ps1 to link fakes for migrated interfaces; retire stub
+headers no longer included by any host-compiled TU.
+
+Correction (2026-09-05, KilnFW-half Phase 2 pass): the "port
+test_esp_spi_owner.c off g_stub_* onto fake_spi's records" bullet above is
+wrong and is not being done. `esp/spi/hal_spi_esp.c` does not call into
+`esp_spi_owner.c` -- it duplicates it, standing up its own request queue,
+heap-backed slot pool, wedge latch and 1000ms timeout directly against
+`driver/spi_master.h` (only referencing esp_spi_owner.c in comments, no
+`#include "esp_spi_owner.h"`, no call to any `spi_owner_*` function). Per
+Phase 1b's own design the owner is meant to become a client ABOVE hal_spi,
+but that migration has not happened: `hal_spi_esp.c` is "not wired into any
+CMakeLists yet" (its own header comment) and no App/ source includes
+`hal_spi.h`. Until `esp_spi_owner.c` is rewritten to call `hal_spi_*`
+instead of `spi_master.h` directly, fake_spi has nothing to substitute
+under `test_esp_spi_owner.c` -- that test's `g_stub_spi_*` assertions are
+against the owner's direct spi_master.h calls, not against anything fake_spi
+intercepts. Porting it today would just add a second, disconnected fake_spi
+harness alongside the real g_stub_* one. Deferred to whichever Phase 3 item
+rebases esp_spi_owner.c onto hal_spi.h.
+
 New tests unlocked immediately: pico spi_owner against fake_spi, pico
 uart_owner ring logic against fake_uart, current-sense guards against
 fake_adc, config_store_flash against fake_flash.
+
+Status (2026-09-05, KilnFW-half pass): verified KilnFW's
+build_host_tests.ps1 already carries the response-file (Option A) and
+`hwAbstraction/interface/` include dir from an earlier pass. Re-audited
+`$totalExpected`: it is 22, matching 22 `Invoke-HostTestExe` calls (the
+exeN variable numbering skips 6, so the highest suffix is 23 for 22
+executables -- not a bug, left unchanged). No `fake_*.c` link was added on
+the KilnFW side: grepped all of `firmware/KilnFW/App/` for any
+`hal_uart_/hal_gpio_/hal_spi_/hal_i2c_/hal_adc_/hal_kv_/hal_flash_/hal_time_`
+call and found none -- no KilnFW host-compiled TU uses the HAL yet (see the
+esp_spi_owner correction above), so no stub header could be retired either;
+all ten are still reached by real host-compiled TUs (kiln_io_owner.c,
+esp_spi_owner.c, safety_link.c and friends) via the ESP-IDF driver/*
+surface directly. `build_host_tests.ps1` (22/22 executables),
+`kiln_call(build_kilnfw)`, and `tools/run_all_checks.ps1` (51/51 checks)
+all pass clean.
 
 **Phase 3 — absorb the stragglers, one interface per commit:**
 1. hal_scratch (pico) — highest safety value, smallest diff; the slot-4 code
