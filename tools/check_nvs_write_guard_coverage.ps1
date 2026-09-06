@@ -21,9 +21,17 @@
 # opted into the caller_stack_is_external() convention (the file already
 # defines that predicate -- see $guardedFiles below), every function BODY
 # that calls nvs_set_*()/nvs_commit()/esp_partition_write()/
-# esp_partition_erase_range() must also call caller_stack_is_external()
-# somewhere in that same function body. A function that writes without the
-# guard fails the check by name.
+# esp_partition_erase_range()/hal_kv_set_*()/hal_kv_commit()/hal_kv_erase_*()
+# must also call caller_stack_is_external() somewhere in that same function
+# body. A function that writes without the guard fails the check by name.
+#
+# 2026-09-06: extended to the hal_kv_* forms once HW_ABSTRACTION_PLAN.md
+# Phase 3 item 3 (the nvs.h -> hal_kv.h migration) started landing in
+# $guardedFiles -- relay_cycles.c and run_state.c now write via
+# hal_kv_set_blob()/hal_kv_commit(), not nvs_set_blob()/nvs_commit()
+# directly, so the old nvs_-only pattern had quietly started matching zero
+# write sites in those two files and passing vacuously (green with no
+# coverage).
 #
 # This is deliberately scoped to files that have already opted into the
 # convention, not every NVS-writing file in the tree (adaptive_tune.c,
@@ -105,7 +113,7 @@ $guardedFiles = @(
     "profile_executor_firing_stats.c"
 )
 
-$writePattern = 'nvs_set_\w+\s*\(|nvs_commit\s*\(|esp_partition_write\s*\(|esp_partition_erase_range\s*\('
+$writePattern = 'nvs_set_\w+\s*\(|nvs_commit\s*\(|esp_partition_write\s*\(|esp_partition_erase_range\s*\(|hal_kv_set_\w+\s*\(|hal_kv_commit\s*\(|hal_kv_erase_\w+\s*\('
 $guardCallPattern = 'caller_stack_is_external\s*\('
 $signaturePattern = '([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*$'
 
@@ -206,8 +214,8 @@ Write-Host "NVS write-guard coverage check: $functionsScanned function bod$(if (
 if ($failures.Count -gt 0) {
     Write-Host "NVS WRITE GUARD COVERAGE CHECK FAILED:" -ForegroundColor Red
     Write-Host "  The following function(s) call nvs_set_*()/nvs_commit()/esp_partition_write()/" -ForegroundColor Red
-    Write-Host "  esp_partition_erase_range() but never call caller_stack_is_external() anywhere" -ForegroundColor Red
-    Write-Host "  in their own body:" -ForegroundColor Red
+    Write-Host "  esp_partition_erase_range()/hal_kv_set_*()/hal_kv_commit()/hal_kv_erase_*() but" -ForegroundColor Red
+    Write-Host "  never call caller_stack_is_external() anywhere in their own body:" -ForegroundColor Red
     foreach ($f in $failures) {
         Write-Host "    $f" -ForegroundColor Red
     }
