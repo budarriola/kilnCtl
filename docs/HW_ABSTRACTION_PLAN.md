@@ -530,11 +530,11 @@ enqueue-timeout (unlogged, request never accepted) from completion-timeout
 (logged, fires HAL_TIMEOUT via pump) from async-pool exhaustion (latches
 hal_spi_bus_is_wedged() until re-init); fake_i2c scripts ack/nack per address
 on the bus so hal_i2c_probe is testable independent of any attached device.
-fake_kv/fake_time/fake_flash remain unstarted: interface/ has no
-hal_kv.h/hal_time.h/hal_flash.h today (contrary to this section's original
-wording, which assumed all eight headers already existed), and a host fake
-must follow an existing interface header rather than invent one -- those
-three wait on Phase 0/1 landing the missing interface headers first.
+hal_kv.h and hal_time.h: header written (compile_headers.ps1 passes, negative
+test still fires). fake_flash remains unstarted: interface/ still has no
+hal_flash.h, and a host fake must follow an existing interface header rather
+than invent one -- fake_flash waits on that header landing first. fake_kv
+and fake_time can now start against the headers above.
 Still not wired into build_host_tests.ps1 (the response-file switch above is
 still open).
 
