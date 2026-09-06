@@ -254,11 +254,8 @@ $HardwareAllowlist = @(
 # of scope: see "Deliberately out of scope" -- timer portability is not
 # listed as an in-scope HAL surface).
 $EspTimerAllowlist = @(
-    @{ RelPath = "firmware/KilnFW/App/drivers/http/dashboard_http.c";      Header = "esp_timer.h"; Reason = "dashboard HTTP handler timing/timeouts"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_esp.c";        Header = "esp_timer.h"; Reason = "OTA HTTP handler timing/timeouts"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov.c";            Header = "esp_timer.h"; Reason = "wifi_prov family -- sole Wi-Fi driver owner, already exempt for esp_wifi.h/esp_netif.h"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_internal.h";   Header = "esp_timer.h"; Reason = "wifi_prov family -- shared internal header"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link.c";       Header = "esp_timer.h"; Reason = "safety link protocol timing (frame timeouts, poll cadence)"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov.c";            Header = "esp_timer.h"; Reason = "wifi_prov family -- sole Wi-Fi driver owner, already exempt for esp_wifi.h/esp_netif.h; esp_timer_create/esp_timer_start_periodic for the AP-fallback/rescan timer objects only, no timestamp reads"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_internal.h";   Header = "esp_timer.h"; Reason = "wifi_prov family -- shared internal header (esp_timer_handle_t fields only)"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/ui/lvgl_port.c";             Header = "esp_timer.h"; Reason = "esp_timer_create/esp_timer_start_periodic for the 1ms lv_tick callback -- named explicitly in the plan's Phase 4 expected-final-entries list (lvgl_port)"; ExpiresAtPhase = "n/a (out of scope: lvgl_port, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c";   Header = "esp_timer.h"; Reason = "diagnostics LCD page refresh timing"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
 )

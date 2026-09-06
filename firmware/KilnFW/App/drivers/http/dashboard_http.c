@@ -10,9 +10,9 @@
 #include "esp_heap_caps.h"
 #include "esp_image_format.h" /* esp_image_get_metadata() -- flash_used below, address/size now sourced from hal_sysinfo */
 #include "esp_log.h"
-#include "esp_timer.h"
 
 #include "hal_sysinfo.h" /* hal_sysinfo_get_running_partition()/_get_build_info()/_reset_reason() -- see below */
+#include "hal_time.h" /* hal_time_now_us() -- uptime_s below, was esp_timer_get_time() */
 
 #include "autotune_engine.h"
 #include "boot_button.h" /* boot_button_ota_bypass_active()/_remaining_ms() -- see the GET /api/status fields below */
@@ -380,7 +380,7 @@ void dashboard_get_status(dashboard_status_t *out)
      * struct comment above these fields for the full rationale). Every read
      * here is cheap and side-effect-free -- esp_app_get_description() reads
      * a const struct baked into the app image, esp_reset_reason()/
-     * esp_timer_get_time() are simple register/RTC reads, and the
+     * hal_time_now_us() are simple register/RTC reads, and the
      * heap_caps_get_*() calls are the same O(free-list-length) walk
      * ui_page_diagnostics.c's own refresh_cb() already performs on the same
      * 2-second LCD tick, so doing it again here on a browser's poll cadence
@@ -401,7 +401,7 @@ void dashboard_get_status(dashboard_status_t *out)
         out->fw_build[0] = '\0';
     }
 
-    out->uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    out->uptime_s = (uint32_t)(hal_time_now_us() / 1000000);
     out->reset_reason = reset_reason_name(hal_sysinfo_reset_reason());
 
     out->heap_internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);

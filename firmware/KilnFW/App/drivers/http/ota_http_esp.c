@@ -18,7 +18,7 @@
 #include "esp_partition.h"
 #include "esp_random.h"
 #include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
-#include "esp_timer.h"
+#include "hal_time.h" /* hal_time_now_us() -- ota_record_fill()'s uptime-seconds timestamp below, was esp_timer_get_time() */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -359,7 +359,7 @@ cleanup:
 
     {
         ota_record_t rec;
-        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "esp", version_before,
+        ota_record_fill(&rec, (uint32_t)(hal_time_now_us() / 1000000), "esp", version_before,
                          version_after, ok, fail_reason, sha_hex);
         ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
     }
@@ -675,7 +675,7 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
         // PREVIOUS image (already written and hashed, if at all, by whatever
         // update put it there), it does not write new bytes for this record
         // to hash.
-        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "esp", version_before,
+        ota_record_fill(&rec, (uint32_t)(hal_time_now_us() / 1000000), "esp", version_before,
                          "", true, "rollback requested", NULL);
         ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
     }

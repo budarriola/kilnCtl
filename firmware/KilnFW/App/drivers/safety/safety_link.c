@@ -39,7 +39,6 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
-#include "esp_timer.h"
 #include "hal_esp_common.h"
 #include "hal_gpio.h"
 #include "stack_margin.h"
@@ -525,9 +524,11 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * first iteration, not merely by the time start() returns. */
     link->initialized = true;
     /* 2026-08-22: PSRAM stack. safety_poll_task talks to the RP2040 only
-     * through uart_protocol.c's hal_uart_attach()/hal_uart_send_blocking
-     * path (uart_owner.c owns the actual UART driver install and keeps its
-     * own internal stack/task for the RX event side); this task itself
+     * through uart_protocol.c's hal_uart_send_blocking path, on the same
+     * hal_uart_t owner->hal already installed (hal_uart_attach deleted,
+     * docs/HW_ABSTRACTION_PLAN.md); uart_owner.c owns the actual UART driver
+     * install and keeps its own internal stack/task for the RX event side.
+     * This task itself
      * never calls into flash/NVS -- per this file's own top-of-file comment,
      * "nothing reaches its flash until safety_link_send_commit_config()",
      * which is called by an HTTP handler, not from this poll loop. */

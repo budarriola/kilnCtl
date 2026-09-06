@@ -339,7 +339,7 @@ typedef struct {
     char     fw_build[40];                  /* esp_app_desc_t::date + ' ' + time, e.g. "Aug 20 2026 14:03:11"; sized for
                                               * gcc's worst-case format-truncation analysis of two 16-byte fixed
                                               * esp_app_desc_t fields (15 usable chars each) plus separator + NUL */
-    uint32_t uptime_s;                      /* esp_timer_get_time() / 1e6 -- monotonic since this boot */
+    uint32_t uptime_s;                      /* hal_time_now_us() / 1e6 -- monotonic since this boot */
     const char *reset_reason;               /* esp_reset_reason() decoded to a short static string */
 
     /* MALLOC_CAP_INTERNAL (on-chip DRAM) and MALLOC_CAP_SPIRAM (external
