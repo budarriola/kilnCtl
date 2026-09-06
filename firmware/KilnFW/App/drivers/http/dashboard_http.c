@@ -6,14 +6,13 @@
 #include <string.h>
 #include <strings.h> /* strcasecmp -- unit_pref_post_handler's "fahrenheit"/"celsius" match */
 
-#include "esp_app_desc.h"
 #include "esp_flash.h" /* esp_flash_get_size() -- flash_size below, same call as ui_page_diagnostics.c */
 #include "esp_heap_caps.h"
-#include "esp_image_format.h" /* esp_image_get_metadata() -- flash_used below */
+#include "esp_image_format.h" /* esp_image_get_metadata() -- flash_used below, address/size now sourced from hal_sysinfo */
 #include "esp_log.h"
-#include "esp_ota_ops.h" /* esp_ota_get_running_partition() -- flash_used below, same as main.c/ota_http.c */
-#include "esp_system.h"
 #include "esp_timer.h"
+
+#include "hal_sysinfo.h" /* hal_sysinfo_get_running_partition()/_get_build_info()/_reset_reason() -- see below */
 
 #include "autotune_engine.h"
 #include "boot_button.h" /* boot_button_ota_bypass_active()/_remaining_ms() -- see the GET /api/status fields below */
@@ -57,27 +56,28 @@ struct dashboard_board_objects s_dash;
  * See dashboard_json.h's own doc comment. Every call site below keeps
  * calling them by the same names as before this split. */
 
-/* esp_reset_reason_t -> short static string, for the diagnostics page's
- * "why did this boot happen" field (UI_PLAN.md section 5). Verified against
- * this project's installed esp_system.h (ESP-IDF's own enum, unchanged
- * across the S3 targets this board uses) -- every named value in
- * esp_reset_reason_t has a case here, so "unknown" only fires against a
- * future IDF adding a new reason this file hasn't been updated for. */
-static const char *reset_reason_name(esp_reset_reason_t r)
+/* hal_reset_reason_t -> short static string, for the diagnostics page's
+ * "why did this boot happen" field (UI_PLAN.md section 5). This table's
+ * wording is this file's own and must NOT be collapsed with ui_page_
+ * diagnostics.c's reset_reason_str() -- see hal_sysinfo.h's top comment.
+ * Every hal_reset_reason_t value has a case here, so "unknown" only fires
+ * for a future value this file hasn't been updated for (or the reset-
+ * reason-not-yet-mapped HAL_RESET_UNKNOWN itself). */
+static const char *reset_reason_name(hal_reset_reason_t r)
 {
     switch (r) {
-    case ESP_RST_UNKNOWN:   return "unknown";
-    case ESP_RST_POWERON:   return "power-on";
-    case ESP_RST_EXT:       return "external pin";
-    case ESP_RST_SW:        return "software (esp_restart)";
-    case ESP_RST_PANIC:     return "panic/exception";
-    case ESP_RST_INT_WDT:   return "interrupt watchdog";
-    case ESP_RST_TASK_WDT:  return "task watchdog";
-    case ESP_RST_WDT:       return "other watchdog";
-    case ESP_RST_DEEPSLEEP: return "wake from deep sleep";
-    case ESP_RST_BROWNOUT:  return "brownout";
-    case ESP_RST_SDIO:      return "SDIO";
-    default:                return "unknown";
+    case HAL_RESET_UNKNOWN:    return "unknown";
+    case HAL_RESET_POWERON:    return "power-on";
+    case HAL_RESET_EXT:        return "external pin";
+    case HAL_RESET_SW:         return "software (esp_restart)";
+    case HAL_RESET_PANIC:      return "panic/exception";
+    case HAL_RESET_INT_WDT:    return "interrupt watchdog";
+    case HAL_RESET_TASK_WDT:   return "task watchdog";
+    case HAL_RESET_WDT:        return "other watchdog";
+    case HAL_RESET_DEEPSLEEP:  return "wake from deep sleep";
+    case HAL_RESET_BROWNOUT:   return "brownout";
+    case HAL_RESET_SDIO:       return "SDIO";
+    default:                   return "unknown";
     }
 }
 
@@ -119,11 +119,11 @@ static void read_flash_facts_once(void)
     s_flash_size_known = (esp_flash_get_size(NULL, &flash_size) == ESP_OK);
     s_flash_size = flash_size;
 
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    if (running) {
-        s_flash_partition_size = running->size;
+    hal_sysinfo_partition_info_t running;
+    if (hal_sysinfo_get_running_partition(&running) == HAL_OK) {
+        s_flash_partition_size = running.size;
         esp_image_metadata_t metadata = { 0 };
-        esp_partition_pos_t part_pos = { .offset = running->address, .size = running->size };
+        esp_partition_pos_t part_pos = { .offset = running.address, .size = running.size };
         s_flash_used_known = (esp_image_get_metadata(&part_pos, &metadata) == ESP_OK);
         s_flash_used = metadata.image_len;
     }
@@ -385,23 +385,24 @@ void dashboard_get_status(dashboard_status_t *out)
      * ui_page_diagnostics.c's own refresh_cb() already performs on the same
      * 2-second LCD tick, so doing it again here on a browser's poll cadence
      * is not a new cost profile for this firmware. */
-    const esp_app_desc_t *app_desc = esp_app_get_description();
-    out->fw_version_known = (app_desc != NULL);
-    if (app_desc) {
-        /* esp_app_desc_t::version/date/time are themselves fixed-size,
-         * NUL-terminated char arrays (esp_app_desc.h) -- snprintf still used
+    hal_sysinfo_build_info_t build_info;
+    hal_sysinfo_get_build_info(&build_info);
+    out->fw_version_known = build_info.valid;
+    if (build_info.valid) {
+        /* hal_sysinfo_build_info_t::version/date/time are themselves
+         * fixed-size, NUL-terminated char arrays -- snprintf still used
          * defensively rather than strcpy, matching this file's json_escape()
          * callers' general "never trust a fixed-size field to already be
          * exactly what its type promises" habit. */
-        snprintf(out->fw_version, sizeof(out->fw_version), "%s", app_desc->version);
-        snprintf(out->fw_build, sizeof(out->fw_build), "%s %s", app_desc->date, app_desc->time);
+        snprintf(out->fw_version, sizeof(out->fw_version), "%s", build_info.version);
+        snprintf(out->fw_build, sizeof(out->fw_build), "%s %s", build_info.date, build_info.time);
     } else {
         out->fw_version[0] = '\0';
         out->fw_build[0] = '\0';
     }
 
     out->uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
-    out->reset_reason = reset_reason_name(esp_reset_reason());
+    out->reset_reason = reset_reason_name(hal_sysinfo_reset_reason());
 
     out->heap_internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     out->heap_internal_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);

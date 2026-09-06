@@ -108,7 +108,10 @@ $sources = @(
     (Join-Path $driversDir "hw/panel_detect.c"),
     (Join-Path $hwAbsDir "esp/spi/owner_slot_pool.c"),
     (Join-Path $hwAbsDir "host/fake_gpio.c"),
+    (Join-Path $hwAbsDir "host/fake_sysinfo.c"),
+    (Join-Path $hwAbsDir "host/fake_time.c"),
     (Join-Path $hwAbsDir "common/hal_status.c"),
+    (Join-Path $hwAbsDir "esp/common/hal_esp_common.c"),
     (Join-Path $driversDir "common/stack_margin.c"),
     (Join-Path $driversDir "net/time_sync_tz.c"),
     (Join-Path $driversDir "persist/log_store.c"),
@@ -117,7 +120,16 @@ $sources = @(
     (Join-Path $driversDir "control/iter_tune.c")
 )
 
-$sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
+# hal_time migration (HW_ABSTRACTION_PLAN.md item 5) pushed the "main"
+# executable's inline source-file list back over cmd.exe's ~8191-char
+# command-line limit (same failure mode this file's own flags-.rsp comment
+# below already describes for the /I flags, just on the $sources side this
+# time) -- "The command line is too long." with no other diagnostic. Fixed
+# the same way: the source list goes through a response file too, so the
+# actual `cl` invocation only ever sees `cl @flags.rsp @sources.rsp ...`.
+$sourcesRsp = Join-Path $outDir "host_tests_main_sources.rsp"
+[System.IO.File]::WriteAllText($sourcesRsp, (($sources | ForEach-Object { '"' + $_ + '"' }) -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+$sourceArgs = "@`"$sourcesRsp`""
 # Type-only stand-ins for the ESP-IDF headers the real firmware headers name,
 # plus CommonFW's include root for kilnlink/kilnlink_version.h. Include-path
 # only, so an on-target build is unaffected.
@@ -165,6 +177,7 @@ $hostTestsRspLines = @(
     "/I`"$hwAbsDir\esp\uart`""
     "/I`"$hwAbsDir\interface`""
     "/I`"$hwAbsDir\host`""
+    "/I`"$hwAbsDir\esp\common`""
 )
 [System.IO.File]::WriteAllText($hostTestsRsp, ($hostTestsRspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
@@ -383,7 +396,12 @@ $cmd8 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
         "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
         "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
-        "`"$(Join-Path $driversDir 'common/stack_margin.c')`""
+        "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+# hal_time migration (HW_ABSTRACTION_PLAN.md item 5): ota_http_pico.c, one of
+# the files #included directly into test_ota_http.c above, now calls
+# hal_time_now_us() instead of esp_timer_get_time(); fake_time.c supplies it.
 # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): ota_http.c's
 # recovery-exit/rollback/pico-rollback reboot task starts now call
 # stack_margin_register() (registration only, no size change), and this
@@ -523,7 +541,13 @@ $cmd14 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +
         "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'safety/safety_trip_decision.c')`" " +
         "`"$(Join-Path $driversDir 'safety/safety_link_frame.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_gpio.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
         "$($slExtra -join ' ')"
+# hal_time migration (HW_ABSTRACTION_PLAN.md item 5): safety_link_commands.c,
+# one of the files #included by test_safety_link_compile.c above, now calls
+# hal_time_now_us() instead of esp_timer_get_time(); fake_time.c supplies it.
 
 Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
 
@@ -627,7 +651,19 @@ $rsObjDir = Join-Path $outDir "rs"
 New-Item -ItemType Directory -Force -Path $rsObjDir | Out-Null
 $cmd19 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$rsObjDir\\`" /Fe:`"$exe19`" `"$(Join-Path $testDir 'test_run_state.c')`" " +
-        "`"$(Join-Path $testDir 'test_relay_cycles.c')`""
+        "`"$(Join-Path $testDir 'test_relay_cycles.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+# hal_time migration (HW_ABSTRACTION_PLAN.md item 5): both run_state.c and
+# relay_cycles.c now call hal_time_now_us() instead of esp_timer_get_time();
+# fake_time.c supplies it. (The separate hal_kv_* unresolved externals here
+# are the concurrent hal_kv/nvs migration's in-progress work, not this one.)
+# fake_kv.c/hal_status.c added HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h ->
+# hal_kv.h migration): relay_cycles.c now calls hal_kv_*() instead of nvs_*()
+# directly, so this executable needs the host hal_kv backend linked in.
+# run_state.c is unaffected (not yet migrated -- still uses stubs/nvs.h via
+# test_run_state.c) and hal_status.c is not otherwise in this executable's
+# link (the main $sources list only pulls it in for the main "exe" build).
 
 Invoke-HostTestExe -Name "run_state_relay_cycles" -ExePath $exe19 -BuildCmd $cmd19
 
@@ -660,7 +696,8 @@ $exe21 = Join-Path $outDir "kilnctl_host_tests_partition_info_http.exe"
 $pihObjDir = Join-Path $outDir "pih"
 New-Item -ItemType Directory -Force -Path $pihObjDir | Out-Null
 $cmd21 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
-        "/Fo:`"$pihObjDir\\`" /Fe:`"$exe21`" `"$(Join-Path $testDir 'test_partition_info_http.c')`""
+        "/Fo:`"$pihObjDir\\`" /Fe:`"$exe21`" `"$(Join-Path $testDir 'test_partition_info_http.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
 
 Invoke-HostTestExe -Name "partition_info_http" -ExePath $exe21 -BuildCmd $cmd21
 

@@ -28,6 +28,8 @@
 
 #include "../drivers/safety/crash_report.c"
 
+#include "fake_sysinfo.h"
+
 static void reset_all(void)
 {
     nvs_test_enable(true); // every test in this file needs a real round trip
@@ -295,6 +297,75 @@ static void test_dump_id_ignores_padding_bytes(void)
     TEST_CHECK(id_a != id_c, "a real difference (exc_pc) still changes dump_id");
 }
 
+// ---------------------------------------------------------------------------
+// crash_report_init()/_clear() through hal_sysinfo's fake backend (HW
+// abstraction Phase 3 item 4 migration). stubs/esp_core_dump.h's
+// esp_core_dump_get_summary() still always reports ESP_ERR_NOT_FOUND (full
+// summary parsing stays out of hal_sysinfo's scope, per that header's top
+// comment), so scripting the fake's coredump-present flag true cannot reach
+// a persisted record -- but it DOES newly reach crash_report_init()'s
+// "coredump present but summary fetch failed" branch, which was completely
+// unreachable before this migration (the old hardcoded stub always reported
+// "no coredump", so hal_sysinfo_coredump_present()==false was the only path
+// host tests ever exercised). This proves crash_report_init() actually
+// calls through to hal_sysinfo_coredump_present() rather than some stale
+// local no-op.
+// ---------------------------------------------------------------------------
+
+static void test_init_reaches_summary_fetch_when_coredump_present(void)
+{
+    TEST_SECTION("crash_report_init -- hal_sysinfo_coredump_present() actually gates the "
+                 "summary-fetch call (both branches leave no record, so that alone can't "
+                 "tell them apart -- the summary-fetch call count can)");
+
+    reset_all();
+    fake_sysinfo_reset_all();
+    fake_sysinfo_set_coredump_present(false);
+    test_esp_core_dump_get_summary_reset_count();
+
+    crash_report_init();
+    TEST_CHECK(test_esp_core_dump_get_summary_call_count() == 0,
+               "coredump_present()==false -> crash_report_init() must not attempt the summary "
+               "fetch at all");
+
+    crash_report_record_t out;
+    TEST_CHECK(crash_report_get(&out) == false, "no record persisted when no coredump present");
+
+    fake_sysinfo_reset_all();
+    fake_sysinfo_set_coredump_present(true);
+    test_esp_core_dump_get_summary_reset_count();
+
+    crash_report_init(); // esp_core_dump_get_summary() stub still fails -- no record persisted
+    TEST_CHECK(test_esp_core_dump_get_summary_call_count() == 1,
+               "coredump_present()==true -> crash_report_init() must reach the summary-fetch "
+               "branch exactly once (proves it calls through to hal_sysinfo_coredump_present() "
+               "rather than a stale local no-op, which the previous version of this test could "
+               "not distinguish from the false case)");
+    TEST_CHECK(crash_report_get(&out) == false,
+               "coredump present but summary fetch fails -> still no record persisted, and no "
+               "crash in crash_report_init() while getting there through hal_sysinfo");
+
+    fake_sysinfo_reset_all();
+}
+
+static void test_clear_erases_coredump_via_hal_sysinfo(void)
+{
+    TEST_SECTION("crash_report_clear -- hal_sysinfo_coredump_erase() clears fake coredump presence");
+    reset_all();
+    fake_sysinfo_reset_all();
+    fake_sysinfo_set_coredump_present(true);
+    TEST_CHECK(hal_sysinfo_coredump_present() == true, "setup: fake reports coredump present");
+
+    esp_err_t err = crash_report_clear();
+
+    TEST_CHECK(err == ESP_OK, "crash_report_clear() succeeds");
+    TEST_CHECK(hal_sysinfo_coredump_present() == false,
+               "crash_report_clear() routed the erase through hal_sysinfo_coredump_erase(), "
+               "which cleared the fake's presence flag");
+
+    fake_sysinfo_reset_all();
+}
+
 void run_test_crash_report(void)
 {
     test_crc_round_trip();
@@ -305,6 +376,8 @@ void run_test_crash_report(void)
     test_second_boot_same_dump_id_does_not_overwrite();
     test_get_with_no_record();
     test_dump_id_ignores_padding_bytes();
+    test_init_reaches_summary_fetch_when_coredump_present();
+    test_clear_erases_coredump_via_hal_sysinfo();
 
     nvs_test_enable(false); // leave shared stub state as every other test file in this binary expects
     nvs_test_clear();

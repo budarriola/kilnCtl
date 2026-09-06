@@ -41,9 +41,28 @@ static inline esp_err_t esp_core_dump_image_check(void)
     return ESP_ERR_NOT_FOUND;
 }
 
+/* Call counter added for test_crash_report.c's
+ * test_init_reaches_summary_fetch_when_coredump_present(): that test needs
+ * to prove crash_report_init() actually GATES this call on
+ * hal_sysinfo_coredump_present() rather than always (or never) reaching it --
+ * crash_report_get() returning false is consistent with either branch, so it
+ * cannot distinguish them on its own. */
+static int s_esp_core_dump_get_summary_calls = 0;
+
+static inline int test_esp_core_dump_get_summary_call_count(void)
+{
+    return s_esp_core_dump_get_summary_calls;
+}
+
+static inline void test_esp_core_dump_get_summary_reset_count(void)
+{
+    s_esp_core_dump_get_summary_calls = 0;
+}
+
 static inline esp_err_t esp_core_dump_get_summary(esp_core_dump_summary_t *summary)
 {
     (void)summary;
+    s_esp_core_dump_get_summary_calls++;
     return ESP_ERR_NOT_FOUND;
 }
 

@@ -16,14 +16,17 @@
 
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
-#include "esp_core_dump.h"
+#include "esp_core_dump.h" /* esp_core_dump_image_check() -- kept direct, see the call site's comment on why hal_sysinfo's presence-only bool can't replace it here */
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_system.h"
+#include "esp_system.h" /* esp_get_free_heap_size() -- reset reason itself now comes from
+                          * hal_sysinfo_reset_reason() below, but this call site still needs
+                          * the vendor heap query directly */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "hal_sysinfo.h" /* hal_sysinfo_reset_reason() */
 #include "board_temps.h"
 #include "boot_button.h"
 #include "boot_guard.h"
@@ -162,20 +165,20 @@ void main_boot_early(main_boot_ctx_t *ctx)
     // boot establishes the "this is what a clean boot's line looks like"
     // baseline for comparison.
     {
-        esp_reset_reason_t rr = esp_reset_reason();
+        hal_reset_reason_t rr = hal_sysinfo_reset_reason();
         const char *rr_name = "UNKNOWN";
         switch (rr) {
-            case ESP_RST_UNKNOWN:    rr_name = "UNKNOWN"; break;
-            case ESP_RST_POWERON:    rr_name = "POWERON"; break;
-            case ESP_RST_EXT:        rr_name = "EXT"; break;
-            case ESP_RST_SW:         rr_name = "SW"; break;
-            case ESP_RST_PANIC:      rr_name = "PANIC"; break;
-            case ESP_RST_INT_WDT:    rr_name = "INT_WDT"; break;
-            case ESP_RST_TASK_WDT:   rr_name = "TASK_WDT"; break;
-            case ESP_RST_WDT:        rr_name = "WDT"; break;
-            case ESP_RST_DEEPSLEEP:  rr_name = "DEEPSLEEP"; break;
-            case ESP_RST_BROWNOUT:   rr_name = "BROWNOUT"; break;
-            case ESP_RST_SDIO:       rr_name = "SDIO"; break;
+            case HAL_RESET_UNKNOWN:    rr_name = "UNKNOWN"; break;
+            case HAL_RESET_POWERON:    rr_name = "POWERON"; break;
+            case HAL_RESET_EXT:        rr_name = "EXT"; break;
+            case HAL_RESET_SW:         rr_name = "SW"; break;
+            case HAL_RESET_PANIC:      rr_name = "PANIC"; break;
+            case HAL_RESET_INT_WDT:    rr_name = "INT_WDT"; break;
+            case HAL_RESET_TASK_WDT:   rr_name = "TASK_WDT"; break;
+            case HAL_RESET_WDT:        rr_name = "WDT"; break;
+            case HAL_RESET_DEEPSLEEP:  rr_name = "DEEPSLEEP"; break;
+            case HAL_RESET_BROWNOUT:   rr_name = "BROWNOUT"; break;
+            case HAL_RESET_SDIO:       rr_name = "SDIO"; break;
             default: break;
         }
         /* MALLOC_CAP_INTERNAL on its own is a misleading number on this chip

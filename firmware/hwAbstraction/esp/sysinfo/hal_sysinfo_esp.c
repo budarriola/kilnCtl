@@ -11,9 +11,10 @@
  * TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80) range -- board_temps.c's own
  * 2026-08-20 fix comment on why that exact range, reproduced verbatim
  * here), esp_random() (safety_link.c:358), and crash_report.c's
- * esp_core_dump_image_check()/_erase() pair. Not wired into any
- * CMakeLists yet -- see
- * firmware/hwAbstraction/test/compile_esp_backends.ps1.
+ * esp_core_dump_image_check()/_erase() pair. Wired into
+ * firmware/hwAbstraction/idf/hwabstraction_esp/CMakeLists.txt as part of the
+ * hwabstraction_esp component (pulled into KilnFW's build transitively, not
+ * listed directly in firmware/KilnFW/App/drivers/CMakeLists.txt).
  *
  * esp_partition stays read-only here; OTA writes (esp_ota_set_boot_
  * partition, esp_ota_begin/write/end) are explicitly out of scope per the
@@ -41,6 +42,30 @@
 #include "driver/temperature_sensor.h"
 
 #include "hal_esp_common.h"
+
+/* main_boot_early.c logs hal_sysinfo_reset_reason()'s result as
+ * "esp_reset_reason=%d" -- i.e. it assumes the hal_reset_reason_t value it
+ * gets back is numerically identical to the underlying esp_reset_reason_t
+ * value, not just semantically mapped by the switch below. hal_reset_reason_t
+ * was deliberately declared in the same 0..15 order as esp_reset_reason_t to
+ * make that true; enforce it at compile time so a future reordering of
+ * either enum cannot silently break that log line. */
+_Static_assert((int)HAL_RESET_UNKNOWN     == (int)ESP_RST_UNKNOWN,     "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_POWERON     == (int)ESP_RST_POWERON,     "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_EXT         == (int)ESP_RST_EXT,         "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_SW          == (int)ESP_RST_SW,          "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_PANIC       == (int)ESP_RST_PANIC,       "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_INT_WDT     == (int)ESP_RST_INT_WDT,     "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_TASK_WDT    == (int)ESP_RST_TASK_WDT,    "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_WDT         == (int)ESP_RST_WDT,         "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_DEEPSLEEP   == (int)ESP_RST_DEEPSLEEP,   "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_BROWNOUT    == (int)ESP_RST_BROWNOUT,    "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_SDIO        == (int)ESP_RST_SDIO,        "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_USB         == (int)ESP_RST_USB,         "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_JTAG        == (int)ESP_RST_JTAG,        "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_EFUSE       == (int)ESP_RST_EFUSE,       "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_PWR_GLITCH  == (int)ESP_RST_PWR_GLITCH,  "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
+_Static_assert((int)HAL_RESET_CPU_LOCKUP  == (int)ESP_RST_CPU_LOCKUP, "hal_reset_reason_t must mirror esp_reset_reason_t numerically");
 
 hal_reset_reason_t hal_sysinfo_reset_reason(void) {
     /* esp_reset_reason_t's real values, mapped 1:1 -- this header hands
@@ -97,15 +122,35 @@ void hal_sysinfo_get_build_info(hal_sysinfo_build_info_t *out) {
     const esp_app_desc_t *app_desc = esp_app_get_description();
     out->valid = (app_desc != NULL);
     if (app_desc) {
-        snprintf(out->version, sizeof(out->version), "%s", app_desc->version);
-        snprintf(out->date, sizeof(out->date), "%s", app_desc->date);
-        snprintf(out->time, sizeof(out->time), "%s", app_desc->time);
+        /* esp_app_desc_t's version/date/time are fixed-size arrays, not
+         * guaranteed NUL-terminated if a build ever filled one completely --
+         * snprintf's size argument only bounds the WRITE into out->*, not how
+         * far it reads looking for a NUL in app_desc->*, so "%s" here could
+         * over-read past the field. Bound the read explicitly instead, same
+         * defensive memcpy(dst, src, sizeof(dst)-1) stance
+         * hal_sysinfo_get_running_partition() already takes on
+         * esp_partition_t::label above, relying on this function's own
+         * memset() above for the terminating NUL. */
+        memcpy(out->version, app_desc->version, sizeof(out->version) - 1);
+        memcpy(out->date, app_desc->date, sizeof(out->date) - 1);
+        memcpy(out->time, app_desc->time, sizeof(out->time) - 1);
     }
 }
 
 /* board_temps.c's own install-once/enable-once handle, reproduced here --
  * see this file's header comment for why (-10, 80) is the exact range,
- * not a rederivation. */
+ * not a rederivation.
+ *
+ * OWNERSHIP HAZARD (unresolved, flagged for future reconciliation, not fixed
+ * here): firmware/KilnFW/App/drivers/hw/board_temps.c owns its own separate
+ * static temperature_sensor_handle_t and independently calls
+ * temperature_sensor_install()/_enable() on the same physical ESP32-S3 on-die
+ * sensor. The IDF driver only supports one live install of that peripheral,
+ * so if any caller ever wires hal_sysinfo_temp_init() into the same boot path
+ * as board_temps_start() (main_boot_early.c currently only calls the latter),
+ * the second temperature_sensor_install() call will fail. Whoever adds a
+ * hal_sysinfo_temp_* call site must first pick one owner and delete the
+ * other's install/enable/uninstall lifecycle rather than running both. */
 static temperature_sensor_handle_t s_tsens;
 static bool s_tsens_ready;
 

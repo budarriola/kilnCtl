@@ -10,8 +10,9 @@
 #include "build_info.h" /* FW_GIT_COMMIT/FW_GIT_DIRTY/FW_BUILD_DATE/FW_BUILD_TIME -- TODO.md 9.6's
                           * per-processor build-identity fields for the ESP side, same header
                           * safety_link.c already includes for the ANNOUNCE_VERSION payload */
-#include "esp_app_desc.h"
+#include "esp_app_desc.h" /* esp_app_desc_t -- esp_ota_get_partition_description() (inactive slot) still uses this directly, out of hal_sysinfo's scope */
 #include "esp_app_format.h" /* esp_image_header_t, ESP_IMAGE_HEADER_MAGIC -- section 3's pre-esp_ota_begin() check */
+#include "hal_sysinfo.h" /* hal_sysinfo_get_build_info()/_get_running_partition() -- the RUNNING image's own version/label, see call sites below */
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -112,8 +113,9 @@ static void ota_esp_do_transfer(httpd_req_t *req, const char *ip)
     bool sha_op_active = false;
     char sha_hex[OTA_RECORD_SHA256_HEX_MAX] = "";
 
-    const esp_app_desc_t *running_desc = esp_app_get_description();
-    const char *version_before = (running_desc && running_desc->version[0]) ? running_desc->version : "";
+    hal_sysinfo_build_info_t running_build;
+    hal_sysinfo_get_build_info(&running_build);
+    const char *version_before = (running_build.valid && running_build.version[0]) ? running_build.version : "";
 
     size_t content_len = req->content_len;
     if (content_len == 0) {
@@ -480,10 +482,12 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     // Added directly to this already-existing status route rather than a new
     // one, same "small, contained addition to an existing endpoint" the
     // Pico-status handler below also gets for its own available fields.
-    const esp_app_desc_t *running_desc = esp_app_get_description();
-    const char *running_version = (running_desc && running_desc->version[0]) ? running_desc->version : "";
-    const esp_partition_t *running_part = esp_ota_get_running_partition();
-    const char *active_slot = running_part ? running_part->label : "unknown";
+    hal_sysinfo_build_info_t running_build;
+    hal_sysinfo_get_build_info(&running_build);
+    const char *running_version = (running_build.valid && running_build.version[0]) ? running_build.version : "";
+    hal_sysinfo_partition_info_t running_info;
+    bool have_running_info = (hal_sysinfo_get_running_partition(&running_info) == HAL_OK);
+    const char *active_slot = have_running_info ? running_info.label : "unknown";
 
     const esp_partition_t *inactive_part = esp_ota_get_next_update_partition(NULL);
     const char *inactive_slot = inactive_part ? inactive_part->label : "unknown";
@@ -661,8 +665,9 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    const esp_app_desc_t *running_desc = esp_app_get_description();
-    const char *version_before = (running_desc && running_desc->version[0]) ? running_desc->version : "";
+    hal_sysinfo_build_info_t running_build;
+    hal_sysinfo_get_build_info(&running_build);
+    const char *version_before = (running_build.valid && running_build.version[0]) ? running_build.version : "";
 
     {
         ota_record_t rec;

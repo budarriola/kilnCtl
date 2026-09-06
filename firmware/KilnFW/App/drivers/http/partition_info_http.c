@@ -5,9 +5,9 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
-#include "esp_ota_ops.h"
 #include "esp_partition.h"
 
+#include "hal_sysinfo.h" /* hal_sysinfo_get_running_partition() -- the "running" field below */
 #include "wifi_provision_http.h"
 
 static const char *TAG = "partition_info_http";
@@ -91,10 +91,11 @@ static esp_err_t api_partitions_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
 
-    const esp_partition_t *running = esp_ota_get_running_partition();
+    hal_sysinfo_partition_info_t running;
+    bool have_running = (hal_sysinfo_get_running_partition(&running) == HAL_OK);
     char head[ENTRY_BUF_SIZE];
     int n = snprintf(head, sizeof(head), "{\"running\":\"%s\",\"partitions\":[",
-                      running ? running->label : "");
+                      have_running ? running.label : "");
     if (n < 0 || (size_t)n >= sizeof(head)) {
         ESP_LOGE(TAG, "running-partition label did not fit head buffer");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "partition label too long");

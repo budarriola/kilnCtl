@@ -2,12 +2,15 @@
 
 #include <string.h>
 
-#include "esp_core_dump.h"
 #include "esp_crc.h"
+#include "esp_core_dump.h" /* esp_core_dump_summary_t/esp_core_dump_get_summary() -- full-summary parsing stays above hal_sysinfo, see that header's top comment */
 #include "esp_log.h"
-#include "esp_system.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+
+#include "hal_sysinfo.h" /* hal_sysinfo_coredump_present()/_erase(), hal_sysinfo_reset_reason() */
+#include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t from
+                              * hal_sysinfo_coredump_erase() rather than collapsing it to ESP_FAIL */
 
 static const char *TAG = "crash_report";
 
@@ -277,8 +280,7 @@ void crash_report_init(void)
         return;
     }
 
-    esp_err_t cd_err = esp_core_dump_image_check();
-    if (cd_err != ESP_OK) {
+    if (!hal_sysinfo_coredump_present()) {
         /* No coredump present (the ordinary case) or unreadable -- nothing
          * for this module to capture. main.c's own coredump-check block
          * already logs the outcome; this module does not repeat it. */
@@ -309,21 +311,21 @@ void crash_report_init(void)
         return;
     }
 
-    esp_reset_reason_t rr = esp_reset_reason();
+    hal_reset_reason_t rr = hal_sysinfo_reset_reason();
     const char *rr_name;
     switch (rr) {
-    case ESP_RST_UNKNOWN:    rr_name = "UNKNOWN"; break;
-    case ESP_RST_POWERON:    rr_name = "POWERON"; break;
-    case ESP_RST_EXT:        rr_name = "EXT"; break;
-    case ESP_RST_SW:         rr_name = "SW"; break;
-    case ESP_RST_PANIC:      rr_name = "PANIC"; break;
-    case ESP_RST_INT_WDT:    rr_name = "INT_WDT"; break;
-    case ESP_RST_TASK_WDT:   rr_name = "TASK_WDT"; break;
-    case ESP_RST_WDT:        rr_name = "WDT"; break;
-    case ESP_RST_DEEPSLEEP:  rr_name = "DEEPSLEEP"; break;
-    case ESP_RST_BROWNOUT:   rr_name = "BROWNOUT"; break;
-    case ESP_RST_SDIO:       rr_name = "SDIO"; break;
-    default:                 rr_name = "UNKNOWN"; break;
+    case HAL_RESET_UNKNOWN:    rr_name = "UNKNOWN"; break;
+    case HAL_RESET_POWERON:    rr_name = "POWERON"; break;
+    case HAL_RESET_EXT:        rr_name = "EXT"; break;
+    case HAL_RESET_SW:         rr_name = "SW"; break;
+    case HAL_RESET_PANIC:      rr_name = "PANIC"; break;
+    case HAL_RESET_INT_WDT:    rr_name = "INT_WDT"; break;
+    case HAL_RESET_TASK_WDT:   rr_name = "TASK_WDT"; break;
+    case HAL_RESET_WDT:        rr_name = "WDT"; break;
+    case HAL_RESET_DEEPSLEEP:  rr_name = "DEEPSLEEP"; break;
+    case HAL_RESET_BROWNOUT:   rr_name = "BROWNOUT"; break;
+    case HAL_RESET_SDIO:       rr_name = "SDIO"; break;
+    default:                   rr_name = "UNKNOWN"; break;
     }
 
     crash_report_record_t rec;
@@ -390,9 +392,10 @@ esp_err_t crash_report_clear(void)
         ESP_LOGW(TAG, "could not erase crash record from NVS: %s", esp_err_to_name(err));
     }
 
-    esp_err_t erase_err = esp_core_dump_image_erase();
-    if (erase_err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_core_dump_image_erase failed: %s", esp_err_to_name(erase_err));
+    hal_status_t erase_status = hal_sysinfo_coredump_erase();
+    if (erase_status != HAL_OK) {
+        esp_err_t erase_err = hal_status_to_esp_err(erase_status);
+        ESP_LOGW(TAG, "hal_sysinfo_coredump_erase failed: %s", esp_err_to_name(erase_err));
         return erase_err;
     }
     ESP_LOGI(TAG, "crash record and coredump image cleared");

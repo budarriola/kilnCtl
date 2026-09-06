@@ -173,9 +173,13 @@ if ($otaDirtyScan.StrictViolations.Count -ne 1) {
 
 # --- Assertion 5: the SAME injected include, on an allowlisted path, must
 # score ZERO strict violations -- proves the allowlist is consulted by path,
-# not just by header name. dashboard_http.c is on $OtaOpsAllowlist for
-# esp_ota_ops.h. ---
-$allowlistedRel = "firmware/KilnFW/App/drivers/http/dashboard_http.c"
+# not just by header name. ota_http.c is on $OtaOpsAllowlist for
+# esp_ota_ops.h. (dashboard_http.c and partition_info_http.c were dropped
+# from the allowlist 2026-09-06: the hal_sysinfo migration moved both onto
+# hal_sysinfo_get_running_partition()/_get_build_info()/_reset_reason(), so
+# neither includes esp_ota_ops.h any more -- see $OtaOpsAllowlist's own
+# comment in check_hal_include_boundary.ps1.) ---
+$allowlistedRel = "firmware/KilnFW/App/drivers/http/ota_http.c"
 $allowlistedScanDir = Join-Path $scratchDir "allowlisted_root"
 $allowlistedFull = Join-Path $allowlistedScanDir ($allowlistedRel -replace '/', '\')
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $allowlistedFull) | Out-Null

@@ -34,6 +34,8 @@ int g_test_count = 0;
 
 #include "../drivers/http/partition_info_http.c"
 
+#include "fake_sysinfo.h"
+
 // ---------------------------------------------------------------------
 // Fake esp_partition table + iterator -- stands in for the real
 // esp_partition_find()/esp_partition_next() ESP-IDF gives a running app.
@@ -96,9 +98,37 @@ esp_err_t esp_partition_iterator_release(esp_partition_iterator_t iterator)
     return ESP_OK;
 }
 
+// api_partitions_get_handler() now reads the running partition through
+// hal_sysinfo_get_running_partition() (HW abstraction Phase 3 item 4), not
+// esp_ota_get_running_partition() directly -- this test's own fake table
+// still models "running" as an esp_partition_t* (s_fake_running) since every
+// other partition-table fake in this file is shaped that way, so
+// set_fake_running() below is the one place that also arms fake_sysinfo's
+// mirror of it. esp_ota_get_running_partition() itself is no longer called
+// by the code under test, but is kept defined here (unused) so any other
+// translation unit this executable might someday link that still calls it
+// does not fail to link.
 const esp_partition_t *esp_ota_get_running_partition(void)
 {
     return s_fake_running;
+}
+
+static void set_fake_running(const esp_partition_t *p)
+{
+    s_fake_running = p;
+    if (p) {
+        hal_sysinfo_partition_info_t info = {0};
+        snprintf(info.label, sizeof(info.label), "%s", p->label);
+        info.address = p->address;
+        info.size = p->size;
+        fake_sysinfo_set_running_partition(&info);
+    } else {
+        // fake_sysinfo_set_running_partition() was never called (or called
+        // with NULL) -- fake_sysinfo.h documents this as the "never called"
+        // default, which already reports HAL_IO/absent, matching
+        // esp_ota_get_running_partition() returning NULL.
+        fake_sysinfo_reset_all();
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -178,7 +208,7 @@ static void test_reports_running_slot_and_every_partition(void)
     reset_capture();
     s_fake_table = k_table;
     s_fake_table_count = 4;
-    s_fake_running = &k_table[1]; // ota_0 is running
+    set_fake_running(&k_table[1]); // ota_0 is running
 
     httpd_req_t req = {0};
     esp_err_t err = api_partitions_get_handler(&req);
@@ -211,7 +241,7 @@ static void test_no_running_partition_reports_empty_string(void)
     reset_capture();
     s_fake_table = k_table;
     s_fake_table_count = 4;
-    s_fake_running = NULL; // esp_ota_get_running_partition() can legitimately return NULL
+    set_fake_running(NULL); // esp_ota_get_running_partition() can legitimately return NULL
 
     httpd_req_t req = {0};
     esp_err_t err = api_partitions_get_handler(&req);
@@ -224,7 +254,7 @@ static void test_empty_table_produces_valid_empty_array(void)
     reset_capture();
     s_fake_table = k_table;
     s_fake_table_count = 0; // no partitions of either type found
-    s_fake_running = NULL;
+    set_fake_running(NULL);
 
     httpd_req_t req = {0};
     esp_err_t err = api_partitions_get_handler(&req);
@@ -241,7 +271,7 @@ static void test_chunk_send_failure_mid_stream_is_propagated(void)
     reset_capture();
     s_fake_table = k_table;
     s_fake_table_count = 4;
-    s_fake_running = &k_table[0];
+    set_fake_running(&k_table[0]);
     s_send_chunk_fail_at = 3;
 
     httpd_req_t req = {0};
@@ -262,7 +292,7 @@ static void test_only_one_type_present_has_no_stray_comma(void)
     reset_capture();
     s_fake_table = data_only;
     s_fake_table_count = 2;
-    s_fake_running = NULL;
+    set_fake_running(NULL);
 
     httpd_req_t req = {0};
     esp_err_t err = api_partitions_get_handler(&req);

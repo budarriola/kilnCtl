@@ -150,15 +150,16 @@ $RatchetHeaders = [ordered]@{
 # is allowlisted for esp_wifi.h but somehow also picked up esp_ota_ops.h
 # still fails on the latter. ---
 
-# esp_ota_ops.h -- measured 2026-09-05 against the current tree: 8 files,
-# matching HW_ABSTRACTION_PLAN.md's Phase 4 estimate exactly.
+# esp_ota_ops.h -- measured 2026-09-06 against the current tree: 6 files.
+# dashboard_http.c and partition_info_http.c were allowlisted here as of
+# 2026-09-05 (8 files) but the hal_sysinfo migration moved both onto
+# hal_sysinfo_get_running_partition()/_get_build_info()/_reset_reason()
+# instead, so neither includes esp_ota_ops.h any more -- entries removed.
 $OtaOpsAllowlist = @(
-    @{ RelPath = "firmware/KilnFW/App/drivers/http/dashboard_http.c";      Header = "esp_ota_ops.h"; Reason = "reads running/next-boot partition info for the dashboard status card"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http.c";            Header = "esp_ota_ops.h"; Reason = "OTA HTTP handler orchestration -- direct partition/OTA-write owner"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_esp.c";        Header = "esp_ota_ops.h"; Reason = "ESP-side OTA write/verify/set-boot-partition implementation"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_pico.c";       Header = "esp_ota_ops.h"; Reason = "relays an OTA image to the Pico; still touches the ESP-side esp_ota_ops API for its own state"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_recovery.c";   Header = "esp_ota_ops.h"; Reason = "recovery-mode OTA rollback path -- reads/sets boot partition"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/http/partition_info_http.c"; Header = "esp_ota_ops.h"; Reason = "GET /api/partitions -- reports the RUNNING partition marker used by flash_firmware() verification"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c"; Header = "esp_ota_ops.h"; Reason = "diagnostics LCD page displays running partition/build info"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/main_network_http.c";           Header = "esp_ota_ops.h"; Reason = "wires the OTA HTTP handlers into the httpd instance at boot"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
 )
@@ -186,27 +187,32 @@ $StrictHeaders = [ordered]@{
 # (catching KilnFW/SaftyFW app code that reaches for vendor headers instead
 # of going through the HAL) but it also means nobody was checking the HAL
 # boundary's OTHER direction: hwAbstraction code reaching back UP into
-# KilnFW/SaftyFW. Three "TEMPORARY (HAL Phase 1b)" sites do exactly that
-# today (board_pins.h is firmware/SaftyFW/src/board_pins.h, reached via
-# hwabstraction_pico's private SaftyFW/src include dir):
+# KilnFW/SaftyFW.
+#
+# CLOSED 2026-09-06 (HAL Phase 1b, docs/HW_ABSTRACTION_PLAN.md): the four
+# pico-side sites that used to #include "board_pins.h" straight across this
+# boundary --
 #   - firmware/hwAbstraction/pico/spi/spi_owner.c
 #   - firmware/hwAbstraction/pico/spi/hal_spi_pico.c
 #   - firmware/hwAbstraction/pico/uart/uart_owner.c
 #   - firmware/hwAbstraction/pico/uart/hal_uart_pico.c
-# and two files legitimately include stack_margin.h as pre-existing, ACCEPTED
-# (not temporary) behavior -- they are the same owner modules
+# now take their pin values as init-time parameters instead
+# (spi_owner_pins_t/uart_owner_pins_t, passed by SaftyFW's own callers --
+# main.c and max31856.c -- which still read board_pins.h themselves). None of
+# the four includes board_pins.h any more, so they are off the allowlist
+# below; SaftyFW/CMakeLists.txt's hwabstraction_pico PRIVATE include dir on
+# src/board has also been removed (nothing in the library needs it any more).
+#
+# Two files still legitimately include stack_margin.h as pre-existing,
+# ACCEPTED (not temporary) behavior -- they are the same owner modules
 # check_stack_margin_registration.ps1 documents as relocated byte-identical
 # by the move and already calling stack_margin_register() directly:
 #   - firmware/hwAbstraction/esp/i2c/i2c_owner.c
 #   - firmware/hwAbstraction/esp/spi/esp_spi_owner.c
-# Both allowlists below are per-file/per-header, same shape as $OtaOpsAllowlist
-# above, and both are STRICT (any other hwAbstraction file including either
-# header is a hard failure, not a ratchet).
+# The allowlist below is per-file/per-header, same shape as $OtaOpsAllowlist
+# above, and is STRICT (any other hwAbstraction file including the header is
+# a hard failure, not a ratchet).
 $HalUpwardAllowlist = @(
-    @{ RelPath = "firmware/hwAbstraction/pico/spi/spi_owner.c";     Header = "board_pins.h";  Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
-    @{ RelPath = "firmware/hwAbstraction/pico/spi/hal_spi_pico.c";  Header = "board_pins.h";  Reason = "TEMPORARY (HAL Phase 1b): validates hal_spi_bus_init()/hal_spi_device_attach() cfg against SaftyFW's fixed SPI0 pin/CS assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
-    @{ RelPath = "firmware/hwAbstraction/pico/uart/uart_owner.c";   Header = "board_pins.h";  Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
-    @{ RelPath = "firmware/hwAbstraction/pico/uart/hal_uart_pico.c"; Header = "board_pins.h"; Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
     @{ RelPath = "firmware/hwAbstraction/esp/i2c/i2c_owner.c";      Header = "stack_margin.h"; Reason = "pre-existing owner module relocated byte-identical by HAL Phase 1a; already calls stack_margin_register() directly (accepted, not temporary -- see check_stack_margin_registration.ps1)" }
     @{ RelPath = "firmware/hwAbstraction/esp/spi/esp_spi_owner.c";  Header = "stack_margin.h"; Reason = "pre-existing owner module relocated byte-identical by HAL Phase 1a; already calls stack_margin_register() directly (accepted, not temporary -- see check_stack_margin_registration.ps1)" }
 )

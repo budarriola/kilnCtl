@@ -55,7 +55,7 @@
 #include "dashboard_http.h"
 
 #include "esp_http_server.h"
-#include "esp_system.h" /* esp_reset_reason_t -- reset_reason_name() */
+#include "hal_sysinfo.h" /* hal_reset_reason_t -- reset_reason_name() */
 #include "kiln_io.h" /* kiln_io_t */
 #include "MAX31856.h" /* MAX31856BusClass */
 #include "safety_link.h" /* SafetyLinkClass */

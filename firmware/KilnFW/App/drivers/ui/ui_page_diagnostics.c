@@ -2,19 +2,18 @@
 
 #include <stdio.h>
 
-#include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
-#include "esp_ota_ops.h"
+#include "esp_ota_ops.h" /* esp_ota_get_state_partition()/esp_ota_img_states_t -- not covered by hal_sysinfo, see build_firmware_statics() */
 #include "esp_partition.h"
-#include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
 #include <string.h>
 
+#include "hal_sysinfo.h" /* hal_sysinfo_reset_reason()/_get_build_info()/_get_running_partition() */
 #include "MAX31856.h"
 #include "board_temps.h"
 #include "dashboard_http.h"
@@ -463,26 +462,26 @@ static void format_trip_age(uint32_t age_ms, char *buf, size_t buf_len)
     }
 }
 
-static const char *reset_reason_str(esp_reset_reason_t r)
+static const char *reset_reason_str(hal_reset_reason_t r)
 {
     switch (r) {
-    case ESP_RST_POWERON:    return "Power-on";
-    case ESP_RST_EXT:        return "External pin";
-    case ESP_RST_SW:         return "Software (esp_restart)";
-    case ESP_RST_PANIC:      return "Panic/exception";
-    case ESP_RST_INT_WDT:    return "Interrupt watchdog";
-    case ESP_RST_TASK_WDT:   return "Task watchdog";
-    case ESP_RST_WDT:        return "Other watchdog";
-    case ESP_RST_DEEPSLEEP:  return "Deep sleep wake";
-    case ESP_RST_BROWNOUT:   return "Brownout";
-    case ESP_RST_SDIO:       return "SDIO";
-    case ESP_RST_USB:        return "USB";
-    case ESP_RST_JTAG:       return "JTAG";
-    case ESP_RST_EFUSE:      return "eFuse error";
-    case ESP_RST_PWR_GLITCH: return "Power glitch";
-    case ESP_RST_CPU_LOCKUP: return "CPU lockup";
-    case ESP_RST_UNKNOWN:
-    default:                 return "Unknown";
+    case HAL_RESET_POWERON:    return "Power-on";
+    case HAL_RESET_EXT:        return "External pin";
+    case HAL_RESET_SW:         return "Software (esp_restart)";
+    case HAL_RESET_PANIC:      return "Panic/exception";
+    case HAL_RESET_INT_WDT:    return "Interrupt watchdog";
+    case HAL_RESET_TASK_WDT:   return "Task watchdog";
+    case HAL_RESET_WDT:        return "Other watchdog";
+    case HAL_RESET_DEEPSLEEP:  return "Deep sleep wake";
+    case HAL_RESET_BROWNOUT:   return "Brownout";
+    case HAL_RESET_SDIO:       return "SDIO";
+    case HAL_RESET_USB:        return "USB";
+    case HAL_RESET_JTAG:       return "JTAG";
+    case HAL_RESET_EFUSE:      return "eFuse error";
+    case HAL_RESET_PWR_GLITCH: return "Power glitch";
+    case HAL_RESET_CPU_LOCKUP: return "CPU lockup";
+    case HAL_RESET_UNKNOWN:
+    default:                   return "Unknown";
     }
 }
 
@@ -508,25 +507,33 @@ static void build_firmware_statics(void)
 {
     char buf[64];
 
-    const esp_app_desc_t *app_desc = esp_app_get_description();
-    lv_label_set_text(s_fw_version_label, app_desc ? app_desc->version : "n/a");
-    if (app_desc) {
-        snprintf(buf, sizeof(buf), "%s %s", app_desc->date, app_desc->time);
+    hal_sysinfo_build_info_t build_info;
+    hal_sysinfo_get_build_info(&build_info);
+    lv_label_set_text(s_fw_version_label, build_info.valid ? build_info.version : "n/a");
+    if (build_info.valid) {
+        snprintf(buf, sizeof(buf), "%s %s", build_info.date, build_info.time);
         lv_label_set_text(s_build_label, buf);
     } else {
         lv_label_set_text(s_build_label, "n/a");
     }
 
-    lv_label_set_text(s_reset_reason_label, reset_reason_str(esp_reset_reason()));
+    lv_label_set_text(s_reset_reason_label, reset_reason_str(hal_sysinfo_reset_reason()));
 
+    hal_sysinfo_partition_info_t running_info;
+    bool have_running_info = (hal_sysinfo_get_running_partition(&running_info) == HAL_OK);
+    /* esp_ota_get_state_partition() below needs the real esp_partition_t
+     * pointer (an OTA-state read, not one of hal_sysinfo.h's six covered
+     * operations -- see this file's esp_ota_ops.h include comment), so the
+     * running-partition pointer is still fetched directly for that one call
+     * even though the label/size text above now comes from hal_sysinfo. */
     const esp_partition_t *running = esp_ota_get_running_partition();
-    if (running) {
-        snprintf(buf, sizeof(buf), "%s (%lu KB)", running->label,
-                 (unsigned long)(running->size / 1024));
+    if (have_running_info) {
+        snprintf(buf, sizeof(buf), "%s (%lu KB)", running_info.label,
+                 (unsigned long)(running_info.size / 1024));
         lv_label_set_text(s_partition_label, buf);
 
         esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
-        if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+        if (running && esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
             lv_label_set_text(s_ota_state_label, ota_state_str(ota_state));
         } else {
             /* Genuinely can't be determined (e.g. running from `factory`,
