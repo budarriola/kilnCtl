@@ -680,12 +680,17 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
  *   bytes43..46  p_total_w, f32 LE
  *   bytes47..54  energy_wh, f64 LE (accumulated since Pico boot -- not cached
  *                here; nothing in this build displays it yet)
+ *   bytes55..60  3 x counts_avg, u16 LE (V2 only, 2026-09-06 -- raw ADC
+ *                counts per channel, valid only when flags bit3 is set)
  * Mirrors kilnlink_power_decode() in firmware/CommonFW/src/kilnlink_power.c
  * byte-for-byte; see uart_task_ids.h's SAFETY_CMD_POWER comment for why this
- * driver hand-parses rather than linking that codec. */
+ * driver hand-parses rather than linking that codec. Accepts either
+ * SAFETY_LINK_POWER_FRAME_LEN_V1 (55, legacy Pico) or _V2 (61, current). */
 bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t *msg)
 {
-    if (msg->length != SAFETY_LINK_POWER_FRAME_LEN || msg->payload[0] != SAFETY_CMD_POWER) {
+    if ((msg->length != SAFETY_LINK_POWER_FRAME_LEN_V1 &&
+         msg->length != SAFETY_LINK_POWER_FRAME_LEN_V2) ||
+        msg->payload[0] != SAFETY_CMD_POWER) {
         if (safety_lock(link)) {
             link->stats.frame_errors++;
             safety_unlock(link);
@@ -717,6 +722,13 @@ bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.power_total_w = safety_read_f32_le(&p[43]);
     /* bytes47..54 (energy_wh) intentionally not cached -- nothing in this
      * build's dashboard/LCD reads it yet; add a field here when it does. */
+    bool counts_valid = (msg->length == SAFETY_LINK_POWER_FRAME_LEN_V2) &&
+                         ((flags & SAFETY_LINK_POWER_FLAG_COUNTS_VALID) != 0u);
+    link->cached.power_counts_valid = counts_valid;
+    for (unsigned ch = 0; ch < SAFETY_LINK_POWER_CHANNELS; ch++) {
+        link->cached.power_channel_counts_avg[ch] =
+            counts_valid ? safety_read_u16_le(&p[55u + (size_t)ch * 2u]) : 0u;
+    }
     link->cached.power_ever_received = true;
     link->stats.power_applied++; /* 2026-08-23: real counter, see its own doc comment (safety_link.h) */
     safety_unlock(link);

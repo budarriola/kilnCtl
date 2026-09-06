@@ -1072,6 +1072,15 @@ static void link_task_send_power(void)
     current_sense_power_t pw;
     current_task_get_power(&pw);
 
+    // counts_avg comes from the UNFILTERED snapshot (current_snapshot_t),
+    // not current_sense_power_t -- see snapshots.h's field comment. Pulled
+    // as its own getter call rather than added to current_sense_power_t,
+    // matching current_sense.h's own split: the wire-facing power struct is
+    // deliberately built from the filtered/derived reporting quantities
+    // only, and counts_avg is neither -- it is the raw pre-conversion value.
+    current_snapshot_t snap_for_counts;
+    current_task_get_snapshot(&snap_for_counts);
+
     kilnlink_power_t frame = {
         .power_window_s = 120u, // docs/CURRENT_SENSE.md section 3b default; current_sense.c's
                                  // CS_POWER_WINDOW_S is not exposed across the module boundary,
@@ -1084,6 +1093,7 @@ static void link_task_send_power(void)
         frame.i_conducting_a[ch] = pw.i_conducting_a[ch];
         frame.conduction_fraction[ch] = pw.conduction_fraction[ch];
         frame.p_avg_w[ch] = pw.p_avg_w[ch];
+        frame.counts_avg[ch] = snap_for_counts.counts_avg[ch];
     }
 
     uint8_t flags = 0;

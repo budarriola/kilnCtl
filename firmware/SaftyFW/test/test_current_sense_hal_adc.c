@@ -1,4 +1,4 @@
-// test_current_sense_hal_adc.c -- HAL Phase 1b (docs/HW_ABSTRACTION_PLAN.md
+// test_current_sense_hal_adc.c -- HAL Phase 1b (docs/HW_ABSTRACTION.md
 // "hal_adc -- pico-only" section): current_sense.c is now a hal_adc client.
 // This is the host-testable oversample/discard-first-sample property the
 // plan promises: current_sense.c itself must keep that policy (hal_adc.h's
@@ -149,6 +149,50 @@ static void test_current_sense_discards_first_sample_and_oversamples_16x(void)
                    "counts, not the discarded outlier and not just the flat base "
                    "value -- if this fails, the discard-first-sample or the "
                    "oversample accumulation broke on the hal_adc path");
+        // 2026-09-06, CURRENT_SENSE.md sec 4's "Tooling gap" option 1:
+        // counts_avg[n] must carry the SAME exact-integer-truncated average
+        // amps[n] was derived from, not a separately-rounded/re-sampled
+        // value.
+        TEST_CHECK(snap.counts_avg[n] == (uint16_t)expected_counts[n],
+                   "counts_avg[n] matches the exact dithered-average counts "
+                   "amps[n] was itself derived from");
+    }
+}
+
+// 2026-09-06, CURRENT_SENSE.md sec 4's "Tooling gap" option 1: counts_avg
+// must be populated EVEN WHEN THE CHANNEL IS UNCALIBRATED -- that is the
+// entire point of the field (amps[n] already reads 0.0f, honestly, in this
+// state; see cs_counts_to_amps()). Uses quantized 12-bit scripted samples
+// (via script_channel_dithered()), not idealized floats, per this
+// codebase's own "idealized test input" bug-class caution.
+static void test_current_sense_counts_avg_populated_when_uncalibrated(void)
+{
+    TEST_SECTION("current_sense_sample() -- counts_avg is populated even when "
+                 "k_ct_v_per_a is uncommissioned (CURRENT_SENSE.md sec 4)");
+
+    fake_adc_reset();
+    hal_adc_init();
+    current_sense_init(); // leaves s_cal at its zero-initialized, uncalibrated default
+
+    uint32_t expected_counts[3];
+    expected_counts[0] = script_channel_dithered(0, /*discard=*/4095, /*base=*/1500);
+    expected_counts[1] = script_channel_dithered(1, /*discard=*/0,    /*base=*/800);
+    expected_counts[2] = script_channel_dithered(2, /*discard=*/2047, /*base=*/300);
+
+    current_sense_sample();
+
+    current_snapshot_t snap;
+    current_sense_get_snapshot(&snap);
+    TEST_CHECK(!snap.calibrated, "snapshot honestly reports uncalibrated (this test's whole premise)");
+    for (unsigned n = 0; n < 3; n++) {
+        TEST_CHECK(snap.amps[n] == 0.0f,
+                   "amps[n] is the documented honest 0.0f when uncommissioned -- "
+                   "this test's control assertion, proving the premise");
+        TEST_CHECK(snap.counts_avg[n] == (uint16_t)expected_counts[n],
+                   "counts_avg[n] is populated from the real ADC reading regardless -- "
+                   "the whole point of this field. If this fails with 0 instead, "
+                   "counts_avg has been made to (incorrectly) mirror amps[n]'s "
+                   "calibration-gated zero instead of being unconditional");
     }
 }
 
@@ -188,5 +232,6 @@ static void test_current_task_start_enables_all_three_adc_gpios(void)
 void run_test_current_sense_hal_adc(void)
 {
     test_current_sense_discards_first_sample_and_oversamples_16x();
+    test_current_sense_counts_avg_populated_when_uncalibrated();
     test_current_task_start_enables_all_three_adc_gpios();
 }

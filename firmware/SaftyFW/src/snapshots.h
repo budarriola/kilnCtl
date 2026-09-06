@@ -61,6 +61,17 @@ typedef struct {
     bool     clipped[3];
     bool     present[3];
     bool     calibrated;
+    // Raw 16x-oversampled ADC counts per channel (current_sense.c's
+    // cs_read_channel_counts() -- CURRENT_SENSE.md section 4), published
+    // UNCONDITIONALLY, regardless of `calibrated` or any per-channel
+    // k_ct_v_per_a/zero_counts commissioning state. Added 2026-09-06 to
+    // close the "noise floor cannot be measured" gap in CURRENT_SENSE.md
+    // section 4 ("Tooling gap" option 1) -- `amps[n]` reads 0.0f honestly
+    // when uncommissioned (see cs_counts_to_amps()), so before this field
+    // there was no way to see the ADC's actual value independent of
+    // calibration. Never consumed by a guard -- diagnostic/display only,
+    // same scope note as current_sense_power_t.
+    uint16_t counts_avg[3];
 } current_snapshot_t;
 
 // context_snapshot_t -- link_task / SAFETY_CMD_PUSH_CONTEXT (0x07),

@@ -295,6 +295,93 @@ static void test_apply_status_accepts_v1_and_v2_lengths(void)
     TEST_CHECK(link.stats.frame_errors == 1, "the rejection is counted as a frame error");
 }
 
+// 2026-09-06, CURRENT_SENSE.md sec 4's "Tooling gap": SAFETY_CMD_POWER
+// (Frame E) grew a 61-byte V2 layout carrying counts_avg[3] (raw ADC counts,
+// independent of calibration) -- same "accept both fixed lengths, gate the
+// new field on an explicit flag rather than length alone" shape as Frame A's
+// own V1/V2 test just above. Fills the payload by hand (not via kilnlink_
+// power_encode(), which this test file has no link to -- CommonFW's codec
+// and KilnFW's hand-parser are deliberately two independent implementations
+// of the same wire contract, per safety_link.h's own "mirrored here" notes)
+// so this test genuinely exercises safety_apply_power()'s own byte offsets
+// rather than round-tripping through the same code twice.
+static void set_power_frame_v2(uint8_t *p, uint8_t flags, uint16_t c0, uint16_t c1, uint16_t c2)
+{
+    memset(p, 0, SAFETY_LINK_POWER_FRAME_LEN_V2);
+    p[0] = SAFETY_CMD_POWER;
+    p[1] = 120; // power_window_s
+    p[2] = flags;
+    float mains_v = 240.0f;
+    memcpy(&p[3], &mains_v, sizeof(float));
+    // bytes 7..42 (i_conducting_a/conduction_fraction/p_avg_w per channel)
+    // deliberately left zeroed -- not under test here.
+    float p_total = 100.0f;
+    memcpy(&p[43], &p_total, sizeof(float));
+    double energy = 1.0;
+    memcpy(&p[47], &energy, sizeof(double));
+    memcpy(&p[55], &c0, sizeof(uint16_t));
+    memcpy(&p[57], &c1, sizeof(uint16_t));
+    memcpy(&p[59], &c2, sizeof(uint16_t));
+}
+
+static void test_apply_power_accepts_v1_and_v2_lengths_and_gates_counts_on_flag(void)
+{
+    TEST_SECTION("safety_apply_power -- V1 (55B, legacy) and V2 (61B, current) frames BOTH "
+                 "decode; counts_avg is gated on COUNTS_VALID (bit3), never on length alone "
+                 "(CommonFW/docs/LINK_PROTOCOL.md Frame E, 2026-09-06)");
+
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    // V1 (55-byte) frame from a legacy Pico: no bytes 55..60 exist at all.
+    // power_calibrated bit set, COUNTS_VALID bit clear (a real legacy peer
+    // never sets a bit for a field it has never heard of).
+    set_power_frame_v2(msg.payload, SAFETY_LINK_POWER_FLAG_CALIBRATED, 0, 0, 0);
+    msg.length = SAFETY_LINK_POWER_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_power(&link, &msg) == true, "V1 (55-byte) frame is accepted");
+    TEST_CHECK(link.cached.power_counts_valid == false, "V1 frame leaves power_counts_valid false");
+    TEST_CHECK(link.cached.power_channel_counts_avg[0] == 0 &&
+               link.cached.power_channel_counts_avg[1] == 0 &&
+               link.cached.power_channel_counts_avg[2] == 0,
+               "V1 frame leaves counts_avg zeroed (nothing on the wire to read)");
+
+    // V2 (61-byte) frame, COUNTS_VALID set, real nonzero counts.
+    set_power_frame_v2(msg.payload,
+                        (uint8_t)(SAFETY_LINK_POWER_FLAG_CALIBRATED | SAFETY_LINK_POWER_FLAG_COUNTS_VALID),
+                        10, 2000, 4095);
+    msg.length = SAFETY_LINK_POWER_FRAME_LEN_V2;
+    TEST_CHECK(safety_apply_power(&link, &msg) == true, "V2 (61-byte) frame is accepted");
+    TEST_CHECK(link.cached.power_counts_valid == true, "V2 frame with the flag set sets power_counts_valid true");
+    TEST_CHECK(link.cached.power_channel_counts_avg[0] == 10 &&
+               link.cached.power_channel_counts_avg[1] == 2000 &&
+               link.cached.power_channel_counts_avg[2] == 4095,
+               "V2 frame's counts_avg bytes decode correctly, per channel");
+
+    // NEGATIVE case proving the flag governs, not length: a 61-byte frame
+    // with real-looking nonzero bytes at the counts offset but the flag
+    // CLEAR must still read back as invalid/zeroed -- exactly the untrusted-
+    // wire-input discipline kilnlink_power_decode()'s own equivalent test
+    // asserts (test_v2_length_but_flag_not_set_is_treated_as_invalid,
+    // CommonFW/test/test_power.c).
+    set_power_frame_v2(msg.payload, SAFETY_LINK_POWER_FLAG_CALIBRATED, 111, 222, 333);
+    msg.length = SAFETY_LINK_POWER_FRAME_LEN_V2;
+    TEST_CHECK(safety_apply_power(&link, &msg) == true, "V2-length frame with COUNTS_VALID clear still decodes OK");
+    TEST_CHECK(link.cached.power_counts_valid == false,
+               "power_counts_valid stays false when the flag is clear, even at V2 length");
+    TEST_CHECK(link.cached.power_channel_counts_avg[0] == 0 &&
+               link.cached.power_channel_counts_avg[1] == 0 &&
+               link.cached.power_channel_counts_avg[2] == 0,
+               "counts_avg is zeroed, not the raw wire bytes, when the flag is clear -- "
+               "the assertion that would catch a decoder trusting length over the flag");
+
+    // A length that is neither V1 nor V2 must be rejected outright.
+    msg.length = 56;
+    link.stats.frame_errors = 0;
+    TEST_CHECK(safety_apply_power(&link, &msg) == false, "a length that is neither V1 nor V2 is rejected");
+    TEST_CHECK(link.stats.frame_errors == 1, "the rejection is counted as a frame error");
+}
+
 static void test_apply_status_v3_borrowed(void)
 {
     TEST_SECTION("safety_apply_status -- V3 (26B) BORROWED status frame: absent-byte contract "
@@ -1166,6 +1253,7 @@ int main(void)
     TEST_SECTION("safety_link.c host build -- safety_apply_status() / safety_link_versions_compatible()");
 
     test_apply_status_accepts_v1_and_v2_lengths();
+    test_apply_power_accepts_v1_and_v2_lengths_and_gates_counts_on_flag();
     test_apply_status_v3_borrowed();
     test_safety_tc_is_separate_physical_sensor_predicate();
     test_apply_status_temp_valid_flag_is_sole_authority();

@@ -57,7 +57,15 @@ static void test_roundtrip_configured(void)
     expect_ok(dec_status, "decode status OK");
 
     TEST_CHECK(out.power_window_s == pw.power_window_s, "power_window_s round-trips");
-    TEST_CHECK(out.flags == pw.flags, "flags round-trip");
+    // 2026-09-06: encode() always sets COUNTS_VALID (bit3) itself, since this
+    // build's encoder always writes the V2 layout -- see kilnlink_power.h's
+    // own doc comment. Mask it out of the comparison rather than baking it
+    // into `pw.flags` above, so this test still documents the flags the
+    // CALLER actually asked for.
+    TEST_CHECK((out.flags & (uint8_t)~KILNLINK_POWER_FLAG_COUNTS_VALID) == pw.flags,
+               "caller-supplied flags round-trip (encoder-added COUNTS_VALID excluded)");
+    TEST_CHECK((out.flags & (uint8_t)KILNLINK_POWER_FLAG_COUNTS_VALID) != 0,
+               "encoder always sets COUNTS_VALID");
     TEST_CHECK_NEAR(out.mains_voltage_v, pw.mains_voltage_v, 1e-4, "mains_voltage_v round-trips");
     for (unsigned ch = 0; ch < KILNLINK_POWER_CHANNELS; ch++) {
         TEST_CHECK_NEAR(out.i_conducting_a[ch], pw.i_conducting_a[ch], 1e-4, "i_conducting_a[ch] round-trips");
@@ -171,6 +179,43 @@ static void test_flag_derivation_is_independent_per_bit(void)
                "all three conditions -> all three bits");
 }
 
+// 2026-09-06: CURRENT_SENSE.md sec 4's "Tooling gap" -- counts_avg must
+// round-trip even when the channel is UNCALIBRATED (mains unconfigured,
+// amps/power all NaN), since the whole point of this field is to be visible
+// independent of commissioning state.
+static void test_counts_avg_survives_uncalibrated_channel(void)
+{
+    TEST_SECTION("kilnlink_power: counts_avg round-trips even when uncalibrated");
+
+    kilnlink_power_t pw = {
+        .power_window_s = 120u,
+        .flags = 0u, // nothing configured/calibrated
+        .mains_voltage_v = NAN,
+        .i_conducting_a = {0.0f, 0.0f, 0.0f},
+        .conduction_fraction = {0.0f, 0.0f, 0.0f},
+        .p_avg_w = {NAN, NAN, NAN},
+        .p_total_w = NAN,
+        .energy_wh = 0.0,
+        .counts_avg = {1u, 2048u, 4095u}, // quantized, real ADC-domain values -- not idealized floats
+    };
+
+    uint8_t wire[KILNLINK_POWER_LEN];
+    kilnlink_power_status_t enc_status;
+    size_t len = kilnlink_power_encode(&pw, wire, sizeof(wire), &enc_status);
+    expect_ok(enc_status, "encode status OK (uncalibrated + counts_avg)");
+
+    kilnlink_power_t out;
+    kilnlink_power_status_t dec_status = kilnlink_power_decode(wire, len, &out);
+    expect_ok(dec_status, "decode status OK (uncalibrated + counts_avg)");
+    TEST_CHECK((out.flags & (uint8_t)KILNLINK_POWER_FLAG_COUNTS_VALID) != 0,
+               "COUNTS_VALID set even though nothing else is calibrated -- counts_avg is "
+               "documented to be independent of calibration state");
+    for (unsigned ch = 0; ch < KILNLINK_POWER_CHANNELS; ch++) {
+        TEST_CHECK(out.counts_avg[ch] == pw.counts_avg[ch], "counts_avg[ch] round-trips");
+    }
+    TEST_CHECK(isnan(out.p_total_w), "power fields stay NaN -- counts_avg does not leak into them");
+}
+
 void run_test_kilnlink_power(void)
 {
     test_roundtrip_configured();
@@ -178,4 +223,5 @@ void run_test_kilnlink_power(void)
     test_decode_rejects_bad_length_and_wrong_cmd();
     test_encode_rejects_undersized_buffer();
     test_flag_derivation_is_independent_per_bit();
+    test_counts_avg_survives_uncalibrated_channel();
 }

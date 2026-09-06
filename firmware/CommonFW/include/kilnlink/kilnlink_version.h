@@ -150,8 +150,38 @@
  * a too-short frame must read as UNKNOWN, never as a zero that silently
  * means "fine".
  * KILNLINK_MIN_COMPATIBLE is NOT raised alongside this bump -- see its own
- * comment below. */
-#define KILNLINK_PROTOCOL_VERSION 10
+ * comment below.
+ *
+ * 10 -> 11 (2026-09-06): Frame E (SAFETY_CMD_POWER) grew 6 bytes, 3 x u16
+ * counts_avg -- the raw 16x-oversampled ADC counts per channel, published
+ * independent of calibration state (CURRENT_SENSE.md sec 4's "Tooling gap"
+ * option 1/2: there was previously no way to see the ADC's actual value
+ * when a channel is uncommissioned, since amps[] honestly reads 0.0f in
+ * that case). Unlike every other length-grown frame on this link (Frame A's
+ * 5->6 and 9->10 steps, both ADDITIVE with a length-tolerant decoder from
+ * day one), kilnlink_power_decode() had NO length-tolerant path before this
+ * change -- it hard-rejected (KILNLINK_POWER_ERR_LENGTH_MISMATCH) any
+ * length other than the old fixed KILNLINK_POWER_LEN (55). This bump adds
+ * that tolerance AT THE SAME TIME as the new field: kilnlink_power.h now
+ * defines KILNLINK_POWER_LEN_V1 (55, still accepted) and _V2 (61, current),
+ * with a new KILNLINK_POWER_FLAG_COUNTS_VALID flag bit distinguishing "this
+ * frame carries real counts" from "legacy peer, counts_avg is zero-filled
+ * padding" for a decoder that cannot infer that from length alone once the
+ * length check has already passed both ways. Net effect once both sides
+ * are rebuilt: fully additive, same as the 5->6/9->10 precedent -- an old
+ * (protocol <= 10) Pico keeps sending 55-byte frames a new ESP decodes with
+ * counts_avg=0/flag clear, and a new (protocol 11) Pico's 61-byte frames
+ * decode cleanly on an old ESP built against this same commit's decoder
+ * (which already accepts both lengths) but would have been REJECTED
+ * outright by any ESP build that predates this commit -- that boundary is
+ * exactly what the version bump exists to make visible rather than an
+ * unexplained "POWER frame stopped decoding" symptom.
+ * KILNLINK_MIN_COMPATIBLE is NOT raised alongside this bump, same shape of
+ * reasoning as 5->6/8->9/9->10: no other frame's shape changed, and the
+ * decoder change is itself the thing that makes staying permissive safe --
+ * a pre-11 peer's 55-byte POWER frames still decode correctly under this
+ * commit's own decoder. */
+#define KILNLINK_PROTOCOL_VERSION 11
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6
@@ -193,7 +223,12 @@
  * NOT bumped alongside the 9 -> 10 step above either, same reasoning again:
  * that step is purely additive (two new optional bytes on an existing frame,
  * gated the same way the 5->6 step's byte 23 was), so a peer built against
- * 7, 8, or 9 remains fully compatible with a 10-built peer. */
+ * 7, 8, or 9 remains fully compatible with a 10-built peer.
+ *
+ * NOT bumped alongside the 10 -> 11 step above either: that step's own
+ * decoder change is what makes staying permissive safe (see its own
+ * comment) -- a peer built against 7 through 10 sends/reads the 55-byte V1
+ * POWER layout, which this build's decoder still accepts. */
 #define KILNLINK_MIN_COMPATIBLE 7
 
 #endif /* KILNLINK_VERSION_H */

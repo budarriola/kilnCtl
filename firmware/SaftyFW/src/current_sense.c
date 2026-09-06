@@ -231,6 +231,11 @@ void current_sense_sample(void)
     for (int n = 0; n < 3; n++) {
         uint32_t counts_avg = cs_read_channel_counts(n);
 
+        // Published unconditionally, independent of calibration state --
+        // see snapshots.h's counts_avg field comment. Always fits u16
+        // (12-bit ADC, CS_ADC_MAX_COUNTS == 4095).
+        snap.counts_avg[n] = (uint16_t)counts_avg;
+
         bool clipped = (counts_avg >= CS_CLIP_THRESHOLD_COUNTS);
         float amps = cs_counts_to_amps(n, counts_avg);
 

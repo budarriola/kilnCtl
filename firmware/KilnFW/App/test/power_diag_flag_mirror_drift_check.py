@@ -39,7 +39,14 @@ from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
 # Values are ints; both sides are parsed as C integer literals (0xNNu, NNu,
 # or a bare enum member with an explicit '= <literal>').
 MIRROR_MAP = [
-    ("kilnlink_power.h", "KILNLINK_POWER_LEN", "safety_link.h", "SAFETY_LINK_POWER_FRAME_LEN"),
+    # 2026-09-06: KILNLINK_POWER_LEN/SAFETY_LINK_POWER_FRAME_LEN are now each
+    # an ALIAS of their own file's _V2 constant (kilnlink_power.h's own doc
+    # comment on KILNLINK_POWER_LEN_V2) rather than a literal -- compare the
+    # two underlying literals (_V1 and _V2) directly instead, since extract_
+    # constants() only resolves "#define NAME <int literal>", not a
+    # #define-of-a-#define chain.
+    ("kilnlink_power.h", "KILNLINK_POWER_LEN_V1", "safety_link.h", "SAFETY_LINK_POWER_FRAME_LEN_V1"),
+    ("kilnlink_power.h", "KILNLINK_POWER_LEN_V2", "safety_link.h", "SAFETY_LINK_POWER_FRAME_LEN_V2"),
     ("kilnlink_power.h", "KILNLINK_POWER_CHANNELS", "safety_link.h", "SAFETY_LINK_POWER_CHANNELS"),
     ("kilnlink_power.h", "KILNLINK_POWER_FLAG_MAINS_VOLTAGE_CONFIGURED",
      "safety_link.h", "SAFETY_LINK_POWER_FLAG_MAINS_VOLTAGE_CONFIGURED"),
@@ -47,6 +54,8 @@ MIRROR_MAP = [
      "safety_link.h", "SAFETY_LINK_POWER_FLAG_ANY_CHANNEL_CLIPPED"),
     ("kilnlink_power.h", "KILNLINK_POWER_FLAG_CALIBRATED",
      "safety_link.h", "SAFETY_LINK_POWER_FLAG_CALIBRATED"),
+    ("kilnlink_power.h", "KILNLINK_POWER_FLAG_COUNTS_VALID",
+     "safety_link.h", "SAFETY_LINK_POWER_FLAG_COUNTS_VALID"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_LEN", "safety_link.h", "SAFETY_LINK_DIAG_FRAME_LEN"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN",
      "safety_link.h", "SAFETY_LINK_DIAG_FLAG_SIM_CONTEXT_SEEN"),

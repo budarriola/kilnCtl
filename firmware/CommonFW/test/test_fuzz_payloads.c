@@ -720,39 +720,51 @@ typedef struct {
     decode_fn_t decode;
     build_valid_fn_t build_valid;
     size_t max_len; /* upper bound for the length sweep */
+    /* 0 (the common case) means "no exception". Nonzero names a length that
+     * the truncation loop must NOT treat as "must fail": a length this
+     * decoder documents as a second, independently valid fixed size for the
+     * SAME command byte (kilnlink_power.h's KILNLINK_POWER_LEN_V1, 2026-09-06
+     * -- build_valid_power() always encodes the current V2 length, so
+     * truncating it by exactly the V1/V2 size difference lands on a frame
+     * that is genuinely supposed to decode OK, not a misdecode). build_
+     * valid_status() avoids needing this by choosing which length IT builds
+     * (V1) instead -- that trick isn't available here because kilnlink_
+     * power_encode() itself no longer has a V1-producing mode (see its own
+     * doc comment), so the exception is expressed here instead. */
+    size_t truncation_exception_len;
 } decoder_case_t;
 
 static const decoder_case_t k_cases[] = {
-    {"kilnlink_context_decode", decode_context, build_valid_context, context_MAX_LEN},
-    {"kilnlink_status_decode", decode_status, build_valid_status, status_MAX_LEN},
-    {"kilnlink_power_decode", decode_power, build_valid_power, power_MAX_LEN},
-    {"kilnlink_announce_decode", decode_announce, build_valid_announce, announce_MAX_LEN},
-    {"kilnlink_diag_decode", decode_diag, build_valid_diag, diag_MAX_LEN},
-    {"kilnlink_trip_decode", decode_trip, build_valid_trip, trip_MAX_LEN},
-    {"kilnlink_ceiling_decode", decode_ceiling, build_valid_ceiling, ceiling_MAX_LEN},
-    {"kilnlink_clear_trip_decode", decode_clear_trip, build_valid_clear_trip, clear_trip_MAX_LEN},
-    {"kilnlink_set_config_decode", decode_set_config, build_valid_set_config, set_config_MAX_LEN},
-    {"kilnlink_rollback_decode", decode_rollback, build_valid_none, rollback_MAX_LEN},
-    {"kilnlink_get_fw_version_decode", decode_get_fw_version, build_valid_none, get_fw_version_MAX_LEN},
-    {"kilnlink_set_clock_decode", decode_set_clock, build_valid_set_clock, set_clock_MAX_LEN},
-    {"kilnlink_announce_reboot_decode", decode_announce_reboot, build_valid_none, announce_reboot_MAX_LEN},
-    {"kilnlink_set_ct_cal_decode", decode_set_ct_cal, build_valid_set_ct_cal, set_ct_cal_MAX_LEN},
-    {"kilnlink_get_ct_cal_decode", decode_get_ct_cal, build_valid_none, get_ct_cal_MAX_LEN},
-    {"kilnlink_ct_cal_decode", decode_ct_cal, build_valid_ct_cal, ct_cal_MAX_LEN},
-    {"kilnlink_set_log_level_decode", decode_set_log_level, build_valid_set_log_level, set_log_level_MAX_LEN},
-    {"kilnlink_set_param_decode", decode_set_param, build_valid_set_param, set_param_MAX_LEN},
-    {"kilnlink_commit_config_decode", decode_commit_config, build_valid_none, commit_config_MAX_LEN},
+    {"kilnlink_context_decode", decode_context, build_valid_context, context_MAX_LEN, 0},
+    {"kilnlink_status_decode", decode_status, build_valid_status, status_MAX_LEN, 0},
+    {"kilnlink_power_decode", decode_power, build_valid_power, power_MAX_LEN, KILNLINK_POWER_LEN_V1},
+    {"kilnlink_announce_decode", decode_announce, build_valid_announce, announce_MAX_LEN, 0},
+    {"kilnlink_diag_decode", decode_diag, build_valid_diag, diag_MAX_LEN, 0},
+    {"kilnlink_trip_decode", decode_trip, build_valid_trip, trip_MAX_LEN, 0},
+    {"kilnlink_ceiling_decode", decode_ceiling, build_valid_ceiling, ceiling_MAX_LEN, 0},
+    {"kilnlink_clear_trip_decode", decode_clear_trip, build_valid_clear_trip, clear_trip_MAX_LEN, 0},
+    {"kilnlink_set_config_decode", decode_set_config, build_valid_set_config, set_config_MAX_LEN, 0},
+    {"kilnlink_rollback_decode", decode_rollback, build_valid_none, rollback_MAX_LEN, 0},
+    {"kilnlink_get_fw_version_decode", decode_get_fw_version, build_valid_none, get_fw_version_MAX_LEN, 0},
+    {"kilnlink_set_clock_decode", decode_set_clock, build_valid_set_clock, set_clock_MAX_LEN, 0},
+    {"kilnlink_announce_reboot_decode", decode_announce_reboot, build_valid_none, announce_reboot_MAX_LEN, 0},
+    {"kilnlink_set_ct_cal_decode", decode_set_ct_cal, build_valid_set_ct_cal, set_ct_cal_MAX_LEN, 0},
+    {"kilnlink_get_ct_cal_decode", decode_get_ct_cal, build_valid_none, get_ct_cal_MAX_LEN, 0},
+    {"kilnlink_ct_cal_decode", decode_ct_cal, build_valid_ct_cal, ct_cal_MAX_LEN, 0},
+    {"kilnlink_set_log_level_decode", decode_set_log_level, build_valid_set_log_level, set_log_level_MAX_LEN, 0},
+    {"kilnlink_set_param_decode", decode_set_param, build_valid_set_param, set_param_MAX_LEN, 0},
+    {"kilnlink_commit_config_decode", decode_commit_config, build_valid_none, commit_config_MAX_LEN, 0},
     {"kilnlink_commit_config_rejected_decode", decode_commit_config_rejected,
-     build_valid_commit_config_rejected, commit_config_rejected_MAX_LEN},
-    {"kilnlink_inject_tc_decode", decode_inject_tc, build_valid_inject_tc, inject_tc_MAX_LEN},
-    {"kilnlink_get_param_decode", decode_get_param, build_valid_get_param, get_param_MAX_LEN},
-    {"kilnlink_param_decode", decode_param, build_valid_param, param_MAX_LEN},
+     build_valid_commit_config_rejected, commit_config_rejected_MAX_LEN, 0},
+    {"kilnlink_inject_tc_decode", decode_inject_tc, build_valid_inject_tc, inject_tc_MAX_LEN, 0},
+    {"kilnlink_get_param_decode", decode_get_param, build_valid_get_param, get_param_MAX_LEN, 0},
+    {"kilnlink_param_decode", decode_param, build_valid_param, param_MAX_LEN, 0},
     {"kilnlink_get_config_page_decode", decode_get_config_page, build_valid_get_config_page,
-     get_config_page_MAX_LEN},
-    {"kilnlink_config_page_decode", decode_config_page, build_valid_config_page, config_page_MAX_LEN},
+     get_config_page_MAX_LEN, 0},
+    {"kilnlink_config_page_decode", decode_config_page, build_valid_config_page, config_page_MAX_LEN, 0},
     {"kilnlink_rollback_result_decode", decode_rollback_result, build_valid_rollback_result,
-     rollback_result_MAX_LEN},
-    {"kilnlink_fw_version_decode", decode_fw_version, build_valid_fw_version, fw_version_MAX_LEN},
+     rollback_result_MAX_LEN, 0},
+    {"kilnlink_fw_version_decode", decode_fw_version, build_valid_fw_version, fw_version_MAX_LEN, 0},
 };
 
 #define NUM_CASES (sizeof(k_cases) / sizeof(k_cases[0]))
@@ -863,6 +875,13 @@ static void run_corpus(const decoder_case_t *c, uint8_t *buf)
      * plausible -- and so this corpus is itself reproducible byte-for-byte
      * run to run. */
     for (size_t trunc_len = 0; trunc_len < vlen; ++trunc_len) {
+        if (c->truncation_exception_len != 0 && trunc_len == c->truncation_exception_len) {
+            /* Not a real truncation for this decoder -- see decoder_case_t's
+             * own field comment (kilnlink_power's V1/V2 dual-length frame,
+             * 2026-09-06). A decoder reporting OK here is documented,
+             * correct behavior, not a misdecode. */
+            continue;
+        }
         memset(buf, 0xEE, vlen);
         memcpy(buf, valid, trunc_len);
         int rc = c->decode(buf, trunc_len);

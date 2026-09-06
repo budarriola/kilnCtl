@@ -1067,12 +1067,13 @@ question anyone asks, and this frame is the only place the answer is preserved.
 |---|---|---|
 | 0 | u8 | `0x0E` |
 | 1 | u8 | `power_window_s` — the window the fractions cover (default 120) |
-| 2 | u8 | flags: bit0 `mains_voltage_configured`, bit1 `any_channel_clipped`, bit2 `calibrated` |
+| 2 | u8 | flags: bit0 `mains_voltage_configured`, bit1 `any_channel_clipped`, bit2 `calibrated`, bit3 `counts_valid` (2026-09-06) |
 | 3..6 | f32 LE | `mains_voltage_v` as configured (NaN if not set) |
 | 7..30 | 3 × 8 | per channel: `i_conducting_a` f32 LE, `conduction_fraction` f32 LE |
 | 31..42 | 3 × f32 LE | `p_avg_w` per channel (NaN if `mains_voltage_v` unset or channel clipped) |
 | 43..46 | f32 LE | `p_total_w` (NaN if any contributing channel is invalid) |
 | 47..54 | f64 LE | `energy_wh` accumulated since the Pico last booted |
+| 55..60 | 3 × u16 LE | `counts_avg` per channel — **added 2026-09-06** (`KILNLINK_PROTOCOL_VERSION` 11) |
 
 `i_conducting_a` is the draw **while conducting**, not a duty-averaged figure —
 see `firmware/SaftyFW/docs/CURRENT_SENSE.md` §3b for why those must be reported separately, and why
@@ -1080,6 +1081,21 @@ the ESP's own duty figure is the better multiplier.
 
 `energy_wh` resets on Pico reboot; `boot_id` in the context/version frames is
 how the ESP knows to restart its own totalisation rather than see a step change.
+
+**`counts_avg`** is the raw 16x-oversampled ADC reading per channel
+(`current_sense.c`'s `cs_read_channel_counts()`, `CURRENT_SENSE.md` §4),
+published **independent of calibration** — unlike `amps[]`/`i_conducting_a`,
+it is never zero-forced by an uncommissioned `k_ct_v_per_a`. This closes the
+gap `CURRENT_SENSE.md` §4 ("Measured noise floor — BLOCKED, not measured")
+recorded: there was previously no path from the running board to raw ADC
+counts on either the wire or the debug side. This frame's length grew from
+`KILNLINK_POWER_LEN_V1` (55) to `KILNLINK_POWER_LEN_V2` (61) to carry it, the
+first length change this frame has ever had; `kilnlink_power_decode()`
+accepts both lengths and reports whether `counts_avg` is real via the new
+`KILNLINK_POWER_FLAG_COUNTS_VALID` bit rather than inferring it from length
+alone — see `kilnlink_version.h`'s 10→11 entry for the full skew-safety
+argument (this is the first POWER-frame length change, so unlike Frame A it
+had no pre-existing length-tolerant decoder to reuse; this change adds one).
 
 ### Frame F: LOG relay — the Pico's console, task id **5**
 

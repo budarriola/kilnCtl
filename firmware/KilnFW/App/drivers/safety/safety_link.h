@@ -240,7 +240,13 @@ extern "C" {
  * KILNLINK_POWER_LEN from kilnlink_power.h. Pushed unsolicited, "no guard
  * reads any of this. It exists to be displayed." -- see
  * safety_apply_power() in safety_link.c for the field layout. */
-#define SAFETY_LINK_POWER_FRAME_LEN 55u
+/* 2026-09-06: the Pico's encoder always writes the V2 (61-byte) layout
+ * (kilnlink_power.h's KILNLINK_POWER_LEN_V2, +3 x u16 counts_avg), but a
+ * pre-11-protocol Pico still sends the V1 (55-byte) layout -- accept both,
+ * mirroring kilnlink_power_decode()'s own tolerance. */
+#define SAFETY_LINK_POWER_FRAME_LEN_V1 55u
+#define SAFETY_LINK_POWER_FRAME_LEN_V2 61u
+#define SAFETY_LINK_POWER_FRAME_LEN SAFETY_LINK_POWER_FRAME_LEN_V2
 #define SAFETY_LINK_POWER_CHANNELS 3u
 
 /* Power frame flags byte (offset 2), kilnlink_power.h's
@@ -249,6 +255,7 @@ extern "C" {
 #define SAFETY_LINK_POWER_FLAG_MAINS_VOLTAGE_CONFIGURED 0x01u
 #define SAFETY_LINK_POWER_FLAG_ANY_CHANNEL_CLIPPED       0x02u
 #define SAFETY_LINK_POWER_FLAG_CALIBRATED                0x04u
+#define SAFETY_LINK_POWER_FLAG_COUNTS_VALID              0x08u
 
 /* Length of the Pico's DIAG frame (SAFETY_CMD_DIAG / Frame B,
  * CommonFW/docs/LINK_PROTOCOL.md sec 6), byte-for-byte KILNLINK_DIAG_LEN
@@ -748,6 +755,13 @@ typedef struct {
     bool     power_mains_voltage_configured;
     bool     power_any_channel_clipped;
     bool     power_calibrated;
+    /* Raw 16x-oversampled ADC counts per channel, independent of
+     * calibration -- CommonFW/docs/LINK_PROTOCOL.md Frame E's counts_avg
+     * field (2026-09-06, kilnlink_power.h KILNLINK_POWER_LEN_V2). Valid only
+     * when power_counts_valid is true (a pre-11-protocol Pico's 55-byte V1
+     * frame leaves these at 0/false -- see safety_apply_power()). */
+    uint16_t power_channel_counts_avg[SAFETY_LINK_POWER_CHANNELS];
+    bool     power_counts_valid;
 
     /* SAFETY_CMD_DIAG (Frame B) telemetry -- ROADMAP.md M5, LINK_PROTOCOL.md
      * sec 6: "Everything the 23-byte frame has no room for." diag_ever_received
