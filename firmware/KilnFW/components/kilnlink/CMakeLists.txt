@@ -12,8 +12,10 @@
 # Not yet consumed by anything in App/drivers -- KilnFW/App/drivers/CMakeLists.txt
 # lists "kilnlink" in REQUIRES purely so `idf.py build` compiles this
 # component under the real xtensa-gcc toolchain and catches anything MSVC's
-# host build didn't. App/drivers/espInterfaces/uart_protocol.c has not been
-# migrated to call kilnlink_frame_* yet -- CommonFW/README.md is explicit
+# host build didn't. App/drivers/owners/uart_protocol.c (formerly
+# App/drivers/espInterfaces/uart_protocol.c before the drivers/ layering
+# reorg flattened espInterfaces/ into owners/) has not been migrated to
+# call kilnlink_frame_* yet -- CommonFW/README.md is explicit
 # that migration needs proven byte-identical output against the
 # pre-refactor implementation before the old code is deleted, which is a
 # dedicated verification pass of its own, not bundled with wiring the build.
@@ -32,8 +34,8 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_get_ct_cal.c"
          "${KILNLINK_DIR}/src/kilnlink_ct_cal.c"
          # docs/COMMISSIONING.md sec 2/3 (2026-08-21 follow-up): the ESP-side
-         # commissioning cache/HTTP surface (App/drivers/safety_cfg_store.c,
-         # safety_cfg_http.c) and safety_link.c's SET_PARAM/COMMIT_CONFIG/
+         # commissioning cache/HTTP surface (App/drivers/safety/safety_cfg_store.c,
+         # App/drivers/http/safety_cfg_http.c) and safety_link.c's SET_PARAM/COMMIT_CONFIG/
          # GET_CONFIG_PAGE wire calls need these five -- added here for the
          # identical reason every entry above this line was added: this
          # wrapper's SRCS list does not track CommonFW/CMakeLists.txt's own

@@ -205,12 +205,114 @@ function Get-Layer([string]$path) {
     return $null
 }
 
+$moveRows = $rows | Where-Object { (Get-Layer $_.new_path) -and ($tierOf.ContainsKey((Get-Layer $_.new_path))) }
+$stayRows = $rows | Where-Object { -not ((Get-Layer $_.new_path) -and $tierOf.ContainsKey((Get-Layer $_.new_path))) }
+
+# ---------------------------------------------------------------------------
+# 5. Include-direction verifier (round-6 finding 3: moved ahead of section 1's
+#    git mv / sections 2 and 4's rewrites, computed against the PLANNED
+#    post-move layout the same way sections 0/0a validate mapping.csv before
+#    touching anything -- previously this ran after the move, so `-Apply` on
+#    a tree with a genuine (non-allowlisted) upward include would already
+#    have git-mv'd all 359 files and rewritten CMakeLists.txt/check scripts
+#    before exiting 1, leaving the repo mid-reorg on a failed run. The check
+#    itself needs no on-disk move to be meaningful: $layerOf below maps each
+#    file's CURRENT basename to its PLANNED new layer from mapping.csv, and
+#    the #include scan reads each file at wherever it lives right now (still
+#    the old flat drivers/ location at this point in the script, both under
+#    -DryRun and now also under -Apply) -- the tier comparison is entirely
+#    basename-driven and is identical whether the physical git mv has
+#    happened yet or not.
+# ---------------------------------------------------------------------------
+Write-Host "=== 5. Include-direction verifier (planned post-move layout, checked BEFORE any move/rewrite) ===" -ForegroundColor Cyan
+
+# old basename -> new layer
+$layerOf = @{}
+foreach ($r in $moveRows) {
+    $bn = Split-Path $r.old_path -Leaf
+    $layerOf[$bn] = Get-Layer $r.new_path
+}
+
+# Deliberate exceptions (coordinator-reviewed, not architecture violations):
+# the owner modules that arbitrate direct relay/GPIO access reach *up* to
+# consult the safety/control state that gates whether a write is allowed at
+# all -- CLAUDE.md's "Bypassed owner module bug class" note is explicit that
+# every relay write must route through these owners with interlocks
+# consulted, so an owner checking danger_mode/heat_interlock/ota_state/
+# safety_link before acting is the safety property, not a layering bug.
+# Keyed by "<includer basename>|<included basename>" so only these exact
+# pairs are suppressed -- any other upward include from these same files
+# still reports.
+$allowedUpwardIncludes = @{
+    "kiln_io_owner.c|danger_mode.h"   = $true
+    "kiln_io_owner.c|heat_interlock.h" = $true
+    "kiln_io_owner.c|ota_state.h"     = $true
+    "kiln_io_owner.h|safety_link.h"   = $true
+    "relay_authority.h|safety_link.h" = $true
+}
+
+$violations = @()
+$driversDir = Join-Path $RepoRoot "firmware/KilnFW/App/drivers"
+$srcFiles = Get-ChildItem -Path $driversDir -Recurse -File -Include *.c,*.h
+foreach ($file in $srcFiles) {
+    $bn = $file.Name
+    if (-not $layerOf.ContainsKey($bn)) { continue }
+    $includerLayer = $layerOf[$bn]
+    if (-not $tierOf.ContainsKey($includerLayer)) { continue }
+    $includerTier = $tierOf[$includerLayer]
+
+    $lines = Get-Content $file.FullName
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        # Anchor to an actual preprocessor directive (optional leading
+        # whitespace only) so a comment that merely mentions #include "x.h"
+        # as prose -- e.g. backlight_pwm.h's "Deliberately NOT #include
+        # ..." and safety_cfg_store.c's "Declared here by hand rather than
+        # via #include ..." -- is not misreported as a real upward include.
+        if ($lines[$i] -match '^\s*#\s*include\s*"([^"]+)"') {
+            $incName = $matches[1] -replace '^.*/', ''
+            if ($layerOf.ContainsKey($incName)) {
+                $includedLayer = $layerOf[$incName]
+                if ($tierOf.ContainsKey($includedLayer)) {
+                    $includedTier = $tierOf[$includedLayer]
+                    if ($includerTier -gt $includedTier) {
+                        $allowKey = "$bn|$incName"
+                        if (-not $allowedUpwardIncludes.ContainsKey($allowKey)) {
+                            $violations += [pscustomobject]@{
+                                File = $bn; Layer = $includerLayer; Line = $i + 1
+                                Include = $incName; IncludedLayer = $includedLayer
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+if ($violations.Count -eq 0) {
+    Write-Host "No upward includes found (expected -- items 1-6 in the plan already untangled the six known patterns)."
+} else {
+    Write-Host "$($violations.Count) upward include(s) remain:" -ForegroundColor Yellow
+    $violations | ForEach-Object {
+        Write-Host "  $($_.File) [$($_.Layer)]:$($_.Line) includes `"$($_.Include)`" [$($_.IncludedLayer)] -- bottom-tier file including a higher-tier header"
+    }
+    # finding 8 (round -1 pass) / round-6 finding 3: a non-allowlisted upward
+    # include is an architecture violation the reorg is supposed to remove,
+    # not just a thing to note -- `-Apply` must refuse, and now refuses
+    # BEFORE section 1's git mv or any rewrite runs, so a violating tree
+    # exits 1 having moved/rewritten NOTHING. -DryRun (including a
+    # -PreviewDir run, which is still a dry run) only reports it, since
+    # that's exactly what dry runs are for.
+    if ($Apply) {
+        Write-Error "Refusing -Apply: $($violations.Count) non-allowlisted upward include(s) remain (listed above). Either resolve them (see DRYRUN.md section 5's proposed fixes) or add a reviewed entry to `$allowedUpwardIncludes. NOTHING was moved or rewritten by this run."
+        exit 1
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 1. git mv plan
 # ---------------------------------------------------------------------------
-Write-Host "=== 1. git mv plan ($($rows.Count) rows) ===" -ForegroundColor Cyan
-$moveRows = $rows | Where-Object { (Get-Layer $_.new_path) -and ($tierOf.ContainsKey((Get-Layer $_.new_path))) }
-$stayRows = $rows | Where-Object { -not ((Get-Layer $_.new_path) -and $tierOf.ContainsKey((Get-Layer $_.new_path))) }
+Write-Host "`n=== 1. git mv plan ($($rows.Count) rows) ===" -ForegroundColor Cyan
 
 Write-Host "$($moveRows.Count) rows map into the eleven layer subdirs; $($stayRows.Count) are STAY rows (CMakeLists.txt/Kconfig/README.md/gen_build_info.cmake -- component root files, no git mv needed since old_path == new_path)."
 
@@ -237,6 +339,24 @@ foreach ($r in $moveRows) {
         git mv -- $r.old_path $r.new_path
         if ($LASTEXITCODE -ne 0) {
             Write-Error "git mv failed for $($r.old_path) -> $($r.new_path)"
+            exit 1
+        }
+    }
+}
+
+# Round-6 finding 6: `git mv` empties firmware/KilnFW/App/drivers/espInterfaces/
+# (every file under it moves into owners/ per mapping.csv) but leaves the now-
+# empty directory itself behind, untracked by git -- clean it up here so
+# -Apply doesn't leave stray empty dirs in the working tree.
+if (-not $DryRun) {
+    $espInterfacesDir = Join-Path $RepoRoot "firmware/KilnFW/App/drivers/espInterfaces"
+    if (Test-Path $espInterfacesDir) {
+        $remaining = Get-ChildItem -Path $espInterfacesDir -Recurse -Force
+        if (-not $remaining) {
+            Remove-Item -Path $espInterfacesDir -Force
+            Write-Host "  rmdir (empty) firmware/KilnFW/App/drivers/espInterfaces"
+        } else {
+            Write-Error "firmware/KilnFW/App/drivers/espInterfaces still contains $($remaining.Count) item(s) after the move -- not removing it (mapping.csv may be missing a row)."
             exit 1
         }
     }
@@ -555,7 +675,14 @@ $basenames = $rows | ForEach-Object { Split-Path $_.old_path -Leaf } | Sort-Obje
 $searchDirs = @(
     "tools",
     "firmware/KilnFW/tools",
-    "firmware/KilnFW/App/test"
+    "firmware/KilnFW/App/test",
+    # Round-6 finding 1: check_link_impl_isolation.ps1's allowlist entries
+    # (Join-Path $firmwareRoot "KilnFW\App\drivers\<file>") live here, one
+    # directory this scan never walked before -- the post-move check
+    # otherwise reports 12 "CRC/byte-stuffing implementation(s) found
+    # outside firmware/CommonFW" false positives (every allowlisted file
+    # under App/drivers/<file> still resolves to the OLD flat path).
+    "firmware/SaftyFW/tools"
 ) | Where-Object { Test-Path (Join-Path $RepoRoot $_) }
 
 # finding 12: check_uri_handler_cap.ps1, check_nvs_write_guard_coverage.ps1
@@ -660,7 +787,11 @@ foreach ($r in $moveRows) {
 # (finding 3 / DRYRUN.md 4a): that subfolder is flattened into `owners/` by
 # the move, so "App/drivers/espInterfaces/uart_protocol.h" becomes
 # "App/drivers/owners/uart_protocol.h", not "App/drivers/owners/espInterfaces/...".
-$siteRewritePattern = '((?:App/drivers/|\.\./drivers/))(?:espInterfaces/)?([A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*)'
+# Round-6 finding 1: accept backslash separators too (e.g.
+# check_link_impl_isolation.ps1's `Join-Path $firmwareRoot
+# "KilnFW\App\drivers\<file>"` allowlist entries), not just the forward-slash
+# forms this pattern originally covered -- [\\/] in place of a literal '/'.
+$siteRewritePattern = '((?:App[\\/]drivers[\\/]|\.\.[\\/]drivers[\\/]))(?:espInterfaces[\\/])?([A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*)'
 $unmapped = New-Object System.Collections.Generic.HashSet[string]
 $rewriteFileCount = 0
 $rewriteLineCount = 0
@@ -670,15 +801,38 @@ $rewriteLineCount = 0
 # is a PowerShell variable holding that path) -- rewrite the quoted basename
 # argument to "<layer>/<name>" so Join-Path resolves into the new subdir.
 # Matches both quote styles used in the file ("pid.c" and 'zones_config_json.c').
-$joinPathPattern = 'Join-Path\s+\$driversDir\s+([\x22\x27])([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\1'
+# Round-6 finding 2: the original pattern hardcoded the variable name
+# $driversDir, so any OTHER script holding an App/drivers root under a
+# different variable name (e.g. a hypothetical $appDriversRoot) was silently
+# skipped. Generalised to any `$<name>` variable whose name itself contains
+# "driver(s)" (case-insensitive) -- $driversDir, $DriversRoot,
+# $appDriversRoot, etc. -- rather than truly ANY PowerShell variable: a
+# first attempt matching every `Join-Path $var "<basename>.<ext>"` site
+# regardless of variable name produced a massive false-positive surge (a
+# -PreviewDir run went from ~32 unmapped literals to 156, 124 of them
+# hard-`-Apply`-failure candidates) by also matching unrelated Join-Path
+# calls like `Join-Path $testDir "test_pid.c"` or `Join-Path $outDir
+# "kilnctl_host_tests_kiln_io_owner.exe"` in build_host_tests.ps1, whose
+# basenames were never mapped drivers/ files at all. Restricting to
+# variable names that actually say "driver(s)" keeps the generalisation
+# (any name, not just the literal $driversDir) while excluding every one of
+# those unrelated Join-Path sites. The variable name itself is captured
+# (group 1) and echoed back unchanged in the rewrite, since this script has
+# no way to know what that variable actually points at; only the quoted
+# basename argument (group 3) is rewritten.
+$joinPathPattern = 'Join-Path\s+(\$[A-Za-z0-9_]*[Dd]rivers?[A-Za-z0-9_]*)\s+([\x22\x27])([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\2'
 
 $allRewriteTargets = @($candidateFiles) + @($mdFiles)
 foreach ($file in $allRewriteTargets) {
     $raw = Get-Content -Path $file.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($null -eq $raw) { continue }
     $originalRaw = $raw
-    $hasSiteHits = ($raw -match [regex]::Escape('App/drivers/')) -or ($raw -match [regex]::Escape('../drivers/'))
-    $hasJoinPathHits = $raw -match 'Join-Path\s+\$driversDir'
+    # Round-6 finding 1: also check the backslash forms now covered by
+    # $siteRewritePattern -- a file with only "KilnFW\App\drivers\<file>"
+    # literals (no forward-slash form at all) must not be skipped here.
+    $hasSiteHits = ($raw -match [regex]::Escape('App/drivers/')) -or ($raw -match [regex]::Escape('../drivers/')) -or
+                   ($raw -match [regex]::Escape('App\drivers\')) -or ($raw -match [regex]::Escape('..\drivers\'))
+    $hasJoinPathHits = $raw -match 'Join-Path\s+\$[A-Za-z0-9_]*[Dd]rivers?[A-Za-z0-9_]*\s+[\x22\x27][A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+[\x22\x27]'
     if (-not $hasSiteHits -and -not $hasJoinPathHits) { continue }
 
     $fileLineHits = 0
@@ -688,11 +842,12 @@ foreach ($file in $allRewriteTargets) {
         $jsb = New-Object System.Text.StringBuilder
         $jLastEnd = 0
         foreach ($jm in $jpMatches) {
-            $bn = $jm.Groups[2].Value
+            $varName = $jm.Groups[1].Value
+            $bn = $jm.Groups[3].Value
             [void]$jsb.Append($raw.Substring($jLastEnd, $jm.Index - $jLastEnd))
             if ($basenameLayer.ContainsKey($bn)) {
-                $q = $jm.Groups[1].Value
-                [void]$jsb.Append("Join-Path `$driversDir $q$($basenameLayer[$bn])/$bn$q")
+                $q = $jm.Groups[2].Value
+                [void]$jsb.Append("Join-Path $varName $q$($basenameLayer[$bn])/$bn$q")
                 $fileLineHits++
             } else {
                 [void]$jsb.Append($jm.Value)
@@ -744,7 +899,12 @@ foreach ($file in $allRewriteTargets) {
             continue
         }
         if ($basenameLayer.ContainsKey($bn)) {
-            [void]$sb.Append("$prefix$($basenameLayer[$bn])/$bn")
+            # Round-6 finding 1: preserve the prefix's own separator style
+            # (backslash for a Join-Path-style literal like
+            # "KilnFW\App\drivers\pid.c", forward slash otherwise) instead of
+            # always inserting a forward slash before the basename.
+            $layerSep = if ($prefix -match '\\$') { '\' } else { '/' }
+            [void]$sb.Append("$prefix$($basenameLayer[$bn])$layerSep$bn")
             $fileLineHits++
         } else {
             # Basename not one we're moving (e.g. UnitTestFw's own files
@@ -1039,91 +1199,10 @@ if ($genuinelyUnmapped.Count -gt 0 -and -not $DryRun) {
     exit 1
 }
 
-# ---------------------------------------------------------------------------
-# 5. Include-direction verifier
-# ---------------------------------------------------------------------------
-Write-Host "`n=== 5. Include-direction verifier (hypothetical post-move) ===" -ForegroundColor Cyan
-
-# old basename -> new layer
-$layerOf = @{}
-foreach ($r in $moveRows) {
-    $bn = Split-Path $r.old_path -Leaf
-    $layerOf[$bn] = Get-Layer $r.new_path
-}
-
-# Deliberate exceptions (coordinator-reviewed, not architecture violations):
-# the owner modules that arbitrate direct relay/GPIO access reach *up* to
-# consult the safety/control state that gates whether a write is allowed at
-# all -- CLAUDE.md's "Bypassed owner module bug class" note is explicit that
-# every relay write must route through these owners with interlocks
-# consulted, so an owner checking danger_mode/heat_interlock/ota_state/
-# safety_link before acting is the safety property, not a layering bug.
-# Keyed by "<includer basename>|<included basename>" so only these exact
-# pairs are suppressed -- any other upward include from these same files
-# still reports.
-$allowedUpwardIncludes = @{
-    "kiln_io_owner.c|danger_mode.h"   = $true
-    "kiln_io_owner.c|heat_interlock.h" = $true
-    "kiln_io_owner.c|ota_state.h"     = $true
-    "kiln_io_owner.h|safety_link.h"   = $true
-    "relay_authority.h|safety_link.h" = $true
-}
-
-$violations = @()
-$driversDir = Join-Path $RepoRoot "firmware/KilnFW/App/drivers"
-$srcFiles = Get-ChildItem -Path $driversDir -Recurse -File -Include *.c,*.h
-foreach ($file in $srcFiles) {
-    $bn = $file.Name
-    if (-not $layerOf.ContainsKey($bn)) { continue }
-    $includerLayer = $layerOf[$bn]
-    if (-not $tierOf.ContainsKey($includerLayer)) { continue }
-    $includerTier = $tierOf[$includerLayer]
-
-    $lines = Get-Content $file.FullName
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        # Anchor to an actual preprocessor directive (optional leading
-        # whitespace only) so a comment that merely mentions #include "x.h"
-        # as prose -- e.g. backlight_pwm.h's "Deliberately NOT #include
-        # ..." and safety_cfg_store.c's "Declared here by hand rather than
-        # via #include ..." -- is not misreported as a real upward include.
-        if ($lines[$i] -match '^\s*#\s*include\s*"([^"]+)"') {
-            $incName = $matches[1] -replace '^.*/', ''
-            if ($layerOf.ContainsKey($incName)) {
-                $includedLayer = $layerOf[$incName]
-                if ($tierOf.ContainsKey($includedLayer)) {
-                    $includedTier = $tierOf[$includedLayer]
-                    if ($includerTier -gt $includedTier) {
-                        $allowKey = "$bn|$incName"
-                        if (-not $allowedUpwardIncludes.ContainsKey($allowKey)) {
-                            $violations += [pscustomobject]@{
-                                File = $bn; Layer = $includerLayer; Line = $i + 1
-                                Include = $incName; IncludedLayer = $includedLayer
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-if ($violations.Count -eq 0) {
-    Write-Host "No upward includes found (expected -- items 1-6 in the plan already untangled the six known patterns)."
-} else {
-    Write-Host "$($violations.Count) upward include(s) remain:" -ForegroundColor Yellow
-    $violations | ForEach-Object {
-        Write-Host "  $($_.File) [$($_.Layer)]:$($_.Line) includes `"$($_.Include)`" [$($_.IncludedLayer)] -- bottom-tier file including a higher-tier header"
-    }
-    # finding 8: a non-allowlisted upward include is an architecture
-    # violation the reorg is supposed to remove, not just a thing to note --
-    # -Apply must refuse rather than complete a move that leaves it in
-    # place. -DryRun (including a -PreviewDir run, which is still a dry
-    # run) only reports it, since that's exactly what dry runs are for.
-    if ($Apply) {
-        Write-Error "Refusing -Apply: $($violations.Count) non-allowlisted upward include(s) remain (listed above). Either resolve them (see DRYRUN.md section 5's proposed fixes) or add a reviewed entry to `$allowedUpwardIncludes."
-        exit 1
-    }
-}
+# (Round-6 finding 3: section 5's include-direction verifier now runs
+# BEFORE section 1's git mv, immediately after $moveRows/$stayRows are
+# computed -- see that block above. $violations/$layerOf/$allowedUpwardIncludes
+# are already populated by the time execution reaches here.)
 
 if ($DryRun) {
     Write-Host "`n=== 6. Dry-run diff preview (counts) ===" -ForegroundColor Cyan

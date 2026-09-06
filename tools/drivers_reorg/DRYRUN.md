@@ -1,5 +1,163 @@
 # drivers/ reorg dry run (2026-09-05, revised)
 
+## -3. Round-6 Opus review pass (2026-09-05, this session) -- 6 findings fixed
+
+A round-6 review of the state above found 6 findings (1 real bug, 1 real
+scoping gap, 1 real ordering hazard, 1 stale-but-actually-correct number, 1
+doc-drift gap, 1 cleanliness gap). All fixed in `plan_moves.ps1`/
+`firmware/KilnFW/App/drivers/README.md`/
+`firmware/KilnFW/components/kilnlink/CMakeLists.txt` this session, confirmed
+against a fresh `-PreviewDir C:\rc7` run (deleted after inspection, per the
+sandboxing rule -- `-Apply` itself was never invoked).
+
+1. **`firmware/SaftyFW/tools/check_link_impl_isolation.ps1`'s 10
+   backslash-form allowlist entries were invisible to section 4's scan.**
+   `Join-Path $firmwareRoot "KilnFW\App\drivers\<file>"` uses `\` separators
+   and lives under `firmware/SaftyFW/tools`, a directory `$searchDirs` never
+   walked -- post-move this check would report 12 "CRC/byte-stuffing
+   implementation(s) found outside firmware/CommonFW" false positives
+   (every allowlisted `App/drivers/<file>` still pointing at the OLD flat
+   path). Fixed: added `firmware/SaftyFW/tools` to `$searchDirs`, and
+   `$siteRewritePattern`/the `$hasSiteHits` guard now accept `[\\/]` in
+   place of a literal `/` throughout. The rewrite also preserves whichever
+   separator style the literal already used (backslash in, backslash out)
+   instead of always inserting a forward slash before the layer name.
+   Confirmed via `-PreviewDir`: all 10 entries (`boot_guard.c`,
+   `watchdog_cfg.c`, `crash_report.c`, `profiles_http.c`,
+   `zones_config_json.c/.h`, `zones_config_migrate.c`,
+   `zones_config_store.c`, `safety_cfg_store.c/.h`) rewrote to their new
+   `KilnFW\App\drivers\<layer>\<file>` form; the one line that must NOT be
+   touched (`UnitTestFw\UnitTest\App\drivers\espInterfaces\uart_protocol.c`,
+   explicitly out of scope) stayed untouched, confirmed by grepping the
+   preview tree.
+2. **`$joinPathPattern` hardcoded the variable name `$driversDir`.** Other
+   scripts holding an App/drivers root under a different variable name were
+   silently skipped. First fix attempt generalised to ANY `$<name>`
+   variable, which was wrong: a `-PreviewDir` run immediately surged from
+   ~32 unmapped literals to 156 (124 of them hard-`-Apply`-failure
+   candidates) by also matching unrelated `Join-Path $testDir
+   "test_pid.c"` / `Join-Path $outDir "kilnctl_host_tests_kiln_io_owner.exe"`
+   -style calls in `build_host_tests.ps1` whose basenames were never mapped
+   drivers/ files. Corrected to match any variable name that itself
+   contains "driver(s)" (case-insensitive) -- `$driversDir`,
+   `$DriversRoot`, a hypothetical `$appDriversRoot`, etc. -- which restores
+   the generalisation (no longer just the literal `$driversDir`) while
+   excluding the false-positive class. Re-ran `-PreviewDir`: back to 32
+   unmapped literals, 0 hard-fail, identical to the pre-finding-2 baseline.
+   Grepped the full `C:\rc7` reconstruction for any remaining
+   `App\drivers\<moved-basename>` / `App/drivers/<moved-basename>` literal
+   outside the eleven layer subdirs and the STAY set: 3 hits, all
+   pre-existing, already-documented placeholders --
+   `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md:143` (`App/drivers/ILI9488.c`,
+   the pre-rename historical name, already in `$knownPlaceholders`),
+   `firmware/KilnFW/TODO.md:2301` (`App/drivers/rules_task.c`, the deleted
+   rule engine, already in `$knownPlaceholders`), and
+   `check_link_impl_isolation.ps1`'s own UnitTestFw line (deliberately
+   excluded, finding 1 above). No genuine gap found.
+3. **MEDIUM -- the upward-include verifier (section 5) ran AFTER section
+   1's `git mv` and sections 2/4's rewrites**, so `-Apply` on a tree with a
+   real, non-allowlisted upward include would already have moved all 359
+   files and rewritten `CMakeLists.txt`/every check script before exiting
+   1, leaving the repo mid-reorg on a failed run. Moved section 5's entire
+   body (the `$layerOf` map, `$allowedUpwardIncludes`, the violation scan,
+   and the `-Apply`-refusal `exit 1`) to run immediately after
+   `$moveRows`/`$stayRows` are computed and BEFORE section 1's `git mv`
+   loop -- the same "validate the planned layout before touching disk"
+   posture sections 0/0a already use. No logic change was needed to make
+   this safe: the scan is entirely basename-driven (`$layerOf` maps each
+   file's CURRENT basename to its PLANNED new layer from `mapping.csv`) and
+   reads each file's `#include` lines wherever it currently sits on disk,
+   so it produces an identical violation list whether the physical `git
+   mv` has happened yet or not -- confirmed identical counts (359 git mv, 0
+   upward includes) in the `-PreviewDir` re-run before and after relocating
+   the block. **Negative-tested**: temporarily re-inserted the same
+   `#include "pid.h"` fixture from the original finding-8 negative test
+   into `stack_margin.h`, ran `plan_moves.ps1 -DryRun`, and confirmed the
+   "=== 5. Include-direction verifier ===" banner (now printed before "===
+   1. git mv plan ===" in the console output, not after) reports the
+   injected violation -- proving the check runs, and would refuse, before
+   any move. Reverted the single inserted line immediately after; `git
+   diff -- firmware/KilnFW/App/drivers/stack_margin.h` empty afterward. (A
+   full injected--Apply run proving "zero moves happened" was not performed
+   since `-Apply` itself is out of scope for this task under the
+   sandboxing rule; the code path is structurally identical to the
+   `-DryRun` case -- the `if ($Apply) { exit 1 }` check sits inside the
+   same relocated block, now unconditionally before section 1 regardless of
+   `-DryRun`/`-Apply`.)
+4. **LOW -- claimed "main" `cl` line length was re-measured, not
+   corrected.** The round-6 task description asserted DRYRUN.md's existing
+   7659-char figure was stale (stating a real measurement of 7815).
+   Re-measured directly against the real repo path by extracting
+   `build_host_tests.ps1`'s literal source (through the `$cmd = ...`
+   assignment) into a throwaway copy placed IN `firmware/KilnFW/App/test/`
+   (so `$PSScriptRoot` resolves to the real directory, not a scratch path)
+   and running it: **7659 chars**, matching DRYRUN.md's existing number
+   exactly, not 7815. The throwaway file was deleted immediately after
+   (`git status --porcelain -- firmware/KilnFW/App/test/_measure_tmp.ps1`
+   empty). DRYRUN.md's number stands uncorrected; residual headroom to
+   cmd.exe's ~8191-char limit is **532 chars** (8191 - 7659), not the 376
+   the task description assumed.
+5. **LOW -- `App/drivers/README.md` and
+   `components/kilnlink/CMakeLists.txt` cited `espInterfaces/` and flat
+   `App/drivers/<file>` paths the mechanical scan never reaches.**
+   `components/kilnlink/CMakeLists.txt` is a `.txt` file outside every
+   scanned extension (`*.ps1`/`*.py`/`*.c`/`*.h`/`*.md`) and outside every
+   scanned directory (`tools/`, `firmware/KilnFW/tools`,
+   `firmware/KilnFW/App/test`, `docs/`, `firmware/**/*.md`) -- adding a
+   whole new directory to the generic scan for one file's three lines was
+   judged not worth the added surface, so it was hand-fixed instead:
+   `App/drivers/espInterfaces/uart_protocol.c` -> `App/drivers/owners/
+   uart_protocol.c` (line ~15) and `App/drivers/safety_cfg_store.c` /
+   `safety_cfg_http.c` -> `App/drivers/safety/safety_cfg_store.c` /
+   `App/drivers/http/safety_cfg_http.c` (line ~37, decision C moved
+   `safety_cfg_http.c` to `http`). `App/drivers/README.md:20`'s
+   `espInterfaces/` prose was never reachable by the mechanical rewrite
+   either, since it has no `App/drivers/`/`../drivers/` prefix at all (a
+   prerequisite the pattern requires) -- hand-fixed to `owners/` with a
+   parenthetical explaining the flatten, and every basename in the file's
+   table gained its new layer prefix (`hw/MAX31856.c/.h`,
+   `owners/kiln_io.c/.h`, `safety/safety_link.c/.h`,
+   `bridge/uart_bridge.c/.h`, `bridge/uart_log_bridge.c/.h`,
+   `common/uart_task_ids.h`, etc.) per `mapping.csv`. `espInterfaces`
+   stays in `$knownPlaceholders` (it isn't what suppressed these two
+   citations -- the scan never reached the files at all -- and it's still
+   needed for other bare "espInterfaces" prose hits elsewhere).
+6. **LOW -- `-Apply` left an empty, untracked
+   `App/drivers/espInterfaces/` directory behind.** `git mv` empties it
+   (every file under it maps into `owners/`) but never removes the
+   directory itself. Added a check right after the `git mv` loop: if
+   `firmware/KilnFW/App/drivers/espInterfaces` still exists and is
+   genuinely empty, `Remove-Item` it and log the rmdir; if anything
+   unexpected remains in it (a sign `mapping.csv` is missing a row), fail
+   loud instead of silently leaving or deleting a non-empty directory.
+
+### Refreshed dry-run summary (this session, after all 6 round-6 fixes)
+
+```
+=== 6. Dry-run diff preview (counts) ===
+  git mv                         : 359 file(s), 4 STAY (no-op)
+  CMakeLists SRCS rewrite        : 186 literal(s) in drivers/CMakeLists.txt, 0 in App/CMakeLists.txt
+  INCLUDE_DIRS rewrite           : 11 of 12 '.'+layer dir(s) to add (0 = already up to date)
+  Path-keyed site rewrite        : 639 line(s) across 181 file(s) (incl. markdown + Join-Path $driversDir sites)
+  espInterfaces/ include strip   : 4 line(s) across 4 file(s)
+  Unmapped 'drivers/<name>' hits : 32 (of which 0 would hard-fail -Apply)
+  Upward includes remaining      : 0
+  Missing old_path row(s)        : 0 (would hard-fail -Apply; benign in -DryRun -- see section 0a)
+```
+
+359 `git mv` (363 mapping.csv rows minus 4 STAY), 0 upward includes (the one
+residual `sim_backend.c -> wifi_provision_http.h` site tracked in section 5
+below has since resolved -- confirmed 0 in this run), 32 benign unmapped
+literals (0 hard-fail), guards fire as designed. `firmware/KilnFW/App/test`
+and its five `check_*.ps1` scripts were left untouched throughout this pass
+per the coordinator's instruction (another agent's concurrent work); nothing
+in this session's diff touches that directory. Host-test build count
+(22/22) was not independently re-verified this session -- see round -1/-2's
+reconstruction-build sections above for the last full from-scratch
+build-and-run confirmation; this pass's changes (search-dir/regex scoping,
+section reordering, doc text, an `rmdir`) touch no code path that
+reconstruction build exercises differently.
+
 Output of `tools/drivers_reorg/plan_moves.ps1 -DryRun` against the
 coordinator-revised `mapping.csv` (decisions A-E below). Nothing was applied;
 this whole pass is preparation only.
