@@ -265,13 +265,24 @@ button { min-height: var(--ui-touch); }
    field's own label/input for attention at phone width; content wraps in
    normal flow (no fixed width) so it never causes horizontal scroll. */
 details.info { display: inline-block; margin: 0 0 0.4em; }
+/* Touch-target fix: the visible glyph stays a small 1.4em circle (drawn on
+   ::before, below), but the <summary> itself -- the actual tap target --
+   is padded out to var(--ui-touch) in both dimensions, same floor every
+   other tappable control on this page already meets (button, a.button,
+   .kc-menu-panel summary). The literal "i" text node written by
+   infoDetailsHtml() is kept for accessibility/copy-paste but visually
+   collapsed (font-size: 0) so it doesn't duplicate the ::before glyph. */
 details.info summary { display: inline-flex; align-items: center; justify-content: center;
-                        width: 1.4em; height: 1.4em; border-radius: 50%;
-                        border: 1px solid var(--border); color: var(--muted);
-                        font-size: 0.75em; font-style: italic; line-height: 1;
+                        min-width: var(--ui-touch); min-height: var(--ui-touch);
+                        box-sizing: border-box; font-size: 0;
                         cursor: pointer; list-style: none; user-select: none; }
 details.info summary::-webkit-details-marker { display: none; }
-details.info[open] summary { color: var(--fg); border-color: var(--fg); }
+details.info summary::before { content: 'i'; display: inline-flex; align-items: center;
+                                justify-content: center; width: 1.4em; height: 1.4em;
+                                border-radius: 50%; border: 1px solid var(--border);
+                                color: var(--muted); font-size: 0.95rem; font-style: italic;
+                                line-height: 1; }
+details.info[open] summary::before { color: var(--fg); border-color: var(--fg); }
 /* Info text renders as its own block below the summary, full width of
    whatever container the field is in -- never inline with the glyph, so a
    long paragraph or the fuzzy rule table never has to fight the summary's
