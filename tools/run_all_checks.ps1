@@ -112,8 +112,18 @@ if ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython)) {
     # under $selfcheckPython instead of `powershell -File`.
     $checks += Get-Item $selfcheckPy
     $checks = $checks | Sort-Object FullName
-} else {
-    Write-Host "WARNING: expected $selfcheckPy (or its venv $selfcheckPython) not found -- has it moved?" -ForegroundColor Yellow
+} elseif (-not $AllowFewerChecks) {
+    # A missing selfcheck.py/venv used to be a silent WARNING that just
+    # dropped the check from the run while the script still reported "all
+    # passed" -- exactly the "glob found nothing, still green" trap this
+    # file's own header warns about, just for a hand-added entry instead of
+    # a glob. Hard failure instead: a live selfcheck.py that regressed is
+    # supposed to show up as FAIL below, not as a check quietly missing.
+    Write-Host ""
+    Write-Host "FAILED: expected $selfcheckPy (or its venv $selfcheckPython) not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing selfcheck.py must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    exit 2
 }
 
 # As of 2026-08-28 there are several: some under tools/, two under

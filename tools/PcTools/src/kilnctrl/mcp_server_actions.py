@@ -75,14 +75,45 @@ def list_buttons() -> str:
     """List every button/action press_button can invoke, with its parameters.
 
     Names match the GUI's own button/menu-item labels 1:1 (e.g. "Thermo: Read
-    All", "IO: Set Relay"), grouped by popup/menu.
+    All", "IO: Set Relay"), grouped by popup/menu. A parameter name suffixed
+    with ``*`` is in that action's ``required`` set -- no implicit default,
+    must be passed explicitly (e.g. "System: Factory Reset"'s ``scope*`` and
+    ``confirm*``).
     """
     lines = []
     for name in sorted(actions.ACTIONS):
         action = actions.ACTIONS[name]
-        params = ", ".join(f"{p}: {t.__name__}" for p, t in action.params.items())
+        params = ", ".join(
+            f"{p}{'*' if p in action.required else ''}: {t.__name__}"
+            for p, t in action.params.items()
+        )
         lines.append(f"{name}({params})\n    {action.description}")
     return "\n".join(lines)
+
+
+def _validate_param(param_name: str, action_name: str, value: Any, declared: type) -> Optional[str]:
+    """press_button's type gate: a value must be exactly ``declared``, not
+    merely coercible to it -- a JSON-transport quirk ("false"/"true", "0"/"1",
+    or the integer 1) must never slip past a caller reading `if not confirm` /
+    `confirm is True` in an action's own lambda (actions.py's factory-reset
+    and watchdog-panic gates are exactly that shape). bool is checked before
+    int since bool is an int subclass in Python (isinstance(True, int) is
+    True) -- an int-typed param must reject True/False too, since silently
+    reading those as 1/0 is the same class of bug.
+    """
+    if declared is bool:
+        if not isinstance(value, bool):
+            return (
+                f"error: bad arguments for {action_name!r}: {param_name!r} must be a "
+                f"real boolean (true/false), got {value!r} ({type(value).__name__})"
+            )
+    elif declared is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return (
+                f"error: bad arguments for {action_name!r}: {param_name!r} must be a "
+                f"real integer, got {value!r} ({type(value).__name__})"
+            )
+    return None
 
 
 @_srv._tool()
@@ -92,14 +123,29 @@ def press_button(name: str, params: Optional[dict[str, Any]] = None) -> str:
     `params` is a JSON object matching that action's parameter names, e.g.
     press_button("IO: Set Relay", {"relay": 1, "on": true})
     or press_button("Thermo: Read All") for an action that takes none.
+
+    Every supplied value is checked against the action's declared param type
+    before dispatch (see _validate_param): a bool-typed param (e.g. a gated
+    action's `confirm`) must be a real JSON boolean, not "false"/"true"/0/1
+    -- those used to pass straight through to the action's own `if not
+    confirm` check, where a truthy string like "false" evaluates true and
+    defeats the gate entirely.
     """
     action = actions.ACTIONS.get(name)
     if action is None:
         return f"error: unknown action {name!r}. Call list_buttons() for the full list."
     if params is not None and not isinstance(params, dict):
         return f"error: params must be a JSON object of named arguments, got {type(params).__name__}"
+    params = params or {}
+    for param_name, value in params.items():
+        declared = action.params.get(param_name)
+        if declared is None:
+            continue  # an unknown key still surfaces below as a TypeError from run()
+        error = _validate_param(param_name, name, value, declared)
+        if error is not None:
+            return error
     try:
-        return action.run(_srv._action_ctx, **(params or {}))
+        return action.run(_srv._action_ctx, **params)
     except TypeError as exc:
         return f"error: bad arguments for {name!r}: {exc}"
     except ValueError as exc:

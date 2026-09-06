@@ -68,20 +68,37 @@ class ActionContext:
 class Action:
     name: str
     description: str
-    #: param name -> (type, required). Purely descriptive/self-documenting;
-    #: the real validation happens inside devices.py's builders, which
-    #: press_button's caller (mcp_server.py) surfaces as ValueError/TypeError.
+    #: param name -> type. press_button (mcp_server_actions.py) validates
+    #: every supplied value against this before calling ``run`` -- a bool
+    #: param must be a real bool (not "false"/"true"/0/1) and an int param a
+    #: real int, so a stringly/loosely-typed ``confirm`` can never slip past
+    #: a refusal gate the way it could when this was descriptive-only.
     params: "dict[str, type]" = field(default_factory=dict)
+    #: Subset of ``params`` that must be supplied explicitly -- no implicit
+    #: default. Purely descriptive today (surfaced by list_buttons so a
+    #: caller can see "scope and confirm are required" before ever calling
+    #: press_button); the actual requiredness is enforced by ``run``'s own
+    #: signature raising TypeError on a missing arg, same as always.
+    required: "frozenset[str]" = field(default_factory=frozenset)
     run: Callable[..., str] = field(repr=False, default=None)  # type: ignore[assignment]
 
 
 ACTIONS: "dict[str, Action]" = {}
 
 
-def _register(name: str, description: str, params: "dict[str, type]", run: Callable[..., str]) -> None:
+def _register(
+    name: str,
+    description: str,
+    params: "dict[str, type]",
+    run: Callable[..., str],
+    required: "frozenset[str] | None" = None,
+) -> None:
     if name in ACTIONS:  # pragma: no cover - programmer error, not a runtime path
         raise ValueError(f"duplicate action name: {name!r}")
-    ACTIONS[name] = Action(name=name, description=description, params=params, run=run)
+    ACTIONS[name] = Action(
+        name=name, description=description, params=params, run=run,
+        required=required or frozenset(),
+    )
 
 
 def _send(ctx: ActionContext, dst_task: int, payload: bytes) -> str:
@@ -743,9 +760,10 @@ _register(
     lambda ctx, scope, confirm=False: (
         "error: factory reset refused without confirm=True -- this erases NVS-backed "
         "configuration and reboots the device"
-        if not confirm
+        if confirm is not True
         else _send(ctx, UART_TASK_ID_SYSTEM, devices.system_factory_reset(scope))
     ),
+    required=frozenset({"scope", "confirm"}),
 )
 _register(
     "System: Get Watchdog Panic Disabled",
@@ -773,9 +791,10 @@ _register(
     lambda ctx, disabled, confirm=False: (
         "error: watchdog panic change refused without confirm=True -- this changes "
         "whether a hung task reboots the board"
-        if not confirm
+        if confirm is not True
         else _send(ctx, UART_TASK_ID_SYSTEM, devices.system_set_watchdog_panic_disabled(disabled))
     ),
+    required=frozenset({"disabled", "confirm"}),
 )
 
 # ---------------------------------------------------------------------------
