@@ -48,6 +48,7 @@ int g_test_count = 0;
 // use).
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "fake_kv.h"
 
 // asm("_binary_...") is a GCC/binutils extension (EMBED_TXTFILES,
 // CMakeLists.txt) with no MSVC equivalent -- #define it away to nothing so
@@ -80,6 +81,47 @@ int g_test_count = 0;
 #include "../drivers/control/zones_current_sweep_task.c"
 
 #undef asm
+
+// ---- HW_ABSTRACTION_PLAN.md Phase 3 item 3: nvs.h -> hal_kv.h migration ---
+// zones_http.c/zones_config_store.c now call hal_kv_*() instead of nvs_*()
+// directly (production no longer includes nvs.h/nvs_flash.h at all), so
+// stubs/nvs.h's single-blob-slot stub (nvs_test_enable()/nvs_test_clear())
+// is no longer reachable through production code and cannot be used here
+// either. Rather than hand-edit every one of this file's ~90
+// nvs_test_enable(true)/nvs_test_clear() call-site pairs (every test below
+// follows the identical enable/stage/assert/disable discipline the original
+// stub required), these two names are re-implemented as thin shims over
+// fake_kv.h -- the real per-(partition,namespace,key) RAM store every other
+// migrated file's host test now uses (see test_relay_cycles.c/
+// test_kiln_cfg_store.c). This is a STRICT improvement in fidelity, not a
+// workaround: the old stub collapsed every (partition, namespace, key) into
+// one shared slot (its own header comment called this out explicitly), which
+// happened to make writes to the wrong partition invisible-but-harmless;
+// fake_kv is a real per-partition store, so a write actually has to land in
+// KILN_NVS_PARTITION (kiln_nvs) to be visible to nvs_load_from("kiln_nvs",
+// ...) the way it would on real hardware.
+static inline void nvs_test_enable(bool enable)
+{
+    if (enable) {
+        fake_kv_reset_all();
+        hal_kv_init_partition(KILN_NVS_PARTITION); // zones_http_start()/nvs_partition_init()
+                                                    // does this once at boot; tests below call
+                                                    // nvs_load_from()/relay_names_save()/etc.
+                                                    // directly without going through boot, so it
+                                                    // has to be done here instead.
+    }
+    (void)enable; // no separate "disabled" state to model -- fake_kv_reset_all() below undoes it
+}
+
+static inline void nvs_test_clear(void)
+{
+    // Called both right after nvs_test_enable(true) (to guarantee a clean
+    // store before staging) and right after nvs_test_enable(false) (test
+    // teardown) -- both cases want the same "back to a known-empty state"
+    // effect the old stub's nvs_test_clear() gave.
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+}
 
 // ---- Embedded-page symbols page_get_handler() references ------------------
 // Never actually sent by these tests (that handler is never called), but
@@ -1212,11 +1254,16 @@ static void test_post_whole_page_cross_zone_legal_chain_accepted(void)
 
 static void stage_zones_blob(const void *data, size_t len)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition("whatever", NVS_NAMESPACE, NVS_READWRITE, &h);
-    (void)err; // the stub always succeeds once nvs_test_enable(true) is set
-    nvs_set_blob(h, NVS_KEY_ZONES, data, len);
-    nvs_close(h);
+    // fake_kv, unlike the retired single-slot stub, is a real per-partition
+    // store -- this MUST target KILN_NVS_PARTITION ("kiln_nvs"), the same
+    // partition nvs_load_from()/nvs_load() below actually read, or the
+    // staged bytes would simply never be seen.
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    (void)err; // the fake always succeeds once hal_kv_init_partition() has been called (nvs_test_enable(true))
+    hal_kv_set_blob(&h, NVS_KEY_ZONES, data, len);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
 }
 
 static void test_nvs_load_from_too_short_is_corrupt_not_refused(void)
@@ -1540,19 +1587,20 @@ static void test_nvs_load_from_newer_than_firmware_is_found_but_not_valid(void)
 // blob staged as "what's on flash" must survive a boot completely
 // untouched -- not clobbered by the legacy-partition migration, which the
 // old (err == ESP_OK && s_zones.cfg.version != 0) proxy could not tell apart
-// from "kiln_nvs has never had anything saved". stubs/nvs.h's stub has a
-// single blob slot shared across every (partition, key) pair, which happens
-// to model this exact bug perfectly: if zones_http_start() ever calls
-// migrate_from_default_partition() here, THAT function's own
-// nvs_load_from(NVS_DEFAULT_PART_NAME, ...) call reads the very same staged
-// blob right back (there is only one slot), decides it cannot use it either
-// (same refusal), and returns without saving -- so any accidental migration
-// attempt is invisible to a check that only looks at "did anything change".
-// The real, load-bearing assertion here is s_zones_config_valid staying
-// false AND the staged bytes in the stub's one slot staying byte-for-byte
-// identical after the call: an nvs_save() from ANY path (migration or
-// otherwise) would stamp a fresh ZONES_CFG_VERSION into byte 0, which the
-// staged (ZONES_CFG_VERSION + 1) can never equal.
+// from "kiln_nvs has never had anything saved". Under fake_kv (a real
+// per-partition store, unlike the retired stub's single shared slot),
+// migrate_from_default_partition() cannot even reach a decision here: its
+// own nvs_load_from(NVS_DEFAULT_PART_NAME, ...) call opens a partition
+// ("nvs") that was never hal_kv_init_partition()'d in this test, so it comes
+// back not-OK and migrate_from_default_partition() returns immediately --
+// but the real guard under test is zones_http_start()'s own
+// found_in_kiln_nvs check, which must be true for a refused-newer blob and
+// therefore must skip calling migrate_from_default_partition() at all. The
+// load-bearing assertion is s_zones_config_valid staying false AND the
+// bytes actually stored under kiln_nvs staying byte-for-byte identical
+// after the call: an nvs_save() from ANY path (migration or otherwise)
+// would stamp a fresh ZONES_CFG_VERSION into byte 0, which the staged
+// (ZONES_CFG_VERSION + 1) can never equal.
 static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
 {
     TEST_SECTION("zones_http_start -- FIX 1: a refused newer-version blob on flash survives a boot untouched");
@@ -1574,8 +1622,16 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
     TEST_CHECK(!s_zones_config_valid, "a refused newer-version blob must leave the config NOT valid for "
                                       "this boot -- zone commanding must stay refused, not silently run "
                                       "off a stale migrated copy");
-    TEST_CHECK(s_stub_nvs_blob_len == sizeof(src) &&
-                  memcmp(s_stub_nvs_blob, blob_before, sizeof(src)) == 0,
+    hal_kv_handle_t readback_h;
+    hal_status_t readback_err = hal_kv_open(&readback_h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    uint8_t readback[sizeof(zones_cfg_t)];
+    size_t readback_len = sizeof(readback);
+    if (readback_err == HAL_OK) {
+        readback_err = hal_kv_get_blob(&readback_h, NVS_KEY_ZONES, readback, &readback_len);
+        hal_kv_close(&readback_h);
+    }
+    TEST_CHECK(readback_err == HAL_OK && readback_len == sizeof(src) &&
+                  memcmp(readback, blob_before, sizeof(src)) == 0,
               "FIX 1: the on-flash blob must be byte-for-byte unchanged -- if migrate_from_default_"
               "partition() ran and saved, nvs_save() would have stamped ZONES_CFG_VERSION (not "
               "ZONES_CFG_VERSION+1) into byte 0, which this check catches");
@@ -5417,11 +5473,12 @@ static void reset_relay_names(void)
 
 static void stage_relay_names_blob(const void *data, size_t len)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition("whatever", NVS_NAMESPACE, NVS_READWRITE, &h);
-    (void)err; // the stub always succeeds once nvs_test_enable(true) is set
-    nvs_set_blob(h, NVS_KEY_RELAY_NAMES, data, len);
-    nvs_close(h);
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    (void)err; // the fake always succeeds once hal_kv_init_partition() has been called (nvs_test_enable(true))
+    hal_kv_set_blob(&h, NVS_KEY_RELAY_NAMES, data, len);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
 }
 
 /* zones_config_set_relay_name() persists via relay_names_save(), which opens

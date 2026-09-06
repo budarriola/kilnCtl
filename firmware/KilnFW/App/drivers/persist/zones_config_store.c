@@ -8,7 +8,12 @@
 #include "esp_crc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "nvs.h"
+
+#include "hal_esp_common.h"
+#include "hal_kv.h"
+/* nvs_flash.h kept for NVS_DEFAULT_PART_NAME only -- see wifi_prov_nvs.c's
+ * identical comment; every actual nvs_*() call in this file below now goes
+ * through hal_kv_*() instead. */
 #include "nvs_flash.h"
 
 #include "kiln_io.h"
@@ -23,16 +28,7 @@
  * the rest of kiln_nvs (or, worse, the default partition) with it. */
 esp_err_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(ZONES_HTTP_TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_status_to_esp_err(hal_kv_init_partition(partition));
 }
 
 /* Reads NVS_NAMESPACE/NVS_KEY_ZONES out of `partition` into *out_cfg, applying
@@ -64,13 +60,13 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
     }
     memset(out_cfg, 0, sizeof(*out_cfg));
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (err == HAL_NOT_FOUND) {
         return ESP_OK; /* namespace never created -- nothing configured, not an error */
     }
-    if (err != ESP_OK) {
-        return err;
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
 
     /* Raw byte buffer, not out_cfg directly: zones_config_json_decode_blob() needs the
@@ -84,14 +80,14 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
     uint8_t raw[sizeof(zones_cfg_t)];
     memset(raw, 0, sizeof(raw));
     size_t len = sizeof(raw);
-    err = nvs_get_blob(h, NVS_KEY_ZONES, raw, &len);
-    nvs_close(h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len);
+    hal_kv_close(&h);
+    if (err == HAL_NOT_FOUND) {
         return ESP_OK;
     }
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg blob read from '%s' failed (%s) -- treating as unreadable",
-                 partition, esp_err_to_name(err));
+                 partition, hal_status_to_name(err));
         return ESP_OK;
     }
 
@@ -216,17 +212,17 @@ esp_err_t nvs_save(void)
      * blob without also re-stamping it. */
     s_zones.cfg.crc32 = zones_config_json_compute_crc(&s_zones.cfg);
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_blob(h, NVS_KEY_ZONES, &s_zones.cfg, sizeof(s_zones.cfg));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_ZONES, &s_zones.cfg, sizeof(s_zones.cfg));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 /* ---- Relay names (owner request 2026-08-27+1: "the user should be able to
@@ -320,17 +316,17 @@ void relay_names_load(void)
 {
     memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return; /* namespace not yet created -- first boot, names stay blank */
     }
     uint8_t raw[sizeof(relay_names_cfg_t)];
     size_t len = sizeof(raw);
-    err = nvs_get_blob(h, NVS_KEY_RELAY_NAMES, raw, &len);
-    nvs_close(h);
-    if (err != ESP_OK) {
-        return; /* ESP_ERR_NVS_NOT_FOUND (never saved) or a real error -- blank is safe either way */
+    err = hal_kv_get_blob(&h, NVS_KEY_RELAY_NAMES, raw, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
+        return; /* HAL_NOT_FOUND (never saved) or a real error -- blank is safe either way */
     }
     if (len != sizeof(relay_names_cfg_t)) {
         ESP_LOGE(ZONES_HTTP_TAG, "relay_names blob is %u bytes, expected %u -- discarding, names reset to blank",
@@ -365,17 +361,17 @@ esp_err_t relay_names_save(void)
     s_relay_names.cfg.version = RELAY_NAMES_CFG_VERSION;
     s_relay_names.cfg.crc32 = compute_relay_names_crc(&s_relay_names.cfg);
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_blob(h, NVS_KEY_RELAY_NAMES, &s_relay_names.cfg, sizeof(s_relay_names.cfg));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_RELAY_NAMES, &s_relay_names.cfg, sizeof(s_relay_names.cfg));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 /* ---- Task 1's persisted normal-current results ----------------------------
@@ -405,7 +401,41 @@ esp_err_t relay_names_save(void)
  * discarded rather than migrated, for exactly the reason v1 was: one button
  * press re-measures the whole thing. */
 #define ZONE_NORMALS_CFG_VERSION 3
-#define NVS_KEY_ZONE_NORMALS "zone_normals_cfg"
+/* RENAMED 2026-09-06 from "zone_normals_cfg" (16 chars) -- confirmed against
+ * the installed ESP-IDF (nvs.h: `#define NVS_KEY_NAME_MAX_SIZE 16` "including
+ * null terminator"; nvs_page.cpp's Item::MAX_KEY_LENGTH = sizeof(key)-1 = 15,
+ * checked as `if (keySize > Item::MAX_KEY_LENGTH) return ESP_ERR_NVS_KEY_TOO_LONG;`)
+ * that a 16-character key is one character too long for real NVS to ever
+ * accept. This was NOT a fake_kv.h sizing gap found during the HAL migration
+ * -- it is a production defect that predates this migration entirely (the
+ * key was introduced with this exact 16-char spelling in ddbd024, "Stop the
+ * commissioning page reporting writes that never landed") and was invisible
+ * because the pre-migration host stub (stubs/nvs.h) modeled ONE shared blob
+ * slot with no key-length check of any kind, and the board's own
+ * zone_normals_save() logs nothing on a non-OK return (unlike every sibling
+ * setter in this file). So on real hardware, EVERY zone_normals_set()/
+ * zone_ct_map_set()/zone_k_ct_set() write since that commit has silently
+ * failed at nvs_set_blob() with ESP_ERR_NVS_KEY_TOO_LONG -- measured normal
+ * currents and derived CT-channel/k_ct_v_per_a maps have never actually
+ * persisted across a reboot on this board. Because nothing was ever
+ * written under the old name, there is no on-flash data to migrate: the
+ * rename below is a plain one-time swap, not a migration. See
+ * fake_kv.h's FAKE_KV_MAX_KEY_LEN (also 15 usable chars, deliberately kept
+ * equal to NVS's real limit rather than raised) -- it is what caught this
+ * during the nvs.h -> hal_kv.h migration's host-test pass. */
+#define NVS_KEY_ZONE_NORMALS "zone_norm_cfg"
+
+/* Compile-time guard so this class of bug (a >15-char NVS key that silently
+ * never persists on real hardware) cannot recur in this file: every
+ * NVS_KEY_* literal used here must fit ESP-IDF's real NVS_KEY_NAME_MAX_SIZE
+ * (16 bytes INCLUDING the NUL terminator, i.e. 15 usable characters) --
+ * sizeof() on a string literal includes its own NUL, so `sizeof(lit) - 1`
+ * is the same character count nvs_page.cpp's `strlen(key)` check uses. */
+#define NVS_KEY_LEN_CHECK(lit) \
+    _Static_assert(sizeof(lit) - 1 <= 15, #lit " exceeds NVS's 15-character key limit (NVS_KEY_NAME_MAX_SIZE=16 including NUL)")
+NVS_KEY_LEN_CHECK(NVS_KEY_ZONES);
+NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
+NVS_KEY_LEN_CHECK(NVS_KEY_ZONE_NORMALS);
 
 typedef struct {
     uint8_t  version;
@@ -447,16 +477,16 @@ void zone_normals_load(void)
 {
     memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return;
     }
     uint8_t raw[sizeof(zone_normals_cfg_t)];
     size_t len = sizeof(raw);
-    err = nvs_get_blob(h, NVS_KEY_ZONE_NORMALS, raw, &len);
-    nvs_close(h);
-    if (err != ESP_OK) {
+    err = hal_kv_get_blob(&h, NVS_KEY_ZONE_NORMALS, raw, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
         return; /* never saved, or a read error -- blank is safe either way */
     }
     if (len != sizeof(zone_normals_cfg_t)) {
@@ -484,17 +514,17 @@ static esp_err_t zone_normals_save(void)
     s_zone_normals.cfg.version = ZONE_NORMALS_CFG_VERSION;
     s_zone_normals.cfg.crc32 = compute_zone_normals_crc(&s_zone_normals.cfg);
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_blob(h, NVS_KEY_ZONE_NORMALS, &s_zone_normals.cfg, sizeof(s_zone_normals.cfg));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_ZONE_NORMALS, &s_zone_normals.cfg, sizeof(s_zone_normals.cfg));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 bool zones_config_get_normal_current(uint8_t zone_index, float *out_amps, bool *out_measured)

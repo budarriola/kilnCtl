@@ -14,8 +14,6 @@
 #include "esp_crc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 

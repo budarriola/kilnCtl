@@ -4,12 +4,13 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
 
+#include "hal_esp_common.h"
+#include "hal_kv.h"
+#include "hal_wdt.h"
 #include "http_form.h"
 #include "ota_http.h" /* interlocks + challenge/response auth -- see reset_post_handler() */
 #include "profiles_builtin.h"
@@ -24,7 +25,7 @@ static const char *TAG = "factory_reset";
  * exactly one of the four scopes below, never a default, and gets exactly
  * that much destroyed.
  *
- * Each scope maps to nvs_flash_erase_partition() on ONE OR MORE of the same
+ * Each scope maps to hal_kv_erase_partition() on ONE OR MORE of the same
  * three partition names every other module in this codebase already erases
  * from its own recovery path (wifi_prov.c, zones_http.c, rules_http.c,
  * relay_cycles.c, run_state.c, profiles_http.c) -- see those files'
@@ -87,7 +88,11 @@ static void reboot_task(void *arg)
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGW(TAG, "rebooting now to bring every module up clean against the erased partition(s)");
-    esp_restart();
+    hal_wdt_reboot(); /* esp_restart() under the hood on this backend; never returns -- see hal_wdt.h */
+    vTaskDelete(NULL); /* defensive only: hal_wdt_reboot() is not declared noreturn (the host
+                         * fake deliberately returns so tests can observe the call -- see
+                         * fake_wdt.c), so this guards a real backend that somehow returns
+                         * instead of falling off the end of a FreeRTOS task function. */
 }
 
 /* Shared by both entry points (HTTP name-based lookup and the UART SYSTEM
@@ -122,9 +127,10 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
 
     for (size_t i = 0; scope->partitions[i] != NULL; i++) {
         const char *part = scope->partitions[i];
-        esp_err_t err = nvs_flash_erase_partition(part);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "nvs_flash_erase_partition('%s') failed: %s", part, esp_err_to_name(err));
+        hal_status_t st = hal_kv_erase_partition(part);
+        if (st != HAL_OK) {
+            esp_err_t err = hal_status_to_esp_err(st);
+            ESP_LOGE(TAG, "hal_kv_erase_partition('%s') failed: %s", part, hal_status_to_name(st));
             if (first_err == ESP_OK) {
                 first_err = err;
             }
