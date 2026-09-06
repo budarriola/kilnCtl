@@ -282,6 +282,44 @@ if ($nvsFlashAllowlistedScan.StrictViolations.Count -ne 0) {
     Write-Host "Assertion 8 OK: allowlisted nvs_flash.h path ($nvsFlashAllowlistedRel) scored 0 strict violations."
 }
 
+# --- Assertion 9: esp_random.h strict allowlist, added 2026-09-06 when the
+# HW_ABSTRACTION_PLAN.md "esp_random.h was never classified" open item was
+# closed -- every real call site migrated onto hal_sysinfo_random_u32()/
+# hal_sysinfo_fill_random() and no holdout remains, so $EspRandomAllowlist is
+# EMPTY. Unlike nvs.h/nvs_flash.h/esp_ota_ops.h (which pair a non-allowlisted
+# negative with an allowlisted-path positive), there is no allowlisted path
+# to use for a positive case here -- the positive half of this pair instead
+# proves the empty allowlist has no accidental grandfather entry: injecting
+# esp_random.h into safety_link.c itself (the file that used to be the real
+# esp_random() call site, until this migration) must ALSO score a strict
+# violation, exactly like any other non-allowlisted file. ---
+$randDirtyRel = "scratch_pid_esprandom_dirty.c"
+$randDirtyFull = Join-Path $scratchDir $randDirtyRel
+$randInjected = @('#include "esp_random.h"') + $content
+Set-Content -Path $randDirtyFull -Value $randInjected -Encoding utf8
+
+$randDirtyScan = Invoke-HalBoundaryScan -RelPaths @($randDirtyRel) -FileRoot $scratchDir
+if ($randDirtyScan.StrictViolations.Count -ne 1) {
+    $failures += "Assertion 9 FAILED: non-allowlisted file with injected esp_random.h scored $($randDirtyScan.StrictViolations.Count) strict violation(s), expected exactly 1."
+} elseif ($randDirtyScan.StrictViolations[0] -notlike "*esp_random.h*") {
+    $failures += "Assertion 9 FAILED: the single strict violation did not name esp_random.h: $($randDirtyScan.StrictViolations[0])"
+} else {
+    Write-Host "Assertion 9 OK: non-allowlisted esp_random.h injection produced exactly one strict violation -- $($randDirtyScan.StrictViolations[0])"
+}
+
+$randFormerHoldoutRel = "firmware/KilnFW/App/drivers/safety/safety_link.c"
+$randFormerHoldoutScanDir = Join-Path $scratchDir "esprandom_former_holdout_root"
+$randFormerHoldoutFull = Join-Path $randFormerHoldoutScanDir ($randFormerHoldoutRel -replace '/', '\')
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $randFormerHoldoutFull) | Out-Null
+Set-Content -Path $randFormerHoldoutFull -Value $randInjected -Encoding utf8
+
+$randFormerHoldoutScan = Invoke-HalBoundaryScan -RelPaths @($randFormerHoldoutRel) -FileRoot $randFormerHoldoutScanDir
+if ($randFormerHoldoutScan.StrictViolations.Count -ne 1) {
+    $failures += "Assertion 9 FAILED: former-holdout path ($randFormerHoldoutRel) with injected esp_random.h scored $($randFormerHoldoutScan.StrictViolations.Count) strict violation(s), expected exactly 1 (the empty allowlist must not grandfather this file back in)."
+} else {
+    Write-Host "Assertion 9 OK: former-holdout esp_random.h path ($randFormerHoldoutRel) still scored 1 strict violation -- empty allowlist has no grandfather entry."
+}
+
 } finally {
     # Cleanup: remove the whole per-PID scratch directory now that the test
     # is done with it (this test owns $scratchDir exclusively -- it is
@@ -298,5 +336,5 @@ if ($failures.Count -gt 0) {
     throw "$($failures.Count) assertion(s) failed."
 }
 
-Write-Host "test_check_hal_include_boundary: all assertions passed (clean=0 violations, non-allowlisted driver/gpio.h=1 strict violation/0 ratchet, ratchet-fail-detection confirmed via production Test-HalRatchet on a synthetic label, esp_ota_ops.h/driver/gpio.h/nvs.h/nvs_flash.h strict allowlists all negative/positive confirmed)." -ForegroundColor Green
+Write-Host "test_check_hal_include_boundary: all assertions passed (clean=0 violations, non-allowlisted driver/gpio.h=1 strict violation/0 ratchet, ratchet-fail-detection confirmed via production Test-HalRatchet on a synthetic label, esp_ota_ops.h/driver/gpio.h/nvs.h/nvs_flash.h strict allowlists all negative/positive confirmed, esp_random.h strict allowlist confirmed empty with no grandfathered holdout)." -ForegroundColor Green
 exit 0

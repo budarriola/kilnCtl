@@ -191,17 +191,12 @@ void hal_wdt_reboot(void) {}
 esp_err_t profiles_builtin_restore_all(void) { return ESP_OK; }
 
 // ---------------------------------------------------------------------------
-// esp_random.h
-// ---------------------------------------------------------------------------
-void esp_fill_random(void *buf, size_t len)
-{
-    // Not real randomness (host tests must be deterministic) -- never
-    // actually reached by any test in this file (ota_challenge_get_handler()
-    // is never called), just deterministic filler so the file links.
-    uint8_t *b = (uint8_t *)buf;
-    for (size_t i = 0; i < len; i++) b[i] = (uint8_t)(i * 37u + 11u);
-}
-
+// esp_random.h migration (2026-09-06): ota_http.c now calls
+// hal_sysinfo_fill_random() instead of esp_fill_random() -- fake_sysinfo.c
+// (already linked into this executable, see build_host_tests.ps1's cmd8)
+// supplies it, so no stub definition is needed here any more.
+// Never actually reached by any test in this file
+// (ota_challenge_get_handler() is never called).
 // ---------------------------------------------------------------------------
 // esp_partition.h / esp_ota_ops.h -- declared in those stub headers, defined
 // here. None of these is ever invoked by this file's tests (only

@@ -288,8 +288,20 @@ $NvsFlashAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/persist/zones_config_store.c"; Header = "nvs_flash.h"; Reason = "NVS_DEFAULT_PART_NAME only -- see wifi_prov_nvs.c's holdout, actual NVS access goes through hal_kv"; ExpiresAtPhase = "n/a (constant-only holdout, see plan)" }
 )
 
+# esp_random.h -- classified 2026-09-06 (HW_ABSTRACTION_PLAN.md "Open" bullet
+# closed out): every real esp_random()/esp_fill_random() call site migrated
+# onto hal_sysinfo_random_u32()/hal_sysinfo_fill_random() (safety_link.c's
+# esp_boot_id, ota_http.c's OTA challenge nonce -- the only two real calls;
+# the other eight files that used to #include esp_random.h never called it
+# independently, per hal_sysinfo.h's own consumer-census comment, and have
+# had the dead include removed outright). No holdout remains, so this
+# allowlist is empty -- any future #include "esp_random.h" outside
+# firmware/hwAbstraction/ is an unconditional strict failure.
+$EspRandomAllowlist = @()
+
 $StrictHeaders = [ordered]@{
     "nvs.h"                      = @{ Pattern = '^\s*#\s*include\s*["<]nvs\.h[">]';                    Allowlist = $NvsAllowlist }
+    "esp_random.h"                = @{ Pattern = '^\s*#\s*include\s*["<]esp_random\.h[">]';             Allowlist = $EspRandomAllowlist }
     "nvs_flash.h"                = @{ Pattern = '^\s*#\s*include\s*["<]nvs_flash\.h[">]';               Allowlist = $NvsFlashAllowlist }
     "esp_ota_ops.h"              = @{ Pattern = '^\s*#\s*include\s*["<]esp_ota_ops\.h[">]';            Allowlist = $OtaOpsAllowlist }
     "esp_wifi.h"                 = @{ Pattern = '^\s*#\s*include\s*["<]esp_wifi\.h[">]';                Allowlist = $WifiAllowlist }

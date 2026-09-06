@@ -140,6 +140,34 @@ int main(void) {
         CHECK(hal_sysinfo_random_u32() == 0xA5A5A5A5u);
     }
 
+    /* --- fill_random: draws from the same scripted sequence, whole words --- */
+    {
+        uint32_t seq[2] = { 0x11223344u, 0x55667788u };
+        fake_sysinfo_script_random_sequence(seq, 2);
+        uint8_t buf[8];
+        memset(buf, 0xCC, sizeof(buf));
+        hal_sysinfo_fill_random(buf, sizeof(buf));
+        uint32_t got0, got1;
+        memcpy(&got0, buf, sizeof(got0));
+        memcpy(&got1, buf + 4, sizeof(got1));
+        CHECK(got0 == 0x11223344u);
+        CHECK(got1 == 0x55667788u);
+    }
+    /* --- fill_random: a trailing partial word takes only the low bytes of
+     * the next scripted/fallback u32 (little-endian host, matching this
+     * fake's memcpy-from-uint32_t implementation) --- */
+    {
+        fake_sysinfo_script_random_sequence(NULL, 0); /* fall back to 0xA5A5A5A5 */
+        uint8_t buf[3];
+        memset(buf, 0, sizeof(buf));
+        hal_sysinfo_fill_random(buf, sizeof(buf));
+        CHECK(buf[0] == 0xA5u);
+        CHECK(buf[1] == 0xA5u);
+        CHECK(buf[2] == 0xA5u);
+    }
+    /* --- fill_random: len == 0 is a safe no-op, even with buf == NULL --- */
+    hal_sysinfo_fill_random(NULL, 0);
+
     /* --- coredump: presence set, erase clears it --- */
     fake_sysinfo_set_coredump_present(true);
     CHECK(hal_sysinfo_coredump_present());

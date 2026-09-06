@@ -14,8 +14,6 @@ captured there.
   a bench run. Budget for reference: reply window 345 ms, worst-case
   measured-on-paper reply flight ≈40 ms (see git history / commit `274afff`
   and friends for the arithmetic if it needs re-deriving).
-- **`esp_random.h`** (10 files) was never classified — assign it to
-  `hal_sysinfo` before treating the Phase 4 header set as fully closed out.
 - **Pico flash** of the full HAL tree on the real board. The ESP side is
   done: `a410edd` flashed via `flash_firmware()` 2026-09-06, verified
   running factory, tuned gains and coupling matrix read back intact. The
@@ -27,13 +25,14 @@ captured there.
   httpd/LVGL/heap portability, OTA partition writes, the SaftyFW bootloader,
   `firmware/UnitTestFw`) is **owner-decided out of scope**, not open work.
 
-If the hardware timing pass and the `esp_random.h` classification are
-judged not worth doing, nothing else in this doc is open — in that case
-this file should lose its `_PLAN` suffix per standing practice (finished
-plans get renamed or folded into documentation). Proposed, not done here:
-rename to `docs/HW_ABSTRACTION.md` and fold the phase history below into a
-shorter changelog, once an owner confirms the two bullets above are closed
+If the hardware timing pass is judged not worth doing, nothing else in this
+doc is open — in that case this file should lose its `_PLAN` suffix per
+standing practice (finished plans get renamed or folded into documentation).
+Proposed, not done here: rename to `docs/HW_ABSTRACTION.md` and fold the
+phase history below into a shorter changelog, once an owner confirms the
+bullet above is closed
 or explicitly deferred.
+
 
 ## Goal
 
@@ -192,7 +191,13 @@ the negative test). `test_check_hal_include_boundary.ps1` was rewritten for
 the strict allowlists as part of step 2 (assertions 7/8) — the step-1 TODO
 to do this is closed. Negative-tested at every stage (inject a
 non-allowlisted include, confirm the check fails naming the file; revert,
-confirm it passes).
+confirm it passes). **`esp_random.h` classified 2026-09-06** (closing this
+doc's last open header): the two real call sites (`safety_link.c`'s
+`esp_boot_id`, `ota_http.c`'s OTA challenge nonce) migrated onto
+`hal_sysinfo_random_u32()`/`hal_sysinfo_fill_random()`; the other eight files
+that used to `#include "esp_random.h"` never called it independently and had
+the dead include deleted outright; `esp_random.h` added to `$StrictHeaders`
+with an empty allowlist (assertion 9).
 
 ## `drivers/` layering (KilnFW only) — DONE
 

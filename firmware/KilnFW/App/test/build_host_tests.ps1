@@ -593,12 +593,18 @@ $cmd14 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'safety/safety_trip_decision.c')`" " +
         "`"$(Join-Path $driversDir 'safety/safety_link_frame.c')`" " +
         "`"$(Join-Path $hwAbsDir 'host/fake_gpio.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
         "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
         "$($slExtra -join ' ')"
 # hal_time migration (HW_ABSTRACTION_PLAN.md item 5): safety_link_commands.c,
 # one of the files #included by test_safety_link_compile.c above, now calls
 # hal_time_now_us() instead of esp_timer_get_time(); fake_time.c supplies it.
+# esp_random.h migration (HW_ABSTRACTION_PLAN.md, 2026-09-06): safety_link.c
+# now calls hal_sysinfo_random_u32() instead of esp_random() for esp_boot_id
+# -- fake_sysinfo.c supplies it (unscripted, so this returns the fixed
+# 0xA5A5A5A5 fallback; the value itself is diagnostic-only, never asserted
+# on by this file's tests).
 
 Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
 

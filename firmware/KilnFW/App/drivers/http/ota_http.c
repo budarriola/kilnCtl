@@ -15,7 +15,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_random.h"
+#include "hal_sysinfo.h"
 #include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
 
 #include "freertos/FreeRTOS.h"
@@ -61,7 +61,6 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_random.h"
 #include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
 
 #include "freertos/FreeRTOS.h"
@@ -305,7 +304,7 @@ esp_err_t ota_http_send_json_clamped(httpd_req_t *req, const char *buf, int n, s
 static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
 {
     uint8_t rand_bytes[OTA_AUTH_NONCE_LEN];
-    esp_fill_random(rand_bytes, sizeof(rand_bytes)); // hardware RNG, not a hand-rolled source
+    hal_sysinfo_fill_random(rand_bytes, sizeof(rand_bytes)); // hardware RNG, not a hand-rolled source
 
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip));

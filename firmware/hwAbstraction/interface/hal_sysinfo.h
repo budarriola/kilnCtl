@@ -92,6 +92,7 @@
 #define KILNCTL_HAL_SYSINFO_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "hal_status.h"
@@ -165,6 +166,12 @@ hal_status_t hal_sysinfo_temp_deinit(void);
  * others. No seeding call -- esp_random() takes none and needs none
  * (SAR ADC/RF noise backed, per esp_random.h). */
 uint32_t hal_sysinfo_random_u32(void);
+
+/* esp_fill_random()-shaped: hardware RNG into a caller buffer -- ota_http.c's
+ * ota_challenge_get_handler() nonce fill is the one real call site (2026-09-06
+ * migration; see this header's top comment). `len` bytes are written to
+ * `buf`; `buf` may be NULL only if `len` is 0. */
+void hal_sysinfo_fill_random(void *buf, size_t len);
 
 /* True if a core-dump image is present in flash (esp_core_dump_image_check()
  * succeeding), matching crash_report.c's own gate before it attempts

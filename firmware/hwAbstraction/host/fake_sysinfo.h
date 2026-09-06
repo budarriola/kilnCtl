@@ -81,6 +81,14 @@ void fake_sysinfo_script_temp_read_status(hal_status_t status);
  * count == 0 clears any previously armed sequence. */
 void fake_sysinfo_script_random_sequence(const uint32_t *values, uint32_t count);
 
+/* hal_sysinfo_fill_random() (declared in hal_sysinfo.h, implemented in
+ * fake_sysinfo.c) draws from this SAME scripted sequence, one u32 at a time
+ * (fallback value included) -- there is only one scripted RNG stream in this
+ * fake, not two independent ones, matching the real backend's single
+ * esp_random() hardware source that both esp_random()/esp_fill_random()
+ * ultimately read from. A trailing partial word (len not a multiple of 4)
+ * takes only the low bytes of the next scripted/fallback u32. */
+
 /* Sets whether a core-dump image is "present". hal_sysinfo_coredump_erase()
  * clears this back to false -- see this header's top comment. */
 void fake_sysinfo_set_coredump_present(bool present);

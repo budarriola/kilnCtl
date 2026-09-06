@@ -38,9 +38,9 @@
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_random.h"
 #include "hal_esp_common.h"
 #include "hal_gpio.h"
+#include "hal_sysinfo.h"
 #include "stack_margin.h"
 #include "freertos/idf_additions.h"
 #include "settings.h"
@@ -352,11 +352,12 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
     /* Diagnostic identity only (Phase 7b.2), same spirit as SaftyFW's own
      * s_boot_id (link_task.c: "not a security or safety value, so true
      * entropy is not required") -- but the ESP has a real hardware RNG
-     * (esp_random(), backed by the SAR ADC/RF noise per esp_random.h), so
-     * there is no reason to fall back to a time-derived pseudo-random value
-     * the way the Pico does. Lets the Pico notice "the ESP just rebooted"
-     * from ANNOUNCE_VERSION alone, without polling for it. */
-    link->esp_boot_id = (uint8_t)esp_random();
+     * (esp_random(), backed by the SAR ADC/RF noise per esp_random.h, reached
+     * through hal_sysinfo_random_u32() as of the 2026-09-06 hal_sysinfo
+     * migration), so there is no reason to fall back to a time-derived
+     * pseudo-random value the way the Pico does. Lets the Pico notice "the
+     * ESP just rebooted" from ANNOUNCE_VERSION alone, without polling for it. */
+    link->esp_boot_id = (uint8_t)hal_sysinfo_random_u32();
     /* No reading has ever arrived, and NaN is the only honest value for that.
      * Zero would read as a stone-cold kiln, which is exactly the wrong
      * direction to be wrong in. */

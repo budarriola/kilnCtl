@@ -183,6 +183,20 @@ uint32_t hal_sysinfo_random_u32(void) {
     return FAKE_SYSINFO_RANDOM_FALLBACK;
 }
 
+void hal_sysinfo_fill_random(void *buf, size_t len) {
+    if (buf == NULL || len == 0) {
+        return;
+    }
+    uint8_t *out = (uint8_t *)buf;
+    size_t i = 0;
+    while (i < len) {
+        uint32_t word = hal_sysinfo_random_u32();
+        size_t chunk = (len - i < sizeof(word)) ? (len - i) : sizeof(word);
+        memcpy(out + i, &word, chunk);
+        i += chunk;
+    }
+}
+
 bool hal_sysinfo_coredump_present(void) {
     return s_coredump_present;
 }

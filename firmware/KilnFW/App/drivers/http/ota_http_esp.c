@@ -16,7 +16,6 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_random.h"
 #include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
 #include "hal_time.h" /* hal_time_now_us() -- ota_record_fill()'s uptime-seconds timestamp below, was esp_timer_get_time() */
 

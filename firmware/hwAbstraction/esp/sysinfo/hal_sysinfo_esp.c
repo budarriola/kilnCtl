@@ -199,6 +199,13 @@ uint32_t hal_sysinfo_random_u32(void) {
     return esp_random();
 }
 
+void hal_sysinfo_fill_random(void *buf, size_t len) {
+    if (len == 0) {
+        return;
+    }
+    esp_fill_random(buf, len);
+}
+
 bool hal_sysinfo_coredump_present(void) {
     return esp_core_dump_image_check() == ESP_OK;
 }

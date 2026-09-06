@@ -67,8 +67,6 @@
 #include "zones_config_accessors.h"
 #include "safety_cfg_store.h"
 
-uint32_t esp_random(void) { return 0; }
-
 MAX31856Class *MAX31856_bus_channel(MAX31856BusClass *bus, uint8_t channel)
 { (void)bus; (void)channel; return NULL; }
 esp_err_t MAX31856_get_config(MAX31856Class *ch, MAX31856Config *out_cfg)
