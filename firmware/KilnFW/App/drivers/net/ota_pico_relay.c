@@ -62,7 +62,7 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
-#include "esp_timer.h" // esp_timer_get_time() -- ota_record_t's uptime_s, same source ota_http.c uses
+#include "hal_time.h" // hal_time_now_us() -- ota_record_t's uptime_s, same source ota_http.c uses
 
 #include "kilnlink/kilnlink_version.h"
 
@@ -646,7 +646,7 @@ done:
             sha_hex[2 * sizeof(args.sha256)] = '\0';
         }
         ota_record_t rec;
-        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "pico", "", "", ok, reason,
+        ota_record_fill(&rec, (uint32_t)(hal_time_now_us() / 1000000), "pico", "", "", ok, reason,
                          sha_hex);
         ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
     }

@@ -8,7 +8,7 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -75,7 +75,7 @@ static void sim_init_locked(void)
 
     sim_kiln_reset(&s_sim.state, &s_sim.cfg);
     memset(s_sim.relay_on, 0, sizeof(s_sim.relay_on));
-    s_sim.last_step_us = esp_timer_get_time();
+    s_sim.last_step_us = (int64_t)hal_time_now_us();
     s_sim.initialized = true;
 
     ESP_LOGW(TAG, "SIMULATED PLANT ACTIVE: %d zone(s), %dW elements, coupling %dW/degC -- "
@@ -110,7 +110,7 @@ static void sim_advance_locked(void)
         return;
     }
 
-    int64_t now_us = esp_timer_get_time();
+    int64_t now_us = (int64_t)hal_time_now_us();
     float elapsed_s = (float)(now_us - s_sim.last_step_us) / 1e6f;
     if (elapsed_s <= 0.0f) {
         return;

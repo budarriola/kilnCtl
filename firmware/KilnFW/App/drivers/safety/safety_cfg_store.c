@@ -5,7 +5,7 @@
 
 #include "esp_heap_caps.h" /* esp_ptr_external_ram() -- the wrong-task guard below */
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h" /* s_store_lock -- 2026-08-27 audit fix (H5), see its own comment */
 #include "nvs.h"
@@ -190,7 +190,7 @@ static safety_cfg_store_blob_t s_store;
  * on flash -- see that function's own init()-time note. safety_cfg_store_
  * fetched_ms_ago() measures against this, never against anything persisted
  * (a wall-clock timestamp would need a synced RTC this board does not have;
- * esp_timer_get_time()'s monotonic microsecond counter needs none) -- which
+ * hal_time_now_us()'s monotonic microsecond counter needs none) -- which
  * is exactly why an NVS load, with no live round trip behind it, has nothing
  * honest to stamp here. */
 static int64_t s_fetched_at_us = -1;
@@ -524,7 +524,7 @@ esp_err_t safety_cfg_store_init(void)
     }
     nvs_load_store();
     /* 2026-08-27 audit fix (defect c): this used to stamp s_fetched_at_us =
-     * esp_timer_get_time() here whenever the loaded blob's config_crc != 0
+     * hal_time_now_us() here whenever the loaded blob's config_crc != 0
      * ("a load from NVS counts as fetched"). That was a DIFFERENT and worse
      * lie than the one the 2026-08-22 fix above already closed: it made
      * fetched_ms_ago report BOARD UPTIME, not fetch age, for any board that
@@ -554,7 +554,7 @@ uint32_t safety_cfg_store_fetched_ms_ago(void)
     if (s_fetched_at_us < 0) {
         return UINT32_MAX;
     }
-    int64_t elapsed_us = esp_timer_get_time() - s_fetched_at_us;
+    int64_t elapsed_us = (int64_t)hal_time_now_us() - s_fetched_at_us;
     if (elapsed_us < 0) {
         elapsed_us = 0; /* clock went backwards somehow -- never report a negative age */
     }
@@ -626,18 +626,18 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
      * actually uses its full declared wait. A multi-page fetch must not be
      * allowed to spend an unbounded number of those budgets back to back
      * inside one poll iteration. */
-    int64_t refetch_started_us = esp_timer_get_time();
+    int64_t refetch_started_us = (int64_t)hal_time_now_us();
 
     uint8_t page_index = 0;
     for (;;) {
-        int64_t elapsed_us = esp_timer_get_time() - refetch_started_us;
+        int64_t elapsed_us = (int64_t)hal_time_now_us() - refetch_started_us;
         if (elapsed_us >= (int64_t)SAFETY_CFG_STORE_REFETCH_BUDGET_MS * 1000) {
             /* Same "cache left unchanged, retry next poll" outcome as a
              * failed page request below -- safety_cfg_store_maybe_refetch()
              * re-invokes this from scratch (page 0) on the very next poll as
              * long as the CRC still disagrees, so nothing here is lost, only
              * deferred to a later iteration that gets a fresh budget. */
-            int64_t now_us = esp_timer_get_time();
+            int64_t now_us = (int64_t)hal_time_now_us();
             if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
                 ESP_LOGW(TAG, "safety_cfg_store_refetch: wall-clock budget (%u ms) exhausted after "
                               "page %u -- cache left unchanged, retrying on a later poll",
@@ -682,7 +682,7 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
         kilnlink_config_page_t page;
         esp_err_t err = safety_link_get_config_page(link, page_index, &page);
         if (err != ESP_OK) {
-            int64_t now_us = esp_timer_get_time();
+            int64_t now_us = (int64_t)hal_time_now_us();
             if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
                 if (s_refetch_fail_suppressed > 0) {
                     ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left "
@@ -739,7 +739,7 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
     }
 
     s_store = scratch;
-    s_fetched_at_us = esp_timer_get_time();
+    s_fetched_at_us = (int64_t)hal_time_now_us();
     /* 2026-08-23 fix: no longer nvs_save_store() directly -- this function
      * runs on safety_poll_task, whose stack is PSRAM (safety_link.c:1636-
      * 1638), and a flash write from there aborts the board (see
@@ -859,7 +859,7 @@ bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_
         return false; /* steady state -- no UART traffic at all, by design */
     }
 
-    int64_t now_us = esp_timer_get_time();
+    int64_t now_us = (int64_t)hal_time_now_us();
     if (live_config_crc != s_retry_crc) {
         /* A different config than the one we have been failing to fetch --
          * treat it as a fresh problem, not a continuation of the old one. */
@@ -879,7 +879,7 @@ bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_
         return true;
     }
 
-    s_retry_not_before_us = esp_timer_get_time() + (int64_t)s_retry_delay_ms * 1000;
+    s_retry_not_before_us = (int64_t)hal_time_now_us() + (int64_t)s_retry_delay_ms * 1000;
     if (s_retry_delay_ms < SAFETY_CFG_STORE_RETRY_MAX_MS) {
         s_retry_delay_ms *= 2u;
         if (s_retry_delay_ms > SAFETY_CFG_STORE_RETRY_MAX_MS) {

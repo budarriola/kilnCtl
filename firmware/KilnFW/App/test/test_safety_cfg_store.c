@@ -14,6 +14,9 @@
 #include "test_common.h"
 
 #include "esp_err.h"
+#include "fake_time.h" /* hal_time.h's host fake -- safety_cfg_store.c now calls hal_time_now_us()
+                         * instead of esp_timer_get_time(); see reset_all()/the tests below that
+                         * used to drive the old stub esp_timer via esp_timer_test_set_now_us(). */
 
 // 2026-08-28 audit fix (N2): safety_cfg_store.c's poll-side entry point
 // (safety_cfg_store_refetch_nonblocking()) now genuinely checks
@@ -73,7 +76,7 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
     (void)link;
     s_stub_get_config_page_calls++;
     if (s_stub_advance_us_per_call > 0) {
-        esp_timer_test_set_now_us(esp_timer_get_time() + s_stub_advance_us_per_call);
+        fake_time_advance_us((uint64_t)s_stub_advance_us_per_call);
     }
     if (s_stub_fail_at_page >= 0 && (int)page_index == s_stub_fail_at_page) {
         return s_stub_page_err;
@@ -201,7 +204,7 @@ static void reset_all(void)
 {
     stub_reset();
     reset_to_defaults();
-    esp_timer_test_set_now_us(0);
+    fake_time_reset_all();
     s_fetched_at_us = -1;
     s_dirty = false; /* 2026-08-23 fix -- a prior test's unflushed write must not bleed into the next */
     esp_ptr_external_ram_test_set(false); /* default: called from a normal, internal-RAM stack */
@@ -260,7 +263,7 @@ static void test_refetch_when_crc_changes(void)
 
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
-    esp_timer_test_set_now_us(5000000); // 5s, arbitrary
+    fake_time_advance_us(5000000); // 5s, arbitrary -- clock is at 0 right after reset_all()
 
     bool refetched = safety_cfg_store_maybe_refetch(&fake_link, 0x0002);
 
@@ -532,7 +535,7 @@ static void test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache(void)
     // test, exactly as it runs during real firmware startup.
     memset(&s_store, 0, sizeof(s_store));
     s_fetched_at_us = -1;
-    esp_timer_test_set_now_us(5000ll * 1000ll); // clock has been running 5s since "boot"
+    fake_time_advance_us(5000ull * 1000ull); // clock has been running 5s since "boot" (still at 0 from reset_all())
 
     TEST_CHECK(safety_cfg_store_init() == ESP_OK, "init succeeds");
     TEST_CHECK(s_store.config_crc == 0xBEEF, "the persisted cache WAS loaded -- values are being served");

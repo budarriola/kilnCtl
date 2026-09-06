@@ -4,7 +4,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
@@ -255,7 +255,7 @@ static esp_err_t persist_locked(const run_state_record_t *rec)
     }
     nvs_close(h);
     if (err == ESP_OK) {
-        s_rs.last_write_us = esp_timer_get_time();
+        s_rs.last_write_us = (int64_t)hal_time_now_us();
     }
     return err;
 }
@@ -279,7 +279,7 @@ static void fill_live_locked(run_state_phase_t phase, const run_state_snapshot_t
     r->phase = (uint8_t)phase;
     /* Uptime, not a date: this board has no RTC and no guaranteed SNTP, so
      * an absolute timestamp here would be invented. See run_state.h. */
-    r->uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    r->uptime_s = (uint32_t)((int64_t)hal_time_now_us() / 1000000);
     if (!snap) {
         return;
     }
@@ -312,7 +312,7 @@ esp_err_t run_state_init(void)
     memset(&s_rs.live, 0, sizeof(s_rs.live));
     s_rs.boot_valid = false;
     s_rs.wrote_this_boot = false;
-    s_rs.last_write_us = esp_timer_get_time();
+    s_rs.last_write_us = (int64_t)hal_time_now_us();
     s_rs.initialized = true;
 
     /* Migrate before the real load so a pre-split board's breadcrumb shows up
@@ -425,7 +425,7 @@ void run_state_note_progress(const run_state_snapshot_t *snap)
      * it from a stale tick would either burn flash for nothing or, worse,
      * re-open an ending that was already recorded. */
     bool due = s_rs.live.phase == RUN_STATE_PHASE_RUNNING &&
-               (esp_timer_get_time() - s_rs.last_write_us) >= (int64_t)RUN_STATE_REFRESH_INTERVAL_S * 1000000;
+               ((int64_t)hal_time_now_us() - s_rs.last_write_us) >= (int64_t)RUN_STATE_REFRESH_INTERVAL_S * 1000000;
     esp_err_t err = ESP_OK;
     if (due) {
         fill_live_locked(RUN_STATE_PHASE_RUNNING, snap);
@@ -436,7 +436,7 @@ void run_state_note_progress(const run_state_snapshot_t *snap)
             /* Don't retry-storm a failing flash: last_write_us is only
              * advanced on success, so the next attempt is one tick later.
              * Losing a refresh costs progress resolution, not the record. */
-            s_rs.last_write_us = esp_timer_get_time();
+            s_rs.last_write_us = (int64_t)hal_time_now_us();
         }
     }
     xSemaphoreGive(s_rs.lock);

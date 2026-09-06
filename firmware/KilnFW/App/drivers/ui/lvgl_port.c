@@ -4,7 +4,10 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "esp_timer.h" /* esp_timer_create/esp_timer_start_periodic for the 1ms lv_tick callback below --
+                         * only the elapsed-time reads (esp_timer_get_time) migrated to hal_time.h; this
+                         * file still owns a real periodic esp_timer, which hal_time.h does not model. */
+#include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
@@ -175,7 +178,7 @@ static void ili9488_flush_async_done(void *ctx, esp_err_t result)
         ESP_LOGW(TAG, "async flush failed: %s", esp_err_to_name(result));
     }
 
-    uint32_t flush_us = (uint32_t)(esp_timer_get_time() - actx->flush_start_us);
+    uint32_t flush_us = (uint32_t)((int64_t)hal_time_now_us() - actx->flush_start_us);
     s_last_flush_us = flush_us;
     if (flush_us > s_max_flush_us) {
         s_max_flush_us = flush_us;
@@ -229,11 +232,11 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
          * moment anyone looks instead of waiting on a bench session. Spans
          * exactly the SPI work (begin/data/end), not the screen_idle read or
          * the skip-while-blanked branch above, since those aren't what 9.6's
-         * async-flush decision turns on. esp_timer_get_time() is a plain
+         * async-flush decision turns on. hal_time_now_us() is a plain
          * volatile read of a hardware counter -- safe to call from
          * lvgl_port_task same as anywhere else, no lock needed for a
          * single-writer stat. */
-        int64_t flush_start_us = esp_timer_get_time();
+        int64_t flush_start_us = (int64_t)hal_time_now_us();
 
 #if KILNCTL_SPI_ASYNC_FLUSH
         /* DISPLAY_ST7796_PLAN.md 9.6. ILI9488_blit_begin() stays synchronous
@@ -269,7 +272,7 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
          * for this flush -- finish the bookkeeping and flush_ready here,
          * exactly as the synchronous path below does on any failure. */
         ESP_LOGW(TAG, "flush [%u,%u %ux%u] failed: %s", x, y, w, h, esp_err_to_name(err));
-        uint32_t flush_us = (uint32_t)(esp_timer_get_time() - flush_start_us);
+        uint32_t flush_us = (uint32_t)((int64_t)hal_time_now_us() - flush_start_us);
         s_last_flush_us = flush_us;
         if (flush_us > s_max_flush_us) {
             s_max_flush_us = flush_us;
@@ -296,7 +299,7 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
             ESP_LOGW(TAG, "flush [%u,%u %ux%u] failed: %s", x, y, w, h, esp_err_to_name(err));
         }
 
-        uint32_t flush_us = (uint32_t)(esp_timer_get_time() - flush_start_us);
+        uint32_t flush_us = (uint32_t)((int64_t)hal_time_now_us() - flush_start_us);
         s_last_flush_us = flush_us;
         if (flush_us > s_max_flush_us) {
             s_max_flush_us = flush_us;

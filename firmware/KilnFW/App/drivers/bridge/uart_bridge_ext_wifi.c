@@ -13,7 +13,7 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -121,7 +121,7 @@ static size_t wifi_build_networks(uint8_t *out)
     size_t saved_count = 0;
     wifi_prov_get_saved_networks(saved, sizeof(saved) / sizeof(saved[0]), &saved_count);
 
-    int64_t now_us = esp_timer_get_time();
+    int64_t now_us = (int64_t)hal_time_now_us();
     if (s_networks_scan_us == 0 || (now_us - s_networks_scan_us) >= WIFI_NETWORKS_SCAN_CACHE_US) {
         size_t    fresh_count = 0;
         esp_err_t scan_err = wifi_prov_scan(s_networks_scan,

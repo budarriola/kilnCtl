@@ -29,7 +29,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
-#include "esp_timer.h"
+#include "hal_time.h"
 #include "stack_margin.h"
 #include "freertos/idf_additions.h"
 #include "settings.h"
@@ -1175,9 +1175,9 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
      * board into a panic-reboot loop). */
     uart_proto_message_t page_msg;
     bool got_page = false;
-    int64_t wait_started_us = esp_timer_get_time();
+    int64_t wait_started_us = (int64_t)hal_time_now_us();
     for (;;) {
-        int64_t elapsed_ms = (esp_timer_get_time() - wait_started_us) / 1000;
+        int64_t elapsed_ms = ((int64_t)hal_time_now_us() - wait_started_us) / 1000;
         int32_t remaining_ms = (int32_t)SAFETY_LINK_REPLY_TIMEOUT_MS - (int32_t)elapsed_ms;
         if (remaining_ms < 0) {
             remaining_ms = 0;

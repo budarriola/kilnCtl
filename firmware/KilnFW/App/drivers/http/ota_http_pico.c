@@ -17,7 +17,7 @@
 #include "esp_partition.h"
 #include "esp_random.h"
 #include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
-#include "esp_timer.h"
+#include "hal_time.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -491,7 +491,7 @@ esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
         // -- same reasoning ota_pico_relay.c's own ota_record_fill() call
         // already documents (this ESP-side code never reads the Pico's own
         // running version back out). Left blank rather than guessed.
-        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "pico", "", "", true,
+        ota_record_fill(&rec, (uint32_t)(hal_time_now_us() / 1000000), "pico", "", "", true,
                          "rollback requested", NULL);
         ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
     }

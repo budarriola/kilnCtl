@@ -17,7 +17,6 @@
 #include "esp_partition.h"
 #include "esp_random.h"
 #include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
-#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
