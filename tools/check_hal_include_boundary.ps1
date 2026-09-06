@@ -135,11 +135,8 @@ function Get-ScanFiles {
 # the baseline file and in output; Pattern is matched against a
 # comment-stripped #include line. ---
 $RatchetHeaders = [ordered]@{
-    "driver/"      = '^\s*#\s*include\s*["<]driver/'
-    "hardware/"    = '^\s*#\s*include\s*["<]hardware/'
     "nvs.h"        = '^\s*#\s*include\s*["<]nvs\.h[">]'
     "nvs_flash.h"  = '^\s*#\s*include\s*["<]nvs_flash\.h[">]'
-    "esp_timer.h"  = '^\s*#\s*include\s*["<]esp_timer\.h[">]'
 }
 
 # --- Strict, per-file allowlists. Full repo-relative paths only -- never a
@@ -174,10 +171,107 @@ $WifiAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_internal.h"; Header = "esp_netif.h"; Reason = "wifi_prov family -- shared internal header"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
 )
 
+
+# driver/*.h -- promoted from the count-ratchet to a strict per-file, per-
+# specific-header allowlist (HAL Phase 4 enforcement, step 1,
+# docs/HW_ABSTRACTION_PLAN.md "Phase 4 -- enforcement"). Every site below is
+# a documented legitimate pin/type-only holdout, not a TEMPORARY placeholder
+# -- none of today's driver/* sites carry a `// TEMPORARY` marker in the
+# plan, so every entry's ExpiresAtPhase is "n/a", citing the plan section
+# that accepts it as out of scope for the HAL boundary.
+$DriverGpioAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/bridge/uart_bridge.c";        Header = "driver/gpio.h"; Reason = "UART bridge diagnostic/scope-marker GPIO toggling, bridge-layer instrumentation predating the GPIO HAL"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/bridge/uart_bridge_info.c";   Header = "driver/gpio.h"; Reason = "UART bridge diagnostic/scope-marker GPIO toggling, bridge-layer instrumentation predating the GPIO HAL"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/bridge/uart_bridge_io.c";     Header = "driver/gpio.h"; Reason = "one of the two raw IRQ owners (SX1509 ~INT via gpio_isr_handler_add, per-pin) named explicitly in the plan's Phase 4 expected-final-entries list"; ExpiresAtPhase = "n/a (out of scope: raw IRQ owner, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/bridge/uart_bridge_safety.c"; Header = "driver/gpio.h"; Reason = "UART bridge diagnostic/scope-marker GPIO toggling, bridge-layer instrumentation predating the GPIO HAL"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/bridge/uart_bridge_system.c"; Header = "driver/gpio.h"; Reason = "UART bridge diagnostic/scope-marker GPIO toggling, bridge-layer instrumentation predating the GPIO HAL"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/bridge/uart_bridge_thermo.c"; Header = "driver/gpio.h"; Reason = "UART bridge diagnostic/scope-marker GPIO toggling, bridge-layer instrumentation predating the GPIO HAL"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/bridge/uart_bridge_touch.c";  Header = "driver/gpio.h"; Reason = "UART bridge diagnostic/scope-marker GPIO toggling, bridge-layer instrumentation predating the GPIO HAL"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/bridge/uart_bridge_ui_test.c";Header = "driver/gpio.h"; Reason = "UART bridge diagnostic/scope-marker GPIO toggling, bridge-layer instrumentation predating the GPIO HAL"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/MAX31856.c";               Header = "driver/gpio.h"; Reason = "CS-line bit-bang for the MAX31856 SPI transfer sequence -- pin-level, not a HAL abstraction candidate"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/panel_spi.c";              Header = "driver/gpio.h"; Reason = "panel CS/reset bit-bang for the ST7796 SPI sequence -- pin-level, not a HAL abstraction candidate"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/settings.h";               Header = "driver/gpio.h"; Reason = "shared pin/type declarations header for the hw/ family -- type-only holdout"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/SX1509.c";                 Header = "driver/gpio.h"; Reason = "SX1509 ~INT pin configured as polled input; owned/read by uart_bridge_io.c's raw IRQ path per the plan"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link.c";        Header = "driver/gpio.h"; Reason = "safety link handshake GPIO line, pin-level control alongside the UART driver it pairs with"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_commands.c"; Header = "driver/gpio.h"; Reason = "safety link handshake GPIO line, pin-level control alongside the UART driver it pairs with"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_frames.c"; Header = "driver/gpio.h"; Reason = "safety link handshake GPIO line, pin-level control alongside the UART driver it pairs with"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_inbox.c";  Header = "driver/gpio.h"; Reason = "safety link handshake GPIO line, pin-level control alongside the UART driver it pairs with"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_payload.c"; Header = "driver/gpio.h"; Reason = "safety link handshake GPIO line, pin-level control alongside the UART driver it pairs with"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_poll.c";   Header = "driver/gpio.h"; Reason = "safety link handshake GPIO line, pin-level control alongside the UART driver it pairs with"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+)
+
+$DriverI2cAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/NS2009.h";     Header = "driver/i2c_master.h"; Reason = "legacy resistive touch controller type-only holdout (bus handle type), superseded path retained per PROJECT_STATUS.md"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/SX1509.c";     Header = "driver/i2c_master.h"; Reason = "SX1509 I/O expander I2C transfers -- direct bus owner"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/SX1509.h";     Header = "driver/i2c_master.h"; Reason = "SX1509 I/O expander I2C bus handle type declaration"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/i2c_scan.h";   Header = "driver/i2c_master.h"; Reason = "diagnostic I2C bus scan utility -- direct bus owner by design"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/panel_spi.h";  Header = "driver/i2c_master.h"; Reason = "shares the hw/ header's bus handle type declarations"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/main_boot_early.c";       Header = "driver/i2c_master.h"; Reason = "bus init named explicitly in the plan's Phase 4 expected-final-entries list (main_boot_early.c: bus init)"; ExpiresAtPhase = "n/a (out of scope: bus init, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/main_internal.h";         Header = "driver/i2c_master.h"; Reason = "shared internal header for main_boot_early.c's bus-init bus handle types"; ExpiresAtPhase = "n/a (out of scope: bus init, see plan)" }
+)
+
+$DriverSpiAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/MAX31856.h";  Header = "driver/spi_master.h"; Reason = "spi_host_device_t type only -- transfers go through hal_spi.h now, per the header's own comment"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/panel_spi.h";  Header = "driver/spi_master.h"; Reason = "panel SPI bus handle/type declarations"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/settings.h";   Header = "driver/spi_master.h"; Reason = "shared pin/type declarations header for the hw/ family -- type-only holdout"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/main_boot_early.c";       Header = "driver/spi_master.h"; Reason = "bus init named explicitly in the plan's Phase 4 expected-final-entries list (main_boot_early.c: bus init)"; ExpiresAtPhase = "n/a (out of scope: bus init, see plan)" }
+)
+
+$DriverUartAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/settings.h";               Header = "driver/uart.h"; Reason = "shared pin/type declarations header for the hw/ family -- type-only holdout"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link.c";        Header = "driver/uart.h"; Reason = "safety link's direct UART driver owner -- the hardened link protocol needs the raw UART API"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_commands.c"; Header = "driver/uart.h"; Reason = "safety link's direct UART driver owner -- the hardened link protocol needs the raw UART API"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_frames.c"; Header = "driver/uart.h"; Reason = "safety link's direct UART driver owner -- the hardened link protocol needs the raw UART API"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_inbox.c";  Header = "driver/uart.h"; Reason = "safety link's direct UART driver owner -- the hardened link protocol needs the raw UART API"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_payload.c"; Header = "driver/uart.h"; Reason = "safety link's direct UART driver owner -- the hardened link protocol needs the raw UART API"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link_poll.c";   Header = "driver/uart.h"; Reason = "safety link's direct UART driver owner -- the hardened link protocol needs the raw UART API"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+)
+
+$DriverTempSensorAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/hw/board_temps.c"; Header = "driver/temperature_sensor.h"; Reason = "on-die ESP32-S3 temperature sensor peripheral -- vendor-specific, no cross-target HAL candidate exists"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+)
+
+# hardware/*.h (SaftyFW/RP2040 pico-sdk) -- same promotion, one entry per
+# file (the ratchet counted "does this file include anything under
+# hardware/" regardless of which specific pico-sdk header, so the allowlist
+# stays at that granularity rather than splintering by sub-header).
+$HardwareAllowlist = @(
+    @{ RelPath = "firmware/SaftyFW/src/main.c";                   Header = "hardware/"; Reason = "pico-sdk GPIO/timer/watchdog bring-up at boot (hardware/gpio.h, hardware/regs/timer.h, hardware/timer.h, hardware/watchdog.h) -- SaftyFW hardware/* holdout named in the plan"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/SaftyFW/src/max31856.c";                Header = "hardware/"; Reason = "MAX31856 CS-line bit-bang (hardware/gpio.h) -- pin-level, not a HAL abstraction candidate"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/SaftyFW/src/tasks/console_uart.c";      Header = "hardware/"; Reason = "write-only diagnostic UART/GPIO, no IRQ -- named explicitly in the plan's Phase 4 expected-final-entries list"; ExpiresAtPhase = "n/a (out of scope: console_uart.c, see plan)" }
+    @{ RelPath = "firmware/SaftyFW/src/tasks/discrete_task.c";     Header = "hardware/"; Reason = "discrete I/O pin reads (hardware/gpio.h) -- pin-level holdout" ; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/SaftyFW/src/tasks/thermo_task.c";       Header = "hardware/"; Reason = "one of the two raw IRQ owners (DRDY via gpio_set_irq_enabled_with_callback, shared) named explicitly in the plan's Phase 4 expected-final-entries list"; ExpiresAtPhase = "n/a (out of scope: raw IRQ owner, see plan)" }
+    @{ RelPath = "firmware/SaftyFW/src/tasks/update_task.c";       Header = "hardware/"; Reason = "flash/watchdog access for OTA rollback (hardware/flash.h, hardware/regs/addressmap.h, hardware/watchdog.h) -- vendor-specific bootloader interaction"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    @{ RelPath = "firmware/SaftyFW/src/tasks/watchdog_task.c";     Header = "hardware/"; Reason = "watchdog pet/reboot (hardware/gpio.h, hardware/watchdog.h) -- vendor-specific pico-sdk API"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+)
+
+# esp_timer.h -- promoted from the count-ratchet to a strict per-file
+# allowlist. All seven sites use esp_timer for periodic/one-shot callback
+# scheduling (LVGL tick, HTTP/OTA/wifi timing, safety link timing) with no
+# cross-target HAL timer abstraction defined by this plan (deliberately out
+# of scope: see "Deliberately out of scope" -- timer portability is not
+# listed as an in-scope HAL surface).
+$EspTimerAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/dashboard_http.c";      Header = "esp_timer.h"; Reason = "dashboard HTTP handler timing/timeouts"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_esp.c";        Header = "esp_timer.h"; Reason = "OTA HTTP handler timing/timeouts"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov.c";            Header = "esp_timer.h"; Reason = "wifi_prov family -- sole Wi-Fi driver owner, already exempt for esp_wifi.h/esp_netif.h"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_internal.h";   Header = "esp_timer.h"; Reason = "wifi_prov family -- shared internal header"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/safety/safety_link.c";       Header = "esp_timer.h"; Reason = "safety link protocol timing (frame timeouts, poll cadence)"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/ui/lvgl_port.c";             Header = "esp_timer.h"; Reason = "esp_timer_create/esp_timer_start_periodic for the 1ms lv_tick callback -- named explicitly in the plan's Phase 4 expected-final-entries list (lvgl_port)"; ExpiresAtPhase = "n/a (out of scope: lvgl_port, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c";   Header = "esp_timer.h"; Reason = "diagnostics LCD page refresh timing"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
+)
+
 $StrictHeaders = [ordered]@{
-    "esp_ota_ops.h" = @{ Pattern = '^\s*#\s*include\s*["<]esp_ota_ops\.h[">]'; Allowlist = $OtaOpsAllowlist }
-    "esp_wifi.h"    = @{ Pattern = '^\s*#\s*include\s*["<]esp_wifi\.h[">]';    Allowlist = $WifiAllowlist }
-    "esp_netif.h"   = @{ Pattern = '^\s*#\s*include\s*["<]esp_netif\.h[">]';  Allowlist = $WifiAllowlist }
+    "esp_ota_ops.h"              = @{ Pattern = '^\s*#\s*include\s*["<]esp_ota_ops\.h[">]';            Allowlist = $OtaOpsAllowlist }
+    "esp_wifi.h"                 = @{ Pattern = '^\s*#\s*include\s*["<]esp_wifi\.h[">]';                Allowlist = $WifiAllowlist }
+    "esp_netif.h"                = @{ Pattern = '^\s*#\s*include\s*["<]esp_netif\.h[">]';               Allowlist = $WifiAllowlist }
+    "driver/gpio.h"               = @{ Pattern = '^\s*#\s*include\s*["<]driver/gpio\.h[">]';             Allowlist = $DriverGpioAllowlist }
+    "driver/i2c_master.h"         = @{ Pattern = '^\s*#\s*include\s*["<]driver/i2c_master\.h[">]';       Allowlist = $DriverI2cAllowlist }
+    "driver/spi_master.h"         = @{ Pattern = '^\s*#\s*include\s*["<]driver/spi_master\.h[">]';       Allowlist = $DriverSpiAllowlist }
+    "driver/uart.h"                = @{ Pattern = '^\s*#\s*include\s*["<]driver/uart\.h[">]';            Allowlist = $DriverUartAllowlist }
+    "driver/temperature_sensor.h" = @{ Pattern = '^\s*#\s*include\s*["<]driver/temperature_sensor\.h[">]'; Allowlist = $DriverTempSensorAllowlist }
+    "hardware/"                   = @{ Pattern = '^\s*#\s*include\s*["<]hardware/';                      Allowlist = $HardwareAllowlist }
+    "esp_timer.h"                 = @{ Pattern = '^\s*#\s*include\s*["<]esp_timer\.h[">]';               Allowlist = $EspTimerAllowlist }
 }
 
 # --- Stage 3: firmware/hwAbstraction/** upward-include boundary. ---
@@ -351,7 +445,7 @@ function Invoke-HalBoundaryScan {
                 if ($a.RelPath -ieq $rel -and $a.Header -ieq $headerName) { $allowed = $true; break }
             }
             if (-not $allowed) {
-                $strictViolations += "${rel}: includes $headerName outside hwAbstraction/ and is not on its allowlist"
+                $strictViolations += "${rel}: includes $headerName outside hwAbstraction/ and is not on its allowlist -- add a { RelPath; Header = `"$headerName`"; Reason; ExpiresAtPhase } entry to the matching allowlist array in tools/check_hal_include_boundary.ps1, after review, or move the include behind the HAL"
             }
         }
     }

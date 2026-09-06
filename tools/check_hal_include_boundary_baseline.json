@@ -1,15 +1,9 @@
-﻿{
-    "_note":  "The a2a1300 drop in the KilnFW/App+SaftyFW/src counts below (driver/ 36-\u003e32, hardware/ 16-\u003e13, esp_timer.h 23-\u003e22) was files LEAVING the scanned set when HAL Phase 1a relocated esp_spi_owner.c/owner_slot_pool.c/i2c_owner.c/uart_owner.c/uart_protocol.c (esp) and spi_owner.c/uart_owner.c/uart_owner_tx_policy.c (pico) into firmware/hwAbstraction/, which check_hal_include_boundary.ps1 excludes via Test-InsideHal -- it was never a real reduction in driver/hardware/esp_timer.h usage. hwAbstraction is honestly accounted for now via hwAbstractionRatchet below, which was populated by scanning firmware/hwAbstraction/ the same way (see 2026-09-05 fix).",
-    "driver/":  27,
-    "hardware/":  11,
+{
+    "_note":  "HAL Phase 4 enforcement step 1 (2026-09-06): driver/, hardware/ and esp_timer.h moved off this count-ratchet onto the per-file, per-header strict allowlists in check_hal_include_boundary.ps1 ($DriverGpioAllowlist etc., $HardwareAllowlist, $EspTimerAllowlist) -- they are no longer tracked here. nvs.h/nvs_flash.h remain on the ratchet, pending a separate migration pass. hwAbstractionRatchet below tracks only the nvs pair for firmware/hwAbstraction/ (Test-InsideHal excludes that tree from the main scan; its driver/hardware/esp_timer.h includes are the backend itself and are not counted).",
     "nvs.h":  23,
     "nvs_flash.h":  24,
-    "esp_timer.h":  22,
     "hwAbstractionRatchet":  {
-                                 "driver/":  10,
-                                 "hardware/":  7,
                                  "nvs.h":  1,
-                                 "nvs_flash.h":  1,
-                                 "esp_timer.h":  2
+                                 "nvs_flash.h":  1
                              }
 }
