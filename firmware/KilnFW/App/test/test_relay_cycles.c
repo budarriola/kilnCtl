@@ -323,6 +323,96 @@ static void test_reset_runs_inline_when_already_on_flash_worker(void)
     TEST_CHECK(s_rc.counts[3] == 0, "the count was actually reset via the inline path");
 }
 
+// opus review (MEDIUM, follow-up audit): relay_cycles_reset() used to hold
+// s_rc.lock across the ENTIRE flash-worker dispatch, which correctly avoided
+// losing a concurrent relay_cycles_add() but stalled every other lock holder
+// (the executor tick) for a full NVS commit. The fix takes a snapshot under
+// the lock, releases it, then dispatches the write against the snapshot
+// alone. This test proves the fix didn't just trade the stall back for the
+// race it was closing: a relay_cycles_add() that lands in the window between
+// the snapshot and the dispatched write actually running must not be
+// silently dropped -- either because the write in flight already captured it
+// (impossible here, since the snapshot was already taken) or because `dirty`
+// is left set so a later relay_cycles_maybe_persist()/relay_cycles_flush()
+// picks it up.
+//
+// This file already #includes relay_cycles.c directly (see the top of this
+// file), so persist_snapshot()/reset_persist_job()/reset_persist_job_ctx_t
+// and reset_persist_job_arg_t are all directly visible here. Rather than
+// touch the shared bx_worker_stub.h (used by other test files too) to add a
+// mid-dispatch hook, this test reproduces relay_cycles_reset()'s own
+// snapshot-then-dispatch sequence by hand, inserting the "concurrent"
+// relay_cycles_add() call itself between the snapshot and the dispatch --
+// exactly the window the real function's fix is protecting.
+//
+// Before this fix's dirty-handling was written carefully, a naive version
+// could overwrite `dirty` back to false unconditionally after a successful
+// write, silently losing the concurrent increment (relay_cycles_get() would
+// show the incremented RAM value, but nothing would ever persist it past a
+// reboot -- exactly this codebase's "reset one side of a pair" bug class).
+static void test_reset_does_not_lose_a_concurrent_add(void)
+{
+    TEST_SECTION("relay_cycles_reset -- a relay_cycles_add() landing between the snapshot and the "
+                 "dispatched write must not be lost: dirty must survive so it persists later "
+                 "(opus review MEDIUM: lock-across-dispatch was fixed by a snapshot, not by "
+                 "silently dropping the race it was protecting against)");
+    reset_all();
+    s_rc.counts[1] = 7; // relay 1's starting count, matches reset_all()'s own setup
+
+    // --- relay_cycles_reset(0)'s own snapshot step, reproduced by hand ---
+    // reset_all() above memset()s s_rc (including s_rc.lock) to zero, so the
+    // lock must be (re-)created here the same way relay_cycles_reset() does
+    // via ensure_lock() -- every other test in this file reaches s_rc.lock
+    // indirectly through a real relay_cycles_*() call that calls ensure_lock()
+    // itself first; this one takes the lock directly, so it must too.
+    TEST_CHECK(ensure_lock(), "lock (re-)created after reset_all()'s memset");
+    reset_persist_job_arg_t snap;
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    s_rc.counts[0] = 0;
+    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
+    memcpy(snap.types, s_rc.types, sizeof(snap.types));
+    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
+    s_rc.dirty = false;
+    xSemaphoreGive(s_rc.lock);
+
+    // --- the "concurrent" add(), landing in the window between the snapshot
+    // above and the dispatched write below -- exercises the real lock, not a
+    // bypass of it. ---
+    relay_cycles_add(0x02, 9); // relay index 1 (mask bit 1), same slot the snapshot above did NOT touch
+
+    // --- the dispatched write itself, against the snapshot ONLY (never
+    // touching the live s_rc that the concurrent add() above just updated) --
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
+    reset_persist_job(&ctx);
+    TEST_CHECK(ctx.err == ESP_OK, "the dispatched write against the snapshot succeeds");
+
+    TEST_CHECK(s_rc.counts[1] == 7 + 9, "the concurrent add()'s increment is visible in RAM");
+    TEST_CHECK(s_rc.dirty == true, "dirty must still be set after reset(0)'s own successful "
+                                   "persist -- the concurrent add() happened after the snapshot "
+                                   "was taken, so it was NOT included in what reset(0) just wrote, "
+                                   "and must survive to be picked up by the next persist. A version "
+                                   "that unconditionally cleared dirty after a successful write "
+                                   "would fail this check, silently losing the increment across a "
+                                   "reboot.");
+
+    // Prove the flag being set is not vacuous: flushing now actually
+    // persists relay 1's incremented count, not just relay 0's reset.
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "the follow-up flush this dirty flag exists to "
+                                               "trigger succeeds");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "reopen for readback");
+    relay_cycles_blob_t blob;
+    size_t len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
+               "blob round-trips");
+    hal_kv_close(&h);
+    TEST_CHECK(blob.counts[1] == 7 + 9, "the concurrent add()'s increment actually reached flash "
+                                        "via the follow-up flush -- not just left dirty in RAM "
+                                        "forever");
+    TEST_CHECK(blob.counts[0] == 0, "relay 0's reset from earlier is still reflected too");
+}
+
 void run_test_relay_cycles(void)
 {
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
@@ -335,6 +425,7 @@ void run_test_relay_cycles(void)
     test_reset_zeroes_count_and_persists();
     test_reset_rejects_out_of_range_relay();
     test_reset_runs_inline_when_already_on_flash_worker();
+    test_reset_does_not_lose_a_concurrent_add();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

@@ -515,15 +515,62 @@ relay_budget_tier_t relay_cycles_max_budget_tier(void)
     return max_tier;
 }
 
+/* Job payload for reset_persist_job() below: a self-contained snapshot of
+ * everything persist_locked() would otherwise read from s_rc directly, taken
+ * under s_rc.lock and handed to the flash worker AFTER the lock is released
+ * (see relay_cycles_reset()'s comment on why holding the lock across the
+ * whole dispatch, the previous fix, traded a data race for a stall). */
+typedef struct {
+    uint32_t counts[RELAY_CYCLES_COUNT];
+    uint8_t  types[RELAY_CYCLES_COUNT];
+    uint32_t rated_overrides[RELAY_CYCLES_COUNT];
+} reset_persist_job_arg_t;
+
+/* Same body as persist_locked(), minus the "read live s_rc" part -- writes
+ * exactly the snapshot it was handed. Runs ON the flash worker's own
+ * internal-SRAM stack (or inline, if the caller is already there -- see
+ * relay_cycles_reset() below), so caller_stack_is_external()'s guard still
+ * applies and is still checked. */
+static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
+{
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "persist_snapshot: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). See persist_locked()'s identical guard comment in this file.");
+        return HAL_NOT_READY;
+    }
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return err;
+    }
+    relay_cycles_blob_t blob;
+    blob.version = RELAY_CYCLES_VERSION;
+    memcpy(blob.counts, snap->counts, sizeof(blob.counts));
+    memcpy(blob.types, snap->types, sizeof(blob.types));
+    memcpy(blob.rated_overrides, snap->rated_overrides, sizeof(blob.rated_overrides));
+    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return err;
+}
+
 /* The job run ON the flash worker's own internal-SRAM stack -- see
  * safety_cfg_store.c's nvs_save_store_job()/adaptive_tune.c's
- * save_kibase_job() for the identical shape. `arg` points at the calling
- * task's own esp_err_t local, safe because uart_bridge_ext_run_on_flash_
- * worker() blocks the caller for the whole call. */
+ * save_kibase_job() for the identical shape. `arg` points at a small struct
+ * (job_ctx_t below) owned by the calling task's own stack frame, safe
+ * because uart_bridge_ext_run_on_flash_worker() blocks the caller for the
+ * whole call. */
+typedef struct {
+    const reset_persist_job_arg_t *snap;
+    esp_err_t err;
+} reset_persist_job_ctx_t;
+
 static void reset_persist_job(void *arg)
 {
-    esp_err_t *out_err = (esp_err_t *)arg;
-    *out_err = hal_status_to_esp_err(persist_locked());
+    reset_persist_job_ctx_t *ctx = (reset_persist_job_ctx_t *)arg;
+    ctx->err = hal_status_to_esp_err(persist_snapshot(ctx->snap));
 }
 
 bool relay_cycles_reset(unsigned relay)
@@ -532,11 +579,33 @@ bool relay_cycles_reset(unsigned relay)
         return false;
     }
 
+    /* opus review finding (MEDIUM, RELAY_LIFE_BUDGET_PLAN.md follow-up audit):
+     * the previous version held s_rc.lock across the ENTIRE flash-worker
+     * dispatch below to close a data race (see the superseded comment this
+     * replaced) -- but uart_bridge_ext_run_on_flash_worker() blocks for a
+     * full NVS commit, and relay_cycles_add()/relay_cycles_maybe_persist()
+     * take the same lock with portMAX_DELAY from the executor's tick path.
+     * Holding the lock that long stalls every tick's contact-cycle
+     * accounting for the duration of an NVS commit. Fixed by taking a
+     * snapshot of everything the write needs (and clearing `dirty`) under
+     * the lock, then releasing it BEFORE dispatching -- the write itself
+     * touches only the local snapshot, never s_rc again, so it needs no
+     * lock at all. A relay_cycles_add()/relay_cycles_note_safety_edge()
+     * that lands between the snapshot and the write's completion sets
+     * `dirty` again on its own (both take the lock themselves), so if the
+     * write fails, re-setting `dirty` below only needs to cover the "the
+     * write itself failed" case -- a concurrent add() has already left
+     * dirty=true on its own and this must not paper over that by
+     * unconditionally forcing it back to whatever it was pre-snapshot. */
     uint32_t old_count = 0;
+    reset_persist_job_arg_t snap;
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     old_count = s_rc.counts[relay];
     s_rc.counts[relay] = 0;
-    s_rc.dirty = true;
+    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
+    memcpy(snap.types, s_rc.types, sizeof(snap.types));
+    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
+    s_rc.dirty = false;
     xSemaphoreGive(s_rc.lock);
 
     /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): check whether we are
@@ -548,34 +617,29 @@ bool relay_cycles_reset(unsigned relay)
      * httpd-task POST handler) is expected to already be on the worker
      * today, but the check is cheap and this is exactly the class of bug
      * that stays invisible until a caller changes. */
-    /* opus review finding (RELAY_LIFE_BUDGET_PLAN.md audit): persist_locked()
-     * reads/clears s_rc.counts/types/rated_overrides/dirty with NO lock of
-     * its own -- it is written to be called with s_rc.lock already held
-     * (relay_cycles_maybe_persist() does exactly that around its own call a
-     * few lines down). This dispatch used to call it via reset_persist_job()
-     * with the lock already released above, racing relay_cycles_add(): a
-     * concurrent add() between the release above and persist_locked()'s
-     * memcpy could see its increment folded into the blob written to flash
-     * (harmless) OR see dirty cleared by this persist and then never win the
-     * race to set it again (the add()'s own increment silently never gets
-     * persisted). Held across the dispatch instead -- reset_persist_job()
-     * itself takes no lock, so this cannot deadlock the flash worker. */
-    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
     esp_err_t err;
     if (uart_bridge_ext_is_on_flash_worker()) {
-        reset_persist_job(&err);
+        reset_persist_job(&ctx);
+        err = ctx.err;
     } else {
-        esp_err_t job_err = ESP_FAIL;
-        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &job_err);
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
         /* uart_bridge_ext_run_on_flash_worker() itself returning non-OK
          * (worker not started/queue busy) means reset_persist_job() never
-         * ran and job_err was never written -- report submit_err in that
-         * case rather than the uninitialized-in-effect job_err. */
-        err = (submit_err != ESP_OK) ? submit_err : job_err;
+         * ran and ctx.err was never written -- report submit_err in that
+         * case rather than the uninitialized-in-effect ctx.err. */
+        err = (submit_err != ESP_OK) ? submit_err : ctx.err;
     }
-    xSemaphoreGive(s_rc.lock);
 
     if (err != ESP_OK) {
+        /* The write failed: re-arm `dirty` so the next periodic persist
+         * retries it. A concurrent add()/note_safety_edge() during the
+         * dispatch already set dirty=true itself under the lock (see the
+         * comment above) -- this is a plain assignment, not a clear-then-set,
+         * so it cannot un-set a flag a racing writer just set. */
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.dirty = true;
+        xSemaphoreGive(s_rc.lock);
         /* opus review finding: "will retry on the next periodic persist" is
          * only true when something is actually ticking relay_cycles_maybe_
          * persist() -- boot_guard.h's RECOVERY MODE deliberately does not

@@ -167,36 +167,35 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * (project_httpd_stack_near_overflow note) even before this struct grew.
      * Heap-allocated for the same reason `json` above is: freed on every
      * return path below (success, truncated, and this malloc-failure path). */
-    dashboard_status_t *dsp = heap_caps_malloc(sizeof(*dsp), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (dsp == NULL) {
+    dashboard_status_t *ds = heap_caps_malloc(sizeof(*ds), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ds == NULL) {
         ESP_LOGE(DASH_TAG, "GET /api/status: malloc(%u) failed for the status snapshot",
-                 (unsigned)sizeof(*dsp));
+                 (unsigned)sizeof(*ds));
         free(json);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
-#define ds (*dsp)
-    dashboard_get_status(&ds);
+    dashboard_get_status(ds);
 
-    APPEND("{\"io_ready\":%s", ds.io_ready ? "true" : "false");
+    APPEND("{\"io_ready\":%s", ds->io_ready ? "true" : "false");
 
-    if (ds.io_ready) {
+    if (ds->io_ready) {
         APPEND(",\"relays\":[");
         for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
-            bool on = ds.relay_on[relay - 1];
+            bool on = ds->relay_on[relay - 1];
             APPEND("%s{\"relay\":%u,\"on\":%s}", relay == 1 ? "" : ",", relay, on ? "true" : "false");
         }
         APPEND("]");
-        if (ds.io_read_failed) {
+        if (ds->io_read_failed) {
             APPEND(",\"io_read_failed\":true");
         }
     }
 
     APPEND(",\"relay_cycles\":[");
     for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
-        APPEND("%s%lu", r == 0 ? "" : ",", (unsigned long)ds.relay_cycles[r]);
+        APPEND("%s%lu", r == 0 ? "" : ",", (unsigned long)ds->relay_cycles[r]);
     }
     APPEND("]");
 
@@ -208,9 +207,9 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * elsewhere on this endpoint. */
     APPEND(",\"relay_life\":[");
     for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
-        const relay_cycles_budget_t *b = &ds.relay_life[r];
+        const relay_cycles_budget_t *b = &ds->relay_life[r];
         const char *type_str;
-        switch (ds.relay_life_type[r]) {
+        switch (ds->relay_life_type[r]) {
         case RELAY_TYPE_CONTACTOR: type_str = "contactor"; break;
         case RELAY_TYPE_MERCURY:   type_str = "mercury"; break;
         default:                   type_str = "ssr"; break;
@@ -236,7 +235,7 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     APPEND("]");
     {
         const char *overall_tier_str;
-        switch (ds.relay_life_tier) {
+        switch (ds->relay_life_tier) {
         case RELAY_BUDGET_TIER_WARN:  overall_tier_str = "warn"; break;
         case RELAY_BUDGET_TIER_ERROR: overall_tier_str = "error"; break;
         default:                      overall_tier_str = "none"; break;
@@ -244,22 +243,22 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         APPEND(",\"relay_life_tier\":\"%s\"", overall_tier_str);
     }
 
-    APPEND(",\"thermo_ready\":%s", ds.thermo_ready ? "true" : "false");
+    APPEND(",\"thermo_ready\":%s", ds->thermo_ready ? "true" : "false");
     /* opus review, commit f3a1600, G2b: operator-visible surface for the
      * shared SPI owner's wedged latch -- see dashboard_http.h's field
      * comment. Reported unconditionally (not gated behind thermo_ready)
      * since a wedged owner also takes the display down with it. */
-    APPEND(",\"thermo_spi_wedged\":%s", ds.thermo_spi_wedged ? "true" : "false");
+    APPEND(",\"thermo_spi_wedged\":%s", ds->thermo_spi_wedged ? "true" : "false");
     /* DISPLAY_ST7796_PLAN.md 9.1 capture procedure: `curl .../api/status |
      * jq .flush_max_us` (or flush_last_us for the most recent one) is now
      * the whole bench step -- no separate build or scope session needed. */
     APPEND(",\"flush_last_us\":%u,\"flush_max_us\":%u,\"flush_count\":%u",
-           (unsigned)ds.flush_last_us, (unsigned)ds.flush_max_us, (unsigned)ds.flush_count);
+           (unsigned)ds->flush_last_us, (unsigned)ds->flush_max_us, (unsigned)ds->flush_count);
 
-    if (ds.thermo_ready) {
+    if (ds->thermo_ready) {
         APPEND(",\"channels\":[");
-        for (size_t i = 0; i < ds.channel_count; i++) {
-            const dashboard_channel_status_t *r = &ds.channels[i];
+        for (size_t i = 0; i < ds->channel_count; i++) {
+            const dashboard_channel_status_t *r = &ds->channels[i];
             /* null, not a sentinel integer: "we have never had a good
              * conversion from this channel" is not an age, and the same
              * null-rather-than-0 convention the safety/board temps already
@@ -285,29 +284,29 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         APPEND("]");
     }
 
-    APPEND(",\"safety_ready\":%s", ds.safety_ready ? "true" : "false");
-    APPEND(",\"zones_config_valid\":%s", ds.zones_config_valid ? "true" : "false");
+    APPEND(",\"safety_ready\":%s", ds->safety_ready ? "true" : "false");
+    APPEND(",\"zones_config_valid\":%s", ds->zones_config_valid ? "true" : "false");
 
     /* ROADMAP.md M6 -- null (not 0), same convention board_temps.c's
      * GET /api/board_temps already established (TODO.md 10.7): a JSON null
      * cannot be mistaken for a real 0 C reading or a real 0 W power figure
      * the way a bare 0 could. */
-    APPEND(",\"safety_temp_c\":%s", ds.safety_temp_valid ? "" : "null");
-    if (ds.safety_temp_valid) {
-        APPEND("%.2f", (double)ds.safety_temp_c);
+    APPEND(",\"safety_temp_c\":%s", ds->safety_temp_valid ? "" : "null");
+    if (ds->safety_temp_valid) {
+        APPEND("%.2f", (double)ds->safety_temp_c);
     }
     /* ROADMAP.md "Safety TC display audit, 2026-09-05" -- see
      * dashboard_http.h's field comment; every consumer of safety_temp_c
      * must gate its "this is a distinct thermocouple fault" display on
      * this, not on safety_ready/safety_temp_valid alone. */
-    APPEND(",\"safety_tc_is_separate_sensor\":%s", ds.safety_tc_is_separate_sensor ? "true" : "false");
-    APPEND(",\"enclosure_temp_c\":%s", ds.enclosure_temp_valid ? "" : "null");
-    if (ds.enclosure_temp_valid) {
-        APPEND("%.2f", (double)ds.enclosure_temp_c);
+    APPEND(",\"safety_tc_is_separate_sensor\":%s", ds->safety_tc_is_separate_sensor ? "true" : "false");
+    APPEND(",\"enclosure_temp_c\":%s", ds->enclosure_temp_valid ? "" : "null");
+    if (ds->enclosure_temp_valid) {
+        APPEND("%.2f", (double)ds->enclosure_temp_c);
     }
-    APPEND(",\"power_w\":%s", ds.power_valid ? "" : "null");
-    if (ds.power_valid) {
-        APPEND("%.1f", (double)ds.power_w);
+    APPEND(",\"power_w\":%s", ds->power_valid ? "" : "null");
+    if (ds->power_valid) {
+        APPEND("%.1f", (double)ds->power_w);
     }
 
     /* dashboard_http.h's ct_current_a comment -- each of the safety
@@ -320,10 +319,10 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * changed; only the comment was wrong. */
     APPEND(",\"ct_current_a\":[");
     for (unsigned ci = 0; ci < 3; ci++) {
-        bool ct_valid = !isnan(ds.ct_current_a[ci]);
+        bool ct_valid = !isnan(ds->ct_current_a[ci]);
         APPEND("%s%s", ci == 0 ? "" : ",", ct_valid ? "" : "null");
         if (ct_valid) {
-            APPEND("%.3f", (double)ds.ct_current_a[ci]);
+            APPEND("%.3f", (double)ds->ct_current_a[ci]);
         }
     }
     APPEND("]");
@@ -334,31 +333,31 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * unlike ct_current_a[] above, a legacy (pre-protocol-11) Pico never
      * populates any of the three, so a per-element null would misleadingly
      * suggest some channels might still be real. */
-    APPEND(",\"ct_counts\":%s", ds.ct_counts_valid ? "[" : "null");
-    if (ds.ct_counts_valid) {
+    APPEND(",\"ct_counts\":%s", ds->ct_counts_valid ? "[" : "null");
+    if (ds->ct_counts_valid) {
         for (unsigned ci = 0; ci < 3; ci++) {
-            APPEND("%s%u", ci == 0 ? "" : ",", (unsigned)ds.ct_counts[ci]);
+            APPEND("%s%u", ci == 0 ? "" : ",", (unsigned)ds->ct_counts[ci]);
         }
         APPEND("]");
     }
 
     /* K4, the safety processor's own relay -- dashboard_http.h's field
-     * comment. null (not a fabricated "false") until ds.safety_relay_known
+     * comment. null (not a fabricated "false") until ds->safety_relay_known
      * -- same null-until-known convention every other safety_link-sourced
      * field on this endpoint already uses. */
-    APPEND(",\"safety_relay_energized\":%s", ds.safety_relay_known ? "" : "null");
-    if (ds.safety_relay_known) {
-        APPEND("%s", ds.safety_relay_energized ? "true" : "false");
+    APPEND(",\"safety_relay_energized\":%s", ds->safety_relay_known ? "" : "null");
+    if (ds->safety_relay_known) {
+        APPEND("%s", ds->safety_relay_energized ? "true" : "false");
     }
-    APPEND(",\"safety_heating_enabled\":%s", ds.safety_relay_known ? "" : "null");
-    if (ds.safety_relay_known) {
-        APPEND("%s", ds.safety_heating_enabled ? "true" : "false");
+    APPEND(",\"safety_heating_enabled\":%s", ds->safety_relay_known ? "" : "null");
+    if (ds->safety_relay_known) {
+        APPEND("%s", ds->safety_heating_enabled ? "true" : "false");
     }
     /* The ESP's own reason for refusing heat -- see dashboard_http.h. Always
      * present and always an integer: 0 is a real answer ("nothing is blocking
      * heat"), not an absence, so this one does NOT take the null convention
      * its neighbours use. */
-    APPEND(",\"heat_block_sources\":%lu", (unsigned long)ds.heat_block_sources);
+    APPEND(",\"heat_block_sources\":%lu", (unsigned long)ds->heat_block_sources);
     /* Decoded words for the mask above -- safety_trip_words.h's shared table
      * (2026-08-27, owner: "all faults... what was detected wrong"), same
      * function ui_page_diagnostics.c's LCD trip page now calls, so the two
@@ -370,19 +369,19 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
          * tf_words below: six comma-joined source strings are 141 bytes. */
         char hb_words[160];
         APPEND(",\"heat_block_sources_words\":\"%s\"",
-               safety_fault_source_words(ds.heat_block_sources, hb_words, sizeof(hb_words)));
+               safety_fault_source_words(ds->heat_block_sources, hb_words, sizeof(hb_words)));
     }
-    APPEND(",\"zone_blocked_mask\":%u", (unsigned)ds.zone_blocked_mask);
+    APPEND(",\"zone_blocked_mask\":%u", (unsigned)ds->zone_blocked_mask);
 
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
      * older" item. self_protocol_version is always known; peer fields are
      * null until the Pico has announced itself (same convention as
      * safety_temp_c/power_w above). */
-    APPEND(",\"self_protocol_version\":%u", (unsigned)ds.self_protocol_version);
-    APPEND(",\"link_version_known\":%s", ds.link_version_known ? "true" : "false");
-    if (ds.link_version_known) {
-        APPEND(",\"link_version_compatible\":%s", ds.link_version_compatible ? "true" : "false");
-        APPEND(",\"peer_protocol_version\":%u", (unsigned)ds.peer_protocol_version);
+    APPEND(",\"self_protocol_version\":%u", (unsigned)ds->self_protocol_version);
+    APPEND(",\"link_version_known\":%s", ds->link_version_known ? "true" : "false");
+    if (ds->link_version_known) {
+        APPEND(",\"link_version_compatible\":%s", ds->link_version_compatible ? "true" : "false");
+        APPEND(",\"peer_protocol_version\":%u", (unsigned)ds->peer_protocol_version);
     } else {
         APPEND(",\"link_version_compatible\":null");
         APPEND(",\"peer_protocol_version\":null");
@@ -396,26 +395,26 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * diag_trip_reason/trip_reason are the single "the" reason and now DO
      * get decoded cause/remedy text below, via safety_trip_words.h's shared
      * table (2026-08-27 scope change). */
-    APPEND(",\"diag_ever_received\":%s", ds.diag_ever_received ? "true" : "false");
-    if (ds.diag_ever_received) {
-        APPEND(",\"diag_trip_reason\":%u", (unsigned)ds.diag_trip_reason);
-        APPEND(",\"diag_trip_reason_words\":\"%s\"", safety_trip_words_short(ds.diag_trip_reason));
-        APPEND(",\"diag_trip_reason_cause\":\"%s\"", safety_trip_words_cause(ds.diag_trip_reason));
-        APPEND(",\"diag_trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(ds.diag_trip_reason));
-        APPEND(",\"diag_warn_mask\":%u", (unsigned)ds.diag_warn_mask);
-        APPEND(",\"diag_trip_mask\":%u", (unsigned)ds.diag_trip_mask);
-        APPEND(",\"diag_state\":%u", (unsigned)ds.diag_state);
-        APPEND(",\"diag_age_ms\":%u", (unsigned)ds.diag_age_ms);
-        APPEND(",\"diag_context_age_100ms\":%u", (unsigned)ds.diag_context_age_100ms);
-        APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds.diag_context_frames_ok);
-        APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)ds.diag_context_frames_bad);
-        APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)ds.diag_tx_frames_dropped);
+    APPEND(",\"diag_ever_received\":%s", ds->diag_ever_received ? "true" : "false");
+    if (ds->diag_ever_received) {
+        APPEND(",\"diag_trip_reason\":%u", (unsigned)ds->diag_trip_reason);
+        APPEND(",\"diag_trip_reason_words\":\"%s\"", safety_trip_words_short(ds->diag_trip_reason));
+        APPEND(",\"diag_trip_reason_cause\":\"%s\"", safety_trip_words_cause(ds->diag_trip_reason));
+        APPEND(",\"diag_trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(ds->diag_trip_reason));
+        APPEND(",\"diag_warn_mask\":%u", (unsigned)ds->diag_warn_mask);
+        APPEND(",\"diag_trip_mask\":%u", (unsigned)ds->diag_trip_mask);
+        APPEND(",\"diag_state\":%u", (unsigned)ds->diag_state);
+        APPEND(",\"diag_age_ms\":%u", (unsigned)ds->diag_age_ms);
+        APPEND(",\"diag_context_age_100ms\":%u", (unsigned)ds->diag_context_age_100ms);
+        APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds->diag_context_frames_ok);
+        APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)ds->diag_context_frames_bad);
+        APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)ds->diag_tx_frames_dropped);
     }
 
-    APPEND(",\"trip_event_ever_received\":%s", ds.trip_event_ever_received ? "true" : "false");
-    if (ds.trip_event_ever_received) {
-        APPEND(",\"trip_reason\":%u", (unsigned)ds.trip_reason);
-        APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(ds.trip_reason));
+    APPEND(",\"trip_event_ever_received\":%s", ds->trip_event_ever_received ? "true" : "false");
+    if (ds->trip_event_ever_received) {
+        APPEND(",\"trip_reason\":%u", (unsigned)ds->trip_reason);
+        APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(ds->trip_reason));
         {
             /* 2026-08-28 scope change: the cause line now carries the actual
              * detected numbers where this firmware has them -- see
@@ -430,19 +429,19 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
              * produce, not the common case. */
             char cause_buf[320];
             APPEND(",\"trip_reason_cause\":\"%s\"",
-                   safety_trip_words_cause_numbered(ds.trip_reason, ds.trip_safety_tc_c,
-                                                     ds.trip_deciding_threshold,
-                                                     ds.trip_current_a, ds.trip_context_age_100ms,
+                   safety_trip_words_cause_numbered(ds->trip_reason, ds->trip_safety_tc_c,
+                                                     ds->trip_deciding_threshold,
+                                                     ds->trip_current_a, ds->trip_context_age_100ms,
                                                      cause_buf, sizeof(cause_buf)));
         }
-        APPEND(",\"trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(ds.trip_reason));
-        APPEND(",\"trip_event_age_ms\":%lu", (unsigned long)ds.trip_event_age_ms);
+        APPEND(",\"trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(ds->trip_reason));
+        APPEND(",\"trip_event_age_ms\":%lu", (unsigned long)ds->trip_event_age_ms);
         char trip_tc_buf[16];
         char trip_thr_buf[16];
         APPEND(",\"trip_safety_tc_c\":%s",
-               json_f(trip_tc_buf, sizeof(trip_tc_buf), "%.1f", ds.trip_safety_tc_c));
+               json_f(trip_tc_buf, sizeof(trip_tc_buf), "%.1f", ds->trip_safety_tc_c));
         APPEND(",\"trip_deciding_threshold\":%s",
-               json_f(trip_thr_buf, sizeof(trip_thr_buf), "%.1f", ds.trip_deciding_threshold));
+               json_f(trip_thr_buf, sizeof(trip_thr_buf), "%.1f", ds->trip_deciding_threshold));
         /* S6a only (safety_link.h's trip_fault_sources field comment): THIS
          * board's own fault_sources bitmask, snapshotted the instant this
          * trip latched -- distinct from heat_block_sources above, which is
@@ -456,8 +455,8 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
          * trip leaves this false; the mask is still emitted (so the JSON
          * shape never changes) but words says so explicitly rather than
          * rendering a plausible-looking wrong cause. */
-        APPEND(",\"trip_fault_sources\":%lu", (unsigned long)ds.trip_fault_sources);
-        APPEND(",\"trip_fault_sources_valid\":%s", ds.trip_fault_sources_valid ? "true" : "false");
+        APPEND(",\"trip_fault_sources\":%lu", (unsigned long)ds->trip_fault_sources);
+        APPEND(",\"trip_fault_sources_valid\":%s", ds->trip_fault_sources_valid ? "true" : "false");
         {
             /* 2026-08-28 audit fix (N6): 128 truncates a multi-source mask
              * mid-word -- all six safety_fault_source_words() strings
@@ -473,9 +472,9 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
              * arrived, not that nothing was wrong. Combined with N3's
              * validity gate: either reason renders the same "not captured"
              * message, since an operator cannot act on either differently. */
-            if (ds.trip_fault_sources_valid && ds.trip_fault_sources != 0u) {
+            if (ds->trip_fault_sources_valid && ds->trip_fault_sources != 0u) {
                 APPEND(",\"trip_fault_sources_words\":\"%s\"",
-                       safety_fault_source_words(ds.trip_fault_sources, tf_words, sizeof(tf_words)));
+                       safety_fault_source_words(ds->trip_fault_sources, tf_words, sizeof(tf_words)));
             } else {
                 APPEND(",\"trip_fault_sources_words\":\"not captured -- the source cleared before "
                        "the trip was reported\"");
@@ -490,17 +489,17 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * dashboard_http.h's safety_build_known comment. Escaped for the same
      * "operator/build-time string, still worth escaping" reason
      * fw_version/fw_build are above. */
-    APPEND(",\"safety_build_known\":%s", ds.safety_build_known ? "true" : "false");
-    if (ds.safety_build_known) {
-        char commit_esc[sizeof(ds.safety_build_commit) * 2 + 1];
-        char datetime_esc[sizeof(ds.safety_build_datetime) * 2 + 1];
-        json_escape(ds.safety_build_commit, commit_esc, sizeof(commit_esc));
-        json_escape(ds.safety_build_datetime, datetime_esc, sizeof(datetime_esc));
-        APPEND(",\"safety_build_dirty\":%s", ds.safety_build_dirty ? "true" : "false");
+    APPEND(",\"safety_build_known\":%s", ds->safety_build_known ? "true" : "false");
+    if (ds->safety_build_known) {
+        char commit_esc[sizeof(ds->safety_build_commit) * 2 + 1];
+        char datetime_esc[sizeof(ds->safety_build_datetime) * 2 + 1];
+        json_escape(ds->safety_build_commit, commit_esc, sizeof(commit_esc));
+        json_escape(ds->safety_build_datetime, datetime_esc, sizeof(datetime_esc));
+        APPEND(",\"safety_build_dirty\":%s", ds->safety_build_dirty ? "true" : "false");
         APPEND(",\"safety_build_commit\":\"%s\"", commit_esc);
         APPEND(",\"safety_build_datetime\":\"%s\"", datetime_esc);
-        APPEND(",\"safety_config_version\":%u", (unsigned)ds.safety_config_version);
-        APPEND(",\"safety_config_crc\":%u", (unsigned)ds.safety_config_crc);
+        APPEND(",\"safety_config_version\":%u", (unsigned)ds->safety_config_version);
+        APPEND(",\"safety_config_crc\":%u", (unsigned)ds->safety_config_crc);
     } else {
         APPEND(",\"safety_build_dirty\":null");
         APPEND(",\"safety_build_commit\":null");
@@ -536,37 +535,37 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * is cheap enough that "trust the build" is not a saving worth the risk
      * of ever emitting invalid JSON from a stray quote in a tag name. */
     {
-        char fw_version_esc[sizeof(ds.fw_version) * 2 + 1];
-        char fw_build_esc[sizeof(ds.fw_build) * 2 + 1];
-        json_escape(ds.fw_version, fw_version_esc, sizeof(fw_version_esc));
-        json_escape(ds.fw_build, fw_build_esc, sizeof(fw_build_esc));
-        APPEND(",\"fw_version_known\":%s", ds.fw_version_known ? "true" : "false");
+        char fw_version_esc[sizeof(ds->fw_version) * 2 + 1];
+        char fw_build_esc[sizeof(ds->fw_build) * 2 + 1];
+        json_escape(ds->fw_version, fw_version_esc, sizeof(fw_version_esc));
+        json_escape(ds->fw_build, fw_build_esc, sizeof(fw_build_esc));
+        APPEND(",\"fw_version_known\":%s", ds->fw_version_known ? "true" : "false");
         APPEND(",\"fw_version\":\"%s\"", fw_version_esc);
         APPEND(",\"fw_build\":\"%s\"", fw_build_esc);
     }
-    APPEND(",\"uptime_s\":%lu", (unsigned long)ds.uptime_s);
-    APPEND(",\"reset_reason\":\"%s\"", ds.reset_reason);
+    APPEND(",\"uptime_s\":%lu", (unsigned long)ds->uptime_s);
+    APPEND(",\"reset_reason\":\"%s\"", ds->reset_reason);
     APPEND(",\"heap_internal\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
-           (unsigned long)ds.heap_internal_free, (unsigned long)ds.heap_internal_largest_free_block,
-           (unsigned long)ds.heap_internal_min_free, (unsigned long)ds.heap_internal_total);
+           (unsigned long)ds->heap_internal_free, (unsigned long)ds->heap_internal_largest_free_block,
+           (unsigned long)ds->heap_internal_min_free, (unsigned long)ds->heap_internal_total);
     APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
-           (unsigned long)ds.heap_spiram_free, (unsigned long)ds.heap_spiram_largest_free_block,
-           (unsigned long)ds.heap_spiram_min_free, (unsigned long)ds.heap_spiram_total);
+           (unsigned long)ds->heap_spiram_free, (unsigned long)ds->heap_spiram_largest_free_block,
+           (unsigned long)ds->heap_spiram_min_free, (unsigned long)ds->heap_spiram_total);
     APPEND(",\"heap_dma\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
-           (unsigned long)ds.heap_dma_free, (unsigned long)ds.heap_dma_largest_free_block,
-           (unsigned long)ds.heap_dma_min_free, (unsigned long)ds.heap_dma_total);
+           (unsigned long)ds->heap_dma_free, (unsigned long)ds->heap_dma_largest_free_block,
+           (unsigned long)ds->heap_dma_min_free, (unsigned long)ds->heap_dma_total);
 
     /* Owner request 2026-08-27 -- see dashboard_http.h's field comment for
      * what "size" vs "partition_size" vs "used" each mean. null when the
      * underlying read failed, same convention as safety_temp_c etc. above. */
-    APPEND(",\"flash_size\":%s", ds.flash_size_known ? "" : "null");
-    if (ds.flash_size_known) {
-        APPEND("%lu", (unsigned long)ds.flash_size);
+    APPEND(",\"flash_size\":%s", ds->flash_size_known ? "" : "null");
+    if (ds->flash_size_known) {
+        APPEND("%lu", (unsigned long)ds->flash_size);
     }
-    APPEND(",\"flash_partition_size\":%lu", (unsigned long)ds.flash_partition_size);
-    APPEND(",\"flash_used\":%s", ds.flash_used_known ? "" : "null");
-    if (ds.flash_used_known) {
-        APPEND("%lu", (unsigned long)ds.flash_used);
+    APPEND(",\"flash_partition_size\":%lu", (unsigned long)ds->flash_partition_size);
+    APPEND(",\"flash_used\":%s", ds->flash_used_known ? "" : "null");
+    if (ds->flash_used_known) {
+        APPEND("%lu", (unsigned long)ds->flash_used);
     }
 
     /* 2026-08-21, ROADMAP.md "a real shared temperature-unit setting":
@@ -580,13 +579,13 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * Celsius; a client that wants to *show* Fahrenheit converts using this
      * field, the same boundary point unit_pref_convert() enforces on the LCD
      * side. */
-    APPEND(",\"temp_unit\":\"%s\"", unit_pref_suffix(ds.temp_unit));
+    APPEND(",\"temp_unit\":\"%s\"", unit_pref_suffix(ds->temp_unit));
 
     /* 2026-09-02, forthcoming "ramp assist" feature: ADDITIVE field, same
      * "older client just never heard of this key" reasoning as temp_unit
      * above. The flag ONLY -- see ramp_assist_cfg.h's header comment; this
      * value does not yet change anything about how a ramp or dwell runs. */
-    APPEND(",\"ramp_assist_enabled\":%s", ds.ramp_assist_enabled ? "true" : "false");
+    APPEND(",\"ramp_assist_enabled\":%s", ds->ramp_assist_enabled ? "true" : "false");
 
     /* 2026-08-30, PROFILES.md "Scheduled start + candling": ADDITIVE fields,
      * same "older client just never heard of these keys" reasoning as
@@ -597,10 +596,10 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * fields elsewhere in this handler. DISPLAY/SCHEDULING-INTENT ONLY: see
      * time_sync.h's header comment -- nothing in this firmware may use
      * these two epoch fields to measure a duration or drive control logic. */
-    APPEND(",\"time_synced\":%s", ds.time_synced ? "true" : "false");
-    APPEND(",\"time_now_epoch\":%lld", (long long)ds.time_now_epoch);
-    APPEND(",\"time_last_sync_epoch\":%lld", (long long)ds.time_last_sync_epoch);
-    APPEND(",\"time_tz\":\"%s\"", ds.time_tz);
+    APPEND(",\"time_synced\":%s", ds->time_synced ? "true" : "false");
+    APPEND(",\"time_now_epoch\":%lld", (long long)ds->time_now_epoch);
+    APPEND(",\"time_last_sync_epoch\":%lld", (long long)ds->time_last_sync_epoch);
+    APPEND(",\"time_tz\":\"%s\"", ds->time_tz);
 
     /* watchdog_cfg.h -- a board running with this safety default disabled
      * must say so somewhere always visible, not only at the moment of
@@ -638,8 +637,7 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     APPEND("}");
 
 #undef APPEND
-#undef ds
-    free(dsp);
+    free(ds);
 
     httpd_resp_set_type(req, "application/json");
     {
@@ -680,7 +678,7 @@ truncated:
         esp_err_t send_err = httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"status did not fit in the response "
                                   "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
-        free(dsp);
+        free(ds);
         free(json);
         return send_err;
     }
