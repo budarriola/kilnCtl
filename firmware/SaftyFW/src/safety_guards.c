@@ -31,8 +31,36 @@
 #define TC_DISAGREEMENT_TIME_S_DEFAULT 300.0f /* S10 */
 #define OVERCURRENT_PCT_DEFAULT       150u    /* S14 */
 #define OVERCURRENT_TIME_S_DEFAULT    30.0f   /* S14 */
+#define RATE_WINDOW_S_DEFAULT         60.0f   /* S8 -- SAFETY_MODEL.md section 4 */
 
 #define S1_OVER_CEILING_STREAK_TO_TRIP 3u /* ~300ms at safety_core's 100ms tick */
+
+/* S8. Consecutive WINDOW EVALUATIONS (each rate_window_s long, not ticks)
+ * whose average rate exceeded max_rate_c_per_min, required before tripping.
+ * 2, not 1, and here is the reasoning:
+ *
+ * This guard measures an AVERAGE rate over a whole window using only the
+ * window's two endpoint samples (baseline-sample-and-hold, see the S8 block
+ * below for why a per-tick derivative is unusable at this module's ~100ms
+ * tick). A two-point average is exact for a genuine sustained ramp, but it
+ * has one real weakness: if the sample landing exactly on a window boundary
+ * is itself a glitch -- a single-tick spurious reading that S5's fault-bit
+ * checks did not catch (S5 only rejects SPI failures, NaN and MAX31856
+ * OPEN/OVUV/TCRANGE, not an in-range-but-wrong sample) -- that one glitchy
+ * endpoint can make a whole window's average look like a runaway even though
+ * the kiln never moved.
+ *
+ * Requiring the SAME threshold crossing on two consecutive windows closes
+ * that hole almost for free: a glitch that resolves by the very next tick is,
+ * by construction, the boundary sample for at most one window on the "high"
+ * side and becomes the STARTING sample for the next window, which then
+ * measures back down from the inflated value -- so the same glitch cannot
+ * make two consecutive windows both read high. A genuine sustained runaway,
+ * by contrast, keeps climbing every window, so it clears both bars with
+ * margin. This is the same "magnitude AND duration, one alone is never
+ * enough" doctrine (SAFETY_MODEL.md section 2) applied across windows
+ * instead of within one. */
+#define S8_OVER_RATE_STREAK_TO_TRIP 2u
 
 /* S9. Consecutive ticks of `any_current_present` required, once
  * trip_verify_s has already elapsed AND in->current_sensing_commissioned is
@@ -143,7 +171,13 @@ static bool s5_bad_read_now(const safety_guard_input_t *in)
  * S1 remains excluded: it is a 3-tick debounce with no single-tick "the
  * value itself is disqualifying" test short of the trip condition itself,
  * so there is nothing to recompute that isn't just re-running the debounce
- * from scratch. Returning false for any other reason leaves
+ * from scratch. S8 (added later than this function's original audit pass)
+ * is excluded for the identical reason -- it is a two-window average-rate
+ * debounce (S8_OVER_RATE_STREAK_TO_TRIP), not a single-tick level, and its
+ * own window state is exactly what safety_guards_clear() is about to zero,
+ * so "still true right now" has no honest single-tick answer here either;
+ * it re-trips on its own normal two-window timescale instead, the same
+ * accepted scope limit as S1. Returning false for any other reason leaves
  * safety_guards_try_clear()'s existing one-tick-retest behaviour completely
  * unchanged for every guard not listed here. */
 static bool guard_condition_still_immediate(safety_trip_t reason, const safety_guard_cfg_t *cfg,
@@ -272,6 +306,12 @@ float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guar
         return effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
     case SAFETY_TRIP_LOAD_STUCK_ON: /* S3 */
         return effective_f(cfg->i_present_a, I_PRESENT_A_DEFAULT);
+    case SAFETY_TRIP_RATE: /* S8. max_rate_c_per_min has no substituted default
+                             * (safety_guards.h: "0 = not commissioned, guard
+                             * never trips"), so if this guard tripped, this
+                             * value is real and non-zero -- same reasoning as
+                             * S1's abs_max_temp_c just above. */
+        return cfg->max_rate_c_per_min;
     case SAFETY_TRIP_FROZEN_SENSOR: /* S11 */
         return effective_f(cfg->frozen_window_s, FROZEN_WINDOW_S_DEFAULT);
     case SAFETY_TRIP_ENCLOSURE_TEMP: /* S12 */
@@ -656,6 +696,99 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
             state->s12_over_max_elapsed_s = 0.0f;
         }
     }
+
+    /* --- S8: implausible rate of rise -----------------------------------------
+     * SAFETY_MODEL.md section 4, S8: "d(safety_tc_c)/dt > max_rate_c_per_min
+     * sustained for rate_window_s". Ships disabled: max_rate_c_per_min == 0
+     * means "not commissioned, never trip" -- the same convention as S1's
+     * abs_max_temp_c, and for the identical reason: "the correct threshold
+     * depends on the kiln's mass, element power and insulation, and nobody
+     * has ever measured this kiln's maximum legitimate ramp rate." A
+     * substituted magnitude here would be a missed-trip risk if guessed too
+     * high, and exactly the nuisance-trip generator SAFETY_MODEL.md section
+     * 2 forbids if guessed too low -- neither is a call this module gets to
+     * make silently.
+     *
+     * Measured as an AVERAGE rate over one whole rate_window_s window
+     * (baseline-sample-and-hold: remember the reading at the start of the
+     * window, compare against the reading rate_window_s later), never a
+     * per-tick instantaneous derivative. At this module's ~100ms tick, a
+     * per-tick dT/dt amplifies ordinary MAX31856 read noise by roughly
+     * dt_s's own reciprocal in minutes -- a mere 0.1C jitter between two
+     * consecutive 100ms ticks already reads as 60C/min, comfortably past any
+     * threshold anyone would ever commission -- which would turn every board
+     * that enables this guard into a nuisance-trip generator on a perfectly
+     * healthy sensor, the opposite of the doctrine this file is built on.
+     * Averaging over the full window is also what makes the guard
+     * "sustained" in the sense SAFETY_MODEL.md means it: a fast transient
+     * cannot move a whole-window average past the threshold by itself.
+     *
+     * Requiring TWO consecutive over-threshold window evaluations
+     * (S8_OVER_RATE_STREAK_TO_TRIP, see its own comment above) before
+     * tripping is the second, independent bar: it is what keeps a single
+     * glitchy sample landing on one window boundary from being read as a
+     * runaway, without weakening the response to a genuine sustained climb,
+     * which clears both windows with margin. */
+    if (in->tc_valid) {
+        if (cfg->max_rate_c_per_min > 0.0f) {
+            if (!state->s8_window_active) {
+                state->s8_window_active = true;
+                state->s8_window_start_c = in->tc_c;
+                state->s8_window_elapsed_s = 0.0f;
+            } else {
+                state->s8_window_elapsed_s += in->dt_s;
+                float window_th = effective_f(cfg->rate_window_s, RATE_WINDOW_S_DEFAULT);
+                if (state->s8_window_elapsed_s >= window_th) {
+                    float delta_c = in->tc_c - state->s8_window_start_c;
+                    float elapsed_min = state->s8_window_elapsed_s / 60.0f;
+                    float rate_c_per_min = delta_c / elapsed_min;
+
+                    if (rate_c_per_min > cfg->max_rate_c_per_min) {
+                        if (state->s8_over_rate_streak < UINT8_MAX) {
+                            state->s8_over_rate_streak++;
+                        }
+                    } else {
+                        state->s8_over_rate_streak = 0;
+                    }
+
+                    if (state->s8_over_rate_streak >= S8_OVER_RATE_STREAK_TO_TRIP) {
+                        trip(state, SAFETY_TRIP_RATE,
+                             "%.1fC/min > max_rate_c_per_min %.1fC/min over %.0fs window (%.1fC -> %.1fC), "
+                             "%u consecutive windows",
+                             (double)rate_c_per_min, (double)cfg->max_rate_c_per_min,
+                             (double)state->s8_window_elapsed_s, (double)state->s8_window_start_c,
+                             (double)in->tc_c, (unsigned)state->s8_over_rate_streak);
+                        return true;
+                    }
+
+                    /* Window complete either way: slide to a fresh window
+                     * starting now rather than growing the baseline further.
+                     * A sliding window keeps the guard responsive to a
+                     * runaway that starts partway through what would
+                     * otherwise be an arbitrarily long accumulation, and
+                     * keeps every window's rate calculation an honest
+                     * rate_window_s-long average rather than a stretched
+                     * one. */
+                    state->s8_window_start_c = in->tc_c;
+                    state->s8_window_elapsed_s = 0.0f;
+                }
+            }
+        } else {
+            state->s8_window_active = false;
+            state->s8_window_elapsed_s = 0.0f;
+            state->s8_over_rate_streak = 0;
+        }
+    }
+    /* A bad read (bad_read above) already returned before reaching here, so
+     * this block never runs against an invalid/NaN/stale sample -- it simply
+     * leaves the window paused (state untouched) across the bad ticks, the
+     * same "don't advance on garbage, don't reset on a transient either"
+     * treatment S1's streak gets. If the sensor stays bad long enough, S5
+     * trips first via its own, independent, faster path (bad_read_count_
+     * threshold / bad_read_time_s / blind_grace_s), which fires on this same
+     * tick's early return -- S8 never gets a chance to see the recovering
+     * value at all until S5 either clears or this whole guard set is
+     * latched by S5's own trip. */
 
     /* --- Context-dependent guards: S2, S3, S4, S10, S13 -----------------------
      * SAFETY_MODEL.md section 5, rule 2: "stale context is no context" -- and

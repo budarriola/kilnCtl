@@ -774,6 +774,273 @@ static void test_s12(void)
     }
 }
 
+/* S8 -- implausible rate of rise. SAFETY_MODEL.md section 4: "d(safety_tc_c)/dt
+ * > max_rate_c_per_min sustained for rate_window_s", ships disabled
+ * (max_rate_c_per_min == 0.0f). Every test here uses dt_s == rate_window_s
+ * (60.0f) so one safety_guards_tick() call is exactly one whole averaging
+ * window -- makes the window-by-window arithmetic in each test's comment
+ * checkable by hand, and keeps the streak (S8_OVER_RATE_STREAK_TO_TRIP == 2
+ * window evaluations) legible one call at a time. */
+static void test_s8(void)
+{
+    TEST_SECTION("S8 -- implausible rate of rise");
+
+    /* SHIPS INERT: base_cfg() (memset to 0, per every other test in this
+     * file) leaves max_rate_c_per_min at its zero-initialised,
+     * uncommissioned, documented-default value. GUARD_TEST_MATRIX.md's own
+     * pinned semantics: "Rate above threshold with max_rate_c_per_min = 0 ->
+     * No trip -- disabled means disabled." Proven here against a rate no
+     * real kiln could ever produce (500C/min, sustained for ten windows) --
+     * if this guard could trip at the shipped default, it would trip on
+     * this input long before any realistic one. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg(); /* max_rate_c_per_min == 0.0f, unset */
+        cfg.abs_max_temp_c = 0.0f; /* isolate S8 from S1 -- this test's absurd
+                                     * ramp would otherwise breach S1's own
+                                     * ceiling and fail for the WRONG reason. */
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            in.tc_c += 500.0f; /* 500C/min every window -- physically absurd */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "SHIPS INERT: max_rate_c_per_min == 0 never trips, no matter the rate");
+        TEST_CHECK(!s.s8_window_active,
+                   "disabled S8 does not even accumulate a window (state->s8_window_active stays false)");
+    }
+
+    /* Same proof, but explicitly setting max_rate_c_per_min = 0.0f rather
+     * than relying on memset -- pins "0 means disabled" as the field's
+     * actual documented meaning, not an accident of how the test builds cfg. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f; /* isolate S8 from S1, same reasoning as above */
+        cfg.max_rate_c_per_min = 0.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        bool tripped = false;
+        for (int i = 0; i < 5 && !tripped; i++) {
+            in.tc_c += 1000.0f;
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "explicit max_rate_c_per_min = 0.0f: disabled means disabled");
+    }
+
+    /* NUISANCE, the stated hazard (GUARD_TEST_MATRIX.md: "A legitimate
+     * full-power ramp at the measured maximum rate" must not trip): pick a
+     * threshold with an honest 2x margin over a measured maximum rate, per
+     * SAFETY_MODEL.md section 4's own commissioning guidance ("set the
+     * threshold at roughly 2x that"), and run a ramp AT that maximum rate
+     * for many windows. This repo has no logged full-power ramp to read a
+     * real number from (SAFETY_MODEL.md says exactly that -- "nobody has
+     * ever measured this kiln's maximum legitimate ramp rate"), so this test
+     * uses the SAME document's own stated bound for a small test kiln on
+     * full power -- "can genuinely exceed 15C/min" -- as the maximum
+     * legitimate rate, commissions max_rate_c_per_min at 2x it (30C/min),
+     * and proves a full 30-minute ramp held exactly at 15C/min never trips. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 30.0f; /* 2x SAFETY_MODEL.md's stated small-kiln max */
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        bool tripped = false;
+        for (int i = 0; i < 30 && !tripped; i++) { /* 30 windows = 30 minutes, held exactly at max legit rate */
+            in.tc_c += 15.0f;
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped,
+                   "a legitimate full-power ramp at the measured maximum rate (15C/min, 2x margin to threshold) never trips S8");
+    }
+
+    /* TRIP: a genuinely implausible sustained rate -- well past any
+     * plausible full-power ramp -- clears both the magnitude bar
+     * (max_rate_c_per_min) and the duration bar (two consecutive
+     * rate_window_s windows, S8_OVER_RATE_STREAK_TO_TRIP). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f; /* t=0: window 1 opens at 20C */
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "window 1 merely opens -- nothing to evaluate yet");
+
+        in.tc_c = 40.0f; /* t=60s: window 1 closes, 20C in 60s = 20C/min > 10 -- streak 1 */
+        tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "first over-threshold window alone does not trip (duration bar not yet cleared)");
+        TEST_CHECK(s.s8_over_rate_streak == 1, "first over-threshold window sets the streak to 1");
+
+        in.tc_c = 60.0f; /* t=120s: window 2 closes, another 20C in 60s -- streak 2, trips */
+        tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(tripped, "a second consecutive over-threshold window trips S8");
+        TEST_CHECK(s.reason == SAFETY_TRIP_RATE, "reason is SAFETY_TRIP_RATE");
+    }
+
+    /* NUISANCE: a single glitchy sample landing exactly on a window
+     * boundary, then reverting on the very next sample -- must not trip.
+     * This is the case the two-window streak exists for: window 2's
+     * inflated average becomes window 3's STARTING value, so window 3
+     * measures back down and the streak never reaches 2. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+
+        in.tc_c = 20.0f; /* window 1 opens */
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 20.0f; /* window 1 closes flat: 0C/min -- streak stays 0 */
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped && s.s8_over_rate_streak == 0, "sanity: a flat window never sets the streak");
+
+        in.tc_c = 70.0f; /* window 2 closes on a single glitch sample: 50C in 60s = 50C/min -- streak 1 */
+        tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "one glitchy window alone never trips (duration bar)");
+        TEST_CHECK(s.s8_over_rate_streak == 1, "the glitch does register as one over-threshold window");
+
+        in.tc_c = 20.0f; /* glitch reverts: window 3 measures back DOWN from the glitchy 70C -- streak resets */
+        tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "a single glitch that reverts by the next sample never trips S8");
+        TEST_CHECK(s.s8_over_rate_streak == 0, "the reverting window resets the streak back to 0");
+    }
+
+    /* WINDOWED STATE RESETS CORRECTLY when the rate falls back below
+     * threshold: an over-threshold window followed by an in-bounds window
+     * must fully clear the streak, not merely fail to advance it -- a later
+     * over-threshold window must start counting from zero, not from
+     * wherever the streak was left. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in); /* window 1 opens */
+        in.tc_c = 40.0f;                   /* window 1 closes: 20C/min -- streak 1 */
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s8_over_rate_streak == 1, "sanity: streak is 1 after one over-threshold window");
+
+        in.tc_c = 45.0f; /* window 2 closes: 5C/min, under threshold -- streak resets to 0 */
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "sanity: still not tripped");
+        TEST_CHECK(s.s8_over_rate_streak == 0, "an in-bounds window fully resets the streak, not just pauses it");
+
+        in.tc_c = 65.0f; /* window 3 closes: 20C/min again -- this is only the FIRST over-threshold
+                           * window since the reset, so it must not trip on its own. */
+        tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped,
+                   "a fresh over-threshold window after a reset needs its own two-window streak -- it does not "
+                   "inherit credit from before the reset");
+        TEST_CHECK(s.s8_over_rate_streak == 1, "the post-reset streak restarted from 0, now at 1");
+    }
+
+    /* Invalid/stale/NaN samples must not read as an enormous rate -- this
+     * repo has shipped exactly that class of bug before (an invalid-sample
+     * placeholder read as a real temperature). A bad read (S5's definition:
+     * spi_failed, !tc_valid, NaN, or OPEN/OVUV/TCRANGE fault bits) makes
+     * safety_guards_tick() return before this guard's block ever runs
+     * (see safety_guards.c's S5 block: "skip the rest of this tick's checks
+     * rather than reasoning about a value that isn't trustworthy") -- so the
+     * window is left PAUSED across bad ticks, never fed the bad value as
+     * either endpoint. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in); /* window opens at 20C */
+
+        /* A burst of bad reads -- !tc_valid, tc_c NaN, matching
+         * safety_guard_input_t's own "tc_valid == false implies tc_c and
+         * cj_c are NaN, never 0, never the last good reading" contract --
+         * long enough that if this guard read tc_c during a bad tick, NaN
+         * propagated through the rate arithmetic would poison every
+         * subsequent comparison (NaN compares false against everything,
+         * which could go EITHER way depending on exactly how it leaked in --
+         * exactly the ambiguity this test rules out). */
+        for (int i = 0; i < 15; i++) {
+            safety_guard_input_t bad = in;
+            bad.tc_valid = false;
+            bad.tc_c = NAN;
+            bad.cj_c = NAN;
+            /* Real tick period, not the 60s window-compressing dt_s used
+             * elsewhere in this test -- at dt_s=60s, S5's own
+             * bad_read_time_s(5s)/blind_grace_s(60s) bars would clear
+             * within two or three of these ticks and S5 itself would trip
+             * first, which would prove nothing about S8. This burst is
+             * about S8's window surviving bad reads, not about
+             * reproducing S5's own graduated response. */
+            bad.dt_s = 0.1f;
+            bool t = safety_guards_tick(&s, &cfg, &bad);
+            TEST_CHECK(!t, "a bad read never trips S8 by itself");
+        }
+        TEST_CHECK(s.s8_window_active && s.s8_window_start_c == 20.0f,
+                   "S8's window survives a burst of bad reads untouched -- paused, not corrupted, not reset");
+
+        /* Sensor recovers with a perfectly ordinary reading -- the window
+         * resumes exactly where it left off, using the ORIGINAL 20C
+         * baseline, not a NaN-poisoned one. */
+        in.tc_c = 22.0f; /* trivial rate once the window eventually closes */
+        bool tripped = false;
+        for (int i = 0; i < 2 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "recovering to a normal reading after a bad-read burst does not trip S8");
+    }
+
+    /* Latching: once tripped, S8 stays tripped, and safety_guards_clear()
+     * un-latches it -- the same contract every other guard in this file
+     * gets. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in), "sanity: S8 tripped");
+        safety_guard_input_t cool = in;
+        cool.tc_c = 20.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &cool) == false, "latched: a cooling reading does not un-latch S8");
+        TEST_CHECK(s.is_tripped, "still tripped");
+        safety_guards_clear(&s);
+        TEST_CHECK(!s.is_tripped, "safety_guards_clear() un-latches S8");
+    }
+}
+
 /* ARCHITECTURE.md section 10: "assert the independence invariant in tests,
  * not just in prose: run the guard suite with the TX path stubbed out
  * entirely and assert the verdict stream is bit-identical to a run with it
@@ -3177,6 +3444,7 @@ void run_test_safety_guards(void)
     test_s7();
     test_s11();
     test_s12();
+    test_s8();
     test_s2();
     test_s3_s4();
     test_s14();

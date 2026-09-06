@@ -29,19 +29,36 @@
 //   S5  Safety thermocouple invalid            WARN, then TRIP (graduated)
 //   S6  Main controller unhealthy              TRIP  (mainFault discrete + link liveness)
 //   S7  E-stop                                  TRIP
+//   S8  Implausible rate of rise                TRIP, ships disabled (max_rate_c_per_min == 0)
 //   S9  Trip ineffective / contactor welded    ESCALATE (post-trip current)
 //   S10 Safety TC vs zone TC disagreement       WARN  (context, CHAMBER_AGREED only)
 //   S11 Frozen safety reading                   TRIP
 //   S12 Cold junction / enclosure over-temp     WARN, then TRIP (graduated)
 //   S13 Borrowed channel not updating           WARN, then TRIP (context, BORROWED_ZONE/BOTH)
 //
-// NOT implemented here: S8 (implausible rate of rise) -- SAFETY_MODEL.md
-// section 4 says it "ships disabled" until a real kiln's maximum ramp rate
-// has been measured on the bench (TODO.md phase 9); hard-coding a plausible
-// threshold now is exactly the mistake that section refuses to make. Also
-// not implemented: the "runtime configuration integrity" background CRC
+// S8 is now implemented (this pass), but SHIPS INERT: max_rate_c_per_min ==
+// 0.0f (the zero-initialised, uncommissioned, and documented-default value --
+// SAFETY_MODEL.md section 4, S8, config_store.c's config_store_default())
+// means "not commissioned, never trip", the identical convention S1 uses for
+// abs_max_temp_c and for the identical reason -- nobody has measured this
+// kiln's maximum legitimate ramp rate, so this module must not guess one.
+// See safety_guards.c's S8 block for the averaging-window design that keeps
+// a single noisy sample from being mistaken for a runaway.
+//
+// NOT implemented here: the "runtime configuration integrity" background CRC
 // check (SAFETY_MODEL.md section 4) -- that is a config_store concern
 // (Phase 9, no config_store exists yet), not a guard evaluated per tick.
+//
+// Integration note (read before assuming this ships live): this file and its
+// host tests are the pure guard only. safety_core.c's
+// safety_core_load_guard_cfg() -- the function that copies commissioned
+// config_store fields into s_guard_cfg, same one whose omission for S1 was a
+// 2026-08-27 audit finding ("the pure function was correct the whole time;
+// the value never arrived") -- has NOT been touched by this pass to populate
+// max_rate_c_per_min/rate_window_s from config_store's existing 0x0204/0x0205
+// fields. Until that one-line wiring lands, S8 is built and host-tested but
+// NOT integrated, in this document's own vocabulary, and ships exactly as
+// inert as it did before this pass (max_rate_c_per_min reads 0 either way).
 //
 // Latching, always (SAFETY_MODEL.md section 2's "latching is not
 // auto-recovery"): once tripped, this module reports is_tripped == true on
@@ -81,7 +98,7 @@ typedef enum {
     SAFETY_TRIP_MAIN_FAULT      = 6,  /* S6a -- implemented */
     SAFETY_TRIP_LINK_DEAD       = 7,  /* S6b -- implemented */
     SAFETY_TRIP_ESTOP           = 8,  /* S7  -- implemented */
-    SAFETY_TRIP_RATE            = 9,  /* S8  -- not implemented, ships disabled per SAFETY_MODEL.md */
+    SAFETY_TRIP_RATE            = 9,  /* S8  -- implemented; ships disabled (max_rate_c_per_min == 0) */
     SAFETY_TRIP_INEFFECTIVE     = 10, /* S9  -- implemented */
     /* 11 reserved: S10 is WARN-only */
     SAFETY_TRIP_FROZEN_SENSOR   = 12, /* S11 -- implemented */
@@ -235,6 +252,19 @@ typedef struct {
      * tc_disagreement_time_s=300.0s. */
     float tc_disagreement_c;
     float tc_disagreement_time_s;
+
+    /* S8. max_rate_c_per_min: 0.0f = not commissioned, guard never trips --
+     * NOT a "substitute a default" 0, the same convention and the same
+     * reason as abs_max_temp_c above (SAFETY_MODEL.md section 4, S8: "it
+     * ships off ... nobody has ever measured this kiln's maximum legitimate
+     * ramp rate"). config_store.c's config_store_default() already sets
+     * this field to 0.0f, so an uncommissioned board is inert by
+     * construction, not merely by this module's own gate. rate_window_s: 0
+     * -> 60.0s default, an ordinary "0 means not configured" field like
+     * every window elsewhere in this struct -- unlike the magnitude, a
+     * window default is not a safety judgement call. */
+    float max_rate_c_per_min;
+    float rate_window_s;
 
     /* S14. Per-channel measured "normal" current (0x031A-0x031C,
      * i_normal_a[0..2]) and its own presence flag -- unlike every other
@@ -544,6 +574,19 @@ typedef struct {
      * non-timed) cj_warn_c crossing. */
     bool  s12_warn;
     float s12_over_max_elapsed_s;
+
+    /* S8: baseline-sample-and-hold rate-of-rise window. s8_window_start_c is
+     * the reading at the start of the current rate_window_s window;
+     * s8_window_elapsed_s accumulates toward rate_window_s, at which point
+     * the average rate over the window is evaluated and the window slides
+     * (never grows without bound). s8_over_rate_streak counts consecutive
+     * WINDOW EVALUATIONS (not ticks) whose average rate exceeded
+     * max_rate_c_per_min -- see safety_guards.c's S8 block for why a single
+     * over-threshold window is not enough to trip on its own. */
+    bool    s8_window_active;
+    float   s8_window_start_c;
+    float   s8_window_elapsed_s;
+    uint8_t s8_over_rate_streak;
 
     /* S2: sustained-over-setpoint timer. */
     float s2_over_elapsed_s;
