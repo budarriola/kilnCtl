@@ -30,6 +30,9 @@
 #include "watchdog_cfg.h"
 #include "crash_report.h"
 #include "MAX31856.h"
+#include "hal_spi_esp_owner.h" /* ILI9488_start() still takes a raw spi_owner_t*
+                                 * -- see that header's comment for why this
+                                 * bridge exists post-HAL-Phase-1b. */
 #include "NS2009.h"
 #include "FT6336U.h"
 #include "hal_i2c.h"
@@ -604,7 +607,18 @@ void main_boot_early(main_boot_ctx_t *ctx)
     // going through a missing expander is already tolerated: it just falls
     // back to a software reset, same as a genuinely absent reset line today.
     bool display_needs_expander = (DISPLAY_DC_GPIO < 0);
-    if ((ctx->io_ready || !display_needs_expander) && ctx->thermo_bus.owner_initialized) {
+    // HAL Phase 1b (2026-09-06): thermo_bus.owner_initialized/owner (raw
+    // spi_owner_t) folded into thermo_bus.hal_bus (hal_spi_bus_t) when
+    // MAX31856.c migrated to interface/hal_spi.h -- see MAX31856.h's own
+    // comment. `initialized` is the same "bus is up" signal owner_initialized
+    // used to be (MAX31856_bus_init() sets it last, only on success).
+    // ILI9488_start() below still wants the raw spi_owner_t*, since the
+    // display has not migrated to hal_spi.h yet -- hal_spi_esp_get_owner()
+    // (hal_spi_esp_owner.h) is the ESP-only bridge back to it, returning NULL
+    // on an uninitialized bus.
+    spi_owner_t *thermo_owner_for_display =
+        ctx->thermo_bus.initialized ? hal_spi_esp_get_owner(&ctx->thermo_bus.hal_bus) : NULL;
+    if ((ctx->io_ready || !display_needs_expander) && thermo_owner_for_display) {
         // INVARIANT, deliberate: ILI9488_start() draws the boot splash from
         // this task (app_main), and it must run strictly before
         // lvgl_port_start() (main_bridges_bringup.c) hands the display's SPI
@@ -621,7 +635,7 @@ void main_boot_early(main_boot_ctx_t *ctx)
         // touch-address corroboration -- only read from when
         // KILNCTL_DISPLAY_PANEL_AUTO is selected (not the default); every
         // other build ignores it entirely.
-        esp_err_t disp_err = ILI9488_start(&ctx->display, &ctx->thermo_bus.owner, KILN_SPI_HOST,
+        esp_err_t disp_err = ILI9488_start(&ctx->display, thermo_owner_for_display, KILN_SPI_HOST,
                                             ctx->io_ready ? &ctx->kio : NULL, ctx->i2c_bus);
         if (disp_err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "ILI9488 bring-up failed: %s", esp_err_to_name(disp_err));

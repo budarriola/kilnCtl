@@ -1,128 +1,58 @@
 /* hal_spi_esp.c -- ESP-IDF backend for interface/hal_spi.h.
  *
- * Phase 1b ("adapt"): implements the Phase-0 interface against ESP-IDF
- * v6.0.2, grounded in the real KilnFW consumers of espInterfaces/
- * esp_spi_owner.c: panel_spi*.c/lvgl_port*.c (the ST7796/ILI9488 display,
- * queued + async-flush path) and MAX31856.c/thermo_owner.c (the 5-channel
- * thermocouple bus, polling path). Bus bring-up mirrors
- * main_boot_early.c:421-474's spi_bus_initialize() call, folded into
- * hal_spi_bus_init() per this interface's unified bus-init contract. Not
- * wired into any CMakeLists yet -- see
- * firmware/hwAbstraction/test/compile_esp_backends.ps1.
+ * Phase 1b ("adapt") CORRECTED 2026-09-05: this used to duplicate
+ * esp_spi_owner.c's whole design (queue, slot pool, wedge latch, timeout)
+ * against driver/spi_master.h directly, so the firmware carried two
+ * independent implementations of the same safety-relevant single-writer SPI
+ * arbiter -- see docs/HW_ABSTRACTION_PLAN.md Phase 2 status (commit
+ * 26b16a6) and Phase 1b's own "esp owners implement hal_spi/hal_i2c/hal_uart
+ * at the edge" line: the owner IS the backend body, not a second thing next
+ * to it. This file is now a thin adapter: every hal_spi_* call maps directly
+ * to the matching spi_owner_* call in esp_spi_owner.c, which keeps the
+ * queue, the heap-backed slot pool, and the wedge latch. Nothing here holds
+ * request state; the two impl structs below hold only what is needed to
+ * find the right spi_owner_t/spi_device_handle_t from an opaque hal handle.
  *
- * No INTERFACE MISMATCH found for hal_spi.h: unlike hal_uart.h/hal_i2c.h,
- * hal_spi_bus_cfg_t already carries queue_len/task_priority/stack_depth/
- * core_id/dma_use_psram/async_flush/max_transfer_sz/dma_chan -- every
- * parameter spi_owner_init() and spi_bus_initialize() take today -- so this
- * backend needs no hardcoded stand-ins for caller-supplied task sizing.
+ * No INTERFACE MISMATCH found for hal_spi.h: hal_spi_bus_cfg_t already
+ * carries queue_len/task_priority/stack_depth/core_id/dma_use_psram/
+ * async_flush/max_transfer_sz/dma_chan -- every parameter spi_owner_init()
+ * and spi_bus_initialize() take -- so this adapter needs no hardcoded
+ * stand-ins for caller-supplied task sizing.
  *
- * Preserved behaviors (interface/hal_spi.h's contract comment and
- * docs/HW_ABSTRACTION_PLAN.md "hal_spi"):
- *  - Single-writer-per-bus via one owner task and its request queue,
- *    exactly as esp_spi_owner.c: display and thermocouple transfers funnel
- *    through the same FIFO queue with no priority.
- *  - Wedge latch: a queue-send timeout or an owner-task completion timeout
- *    (SPI_OWNER_TRANSFER_TIMEOUT_MS, unchanged at 1000 ms) latches
- *    hal_spi_bus_is_wedged() true; every subsequent transfer fails fast
- *    without touching the queue until hal_spi_bus_deinit()+_init() clears
- *    it. A pool-exhaustion failure does NOT latch wedged (matches
- *    spi_owner_transfer_impl()'s "transient resource condition, not
- *    evidence the bus itself is stuck" reasoning).
- *  - Request state is never stored on the caller's stack: a heap-backed
- *    slot pool (sized queue_len+1, same off-by-one reasoning as
- *    esp_spi_owner.c's spi_owner_init() comment -- the owner task frees a
- *    queue slot before it releases the matching pool slot) holds each
- *    request's completion semaphore (StaticSemaphore_t, not heap-allocated
- *    per transfer) and result, so a caller that times out and returns
- *    leaves nothing dangling for a late completion to write into.
- *  - One request build per call: hal_spi_transfer/_polling/_async build
- *    exactly one spi_owner_esp_request_t each, matching the ~56 B
- *    single-request-per-call invariant.
- *  - DMA sentinel translation: HAL_SPI_DMA_AUTO(0) -> SPI_DMA_CH_AUTO,
- *    HAL_SPI_DMA_NONE(-1) -> SPI_DMA_DISABLED, an explicit channel N -> N
- *    (see hal_spi_bus_cfg_t.dma_chan's own doc comment for why these are
- *    deliberately NOT the same numbering as ESP-IDF's spi_common_dma_t).
- *  - ALREADY_INIT: spi_bus_initialize() returning ESP_ERR_INVALID_STATE
- *    (observed after a JTAG/OpenOCD reset, main_boot_early.c's own comment)
- *    maps to HAL_OK with an INFO log, not a failure -- but hal_spi_bus_init
- *    still creates and starts THIS bus_t's own owner task/queue/slot pool
- *    in that case, since a fresh hal_spi_bus_t has none yet even though the
- *    underlying host peripheral is already up.
- *
- * Not implemented as a queued/ISR completion (spi_device_queue_trans() +
- * get_trans_result()): hal_spi_transfer_async(), like
- * spi_owner_transfer_async(), is a synchronous transfer run on the owner
- * task's own thread with the callback fired from there before the request
- * is released -- "the caller returns early, not that transfers interleave"
- * (DISPLAY_ST7796_PLAN.md 9.6, reproduced verbatim in esp_spi_owner.c's own
- * comment). Async is gated off (HAL_NOT_SUPPORTED) unless
- * cfg->async_flush was true at hal_spi_bus_init() time, matching
- * CONFIG_KILNCTL_SPI_ASYNC_FLUSH's default-off behavior exactly.
+ * esp_spi_owner.c has no device-attach or bus-bringup entry point of its
+ * own (spi_owner_init() only starts the queue/task/pool once the underlying
+ * spi_host_device_t already exists) -- spi_bus_initialize()/
+ * spi_bus_add_device() are plain ESP-IDF calls every real caller
+ * (MAX31856.c, panel_spi_bringup.c) makes directly today, so this adapter
+ * still makes them directly too. That is orchestration (bus/device
+ * bring-up), not a second copy of the owner's arbitration logic.
  */
 #include "hal_spi.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
 
+#include "esp_spi_owner.h"
 #include "hal_esp_common.h"
+#include "hal_spi_esp_owner.h"
 
 static const char *TAG = "hal_spi_esp";
 
-/* Unchanged from esp_spi_owner.c's SPI_OWNER_TRANSFER_TIMEOUT_MS -- see
- * that file's header comment for the full margin derivation (~1700x the
- * largest real transfer time; the realistic trigger is owner-task
- * starvation behind a flash erase/OTA write, not a genuinely dead bus). */
-#define HAL_SPI_ESP_TRANSFER_TIMEOUT_MS 1000u
-
 typedef struct {
-    spi_device_handle_t device;
-    const uint8_t *tx_buffer;
-    size_t tx_length;
-    uint8_t *rx_buffer;
-    size_t rx_length;
-    int cs_pin;
-    int slot;
-    bool shutdown;
-    bool use_polling;
-    bool async;
-    hal_spi_async_cb_t async_cb;
-    void *async_ctx;
-} hal_spi_esp_request_t;
-
-/* Module-owned result-slot pool -- see esp_spi_owner.c's spi_owner_slot_t /
- * spi_owner_slot_pool_init()/_deinit() for the full invariant this
- * reproduces (never the caller's stack; a late completion after a
- * caller-side timeout lands somewhere still valid). Reimplemented locally
- * rather than depending on KilnFW's App/drivers/owner_slot_pool.[ch] --
- * this tree does not include drivers/ code, and a self-contained
- * refcount-of-2 alloc/release pair is small enough not to need it. */
-typedef struct {
-    esp_err_t result;
-    StaticSemaphore_t sem_storage;
-    SemaphoreHandle_t sem;
-} hal_spi_esp_slot_t;
-
-typedef struct {
+    spi_owner_t owner;
     spi_host_device_t host;
-    QueueHandle_t request_queue;
-    TaskHandle_t task_handle;
-    SemaphoreHandle_t shutdown_done;
-    bool initialized;
-    volatile bool wedged;
-    bool dma_use_psram;
-    bool async_flush;
-    hal_spi_esp_slot_t *slots;
-    uint8_t *slot_refcount; /* 0 = free, else refcount (starts at 2) */
-    size_t slot_count;
-    SemaphoreHandle_t slot_lock;
+    bool bus_owned; /* true only if THIS init actually called spi_bus_initialize
+                      * successfully (not the ALREADY_INIT/shared-bus case) --
+                      * mirrors MAX31856BusClass::bus_owned. Not currently
+                      * acted on at deinit (see hal_spi_bus_deinit()'s comment
+                      * for why spi_bus_free() is deliberately never called
+                      * here), kept for parity with the owner-level callers'
+                      * own bookkeeping and for any future caller that does
+                      * need to know. */
 } hal_spi_esp_bus_impl_t;
 
 _Static_assert(sizeof(hal_spi_esp_bus_impl_t) <= sizeof(((hal_spi_bus_t *)0)->storage),
@@ -132,12 +62,9 @@ typedef struct {
     spi_device_handle_t device;
     int cs_pin;
     /* Back-pointer to the owning bus's impl, captured at attach time --
-     * ESP-IDF's spi_device_handle_t carries no such link, and
-     * hal_spi_transfer()/_polling()'s signatures (interface/hal_spi.h,
-     * NOT widened here) take only the device, so this is the only way a
-     * transfer can reach the owner task/queue/slot pool that
-     * hal_spi_bus_init() created. Same shape as hal_i2c_esp.c's identical
-     * device->bus-queue back-pointer. */
+     * hal_spi_transfer()/_polling()'s signatures (interface/hal_spi.h, NOT
+     * widened here) take only the device, so this is the only way a
+     * transfer can reach the spi_owner_t hal_spi_bus_init() created. */
     hal_spi_esp_bus_impl_t *bus;
 } hal_spi_esp_device_impl_t;
 
@@ -154,150 +81,6 @@ static const hal_spi_esp_bus_impl_t *bus_impl_of_const(const hal_spi_bus_t *bus)
 
 static hal_spi_esp_device_impl_t *device_impl_of(hal_spi_device_t *dev) {
     return (hal_spi_esp_device_impl_t *)(void *)dev->storage;
-}
-
-/* -- slot pool ---------------------------------------------------------- */
-
-static int slot_pool_alloc(uint8_t *refcount, size_t count) {
-    for (size_t i = 0; i < count; i++) {
-        if (refcount[i] == 0) {
-            refcount[i] = 2; /* one for the waiter (or nobody, if async), one for the owner task */
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-/* Returns true if this release brought the slot's refcount to 0 (i.e. it is
- * now free to reuse). */
-static bool slot_pool_release(uint8_t *refcount, size_t count, int idx) {
-    if (idx < 0 || (size_t)idx >= count) {
-        return false;
-    }
-    if (refcount[idx] > 0) {
-        refcount[idx]--;
-    }
-    return refcount[idx] == 0;
-}
-
-static esp_err_t slot_pool_init(hal_spi_esp_bus_impl_t *impl, size_t count) {
-    impl->slots = calloc(count, sizeof(hal_spi_esp_slot_t));
-    impl->slot_refcount = calloc(count, sizeof(uint8_t));
-    if (!impl->slots || !impl->slot_refcount) {
-        free(impl->slots);
-        free(impl->slot_refcount);
-        impl->slots = NULL;
-        impl->slot_refcount = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-
-    impl->slot_lock = xSemaphoreCreateMutex();
-    if (!impl->slot_lock) {
-        free(impl->slots);
-        free(impl->slot_refcount);
-        impl->slots = NULL;
-        impl->slot_refcount = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-
-    for (size_t i = 0; i < count; i++) {
-        impl->slots[i].sem = xSemaphoreCreateBinaryStatic(&impl->slots[i].sem_storage);
-        if (!impl->slots[i].sem) {
-            for (size_t j = 0; j < i; j++) {
-                vSemaphoreDelete(impl->slots[j].sem);
-            }
-            vSemaphoreDelete(impl->slot_lock);
-            impl->slot_lock = NULL;
-            free(impl->slots);
-            free(impl->slot_refcount);
-            impl->slots = NULL;
-            impl->slot_refcount = NULL;
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    impl->slot_count = count;
-    return ESP_OK;
-}
-
-static void slot_pool_deinit(hal_spi_esp_bus_impl_t *impl) {
-    if (impl->slots) {
-        for (size_t i = 0; i < impl->slot_count; i++) {
-            if (impl->slots[i].sem) {
-                vSemaphoreDelete(impl->slots[i].sem);
-            }
-        }
-    }
-    if (impl->slot_lock) {
-        vSemaphoreDelete(impl->slot_lock);
-    }
-    free(impl->slots);
-    free(impl->slot_refcount);
-    impl->slots = NULL;
-    impl->slot_refcount = NULL;
-    impl->slot_lock = NULL;
-    impl->slot_count = 0;
-}
-
-/* -- owner task ----------------------------------------------------------- */
-
-static void hal_spi_esp_task(void *arg) {
-    hal_spi_esp_bus_impl_t *impl = (hal_spi_esp_bus_impl_t *)arg;
-    hal_spi_esp_request_t request;
-
-    while (true) {
-        if (xQueueReceive(impl->request_queue, &request, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        if (request.shutdown) {
-            break;
-        }
-
-        esp_err_t result = ESP_OK;
-        if (request.tx_buffer && request.tx_length > 0) {
-            bool bitbang_cs = request.cs_pin >= 0;
-            if (bitbang_cs) {
-                gpio_set_level((gpio_num_t)request.cs_pin, 0);
-            }
-            spi_transaction_t trans = {
-                .length = request.tx_length * 8,
-                .tx_buffer = request.tx_buffer,
-                .rx_buffer = request.rx_buffer,
-                .rxlength = request.rx_length * 8,
-            };
-            if (impl->dma_use_psram && !request.use_polling) {
-                trans.flags |= SPI_TRANS_DMA_USE_PSRAM;
-            }
-            result = request.use_polling ? spi_device_polling_transmit(request.device, &trans)
-                                          : spi_device_transmit(request.device, &trans);
-            if (bitbang_cs) {
-                gpio_set_level((gpio_num_t)request.cs_pin, 1);
-            }
-        } else {
-            result = ESP_ERR_INVALID_ARG;
-        }
-
-        if (request.async && request.async_cb) {
-            request.async_cb(request.async_ctx, hal_esp_err_to_status(result));
-        }
-
-        hal_spi_esp_slot_t *slot = &impl->slots[request.slot];
-        slot->result = result;
-        xSemaphoreGive(slot->sem);
-
-        xSemaphoreTake(impl->slot_lock, portMAX_DELAY);
-        bool free_now = slot_pool_release(impl->slot_refcount, impl->slot_count, request.slot);
-        if (free_now) {
-            xSemaphoreTake(slot->sem, 0); /* drain a Give() nobody ever collected */
-            slot->result = ESP_OK;
-        }
-        xSemaphoreGive(impl->slot_lock);
-    }
-
-    if (impl->shutdown_done) {
-        xSemaphoreGive(impl->shutdown_done);
-    }
-    vTaskDelete(NULL);
 }
 
 /* -- bus lifecycle -------------------------------------------------------- */
@@ -320,8 +103,6 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id, const hal_spi_bus_
     hal_spi_esp_bus_impl_t *impl = bus_impl_of(bus);
     memset(impl, 0, sizeof(*impl));
     impl->host = (spi_host_device_t)bus_id;
-    impl->dma_use_psram = cfg->dma_use_psram;
-    impl->async_flush = cfg->async_flush;
 
     spi_bus_config_t bus_config = {
         .mosi_io_num = cfg->mosi_pin,
@@ -332,65 +113,36 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id, const hal_spi_bus_
         .max_transfer_sz = (int)cfg->max_transfer_sz, /* 0 -> IDF default, matches header contract */
     };
     esp_err_t err = spi_bus_initialize(impl->host, &bus_config, hal_spi_esp_dma_chan(cfg->dma_chan));
-    bool already_up = false;
     if (err == ESP_ERR_INVALID_STATE) {
         /* ALREADY_INIT decision (hal_spi.h): benign re-entry, not caller
          * error. Only the FIRST init's config took effect on the underlying
-         * peripheral -- this bus_t still needs its own fresh owner
-         * task/queue/pool below since it has none yet. */
+         * peripheral -- this bus_t still needs its own fresh spi_owner_t
+         * below since it has none yet even though the underlying host
+         * peripheral is already up. */
         ESP_LOGI(TAG, "spi host %d already initialized; treating as OK", bus_id);
-        already_up = true;
     } else if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(err));
         return hal_esp_err_to_status(err);
+    } else {
+        impl->bus_owned = true;
     }
 
-    impl->request_queue = xQueueCreate(cfg->queue_len, sizeof(hal_spi_esp_request_t));
-    if (!impl->request_queue) {
-        ESP_LOGE(TAG, "failed to create request queue");
-        return HAL_NO_MEM;
+    esp_err_t owner_err =
+        spi_owner_init(&impl->owner, impl->host, (UBaseType_t)cfg->queue_len,
+                        (UBaseType_t)cfg->task_priority, cfg->stack_depth,
+                        cfg->core_id == HAL_CORE_ANY ? tskNO_AFFINITY : (BaseType_t)cfg->core_id,
+                        cfg->dma_use_psram, cfg->async_flush);
+    /* Fixed 2026-09-05: this used to test `cfg->core_id == 0`, which made ESP
+     * core 0 unrepresentable -- a caller who genuinely wanted core 0 silently
+     * got tskNO_AFFINITY instead. HAL_CORE_ANY (hal_status.h, -1, numerically
+     * equal to FreeRTOS's tskNO_AFFINITY) is the sentinel now; 0 means core
+     * 0. Every real caller sets core_id to HAL_CORE_ANY explicitly, same as
+     * today's tskNO_AFFINITY usage. */
+    if (owner_err != ESP_OK) {
+        ESP_LOGE(TAG, "spi_owner_init failed: %s", esp_err_to_name(owner_err));
+        return hal_esp_err_to_status(owner_err);
     }
 
-    /* Sized queue_len + 1 -- same dequeue-before-release race margin as
-     * esp_spi_owner.c's spi_owner_init() comment: the owner task frees a
-     * queue slot before it releases the matching pool slot. */
-    esp_err_t pool_err = slot_pool_init(impl, (size_t)cfg->queue_len + 1);
-    if (pool_err != ESP_OK) {
-        vQueueDelete(impl->request_queue);
-        impl->request_queue = NULL;
-        ESP_LOGE(TAG, "failed to create result-slot pool");
-        return HAL_NO_MEM;
-    }
-
-    impl->shutdown_done = xSemaphoreCreateBinary();
-    if (!impl->shutdown_done) {
-        slot_pool_deinit(impl);
-        vQueueDelete(impl->request_queue);
-        impl->request_queue = NULL;
-        return HAL_NO_MEM;
-    }
-
-    BaseType_t task_created = xTaskCreatePinnedToCore(
-        hal_spi_esp_task, "hal_spi_owner", cfg->stack_depth, impl, cfg->task_priority,
-        &impl->task_handle, cfg->core_id == HAL_CORE_ANY ? tskNO_AFFINITY : (BaseType_t)cfg->core_id);
-    /* Fixed 2026-09-05: this used to test `cfg->core_id == 0`, which made
-     * ESP core 0 unrepresentable -- a caller who genuinely wanted core 0
-     * silently got tskNO_AFFINITY instead. HAL_CORE_ANY (hal_status.h, -1,
-     * numerically equal to FreeRTOS's tskNO_AFFINITY) is the sentinel now;
-     * 0 means core 0. Every real caller sets core_id to HAL_CORE_ANY
-     * explicitly, same as today's tskNO_AFFINITY usage. */
-    if (task_created != pdPASS) {
-        vQueueDelete(impl->request_queue);
-        impl->request_queue = NULL;
-        vSemaphoreDelete(impl->shutdown_done);
-        impl->shutdown_done = NULL;
-        slot_pool_deinit(impl);
-        ESP_LOGE(TAG, "failed to create owner task");
-        return HAL_NO_MEM;
-    }
-
-    impl->initialized = true;
-    (void)already_up;
     return HAL_OK;
 }
 
@@ -399,45 +151,26 @@ hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus) {
         return HAL_INVALID_ARG;
     }
     hal_spi_esp_bus_impl_t *impl = bus_impl_of(bus);
-    if (!impl->initialized) {
+    if (!impl->owner.initialized) {
         return HAL_NOT_READY;
     }
 
     /* CALLER CONTRACT, unchanged from spi_owner_deinit(): the caller must
-     * guarantee no hal_spi_transfer* call is still in flight anywhere
-     * (queued, or parked in its own completion wait) before calling this --
-     * see esp_spi_owner.c's spi_owner_deinit() doc comment for the full
-     * use-after-free reasoning this mirrors. Unreachable today: nothing in
+     * guarantee no hal_spi_transfer* call is still in flight anywhere before
+     * calling this -- see esp_spi_owner.h's spi_owner_deinit() doc comment
+     * for the full use-after-free reasoning. Unreachable today: nothing in
      * this firmware calls the equivalent deinit. */
-    hal_spi_esp_request_t shutdown_request;
-    memset(&shutdown_request, 0, sizeof(shutdown_request));
-    shutdown_request.shutdown = true;
-    if (impl->request_queue) {
-        xQueueSend(impl->request_queue, &shutdown_request, portMAX_DELAY);
-    }
-    if (impl->shutdown_done) {
-        if (xSemaphoreTake(impl->shutdown_done, pdMS_TO_TICKS(2000)) != pdTRUE) {
-            ESP_LOGW(TAG, "worker did not confirm shutdown in time; deleting queue anyway");
-        }
-        vSemaphoreDelete(impl->shutdown_done);
-    }
-    if (impl->request_queue) {
-        vQueueDelete(impl->request_queue);
-    }
-    slot_pool_deinit(impl);
+    esp_err_t err = spi_owner_deinit(&impl->owner);
 
-    spi_host_device_t host = impl->host;
-    memset(impl, 0, sizeof(*impl));
     /* spi_bus_free() is deliberately NOT called here: multiple hal_spi_bus_t
-     * instances / devices can share one underlying host peripheral (the
+     * instances/devices can share one underlying host peripheral (the
      * display and thermo devices share one bus per
      * docs/HW_ABSTRACTION_PLAN.md's "Bus-init semantics"), and freeing the
-     * host out from under a sibling hal_spi_bus_t this backend has no way
-     * to see would be unsafe. This matches spi_owner_deinit(), which never
-     * calls spi_bus_free() either -- only the owner task/queue/pool are
-     * torn down. */
-    (void)host;
-    return HAL_OK;
+     * host out from under a sibling hal_spi_bus_t this backend has no way to
+     * see would be unsafe. This matches spi_owner_deinit()/MAX31856_bus_deinit(),
+     * neither of which calls spi_bus_free() unconditionally either. */
+    memset(impl, 0, sizeof(*impl));
+    return hal_esp_err_to_status(err);
 }
 
 bool hal_spi_bus_is_wedged(const hal_spi_bus_t *bus) {
@@ -445,16 +178,7 @@ bool hal_spi_bus_is_wedged(const hal_spi_bus_t *bus) {
         return false;
     }
     const hal_spi_esp_bus_impl_t *impl = bus_impl_of_const(bus);
-    /* Fixed 2026-09-05: this used to read impl->wedged unconditionally,
-     * including on a never-initialized (or already-deinitialized)
-     * hal_spi_bus_t, where storage is either zeroed (reads false, harmless
-     * today) or stale/garbage from a prior use of the same memory (could
-     * read true) -- neither is a meaningful "is this bus wedged" answer.
-     * Report false unless the bus is actually initialized. */
-    if (!impl->initialized) {
-        return false;
-    }
-    return impl->wedged;
+    return spi_owner_is_wedged(&impl->owner);
 }
 
 void *hal_spi_get_task_handle(const hal_spi_bus_t *bus) {
@@ -462,10 +186,24 @@ void *hal_spi_get_task_handle(const hal_spi_bus_t *bus) {
         return NULL;
     }
     const hal_spi_esp_bus_impl_t *impl = bus_impl_of_const(bus);
-    if (!impl->initialized) {
+    if (!impl->owner.initialized) {
         return NULL;
     }
-    return (void *)impl->task_handle;
+    return (void *)impl->owner.task_handle;
+}
+
+/* See hal_spi_esp_owner.h -- ESP-only bridge for the display driver, which
+ * still takes a raw spi_owner_t* and shares this same physical bus/host with
+ * the (now HAL-migrated) MAX31856 channels. */
+spi_owner_t *hal_spi_esp_get_owner(hal_spi_bus_t *bus) {
+    if (!bus) {
+        return NULL;
+    }
+    hal_spi_esp_bus_impl_t *impl = bus_impl_of(bus);
+    if (!impl->owner.initialized) {
+        return NULL;
+    }
+    return &impl->owner;
 }
 
 hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
@@ -474,15 +212,15 @@ hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
         return HAL_INVALID_ARG;
     }
     hal_spi_esp_bus_impl_t *bus_impl = bus_impl_of(bus);
-    if (!bus_impl->initialized) {
+    if (!bus_impl->owner.initialized) {
         return HAL_NOT_READY;
     }
     hal_spi_esp_device_impl_t *dev_impl = device_impl_of(dev);
     memset(dev_impl, 0, sizeof(*dev_impl));
 
     /* CS is bit-banged around each transfer on both real buses today
-     * (DISPLAY_ST7796_PLAN.md 9.4) -- spics_io_num stays -1 whenever
-     * cs_pin is a real GPIO, matching MAX31856.c:558/panel_spi_bringup.c:301
+     * (DISPLAY_ST7796_PLAN.md 9.4) -- spics_io_num stays -1 whenever cs_pin
+     * is a real GPIO, matching MAX31856.c:558/panel_spi_bringup.c:301
      * exactly. hw_cs (a real spics_io_num) is supported for a caller that
      * opts into hardware CS instead. */
     spi_device_interface_config_t dev_config = {
@@ -503,101 +241,39 @@ hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
 
 /* -- transfers -------------------------------------------------------------- */
 
-static hal_status_t hal_spi_esp_transfer_impl(hal_spi_device_t *dev, const uint8_t *tx, size_t tx_len,
-                                               uint8_t *rx, size_t rx_len, uint32_t timeout_ms,
-                                               bool use_polling) {
-    (void)timeout_ms; /* the owner task's own bounded wait uses the fixed
-                        * HAL_SPI_ESP_TRANSFER_TIMEOUT_MS margin, matching
-                        * esp_spi_owner.c exactly -- spi_owner_transfer()
-                        * takes no caller-supplied timeout either. */
+hal_status_t hal_spi_transfer(hal_spi_device_t *dev, const uint8_t *tx, size_t tx_len, uint8_t *rx,
+                               size_t rx_len, uint32_t timeout_ms) {
+    (void)timeout_ms; /* spi_owner_transfer() takes no caller-supplied timeout
+                        * either -- the owner's own fixed
+                        * SPI_OWNER_TRANSFER_TIMEOUT_MS margin applies. */
     if (!dev) {
         return HAL_INVALID_ARG;
     }
     hal_spi_esp_device_impl_t *dev_impl = device_impl_of(dev);
-    hal_spi_esp_bus_impl_t *impl = dev_impl->bus;
-    if (!impl || !impl->initialized || !dev_impl->device) {
+    if (!dev_impl->bus || !dev_impl->device) {
         return HAL_NOT_READY;
     }
-
-    if (impl->wedged) {
-        return HAL_WEDGED;
-    }
-
-    xSemaphoreTake(impl->slot_lock, portMAX_DELAY);
-    int idx = slot_pool_alloc(impl->slot_refcount, impl->slot_count);
-    xSemaphoreGive(impl->slot_lock);
-    if (idx < 0) {
-        ESP_LOGE(TAG, "result-slot pool exhausted -- failing this transfer, not latching wedged");
-        return HAL_NO_MEM;
-    }
-
-    hal_spi_esp_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.device = dev_impl->device;
-    request.tx_buffer = tx;
-    request.tx_length = tx_len;
-    request.rx_buffer = rx;
-    request.rx_length = rx_len;
-    request.cs_pin = dev_impl->cs_pin;
-    request.slot = idx;
-    request.use_polling = use_polling;
-
-    if (xQueueSend(impl->request_queue, &request, pdMS_TO_TICKS(HAL_SPI_ESP_TRANSFER_TIMEOUT_MS)) !=
-        pdTRUE) {
-        xSemaphoreTake(impl->slot_lock, portMAX_DELAY);
-        slot_pool_release(impl->slot_refcount, impl->slot_count, idx);
-        slot_pool_release(impl->slot_refcount, impl->slot_count, idx);
-        xSemaphoreGive(impl->slot_lock);
-        impl->wedged = true;
-        ESP_LOGE(TAG,
-                 "request queue did not accept a transfer within %ums -- owner task presumed "
-                 "wedged, failing all transfers until hal_spi_bus_deinit()+init()",
-                 (unsigned)HAL_SPI_ESP_TRANSFER_TIMEOUT_MS);
-        return HAL_TIMEOUT;
-    }
-
-    hal_spi_esp_slot_t *slot = &impl->slots[idx];
-    esp_err_t result = ESP_ERR_TIMEOUT;
-    if (xSemaphoreTake(slot->sem, pdMS_TO_TICKS(HAL_SPI_ESP_TRANSFER_TIMEOUT_MS)) == pdTRUE) {
-        result = slot->result;
-        xSemaphoreTake(impl->slot_lock, portMAX_DELAY);
-        bool free_now = slot_pool_release(impl->slot_refcount, impl->slot_count, idx);
-        if (free_now) {
-            xSemaphoreTake(slot->sem, 0);
-            slot->result = ESP_OK;
-        }
-        xSemaphoreGive(impl->slot_lock);
-        return hal_esp_err_to_status(result);
-    }
-
-    /* Request was handed to the owner task, which is still presumably busy
-     * -- release only this side's half of the refcount and walk away,
-     * exactly as spi_owner_transfer_impl()'s identical branch: the slot
-     * stays orphaned (never reused) unless/until the owner task's own
-     * release later completes it. */
-    xSemaphoreTake(impl->slot_lock, portMAX_DELAY);
-    slot_pool_release(impl->slot_refcount, impl->slot_count, idx);
-    xSemaphoreGive(impl->slot_lock);
-
-    impl->wedged = true;
-    ESP_LOGE(TAG,
-             "owner task did not complete a transfer within %ums -- presumed wedged, failing all "
-             "transfers until hal_spi_bus_deinit()+init()",
-             (unsigned)HAL_SPI_ESP_TRANSFER_TIMEOUT_MS);
-    return HAL_TIMEOUT;
-}
-
-hal_status_t hal_spi_transfer(hal_spi_device_t *dev, const uint8_t *tx, size_t tx_len, uint8_t *rx,
-                               size_t rx_len, uint32_t timeout_ms) {
-    return hal_spi_esp_transfer_impl(dev, tx, tx_len, rx, rx_len, timeout_ms, /*use_polling=*/false);
+    esp_err_t err = spi_owner_transfer(&dev_impl->bus->owner, dev_impl->device, tx, tx_len, rx,
+                                        rx_len, dev_impl->cs_pin);
+    return hal_esp_err_to_status(err);
 }
 
 hal_status_t hal_spi_transfer_polling(hal_spi_device_t *dev, const uint8_t *tx, size_t tx_len,
                                        uint8_t *rx, size_t rx_len, uint32_t timeout_ms) {
     /* MAX31856 register transfers only (<=17 bytes) -- dispatches to
-     * spi_device_polling_transmit() instead of spi_device_transmit() on the
-     * owner task's own thread, exactly as spi_owner_transfer_polling(). */
-    return hal_spi_esp_transfer_impl(dev, tx, tx_len, rx, rx_len, timeout_ms, /*use_polling=*/true);
+     * spi_owner_transfer_polling(), which issues spi_device_polling_transmit()
+     * instead of spi_device_transmit() on the owner task's own thread. */
+    (void)timeout_ms;
+    if (!dev) {
+        return HAL_INVALID_ARG;
+    }
+    hal_spi_esp_device_impl_t *dev_impl = device_impl_of(dev);
+    if (!dev_impl->bus || !dev_impl->device) {
+        return HAL_NOT_READY;
+    }
+    esp_err_t err = spi_owner_transfer_polling(&dev_impl->bus->owner, dev_impl->device, tx, tx_len,
+                                                rx, rx_len, dev_impl->cs_pin);
+    return hal_esp_err_to_status(err);
 }
 
 hal_status_t hal_spi_transfer_async(hal_spi_device_t *dev, const uint8_t *tx, size_t len,
@@ -607,62 +283,32 @@ hal_status_t hal_spi_transfer_async(hal_spi_device_t *dev, const uint8_t *tx, si
         return HAL_INVALID_ARG;
     }
     hal_spi_esp_device_impl_t *dev_impl = device_impl_of(dev);
-    hal_spi_esp_bus_impl_t *impl = dev_impl->bus;
-    if (!impl || !impl->initialized || !dev_impl->device) {
+    if (!dev_impl->bus || !dev_impl->device) {
         return HAL_NOT_READY;
     }
-
-    if (!impl->async_flush) {
-        /* Default OFF, matching CONFIG_KILNCTL_SPI_ASYNC_FLUSH: never
-         * touches the queue -- callers must fall back to
-         * hal_spi_transfer(). */
-        return HAL_NOT_SUPPORTED;
+    /* spi_owner_transfer_async()'s callback shape (`cb(ctx, esp_err_t)`) is
+     * not hal_spi_async_cb_t's shape (`cb(ctx, hal_status_t)`) -- ESP-IDF
+     * error codes must not leak through the portable interface. A single
+     * static trampoline can't close over `cb`/`ctx` per-call without adding
+     * per-call heap/pool state (exactly the duplication this rewrite
+     * removes), so this backend narrows to synchronous-equivalent dispatch:
+     * it calls the owner synchronously via spi_owner_transfer() and invokes
+     * `cb` itself with the translated status before returning.
+     * // INTERFACE MISMATCH: hal_spi_transfer_async's contract (interface/
+     * hal_spi.h) is "the caller returns as soon as the request is queued,
+     * cb fires later from the owner task's own thread" -- this adapter
+     * cannot preserve that without either widening hal_spi_async_cb_t's
+     * signature to carry esp_err_t or giving the adapter its own
+     * per-request callback-translation slot (the kind of state this
+     * rewrite is explicitly trying to eliminate). panel_spi_blit.c is the
+     * only real caller and CONFIG_KILNCTL_SPI_ASYNC_FLUSH defaults off, so
+     * nothing exercises this path on real hardware today; flagged here
+     * rather than silently widened. Report and confirm before this path is
+     * ever turned on. */
+    esp_err_t err = spi_owner_transfer(&dev_impl->bus->owner, dev_impl->device, tx, len, NULL, 0,
+                                        dev_impl->cs_pin);
+    if (cb) {
+        cb(ctx, hal_esp_err_to_status(err));
     }
-    if (impl->wedged) {
-        return HAL_WEDGED;
-    }
-
-    xSemaphoreTake(impl->slot_lock, portMAX_DELAY);
-    int idx = slot_pool_alloc(impl->slot_refcount, impl->slot_count);
-    xSemaphoreGive(impl->slot_lock);
-    if (idx < 0) {
-        ESP_LOGE(TAG, "result-slot pool exhausted -- failing this async transfer, not latching wedged");
-        return HAL_NO_MEM;
-    }
-
-    hal_spi_esp_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.device = dev_impl->device;
-    request.tx_buffer = tx;
-    request.tx_length = len;
-    request.cs_pin = dev_impl->cs_pin;
-    request.slot = idx;
-    request.async = true;
-    request.async_cb = cb;
-    request.async_ctx = ctx;
-
-    if (xQueueSend(impl->request_queue, &request, pdMS_TO_TICKS(HAL_SPI_ESP_TRANSFER_TIMEOUT_MS)) !=
-        pdTRUE) {
-        xSemaphoreTake(impl->slot_lock, portMAX_DELAY);
-        slot_pool_release(impl->slot_refcount, impl->slot_count, idx);
-        slot_pool_release(impl->slot_refcount, impl->slot_count, idx);
-        xSemaphoreGive(impl->slot_lock);
-        impl->wedged = true;
-        ESP_LOGE(TAG,
-                 "async request queue did not accept a transfer within %ums -- owner task presumed "
-                 "wedged, failing all transfers until hal_spi_bus_deinit()+init()",
-                 (unsigned)HAL_SPI_ESP_TRANSFER_TIMEOUT_MS);
-        return HAL_TIMEOUT;
-    }
-
-    /* Enqueued: this caller does not wait on the slot's completion
-     * semaphore at all -- it releases its own half of the refcount right
-     * now, exactly as spi_owner_transfer_async(). The owner task's own
-     * release (after firing async_cb) brings the refcount the rest of the
-     * way to 0. */
-    xSemaphoreTake(impl->slot_lock, portMAX_DELAY);
-    slot_pool_release(impl->slot_refcount, impl->slot_count, idx);
-    xSemaphoreGive(impl->slot_lock);
-
     return HAL_OK;
 }

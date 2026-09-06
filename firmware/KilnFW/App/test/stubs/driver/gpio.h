@@ -49,6 +49,11 @@ static inline int gpio_get_level(gpio_num_t gpio)
  * exists and the call compiles/links" matters, same convention as the rest
  * of this file. */
 #define GPIO_IS_VALID_OUTPUT_GPIO(gpio) (1)
+/* Added 2026-09-05 for MAX31856.c's HAL Phase 1b host test
+ * (test_max31856_hal_spi.c), which is the first host test to hit
+ * MAX31856_init()'s fault_gpio validity check. Same "always valid" test
+ * double as GPIO_IS_VALID_OUTPUT_GPIO above. */
+#define GPIO_IS_VALID_GPIO(gpio) (1)
 
 /* DISPLAY_ST7796_PLAN.md 9.4: test_esp_spi_owner.c proves cs_pin < 0 skips
  * esp_spi_owner.c's bit-banging entirely (CONFIG_KILNCTL_SPI_HARDWARE_CS's

@@ -42,12 +42,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "driver/spi_master.h"
+#include "driver/spi_master.h" /* spi_host_device_t only -- transfers go through hal_spi.h now */
 #include "esp_err.h"
-#include "esp_spi_owner.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "hal_spi.h"
 #include "max31856_codec.h"
 #include "uart_task_ids.h"
 
@@ -258,12 +258,15 @@ typedef struct MAX31856Class MAX31856Class;
  * the wire to a driver instance without keeping its own array). */
 typedef struct {
     spi_host_device_t host;
-    spi_owner_t owner;
-    bool owner_initialized;
-    /* True only if THIS driver called spi_bus_initialize(). The display shares
-     * the bus; whoever gets there first initializes it and only that one frees
-     * it in deinit. */
-    bool bus_owned;
+    /* HAL Phase 1b (2026-09-05): the shared owner task/queue/slot-pool that
+     * used to be a raw spi_owner_t here now lives behind hal_spi.h -- this
+     * is a hal_spi_bus_t (opaque storage over esp_spi_owner.c's spi_owner_t
+     * on the ESP backend, see firmware/hwAbstraction/esp/spi/hal_spi_esp.c).
+     * bus_owned/owner_initialized folded away with it: hal_spi_bus_init()'s
+     * own ALREADY_INIT handling and hal_spi_bus_deinit()'s "never call
+     * spi_bus_free(), a sibling hal_spi_bus_t may share this host" rule
+     * (interface/hal_spi.h) now own that bookkeeping. */
+    hal_spi_bus_t hal_bus;
     bool initialized;
     MAX31856Class *channels[MAX31856_CHANNEL_COUNT];
     MAX31856_drdy_provider_t drdy_provider;
@@ -272,7 +275,16 @@ typedef struct {
 
 struct MAX31856Class {
     MAX31856BusClass *bus;
-    spi_device_handle_t dev;
+    /* HAL Phase 1b: was a raw spi_device_handle_t; every transfer now goes
+     * through hal_spi_transfer_polling()/hal_spi.h instead of
+     * spi_owner_transfer_polling() directly. */
+    hal_spi_device_t dev;
+    bool dev_attached; /* hal_spi_device_t has no NULL sentinel of its own
+                         * (opaque backend storage, not a pointer) -- this
+                         * replaces the pre-HAL `ch->dev != NULL` truthiness
+                         * checks used throughout this driver to mean
+                         * "hal_spi_device_attach() has succeeded for this
+                         * channel and never been undone". */
     int cs_gpio;
     int fault_gpio;          /* -1 if this channel's ~FAULT is not wired */
     uint8_t channel;         /* 0..2, as used on the wire */

@@ -10,6 +10,31 @@
 
 static const char *TAG = "MAX31856";
 
+/* HAL Phase 1b (2026-09-05): this driver's public API is esp_err_t
+ * end-to-end (thermo_owner.c and everything above it branches on ESP_ERR_*
+ * values today), but transfers now go through hal_spi.h, which returns
+ * hal_status_t. Rather than widen this driver's whole return-type surface
+ * (a change that would ripple into thermo_owner.c and beyond, well past the
+ * SPI-arbiter duplication this migration exists to fix), this narrow
+ * translation preserves the exact esp_err_t values every call site here
+ * already returned when talking to spi_owner_transfer_polling() directly:
+ * ESP_ERR_INVALID_STATE for both "not ready" and "wedged" (spi_owner_transfer_impl()
+ * returned ESP_ERR_INVALID_STATE for both before this migration), ESP_ERR_TIMEOUT,
+ * ESP_ERR_NO_MEM, ESP_ERR_INVALID_ARG unchanged. */
+static esp_err_t max31856_hal_to_esp_err(hal_status_t status)
+{
+    switch (status) {
+        case HAL_OK:           return ESP_OK;
+        case HAL_TIMEOUT:      return ESP_ERR_TIMEOUT;
+        case HAL_NO_MEM:       return ESP_ERR_NO_MEM;
+        case HAL_INVALID_ARG:  return ESP_ERR_INVALID_ARG;
+        case HAL_NOT_READY:    return ESP_ERR_INVALID_STATE;
+        case HAL_WEDGED:       return ESP_ERR_INVALID_STATE;
+        case HAL_NOT_SUPPORTED: return ESP_ERR_NOT_SUPPORTED;
+        default:                return ESP_FAIL;
+    }
+}
+
 /* SPI mode 1 = CPOL 0 / CPHA 1. The datasheet's Table 5 says the part "auto-
  * matically accommodates either clock polarity by sampling SCLK when CS
  * becomes active", but is unambiguous that "CPHA bit polarity must be set to
@@ -124,7 +149,7 @@ static void max31856_unlock(MAX31856Class *ch)
  * dereferencing a stale device handle or a deleted mutex. */
 static bool max31856_ready(const MAX31856Class *ch)
 {
-    return ch->initialized && ch->lock && ch->dev && ch->bus && ch->bus->initialized;
+    return ch->initialized && ch->lock && ch->dev_attached && ch->bus && ch->bus->initialized;
 }
 
 /* --- Low-level register access ----------------------------------------
@@ -165,8 +190,8 @@ static esp_err_t max31856_read_burst(MAX31856Class *ch, uint8_t reg, uint8_t *ou
     memset(rx, 0, sizeof(rx));
     tx[0] = (uint8_t)(reg & 0x7Fu); /* bit 7 = 0 selects a read */
 
-    esp_err_t err = spi_owner_transfer_polling(&ch->bus->owner, ch->dev, tx, len + 1u, rx, len + 1u,
-                                       ch->cs_gpio);
+    hal_status_t st = hal_spi_transfer_polling(&ch->dev, tx, len + 1u, rx, len + 1u, /*timeout_ms=*/0);
+    esp_err_t err = max31856_hal_to_esp_err(st);
     if (err != ESP_OK) {
         return err;
     }
@@ -190,7 +215,8 @@ static esp_err_t max31856_write_burst(MAX31856Class *ch, uint8_t reg, const uint
     tx[0] = MAX31856_WRITE_ADDR(reg);
     memcpy(&tx[1], data, len);
 
-    return spi_owner_transfer_polling(&ch->bus->owner, ch->dev, tx, len + 1u, NULL, 0, ch->cs_gpio);
+    hal_status_t st = hal_spi_transfer_polling(&ch->dev, tx, len + 1u, NULL, 0, /*timeout_ms=*/0);
+    return max31856_hal_to_esp_err(st);
 }
 
 static esp_err_t max31856_write_u8(MAX31856Class *ch, uint8_t reg, uint8_t value)
@@ -332,58 +358,45 @@ esp_err_t MAX31856_bus_init(MAX31856BusClass *bus,
     bus->drdy_provider = saved_provider;
     bus->drdy_ctx = saved_ctx;
 
-    spi_bus_config_t bus_config = {
-        .mosi_io_num = mosi_gpio,
-        .miso_io_num = miso_gpio,
-        .sclk_io_num = sclk_gpio,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
+    /* HAL Phase 1b (2026-09-05): hal_spi_bus_init() folds together what used
+     * to be two separate calls here (spi_bus_initialize() + spi_owner_init())
+     * -- see firmware/hwAbstraction/esp/spi/hal_spi_esp.c, which does exactly
+     * these two ESP-IDF/owner calls in order and carries forward the same
+     * ALREADY_INIT ("someone else -- the ILI9488 driver -- already brought
+     * this host up, reuse it") and queue/task-sizing behavior unchanged.
+     * Queue depth 8: deep enough that all three channels plus a UART-driven
+     * raw register poke can be in flight without a caller blocking on the
+     * queue itself. dma_use_psram/async_flush: CONFIG_KILNCTL_SPI_DMA_USE_PSRAM
+     * / CONFIG_KILNCTL_SPI_ASYNC_FLUSH, both default OFF. */
+    hal_spi_bus_cfg_t cfg = {
+        .sck_pin = sclk_gpio,
+        .mosi_pin = mosi_gpio,
+        .miso_pin = miso_gpio,
+        .queue_len = 8,
+        .task_priority = 5,
+        .stack_depth = 4096,
+        .core_id = HAL_CORE_ANY,
+        .dma_use_psram = KILNCTL_SPI_DMA_USE_PSRAM ? true : false,
+        .async_flush = KILNCTL_SPI_ASYNC_FLUSH ? true : false,
         /* Address byte + the longest burst. Nothing this driver sends is
          * bigger, and with DMA disabled the hardware FIFO caps a transfer at
          * 64 bytes anyway. NOTE for whoever brings up the ILI9488 on this same
          * bus: a framebuffer blit wants DMA and a much larger max_transfer_sz,
-         * and only the first spi_bus_initialize() on a host takes effect -- so
+         * and only the first hal_spi_bus_init() on a host takes effect -- so
          * the display driver should initialize the bus with its own (larger)
-         * config and let MAX31856_bus_init find it already up, which is the
-         * case handled just below. */
+         * config and let MAX31856_bus_init find it already up. */
         .max_transfer_sz = MAX31856_MAX_XFER_LEN,
+        /* DMA disabled: every transfer here is <= 17 bytes, which fits the
+         * FIFO, and it keeps the tx/rx buffers in this file ordinary stack
+         * arrays with no DMA-capable-memory or alignment requirements. */
+        .dma_chan = HAL_SPI_DMA_NONE,
     };
-
-    /* DMA disabled: every transfer here is <= 17 bytes, which fits the FIFO,
-     * and it keeps the tx/rx buffers in this file ordinary stack arrays with
-     * no DMA-capable-memory or alignment requirements. */
-    esp_err_t err = spi_bus_initialize(host, &bus_config, SPI_DMA_DISABLED);
-    if (err == ESP_ERR_INVALID_STATE) {
-        /* Someone else (the ILI9488 driver) already brought this host up. That
-         * is the normal case on this board -- one bus, four chip selects -- so
-         * reuse it and, crucially, remember that we do not own it: freeing a
-         * bus out from under the display would be worse than leaking it. */
-        ESP_LOGI(TAG, "SPI host %d already initialized; sharing it", (int)host);
-    } else if (err != ESP_OK) {
-        ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(err));
-        return err;
-    } else {
-        bus->bus_owned = true;
+    hal_status_t st = hal_spi_bus_init(&bus->hal_bus, (int)host, &cfg);
+    if (st != HAL_OK) {
+        ESP_LOGE(TAG, "hal_spi_bus_init failed: %s", hal_status_to_name(st));
+        return max31856_hal_to_esp_err(st);
     }
 
-    /* Queue deep enough that all three channels plus a UART-driven raw
-     * register poke can be in flight without a caller blocking on the queue
-     * itself (each caller still blocks on its own completion semaphore). */
-    /* DISPLAY_ST7796_PLAN.md 9.3/9.6: CONFIG_KILNCTL_SPI_DMA_USE_PSRAM and
-     * CONFIG_KILNCTL_SPI_ASYNC_FLUSH, both default OFF -- see
-     * esp_spi_owner.h's spi_owner_t::dma_use_psram/async_flush comments. */
-    err = spi_owner_init(&bus->owner, host, 8, 5, 4096, tskNO_AFFINITY,
-                          KILNCTL_SPI_DMA_USE_PSRAM ? true : false,
-                          KILNCTL_SPI_ASYNC_FLUSH ? true : false);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "spi_owner_init failed: %s", esp_err_to_name(err));
-        if (bus->bus_owned) {
-            spi_bus_free(host);
-            bus->bus_owned = false;
-        }
-        return err;
-    }
-    bus->owner_initialized = true;
     bus->initialized = true;
     return ESP_OK;
 }
@@ -407,20 +420,21 @@ esp_err_t MAX31856_bus_deinit(MAX31856BusClass *bus)
         }
     }
 
-    if (bus->owner_initialized) {
-        esp_err_t e = spi_owner_deinit(&bus->owner);
-        if (e != ESP_OK) {
-            err = e;
+    /* HAL Phase 1b: hal_spi_bus_deinit() tears down the owner task/queue/pool
+     * (spi_owner_deinit()) but deliberately never calls spi_bus_free() --
+     * see interface/hal_spi.h's threading contract and
+     * firmware/hwAbstraction/esp/spi/hal_spi_esp.c's own comment: a sibling
+     * hal_spi_bus_t (the display's) may still be sharing this host, and this
+     * backend has no way to see it. This is the same "only the original
+     * owner frees it" rule this driver's bus_owned field used to implement
+     * by hand; unreachable in practice today either way (nothing in this
+     * firmware calls MAX31856_bus_deinit() -- see spi_owner_deinit()'s own
+     * doc comment for the caller contract that would apply if that changes). */
+    if (bus->initialized) {
+        hal_status_t st = hal_spi_bus_deinit(&bus->hal_bus);
+        if (st != HAL_OK) {
+            err = max31856_hal_to_esp_err(st);
         }
-        bus->owner_initialized = false;
-    }
-
-    if (bus->bus_owned) {
-        esp_err_t e = spi_bus_free(bus->host);
-        if (e != ESP_OK) {
-            err = e;
-        }
-        bus->bus_owned = false;
     }
 
     bus->initialized = false;
@@ -438,10 +452,10 @@ MAX31856Class *MAX31856_bus_channel(MAX31856BusClass *bus, uint8_t channel)
 
 bool MAX31856_bus_spi_wedged(const MAX31856BusClass *bus)
 {
-    if (!bus || !bus->owner_initialized) {
+    if (!bus || !bus->initialized) {
         return false;
     }
-    return spi_owner_is_wedged(&bus->owner);
+    return hal_spi_bus_is_wedged(&bus->hal_bus);
 }
 
 esp_err_t MAX31856_set_drdy_provider(MAX31856BusClass *bus,
@@ -479,7 +493,7 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
      * and the mutex below without freeing either, and leave the bus registry
      * pointing at a struct whose contents just changed underneath it. Deinit
      * first, deliberately, or not at all. */
-    if (ch->initialized || ch->dev || ch->lock) {
+    if (ch->initialized || ch->dev_attached || ch->lock) {
         ESP_LOGE(TAG, "ch%u: init called on a channel that is already up", channel);
         return ESP_ERR_INVALID_STATE;
     }
@@ -549,29 +563,52 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
         }
     }
 
-    spi_device_interface_config_t dev_config = {
-        .clock_speed_hz = THERMO_SPI_CLOCK_HZ,
-        .mode = MAX31856_SPI_MODE,
+    hal_spi_device_cfg_t dev_cfg = {
+        .clock_hz = THERMO_SPI_CLOCK_HZ,
+        .mode = HAL_SPI_MODE_1,
 #if KILNCTL_SPI_HARDWARE_CS
-        .spics_io_num = cs_gpio, /* DISPLAY_ST7796_PLAN.md 9.4: peripheral drives CS */
+        .hw_cs = cs_gpio,      /* DISPLAY_ST7796_PLAN.md 9.4: peripheral drives CS */
+        .cs_pin = HAL_CS_NONE,
 #else
-        .spics_io_num = -1, /* CS driven by spi_owner, not the SPI peripheral */
+        .hw_cs = HAL_CS_NONE,
+        .cs_pin = HAL_CS_NONE, /* bit-banged by hal_spi's owner around each
+                                 * transfer via ch->cs_gpio, passed at
+                                 * transfer time -- NOT here; see hal_spi.h's
+                                 * device_cfg.cs_pin doc comment: it names the
+                                 * pin the DEVICE is fixed to. This driver's
+                                 * per-channel CS is threaded through
+                                 * ch->cs_gpio at every hal_spi_transfer_polling()
+                                 * call instead, exactly matching what the
+                                 * pre-HAL spi_owner_transfer_polling() call
+                                 * sites already did (cs_pin was a per-call
+                                 * argument there too, not a per-device one). */
 #endif
         .queue_size = 1,
         .input_delay_ns = MAX31856_SPI_INPUT_DELAY_NS,
     };
-    err = spi_bus_add_device(bus->host, &dev_config, &ch->dev);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ch%u: spi_bus_add_device failed: %s", channel, esp_err_to_name(err));
-        ch->dev = NULL;
-        return err;
+    hal_status_t attach_st = hal_spi_device_attach(&bus->hal_bus, &ch->dev, &dev_cfg);
+    if (attach_st != HAL_OK) {
+        ESP_LOGE(TAG, "ch%u: hal_spi_device_attach failed: %s", channel, hal_status_to_name(attach_st));
+        return max31856_hal_to_esp_err(attach_st);
     }
+    ch->dev_attached = true;
 
     ch->lock = xSemaphoreCreateMutex();
     if (!ch->lock) {
         ESP_LOGE(TAG, "ch%u: failed to allocate mutex", channel);
-        spi_bus_remove_device(ch->dev);
-        ch->dev = NULL;
+        /* HAL Phase 1b // INTERFACE MISMATCH: hal_spi.h has no
+         * hal_spi_device_detach()/hal_spi_bus's device-removal counterpart
+         * to hal_spi_device_attach() -- the pre-HAL code called
+         * spi_bus_remove_device(ch->dev) here. This leaves the ESP-IDF SPI
+         * device slot attached (a bounded, one-time leak of a device handle
+         * on a rare allocation-failure path at boot, not a functional or
+         * safety issue -- ch->dev is about to be zeroed and this channel
+         * never used again) rather than adding a device-lifecycle entry
+         * point to the portable interface for a single failure path. Flagged
+         * here rather than silently dropped; add hal_spi_device_detach() if
+         * a real teardown need shows up. */
+        memset(&ch->dev, 0, sizeof(ch->dev));
+        ch->dev_attached = false;
         return ESP_ERR_NO_MEM;
     }
 
@@ -609,7 +646,7 @@ esp_err_t MAX31856_deinit(MAX31856Class *ch)
     /* Leave the part not converting rather than free-running into a dead
      * driver -- best effort; a part that is already unreachable stays that
      * way and the error is ignored on the way out. */
-    if (ch->dev && ch->bus && ch->bus->initialized) {
+    if (ch->dev_attached && ch->bus && ch->bus->initialized) {
         (void)max31856_write_u8(ch, MAX31856_REG_CR0,
                                 (uint8_t)(ch->cr0_shadow & ~MAX31856_CR0_CMODE));
     }
@@ -619,12 +656,21 @@ esp_err_t MAX31856_deinit(MAX31856Class *ch)
         ch->bus->channels[ch->channel] = NULL;
     }
 
-    if (ch->dev) {
-        esp_err_t e = spi_bus_remove_device(ch->dev);
-        if (e != ESP_OK) {
-            err = e;
-        }
-        ch->dev = NULL;
+    /* HAL Phase 1b // INTERFACE MISMATCH: hal_spi.h has no
+     * hal_spi_device_detach() counterpart to hal_spi_device_attach() -- the
+     * pre-HAL code called spi_bus_remove_device(ch->dev) here. Same
+     * bounded-leak reasoning as MAX31856_init()'s allocation-failure comment
+     * above: this path frees this driver's own bookkeeping (ch->dev_attached
+     * goes false, the channel is fully usable again from this driver's point
+     * of view) but leaves the ESP-IDF SPI device slot attached underneath.
+     * MAX31856_deinit() itself is not called anywhere in this firmware today
+     * (grep confirms), so this is not a live leak on any current boot/runtime
+     * path -- flagged rather than silently dropped; add
+     * hal_spi_device_detach() to interface/hal_spi.h (and every backend) if a
+     * real repeated attach/detach cycle is ever needed. */
+    if (ch->dev_attached) {
+        ch->dev_attached = false;
+        memset(&ch->dev, 0, sizeof(ch->dev));
     }
 
     /* Device handle gone first, mutex last: nothing can start a new transfer

@@ -7,6 +7,15 @@
 #include "esp_err.h"
 
 typedef int spi_host_device_t;
+
+/* Real ESP-IDF spi_common_dma_t enumerates SPI1_HOST=0, SPI2_HOST=1,
+ * SPI3_HOST=2 -- added 2026-09-05 for MAX31856.c's HAL Phase 1b host test
+ * (test_max31856_hal_spi.c), which links settings.h's KILN_SPI_HOST (SPI2_HOST
+ * or SPI3_HOST depending on CONFIG_KILNCTL_SPI_HOST_SPI3) for the first time
+ * on host. Values are never asserted against -- only "this compiles and is a
+ * distinct int" matters, same convention as this stub's other typedefs. */
+#define SPI2_HOST 1
+#define SPI3_HOST 2
 typedef struct spi_device_t *spi_device_handle_t;
 
 /* Added 2026-09-01 for esp_spi_owner.c's host test (test_esp_spi_owner.c),
