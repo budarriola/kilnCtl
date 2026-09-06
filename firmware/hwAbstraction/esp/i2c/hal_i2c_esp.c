@@ -6,9 +6,8 @@
  * task/queue/retry logic directly against driver/i2c_master.h instead of
  * calling it; that duplication is gone. This file now only:
  *  1. Owns the i2c_master_bus_handle_t lifecycle (i2c_new_master_bus /
- *     i2c_del_master_bus / the ALREADY_INIT recovery path), which
- *     i2c_owner.c does not do -- i2c_owner_init() takes an already-created
- *     bus handle.
+ *     i2c_del_master_bus), which i2c_owner.c does not do -- i2c_owner_init()
+ *     takes an already-created bus handle.
  *  2. Maps each hal_i2c_* call onto the matching i2c_owner_* call.
  *  3. Owns i2c_master_bus_add_device()/i2c_master_probe(), which also sit
  *     outside i2c_owner.c's scope (device attach/probe are not
@@ -26,11 +25,14 @@
  * so a caller that leaves a field at 0 is never under-provisioned relative
  * to today.
  *
- * The ALREADY_INIT branch (bus_id shared by two devices, e.g. SX1509 +
- * touch on one i2c_port_num_t) recovers the real handle via
- * i2c_master_get_bus_handle() and falls through to i2c_owner_init() so THIS
- * hal_i2c_bus_t instance still gets its own queue/task, exactly as
- * hal_spi_bus_init() does for its identical ALREADY_INIT case.
+ * hal_i2c_bus_init() must NEVER be called on a port that is already open --
+ * see its own comment below for the 2026-09-06 hardware bug (a failed
+ * i2c_new_master_bus() on an already-open port leaves the port half
+ * released, breaking every other consumer sharing it) that killed the old
+ * ALREADY_INIT recovery path. A caller sharing a port another driver
+ * already brought up (e.g. FT6336U/NS2009 sharing SX1509's I2C_NUM_0) must
+ * use hal_i2c_esp_adopt() (hal_i2c_esp_owner.h) on the existing handle/
+ * owner instead.
  *
  * i2c_owner.c already preserves the two hard-won behaviors this backend
  * must not regress (interface/hal_i2c.h's own contract comment, and
@@ -54,6 +56,7 @@
 #include "freertos/FreeRTOS.h"
 
 #include "hal_esp_common.h"
+#include "hal_i2c_esp_owner.h"
 #include "i2c_owner.h"
 
 static const char *TAG = "hal_i2c_esp";
@@ -70,9 +73,16 @@ static const char *TAG = "hal_i2c_esp";
 #define HAL_I2C_ESP_DEFAULT_QUEUE_LEN     8
 
 typedef struct {
-    i2c_owner_t owner;
-    bool bus_owned; /* false on ALREADY_INIT recovery: don't i2c_del_master_bus() a
-                      * handle this hal_i2c_bus_t instance didn't create. */
+    i2c_owner_t owner_storage; /* used only when this bus_t created its own owner */
+    i2c_owner_t *owner;        /* &owner_storage normally; an adopted external
+                                 * i2c_owner_t* when hal_i2c_esp_adopt() was used
+                                 * instead of hal_i2c_bus_init() -- see
+                                 * hal_i2c_esp_owner.h. NULL when not initialized. */
+    bool bus_owned;   /* false when adopted: don't i2c_del_master_bus() a handle
+                        * this hal_i2c_bus_t instance didn't create. */
+    bool owner_owned; /* false when adopted: don't i2c_owner_deinit() an owner
+                        * this hal_i2c_bus_t instance didn't create -- some other
+                        * driver (e.g. SX1509.c) still uses it. */
 } hal_i2c_esp_bus_impl_t;
 
 _Static_assert(sizeof(hal_i2c_esp_bus_impl_t) <= sizeof(((hal_i2c_bus_t *)0)->storage),
@@ -120,42 +130,52 @@ hal_status_t hal_i2c_bus_init(hal_i2c_bus_t *bus, int bus_id, const hal_i2c_bus_
         .flags.enable_internal_pullup = true,
     };
     esp_err_t err = i2c_new_master_bus(&bus_config, &bus_handle);
-    if (err == ESP_ERR_INVALID_STATE) {
-        /* ALREADY_INIT per hal_i2c.h/hal_spi.h's shared decision: benign
-         * re-entry (e.g. a JTAG-reset re-bringup), not caller error. BUT
-         * this hal_i2c_bus_t instance still has no owner queue/task yet --
-         * returning HAL_OK here without creating one (the pre-fix bug) left
-         * every later attach/transfer/probe on THIS bus_t HAL_NOT_READY
-         * forever, even though the underlying port was fine (hit whenever
-         * two devices, e.g. SX1509 + touch, share one i2c_port_num_t).
-         * Recover the existing handle and fall through to i2c_owner_init()
-         * for this bus_t's own queue/task, exactly as hal_spi_bus_init()
-         * already does for the identical ALREADY_INIT case. */
-        err = i2c_master_get_bus_handle((i2c_port_num_t)bus_id, &bus_handle);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "i2c bus %d already initialized but i2c_master_get_bus_handle failed: %s",
-                     bus_id, esp_err_to_name(err));
-            return hal_esp_err_to_status(err);
-        }
-        ESP_LOGI(TAG, "i2c bus %d already initialized; recovered handle, treating as OK", bus_id);
-        impl->bus_owned = false;
-    } else if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        /* hal_i2c_bus_init() must NEVER be called on a port that is already
+         * open -- this used to recover via i2c_master_get_bus_handle() on
+         * ESP_ERR_INVALID_STATE ("ALREADY_INIT"), but IDF's cleanup on the
+         * FAILED i2c_new_master_bus() call above leaves the port half
+         * released ("acquire bus failed" / "Bus not freed entirely"), so
+         * every later transfer on the port -- including by whoever already
+         * owned it -- started failing with ESP_ERR_INVALID_RESPONSE. A
+         * caller sharing an already-open port must use hal_i2c_esp_adopt()
+         * (hal_i2c_esp_owner.h) on the existing handle/owner instead of
+         * calling this function at all. No recovery here; just fail loud. */
+        ESP_LOGE(TAG, "i2c_new_master_bus failed: %s -- if bus %d is already open, use "
+                      "hal_i2c_esp_adopt() instead of hal_i2c_bus_init()",
+                 esp_err_to_name(err), bus_id);
+        memset(impl, 0, sizeof(*impl));
         return hal_esp_err_to_status(err);
-    } else {
-        impl->bus_owned = true;
     }
+    impl->bus_owned = true;
 
-    esp_err_t owner_err = i2c_owner_init(&impl->owner, bus_handle, queue_len, task_priority,
+    esp_err_t owner_err = i2c_owner_init(&impl->owner_storage, bus_handle, queue_len, task_priority,
                                           stack_depth, core_id);
     if (owner_err != ESP_OK) {
-        if (impl->bus_owned) {
-            i2c_del_master_bus(bus_handle);
-        }
+        i2c_del_master_bus(bus_handle);
         memset(impl, 0, sizeof(*impl));
         return hal_esp_err_to_status(owner_err);
     }
+    impl->owner = &impl->owner_storage;
+    impl->owner_owned = true;
 
+    return HAL_OK;
+}
+
+hal_status_t hal_i2c_esp_adopt(hal_i2c_bus_t *bus, i2c_master_bus_handle_t handle,
+                                i2c_owner_t *owner) {
+    if (!bus || !owner) {
+        return HAL_INVALID_ARG;
+    }
+    if (!owner->initialized || (handle != NULL && owner->bus != handle)) {
+        ESP_LOGE(TAG, "hal_i2c_esp_adopt: owner not initialized or handle mismatch");
+        return HAL_INVALID_ARG;
+    }
+    hal_i2c_esp_bus_impl_t *impl = bus_impl_of(bus);
+    memset(impl, 0, sizeof(*impl));
+    impl->owner = owner;
+    impl->bus_owned = false;
+    impl->owner_owned = false;
     return HAL_OK;
 }
 
@@ -164,10 +184,10 @@ void *hal_i2c_get_task_handle(const hal_i2c_bus_t *bus) {
         return NULL;
     }
     const hal_i2c_esp_bus_impl_t *impl = (const hal_i2c_esp_bus_impl_t *)(const void *)bus->storage;
-    if (!impl->owner.initialized) {
+    if (!impl->owner || !impl->owner->initialized) {
         return NULL;
     }
-    return (void *)impl->owner.task_handle;
+    return (void *)impl->owner->task_handle;
 }
 
 hal_status_t hal_i2c_bus_deinit(hal_i2c_bus_t *bus) {
@@ -175,25 +195,34 @@ hal_status_t hal_i2c_bus_deinit(hal_i2c_bus_t *bus) {
         return HAL_INVALID_ARG;
     }
     hal_i2c_esp_bus_impl_t *impl = bus_impl_of(bus);
-    if (!impl->owner.initialized) {
+    if (!impl->owner || !impl->owner->initialized) {
         return HAL_NOT_READY;
     }
 
-    i2c_master_bus_handle_t bus_handle = impl->owner.bus;
+    i2c_master_bus_handle_t bus_handle = impl->owner->bus;
     bool bus_owned = impl->bus_owned;
+    bool owner_owned = impl->owner_owned;
 
-    /* i2c_owner_deinit() only fails today on !owner->initialized, which the
-     * check above already rules out -- but treat a failure defensively
-     * rather than assume that stays true forever: an earlier return here
-     * used to leave `impl` exactly as it was (owner.initialized still true,
-     * bus handle still live) on any error, which reads as "still a valid,
-     * usable bus" to every other hal_i2c_* call even though the caller was
-     * just told deinit happened. Whatever i2c_owner_deinit() returns, still
-     * release the bus handle this instance owns (if any) and zero `impl` so
-     * a later hal_i2c_transfer/probe/device_attach on this bus_t correctly
-     * sees HAL_NOT_READY instead of a half-torn-down owner that reads as
-     * initialized. The error itself is still reported to the caller. */
-    esp_err_t err = i2c_owner_deinit(&impl->owner);
+    /* Adopted bus (hal_i2c_esp_adopt(), owner_owned == false): this bus_t
+     * did not create the owner or the bus handle, so it must not tear
+     * either down -- some other driver (e.g. SX1509.c) still uses them.
+     * Only this instance's own local storage is cleared. */
+    esp_err_t err = ESP_OK;
+    if (owner_owned) {
+        /* i2c_owner_deinit() only fails today on !owner->initialized, which
+         * the check above already rules out -- but treat a failure
+         * defensively rather than assume that stays true forever: an
+         * earlier return here used to leave `impl` exactly as it was
+         * (owner.initialized still true, bus handle still live) on any
+         * error, which reads as "still a valid, usable bus" to every other
+         * hal_i2c_* call even though the caller was just told deinit
+         * happened. Whatever i2c_owner_deinit() returns, still release the
+         * bus handle this instance owns (if any) and zero `impl` so a later
+         * hal_i2c_transfer/probe/device_attach on this bus_t correctly sees
+         * HAL_NOT_READY instead of a half-torn-down owner that reads as
+         * initialized. The error itself is still reported to the caller. */
+        err = i2c_owner_deinit(impl->owner);
+    }
 
     if (bus_owned && bus_handle) {
         i2c_del_master_bus(bus_handle);
@@ -213,7 +242,7 @@ hal_status_t hal_i2c_device_attach(hal_i2c_bus_t *bus, hal_i2c_device_t *dev, ui
         return HAL_INVALID_ARG;
     }
     hal_i2c_esp_bus_impl_t *bus_impl = bus_impl_of(bus);
-    if (!bus_impl->owner.initialized) {
+    if (!bus_impl->owner || !bus_impl->owner->initialized) {
         return HAL_NOT_READY;
     }
     hal_i2c_esp_device_impl_t *dev_impl = device_impl_of(dev);
@@ -224,11 +253,11 @@ hal_status_t hal_i2c_device_attach(hal_i2c_bus_t *bus, hal_i2c_device_t *dev, ui
         .device_address = addr,
         .scl_speed_hz = clock_hz,
     };
-    esp_err_t err = i2c_master_bus_add_device(bus_impl->owner.bus, &dev_config, &dev_impl->device);
+    esp_err_t err = i2c_master_bus_add_device(bus_impl->owner->bus, &dev_config, &dev_impl->device);
     if (err != ESP_OK) {
         return hal_esp_err_to_status(err);
     }
-    dev_impl->owner = &bus_impl->owner;
+    dev_impl->owner = bus_impl->owner;
     return HAL_OK;
 }
 
@@ -252,9 +281,9 @@ hal_status_t hal_i2c_probe(hal_i2c_bus_t *bus, uint8_t addr, uint32_t timeout_ms
         return HAL_INVALID_ARG;
     }
     hal_i2c_esp_bus_impl_t *impl = bus_impl_of(bus);
-    if (!impl->owner.initialized) {
+    if (!impl->owner || !impl->owner->initialized) {
         return HAL_NOT_READY;
     }
-    esp_err_t err = i2c_master_probe(impl->owner.bus, addr, timeout_ms);
+    esp_err_t err = i2c_master_probe(impl->owner->bus, addr, timeout_ms);
     return hal_esp_err_to_status(err);
 }

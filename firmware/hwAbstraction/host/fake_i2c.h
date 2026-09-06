@@ -83,6 +83,16 @@ void fake_i2c_script_transfer_timeout(hal_i2c_bus_t *bus, uint8_t addr);
 hal_status_t fake_i2c_script_rx(hal_i2c_bus_t *bus, uint8_t addr,
                                  const uint8_t *data, size_t len);
 
+/* Host-fake model of the ESP-only hal_i2c_esp_adopt() bridge
+ * (firmware/hwAbstraction/esp/i2c/hal_i2c_esp_owner.h): stamps `bus` to
+ * share the same underlying slot as an already-live `existing` bus, so
+ * transfers/probes/device attaches through EITHER handle observe the same
+ * scripts and the same fake_i2c_transfer() log, while hal_i2c_bus_deinit()
+ * on the adopted `bus` never frees the shared slot (only a deinit of the
+ * ORIGINAL bus that owns it does). Returns HAL_NOT_READY if `existing` is
+ * not a live bus, HAL_INVALID_ARG if either pointer is NULL. */
+hal_status_t fake_i2c_bus_adopt(hal_i2c_bus_t *bus, const hal_i2c_bus_t *existing);
+
 #ifdef __cplusplus
 }
 #endif

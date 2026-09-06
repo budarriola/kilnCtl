@@ -36,6 +36,7 @@
 #include "NS2009.h"
 #include "FT6336U.h"
 #include "hal_i2c.h"
+#include "hal_i2c_esp_owner.h"
 #include "stack_margin.h"
 #include "touch_dev.h"
 /* ROADMAP.md M15 A1: this is one of the SX1509 write/config owners
@@ -667,21 +668,24 @@ void main_boot_early(main_boot_ctx_t *ctx)
     // driver/i2c_master.h one -- see FT6336U.h's header comment and
     // docs/HW_ABSTRACTION_PLAN.md. ctx->i2c_bus above is a raw
     // i2c_master_bus_handle_t shared with SX1509/ILI9488/NS2009, which have
-    // not migrated yet, so this hal_i2c_bus_t wraps the SAME already-created
-    // I2C_NUM_0 port rather than owning a second one: hal_i2c_bus_init()'s
-    // ALREADY_INIT recovery path (hal_i2c_esp.c) exists for exactly this --
-    // it detects the port is already up via i2c_new_master_bus's
-    // ESP_ERR_INVALID_STATE, recovers the existing handle, and still gives
-    // THIS hal_i2c_bus_t its own owner queue/task, independent of whatever
-    // else is queued on the port. scl/sda are only consulted on the
-    // NOT-already-initialized path, so passing zero here is fine.
+    // not migrated yet, so this hal_i2c_bus_t ADOPTS the SAME already-
+    // created I2C_NUM_0 port and the SAME i2c_owner_t the SX1509 bring-up
+    // above already initialized (ctx->expander.owner), via
+    // hal_i2c_esp_adopt() (hal_i2c_esp_owner.h), rather than creating a
+    // second bus/owner on the port. 2026-09-06: hal_i2c_bus_init() used to
+    // have an ALREADY_INIT recovery path for exactly this sharing case, but
+    // IDF's cleanup after i2c_new_master_bus() FAILS on an already-open
+    // port leaves the port half released ("acquire bus failed"/"Bus not
+    // freed entirely"), which broke every later SX1509 transfer on the same
+    // port (LCD D/C via the expander failing, SPI owner queue starving,
+    // MAX31856 channel locks timing out, 79s boot). hal_i2c_bus_init() must
+    // never be called on this already-open port again -- adopt is the
+    // replacement. This also fixes the second latent bug that path had:
+    // a second independent i2c_owner_t task on one physical port breaks the
+    // single-writer invariant i2c_owner.c exists to protect; adopting keeps
+    // exactly one owner task/queue for I2C_NUM_0.
     static hal_i2c_bus_t ft6336u_hal_bus;
     bool ft6336u_hal_bus_ready = false;
-    // stack_margin_register()'s task_handle_slot must be a stable address
-    // holding the real TaskHandle_t -- hal_i2c_get_task_handle() itself
-    // just returns the value, it is not a slot -- so this static holds it,
-    // same shape as SX1509.c's own &e->owner.task_handle call site.
-    static TaskHandle_t ft6336u_hal_i2c_task = NULL;
 #else
     static NS2009Class touch;
 #endif
@@ -689,30 +693,18 @@ void main_boot_early(main_boot_ctx_t *ctx)
     ctx->touch_dev = (touch_dev_t){0};
     if (ctx->i2c_bus) {
 #if CONFIG_KILNCTL_TOUCH_FT6336U
-        hal_i2c_bus_cfg_t ft6336u_bus_cfg = {
-            .scl_pin = I2C_MASTER_SCL_IO,
-            .sda_pin = I2C_MASTER_SDA_IO,
-            .queue_len = 8,
-            .task_priority = 5,
-            .stack_depth = 3072,
-            .core_id = HAL_CORE_ANY,
-        };
-        hal_status_t hal_bus_err = hal_i2c_bus_init(&ft6336u_hal_bus, I2C_NUM_0, &ft6336u_bus_cfg);
+        // Adopt the SX1509's already-initialized owner/bus (SX1509_start()
+        // above already ran i2c_owner_init() on this exact ctx->i2c_bus
+        // handle) instead of creating a second bus/owner on the same port --
+        // see the header comment above and hal_i2c_esp_owner.h. The owner
+        // task is already registered for stack-margin reporting by
+        // SX1509.c ("i2c_owner_sx1509"); nothing new to register here since
+        // no new task is created.
+        hal_status_t hal_bus_err =
+            hal_i2c_esp_adopt(&ft6336u_hal_bus, ctx->i2c_bus, &ctx->expander.owner);
         ft6336u_hal_bus_ready = (hal_bus_err == HAL_OK);
-        if (ft6336u_hal_bus_ready) {
-            // Register the owner task hal_i2c_bus_init() just created --
-            // pre-HAL, SX1509.c/NS2009.c/FT6336U.c's own i2c_owner_init()
-            // call sites each did this themselves right after success (see
-            // i2c_owner.c's own comment on why it can't self-register); the
-            // HAL migration moved owner creation behind hal_i2c_bus_init()
-            // but left this call with nobody making it, so this 3072 B task
-            // ran unregistered until now (check_stack_margin_registration.ps1
-            // ratchet did not catch it -- ft6336u_hal_i2c_task is a brand
-            // new name, not a widened `static`).
-            ft6336u_hal_i2c_task = (TaskHandle_t)hal_i2c_get_task_handle(&ft6336u_hal_bus);
-            stack_margin_register("hal_i2c_ft6336u", &ft6336u_hal_i2c_task, 3072);
-        } else {
-            ESP_LOGE(MAIN_TAG, "hal_i2c_bus_init for FT6336U failed: %s",
+        if (!ft6336u_hal_bus_ready) {
+            ESP_LOGE(MAIN_TAG, "hal_i2c_esp_adopt for FT6336U failed: %s",
                      hal_status_to_name(hal_bus_err));
         }
         esp_err_t touch_err = ft6336u_hal_bus_ready
@@ -730,17 +722,16 @@ void main_boot_early(main_boot_ctx_t *ctx)
             ESP_LOGW(MAIN_TAG, "FT6336U bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",
                      esp_err_to_name(touch_err));
-            // No FT6336U on the bus (or it failed identity check): the
-            // owner task/queue hal_i2c_bus_init() created above has nothing
-            // to serve -- pre-HAL, i2c_owner_init() for this controller was
-            // only ever called AFTER a successful probe, so no such task
-            // was ever left running for an absent device. Tear it down here
-            // to restore that property, rather than leaving a live 3072 B
-            // task + 8-deep queue idle for the rest of the boot.
+            // No FT6336U on the bus (or it failed identity check). Unlike
+            // the pre-adopt code, this bus_t is adopted (owner_owned=false,
+            // bus_owned=false, see hal_i2c_esp_owner.h) -- deinit here only
+            // clears ft6336u_hal_bus's own local storage; it does NOT tear
+            // down the shared SX1509 owner task/queue/bus handle, which
+            // stays alive for the SX1509/relay path regardless of whether a
+            // touch controller answered on the bus.
             if (ft6336u_hal_bus_ready) {
                 hal_i2c_bus_deinit(&ft6336u_hal_bus);
                 ft6336u_hal_bus_ready = false;
-                ft6336u_hal_i2c_task = NULL;
             }
         }
 #else

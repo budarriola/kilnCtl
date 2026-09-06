@@ -10,6 +10,9 @@
 typedef struct {
     uint32_t magic;
     int      slot;
+    bool     owned; /* false for a bus_t stamped by fake_i2c_bus_adopt():
+                      * hal_i2c_bus_deinit() on it must not free the shared
+                      * slot, mirroring hal_i2c_esp_adopt()'s owner_owned. */
 } fake_i2c_tag_t;
 
 _Static_assert(sizeof(fake_i2c_tag_t) <= HAL_I2C_BUS_STORAGE_BYTES,
@@ -234,6 +237,28 @@ hal_status_t hal_i2c_bus_init(hal_i2c_bus_t *bus, int bus_id,
     fake_i2c_tag_t tag;
     tag.magic = FAKE_I2C_BUS_MAGIC;
     tag.slot = free_slot;
+    tag.owned = true;
+    memset(bus->storage, 0, sizeof(bus->storage));
+    memcpy(bus->storage, &tag, sizeof(tag));
+    return HAL_OK;
+}
+
+/* Models hal_i2c_esp_adopt() (firmware/hwAbstraction/esp/i2c/
+ * hal_i2c_esp_owner.h) at the portable fake level: `bus` becomes a second
+ * hal_i2c_bus_t pointing at the SAME underlying slot as `existing` --
+ * transfers/probes/device_attach through either handle share one address-
+ * script table and one transfer log entry stream -- but is marked
+ * !owned, so hal_i2c_bus_deinit(bus) below never frees the shared slot. */
+hal_status_t fake_i2c_bus_adopt(hal_i2c_bus_t *bus, const hal_i2c_bus_t *existing)
+{
+    if (!bus || !existing) return HAL_INVALID_ARG;
+    int slot = get_bus_slot_index(existing);
+    if (slot < 0) return HAL_NOT_READY;
+
+    fake_i2c_tag_t tag;
+    tag.magic = FAKE_I2C_BUS_MAGIC;
+    tag.slot = slot;
+    tag.owned = false;
     memset(bus->storage, 0, sizeof(bus->storage));
     memcpy(bus->storage, &tag, sizeof(tag));
     return HAL_OK;
@@ -243,7 +268,13 @@ hal_status_t hal_i2c_bus_deinit(hal_i2c_bus_t *bus)
 {
     fake_i2c_bus_slot_t *b = get_bus(bus);
     if (!b) return HAL_NOT_READY;
-    b->in_use = false;
+
+    fake_i2c_tag_t tag;
+    memcpy(&tag, bus->storage, sizeof(tag));
+
+    if (tag.owned) {
+        b->in_use = false;
+    }
     memset(bus->storage, 0, sizeof(bus->storage));
     return HAL_OK;
 }
