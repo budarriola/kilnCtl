@@ -171,6 +171,11 @@ set(SAFTYFW_APP_SOURCES
 # relay_owner.c is now a hal_gpio client (interface/hal_gpio.h), backed on
 # target by pico/gpio/hal_gpio_pico.c. common/hal_status.c is the shared,
 # vendor-neutral hal_status_t name table every backend links against.
+# hal_wdt (HAL Phase 4, docs/HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt /
+# hal_pwm / hal_sysinfo" section): pico/wdt/hal_wdt_pico.c existed since the
+# Phase 1b syntax-only pass (compile_pico_backends.ps1) but was never linked
+# into a real target -- watchdog_task.c (feed) and update_task.c (reboot) are
+# now real hal_wdt clients, wired in for real by this pass.
 set(HWABSTRACTION_DIR ${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction)
 set(HWABSTRACTION_PICO_DIR ${HWABSTRACTION_DIR}/pico)
 add_library(hwabstraction_pico STATIC
@@ -182,6 +187,7 @@ add_library(hwabstraction_pico STATIC
     ${HWABSTRACTION_PICO_DIR}/adc/hal_adc_pico.c
     ${HWABSTRACTION_PICO_DIR}/scratch/hal_scratch_pico.c
     ${HWABSTRACTION_PICO_DIR}/flash/hal_flash_pico.c
+    ${HWABSTRACTION_PICO_DIR}/wdt/hal_wdt_pico.c
     ${HWABSTRACTION_DIR}/common/hal_status.c
 )
 target_include_directories(hwabstraction_pico PUBLIC
@@ -191,6 +197,7 @@ target_include_directories(hwabstraction_pico PUBLIC
     ${HWABSTRACTION_PICO_DIR}/adc
     ${HWABSTRACTION_PICO_DIR}/scratch
     ${HWABSTRACTION_PICO_DIR}/flash
+    ${HWABSTRACTION_PICO_DIR}/wdt
     ${HWABSTRACTION_DIR}/interface
 )
 # CLOSED 2026-09-06 (HAL Phase 1b, docs/HW_ABSTRACTION_PLAN.md): this used to

@@ -70,7 +70,13 @@
 
 #include "hardware/flash.h"
 #include "hardware/regs/addressmap.h" // XIP_BASE
-#include "hardware/watchdog.h"        // watchdog_reboot() -- update_task_request_rollback()
+// hardware/watchdog.h dropped (this pass): hal_wdt.h now covers this file's
+// sole watchdog_reboot(0, 0, 0) call, see update_task_request_rollback()
+// below. flash_range_erase()/flash_range_program()/XIP_BASE stay raw --
+// hal_flash.h's own header comment notes this file's usage fits that
+// interface too but its rebase "is not scheduled by the current plan pass";
+// this pass does not widen that scope.
+#include "hal_wdt.h"
 
 #include "task_priorities.h"
 #include "watchdog_task.h"
@@ -993,11 +999,15 @@ bool update_task_request_rollback(const char **out_reason, uint8_t *out_reason_c
 
     // No further code in this function runs after this call -- the caller
     // must log "accepted" (or otherwise act on `out_reason == "ok"`) BEFORE
-    // calling this function's caller chain concludes, since watchdog_reboot()
-    // resets the RP2040 immediately rather than returning.
-    watchdog_reboot(0, 0, 0);
+    // calling this function's caller chain concludes, since hal_wdt_reboot()
+    // resets the RP2040 immediately rather than returning. hal_wdt_reboot()
+    // is exactly this call site per hal_wdt.h's own header comment
+    // ("Pico watchdog_reboot() -- update_task.c:998, SaftyFW's sole call
+    // site, always as watchdog_reboot(0, 0, 0)") -- backend exists
+    // (pico/wdt/hal_wdt_pico.c) and is now wired into hwabstraction_pico.
+    hal_wdt_reboot();
     for (;;) {
-        // Defensive only: watchdog_reboot() does not return on real
+        // Defensive only: hal_wdt_reboot() does not return on real
         // hardware. Never reached, but a function declared to return bool
         // must not fall off its own end.
     }

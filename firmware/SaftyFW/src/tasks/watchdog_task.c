@@ -27,8 +27,12 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "hardware/gpio.h"
-#include "hardware/watchdog.h"
+#include "hal_gpio.h" // HAL Phase 1b/4 -- heartbeat LED, plain migration debt;
+                       // hal_gpio_pico.c's own header comment names this
+                       // file's LED as a client it must serve unchanged.
+#include "hal_wdt.h"   // HAL Phase 4 -- watchdog_update() feed, exactly the
+                       // call site hal_wdt.h's own header comment names
+                       // (watchdog_task.c:161, "the recurring feed").
 
 #include "board_pins.h"
 #include "startup_diag.h"
@@ -158,7 +162,7 @@ static void watchdog_task_fn(void *arg)
         s_diag_watchdog_loops++;
 
         if (all_ok) {
-            watchdog_update();
+            (void)hal_wdt_feed();
 
             // Toggle, not set-high: a steady blink at half the feed period
             // (500 ms full cycle) is what makes this a *heartbeat* rather
@@ -168,7 +172,7 @@ static void watchdog_task_fn(void *arg)
             // here, in the same branch as the real feed, so the LED cannot
             // physically keep moving once this branch stops running.
             s_led_state = !s_led_state;
-            gpio_put(SAFTYFW_PIN_HEARTBEAT_LED, s_led_state);
+            (void)hal_gpio_set(SAFTYFW_PIN_HEARTBEAT_LED, s_led_state);
         } else {
             // At least one task is past its own deadline. Do NOT feed --
             // the watchdog will reboot the chip in <= 1s, which is the
@@ -235,9 +239,9 @@ bool watchdog_task_start(void)
     // board_pins.h for why GPIO25 is a real pin here despite having no A1
     // schematic net (it is the Pico module's own onboard LED).
     s_led_state = false;
-    gpio_init(SAFTYFW_PIN_HEARTBEAT_LED);
-    gpio_set_dir(SAFTYFW_PIN_HEARTBEAT_LED, GPIO_OUT);
-    gpio_put(SAFTYFW_PIN_HEARTBEAT_LED, s_led_state);
+    if (hal_gpio_init_out(SAFTYFW_PIN_HEARTBEAT_LED, s_led_state) != HAL_OK) {
+        return false;
+    }
 
     // The hardware watchdog is armed exactly once, by main() step 3, using
     // SAFTYFW_WATCHDOG_TIMEOUT_MS. This function deliberately does NOT arm it.

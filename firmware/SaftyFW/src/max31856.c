@@ -13,12 +13,24 @@
 // identical body, unchanged transfer/timing/retry behavior) -- see
 // max31856_bus_init() below, which main.c now calls in place of
 // spi_owner_init().
+//
+// hardware/gpio.h dropped (this pass): the only two gpio_* call sites left
+// in this file were max31856_init()'s one-time ~CS idle-high setup and the
+// ~FAULT input-with-pullup setup + its steady-state read -- neither is the
+// per-transfer CS bit-bang (that already lives entirely inside
+// hal_spi_pico.c/spi_owner.c, "CS is bit-banged by spi_owner.c itself", see
+// max31856_bus_init()'s dev_cfg.hw_cs = HAL_CS_NONE comment below). Both are
+// exactly the shapes hal_gpio.h's own header comment names this file for
+// ("MAX31856 CS + fault-input pins (max31856.c)") and hal_gpio_pico.c is
+// already wired into hwabstraction_pico -- plain migration debt, not a
+// pin-level holdout. Order/polarity unchanged: put-then-set_dir for CS
+// (latch-before-direction, matches hal_gpio_init_out()'s contract exactly).
 #include "max31856.h"
 
 #include <math.h>
 #include <string.h>
 
-#include "hardware/gpio.h"
+#include "hal_gpio.h"
 
 #include "board_pins.h" // SAFTYFW_PIN_SPI0_{SCK,MOSI,MISO,CS0}
 #include "hal_spi.h"
@@ -155,18 +167,21 @@ bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio)
 {
     // ~CS idles high, output latch set before direction -- same
     // "never briefly undriven" discipline used for GPIO6 and spi_owner's CS0.
-    gpio_init(cs_gpio);
-    gpio_put(cs_gpio, 1);
-    gpio_set_dir(cs_gpio, GPIO_OUT);
+    // hal_gpio_init_out() sets the level BEFORE switching direction by
+    // contract (hal_gpio.h's latch-before-direction rule), matching the
+    // put-then-set_dir order this file used directly before this migration.
+    if (hal_gpio_init_out((int)cs_gpio, true) != HAL_OK) {
+        return false;
+    }
     s_cs_gpio = cs_gpio;
 
     // ~FAULT: input with the internal pull-up. THERMOCOUPLE.md section 1
     // says R1 (external, 10k) already does this job on this board; the
     // internal pull-up is redundant belt-and-braces, matching KilnFW's own
     // reasoning for its (non-redundant) case.
-    gpio_init(fault_gpio);
-    gpio_set_dir(fault_gpio, GPIO_IN);
-    gpio_pull_up(fault_gpio);
+    if (hal_gpio_init_in((int)fault_gpio, HAL_GPIO_PULL_UP) != HAL_OK) {
+        return false;
+    }
     s_fault_gpio = (int)fault_gpio;
 
     // Power-on defaults (datasheet Table 6): CR0 = 00h, CR1 = 03h (type K,
@@ -300,7 +315,7 @@ bool max31856_read(max31856_reading_t *out)
     }
 
     out->fault_pin_asserted =
-        (s_fault_gpio >= 0) && max31856_fault_pin_asserted(gpio_get(s_fault_gpio) != 0);
+        (s_fault_gpio >= 0) && max31856_fault_pin_asserted(hal_gpio_get(s_fault_gpio));
 
     // One transaction, six registers: CJTH, CJTL, LTCBH, LTCBM, LTCBL, SR.
     // Reading this burst is what releases ~DRDY back high (THERMOCOUPLE.md

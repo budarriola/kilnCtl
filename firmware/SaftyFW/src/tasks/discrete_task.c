@@ -12,7 +12,11 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "hardware/gpio.h"
+#include "hal_gpio.h" // HAL Phase 1b/4 -- discrete_task is a hal_gpio client now;
+                       // plain migration debt, see docs/HW_ABSTRACTION_PLAN.md's
+                       // "hal_gpio" section and hal_gpio_pico.c's own header
+                       // comment, which names this file's E-stop/main-fault
+                       // inputs as clients this backend must serve unchanged.
 
 #include "board_pins.h"
 #include "debounce_policy.h"
@@ -82,9 +86,9 @@ static void discrete_task_fn(void *arg)
         // S7 in both directions -- was invisible to the existing test
         // suite (virtual_dut synthesizes `estop_pressed` directly and never
         // exercises a GPIO read).
-        bool estop_raw = discrete_pin_policy_estop_asserted(gpio_get(SAFTYFW_PIN_ESTOP));
+        bool estop_raw = discrete_pin_policy_estop_asserted(hal_gpio_get(SAFTYFW_PIN_ESTOP));
         bool main_fault_raw =
-            discrete_pin_policy_main_fault_asserted(gpio_get(SAFTYFW_PIN_MAIN_FAULT));
+            discrete_pin_policy_main_fault_asserted(hal_gpio_get(SAFTYFW_PIN_MAIN_FAULT));
 
         s_estop_pressed = debounce_update(&estop_db, estop_raw, estop_n);
         s_main_fault = debounce_update(&main_fault_db, main_fault_raw, main_fault_n);
@@ -95,13 +99,15 @@ static void discrete_task_fn(void *arg)
 
 bool discrete_task_start(void)
 {
-    gpio_init(SAFTYFW_PIN_ESTOP);
-    gpio_set_dir(SAFTYFW_PIN_ESTOP, false); // input
-    gpio_pull_up(SAFTYFW_PIN_ESTOP); // matches R10's external pull-up; belt and suspenders
+    // matches R10's external pull-up; belt and suspenders
+    if (hal_gpio_init_in(SAFTYFW_PIN_ESTOP, HAL_GPIO_PULL_UP) != HAL_OK) {
+        return false;
+    }
 
-    gpio_init(SAFTYFW_PIN_MAIN_FAULT);
-    gpio_set_dir(SAFTYFW_PIN_MAIN_FAULT, false); // input
-    gpio_pull_up(SAFTYFW_PIN_MAIN_FAULT); // matches R8's external pull-up
+    // matches R8's external pull-up
+    if (hal_gpio_init_in(SAFTYFW_PIN_MAIN_FAULT, HAL_GPIO_PULL_UP) != HAL_OK) {
+        return false;
+    }
 
     BaseType_t ok = xTaskCreate(discrete_task_fn, "discrete_task", DISCRETE_TASK_STACK_WORDS, NULL,
                                  SAFTYFW_PRIO_DISCRETE_TASK, &s_task_handle);
