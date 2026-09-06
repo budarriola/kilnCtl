@@ -152,7 +152,51 @@ _VID_HINTS: tuple[tuple[str, int], ...] = (
     ("0403:6001", 40),  # FTDI FT232R
     ("0403:6015", 40),  # FTDI FT231X
     ("303A:1001", -80),  # Espressif native USB-Serial-JTAG
+    # WCH CH340K -- the UnitTestFixture board's UART bridge (fixture.py),
+    # never the main board's. Both boards' plain "ch340"/"ch343" substring
+    # hints above score positive on either board's description text, so
+    # without this the generic +50 "ch340" hint alone made recommend_port()
+    # (the MAIN board's picker) tie the fixture's CH340K against the main
+    # board's own CH343 bridge and lose the tie-break on COM-port name
+    # ("COM14" < "COM6" lexicographically) -- confirmed on the bench
+    # 2026-09-05 with both boards attached. See is_fixture_port() below for
+    # the belt-and-suspenders exclusion applied on top of this score.
+    ("1A86:7522", -80),
 )
+
+# ---------------------------------------------------------------------------
+# Known board identities (bench enumeration, 2026-09-05, both boards attached
+# simultaneously). Both boards' native ESP32-S3 USB-Serial-JTAG interface
+# shares VID:PID 303A:1001 -- indistinguishable by VID:PID alone -- so the USB
+# serial number is the only anchor for that side; the two boards' UART
+# bridges are different silicon (CH343 vs CH340K) and can also be told apart
+# by VID:PID, though the CH340K reports no serial number of its own.
+# `mcp_server_flash.py` pins the same MAIN_BOARD_JTAG_SERIAL /
+# FIXTURE_JTAG_SERIAL for OpenOCD's `adapter serial`; `fixture.py` keeps its
+# own historical text-hint exclusion list but is cross-checked against
+# is_main_board_port() below.
+# ---------------------------------------------------------------------------
+MAIN_BOARD_JTAG_SERIAL = "1C:DB:D4:92:F4:7C"  # 303A:1001, COM3
+MAIN_BOARD_UART_SERIAL = "552E006806"  # CH343 1A86:55D3, COM6
+FIXTURE_JTAG_SERIAL = "68:B6:B3:29:D0:B8"  # 303A:1001, COM7
+FIXTURE_UART_VID_PID = "1A86:7522"  # CH340K, no serial number, COM14
+
+
+def is_main_board_port(info: "PortInfo") -> bool:
+    """True if `info` is one of the main board's two USB interfaces
+    (JTAG by serial number, UART bridge by serial number)."""
+    hwid = info.hwid.upper()
+    return MAIN_BOARD_JTAG_SERIAL.upper() in hwid or MAIN_BOARD_UART_SERIAL in hwid
+
+
+def is_fixture_port(info: "PortInfo") -> bool:
+    """True if `info` is one of the UnitTestFixture board's two USB
+    interfaces (JTAG by serial number; the CH340K UART bridge reports no
+    serial number at all, so that side is identified by VID:PID alone --
+    see FIXTURE_UART_VID_PID's comment for the caveat if a second CH340K
+    device ever joins the bench)."""
+    hwid = info.hwid.upper()
+    return FIXTURE_JTAG_SERIAL.upper() in hwid or FIXTURE_UART_VID_PID in hwid
 
 
 def _score_port(port) -> int:
@@ -237,9 +281,18 @@ def list_ports() -> list[PortInfo]:
 
 
 def recommend_port() -> Optional[str]:
-    """Best-guess COM port for the USB-UART bridge, or None if nothing scores."""
+    """Best-guess COM port for the MAIN BOARD's USB-UART bridge, or None if
+    nothing scores.
+
+    Explicitly excludes any port identified as the UnitTestFixture board
+    (is_fixture_port()), on top of that board's CH340K already scoring
+    negative via _VID_HINTS -- two independent checks, since a fixture port
+    silently winning here would send main-board traffic (profiles, OTA,
+    settings) out the wrong board's UART. Confirmed on the bench 2026-09-05:
+    before this exclusion, recommend_port() picked the fixture's COM14 over
+    the main board's COM6."""
     for info in list_ports():
-        if info.score > 0:
+        if info.score > 0 and not is_fixture_port(info):
             return info.device
     return None
 

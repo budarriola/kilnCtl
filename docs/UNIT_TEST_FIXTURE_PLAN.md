@@ -81,12 +81,30 @@ Bench USB enumeration, 2026-09-05, both boards plugged in at once:
 
 Fixture and main board use different UART bridge silicon (CH340K vs CH343),
 so `recommend_fixture_port()` keys on VID:PID `1A86:7522`, excluding the main
-board's `1A86:55D3`/303A:1001/JTAG by name. The CH340K reports no per-device
-serial, so a second CH340K-family device on the bench would be ambiguous —
-`KILNCTL_FIXTURE_PORT` env var / `port=` is the fallback. Pinning the two
-identical-VID:PID native JTAG ports (relevant to `flash_firmware()`, not this
-surface) is a separate, ongoing pass on `serial_link.py`/`mcp_server_flash.py`,
-intentionally untouched here.
+board's `1A86:55D3`/303A:1001/JTAG by VID:PID (and, redundantly, by text
+hints). The CH340K reports no per-device serial, so a second CH340K-family
+device on the bench would be ambiguous — `KILNCTL_FIXTURE_PORT` env var /
+`port=` is the fallback.
+
+**Fixed 2026-09-06 (follow-up task; see git log for the commit that added
+this note):** the two identical
+VID:PID (303A:1001) native JTAG ports are now told apart everywhere by USB
+serial number. `serial_link.py` gained a board-identity table
+(`MAIN_BOARD_JTAG_SERIAL`/`MAIN_BOARD_UART_SERIAL`/`FIXTURE_JTAG_SERIAL`/
+`FIXTURE_UART_VID_PID`, `is_main_board_port()`/`is_fixture_port()`);
+`recommend_port()` (the MAIN board's own picker) now explicitly excludes
+fixture ports — confirmed bug: it previously picked the fixture's CH340K
+port when the main board was unplugged, instead of refusing.
+`recommend_fixture_port()` now also excludes by VID:PID/serial directly
+(a 303A:1001 port with a generic, non-"jtag" description was not excluded by
+the old text-only check) and never falls back to an unidentified port.
+`mcp_server_flash.py`'s `flash_firmware()` now passes `adapter serial
+<main board's serial>` to OpenOCD and refuses, before calling OpenOCD at
+all, if that serial isn't currently enumerated; a new `fixture_flash()` tool
+does the same pinned to the fixture's serial. Tests:
+`tests/test_serial_link_board_identity.py`, `tests/test_flash_board_pinning.py`,
+plus additions to `tests/test_fixture.py`. No firmware was flashed as part
+of this fix.
 
 ## Verification run this session
 

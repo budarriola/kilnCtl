@@ -258,6 +258,19 @@ exact incident's mixed dirty set (schema files plus an unrelated edit) --
 with a required negative test that drops the `zones?_config` pattern and
 confirms the assertions fail, naming the file that slipped through.
 
+Two ESP32-S3 boards are now permanently on the bench (2026-09-05: the main
+board and the UnitTestFixture), and both share USB VID:PID 303A:1001 on
+their native USB-Serial-JTAG interface -- indistinguishable to OpenOCD's
+`board/esp32s3-builtin.cfg` without an `adapter serial`. `flash_firmware()`
+now pins `adapter serial` to the main board's USB serial number and refuses,
+before calling OpenOCD at all, if that serial isn't currently enumerated
+(naming whichever 303A:1001 serial(s) are seen instead); a parallel
+`fixture_flash()` tool does the same pinned to the fixture's serial.
+`serial_link.recommend_port()` (the main board's own port picker) and
+`fixture.recommend_fixture_port()` got the same serial/VID:PID-anchored
+identity check, since either picker returning the other board's port
+misdirects UART traffic just as badly as an unpinned JTAG flash.
+
 ## Adding a tool
 
 For `kilnctrl`, write it in the server module with the existing

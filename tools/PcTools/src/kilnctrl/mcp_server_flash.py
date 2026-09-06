@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, debug_probe, devices, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, debug_probe, devices, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -84,6 +84,60 @@ def _kiln_fw_root() -> str:
     as a thin wrapper here since flash_firmware() below already refers to it
     by this name."""
     return debug_probe._kiln_fw_root()
+
+
+def _unit_test_fixture_fw_root() -> str:
+    """firmware/UnitTestFw/UnitTest/ project root (the UnitTestFixture
+    board's firmware), mirroring _kiln_fw_root()."""
+    return os.path.join(debug_probe._repo_root(), "firmware", "UnitTestFw", "UnitTest")
+
+
+# ---------------------------------------------------------------------------
+# Two ESP32-S3 boards are now permanently on the bench (2026-09-05): the main
+# board and the UnitTestFixture. Both boards' native USB-Serial-JTAG
+# interface shares VID:PID 303A:1001 -- OpenOCD's board/esp32s3-builtin.cfg
+# with no `adapter serial` binds to whichever one it enumerates first, which
+# is a real risk of flashing the wrong image onto the wrong board now that
+# both are attached simultaneously. Pin each flash path to its own board by
+# USB serial number (same anchors as serial_link.py's identity table) and
+# refuse outright, before touching OpenOCD, if that serial isn't enumerated.
+# ---------------------------------------------------------------------------
+MAIN_BOARD_JTAG_SERIAL = serial_link.MAIN_BOARD_JTAG_SERIAL
+FIXTURE_JTAG_SERIAL = serial_link.FIXTURE_JTAG_SERIAL
+
+
+def _enumerated_jtag_serials() -> "list[str]":
+    """USB serial numbers of every enumerated 303A:1001 (ESP32-S3 native
+    USB-Serial-JTAG) interface currently plugged in, for the refusal message
+    below -- named so an operator sees exactly what IS present, not just
+    that the expected board wasn't found."""
+    out = []
+    for info in serial_link.list_ports():
+        if "303A:1001" in info.hwid.upper():
+            ser = serial_link.debug_probe_hwid_serial(info.hwid)
+            if ser:
+                out.append(ser)
+    return out
+
+
+def _refuse_if_adapter_absent(expected_serial: str, board_label: str) -> Optional[str]:
+    """None if `expected_serial` is currently enumerated as a 303A:1001
+    interface; otherwise an error string naming what WAS seen instead, for
+    the caller to return immediately -- before OpenOCD is invoked at all, so
+    a missing/swapped board never silently flashes whatever unit OpenOCD
+    finds first."""
+    present = _enumerated_jtag_serials()
+    if expected_serial in present:
+        return None
+    return (
+        f"error: {board_label}'s debug-probe serial {expected_serial} is not "
+        "enumerated right now -- refusing to flash, since OpenOCD with no "
+        "`adapter serial` binds whichever 303A:1001 (ESP32-S3 native "
+        "USB-Serial-JTAG) unit it finds first, and both boards share that "
+        "VID:PID. "
+        + (f"303A:1001 serial(s) seen instead: {', '.join(present)}." if present
+           else "No 303A:1001 device is enumerated at all -- is the board plugged in?")
+    )
 
 
 def _run_openocd(openocd_exe: str, board_cfg_relpath: str, tcl_commands: str, cwd: str, timeout_s: int) -> tuple[bool, str]:
@@ -322,6 +376,15 @@ def flash_firmware(
     Requires `idf.py build` to have already produced KilnFW/build/*.bin --
     this tool does not build, only flashes.
 
+    Two ESP32-S3 boards are on the bench (2026-09-05: the main board and the
+    UnitTestFixture), and both boards' native USB-Serial-JTAG interface
+    shares VID:PID 303A:1001 -- `board_cfg`'s cfg file alone cannot tell them
+    apart, so this pins OpenOCD's `adapter serial` to the main board's
+    (MAIN_BOARD_JTAG_SERIAL) and refuses BEFORE calling OpenOCD at all if
+    that serial isn't currently enumerated, naming whichever 303A:1001
+    serial(s) ARE seen instead. Flashing the fixture is `fixture_flash()`,
+    pinned the same way to its own serial -- never this tool.
+
     Before flashing, refuses if KilnCtrl.bin looks stale relative to the
     current source tree (see stale_check.py's module docstring for the full
     mechanism: it compares the git commit recorded in build_info.h at build
@@ -416,6 +479,10 @@ def flash_firmware(
     if missing:
         return "error: missing build output(s), run `idf.py build` first: " + ", ".join(missing)
 
+    adapter_refusal = _refuse_if_adapter_absent(MAIN_BOARD_JTAG_SERIAL, "main board (ESP32-S3)")
+    if adapter_refusal:
+        return adapter_refusal
+
     provenance_path = os.path.join(build_dir, "flash_provenance.json")
     tree_state = flash_provenance.capture_tree_state()
     guard_reason = flash_provenance.decide_guard(tree_state, allow_sensitive_dirty=allow_sensitive_dirty)
@@ -462,6 +529,7 @@ def flash_firmware(
     kill_openocd_sessions()  # a stale session holding the JTAG interface looks identical to a flash failure
 
     tcl = (
+        f"adapter serial {MAIN_BOARD_JTAG_SERIAL}; "
         "program_esp build/bootloader/bootloader.bin 0x0 verify; "
         "program_esp build/partition_table/partition-table.bin 0x8000 verify; "
         "program_esp build/KilnCtrl.bin 0x810000 verify reset exit"
@@ -511,6 +579,92 @@ def flash_firmware(
         "USB power cycle of the board (not just a JTAG reset) has resolved a "
         "flash-write-protect-stuck state before."
     )
+
+
+@_srv._tool()
+def fixture_flash(
+    bootloader_bin: Optional[str] = None,
+    partition_table_bin: Optional[str] = None,
+    app_bin: Optional[str] = None,
+    board_cfg: str = "board/esp32s3-builtin.cfg",
+    retry_once: bool = True,
+) -> str:
+    """Flashes the UnitTestFixture board (also an ESP32-S3) over JTAG via
+    OpenOCD, pinned to that board's own USB serial number
+    (FIXTURE_JTAG_SERIAL) -- the counterpart to flash_firmware() for the
+    MAIN board. Refuses immediately, before calling OpenOCD at all, if that
+    serial is not currently enumerated (see _refuse_if_adapter_absent()),
+    naming whichever 303A:1001 serial(s) ARE seen instead -- both boards
+    share VID:PID 303A:1001 on their native USB-Serial-JTAG interface, so an
+    unpinned `adapter serial` would otherwise let OpenOCD silently bind
+    whichever board it enumerates first, same risk flash_firmware() guards
+    against on the main board's side.
+
+    `firmware/UnitTestFw/` has no build tooling wired into this codebase yet
+    (no dedicated `build_*` MCP tool, per docs/UNIT_TEST_FIXTURE_PLAN.md), so
+    unlike flash_firmware() this tool does not assume a fixed KilnFW-style
+    `build/` layout -- pass explicit paths for whichever of the three images
+    you built. Any omitted path is left out of the flash sequence entirely
+    (useful for flashing just an updated app image without re-touching the
+    bootloader/partition table), so at least one of the three must be given.
+
+    Same 3-image safety rule as flash_firmware(): each image is written with
+    `program_esp ... verify`, never a bare full-chip erase, and a single
+    "Verify Failed" on the first attempt is retried once automatically
+    (retry_once=True, the default) before this reports failure.
+
+    Deliberately does NOT do flash_firmware()'s post-flash HTTP verification
+    (partition/build-timestamp check) -- the fixture firmware's HTTP surface
+    (if any) is out of scope for this task; this tool only confirms the
+    OpenOCD write itself succeeded."""
+    openocd_exe = _find_openocd_exe()
+    if not openocd_exe:
+        return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
+
+    images: "list[tuple[str, str]]" = []  # (path, flash offset)
+    if bootloader_bin:
+        images.append((bootloader_bin, "0x0"))
+    if partition_table_bin:
+        images.append((partition_table_bin, "0x8000"))
+    if app_bin:
+        images.append((app_bin, "0x810000"))
+    if not images:
+        return (
+            "error: no image path given -- pass at least one of bootloader_bin, "
+            "partition_table_bin, app_bin."
+        )
+    missing = [p for p, _off in images if not os.path.isfile(p)]
+    if missing:
+        return "error: missing build output(s): " + ", ".join(missing)
+
+    adapter_refusal = _refuse_if_adapter_absent(FIXTURE_JTAG_SERIAL, "UnitTestFixture board")
+    if adapter_refusal:
+        return adapter_refusal
+
+    kill_openocd_sessions()  # a stale session holding the JTAG interface looks identical to a flash failure
+
+    # See program()'s comment in debug_probe.py: forward slashes sidestep
+    # Tcl's backslash escaping of a bare Windows path.
+    parts = [f"adapter serial {FIXTURE_JTAG_SERIAL}"]
+    for path, offset in images:
+        parts.append(f'program_esp "{path.replace(chr(92), "/")}" {offset} verify')
+    parts[-1] += " reset exit"
+    tcl = "; ".join(parts)
+
+    fixture_root = _unit_test_fixture_fw_root()
+    ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=fixture_root, timeout_s=90)
+    if ok:
+        return "flashed and verified OK (" + ", ".join(os.path.basename(p) for p, _ in images) + "), board reset"
+
+    if retry_once:
+        _srv._session_log.warning("fixture_flash: first attempt failed, retrying once (known benign quirk)")
+        ok2, output2 = _run_openocd(openocd_exe, board_cfg, tcl, cwd=fixture_root, timeout_s=90)
+        if ok2:
+            return "flashed and verified OK on retry (" + ", ".join(os.path.basename(p) for p, _ in images) + "), board reset"
+        output = output2
+
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return "error: fixture flash failed" + (" twice" if retry_once else "") + f":\n{tail}"
 
 
 # ---------------------------------------------------------------------------
