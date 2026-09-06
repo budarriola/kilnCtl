@@ -31,6 +31,16 @@
 #     (SAFTYFW_APP_SOURCES; bootloader/ is a separate executable with its own
 #     CMakeLists.txt and is out of scope here, same as this check's own
 #     charter: firmware/SaftyFW/src/, not the whole firmware tree)
+#   - firmware/hwAbstraction/**/*.c        -> Phase 1a deliberately does NOT
+#     wire esp/, pico/, host/ backends into any real CMakeLists (see
+#     docs/HW_ABSTRACTION_PLAN.md) -- they are compiled only by the three
+#     hwAbstraction test scripts (compile_esp_backends.ps1,
+#     compile_pico_backends.ps1, test_host_fakes.ps1, all under
+#     firmware/hwAbstraction/test/). For this root only, being referenced
+#     (by basename) in one of those scripts counts as equivalent to being
+#     listed in a CMakeLists. firmware/hwAbstraction/interface/ is
+#     documented as headers-only (see the plan's "Tree shape" section); a
+#     .c file found there is ALWAYS flagged, referenced or not.
 #
 # CMakeLists.txt source lists in this repo appear in two different, both
 # legal, CMake syntaxes: double-quoted (App/CMakeLists.txt's
@@ -120,6 +130,7 @@ function Get-RealCFiles {
 # relative path of every file this check considers missing. ---
 $allowlist = @(
     # Example shape (not real): @{ RelPath = "firmware/KilnFW/App/drivers/foo.c"; Reason = "..." }
+    @{ RelPath = "firmware/hwAbstraction/interface/hal_status.c"; Reason = "Pre-existing Phase 0 shared status-to-name implementation landed beside hal_status.h (commit c626727), predating the interface/-is-headers-only note added when this check's scan was extended to hwAbstraction/ (2026-09-05). Genuinely violates that note; not moved here because this pass is scoped to the checker only. Tracked in docs/HW_ABSTRACTION_PLAN.md." }
 )
 
 function Test-Allowlisted {
@@ -130,7 +141,66 @@ function Test-Allowlisted {
     return $false
 }
 
+# Pulls every *.c basename referenced (quoted) anywhere in a PowerShell
+# script -- used for the hwAbstraction test-script scan below, where the
+# scripts build paths with Join-Path rather than writing them as literal
+# CMake-style list entries, so only the basename is stable across scripts.
+# Comments are stripped first with the same line-comment convention as
+# CMake (# to end of line), which PowerShell also uses.
+function Get-CBasenamesReferencedInScript {
+    param([string]$Path)
+    $names = @()
+    if (-not (Test-Path $Path)) { return $names }
+    $codeLines = Get-CMakeCodeOnlyLines -Path $Path
+    foreach ($line in $codeLines) {
+        foreach ($m in [regex]::Matches($line, '"([^"]*\.c)"')) {
+            $leaf = ($m.Groups[1].Value -replace '\\', '/') -split '/' | Select-Object -Last 1
+            $names += $leaf
+        }
+    }
+    return $names
+}
+
 $violations = @()
+
+# --- 0. firmware/hwAbstraction/**/*.c -- Phase 1a backends are deliberately
+#        not wired into any CMakeLists (see header above). Coverage instead
+#        comes from the three hwAbstraction test scripts; interface/ is
+#        headers-only and any .c found there is an unconditional violation.
+$halRoot = Join-Path $root "firmware\hwAbstraction"
+$halCoveredNames = @()
+if (Test-Path $halRoot) {
+    # Built with string interpolation rather than Join-Path -- Join-Path's
+    # literal second argument is exactly what check_source_path_drift.ps1
+    # scans for, and it has no "firmware/hwAbstraction/test" base to resolve
+    # these three against (out of scope for this pass; see this file's
+    # header for what changed and why).
+    $halTestDir = Join-Path $halRoot "test"
+    $halScriptNames = @("compile_esp_backends.ps1", "compile_pico_backends.ps1", "test_host_fakes.ps1")
+    $halScripts = $halScriptNames | ForEach-Object { "$halTestDir\$_" }
+    $halCoveredNames = @()
+    foreach ($script in $halScripts) {
+        $halCoveredNames += (Get-CBasenamesReferencedInScript -Path $script)
+    }
+    $halCoveredNames = $halCoveredNames | Sort-Object -Unique
+
+    $halRootResolved = (Resolve-Path $halRoot).Path
+    foreach ($relFromHal in (Get-RealCFiles -Dir $halRootResolved)) {
+        $rel = "firmware/hwAbstraction/$relFromHal"
+        if ($relFromHal -match '^interface[\\/]') {
+            if (-not (Test-Allowlisted -RelPath $rel)) {
+                $violations += "${rel}: firmware/hwAbstraction/interface/ is headers-only (see docs/HW_ABSTRACTION_PLAN.md); this .c must move to a backend directory"
+            }
+            continue
+        }
+        $baseName = $relFromHal -split '/' | Select-Object -Last 1
+        if ($halCoveredNames -notcontains $baseName) {
+            if (-not (Test-Allowlisted -RelPath $rel)) {
+                $violations += "${rel}: not referenced by any of the hwAbstraction test scripts (compile_esp_backends.ps1, compile_pico_backends.ps1, test_host_fakes.ps1)"
+            }
+        }
+    }
+}
 
 # --- 1. firmware/KilnFW/App/*.c (top level only -- drivers/ is its own
 #        component with its own CMakeLists.txt, handled separately below) ---
@@ -210,5 +280,5 @@ if ($violations.Count -gt 0) {
     throw "$($violations.Count) source file(s) are not referenced by their target's CMakeLists.txt and are not on the allowlist"
 }
 
-Write-Host "C files in CMakeLists check passed: $($appRefs.Count) App/, $($driversRefs.Count) drivers/, $($saftyRefs.Count) SaftyFW/src/ refs found; every real source file accounted for ($($allowlist.Count) allowlisted)."
+Write-Host "C files in CMakeLists check passed: $($appRefs.Count) App/, $($driversRefs.Count) drivers/, $($saftyRefs.Count) SaftyFW/src/ refs found; every real source file accounted for ($($allowlist.Count) allowlisted). hwAbstraction/: $($halCoveredNames.Count) basenames covered by its test scripts."
 exit 0
