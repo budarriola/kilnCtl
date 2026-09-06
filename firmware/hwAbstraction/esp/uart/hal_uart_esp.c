@@ -72,7 +72,9 @@ static const char *TAG = "hal_uart_esp";
  * ask for anything else. */
 #define HAL_UART_ESP_DEFAULT_EVENT_TASK_STACK    3072
 #define HAL_UART_ESP_DEFAULT_EVENT_TASK_PRIORITY 5
-#define HAL_UART_ESP_DEFAULT_EVENT_QUEUE_LEN     16
+/* Event queue length default lives in HAL_UART_ESP_EVENT_QUEUE_LEN above --
+ * a second, duplicate HAL_UART_ESP_DEFAULT_EVENT_QUEUE_LEN (also 16, unused
+ * anywhere) used to live here; removed rather than kept as dead code. */
 
 typedef struct {
     uart_port_t port;
@@ -277,8 +279,37 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
         return HAL_NOT_READY;
     }
 
-    /* Unchanged from uart_owner_task()'s TX branch: write, then block until
-     * the last byte has left the wire. This is the primitive
+    /* Fixed 2026-09-05: uart_write_bytes() blocks internally, with NO
+     * caller-supplied bound, once the TX ring does not have room for the
+     * whole buffer -- it waits on the driver's own internal semaphore for
+     * space to free up. That made this function ignore `timeout_ms`
+     * entirely and hang forever if the ring stayed full (e.g. the other end
+     * stopped reading). Poll the ring's free space first -- same
+     * uart_get_tx_buffer_free_size() check hal_uart_send() uses -- in a
+     * vTaskDelay(1) loop bounded by timeout_ms, so a ring that never drains
+     * returns HAL_TIMEOUT with nothing partially queued, instead of hanging.
+     * Only once there is room for the FULL buffer do we call
+     * uart_write_bytes(), which can then be trusted to return immediately
+     * without its own internal wait. */
+    TickType_t start_tick = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        size_t free_bytes = 0;
+        esp_err_t free_err = uart_get_tx_buffer_free_size(impl->port, &free_bytes);
+        if (free_err != ESP_OK) {
+            return hal_esp_err_to_status(free_err);
+        }
+        if (free_bytes >= len) {
+            break;
+        }
+        if ((xTaskGetTickCount() - start_tick) >= timeout_ticks) {
+            return HAL_TIMEOUT;
+        }
+        vTaskDelay(1);
+    }
+
+    /* Unchanged from uart_owner_task()'s TX branch otherwise: write, then
+     * block until the last byte has left the wire. This is the primitive
      * uart_protocol.c:107's frame_and_send() needs -- its ACK timer starts
      * right after this call returns. */
     int written = uart_write_bytes(impl->port, (const char *)data, len);
@@ -286,7 +317,12 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
         impl->tx_dropped_count += (uint32_t)(len - (size_t)(written > 0 ? written : 0));
         return HAL_IO;
     }
-    esp_err_t err = uart_wait_tx_done(impl->port, pdMS_TO_TICKS(timeout_ms));
+
+    /* Remaining budget after the free-space wait above, so the total time
+     * spent in this call (wait + wait_tx_done) never exceeds timeout_ms. */
+    TickType_t elapsed_ticks = xTaskGetTickCount() - start_tick;
+    TickType_t remaining_ticks = (elapsed_ticks < timeout_ticks) ? (timeout_ticks - elapsed_ticks) : 0;
+    esp_err_t err = uart_wait_tx_done(impl->port, remaining_ticks);
     if (err != ESP_OK) {
         return hal_esp_err_to_status(err);
     }

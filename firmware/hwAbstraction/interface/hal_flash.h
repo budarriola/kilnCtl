@@ -145,6 +145,29 @@ typedef struct {
     HAL_ALIGNAS8 uint8_t storage[HAL_FLASH_REGION_STORAGE_BYTES];
 } hal_flash_region_t;
 
+/* A hal_flash_region_t is opaque storage, not a plain-old-data struct a
+ * caller may zero-init and pass: it MUST be produced by
+ * hal_flash_region_init() before use. NULL, or a hal_flash_region_t that has
+ * never been through hal_flash_region_init() (including one that is merely
+ * zeroed), is NOT a legal argument to any function below -- every one of
+ * them returns HAL_NOT_READY rather than silently treating it as "whole
+ * device" or crashing. This mirrors hal_kv's stance on an unopened handle;
+ * it replaces this header's earlier undocumented behavior of accepting NULL.
+ *
+ * Binds `r` to the byte range [base, base+size) of the whole-chip flash
+ * device (offset 0 == XIP_BASE on pico), bounds-checked against real chip
+ * geometry: `size` must be nonzero and base+size must not exceed the
+ * device's total flash size, else HAL_INVALID_ARG. Every later
+ * hal_flash_read/_erase/_program/_geometry() call against this `r` treats
+ * its `offset` argument as relative to `base` (matching the existing
+ * "offset 0 == start of flash" convention, now start-of-region rather than
+ * start-of-device) and is bounds-checked against `size`, not just against
+ * whole-device geometry.
+ *
+ * A region may be re-initialized (e.g. to rebind it to a different range);
+ * doing so does not erase or otherwise touch flash contents. */
+hal_status_t hal_flash_region_init(hal_flash_region_t *r, uint32_t base, uint32_t size);
+
 /* Whole-device geometry, independent of any one caller's region macros
  * (flash_layout.h's SAFTYFW_CONFIG_STORE_FLASH_OFFSET/_SIZE and friends
  * stay exactly where they are -- this reports chip-wide bounds so a caller
@@ -161,23 +184,40 @@ hal_status_t hal_flash_geometry(hal_flash_region_t *r, hal_flash_geometry_t *out
 /* Byte-granular read of already-programmed flash, XIP-mapped on pico (no
  * offset/len alignment requirement, no safe_execute lockout -- see the
  * execution-context contract above). offset/len are relative to the start
- * of flash (offset 0 == XIP_BASE), matching how config_store_flash.c and
- * update_task.c already compute XIP_BASE + <flash_layout.h offset>. */
+ * of `r` (see hal_flash_region_init() above), matching how
+ * config_store_flash.c and update_task.c already compute XIP_BASE +
+ * <flash_layout.h offset>. `r` must have been through
+ * hal_flash_region_init() -- HAL_NOT_READY otherwise. */
 hal_status_t hal_flash_read(hal_flash_region_t *r, uint32_t offset,
                              void *buf, size_t len);
 
 /* Erases [offset, offset+len) to all-0xFF. offset and len MUST each be an
- * exact multiple of HAL_FLASH_ERASE_SIZE -- HAL_INVALID_SIZE otherwise.
+ * exact multiple of HAL_FLASH_ERASE_SIZE -- HAL_INVALID_SIZE otherwise. `r`
+ * must have been through hal_flash_region_init() -- HAL_NOT_READY otherwise.
  * MUST be called from inside a hal_flash_safe_execute() callback; see the
  * execution-context contract above. */
 hal_status_t hal_flash_erase(hal_flash_region_t *r, uint32_t offset, size_t len);
 
-/* Programs `len` bytes from `buf` starting at `offset` into already-erased
- * flash. offset and len MUST each be an exact multiple of
- * HAL_FLASH_PROGRAM_SIZE -- HAL_INVALID_SIZE otherwise (config_store's
- * 512 B record and update_task's page_buf writes already satisfy this).
- * MUST be called from inside a hal_flash_safe_execute() callback; see the
- * execution-context contract above. */
+/* Programs `len` bytes from `buf` starting at `offset` into flash. offset
+ * and len MUST each be an exact multiple of HAL_FLASH_PROGRAM_SIZE --
+ * HAL_INVALID_SIZE otherwise (config_store's 512 B record and
+ * update_task's page_buf writes already satisfy this). `r` must have been
+ * through hal_flash_region_init() -- HAL_NOT_READY otherwise. MUST be
+ * called from inside a hal_flash_safe_execute() callback; see the
+ * execution-context contract above.
+ *
+ * AND-programming semantics, pinned explicitly (real NOR flash can only
+ * clear bits, 1->0, never set them without an intervening erase):
+ * programming is NOT an overwrite. Programming into already-erased
+ * (all-0xFF) flash reads back as `buf` exactly, indistinguishable from an
+ * overwrite. Programming a byte that is NOT already erased is PERMITTED --
+ * it is not an error this interface detects or refuses -- and the result is
+ * `existing_byte & new_byte` bitwise, per byte: any bit `buf` asks to be 1
+ * that the flash had already cleared to 0 stays 0. A caller that skips the
+ * required erase gets back neither `buf` nor the pre-existing contents, but
+ * their bitwise AND -- exactly what real hardware does, and exactly what
+ * test/test_fake_flash.c:121 (programming 0xF0 over unerased 0x0F reads
+ * back as 0x00) already asserts against the host fake. */
 hal_status_t hal_flash_program(hal_flash_region_t *r, uint32_t offset,
                                 const void *buf, size_t len);
 

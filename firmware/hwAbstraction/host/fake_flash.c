@@ -3,10 +3,59 @@
 
 #include <string.h>
 
+/* Region concept: a hal_flash_region_t is opaque storage that MUST be
+ * produced by hal_flash_region_init() -- see hal_flash.h's own doc comment
+ * on that function and on hal_flash_region_t. This backend tags an
+ * initialized region with a magic value plus its bound [base, base+size)
+ * range so every later op can (a) refuse an uninitialized/NULL region with
+ * HAL_NOT_READY and (b) translate that op's offset relative to the region's
+ * base and bounds-check it against the region's size, not just the whole
+ * device. */
+#define FAKE_FLASH_REGION_MAGIC 0x464C5348u /* "FLSH" */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t base;
+    uint32_t size;
+} fake_flash_region_data_t;
+
+typedef char fake_flash_region_fits_storage
+    [(sizeof(fake_flash_region_data_t) <= HAL_FLASH_REGION_STORAGE_BYTES) ? 1 : -1];
+
 static uint8_t  s_image[FAKE_FLASH_MAX_SIZE_BYTES];
 static size_t   s_total_size = FAKE_FLASH_DEFAULT_SIZE_BYTES;
 static uint32_t s_erase_counts[FAKE_FLASH_MAX_SECTORS];
 static bool     s_write_safe_here = true;
+
+hal_status_t hal_flash_region_init(hal_flash_region_t *r, uint32_t base, uint32_t size) {
+    if (r == NULL || size == 0u) {
+        return HAL_INVALID_ARG;
+    }
+    if ((uint64_t)base + (uint64_t)size > (uint64_t)s_total_size) {
+        return HAL_INVALID_ARG;
+    }
+    fake_flash_region_data_t d;
+    d.magic = FAKE_FLASH_REGION_MAGIC;
+    d.base = base;
+    d.size = size;
+    memcpy(r->storage, &d, sizeof(d));
+    return HAL_OK;
+}
+
+/* Returns true and fills *out if `r` is an initialized region; false (region
+ * untouched) for NULL or an uninitialized/zeroed hal_flash_region_t. */
+static bool region_get(const hal_flash_region_t *r, fake_flash_region_data_t *out) {
+    if (r == NULL) {
+        return false;
+    }
+    fake_flash_region_data_t d;
+    memcpy(&d, r->storage, sizeof(d));
+    if (d.magic != FAKE_FLASH_REGION_MAGIC) {
+        return false;
+    }
+    *out = d;
+    return true;
+}
 
 static bool     s_next_status_armed[4];
 static hal_status_t s_next_status[4];
@@ -100,14 +149,26 @@ static bool take_power_loss(fake_flash_op_t op) {
     return matches;
 }
 
-static bool bounds_ok(uint32_t offset, size_t len) {
-    return (uint64_t)offset + (uint64_t)len <= (uint64_t)s_total_size;
+/* Bounds-checks [offset, offset+len) against the region's own [0, size)
+ * range (offset is region-relative, per hal_flash_region_init()'s doc
+ * comment) and, on success, writes the absolute device offset to
+ * *abs_offset. */
+static bool region_bounds_ok(const fake_flash_region_data_t *d, uint32_t offset,
+                              size_t len, uint32_t *abs_offset) {
+    if ((uint64_t)offset + (uint64_t)len > (uint64_t)d->size) {
+        return false;
+    }
+    *abs_offset = d->base + offset;
+    return true;
 }
 
 /* --- hal_flash.h implementation --- */
 
 hal_status_t hal_flash_geometry(hal_flash_region_t *r, hal_flash_geometry_t *out) {
-    (void)r;
+    fake_flash_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
     if (out == NULL) {
         return HAL_INVALID_ARG;
     }
@@ -118,6 +179,8 @@ hal_status_t hal_flash_geometry(hal_flash_region_t *r, hal_flash_geometry_t *out
          * both are pure, side-effect-free queries. */
         return scripted;
     }
+    /* Whole-device geometry, independent of `r`'s own range -- see
+     * hal_flash.h's doc comment on hal_flash_geometry_t. */
     out->flash_total_size = (uint32_t)s_total_size;
     out->erase_size = HAL_FLASH_ERASE_SIZE;
     out->program_size = HAL_FLASH_PROGRAM_SIZE;
@@ -126,7 +189,10 @@ hal_status_t hal_flash_geometry(hal_flash_region_t *r, hal_flash_geometry_t *out
 
 hal_status_t hal_flash_read(hal_flash_region_t *r, uint32_t offset,
                              void *buf, size_t len) {
-    (void)r;
+    fake_flash_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
     hal_status_t scripted;
     if (take_scripted_status(FAKE_FLASH_OP_READ, &scripted)) {
         return scripted;
@@ -140,15 +206,19 @@ hal_status_t hal_flash_read(hal_flash_region_t *r, uint32_t offset,
     if (len == 0) {
         return HAL_OK;
     }
-    if (!bounds_ok(offset, len)) {
+    uint32_t abs_offset;
+    if (!region_bounds_ok(&d, offset, len, &abs_offset)) {
         return HAL_INVALID_ARG;
     }
-    memcpy(buf, &s_image[offset], len);
+    memcpy(buf, &s_image[abs_offset], len);
     return HAL_OK;
 }
 
 hal_status_t hal_flash_erase(hal_flash_region_t *r, uint32_t offset, size_t len) {
-    (void)r;
+    fake_flash_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
     hal_status_t scripted;
     if (take_scripted_status(FAKE_FLASH_OP_ERASE, &scripted)) {
         return scripted;
@@ -159,9 +229,11 @@ hal_status_t hal_flash_erase(hal_flash_region_t *r, uint32_t offset, size_t len)
     if ((offset % HAL_FLASH_ERASE_SIZE) != 0u || (len % HAL_FLASH_ERASE_SIZE) != 0u) {
         return HAL_INVALID_SIZE;
     }
-    if (!bounds_ok(offset, len)) {
+    uint32_t offset_abs;
+    if (!region_bounds_ok(&d, offset, len, &offset_abs)) {
         return HAL_INVALID_ARG;
     }
+    offset = offset_abs;
 
     bool power_loss = take_power_loss(FAKE_FLASH_OP_ERASE);
     size_t apply_len = len;
@@ -184,7 +256,10 @@ hal_status_t hal_flash_erase(hal_flash_region_t *r, uint32_t offset, size_t len)
 
 hal_status_t hal_flash_program(hal_flash_region_t *r, uint32_t offset,
                                 const void *buf, size_t len) {
-    (void)r;
+    fake_flash_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
     hal_status_t scripted;
     if (take_scripted_status(FAKE_FLASH_OP_PROGRAM, &scripted)) {
         return scripted;
@@ -198,9 +273,11 @@ hal_status_t hal_flash_program(hal_flash_region_t *r, uint32_t offset,
     if ((offset % HAL_FLASH_PROGRAM_SIZE) != 0u || (len % HAL_FLASH_PROGRAM_SIZE) != 0u) {
         return HAL_INVALID_SIZE;
     }
-    if (!bounds_ok(offset, len)) {
+    uint32_t offset_abs;
+    if (!region_bounds_ok(&d, offset, len, &offset_abs)) {
         return HAL_INVALID_ARG;
     }
+    offset = offset_abs;
 
     bool power_loss = take_power_loss(FAKE_FLASH_OP_PROGRAM);
     size_t apply_len = len;

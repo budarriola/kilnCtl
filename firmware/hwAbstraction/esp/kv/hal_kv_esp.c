@@ -28,14 +28,17 @@
  * any commit -- NVS itself does not buffer writes in a way a crash could
  * lose independently of flash wear-leveling; nvs_commit() forces those
  * pages to be written out now rather than leaving it to NVS's own internal
- * flushing. This backend's hal_kv_commit() is therefore a durability
- * fence, not the ONLY thing that makes a write durable: per hal_kv.h's own
- * contract comment ("Nothing is durable until hal_kv_commit()... callers
- * that assume set-then-crash loses the write are relying on documented,
- * not accidental, behavior"), callers must still call it explicitly before
- * relying on survival across a reset, and this backend does exactly what
- * nvs_commit() does today -- no additional buffering is introduced or
- * removed.
+ * flushing. Per hal_kv.h's own contract comment, a hal_kv_set_blob/_str call
+ * MAY already be durable before hal_kv_commit() returns -- real NVS's
+ * nvs_set_* writes to flash immediately, so "nothing is durable until
+ * commit" does NOT hold for this backend. What hal_kv_commit() DOES
+ * guarantee: every write issued on that handle before the call is durable,
+ * unconditionally, once it returns. Callers must not rely on a
+ * set-then-crash (power loss / reset before commit) losing the write --
+ * that behavior is backend- and even call-specific (NVS page write timing),
+ * not something this interface promises either way. This backend's
+ * hal_kv_commit() does exactly what nvs_commit() does today -- no
+ * additional buffering is introduced or removed.
  *
  * INTERFACE MISMATCH -- ESP_ERR_NVS_NOT_FOUND vs the shared esp_err_t
  * mapper: hal_esp_common.c's hal_esp_err_to_status() only maps the

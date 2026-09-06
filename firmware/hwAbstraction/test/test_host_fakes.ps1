@@ -29,7 +29,12 @@ $here = $PSScriptRoot
 $hostDir = Join-Path (Split-Path -Parent $here) "host"
 $ifaceDir = Join-Path (Split-Path -Parent $here) "interface"
 $commonDir = Join-Path (Split-Path -Parent $here) "common"
-$workDir = Join-Path $here "_fakes_work"
+# PID-suffixed: a fixed "_fakes_work" name collides when two instances of
+# this script run concurrently (seen as DirectoryNotFoundException around
+# line 207 during run_all_checks.ps1, when one instance's cleanup deleted
+# files the other instance was still using). Each instance gets its own
+# directory and cleans up only that one.
+$workDir = Join-Path $here "_fakes_work_$PID"
 if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
 New-Item -ItemType Directory -Path $workDir | Out-Null
 

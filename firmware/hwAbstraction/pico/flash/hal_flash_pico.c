@@ -74,13 +74,75 @@ typedef char hal_flash_erase_size_matches_pico_sdk
 typedef char hal_flash_program_size_matches_pico_sdk
     [(HAL_FLASH_PROGRAM_SIZE == FLASH_PAGE_SIZE) ? 1 : -1];
 
+/* Region concept -- see hal_flash.h's doc comment on hal_flash_region_t and
+ * hal_flash_region_init(). Mirrors the host fake's implementation: an
+ * initialized region is tagged with a magic value plus its bound
+ * [base, base+size) range within the whole-chip device; every op below
+ * requires this tag (HAL_NOT_READY otherwise) and treats its `offset`
+ * argument as relative to the region's base. */
+#define HAL_FLASH_PICO_REGION_MAGIC 0x464C5348u /* "FLSH" */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t base;
+    uint32_t size;
+} hal_flash_pico_region_data_t;
+
+typedef char hal_flash_pico_region_fits_storage
+    [(sizeof(hal_flash_pico_region_data_t) <= HAL_FLASH_REGION_STORAGE_BYTES) ? 1 : -1];
+
+hal_status_t hal_flash_region_init(hal_flash_region_t *r, uint32_t base, uint32_t size) {
+    if (r == NULL || size == 0u) {
+        return HAL_INVALID_ARG;
+    }
+    if ((uint64_t)base + (uint64_t)size > (uint64_t)PICO_FLASH_SIZE_BYTES) {
+        return HAL_INVALID_ARG;
+    }
+    hal_flash_pico_region_data_t d;
+    d.magic = HAL_FLASH_PICO_REGION_MAGIC;
+    d.base = base;
+    d.size = size;
+    memcpy(r->storage, &d, sizeof(d));
+    return HAL_OK;
+}
+
+/* Returns true and fills *out if `r` is an initialized region; false for
+ * NULL or an uninitialized/zeroed hal_flash_region_t. */
+static bool region_get(const hal_flash_region_t *r, hal_flash_pico_region_data_t *out) {
+    if (r == NULL) {
+        return false;
+    }
+    hal_flash_pico_region_data_t d;
+    memcpy(&d, r->storage, sizeof(d));
+    if (d.magic != HAL_FLASH_PICO_REGION_MAGIC) {
+        return false;
+    }
+    *out = d;
+    return true;
+}
+
+/* Bounds-checks [offset, offset+len) against the region's own [0, size)
+ * range and, on success, writes the absolute device offset to *abs_offset. */
+static bool region_bounds_ok(const hal_flash_pico_region_data_t *d, uint32_t offset,
+                              size_t len, uint32_t *abs_offset) {
+    if ((uint64_t)offset + (uint64_t)len > (uint64_t)d->size) {
+        return false;
+    }
+    *abs_offset = d->base + offset;
+    return true;
+}
+
 hal_status_t hal_flash_geometry(hal_flash_region_t *r, hal_flash_geometry_t *out) {
-    (void)r;
+    hal_flash_pico_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
     if (out == NULL) {
         return HAL_INVALID_ARG;
     }
     /* See INTERFACE MISMATCH 1 above: PICO_FLASH_SIZE_BYTES is compiled in,
-     * not queried from the part. */
+     * not queried from the part. Reports whole-device geometry, independent
+     * of `r`'s own range -- see hal_flash.h's doc comment. */
     out->flash_total_size = PICO_FLASH_SIZE_BYTES;
     out->erase_size = HAL_FLASH_ERASE_SIZE;
     out->program_size = HAL_FLASH_PROGRAM_SIZE;
@@ -89,46 +151,57 @@ hal_status_t hal_flash_geometry(hal_flash_region_t *r, hal_flash_geometry_t *out
 
 hal_status_t hal_flash_read(hal_flash_region_t *r, uint32_t offset,
                              void *buf, size_t len) {
-    (void)r;
+    hal_flash_pico_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
     if (buf == NULL) {
         return HAL_INVALID_ARG;
     }
     if (len == 0) {
         return HAL_OK;
     }
-    if ((uint64_t)offset + (uint64_t)len > (uint64_t)PICO_FLASH_SIZE_BYTES) {
+    uint32_t abs_offset;
+    if (!region_bounds_ok(&d, offset, len, &abs_offset)) {
         return HAL_INVALID_ARG;
     }
     /* XIP-mapped read, no lockout -- see hal_flash.h's execution-context
      * contract: reads never race a concurrent erase/program from the SAME
      * core, and a concurrent erase/program from the OTHER core is exactly
      * the hazard flash_safe_execute() fences by halting that core first. */
-    const uint8_t *src = (const uint8_t *)(XIP_BASE + offset);
+    const uint8_t *src = (const uint8_t *)(XIP_BASE + abs_offset);
     memcpy(buf, src, len);
     return HAL_OK;
 }
 
 hal_status_t hal_flash_erase(hal_flash_region_t *r, uint32_t offset, size_t len) {
-    (void)r;
+    hal_flash_pico_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
     if (len == 0) {
         return HAL_INVALID_SIZE;
     }
     if ((offset % HAL_FLASH_ERASE_SIZE) != 0u || (len % HAL_FLASH_ERASE_SIZE) != 0u) {
         return HAL_INVALID_SIZE;
     }
-    if ((uint64_t)offset + (uint64_t)len > (uint64_t)PICO_FLASH_SIZE_BYTES) {
+    uint32_t abs_offset;
+    if (!region_bounds_ok(&d, offset, len, &abs_offset)) {
         return HAL_INVALID_ARG;
     }
     /* Caller-bug contract, not runtime-checked here (see hal_flash.h's
      * "Binding rule for every backend of this interface"): this MUST be
      * called from inside a hal_flash_safe_execute() callback. */
-    flash_range_erase(offset, len);
+    flash_range_erase(abs_offset, len);
     return HAL_OK;
 }
 
 hal_status_t hal_flash_program(hal_flash_region_t *r, uint32_t offset,
                                 const void *buf, size_t len) {
-    (void)r;
+    hal_flash_pico_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
     if (buf == NULL) {
         return HAL_INVALID_ARG;
     }
@@ -138,11 +211,12 @@ hal_status_t hal_flash_program(hal_flash_region_t *r, uint32_t offset,
     if ((offset % HAL_FLASH_PROGRAM_SIZE) != 0u || (len % HAL_FLASH_PROGRAM_SIZE) != 0u) {
         return HAL_INVALID_SIZE;
     }
-    if ((uint64_t)offset + (uint64_t)len > (uint64_t)PICO_FLASH_SIZE_BYTES) {
+    uint32_t abs_offset;
+    if (!region_bounds_ok(&d, offset, len, &abs_offset)) {
         return HAL_INVALID_ARG;
     }
     /* Same caller-bug contract as hal_flash_erase() above. */
-    flash_range_program(offset, (const uint8_t *)buf, len);
+    flash_range_program(abs_offset, (const uint8_t *)buf, len);
     return HAL_OK;
 }
 
