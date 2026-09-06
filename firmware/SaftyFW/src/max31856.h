@@ -208,12 +208,17 @@ typedef struct {
 bool max31856_bus_init(void);
 
 /* Test-only accessor (naming convention: reboot_announce.h's
- * reboot_announce_reset_for_test()) -- returns the hal_spi_device_t this
- * module attached in max31856_bus_init(), so a host test can script
- * fake_spi.h responses (fake_spi_script_rx()) and inspect its transfer log
- * against the SAME instance max31856_write_u8()/_read_burst() transfer
- * through. Not for production use; NULL if max31856_bus_init() has not
- * (yet, or successfully) run. */
+ * reboot_announce_reset_for_test()) -- returns the (always non-NULL) static
+ * hal_spi_device_t storage this module attaches in max31856_bus_init(), so
+ * a host test can script fake_spi.h responses (fake_spi_script_rx()) and
+ * inspect its transfer log against the SAME instance
+ * max31856_write_u8()/_read_burst() transfer through. Not for production
+ * use. Deliberately does NOT report whether max31856_bus_init() has
+ * (yet, or successfully) run -- that is already tracked once, by the
+ * device's own attached-tag (hal_spi_pico.c's hal_spi_pico_device_impl_t /
+ * fake_spi.c's equivalent), and any hal_spi_* call a test makes through
+ * this pointer before a successful attach already fails HAL_NOT_READY on
+ * its own. */
 hal_spi_device_t *max31856_spi_device_for_test(void);
 
 /* Configures cs_gpio as a plain output (idling high) and fault_gpio as an

@@ -86,6 +86,19 @@
 typedef struct {
     uint32_t magic;
     bool     initialized;
+    /* Reset-one-side hazard, named per CLAUDE.md's checklist: this flag and
+     * hal_spi_pico_device_impl_t::attached below are two sides of the same
+     * fact (spi_owner.c has exactly one CS line, so at most one hal_spi
+     * device may ever be attached to it). Owning it HERE, on the bus impl
+     * that hal_spi_bus_init()'s memset() already zeroes on every (re-)init,
+     * means it cannot go stale independently of the bus the way a
+     * file-scope global could -- there is no second reset path that clears
+     * the bus but forgets this flag, because there is no other reset path
+     * at all. hal_spi_bus_deinit() is HAL_NOT_SUPPORTED today (note 6 below)
+     * so this is never exercised at runtime yet -- if a real deinit is ever
+     * added, it MUST clear this alongside `initialized`, exactly the class
+     * of pairing CLAUDE.md's "reset one side of a pair" section warns about. */
+    bool     device_attached;
 } hal_spi_pico_bus_impl_t;
 
 #define HAL_SPI_PICO_BUS_MAGIC 0x53504942u /* "SPIB" */
@@ -102,12 +115,6 @@ typedef struct {
 
 _Static_assert(sizeof(hal_spi_pico_device_impl_t) <= sizeof(((hal_spi_device_t *)0)->storage),
                "hal_spi_pico_device_impl_t exceeds HAL_SPI_DEVICE_STORAGE_BYTES reservation");
-
-/* spi_owner.c is a process-wide singleton (see this file's top comment) --
- * this flag tracks whether ANY hal_spi_bus_t has already attached a device,
- * since spi_owner.c itself has exactly one CS line and cannot arbitrate two
- * independently-tracked "devices" without colliding on the wire. */
-static bool s_device_attached = false;
 
 static hal_spi_pico_bus_impl_t *bus_impl_of(hal_spi_bus_t *bus)
 {
@@ -179,7 +186,7 @@ hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
          * hardwired clock/mode/CS; nothing else can be honored. */
         return HAL_INVALID_ARG;
     }
-    if (s_device_attached) {
+    if (bus_impl->device_attached) {
         /* See INTERFACE MISMATCH note 2 -- one CS line, one device, ever. */
         return HAL_BUSY;
     }
@@ -188,7 +195,7 @@ hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
     memset(dev_impl, 0, sizeof(*dev_impl));
     dev_impl->magic = HAL_SPI_PICO_DEVICE_MAGIC;
     dev_impl->attached = true;
-    s_device_attached = true;
+    bus_impl->device_attached = true;
     return HAL_OK;
 }
 

@@ -43,6 +43,13 @@ $freertosMinStubDir = Join-Path $testDir "stubs\freertos_min"
 # max31856_init() (outside this migration's scope), stubbed to inert no-ops
 # by this dir's hardware/gpio.h -- see that file's own comment.
 $hardwareGpioMinStubDir = Join-Path $testDir "stubs\hardware_gpio_min"
+# hal_spi_pico.c's OWN adapter-logic host test (test_hal_spi_pico.c) links
+# the real hal_spi_pico.c against a small spi_owner stub (spi_owner_stub.c),
+# NOT fake_spi.c -- see stubs/spi_owner_stub/spi_owner_stub.h's own comment
+# for why this is a different layer than max31856.c's fake_spi-backed test.
+$hwAbstractionPicoSpiDir = Join-Path $testDir "..\..\hwAbstraction\pico\spi"
+$spiOwnerStubDir = Join-Path $testDir "stubs\spi_owner_stub"
+
 $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "saftyfw_host_tests.exe"
@@ -163,6 +170,11 @@ $sources = @(
     (Join-Path $srcDir "max31856.c"),
     (Join-Path $hwAbstractionHostDir "fake_spi.c"),
     (Join-Path $testDir "test_max31856_hal_spi.c")
+    # hal_spi_pico.c's own adapter-logic test (test_hal_spi_pico.c) is built
+    # as its own SEPARATE executable below, not added here -- it implements
+    # the exact same hal_spi_* symbol names fake_spi.c does (both are
+    # hal_spi.h backends), so linking both into one exe is an LNK2005
+    # multiply-defined-symbol error, not a valid combination.
 )
 
 # A response file for the cl invocation itself (not just $sources) -- this
@@ -181,8 +193,9 @@ $sources = @(
 # rather than already fixed elsewhere. Matches the fuzz build's own
 # /std:c17 below.
 $rspContent = "/nologo /W4 /WX /EHsc /std:c17 /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
-    "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" " +
+    "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" /I `"$hwAbstractionPicoSpiDir`" " +
     "/I `"$hardwareGpioMinStubDir`" " +
+    "/I `"$spiOwnerStubDir`" " +
     "/Fo:`"$outDir\\`" /Fe:`"$exe`" " +
     (($sources | ForEach-Object { '"' + $_ + '"' }) -join " ")
 $rspPath = Join-Path $outDir "saftyfw_host_tests_cl.rsp"
@@ -260,7 +273,37 @@ if ($fuzzExit -ne 0) {
     throw "kilnlink payload fuzz FAILED (exit $fuzzExit) -- see output above for which decoder and case; rerun with KILNLINK_FUZZ_SEED set to the seed printed above to reproduce"
 }
 
+# hal_spi_pico.c's own adapter-logic test -- a SEPARATE executable (see
+# this script's earlier comment on why it cannot share test_main.c's exe:
+# it links the real hal_spi_pico.c against spi_owner_stub.c, which defines
+# the same hal_spi_* symbol names fake_spi.c already provides in the main
+# exe above). Own main() (test_hal_spi_pico_main.c), same TEST_CHECK/
+# g_test_count convention as test_main.c, own exit code folded in below.
+$halSpiPicoExe = Join-Path $outDir "hal_spi_pico_tests.exe"
+$halSpiPicoObjDir = Join-Path $outDir "hal_spi_pico_obj"
+New-Item -ItemType Directory -Force -Path $halSpiPicoObjDir | Out-Null
+$halSpiPicoSources = @(
+    (Join-Path $testDir "test_hal_spi_pico_main.c"),
+    (Join-Path $testDir "test_hal_spi_pico.c"),
+    (Join-Path $hwAbstractionPicoSpiDir "hal_spi_pico.c"),
+    (Join-Path $spiOwnerStubDir "spi_owner_stub.c")
+)
+$halSpiPicoSourceArgs = ($halSpiPicoSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+$halSpiPicoCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 " +
+    "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionPicoSpiDir`" /I `"$spiOwnerStubDir`" " +
+    "/I `"$srcDir/board`" /I `"$testDir`" " +
+    "/Fo:`"$halSpiPicoObjDir\\`" /Fe:`"$halSpiPicoExe`" $halSpiPicoSourceArgs"
+cmd.exe /c $halSpiPicoCmd
+if ($LASTEXITCODE -ne 0) {
+    throw "hal_spi_pico adapter test build failed"
+}
+& $halSpiPicoExe
+$halSpiPicoExit = $LASTEXITCODE
+
 if ($mainExit -ne 0) {
     exit $mainExit
 }
-exit $fuzzExit
+if ($fuzzExit -ne 0) {
+    exit $fuzzExit
+}
+exit $halSpiPicoExit

@@ -72,11 +72,21 @@ static bool s_tc_type_verified = false;
 // exist on this board.
 static hal_spi_bus_t s_spi_bus;
 static hal_spi_device_t s_spi_dev;
-static bool s_spi_dev_ready = false;
 
+// No separate "is s_spi_dev ready" flag here -- that would be a third
+// tracker of the same one fact hal_spi_pico.c's own
+// hal_spi_pico_device_impl_t::attached and spi_owner.c's s_initialized
+// already hold (see hal_spi_pico.c's struct comment for that pairing).
+// max31856_spi_device_for_test() is test-only: every real hal_spi_* call a
+// test makes through the returned pointer already re-checks the device's
+// own magic+attached tag (hal_spi_pico.c) or fake_spi.c's equivalent tag
+// and fails HAL_NOT_READY on its own if max31856_bus_init() has not (yet,
+// or successfully) run -- adding a fourth flag here to pre-empt that would
+// only be one more copy of the same fact to keep in sync, not a safety
+// requirement.
 hal_spi_device_t *max31856_spi_device_for_test(void)
 {
-    return s_spi_dev_ready ? &s_spi_dev : NULL;
+    return &s_spi_dev;
 }
 
 bool max31856_bus_init(void)
@@ -101,7 +111,6 @@ bool max31856_bus_init(void)
     if (hal_spi_device_attach(&s_spi_bus, &s_spi_dev, &dev_cfg) != HAL_OK) {
         return false;
     }
-    s_spi_dev_ready = true;
     return true;
 }
 
