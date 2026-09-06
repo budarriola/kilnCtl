@@ -1,27 +1,37 @@
 # check_hal_include_boundary.ps1 -- HAL_ABSTRACTION_PLAN.md Phase 4
-# enforcement. Two-stage check, per that plan's "Phase 4 -- enforcement"
-# section:
+# enforcement. Per that plan's "Phase 4 -- enforcement" section:
 #
-#   1. RATCHET (active now, every phase). Counts every KilnFW/App file
-#      (excluding test/, stubs/, build/) and SaftyFW/src file that
-#      #includes driver/, hardware/, nvs.h, nvs_flash.h or esp_timer.h
-#      outside firmware/hwAbstraction/. Fails if the count for any one of
-#      those headers/prefixes rises above the recorded baseline below --
-#      same idea as check_stack_margin_baseline.ps1: a number that must
-#      never go up, refreshed deliberately with -UpdateBaseline, never
-#      crept upward by an unnoticed edit.
+#   1. RATCHET mechanism (kept, currently empty). Counts every KilnFW/App
+#      file (excluding test/, stubs/, build/) and SaftyFW/src file that
+#      #includes a tracked header/prefix outside firmware/hwAbstraction/,
+#      failing if the count for any one of them rises above the recorded
+#      baseline -- same idea as check_stack_margin_baseline.ps1: a number
+#      that must never go up, refreshed deliberately with -UpdateBaseline,
+#      never crept upward by an unnoticed edit. As of HAL Phase 4 step 2
+#      (2026-09-06) every header that was ever on this ratchet (driver/,
+#      hardware/, esp_timer.h in step 1; nvs.h/nvs_flash.h in step 2) has
+#      been promoted to a strict per-file allowlist below, so $RatchetHeaders
+#      is empty and Test-HalRatchet always returns zero failures against it.
+#      The mechanism itself is kept rather than deleted: the hwAbstraction
+#      upward-scan (Invoke-HalUpwardScan) and its baseline section
+#      (hwAbstractionRatchet) share the same RatchetHeaders/Test-HalRatchet
+#      plumbing, and test_check_hal_include_boundary.ps1 exercises
+#      Test-HalRatchet directly (with a synthetic label, not tied to any
+#      currently-tracked header) to prove the comparison itself still works.
 #
-#   2. STRICT, from day one, for two small self-contained sets that are
-#      auditable file-by-file right now (unlike the count-only set above,
-#      which the plan says would be 60-75 decorative allowlist entries if
-#      done that way today):
+#   2. STRICT, for small self-contained sets that are auditable file-by-file
+#      (unlike a count-only ratchet, which the plan says would be 60-75
+#      decorative allowlist entries if done that way for every header):
 #        - esp_ota_ops.h: exactly the files on $OtaOpsAllowlist below.
 #        - esp_wifi.h / esp_netif.h: wifi_prov family only (also an
 #          explicit allowlist, so a new non-wifi_prov file that reaches
-#          for esp_wifi.h is caught immediately rather than waiting for
-#          the count-based ratchet to notice).
-#      A file that includes one of these two headers and is NOT on its
-#      allowlist is a hard failure regardless of the ratchet baseline.
+#          for esp_wifi.h is caught immediately).
+#        - driver/*, hardware/*, esp_timer.h: promoted from the ratchet in
+#          step 1 (2026-09-06).
+#        - nvs.h / nvs_flash.h: promoted from the ratchet in step 2
+#          (2026-09-06) -- see $NvsAllowlist / $NvsFlashAllowlist.
+#      A file that includes one of these headers and is NOT on its
+#      allowlist is a hard failure, unconditionally.
 #
 # Mechanics are copied, not reinvented, from two existing checks:
 #   - Comment stripping: check_isolation.ps1's Get-CodeOnlyLines (its
@@ -131,12 +141,16 @@ function Get-ScanFiles {
         Sort-Object
 }
 
-# --- The set of headers the ratchet counts. Keys are a short label used in
-# the baseline file and in output; Pattern is matched against a
-# comment-stripped #include line. ---
+# --- The count-ratchet is now empty: nvs.h/nvs_flash.h (the last two labels
+# on it) were promoted to strict per-file allowlists below (HAL Phase 4
+# enforcement, step 2, docs/HW_ABSTRACTION_PLAN.md "Phase 4 -- enforcement").
+# The mechanism is kept (rather than deleted) because the hwAbstraction
+# upward-scan (Invoke-HalUpwardScan) and the negative test both still call
+# Test-HalRatchet against RatchetHeaders/RatchetCounts, and the baseline file
+# keeps an (now-empty) top-level object plus a populated hwAbstractionRatchet
+# section for the same two headers, tracking KV owner code inside
+# firmware/hwAbstraction/. ---
 $RatchetHeaders = [ordered]@{
-    "nvs.h"        = '^\s*#\s*include\s*["<]nvs\.h[">]'
-    "nvs_flash.h"  = '^\s*#\s*include\s*["<]nvs_flash\.h[">]'
 }
 
 # --- Strict, per-file allowlists. Full repo-relative paths only -- never a
@@ -241,7 +255,6 @@ $HardwareAllowlist = @(
     @{ RelPath = "firmware/SaftyFW/src/main.c";                   Header = "hardware/"; Reason = "pico-sdk GPIO/timer/watchdog bring-up at boot (hardware/gpio.h: GPIO6-low, the literal first statement of main(), deliberately raw; hardware/regs/timer.h, hardware/timer.h: TIMER_DBGPAUSE_BITS/timer_hw->dbgpause register, no HAL primitive covers this; hardware/watchdog.h: watchdog_caused_reboot()/watchdog_enable_caused_reboot() boot-reason reads and the raw watchdog_hw->scratch[5] write in vApplicationStackOverflowHook(), neither expressible through hal_wdt.h/hal_scratch.h) -- SaftyFW hardware/* holdout named in the plan"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
     @{ RelPath = "firmware/SaftyFW/src/tasks/console_uart.c";      Header = "hardware/"; Reason = "write-only diagnostic UART/GPIO, no IRQ -- named explicitly in the plan's Phase 4 expected-final-entries list"; ExpiresAtPhase = "n/a (out of scope: console_uart.c, see plan)" }
     @{ RelPath = "firmware/SaftyFW/src/tasks/thermo_task.c";       Header = "hardware/"; Reason = "one of the two raw IRQ owners (DRDY via gpio_set_irq_enabled_with_callback, shared) named explicitly in the plan's Phase 4 expected-final-entries list"; ExpiresAtPhase = "n/a (out of scope: raw IRQ owner, see plan)" }
-    @{ RelPath = "firmware/SaftyFW/src/tasks/update_task.c";       Header = "hardware/"; Reason = "flash access for OTA rollback (hardware/flash.h, hardware/regs/addressmap.h) -- hal_flash.h's own header comment notes this fits that interface but its rebase 'is not scheduled by the current plan pass'; watchdog_reboot() migrated to hal_wdt_reboot() this pass, hardware/watchdog.h dropped"; ExpiresAtPhase = "n/a (deferred to a future pass, see plan)" }
 )
 
 # esp_timer.h -- promoted from the count-ratchet to a strict per-file
@@ -256,7 +269,28 @@ $EspTimerAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/ui/lvgl_port.c";             Header = "esp_timer.h"; Reason = "esp_timer_create/esp_timer_start_periodic for the 1ms lv_tick callback -- named explicitly in the plan's Phase 4 expected-final-entries list (lvgl_port)"; ExpiresAtPhase = "n/a (out of scope: lvgl_port, see plan)" }
 )
 
+# nvs.h / nvs_flash.h -- promoted from the count-ratchet to strict per-file
+# allowlists (HAL Phase 4 enforcement, step 2, docs/HW_ABSTRACTION_PLAN.md
+# "Phase 4 -- enforcement"). Measured 2026-09-06 against the current tree
+# (production files only -- firmware/KilnFW/App/test/test_profiles_http.c
+# also includes nvs.h but is excluded from the scan by Get-ScanFiles's
+# test/ filter, and firmware/hwAbstraction/esp/kv/hal_kv_esp.c is the actual
+# KV-owner backend, excluded from strict checks entirely by Test-InsideHal):
+# exactly one nvs.h site and three nvs_flash.h sites remain, each for a
+# single named constant with no nvs_*()/nvs_flash_*() function call.
+$NvsAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/persist/ota_record.c"; Header = "nvs.h"; Reason = "ESP_ERR_NVS_NOT_FOUND only, per ota_record.h's doc contract -- no nvs_*()/nvs_flash_*() function call in this file, actual NVS access goes through hal_kv"; ExpiresAtPhase = "n/a (constant-only holdout, see plan)" }
+)
+
+$NvsFlashAllowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov.c";              Header = "nvs_flash.h"; Reason = "NVS_DEFAULT_PART_NAME only -- HAL Phase 3 item 3, actual NVS access goes through hal_kv"; ExpiresAtPhase = "n/a (constant-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_nvs.c";          Header = "nvs_flash.h"; Reason = "NVS_DEFAULT_PART_NAME only -- see wifi_prov.c's holdout, actual NVS access goes through hal_kv"; ExpiresAtPhase = "n/a (constant-only holdout, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/persist/zones_config_store.c"; Header = "nvs_flash.h"; Reason = "NVS_DEFAULT_PART_NAME only -- see wifi_prov_nvs.c's holdout, actual NVS access goes through hal_kv"; ExpiresAtPhase = "n/a (constant-only holdout, see plan)" }
+)
+
 $StrictHeaders = [ordered]@{
+    "nvs.h"                      = @{ Pattern = '^\s*#\s*include\s*["<]nvs\.h[">]';                    Allowlist = $NvsAllowlist }
+    "nvs_flash.h"                = @{ Pattern = '^\s*#\s*include\s*["<]nvs_flash\.h[">]';               Allowlist = $NvsFlashAllowlist }
     "esp_ota_ops.h"              = @{ Pattern = '^\s*#\s*include\s*["<]esp_ota_ops\.h[">]';            Allowlist = $OtaOpsAllowlist }
     "esp_wifi.h"                 = @{ Pattern = '^\s*#\s*include\s*["<]esp_wifi\.h[">]';                Allowlist = $WifiAllowlist }
     "esp_netif.h"                = @{ Pattern = '^\s*#\s*include\s*["<]esp_netif\.h[">]';               Allowlist = $WifiAllowlist }

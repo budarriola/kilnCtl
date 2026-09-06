@@ -15,7 +15,19 @@
 # ($DriverGpioAllowlist etc., $HardwareAllowlist, $EspTimerAllowlist). The
 # old assertions 2/3/3b assumed "driver/" was still a ratchet label and
 # would fail against the new script (RatchetCounts no longer has a "driver/"
-# key at all). This version:
+# key at all).
+#
+# Rewritten again 2026-09-06 (HAL Phase 4 enforcement step 2): nvs.h and
+# nvs_flash.h -- the last two headers left on the ratchet -- were also
+# promoted to strict per-file allowlists ($NvsAllowlist, $NvsFlashAllowlist).
+# $RatchetHeaders is now empty, so the old assertions 3/3b (which took the
+# REAL tree's "nvs.h" ratchet count and fed it through Test-HalRatchet) no
+# longer have a real-tree ratcheted header to exercise -- RatchetCounts has
+# no "nvs.h" key at all any more. Test-HalRatchet itself is still shared
+# with the hwAbstraction upward-scan, so assertions 3/3b now call it with a
+# synthetic, made-up label instead of a real one -- this proves the
+# comparison function's logic directly, independent of what happens to be
+# tracked in production today. This version:
 #   1. Copies a clean, non-allowlisted file (drivers/pid.c) into the
 #      scratchpad, unmodified. Runs the scan -- expects ZERO ratchet hits
 #      and ZERO strict violations.
@@ -24,13 +36,12 @@
 #      all) and EXACTLY ONE strict violation naming driver/gpio.h -- proves
 #      the strict driver/gpio.h allowlist has teeth against a file that
 #      isn't on it.
-#   3. Proves the ratchet itself can still fail for the headers that remain
-#      on it (nvs.h): takes the REAL tree's current "nvs.h" count and calls
-#      the PRODUCTION Test-HalRatchet function (the same one
-#      check_hal_include_boundary.ps1's main body calls) with a synthetic
-#      baseline set one below that real count -- expects exactly one
-#      violation naming "nvs.h". 3b confirms a baseline at the real count
-#      does NOT trip it.
+#   3. Proves Test-HalRatchet (the PRODUCTION function, the same one
+#      check_hal_include_boundary.ps1's main body calls) can still detect a
+#      rise, using a synthetic label/count pair (not tied to any header
+#      currently tracked in production, since the real ratchet is empty) --
+#      expects exactly one violation naming the synthetic label. 3b confirms
+#      a baseline at or above the count does NOT trip it.
 #   4. Proves the esp_ota_ops.h strict allowlist has teeth: injects
 #      `#include "esp_ota_ops.h"` into a non-allowlisted scratch copy --
 #      expects exactly one strict violation.
@@ -41,6 +52,14 @@
 #      allowlisted path (uart_bridge_io.c, on $DriverGpioAllowlist) --
 #      expects zero strict violations, proving the new driver/gpio.h
 #      allowlist is also consulted by path.
+#   7. The same shape for nvs.h: non-allowlisted scratch copy of pid.c with
+#      `#include "nvs.h"` injected -- expects exactly one strict violation;
+#      the same injection on the allowlisted path (ota_record.c) -- expects
+#      zero.
+#   8. The same shape for nvs_flash.h: non-allowlisted scratch copy with
+#      `#include "nvs_flash.h"` injected -- expects exactly one strict
+#      violation; the same injection on an allowlisted path (wifi_prov.c) --
+#      expects zero.
 #
 # This does not touch the real repo tree or the real baseline file; it
 # dot-sources tools/check_hal_include_boundary.ps1 (which, per its own
@@ -119,61 +138,35 @@ if ($dirtyScan.StrictViolations.Count -ne 1) {
     Write-Host "Assertion 2 OK: non-allowlisted driver/gpio.h injection produced exactly one strict violation -- $($dirtyScan.StrictViolations[0])"
 }
 
-# --- Assertion 3: the ratchet itself can still fail, for a header that
-# remains on it (nvs.h -- driver/hardware/esp_timer.h moved to strict
-# allowlists in HAL Phase 4 step 1 and are no longer ratchet labels). Scan
-# the REAL tree, take the real "nvs.h" count, and call the PRODUCTION
-# Test-HalRatchet function (the exact same function
-# check_hal_include_boundary.ps1's main body calls against the real
-# baseline file) with a synthetic baseline set one below that real count.
-# Expect exactly one ratchet violation, naming "nvs.h". This calls the real
-# comparison, not a reimplementation of it -- a bug in Test-HalRatchet
+# --- Assertion 3: Test-HalRatchet (the PRODUCTION function, the exact same
+# one check_hal_include_boundary.ps1's main body calls against the real
+# baseline file) can still detect a rise. $RatchetHeaders is empty now (HAL
+# Phase 4 step 2 promoted its last two labels, nvs.h/nvs_flash.h, to strict
+# allowlists), so there is no real-tree ratcheted header left to drive this
+# off of -- use a synthetic label/count pair instead. This still calls the
+# real comparison, not a reimplementation of it: a bug in Test-HalRatchet
 # itself would be caught here, which a hand-rolled `$count -gt $count-1`
 # tautology could never do. ---
-$appDirReal = Join-Path $repoRoot "firmware\KilnFW\App"
-$saftyDirReal = Join-Path $repoRoot "firmware\SaftyFW\src"
-$realFiles = @()
-$realFiles += Get-ScanFiles -Dir (Resolve-Path $appDirReal).Path -RepoRoot $repoRoot
-$realFiles += Get-ScanFiles -Dir (Resolve-Path $saftyDirReal).Path -RepoRoot $repoRoot
+$syntheticCounts = [ordered]@{ "synthetic_test_header.h" = 5 }
+$syntheticBaseline = [ordered]@{ "synthetic_test_header.h" = 4 }
 
-$realScan = Invoke-HalBoundaryScan -RelPaths $realFiles -FileRoot $repoRoot
-$realNvsCount = $realScan.RatchetCounts["nvs.h"]
-
-# Guard against a broken glob (e.g. a moved directory returning an empty
-# file list) making assertions 3/3b pass vacuously: with $realFiles.Count
-# at 0, $realNvsCount would be 0, $tooLowBaseline would be -1, and
-# Test-HalRatchet would still legitimately report "count rose" -- a false
-# positive that looks like a real, meaningful pass but proves nothing about
-# the actual tree. Fail loudly here instead of building the synthetic
-# baseline off a hollow scan.
-if ($realFiles.Count -lt 200 -or $realNvsCount -lt 1) {
-    throw "test_check_hal_include_boundary: real-tree scan looks broken (realFiles.Count=$($realFiles.Count), nvs.h count=$realNvsCount) -- expected at least 200 files and at least 1 nvs.h include. The glob is probably pointed at the wrong directory; assertions 3/3b would pass vacuously against this scan."
-}
-
-$tooLowBaseline = $realNvsCount - 1
-
-$syntheticBaseline = [ordered]@{}
-foreach ($label in $realScan.RatchetCounts.Keys) { $syntheticBaseline[$label] = $realScan.RatchetCounts[$label] }
-$syntheticBaseline["nvs.h"] = $tooLowBaseline
-
-$ratchetResult = Test-HalRatchet -Counts $realScan.RatchetCounts -Baseline $syntheticBaseline
-$nvsViolations = @($ratchetResult | Where-Object { $_ -like "nvs.h *" })
+$ratchetResult = Test-HalRatchet -Counts $syntheticCounts -Baseline $syntheticBaseline
+$syntheticViolations = @($ratchetResult | Where-Object { $_ -like "synthetic_test_header.h *" })
 
 if ($ratchetResult.Count -ne 1) {
-    $failures += "Assertion 3 FAILED: expected exactly 1 ratchet violation from Test-HalRatchet with a baseline one below the real 'nvs.h' count ($realNvsCount vs baseline $tooLowBaseline), got $($ratchetResult.Count): $($ratchetResult -join ' | ')"
-} elseif ($nvsViolations.Count -ne 1) {
-    $failures += "Assertion 3 FAILED: the single ratchet violation did not name 'nvs.h': $($ratchetResult -join ' | ')"
+    $failures += "Assertion 3 FAILED: expected exactly 1 ratchet violation from Test-HalRatchet with a synthetic count of 5 vs baseline 4, got $($ratchetResult.Count): $($ratchetResult -join ' | ')"
+} elseif ($syntheticViolations.Count -ne 1) {
+    $failures += "Assertion 3 FAILED: the single ratchet violation did not name 'synthetic_test_header.h': $($ratchetResult -join ' | ')"
 } else {
-    Write-Host "Assertion 3 OK: Test-HalRatchet (production function) flagged 'nvs.h' with baseline $tooLowBaseline vs real count $realNvsCount -- $($nvsViolations[0])"
+    Write-Host "Assertion 3 OK: Test-HalRatchet (production function) flagged a synthetic count rise (5 vs baseline 4) -- $($syntheticViolations[0])"
 }
 
-# --- Assertion 3b: negate the check -- a baseline AT or ABOVE the real count
-# must NOT trip the ratchet. Proves Test-HalRatchet isn't just always-fail. ---
-$syntheticBaselineOk = [ordered]@{}
-foreach ($label in $realScan.RatchetCounts.Keys) { $syntheticBaselineOk[$label] = $realScan.RatchetCounts[$label] }
-$ratchetResultOk = Test-HalRatchet -Counts $realScan.RatchetCounts -Baseline $syntheticBaselineOk
+# --- Assertion 3b: negate the check -- a baseline AT or ABOVE the count must
+# NOT trip the ratchet. Proves Test-HalRatchet isn't just always-fail. ---
+$syntheticBaselineOk = [ordered]@{ "synthetic_test_header.h" = 5 }
+$ratchetResultOk = Test-HalRatchet -Counts $syntheticCounts -Baseline $syntheticBaselineOk
 if ($ratchetResultOk.Count -ne 0) {
-    $failures += "Assertion 3b FAILED: baseline equal to the real counts should produce 0 ratchet violations, got $($ratchetResultOk.Count): $($ratchetResultOk -join ' | ')"
+    $failures += "Assertion 3b FAILED: baseline equal to the count should produce 0 ratchet violations, got $($ratchetResultOk.Count): $($ratchetResultOk -join ' | ')"
 }
 
 # --- Assertion 4: strict allowlist has teeth. Copy a non-allowlisted file
@@ -229,6 +222,66 @@ if ($gpioAllowlistedScan.StrictViolations.Count -ne 0) {
     Write-Host "Assertion 6 OK: allowlisted driver/gpio.h path ($gpioAllowlistedRel) scored 0 strict violations."
 }
 
+# --- Assertion 7: same shape as 4/5/6, for the nvs.h strict allowlist added
+# in HAL Phase 4 step 2. Non-allowlisted scratch copy -> exactly one strict
+# violation; allowlisted path (ota_record.c, on $NvsAllowlist) -> zero. ---
+$nvsDirtyRel = "scratch_pid_nvs_dirty.c"
+$nvsDirtyFull = Join-Path $scratchDir $nvsDirtyRel
+$nvsInjected = @('#include "nvs.h"') + $content
+Set-Content -Path $nvsDirtyFull -Value $nvsInjected -Encoding utf8
+
+$nvsDirtyScan = Invoke-HalBoundaryScan -RelPaths @($nvsDirtyRel) -FileRoot $scratchDir
+if ($nvsDirtyScan.StrictViolations.Count -ne 1) {
+    $failures += "Assertion 7 FAILED: non-allowlisted file with injected nvs.h scored $($nvsDirtyScan.StrictViolations.Count) strict violation(s), expected exactly 1."
+} elseif ($nvsDirtyScan.StrictViolations[0] -notlike "*nvs.h*") {
+    $failures += "Assertion 7 FAILED: the single strict violation did not name nvs.h: $($nvsDirtyScan.StrictViolations[0])"
+} else {
+    Write-Host "Assertion 7 OK: non-allowlisted nvs.h injection produced exactly one strict violation -- $($nvsDirtyScan.StrictViolations[0])"
+}
+
+$nvsAllowlistedRel = "firmware/KilnFW/App/drivers/persist/ota_record.c"
+$nvsAllowlistedScanDir = Join-Path $scratchDir "nvs_allowlisted_root"
+$nvsAllowlistedFull = Join-Path $nvsAllowlistedScanDir ($nvsAllowlistedRel -replace '/', '\')
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $nvsAllowlistedFull) | Out-Null
+Set-Content -Path $nvsAllowlistedFull -Value $nvsInjected -Encoding utf8
+
+$nvsAllowlistedScan = Invoke-HalBoundaryScan -RelPaths @($nvsAllowlistedRel) -FileRoot $nvsAllowlistedScanDir
+if ($nvsAllowlistedScan.StrictViolations.Count -ne 0) {
+    $failures += "Assertion 7 FAILED: allowlisted path ($nvsAllowlistedRel) with injected nvs.h scored $($nvsAllowlistedScan.StrictViolations.Count) strict violation(s), expected 0."
+} else {
+    Write-Host "Assertion 7 OK: allowlisted nvs.h path ($nvsAllowlistedRel) scored 0 strict violations."
+}
+
+# --- Assertion 8: same shape, for the nvs_flash.h strict allowlist.
+# Non-allowlisted scratch copy -> exactly one strict violation; allowlisted
+# path (wifi_prov.c, on $NvsFlashAllowlist) -> zero. ---
+$nvsFlashDirtyRel = "scratch_pid_nvsflash_dirty.c"
+$nvsFlashDirtyFull = Join-Path $scratchDir $nvsFlashDirtyRel
+$nvsFlashInjected = @('#include "nvs_flash.h"') + $content
+Set-Content -Path $nvsFlashDirtyFull -Value $nvsFlashInjected -Encoding utf8
+
+$nvsFlashDirtyScan = Invoke-HalBoundaryScan -RelPaths @($nvsFlashDirtyRel) -FileRoot $scratchDir
+if ($nvsFlashDirtyScan.StrictViolations.Count -ne 1) {
+    $failures += "Assertion 8 FAILED: non-allowlisted file with injected nvs_flash.h scored $($nvsFlashDirtyScan.StrictViolations.Count) strict violation(s), expected exactly 1."
+} elseif ($nvsFlashDirtyScan.StrictViolations[0] -notlike "*nvs_flash.h*") {
+    $failures += "Assertion 8 FAILED: the single strict violation did not name nvs_flash.h: $($nvsFlashDirtyScan.StrictViolations[0])"
+} else {
+    Write-Host "Assertion 8 OK: non-allowlisted nvs_flash.h injection produced exactly one strict violation -- $($nvsFlashDirtyScan.StrictViolations[0])"
+}
+
+$nvsFlashAllowlistedRel = "firmware/KilnFW/App/drivers/net/wifi_prov.c"
+$nvsFlashAllowlistedScanDir = Join-Path $scratchDir "nvsflash_allowlisted_root"
+$nvsFlashAllowlistedFull = Join-Path $nvsFlashAllowlistedScanDir ($nvsFlashAllowlistedRel -replace '/', '\')
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $nvsFlashAllowlistedFull) | Out-Null
+Set-Content -Path $nvsFlashAllowlistedFull -Value $nvsFlashInjected -Encoding utf8
+
+$nvsFlashAllowlistedScan = Invoke-HalBoundaryScan -RelPaths @($nvsFlashAllowlistedRel) -FileRoot $nvsFlashAllowlistedScanDir
+if ($nvsFlashAllowlistedScan.StrictViolations.Count -ne 0) {
+    $failures += "Assertion 8 FAILED: allowlisted path ($nvsFlashAllowlistedRel) with injected nvs_flash.h scored $($nvsFlashAllowlistedScan.StrictViolations.Count) strict violation(s), expected 0."
+} else {
+    Write-Host "Assertion 8 OK: allowlisted nvs_flash.h path ($nvsFlashAllowlistedRel) scored 0 strict violations."
+}
+
 } finally {
     # Cleanup: remove the whole per-PID scratch directory now that the test
     # is done with it (this test owns $scratchDir exclusively -- it is
@@ -245,5 +298,5 @@ if ($failures.Count -gt 0) {
     throw "$($failures.Count) assertion(s) failed."
 }
 
-Write-Host "test_check_hal_include_boundary: all assertions passed (clean=0 violations, non-allowlisted driver/gpio.h=1 strict violation/0 ratchet, ratchet-fail-detection confirmed via production Test-HalRatchet on nvs.h, esp_ota_ops.h and driver/gpio.h strict allowlists both negative/positive confirmed)." -ForegroundColor Green
+Write-Host "test_check_hal_include_boundary: all assertions passed (clean=0 violations, non-allowlisted driver/gpio.h=1 strict violation/0 ratchet, ratchet-fail-detection confirmed via production Test-HalRatchet on a synthetic label, esp_ota_ops.h/driver/gpio.h/nvs.h/nvs_flash.h strict allowlists all negative/positive confirmed)." -ForegroundColor Green
 exit 0

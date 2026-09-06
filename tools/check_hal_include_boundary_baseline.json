@@ -1,9 +1,6 @@
 {
-    "_note":  "HAL Phase 4 enforcement step 1 (2026-09-06): driver/, hardware/ and esp_timer.h moved off this count-ratchet onto the per-file, per-header strict allowlists in check_hal_include_boundary.ps1 ($DriverGpioAllowlist etc., $HardwareAllowlist, $EspTimerAllowlist) -- they are no longer tracked here. nvs.h/nvs_flash.h remain on the ratchet, pending a separate migration pass. hwAbstractionRatchet below tracks only the nvs pair for firmware/hwAbstraction/ (Test-InsideHal excludes that tree from the main scan; its driver/hardware/esp_timer.h includes are the backend itself and are not counted).",
-    "nvs.h":  23,
-    "nvs_flash.h":  24,
+    "_note":  "HAL Phase 4 enforcement complete (2026-09-06): every header ever tracked by this count-ratchet (driver/, hardware/, esp_timer.h in step 1; nvs.h, nvs_flash.h in step 2) has been promoted to a strict per-file, per-header allowlist in check_hal_include_boundary.ps1 ($DriverGpioAllowlist, $HardwareAllowlist, $EspTimerAllowlist, $NvsAllowlist, $NvsFlashAllowlist, etc.). The top-level object below and hwAbstractionRatchet are intentionally empty -- nothing is tracked by count any more -- and are kept only because the ratchet mechanism (Test-HalRatchet) is still exercised by test_check_hal_include_boundary.ps1 and shared with the hwAbstraction/** upward-include scan.",
     "hwAbstractionRatchet":  {
-                                 "nvs.h":  1,
-                                 "nvs_flash.h":  1
+
                              }
 }
