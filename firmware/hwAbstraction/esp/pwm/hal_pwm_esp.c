@@ -8,9 +8,8 @@
  * BACKLIGHT_LEDC_MODE=LEDC_LOW_SPEED_MODE, BACKLIGHT_LEDC_FREQ_HZ=5000,
  * BACKLIGHT_LEDC_DUTY_RES=LEDC_TIMER_13_BIT): ledc_timer_config() then
  * ledc_channel_config() at init (duty=0, hpoint=0), ledc_set_duty()
- * immediately followed by ledc_update_duty() on every re-sync. Not wired
- * into any CMakeLists yet -- see
- * firmware/hwAbstraction/test/compile_esp_backends.ps1.
+ * immediately followed by ledc_update_duty() on every re-sync. Compiled by
+ * firmware/hwAbstraction/idf/hwabstraction_esp/CMakeLists.txt.
  *
  * Timer/channel/speed-mode are hardcoded to LEDC_TIMER_0/LEDC_CHANNEL_0/
  * LEDC_LOW_SPEED_MODE here, matching hal_pwm.h's own comment that ESP

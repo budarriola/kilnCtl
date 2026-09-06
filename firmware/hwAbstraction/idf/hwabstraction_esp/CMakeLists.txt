@@ -26,12 +26,15 @@ idf_component_register(SRCS "../../esp/spi/esp_spi_owner.c"
                              "../../esp/sysinfo/hal_sysinfo_esp.c"
                              "../../esp/kv/hal_kv_esp.c"
                              "../../esp/time/hal_time_esp.c"
+                             "../../esp/wdt/hal_wdt_esp.c"
+                             "../../esp/pwm/hal_pwm_esp.c"
                              "../../esp/common/hal_esp_common.c"
                              "../../common/hal_status.c"
                        INCLUDE_DIRS "../../esp/spi" "../../esp/i2c" "../../esp/uart"
                                     "../../esp/gpio" "../../esp/sysinfo" "../../esp/kv" "../../esp/time"
+                                    "../../esp/wdt" "../../esp/pwm"
                                     "../../esp/common" "../../interface"
                        REQUIRES esp_driver_spi esp_driver_i2c esp_driver_uart esp_driver_gpio
-                                esp_driver_tsens app_update espcoredump esp_partition
-                                freertos esp_timer nvs_flash kilnlink
+                                esp_driver_tsens esp_driver_ledc app_update espcoredump esp_partition
+                                freertos esp_timer nvs_flash kilnlink esp_system
                        PRIV_REQUIRES drivers)

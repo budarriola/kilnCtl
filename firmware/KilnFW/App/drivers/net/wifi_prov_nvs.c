@@ -11,7 +11,11 @@
 
 #include "esp_log.h"
 
-#include "nvs.h"
+#include "hal_esp_common.h"
+#include "hal_kv.h"
+/* nvs_flash.h kept for NVS_DEFAULT_PART_NAME only -- see wifi_prov.c's
+ * identical comment; every actual nvs_*() call in this file below now goes
+ * through hal_kv_*() instead. */
 #include "nvs_flash.h"
 
 /* Dedicated NVS partition for Wi-Fi credentials -- see partitions.csv, which
@@ -124,17 +128,21 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
     if (out_found) {
         *out_found = false;
     }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_PART_NOT_FOUND) {
-        /* NOT_FOUND: nothing saved yet -- first boot. PART_NOT_FOUND: this
-         * build's partition table isn't on the chip (e.g. a new app flashed
-         * without the new table). Neither is an error worth refusing to bring
-         * Wi-Fi up over -- the board just comes up unprovisioned. */
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (err == HAL_NOT_FOUND) {
+        /* Namespace/key not found (first boot) -- see this file's own
+         * INTERFACE MISMATCH-adjacent note in hal_kv_esp.c: a genuinely
+         * missing partition table (the old ESP_ERR_NVS_PART_NOT_FOUND case)
+         * is not distinguished from this by hal_kv today and instead falls
+         * into the generic HAL_IO branch below, where it is still treated
+         * as "nothing saved" -- just via the warn-and-continue path instead
+         * of this silent one. Neither is an error worth refusing to bring
+         * Wi-Fi up over -- the board just comes up unprovisioned either way. */
         return ESP_OK;
     }
-    if (err != ESP_OK) {
-        return err;
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
     if (out_found) {
         *out_found = true;
@@ -158,75 +166,75 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
      * read-only and completes for real the next time the mode is saved
      * (nvs_save_mode() below only ever writes NVS_KEY_MODE). */
     u8 = 0;
-    err = nvs_get_u8(h, NVS_KEY_MODE, &u8);
-    if (err == ESP_OK) {
+    err = hal_kv_get_u8(&h, NVS_KEY_MODE, &u8);
+    if (err == HAL_OK) {
         s_wifi.mode = u8 ? WIFI_PROV_MODE_AP : WIFI_PROV_MODE_HOME;
-    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+    } else if (err == HAL_NOT_FOUND) {
         uint8_t legacy_local_only = 0;
-        esp_err_t legacy_err = nvs_get_u8(h, NVS_KEY_LOCAL_ONLY, &legacy_local_only);
-        if (legacy_err == ESP_OK && legacy_local_only) {
+        hal_status_t legacy_err = hal_kv_get_u8(&h, NVS_KEY_LOCAL_ONLY, &legacy_local_only);
+        if (legacy_err == HAL_OK && legacy_local_only) {
             ESP_LOGI(WIFI_PROV_TAG, "migrating legacy local_only=1 NVS flag to mode=AP");
             s_wifi.mode = WIFI_PROV_MODE_AP;
         } else {
             s_wifi.mode = WIFI_PROV_MODE_HOME;
         }
     } else {
-        nvs_close(h);
-        return err;
+        hal_kv_close(&h);
+        return hal_status_to_esp_err(err);
     }
 
     len = sizeof(s_wifi.ap_ssid);
-    err = nvs_get_str(h, NVS_KEY_AP_SSID, s_wifi.ap_ssid, &len);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        nvs_close(h);
-        return err;
+    err = hal_kv_get_str(&h, NVS_KEY_AP_SSID, s_wifi.ap_ssid, &len);
+    if (err != HAL_OK && err != HAL_NOT_FOUND) {
+        hal_kv_close(&h);
+        return hal_status_to_esp_err(err);
     }
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    if (err == HAL_NOT_FOUND) {
         s_wifi.ap_ssid[0] = '\0';
     }
 
     u8 = 0;
-    err = nvs_get_u8(h, NVS_KEY_HAS_AP_SSID, &u8);
-    s_wifi.has_ap_ssid_override = (err == ESP_OK) && u8;
+    err = hal_kv_get_u8(&h, NVS_KEY_HAS_AP_SSID, &u8);
+    s_wifi.has_ap_ssid_override = (err == HAL_OK) && u8;
 
     len = sizeof(s_wifi.ap_password);
-    err = nvs_get_str(h, NVS_KEY_AP_PASS, s_wifi.ap_password, &len);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        nvs_close(h);
-        return err;
+    err = hal_kv_get_str(&h, NVS_KEY_AP_PASS, s_wifi.ap_password, &len);
+    if (err != HAL_OK && err != HAL_NOT_FOUND) {
+        hal_kv_close(&h);
+        return hal_status_to_esp_err(err);
     }
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    if (err == HAL_NOT_FOUND) {
         s_wifi.ap_password[0] = '\0';
     }
 
     u8 = 0;
-    err = nvs_get_u8(h, NVS_KEY_HAS_AP_PASS, &u8);
-    s_wifi.has_ap_password_override = (err == ESP_OK) && u8;
+    err = hal_kv_get_u8(&h, NVS_KEY_HAS_AP_PASS, &u8);
+    s_wifi.has_ap_password_override = (err == HAL_OK) && u8;
 
     /* 2026-08-20, web-GUI-only static-IP fields. Absent (pre-feature NVS
      * blob, or genuinely never configured) reads back as DHCP with empty
      * strings -- today's always-on default, unchanged. */
     u8 = 0;
-    err = nvs_get_u8(h, NVS_KEY_IP_MODE, &u8);
-    s_wifi.ip_mode = (err == ESP_OK && u8) ? WIFI_PROV_IP_MODE_STATIC : WIFI_PROV_IP_MODE_DHCP;
+    err = hal_kv_get_u8(&h, NVS_KEY_IP_MODE, &u8);
+    s_wifi.ip_mode = (err == HAL_OK && u8) ? WIFI_PROV_IP_MODE_STATIC : WIFI_PROV_IP_MODE_DHCP;
 
     len = sizeof(s_wifi.static_ip);
-    err = nvs_get_str(h, NVS_KEY_STATIC_IP, s_wifi.static_ip, &len);
-    if (err != ESP_OK) {
+    err = hal_kv_get_str(&h, NVS_KEY_STATIC_IP, s_wifi.static_ip, &len);
+    if (err != HAL_OK) {
         s_wifi.static_ip[0] = '\0';
     }
     len = sizeof(s_wifi.static_netmask);
-    err = nvs_get_str(h, NVS_KEY_STATIC_NETMASK, s_wifi.static_netmask, &len);
-    if (err != ESP_OK) {
+    err = hal_kv_get_str(&h, NVS_KEY_STATIC_NETMASK, s_wifi.static_netmask, &len);
+    if (err != HAL_OK) {
         s_wifi.static_netmask[0] = '\0';
     }
     len = sizeof(s_wifi.static_gateway);
-    err = nvs_get_str(h, NVS_KEY_STATIC_GW, s_wifi.static_gateway, &len);
-    if (err != ESP_OK) {
+    err = hal_kv_get_str(&h, NVS_KEY_STATIC_GW, s_wifi.static_gateway, &len);
+    if (err != HAL_OK) {
         s_wifi.static_gateway[0] = '\0';
     }
 
-    nvs_close(h);
+    hal_kv_close(&h);
     return ESP_OK;
 }
 
@@ -249,33 +257,33 @@ void nvs_load_legacy_single(const char *partition, saved_net_t *out_net, bool *o
     memset(out_net, 0, sizeof(*out_net));
     *out_has = false;
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (err != HAL_OK) {
         return; /* namespace/partition absent -- nothing legacy to find */
     }
 
     size_t len = sizeof(out_net->ssid);
-    err = nvs_get_str(h, NVS_KEY_SSID, out_net->ssid, &len);
-    if (err != ESP_OK) {
+    err = hal_kv_get_str(&h, NVS_KEY_SSID, out_net->ssid, &len);
+    if (err != HAL_OK) {
         out_net->ssid[0] = '\0';
     }
 
     len = sizeof(out_net->password);
-    err = nvs_get_str(h, NVS_KEY_PASS, out_net->password, &len);
-    if (err != ESP_OK) {
+    err = hal_kv_get_str(&h, NVS_KEY_PASS, out_net->password, &len);
+    if (err != HAL_OK) {
         out_net->password[0] = '\0';
     }
 
     uint8_t u8 = 0;
-    err = nvs_get_u8(h, NVS_KEY_HAS_CREDS, &u8);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = hal_kv_get_u8(&h, NVS_KEY_HAS_CREDS, &u8);
+    if (err == HAL_NOT_FOUND) {
         *out_has = out_net->ssid[0] != '\0';
     } else {
-        *out_has = (err == ESP_OK) && u8;
+        *out_has = (err == HAL_OK) && u8;
     }
 
-    nvs_close(h);
+    hal_kv_close(&h);
 }
 
 /* Reads the current saved_nets_blob_t out of `partition`, applying the same
@@ -291,27 +299,32 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
 {
     memset(out_blob, 0, sizeof(*out_blob));
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_PART_NOT_FOUND) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (err == HAL_NOT_FOUND) {
+        /* See wifi_prov_nvs_load_from()'s comment: the old ESP_ERR_NVS_
+         * PART_NOT_FOUND case (partition table missing this partition
+         * entirely) is not distinguished by hal_kv today and falls into the
+         * generic err != HAL_OK branch below instead, which still resolves
+         * to "treat as empty" -- just with a warning log this path skips. */
         out_blob->version = SAVED_NETS_VERSION;
         return ESP_OK;
     }
-    if (err != ESP_OK) {
-        return err;
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
 
     size_t len = sizeof(*out_blob);
-    err = nvs_get_blob(h, NVS_KEY_SAVED_NETS, out_blob, &len);
-    nvs_close(h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = hal_kv_get_blob(&h, NVS_KEY_SAVED_NETS, out_blob, &len);
+    hal_kv_close(&h);
+    if (err == HAL_NOT_FOUND) {
         memset(out_blob, 0, sizeof(*out_blob));
         out_blob->version = SAVED_NETS_VERSION;
         return ESP_OK;
     }
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob read from '%s' failed (%s) -- treating as empty",
-                 partition, esp_err_to_name(err));
+                 partition, hal_status_to_name(err));
         memset(out_blob, 0, sizeof(*out_blob));
         out_blob->version = SAVED_NETS_VERSION;
         return ESP_OK;
@@ -347,68 +360,68 @@ esp_err_t nvs_save_saved_nets(void)
 {
     s_wifi.saved_nets.version = SAVED_NETS_VERSION;
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_blob(h, NVS_KEY_SAVED_NETS, &s_wifi.saved_nets, sizeof(s_wifi.saved_nets));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_SAVED_NETS, &s_wifi.saved_nets, sizeof(s_wifi.saved_nets));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 esp_err_t nvs_save_mode(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_u8(h, NVS_KEY_MODE, s_wifi.mode == WIFI_PROV_MODE_AP ? 1 : 0);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_u8(&h, NVS_KEY_MODE, s_wifi.mode == WIFI_PROV_MODE_AP ? 1 : 0);
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 esp_err_t nvs_save_ap_ssid(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_str(h, NVS_KEY_AP_SSID, s_wifi.ap_ssid);
-    if (err == ESP_OK) {
-        err = nvs_set_u8(h, NVS_KEY_HAS_AP_SSID, s_wifi.has_ap_ssid_override ? 1 : 0);
+    err = hal_kv_set_str(&h, NVS_KEY_AP_SSID, s_wifi.ap_ssid);
+    if (err == HAL_OK) {
+        err = hal_kv_set_u8(&h, NVS_KEY_HAS_AP_SSID, s_wifi.has_ap_ssid_override ? 1 : 0);
     }
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 esp_err_t nvs_save_ap_password(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_str(h, NVS_KEY_AP_PASS, s_wifi.ap_password);
-    if (err == ESP_OK) {
-        err = nvs_set_u8(h, NVS_KEY_HAS_AP_PASS, s_wifi.has_ap_password_override ? 1 : 0);
+    err = hal_kv_set_str(&h, NVS_KEY_AP_PASS, s_wifi.ap_password);
+    if (err == HAL_OK) {
+        err = hal_kv_set_u8(&h, NVS_KEY_HAS_AP_PASS, s_wifi.has_ap_password_override ? 1 : 0);
     }
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 /* 2026-08-20, web-GUI-only: persists ip_mode + the three static-IP strings
@@ -417,26 +430,26 @@ esp_err_t nvs_save_ap_password(void)
  * other nvs_save_*() in this file. */
 esp_err_t nvs_save_ip_config(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_u8(h, NVS_KEY_IP_MODE, s_wifi.ip_mode == WIFI_PROV_IP_MODE_STATIC ? 1 : 0);
-    if (err == ESP_OK) {
-        err = nvs_set_str(h, NVS_KEY_STATIC_IP, s_wifi.static_ip);
+    err = hal_kv_set_u8(&h, NVS_KEY_IP_MODE, s_wifi.ip_mode == WIFI_PROV_IP_MODE_STATIC ? 1 : 0);
+    if (err == HAL_OK) {
+        err = hal_kv_set_str(&h, NVS_KEY_STATIC_IP, s_wifi.static_ip);
     }
-    if (err == ESP_OK) {
-        err = nvs_set_str(h, NVS_KEY_STATIC_NETMASK, s_wifi.static_netmask);
+    if (err == HAL_OK) {
+        err = hal_kv_set_str(&h, NVS_KEY_STATIC_NETMASK, s_wifi.static_netmask);
     }
-    if (err == ESP_OK) {
-        err = nvs_set_str(h, NVS_KEY_STATIC_GW, s_wifi.static_gateway);
+    if (err == HAL_OK) {
+        err = hal_kv_set_str(&h, NVS_KEY_STATIC_GW, s_wifi.static_gateway);
     }
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 /* Brings up one NVS partition, erasing ONLY that partition if its contents are
@@ -451,18 +464,11 @@ esp_err_t nvs_save_ip_config(void)
  * mount at all in either state -- so erasing is the only way forward; the
  * requirement is just that it stays inside the partition that is actually
  * broken. */
-esp_err_t wifi_prov_nvs_partition_init(const char *partition)
+hal_status_t wifi_prov_nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(WIFI_PROV_TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    /* HAL Phase 3 item 3 (hal_kv migration): hal_kv_init_partition() already
+     * implements this erase-and-retry idiom. */
+    return hal_kv_init_partition(partition);
 }
 
 /* One-time move of the persisted config out of the default partition's

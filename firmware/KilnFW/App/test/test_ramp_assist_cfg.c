@@ -13,14 +13,16 @@
 // -- an unassisted run silently becoming assisted invalidates every tracking-
 // error measurement it produces).
 //
-// Uses stubs/nvs.h's opt-in "real" u8-key store (nvs_test_enable(true)) to
-// simulate actual persistence across simulated reboots, same as
-// test_watchdog_cfg.c/test_adaptive_tune.c.
+// Uses fake_kv.h's RAM-backed hal_kv fake to simulate actual persistence
+// across simulated reboots (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the
+// nvs.h -> hal_kv.h migration; this file previously used stubs/nvs.h's
+// opt-in "real" u8-key store, same as test_watchdog_cfg.c's original form).
 #include <string.h>
 
 #include "test_common.h"
 
 #include "esp_err.h"
+#include "fake_kv.h"
 
 #include "../drivers/control/ramp_assist_cfg.c"
 
@@ -38,8 +40,8 @@ static void simulate_reboot(void)
 
 static void test_default_is_disabled_on_empty_nvs(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     esp_err_t err = ramp_assist_cfg_start();
@@ -53,8 +55,8 @@ static void test_default_is_disabled_on_empty_nvs(void)
 
 static void test_persistence_round_trip(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     ramp_assist_cfg_start();
@@ -86,30 +88,30 @@ static void test_persistence_round_trip(void)
 
 static void test_corrupted_value_falls_back_to_safe_default(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     ramp_assist_cfg_start();
     esp_err_t err = ramp_assist_cfg_set_enabled(true);
     TEST_CHECK(err == ESP_OK, "precondition: enabled=true is persisted");
 
-    // Corrupt the stubbed stored byte directly to something out of range for
-    // this module's 0/1 encoding -- simulates a bit flip that survives the
-    // u8 storage layer without also being caught at that layer (unlike
+    // Corrupt the persisted byte directly to something out of range for this
+    // module's 0/1 encoding -- simulates a bit flip that survives the u8
+    // storage layer without also being caught at that layer (unlike
     // watchdog_cfg.c's CRC'd record, this module has no CRC of its own, so
     // its own explicit range check (raw != 0 && raw != 1) is the ENTIRE
     // defense here -- this test is what proves that check actually does
-    // something rather than being dead code).
-    bool found = false;
-    for (int i = 0; i < TEST_STUB_NVS_U8_SLOTS; i++) {
-        if (s_stub_nvs_u8_has[i] && strcmp(s_stub_nvs_u8_keys[i], NVS_KEY_RAMP_ASSIST) == 0) {
-            s_stub_nvs_u8_vals[i] = 0xAA; // neither 0 nor 1
-            found = true;
-            break;
-        }
-    }
-    TEST_CHECK(found, "precondition: the stub actually has a stored slot for this module's key");
+    // something rather than being dead code). Written through the real
+    // hal_kv_set_u8()/hal_kv_commit() round trip, same as
+    // test_boot_guard.c's/test_watchdog_cfg.c's blob-corruption approach.
+    hal_kv_handle_t corrupt_h;
+    TEST_CHECK(hal_kv_open(&corrupt_h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "precondition: the ramp_assist namespace opens");
+    TEST_CHECK(hal_kv_set_u8(&corrupt_h, NVS_KEY_RAMP_ASSIST, 0xAA) == HAL_OK
+                   && hal_kv_commit(&corrupt_h) == HAL_OK,
+               "precondition: an out-of-range byte (neither 0 nor 1) is written back");
+    hal_kv_close(&corrupt_h);
 
     simulate_reboot();
     ramp_assist_cfg_start();

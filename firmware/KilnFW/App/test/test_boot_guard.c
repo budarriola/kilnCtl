@@ -6,14 +6,16 @@
 // and its s_bg file-scope state directly -- there is no other seam into a
 // module whose entire job is managing that state.
 //
-// Uses stubs/nvs.h's opt-in "real" blob store (nvs_test_enable(true)) to
-// simulate actual persistence across simulated reboots -- see that header's
-// own comment for why it exists (added originally for test_safety_cfg_store.c).
+// Uses fake_kv.h's RAM-backed hal_kv fake to simulate actual persistence
+// across simulated reboots (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the
+// nvs.h -> hal_kv.h migration; this file previously used stubs/nvs.h's
+// opt-in "real" blob store, nvs_test_enable(true)/nvs_test_clear()).
 #include <string.h>
 
 #include "test_common.h"
 
 #include "esp_err.h"
+#include "fake_kv.h"
 
 #include "../drivers/persist/boot_guard.c"
 
@@ -105,8 +107,8 @@ static void test_next_boot_count_threshold(void)
 
 static void test_counter_increments_and_enters_recovery(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     // Boots 1..RECOVERY_MODE_BOOT_THRESHOLD: never marked healthy. Boot N's
@@ -137,8 +139,8 @@ static void test_counter_increments_and_enters_recovery(void)
 
 static void test_mark_healthy_clears_counter(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     // Run it up close to the threshold, then confirm healthy, then prove the
@@ -160,8 +162,8 @@ static void test_mark_healthy_clears_counter(void)
 
 static void test_corrupted_record_is_treated_as_count_zero(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     // Run up several real boots so the persisted count is unambiguously
@@ -178,10 +180,26 @@ static void test_corrupted_record_is_treated_as_count_zero(void)
                "precondition: the persisted count is unambiguously past the threshold");
 #endif
 
-    // Corrupt the stubbed "flash" blob directly -- flip a bit in the middle
-    // of the stored bytes, simulating a brownout-mid-write / bit-flip.
-    TEST_CHECK(s_stub_nvs_has_blob, "precondition: something is actually stored");
-    s_stub_nvs_blob[4] ^= 0xFF;
+    // Corrupt the persisted blob by reading it back, flipping a byte, and
+    // writing the flipped bytes back through the real hal_kv_get_blob/
+    // set_blob/commit round trip -- simulates a brownout-mid-write / bit-flip
+    // without needing fake_kv-internal storage access (fake_kv.h's
+    // fake_kv_script_corrupt_key() makes the NEXT get_* fail outright with
+    // HAL_IO instead, which would not exercise record_is_valid()'s CRC
+    // check the way a still-readable-but-wrong-bytes record does).
+    boot_guard_record_t corrupt_rec;
+    size_t corrupt_len = sizeof(corrupt_rec);
+    hal_kv_handle_t corrupt_h;
+    TEST_CHECK(hal_kv_open(&corrupt_h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "precondition: the boot-guard namespace opens");
+    TEST_CHECK(hal_kv_get_blob(&corrupt_h, NVS_KEY_REC, &corrupt_rec, &corrupt_len) == HAL_OK
+                   && corrupt_len == sizeof(corrupt_rec),
+               "precondition: something is actually stored");
+    ((uint8_t *)&corrupt_rec)[4] ^= 0xFF;
+    TEST_CHECK(hal_kv_set_blob(&corrupt_h, NVS_KEY_REC, &corrupt_rec, sizeof(corrupt_rec)) == HAL_OK
+                   && hal_kv_commit(&corrupt_h) == HAL_OK,
+               "corrupted bytes written back");
+    hal_kv_close(&corrupt_h);
 
     simulate_reboot();
     esp_err_t err = boot_guard_init();

@@ -12,15 +12,18 @@
 // or missing record must always resolve to panic ENABLED, never the other
 // way.
 //
-// Uses stubs/nvs.h's opt-in "real" blob store (nvs_test_enable(true)) to
-// simulate actual persistence across simulated reboots -- see that header's
-// own comment (added originally for test_safety_cfg_store.c) and
-// test_boot_guard.c's identical use of it.
+// Uses fake_kv.h's RAM-backed hal_kv fake to simulate actual persistence
+// across simulated reboots (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the
+// nvs.h -> hal_kv.h migration; this file previously used stubs/nvs.h's
+// opt-in "real" blob store, same as test_boot_guard.c's original form).
 #include <string.h>
 
 #include "test_common.h"
 
 #include "esp_err.h"
+
+#include "fake_kv.h"
+#include "fake_wdt.h"
 
 #include "../drivers/safety/watchdog_cfg.c"
 
@@ -68,8 +71,8 @@ static void test_record_crc_detects_corruption(void)
 
 static void test_default_is_panic_enabled_on_empty_nvs(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     watchdog_cfg_init();
@@ -80,8 +83,8 @@ static void test_default_is_panic_enabled_on_empty_nvs(void)
 
 static void test_persistence_round_trip(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     watchdog_cfg_init();
@@ -108,18 +111,32 @@ static void test_persistence_round_trip(void)
 
 static void test_corrupted_record_falls_back_to_safe_default(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     watchdog_cfg_init();
     esp_err_t err = watchdog_cfg_set_panic_disabled(true, "test");
     TEST_CHECK(err == ESP_OK, "precondition: panic_disabled=true is persisted");
 
-    TEST_CHECK(s_stub_nvs_has_blob, "precondition: something is actually stored");
-    // Corrupt the stubbed "flash" blob directly -- flip a bit in the middle
-    // of the stored bytes, simulating a brownout-mid-write / bit-flip.
-    s_stub_nvs_blob[1] ^= 0xFF;
+    // Corrupt the persisted blob by reading it back, flipping a byte, and
+    // writing the flipped bytes back through the real hal_kv_get_blob/
+    // set_blob/commit round trip -- simulates a brownout-mid-write / bit-flip
+    // without needing fake_kv-internal storage access (see
+    // test_boot_guard.c's identical approach and comment).
+    watchdog_cfg_record_t corrupt_rec;
+    size_t corrupt_len = sizeof(corrupt_rec);
+    hal_kv_handle_t corrupt_h;
+    TEST_CHECK(hal_kv_open(&corrupt_h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "precondition: the watchdog_cfg namespace opens");
+    TEST_CHECK(hal_kv_get_blob(&corrupt_h, NVS_KEY_REC, &corrupt_rec, &corrupt_len) == HAL_OK
+                   && corrupt_len == sizeof(corrupt_rec),
+               "precondition: something is actually stored");
+    ((uint8_t *)&corrupt_rec)[1] ^= 0xFF;
+    TEST_CHECK(hal_kv_set_blob(&corrupt_h, NVS_KEY_REC, &corrupt_rec, sizeof(corrupt_rec)) == HAL_OK
+                   && hal_kv_commit(&corrupt_h) == HAL_OK,
+               "corrupted bytes written back");
+    hal_kv_close(&corrupt_h);
 
     simulate_reboot();
     watchdog_cfg_init();
@@ -130,6 +147,33 @@ static void test_corrupted_record_falls_back_to_safe_default(void)
                "behind");
 }
 
+// HAL Phase 3 item 7: apply_panic_disabled() now calls
+// hal_wdt_set_panic_disabled() (interface/hal_wdt.h) instead of
+// esp_task_wdt_reconfigure() directly. This is the one place this module's
+// host tests can now observe a real HAL side effect (against fake_wdt.c)
+// rather than only the load/persist/CRC path around it -- confirms the
+// live value set through watchdog_cfg_set_panic_disabled() actually reaches
+// the HAL, not just s_wd's own RAM copy.
+static void test_set_panic_disabled_reaches_hal_wdt(void)
+{
+    fake_wdt_reset_all();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+    watchdog_cfg_init();
+
+    esp_err_t err = watchdog_cfg_set_panic_disabled(true, "test");
+    TEST_CHECK(err == ESP_OK, "set_panic_disabled(true) succeeds");
+    TEST_CHECK(fake_wdt_get_panic_disabled() == true,
+               "hal_wdt_set_panic_disabled(true) reached the HAL (fake_wdt) -- the migrated call, "
+               "not just watchdog_cfg's own RAM copy");
+
+    err = watchdog_cfg_set_panic_disabled(false, "test");
+    TEST_CHECK(err == ESP_OK, "set_panic_disabled(false) succeeds");
+    TEST_CHECK(fake_wdt_get_panic_disabled() == false,
+               "hal_wdt_set_panic_disabled(false) also reached the HAL, not just the initial call");
+}
+
 void run_test_watchdog_cfg(void)
 {
     test_crc32_reference_vector();
@@ -137,4 +181,5 @@ void run_test_watchdog_cfg(void)
     test_default_is_panic_enabled_on_empty_nvs();
     test_persistence_round_trip();
     test_corrupted_record_falls_back_to_safe_default();
+    test_set_panic_disabled_reaches_hal_wdt();
 }

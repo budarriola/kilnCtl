@@ -3,8 +3,8 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_esp_common.h"
+#include "hal_kv.h"
 
 static const char *TAG = "display_power_cfg";
 
@@ -40,19 +40,11 @@ static bool s_display_on_error = true;
 
 // Copied verbatim from unit_pref.c/ramp_assist_cfg.c's identical
 // nvs_partition_init() -- same partition, same rationale, same erase-only-
-// the-broken-partition scope.
-static esp_err_t nvs_partition_init(const char *partition)
+// the-broken-partition scope. HAL Phase 3 item 3 (hal_kv migration):
+// hal_kv_init_partition() already implements this erase-and-retry idiom.
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
 static void apply_defaults(void)
@@ -67,34 +59,34 @@ esp_err_t display_power_cfg_start(void)
 {
     apply_defaults(); // safe defaults stand until proven otherwise below
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- display power settings stay at defaults this boot",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
         return ESP_OK; // non-fatal, same convention as unit_pref_start()/ramp_assist_cfg_start()
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_NOT_FOUND) {
         return ESP_OK; // namespace never written -- defaults are the expected steady state
     }
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGW(TAG, "nvs_open_from_partition failed: %s -- display power settings stay at defaults this boot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
         return ESP_OK;
     }
 
     display_power_cfg_blob_t blob;
     memset(&blob, 0, sizeof(blob));
     size_t len = sizeof(blob);
-    err = nvs_get_blob(h, NVS_KEY_DISPLAY_POWER, &blob, &len);
-    nvs_close(h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, &len);
+    hal_kv_close(&h);
+    if (err == HAL_NOT_FOUND) {
         return ESP_OK; // key never set -- defaults stand
     }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "display_power_cfg read failed: %s -- defaults stay in effect this boot", esp_err_to_name(err));
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "display_power_cfg read failed: %s -- defaults stay in effect this boot", hal_status_to_name(err));
         return ESP_OK;
     }
     if (len != sizeof(blob) || blob.version != DISPLAY_POWER_CFG_VERSION) {
@@ -152,19 +144,19 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     s_keep_on_while_firing = keep_on_while_firing;
     s_display_on_error = display_on_error;
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- display power settings not persisted",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
-        return part_err;
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
+        return hal_status_to_esp_err(part_err);
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "nvs_open_from_partition failed: %s -- display power settings not persisted",
-                 esp_err_to_name(err));
-        return err;
+                 hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
     }
 
     display_power_cfg_blob_t blob;
@@ -175,20 +167,20 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     blob.keep_on_while_firing = keep_on_while_firing ? 1 : 0;
     blob.display_on_error = display_on_error ? 1 : 0;
 
-    err = nvs_set_blob(h, NVS_KEY_DISPLAY_POWER, &blob, sizeof(blob));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
 
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "could not persist display power settings: %s -- will not survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     } else {
         ESP_LOGI(TAG, "display power settings saved: brightness=%u%% timeout_setting=%u keep_on_while_firing=%s "
                       "display_on_error=%s",
                  (unsigned)brightness_percent, (unsigned)timeout_setting,
                  keep_on_while_firing ? "true" : "false", display_on_error ? "true" : "false");
     }
-    return err;
+    return hal_status_to_esp_err(err);
 }

@@ -86,7 +86,14 @@
 #include "esp_wifi.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
-#include "nvs.h"
+#include "hal_kv.h"
+/* nvs_flash.h is kept for NVS_DEFAULT_PART_NAME only -- HAL Phase 3 item 3
+ * (hal_kv migration) moved every actual nvs_*() call in this file to
+ * hal_kv_*() (see wifi_prov_nvs_partition_init() below), but that macro
+ * (the default partition's name, "nvs") is still the right thing to pass
+ * through to it: hal_kv_init_partition()/hal_kv_open() take a partition
+ * name string, not a NULL-means-default sentinel, for the *_partition_init
+ * and *_load_from calls that operate on the pre-split default partition. */
 #include "nvs_flash.h"
 
 #include "settings.h"
@@ -204,18 +211,18 @@ esp_err_t wifi_prov_start(void)
      * partition errors, same as a blank one) and every module just starts
      * from its own (already-migrated, or first-boot-empty) real partition --
      * never fatal, never a reason to block Wi-Fi bring-up. */
-    esp_err_t default_err = wifi_prov_nvs_partition_init(NVS_DEFAULT_PART_NAME);
-    if (default_err != ESP_OK) {
+    hal_status_t default_err = wifi_prov_nvs_partition_init(NVS_DEFAULT_PART_NAME);
+    if (default_err != HAL_OK) {
         ESP_LOGW(WIFI_PROV_TAG, "default NVS init failed: %s -- one-time migration reads for "
                  "zones/rules/profiles/run_state/relay_cycles will find nothing to migrate "
                  "(harmless if already migrated; otherwise those sections start unconfigured)",
-                 esp_err_to_name(default_err));
+                 hal_status_to_name(default_err));
     }
 
-    esp_err_t err = wifi_prov_nvs_partition_init(WIFI_NVS_PARTITION);
-    if (err != ESP_OK) {
+    hal_status_t part_err = wifi_prov_nvs_partition_init(WIFI_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(WIFI_PROV_TAG, "NVS init for '%s' failed: %s -- Wi-Fi credentials cannot persist",
-                 WIFI_NVS_PARTITION, esp_err_to_name(err));
+                 WIFI_NVS_PARTITION, hal_status_to_name(part_err));
         /* Deliberately not a return: an unusable credential partition means
          * nothing persists, but the AP still has to come up so the board can
          * be reached and reprovisioned at all. Falling through leaves s_wifi
@@ -223,14 +230,15 @@ esp_err_t wifi_prov_start(void)
     }
 
     bool found_in_wifi_nvs = false;
-    if (err == ESP_OK) {
+    esp_err_t err = ESP_OK;
+    if (part_err == HAL_OK) {
         err = wifi_prov_nvs_load_from(WIFI_NVS_PARTITION, &found_in_wifi_nvs);
         if (err != ESP_OK) {
             ESP_LOGW(WIFI_PROV_TAG, "wifi_cfg load from '%s' failed: %s -- starting unprovisioned",
                      WIFI_NVS_PARTITION, esp_err_to_name(err));
             s_wifi.mode = WIFI_PROV_MODE_HOME;
         } else {
-            if (default_err == ESP_OK) {
+            if (default_err == HAL_OK) {
                 /* Only worth attempting when the default partition actually
                  * mounted -- there is nothing to migrate from otherwise. */
                 wifi_prov_migrate_from_default_partition(found_in_wifi_nvs);

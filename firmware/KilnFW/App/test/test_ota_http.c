@@ -172,6 +172,18 @@ char g_stub_local_ip[16] = "";
 void esp_restart(void) {}
 
 // ---------------------------------------------------------------------------
+// hal_wdt.h -- HAL Phase 3 item 7 migrated factory_reset.c's reboot_task()
+// and ota_http_recovery.c's ota_recovery_exit_reboot_task() off esp_restart()
+// directly onto hal_wdt_reboot(). Same "never actually invoked" reasoning as
+// esp_restart() above: neither reboot task ever runs in this file's tests
+// (xTaskCreate() is stubbed to never call its argument), but the symbol must
+// still resolve. A trivial no-op stub, not fake_wdt.c, matching this file's
+// existing convention of defining its own minimal stand-ins for symbols it
+// never actually exercises rather than linking a real backend/fake.
+// ---------------------------------------------------------------------------
+void hal_wdt_reboot(void) {}
+
+// ---------------------------------------------------------------------------
 // profiles_builtin.h -- factory_reset.c's execute_scope() calls this for
 // "profiles"/"all" scopes; the tests in this file never reach a scope that
 // executes (the interlock check always refuses first), but must resolve.

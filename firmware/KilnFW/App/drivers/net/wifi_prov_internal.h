@@ -47,6 +47,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "hal_status.h"
 
 #include "wifi_prov.h"
 
@@ -189,7 +190,12 @@ bool wifi_prov_post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wa
 void post_event(wifi_cmd_type_t type);
 
 /* ---- NVS load/save/migration (wifi_prov_nvs.c) ---------------------------- */
-esp_err_t wifi_prov_nvs_partition_init(const char *partition);
+/* HAL Phase 3 item 3 (hal_kv migration): thin wrapper over
+ * hal_kv_init_partition(), returns its hal_status_t verbatim rather than
+ * collapsing to esp_err_t here -- callers that need an esp_err_t convert at
+ * their own boundary via hal_status_to_esp_err(), same convention as
+ * relay_cycles.c/display_power_cfg.c/time_sync.c's identical wrappers. */
+hal_status_t wifi_prov_nvs_partition_init(const char *partition);
 esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found);
 void nvs_load_legacy_single(const char *partition, saved_net_t *out_net, bool *out_has);
 void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs);

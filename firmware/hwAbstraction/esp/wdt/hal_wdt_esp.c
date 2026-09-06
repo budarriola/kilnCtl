@@ -9,8 +9,8 @@
  * boot-time init off Kconfig, and watchdog_cfg.c only ever *reconfigures*
  * it later to flip panic-vs-warn). esp_restart() sole real call sites:
  * factory_reset.c:90, ota_http_recovery.c:98, both unconditional no-args
- * never-returns calls. Not wired into any CMakeLists yet -- see
- * firmware/hwAbstraction/test/compile_esp_backends.ps1.
+ * never-returns calls. Compiled by
+ * firmware/hwAbstraction/idf/hwabstraction_esp/CMakeLists.txt.
  *
  * INTERFACE MISMATCH: hal_wdt_init(timeout_ms, panic_disabled) is
  * esp_task_wdt_init()-shaped per hal_wdt.h's own doc comment, but this

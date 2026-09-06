@@ -14,6 +14,7 @@
 #include "test_common.h"
 
 #include "esp_err.h"
+#include "fake_kv.h"
 
 #include "../drivers/persist/display_power_cfg.c"
 
@@ -37,8 +38,8 @@ static void simulate_reboot(void)
 
 static void test_defaults_on_empty_nvs(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
 
     esp_err_t err = display_power_cfg_start();
@@ -52,8 +53,8 @@ static void test_defaults_on_empty_nvs(void)
 
 static void test_persistence_round_trip(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     display_power_cfg_start();
 
@@ -75,8 +76,8 @@ static void test_persistence_round_trip(void)
 
 static void test_set_refuses_out_of_range_brightness(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     display_power_cfg_start();
     uint8_t before = display_power_cfg_brightness_percent();
@@ -89,8 +90,8 @@ static void test_set_refuses_out_of_range_brightness(void)
 
 static void test_set_refuses_invalid_timeout_setting(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     display_power_cfg_start();
     display_timeout_setting_t before = display_power_cfg_timeout_setting();
@@ -103,22 +104,22 @@ static void test_set_refuses_invalid_timeout_setting(void)
 
 static void test_corrupt_blob_size_falls_back_to_defaults(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     display_power_cfg_start(); // establishes defaults + opens the namespace once
 
     // Directly stash a wrong-size blob under the same key, bypassing
     // display_power_cfg_set() entirely -- simulates a blob written by an
     // incompatible future/older schema.
-    nvs_handle_t h;
-    esp_err_t open_err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    TEST_CHECK(open_err == ESP_OK, "test setup: nvs_open_from_partition for the corrupt-blob stash succeeds");
+    hal_kv_handle_t h;
+    hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    TEST_CHECK(open_err == HAL_OK, "test setup: hal_kv_open for the corrupt-blob stash succeeds");
     uint8_t wrong_size_blob[2] = { 1, 2 };
-    esp_err_t set_err = nvs_set_blob(h, NVS_KEY_DISPLAY_POWER, wrong_size_blob, sizeof(wrong_size_blob));
-    TEST_CHECK(set_err == ESP_OK, "test setup: stashing the wrong-size blob succeeds");
-    nvs_commit(h);
-    nvs_close(h);
+    hal_status_t set_err = hal_kv_set_blob(&h, NVS_KEY_DISPLAY_POWER, wrong_size_blob, sizeof(wrong_size_blob));
+    TEST_CHECK(set_err == HAL_OK, "test setup: stashing the wrong-size blob succeeds");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
 
     simulate_reboot();
     esp_err_t err = display_power_cfg_start();
@@ -129,8 +130,8 @@ static void test_corrupt_blob_size_falls_back_to_defaults(void)
 
 static void test_out_of_range_field_in_wellformed_blob_falls_back_to_defaults(void)
 {
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     display_power_cfg_start();
 
@@ -145,11 +146,11 @@ static void test_out_of_range_field_in_wellformed_blob_falls_back_to_defaults(vo
     bad_blob.keep_on_while_firing = 0;
     bad_blob.display_on_error = 0;
 
-    nvs_handle_t h;
-    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    nvs_set_blob(h, NVS_KEY_DISPLAY_POWER, &bad_blob, sizeof(bad_blob));
-    nvs_commit(h);
-    nvs_close(h);
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_blob(&h, NVS_KEY_DISPLAY_POWER, &bad_blob, sizeof(bad_blob));
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
 
     simulate_reboot();
     esp_err_t err = display_power_cfg_start();
@@ -166,4 +167,6 @@ void run_test_display_power_cfg(void)
     test_set_refuses_invalid_timeout_setting();
     test_corrupt_blob_size_falls_back_to_defaults();
     test_out_of_range_field_in_wellformed_blob_falls_back_to_defaults();
+
+    fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

@@ -120,12 +120,36 @@ hal_status_t hal_kv_get_str(hal_kv_handle_t *h, const char *key,
 hal_status_t hal_kv_set_str(hal_kv_handle_t *h, const char *key,
                              const char *value);
 
+/* Added for profiles_builtin.c's NVS_KEY_HIDDEN mask and unit_pref.c's/
+ * ramp_assist_cfg.c's single-byte settings -- genuine production scalar
+ * callers this header's original census (comment above) missed: they call
+ * nvs_get_u32()/nvs_set_u32() and nvs_get_u8()/nvs_set_u8() directly, not
+ * the blob/str forms. */
+hal_status_t hal_kv_get_u32(hal_kv_handle_t *h, const char *key, uint32_t *out);
+hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value);
+hal_status_t hal_kv_get_u8(hal_kv_handle_t *h, const char *key, uint8_t *out);
+hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value);
+
 /* crash_report.c and profiles_http.c's scoped-key erase. */
 hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key);
 
 /* Idempotent, with erase-retry -- matches today's nvs_flash_init_partition
  * fallback-to-erase-and-retry pattern used ~13 places at boot. */
 hal_status_t hal_kv_init_partition(const char *partition);
+
+/* Non-erasing mount probe -- nvs_report_capture()'s use (re-observing a
+ * partition every OTHER module has already brought up at boot, per
+ * main.c ordering) must never itself trigger an erase-and-retry: erasing a
+ * partition just to report on it would silently destroy whatever data the
+ * module that actually owns it was relying on. Same underlying
+ * nvs_flash_init_partition() call hal_kv_init_partition() makes, but WITHOUT
+ * the NO_FREE_PAGES/NEW_VERSION_FOUND erase-retry branch -- a partition that
+ * needs erasing is reported not-ready, not silently fixed. Returns HAL_OK if
+ * the partition is already mounted, HAL_NOT_READY if it is present but not
+ * mountable as-is (the caller should NOT erase it itself -- that decision
+ * belongs to whichever module owns the partition and calls
+ * hal_kv_init_partition()), or the mapped error for any other failure. */
+hal_status_t hal_kv_mount_probe(const char *partition);
 
 /* factory_reset.c's scoped erase of one partition. */
 hal_status_t hal_kv_erase_partition(const char *partition);

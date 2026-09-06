@@ -2,13 +2,12 @@
 
 #include <string.h>
 
-#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "hal_esp_common.h"
+#include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_kv.h"
 
 static const char *TAG = "relay_cycles";
 
@@ -48,22 +47,11 @@ typedef struct {
 static relay_cycles_t s_rc;
 
 /* Brings up KILN_NVS_PARTITION, erasing ONLY that partition if its contents
- * are unusable. Adapted from wifi_prov.c's nvs_partition_init() (2026-08-12
- * NVS-partition split): NO_FREE_PAGES / NEW_VERSION_FOUND leave NVS unable
- * to mount at all, so erasing is the only cure, but it must stay scoped to
- * the partition that is actually broken. */
-static esp_err_t nvs_partition_init(const char *partition)
+ * are unusable. hal_kv_init_partition() already implements the
+ * erase-and-retry idiom this used to do by hand (see hal_kv_esp.c). */
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
 /* Forward declaration -- defined below, but this write path needs it before
@@ -78,7 +66,7 @@ static bool caller_stack_is_external(void);
  * when KILN_NVS_PARTITION has nothing under NVS_KEY_CYCLES yet.
  *
  * DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
- * function writes NVS (nvs_set_blob()/nvs_commit() below) exactly like
+ * function writes NVS (hal_kv_set_blob()/hal_kv_commit() below) exactly like
  * persist_locked() does further down, but never got persist_locked()'s
  * caller_stack_is_external() guard when that guard was added -- the earlier
  * pass treated "this file is guarded" as true of the file's main write path
@@ -92,16 +80,16 @@ static bool caller_stack_is_external(void);
  * not because a live path was found. */
 static void migrate_from_default_partition(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL);
+    if (err != HAL_OK) {
         return;
     }
     relay_cycles_blob_t old_blob;
     size_t len = sizeof(old_blob);
-    err = nvs_get_blob(h, NVS_KEY_CYCLES, &old_blob, &len);
-    nvs_close(h);
-    if (err != ESP_OK) {
+    err = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &old_blob, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
         /* Nothing in the old location either (or it's the pre-version-field
          * bare uint32_t[] blob, a different size) -- nothing to migrate. */
         return;
@@ -117,20 +105,20 @@ static void migrate_from_default_partition(void)
         return;
     }
 
-    nvs_handle_t hw;
-    err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &hw);
-    if (err != ESP_OK) {
+    hal_kv_handle_t hw;
+    err = hal_kv_open(&hw, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return;
     }
-    err = nvs_set_blob(hw, NVS_KEY_CYCLES, &old_blob, sizeof(old_blob));
-    if (err == ESP_OK) {
-        err = nvs_commit(hw);
+    err = hal_kv_set_blob(&hw, NVS_KEY_CYCLES, &old_blob, sizeof(old_blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&hw);
     }
-    nvs_close(hw);
-    if (err == ESP_OK) {
+    hal_kv_close(&hw);
+    if (err == HAL_OK) {
         ESP_LOGI(TAG, "migrated relay cycle counts from default NVS partition to '%s'", KILN_NVS_PARTITION);
     } else {
-        ESP_LOGW(TAG, "relay cycle count migration to '%s' failed: %s", KILN_NVS_PARTITION, esp_err_to_name(err));
+        ESP_LOGW(TAG, "relay cycle count migration to '%s' failed: %s", KILN_NVS_PARTITION, hal_status_to_name(err));
     }
 }
 
@@ -147,22 +135,22 @@ static bool ensure_lock(void)
 }
 
 /* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
- * (PSRAM). Same predicate, same reasoning, and same incident class as
- * kiln_cfg_store.c's/safety_cfg_store.c's/run_state.c's
- * caller_stack_is_external(): a flash/NVS write disables the cache, which
- * makes a PSRAM-resident stack unreachable and aborts the whole board via
- * ESP-IDF's own esp_task_stack_is_sane_cache_disabled() rather than failing
- * just this one call. This module's persist_locked() is called directly
- * from profile_executor's tick path (relay_cycles_maybe_persist()) and its
- * stop path (relay_cycles_flush()) -- see run_state.c's identical guard for
- * the fuller rationale; this closes the same gap for this module. */
+ * (PSRAM) -- i.e. the negation of hal_kv_write_safe_here(). Same predicate,
+ * same reasoning, and same incident class as kiln_cfg_store.c's/
+ * safety_cfg_store.c's/run_state.c's caller_stack_is_external(): a flash/NVS
+ * write disables the cache, which makes a PSRAM-resident stack unreachable
+ * and aborts the whole board via ESP-IDF's own
+ * esp_task_stack_is_sane_cache_disabled() rather than failing just this one
+ * call. This module's persist_locked() is called directly from
+ * profile_executor's tick path (relay_cycles_maybe_persist()) and its stop
+ * path (relay_cycles_flush()) -- see run_state.c's identical guard for the
+ * fuller rationale; this closes the same gap for this module. */
 static bool caller_stack_is_external(void)
 {
-    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
-    return esp_ptr_external_ram((void *)&stack_probe);
+    return !hal_kv_write_safe_here();
 }
 
-static esp_err_t persist_locked(void)
+static hal_status_t persist_locked(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "persist_locked: REFUSING -- calling task's stack is in external RAM "
@@ -171,24 +159,24 @@ static esp_err_t persist_locked(void)
                       "through a task with an internal-SRAM stack instead -- see "
                       "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
                       "worker for the established pattern.");
-        return ESP_ERR_INVALID_STATE;
+        return HAL_NOT_READY;
     }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return err;
     }
     relay_cycles_blob_t blob;
     blob.version = RELAY_CYCLES_VERSION;
     memcpy(blob.counts, s_rc.counts, sizeof(blob.counts));
-    err = nvs_set_blob(h, NVS_KEY_CYCLES, &blob, sizeof(blob));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    if (err == ESP_OK) {
+    hal_kv_close(&h);
+    if (err == HAL_OK) {
         s_rc.dirty = false;
-        s_rc.last_persist_us = esp_timer_get_time();
+        s_rc.last_persist_us = (int64_t)hal_time_now_us();
     }
     return err;
 }
@@ -199,10 +187,10 @@ esp_err_t relay_cycles_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- relay cycle counts will not persist",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
     }
 
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
@@ -210,16 +198,16 @@ esp_err_t relay_cycles_init(void)
 
     /* Migrate before the real load so a pre-split board's counts show up on
      * the very first boot after the update, not one boot late. */
-    if (part_err == ESP_OK) {
+    if (part_err == HAL_OK) {
         migrate_from_default_partition();
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_OK) {
         relay_cycles_blob_t blob;
         size_t len = sizeof(blob);
-        err = nvs_get_blob(h, NVS_KEY_CYCLES, &blob, &len);
+        err = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len);
         /* BUG FIXED (matching zones_http.c's nvs_load_from()): this used to
          * gate BOTH the current-version and newer-version branches on
          * `len == sizeof(blob)` before ever looking at `version`, which
@@ -229,42 +217,42 @@ esp_err_t relay_cycles_init(void)
          * everything else must be classified by version first, with the
          * exact-size check applied only to the current-version case (a real
          * current-version blob is always written at exactly sizeof(blob)). */
-        if (err == ESP_OK && len < sizeof(blob.version)) {
+        if (err == HAL_OK && len < sizeof(blob.version)) {
             ESP_LOGW(TAG, "relay cycle blob is too short to contain a version -- starting at zero");
-        } else if (err == ESP_OK && blob.version == RELAY_CYCLES_VERSION) {
+        } else if (err == HAL_OK && blob.version == RELAY_CYCLES_VERSION) {
             if (len != sizeof(blob)) {
                 ESP_LOGW(TAG, "relay cycle blob claims current version but is the wrong size -- starting at zero");
             } else {
                 memcpy(s_rc.counts, blob.counts, sizeof(s_rc.counts));
             }
-        } else if (err == ESP_OK && blob.version > RELAY_CYCLES_VERSION) {
+        } else if (err == HAL_OK && blob.version > RELAY_CYCLES_VERSION) {
             /* Newer than this firmware understands -- a firmware-rollback
              * case (TODO.md 8.1). Refuse to load rather than guess at a
              * layout this build doesn't know, and leave flash untouched so
              * a subsequent boot on the newer firmware still finds it. */
             ESP_LOGW(TAG, "relay cycle blob version %u is newer than this firmware's %u -- refusing to load, "
                      "leaving flash untouched", blob.version, RELAY_CYCLES_VERSION);
-        } else if (err == ESP_OK) {
+        } else if (err == HAL_OK) {
             /* blob.version < RELAY_CYCLES_VERSION: version 1 is the first
              * this field has ever had, so there is no older layout to
              * migrate from yet -- this is the hook point for when one
              * exists. */
             ESP_LOGW(TAG, "relay cycle blob version %u predates this firmware's %u with no migration defined -- "
                      "starting at zero", blob.version, RELAY_CYCLES_VERSION);
-        } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        } else if (err != HAL_NOT_FOUND) {
             /* Missing (first boot, or nothing survived migration) is the
              * only case treated identically to "start at zero" without a
              * warning; anything else (unreadable) is logged as corrupt
              * data. */
             memset(s_rc.counts, 0, sizeof(s_rc.counts));
             ESP_LOGW(TAG, "relay cycle blob load failed (%s) -- starting at zero",
-                     esp_err_to_name(err));
+                     hal_status_to_name(err));
         }
-        nvs_close(h);
+        hal_kv_close(&h);
     }
 
     s_rc.dirty = false;
-    s_rc.last_persist_us = esp_timer_get_time();
+    s_rc.last_persist_us = (int64_t)hal_time_now_us();
     s_rc.initialized = true;
     xSemaphoreGive(s_rc.lock);
 
@@ -318,12 +306,12 @@ void relay_cycles_maybe_persist(void)
     }
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     bool due = s_rc.dirty &&
-               (esp_timer_get_time() - s_rc.last_persist_us) >= (int64_t)RELAY_CYCLES_PERSIST_INTERVAL_S * 1000000;
-    esp_err_t err = due ? persist_locked() : ESP_OK;
+               ((int64_t)hal_time_now_us() - s_rc.last_persist_us) >= (int64_t)RELAY_CYCLES_PERSIST_INTERVAL_S * 1000000;
+    hal_status_t err = due ? persist_locked() : HAL_OK;
     xSemaphoreGive(s_rc.lock);
 
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "periodic persist failed: %s (counts kept in RAM, will retry)", esp_err_to_name(err));
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "periodic persist failed: %s (counts kept in RAM, will retry)", hal_status_to_name(err));
     }
 }
 
@@ -333,10 +321,11 @@ esp_err_t relay_cycles_flush(void)
         return ESP_ERR_NO_MEM;
     }
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    esp_err_t err = s_rc.dirty ? persist_locked() : ESP_OK;
+    hal_status_t err = s_rc.dirty ? persist_locked() : HAL_OK;
     xSemaphoreGive(s_rc.lock);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "flush failed: %s", esp_err_to_name(err));
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "flush failed: %s", hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
     }
-    return err;
+    return ESP_OK;
 }

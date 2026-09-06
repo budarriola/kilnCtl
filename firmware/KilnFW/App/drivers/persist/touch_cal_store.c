@@ -4,8 +4,8 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_esp_common.h"
+#include "hal_kv.h"
 
 static const char *TAG = "touch_cal_store";
 
@@ -33,18 +33,9 @@ typedef struct {
 _Static_assert(sizeof(touch_cal_record_t) == 28,
                "touch_cal_record_t layout changed -- bump TOUCH_CAL_RECORD_VERSION");
 
-static esp_err_t nvs_partition_init(const char *partition)
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
 static void set_uncalibrated(touch_cal_t *out)
@@ -58,28 +49,28 @@ esp_err_t touch_cal_store_load(touch_cal_t *out)
     if (!out) return ESP_ERR_INVALID_ARG;
     set_uncalibrated(out);
 
-    esp_err_t part_err = nvs_partition_init(NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- treating as uncalibrated",
-                 NVS_PARTITION, esp_err_to_name(part_err));
+                 NVS_PARTITION, hal_status_to_name(part_err));
         return ESP_OK;
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
-        /* ESP_ERR_NVS_NOT_FOUND on a fresh board is the expected steady
-         * state, not a fault -- see this file's header comment. */
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NVS_PARTITION);
+    if (err != HAL_OK) {
+        /* HAL_NOT_FOUND on a fresh board is the expected steady state, not
+         * a fault -- see this file's header comment. */
         return ESP_OK;
     }
 
     touch_cal_record_t rec;
     size_t len = sizeof(rec);
-    err = nvs_get_blob(h, NVS_KEY_CAL, &rec, &len);
-    nvs_close(h);
+    err = hal_kv_get_blob(&h, NVS_KEY_CAL, &rec, &len);
+    hal_kv_close(&h);
 
-    if (err != ESP_OK || len != sizeof(rec) || rec.version != TOUCH_CAL_RECORD_VERSION) {
-        if (err == ESP_OK) {
+    if (err != HAL_OK || len != sizeof(rec) || rec.version != TOUCH_CAL_RECORD_VERSION) {
+        if (err == HAL_OK) {
             ESP_LOGW(TAG, "stored calibration record size/version mismatch -- treating as uncalibrated");
         }
         return ESP_OK;
@@ -106,19 +97,19 @@ esp_err_t touch_cal_store_save(const touch_cal_t *cal)
 {
     if (!cal) return ESP_ERR_INVALID_ARG;
 
-    esp_err_t part_err = nvs_partition_init(NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- calibration not saved", NVS_PARTITION,
-                 esp_err_to_name(part_err));
-        return part_err;
+                 hal_status_to_name(part_err));
+        return hal_status_to_esp_err(part_err);
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_open_from_partition failed: %s -- calibration not saved",
-                 esp_err_to_name(err));
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_PARTITION);
+    if (err != HAL_OK) {
+        ESP_LOGE(TAG, "hal_kv_open failed: %s -- calibration not saved",
+                 hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
     }
 
     touch_cal_record_t rec = {
@@ -127,21 +118,21 @@ esp_err_t touch_cal_store_save(const touch_cal_t *cal)
         .a = cal->a, .b = cal->b, .c = cal->c,
         .d = cal->d, .e = cal->e, .f = cal->f,
     };
-    err = nvs_set_blob(h, NVS_KEY_CAL, &rec, sizeof(rec));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_CAL, &rec, sizeof(rec));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
 
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "could not persist touch calibration: %s -- will not survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     } else {
         ESP_LOGI(TAG, "touch calibration saved: x=%.5f*rx+%.5f*ry+%.2f y=%.5f*rx+%.5f*ry+%.2f",
                  (double)rec.a, (double)rec.b, (double)rec.c, (double)rec.d, (double)rec.e,
                  (double)rec.f);
     }
-    return err;
+    return hal_status_to_esp_err(err);
 }
 
 /* 3x3 determinant, expansion by the first row -- n is always exactly 3 here

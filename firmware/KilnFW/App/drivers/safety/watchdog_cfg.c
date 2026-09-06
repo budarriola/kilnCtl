@@ -4,12 +4,13 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 #include "sdkconfig.h"
+
+#include "hal_esp_common.h"
+#include "hal_kv.h"
+#include "hal_wdt.h"
 
 static const char *TAG = "watchdog_cfg";
 
@@ -83,54 +84,29 @@ static bool record_is_valid(const watchdog_cfg_record_t *rec)
     return rec->version == WATCHDOG_CFG_RECORD_VERSION && rec->crc32 == record_crc(rec);
 }
 
-/* Pure, host-testable: the esp_task_wdt_config_t this build's own Kconfig
- * says the TWDT should run with, for a given trigger_panic value.
- * timeout_ms/idle_core_mask are ALWAYS derived from CONFIG_ESP_TASK_WDT_*
- * here -- never hardcoded -- so this module can only ever change
- * trigger_panic, never silently drift the timeout the rest of the firmware
- * was sized around. */
-static esp_task_wdt_config_t build_twdt_config(bool trigger_panic)
-{
-    esp_task_wdt_config_t cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.timeout_ms = (uint32_t)CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000u;
-    cfg.trigger_panic = trigger_panic;
-#if defined(CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0) && CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
-    cfg.idle_core_mask |= (1u << 0);
-#endif
-#if defined(CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1) && CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
-    cfg.idle_core_mask |= (1u << 1);
-#endif
-    return cfg;
-}
-
-/* Applies `disabled` to the already-running TWDT. trigger_panic is the
- * inverse of disabled: disabled=true means trigger_panic=false. Not
- * exercised by the host tests (no real TWDT off-target) -- see
- * test_watchdog_cfg.c's header comment. */
+/* Applies `disabled` to the already-running TWDT via hal_wdt_set_panic_
+ * disabled() -- HAL Phase 3 item 7 migration off esp_task_wdt_reconfigure()
+ * directly. timeout_ms/idle_core_mask stay entirely inside hal_wdt_esp.c
+ * (still always CONFIG_ESP_TASK_WDT_*-derived there, never hardcoded, same
+ * "this module can only ever change trigger_panic" guarantee as before);
+ * this module now only ever passes the one bit hal_wdt.h's header comment
+ * says this call owns. Exercised by the host tests against fake_wdt.c (no
+ * real TWDT off-target, but hal_wdt_set_panic_disabled() itself is now a
+ * thin, generic HAL call worth checking against the fake -- see
+ * test_watchdog_cfg.c). */
 static esp_err_t apply_panic_disabled(bool disabled)
 {
-    esp_task_wdt_config_t cfg = build_twdt_config(!disabled);
-    return esp_task_wdt_reconfigure(&cfg);
+    return hal_status_to_esp_err(hal_wdt_set_panic_disabled(disabled));
 }
 
 /* Adapted from boot_guard.c's nvs_partition_init() -- same "erase ONLY this
  * partition if its contents are unusable" recovery. */
-static esp_err_t nvs_partition_init(const char *partition)
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
-static esp_err_t persist_disabled_flag(bool disabled)
+static hal_status_t persist_disabled_flag(bool disabled)
 {
     watchdog_cfg_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -138,16 +114,16 @@ static esp_err_t persist_disabled_flag(bool disabled)
     rec.panic_disabled = disabled ? 1u : 0u;
     rec.crc32 = record_crc(&rec);
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return err;
     }
-    err = nvs_set_blob(h, NVS_KEY_REC, &rec, sizeof(rec));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_REC, &rec, sizeof(rec));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
     return err;
 }
 
@@ -157,16 +133,16 @@ static esp_err_t persist_disabled_flag(bool disabled)
  * load-tolerant convention as boot_guard.c/run_state.c. */
 static bool load_disabled_flag(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return false;
     }
     watchdog_cfg_record_t rec;
     size_t len = sizeof(rec);
-    err = nvs_get_blob(h, NVS_KEY_REC, &rec, &len);
-    nvs_close(h);
-    if (err != ESP_OK || len != sizeof(rec)) {
+    err = hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(rec)) {
         return false;
     }
     if (!record_is_valid(&rec)) {
@@ -198,14 +174,14 @@ void watchdog_cfg_init(void)
         return;
     }
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- watchdog-panic-disabled setting will not "
                       "persist (this boot stays with panic ENABLED, the safe default)",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
     }
 
-    bool disabled = (part_err == ESP_OK) ? load_disabled_flag() : false;
+    bool disabled = (part_err == HAL_OK) ? load_disabled_flag() : false;
 
     xSemaphoreTake(s_wd.lock, portMAX_DELAY);
     s_wd.panic_disabled = disabled;
@@ -258,7 +234,7 @@ esp_err_t watchdog_cfg_set_panic_disabled(bool disabled, const char *source)
         source = "unknown";
     }
 
-    esp_err_t persist_err = persist_disabled_flag(disabled);
+    hal_status_t persist_err = persist_disabled_flag(disabled);
     esp_err_t apply_err = apply_panic_disabled(disabled);
 
     xSemaphoreTake(s_wd.lock, portMAX_DELAY);
@@ -270,12 +246,12 @@ esp_err_t watchdog_cfg_set_panic_disabled(bool disabled, const char *source)
         ESP_LOGE(TAG, "task-watchdog panic DISABLED by request (source: %s) -- a hung task will no "
                       "longer reboot this board; relays stay in whatever state they were last "
                       "commanded (persist=%s, apply=%s)",
-                 source, esp_err_to_name(persist_err), esp_err_to_name(apply_err));
+                 source, hal_status_to_name(persist_err), esp_err_to_name(apply_err));
     } else {
         ESP_LOGW(TAG, "task-watchdog panic RE-ENABLED (source: %s, restoring the safe default) "
                       "(persist=%s, apply=%s)",
-                 source, esp_err_to_name(persist_err), esp_err_to_name(apply_err));
+                 source, hal_status_to_name(persist_err), esp_err_to_name(apply_err));
     }
 
-    return persist_err;
+    return hal_status_to_esp_err(persist_err);
 }

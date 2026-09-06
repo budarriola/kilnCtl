@@ -7,8 +7,7 @@
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_kv.h"
 
 static const char *TAG = "time_sync";
 
@@ -35,19 +34,11 @@ static bool s_sntp_init_ok;
 
 /* Copied verbatim from unit_pref.c's nvs_partition_init() -- same
  * partition, same NO_FREE_PAGES/NEW_VERSION_FOUND erase-and-retry, scoped
- * to only the broken partition. */
-static esp_err_t nvs_partition_init(const char *partition)
+ * to only the broken partition. HAL Phase 3 item 3 (hal_kv migration):
+ * hal_kv_init_partition() already implements this erase-and-retry idiom. */
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
 /* Runs on the lwIP SNTP task -- must stay fast and non-blocking, no logging
@@ -77,25 +68,25 @@ esp_err_t time_sync_start(void)
     s_sntp_init_ok = false;
     time_sync_tz_effective(NULL, s_status.tz, sizeof(s_status.tz)); /* UTC default until NVS says otherwise */
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- defaulting to %s this boot",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err), s_status.tz);
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err), s_status.tz);
         apply_tz(s_status.tz);
     } else {
-        nvs_handle_t h;
-        esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+        hal_kv_handle_t h;
+        hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
         char stored[TIME_SYNC_TZ_MAX_LEN + 1] = { 0 };
         bool have_stored = false;
-        if (err == ESP_OK) {
+        if (err == HAL_OK) {
             size_t len = sizeof(stored);
-            if (nvs_get_str(h, NVS_KEY_TZ, stored, &len) == ESP_OK) {
+            if (hal_kv_get_str(&h, NVS_KEY_TZ, stored, &len) == HAL_OK) {
                 have_stored = true;
             }
-            nvs_close(h);
-        } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+            hal_kv_close(&h);
+        } else if (err != HAL_NOT_FOUND) {
             ESP_LOGW(TAG, "nvs_open_from_partition failed: %s -- defaulting to %s this boot",
-                     esp_err_to_name(err), s_status.tz);
+                     hal_status_to_name(err), s_status.tz);
         }
         char effective[TIME_SYNC_TZ_MAX_LEN + 1];
         time_sync_tz_effective(have_stored ? stored : NULL, effective, sizeof(effective));
@@ -165,26 +156,26 @@ esp_err_t time_sync_set_tz(const char *tz)
      * board running the OLD timezone after reporting success. */
     apply_tz(tz);
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- TZ applied live but NOT persisted",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
         return ESP_OK;
     }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         ESP_LOGW(TAG, "nvs_open_from_partition (RW) failed: %s -- TZ applied live but NOT persisted",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
         return ESP_OK;
     }
-    err = nvs_set_str(h, NVS_KEY_TZ, tz);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_str(&h, NVS_KEY_TZ, tz);
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "TZ persist failed: %s -- applied live for this boot only", esp_err_to_name(err));
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "TZ persist failed: %s -- applied live for this boot only", hal_status_to_name(err));
     }
     return ESP_OK;
 }

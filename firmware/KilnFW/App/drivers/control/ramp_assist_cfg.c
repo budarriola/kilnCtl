@@ -1,8 +1,8 @@
 #include "ramp_assist_cfg.h"
 
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_esp_common.h"
+#include "hal_kv.h"
 
 static const char *TAG = "ramp_assist_cfg";
 
@@ -22,54 +22,45 @@ static bool s_ramp_assist_enabled = false;
 // Copied from unit_pref.c/zones_http.c/touch_cal_store.c's identical
 // nvs_partition_init() -- same partition, same rationale, same erase-only-
 // the-broken-partition scope.
-static esp_err_t nvs_partition_init(const char *partition)
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
 esp_err_t ramp_assist_cfg_start(void)
 {
     s_ramp_assist_enabled = false; // safe default stands until proven otherwise below
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- ramp assist stays disabled this boot",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
         return ESP_OK; // non-fatal, same convention as unit_pref_start()/watchdog_cfg_init()
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_NOT_FOUND) {
         // Namespace never written (fresh board, or another module wrote it
         // first but this key specifically was never set) -- disabled is the
         // expected steady state, not an error.
         return ESP_OK;
     }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "nvs_open_from_partition failed: %s -- ramp assist stays disabled this boot",
-                 esp_err_to_name(err));
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "hal_kv_open failed: %s -- ramp assist stays disabled this boot",
+                 hal_status_to_name(err));
         return ESP_OK;
     }
 
     uint8_t raw = 0;
-    err = nvs_get_u8(h, NVS_KEY_RAMP_ASSIST, &raw);
-    nvs_close(h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = hal_kv_get_u8(&h, NVS_KEY_RAMP_ASSIST, &raw);
+    hal_kv_close(&h);
+    if (err == HAL_NOT_FOUND) {
         return ESP_OK; // key never set -- disabled default stands
     }
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGW(TAG, "ramp_assist_cfg read failed: %s -- ramp assist stays disabled this boot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
         return ESP_OK;
     }
     if (raw != 0 && raw != 1) {
@@ -107,31 +98,31 @@ esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
     // boot.
     s_ramp_assist_enabled = enabled;
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- ramp assist setting not persisted",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
-        return part_err;
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
+        return hal_status_to_esp_err(part_err);
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_open_from_partition failed: %s -- ramp assist setting not persisted",
-                 esp_err_to_name(err));
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        ESP_LOGE(TAG, "hal_kv_open failed: %s -- ramp assist setting not persisted",
+                 hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_u8(h, NVS_KEY_RAMP_ASSIST, enabled ? 1 : 0);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, enabled ? 1 : 0);
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
 
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "could not persist ramp assist setting: %s -- will not survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     } else {
         ESP_LOGW(TAG, "ramp assist saved: %s", enabled ? "ENABLED" : "disabled");
     }
-    return err;
+    return hal_status_to_esp_err(err);
 }

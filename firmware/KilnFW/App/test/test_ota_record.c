@@ -4,12 +4,13 @@
 // "an append-only update record in NVS: timestamp, processor, image SHA-256,
 // version before and after, result").
 //
-// ota_record_append()/ota_record_load() (the NVS I/O) are NOT exercised here
-// -- this file's own header comment already explains why the module as a
-// whole isn't host-tested (run_state.c/relay_cycles.c precedent), and the
-// nvs.h test stub's nvs_open_from_partition() always returns
-// ESP_ERR_NVS_NOT_FOUND, so there would be nothing real to assert about a
-// round trip anyway. What IS worth a host test, now that this field exists,
+// ota_record_append()/ota_record_load() (the NVS I/O, now hal_kv_* per
+// HW_ABSTRACTION_PLAN.md Phase 3 item 3) are NOT exercised here -- this
+// file's own header comment already explains why the module as a whole
+// isn't host-tested (run_state.c/relay_cycles.c precedent), and this file
+// never #includes ota_record.c or opens a real (fake_kv-backed) partition,
+// so there would be nothing real to assert about a round trip anyway. What
+// IS worth a host test, now that this field exists,
 // is the pure fill/truncate/NULL-tolerance behavior every other string field
 // in ota_record_t already gets implicitly exercised by -- this file makes
 // that explicit for the new field specifically.

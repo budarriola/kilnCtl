@@ -15,8 +15,8 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_esp_common.h"
+#include "hal_kv.h"
 
 static const char *TAG = "profiles_builtin";
 
@@ -64,32 +64,23 @@ static bool builtin_index(uint8_t id, size_t *out_index)
  * stay scoped to the broken partition. Calling this when profiles_http.c has
  * already initialized the same partition is a harmless no-op returning
  * ESP_OK, so neither module has to assume the other ran first. */
-static esp_err_t nvs_partition_init(const char *partition)
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
-static esp_err_t hidden_mask_save(void)
+static hal_status_t hidden_mask_save(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
+    if (err != HAL_OK) {
         return err;
     }
-    err = nvs_set_u32(h, NVS_KEY_HIDDEN, s_hidden_mask);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_u32(&h, NVS_KEY_HIDDEN, s_hidden_mask);
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
     return err;
 }
 
@@ -97,16 +88,16 @@ esp_err_t profiles_builtin_start(void)
 {
     s_hidden_mask = 0;
 
-    esp_err_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- hidden-schedule choices will not persist",
-                 PROFILES_NVS_PARTITION, esp_err_to_name(part_err));
-        return part_err;
+                 PROFILES_NVS_PARTITION, hal_status_to_name(part_err));
+        return hal_status_to_esp_err(part_err);
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION);
+    if (err == HAL_NOT_FOUND) {
         /* Namespace has never been written on this partition. Same reading
          * profiles_http.c's nvs_load_all_from() gives it: not an error,
          * just "nothing configured yet". */
@@ -114,22 +105,22 @@ esp_err_t profiles_builtin_start(void)
                  (unsigned)g_builtin_profile_count);
         return ESP_OK;
     }
-    if (err != ESP_OK) {
-        return err;
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
 
     uint32_t mask = 0;
-    err = nvs_get_u32(h, NVS_KEY_HIDDEN, &mask);
-    nvs_close(h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = hal_kv_get_u32(&h, NVS_KEY_HIDDEN, &mask);
+    hal_kv_close(&h);
+    if (err == HAL_NOT_FOUND) {
         /* Missing key is explicitly not an error -- it means nothing has ever
          * been hidden, which is the shipped default. */
-        err = ESP_OK;
-    } else if (err == ESP_OK) {
+        err = HAL_OK;
+    } else if (err == HAL_OK) {
         s_hidden_mask = mask;
     } else {
-        ESP_LOGW(TAG, "hidden-mask read failed: %s -- starting with nothing hidden", esp_err_to_name(err));
-        return err;
+        ESP_LOGW(TAG, "hidden-mask read failed: %s -- starting with nothing hidden", hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
     }
 
     ESP_LOGI(TAG, "%u builtin schedules, hidden mask 0x%08lx", (unsigned)g_builtin_profile_count,
@@ -223,12 +214,12 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
         return ESP_OK; /* already in the requested state -- no flash write */
     }
     s_hidden_mask = updated;
-    esp_err_t err = hidden_mask_save();
-    if (err != ESP_OK) {
+    hal_status_t err = hidden_mask_save();
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "hidden-mask save failed: %s -- applied live but will revert on reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     }
-    return err;
+    return hal_status_to_esp_err(err);
 }
 
 esp_err_t profiles_builtin_restore_all(void)
@@ -237,10 +228,10 @@ esp_err_t profiles_builtin_restore_all(void)
         return ESP_OK;
     }
     s_hidden_mask = 0;
-    esp_err_t err = hidden_mask_save();
-    if (err != ESP_OK) {
+    hal_status_t err = hidden_mask_save();
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "hidden-mask save failed: %s -- restored live but will revert on reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     }
-    return err;
+    return hal_status_to_esp_err(err);
 }

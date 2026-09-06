@@ -3,8 +3,15 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "hal_esp_common.h"
+#include "hal_kv.h"
+/* ESP_ERR_NVS_NOT_FOUND only -- no nvs_*()/nvs_flash_*() function call in
+ * this file reaches NVS directly any more (see hal_kv_* below). Reinstated
+ * per ota_record.h's doc contract: ota_record_load()'s "no record yet" case
+ * must keep returning this SPECIFIC code, not a generic ESP_FAIL, because
+ * that is the value this header has always promised and nothing about the
+ * hal_kv.h migration changes what "no record" means to a caller. */
 #include "nvs.h"
-#include "nvs_flash.h"
 
 static const char *TAG = "ota_record";
 
@@ -42,18 +49,9 @@ typedef char ota_record_t_size_check[(sizeof(ota_record_t) == 216) ? 1 : -1];
  * comment: "each of which manages its own init/migration independently").
  * Cheap to call on every append: nvs_flash_init_partition() is a no-op
  * success if the partition is already initialized. */
-static esp_err_t nvs_partition_init(const char *partition)
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
 static void copy_str(char *dst, size_t cap, const char *src)
@@ -87,41 +85,41 @@ esp_err_t ota_record_append(const ota_record_t *rec)
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- update record not saved",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
-        return part_err;
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
+        return hal_status_to_esp_err(part_err);
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_open_from_partition failed: %s -- update record not saved",
-                 esp_err_to_name(err));
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        ESP_LOGE(TAG, "hal_kv_open failed: %s -- update record not saved",
+                 hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_blob(h, NVS_KEY_OTA_RECORD, rec, sizeof(*rec));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_OTA_RECORD, rec, sizeof(*rec));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
 
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         /* Best-effort, like run_state.c's own persist failures -- an update
          * record that failed to save is not a reason to have refused (or
          * un-refused) the update itself, but it must not be silent: this is
          * the only place the outcome would otherwise be recorded at all. */
         ESP_LOGE(TAG, "could not persist OTA update record: %s -- this update's outcome will not "
                       "survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     } else {
         ESP_LOGI(TAG, "OTA update record saved: processor=%s success=%d reason=\"%s\" "
                       "version %s -> %s sha256=%s",
                  rec->processor, (int)rec->success, rec->reason, rec->version_before,
                  rec->version_after, rec->image_sha256_hex[0] ? rec->image_sha256_hex : "(none)");
     }
-    return err;
+    return hal_status_to_esp_err(err);
 }
 
 esp_err_t ota_record_load(ota_record_t *out)
@@ -130,30 +128,36 @@ esp_err_t ota_record_load(ota_record_t *out)
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- cannot read update record",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
-        return part_err;
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
+        return hal_status_to_esp_err(part_err);
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
-        /* ESP_ERR_NVS_NOT_FOUND here means the namespace itself has never
-         * been written -- same "no record yet" case as the blob-not-found
-         * path below, not a real failure. */
-        if (err != ESP_ERR_NVS_NOT_FOUND) {
-            ESP_LOGE(TAG, "nvs_open_from_partition (read) failed: %s", esp_err_to_name(err));
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        /* HAL_NOT_FOUND here means the namespace itself has never been
+         * written -- same "no record yet" case as the blob-not-found path
+         * below, not a real failure. Reported as the SPECIFIC
+         * ESP_ERR_NVS_NOT_FOUND, per ota_record.h's doc contract -- unlike
+         * hal_status_to_esp_err()'s generic HAL_NOT_FOUND -> ESP_ERR_NOT_FOUND
+         * mapping (a different, generic-driver code), this preserves the
+         * exact value callers have always been able to rely on for "no
+         * record yet" specifically. */
+        if (err == HAL_NOT_FOUND) {
+            return ESP_ERR_NVS_NOT_FOUND;
         }
-        return err;
+        ESP_LOGE(TAG, "hal_kv_open (read) failed: %s", hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
     }
 
     size_t len = sizeof(*out);
-    err = nvs_get_blob(h, NVS_KEY_OTA_RECORD, out, &len);
-    nvs_close(h);
+    err = hal_kv_get_blob(&h, NVS_KEY_OTA_RECORD, out, &len);
+    hal_kv_close(&h);
 
-    if (err == ESP_OK && len != sizeof(*out)) {
+    if (err == HAL_OK && len != sizeof(*out)) {
         /* Same "a size-mismatched blob is not a current record" tolerance
          * ota_record.h's doc comment on this function promises -- treat it
          * as absent rather than hand back a partially-filled struct. */
@@ -161,8 +165,12 @@ esp_err_t ota_record_load(ota_record_t *out)
                  (unsigned)len, (unsigned)sizeof(*out));
         return ESP_ERR_NVS_NOT_FOUND;
     }
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGE(TAG, "nvs_get_blob(ota_record) failed: %s", esp_err_to_name(err));
+    if (err == HAL_OK) {
+        return ESP_OK;
     }
-    return err;
+    if (err == HAL_NOT_FOUND) {
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+    ESP_LOGE(TAG, "hal_kv_get_blob(ota_record) failed: %s", hal_status_to_name(err));
+    return hal_status_to_esp_err(err);
 }

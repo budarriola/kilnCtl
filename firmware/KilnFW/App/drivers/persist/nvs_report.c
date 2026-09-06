@@ -2,7 +2,7 @@
 
 #include "esp_log.h"
 #include "esp_partition.h"
-#include "nvs_flash.h"
+#include "hal_kv.h"
 
 static const char *TAG = "nvs_report";
 
@@ -33,15 +33,18 @@ void nvs_report_capture(void)
             continue;
         }
 
-        /* nvs_flash_init_partition() is idempotent -- every module that owns
-         * one of these partitions has already called its own version of this
-         * before nvs_report_capture() runs (see main.c ordering), so this
-         * just re-observes the outcome without erasing or re-mounting
-         * anything on a partition that mounted fine the first time. */
-        esp_err_t err = nvs_flash_init_partition(name);
-        sec->mounted = (err == ESP_OK);
+        /* hal_kv_mount_probe(), NOT hal_kv_init_partition() -- every module
+         * that owns one of these partitions has already called its own
+         * version of the erase-retry init before nvs_report_capture() runs
+         * (see main.c ordering), so this only needs to OBSERVE the outcome.
+         * hal_kv_init_partition() would erase-and-retry on its own if it
+         * found NO_FREE_PAGES/NEW_VERSION_FOUND, which is never this
+         * function's call to make -- a report/diagnostics pass must never
+         * itself destroy the very data it is reporting on. */
+        hal_status_t err = hal_kv_mount_probe(name);
+        sec->mounted = (err == HAL_OK);
         if (!sec->mounted) {
-            ESP_LOGW(TAG, "partition '%s' present but not mounted: %s", name, esp_err_to_name(err));
+            ESP_LOGW(TAG, "partition '%s' present but not mounted: %s", name, hal_status_to_name(err));
         }
     }
 }

@@ -72,7 +72,17 @@ extern "C" {
 #define FAKE_KV_MAX_KEYS_PER_NS         4
 #define FAKE_KV_MAX_KEY_LEN            16
 #define FAKE_KV_MAX_NAME_LEN           16
-#define FAKE_KV_MAX_VALUE_BYTES       256
+/* 256 -> 8192 (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the nvs.h -> hal_kv.h
+ * migration): kiln_cfg_store.c's host test (test_kiln_cfg_store.c) round-
+ * trips a REAL full-size kiln_cfg_store_blob_t (5420+ bytes, grows with
+ * ZONES_CONFIG_BLOB_MAX_SIZE) and kiln_cfg_store_blob_v1_t (4396 bytes)
+ * through this fake to exercise nvs_load_store()'s migration path -- the
+ * same value stubs/nvs.h's single-slot blob store (s_stub_nvs_blob) was
+ * independently bumped to over several ZONES_CONFIG_BLOB_MAX_SIZE growth
+ * spurts, for the identical reason: a slot too small to hold them just
+ * makes that migration path silently untestable again (every set_blob call
+ * returns HAL_INVALID_SIZE instead of actually storing anything). */
+#define FAKE_KV_MAX_VALUE_BYTES      8192
 #define FAKE_KV_MAX_HANDLES             8
 
 /* Clears every partition/namespace/key, all handles, all injected faults,
@@ -115,6 +125,10 @@ bool fake_kv_script_corrupt_key(const char *partition, const char *namespace_nam
  * reverts to normal behavior. Intended for HAL_NO_MEM / HAL_IO write-failure
  * injection per the plan's "error injection ... no-space" spec. */
 void fake_kv_script_next_write_status(hal_status_t status);
+
+/* hal_kv_get_u32/set_u32 (profiles_builtin.c's NVS_KEY_HIDDEN mask) are
+ * modeled as a plain 4-byte blob under the same key-slot storage
+ * hal_kv_get/set_blob use -- no separate scalar storage needed. */
 
 /* Test-controllable override for hal_kv_write_safe_here() -- see
  * hal_kv.h's write-context safety contract. Defaults to true after

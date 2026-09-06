@@ -42,6 +42,7 @@
 #include "test_common.h"
 
 #include "esp_err.h"
+#include "fake_kv.h"
 
 // Test-only malloc seam for nvs_load_store()'s v1-migration-buffer
 // allocation (kiln_cfg_store.c:234ish, `malloc(sizeof(*v1))`) -- proves the
@@ -607,17 +608,18 @@ static void test_nvs_load_store_migrates_v1_blob_at_full_size(void)
 {
     TEST_SECTION("nvs_load_store() -- v1-sized blob migrates through a real nvs_get_blob() round trip");
     reset_state();
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
 
     kiln_cfg_store_blob_v1_t v1;
     build_v1_blob(&v1, 1, 0x10);
-    nvs_handle_t h;
-    TEST_CHECK(nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK,
-               "stub nvs open succeeds once enabled");
-    TEST_CHECK(nvs_set_blob(h, NVS_KEY_STORE, &v1, sizeof(v1)) == ESP_OK,
-               "a full-size (4396B) v1 blob fits the stub's storage slot");
-    nvs_close(h);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "hal_kv open succeeds once the partition is initialized");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_STORE, &v1, sizeof(v1)) == HAL_OK,
+               "a full-size (4396B) v1 blob fits the fake's storage slot");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
 
     nvs_load_store();
 
@@ -630,7 +632,7 @@ static void test_nvs_load_store_migrates_v1_blob_at_full_size(void)
     TEST_CHECK(s_store.entries[0].blob[0] == 0x10 && s_store.entries[0].blob[7] == 0x17,
                "entry 0's blob bytes migrated verbatim");
 
-    nvs_test_enable(false);
+    fake_kv_reset_all();
 }
 
 static void test_nvs_load_store_second_call_does_not_see_first_calls_data(void)
@@ -651,16 +653,17 @@ static void test_nvs_load_store_second_call_does_not_see_first_calls_data(void)
     TEST_SECTION("nvs_load_store() -- back-to-back v1 migrations for two different boards each load "
                  "THEIR OWN data, not a cached/stale result from the previous call");
     reset_state();
-    nvs_test_enable(true);
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
 
     // First load: a v1 blob for "board A".
-    nvs_test_clear();
     kiln_cfg_store_blob_v1_t v1_a;
     build_v1_blob(&v1_a, 1, 0xAA);
-    nvs_handle_t h;
-    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    nvs_set_blob(h, NVS_KEY_STORE, &v1_a, sizeof(v1_a));
-    nvs_close(h);
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_blob(&h, NVS_KEY_STORE, &v1_a, sizeof(v1_a));
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
     nvs_load_store();
     TEST_CHECK(s_store.active_id == 1 && s_store.entries[0].blob[0] == 0xAA,
                "first call reads board A's data");
@@ -670,15 +673,16 @@ static void test_nvs_load_store_second_call_does_not_see_first_calls_data(void)
     reset_to_defaults();
     kiln_cfg_store_blob_v1_t v1_b;
     build_v1_blob(&v1_b, 2, 0xBB);
-    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    nvs_set_blob(h, NVS_KEY_STORE, &v1_b, sizeof(v1_b));
-    nvs_close(h);
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_blob(&h, NVS_KEY_STORE, &v1_b, sizeof(v1_b));
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
     nvs_load_store();
     TEST_CHECK(s_store.active_id == 2, "second call reads board B's active_id, not board A's stale 1");
     TEST_CHECK(s_store.entries[0].blob[0] == 0xBB,
                "second call reads board B's blob bytes, not board A's stale 0xAA");
 
-    nvs_test_enable(false);
+    fake_kv_reset_all();
 }
 
 static void test_nvs_load_store_v1_migration_malloc_failure_leaves_defaults(void)
@@ -692,15 +696,16 @@ static void test_nvs_load_store_v1_migration_malloc_failure_leaves_defaults(void
     // exhaust the heap deterministically).
     TEST_SECTION("nvs_load_store() -- v1 migration buffer malloc() failure leaves defaults standing");
     reset_state();
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
 
     kiln_cfg_store_blob_v1_t v1;
     build_v1_blob(&v1, 1, 0x99);
-    nvs_handle_t h;
-    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    nvs_set_blob(h, NVS_KEY_STORE, &v1, sizeof(v1));
-    nvs_close(h);
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_blob(&h, NVS_KEY_STORE, &v1, sizeof(v1));
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
 
     s_test_malloc_should_fail = true;
     nvs_load_store();
@@ -712,15 +717,15 @@ static void test_nvs_load_store_v1_migration_malloc_failure_leaves_defaults(void
     TEST_CHECK(s_store.entries[0].in_use == 0,
                "entry 0 is NOT in_use -- the v1 blob's data never reached s_store");
 
-    nvs_test_enable(false);
+    fake_kv_reset_all();
 }
 
 static void test_nvs_load_store_current_version_full_size_happy_path(void)
 {
     TEST_SECTION("nvs_load_store() -- a current-version, current-size blob loads on the fast path");
     reset_state();
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
 
     kiln_cfg_store_blob_t current;
     memset(&current, 0, sizeof(current));
@@ -734,11 +739,12 @@ static void test_nvs_load_store_current_version_full_size_happy_path(void)
     current.entries[0].blob[0] = 0xDE;
     current.entries[0].blob[3] = 0xEF;
 
-    nvs_handle_t h;
-    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    TEST_CHECK(nvs_set_blob(h, NVS_KEY_STORE, &current, sizeof(current)) == ESP_OK,
-               "a full-size (5420B) current-version blob fits the stub's storage slot");
-    nvs_close(h);
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_STORE, &current, sizeof(current)) == HAL_OK,
+               "a full-size (5420B) current-version blob fits the fake's storage slot");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
 
     nvs_load_store();
 
@@ -746,7 +752,7 @@ static void test_nvs_load_store_current_version_full_size_happy_path(void)
     TEST_CHECK(s_store.entries[0].blob[0] == 0xDE && s_store.entries[0].blob[3] == 0xEF,
                "current-version blob's bytes loaded as-is, no migration applied");
 
-    nvs_test_enable(false);
+    fake_kv_reset_all();
 }
 
 static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
@@ -755,32 +761,33 @@ static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
                  "underneath it (DRAM_PSRAM_PLAN.md section 7.2 safety net)");
     reset_state();
 
-    esp_ptr_external_ram_test_set(true); // simulate being called from a PSRAM-stacked task
+    fake_kv_set_write_safe_here(false); // simulate being called from a PSRAM-stacked task
 
-    esp_err_t err = nvs_save_store();
+    hal_status_t err = nvs_save_store();
 
-    TEST_CHECK(err == ESP_ERR_INVALID_STATE,
+    TEST_CHECK(err == HAL_NOT_READY,
                "the wrong-task guard refuses with a diagnosable error, not a crash -- exactly "
                "the class of bug (an NVS write reached from a PSRAM-stack task) this net exists "
                "to catch before a future task relocation (DRAM_PSRAM_PLAN.md section 7) makes it "
                "reachable for real");
 
-    esp_ptr_external_ram_test_set(false); // leave shared stub state as every other test expects
+    fake_kv_set_write_safe_here(true); // leave shared fake state as every other test expects
 }
 
 static void test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack(void)
 {
     TEST_SECTION("nvs_save_store -- proceeds normally when the calling task's stack is internal RAM");
     reset_state();
-    nvs_test_enable(true);
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
 
-    // esp_ptr_external_ram_test_set(false) is the stub's default state.
-    esp_err_t err = nvs_save_store();
+    // fake_kv_set_write_safe_here(true) is the fake's default state after reset.
+    hal_status_t err = nvs_save_store();
 
-    TEST_CHECK(err == ESP_OK, "the guard does not fire on an internal-RAM stack -- the write "
+    TEST_CHECK(err == HAL_OK, "the guard does not fire on an internal-RAM stack -- the write "
                               "proceeds exactly as before this net was added");
 
-    nvs_test_enable(false);
+    fake_kv_reset_all();
 }
 
 void run_test_kiln_cfg_store(void)

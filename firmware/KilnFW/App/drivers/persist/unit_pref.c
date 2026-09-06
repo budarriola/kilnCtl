@@ -1,8 +1,8 @@
 #include "unit_pref.h"
 
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_esp_common.h"
+#include "hal_kv.h"
 
 static const char *TAG = "unit_pref";
 
@@ -22,53 +22,44 @@ static unit_pref_t s_unit_pref = UNIT_PREF_CELSIUS;
 // nvs_partition_init() (same partition, same rationale: NO_FREE_PAGES /
 // NEW_VERSION_FOUND have no other cure, and the erase must stay scoped to the
 // partition that is actually broken).
-static esp_err_t nvs_partition_init(const char *partition)
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
 esp_err_t unit_pref_start(void)
 {
     s_unit_pref = UNIT_PREF_CELSIUS;
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- defaulting to Celsius this boot",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
         return ESP_OK; // non-fatal, same convention as touch_cal_store_load()
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_NOT_FOUND) {
         // Namespace never written (fresh board, or zones/profiles wrote it
         // first but this key specifically was never set) -- Celsius is the
         // expected steady state, not an error.
         return ESP_OK;
     }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "nvs_open_from_partition failed: %s -- defaulting to Celsius this boot",
-                 esp_err_to_name(err));
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "hal_kv_open failed: %s -- defaulting to Celsius this boot",
+                 hal_status_to_name(err));
         return ESP_OK;
     }
 
     uint8_t raw = (uint8_t)UNIT_PREF_CELSIUS;
-    err = nvs_get_u8(h, NVS_KEY_UNIT_PREF, &raw);
-    nvs_close(h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = hal_kv_get_u8(&h, NVS_KEY_UNIT_PREF, &raw);
+    hal_kv_close(&h);
+    if (err == HAL_NOT_FOUND) {
         return ESP_OK; // key never set -- Celsius default stands
     }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "unit_pref read failed: %s -- defaulting to Celsius this boot", esp_err_to_name(err));
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "unit_pref read failed: %s -- defaulting to Celsius this boot", hal_status_to_name(err));
         return ESP_OK;
     }
     if (raw != (uint8_t)UNIT_PREF_CELSIUS && raw != (uint8_t)UNIT_PREF_FAHRENHEIT) {
@@ -101,33 +92,33 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     // zones_config_set_pid()/set_model() use).
     s_unit_pref = pref;
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- unit preference not persisted",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
-        return part_err;
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
+        return hal_status_to_esp_err(part_err);
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_open_from_partition failed: %s -- unit preference not persisted",
-                 esp_err_to_name(err));
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        ESP_LOGE(TAG, "hal_kv_open failed: %s -- unit preference not persisted",
+                 hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_u8(h, NVS_KEY_UNIT_PREF, (uint8_t)pref);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_u8(&h, NVS_KEY_UNIT_PREF, (uint8_t)pref);
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
 
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "could not persist unit preference: %s -- will not survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     } else {
         ESP_LOGI(TAG, "unit preference saved: %s", pref == UNIT_PREF_FAHRENHEIT ? "Fahrenheit" : "Celsius");
     }
-    return err;
+    return hal_status_to_esp_err(err);
 }
 
 const char *unit_pref_suffix(unit_pref_t pref)

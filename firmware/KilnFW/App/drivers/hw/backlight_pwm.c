@@ -2,11 +2,11 @@
 
 #include <string.h>
 
-#include "driver/ledc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "hal_pwm.h"
 #include "stack_margin.h"
 
 // No screen_idle.h/display_power_cfg.h include here at all any more
@@ -30,22 +30,18 @@ static TaskHandle_t s_task_handle;
  * CPU than matching screen_idle's own cadence. */
 #define BACKLIGHT_PWM_POLL_MS 200u
 
-/* LEDC_TIMER_0 / LEDC_CHANNEL_0: nothing else in this tree uses LEDC (grepped
- * App/ for ledc_/LEDC_TIMER/LEDC_CHANNEL before adding this -- no hits), so
- * the first timer/channel is free. */
-#define BACKLIGHT_LEDC_TIMER   LEDC_TIMER_0
-#define BACKLIGHT_LEDC_CHANNEL LEDC_CHANNEL_0
-#define BACKLIGHT_LEDC_MODE    LEDC_LOW_SPEED_MODE
-
-/* 13-bit resolution at 5 kHz is comfortably above flicker perception and
+/* Timer/channel/speed-mode selection is now hal_pwm_esp.c's concern (hardcoded
+ * there to LEDC_TIMER_0/LEDC_CHANNEL_0/LEDC_LOW_SPEED_MODE -- nothing else in
+ * this tree uses LEDC, so there is only ever one channel to abstract; see
+ * hal_pwm.h's header comment). Only the frequency and resolution stay here,
+ * since they are this driver's own config passed into hal_pwm_cfg_t below.
+ *
+ * 13-bit resolution at 5 kHz is comfortably above flicker perception and
  * within the LEDC low-speed timer's max (80MHz APB / 2^13 ~= 9.8kHz ceiling
  * for this duty resolution) -- plenty of headroom for a backlight MOSFET
  * gate, not chasing PWM-audible-whine territory the way a motor driver
  * would need to. */
-#define BACKLIGHT_LEDC_DUTY_RES LEDC_TIMER_13_BIT
 #define BACKLIGHT_LEDC_FREQ_HZ  5000
-
-#define BACKLIGHT_LEDC_DUTY_MAX ((1u << 13) - 1u) /* must match BACKLIGHT_LEDC_DUTY_RES */
 
 // --- Pure logic (host-testable) ---------------------------------------------
 
@@ -60,19 +56,11 @@ uint8_t backlight_duty_percent_for_state(bool screen_on, uint8_t on_percent, uin
 
 #if CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE
 
-static uint32_t duty_for_percent(uint8_t pct)
-{
-    if (pct >= 100) return BACKLIGHT_LEDC_DUTY_MAX;
-    if (pct == 0) return 0;
-    return (uint32_t)pct * BACKLIGHT_LEDC_DUTY_MAX / 100u;
-}
+#include "hal_esp_common.h" /* hal_status_to_esp_err() -- see panel_spi_bringup.c's identical use */
 
-static esp_err_t apply_duty(uint8_t pct)
+static hal_status_t apply_duty(uint8_t pct)
 {
-    uint32_t duty = duty_for_percent(pct);
-    esp_err_t err = ledc_set_duty(BACKLIGHT_LEDC_MODE, BACKLIGHT_LEDC_CHANNEL, duty);
-    if (err != ESP_OK) return err;
-    return ledc_update_duty(BACKLIGHT_LEDC_MODE, BACKLIGHT_LEDC_CHANNEL);
+    return hal_pwm_set_duty(pct);
 }
 
 static void backlight_pwm_task(void *arg)
@@ -108,9 +96,13 @@ static void backlight_pwm_task(void *arg)
             continue; /* nothing to write: skip the LEDC call */
         }
 
-        esp_err_t err = apply_duty(pct);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "apply_duty(%u%%) failed: %s", (unsigned)pct, esp_err_to_name(err));
+        hal_status_t status = apply_duty(pct);
+        if (status != HAL_OK) {
+            /* Log the hal_status_t directly rather than round-tripping through
+             * esp_err_to_name(status-as-esp_err_t) -- that conversion collapses
+             * every unmapped LEDC error onto ESP_FAIL, hiding which hal_status_t
+             * actually came back. */
+            ESP_LOGW(TAG, "apply_duty(%u%%) failed: %s", (unsigned)pct, hal_status_to_name(status));
             continue; /* leave last_* unset so the next tick retries */
         }
 
@@ -129,35 +121,21 @@ esp_err_t backlight_pwm_init(backlight_pwm_t *bl, backlight_pwm_query_fn query_f
     bl->query_fn = query_fn;
     bl->query_ctx = query_ctx;
 
-    ledc_timer_config_t timer_cfg = {
-        .speed_mode = BACKLIGHT_LEDC_MODE,
-        .duty_resolution = BACKLIGHT_LEDC_DUTY_RES,
-        .timer_num = BACKLIGHT_LEDC_TIMER,
-        .freq_hz = BACKLIGHT_LEDC_FREQ_HZ,
-        .clk_cfg = LEDC_AUTO_CLK,
-    };
-    esp_err_t err = ledc_timer_config(&timer_cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ledc_timer_config failed: %s -- backlight PWM unavailable this boot",
-                 esp_err_to_name(err));
-        return err;
-    }
-
-    /* Start at ON-percent duty, matching panel_spi.c leaving the panel lit
-     * after bring-up (screen_idle_init() likewise seeds screen_on = true) --
-     * the backlight must not start dark if the flying wire IS fitted. */
-    ledc_channel_config_t chan_cfg = {
+    /* hal_pwm_init() folds the old ledc_timer_config()+ledc_channel_config()
+     * pair into one call, and applies start_duty_percent as part of the
+     * channel config itself -- matching this driver's own "must not start
+     * dark if the flying wire IS fitted" requirement (panel_spi.c leaves the
+     * panel lit after bring-up; screen_idle_init() likewise seeds
+     * screen_on = true) without a separate follow-up hal_pwm_set_duty(). */
+    hal_pwm_cfg_t pwm_cfg = {
         .gpio_num = CONFIG_KILNCTL_BACKLIGHT_GPIO,
-        .speed_mode = BACKLIGHT_LEDC_MODE,
-        .channel = BACKLIGHT_LEDC_CHANNEL,
-        .intr_type = LEDC_INTR_DISABLE,
-        .timer_sel = BACKLIGHT_LEDC_TIMER,
-        .duty = duty_for_percent(CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT),
-        .hpoint = 0,
+        .freq_hz = BACKLIGHT_LEDC_FREQ_HZ,
+        .duty_resolution_bits = 13, /* see BACKLIGHT_LEDC_FREQ_HZ's comment above */
+        .start_duty_percent = CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT,
     };
-    err = ledc_channel_config(&chan_cfg);
+    esp_err_t err = hal_status_to_esp_err(hal_pwm_init(&pwm_cfg));
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ledc_channel_config(GPIO%d) failed: %s -- backlight PWM unavailable this boot",
+        ESP_LOGE(TAG, "hal_pwm_init(GPIO%d) failed: %s -- backlight PWM unavailable this boot",
                  CONFIG_KILNCTL_BACKLIGHT_GPIO, esp_err_to_name(err));
         return err;
     }

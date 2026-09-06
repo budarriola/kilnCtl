@@ -26,27 +26,15 @@ int g_test_count = 0;
 
 #include "test_common.h"
 
-// stubs/nvs.h doesn't provide nvs_get_u32()/nvs_set_u32() (no other host
-// test needed them before) -- profiles_builtin.c's hidden-mask persistence
-// (profiles_builtin_start()/profiles_builtin_set_hidden()) calls them, but
-// none of this file's tests exercise that path, so trivial always-empty /
-// always-OK stand-ins are enough just to satisfy the linker.
+// profiles_builtin.c's hidden-mask persistence (profiles_builtin_start()/
+// profiles_builtin_set_hidden()) now calls hal_kv_get_u32()/hal_kv_set_u32()
+// (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the nvs.h -> hal_kv.h migration)
+// -- none of this file's tests exercise that path, but the symbols must
+// still resolve at link time, so this executable links the real fake_kv.c
+// backend (build_host_tests.ps1's exe23) rather than hand-rolling
+// always-empty/always-OK stand-ins the way the old nvs.h-based version did.
 #include "esp_err.h"
-#include "nvs.h"
-esp_err_t nvs_get_u32(nvs_handle_t handle, const char *key, uint32_t *out_value)
-{
-    (void)handle;
-    (void)key;
-    (void)out_value;
-    return ESP_ERR_NVS_NOT_FOUND;
-}
-esp_err_t nvs_set_u32(nvs_handle_t handle, const char *key, uint32_t value)
-{
-    (void)handle;
-    (void)key;
-    (void)value;
-    return ESP_OK;
-}
+#include "fake_kv.h"
 
 #include "profiles_builtin.c"
 

@@ -7,9 +7,10 @@ comments and DRAM_PSRAM_PLAN.md section 7.2), and a handler already running
 ON the flash-safe worker deadlocked the whole board when it tried to
 dispatch a SECOND flash-safe call through the normal path (uart_bridge_ext.c
 commit 7c47683, see that file's "RE-ENTRANCY" comment). Host tests cannot
-see either bug -- the host build stubs nvs_set_*()/nvs_commit() as no-ops
-with no stack or re-entrancy model at all (see App/test/stubs/nvs.h) -- so
-this is a static grep-based lint, not a test.
+see either bug -- the host build stubs nvs_set_*()/nvs_commit()/
+hal_kv_set_*()/hal_kv_commit() as no-ops with no stack or re-entrancy model
+at all (see App/test/stubs/nvs.h and App/test/fake_kv.h) -- so this is a
+static grep-based lint, not a test.
 
 THE SANCTIONED PATTERN (read uart_bridge_ext.c's own header comment and
 kiln_cfg_store.c's nvs_save_store()/caller_stack_is_external() for the full
@@ -31,14 +32,18 @@ story before changing this allowlist):
   3. OR run ONLY from app_main's own task, once, before the scheduler starts
      any other task that could contend for the worker or run on a PSRAM
      stack -- the same "no concurrency yet" argument boot_guard.c/
-     crash_report.c/ota_record.c/profiles_builtin.c/ramp_assist_cfg.c/
-     time_sync.c/touch_cal_store.c/unit_pref.c/watchdog_cfg.c/wifi_prov.c/
-     zones_config_store.c/ota_http.c each make in their own init-time
-     comments.
+     crash_report.c/ota_record.c/time_sync.c/touch_cal_store.c/watchdog_cfg.c/
+     wifi_prov.c/ota_http.c each make in their own init-time comments. A
+     SIBLING justification under this same pattern number, for a file whose
+     write call site is instead reached live from an httpd handler's or the
+     LVGL task's own internal-SRAM stack (never init-time, never PSRAM) --
+     profiles_builtin.c/ramp_assist_cfg.c/unit_pref.c/zones_config_store.c
+     each make this version in their own entries below.
 
 A file not on the allowlist below that starts calling nvs_set_*()/
-nvs_commit()/esp_partition_write()/esp_partition_erase_range() directly has,
-by definition, not been through that reasoning -- it fails this lint naming
+nvs_commit()/hal_kv_set_*()/hal_kv_commit()/hal_kv_erase_*()/
+esp_partition_write()/esp_partition_erase_range() directly has, by
+definition, not been through that reasoning -- it fails this lint naming
 the exact file:line, rather than shipping a fourth hardware incident.
 
 Usage: python flash_worker_lint.py [drivers_dir]
@@ -50,8 +55,9 @@ from pathlib import Path
 
 # ---- allowlist --------------------------------------------------------
 # Seeded from current reality (2026-09-04 audit: every drivers/*.c file
-# that calls nvs_set_*()/nvs_commit()/esp_partition_write()/
-# esp_partition_erase_range() today). Adding a file here is not "fixing a
+# that calls nvs_set_*()/nvs_commit()/hal_kv_set_*()/hal_kv_commit()/
+# hal_kv_erase_*()/esp_partition_write()/esp_partition_erase_range()
+# today). Adding a file here is not "fixing a
 # lint failure" -- it is asserting, with the one-line justification below,
 # that the new call site follows one of the three sanctioned patterns
 # above. Say which pattern and why in the comment, the same way every
@@ -91,15 +97,36 @@ ALLOWLIST = {
     # Pattern 2 (local caller_stack_is_external() guard), see this file's
     # own comment mirroring kiln_cfg_store.c's.
     "profile_executor_firing_stats.c",
-    # Pattern 3 (init-time only): profiles_builtin_init() runs once from
-    # app_main before the scheduler starts any other task.
+    # RE-JUSTIFIED 2026-09-06 (flash-safety review of the hal_kv migration):
+    # the "init-time only" claim below was FALSE -- profiles_builtin_start()
+    # is init-time, but profiles_builtin_set_hidden()/_restore_all() (this
+    # file's OTHER two write call sites) are reached live, long after boot,
+    # from profiles_edit_http.c:505/520 (POST /api/profiles/builtin/hidden,
+    # POST .../restore) and ui_page_profiles.c:50 (the "restore all" LCD
+    # button). Actually Pattern 3 (internal-SRAM-stack caller, not init-time
+    # concurrency-free-ness): profiles_edit_http.c's two call sites run on
+    # the httpd task -- internal-SRAM stack, same established fact
+    # zones_config_store.c's/unit_pref.c's/display_power_cfg.c's own entries
+    # below rely on -- and ui_page_profiles.c's call site runs on the LVGL
+    # task, whose stack is `static StackType_t s_lvgl_task_stack[...]`
+    # (lvgl_port.c, xTaskCreateStaticPinnedToCore) -- a plain static array,
+    # .bss-resident, never PSRAM. No caller of either write function reaches
+    # it from a PSRAM-stacked task.
     "profiles_builtin.c",
     # Pattern 2 (local caller_stack_is_external() guard), added after the
     # "earlier pass treated this file as always-internal-stack" incident --
     # see this file's own comment.
     "profiles_http.c",
-    # Pattern 3 (init-time only): ramp_assist_cfg loads/saves run from
-    # app_main's own task at boot before other tasks exist.
+    # RE-JUSTIFIED 2026-09-06 (flash-safety review of the hal_kv migration):
+    # the "init-time only" claim below was FALSE for one of this file's two
+    # write call sites -- ramp_assist_cfg_start() runs at boot from
+    # app_main, but ramp_assist_cfg_set_enabled() is reached live from
+    # diagnostics_http.c:455 (POST the ramp-assist debug toggle), long after
+    # boot. Actually Pattern 3 (internal-SRAM-stack caller): the httpd task
+    # diagnostics_http.c's handler runs on has an internal-SRAM stack, the
+    # same established fact zones_config_store.c's/unit_pref.c's/
+    # display_power_cfg.c's/profiles_builtin.c's own entries in this list
+    # rely on -- not a PSRAM-stacked task.
     "ramp_assist_cfg.c",
     # Pattern 2 (local caller_stack_is_external() guard), added when the
     # guard was introduced -- see this file's own comment; also called once
@@ -149,7 +176,8 @@ ALLOWLIST = {
 }
 
 WRITE_CALL_RE = re.compile(
-    r"\b(nvs_set_\w+|nvs_commit|esp_partition_write(?:_raw)?|esp_partition_erase_range)\s*\("
+    r"\b(nvs_set_\w+|nvs_commit|hal_kv_set_\w+|hal_kv_commit|hal_kv_erase_\w+|"
+    r"esp_partition_write(?:_raw)?|esp_partition_erase_range)\s*\("
 )
 
 # Matches this file's own definitions/declarations of the sanctioned
@@ -199,8 +227,19 @@ def main(argv):
         print(f"flash_worker_lint: drivers dir not found: {drivers_dir}", file=sys.stderr)
         return 1
 
+    # rglob, not glob: the 2026-09 drivers/ layering reorg (tools/drivers_reorg/)
+    # split every file that used to live flat in drivers/*.c into subdirectories
+    # (drivers/persist/, drivers/control/, drivers/http/, ...) -- drivers_dir
+    # itself now contains ZERO .c files directly. A plain glob("*.c") silently
+    # scans nothing and this lint reports "clean" no matter what any driver
+    # file does, exactly the "splits break filename-keyed checks" class (see
+    # project memory / b9a5112) this repo has hit before. Found and fixed
+    # 2026-09-06 auditing HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h ->
+    # hal_kv.h migration) -- this lint had been vacuously passing since the
+    # reorg landed.
+    all_driver_files = sorted(drivers_dir.rglob("*.c"))
     all_violations = []
-    for c_file in sorted(drivers_dir.glob("*.c")):
+    for c_file in all_driver_files:
         if c_file.name in ALLOWLIST:
             continue
         for lineno, text in scan_file(c_file):
@@ -215,7 +254,7 @@ def main(argv):
         print("patterns and how to add a justified allowlist entry.")
         return 1
 
-    print(f"flash_worker_lint: clean ({len(list(drivers_dir.glob('*.c')))} driver files scanned, "
+    print(f"flash_worker_lint: clean ({len(all_driver_files)} driver files scanned, "
           f"{len(ALLOWLIST)} allowlisted)")
     return 0
 

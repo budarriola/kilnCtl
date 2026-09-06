@@ -110,6 +110,14 @@ $sources = @(
     (Join-Path $hwAbsDir "host/fake_gpio.c"),
     (Join-Path $hwAbsDir "host/fake_sysinfo.c"),
     (Join-Path $hwAbsDir "host/fake_time.c"),
+    (Join-Path $hwAbsDir "host/fake_wdt.c"),
+    # HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h migration):
+    # boot_guard.c/kiln_cfg_store.c/watchdog_cfg.c/ramp_assist_cfg.c (each
+    # #included directly by its own test_*.c above) and ota_record.c (linked
+    # as a real object further down this list) now call hal_kv_*() instead
+    # of nvs_*() directly, so this one shared executable needs the host
+    # hal_kv backend linked in once for all of them.
+    (Join-Path $hwAbsDir "host/fake_kv.c"),
     (Join-Path $hwAbsDir "common/hal_status.c"),
     (Join-Path $hwAbsDir "esp/common/hal_esp_common.c"),
     (Join-Path $driversDir "common/stack_margin.c"),
@@ -310,7 +318,16 @@ $cmd4 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
         "`"$(Join-Path $driversDir 'control/adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/adaptive_tune_model.c')`" " +
         "`"$(Join-Path $driversDir 'control/adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
-        "`"$(Join-Path $driversDir 'control/cone_table.c')`""
+        "`"$(Join-Path $driversDir 'control/cone_table.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+# HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
+# 4: control/, safety/, profiles_http.c, ui_page_diagnostics.c): this
+# executable links adaptive_tune.c/adaptive_tune_model.c/adaptive_tune_ki.c
+# for real (see above), and adaptive_tune.c now calls hal_kv_*() and
+# hal_status_to_esp_err() instead of nvs_*() directly, so the host hal_kv
+# backend (fake_kv.c) and the shared esp_err_t<->hal_status_t mapper
+# (hal_status.c/hal_esp_common.c) both need linking in.
 # profile_executor.c split 2026-09-01 ("files over 1500 lines should be
 # broken up where it makes sense") -- the new profile_executor_*.c pieces
 # are NOT added as separate compile units above; test_profile_executor_
@@ -367,8 +384,21 @@ Invoke-HostTestExe -Name "autotune_engine_prestart" -ExePath $exe5 -BuildCmd $cm
 # for zones_http.h/profile_feasibility.h/profiles_builtin.h, never collide
 # with any other test file's definitions of those same symbols.
 $exe7 = Join-Path $outDir "kilnctl_host_tests_profiles_http.exe"
+$phObjDir = Join-Path $outDir "profiles_http_obj"
+New-Item -ItemType Directory -Force -Path $phObjDir | Out-Null
 $cmd7 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
-        "/Fo:`"$outDir\\profiles_`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`""
+        "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+# HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
+# 4): profiles_http.c (#included directly above) now calls hal_kv_*() and
+# hal_status_to_esp_err() instead of nvs_*() directly, so this executable
+# needs the host hal_kv backend and the shared esp_err_t<->hal_status_t
+# mapper linked in. /Fo: switched from a single-file name prefix
+# ("$outDir\profiles_") to a real object directory now that this cl
+# invocation compiles more than one source -- a name-prefix /Fo: only works
+# for a single source file; MSVC needs a directory (trailing backslash) once
+# there is more than one .obj to place.
 
 Invoke-HostTestExe -Name "profiles_http" -ExePath $exe7 -BuildCmd $cmd7
 
@@ -398,7 +428,9 @@ $cmd8 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
         "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
         "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
-        "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+        "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 # hal_time migration (HW_ABSTRACTION_PLAN.md item 5): ota_http_pico.c, one of
 # the files #included directly into test_ota_http.c above, now calls
 # hal_time_now_us() instead of esp_timer_get_time(); fake_time.c supplies it.
@@ -406,6 +438,12 @@ $cmd8 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 # recovery-exit/rollback/pico-rollback reboot task starts now call
 # stack_margin_register() (registration only, no size change), and this
 # executable #includes ota_http.c directly.
+# fake_kv.c added HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h
+# migration): ota_record.c, linked in for real above, now calls hal_kv_*()
+# instead of nvs_*() directly. hal_esp_common.c added in the same pass's
+# flash-safety review follow-up: ota_record.c now also calls
+# hal_status_to_esp_err() to preserve its ESP_FAIL/mapped-error return
+# contract instead of collapsing every failure to plain ESP_FAIL.
 
 Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
 
@@ -429,15 +467,21 @@ Invoke-HostTestExe -Name "uart_protocol_link_delegate" -ExePath $exe9 -BuildCmd 
 # ---- test_board_temps.c: its own TENTH, separate executable --------------
 # Same reason as test_zones_http.c above: it #includes board_temps.c
 # directly to reach board_temps_get() (the pure half of that file, no other
-# seam), which needs driver/temperature_sensor.h's stub -- own executable so
-# that stub's temperature_sensor_*() bodies, defined in test_board_temps.c
-# itself, never collide with any other test file's definitions of those
-# same symbols.
+# seam). 2026-09-06 migration: board_temps.c now goes through
+# hal_sysinfo_temp_*() instead of driver/temperature_sensor.h directly, so
+# this executable links the real host fake_sysinfo.c + hal_status.c (same
+# pair exe21/test_partition_info_http.c links) instead of defining its own
+# temperature_sensor_*() stub bodies -- own executable so fake_sysinfo.c's
+# hal_sysinfo_* symbols never collide with any other test file's own fakes
+# of the same names (test_partition_info_http.c already claims fake_sysinfo.c
+# for itself the same way).
 $exe10 = Join-Path $outDir "kilnctl_host_tests_board_temps.exe"
 $btObjDir = Join-Path $outDir "bt"
 New-Item -ItemType Directory -Force -Path $btObjDir | Out-Null
 $cmd10 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
-        "/Fo:`"$btObjDir\\`" /Fe:`"$exe10`" `"$(Join-Path $testDir 'test_board_temps.c')`""
+        "/Fo:`"$btObjDir\\`" /Fe:`"$exe10`" `"$(Join-Path $testDir 'test_board_temps.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
 Invoke-HostTestExe -Name "board_temps" -ExePath $exe10 -BuildCmd $cmd10
 
@@ -615,7 +659,14 @@ New-Item -ItemType Directory -Force -Path $atObjDir | Out-Null
 $cmd17 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$atObjDir\\`" /Fe:`"$exe17`" " +
         "`"$(Join-Path $testDir 'test_adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
-        "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`""
+        "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+# HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
+# 4): adaptive_tune.c (#included directly by test_adaptive_tune.c) now calls
+# hal_kv_*() and hal_status_to_esp_err() instead of nvs_*() directly, so this
+# executable needs the host hal_kv backend and the shared
+# esp_err_t<->hal_status_t mapper linked in.
 
 Invoke-HostTestExe -Name "adaptive_tune" -ExePath $exe17 -BuildCmd $cmd17
 
@@ -653,7 +704,8 @@ $cmd19 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$rsObjDir\\`" /Fe:`"$exe19`" `"$(Join-Path $testDir 'test_run_state.c')`" " +
         "`"$(Join-Path $testDir 'test_relay_cycles.c')`" " +
         "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
-        "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+        "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 # hal_time migration (HW_ABSTRACTION_PLAN.md item 5): both run_state.c and
 # relay_cycles.c now call hal_time_now_us() instead of esp_timer_get_time();
 # fake_time.c supplies it. (The separate hal_kv_* unresolved externals here
@@ -661,8 +713,13 @@ $cmd19 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 # fake_kv.c/hal_status.c added HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h ->
 # hal_kv.h migration): relay_cycles.c now calls hal_kv_*() instead of nvs_*()
 # directly, so this executable needs the host hal_kv backend linked in.
-# run_state.c is unaffected (not yet migrated -- still uses stubs/nvs.h via
-# test_run_state.c) and hal_status.c is not otherwise in this executable's
+# hal_esp_common.c added in the same pass's flash-safety review follow-up:
+# relay_cycles.c (and, independently, run_state.c's own concurrent
+# migration) now also call hal_status_to_esp_err() to preserve their
+# ESP_FAIL/mapped-error return contract instead of collapsing every failure
+# to plain ESP_FAIL. run_state.c is otherwise unaffected here (still uses
+# stubs/nvs.h via test_run_state.c for its blob I/O) and hal_status.c is not
+# otherwise in this executable's
 # link (the main $sources list only pulls it in for the main "exe" build).
 
 Invoke-HostTestExe -Name "run_state_relay_cycles" -ExePath $exe19 -BuildCmd $cmd19
@@ -740,7 +797,19 @@ $exe23 = Join-Path $outDir "kilnctl_host_tests_profiles_builtin.exe"
 $pbObjDir = Join-Path $outDir "pb"
 New-Item -ItemType Directory -Force -Path $pbObjDir | Out-Null
 $cmd23 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
-        "/Fo:`"$pbObjDir\\`" /Fe:`"$exe23`" `"$(Join-Path $testDir 'test_profiles_builtin.c')`""
+        "/Fo:`"$pbObjDir\\`" /Fe:`"$exe23`" `"$(Join-Path $testDir 'test_profiles_builtin.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+# fake_kv.c/hal_status.c added HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h ->
+# hal_kv.h migration): profiles_builtin.c's hidden-mask persistence now calls
+# hal_kv_get_u32()/hal_kv_set_u32()/hal_kv_init_partition() instead of
+# nvs_get_u32()/nvs_set_u32()/nvs_flash_init_partition() directly, so this
+# executable needs the host hal_kv backend linked in (this file's own local
+# nvs_get_u32()/nvs_set_u32() stand-ins were removed accordingly).
+# hal_esp_common.c added in the same pass's flash-safety review follow-up:
+# profiles_builtin.c now also calls hal_status_to_esp_err() to preserve its
+# ESP_FAIL/mapped-error return contract instead of collapsing every failure
+# to plain ESP_FAIL.
 
 Invoke-HostTestExe -Name "profiles_builtin" -ExePath $exe23 -BuildCmd $cmd23
 

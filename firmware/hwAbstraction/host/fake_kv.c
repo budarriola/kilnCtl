@@ -227,7 +227,21 @@ hal_status_t hal_kv_open(hal_kv_handle_t *h, const char *namespace_name,
     if (strlen(namespace_name) >= FAKE_KV_MAX_NAME_LEN) return HAL_INVALID_ARG;
 
     int p = find_partition_slot(partition);
-    if (p < 0) return HAL_NOT_READY; /* hal_kv_init_partition() not called yet */
+    /* HAL_NOT_READY, NOT HAL_NOT_FOUND -- deliberately NOT mirroring
+     * hal_kv_esp.c's ESP_ERR_NVS_PART_NOT_FOUND -> HAL_NOT_FOUND mapping
+     * here. The two "partition missing" cases are different concepts: on
+     * target it means the partition table itself never had this partition
+     * flashed; here it means this test/harness simply has not called
+     * hal_kv_init_partition() yet for this fake run -- a usage-discipline
+     * signal, not a "board was never provisioned" signal, and existing
+     * tests (test_fake_kv.c's "open before init_partition -> HAL_NOT_READY"
+     * and its uninitialized-handle checks, test_safety_cfg_store.c's
+     * "hal_kv_open() fails closed with HAL_NOT_READY") already lock this
+     * return value in. Changing it would fix nothing a real board could
+     * ever observe (a partition that's missing from a fake's in-RAM model
+     * is always because a test forgot to init it, never because of a
+     * misflashed partition table) and would break those call sites. */
+    if (p < 0) return HAL_NOT_READY;
     fake_kv_partition_t *part = &s_partitions[p];
 
     int ns_slot = -1, free_ns = -1;
@@ -406,6 +420,42 @@ hal_status_t hal_kv_set_str(hal_kv_handle_t *h, const char *key, const char *val
     return do_set(get_handle(h), key, true, value, strlen(value) + 1);
 }
 
+hal_status_t hal_kv_get_u32(hal_kv_handle_t *h, const char *key, uint32_t *out)
+{
+    if (out == NULL) return HAL_INVALID_ARG;
+    size_t len = sizeof(*out);
+    /* Stored as a plain 4-byte blob -- same underlying key-slot storage as
+     * hal_kv_get_blob(), just fixed-size. A key whose stored value is a
+     * different size (written via set_blob/set_str with other content, or
+     * genuinely corrupt) is caught by do_get()'s own `*out_len < len` check
+     * (HAL_INVALID_SIZE) when the stored value is larger than 4 bytes; the
+     * length re-check below additionally rejects a stored value SMALLER
+     * than 4 bytes, which do_get() would otherwise report as a successful
+     * short read. */
+    hal_status_t err = do_get(get_handle(h), key, false, out, &len);
+    if (err == HAL_OK && len != sizeof(*out)) return HAL_INVALID_ARG; /* wrong-type injection case */
+    return err;
+}
+
+hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value)
+{
+    return do_set(get_handle(h), key, false, &value, sizeof(value));
+}
+
+hal_status_t hal_kv_get_u8(hal_kv_handle_t *h, const char *key, uint8_t *out)
+{
+    if (out == NULL) return HAL_INVALID_ARG;
+    size_t len = sizeof(*out);
+    hal_status_t err = do_get(get_handle(h), key, false, out, &len);
+    if (err == HAL_OK && len != sizeof(*out)) return HAL_INVALID_ARG; /* wrong-type injection case */
+    return err;
+}
+
+hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value)
+{
+    return do_set(get_handle(h), key, false, &value, sizeof(value));
+}
+
 hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
 {
     fake_kv_handle_slot_t *hs = get_handle(h);
@@ -447,6 +497,17 @@ hal_status_t hal_kv_init_partition(const char *partition)
     s_partitions[free_slot].initialized = true;
     copy_bounded(s_partitions[free_slot].name, sizeof(s_partitions[free_slot].name), name);
     return HAL_OK;
+}
+
+hal_status_t hal_kv_mount_probe(const char *partition)
+{
+    /* The fake has no NO_FREE_PAGES/NEW_VERSION_FOUND concept -- an in-RAM
+     * partition is either initialized (mounted) or not, with nothing
+     * in-between an erase could fix. Mirrors hal_kv_init_partition()'s own
+     * idempotent-if-initialized check, but never initializes: matches
+     * hal_kv_esp.c's hal_kv_mount_probe(), which never erases either. */
+    if (strlen(norm_partition(partition)) >= FAKE_KV_MAX_NAME_LEN) return HAL_INVALID_ARG;
+    return (find_partition_slot(partition) >= 0) ? HAL_OK : HAL_NOT_READY;
 }
 
 hal_status_t hal_kv_erase_partition(const char *partition)

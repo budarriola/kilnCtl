@@ -144,11 +144,17 @@ esp_err_t ota_record_append(const ota_record_t *rec);
 // loader uses -- a layout change bumps OTA_RECORD_VERSION and the old blob
 // is simply treated as absent, not misread). Returns ESP_ERR_NVS_NOT_FOUND
 // if no update has ever run this boot-image's NVS lifetime (nothing has
-// ever called ota_record_append()), or any other nvs_* error verbatim on a
-// genuine read failure -- callers must not treat a non-ESP_OK return as "an
-// update happened but is unreadable," only as "no current record." Never
-// itself logs at error level for the NOT_FOUND case (that is the normal,
-// expected state on a board that has never been updated), unlike
+// ever called ota_record_append()) -- including the size-mismatch case
+// above, which is deliberately reported the same way -- or the mapped
+// equivalent of any other genuine read failure via hal_status_to_esp_err()
+// (HW_ABSTRACTION_PLAN.md Phase 3 item 3's nvs.h -> hal_kv.h migration:
+// this file no longer calls nvs_*() directly, but keeps returning this
+// SPECIFIC code for "no record yet" rather than collapsing it into a
+// generic ESP_FAIL, since that is the value this header has always
+// promised) -- callers must not treat a non-ESP_OK return as "an update
+// happened but is unreadable," only as "no current record." Never itself
+// logs at error level for the not-found case (that is the normal, expected
+// state on a board that has never been updated), unlike
 // ota_record_append()'s failure logging.
 esp_err_t ota_record_load(ota_record_t *out);
 

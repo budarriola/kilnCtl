@@ -4,10 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_esp_common.h"
+#include "hal_kv.h"
 
 #include "ota_state.h"
 #include "zones_config_accessors.h"
@@ -153,21 +152,12 @@ static kiln_cfg_store_blob_t s_store;
 
 /* Copied from zones_http.c's nvs_partition_init() (see that file for the
  * full rationale) -- each module using kiln_nvs brings the partition up
- * independently rather than assuming another module already has;
- * nvs_flash_init_partition() on an already-initialized partition is a
- * harmless no-op. */
-static esp_err_t nvs_partition_init(const char *partition)
+ * independently rather than assuming another module already has.
+ * hal_kv_init_partition() already implements the erase-and-retry idiom this
+ * used to do by hand (see hal_kv_esp.c). */
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
 static void reset_to_defaults(void)
@@ -189,24 +179,24 @@ static void reset_to_defaults(void)
  * bump beyond 2 needs its own branch added alongside the v1 one. */
 /* Defined below; nvs_load_store() calls it to rewrite a migrated v1 store in
  * the current layout. */
-static esp_err_t nvs_save_store(void);
+static hal_status_t nvs_save_store(void);
 
 static void nvs_load_store(void)
 {
     reset_to_defaults();
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
-        return; /* ESP_ERR_NVS_NOT_FOUND (never saved) or partition trouble -- defaults stand */
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return; /* HAL_NOT_FOUND (never saved) or partition trouble -- defaults stand */
     }
 
     /* Read the size first, so a v1-sized blob can be migrated instead of
      * being dismissed as corruption by the exact-size check below. */
     size_t stored_len = 0;
-    err = nvs_get_blob(h, NVS_KEY_STORE, NULL, &stored_len);
-    if (err != ESP_OK) {
-        nvs_close(h);
+    err = hal_kv_get_blob(&h, NVS_KEY_STORE, NULL, &stored_len);
+    if (err != HAL_OK) {
+        hal_kv_close(&h);
         return; /* nothing stored, or unreadable -- defaults stand */
     }
 
@@ -228,14 +218,14 @@ static void nvs_load_store(void)
          * read failure. */
         kiln_cfg_store_blob_v1_t *v1 = malloc(sizeof(*v1));
         if (!v1) {
-            nvs_close(h);
+            hal_kv_close(&h);
             ESP_LOGW(TAG, "kiln_cfg_store v1 migration buffer alloc failed -- defaults stand");
             return;
         }
         size_t v1_len = sizeof(*v1);
-        err = nvs_get_blob(h, NVS_KEY_STORE, v1, &v1_len);
-        nvs_close(h);
-        if (err != ESP_OK || v1_len != sizeof(*v1)) {
+        err = hal_kv_get_blob(&h, NVS_KEY_STORE, v1, &v1_len);
+        hal_kv_close(&h);
+        if (err != HAL_OK || v1_len != sizeof(*v1)) {
             ESP_LOGW(TAG, "kiln_cfg_store v1 blob could not be re-read -- defaults stand");
             free(v1);
             return;
@@ -264,9 +254,9 @@ static void nvs_load_store(void)
      * the previous "read into a scratch `loaded`, only copy to s_store on
      * the happy path" approach, at zero bytes of extra BSS/heap. */
     size_t len = sizeof(s_store);
-    err = nvs_get_blob(h, NVS_KEY_STORE, &s_store, &len);
-    nvs_close(h);
-    if (err != ESP_OK) {
+    err = hal_kv_get_blob(&h, NVS_KEY_STORE, &s_store, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
         reset_to_defaults(); /* nothing stored, or unreadable, or a partial read -- defaults stand */
         return;
     }
@@ -332,11 +322,10 @@ static void nvs_load_store(void)
  * internal-stack tasks) is refused loudly instead of taking the board down. */
 static bool caller_stack_is_external(void)
 {
-    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
-    return esp_ptr_external_ram((void *)&stack_probe);
+    return !hal_kv_write_safe_here();
 }
 
-static esp_err_t nvs_save_store(void)
+static hal_status_t nvs_save_store(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "nvs_save_store: REFUSING -- calling task's stack is in external RAM "
@@ -345,19 +334,19 @@ static esp_err_t nvs_save_store(void)
                       "through a task with an internal-SRAM stack instead -- see "
                       "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
                       "worker for the established pattern.");
-        return ESP_ERR_INVALID_STATE;
+        return HAL_NOT_READY;
     }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return err;
     }
     s_store.version = KILN_CFG_STORE_VERSION;
-    err = nvs_set_blob(h, NVS_KEY_STORE, &s_store, sizeof(s_store));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_STORE, &s_store, sizeof(s_store));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
     return err;
 }
 
@@ -475,12 +464,12 @@ static bool name_collides(const char *normalized_name, int32_t exclude_id)
 
 esp_err_t kiln_cfg_store_init(void)
 {
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- kiln configs will not persist",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
         reset_to_defaults();
-        return part_err;
+        return hal_status_to_esp_err(part_err);
     }
     nvs_load_store();
 
@@ -619,10 +608,10 @@ bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32
         s_store.active_id = id;
     }
 
-    esp_err_t err = nvs_save_store();
-    if (err != ESP_OK) {
+    hal_status_t err = nvs_save_store();
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "nvs_save_store after save failed: %s -- saved live but will not survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     }
     if (out_id) {
         *out_id = id;
@@ -667,10 +656,10 @@ bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, cha
     /* Deliberately does NOT touch active_id -- a clone is a new saved slot,
      * not a change to what's live or what boots next. See this function's
      * header comment. */
-    esp_err_t err = nvs_save_store();
-    if (err != ESP_OK) {
+    hal_status_t err = nvs_save_store();
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "nvs_save_store after clone failed: %s -- cloned live but will not survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     }
     if (out_id) {
         *out_id = new_id;
@@ -708,11 +697,11 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason
         return false;
     }
     s_store.active_id = id;
-    esp_err_t err = nvs_save_store();
-    if (err != ESP_OK) {
+    hal_status_t err = nvs_save_store();
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "nvs_save_store after apply failed: %s -- active id applied live but will not "
                       "survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     }
     return true;
 }
@@ -727,10 +716,10 @@ bool kiln_cfg_store_delete(int32_t id)
     if (s_store.active_id == id) {
         s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
     }
-    esp_err_t err = nvs_save_store();
-    if (err != ESP_OK) {
+    hal_status_t err = nvs_save_store();
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "nvs_save_store after delete failed: %s -- deleted live but will not survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     }
     return true;
 }
@@ -754,10 +743,10 @@ bool kiln_cfg_store_rename(int32_t id, const char *name)
     }
     strncpy(s_store.entries[idx].name, normalized, KILN_CFG_NAME_MAX_LEN);
     s_store.entries[idx].name[KILN_CFG_NAME_MAX_LEN] = '\0';
-    esp_err_t err = nvs_save_store();
-    if (err != ESP_OK) {
+    hal_status_t err = nvs_save_store();
+    if (err != HAL_OK) {
         ESP_LOGE(TAG, "nvs_save_store after rename failed: %s -- renamed live but will not survive a reboot",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     }
     return true;
 }

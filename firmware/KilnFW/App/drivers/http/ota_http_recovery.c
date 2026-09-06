@@ -22,6 +22,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "hal_wdt.h"
+
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
@@ -94,7 +96,14 @@ static void ota_recovery_exit_reboot_task(void *arg)
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(300));
     ESP_LOGW(OTA_HTTP_TAG, "recovery-mode exit requested over HTTP -- rebooting now");
-    esp_restart();
+    hal_wdt_reboot(); /* esp_restart() under the hood on this backend; never returns -- see hal_wdt.h.
+                        * Same internal-RAM-stack requirement as before: esp_restart() disables the
+                        * flash cache, which a PSRAM-backed task stack cannot survive -- see this
+                        * task's own stack_margin_register() call below, unchanged. */
+    vTaskDelete(NULL); /* defensive only: hal_wdt_reboot() is not declared noreturn (the host
+                         * fake deliberately returns so tests can observe the call -- see
+                         * fake_wdt.c), so this guards a real backend that somehow returns
+                         * instead of falling off the end of a FreeRTOS task function. */
 }
 
 esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)

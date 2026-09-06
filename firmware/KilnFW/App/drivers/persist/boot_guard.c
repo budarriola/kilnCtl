@@ -6,8 +6,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "hal_kv.h"
 
 static const char *TAG = "boot_guard";
 
@@ -110,21 +109,12 @@ static uint32_t next_boot_count(uint32_t loaded_count, bool *out_recovery_mode)
     return loaded_count + 1u;
 }
 
-static esp_err_t nvs_partition_init(const char *partition)
+static hal_status_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_kv_init_partition(partition);
 }
 
-static esp_err_t persist_count(uint32_t count)
+static hal_status_t persist_count(uint32_t count)
 {
     boot_guard_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -132,16 +122,16 @@ static esp_err_t persist_count(uint32_t count)
     rec.boot_count = count;
     rec.crc32 = record_crc(&rec);
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return err;
     }
-    err = nvs_set_blob(h, NVS_KEY_REC, &rec, sizeof(rec));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_REC, &rec, sizeof(rec));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
     return err;
 }
 
@@ -150,16 +140,16 @@ static esp_err_t persist_count(uint32_t count)
  * version, or a bad CRC all collapse to the same "count 0" answer. */
 static uint32_t load_count(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return 0;
     }
     boot_guard_record_t rec;
     size_t len = sizeof(rec);
-    err = nvs_get_blob(h, NVS_KEY_REC, &rec, &len);
-    nvs_close(h);
-    if (err != ESP_OK || len != sizeof(rec)) {
+    err = hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(rec)) {
         return 0;
     }
     if (!record_is_valid(&rec)) {
@@ -201,21 +191,21 @@ esp_err_t boot_guard_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != ESP_OK) {
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- boot-guard counter will not persist "
                       "this boot (defaulting to NOT recovery mode)",
-                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
     }
 
     xSemaphoreTake(s_bg.lock, portMAX_DELAY);
 
-    uint32_t loaded = (part_err == ESP_OK) ? load_count() : 0;
+    uint32_t loaded = (part_err == HAL_OK) ? load_count() : 0;
     bool recovery_mode;
     uint32_t new_count = next_boot_count(loaded, &recovery_mode);
 
-    esp_err_t write_err = ESP_OK;
-    if (part_err == ESP_OK) {
+    hal_status_t write_err = HAL_OK;
+    if (part_err == HAL_OK) {
         write_err = persist_count(new_count);
     }
 
@@ -225,14 +215,14 @@ esp_err_t boot_guard_init(void)
     s_bg.initialized = true;
     xSemaphoreGive(s_bg.lock);
 
-    if (write_err != ESP_OK) {
+    if (write_err != HAL_OK) {
         /* Loud on purpose -- see boot_guard.h's doc comment on boot_guard_init():
          * a boot-guard that silently stops counting is exactly the failure
          * mode that would leave a genuinely reset-looping board never
          * entering recovery. */
         ESP_LOGE(TAG, "could not persist boot-guard count %lu: %s -- next boot will not see this "
                       "one counted",
-                 (unsigned long)new_count, esp_err_to_name(write_err));
+                 (unsigned long)new_count, hal_status_to_name(write_err));
     }
 
     if (recovery_mode) {
@@ -288,16 +278,16 @@ void boot_guard_mark_healthy(void)
         return;
     }
     xSemaphoreTake(s_bg.lock, portMAX_DELAY);
-    esp_err_t err = persist_count(0);
-    if (err == ESP_OK) {
+    hal_status_t err = persist_count(0);
+    if (err == HAL_OK) {
         s_bg.healthy_marked = true;
     }
     xSemaphoreGive(s_bg.lock);
 
-    if (err == ESP_OK) {
+    if (err == HAL_OK) {
         ESP_LOGI(TAG, "boot-guard counter cleared -- this boot is confirmed healthy");
     } else {
         ESP_LOGW(TAG, "could not clear boot-guard counter: %s -- will retry next call",
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     }
 }

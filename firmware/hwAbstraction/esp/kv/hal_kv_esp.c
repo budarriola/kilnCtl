@@ -100,11 +100,14 @@
 
 #include <string.h>
 
+#include "esp_log.h"
 #include "esp_memory_utils.h" /* esp_ptr_external_ram() -- hal_kv_write_safe_here() */
 #include "nvs.h"
 #include "nvs_flash.h"
 
 #include "hal_esp_common.h"
+
+static const char *TAG = "hal_kv_esp";
 
 struct hal_kv_esp_impl {
     nvs_handle_t handle;
@@ -124,10 +127,28 @@ static struct hal_kv_esp_impl *hal_kv_esp_impl(hal_kv_handle_t *h) {
 static hal_status_t hal_kv_esp_err_to_status(esp_err_t err) {
     switch (err) {
         case ESP_ERR_NVS_NOT_FOUND:         return HAL_NOT_FOUND;
+        /* A missing PARTITION (wifi_nvs/kiln_nvs/profiles_nvs never flashed,
+         * or hal_kv_init_partition() never called for it) vs. a missing KEY
+         * inside a present partition are different ESP-IDF codes, but every
+         * pre-migration caller (wifi_prov_nvs.c's "nothing saved yet" paths
+         * are the concrete example) already treated both as the same "not
+         * found" outcome -- there is no hal_status_t distinct from
+         * HAL_NOT_FOUND that fits "not found" any better, so this maps here
+         * rather than falling through to the shared mapper's HAL_IO
+         * catch-all, which would turn an ordinary "never provisioned" board
+         * into a logged hard-I/O-error case. */
+        case ESP_ERR_NVS_PART_NOT_FOUND:    return HAL_NOT_FOUND;
         case ESP_ERR_NVS_INVALID_LENGTH:    return HAL_INVALID_SIZE;
         case ESP_ERR_NVS_NOT_ENOUGH_SPACE:  return HAL_NO_MEM;
         case ESP_ERR_NVS_INVALID_HANDLE:    return HAL_INVALID_ARG;
         case ESP_ERR_NVS_READ_ONLY:         return HAL_INVALID_ARG;
+        /* get_str() on a key written via set_blob() (or vice versa) -- NVS's
+         * own type tag mismatch. Mapped to HAL_INVALID_ARG (a caller-error
+         * shape, not a transport failure) to match fake_kv.c's identical
+         * "wrong-type injection case" return for the same scenario
+         * (fake_kv.c:412/436's do_get()/hal_kv_get_u32() HAL_INVALID_ARG
+         * returns) -- target and host now agree on this case. */
+        case ESP_ERR_NVS_TYPE_MISMATCH:     return HAL_INVALID_ARG;
         default:                            return hal_esp_err_to_status(err);
     }
 }
@@ -238,6 +259,54 @@ hal_status_t hal_kv_set_str(hal_kv_handle_t *h, const char *key,
     return hal_kv_esp_err_to_status(err);
 }
 
+hal_status_t hal_kv_get_u32(hal_kv_handle_t *h, const char *key, uint32_t *out) {
+    if (!h || !key || !out) {
+        return HAL_INVALID_ARG;
+    }
+    struct hal_kv_esp_impl *impl = hal_kv_esp_impl(h);
+    if (!impl->is_open) {
+        return HAL_NOT_READY;
+    }
+    esp_err_t err = nvs_get_u32(impl->handle, key, out);
+    return hal_kv_esp_err_to_status(err);
+}
+
+hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value) {
+    if (!h || !key) {
+        return HAL_INVALID_ARG;
+    }
+    struct hal_kv_esp_impl *impl = hal_kv_esp_impl(h);
+    if (!impl->is_open) {
+        return HAL_NOT_READY;
+    }
+    esp_err_t err = nvs_set_u32(impl->handle, key, value);
+    return hal_kv_esp_err_to_status(err);
+}
+
+hal_status_t hal_kv_get_u8(hal_kv_handle_t *h, const char *key, uint8_t *out) {
+    if (!h || !key || !out) {
+        return HAL_INVALID_ARG;
+    }
+    struct hal_kv_esp_impl *impl = hal_kv_esp_impl(h);
+    if (!impl->is_open) {
+        return HAL_NOT_READY;
+    }
+    esp_err_t err = nvs_get_u8(impl->handle, key, out);
+    return hal_kv_esp_err_to_status(err);
+}
+
+hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value) {
+    if (!h || !key) {
+        return HAL_INVALID_ARG;
+    }
+    struct hal_kv_esp_impl *impl = hal_kv_esp_impl(h);
+    if (!impl->is_open) {
+        return HAL_NOT_READY;
+    }
+    esp_err_t err = nvs_set_u8(impl->handle, key, value);
+    return hal_kv_esp_err_to_status(err);
+}
+
 hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key) {
     if (!h || !key) {
         return HAL_INVALID_ARG;
@@ -260,10 +329,43 @@ hal_status_t hal_kv_init_partition(const char *partition) {
      * if the partition is already initialized. */
     esp_err_t err = nvs_flash_init_partition(partition);
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        /* Every one of the ~13 pre-migration call sites logged at WARN
+         * before erasing -- an erase is destructive and worth a loud record
+         * even though it is the only cure for these two codes. Restored
+         * here (it was dropped when those call sites collapsed onto this
+         * one shared function) so centralizing the erase-retry idiom does
+         * not also silence it. */
+        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
+                 partition, esp_err_to_name(err));
         err = nvs_flash_erase_partition(partition);
         if (err == ESP_OK) {
             err = nvs_flash_init_partition(partition);
         }
+    }
+    if (err != ESP_OK) {
+        /* ERROR, not just the mapped hal_status_t -- a caller several
+         * layers up (e.g. wifi_prov.c) now only ever sees the generic
+         * HAL_IO/HAL_NOT_READY shape and this function's own return value,
+         * never the raw esp_err_t, so this is the only place left that can
+         * still tell a headless board's log the difference between
+         * "partition not in the flashed table" (ESP_ERR_NVS_PART_NOT_FOUND)
+         * and every other failure this function can return. */
+        ESP_LOGE(TAG, "hal_kv_init_partition('%s') failed: %s", partition, esp_err_to_name(err));
+    }
+    return hal_kv_esp_err_to_status(err);
+}
+
+hal_status_t hal_kv_mount_probe(const char *partition) {
+    if (!partition) {
+        return HAL_INVALID_ARG;
+    }
+    /* Same call hal_kv_init_partition() makes, but WITHOUT the erase-retry
+     * branch -- see hal_kv.h's doc comment on this function for why
+     * nvs_report_capture() (this function's only caller) must never trigger
+     * an erase of a partition it does not own. */
+    esp_err_t err = nvs_flash_init_partition(partition);
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        return HAL_NOT_READY;
     }
     return hal_kv_esp_err_to_status(err);
 }
