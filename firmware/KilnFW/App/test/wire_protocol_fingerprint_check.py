@@ -81,6 +81,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
+
 MIN_DEFS_PER_LINK = 30
 
 DEFINE_RE = re.compile(
@@ -148,9 +151,14 @@ def diff_defs(old_lines, new_lines):
 
 def build_link_specs(root: Path):
     kilnlink_dir = root / "firmware/CommonFW/include/kilnlink"
-    uart_ids = root / "firmware/KilnFW/App/drivers/uart_task_ids.h"
+    # uart_task_ids.h and uart_protocol.h live somewhere under
+    # firmware/KilnFW/App/drivers/ -- the layer subdirectory they sit in is
+    # an implementation detail (uart_protocol.h in particular used to be
+    # nested under a now-flattened espInterfaces/ subfolder), so resolve by
+    # basename rather than a hand-built flat/nested path.
+    uart_ids = resolve_driver_file(root, "uart_task_ids.h")
     safaty_link_frame = root / "firmware/SaftyFW/src/tasks/link_frame.h"
-    max_payload_hdr = root / "firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.h"
+    max_payload_hdr = resolve_driver_file(root, "uart_protocol.h")
 
     return {
         "kilnlink": {
@@ -213,7 +221,11 @@ def main():
         return 1
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    specs = build_link_specs(root)
+    try:
+        specs = build_link_specs(root)
+    except DriverFileError as exc:
+        print(f"FAIL: {exc}")
+        return 1
     failures = []
     updated = dict(manifest)
 

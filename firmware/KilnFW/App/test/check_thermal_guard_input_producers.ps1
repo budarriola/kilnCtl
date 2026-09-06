@@ -35,14 +35,29 @@ $ErrorActionPreference = "Stop"
 $testDir = $PSScriptRoot
 $driversDir = Split-Path -Parent $testDir
 $driversDir = Join-Path $driversDir "drivers"
-$guardHeader = Join-Path $driversDir "thermal_guard.h"
 
-if (-not (Test-Path $guardHeader)) {
-    throw "check_thermal_guard_input_producers: $guardHeader not found -- did the file move? This check is now blind, which is worse than the bug it looks for."
-}
 if (-not (Test-Path $driversDir)) {
     throw "check_thermal_guard_input_producers: $driversDir not found."
 }
+
+# thermal_guard.h is being moved into a layer subdirectory of drivers/
+# (drivers/<layer>/thermal_guard.h) rather than staying flat -- resolve by
+# basename anywhere under $driversDir instead of assuming it is a direct
+# child, and fail loudly (not silently) if it is missing or ambiguous.
+function Resolve-DriverFile {
+    param([string]$DriversDir, [string]$BaseName)
+    $found = Get-ChildItem -Path $DriversDir -Filter $BaseName -File -Recurse
+    if ($found.Count -eq 0) {
+        throw "check_thermal_guard_input_producers: expected file '$BaseName' not found anywhere under $DriversDir -- has it moved or been renamed? This check is now blind, which is worse than the bug it looks for."
+    }
+    if ($found.Count -gt 1) {
+        $paths = ($found | ForEach-Object { $_.FullName }) -join ", "
+        throw "check_thermal_guard_input_producers: '$BaseName' matched more than one file under $DriversDir ($paths) -- cannot tell which one is the real file."
+    }
+    return $found[0].FullName
+}
+
+$guardHeader = Resolve-DriverFile -DriversDir $driversDir -BaseName "thermal_guard.h"
 
 # --- 1. The field list, from thermal_guard_input_t in thermal_guard.h ---
 $headerLines = Get-Content -Path $guardHeader

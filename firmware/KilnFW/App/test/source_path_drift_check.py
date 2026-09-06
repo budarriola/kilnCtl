@@ -153,6 +153,19 @@ def resolve_under_bases(repo_root: Path, rel_literal: str) -> bool:
         candidate = (repo_root / base / norm) if base else (repo_root / norm)
         if candidate.is_file():
             return True
+    # firmware/KilnFW/App/drivers/ is being split into layer subdirectories
+    # (drivers/<layer>/<name>) -- a literal like "pid.c" or a chain that
+    # used to resolve directly under the flat "firmware/KilnFW/App/drivers"
+    # BASES entry would otherwise start reporting as missing the moment its
+    # file moves one level deeper, even though nothing about the reference
+    # is actually stale. Try every real subdirectory of drivers/ too, found
+    # dynamically rather than a hardcoded layer-name list so this keeps
+    # working regardless of which/how many layers end up existing.
+    drivers_dir = repo_root / "firmware" / "KilnFW" / "App" / "drivers"
+    if drivers_dir.is_dir():
+        for sub in drivers_dir.iterdir():
+            if sub.is_dir() and (sub / norm).is_file():
+                return True
     return False
 
 

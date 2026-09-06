@@ -83,9 +83,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
+
 TEST_DIR = Path(__file__).resolve().parent
 HARNESS_SRC = TEST_DIR / "heater_output_pwm_drift_harness.c"
-HEATER_OUTPUT_C = TEST_DIR / ".." / "drivers" / "heater_output.c"
+DRIVERS_DIR = TEST_DIR.parent / "drivers"
 BUILD_DIR = TEST_DIR / "build"
 HARNESS_EXE = BUILD_DIR / "heater_output_pwm_drift_harness.exe"
 VCVARS = r"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
@@ -102,12 +105,13 @@ def build_harness():
         raise RuntimeError(f"vcvarsall.bat not found at {VCVARS} -- update this path if MSVC Build Tools moved.")
     if HARNESS_EXE.exists():
         HARNESS_EXE.unlink()
+    heater_output_c = resolve_driver_file(None, "heater_output.c", drivers_dir=DRIVERS_DIR)
     bat_path = BUILD_DIR / "_heater_output_pwm_drift_build.bat"
     bat_path.write_text(
         "@echo off\r\n"
         f'call "{VCVARS}" x64 >nul\r\n'
         f'cl /nologo /W3 /std:c11 /Fo:"{BUILD_DIR}\\\\" /Fe:"{HARNESS_EXE}" '
-        f'"{HARNESS_SRC}" "{HEATER_OUTPUT_C}"\r\n',
+        f'"{HARNESS_SRC}" "{heater_output_c}"\r\n',
         encoding="utf-8",
     )
     try:

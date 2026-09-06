@@ -67,6 +67,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
+
 PROD_REL = "firmware/KilnFW/App/drivers/profile_executor_pid_tick.c"
 MIRROR_REL = "firmware/KilnFW/App/test/test_closed_loop.c"
 
@@ -225,10 +228,15 @@ def normalize(body: str, only_stmt_res: list) -> list:
 def main() -> int:
     repo_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[4]
 
-    prod_path = repo_root / PROD_REL
+    try:
+        prod_path = resolve_driver_file(repo_root, Path(PROD_REL).name)
+    except DriverFileError as exc:
+        print("FUZZY-GAIN MIRROR DRIFT CHECK: FAILED (setup)")
+        print(f"  production file not found: {exc}")
+        return 1
     mirror_path = repo_root / MIRROR_REL
 
-    for label, path in (("production", prod_path), ("mirror", mirror_path)):
+    for label, path in (("mirror", mirror_path),):
         if not path.is_file():
             print("FUZZY-GAIN MIRROR DRIFT CHECK: FAILED (setup)")
             print(f"  {label} file not found: {path}")

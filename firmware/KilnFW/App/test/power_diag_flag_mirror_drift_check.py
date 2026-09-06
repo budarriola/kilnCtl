@@ -32,6 +32,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
+
 # (source-of-truth file, source symbol, mirror file, mirror symbol)
 # Values are ints; both sides are parsed as C integer literals (0xNNu, NNu,
 # or a bare enum member with an explicit '= <literal>').
@@ -93,12 +96,18 @@ def main() -> int:
     repo_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[4]
 
     commonfw_dir = repo_root / "firmware" / "CommonFW" / "include" / "kilnlink"
-    kilnfw_drivers_dir = repo_root / "firmware" / "KilnFW" / "App" / "drivers"
+
+    try:
+        safety_link_path = resolve_driver_file(repo_root, "safety_link.h")
+    except DriverFileError as exc:
+        print("POWER/DIAG FLAG MIRROR DRIFT CHECK: FAILED (setup)")
+        print(f"  {exc}")
+        return 1
 
     file_paths = {
         "kilnlink_power.h": commonfw_dir / "kilnlink_power.h",
         "kilnlink_diag.h": commonfw_dir / "kilnlink_diag.h",
-        "safety_link.h": kilnfw_drivers_dir / "safety_link.h",
+        "safety_link.h": safety_link_path,
     }
 
     texts: dict[str, str] = {}

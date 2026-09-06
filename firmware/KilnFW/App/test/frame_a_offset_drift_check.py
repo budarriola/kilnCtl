@@ -40,6 +40,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
+
 # Each site is a (label, relative_path, function_name_regex, body_terminator)
 # tuple describing how to isolate the Frame A function's body text out of its
 # file, the same bounded-region approach the original version of this check
@@ -92,7 +95,17 @@ def main() -> int:
     problems: list[str] = []
 
     for label, rel_path, func_re in SITES:
-        path = repo_root / rel_path
+        if "App/drivers/" in rel_path:
+            # firmware/KilnFW/App/drivers/ is being split into layer
+            # subdirectories -- resolve by basename instead of assuming the
+            # historical flat path still exists.
+            try:
+                path = resolve_driver_file(repo_root, Path(rel_path).name)
+            except DriverFileError as exc:
+                problems.append(f"{rel_path}: {exc}")
+                continue
+        else:
+            path = repo_root / rel_path
         if not path.is_file():
             problems.append(f"{rel_path}: file not found")
             continue

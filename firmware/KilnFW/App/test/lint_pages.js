@@ -24,6 +24,38 @@ const fs = require('fs'), path = require('path'), vm = require('vm');
 const dir = process.argv[2];
 let bad = 0, checked = 0;
 
+/* firmware/KilnFW/App/drivers/ is being split into layer subdirectories
+ * (drivers/<layer>/<name>): the .html/.js/.css pages this script scans, and
+ * the four cross-check files named below (ota_interlock.h, app.js,
+ * watchdog_cfg.h, main_page.html), will no longer sit directly in `dir` --
+ * they'll be one level deeper, under drivers/http, drivers/net, etc. A
+ * plain non-recursive fs.readdirSync(dir) would then silently find nothing
+ * and report a vacuous "0 problems" pass instead of scanning any pages at
+ * all, and the fs.existsSync(path.join(dir, name)) cross-checks below would
+ * silently skip their comparison the same way. walk_files() recurses so
+ * both keep finding the real files regardless of which layer they land in;
+ * find_file() resolves one specific basename anywhere under `dir` and
+ * throws loudly (not a silent skip) if it is ambiguous. */
+function walk_files(root) {
+  let out = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === '.git') continue;
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) out = out.concat(walk_files(full));
+    else out.push(full);
+  }
+  return out;
+}
+
+function find_file(root, basename) {
+  const matches = walk_files(root).filter(p => path.basename(p) === basename);
+  if (matches.length > 1) {
+    throw new Error(`lint_pages.js: '${basename}' matched more than one file under ${root}: ` +
+                     `${matches.join(', ')} -- cannot tell which one is the real file.`);
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
 /* A comment terminator immediately followed by a non-space character.
  *
  * This is the shared signature of both bugs above: a legitimate comment end
@@ -53,8 +85,9 @@ function glued_comment_ends(code, label, line0) {
   return out;
 }
 
-for (const f of fs.readdirSync(dir).filter(n => /\.(html|js|css)$/.test(n))) {
-  let src = fs.readFileSync(path.join(dir, f), 'utf8');
+for (const fullPath of walk_files(dir).filter(p => /\.(html|js|css)$/.test(p))) {
+  const f = path.relative(dir, fullPath).split(path.sep).join('/');
+  let src = fs.readFileSync(fullPath, 'utf8');
   const scripts = [], styles = [];
 
   if (f.endsWith('.js')) {
@@ -159,9 +192,9 @@ function extract_js_var_string(src, varName) {
 }
 
 {
-  const hPath = path.join(dir, 'ota_interlock.h');
-  const jsPath = path.join(dir, 'app.js');
-  if (fs.existsSync(hPath) && fs.existsSync(jsPath)) {
+  const hPath = find_file(dir, 'ota_interlock.h');
+  const jsPath = find_file(dir, 'app.js');
+  if (hPath && jsPath) {
     checked++;
     const cText = extract_c_macro_string(fs.readFileSync(hPath, 'utf8'), 'OTA_INTERLOCK_NO_SAFETY_WARNING');
     const jsText = extract_js_var_string(fs.readFileSync(jsPath, 'utf8'), 'NO_SAFETY_WARNING');
@@ -186,9 +219,9 @@ function extract_js_var_string(src, varName) {
   // OTA_INTERLOCK_NO_SAFETY_WARNING/NO_SAFETY_WARNING pair just above, for
   // the extra firing confirmation shown when the task-watchdog panic is
   // disabled (also mirrored, verbatim, in the LCD's ui_page_home.c dialog).
-  const hPath = path.join(dir, 'watchdog_cfg.h');
-  const jsPath = path.join(dir, 'main_page.html');
-  if (fs.existsSync(hPath) && fs.existsSync(jsPath)) {
+  const hPath = find_file(dir, 'watchdog_cfg.h');
+  const jsPath = find_file(dir, 'main_page.html');
+  if (hPath && jsPath) {
     checked++;
     const cText = extract_c_macro_string(fs.readFileSync(hPath, 'utf8'), 'WATCHDOG_CFG_FIRING_WARNING');
     const jsText = extract_js_var_string(fs.readFileSync(jsPath, 'utf8'), 'WATCHDOG_CFG_FIRING_WARNING_JS');
