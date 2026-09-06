@@ -1,4 +1,4 @@
-// Host tests for owner_slot_pool.c (../drivers/owners/owner_slot_pool.c) -- the
+// Host tests for owner_slot_pool.c (../../hwAbstraction/esp/spi/owner_slot_pool.c) -- the
 // pure two-sided release protocol kiln_io_owner.c's and thermo_owner.c's
 // post_and_wait()/owner_task() use to fix the 2026-08-24 stack-lifetime bug
 // (see owner_slot_pool.h's top comment for the full story). FreeRTOS's real
@@ -16,7 +16,7 @@
 // success shapes the task named, and proves a slot can never look free (and
 // so be handed to a NEW command) while either side might still touch it.
 #include "test_common.h"
-#include "../drivers/owners/owner_slot_pool.h"
+#include "../../hwAbstraction/esp/spi/owner_slot_pool.h"
 
 #include <stdint.h>
 

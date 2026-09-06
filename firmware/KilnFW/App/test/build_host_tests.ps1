@@ -26,6 +26,7 @@ if (-not (Test-Path $vcvars)) {
 
 $testDir = $PSScriptRoot
 $driversDir = Join-Path $testDir "..\drivers"
+$hwAbsDir = Join-Path $testDir "..\..\..\hwAbstraction"
 $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "kilnctl_host_tests.exe"
@@ -105,7 +106,7 @@ $sources = @(
     (Join-Path $driversDir "hw/panel_codec.c"),
     (Join-Path $driversDir "hw/st7796_panel.c"),
     (Join-Path $driversDir "hw/panel_detect.c"),
-    (Join-Path $driversDir "owners/owner_slot_pool.c"),
+    (Join-Path $hwAbsDir "esp/spi/owner_slot_pool.c"),
     (Join-Path $driversDir "common/stack_margin.c"),
     (Join-Path $driversDir "net/time_sync_tz.c"),
     (Join-Path $driversDir "persist/log_store.c"),
@@ -157,6 +158,9 @@ $hostTestsRspLines = @(
     "/I`"$driversDir\safety`""
     "/I`"$driversDir\sim`""
     "/I`"$driversDir\ui`""
+    "/I`"$hwAbsDir\esp\spi`""
+    "/I`"$hwAbsDir\esp\i2c`""
+    "/I`"$hwAbsDir\esp\uart`""
 )
 [System.IO.File]::WriteAllText($hostTestsRsp, ($hostTestsRspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
@@ -431,7 +435,7 @@ New-Item -ItemType Directory -Force -Path $kioObjDir | Out-Null
 $cmd11 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
         "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
-        "`"$(Join-Path $driversDir 'owners/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
+        "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
 # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): kiln_io_owner.c's
 # kiln_io_owner_start() now calls stack_margin_register() (registration
 # only, no size change), and this executable #includes kiln_io_owner.c

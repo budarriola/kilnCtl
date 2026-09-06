@@ -27,7 +27,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "owners/uart_protocol.h"
+#include "../../../../hwAbstraction/esp/uart/uart_protocol.h"
 
 #ifdef __cplusplus
 extern "C" {

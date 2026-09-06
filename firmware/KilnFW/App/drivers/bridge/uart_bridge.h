@@ -3,7 +3,7 @@
 
 #include "MAX31856.h"
 #include "esp_err.h"
-#include "owners/uart_protocol.h"
+#include "../../../../hwAbstraction/esp/uart/uart_protocol.h"
 #include "kiln_io.h"
 #include "safety_link.h"
 #include "screen_idle.h"

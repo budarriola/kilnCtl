@@ -136,7 +136,6 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "owners/kiln_io.c"
                        "owners/kiln_io_owner.c"
                        "owners/thermo_owner.c"
-                       "owners/owner_slot_pool.c"
                        "hw/panel_spi.c"
                        "hw/panel_spi_bringup.c"
                        "hw/panel_spi_draw.c"
@@ -371,10 +370,6 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "control/autotune_engine_coupling.c"
                        "bridge/gpio_probe.c"
                        "common/stack_margin.c"
-                       "owners/esp_spi_owner.c"
-                       "owners/i2c_owner.c"
-                       "owners/uart_owner.c"
-                       "owners/uart_protocol.c"
                        ${SIM_SRCS}
                        INCLUDE_DIRS "." "bridge" "common" "control" "http" "hw" "net" "owners" "persist" "safety" "sim" "ui"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
@@ -384,7 +379,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
                                 esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
                                 esp_hw_support esp_hal_wdt
-                                espcoredump
+                                espcoredump esp
                        PRIV_REQUIRES spi_flash spiffs)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated

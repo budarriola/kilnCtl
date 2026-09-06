@@ -35,7 +35,7 @@
  * uart_protocol.h in test/stubs/ is a different file and is not what the
  * firmware compiles). Included here rather than in a new executable because
  * this file is already the one that owns uart_protocol.c's framing sizes. */
-#include "../drivers/owners/uart_protocol.h"
+#include "../../hwAbstraction/esp/uart/uart_protocol.h"
 
 static int g_failures = 0;
 
