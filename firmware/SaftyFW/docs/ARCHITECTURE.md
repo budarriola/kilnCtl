@@ -291,6 +291,26 @@ measured in hours.
 Only `uart_owner` failing to initialise aborts the boot; everything else is
 logged and stepped over. Same policy as `firmware/KilnFW/App/main.c`.
 
+**Step 7's task-start failures are latched, not fatal — and the reboot loop
+that follows is the actual fail-safe, not an accident.** Every
+`SAFTYFW_START_TASK(bit, call)` in `main.c` ORs a bit into a local
+`start_failures` mask (surviving a watchdog reset via the
+`SAFTYFW_STARTUP_DIAG_SCRATCH` register, §"Latch the trip reason in the
+watchdog scratch registers") and continues starting the rest — nothing in
+`main.c` treats a `false` return as fatal, `relay_owner_start()` included.
+The real consequence is indirect: a task that never started never sets its
+bit in `watchdog_task.c`'s `s_checkin_mask`, that mask can then never equal
+`WATCHDOG_CHECKIN_ALL_MASK`, `watchdog_task_fn()` never feeds the hardware
+watchdog, and the board reboots in a 1 s loop with `start_failures` (and
+`boot_reason`) readable over SWD to say why. For `relay_owner_start()`
+specifically: GPIO6/K4's gate is left in whatever state its own
+`hal_gpio_set()`/`hal_gpio_set_direction()` calls actually reached before
+failing (LOW if only the direction call failed) and the relay can never be
+commanded ON, since `relay_owner_task()` — the only path that ever does
+that — never starts. This is the same "fail-safe by construction" property
+§4's watchdog section describes for a hung task, applied to a task that
+never starts in the first place.
+
 ---
 
 ## 6. Data flow and snapshots

@@ -16,13 +16,16 @@
 # moved, and nothing in run_all_checks.ps1 or build_saftyfw noticed.
 #
 # What this does: reconfigures (cmake .) and rebuilds (ninja) the existing
-# firmware/SaftyFW/bootloader/build directory in place -- it does NOT create
-# a fresh build tree (that's a much slower first-time pico-sdk configure,
-# and this check runs on every check pass). If build/ does not exist yet
-# (e.g. a fresh clone before anyone has configured the bootloader once),
-# this check reports that clearly and fails rather than silently skipping,
-# since a check that can silently no-op is worse than no check (this
-# project's own "negative-test every check" rule).
+# firmware/SaftyFW/bootloader/build directory in place if it already exists
+# (fast -- no fresh pico-sdk configure). On a genuinely fresh clone (no
+# build/CMakeCache.txt yet) it runs the first-time configure itself
+# (cmake -G Ninja -B build .) instead of hard-failing -- a check that can
+# only ever pass on a machine someone already hand-configured isn't
+# actually guarding anything for a fresh clone or a fresh CI runner, which
+# is exactly the scenario "the bootloader still builds" most needs to
+# cover. The first-time configure is slower (pico-sdk discovery), but that
+# cost is paid once per machine/build-dir, same as every other CMake
+# project in this repo.
 
 $ErrorActionPreference = "Stop"
 
@@ -30,8 +33,34 @@ $bootloaderDir = Join-Path $PSScriptRoot "..\bootloader"
 $buildDir = Join-Path $bootloaderDir "build"
 
 if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
-    Write-Host "FAILED: $buildDir has no CMakeCache.txt -- configure the bootloader's CMake project at least once (cmake -G Ninja -B bootloader/build bootloader) before this check can run." -ForegroundColor Red
-    exit 1
+    Write-Host "No $buildDir\CMakeCache.txt -- first-time configure (cmake -G Ninja -B build .) ..."
+    if (-not (Test-Path $buildDir)) {
+        New-Item -ItemType Directory -Path $buildDir | Out-Null
+    }
+    # ../CMakeLists.txt's/bootloader/CMakeLists.txt's own header comments
+    # both document PICO_SDK_PATH as an environment variable the invoker
+    # must set (their example: $env:PICO_SDK_PATH = "C:\pico-tools\pico-sdk"),
+    # normally provided by whatever process starts a build (e.g. the
+    # kilnctrl MCP server's build_saftyfw). This check can run standalone
+    # with no such process around it, so fall back to that same documented
+    # default -- but only if the caller hasn't already set one, so a
+    # machine with a different SDK location is never silently overridden.
+    if (-not $env:PICO_SDK_PATH) {
+        $env:PICO_SDK_PATH = "C:\pico-tools\pico-sdk"
+        Write-Host "PICO_SDK_PATH not set -- defaulting to $env:PICO_SDK_PATH (see CMakeLists.txt header comment)"
+    }
+    Push-Location $bootloaderDir
+    try {
+        # See the note below (before the reconfigure/build block) on why
+        # stderr is not merged with 2>&1.
+        cmake -G Ninja -B build .
+        if ($LASTEXITCODE -ne 0) {
+            throw "cmake first-time configure failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 Push-Location $buildDir

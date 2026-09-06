@@ -176,13 +176,31 @@ bool relay_owner_start(void)
     // host testing (fake_gpio, test/test_relay_owner_gpio_init.c).
     // Both calls' hal_status_t results are checked: this is the relay's
     // fail-safe de-energized latch, not a best-effort convenience, so a
-    // HAL failure here must abort startup rather than let relay_owner_task
-    // start against a pin that may still be in an unknown state (e.g.
-    // still INPUT, or still HIGH). No console/log facility exists this
-    // early in boot (before the scheduler and console_uart's own task
-    // exist), so there is nothing to log to -- the caller (main_boot_*.c)
-    // is expected to treat relay_owner_start() returning false as fatal,
-    // same as the xQueueCreate/xTaskCreate failure paths below already do.
+    // HAL failure here must abort THIS FUNCTION rather than let
+    // relay_owner_task start against a pin that may still be in an unknown
+    // state (e.g. still INPUT, or still HIGH). No console/log facility
+    // exists this early in boot (before the scheduler and console_uart's
+    // own task exist), so there is nothing to log to here.
+    //
+    // What the caller (main.c step 7's SAFTYFW_START_TASK macro) actually
+    // does with a false return is NOT fatal, despite an earlier version of
+    // this comment claiming otherwise: main.c latches every task-start
+    // failure into start_failures and continues starting the rest (same
+    // policy as firmware/KilnFW/App/main.c, documented in
+    // docs/ARCHITECTURE.md section 5, "Only uart_owner failing to
+    // initialise aborts the boot; everything else is logged and stepped
+    // over"). Concretely, if THIS function returns false: relay_owner_task
+    // never starts, so WATCHDOG_CHECKIN_RELAY_OWNER's bit in
+    // s_checkin_mask is never set, watchdog_task_fn() can never see every
+    // task checked in, and the 1 s hardware watchdog reboots the board in
+    // a loop -- with the relay pin left in whatever state the failed
+    // hal_gpio_set()/hal_gpio_set_direction() call above actually reached
+    // (LOW if only the direction call failed; whatever it was pre-boot if
+    // even the level call failed). That reboot loop is fail-safe by
+    // construction (ARCHITECTURE.md section 4's "Fail-safe by
+    // construction" note about watchdog reboots generally: a hung/failed
+    // task can never leave K4 energized because it can never reach ARMED),
+    // not by an explicit halt-with-relay-held-low path -- there isn't one.
     if (hal_gpio_set(SAFTYFW_PIN_RELAY, false) != HAL_OK) {
         return false;
     }

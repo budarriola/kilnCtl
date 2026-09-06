@@ -113,7 +113,13 @@ static void test_current_sense_discards_first_sample_and_oversamples_16x(void)
     current_sense_sample();
 
     // 1 discard + 16 oversampled reads per channel, 3 channels = 51 total.
-    TEST_CHECK(fake_adc_read_count() == 3u * (1u + TEST_CS_OVERSAMPLE_N),
+    // Deliberately the LITERAL 16 here, not TEST_CS_OVERSAMPLE_N -- that
+    // local mirror of current_sense.c's private CS_OVERSAMPLE_N is only
+    // used above to size/generate the scripted series, and using it again
+    // here would make this specific assertion compare the mirror against
+    // itself instead of against the real, documented oversample factor
+    // (docs/CURRENT_SENSE.md section 4: "16 back-to-back conversions").
+    TEST_CHECK(fake_adc_read_count() == 3u * (1u + 16u),
                "exactly (1 discard + 16 oversample) x 3 channels reads happened");
 
     // Every scripted sample was consumed (none left pending) -- proves the
@@ -131,7 +137,14 @@ static void test_current_sense_discards_first_sample_and_oversamples_16x(void)
     current_sense_get_snapshot(&snap);
     for (unsigned n = 0; n < 3; n++) {
         float expected_amps = counts_to_amps(expected_counts[n]);
-        TEST_CHECK(fabsf(snap.amps[n] - expected_amps) < 0.001f,
+        // Tolerance must be tighter than one whole count's worth of amps
+        // (counts_to_amps(1) ~= 5.7e-4 A here) -- this dithered series'
+        // true average is base+1.5, truncating to base+1, so a broken
+        // accumulator that instead reports the flat base value (base+0)
+        // differs from the correct answer by exactly one count, ~5.7e-4 A.
+        // The previous 0.001f tolerance was wider than that whole-count gap
+        // and could not tell the two apart; 2e-4 is under a third of it.
+        TEST_CHECK(fabsf(snap.amps[n] - expected_amps) < 0.0002f,
                    "channel's reported amps matches the exact dithered-average "
                    "counts, not the discarded outlier and not just the flat base "
                    "value -- if this fails, the discard-first-sample or the "
