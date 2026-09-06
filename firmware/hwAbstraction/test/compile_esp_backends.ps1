@@ -1,7 +1,8 @@
 # compile_esp_backends.ps1 -- syntax-only compile check for the ESP-IDF
 # hwAbstraction backends (esp/gpio/hal_gpio_esp.c, esp/common/hal_esp_common.c,
 # esp/uart/hal_uart_esp.c, esp/spi/hal_spi_esp.c, esp/i2c/hal_i2c_esp.c,
-# esp/kv/hal_kv_esp.c, esp/time/hal_time_esp.c).
+# esp/kv/hal_kv_esp.c, esp/time/hal_time_esp.c, esp/wdt/hal_wdt_esp.c,
+# esp/pwm/hal_pwm_esp.c, esp/sysinfo/hal_sysinfo_esp.c).
 #
 # Phase 1a is move-only: these backends are NOT wired into any CMakeLists
 # yet, so there is no real build target to compile them through. This
@@ -84,7 +85,10 @@ $sources = @(
     (Join-Path $HalDir "esp\spi\hal_spi_esp.c"),
     (Join-Path $HalDir "esp\i2c\hal_i2c_esp.c"),
     (Join-Path $HalDir "esp\kv\hal_kv_esp.c"),
-    (Join-Path $HalDir "esp\time\hal_time_esp.c")
+    (Join-Path $HalDir "esp\time\hal_time_esp.c"),
+    (Join-Path $HalDir "esp\wdt\hal_wdt_esp.c"),
+    (Join-Path $HalDir "esp\pwm\hal_pwm_esp.c"),
+    (Join-Path $HalDir "esp\sysinfo\hal_sysinfo_esp.c")
 )
 
 $failed = $false

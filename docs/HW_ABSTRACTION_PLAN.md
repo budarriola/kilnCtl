@@ -463,14 +463,22 @@ reached.
   partition_info and main_network_http's independent
   esp_ota_get_running_partition calls. esp_partition stays read-only here;
   OTA writes are out of scope. hal_sysinfo.h: header written
-  (compile_headers.ps1 passes, negative test still fires).
+  (compile_headers.ps1 passes, negative test still fires). ESP backend
+  (`esp/sysinfo/hal_sysinfo_esp.c`) landed Phase 1b, bodies-only, syntax-
+  checked by compile_esp_backends.ps1; no interface mismatch found.
 - hal_wdt: esp task-WDT reconfigure (watchdog_cfg.c sole user), `esp_restart`,
   and pico watchdog_enable/update/reboot. Thin. hal_wdt.h: header written
   (compile_headers.ps1 passes, negative test still fires) — reboot wrapper
   takes no pc/sp/delay_ms args so watchdog_reboot()'s scratch[4..7] stomp
-  hazard (pc != 0) is unreachable through the HAL.
+  hazard (pc != 0) is unreachable through the HAL. ESP backend
+  (`esp/wdt/hal_wdt_esp.c`) landed Phase 1b, bodies-only, syntax-checked by
+  compile_esp_backends.ps1; one interface mismatch found and documented in
+  the file (no real `esp_task_wdt_init()` call site in this tree —
+  `hal_wdt_init()` is implemented as `esp_task_wdt_reconfigure()`).
 - hal_pwm: backlight LEDC only. Thin, last. hal_pwm.h: header written
-  (compile_headers.ps1 passes, negative test still fires).
+  (compile_headers.ps1 passes, negative test still fires). ESP backend
+  (`esp/pwm/hal_pwm_esp.c`) landed Phase 1b, bodies-only, syntax-checked by
+  compile_esp_backends.ps1; no interface mismatch found.
 
 ### Board descriptors — forward, never freeze
 
