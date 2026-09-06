@@ -394,6 +394,34 @@ map onto hal_status_t. This brings config_store_flash.c under host test for
 the first time. flash_layout.h constants are shared with the bootloader from
 day one.
 
+What the real config_store_flash.c backend must preserve (moved here from a
+since-removed `hal_kv_pico.c` draft that tried to shoehorn config_store onto
+hal_kv.h instead — see hal_kv's "why pico is excluded" above for why that
+was rejected): config_store is ONE fixed-layout 512-byte C struct
+(`config_store_record_t`), not an arbitrary set of named blobs, kept as a
+seq-numbered, CRC'd, 8-slot round-robin append-only log in one 4 KB sector
+(append-only, not NVS-style key wear-levelling, because that is the only
+scheme safe on NOR flash within one erase-granularity sector). Writes are
+gated by a hard safety interlock — `config_store_write()` unconditionally
+refuses while the relay is ARMED (`config_store_decide_write()`, checked
+against `relay_owner_get_state()`), regardless of which field would change
+— and the interlock must land as a real part of the hal_flash-based
+replacement, not degrade to a caller-side check. The store is also
+format-versioned with an explicit REFUSE-not-reinterpret policy: a record
+newer than this firmware understands is rejected outright rather than
+partially reinterpreted (config_store.h's "Load-time rejection
+diagnostics"; `config_store_unpack_ex()`'s richer
+`config_store_reject_info_t` distinguishes "garbage" from
+"structurally-valid-but-too-new" and should be threaded through where
+hal_flash has room for it, unlike the flat hal_status_t a hal_kv-shaped
+mapping was stuck with). All of this already runs through
+`flash_safe_execute()` (RP2040 multicore XIP lockout,
+`config_store_flash.c`'s `config_store_write_cb()`), which is exactly what
+`hal_flash_safe_execute()` above wraps — config_store_flash.c's rebase onto
+hal_flash (Phase 3 item 2) should keep the ARMED gate, the seq/CRC log, and
+the REFUSE policy intact and expressed at this layer, not bypassed or
+generalized into a namespace/key store.
+
 ### hal_scratch — pico watchdog-scratch registry
 
 All 8 RP2040 scratch slots are claimed (startup_diag.h:13-28): [0]/[1] trip
@@ -694,6 +722,7 @@ fit hal_adc.h's pico-shaped, handle-less, raw-sample-only signature without
 widening it -- see the "hal_adc -- pico-only" section above for the four
 specific gaps it found, kept as a note now that the file itself is gone.
 ESP-side uart/spi/i2c bodies (`firmware/hwAbstraction/esp/{uart,spi,i2c}/`) landed the same way 2026-09-05, grounded in uart_owner.c/esp_spi_owner.c/i2c_owner.c against their real KilnFW consumers; no interface mismatch for hal_spi.h (hal_spi_bus_cfg_t already carries every owner-task-sizing field spi_owner_init() takes), but hal_uart.h and hal_i2c.h have no such fields at all, so both backends hardcode stack/priority/queue-length constants -- see each file's own INTERFACE MISMATCH comment.
+ESP-side kv/time bodies (`firmware/hwAbstraction/esp/{kv,time}/`) landed the same way 2026-09-05, grounded in kiln_cfg_store.c/profiles_http.c/crash_report.c/boot_guard.c/factory_reset.c/ui_page_diagnostics.c and the 44-site esp_timer/vTaskDelay census: hal_kv_esp.c implements `hal_kv_write_safe_here()` as the real `caller_stack_is_external()`/`esp_ptr_external_ram()` predicate and finds one interface mismatch -- `hal_esp_common.c`'s shared mapper only covers generic driver `esp_err_t` codes, not NVS-specific ones (`ESP_ERR_NVS_NOT_FOUND` et al.) that real callers branch on, so hal_kv_esp.c maps those locally rather than widening the shared mapper; hal_time_esp.c finds no mismatch.
 Real pico-side gpio/adc bodies (`firmware/hwAbstraction/pico/{gpio,adc}/`)
 landed the same day against the real SaftyFW consumers, syntax-checked by
 `firmware/hwAbstraction/test/compile_pico_backends.ps1`; no interface
