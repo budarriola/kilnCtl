@@ -919,6 +919,25 @@ All three SaftyFW/SaftyFW_slotA/SaftyFW_slotB targets and
 stale-temp-path race in `test_host_fakes.ps1`'s mutant-file cleanup,
 unrelated to this change).
 
+Status (2026-09-06, I2C+SPI collapse closed on both processors): FT6336U
+and MAX31856 are now migrated on ESP and Pico. New
+`esp/i2c/hal_i2c_esp_owner.h` adopt bridge mirrors `esp/spi/hal_spi_esp_owner.h`:
+rule going forward -- a driver sharing a port with an existing owner ADOPTS
+via the bridge, it never calls `hal_i2c_bus_init`/`hal_spi_bus_init` itself.
+`hal_i2c_esp.c`'s ALREADY_INIT recovery path is deleted (adopt replaces it).
+Open item: `hal_spi_esp.c:114` still logs `spi host %d already initialized;
+treating as OK` -- mirror the I2C fix and remove it once the display driver
+adopts the shared owner through `hal_spi_esp_owner.h` instead of relying on
+this recovery path.
+
+Review checklist: any flash-safety review must read
+`firmware/KilnFW/sdkconfig` (gitignored) for the live `CONFIG_KILNCTL_*`
+values, never the Kconfig defaults -- `484846d`'s regression came from
+reviewing the FT6336U path as dead off the Kconfig default alone.
+FT6336U is physically present on the bench board (`i2c_scan` finds it at
+0x38), so `FT6336U.c`'s `UNVALIDATED ON HARDWARE` log line is stale and can
+be a follow-up, not a blocker.
+
 Real pico-side uart/time bodies (`firmware/hwAbstraction/pico/{uart,time}/`)
 landed 2026-09-05, same script extended to cover both: hal_uart_pico.c
 wraps tasks/uart_owner.c's real IRQ ring/drop contract (documented
