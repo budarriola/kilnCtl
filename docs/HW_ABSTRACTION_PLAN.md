@@ -595,9 +595,14 @@ passes, negative test still fires) -- raw sector erase/page program/read/
 geometry primitive plus the hal_flash_safe_execute()/hal_flash_write_safe_
 here() multicore-XIP execution-context contract; config_store's slot-log/
 CRC/ARMED/format-REFUSE policy deliberately stays out, layered on top by
-config_store_flash.c's later rebase (Phase 3 item 2). fake_flash itself
-remains unstarted -- a host fake must follow an existing interface header
-rather than invent one, and now can.
+config_store_flash.c's later rebase (Phase 3 item 2). fake_flash landed the
+same way once hal_flash.h existed (65 more assertions + one more proven
+negative test): in-memory sector image, erased-state 0xFF, AND semantics on
+program (hal_flash.h does not pin erase-before-program enforcement, so a
+missing erase is modeled, not invented, as a detectable bit pattern rather
+than an error), per-sector erase counts, per-primitive one-shot failure
+injection, and fake_flash_simulate_power_loss_during() leaving a half-
+written page (program) or a partially-completed multi-sector erase.
 Still not wired into build_host_tests.ps1 (the response-file switch above is
 still open).
 
@@ -744,9 +749,21 @@ Real pico-side uart/time bodies (`firmware/hwAbstraction/pico/{uart,time}/`)
 landed 2026-09-05, same script extended to cover both: hal_uart_pico.c
 wraps tasks/uart_owner.c's real IRQ ring/drop contract (documented
 mismatches -- single fixed UART1 instance, no RX error counter, no
-restart); hal_time_pico.c wraps pico-sdk time_us_64/to_ms_since_boot/
-sleep_ms with no mismatch. Negative-tested (broken hal_time_pico.c,
-confirmed FAILED/exit 1, restored, confirmed pass). A `kv/hal_kv_pico.c`
+restart; and, once hal_uart.h grew hal_uart_recv_blocking()/
+hal_uart_get_task_handle() plus the queue_len/task_priority/stack_depth/
+core_id cfg fields, two more -- no task handle to return at all since
+uart_owner.c is IRQ-driven with no FreeRTOS task, and hal_uart_init() now
+rejects any nonzero task-sizing field for the same reason); hal_time_pico.c
+wraps pico-sdk time_us_64/to_ms_since_boot/sleep_ms with no mismatch.
+Negative-tested (broken hal_time_pico.c, confirmed FAILED/exit 1, restored,
+confirmed pass). `flash/hal_flash_pico.c` landed the same way, grounded
+against config_store_flash.c's real XIP-mapped read / conditional
+flash_range_erase()+flash_range_program() / flash_safe_execute(cb,arg,1000u)
+call: two mismatches (PICO_FLASH_SIZE_BYTES is a compile-time board macro,
+not runtime-queryable; hal_flash_write_safe_here() has no real pico-sdk
+predicate to call and is advisory-only, always true). config_store_flash.c's
+own rebase onto hal_flash.h (Phase 3 item 2) has not happened yet. A
+`kv/hal_kv_pico.c`
 was also drafted this day, mapping one blessed (namespace, key) pair onto
 config_store's real record read/write -- removed per review: it included
 config_store.h across the one-way hwAbstraction boundary and added a third

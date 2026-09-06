@@ -76,6 +76,23 @@
  * uart_owner_rx_read() is already exactly hal_uart_recv's contract
  * (non-blocking, returns 0..max bytes actually available); and
  * uart_owner_get_tx_dropped() is exactly hal_uart_get_tx_dropped's counter.
+ *
+ * 4. hal_uart_cfg_t's queue_len/task_priority/stack_depth/core_id fields (added
+ *    alongside hal_uart_get_task_handle()) describe an owner/event TASK's
+ *    sizing. uart_owner.h's own header comment is explicit that this is NOT
+ *    that shape at all: RX is IRQ-driven into a ring link_task polls, and TX
+ *    is drained by the SAME UART1 IRQ handler as FIFO space frees up -- there
+ *    is no FreeRTOS task here to size, prioritize, or pin a core to (the
+ *    "single save_and_disable_interrupts() critical section is sufficient"
+ *    reasoning in that header depends on there being no second task or core
+ *    involved at all). hal_uart_init() therefore requires all four fields be
+ *    0 ("backend default", which for this backend means "N/A, not a task")
+ *    and returns HAL_INVALID_ARG for any nonzero value, rather than silently
+ *    accepting sizing parameters for a task that will never exist.
+ * 5. hal_uart_get_task_handle() has no real handle to return -- see note 4:
+ *    this backend has no owner task at all. Returns NULL unconditionally,
+ *    which hal_uart.h's own doc comment on this function explicitly allows
+ *    ("a backend with no owner task at all, e.g. host/pico today").
  */
 #include "hal_uart.h"
 
@@ -132,6 +149,18 @@ hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
             return HAL_INVALID_ARG;
         }
         if (cfg->baud != HAL_UART_PICO_EXPECTED_BAUD) {
+            return HAL_INVALID_ARG;
+        }
+        /* Per INTERFACE MISMATCH 4: this backend has no owner task at all,
+         * so queue_len/task_priority/stack_depth must be left at "backend
+         * default" (0, per hal_uart_cfg_t's own doc comment) -- a nonzero
+         * value describes a task that will never be created. core_id is
+         * NOT gated here: hal_uart_cfg_t's own doc comment says "pico/host
+         * backends ignore this" (it is not a 0-means-default field, it is a
+         * HAL_CORE_ANY-or-explicit-core field the pico backend has no use
+         * for at all, same as hal_uart_get_task_handle() having no task to
+         * pin). */
+        if (cfg->queue_len != 0 || cfg->task_priority != 0 || cfg->stack_depth != 0) {
             return HAL_INVALID_ARG;
         }
     }
@@ -228,4 +257,40 @@ hal_status_t hal_uart_restart(hal_uart_t *u) {
      * touches TX-side state (it touches nothing at all), preserving the
      * RX-only contract by construction. */
     return HAL_NOT_SUPPORTED;
+}
+
+size_t hal_uart_recv_blocking(hal_uart_t *u, uint8_t *buf, size_t cap,
+                               uint32_t timeout_ms) {
+    if (u == NULL || buf == NULL || cap == 0) {
+        return 0;
+    }
+    /* uart_owner_rx_read() is already non-blocking (INTERFACE section above)
+     * with no blocking sibling of its own -- this backend builds the bounded
+     * wait on top by polling it, same shape as hal_uart_send_blocking()'s
+     * poll-uart_owner_get_tx_used() loop above, and for the same reason: a
+     * cheap ring-state read is fine to poll from ordinary task context, and
+     * 1 ms is well under both LINK_TASK_POLL_MS (10 ms) and the ~345 ms
+     * safety-link reply budget. Ends the wait as soon as ANY bytes are
+     * available, per hal_uart_recv_blocking's own contract -- never waits to
+     * fill cap. */
+    uint64_t deadline_ms = hal_time_now_ms() + (uint64_t)timeout_ms;
+    for (;;) {
+        size_t got = hal_uart_recv(u, buf, cap);
+        if (got > 0) {
+            return got;
+        }
+        if (hal_time_now_ms() >= deadline_ms) {
+            return 0;
+        }
+        hal_time_delay_ms(1);
+    }
+}
+
+void *hal_uart_get_task_handle(const hal_uart_t *u) {
+    (void)u;
+    /* See INTERFACE MISMATCH 5 above: uart_owner.c has no FreeRTOS task at
+     * all (IRQ-driven RX ring + IRQ-drained TX ring), so there is no handle
+     * to return. NULL is an explicitly documented valid answer for this
+     * case per hal_uart_get_task_handle's own contract in hal_uart.h. */
+    return NULL;
 }

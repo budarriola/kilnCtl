@@ -14,8 +14,11 @@ namespace/key store per partition, pending-vs-committed durability model
 with fake_kv_simulate_power_loss() and wrong-type/corruption/no-space error
 injection) and fake_time (manually advanced clock, forward-only, delay_ms
 advances it instead of sleeping) landed once hal_kv.h/hal_time.h existed.
-fake_flash remains unstarted -- interface/ has no hal_flash.h yet, and a
-host fake must follow an existing interface header rather than invent one.
-Standalone MSVC tests + negative tests for all seven live in
-../test/test_host_fakes.ps1 (not yet wired into either firmware's
+fake_flash (in-memory sector image, erased-state 0xFF, program-only-clears-
+bits AND semantics since hal_flash.h does not pin erase-before-program
+enforcement at the interface level, per-sector erase counts for wear
+assertions, injectable per-operation failure, and
+fake_flash_simulate_power_loss_during() for a half-written page) landed once
+hal_flash.h existed. Standalone MSVC tests + negative tests for all eight
+live in ../test/test_host_fakes.ps1 (not yet wired into either firmware's
 build_host_tests.ps1 -- that's the Option A response-file switch still to do).

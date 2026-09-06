@@ -94,7 +94,8 @@ $sources = @(
     (Join-Path $HalDir "pico\gpio\hal_gpio_pico.c"),
     (Join-Path $HalDir "pico\adc\hal_adc_pico.c"),
     (Join-Path $HalDir "pico\uart\hal_uart_pico.c"),
-    (Join-Path $HalDir "pico\time\hal_time_pico.c")
+    (Join-Path $HalDir "pico\time\hal_time_pico.c"),
+    (Join-Path $HalDir "pico\flash\hal_flash_pico.c")
 )
 
 $failed = $false

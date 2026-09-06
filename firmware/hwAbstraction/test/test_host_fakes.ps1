@@ -17,9 +17,9 @@
 # fake_kv and fake_time landed once hal_kv.h/hal_time.h existed (commit
 # 620c8ca) and are covered below, each with its own negative test (fake_kv's
 # commit-durability contract, fake_time's delay_ms-must-advance-the-clock
-# contract). fake_flash is still not covered here: interface/ has no
-# hal_flash.h yet, and a host fake must follow an existing interface header
-# rather than invent one -- see firmware/hwAbstraction/host/README.md.
+# contract). fake_flash landed once hal_flash.h existed and is covered below
+# too, with its own negative test (erase-before-program AND-semantics
+# enforcement in fake_flash_program()).
 #
 # Usage: powershell -ExecutionPolicy Bypass -File test_host_fakes.ps1
 
@@ -94,7 +94,8 @@ $cases = @(
     @{ Name = "fake_spi";  Fake = "fake_spi.c";  Test = "test_fake_spi.c" },
     @{ Name = "fake_i2c";  Fake = "fake_i2c.c";  Test = "test_fake_i2c.c" },
     @{ Name = "fake_kv";   Fake = "fake_kv.c";   Test = "test_fake_kv.c" },
-    @{ Name = "fake_time"; Fake = "fake_time.c"; Test = "test_fake_time.c" }
+    @{ Name = "fake_time"; Fake = "fake_time.c"; Test = "test_fake_time.c" },
+    @{ Name = "fake_flash"; Fake = "fake_flash.c"; Test = "test_fake_flash.c" }
 )
 
 foreach ($c in $cases) {
@@ -384,6 +385,59 @@ if (-not $timeOrigContent.Contains($timeGoodBlock)) {
             $failures += "NEGATIVE TEST FAILED: the non-advancing delay_ms mutant passed test_fake_time.c cleanly -- the delay-advances-the-clock assertion does not actually catch this bug."
         } else {
             Write-Host "OK   negative test: fake_time non-advancing delay_ms mutant correctly fails test_fake_time.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
+            Write-Host "     mutant failure detail:`n$($run.Output)"
+        }
+    }
+}
+
+# --- 7) Negative test: mutate fake_flash's erase-before-program AND semantics ---
+# Proves test_fake_flash.c's AND-semantics assertion can actually fail:
+# hal_flash.h does not pin erase-before-program enforcement, so fake_flash.c
+# models it by ANDing new bits into the existing image (real NOR-flash
+# behavior) rather than overwriting -- if program() is mutated to a plain
+# overwrite, a caller that skipped hal_flash_erase() (e.g. program ignores
+# the erase requirement) would silently get away with it on the fake even
+# though real hardware would corrupt the write, exactly the bug class this
+# fake exists to catch on host.
+Write-Host "`n--- Negative test: fake_flash erase-before-program AND semantics ---"
+
+$flashGoodBlock = (@'
+    const uint8_t *src = (const uint8_t *)buf;
+    for (size_t i = 0; i < apply_len; i++) {
+        s_image[offset + i] &= src[i];
+    }
+'@) -replace "`r`n", "`n"
+
+$flashMutantBlock = (@'
+    const uint8_t *src = (const uint8_t *)buf;
+    for (size_t i = 0; i < apply_len; i++) {
+        /* MUTANT: plain overwrite -- program ignores the erase requirement. */
+        s_image[offset + i] = src[i];
+    }
+'@) -replace "`r`n", "`n"
+
+$flashOrigContent = (Get-Content (Join-Path $hostDir "fake_flash.c") -Raw) -replace "`r`n", "`n"
+if (-not $flashOrigContent.Contains($flashGoodBlock)) {
+    $failures += "Negative test setup FAILED: expected AND-semantics block not found verbatim in fake_flash.c -- source drifted from what this script mutates. Update flashGoodBlock/flashMutantBlock together with fake_flash.c."
+} else {
+    $flashMutantContent = $flashOrigContent.Replace($flashGoodBlock, $flashMutantBlock)
+    $flashMutantSrc = Join-Path $workDir "fake_flash_mutant.c"
+    Set-Content -Path $flashMutantSrc -Value $flashMutantContent -Encoding ASCII -NoNewline
+
+    $flashMutantExe = Join-Path $workDir "fake_flash_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($flashMutantSrc, (Join-Path $here "test_fake_flash.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $flashMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -ne 0) {
+        $failures += "Negative test: mutant fake_flash.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
+    } else {
+        $run = Run-Exe -ExePath $flashMutantExe
+        $parsed = Parse-Result -Output $run.Output
+        if (-not $parsed.Matched) {
+            $failures += "Negative test: mutant fake_flash test binary produced no RESULT line:`n$($run.Output)"
+        } elseif ($run.ExitCode -eq 0 -and $parsed.Fail -eq 0) {
+            $failures += "NEGATIVE TEST FAILED: the plain-overwrite mutant passed test_fake_flash.c cleanly -- the erase-before-program AND-semantics assertion does not actually catch this bug."
+        } else {
+            Write-Host "OK   negative test: fake_flash plain-overwrite mutant correctly fails test_fake_flash.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
             Write-Host "     mutant failure detail:`n$($run.Output)"
         }
     }
