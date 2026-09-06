@@ -31,6 +31,15 @@
 
 #include <stdint.h>
 
+// HAL Phase 3 item 1: SAFTYFW_BOOT_STAGE() below is routed through
+// hal_scratch_write_u32() instead of poking watchdog_hw->scratch[]
+// directly -- see docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico
+// watchdog-scratch registry". This module (slot 6, boot-stage marker) and
+// the SAFTYFW_STARTUP_DIAG_SCRATCH/_MAGIC_SCRATCH pair (slots 2/3, written
+// directly by main.c) are all claimed together in main.c alongside the
+// other real owners.
+#include "hal_scratch.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -108,7 +117,11 @@ extern "C" {
 // Written with a high tag so a stage number is never confused with a stale
 // or zero register: a valid record always reads 0x5A5A00nn.
 #define SAFTYFW_BOOT_STAGE_TAG 0x5A5A0000u
-#define SAFTYFW_BOOT_STAGE(stage)                              do {                                                            watchdog_hw->scratch[SAFTYFW_BOOT_STAGE_SCRATCH] =              SAFTYFW_BOOT_STAGE_TAG | (uint32_t)(stage);         } while (0)
+#define SAFTYFW_BOOT_STAGE(stage)                                             \
+    do {                                                                     \
+        (void)hal_scratch_write_u32(SAFTYFW_BOOT_STAGE_SCRATCH,              \
+                                     SAFTYFW_BOOT_STAGE_TAG | (uint32_t)(stage)); \
+    } while (0)
 
 #ifdef __cplusplus
 }

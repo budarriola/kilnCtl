@@ -4,7 +4,11 @@
 // true power-on").
 #include "boot_reason.h"
 
-#include "hardware/structs/watchdog.h"
+// HAL Phase 3 item 1: routed through hal_scratch.h instead of poking
+// watchdog_hw->scratch[] directly -- see docs/HW_ABSTRACTION_PLAN.md
+// "hal_scratch -- pico watchdog-scratch registry". This module owns
+// slots 0/1 (claimed in main.c alongside the other real owners).
+#include "hal_scratch.h"
 
 #define SAFTYFW_TRIP_REASON_SCRATCH   0
 #define SAFTYFW_TRIP_MAGIC_SCRATCH    1
@@ -25,9 +29,14 @@ saftyfw_boot_reason_t boot_reason_read(bool wd_caused_reboot, bool wd_enable_cau
         .trip_reason = 0,
     };
 
-    if (watchdog_hw->scratch[SAFTYFW_TRIP_MAGIC_SCRATCH] == SAFTYFW_TRIP_MAGIC_WORD) {
+    uint32_t trip_reason_raw = 0u;
+    bool magic_ok = false;
+    (void)hal_scratch_read_u32(SAFTYFW_TRIP_REASON_SCRATCH, &trip_reason_raw,
+                                SAFTYFW_TRIP_MAGIC_SCRATCH, SAFTYFW_TRIP_MAGIC_WORD,
+                                &magic_ok);
+    if (magic_ok) {
         out.trip_reason_valid = true;
-        out.trip_reason = watchdog_hw->scratch[SAFTYFW_TRIP_REASON_SCRATCH];
+        out.trip_reason = trip_reason_raw;
     }
 
     s_cached = out;
@@ -41,11 +50,11 @@ saftyfw_boot_reason_t boot_reason_get_cached(void)
 
 void boot_reason_latch_trip(uint32_t trip_reason)
 {
-    watchdog_hw->scratch[SAFTYFW_TRIP_REASON_SCRATCH] = trip_reason;
-    watchdog_hw->scratch[SAFTYFW_TRIP_MAGIC_SCRATCH] = SAFTYFW_TRIP_MAGIC_WORD;
+    (void)hal_scratch_write_u32(SAFTYFW_TRIP_REASON_SCRATCH, trip_reason);
+    (void)hal_scratch_write_u32(SAFTYFW_TRIP_MAGIC_SCRATCH, SAFTYFW_TRIP_MAGIC_WORD);
 }
 
 void boot_reason_clear_trip(void)
 {
-    watchdog_hw->scratch[SAFTYFW_TRIP_MAGIC_SCRATCH] = 0;
+    (void)hal_scratch_clear(SAFTYFW_TRIP_MAGIC_SCRATCH);
 }

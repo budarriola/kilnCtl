@@ -29,6 +29,7 @@
 
 #include "board_pins.h"
 #include "boot_reason.h"
+#include "hal_scratch.h" // HAL Phase 3 item 1 -- claims for every real scratch owner, see the block in main() below
 #include "clear_trip_diag.h" // 2026-08-23 round 4, CLEAR_TRIP crash checkpoints, see its own header comment
 #include "watchdog_overdue_diag.h" // 2026-08-23, the CLEAR_TRIP investigation's actual conclusion, see its own header comment
 #include "startup_diag.h"
@@ -127,6 +128,13 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
             name1 = (uint8_t)pcTaskName[1];
         }
     }
+    // Deliberately a raw watchdog_hw->scratch[] write, NOT
+    // hal_scratch_write_u32() -- see this hook's own comment above on why
+    // no function call beyond this one register write is safe here. Slot 5
+    // tag 0xE3 is still claimed (main(), before the scheduler starts) so
+    // hal_scratch's runtime registry records this hook as slot 5's second
+    // legitimate co-owner; the claim call and this write are two different
+    // moments in two different execution contexts.
     watchdog_hw->scratch[5] = (0xE3u << 24) | ((uint32_t)name0 << 16) | ((uint32_t)name1 << 8);
 
     taskDISABLE_INTERRUPTS();
@@ -222,6 +230,35 @@ int main(void)
     // -- the whole point is that DBG1's pause-on-halt is already live the
     // instant core 1 exists to be halted.
     hw_clear_bits(&timer_hw->dbgpause, TIMER_DBGPAUSE_BITS);
+
+    // --- hal_scratch claims for every real watchdog-scratch owner. ---------
+    // HAL Phase 3 item 1 (docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico
+    // watchdog-scratch registry"). Centralized here, once, before the first
+    // real access (SAFTYFW_BOOT_STAGE() immediately below writes slot 6),
+    // rather than one claim call per accessor module -- this is the single
+    // list a future reviewer checks against the slot map in
+    // startup_diag.h/hal_scratch.h's own header comments. Slot 4 is never
+    // claimed here: hal_scratch_claim() refuses it outright, it belongs to
+    // pico-sdk's watchdog_enable() below. Slot 5 gets TWO claims, same slot,
+    // distinct tags -- its two legitimate, mutually-exclusive co-owners
+    // (watchdog_overdue_diag.c's normal-operation latch and this file's own
+    // vApplicationStackOverflowHook() above, which stays a raw MMIO write
+    // for the reasons documented on that hook -- claiming it here is pure
+    // bookkeeping, unrelated to how it actually writes). Return values are
+    // intentionally ignored: a collision here is a build-time-invariant
+    // programming error (two modules claiming the same (slot, tag)), not a
+    // runtime condition this boot path needs to react to, and the registry
+    // is advisory only (see hal_scratch.h's own "REGISTRY / UNIQUENESS"
+    // note) -- nothing downstream consults these claims to gate a read or
+    // write.
+    (void)hal_scratch_claim(0u, "boot_reason", HAL_SCRATCH_TAG_NONE);
+    (void)hal_scratch_claim(1u, "boot_reason", HAL_SCRATCH_TAG_NONE);
+    (void)hal_scratch_claim(2u, "startup_diag", HAL_SCRATCH_TAG_NONE);
+    (void)hal_scratch_claim(3u, "startup_diag", HAL_SCRATCH_TAG_NONE);
+    (void)hal_scratch_claim(5u, "watchdog_overdue_diag", 0xD9u);
+    (void)hal_scratch_claim(5u, "stack_overflow_hook", 0xE3u);
+    (void)hal_scratch_claim(6u, "boot_stage", HAL_SCRATCH_TAG_NONE);
+    (void)hal_scratch_claim(7u, "clear_trip_diag", HAL_SCRATCH_TAG_NONE);
 
     // --- Step 2: hardware watchdog, 1 s. ------------------------------------
     // pause_on_debug = true: hardcoded for now -- there is no release/debug
@@ -445,9 +482,9 @@ int main(void)
 #undef SAFTYFW_START_TASK
 
     SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_TASKS_STARTED);
-    watchdog_hw->scratch[SAFTYFW_STARTUP_DIAG_SCRATCH] = start_failures;
-    watchdog_hw->scratch[SAFTYFW_STARTUP_DIAG_MAGIC_SCRATCH] =
-        SAFTYFW_STARTUP_DIAG_MAGIC;
+    (void)hal_scratch_write_u32(SAFTYFW_STARTUP_DIAG_SCRATCH, start_failures);
+    (void)hal_scratch_write_u32(SAFTYFW_STARTUP_DIAG_MAGIC_SCRATCH,
+                                 SAFTYFW_STARTUP_DIAG_MAGIC);
 
     console_uart_puts("SaftyFW: tasks started, entering scheduler\r\n");
 

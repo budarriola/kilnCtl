@@ -47,6 +47,7 @@ void run_test_current_sense_hal_adc(void);
 void run_test_guard_nuisance(void);
 void run_test_debounce_policy(void);
 void run_test_debounce_nuisance(void);
+void run_test_scratch_migration(void);
 
 int main(void)
 {
@@ -89,6 +90,7 @@ int main(void)
     run_test_update_task_relay_wiring();
     run_test_relay_owner_gpio_init();
     run_test_current_sense_hal_adc();
+    run_test_scratch_migration();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

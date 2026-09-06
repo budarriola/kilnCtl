@@ -3,7 +3,20 @@
 // side, watchdog_hw->scratch[5] on the other, nothing else.
 #include "watchdog_overdue_diag.h"
 
-#include "hardware/structs/watchdog.h"
+#include <stddef.h> // NULL, for the hal_scratch_read_u32() magic_ok arg below
+
+// HAL Phase 3 item 1: routed through hal_scratch.h instead of poking
+// watchdog_hw->scratch[] directly -- see docs/HW_ABSTRACTION_PLAN.md
+// "hal_scratch -- pico watchdog-scratch registry". This module claims
+// slot 5 under tag 0xD9; main.c's vApplicationStackOverflowHook is slot 5's
+// other legitimate co-owner (tag 0xE3, claimed in main.c) but that write
+// path deliberately stays a raw watchdog_hw->scratch[] MMIO write -- it can
+// run moments after a stack overflow, where even hal_scratch_write_u32()'s
+// ordinary function-call overhead is not safe to assume (see main.c's own
+// comment on that hook for why). Reads here (both formats share the one
+// physical register) are safe to route through hal_scratch: they only ever
+// run at boot, on the one thread of execution, well before the scheduler.
+#include "hal_scratch.h"
 
 #define WATCHDOG_OVERDUE_DIAG_SCRATCH 5u // startup_diag.h's SAFTYFW_LAST_CHECKIN_MASK_SCRATCH, repurposed -- see this file's own header comment
 
@@ -20,14 +33,17 @@ static watchdog_overflow_diag_t s_watchdog_overflow_cached;
 void watchdog_overdue_diag_mark(uint8_t overdue_mask, uint8_t worst_task_id,
                                  uint16_t worst_overage_ms)
 {
-    watchdog_hw->scratch[WATCHDOG_OVERDUE_DIAG_SCRATCH] =
-        watchdog_overdue_diag_encode(overdue_mask, worst_task_id, worst_overage_ms);
+    (void)hal_scratch_write_u32(
+        WATCHDOG_OVERDUE_DIAG_SCRATCH,
+        watchdog_overdue_diag_encode(overdue_mask, worst_task_id, worst_overage_ms));
 }
 
 watchdog_overdue_diag_t watchdog_overdue_diag_read(void)
 {
-    watchdog_overdue_diag_t out =
-        watchdog_overdue_diag_decode(watchdog_hw->scratch[WATCHDOG_OVERDUE_DIAG_SCRATCH]);
+    uint32_t raw = 0u;
+    (void)hal_scratch_read_u32(WATCHDOG_OVERDUE_DIAG_SCRATCH, &raw,
+                                WATCHDOG_OVERDUE_DIAG_SCRATCH, 0u, NULL);
+    watchdog_overdue_diag_t out = watchdog_overdue_diag_decode(raw);
     s_watchdog_overdue_cached = out;
     return out;
 }
@@ -39,13 +55,15 @@ watchdog_overdue_diag_t watchdog_overdue_diag_get_cached(void)
 
 void watchdog_overdue_diag_clear(void)
 {
-    watchdog_hw->scratch[WATCHDOG_OVERDUE_DIAG_SCRATCH] = 0;
+    (void)hal_scratch_clear(WATCHDOG_OVERDUE_DIAG_SCRATCH);
 }
 
 watchdog_overflow_diag_t watchdog_overflow_diag_read(void)
 {
-    watchdog_overflow_diag_t out =
-        watchdog_overflow_diag_decode(watchdog_hw->scratch[WATCHDOG_OVERDUE_DIAG_SCRATCH]);
+    uint32_t raw = 0u;
+    (void)hal_scratch_read_u32(WATCHDOG_OVERDUE_DIAG_SCRATCH, &raw,
+                                WATCHDOG_OVERDUE_DIAG_SCRATCH, 0u, NULL);
+    watchdog_overflow_diag_t out = watchdog_overflow_diag_decode(raw);
     s_watchdog_overflow_cached = out;
     return out;
 }
