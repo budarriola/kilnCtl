@@ -24,12 +24,18 @@
 // pure-logic half of that file (the other half -- the HTTP handlers, the
 // gzip-embedded page -- has no seam worth testing on the host and would
 // drag in a full esp_http_server/wifi_provision_http stub surface for no
-// benefit). Kept separate rather than folding into the main executable
-// because board_temps.c pulls in driver/temperature_sensor.h, whose stub
-// (stubs/driver/temperature_sensor.h) declares symbols this file alone
-// defines -- linking it alongside another translation unit that also
-// defines them would be a multiple-definition error, same reasoning as
-// every other *_http.c-direct-include test here.
+// benefit).
+//
+// 2026-09-06 migration: board_temps.c now reaches the ESP32-S3 on-die
+// sensor through hal_sysinfo_temp_*() (firmware/hwAbstraction/interface/
+// hal_sysinfo.h) instead of driver/temperature_sensor.h directly, so this
+// executable links the real host fake backend (host/fake_sysinfo.c) --
+// build_host_tests.ps1's exe10 -- instead of defining temperature_sensor_*()
+// stub bodies here. Kept as its own executable regardless: linking
+// fake_sysinfo.c's hal_sysinfo_* symbols alongside another translation unit
+// that defines its own fakes of the same names (none do today, but
+// test_partition_info_http.c already claims fake_sysinfo.c for itself the
+// same way, per that executable's own comment) would collide.
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,6 +44,8 @@ int g_test_failures = 0;
 int g_test_count = 0;
 
 #include "test_common.h"
+
+#include "fake_sysinfo.h"
 
 // asm("_binary_...") is a GCC/binutils extension (EMBED_TXTFILES,
 // CMakeLists.txt) with no MSVC equivalent -- #define it away to nothing so
@@ -70,22 +78,6 @@ esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t 
         *out_count = 0;
     }
     return ESP_FAIL;
-}
-
-// ---- driver/temperature_sensor.h stub bodies -------------------------------
-// board_temps_start() is never called by these tests (s_tsens_ready stays
-// false, so board_temps_get() takes its esp32_valid = false path), but the
-// symbols still need bodies to link.
-esp_err_t temperature_sensor_install(const temperature_sensor_config_t *cfg, temperature_sensor_handle_t *out)
-{
-    (void)cfg; (void)out; return ESP_FAIL;
-}
-esp_err_t temperature_sensor_enable(temperature_sensor_handle_t h) { (void)h; return ESP_OK; }
-esp_err_t temperature_sensor_disable(temperature_sensor_handle_t h) { (void)h; return ESP_OK; }
-esp_err_t temperature_sensor_uninstall(temperature_sensor_handle_t h) { (void)h; return ESP_OK; }
-esp_err_t temperature_sensor_get_celsius(temperature_sensor_handle_t h, float *out_c)
-{
-    (void)h; if (out_c) { *out_c = 0.0f; } return ESP_OK;
 }
 
 static void test_dead_first_channel_indexes_by_channel_number(void)
@@ -216,6 +208,67 @@ static void test_null_readings_reports_all_absent(void)
     }
 }
 
+// ---- hal_sysinfo migration coverage (2026-09-06) --------------------------
+// board_temps_start()/board_temps_get() now go through hal_sysinfo_temp_*()
+// instead of owning a driver/temperature_sensor.h handle directly -- these
+// cases exercise that seam via fake_sysinfo.c, the same host fake
+// test_fake_sysinfo.c (firmware/hwAbstraction/test) already proves against
+// hal_sysinfo.h's own contract.
+
+static void test_start_not_called_leaves_esp32_invalid(void)
+{
+    // Never calling board_temps_start() must leave hal_sysinfo's temperature
+    // lifecycle uninitialized, so board_temps_get() takes its esp32_valid =
+    // false path -- same "safe to call any time" contract board_temps.h
+    // promises.
+    fake_sysinfo_reset_all();
+
+    board_temps_t out;
+    memset(&out, 0xAA, sizeof(out));
+    esp_err_t err = board_temps_get(&out, NULL, 0);
+    TEST_CHECK(err == ESP_OK, "board_temps_get() returns ESP_OK with hal_sysinfo temp uninitialized");
+    TEST_CHECK(out.esp32_valid == false, "esp32_valid is false when board_temps_start() was never called");
+}
+
+static void test_start_success_flows_into_get(void)
+{
+    // board_temps_start() -> hal_sysinfo_temp_init() -> board_temps_get()
+    // reads the value fake_sysinfo_set_temp_celsius() armed, proving the
+    // migrated call actually reaches hal_sysinfo rather than reading some
+    // leftover local state.
+    fake_sysinfo_reset_all();
+    fake_sysinfo_set_temp_celsius(57.25f);
+
+    esp_err_t start_err = board_temps_start();
+    TEST_CHECK(start_err == ESP_OK, "board_temps_start() succeeds when hal_sysinfo_temp_init() succeeds");
+
+    board_temps_t out;
+    memset(&out, 0xAA, sizeof(out));
+    esp_err_t err = board_temps_get(&out, NULL, 0);
+    TEST_CHECK(err == ESP_OK, "board_temps_get() returns ESP_OK after a successful start");
+    TEST_CHECK(out.esp32_valid == true, "esp32_valid is true after board_temps_start() succeeded");
+    TEST_CHECK_NEAR(out.esp32_c, 57.25, 0.001, "esp32_c reads the value fake_sysinfo_set_temp_celsius() armed");
+}
+
+static void test_start_failure_propagates_and_get_stays_invalid(void)
+{
+    // A hal_sysinfo_temp_init() failure (e.g. the real install/enable
+    // sequence failing on real hardware) must make board_temps_start() fail
+    // too, and must leave board_temps_get()'s esp32_valid false rather than
+    // reporting a stale/garbage reading.
+    fake_sysinfo_reset_all();
+    fake_sysinfo_script_temp_init_status(HAL_IO);
+
+    esp_err_t start_err = board_temps_start();
+    TEST_CHECK(start_err != ESP_OK, "board_temps_start() fails when hal_sysinfo_temp_init() fails");
+
+    board_temps_t out;
+    memset(&out, 0xAA, sizeof(out));
+    esp_err_t err = board_temps_get(&out, NULL, 0);
+    TEST_CHECK(err == ESP_OK, "board_temps_get() still returns ESP_OK (esp32 failure is non-fatal to the rest of the call)");
+    TEST_CHECK(out.esp32_valid == false, "esp32_valid stays false after a failed board_temps_start()");
+}
+
 int main(void)
 {
     TEST_SECTION("board_temps");
@@ -224,6 +277,9 @@ int main(void)
     test_all_channels_alive_identity_case_still_correct();
     test_spi_failed_channel_reports_invalid_at_its_own_index();
     test_null_readings_reports_all_absent();
+    test_start_not_called_leaves_esp32_invalid();
+    test_start_success_flows_into_get();
+    test_start_failure_propagates_and_get_stays_invalid();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

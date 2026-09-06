@@ -228,7 +228,9 @@ $DriverUartAllowlist = @(
 )
 
 $DriverTempSensorAllowlist = @(
-    @{ RelPath = "firmware/KilnFW/App/drivers/hw/board_temps.c"; Header = "driver/temperature_sensor.h"; Reason = "on-die ESP32-S3 temperature sensor peripheral -- vendor-specific, no cross-target HAL candidate exists"; ExpiresAtPhase = "n/a (pin/type-only holdout, see plan)" }
+    # board_temps.c migrated to hal_sysinfo_temp_* 2026-09-06 (HW_ABSTRACTION_PLAN.md
+    # "hal_time / hal_wdt / hal_pwm / hal_sysinfo" item 4) -- no remaining
+    # driver/temperature_sensor.h include outside firmware/hwAbstraction/.
 )
 
 # hardware/*.h (SaftyFW/RP2040 pico-sdk) -- same promotion, one entry per

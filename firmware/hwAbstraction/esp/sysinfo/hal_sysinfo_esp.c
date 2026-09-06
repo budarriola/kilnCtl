@@ -137,20 +137,16 @@ void hal_sysinfo_get_build_info(hal_sysinfo_build_info_t *out) {
     }
 }
 
-/* board_temps.c's own install-once/enable-once handle, reproduced here --
- * see this file's header comment for why (-10, 80) is the exact range,
- * not a rederivation.
- *
- * OWNERSHIP HAZARD (unresolved, flagged for future reconciliation, not fixed
- * here): firmware/KilnFW/App/drivers/hw/board_temps.c owns its own separate
- * static temperature_sensor_handle_t and independently calls
- * temperature_sensor_install()/_enable() on the same physical ESP32-S3 on-die
- * sensor. The IDF driver only supports one live install of that peripheral,
- * so if any caller ever wires hal_sysinfo_temp_init() into the same boot path
- * as board_temps_start() (main_boot_early.c currently only calls the latter),
- * the second temperature_sensor_install() call will fail. Whoever adds a
- * hal_sysinfo_temp_* call site must first pick one owner and delete the
- * other's install/enable/uninstall lifecycle rather than running both. */
+/* This peripheral's install-once/enable-once handle. board_temps.c
+ * (firmware/KilnFW/App/drivers/hw/board_temps.c) is the sole caller of the
+ * hal_sysinfo_temp_* lifecycle as of the 2026-09-06 migration -- see that
+ * file's board_temps_start() header comment. (Formerly an OWNERSHIP HAZARD
+ * lived here: board_temps.c used to own a second, independent
+ * temperature_sensor_handle_t and call temperature_sensor_install()/_enable()
+ * on this same physical sensor directly, which would have failed had
+ * anything ever also called hal_sysinfo_temp_init() -- the IDF driver only
+ * supports one live install. Resolved by deleting that second lifecycle, not
+ * by adding a guard: board_temps.c now calls only the functions below.) */
 static temperature_sensor_handle_t s_tsens;
 static bool s_tsens_ready;
 

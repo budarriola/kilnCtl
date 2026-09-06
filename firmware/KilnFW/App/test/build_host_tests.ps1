@@ -273,7 +273,14 @@ $cmd2 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
         "`"$(Join-Path $driversDir 'persist/zones_config_json.c')`" " +
         "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
-        "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`""
+        "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+# fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION_PLAN.md Phase 3
+# item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
+# call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
+# test_zones_http.c's own nvs_test_enable()/nvs_test_clear() shims (see that
+# file's header comment) drive the real fake_kv backend now.
 
 Invoke-HostTestExe -Name "zones_http" -ExePath $exe2 -BuildCmd $cmd2
 
@@ -708,19 +715,17 @@ $cmd19 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 # hal_time migration (HW_ABSTRACTION_PLAN.md item 5): both run_state.c and
 # relay_cycles.c now call hal_time_now_us() instead of esp_timer_get_time();
-# fake_time.c supplies it. (The separate hal_kv_* unresolved externals here
-# are the concurrent hal_kv/nvs migration's in-progress work, not this one.)
-# fake_kv.c/hal_status.c added HW_ABSTRACTION_PLAN.md Phase 3 item 3 (nvs.h ->
-# hal_kv.h migration): relay_cycles.c now calls hal_kv_*() instead of nvs_*()
-# directly, so this executable needs the host hal_kv backend linked in.
-# hal_esp_common.c added in the same pass's flash-safety review follow-up:
-# relay_cycles.c (and, independently, run_state.c's own concurrent
-# migration) now also call hal_status_to_esp_err() to preserve their
-# ESP_FAIL/mapped-error return contract instead of collapsing every failure
-# to plain ESP_FAIL. run_state.c is otherwise unaffected here (still uses
-# stubs/nvs.h via test_run_state.c for its blob I/O) and hal_status.c is not
-# otherwise in this executable's
-# link (the main $sources list only pulls it in for the main "exe" build).
+# fake_time.c supplies it.
+# fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION_PLAN.md Phase 3
+# item 3 (nvs.h -> hal_kv.h migration): BOTH run_state.c and relay_cycles.c
+# now call hal_kv_*() instead of nvs_*() directly (test_run_state.c/
+# test_relay_cycles.c no longer use stubs/nvs.h at all), and both also call
+# hal_status_to_esp_err() to preserve their ESP_FAIL/mapped-error return
+# contract instead of collapsing every failure to plain ESP_FAIL -- so this
+# executable needs the full host hal_kv backend (fake_kv.c + hal_status.c +
+# hal_esp_common.c) linked in, not just fake_time.c. hal_status.c/
+# hal_esp_common.c are not otherwise in this executable's link (the main
+# $sources list only pulls them in for the main "exe" build).
 
 Invoke-HostTestExe -Name "run_state_relay_cycles" -ExePath $exe19 -BuildCmd $cmd19
 

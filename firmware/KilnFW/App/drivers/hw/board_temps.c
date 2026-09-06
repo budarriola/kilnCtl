@@ -3,69 +3,41 @@
 #include <math.h>
 #include <string.h>
 
-#include "driver/temperature_sensor.h"
 #include "esp_log.h"
+
+#include "hal_esp_common.h"
+#include "hal_sysinfo.h"
 
 static const char *TAG = "board_temps";
 
-/* Install-once/enable-once handle. NULL until board_temps_start() succeeds --
- * same init-once/read-many split as every other driver here (NS2009_start
- * vs NS2009_read, MAX31856_start_all vs MAX31856_read_all). */
-static temperature_sensor_handle_t s_tsens = NULL;
-static bool s_tsens_ready = false;
-
+/* 2026-09-06 migration (HW_ABSTRACTION_PLAN.md "hal_time / hal_wdt / hal_pwm
+ * / hal_sysinfo" item 4, "board_temps stays open" note): this module used to
+ * own its own temperature_sensor_handle_t and call
+ * temperature_sensor_install()/_enable()/_get_celsius() directly -- the same
+ * ESP32-S3 on-die peripheral hal_sysinfo_esp.c's hal_sysinfo_temp_init()/
+ * _read_celsius() family independently reproduced (see that file's
+ * "OWNERSHIP HAZARD" comment, which named exactly this double-install risk
+ * and asked whoever wired a hal_sysinfo_temp_* call site to pick one owner).
+ * This is that reconciliation: board_temps.c is now the ONLY caller of the
+ * hal_sysinfo_temp_* lifecycle, board_temps_start()/board_temps_get() below
+ * carry the same init-once/read-many split and (-10, 80) range as before,
+ * just through the HAL instead of driver/temperature_sensor.h directly, and
+ * hal_sysinfo_esp.c's own install/enable/get_celsius sequence is now
+ * load-bearing rather than dead/duplicate code. */
 esp_err_t board_temps_start(void)
 {
-    if (s_tsens_ready) {
-        /* Already up -- board_temps_start() being called twice (e.g. a
-         * future retry path) is a no-op, not an error. */
-        return ESP_OK;
+    /* hal_sysinfo_temp_init() is itself already-up-is-a-no-op (see
+     * hal_sysinfo.h's threading contract and both backends' own comments),
+     * so no separate readiness flag is kept here -- board_temps_get() below
+     * asks the HAL each call whether a read is possible instead of caching
+     * that state a second time in this file. */
+    hal_status_t st = hal_sysinfo_temp_init();
+    if (st != HAL_OK) {
+        ESP_LOGW(TAG, "hal_sysinfo_temp_init failed: %s -- no ESP32-S3 die temp this boot",
+                 esp_err_to_name(hal_status_to_esp_err(st)));
+        return hal_status_to_esp_err(st);
     }
 
-    /* 2026-08-20 fix, found live on the bench: this file's original comment
-     * (below, kept for the record) assumed the driver picks whichever
-     * hardware range "best covers" the requested span. Reading the actual
-     * installed IDF v6.0.2 source
-     * (esp_driver_tsens/src/temperature_sensor.c's
-     * temperature_sensor_choose_best_range()) shows that is wrong: it
-     * requires the requested [range_min, range_max] to fall entirely INSIDE
-     * one single hardware bucket
-     * (esp_hal_ana_conv/esp32s3/temperature_sensor_periph.c's
-     * temperature_sensor_attributes[] -- five fixed buckets, e.g. (20,100),
-     * (-10,80), none of which contain [0,100] as a subset), or install()
-     * fails outright with "Cannot select the correct range" / "Out of
-     * testing range" -- exactly the error this board logged every boot.
-     * (-10, 80) is used here: an exact match for one whole bucket (±1 degC
-     * error, the second-best of the five), and realistically covers both a
-     * cold-startup enclosure reading and a genuinely hot one before this
-     * "is anything cooking itself" indicator needs to say so.
-     *
-     * Original comment, for the record (the "best covers" assumption in it
-     * is the bug, not a description of intent worth preserving otherwise):
-     * "Range picked wide (0-100 degC) rather than a tight span: this is a
-     * board-health 'is anything cooking itself' indicator, not a
-     * calibration-grade measurement, and app_main has no a-priori bound on
-     * enclosure temperature worth encoding here." */
-    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
-
-    esp_err_t err = temperature_sensor_install(&cfg, &s_tsens);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "temperature_sensor_install failed: %s -- no ESP32-S3 die temp this boot",
-                 esp_err_to_name(err));
-        s_tsens = NULL;
-        return err;
-    }
-
-    err = temperature_sensor_enable(s_tsens);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "temperature_sensor_enable failed: %s -- no ESP32-S3 die temp this boot",
-                 esp_err_to_name(err));
-        temperature_sensor_uninstall(s_tsens);
-        s_tsens = NULL;
-        return err;
-    }
-
-    s_tsens_ready = true;
     ESP_LOGI(TAG, "ESP32-S3 internal temperature sensor up");
     return ESP_OK;
 }
@@ -77,19 +49,24 @@ esp_err_t board_temps_get(board_temps_t *out, const MAX31856Reading *readings, s
     }
     memset(out, 0, sizeof(*out));
 
-    if (s_tsens_ready && s_tsens) {
+    {
         float c = 0.0f;
-        esp_err_t err = temperature_sensor_get_celsius(s_tsens, &c);
-        if (err == ESP_OK) {
+        hal_status_t st = hal_sysinfo_temp_read_celsius(&c);
+        if (st == HAL_OK) {
             out->esp32_valid = true;
             out->esp32_c = c;
-        } else {
-            /* Read failure after a successful install/enable is unexpected
+        } else if (st != HAL_NOT_READY) {
+            /* HAL_NOT_READY just means board_temps_start() was never called
+             * or failed -- expected, not logged (esp32_valid stays false,
+             * same silent-absent convention as a channel that never
+             * answered in the MAX31856 loop below). Any other failure is a
+             * read failure after a successful install/enable, unexpected
              * but not fatal to the rest of this call -- report esp32_valid
              * false and keep going, same "one bad field never blocks the
              * others" convention dashboard_http.c's status_get_handler()
              * uses for thermo channels. */
-            ESP_LOGW(TAG, "temperature_sensor_get_celsius failed: %s", esp_err_to_name(err));
+            ESP_LOGW(TAG, "hal_sysinfo_temp_read_celsius failed: %s",
+                     esp_err_to_name(hal_status_to_esp_err(st)));
         }
     }
 
