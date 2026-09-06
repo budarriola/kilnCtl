@@ -121,6 +121,19 @@ $sources = @(
     (Join-Path $testDir "test_clear_trip_diag_codec.c"),
     (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),
     (Join-Path $testDir "test_watchdog_overdue_diag_codec.c"),
+    # HAL Phase 3 item 1 (docs/HW_ABSTRACTION_PLAN.md "hal_scratch -- pico
+    # watchdog-scratch registry"): boot_reason.c/clear_trip_diag.c/
+    # watchdog_overdue_diag.c are now hal_scratch.h clients instead of
+    # poking watchdog_hw->scratch[] directly, so all three are host-
+    # compilable for the first time -- backed here by fake_scratch.c
+    # (hwAbstraction/host), the same host hal_scratch.h backend
+    # firmware/hwAbstraction/test/test_fake_scratch.c exercises directly.
+    # hal_status.c is already linked in below (relay_owner.c's block).
+    (Join-Path $srcDir "boot_reason.c"),
+    (Join-Path $srcDir "clear_trip_diag.c"),
+    (Join-Path $srcDir "watchdog_overdue_diag.c"),
+    (Join-Path $hwAbstractionHostDir "fake_scratch.c"),
+    (Join-Path $testDir "test_scratch_migration.c"),
     (Join-Path $testDir "test_log_task_stack_budget.c"),
     (Join-Path $srcDir "max31856_tc_type_policy.c"),
     (Join-Path $testDir "test_max31856_tc_type_policy.c"),
@@ -300,10 +313,49 @@ if ($LASTEXITCODE -ne 0) {
 & $halSpiPicoExe
 $halSpiPicoExit = $LASTEXITCODE
 
+# config_store_flash.c's own host tests (Phase 3 item 2 hal_flash rebase) --
+# a SEPARATE executable for the same reason hal_spi_pico_tests.exe is above:
+# config_store_flash_host_stubs.c defines relay_owner_get_state()/
+# console_uart_puts()/console_uart_write() as bare test doubles, which
+# collide (LNK2005) with the REAL relay_owner.c/console_uart-shaped symbols
+# the main exe links for its own tests. Links the real config_store.c/
+# config_store_flash.c/config_params.c against fake_flash.c (host hal_flash
+# backend) instead of a real RP2040.
+$configStoreFlashHostStubsDir = Join-Path $testDir "stubs\config_store_flash_host_stubs"
+$configStoreFlashExe = Join-Path $outDir "config_store_flash_tests.exe"
+$configStoreFlashObjDir = Join-Path $outDir "config_store_flash_obj"
+New-Item -ItemType Directory -Force -Path $configStoreFlashObjDir | Out-Null
+$configStoreFlashSources = @(
+    (Join-Path $testDir "test_config_store_flash.c"),
+    (Join-Path $configStoreFlashHostStubsDir "config_store_flash_host_stubs.c"),
+    (Join-Path $srcDir "config_store.c"),
+    (Join-Path $srcDir "config_store_flash.c"),
+    (Join-Path $srcDir "config_params.c"),
+    (Join-Path $bootDir "crc32.c"),
+    (Join-Path $commonSrcDir "kilnlink_commit_config_rejected.c"),
+    (Join-Path $hwAbstractionHostDir "fake_flash.c"),
+    (Join-Path $hwAbstractionCommonDir "hal_status.c")
+)
+$configStoreFlashSourceArgs = ($configStoreFlashSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+$configStoreFlashCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 " +
+    "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$commonIncDir`" " +
+    "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" " +
+    "/I `"$configStoreFlashHostStubsDir`" /I `"$testDir`" " +
+    "/Fo:`"$configStoreFlashObjDir\\`" /Fe:`"$configStoreFlashExe`" $configStoreFlashSourceArgs"
+cmd.exe /c $configStoreFlashCmd
+if ($LASTEXITCODE -ne 0) {
+    throw "config_store_flash host test build failed"
+}
+& $configStoreFlashExe
+$configStoreFlashExit = $LASTEXITCODE
+
 if ($mainExit -ne 0) {
     exit $mainExit
 }
 if ($fuzzExit -ne 0) {
     exit $fuzzExit
 }
-exit $halSpiPicoExit
+if ($halSpiPicoExit -ne 0) {
+    exit $halSpiPicoExit
+}
+exit $configStoreFlashExit

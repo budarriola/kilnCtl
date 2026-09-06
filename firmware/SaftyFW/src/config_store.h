@@ -1026,14 +1026,14 @@ bool config_store_confirm_crc_ok(uint8_t config_version);
 //
 // config_store.c is pure and must stay dependency-free of pico-sdk (this
 // file's own header comment), so it cannot #include pico/error.h and use
-// PICO_OK/PICO_ERROR_* directly. These duplicate pico/error.h's
-// `enum pico_error_codes` values as plain integer literals -- the exact same
-// "duplicate the literal, assert numeric agreement at the call site"
-// convention CONFIG_STORE_DEFAULT_TC_TYPE's header comment documents for
-// MAX31856_TC_TYPE_K. config_store_flash.c (which DOES include pico/error.h)
-// carries a compile-time assert that each of these still matches the SDK's
-// own enum value, so a future pico-sdk upgrade that renumbers them fails the
-// build instead of silently mismatching every reason string below.
+// PICO_OK/PICO_ERROR_* directly. These values are config_store's own and are
+// independent of pico/error.h's `enum pico_error_codes`: they happen to
+// share the same numbers for historical reasons, but nothing asserts that
+// equality any more and nothing depends on it. config_store_flash.c no
+// longer sees a raw pico rc at all -- it receives a hal_status_t and maps it
+// to one of these values itself -- and update_task.c compares only against
+// PICO_OK. A future pico-sdk renumbering therefore cannot mismatch the
+// reason strings below.
 #define CONFIG_STORE_FLASH_RC_OK                      0
 #define CONFIG_STORE_FLASH_RC_TIMEOUT                (-2)
 #define CONFIG_STORE_FLASH_RC_NOT_PERMITTED          (-4)

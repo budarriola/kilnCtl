@@ -64,7 +64,14 @@ extern "C" {
  * up to this compile-time cap. Both are exact multiples of
  * HAL_FLASH_ERASE_SIZE, matching real NOR-flash erase granularity. */
 #define FAKE_FLASH_DEFAULT_SIZE_BYTES (4u * HAL_FLASH_ERASE_SIZE)
-#define FAKE_FLASH_MAX_SIZE_BYTES     (16u * HAL_FLASH_ERASE_SIZE)
+/* Bumped 2026-09-06 (Phase 3 item 2, config_store_flash.c's rebase) from
+ * 16 sectors (64 KiB) to 512 sectors (2 MiB, matching the real RP2040's
+ * PICO_FLASH_SIZE_BYTES): config_store_flash.c binds its hal_flash_region_t
+ * at flash_layout.h's real SAFTYFW_CONFIG_STORE_FLASH_OFFSET (0x1B1000) so
+ * the same production source runs unmodified on both backends -- host tests
+ * need a fake image large enough for hal_flash_region_init() to accept that
+ * offset, not just "a few sectors" at the bottom of the image. */
+#define FAKE_FLASH_MAX_SIZE_BYTES     (512u * HAL_FLASH_ERASE_SIZE)
 #define FAKE_FLASH_MAX_SECTORS        (FAKE_FLASH_MAX_SIZE_BYTES / HAL_FLASH_ERASE_SIZE)
 
 typedef enum {

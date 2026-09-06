@@ -1,10 +1,29 @@
-// config_store_flash.c -- the real flash I/O and ARMED-check glue for
-// config_store.h's pure record logic. NOT host-tested, for the same reason
-// bootloader/main.c and src/tasks/update_task.c are not: it needs a real
-// RP2040 (XIP-mapped reads, flash_safe_execute()'s multicore lockout under
-// FreeRTOS SMP -- see update_task.c's header comment for the full "why
-// flash_safe_execute(), not save_and_disable_interrupts()" reasoning, which
-// applies identically here).
+// config_store_flash.c -- the flash I/O and ARMED-check glue for
+// config_store.h's pure record logic. Rebased (docs/HW_ABSTRACTION_PLAN.md
+// Phase 3 item 2, 2026-09-06) onto hal_flash.h: real flash access now goes
+// through hal_flash_read()/hal_flash_erase()/hal_flash_program()/
+// hal_flash_safe_execute() instead of pico-sdk's XIP_BASE pointer read /
+// flash_range_erase() / flash_range_program() / flash_safe_execute()
+// directly. This is what makes this file host-testable for the first time
+// (see test/test_config_store_flash.c) -- the pico backend
+// (hal_flash_pico.c) still wraps the exact same pico-sdk calls this file
+// used to make itself; the host backend (fake_flash.c) models an in-memory
+// sector image instead. No change to what is preserved: the ARMED gate
+// (config_store_decide_write() against relay_owner_get_state()), the
+// seq/CRC round-robin log, and the format-version REFUSE policy are all
+// still expressed at this layer, untouched by the rebase -- only the flash
+// primitive calls underneath moved.
+//
+// Region binding: this file's hal_flash_region_t is bound once, lazily, to
+// exactly the config store's own sector -- base == flash_layout.h's real
+// SAFTYFW_CONFIG_STORE_FLASH_OFFSET, size == SAFTYFW_CONFIG_STORE_FLASH_SIZE
+// (see ensure_region() below) -- so every offset used elsewhere in this file
+// is 0-based within that one sector, not a whole-device offset. Binding at
+// the REAL flash_layout.h offset (rather than 0 on host, matching pico) is
+// deliberate: it lets this file be identical on both backends, at the cost
+// of the host fake needing to be sized to accept that real offset (see
+// firmware/hwAbstraction/host/fake_flash.h's FAKE_FLASH_MAX_SIZE_BYTES
+// comment, bumped the same day for exactly this).
 //
 // Caches the current record in a static, so config_store_get_tc_type()/
 // config_store_is_calibration_missing() are cheap, lock-free reads for
@@ -16,11 +35,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "pico/error.h"
-#include "pico/flash.h"
-
-#include "hardware/flash.h"
-#include "hardware/regs/addressmap.h" // XIP_BASE
+#include "hal_flash.h"
 
 #include "flash_layout.h" // bootloader/ -- SAFTYFW_CONFIG_STORE_FLASH_OFFSET/_SIZE
 #include "max31856.h"      // MAX31856_TC_TYPE_K -- asserted to match CONFIG_STORE_DEFAULT_TC_TYPE
@@ -41,23 +56,57 @@ typedef char config_store_default_tc_type_matches_max31856
 typedef char config_store_tc_type_max_real_matches_max31856
     [(CONFIG_STORE_TC_TYPE_MAX_REAL == MAX31856_TC_TYPE_T) ? 1 : -1];
 
-// Compile-time cross-check, same pattern as the one above: config_store.h's
-// CONFIG_STORE_FLASH_RC_* literals are a dependency-free duplicate of
-// pico/error.h's `enum pico_error_codes` (config_store.h's own comment on
-// config_store_flash_rc_reason() explains why config_store.c can't just
-// #include pico/error.h directly). If a future pico-sdk upgrade ever
-// renumbers PICO_ERROR_TIMEOUT/_NOT_PERMITTED/_INSUFFICIENT_RESOURCES, this
-// fails the build instead of silently making config_store_flash_rc_reason()
-// return the wrong string for a real failure.
-typedef char config_store_flash_rc_ok_matches_pico_error
-    [(CONFIG_STORE_FLASH_RC_OK == PICO_OK) ? 1 : -1];
-typedef char config_store_flash_rc_timeout_matches_pico_error
-    [(CONFIG_STORE_FLASH_RC_TIMEOUT == PICO_ERROR_TIMEOUT) ? 1 : -1];
-typedef char config_store_flash_rc_not_permitted_matches_pico_error
-    [(CONFIG_STORE_FLASH_RC_NOT_PERMITTED == PICO_ERROR_NOT_PERMITTED) ? 1 : -1];
-typedef char config_store_flash_rc_insufficient_resources_matches_pico_error
-    [(CONFIG_STORE_FLASH_RC_INSUFFICIENT_RESOURCES == PICO_ERROR_INSUFFICIENT_RESOURCES) ? 1
-                                                                                          : -1];
+// config_store.h's CONFIG_STORE_FLASH_RC_* literals used to be cross-checked
+// here at compile time against pico/error.h's `enum pico_error_codes`
+// directly. That check was deleted, not moved: no caller feeds a raw pico rc
+// to config_store_flash_rc_reason() any more, so numeric agreement with the
+// SDK enum is no longer a requirement anywhere. This file only sees the
+// hal_status_t hal_flash_safe_execute() returns, translated to a
+// CONFIG_STORE_FLASH_RC_* value by hal_status_to_config_store_flash_rc()
+// below so config_store_flash_rc_reason()'s existing three named strings
+// keep working unchanged.
+static hal_status_t hal_status_to_config_store_flash_rc(hal_status_t status, int *out_rc)
+{
+    switch (status) {
+        case HAL_OK:
+            *out_rc = CONFIG_STORE_FLASH_RC_OK;
+            break;
+        case HAL_TIMEOUT:
+            *out_rc = CONFIG_STORE_FLASH_RC_TIMEOUT;
+            break;
+        case HAL_NOT_READY:
+            *out_rc = CONFIG_STORE_FLASH_RC_NOT_PERMITTED;
+            break;
+        default:
+            // Catch-all, matching hal_flash_pico.c's own HAL_IO default case
+            // ("PICO_ERROR_INSUFFICIENT_RESOURCES and anything not named
+            // above") -- symmetric with that mapping so the round trip
+            // through hal_status_t loses no distinction config_store_flash_
+            // rc_reason() itself makes.
+            *out_rc = CONFIG_STORE_FLASH_RC_INSUFFICIENT_RESOURCES;
+            break;
+    }
+    return status;
+}
+
+// Lazily bound the first time either read_latest_or_default() or
+// config_store_write() needs it -- see the file header comment above for
+// what this region covers and why the offset is the same on both backends.
+static hal_flash_region_t s_region;
+static bool s_region_ready = false;
+
+static bool ensure_region(void)
+{
+    if (s_region_ready) {
+        return true;
+    }
+    if (hal_flash_region_init(&s_region, SAFTYFW_CONFIG_STORE_FLASH_OFFSET,
+                               SAFTYFW_CONFIG_STORE_FLASH_SIZE) != HAL_OK) {
+        return false;
+    }
+    s_region_ready = true;
+    return true;
+}
 
 static config_store_record_t s_cached_record;
 static size_t s_cached_slot = CONFIG_STORE_NO_SLOT;
@@ -69,12 +118,34 @@ static bool s_loaded = false;
 // 1, this stays false). See config_store_is_config_rejected()'s own comment.
 static bool s_load_rejected = false;
 
+// Module-scope, not a local: SAFTYFW_CONFIG_STORE_FLASH_SIZE is 4096 bytes
+// (one erase sector, bootloader/flash_layout.h), and read_latest_or_default()'s
+// only caller, config_store_boot_load(), runs from main.c's boot sequence
+// step 4 -- before vTaskStartScheduler() -- on core0's pre-scheduler boot
+// stack. That stack is pico-sdk's default PICO_STACK_SIZE (0x800 == 2048
+// bytes; not overridden anywhere in this project's CMakeLists.txt), so a
+// 4096-byte local array here would be a guaranteed overflow of the ENTIRE
+// boot stack on its own, independent of whatever else that stack frame
+// holds -- not merely tight against a margin baseline. config_store_boot_load()
+// is documented (config_store_flash.c's own header comment, "must run once,
+// pre-scheduler") to run exactly once before any task exists, so there is no
+// concurrent caller to serialize against; a single static buffer is safe.
+static uint8_t s_read_sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+
 static size_t read_latest_or_default(config_store_record_t *out_rec,
                                       config_store_reject_info_t *out_reject)
 {
-    const uint8_t *region =
-        (const uint8_t *)(XIP_BASE + SAFTYFW_CONFIG_STORE_FLASH_OFFSET);
-    size_t latest = config_store_find_latest_ex(region, out_rec, out_reject);
+    // ensure_region()/hal_flash_read() failing here is treated the same as
+    // an unreadable/blank sector always was: "a missing part must not abort
+    // boot" (max31856_configure()'s own doc comment) applies to
+    // configuration exactly as much as to a missing sensor -- fall back to
+    // config_store_default() rather than propagate the failure.
+    if (!ensure_region() ||
+        hal_flash_read(&s_region, 0, s_read_sector, sizeof(s_read_sector)) != HAL_OK) {
+        config_store_default(out_rec);
+        return CONFIG_STORE_NO_SLOT;
+    }
+    size_t latest = config_store_find_latest_ex(s_read_sector, out_rec, out_reject);
     if (latest == CONFIG_STORE_NO_SLOT) {
         config_store_default(out_rec);
     }
@@ -249,15 +320,26 @@ typedef struct {
     uint8_t record[CONFIG_STORE_RECORD_LEN];
 } config_store_write_args_t;
 
+// Offsets below are region-relative (0-based within the config store's own
+// sector, per ensure_region()'s binding) -- NOT SAFTYFW_CONFIG_STORE_FLASH_
+// OFFSET-relative any more. hal_flash_erase()/hal_flash_program() return
+// values are not checked here: both can only fail with HAL_NOT_READY (an
+// uninitialized `r`, which config_store_write() already ruled out via
+// ensure_region() before scheduling this callback) or HAL_INVALID_SIZE/ARG
+// (a misaligned or out-of-range offset/len, which the compile-time-fixed
+// SAFTYFW_CONFIG_STORE_FLASH_SIZE/CONFIG_STORE_RECORD_LEN geometry this file
+// uses can never produce) -- the same "caller-bug, not a runtime condition
+// this call site needs to react to" shape flash_range_erase()/flash_range_
+// program() had before the rebase (they returned void).
 static void config_store_write_cb(void *param)
 {
     config_store_write_args_t *a = (config_store_write_args_t *)param;
     if (a->needs_erase) {
-        flash_range_erase(SAFTYFW_CONFIG_STORE_FLASH_OFFSET, SAFTYFW_CONFIG_STORE_FLASH_SIZE);
+        (void)hal_flash_erase(&s_region, 0, SAFTYFW_CONFIG_STORE_FLASH_SIZE);
     }
-    flash_range_program(SAFTYFW_CONFIG_STORE_FLASH_OFFSET +
+    (void)hal_flash_program(&s_region,
                              (uint32_t)a->next_write_slot * CONFIG_STORE_RECORD_LEN,
-                         a->record, CONFIG_STORE_RECORD_LEN);
+                             a->record, CONFIG_STORE_RECORD_LEN);
 }
 
 // Writes `rec` as the new current config record, refusing while ARMED
@@ -284,6 +366,18 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
         return false;
     }
 
+    if (!ensure_region()) {
+        // Same NOT_PERMITTED family as a flash_safe_execute() failure below
+        // -- the region has never bound (e.g. this is somehow called before
+        // any successful boot_load), which is exactly the "safe execution
+        // isn't possible at all" class config_store_flash_rc_reason()
+        // already names, not a transient timeout.
+        if (out_reason != NULL) {
+            *out_reason = config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_NOT_PERMITTED);
+        }
+        return false;
+    }
+
     config_store_record_t to_write = *rec;
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
     to_write.seq = s_cached_record.seq + 1u;
@@ -293,14 +387,19 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
     args.needs_erase = config_store_next_write_needs_erase(s_cached_slot);
     config_store_pack(&to_write, args.record);
 
-    int rc = flash_safe_execute(config_store_write_cb, &args, 1000u);
-    if (rc != PICO_OK) {
+    hal_status_t status = hal_flash_safe_execute(config_store_write_cb, &args, 1000u);
+    if (status != HAL_OK) {
         // Surface WHICH failure mode this was, not a single opaque string --
         // see config_store_flash_rc_reason()'s header comment (config_store.h)
         // for why "the other core never answered the lockout" (TIMEOUT) and
         // "safe execution isn't possible at all" (NOT_PERMITTED) must not be
         // reported identically: one is a transient/bench condition, the
-        // other is a firmware init-order bug.
+        // other is a firmware init-order bug. hal_flash_safe_execute()
+        // already made this same distinction (hal_status_t); translated back
+        // to the legacy CONFIG_STORE_FLASH_RC_* value so config_store_flash_
+        // rc_reason()'s existing strings need no change.
+        int rc;
+        (void)hal_status_to_config_store_flash_rc(status, &rc);
         if (out_reason != NULL) {
             *out_reason = config_store_flash_rc_reason(rc);
         }

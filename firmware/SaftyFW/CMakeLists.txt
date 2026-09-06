@@ -180,6 +180,8 @@ add_library(hwabstraction_pico STATIC
     ${HWABSTRACTION_PICO_DIR}/uart/uart_owner_tx_policy.c
     ${HWABSTRACTION_PICO_DIR}/gpio/hal_gpio_pico.c
     ${HWABSTRACTION_PICO_DIR}/adc/hal_adc_pico.c
+    ${HWABSTRACTION_PICO_DIR}/scratch/hal_scratch_pico.c
+    ${HWABSTRACTION_PICO_DIR}/flash/hal_flash_pico.c
     ${HWABSTRACTION_DIR}/common/hal_status.c
 )
 target_include_directories(hwabstraction_pico PUBLIC
@@ -187,6 +189,8 @@ target_include_directories(hwabstraction_pico PUBLIC
     ${HWABSTRACTION_PICO_DIR}/uart
     ${HWABSTRACTION_PICO_DIR}/gpio
     ${HWABSTRACTION_PICO_DIR}/adc
+    ${HWABSTRACTION_PICO_DIR}/scratch
+    ${HWABSTRACTION_PICO_DIR}/flash
     ${HWABSTRACTION_DIR}/interface
 )
 # TEMPORARY (HAL Phase 1b): spi_owner.c and uart_owner.c both still include
@@ -215,6 +219,7 @@ target_link_libraries(hwabstraction_pico PUBLIC
     hardware_spi
     hardware_adc
     hardware_flash
+    hardware_watchdog
     pico_flash
     pico_multicore
     FreeRTOS-Kernel
