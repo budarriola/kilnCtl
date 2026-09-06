@@ -163,6 +163,14 @@ typedef struct {
      * 10.10). */
     bool     safety_temp_valid;
     float    safety_temp_c;
+    /* ROADMAP.md "Safety TC display audit, 2026-09-05" -- mirrors
+     * safety_tc_is_separate_physical_sensor() (safety_link.h). Consumers of
+     * safety_temp_c/safety_temp_valid must treat that reading as belonging
+     * to a distinct, independently-faultable sensor (i.e. show it under a
+     * "Thermocouple faults"-style display) ONLY when this is true. False
+     * covers both "unknown" (pre-V3 Pico) and "confirmed reused from a main
+     * zone's probe" -- neither is a separate sensor to warn about here. */
+    bool     safety_tc_is_separate_sensor;
     bool     enclosure_temp_valid;
     float    enclosure_temp_c;
     bool     power_valid;

@@ -1270,6 +1270,31 @@ esp_err_t safety_link_stop(SafetyLinkClass *link);
  * GET_STATUS from. */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out);
 
+/* ROADMAP.md "Safety TC display audit, 2026-09-05" -- the single shared
+ * predicate every "Thermocouple faults"-style display site (LCD, web,
+ * PcTools) must call before showing the safety processor's OWN
+ * thermocouple reading/fault as if it were an independent physical sensor.
+ * SaftyFW's tc_source (safety_guards.h) is never sent to the ESP directly --
+ * it is folded into the V3 status frame's BORROWED bit instead
+ * (link_frame_pack_status(): BORROWED iff tc_source is BORROWED_ZONE or
+ * BOTH), so "not BORROWED" here is exactly "tc_source == SAFETY_TC_SOURCE_
+ * OWN_J7" on the Pico. Fail-to-shown: this hides the reading only when it
+ * has been CONFIRMED borrowed (a V3-or-newer frame was received AND that
+ * frame's BORROWED bit is set). Link down suppresses the display (no safety
+ * processor at all means nothing to show). An older Pico that has never
+ * sent a V3 frame (borrowed_known clear) is UNKNOWN, not confirmed
+ * borrowed -- unknown must fail to shown, since hiding a genuine separate
+ * safety-TC reading just because the peer hasn't confirmed it yet is worse
+ * than occasionally showing a reused zone's reading unmarked as confirmed
+ * separate. */
+static inline bool safety_tc_is_separate_physical_sensor(const safety_link_status_t *st)
+{
+    if (!st || !st->link_up) {
+        return false;
+    }
+    return !(st->borrowed_known && st->borrowed);
+}
+
 /* Asks the safety processor to permit (1) or drop (0) heating. Advisory --
  * the Pico's own interlocks always win. Blocks for the exchange, so call it
  * from a bridge/app task, not from anything latency-critical.

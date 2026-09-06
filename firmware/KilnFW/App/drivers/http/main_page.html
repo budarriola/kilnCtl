@@ -639,7 +639,17 @@ function renderSafetyCard(data) {
   if (!data.safety_ready) return null;
   const div = document.createElement('div');
   div.className = 'card';
-  const tempHtml = (data.safety_temp_c === null || data.safety_temp_c === undefined)
+  // ROADMAP.md "Safety TC display audit, 2026-09-05": present this as an
+  // independent thermocouple reading (i.e. something that can have its own
+  // fault, distinct from whichever main zone it may be reusing) unless
+  // window.kcSafetyTcIsSeparate says it has been CONFIRMED borrowed --
+  // fail-to-shown. An older Pico that has never confirmed either way still
+  // shows the reading; only a confirmed BORROWED_ZONE/BOTH configuration
+  // shows the card for K4's sake only.
+  const tcIsSeparate = window.kcSafetyTcIsSeparate({ link_up: data.safety_ready, tc_is_separate_sensor: data.safety_tc_is_separate_sensor });
+  const tempHtml = !tcIsSeparate
+    ? '<span class="stale">(confirmed borrowed from a zone probe -- not a separate sensor)</span>'
+    : (data.safety_temp_c === null || data.safety_temp_c === undefined)
     ? '<span class="stale">(no reading yet)</span>'
     : '<span class="kc-live-value">' + window.kcUnit.fmt(data.safety_temp_c) + '</span>';
   // Same relay-tag markup/classes as relayStatusHtml() above, so K4 reads

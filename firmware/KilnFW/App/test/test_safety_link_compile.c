@@ -353,6 +353,51 @@ static void test_apply_status_v3_borrowed(void)
                "a peer regressing from V3 to V1 mid-session clears the stale borrowed_known flag");
 }
 
+static void test_safety_tc_is_separate_physical_sensor_predicate(void)
+{
+    TEST_SECTION("safety_tc_is_separate_physical_sensor() -- ROADMAP.md 'Safety TC display "
+                 "audit, 2026-09-05' shared predicate: fail-to-shown. Suppressed ONLY for link "
+                 "down or CONFIRMED borrowed (borrowed_known + borrowed); an older Pico that has "
+                 "never confirmed V3 (borrowed_known false) must still show.");
+
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+
+    // Link down: suppressed regardless of the borrowed bits.
+    st.link_up = false;
+    st.borrowed_known = true;
+    st.borrowed = false;
+    TEST_CHECK(safety_tc_is_separate_physical_sensor(&st) == false,
+               "link down suppresses even with borrowed_known/borrowed looking favorable");
+
+    // Link up, V3 confirmed, BORROWED_ZONE/BOTH (borrowed == true): suppressed.
+    st.link_up = true;
+    st.borrowed_known = true;
+    st.borrowed = true;
+    TEST_CHECK(safety_tc_is_separate_physical_sensor(&st) == false,
+               "confirmed BORROWED_ZONE/BOTH suppresses");
+
+    // Link up, V3 confirmed, not borrowed (tc_source == SAFETY_TC_SOURCE_OWN_J7): shows.
+    st.link_up = true;
+    st.borrowed_known = true;
+    st.borrowed = false;
+    TEST_CHECK(safety_tc_is_separate_physical_sensor(&st) == true,
+               "link up + borrowed_known + !borrowed shows");
+
+    // Link up, but an older Pico (or one that hasn't confirmed V3 yet):
+    // borrowed_known false is UNKNOWN, not confirmed borrowed, so it must
+    // fail to shown rather than fail to hidden.
+    st.link_up = true;
+    st.borrowed_known = false;
+    st.borrowed = false;
+    TEST_CHECK(safety_tc_is_separate_physical_sensor(&st) == true,
+               "borrowed_known false (pre-V3 Pico) shows -- unknown is not the same as "
+               "confirmed borrowed, and this predicate fails to shown, not to hidden");
+
+    // NULL is a safe "nothing to show", not a crash.
+    TEST_CHECK(safety_tc_is_separate_physical_sensor(NULL) == false, "NULL status suppresses");
+}
+
 static void test_apply_status_temp_valid_flag_is_sole_authority(void)
 {
     TEST_SECTION("safety_apply_status -- SAFETY_FLAG_TEMP_VALID is the ONLY thing that "
@@ -1124,6 +1169,7 @@ int main(void)
 
     test_apply_status_accepts_v1_and_v2_lengths();
     test_apply_status_v3_borrowed();
+    test_safety_tc_is_separate_physical_sensor_predicate();
     test_apply_status_temp_valid_flag_is_sole_authority();
     test_apply_status_ignores_peer_link_up_and_fault_bits();
     test_fw_version_unknown_before_any_frame_arrives();

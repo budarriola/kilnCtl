@@ -248,6 +248,7 @@ void dashboard_get_status(dashboard_status_t *out)
             out->safety_temp_valid = !isnan(sl.tc_temp_c);
             out->enclosure_temp_c = sl.cj_temp_c;
             out->enclosure_temp_valid = !isnan(sl.cj_temp_c);
+            out->safety_tc_is_separate_sensor = safety_tc_is_separate_physical_sensor(&sl);
 
             /* ROADMAP.md M5/M6, TODO.md 10.10: SAFETY_CMD_POWER (Frame E) now
              * has a real decode path in safety_link.c's safety_apply_power().

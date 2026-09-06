@@ -214,7 +214,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
             * what to show" convention as zone_cfg_t's model_k_dc/etc above. */
            "\"relay_zone_owned_mask\":%u,"
            "\"safety_wiring\":{\"link_up\":%s,\"tc_temp_valid\":%s,\"tc_temp_c\":%.1f,"
-           "\"tc_fault\":%u,\"relay_energized\":%s},"
+           "\"tc_fault\":%u,\"relay_energized\":%s,\"tc_is_separate_sensor\":%s},"
            "\"ct_warn_mask\":%u,"
            "\"relay_names\":[",
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
@@ -223,6 +223,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            zone_owned_relay_mask(&s_zones.cfg),
            safety_wiring.link_up ? "true" : "false", safety_wiring.tc_temp_valid ? "true" : "false",
            (double)safety_wiring.tc_temp_c, safety_wiring.tc_fault, safety_wiring.relay_energized ? "true" : "false",
+           safety_wiring.tc_is_separate_sensor ? "true" : "false",
            ct_warn_mask);
 
     for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {

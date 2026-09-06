@@ -1488,10 +1488,23 @@ function renderSafetyWiring(sw) {
     el.textContent = 'Safety link is down -- nothing to show.';
     return;
   }
-  var tcText = sw.tc_temp_valid ? (sw.tc_temp_c.toFixed(1) + ' °C') : 'UNSET';
   var relayText = sw.relay_energized ? 'ENERGIZED' : 'off';
-  el.textContent = 'Safety thermocouple: ' + tcText + (sw.tc_fault ? ' (fault bits 0x' + sw.tc_fault.toString(16) + ')' : '') +
-    '  |  Safety relay (K4): ' + relayText;
+  // ROADMAP.md "Safety TC display audit, 2026-09-05": hide the safety
+  // processor's own thermocouple reading/fault bits only when the Pico has
+  // CONFIRMED (V3 status frame, BORROWED bit set) it IS reused from a main
+  // zone's probe -- window.kcSafetyTcIsSeparate() is the single shared
+  // predicate (mirrors safety_tc_is_separate_physical_sensor() in
+  // safety_link.h / zone_safety_wiring_t.tc_is_separate_sensor), fail-to-
+  // shown. An older Pico that has never confirmed either way still renders
+  // the "Safety thermocouple" line, fault bits included; only a confirmed
+  // BORROWED_ZONE/BOTH configuration renders as a plain relay line.
+  if (window.kcSafetyTcIsSeparate(sw)) {
+    var tcText = sw.tc_temp_valid ? (sw.tc_temp_c.toFixed(1) + ' °C') : 'UNSET';
+    el.textContent = 'Safety thermocouple: ' + tcText + (sw.tc_fault ? ' (fault bits 0x' + sw.tc_fault.toString(16) + ')' : '') +
+      '  |  Safety relay (K4): ' + relayText;
+  } else {
+    el.textContent = 'Safety relay (K4): ' + relayText;
+  }
 }
 
 /* Task 2: bit N-1 of ct_warn_mask = zone N (1-based) is currently commanded

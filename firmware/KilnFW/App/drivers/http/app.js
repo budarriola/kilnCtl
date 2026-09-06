@@ -46,6 +46,29 @@
       .replace(/'/g, '&#39;');
   };
 
+  // ---- kcSafetyTcIsSeparate ----------------------------------------------
+  //
+  // ROADMAP.md "Safety TC display audit, 2026-09-05": the single shared
+  // predicate every page must call before showing the safety processor's
+  // own thermocouple reading/fault as if it were an independent physical
+  // sensor. Mirrors safety_tc_is_separate_physical_sensor() (safety_link.h)
+  // exactly -- fail-to-shown: hides the reading only when it has been
+  // CONFIRMED borrowed (borrowed_known true AND borrowed true). Link down
+  // suppresses the display. An older Pico (borrowed_known false) is
+  // UNKNOWN, not confirmed borrowed, so it renders as shown, same as a
+  // missing tc_is_separate_sensor field on the payload -- fail-to-shown,
+  // not fail-to-hidden.
+  //
+  // Accepts either shape callers already have on hand: zones_http_get.c's
+  // safety_wiring object ({link_up, tc_is_separate_sensor}) or a raw
+  // safety-link-shaped object ({link_up, borrowed_known, borrowed}) such as
+  // dashboard_http.c's /api/status fields once surfaced there.
+  window.kcSafetyTcIsSeparate = function (st) {
+    if (!st || !st.link_up) return false;
+    if (typeof st.tc_is_separate_sensor === 'boolean') return st.tc_is_separate_sensor;
+    return !(st.borrowed_known && st.borrowed);
+  };
+
   // ---- thermalGuardWords -----------------------------------------------
   //
   // Single shared decode table for thermal_guard_trip_t (thermal_guard.h),

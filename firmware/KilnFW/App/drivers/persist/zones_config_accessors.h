@@ -1337,6 +1337,14 @@ typedef struct {
     float   tc_temp_c;
     uint8_t tc_fault;        /* MAX31856 SR bits; meaningful only if tc_temp_valid */
     bool    relay_energized; /* SAFETY_FLAG_RELAY; meaningful only if link_up */
+    /* ROADMAP.md "Safety TC display audit, 2026-09-05" -- mirrors
+     * safety_tc_is_separate_physical_sensor(safety_link.h): true only when
+     * the safety processor has confirmed (V3 status frame) that its own
+     * thermocouple is NOT reused from a main zone's probe. Consumers must
+     * suppress tc_temp_c/tc_fault as a distinct "Thermocouple fault" when
+     * this is false -- an unconfirmed or borrowed/both source is not shown
+     * as an independent sensor. */
+    bool    tc_is_separate_sensor;
 } zone_safety_wiring_t;
 
 void zones_get_safety_wiring(zone_safety_wiring_t *out);

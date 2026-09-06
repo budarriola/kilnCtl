@@ -671,11 +671,21 @@ static void refresh_cb(lv_timer_t *timer)
     lv_label_set_text(s_esp32_temp_label, buf);
 
     /* ---- Safety Processor (folded from ui_page_safety.c) ---------------- */
-    if (ds.safety_temp_valid) {
+    /* ROADMAP.md "Safety TC display audit, 2026-09-05": show this reading as
+     * a distinct thermocouple unless dashboard_http.h's
+     * safety_tc_is_separate_sensor says it is CONFIRMED borrowed (mirrors
+     * safety_tc_is_separate_physical_sensor()/window.kcSafetyTcIsSeparate on
+     * the web side, fail-to-shown) -- only a BORROWED_ZONE/BOTH
+     * configuration confirmed by a V3-or-newer frame reads as reused; an
+     * older Pico that has never confirmed either way still shows the
+     * reading. */
+    if (ds.safety_temp_valid && ds.safety_tc_is_separate_sensor) {
         snprintf(buf, sizeof(buf), "Safety temp: %.1f %s",
                  (double)unit_pref_convert(ds.safety_temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE),
                  unit_pref_suffix(ds.temp_unit));
         lv_label_set_text(s_safety_temp_label, buf);
+    } else if (ds.safety_temp_valid) {
+        lv_label_set_text(s_safety_temp_label, "Safety temp: (confirmed borrowed from a zone probe)");
     } else {
         lv_label_set_text(s_safety_temp_label, "Safety temp: ---");
     }

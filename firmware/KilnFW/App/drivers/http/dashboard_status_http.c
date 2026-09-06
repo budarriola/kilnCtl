@@ -235,6 +235,11 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     if (ds.safety_temp_valid) {
         APPEND("%.2f", (double)ds.safety_temp_c);
     }
+    /* ROADMAP.md "Safety TC display audit, 2026-09-05" -- see
+     * dashboard_http.h's field comment; every consumer of safety_temp_c
+     * must gate its "this is a distinct thermocouple fault" display on
+     * this, not on safety_ready/safety_temp_valid alone. */
+    APPEND(",\"safety_tc_is_separate_sensor\":%s", ds.safety_tc_is_separate_sensor ? "true" : "false");
     APPEND(",\"enclosure_temp_c\":%s", ds.enclosure_temp_valid ? "" : "null");
     if (ds.enclosure_temp_valid) {
         APPEND("%.2f", (double)ds.enclosure_temp_c);

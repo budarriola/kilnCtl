@@ -928,5 +928,6 @@ void zones_get_safety_wiring(zone_safety_wiring_t *out)
     out->tc_temp_c = st.tc_temp_c;
     out->tc_fault = st.tc_fault;
     out->relay_energized = (st.flags & SAFETY_FLAG_RELAY) != 0;
+    out->tc_is_separate_sensor = safety_tc_is_separate_physical_sensor(&st);
 }
 
