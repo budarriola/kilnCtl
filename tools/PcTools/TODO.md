@@ -23,15 +23,39 @@ main board's.
 | **USB-TTL adapter → isolated UART** | Pico directly | For bring-up before the ESP side works, or when the ESP is the thing under suspicion. **Must invert** — see `firmware/SaftyFW/docs/HARDWARE.md` §1 |
 | **SWD/RTT → Pico** | Pico directly | Development and flashing. Also the only path when the Pico will not talk |
 
-- [ ] `Peer` abstraction (`ESP` | `SAFETY`) threaded through `link_hub.py`; every
-      tool takes a peer argument
+- [x] `Peer` abstraction — 2026-09-05 assessed: doesn't apply as written.
+      `protocol.Device` only ever has `ESP`/`HOST` (`protocol.py:148`); the
+      Pico is not a third wire-level device, it is task `UART_TASK_ID_SAFETY`
+      relayed through the ESP (`safety.py` always sends with
+      `dst_device=Device.ESP`, distinguished only by `task_id`). The peer
+      split already exists at the module level (`devices.py` = ESP tasks,
+      `devices_safety.py`/`safety.py` = the SAFETY task) rather than as a
+      runtime enum argument, so there is nothing to thread through
+      `link_hub.py`. "Every tool takes a peer argument" was also wrong: most
+      tools (thermo, display, zones, ...) can only ever address the ESP —
+      giving them a peer argument would let them accept a value they can
+      never honor. Pinned by `tests/test_link_hub_routing.py`'s negative
+      case: an unrecognized device id passes through `_as_device` unchanged
+      rather than being coerced onto a device that happens to exist.
 - [x] Pico-through-the-ESP path working end to end (no second cable) —
       unblocked 2026-08-23: the isolated link was capped at 9600 baud by the
       TCMT1109 optocouplers (115200 delivered zero frames, ever), not dead.
       With the baud corrected on both sides, `link_status` shows real frames
       received and `safety_get_status()` returns live telemetry. See
       `firmware/SaftyFW/docs/HARDWARE.md` §1
-- [ ] GUI grows a safety column rather than a second application
+- [x] GUI grows a safety column rather than a second application — 2026-09-05:
+      safety was already a mixin (`SafetyMixin` in `gui_safety.py`) inside the
+      single `KilnCtrlApp`, sharing its menu/link/event loop, so "a second
+      application" was already avoided. The literal "column" wasn't there
+      (safety was popup-only, `gui.py:320`), so added a compact one-line
+      always-on summary to the main window's status bar (`gui.py`
+      `_build_status_bar`, `Safety: OK / E-STOP / link down / TC fault`),
+      fed by the existing SAFETY poll now running independently of whether
+      the full popup is open (`gui_safety.py` `_safety_schedule_poll`).
+      Did not restructure the rest of the app (thermo/io/display/zones are
+      all popups too, in a deliberately tiny 640x210 main window) — a full
+      docked pane for safety alone would be the parallel-structure this
+      task's brief warned against.
 
 ## Capabilities to add, in priority order
 
@@ -229,12 +253,15 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 ## Completion checklist
 
 **Two peers**
-- [ ] `Peer` abstraction (`ESP` | `SAFETY`) threaded through `link_hub.py`
-- [ ] Every tool takes a peer argument
-- [ ] Pico-through-the-ESP path working (no second cable)
+- [x] `Peer` abstraction — N/A, see 2026-09-05 note above (not a wire-level
+      Device; already split at the module level)
+- [x] Every tool takes a peer argument — N/A, see same note: most tools can
+      only ever address one processor
+- [x] Pico-through-the-ESP path working (no second cable)
 - [ ] Direct USB-TTL path documented, **with the inversion requirement stated**
 - [ ] SWD/RTT path documented for flashing and for a Pico that will not talk
-- [ ] GUI grows a safety column rather than a second application
+- [x] GUI grows a safety column rather than a second application — see
+      2026-09-05 note above (status-bar summary, `gui.py`/`gui_safety.py`)
 
 **Capabilities**
 - [x] 1c. Coordinated two-board test: both halves confirmed electrically

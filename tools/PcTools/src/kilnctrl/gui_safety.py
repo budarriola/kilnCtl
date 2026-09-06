@@ -260,16 +260,19 @@ class SafetyMixin:
 
     def _safety_schedule_poll(self) -> None:
         """SAFETY has no auto-report subcommand, so this page polls -- but it
-        polls the ESP's *cache*, so it never waits on the isolated link."""
+        polls the ESP's *cache*, so it never waits on the isolated link.
+
+        Runs whenever connected, independent of whether the Safety Processor
+        popup is open: the status-bar summary column (see gui.py's
+        _build_status_bar) needs live data too. Stopped explicitly on
+        disconnect (toggle_connect) rather than gated on popup state."""
         self._safety_stop_poll()
-        if not self._is_open("safety"):
+        if not self.link.is_connected:
             return
         self._safety_poll_id = self.root.after(_SAFETY_POLL_MS, self._safety_poll_tick)
 
     def _safety_poll_tick(self) -> None:
         self._safety_poll_id = None
-        if not self._is_open("safety"):
-            return
         if self.link.is_connected and self.info.compatible is True:
             self.safety_refresh_async(quiet=True)
         self._safety_schedule_poll()
@@ -308,6 +311,23 @@ class SafetyMixin:
         )
 
     def _apply_safety_status(self, status: SafetyStatus) -> None:
+        # Status-bar summary column: updated unconditionally, whether or not
+        # the Safety Processor popup is open (see gui.py's _build_status_bar).
+        if status.estop:
+            self.safety_summary_var.set("Safety: E-STOP")
+            self.safety_summary_label.config(foreground=_BAD_COLOR)
+        elif not status.link_up:
+            self.safety_summary_var.set("Safety: link down (expected, no RP2040 FW)")
+            self.safety_summary_label.config(foreground=_EXPECTED_COLOR)
+        elif status.fault_labels:
+            self.safety_summary_var.set("Safety: TC fault")
+            self.safety_summary_label.config(foreground=_BAD_COLOR)
+        else:
+            self.safety_summary_var.set(
+                "Safety: OK" + (" (enabled)" if status.enabled else "")
+            )
+            self.safety_summary_label.config(foreground=_OK_COLOR)
+
         if not self._is_open("safety"):
             return
 

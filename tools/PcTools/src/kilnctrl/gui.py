@@ -417,6 +417,18 @@ class KilnCtrlApp(
             side="left", fill="x", expand=True, padx=8
         )
 
+        # Compact safety column (TODO.md "GUI grows a safety column rather
+        # than a second application"): a one-line always-visible summary of
+        # the SAFETY task's cached status, independent of whether the full
+        # Safety Processor popup is open. Detail still lives in that popup
+        # (gui_safety.py) -- this is deliberately just enough to notice a
+        # problem without opening it.
+        self.safety_summary_var = tk.StringVar(value="Safety: --")
+        self.safety_summary_label = ttk.Label(
+            bar, textvariable=self.safety_summary_var, anchor="e"
+        )
+        self.safety_summary_label.pack(side="right", padx=8, pady=4)
+
     # -- ports -------------------------------------------------------------
     def refresh_ports(self) -> None:
         self.ports = list_ports()
@@ -464,6 +476,9 @@ class KilnCtrlApp(
             port = self.link.port
             self.link.disconnect()
             self._set_connection_state()
+            self._safety_stop_poll()
+            self.safety_summary_var.set("Safety: --")
+            self.safety_summary_label.config(foreground="")
             self.session_log.info("disconnected from %s", port)
             self.set_status("Disconnected.")
             return
@@ -493,6 +508,10 @@ class KilnCtrlApp(
         # layer has no business knowing INFO_CMD semantics.
         self.query_fw_version_async()
         self.query_wifi_status_async()
+        # Compact safety-column summary (status bar) runs regardless of
+        # whether the Safety Processor popup is open -- see _build_status_bar.
+        self.safety_refresh_async()
+        self._safety_schedule_poll()
 
     def _set_connection_state(self) -> None:
         if self.link.is_connected:

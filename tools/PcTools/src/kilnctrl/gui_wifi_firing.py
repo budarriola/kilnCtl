@@ -793,14 +793,18 @@ class WifiFiringMixin:
         self._popup("display", "Display (ILI9488) - manual control", self._build_display_popup)
 
     def open_safety_popup(self) -> None:
+        # No on_close poll-stop here: the status-bar safety summary (see
+        # gui.py's _build_status_bar) keeps polling after the popup closes,
+        # for as long as the link stays connected -- only toggle_connect's
+        # disconnect path calls _safety_stop_poll now.
         self._popup(
             "safety",
             "Safety processor (RP2040, isolated) - status",
             self._build_safety_popup,
-            on_close=self._safety_stop_poll,
         )
         self.safety_refresh_async()
-        self._safety_schedule_poll()
+        if self._safety_poll_id is None:
+            self._safety_schedule_poll()
 
     def open_about_popup(self) -> None:
         self._popup("about", "About - pin configuration", self._build_about_popup)
