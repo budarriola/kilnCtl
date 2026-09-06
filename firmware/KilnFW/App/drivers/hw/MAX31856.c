@@ -507,11 +507,18 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
     ch->channel = channel;
 #if KILNCTL_SPI_HARDWARE_CS
     /* DISPLAY_ST7796_PLAN.md 9.4: the SPI peripheral (spics_io_num, set below
-     * on dev_config) owns this pin, so every spi_owner_transfer_polling()
-     * call site in this file must pass the -1 sentinel esp_spi_owner.c
-     * treats as "do not bit-bang" instead of the real GPIO number. */
+     * on dev_config) owns this pin. */
     ch->cs_gpio = -1;
 #else
+    /* HAL Phase 1b (2026-09-06): ch->cs_gpio is bookkeeping only now -- the
+     * value that actually drives bit-banged CS is dev_cfg.cs_pin below,
+     * captured by hal_spi_device_attach() at attach time and applied by the
+     * adapter (hal_spi_esp.c) on every hal_spi_transfer_polling() call for
+     * this device; hal_spi.h's transfer functions take no per-call cs_pin
+     * argument, unlike the pre-HAL spi_owner_transfer_polling() call sites
+     * this used to feed directly. Kept on the struct for logging/parity with
+     * the KILNCTL_SPI_HARDWARE_CS branch, not read anywhere on the transfer
+     * path any more. */
     ch->cs_gpio = cs_gpio;
 #endif
     ch->fault_gpio = fault_gpio;
@@ -571,17 +578,21 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
         .cs_pin = HAL_CS_NONE,
 #else
         .hw_cs = HAL_CS_NONE,
-        .cs_pin = HAL_CS_NONE, /* bit-banged by hal_spi's owner around each
-                                 * transfer via ch->cs_gpio, passed at
-                                 * transfer time -- NOT here; see hal_spi.h's
-                                 * device_cfg.cs_pin doc comment: it names the
-                                 * pin the DEVICE is fixed to. This driver's
-                                 * per-channel CS is threaded through
-                                 * ch->cs_gpio at every hal_spi_transfer_polling()
-                                 * call instead, exactly matching what the
-                                 * pre-HAL spi_owner_transfer_polling() call
-                                 * sites already did (cs_pin was a per-call
-                                 * argument there too, not a per-device one). */
+        .cs_pin = cs_gpio, /* bit-banged CS: hal_spi.h's device_cfg.cs_pin is
+                             * the pin THIS device is fixed to -- the adapter
+                             * (hal_spi_esp.c) stores it at attach time and
+                             * bit-bangs it on every hal_spi_transfer_polling()
+                             * call for this device, matching what the pre-HAL
+                             * spi_owner_transfer_polling() call sites did by
+                             * passing ch->cs_gpio per call. (Fixed
+                             * 2026-09-06, opus review: this used to be
+                             * HAL_CS_NONE with a comment claiming CS was
+                             * threaded through per-call, but hal_spi.h's
+                             * transfer functions take no cs_pin argument --
+                             * every read on this branch was clocking with CS
+                             * idle-high, and a floating-SDO all-zero burst
+                             * decodes as a plausible 0.0 C with no fault bit
+                             * set.) */
 #endif
         .queue_size = 1,
         .input_delay_ns = MAX31856_SPI_INPUT_DELAY_NS,

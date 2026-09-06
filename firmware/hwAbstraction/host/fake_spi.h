@@ -62,6 +62,16 @@ typedef struct {
     uint8_t  rx[FAKE_SPI_MAX_RX_BYTES];
     size_t   rx_len;
     uint32_t timeout_ms;
+    /* Added 2026-09-06 (opus review of MAX31856.c's HAL Phase 1b migration):
+     * the device's cs_pin exactly as it was at hal_spi_device_attach() time
+     * (hal_spi_device_cfg_t.cs_pin -- the bit-banged CS pin, HAL_CS_NONE if
+     * this device uses hardware CS or was never attached). Every backend
+     * that bit-bangs CS is expected to drive this same pin for the
+     * transfer -- a driver that silently dropped its per-channel CS (as
+     * MAX31856.c's software-CS branch briefly did) is otherwise invisible to
+     * a host test, since a transfer with no CS asserted still "succeeds" and
+     * a scripted rx response still decodes to a plausible-looking value. */
+    int      cs_pin;
 } fake_spi_transfer_record_t;
 
 /* Clears every bus/device slot, the transfer log, and all injected faults.

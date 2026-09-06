@@ -45,14 +45,6 @@ static const char *TAG = "hal_spi_esp";
 typedef struct {
     spi_owner_t owner;
     spi_host_device_t host;
-    bool bus_owned; /* true only if THIS init actually called spi_bus_initialize
-                      * successfully (not the ALREADY_INIT/shared-bus case) --
-                      * mirrors MAX31856BusClass::bus_owned. Not currently
-                      * acted on at deinit (see hal_spi_bus_deinit()'s comment
-                      * for why spi_bus_free() is deliberately never called
-                      * here), kept for parity with the owner-level callers'
-                      * own bookkeeping and for any future caller that does
-                      * need to know. */
 } hal_spi_esp_bus_impl_t;
 
 _Static_assert(sizeof(hal_spi_esp_bus_impl_t) <= sizeof(((hal_spi_bus_t *)0)->storage),
@@ -123,8 +115,6 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id, const hal_spi_bus_
     } else if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(err));
         return hal_esp_err_to_status(err);
-    } else {
-        impl->bus_owned = true;
     }
 
     esp_err_t owner_err =
@@ -304,7 +294,15 @@ hal_status_t hal_spi_transfer_async(hal_spi_device_t *dev, const uint8_t *tx, si
      * only real caller and CONFIG_KILNCTL_SPI_ASYNC_FLUSH defaults off, so
      * nothing exercises this path on real hardware today; flagged here
      * rather than silently widened. Report and confirm before this path is
-     * ever turned on. */
+     * ever turned on. Also note: this function's own return value is
+     * unconditionally HAL_OK below (matching the "queued OK" contract) even
+     * when the synchronous transfer just performed failed -- the real
+     * transfer status reaches the caller ONLY through `cb`'s argument, never
+     * through this call's return value. A caller that ignores `cb` (or
+     * passes cb=NULL) has no way to observe a failed transfer here at all;
+     * that is a second, narrower consequence of the same interface mismatch,
+     * not a separate bug -- fixing the callback-signature mismatch properly
+     * would fix this too. */
     esp_err_t err = spi_owner_transfer(&dev_impl->bus->owner, dev_impl->device, tx, len, NULL, 0,
                                         dev_impl->cs_pin);
     if (cb) {

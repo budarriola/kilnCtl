@@ -66,6 +66,14 @@ static void log_transfer(fake_spi_xfer_kind_t kind, int dev_slot,
     r->rx_len = (rx_len > FAKE_SPI_MAX_RX_BYTES) ? FAKE_SPI_MAX_RX_BYTES : rx_len;
     if (rx && r->rx_len) memcpy(r->rx, rx, r->rx_len);
     r->timeout_ms = timeout_ms;
+    /* cs_pin is looked up from the device slot rather than threaded through
+     * every do_sync_transfer()/hal_spi_transfer_async() call site: it is
+     * fixed at hal_spi_device_attach() time (hal_spi_device_cfg_t.cs_pin)
+     * and never changes per-transfer, so every caller of log_transfer()
+     * already has dev_slot in hand. */
+    r->cs_pin = (dev_slot >= 0 && dev_slot < FAKE_SPI_MAX_DEVICES && s_devices[dev_slot].in_use)
+                    ? s_devices[dev_slot].cfg.cs_pin
+                    : HAL_CS_NONE;
 }
 
 static fake_spi_bus_slot_t *get_bus(const hal_spi_bus_t *bus)
