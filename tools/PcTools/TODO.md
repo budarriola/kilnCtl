@@ -20,7 +20,7 @@ main board's.
 | Path | Reaches | Notes |
 |---|---|---|
 | **USB serial → ESP32** | ESP directly, **and the Pico through it** | The primary path. The `SAFETY` task (task 7) already relays; no second cable |
-| **USB-TTL adapter → isolated UART** | Pico directly | For bring-up before the ESP side works, or when the ESP is the thing under suspicion. **Must invert** — see `firmware/SaftyFW/docs/HARDWARE.md` §1 |
+| **USB-TTL adapter → isolated UART** | Pico directly | For bring-up before the ESP side works, or when the ESP is the thing under suspicion. **Must invert** — see `firmware/SaftyFW/docs/HARDWARE.md` §1. **2026-09-05: this row is documentation only** — `link_hub.py` has no code path for a direct USB-TTL-to-Pico connection; every `RemoteUartLink`/hub client goes through the single ESP-attached serial port. Using this path today means a separate ad hoc script/terminal outside `kilnctrl`, not this tool. |
 | **SWD/RTT → Pico** | Pico directly | Development and flashing. Also the only path when the Pico will not talk |
 
 - [x] `Peer` abstraction — 2026-09-05 assessed: doesn't apply as written.
@@ -37,6 +37,9 @@ main board's.
       never honor. Pinned by `tests/test_link_hub_routing.py`'s negative
       case: an unrecognized device id passes through `_as_device` unchanged
       rather than being coerced onto a device that happens to exist.
+- [x] Every tool takes a peer argument — N/A, same 2026-09-05 assessment:
+      most tools can only ever address one processor, so a peer argument
+      would let them accept a value they can never honor
 - [x] Pico-through-the-ESP path working end to end (no second cable) —
       unblocked 2026-08-23: the isolated link was capped at 9600 baud by the
       TCMT1109 optocouplers (115200 delivered zero frames, ever), not dead.
@@ -259,6 +262,9 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
       only ever address one processor
 - [x] Pico-through-the-ESP path working (no second cable)
 - [ ] Direct USB-TTL path documented, **with the inversion requirement stated**
+      — 2026-09-05: the doc row exists (Three transports table above) but
+      `link_hub.py` implements no code path for it; it's a separate
+      cable/terminal outside `kilnctrl` today
 - [ ] SWD/RTT path documented for flashing and for a Pico that will not talk
 - [x] GUI grows a safety column rather than a second application — see
       2026-09-05 note above (status-bar summary, `gui.py`/`gui_safety.py`)

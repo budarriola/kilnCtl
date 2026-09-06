@@ -84,6 +84,11 @@ _DEVICE_LOG_HISTORY_LINES = 2000
 _THERMO_REPORT_PERIOD_MS = 1000
 _IO_REPORT_PERIOD_MS = 500
 _SAFETY_POLL_MS = 2000
+#: Above this, the ESP's cached Pico status is old enough to call out in the
+#: status-bar summary rather than silently keep showing the last good text --
+#: comfortably more than one poll period's worth of Pico->ESP reporting so an
+#: ordinary jitter tick doesn't flap the label.
+_SAFETY_STALE_AGE_MS = 5000
 _FIRING_POLL_MS = 3000
 _DEVICE_LOG_COLORS: dict[LogLevel, str] = {
     LogLevel.ERROR: "#a11",
@@ -296,7 +301,16 @@ class SafetyMixin:
             lambda: self.safety.get_status(),
             self._apply_safety_status,
             error_types=(SafetyQueryError,),
+            on_error=self._on_safety_query_error,
         )
+
+    def _on_safety_query_error(self, exc: BaseException) -> None:
+        """A failed Safety status read must not leave the last good summary
+        text on screen -- that would read as "still fine" when it's actually
+        "we don't know" (see TODO.md's paired-state class: two things that
+        looked consistent only because the failing side never updated)."""
+        self.safety_summary_var.set("Safety: no reply")
+        self.safety_summary_label.config(foreground=_BAD_COLOR)
 
     def safety_read_stats_async(self) -> None:
         def apply(stats) -> None:
@@ -316,8 +330,17 @@ class SafetyMixin:
         if status.estop:
             self.safety_summary_var.set("Safety: E-STOP")
             self.safety_summary_label.config(foreground=_BAD_COLOR)
+        elif status.fault_asserted:
+            # The Pico's own fault output, not a locally-clean thermocouple
+            # reading -- a fault-asserted board must never read OK just
+            # because *our* TC happens to be fine.
+            self.safety_summary_var.set("Safety: FAULT asserted")
+            self.safety_summary_label.config(foreground=_BAD_COLOR)
         elif not status.link_up:
             self.safety_summary_var.set("Safety: link down (expected, no RP2040 FW)")
+            self.safety_summary_label.config(foreground=_EXPECTED_COLOR)
+        elif not status.never_received and status.age_ms > _SAFETY_STALE_AGE_MS:
+            self.safety_summary_var.set(f"Safety: stale ({status.age_ms // 1000}s)")
             self.safety_summary_label.config(foreground=_EXPECTED_COLOR)
         elif status.fault_labels:
             self.safety_summary_var.set("Safety: TC fault")

@@ -23,6 +23,10 @@ def test_as_device_unknown_value_passes_through_unchanged():
     # Negative case: there is no Device.SAFETY. An unknown id (e.g. a stray
     # "peer" constant from a future change) must come back as the same raw
     # int, not silently remapped to Device.ESP -- that would make a routing
-    # bug on the client side invisible on the hub side.
-    assert _as_device(7) == 7
-    assert not isinstance(_as_device(7), Device)
+    # bug on the client side invisible on the hub side. Use the next free
+    # Device value (2 -- ESP=0, HOST=1) rather than an arbitrary-looking 7,
+    # so the test reads as "not a defined device" rather than a magic number.
+    unknown = max(int(d) for d in Device) + 1
+    assert unknown == 2
+    assert _as_device(unknown) == 2
+    assert not isinstance(_as_device(unknown), Device)

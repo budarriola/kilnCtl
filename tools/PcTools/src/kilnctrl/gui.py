@@ -510,7 +510,12 @@ class KilnCtrlApp(
         self.query_wifi_status_async()
         # Compact safety-column summary (status bar) runs regardless of
         # whether the Safety Processor popup is open -- see _build_status_bar.
-        self.safety_refresh_async()
+        # No eager safety_refresh_async() here: compatibility isn't known yet
+        # at this point (query_fw_version_async above is still in flight), so
+        # an immediate call would just be refused and stamp "refused
+        # (firmware version not yet confirmed)" on every connect. The poll
+        # loop's own tick already gates on self.info.compatible is True and
+        # will pick up the first real read as soon as that lands.
         self._safety_schedule_poll()
 
     def _set_connection_state(self) -> None:
@@ -575,6 +580,7 @@ class KilnCtrlApp(
         query: Callable[[], object],
         apply: Callable[[object], None],
         error_types: tuple = (Exception,),
+        on_error: Optional[Callable[[BaseException], None]] = None,
     ) -> bool:
         """Run a device *query* on a worker thread and apply its result on the
         Tk thread.
@@ -583,6 +589,12 @@ class KilnCtrlApp(
         queries (which are exempt, being how compatibility is discovered),
         the device tasks' queries are device commands too. Returns False if
         the query was refused before it started.
+
+        ``on_error``, when given, also runs on the Tk thread for any of
+        ``error_types`` (not the refused-before-start cases above, nor the
+        defensive catch-all) -- for a page whose display must not just keep
+        showing stale good data when a query starts failing (see
+        gui_safety.py's status-bar summary).
         """
         if not self.link.is_connected:
             self.set_status(f"{description}: not connected.", error=True)
@@ -602,6 +614,16 @@ class KilnCtrlApp(
             except error_types as exc:
                 self.session_log.warning("%s failed: %s", description, exc)
                 self.results.put((description, str(exc), True))
+                if on_error is not None:
+                    # `except ... as exc` is deleted by Python at the end of
+                    # this block, but self.post() defers the lambda until
+                    # later on the Tk thread -- bind it to a plain local
+                    # first, or on_error's closure raises NameError when it
+                    # actually runs (see test_no_undefined_names.py's
+                    # gui_about.py/gui_display.py "exc" entries for this
+                    # exact bug already live elsewhere).
+                    err = exc
+                    self.post(lambda: on_error(err))
                 return
             except Exception as exc:  # pragma: no cover - defensive
                 self.session_log.error("%s error: %s", description, exc)
@@ -638,6 +660,13 @@ class KilnCtrlApp(
         if not connected and self.connect_button["text"] == "Disconnect":
             self._set_connection_state()
         if self._was_connected and not connected:
+            # Cable-yank path: toggle_connect's own disconnect branch never
+            # ran, so its safety-summary reset and poll-stop have to happen
+            # here too -- otherwise the status bar keeps showing the last
+            # good "Safety: OK" after the link is actually gone.
+            self._safety_stop_poll()
+            self.safety_summary_var.set("Safety: --")
+            self.safety_summary_label.config(foreground="")
             # Link was up last poll, is down now, and nobody clicked
             # Disconnect -- record it with a timestamp so a reboot/dropout
             # burst is visible in the log file after the fact, not just as a
