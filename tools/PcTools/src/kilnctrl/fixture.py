@@ -1,0 +1,397 @@
+"""Client for the UnitTestFixture board's PCF8575 relay-control surface.
+
+This is a **second, independent** board from the kilnCtl main controller:
+its own ESP32-S3, its own USB-UART bridge, its own hardened UART link (same
+wire framing as ``kilnctrl.protocol`` -- SLIP byte-stuffing, CRC-16/CCITT-
+FALSE header, ACK/NACK/retry -- but a completely different task/subcommand
+map, defined in ``firmware/UnitTestFw/UnitTest/docs/UART_PROTOCOL.md``).
+Never share a link/port between this module and the main ``kilnctrl``
+``UartLink`` -- they are two physical boards.
+
+Only the PCF8575 I/O-expander task (task 7) is in scope here, per the
+2026-09-05 owner decision (``docs/UNIT_TEST_FIXTURE_PLAN.md``): drive the
+fixture's relays. The DAC/AD9833/OLED tasks that firmware also exposes are
+out of scope and untouched.
+
+As of that plan's authoring, the fixture's schematic
+(``hardware/UnitTestFixture/UnitTestFixture.kicad_sch``) wires up two
+PCF8575DBR expanders (U4, U5) with their P0x/P1x pins broken out but **not**
+yet connected to any relay coil, connector, or thermocouple switch network --
+the physical relay board this plan targets has not been laid out yet. The
+relay map below is therefore a placeholder keyed by raw ``U<n>:P<pin>``
+expander-pin names (2 expanders x 16 pins), not by function ("heater 1
+open"), so it can be relabeled with zero code changes once real relay
+wiring lands -- update :data:`DEFAULT_RELAY_MAP` (or pass a caller-supplied
+map into :class:`FixtureClient`) at that point.
+"""
+
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+from dataclasses import dataclass
+from typing import Optional
+
+from .protocol import Device, Frame, MsgType  # noqa: F401 - re-exported for callers/tests
+from .serial_link import SendResult, UartLink
+from .serial_link import list_ports as _list_serial_ports
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Wire constants -- fixture firmware's own protocol, NOT kilnctrl's.
+# See firmware/UnitTestFw/UnitTest/docs/UART_PROTOCOL.md.
+# ---------------------------------------------------------------------------
+FIXTURE_BAUD_RATE = 115200
+UART_TASK_ID_PCF8575 = 7
+
+PCF8575_CMD_WRITE_PORT = 0x01
+PCF8575_CMD_WRITE_PIN = 0x02
+PCF8575_CMD_SET_MASK = 0x03
+PCF8575_CMD_CLEAR_MASK = 0x04
+PCF8575_CMD_TOGGLE_MASK = 0x05
+PCF8575_CMD_READ_PORT = 0x06
+PCF8575_CMD_SET_ADDRESS = 0x07
+PCF8575_CMD_SCAN = 0x08
+
+PCF8575_ADDR_MIN = 0x20
+PCF8575_ADDR_MAX = 0x27
+PCF8575_PIN_COUNT = 16
+
+#: USB VID:PID for the fixture's own USB-UART bridge: a CH340K, confirmed by
+#: bench enumeration 2026-09-05 (both boards plugged in simultaneously):
+#:   fixture   ESP32-S3 native USB-Serial-JTAG  303A:1001  SER=68:B6:B3:29:D0:B8 (COM7)
+#:   fixture   CH340K UART                       1A86:7522  no serial number     (COM14)
+#:   main board ESP32-S3 native USB-Serial-JTAG  303A:1001  SER=1C:DB:D4:92:F4:7C (COM3)
+#:   main board CH343 UART                        1A86:55D3  SER=552E006806       (COM6)
+#: The two boards' UART bridges are DIFFERENT silicon (CH340K vs CH343), so
+#: VID:PID alone distinguishes them here -- unlike the two ESP32-S3 native
+#: ports, which share 303A:1001 and are told apart only by serial number (see
+#: mcp_server_flash.py's pinned adapter_serial for that side). The CH340K
+#: itself reports no per-device serial (Windows still strips MI_xx from a
+#: composite descriptor, but there is no serial to strip here in the first
+#: place), so if a second CH340K-based board ever joins the bench, VID:PID
+#: stops being sufficient and an explicit port will be required again -- see
+#: docs/UNIT_TEST_FIXTURE_PLAN.md "PC connection identity".
+FIXTURE_VID_PID_HINT = "1A86:7522"
+
+#: Descriptor substrings that mean "definitely not the fixture's UART bridge"
+#: -- the two CMSIS-DAP debug probes, both boards' JTAG/Serial-JTAG ports,
+#: and the main board's own CH343 bridge (1A86:55D3 -- a different chip
+#: family from the fixture's CH340K, but excluded by name too as a second,
+#: independent check: see test_fixture.py's
+#: test_recommend_never_picks_main_board_ch343). Kept separate from
+#: kilnctrl's own _PORT_HINTS (serial_link.py) rather than imported, since
+#: this module must not depend on that link's board-specific scoring
+#: assumptions.
+_EXCLUDE_HINTS = ("jtag", "cmsis-dap", "debug", "mbed", "55d3", "ch343")
+
+
+class FixtureError(RuntimeError):
+    """Raised for any fixture link/relay failure the caller should see."""
+
+
+@dataclass(frozen=True)
+class RelayId:
+    """One PCF8575 pin, addressed by expander I2C address + pin number."""
+
+    address: int
+    pin: int
+
+
+def _default_relay_map() -> "dict[str, RelayId]":
+    """U4/U5, both expander pins, named generically -- see module docstring.
+
+    U4 is assumed at the Kconfig/board default 0x20; U5's address is NOT
+    confirmed from the schematic (no address-strap resistors were traced as
+    part of this plan) and is provisionally 0x21 pending a bench SCAN. Do not
+    trust this second address without running ``fixture_get_relays()`` (which
+    surfaces the live SCAN) at least once per bench session.
+    """
+    relay_map: "dict[str, RelayId]" = {}
+    for expander_index, address in ((4, 0x20), (5, 0x21)):
+        for pin in range(PCF8575_PIN_COUNT):
+            relay_map[f"U{expander_index}:P{pin:02d}"] = RelayId(address=address, pin=pin)
+    return relay_map
+
+
+#: Data-driven so a future real relay-board revision only has to replace this
+#: dict (or pass its own into FixtureClient) -- no code changes.
+DEFAULT_RELAY_MAP: "dict[str, RelayId]" = _default_relay_map()
+
+
+def recommend_fixture_port() -> Optional[str]:
+    """Best-effort port guess: prefers the fixture's CH340K VID:PID
+    (:data:`FIXTURE_VID_PID_HINT`) and always excludes both boards' JTAG
+    ports and the main board's CH343 bridge (see ``_EXCLUDE_HINTS``).
+
+    Does NOT positively confirm the fixture beyond that VID:PID match -- a
+    second CH340K-based device on the bench would still be ambiguous, see
+    FIXTURE_VID_PID_HINT's docstring. Prefer an explicit
+    ``KILNCTL_FIXTURE_PORT``/``port=`` when in doubt.
+    """
+    candidates = []
+    hinted = []
+    for info in _list_serial_ports():
+        haystack = f"{info.description} {info.hwid}".lower()
+        if any(bad in haystack for bad in _EXCLUDE_HINTS):
+            continue
+        candidates.append(info)
+        if FIXTURE_VID_PID_HINT.lower() in info.hwid.lower():
+            hinted.append(info)
+    pool = hinted or candidates
+    if not pool:
+        return None
+    return pool[0].device
+
+
+class _Pending:
+    def __init__(self, subcommand: int) -> None:
+        self.subcommand = subcommand
+        self.event = threading.Event()
+        self.value: object = None
+
+
+def _pack_u16_le(value: int) -> bytes:
+    return bytes((value & 0xFF, (value >> 8) & 0xFF))
+
+
+def _unpack_u16_le(data: bytes, offset: int) -> int:
+    return data[offset] | (data[offset + 1] << 8)
+
+
+class FixtureClient:
+    """Owns one :class:`~kilnctrl.serial_link.UartLink` to the UnitTestFixture
+    board's PCF8575 task (task 7), plus a relay name -> pin map.
+
+    De-energizes everything on connect and on disconnect/close, per the
+    2026-09-05 owner decision: this device should never be left mid-state
+    between sessions. "De-energize" here means writing every mapped pin to 1
+    (weak pull-up / quasi-bidirectional "input" state, the PCF8575's power-on
+    default) -- see docs/PCF8575.md: whether that reads as a relay's coil
+    OFF or ON on real hardware depends on the (not-yet-designed) drive
+    polarity, so treat "all pins high" as the fixture's own rest state, not
+    as a verified "all relays open" claim, until a bench pass confirms it.
+    """
+
+    def __init__(
+        self,
+        relay_map: Optional["dict[str, RelayId]"] = None,
+        baudrate: int = FIXTURE_BAUD_RATE,
+    ) -> None:
+        self.relay_map = dict(relay_map if relay_map is not None else DEFAULT_RELAY_MAP)
+        self._link = UartLink(baudrate=baudrate)
+        self._inbox: Optional["queue.Queue[Frame]"] = None
+        self._pending: Optional[_Pending] = None
+        self._pending_lock = threading.Lock()
+        self._query_lock = threading.RLock()
+        self._stop = threading.Event()
+        self._consumer: Optional[threading.Thread] = None
+        #: last value written per address, so an unmapped pin on the same
+        #: expander isn't clobbered by a single-pin write (mask read-modify-
+        #: write happens on the firmware side, but WRITE_PIN there works on
+        #: its own shadow per address -- see PCF8575.md's shadow section).
+        self._shadow: "dict[int, int]" = {}
+        #: which address the *firmware* is currently talking to, as far as
+        #: this client knows. None until the first SET_ADDRESS/connect, so
+        #: the very first operation always retargets explicitly rather than
+        #: assuming the firmware's boot default -- a prior session (or this
+        #: client's own all_off() loop, which visits every address) can leave
+        #: it pointed anywhere. Skipping SET_ADDRESS just because a target
+        #: happens to equal PCF8575_ADDR_MIN was the original (wrong)
+        #: shortcut here: it silently wrote to whatever address the *last*
+        #: operation left the firmware on.
+        self._current_address: Optional[int] = None
+
+    # -- lifecycle -----------------------------------------------------
+    @property
+    def is_connected(self) -> bool:
+        return self._link.is_connected
+
+    def connect(self, port: Optional[str] = None) -> str:
+        if self.is_connected:
+            raise FixtureError(f"already connected to {self._link.port}")
+        resolved = port or recommend_fixture_port()
+        if resolved is None:
+            raise FixtureError(
+                "no candidate serial port found for the fixture - pass port= "
+                "explicitly (or set KILNCTL_FIXTURE_PORT)"
+            )
+        opened = self._link.connect(resolved)
+        self._inbox = self._link.register_task(UART_TASK_ID_PCF8575)
+        self._stop.clear()
+        self._consumer = threading.Thread(
+            target=self._consume_loop, name="fixture-pcf8575-rx", daemon=True
+        )
+        self._consumer.start()
+        try:
+            self.all_off()
+        except FixtureError:
+            log.warning("fixture connected but initial all-off failed", exc_info=True)
+        return opened
+
+    def disconnect(self) -> None:
+        if self.is_connected:
+            try:
+                self.all_off()
+            except FixtureError:
+                log.warning("all-off before disconnect failed", exc_info=True)
+        self._stop.set()
+        if self._consumer is not None and self._consumer is not threading.current_thread():
+            self._consumer.join(timeout=2.0)
+        self._consumer = None
+        if self._inbox is not None:
+            self._link.unregister_task(UART_TASK_ID_PCF8575)
+            self._inbox = None
+        self._link.disconnect()
+        self._current_address = None
+        self._shadow.clear()
+
+    def close(self) -> None:
+        """Alias kept for symmetry with the other *Client classes in this
+        package (mcp_server.py's shutdown loop calls ``.close()`` on every
+        client uniformly)."""
+        self.disconnect()
+
+    # -- relay map -------------------------------------------------------
+    def list_relays(self) -> "list[str]":
+        return sorted(self.relay_map)
+
+    def _resolve(self, name: str) -> RelayId:
+        try:
+            return self.relay_map[name]
+        except KeyError as exc:
+            raise FixtureError(
+                f"unknown relay {name!r} - known: {', '.join(sorted(self.relay_map))}"
+            ) from exc
+
+    # -- writes ------------------------------------------------------------
+    def set_relay(self, name: str, on: bool) -> None:
+        """Energize/de-energize one relay by name.
+
+        ``on=True`` drives the pin low (0); ``on=False`` releases it to the
+        weak pull-up (1) -- see docs/PCF8575.md. Whether "pin low" maps to a
+        relay's coil actually energizing depends on drive-circuit polarity
+        not yet designed; this is the firmware-level convention only.
+        """
+        relay = self._resolve(name)
+        self._ensure_address(relay.address)
+        level = 0 if on else 1
+        payload = bytes((PCF8575_CMD_WRITE_PIN, relay.pin & 0xFF, level & 0xFF))
+        result = self._send(payload)
+        if result != SendResult.OK:
+            raise FixtureError(f"set_relay({name!r}, {on}) failed: {result.describe()}")
+        shadow = self._shadow.get(relay.address, 0xFFFF)
+        if level:
+            shadow |= 1 << relay.pin
+        else:
+            shadow &= ~(1 << relay.pin) & 0xFFFF
+        self._shadow[relay.address] = shadow
+
+    def all_off(self) -> None:
+        """De-energize every mapped relay (see class docstring for what
+        "off" means at the pin level)."""
+        addresses = sorted({relay.address for relay in self.relay_map.values()})
+        for address in addresses:
+            self._ensure_address(address)
+            result = self._send(bytes((PCF8575_CMD_WRITE_PORT, 0xFF, 0xFF)))
+            if result != SendResult.OK:
+                raise FixtureError(f"all_off() on 0x{address:02X} failed: {result.describe()}")
+            self._shadow[address] = 0xFFFF
+
+    def _ensure_address(self, address: int) -> None:
+        """SET_ADDRESS the firmware to ``address`` unless we already believe
+        it is there -- see ``_current_address``'s docstring for why this
+        cannot be skipped just because ``address`` is the Kconfig default."""
+        if not (PCF8575_ADDR_MIN <= address <= PCF8575_ADDR_MAX):
+            raise FixtureError(f"address 0x{address:02X} out of range 0x20-0x27")
+        if self._current_address == address:
+            return
+        result = self._send(bytes((PCF8575_CMD_SET_ADDRESS, address & 0xFF)))
+        if result != SendResult.OK:
+            raise FixtureError(f"SET_ADDRESS(0x{address:02X}) failed: {result.describe()}")
+        self._current_address = address
+
+    def _send(self, payload: bytes) -> SendResult:
+        if not self.is_connected:
+            return SendResult.NOT_CONNECTED
+        return self._link.send(
+            dst_task=UART_TASK_ID_PCF8575, src_task=UART_TASK_ID_PCF8575, payload=payload
+        )
+
+    # -- reads -------------------------------------------------------------
+    def get_relays(self, timeout: float = 2.0) -> "dict[str, bool]":
+        """Read back every mapped relay's live pin state via READ_PORT.
+
+        One query per distinct address on the map. A pin currently driven
+        low by us always reads 0 regardless of external wiring (PCF8575.md);
+        a pin left at the weak pull-up reads whatever is externally wired.
+        """
+        addresses = sorted({relay.address for relay in self.relay_map.values()})
+        pins_by_address: "dict[int, int]" = {}
+        for address in addresses:
+            self._ensure_address(address)
+            pins_by_address[address] = self._read_port(timeout)
+        out: "dict[str, bool]" = {}
+        for name, relay in self.relay_map.items():
+            pins = pins_by_address.get(relay.address, 0)
+            out[name] = not bool(pins & (1 << relay.pin))  # low == energized == True
+        return out
+
+    def _read_port(self, timeout: float) -> int:
+        with self._query_lock:
+            pending = _Pending(PCF8575_CMD_READ_PORT)
+            with self._pending_lock:
+                self._pending = pending
+            try:
+                result = self._send(bytes((PCF8575_CMD_READ_PORT,)))
+                if result != SendResult.OK:
+                    raise FixtureError(f"READ_PORT not delivered: {result.describe()}")
+                if not pending.event.wait(timeout):
+                    raise FixtureError(
+                        f"READ_PORT was ACKed but no reply arrived within {timeout:.1f}s"
+                    )
+                return pending.value  # type: ignore[return-value]
+            finally:
+                with self._pending_lock:
+                    if self._pending is pending:
+                        self._pending = None
+
+    # -- receive -------------------------------------------------------
+    def _consume_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                frame = self._inbox.get(timeout=0.2)  # type: ignore[union-attr]
+            except queue.Empty:
+                continue
+            except AttributeError:
+                return  # inbox torn down mid-shutdown
+            try:
+                self._handle_reply(frame)
+            except Exception:  # pragma: no cover - never kill the consumer
+                log.exception("error handling fixture PCF8575 frame")
+
+    def _handle_reply(self, frame: Frame) -> None:
+        payload = frame.payload
+        if not payload:
+            return
+        subcommand = payload[0]
+        if subcommand == PCF8575_CMD_READ_PORT:
+            if len(payload) < 5:
+                log.warning("dropping short READ_PORT reply: %r", payload)
+                return
+            pins = _unpack_u16_le(payload, 1)
+            value: object = pins
+        elif subcommand == PCF8575_CMD_SCAN:
+            count = payload[1] if len(payload) > 1 else 0
+            value = list(payload[2 : 2 + count])
+        else:
+            log.debug("ignoring fixture reply with subcommand 0x%02X", subcommand)
+            return
+
+        with self._pending_lock:
+            pending = self._pending
+        if pending is not None and pending.subcommand == subcommand:
+            pending.value = value
+            pending.event.set()

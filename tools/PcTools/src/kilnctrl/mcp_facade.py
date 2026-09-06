@@ -27,6 +27,7 @@ GROUP_PREFIXES = (
     ("io_", "io"),
     ("expander_", "io"),
     ("touch_", "touch"),
+    ("fixture_", "fixture"),
     ("ui_", "ui_test"),
     ("safety_", "safety"),
     ("ota_", "ota"),
@@ -86,6 +87,10 @@ KEYWORDS = {
     "thermo_read_faults": ("open", "circuit", "broken", "thermocouple"),
     "io_set_relay": ("sx1509", "switch", "output", "coil"),
     "io_all_relays_off": ("panic", "stop", "safe", "everything"),
+    "fixture_set_relay": ("unittestfixture", "pcf8575", "expander", "bench", "short", "open"),
+    "fixture_all_off": ("unittestfixture", "pcf8575", "panic", "stop", "safe"),
+    "fixture_get_relays": ("unittestfixture", "pcf8575", "read", "state"),
+    "fixture_list_relays": ("unittestfixture", "pcf8575", "names"),
     # "what is the safety processor doing" is the standard opening question, and
     # every safety_* tool matches the word "safety" equally -- these are what
     # break the tie towards the one that just reports.

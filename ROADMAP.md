@@ -218,7 +218,9 @@ zone arrangement (owner-confirmed 2026-09-03), the deferred S8 sanity rate
 is a control device only** — a PcTools/MCP surface driving its I/O expanders
 to flip relays, for shorting/opening thermocouples, opening heater
 connections, and simulating SSR lock-ups. It stays excluded from the HAL
-boundary and the `drivers/` reorg (M16/`HW_ABSTRACTION_PLAN.md`).
+boundary and the `drivers/` reorg (M16/`HW_ABSTRACTION_PLAN.md`). See
+`docs/UNIT_TEST_FIXTURE_PLAN.md` for the relay inventory, wire protocol, and
+the MCP control surface.
 
 **Blocked on hardware that does not exist yet.** All of this is scripted and
 waiting, not unwritten:

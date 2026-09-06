@@ -405,6 +405,8 @@ from .mcp_server_actions import *  # noqa: F401,F403
 from .mcp_server_log_analysis import *  # noqa: F401,F403
 from .mcp_server_plant_sim import *  # noqa: F401,F403
 from .mcp_server_coupled_ident import *  # noqa: F401,F403
+from .mcp_server_fixture import _close_fixture  # noqa: F401
+from .mcp_server_fixture import *  # noqa: F401,F403
 
 # ---------------------------------------------------------------------------
 # facade + entry point
@@ -444,6 +446,7 @@ def _close() -> None:
     # (see link_hub.py) -- exiting shouldn't yank the physical port out from
     # under it. The disconnect MCP tool is the only thing that should do that.
     _link.close()
+    _close_fixture()  # separate board/port -- own client, not in the tuple above
     _session_log.close()
 
 
