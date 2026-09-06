@@ -219,8 +219,70 @@ hal_status_t hal_spi_transfer_polling(hal_spi_device_t *dev,
                                        uint8_t *rx, size_t rx_len,
                                        uint32_t timeout_ms);
 
-/* HAL_NOT_SUPPORTED unless the backend enables it (feature-gated off by
- * default -- panel_spi_blit.c is the only caller today). */
+/* hal_spi_transfer_async() contract, defined here BEFORE
+ * CONFIG_KILNCTL_SPI_ASYNC_FLUSH is ever turned on (default OFF today,
+ * verified against firmware/KilnFW/sdkconfig -- the sync path
+ * (hal_spi_transfer/_polling) is what actually runs on the board, and
+ * nothing in this contract may change sync behaviour). No production
+ * caller reaches this function today: panel_spi_blit.c's real async flush
+ * goes around the HAL entirely, straight to spi_owner_transfer_async() via
+ * hal_spi_esp_get_owner() (see hal_spi_esp_owner.h) -- this entry point is
+ * currently dead on real hardware, which is exactly why the contract has to
+ * be nailed down now rather than inferred from a working caller later.
+ *
+ * 1. Return value means QUEUED, not completed. HAL_OK means the request was
+ *    accepted by the backend and `cb` WILL fire later for it -- the transfer
+ *    itself has not necessarily happened yet. Any other return
+ *    (HAL_NOT_SUPPORTED, HAL_NOT_READY, HAL_NO_MEM, HAL_INVALID_ARG, ...)
+ *    means the request was NOT queued: `cb` will never fire for this call,
+ *    and the caller must treat it as a synchronous failure (same as
+ *    hal_spi_transfer() returning non-OK).
+ *
+ * 2. Buffer ownership: see the "Buffer-copy-in" bullet in this file's
+ *    top-of-file threading contract -- `tx` must stay valid and unmodified
+ *    until `cb` fires (HAL_OK case only; nothing to keep alive if the call
+ *    itself failed). rx is not supported by this call (write-only, matching
+ *    a display flush); pass a real `tx`/`len` only.
+ *
+ * 3. Callback context: `cb` fires from the backend's OWN owner/worker
+ *    context -- the ESP backend's spi_owner_task (a FreeRTOS task, never an
+ *    ISR); the host fake only from an explicit fake_spi_pump() call in test
+ *    code, standing in for that same worker context. `cb` must never be
+ *    invoked from an interrupt context by any backend.
+ *
+ * 4. Completion cannot be delivered before hal_spi_transfer_async() itself
+ *    returns: a backend must not call `cb` synchronously, inline, before
+ *    handing control back to the caller on a HAL_OK return. (This is the
+ *    bug hal_spi_esp.c's adapter had: it used to perform the transfer
+ *    synchronously and invoke `cb` before returning -- see that file's
+ *    history for the INTERFACE MISMATCH this contract closes.) A caller may
+ *    therefore safely do bookkeeping after the call returns (e.g. set a
+ *    "one flush in flight" flag) without racing an already-fired callback.
+ *
+ * 5. Ordering vs. later transfers on the same device/bus: this request
+ *    joins the SAME single-writer queue as hal_spi_transfer()/
+ *    _transfer_polling() (the "Single-writer per bus" contract above) --
+ *    every backend must issue queued requests strictly FIFO, one at a time,
+ *    never interleaved. A hal_spi_transfer()/_polling() call made by the
+ *    caller AFTER this call returns HAL_OK is therefore guaranteed to be
+ *    issued on the wire only after this async request's own transfer has
+ *    completed, never before and never concurrently -- callers must not
+ *    call a synchronous transfer that read-modifies state this async
+ *    transfer is still writing before its `cb` has fired, but they need not
+ *    add their own queue: the backend's ordering already covers it.
+ *
+ * 6. Full queue / exhausted resources: if the backend's queue or its
+ *    completion-tracking pool is full, hal_spi_transfer_async() returns
+ *    HAL_NO_MEM (never blocks waiting for room) and does not queue the
+ *    request -- `cb` never fires. A backend MAY treat repeated exhaustion
+ *    as bus-wedging (hal_spi_bus_is_wedged() latches true) the same way a
+ *    completion timeout does; a single transient HAL_NO_MEM does not by
+ *    itself imply the bus is wedged. HAL_NOT_SUPPORTED unless the backend
+ *    enables this call at all (feature-gated off by default): the pico
+ *    backend always returns HAL_NOT_SUPPORTED (no async capability, mutex +
+ *    direct blocking call only), and the ESP backend returns it whenever
+ *    the owning spi_owner_t was not created with async_flush enabled
+ *    (CONFIG_KILNCTL_SPI_ASYNC_FLUSH). */
 hal_status_t hal_spi_transfer_async(hal_spi_device_t *dev,
                                      const uint8_t *tx, size_t len,
                                      uint32_t timeout_ms,

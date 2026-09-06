@@ -29,6 +29,7 @@
  */
 #include "hal_spi.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -316,9 +317,57 @@ hal_status_t hal_spi_transfer_polling(hal_spi_device_t *dev, const uint8_t *tx, 
     return hal_esp_err_to_status(err);
 }
 
+/* Per-call bridge between spi_owner_transfer_async()'s callback shape
+ * (`cb(ctx, esp_err_t)`) and hal_spi_async_cb_t's (`cb(ctx, hal_status_t)`)
+ * -- ESP-IDF error codes must not leak through the portable interface.
+ *
+ * FIXED 2026-09-06 (interface/hal_spi.h's hal_spi_transfer_async() contract,
+ * bullets 1 and 4): this used to sidestep the translation problem by NOT
+ * queuing at all -- it called spi_owner_transfer() synchronously and invoked
+ * `cb` itself before returning, which broke the documented contract two
+ * ways: (a) the transfer completed (or failed) before the caller ever saw
+ * this function return, so a caller relying on "queued now, notified later"
+ * (e.g. clearing an in-flight flag only in `cb`) could observe `cb` having
+ * already run by the time it checked that flag, and (b) this function's own
+ * return value was unconditionally HAL_OK even when the synchronous
+ * transfer had just failed, so a caller that passed cb=NULL had no way to
+ * observe a failed transfer at all. Both are gone now: this function does
+ * not touch the bus itself, only enqueues through spi_owner_transfer_async()
+ * exactly like a real async backend must, and returns whatever status that
+ * enqueue attempt produced -- `cb` fires later, from spi_owner_task()'s own
+ * thread, never here.
+ *
+ * The one caller-visible allocation this requires is a small per-call
+ * heap block carrying `cb`/`ctx` across to the owner task's thread (freed
+ * by the trampoline right before it returns) -- spi_owner_request_t has
+ * exactly one void* async_ctx slot and no room for a second function
+ * pointer plus a portable-status translation without either widening that
+ * struct (extending esp_spi_owner.c's already-reviewed, 56 B-per-request
+ * shape for a caller this adapter currently has zero production traffic
+ * from -- see hal_spi.h's contract comment: panel_spi_blit.c bypasses this
+ * adapter entirely) or doing exactly this. Freed on every path: a failed
+ * enqueue frees it immediately below (before returning), a successful one
+ * lets the trampoline free it once `cb` has run. */
+typedef struct {
+    hal_spi_async_cb_t cb;
+    void *ctx;
+} hal_spi_esp_async_trampoline_t;
+
+static void hal_spi_esp_async_trampoline(void *ctx, esp_err_t result) {
+    hal_spi_esp_async_trampoline_t *tramp = (hal_spi_esp_async_trampoline_t *)ctx;
+    hal_spi_async_cb_t user_cb = tramp->cb;
+    void *user_ctx = tramp->ctx;
+    free(tramp);
+    if (user_cb) {
+        user_cb(user_ctx, hal_esp_err_to_status(result));
+    }
+}
+
 hal_status_t hal_spi_transfer_async(hal_spi_device_t *dev, const uint8_t *tx, size_t len,
                                      uint32_t timeout_ms, hal_spi_async_cb_t cb, void *ctx) {
-    (void)timeout_ms;
+    (void)timeout_ms; /* spi_owner_transfer_async() takes no caller-supplied
+                        * timeout either -- same fixed-margin reasoning as
+                        * hal_spi_transfer() above. */
     if (!dev) {
         return HAL_INVALID_ARG;
     }
@@ -326,37 +375,45 @@ hal_status_t hal_spi_transfer_async(hal_spi_device_t *dev, const uint8_t *tx, si
     if (!dev_impl->bus || !dev_impl->device) {
         return HAL_NOT_READY;
     }
-    /* spi_owner_transfer_async()'s callback shape (`cb(ctx, esp_err_t)`) is
-     * not hal_spi_async_cb_t's shape (`cb(ctx, hal_status_t)`) -- ESP-IDF
-     * error codes must not leak through the portable interface. A single
-     * static trampoline can't close over `cb`/`ctx` per-call without adding
-     * per-call heap/pool state (exactly the duplication this rewrite
-     * removes), so this backend narrows to synchronous-equivalent dispatch:
-     * it calls the owner synchronously via spi_owner_transfer() and invokes
-     * `cb` itself with the translated status before returning.
-     * // INTERFACE MISMATCH: hal_spi_transfer_async's contract (interface/
-     * hal_spi.h) is "the caller returns as soon as the request is queued,
-     * cb fires later from the owner task's own thread" -- this adapter
-     * cannot preserve that without either widening hal_spi_async_cb_t's
-     * signature to carry esp_err_t or giving the adapter its own
-     * per-request callback-translation slot (the kind of state this
-     * rewrite is explicitly trying to eliminate). panel_spi_blit.c is the
-     * only real caller and CONFIG_KILNCTL_SPI_ASYNC_FLUSH defaults off, so
-     * nothing exercises this path on real hardware today; flagged here
-     * rather than silently widened. Report and confirm before this path is
-     * ever turned on. Also note: this function's own return value is
-     * unconditionally HAL_OK below (matching the "queued OK" contract) even
-     * when the synchronous transfer just performed failed -- the real
-     * transfer status reaches the caller ONLY through `cb`'s argument, never
-     * through this call's return value. A caller that ignores `cb` (or
-     * passes cb=NULL) has no way to observe a failed transfer here at all;
-     * that is a second, narrower consequence of the same interface mismatch,
-     * not a separate bug -- fixing the callback-signature mismatch properly
-     * would fix this too. */
-    esp_err_t err = spi_owner_transfer(dev_impl->bus->owner, dev_impl->device, tx, len, NULL, 0,
-                                        dev_impl->cs_pin);
-    if (cb) {
-        cb(ctx, hal_esp_err_to_status(err));
+
+    hal_spi_esp_async_trampoline_t *tramp = malloc(sizeof(*tramp));
+    if (!tramp) {
+        /* Contract bullet 6: full queue / exhausted resources -> HAL_NO_MEM,
+         * nothing queued, cb never fires. */
+        return HAL_NO_MEM;
     }
+    tramp->cb = cb;
+    tramp->ctx = ctx;
+
+    esp_err_t err = spi_owner_transfer_async(dev_impl->bus->owner, dev_impl->device, tx, len,
+                                              dev_impl->cs_pin, hal_spi_esp_async_trampoline, tramp);
+    if (err != ESP_OK) {
+        /* Not queued -- see spi_owner_transfer_async()'s own contract:
+         * ESP_ERR_NOT_SUPPORTED (async_flush off, i.e.
+         * CONFIG_KILNCTL_SPI_ASYNC_FLUSH default n -> HAL_NOT_SUPPORTED),
+         * ESP_ERR_INVALID_STATE (bus latched wedged), ESP_ERR_NO_MEM (slot
+         * pool exhausted), or ESP_ERR_TIMEOUT (the owner's request queue
+         * itself did not accept the request within SPI_OWNER_TRANSFER_
+         * TIMEOUT_MS -- i.e. the queue was full and stayed full). None of
+         * these hand the request to the owner task, so `tramp` must be
+         * freed here -- the trampoline will never run for it.
+         *
+         * hal_spi.h bullet 6's contract is explicit: "full queue / exhausted
+         * resources" -> HAL_NO_MEM, never HAL_TIMEOUT (that is reserved for
+         * a queued-but-not-yet-completed transfer timing out, which this
+         * call never waits for at all). The generic hal_esp_err_to_status()
+         * mapper does not know that distinction and maps ESP_ERR_TIMEOUT to
+         * HAL_TIMEOUT unconditionally, so it must be special-cased here
+         * rather than reused as-is for this one error. */
+        if (err == ESP_ERR_TIMEOUT) {
+            free(tramp);
+            return HAL_NO_MEM;
+        }
+        free(tramp);
+        return hal_esp_err_to_status(err);
+    }
+    /* Enqueued successfully -- contract bullet 1/4: return now, `cb` fires
+     * later from spi_owner_task()'s own thread via the trampoline above,
+     * never from this call. */
     return HAL_OK;
 }

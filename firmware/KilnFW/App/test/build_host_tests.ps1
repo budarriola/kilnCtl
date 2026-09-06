@@ -107,6 +107,8 @@ $sources = @(
     (Join-Path $driversDir "hw/st7796_panel.c"),
     (Join-Path $driversDir "hw/panel_detect.c"),
     (Join-Path $hwAbsDir "esp/spi/owner_slot_pool.c"),
+    (Join-Path $hwAbsDir "host/fake_gpio.c"),
+    (Join-Path $hwAbsDir "common/hal_status.c"),
     (Join-Path $driversDir "common/stack_margin.c"),
     (Join-Path $driversDir "net/time_sync_tz.c"),
     (Join-Path $driversDir "persist/log_store.c"),
@@ -796,19 +798,37 @@ $cmd27 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 
 Invoke-HostTestExe -Name "hal_spi_adopt" -ExePath $exe27 -BuildCmd $cmd27
 
+# ---- test_hal_spi_async.c: its own 28th, separate executable --------------
+# 2026-09-06: hal_spi_transfer_async()'s return/callback contract
+# (interface/hal_spi.h), defined BEFORE CONFIG_KILNCTL_SPI_ASYNC_FLUSH is
+# ever turned on -- see that header's doc comment on the function. Same
+# "hal_spi_esp.c cannot link on host" scope note as exe25/exe27 above: this
+# exercises the contract as fake_spi.c (the host backend) models it --
+# no-synchronous-completion, FIFO completion ordering, and the queue-full/
+# wedge path. Links only fake_spi.c + hal_status.c, same shape as exe27.
+$exe28 = Join-Path $outDir "kilnctl_host_tests_hal_spi_async.exe"
+$spiAsyncObjDir = Join-Path $outDir "spiasync"
+New-Item -ItemType Directory -Force -Path $spiAsyncObjDir | Out-Null
+$cmd28 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+        "/Fo:`"$spiAsyncObjDir\\`" /Fe:`"$exe28`" " +
+        "`"$(Join-Path $testDir 'test_hal_spi_async.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_spi.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+
+Invoke-HostTestExe -Name "hal_spi_async" -ExePath $exe28 -BuildCmd $cmd28
+
 # ---- summary ----------------------------------------------------------
 #
-# 27 executables are attempted above (main + zones_http + safety_cfg_http +
+# 28 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
 # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
 # zone_coupling_solve + partition_info_http + adaptive_tune_http +
 # profiles_builtin + ft6336u + max31856_hal_spi + hal_i2c_adopt +
-# hal_spi_adopt).
+# hal_spi_adopt + hal_spi_async).
 # Report how many of those were even built, separately from how many of the
 # built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 27
+$totalExpected = 28
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {
