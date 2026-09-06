@@ -189,11 +189,13 @@ target_include_directories(hwabstraction_pico PUBLIC
     ${HWABSTRACTION_DIR}/interface
 )
 # TEMPORARY (HAL Phase 1b): spi_owner.c and uart_owner.c both still include
-# SaftyFW's own src/board_pins.h (a SaftyFW header, not part of
+# SaftyFW's own src/board/board_pins.h (a SaftyFW header, not part of
 # hwAbstraction/) -- see each file's own TEMPORARY comment on that include.
 # Given this private include dir instead of moving/duplicating board_pins.h.
+# Scoped to src/board (not all of src) so this library only ever sees the
+# one header it actually needs, not SaftyFW's whole private source tree.
 target_include_directories(hwabstraction_pico PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/src/board
 )
 # FreeRTOSConfig.h lives at the SaftyFW project root (same file SaftyFW's own
 # target_include_directories(SaftyFW PRIVATE ${CMAKE_CURRENT_LIST_DIR} ...)
@@ -224,6 +226,7 @@ add_executable(SaftyFW ${SAFTYFW_APP_SOURCES})
 target_include_directories(SaftyFW PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     src
+    src/board
     src/update
     bootloader
     ${CMAKE_CURRENT_BINARY_DIR}
@@ -411,6 +414,7 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
     target_include_directories(${TARGET_NAME} PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         src
+        src/board
         src/update
         bootloader
         ${CMAKE_CURRENT_BINARY_DIR}

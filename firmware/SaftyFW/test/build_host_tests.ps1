@@ -147,7 +147,7 @@ $sources = @(
 # relay_owner.c sources/includes were added ("The command line is too
 # long."), so the compiler args and source list are written to a file and
 # passed as @rsp instead of inline on the cmd.exe command line.
-$rspContent = "/nologo /W4 /WX /EHsc /I `"$srcDir`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
+$rspContent = "/nologo /W4 /WX /EHsc /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
     "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" " +
     "/Fo:`"$outDir\\`" /Fe:`"$exe`" " +
     (($sources | ForEach-Object { '"' + $_ + '"' }) -join " ")

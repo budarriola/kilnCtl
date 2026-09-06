@@ -1,11 +1,23 @@
-// FreeRTOS.h -- minimal host-test stub, scoped to relay_owner.c's host build
-// (test_relay_owner_gpio_init.c, HAL Phase 1b). Not a general FreeRTOS
-// replacement: only the types/macros relay_owner.c and its own includes
-// (task_priorities.h's configUSE_CORE_AFFINITY/configNUMBER_OF_CORES guard)
-// actually reference. relay_owner_task() itself is never invoked by the host
-// test (no scheduler runs on host) -- this only has to let relay_owner.c
-// compile and let relay_owner_start() run its pre-task-creation code
-// (hal_gpio_init_out(), xQueueCreate()) for real.
+// FreeRTOS.h -- minimal host-test stub. Not a general FreeRTOS replacement:
+// only the types/macros actually referenced by the TUs below are provided.
+//
+// GROWTH RULE: build_host_tests.ps1 puts this directory on the ONE global
+// /I list shared by every TU in the single `cl` invocation (all sources
+// compile together, not per-file) -- so any future src file that includes
+// FreeRTOS.h will silently compile against this minimal stub instead of
+// failing loudly, whether or not that's intended. Today's known clients,
+// both HAL Phase 1b:
+//   - tasks/relay_owner.c (test_relay_owner_gpio_init.c) -- needs the
+//     task-creation surface (xTaskCreate/xQueueCreate/TickType_t) to let
+//     relay_owner_start() run its pre-task-creation code for real;
+//     relay_owner_task() itself is never invoked (no scheduler on host).
+//   - current_sense.c (test_current_sense_hal_adc.c) -- needs only
+//     xTaskGetTickCount()/portTICK_PERIOD_MS.
+// Before adding a third client, either confirm this stub's minimal surface
+// still covers it (extend deliberately, don't silently widen scope further)
+// or split build_host_tests.ps1 into multiple `cl` invocations so /I can be
+// scoped per-TU -- not attempted here to avoid restructuring a working
+// build script for this pass.
 #ifndef SAFTYFW_TEST_STUB_FREERTOS_H
 #define SAFTYFW_TEST_STUB_FREERTOS_H
 

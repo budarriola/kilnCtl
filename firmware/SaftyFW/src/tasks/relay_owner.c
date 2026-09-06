@@ -161,15 +161,21 @@ bool relay_owner_start(void)
     // HAL Phase 1b: re-assert the fail-safe default (de-energized) through
     // the hal_gpio contract before this task's own command loop starts.
     // main() (boot step 1) already drives GPIO6 low with raw pico-sdk calls
-    // before the scheduler exists -- that ordering guarantee is unchanged
-    // and out of scope here -- so this call is redundant on real hardware
-    // (gpio_init()+level-then-direction, done twice, is idempotent and
-    // still glitch-free per hal_gpio.h's latch-before-direction contract).
-    // What it buys: relay_owner itself, not main.c, now owns and can be
-    // host-tested against the "de-energized + latch-before-direction" init
-    // property via fake_gpio (test/test_relay_owner_gpio_init.c), instead
-    // of that property living only in main.c's untestable boot sequence.
-    hal_gpio_init_out(SAFTYFW_PIN_RELAY, false);
+    // before the scheduler exists, so the pin is already SIO-function,
+    // output-configured and low by the time this runs. We deliberately do
+    // NOT call hal_gpio_init_out() here: on the pico backend that calls
+    // gpio_init() first, which resets the pin to INPUT direction before
+    // re-latching it low+output -- a new sub-microsecond high-Z window on
+    // the relay driver gate that main.c's original put-then-set_dir
+    // sequence never had. A mechanical relay cannot actuate in that
+    // window, but it is a real behavior change from pre-HAL code, not the
+    // no-op this comment used to claim. Using set-then-set_direction
+    // instead re-asserts the same fail-safe state without re-running the
+    // gpio_init() reset, preserving the original glitch-free guarantee
+    // while still giving relay_owner ownership of the init property for
+    // host testing (fake_gpio, test/test_relay_owner_gpio_init.c).
+    hal_gpio_set(SAFTYFW_PIN_RELAY, false);
+    hal_gpio_set_direction(SAFTYFW_PIN_RELAY, HAL_GPIO_DIR_OUT);
 
     s_cmd_queue = xQueueCreate(RELAY_OWNER_QUEUE_LEN, sizeof(relay_owner_cmd_t));
     if (s_cmd_queue == NULL) {
