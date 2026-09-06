@@ -33,7 +33,8 @@
 # Usage: powershell -File firmware\KilnFW\App\test\check_label_column_overflow_wrap.ps1
 $ErrorActionPreference = "Stop"
 
-$driversRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "App\drivers"
+. (Join-Path $PSScriptRoot "_drivers_layout.ps1")
+$driversRoot = Get-DriversRoot -TestDir $PSScriptRoot
 if (-not (Test-Path $driversRoot)) {
     throw "check_label_column_overflow_wrap.ps1: expected source tree not found at $driversRoot"
 }
@@ -47,10 +48,13 @@ if (-not (Test-Path $driversRoot)) {
 $labelSelectorPattern = '(\blabel\b|\bdt\b)[^{]*\{[^}]*\}'
 $badValuePattern = 'overflow-wrap\s*:\s*anywhere|word-break\s*:\s*break-all'
 
-$files = Get-ChildItem -Path $driversRoot -Filter "*_page.html" -File
-$themeCss = Join-Path $driversRoot "theme.css"
-if (Test-Path $themeCss) {
+$files = Get-DriverFiles -DriversDir $driversRoot -Filter "*_page.html"
+try {
+    $themeCss = Resolve-DriverFile -DriversDir $driversRoot -BaseName "theme.css"
     $files = @($files) + (Get-Item $themeCss)
+} catch {
+    # theme.css missing entirely is a real problem elsewhere (other checks
+    # require it); this script only adds it to its own scan when present.
 }
 
 $failures = @()

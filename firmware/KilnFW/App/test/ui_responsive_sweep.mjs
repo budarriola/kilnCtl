@@ -52,12 +52,15 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_DRIVERS_DIR = path.resolve(__dirname, '..', 'drivers');
+const require = createRequire(import.meta.url);
+const { resolveDriversDir, listDriverFiles, walkFiles } = require('./_drivers_layout.js');
+const DEFAULT_DRIVERS_DIR = resolveDriversDir(__dirname);
 const DEFAULT_WIDTHS = [320, 360, 390, 768, 1280, 1920];
 const VIEWPORT_HEIGHT = 1400; // tall enough that vertical scroll never masks a horizontal-overflow bug
 const MIN_TARGET_PX = 32; // profiles_page.html catalogue Use/Save bug measured 81x19 -- see WEB_UI_RESPONSIVE.md sec 3 item 3
@@ -100,12 +103,24 @@ function parseArgs(argv) {
 // resolved path that escapes `dir`.
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
 function startStaticServer(dir, port) {
+  // The pages request every asset by a root-relative path (`/nav.js`,
+  // `/theme.css`, ...), correct against the board's real httpd, which
+  // serves a flat namespace. Once drivers/ splits into layer subdirs
+  // (drivers/hw/, drivers/http/, ...) a literal `path.join(dir, rel)` no
+  // longer finds anything not still sitting at the top of `dir`. Resolve
+  // every request by BASENAME anywhere under `dir` instead -- the same
+  // flat-namespace illusion the board's httpd already presents, and the
+  // same recursive-basename contract every other layout-agnostic script in
+  // this directory uses (see _drivers_layout.js). Directory traversal is
+  // still blocked structurally: the lookup never touches the requested
+  // path's directory component at all, only its basename.
   const server = createServer(async (req, res) => {
     try {
       const urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-      const rel = urlPath === '/' ? '/main_page.html' : urlPath;
-      const abs = path.join(dir, rel);
-      if (!abs.startsWith(path.resolve(dir))) { res.writeHead(403); res.end(); return; }
+      const basename = path.basename(urlPath === '/' ? '/main_page.html' : urlPath);
+      const matches = walkFiles(dir).filter((p) => path.basename(p) === basename);
+      if (matches.length !== 1) { res.writeHead(404); res.end('not found'); return; }
+      const abs = matches[0];
       const ext = path.extname(abs);
       const body = await readFile(abs);
       res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
@@ -626,8 +641,9 @@ async function main() {
 
   let pageFiles = args.pages;
   if (!pageFiles) {
-    const entries = await readdir(args.dir);
-    pageFiles = entries.filter(f => f.endsWith('_page.html')).sort();
+    pageFiles = listDriverFiles(args.dir, (name) => name.endsWith('_page.html'))
+      .map((f) => f.name)
+      .sort();
   }
   if (pageFiles.length === 0) {
     console.error(`ui_responsive_sweep: no *_page.html files found under ${args.dir} -- glob or directory is broken, not a clean tree.`);

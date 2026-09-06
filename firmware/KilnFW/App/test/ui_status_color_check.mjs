@@ -113,12 +113,15 @@
 // colour switches without any of the three shapes above). It is a floor,
 // not a proof of accessibility.
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const driversDir = path.resolve(__dirname, '..', 'drivers');
+const require = createRequire(import.meta.url);
+const { resolveDriversDir, resolveDriverFile, listDriverFiles } = require('./_drivers_layout.js');
+const driversDir = resolveDriversDir(__dirname);
 const allowlistPath = path.join(__dirname, 'ui_status_color_allowlist.json');
 const exceptionsPath = path.join(__dirname, 'ui_status_color_contrast_exceptions.json');
 
@@ -146,7 +149,7 @@ function contrast(hexA, hexB) {
 }
 
 function loadUiAccentMap() {
-  const css = readFileSync(path.join(driversDir, 'theme.css'), 'utf8');
+  const css = readFileSync(resolveDriverFile(driversDir, 'theme.css'), 'utf8');
   const map = {};
   const re = /--(ui-[a-z0-9-]+):\s*(#[0-9a-fA-F]{3,6})/g;
   let m;
@@ -370,12 +373,12 @@ function checkColorOnlyAllowlist(pages) {
 
 function main() {
   const uiMap = loadUiAccentMap();
-  const files = readdirSync(driversDir).filter((f) => f.endsWith('_page.html'));
+  const files = listDriverFiles(driversDir, (name) => name.endsWith('_page.html'));
   if (files.length < 10) {
     console.error(`ui_status_color_check: only found ${files.length} *_page.html under ${driversDir}, expected >=10 -- glob likely broken.`);
     process.exit(2);
   }
-  const pages = files.map((f) => [f, readFileSync(path.join(driversDir, f), 'utf8')]);
+  const pages = files.map(({ name, fullPath }) => [name, readFileSync(fullPath, 'utf8')]);
 
   let exceptions = {};
   try {

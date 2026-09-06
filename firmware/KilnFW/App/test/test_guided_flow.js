@@ -28,7 +28,8 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const PAGE_PATH = path.join(__dirname, '..', 'drivers', 'safety_commissioning_page.html');
+const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
+const PAGE_PATH = resolveDriverFile(resolveDriversDir(__dirname), 'safety_commissioning_page.html');
 
 function extractInlineScript(html) {
   // Same rule lint_pages.js uses: an inline <script> with no src=, comments

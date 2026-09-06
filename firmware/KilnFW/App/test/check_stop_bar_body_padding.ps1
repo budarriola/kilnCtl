@@ -27,7 +27,8 @@
 # Usage: powershell -File firmware\KilnFW\App\test\check_stop_bar_body_padding.ps1
 $ErrorActionPreference = "Stop"
 
-$driversRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "App\drivers"
+. (Join-Path $PSScriptRoot "_drivers_layout.ps1")
+$driversRoot = Get-DriversRoot -TestDir $PSScriptRoot
 if (-not (Test-Path $driversRoot)) {
     throw "check_stop_bar_body_padding.ps1: expected source tree not found at $driversRoot"
 }
@@ -48,9 +49,13 @@ function Get-StrippedJs([string]$path) {
 $failures = @()
 
 # --- theme.css: the bar must stay position:fixed, bottom:0 --------------
-$themePath = Join-Path $driversRoot "theme.css"
-if (-not (Test-Path $themePath)) {
-    $failures += "theme.css not found at $themePath"
+try {
+    $themePath = Resolve-DriverFile -DriversDir $driversRoot -BaseName "theme.css"
+} catch {
+    $themePath = $null
+}
+if (-not $themePath) {
+    $failures += "theme.css not found anywhere under $driversRoot"
 } else {
     $themeText = Get-Content -Path $themePath -Raw
     if ($themeText -notmatch '\.kc-stop-bar\s*\{[^}]*position:\s*fixed[^}]*bottom:\s*0') {
@@ -62,9 +67,13 @@ if (-not (Test-Path $themePath)) {
 }
 
 # --- nav.js: updateBodyPadding must exist and actually measure the bar --
-$navPath = Join-Path $driversRoot "nav.js"
-if (-not (Test-Path $navPath)) {
-    $failures += "nav.js not found at $navPath"
+try {
+    $navPath = Resolve-DriverFile -DriversDir $driversRoot -BaseName "nav.js"
+} catch {
+    $navPath = $null
+}
+if (-not $navPath) {
+    $failures += "nav.js not found anywhere under $driversRoot"
 } else {
     $nav = Get-StrippedJs $navPath
     if ($nav -notmatch "function updateBodyPadding\s*\(") {
@@ -97,9 +106,13 @@ if (-not (Test-Path $navPath)) {
 
 # --- app.js: every place that can change the bar's presence or size must
 #     re-run the reservation -------------------------------------------
-$appPath = Join-Path $driversRoot "app.js"
-if (-not (Test-Path $appPath)) {
-    $failures += "app.js not found at $appPath"
+try {
+    $appPath = Resolve-DriverFile -DriversDir $driversRoot -BaseName "app.js"
+} catch {
+    $appPath = $null
+}
+if (-not $appPath) {
+    $failures += "app.js not found anywhere under $driversRoot"
 } else {
     $app = Get-StrippedJs $appPath
     if ($app -notmatch "kcNav\.updateBodyPadding\s*\(\s*\)") {

@@ -25,7 +25,8 @@
 # Usage: powershell -File firmware\KilnFW\App\test\check_ui_budget_asserts.ps1
 $ErrorActionPreference = "Stop"
 
-$driversRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "App\drivers"
+. (Join-Path $PSScriptRoot "_drivers_layout.ps1")
+$driversRoot = Get-DriversRoot -TestDir $PSScriptRoot
 if (-not (Test-Path $driversRoot)) {
     throw "check_ui_budget_asserts.ps1: expected source tree not found at $driversRoot"
 }
@@ -82,9 +83,13 @@ $themeConst = "#define UI_THEME_PAGE_CONTENT_BUDGET_PX"
 
 $failures = @()
 
-$themePath = Join-Path $driversRoot $themeFile
-if (-not (Test-Path $themePath)) {
-    $failures += "$themeFile not found at $themePath"
+try {
+    $themePath = Resolve-DriverFile -DriversDir $driversRoot -BaseName $themeFile
+} catch {
+    $themePath = $null
+}
+if (-not $themePath) {
+    $failures += "$themeFile not found anywhere under $driversRoot"
 } else {
     $themeText = Get-Content -Path $themePath -Raw
     if ($themeText -notmatch [regex]::Escape($themeConst)) {
@@ -95,9 +100,10 @@ if (-not (Test-Path $themePath)) {
 }
 
 foreach ($entry in $required) {
-    $path = Join-Path $driversRoot $entry.File
-    if (-not (Test-Path $path)) {
-        $failures += "$($entry.File) not found at $path"
+    try {
+        $path = Resolve-DriverFile -DriversDir $driversRoot -BaseName $entry.File
+    } catch {
+        $failures += "$($entry.File) not found anywhere under $driversRoot"
         continue
     }
     # Whitespace-normalize (collapse runs of spaces/tabs/newlines to a single

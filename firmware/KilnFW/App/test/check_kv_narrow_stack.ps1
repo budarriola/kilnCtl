@@ -23,11 +23,9 @@
 # Usage: powershell -File firmware\KilnFW\App\test\check_kv_narrow_stack.ps1
 $ErrorActionPreference = "Stop"
 
-$driversRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "App\drivers"
-$otaPath = Join-Path $driversRoot "ota_page.html"
-if (-not (Test-Path $otaPath)) {
-    throw "check_kv_narrow_stack.ps1: ota_page.html not found at $otaPath"
-}
+. (Join-Path $PSScriptRoot "_drivers_layout.ps1")
+$driversRoot = Get-DriversRoot -TestDir $PSScriptRoot
+$otaPath = Resolve-DriverFile -DriversDir $driversRoot -BaseName "ota_page.html"
 
 $raw = Get-Content -Path $otaPath -Raw
 $stripped = $raw -replace '(?s)/\*.*?\*/', ' '

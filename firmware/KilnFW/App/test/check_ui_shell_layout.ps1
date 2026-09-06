@@ -26,7 +26,8 @@
 # Usage: powershell -File firmware\KilnFW\App\test\check_ui_shell_layout.ps1
 $ErrorActionPreference = "Stop"
 
-$driversRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "App\drivers"
+. (Join-Path $PSScriptRoot "_drivers_layout.ps1")
+$driversRoot = Get-DriversRoot -TestDir $PSScriptRoot
 if (-not (Test-Path $driversRoot)) {
     throw "check_ui_shell_layout.ps1: expected source tree not found at $driversRoot"
 }
@@ -129,9 +130,10 @@ $required = @(
 
 $missing = @()
 foreach ($entry in $required) {
-    $path = Join-Path $driversRoot $entry.File
-    if (-not (Test-Path $path)) {
-        $missing += "$($entry.File): file not found at $path"
+    try {
+        $path = Resolve-DriverFile -DriversDir $driversRoot -BaseName $entry.File
+    } catch {
+        $missing += "$($entry.File): not found anywhere under $driversRoot"
         continue
     }
     $text = Get-Content -Raw -LiteralPath $path

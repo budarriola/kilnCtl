@@ -25,7 +25,8 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const PAGE_PATH = path.join(__dirname, '..', 'drivers', 'zones_page.html');
+const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
+const PAGE_PATH = resolveDriverFile(resolveDriversDir(__dirname), 'zones_page.html');
 const SRC = fs.readFileSync(PAGE_PATH, 'utf8');
 const LINES = SRC.split('\n');
 
