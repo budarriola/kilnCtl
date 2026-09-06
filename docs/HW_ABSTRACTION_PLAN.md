@@ -1028,8 +1028,9 @@ sim,common}/` with `misc` folded into whichever layer owns each file (only
 358-file mapping with resolved answers for every ambiguous placement, a
 `git mv` + CMakeLists-rewrite script, and a dry-run report naming the 18
 path-keyed check scripts and the 22 remaining upward includes) lives in
-`tools/drivers_reorg/` -- see `tools/drivers_reorg/DRYRUN.md`. Nothing has
-been applied yet. Allowed include direction is strictly downward:
+`tools/drivers_reorg/` -- see `tools/drivers_reorg/DRYRUN.md`. Applied in
+`9f18ca5` (2026-09-05): 359 renames into `App/drivers/<layer>/`. Allowed
+include direction is strictly downward:
 ui/http/bridge/sim → control/safety/persist/net → owners/hw → common →
 hwAbstraction. Six upward-include patterns existed before this dry-run pass
 and were already untangled as ordinary commits (items 1-6 below); the 22

@@ -80,7 +80,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
-| XL | **Source layering + hardware abstraction** — planned in full, plan-only by owner decision 2026-09-05. Startable once the dirty KilnFW working-tree files (`profiles_builtin*`, `main.c`, `sdkconfig.defaults`, `test/stubs/nvs.h`) land: first step is six small include-untangling commits, no directory move yet | M16; `docs/HW_ABSTRACTION_PLAN.md` |
+| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phase 1a still pending | M16; `docs/HW_ABSTRACTION_PLAN.md` |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
 
 ### Blocked on hardware that does not exist yet
@@ -1369,20 +1369,14 @@ upward-include untangles are DONE; the `firmware/hwAbstraction/` tree exists
 with all interface headers, ESP backends (common/gpio/uart/spi/i2c/kv/time/
 wdt/pwm/sysinfo), Pico backends (gpio/adc/uart/time/flash/scratch/wdt), and
 host fakes for every interface; nothing is wired into CMakeLists yet
-(Phase 1a, the actual move, has not started) and the `drivers/` directory
-move itself has not been applied.
+(Phase 1a, the actual move, has not started). The `drivers/` directory move
+itself was applied in `9f18ca5` (2026-09-05).
 
-1. **KilnFW `drivers/` layering** (KilnFW only). `App/drivers/` holds 332
-   files, most of them not drivers. Target (revised 2026-09-05, third round):
-   subdirectories of the existing `drivers/` component —
+1. **KilnFW `drivers/` layering** (KilnFW only) — DONE (`9f18ca5`,
+   2026-09-05). `App/drivers/` reorganised into
    `App/drivers/{hw,owners,control,safety,persist,net,http,ui,bridge,sim,
-   common}/`, not sibling `App/<layer>/` components — with
-   include direction strictly downward. Six upward-include patterns must be
-   untangled first (the largest: 18 control/safety files include
-   `zones_http.h` for config accessors), each as its own build-green commit;
-   then one move commit that also rewrites the 185 literal `SRCS` in
-   CMakeLists and re-greps every `check_*.ps1` for old paths. Plan section
-   "drivers/ layering".
+   common}/`, 359 renames, CMakeLists SRCS rewritten and `check_*.ps1`
+   scripts re-greped for old paths. Plan section "drivers/ layering".
 2. **`firmware/hwAbstraction/{interface,esp,pico,host}`** — link-time
    backends for spi/i2c/uart/gpio/adc/kv/flash/scratch/time/wdt/pwm/sysinfo
    over ESP-IDF and pico-sdk, with host fakes replacing the stub-header
@@ -1390,7 +1384,7 @@ move itself has not been applied.
    compile) through Phase 4 (include-direction check goes strict). Phase 1a
    moves `espInterfaces/` only after item 1 so paths move once.
 
-Sequence: untangle includes (done), reorg (not started), then HAL Phase 1a.
+Sequence: untangle includes (done), reorg (done, `9f18ca5`), then HAL Phase 1a.
 All owner decisions are taken (2026-09-05): tree location/naming as above,
 opaque-storage option a, hal_uart `send` + `send_blocking`.
 `firmware/UnitTestFw` stays untouched throughout.
