@@ -7,156 +7,113 @@ SSD1306) is in scope; that code stays in place, untouched.
 
 ## What the schematic actually has today
 
-`hardware/UnitTestFixture/UnitTestFixture.kicad_sch` (read via the kicad
-MCP + a direct grep, since `list_kicad_components` only accepts `.kicad_pro`/
-`.kicad_pcb`) contains exactly five parts: one `ESP32-S3-DevKitC` (U1), one
-`MCP4728` DAC (U2), one `AD9833xRM` function generator (U3), and **two**
-`PCF8575DBR` I/O expanders — U4 and U5. The board file
-(`UnitTestFixture.kicad_pcb`) is 79 bytes — no footprints placed, no layout
-done.
+`hardware/UnitTestFixture/UnitTestFixture.kicad_sch` (read via the kicad MCP
++ a direct grep, since `list_kicad_components` only accepts `.kicad_pro`/
+`.kicad_pcb`) has exactly five parts: `ESP32-S3-DevKitC` (U1), `MCP4728` DAC
+(U2), `AD9833xRM` (U3), and **two** `PCF8575DBR` expanders (U4, U5). The
+board file is 79 bytes — no footprints placed or layout done.
 
-**There is no relay board here yet.** U4/U5's sixteen P0x/P1x pins each are
-broken out in the schematic but wired to nothing else — no relay coils, no
-connectors, no thermocouple short/open network, no SSR-emulation circuit.
-The "flip relays through the I/O expanders" capability the owner asked for
-is real at the protocol/firmware level (see below) but has no matching
-relay hardware today; that hardware is the "future use" the owner decision
-explicitly defers. This plan therefore treats the relay map as **placeholder
-and data-driven** — generic `U<n>:P<pin>` names — so it can be relabeled
-with function names ("heater1_open", "tc2_short") with zero code changes
-once the relay board is actually designed and its wiring is known.
+**There is no relay board here yet.** U4/U5's 32 pins are broken out but
+wired to nothing — no relay coils, connectors, thermocouple short/open
+network, or SSR-emulation circuit. That hardware is the "future use" the
+owner decision explicitly defers, so the relay map here is **placeholder
+and data-driven** — generic `U<n>:P<pin>` names — relabelable to function
+names ("heater1_open") with zero code changes once real wiring exists. U4 is
+assumed at the Kconfig default 0x20; U5's address is unconfirmed (no strap
+resistors traced) and provisionally 0x21 pending a bench `SCAN`. Every switch
+to a non-cached address is confirmed against the firmware's own `READ_PORT`
+address byte before any op on it is trusted — see `fixture.py`'s module
+docstring for why a bare protocol ACK isn't proof.
 
-U5's I2C address is not confirmed from the schematic (no address-strap
-resistor net was traced) and is assumed 0x21 pending a bench `SCAN`. U4 is
-assumed at the Kconfig default, 0x20.
+## What the firmware/PC tooling already have
 
-## What the firmware already exposes
+`firmware/UnitTestFw/UnitTest/docs/UART_PROTOCOL.md` + `PCF8575.md`: task 7
+(PCF8575) already covers everything needed — `WRITE_PORT`/`WRITE_PIN` (write),
+`READ_PORT` (query: pins + shadow + live address), `SET_ADDRESS` (retarget
+0x20–0x27), `SCAN`. No firmware change was needed. Pin semantics: writing 1 =
+weak pull-up ("de-energized", power-on default), writing 0 = driven low
+("energized" by this plan's convention, not yet confirmed against real drive
+polarity).
 
-`firmware/UnitTestFw/UnitTest/docs/UART_PROTOCOL.md` + `PCF8575.md`: the
-PCF8575 task (task 7) already supports everything a relay-control surface
-needs — no firmware change was needed for this plan:
-
-| Subcmd | Name | Use |
-|---|---|---|
-| `0x01` `WRITE_PORT` | full 16-bit write | `all_off()` |
-| `0x02` `WRITE_PIN` | one pin | `set_relay()` |
-| `0x06` `READ_PORT` | query: pins + shadow + current address | `get_relays()` |
-| `0x07` `SET_ADDRESS` | retarget 0x20–0x27 without reflashing | reach U5 |
-| `0x08` `SCAN` | which of 0x20–0x27 ACK | bench bring-up |
-
-Pin semantics (PCF8575.md): writing 1 = weak pull-up ("input", power-on
-default); writing 0 = driven low ("energized" by this plan's convention).
-Only one physical PCF8575 instance is ever addressed at a time — reaching
-U5 means `SET_ADDRESS(0x21)` first, same call the firmware already answers.
-
-## What existing PC tooling has
-
-`firmware/UnitTestFw/UnitTest/pc_tools/` (the fixture's *own*, historical PC
-package: `src/uart_control/expander.py`, `protocol.py`, `serial_link.py`,
-`mcp_server.py`) is a full GUI + stdio MCP client for this board, covering
-DAC/AD9833/OLED/PCF8575 alike. It is **not** reused directly here: it is a
-separate stdio server (no facade, no HTTP), tied to the old fixture's wider
-scope, and out of this task's file allowlist. Instead, this plan adds a
-narrow PCF8575-only surface into `tools/PcTools` (the kilnCtl-wide HTTP MCP
-package on 8767), because that is where every other board control surface
-already lives and where `kiln_find`/`kiln_call` already reach.
-
-The wire framing is byte-identical between the two (SLIP + CRC-16/CCITT-
-FALSE + ACK/NACK/retry — both descend from the same hardened UART protocol
-design), so the new code reuses `kilnctrl.serial_link.UartLink` and
-`kilnctrl.protocol.Frame` verbatim, opening a **second, independent**
-`UartLink` instance at 115200 baud (the fixture firmware's baud, vs. the
-main board's 921600) against the fixture's own port. It never shares a link
-or a task-id namespace with the main-board connection.
+`firmware/UnitTestFw/UnitTest/pc_tools/` is the fixture's own historical
+GUI + stdio MCP client (DAC/AD9833/OLED/PCF8575 alike) — not reused here: a
+separate stdio server tied to the old fixture's wider scope. Instead this
+plan adds a narrow PCF8575-only surface into `tools/PcTools` (the kilnCtl-
+wide HTTP MCP package, port 8767), reusing `kilnctrl.serial_link.UartLink`/
+`kilnctrl.protocol.Frame` verbatim (the wire framing is byte-identical
+between the two boards) via a **second, independent** `UartLink` at 115200
+baud against the fixture's own port — never sharing a link or task-id
+namespace with the main-board connection.
 
 ## MCP surface (implemented)
 
 Four tools, `tools/PcTools/src/kilnctrl/mcp_server_fixture.py`, behind the
-existing `kiln_find`/`kiln_call` facade (`fixture_` prefix, new `fixture`
-group in `mcp_facade.py`):
+`kiln_find`/`kiln_call` facade (`fixture_` prefix, new `fixture` group):
 
 - `fixture_list_relays()` — every known relay name (no connection needed)
-- `fixture_set_relay(name, on)` — refuses an unknown name before sending
-  anything
+- `fixture_set_relay(name, on)` — refuses an unknown name up front; verifies
+  the write by read-back and raises rather than reporting a bare ACK as
+  success; a failed energize attempts a fail-safe `all_off()` before raising
 - `fixture_get_relays()` — live `READ_PORT` per distinct address
-- `fixture_all_off()` — de-energize everything
+- `fixture_all_off()` — de-energize everything, verified by read-back
 
-The client (`tools/PcTools/src/kilnctrl/fixture.py`) connects lazily on
-first use and de-energizes all mapped relays both on connect and on
-disconnect/shutdown (`mcp_server.py`'s `_close()` now also calls
-`_close_fixture()`), matching the owner's de-energised-all-off-by-default
-requirement.
+`fixture.py` connects lazily on first use, and de-energizes with a verifying
+read-back on both connect and disconnect/shutdown — `connect()` **fails**
+(no warn-and-continue) if that initial de-energize can't be confirmed, so a
+caller is never handed a "connected" fixture whose safe state was assumed.
+`mcp_server.py`'s `_close()` calls the new `_close_fixture()`.
+
+No client-side shadow of "what we last wrote" is kept: every relay/address
+operation is verified by reading the device back, because a transport ACK
+only proves delivery to the firmware's inbox, not that the I2C transfer (or
+an address switch) actually happened — see `fixture.py`'s module docstring.
 
 ## PC connection identity
 
-Confirmed by bench USB enumeration, 2026-09-05, with both boards plugged in
-at once:
+Bench USB enumeration, 2026-09-05, both boards plugged in at once:
 
 | Board | Port role | VID:PID | Serial |
 |---|---|---|---|
-| Fixture | native USB-Serial-JTAG | 303A:1001 | 68:B6:B3:29:D0:B8 (COM7) |
-| Fixture | UART bridge (CH340K) | 1A86:7522 | *(none reported)* (COM14) |
-| Main board | native USB-Serial-JTAG | 303A:1001 | 1C:DB:D4:92:F4:7C (COM3) |
+| Fixture | native JTAG | 303A:1001 | ...D0:B8 (COM7) |
+| Fixture | UART bridge (CH340K) | 1A86:7522 | none (COM14) |
+| Main board | native JTAG | 303A:1001 | ...F4:7C (COM3) |
 | Main board | UART bridge (CH343) | 1A86:55D3 | 552E006806 (COM6) |
 
-The fixture and the main board use **different UART bridge silicon**
-(CH340K vs. CH343), so `fixture.recommend_fixture_port()` can and does key
-on VID:PID (`1A86:7522`) alone to find the fixture's control port, while
-also excluding the main board's `1A86:55D3` and any JTAG/CMSIS-DAP
-descriptor by name as a second, independent check. The CH340K reports no
-per-device serial number at all (not a Windows MI_xx-stripping artifact —
-there is nothing to strip), so if a second CH340K-based device ever joins
-the bench this VID:PID match stops being sufficient and an explicit port
-(`KILNCTL_FIXTURE_PORT` env var or `port=`) will be required again.
-
-The two ESP32-S3 native JTAG/debug ports share VID:PID 303A:1001 and are
-told apart only by serial number — irrelevant to this plan's PCF8575-only
-UART surface, but load-bearing for whichever tool programs the boards over
-JTAG (flagged below, out of this plan's scope).
-
-**Flagged, not fixed here:** `flash_firmware()` (`mcp_server_flash.py`)
-passes no `adapter serial` to OpenOCD, so with both boards' JTAG present it
-binds to whichever 303A:1001 unit it finds first — a real risk of flashing
-the wrong image onto the wrong board now that both are on the bench
-simultaneously. Pinning that (and adding a parallel `fixture_flash`) touches
-`mcp_server_flash.py` and `serial_link.py`, both outside this task's file
-allowlist (shared, board-wide files; `serial_link.py`'s port-scoring is used
-by every existing tool). Left for a follow-up task with its own explicit
-scope grant.
+Fixture and main board use different UART bridge silicon (CH340K vs CH343),
+so `recommend_fixture_port()` keys on VID:PID `1A86:7522`, excluding the main
+board's `1A86:55D3`/303A:1001/JTAG by name. The CH340K reports no per-device
+serial, so a second CH340K-family device on the bench would be ambiguous —
+`KILNCTL_FIXTURE_PORT` env var / `port=` is the fallback. Pinning the two
+identical-VID:PID native JTAG ports (relevant to `flash_firmware()`, not this
+surface) is a separate, ongoing pass on `serial_link.py`/`mcp_server_flash.py`,
+intentionally untouched here.
 
 ## Verification run this session
 
 - `tools/PcTools/tests/test_fixture.py` — real SLIP/CRC encode-decode against
-  a fake serial peer that plays the fixture firmware's role: connect-time
-  all-off, `set_relay`/`get_relays` round-trip, address retargeting to U5,
-  disconnect-time all-off, and a negative test (unknown relay name refused,
-  nothing written to the wire) plus a negative port-selection test (the main
-  board's CH343 port is never chosen as the fixture's). All pass:
-  `.venv/Scripts/python.exe -m pytest tests/test_fixture*.py -q` → 7 passed.
-- `tools/PcTools/selfcheck.py` — run after the above; see run log for result.
-- No firmware change was needed (protocol already covers every operation
-  used), so no `build_kilnfw`-equivalent build was required for
-  `UnitTestFw`. `kiln_find(query="unit test fixture build")` was checked;
-  no dedicated build tool exists for `UnitTestFw` today — its own
-  `README.md`'s plain `idf.py build` invocation would be the fallback if a
-  firmware change is ever needed here, but none was.
+  a fake serial peer whose command bytes are copied by hand from
+  UART_PROTOCOL.md (not the client's own constants, so a drift in one can't
+  hide behind the other). Covers connect/disconnect all-off, set_relay/
+  get_relays round-trip, address retargeting, and negative tests: unknown
+  relay name, a `SET_ADDRESS` nothing ACKs to, a write whose I2C leg fails
+  silently (read-back catches both), the fail-safe `all_off()` after a
+  failed energize, `connect()` failing loud on an unconfirmable all-off, and
+  port selection never picking the main board's port.
+  `.venv/Scripts/python.exe -m pytest tests/test_fixture*.py -q` → 14 passed.
+- `tools/PcTools/selfcheck.py` — run clean after the above.
+- No firmware build was needed; `kiln_find(query="unit test fixture build")`
+  found no dedicated `UnitTestFw` build tool — its README's `idf.py build`
+  is the fallback.
 
 ## Owner-gated: bench validation (not run this session)
 
-1. Restart the `kilnctrl` MCP server (`mcp_servers.ps1 restart`) so
-   `fixture_*` is published — it is new code the running server has not
-   loaded.
-2. With only the fixture attached, confirm `fixture_list_relays()` then
-   `fixture_get_relays()` succeed and read all-high (de-energized) at boot.
+1. Restart the `kilnctrl` MCP server so `fixture_*` is published.
+2. Fixture only: `fixture_list_relays()` then `fixture_get_relays()` should
+   read all-high (de-energized) at boot.
 3. `fixture_set_relay("U4:P00", true)` then `fixture_get_relays()` — confirm
-   the reported bit flips; there is nothing externally wired to observe yet.
-4. Run `SCAN` (once exposed, or via the fixture's own `pc_tools` GUI) to
-   confirm U5's address is actually 0x21 and not some other value — this
-   plan's `DEFAULT_RELAY_MAP` assumed it without hardware confirmation.
-5. Do this with the main board also attached at least once, and confirm
-   `fixture_*` calls never touch COM6/COM3 (the main board's ports) — the
-   port-selection unit tests cover the *logic*, not the real USB stack.
-6. Once real relay hardware exists: replace `DEFAULT_RELAY_MAP` in
-   `fixture.py` with the actual function-named map and re-verify polarity
-   (does "pin driven low" really energize the relay coil, per this plan's
-   assumption) against a multimeter or continuity check.
+   the bit flips (nothing externally wired to observe yet).
+4. Run `SCAN` to confirm U5's real address — `DEFAULT_RELAY_MAP` assumed
+   0x21 without hardware confirmation.
+5. With the main board attached too, confirm `fixture_*` never touches COM6/COM3 — the unit tests cover the logic, not the real USB stack.
+6. Once real relay hardware exists: replace `DEFAULT_RELAY_MAP` with the
+   real map and verify drive polarity against a multimeter.
