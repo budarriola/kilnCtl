@@ -729,19 +729,21 @@ landed the same day against the real SaftyFW consumers, syntax-checked by
 mismatch found for either -- the pico-sdk calls are exactly the shape both
 interfaces were written for.
 
-Real pico-side uart/time/kv bodies (`firmware/hwAbstraction/pico/{uart,time,
-kv}/`) landed 2026-09-05, same script extended to cover all five: hal_uart_
-pico.c wraps tasks/uart_owner.c's real IRQ ring/drop contract (three
-documented mismatches -- single fixed UART1 instance, no RX error counter,
-no restart); hal_time_pico.c wraps pico-sdk time_us_64/to_ms_since_boot/
-sleep_ms with no mismatch; hal_kv_pico.c is a documented mismatch throughout
--- config_store.c/config_store_flash.c is not a key/value store (fixed
-512 B record, seq/CRC/ARMED-gated, no partitions/string fields/scoped
-erase), so it maps only one blessed (namespace, key) pair onto the real
-record read/write and reports HAL_NOT_SUPPORTED for everything else, per
-hal_kv.h's own "pico explicitly excluded" and the hal_kv section below --
-config_store's real home remains hal_flash, not yet written. Negative-tested
-(broken hal_time_pico.c, confirmed FAILED/exit 1, restored, confirmed pass).
+Real pico-side uart/time bodies (`firmware/hwAbstraction/pico/{uart,time}/`)
+landed 2026-09-05, same script extended to cover both: hal_uart_pico.c
+wraps tasks/uart_owner.c's real IRQ ring/drop contract (documented
+mismatches -- single fixed UART1 instance, no RX error counter, no
+restart); hal_time_pico.c wraps pico-sdk time_us_64/to_ms_since_boot/
+sleep_ms with no mismatch. Negative-tested (broken hal_time_pico.c,
+confirmed FAILED/exit 1, restored, confirmed pass). A `kv/hal_kv_pico.c`
+was also drafted this day, mapping one blessed (namespace, key) pair onto
+config_store's real record read/write -- removed per review: it included
+config_store.h across the one-way hwAbstraction boundary and added a third
+commit-durability model alongside NVS's and fake_kv's, contradicting
+hal_kv.h's own "pico explicitly excluded." config_store's real home
+remains hal_flash (see that section above, now carrying this draft's
+ARMED/seq-CRC-log/format-version-REFUSE analysis as prose), not yet
+written.
 
 **Phase 2 — host backend.** Response file for the main cl invocation first.
 Implement hwAbstraction/host/ per the fake specs; switch both

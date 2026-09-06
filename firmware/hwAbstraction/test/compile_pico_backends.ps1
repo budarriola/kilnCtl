@@ -1,6 +1,6 @@
 # compile_pico_backends.ps1 -- syntax-only compile check for the pico-sdk
 # hwAbstraction backends (pico/gpio/hal_gpio_pico.c, pico/adc/hal_adc_pico.c,
-# pico/uart/hal_uart_pico.c, pico/time/hal_time_pico.c, pico/kv/hal_kv_pico.c).
+# pico/uart/hal_uart_pico.c, pico/time/hal_time_pico.c).
 #
 # Phase 1a is move-only: these backends are NOT wired into any CMakeLists
 # yet, so there is no real build target to compile them through. This
@@ -11,12 +11,12 @@
 # happens to pull in hardware/adc.h's include path transitively through the
 # same target, so one reference compile command covers both backends --
 # mirrors the pattern in compile_esp_backends.ps1). hal_uart_pico.c
-# (tasks/uart_owner.h), hal_time_pico.c (pico/time.h) and hal_kv_pico.c
-# (config_store.h) all resolve through the SAME relay_owner.c.obj
-# DEFINES/INCLUDES/FLAGS -- relay_owner.c itself is one of the SaftyFW.dir
-# target's ordinary src/tasks/*.c files, so the target's whole include
-# surface (src/, src/tasks/, pico-sdk's hardware_*/pico_* library include
-# dirs including pico_time) is present in that one build statement.
+# (tasks/uart_owner.h) and hal_time_pico.c (pico/time.h) both resolve
+# through the SAME relay_owner.c.obj DEFINES/INCLUDES/FLAGS --
+# relay_owner.c itself is one of the SaftyFW.dir target's ordinary
+# src/tasks/*.c files, so the target's whole include surface (src/,
+# src/tasks/, pico-sdk's hardware_*/pico_* library include dirs including
+# pico_time) is present in that one build statement.
 #
 # Requires an existing firmware/SaftyFW/build/build.ninja + CMakeFiles/
 # rules.ninja (run build_saftyfw_host_tests or a normal SaftyFW CMake
@@ -94,8 +94,7 @@ $sources = @(
     (Join-Path $HalDir "pico\gpio\hal_gpio_pico.c"),
     (Join-Path $HalDir "pico\adc\hal_adc_pico.c"),
     (Join-Path $HalDir "pico\uart\hal_uart_pico.c"),
-    (Join-Path $HalDir "pico\time\hal_time_pico.c"),
-    (Join-Path $HalDir "pico\kv\hal_kv_pico.c")
+    (Join-Path $HalDir "pico\time\hal_time_pico.c")
 )
 
 $failed = $false

@@ -32,15 +32,18 @@
  *    uart_owner.c), and every ring/counter is a file-scope static, not a
  *    per-instance struct -- there is exactly ONE real UART1 link on this
  *    board (docs/ARCHITECTURE.md: UART0 is the separate, raw, HAL-external
- *    console path; see console_uart.c). This backend therefore ignores
- *    cfg->port/tx_io/rx_io/baud entirely (matching the pico gpio/adc
- *    backends' own precedent of under-filling the opaque storage with no
- *    per-instance struct at all) and hal_uart_init() is only ever correct
- *    to call once, for the one real link. A second hal_uart_t initialized
- *    with a different cfg would silently alias the exact same hardware
- *    state as the first -- there is no way for this backend to honor two
- *    independent ports, and hal_uart.h has no ALREADY_INIT-style contract
- *    for hal_uart_init the way hal_spi_bus_init/hal_i2c_bus_init do.
+ *    console path; see console_uart.c). This backend cannot honor a cfg
+ *    describing a second, independent port -- there is only one real link
+ *    -- so hal_uart_init() VALIDATES cfg against the owner's own constants
+ *    (port against the uart1 index, tx_io/rx_io against board_pins.h's
+ *    SAFTYFW_PIN_UART1_TX/_RX, baud against a local literal mirroring
+ *    uart_owner.c's private UART_OWNER_BAUD_RATE, since uart_owner.h
+ *    exposes no accessor for it) and returns HAL_INVALID_ARG on any
+ *    mismatch, rather than silently discarding cfg and letting a caller
+ *    believe a different port/pin/baud was honored. hal_uart_init is still
+ *    only ever correct to call once, for the one real link, and hal_uart.h
+ *    has no ALREADY_INIT-style contract for hal_uart_init the way
+ *    hal_spi_bus_init/hal_i2c_bus_init do.
  * 2. hal_uart_get_rx_error_count() has no real backing counter. uart_owner.c
  *    tracks TX-side diagnostics in unusual depth (tx dropped, bytes to
  *    FIFO, bytes from ISR, self-start-failures, raw head/tail, priming
@@ -76,9 +79,22 @@
  */
 #include "hal_uart.h"
 
+/* TEMPORARY boundary violation: tasks/uart_owner.h is a SaftyFW header
+ * (firmware/SaftyFW/src/tasks/), included here across the hwAbstraction/
+ * pico boundary before uart_owner.c has actually moved into this tree. Per
+ * docs/HW_ABSTRACTION_PLAN.md's "espInterfaces move set" / Phase 1a, the
+ * SaftyFW move set (src/tasks/uart_owner.c/h, uart_owner_tx_policy.c/h)
+ * relocates into firmware/hwAbstraction/pico/uart/ itself, at which point
+ * this becomes a same-directory include and the violation disappears. Until
+ * that move lands, this file wraps uart_owner.c's public API from outside
+ * SaftyFW's own tree -- acceptable only as a stopgap; do not add further
+ * SaftyFW-header includes to this backend on the strength of this
+ * precedent. See docs/HW_ABSTRACTION_PLAN.md Phase 1a for the tracked
+ * removal. */
 #include "tasks/uart_owner.h"
 
 #include "hal_time.h"
+#include "board_pins.h"
 
 /* No per-instance struct: uart_owner.c's state is entirely file-scope
  * statics (one real UART1 link), matching the pico gpio/adc backends'
@@ -88,7 +104,37 @@
 
 hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
     (void)u;
-    (void)cfg; /* port/tx_io/rx_io/baud ignored -- see INTERFACE MISMATCH 1 */
+    /* Per INTERFACE MISMATCH 1, uart_owner.c has exactly one real link and
+     * every parameter is a compile-time constant -- there is nothing to
+     * configure. But a cfg that does not describe THAT link is a caller
+     * bug (a second, imagined instance), not something to silently
+     * accept: validate cfg against the owner's own compile-time constants
+     * rather than discarding it outright. `uart1` and `UART_NUM_1`-style
+     * port identity is checked against pico-sdk's `uart1` global (the same
+     * object uart_owner.c's private UART_OWNER_INSTANCE macro names);
+     * tx_io/rx_io are checked against board_pins.h's
+     * SAFTYFW_PIN_UART1_TX/_RX, the same header uart_owner.c itself
+     * includes. Baud has no owner-exposed accessor (UART_OWNER_BAUD_RATE is
+     * a private #define inside uart_owner.c, not in uart_owner.h) --
+     * HAL_UART_PICO_EXPECTED_BAUD below duplicates that literal only
+     * because there is no accessor to reference instead; it must be kept
+     * equal to uart_owner.c's UART_OWNER_BAUD_RATE by hand until Phase 1a
+     * moves uart_owner.c into this tree and the two constants merge into
+     * one. */
+#define HAL_UART_PICO_EXPECTED_PORT 1 /* uart1, per hal_uart_cfg_t's own doc
+                                        * comment: "pico uart0/uart1 index" */
+#define HAL_UART_PICO_EXPECTED_BAUD 230400u
+    if (cfg != NULL) {
+        if (cfg->port != HAL_UART_PICO_EXPECTED_PORT) {
+            return HAL_INVALID_ARG;
+        }
+        if (cfg->tx_io != SAFTYFW_PIN_UART1_TX || cfg->rx_io != SAFTYFW_PIN_UART1_RX) {
+            return HAL_INVALID_ARG;
+        }
+        if (cfg->baud != HAL_UART_PICO_EXPECTED_BAUD) {
+            return HAL_INVALID_ARG;
+        }
+    }
     if (!uart_owner_init()) {
         return HAL_IO;
     }
@@ -149,6 +195,13 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data,
         if (hal_time_now_ms() >= deadline_ms) {
             return HAL_TIMEOUT;
         }
+        /* Yield instead of busy-spinning: uart_owner_get_tx_used() is a
+         * cheap snapshot read, but polling it in a tight loop still burns
+         * a full CPU core doing nothing while the TX IRQ drains the ring in
+         * the background. 1 ms is well under LINK_TASK_POLL_MS (10 ms) and
+         * the ~345 ms safety-link reply budget, so this does not threaten
+         * either. */
+        hal_time_delay_ms(1);
     }
     return HAL_OK;
 }
