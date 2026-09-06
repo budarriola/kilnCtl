@@ -8,9 +8,9 @@
 #include "driver/uart.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
+
+#include "hal_uart.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,10 +18,18 @@ extern "C" {
 
 typedef struct {
     uart_port_t port;
-    QueueHandle_t event_queue;
+    /* Driver-install (uart_driver_install/uart_param_config/uart_set_pin)
+     * plus the event-queue task that watches for FIFO_OVF/BUFFER_FULL/line
+     * errors both now live in this embedded hal_uart_t, delegated to via
+     * hal_uart_init() -- see uart_owner.c's header comment. `event_queue` is
+     * gone (it was never touched outside uart_owner.c); `port` and
+     * `event_task_handle` stay direct fields because callers outside this
+     * file read them (uart_protocol.c's proto->owner->port,
+     * safety_link.c's stack-margin registration on
+     * &link->owner.event_task_handle). */
+    hal_uart_t hal;
     TaskHandle_t event_task_handle;
     bool initialized;
-    volatile uint32_t rx_error_count;
 } uart_owner_t;
 
 /* uart_owner_request_t and the request-queue/worker-task pair

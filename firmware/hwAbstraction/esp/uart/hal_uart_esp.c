@@ -44,6 +44,7 @@
  */
 #include "hal_uart.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "driver/uart.h"
@@ -175,33 +176,43 @@ hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
                                          HAL_UART_ESP_TX_RING_BUF_SIZE,
                                          (int)queue_len, &impl->event_queue, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "uart%d: uart_driver_install failed: %s", impl->port, esp_err_to_name(err));
         return hal_esp_err_to_status(err);
     }
 
     err = uart_param_config(impl->port, &uart_config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "uart%d: uart_param_config failed: %s", impl->port, esp_err_to_name(err));
         uart_driver_delete(impl->port);
         return hal_esp_err_to_status(err);
     }
 
     err = uart_set_pin(impl->port, cfg->tx_io, cfg->rx_io, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "uart%d: uart_set_pin failed: %s", impl->port, esp_err_to_name(err));
         uart_driver_delete(impl->port);
         return hal_esp_err_to_status(err);
     }
 
+    /* Port folded into the task name (e.g. "hal_uart1_evt") so the two live
+     * ports (PC link, safety link) are distinguishable in coredumps/task
+     * lists -- both used to register as the same bare "hal_uart_evt" name.
+     * Buffer sized for the longest real value ("hal_uart" + up to 2 digits
+     * + "_evt" + NUL) and is safe to let go out of scope once
+     * xTaskCreatePinnedToCore returns: FreeRTOS copies the name into the
+     * TCB, it does not retain the pointer. */
+    char task_name[16];
+    snprintf(task_name, sizeof(task_name), "hal_uart%d_evt", (int)impl->port);
+
     BaseType_t task_created = xTaskCreatePinnedToCore(hal_uart_esp_event_task,
-                                                       "hal_uart_evt",
+                                                       task_name,
                                                        stack_depth,
                                                        impl,
                                                        task_priority,
                                                        &impl->event_task_handle,
                                                        core_id);
     if (task_created != pdPASS) {
-        ESP_LOGE(TAG, "failed to create hal_uart event task");
+        ESP_LOGE(TAG, "uart%d: failed to create hal_uart event task", impl->port);
         uart_driver_delete(impl->port);
         impl->event_queue = NULL;
         return HAL_NO_MEM;

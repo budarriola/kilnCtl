@@ -11,14 +11,22 @@
 #include "driver/uart.h"
 #include "esp_err.h"
 #include "freertos/task.h"
+#include "hal_uart.h"
 
 /* task_handle/event_task_handle added for safety_link.c's host build
  * (App/test/test_safety_link_compile.c) -- safety_link.c's own init/deinit
  * paths read/write these two fields directly (see the real espInterfaces/
  * uart_owner.h for the field this mirrors), everything else about this
- * struct is still an opaque stand-in nothing else here inspects. */
+ * struct is still an opaque stand-in nothing else here inspects.
+ *
+ * 2026-09-06 uart collapse: the real uart_owner_t (espInterfaces/uart_owner.h)
+ * replaced its own driver-install bookkeeping (`event_queue`) with an
+ * embedded `hal_uart_t hal`, delegated to via hal_uart_init(). Mirrored here
+ * (`hal` in place of `_unused`) purely to keep this stand-in's layout
+ * consistent with the real struct -- this stub still only needs to be a
+ * complete type, nothing here inspects `hal`'s contents. */
 typedef struct {
-    int _unused;
+    hal_uart_t hal;
     TaskHandle_t task_handle;
     TaskHandle_t event_task_handle;
 } uart_owner_t;
