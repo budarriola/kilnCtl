@@ -110,7 +110,15 @@ static inline void nvs_test_enable(bool enable)
                                                     // directly without going through boot, so it
                                                     // has to be done here instead.
     }
-    (void)enable; // no separate "disabled" state to model -- fake_kv_reset_all() below undoes it
+    (void)enable; // no separate "disabled" state to model -- fake_kv_reset_all() below undoes it.
+                  // The retired nvs.h stub's nvs_test_enable(false) made every subsequent open
+                  // fail closed globally; this shim's disable is a no-op, and nvs_test_clear()
+                  // below only wipes contents -- it leaves the fake partition mounted. So once
+                  // the first bracketed test has run, the store stays open, silently, for the
+                  // rest of the run: a future test written without the enable(true)/clear
+                  // bracket does NOT fail closed the way it would have against the old stub --
+                  // it just gets a working store handed to it for free. Every persistence test
+                  // in this file MUST keep the enable(true)/nvs_test_clear() bracket regardless.
 }
 
 static inline void nvs_test_clear(void)
