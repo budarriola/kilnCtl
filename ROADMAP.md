@@ -14,6 +14,10 @@
 > margin capture. Full detail for every closed item lives in
 > `docs/COMPLETED_2026-09.md`, per this file's own upkeep rule; earlier
 > sweeps' audit trail lives in that file's edit history, not here.
+> **Bench status, 2026-09-05:** the thermocouple swap is fixed, heater power
+> confirmed close to previous levels (if a tuning run doesn't match earlier
+> measurements, recalibration may be needed), and the test fixture kiln is
+> available for firing again.
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -68,6 +72,8 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | **XL** | CTs — deferred, 2026-09-05. Analysis lives in `docs/CONTACTOR_FEEDBACK_OPTIONS.md`. | `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5 |
+| **M** | **New CT hardware, 2026-09-05**: a real CT is now fitted on `Current3`/GPIO28-ADC2 (1A:1V, ~+59 mV DC offset, SUMMED across all heaters). (a) Add offset handling + calibration for this channel — find/extend `firmware/SaftyFW/src/ct_amps_cal.c`; HARDWARE.md §9 updated. (b) Re-evaluate which of S3/S4/S9/S11/S14 (`GUARD_TEST_MATRIX.md`, `safety_guards.c`) become usable with one SUMMED CT vs which still need per-zone current. No firmware changed yet. | M4/M5; `firmware/SaftyFW/docs/HARDWARE.md` §9, `GUARD_TEST_MATRIX.md` |
+| **S** | **Safety TC display audit, 2026-09-05**: the safety processor's own thermocouple should show under "Thermocouple faults" on LCD/web/PcTools UI only when it is a SEPARATE physical TC (`tc_source == SAFETY_TC_SOURCE_OWN_J7` in `firmware/SaftyFW/src/safety_guards.h`) — hide/suppress it when safety is off or configured `BORROWED_ZONE`/`BOTH` (reusing a main TC). Audit every display site; no firmware changed yet. | `firmware/SaftyFW/src/safety_guards.h` (tc_source); `firmware/SaftyFW/docs/SAFETY_MODEL.md` §3 |
 | S | S8 sanity rate — `c43323a`+`ea69efa` set compiled default 33.3 C/min (2x fastest shipped ramp), fields_set-gated. Bench commission of 14.85 C/min NOT yet applied: Pico refuses config writes while ARMED, write must land during the 60 s GRACE window after a Pico reset. | M3 |
 | — | High-temperature validation firing — closed 2026-09-05, `94b1a2a` confirms ff_hold infeasible above 62 °C on hardware. | `PID_EXPANSION_PLAN.md` §3.6i |
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |
@@ -208,7 +214,11 @@ them:
 All three items once listed here as still unanswerable are now closed: physical
 zone arrangement (owner-confirmed 2026-09-03), the deferred S8 sanity rate
 (decided 2026-09-05 — see the table above), and `hardware/UnitTestFixture/`
-(owner said KEEP, 2026-09-05).
+(owner said KEEP, 2026-09-05). **Scope firmed up 2026-09-05: `UnitTestFixture`
+is a control device only** — a PcTools/MCP surface driving its I/O expanders
+to flip relays, for shorting/opening thermocouples, opening heater
+connections, and simulating SSR lock-ups. It stays excluded from the HAL
+boundary and the `drivers/` reorg (M16/`HW_ABSTRACTION_PLAN.md`).
 
 **Blocked on hardware that does not exist yet.** All of this is scripted and
 waiting, not unwritten:
@@ -216,8 +226,11 @@ waiting, not unwritten:
 - `GUARD_TEST_MATRIX.md` §3's trip rows — every enabled guard's real trip,
   safe-state power-on, sensor open-circuit, current-mapping commissioning.
 - ~~The safety processor's own MAX31856~~ — **fitted 2026-08-24 and verified
-  reading 30.2 °C.** Still absent: any CT, so `0.00 A` on all three channels
-  remains correct reporting of absent hardware (M5).
+  reading 30.2 °C.** ~~Still absent: any CT~~ — **2026-09-05: a CT is now
+  fitted on `Current3` (GPIO28/ADC2) and confirmed working** — 1A:1V CT,
+  ~+59 mV DC offset, reading the summed current of ALL heaters (not
+  per-zone); `Current1`/`Current2` remain unpopulated. See the new items
+  below and `firmware/SaftyFW/docs/HARDWARE.md` §9.
 - S9's welded-contactor escalation, which by definition needs a welded
   contactor. **Checked 2026-09-03**: not a SimFW task — SimFW was removed
   (`8553244`, 2026-08-28) and its replacement, `firmware/UnitTestFw`, is

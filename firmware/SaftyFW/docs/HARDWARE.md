@@ -725,6 +725,13 @@ The three headline consequences:
    reading is garbage. The CT is not on the BOM; it is an operator-supplied
    part and its V/A figure is a **calibration constant, never a derived one**.
 
+**2026-09-05: a CT is now fitted and confirmed working**, on `Current3`
+(GPIO28/ADC2, above) only — Current1/Current2 remain unpopulated. It is a
+1A:1V current transformer with a measured **~+59 mV DC offset**, and it reads
+the **summed current of all heaters**, not any one zone — this is not a
+per-zone install and cannot distinguish which zone is drawing current. See
+ROADMAP.md for the calibration and guard-coverage follow-up.
+
 ---
 
 ## 10. Stale sources
