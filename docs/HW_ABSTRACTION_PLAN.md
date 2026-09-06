@@ -693,6 +693,7 @@ per-channel atten/bitwidth config, a separate calibration handle) does not
 fit hal_adc.h's pico-shaped, handle-less, raw-sample-only signature without
 widening it -- see the "hal_adc -- pico-only" section above for the four
 specific gaps it found, kept as a note now that the file itself is gone.
+ESP-side uart/spi/i2c bodies (`firmware/hwAbstraction/esp/{uart,spi,i2c}/`) landed the same way 2026-09-05, grounded in uart_owner.c/esp_spi_owner.c/i2c_owner.c against their real KilnFW consumers; no interface mismatch for hal_spi.h (hal_spi_bus_cfg_t already carries every owner-task-sizing field spi_owner_init() takes), but hal_uart.h and hal_i2c.h have no such fields at all, so both backends hardcode stack/priority/queue-length constants -- see each file's own INTERFACE MISMATCH comment.
 Real pico-side gpio/adc bodies (`firmware/hwAbstraction/pico/{gpio,adc}/`)
 landed the same day against the real SaftyFW consumers, syntax-checked by
 `firmware/hwAbstraction/test/compile_pico_backends.ps1`; no interface

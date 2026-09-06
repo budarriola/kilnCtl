@@ -1,5 +1,6 @@
 # compile_esp_backends.ps1 -- syntax-only compile check for the ESP-IDF
-# hwAbstraction backends (esp/gpio/hal_gpio_esp.c, esp/common/hal_esp_common.c).
+# hwAbstraction backends (esp/gpio/hal_gpio_esp.c, esp/common/hal_esp_common.c,
+# esp/uart/hal_uart_esp.c, esp/spi/hal_spi_esp.c, esp/i2c/hal_i2c_esp.c).
 #
 # Phase 1a is move-only: these backends are NOT wired into any CMakeLists
 # yet, so there is no real build target to compile them through. This
@@ -77,7 +78,10 @@ $extraArgs += ($ownIncludes | ForEach-Object { "-I" + ($_ -replace '\\', '/') })
 
 $sources = @(
     (Join-Path $HalDir "esp\gpio\hal_gpio_esp.c"),
-    (Join-Path $HalDir "esp\common\hal_esp_common.c")
+    (Join-Path $HalDir "esp\common\hal_esp_common.c"),
+    (Join-Path $HalDir "esp\uart\hal_uart_esp.c"),
+    (Join-Path $HalDir "esp\spi\hal_spi_esp.c"),
+    (Join-Path $HalDir "esp\i2c\hal_i2c_esp.c")
 )
 
 $failed = $false
