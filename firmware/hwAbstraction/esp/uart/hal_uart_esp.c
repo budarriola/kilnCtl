@@ -288,34 +288,52 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
      * uart_get_tx_buffer_free_size() check hal_uart_send() uses -- in a
      * vTaskDelay(1) loop bounded by timeout_ms, so a ring that never drains
      * returns HAL_TIMEOUT with nothing partially queued, instead of hanging.
-     * Only once there is room for the FULL buffer do we call
-     * uart_write_bytes(), which can then be trusted to return immediately
-     * without its own internal wait. */
+     *
+     * 2026-09-05 fix: the original gate waited for `free_bytes >= len`
+     * outright, which for any len larger than the TX ring itself
+     * (HAL_UART_ESP_TX_RING_BUF_SIZE, 4096) can NEVER be satisfied even with
+     * an idle, fully-draining ring -- free_bytes tops out at the ring size,
+     * so that request always ran out the clock and returned HAL_TIMEOUT
+     * regardless of timeout_ms, even though uart_write_bytes() itself
+     * chunks writes larger than the ring just fine. Send in ring-sized
+     * chunks instead: wait for room for the NEXT chunk only (bounded by the
+     * remaining timeout budget), write it, then loop for the rest -- this
+     * still queues nothing partial on a timeout within a chunk (the byte
+     * count already written is tracked and reported via written/total
+     * below), and preserves the "whole buffer or a bounded wait" contract
+     * for buffers of any size. */
     TickType_t start_tick = xTaskGetTickCount();
     TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
-    for (;;) {
-        size_t free_bytes = 0;
-        esp_err_t free_err = uart_get_tx_buffer_free_size(impl->port, &free_bytes);
-        if (free_err != ESP_OK) {
-            return hal_esp_err_to_status(free_err);
-        }
-        if (free_bytes >= len) {
-            break;
-        }
-        if ((xTaskGetTickCount() - start_tick) >= timeout_ticks) {
-            return HAL_TIMEOUT;
-        }
-        vTaskDelay(1);
-    }
+    size_t total_written = 0;
+    while (total_written < len) {
+        size_t remaining = len - total_written;
+        size_t chunk_target = (remaining < HAL_UART_ESP_TX_RING_BUF_SIZE)
+                                   ? remaining
+                                   : HAL_UART_ESP_TX_RING_BUF_SIZE;
 
-    /* Unchanged from uart_owner_task()'s TX branch otherwise: write, then
-     * block until the last byte has left the wire. This is the primitive
-     * uart_protocol.c:107's frame_and_send() needs -- its ACK timer starts
-     * right after this call returns. */
-    int written = uart_write_bytes(impl->port, (const char *)data, len);
-    if (written != (int)len) {
-        impl->tx_dropped_count += (uint32_t)(len - (size_t)(written > 0 ? written : 0));
-        return HAL_IO;
+        for (;;) {
+            size_t free_bytes = 0;
+            esp_err_t free_err = uart_get_tx_buffer_free_size(impl->port, &free_bytes);
+            if (free_err != ESP_OK) {
+                impl->tx_dropped_count += (uint32_t)(len - total_written);
+                return hal_esp_err_to_status(free_err);
+            }
+            if (free_bytes >= chunk_target) {
+                break;
+            }
+            if ((xTaskGetTickCount() - start_tick) >= timeout_ticks) {
+                impl->tx_dropped_count += (uint32_t)(len - total_written);
+                return HAL_TIMEOUT;
+            }
+            vTaskDelay(1);
+        }
+
+        int written = uart_write_bytes(impl->port, (const char *)data + total_written, chunk_target);
+        if (written <= 0 || (size_t)written != chunk_target) {
+            impl->tx_dropped_count += (uint32_t)(len - total_written - (size_t)(written > 0 ? written : 0));
+            return HAL_IO;
+        }
+        total_written += (size_t)written;
     }
 
     /* Remaining budget after the free-space wait above, so the total time

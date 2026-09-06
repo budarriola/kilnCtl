@@ -66,7 +66,7 @@ $failures = @()
 
 function Invoke-Cl {
     param([string]$SourceFile, [string]$OutObj)
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /std:c11 /I`"$ifaceDir`" /c `"$SourceFile`" /Fo:`"$OutObj`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$ifaceDir`" /c `"$SourceFile`" /Fo:`"$OutObj`""
     $out = cmd /c $cmd 2>&1
     return @{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
 }

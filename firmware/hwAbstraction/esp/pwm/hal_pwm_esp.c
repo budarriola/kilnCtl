@@ -24,6 +24,7 @@
 #include "hal_pwm.h"
 
 #include "driver/ledc.h"
+#include "soc/soc_caps.h"
 
 #include "hal_esp_common.h"
 
@@ -39,9 +40,14 @@ static uint32_t s_duty_max;
 static bool     s_initialized;
 
 hal_status_t hal_pwm_init(const hal_pwm_cfg_t *cfg) {
-    if (!cfg || cfg->duty_resolution_bits == 0 || cfg->duty_resolution_bits > 20) {
-        /* LEDC_TIMER_BIT_MAX on this port's low-speed timers is 20 bits;
-         * anything outside 1..20 cannot be a valid ledc_timer_bit_t. */
+    if (!cfg || cfg->duty_resolution_bits == 0 ||
+        cfg->duty_resolution_bits > SOC_LEDC_TIMER_BIT_WIDTH) {
+        /* Real ceiling on this chip's LEDC timers (ESP32-S3:
+         * SOC_LEDC_TIMER_BIT_WIDTH == 14), not the generic ledc_timer_bit_t
+         * enum's 1..20 range -- a duty_resolution_bits beyond 14 is a valid
+         * enumerator but not a valid config on this SoC, and letting it
+         * through to ledc_timer_config() defers the rejection to the IDF
+         * call instead of catching it here per hal_pwm.h's contract. */
         return HAL_INVALID_ARG;
     }
 
@@ -60,9 +66,14 @@ hal_status_t hal_pwm_init(const hal_pwm_cfg_t *cfg) {
     s_duty_max = (1u << cfg->duty_resolution_bits) - 1u;
 
     /* Start at duty 0 / hpoint 0, matching backlight_pwm.c's own init order
-     * (timer first, then channel) -- caller applies the real starting duty
-     * via hal_pwm_set_duty() right after, same as backlight_pwm_init()
-     * does today. */
+     * (timer first, then channel). OPEN INTERFACE ITEM: hal_pwm_init() does
+     * NOT itself apply a starting duty -- the caller must follow up with an
+     * explicit hal_pwm_set_duty() call, same as backlight_pwm_init() does
+     * today. A prior version of this comment claimed backlight_pwm_init()
+     * applies duty "right after init" as if that were this function's own
+     * behavior; that is not the case here and any future interface change
+     * that folds a start-duty into hal_pwm_cfg_t belongs in hal_pwm.h, not
+     * this backend. */
     ledc_channel_config_t chan_cfg = {
         .gpio_num = cfg->gpio_num,
         .speed_mode = HAL_PWM_ESP_MODE,

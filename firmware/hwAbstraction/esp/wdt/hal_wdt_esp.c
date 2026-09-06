@@ -54,7 +54,15 @@ static uint32_t hal_wdt_esp_idle_core_mask(void) {
     return mask;
 }
 
-static uint32_t s_last_timeout_ms;
+/* Seeded from CONFIG_ESP_TASK_WDT_TIMEOUT_S, exactly matching
+ * watchdog_cfg.c's own build_twdt_config() (watchdog_cfg.c:92-104): the
+ * task-WDT is actually armed at boot by IDF off this Kconfig value, not by
+ * an hal_wdt_init() call (see this file's header comment) -- so
+ * hal_wdt_set_panic_disabled() must default to that same Kconfig-derived
+ * timeout rather than 0 if it is ever called before hal_wdt_init() runs
+ * (watchdog_cfg.c's sole future consumer only ever reconfigures the panic
+ * bit, per that file's own header comment). */
+static uint32_t s_last_timeout_ms = (uint32_t)CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000u;
 
 hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled) {
     esp_task_wdt_config_t cfg = {
