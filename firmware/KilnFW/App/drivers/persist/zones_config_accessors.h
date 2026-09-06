@@ -235,6 +235,24 @@ extern "C" {
  * every zone with zone 0's numbers on the very next save. */
 #define ZONE_SETTINGS_SOURCE_CUSTOM 0xFFu
 
+/* ZONES_CFG_VERSION 20->21 (WEB_UI_PLAN.md section 2): the single whole-zone
+ * settings_source byte above became one byte PER MIRRORABLE GROUP -- the
+ * owner wanted "same as zone N" per item, not all-or-nothing. Each group
+ * below is independently either ZONE_SETTINGS_SOURCE_CUSTOM or a real zone
+ * index, walked through the SAME chain-walk/cycle-collapse logic the old
+ * single byte used (zone_settings_source_chain_has_cycle()), just once per
+ * group instead of once per zone. Measured fields (model_*, coupling_*,
+ * tuning_*, normals) and topology fields (name, relay_mask, thermo_mask,
+ * ct_mask, relay_type) are NOT a group here and never mirror -- see
+ * WEB_UI_PLAN.md section 2's table. tc's cal_offset_c also never mirrors
+ * (per-sensor); only tc_type does, hence "tc" rather than "thermocouple". */
+#define SRC_GROUP_LIMITS 0        /* max_temp_c, min_temp_c, max_ramp_c_per_hr, sanity_rate_c_per_min */
+#define SRC_GROUP_RELAY_TIMING 1  /* heater_window_ms, heater_min_on_ms, heater_min_off_ms */
+#define SRC_GROUP_CONTROL 2       /* control_mode, pid_kp/ki/kd, fuzzy_strength_pct */
+#define SRC_GROUP_GUARDS 3        /* the eight guard_* thresholds, cross_zone_max_delta_c */
+#define SRC_GROUP_TC 4            /* tc_type ONLY -- cal_offset_c stays per sensor, never mirrors */
+#define SRC_GROUP_COUNT 5
+
 /* heater_min_on_ms is the ONE heater timing field with a lower bound as well
  * as an upper one, and the bound is a hardware-protection minimum rather than
  * a sanity ceiling: HEATER_MIN_ON_MS_FLOOR (heater_output.h, 10 s, set by the
@@ -745,27 +763,31 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s);
 
-/* zone_cfg_t::settings_source (PID_EXPANSION_PLAN.md section 3.5's "Same as
- * zone N / Custom settings for this zone" UI dropdown) -- see
- * ZONE_SETTINGS_SOURCE_CUSTOM's doc comment above for the full "0 is a real
- * value here" hazard. Getter reports the stored byte verbatim. */
-bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_source);
+/* zone_cfg_t::settings_source[group] (PID_EXPANSION_PLAN.md section 3.5's
+ * "Same as zone N / Custom settings for this zone" UI dropdown, split into
+ * SRC_GROUP_COUNT independent per-group bytes by WEB_UI_PLAN.md section 2)
+ * -- see ZONE_SETTINGS_SOURCE_CUSTOM's doc comment above for the full "0 is
+ * a real value here" hazard, and SRC_GROUP_LIMITS et al above for which
+ * fields each group covers. `group` must be < SRC_GROUP_COUNT. Getter
+ * reports the stored byte verbatim. */
+bool zones_config_get_settings_source(uint8_t zone_index, uint8_t group, uint8_t *out_settings_source);
 
 /* Setter for the getter above. Same rule parse_zone_fields()'s
- * z%u_settings_source enforces: either ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) or a
+ * z%u_settings_source_<group> enforces: either ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) or a
  * real zone index < MAX31856_CHANNEL_COUNT other than zone_index itself
  * (self-reference is the degenerate inheritance cycle -- refused here, not
  * left for a later pass to unwind). ALSO refused: any settings_source that
  * would close a LONGER cycle through some other zone's already-stored link
- * (2-zone, 3-zone, ...) -- checked against the live stored config, so this
- * catches everything a single-zone write can create. A whole-page or
+ * (2-zone, 3-zone, ...) -- checked against the live stored config for the
+ * SAME group only (each group's chain is independent), so this catches
+ * everything a single-zone write can create. A whole-page or
  * multi-entry-import write that changes several zones' links AT ONCE, none
  * of which cycles alone against the pre-write config but which cycle
  * together, is NOT caught by this per-call check -- callers doing that (the
  * zones POST handler, backup_http.c's importer) must re-walk the full
  * proposed set themselves before calling this in a commit loop; see
  * zones_config_settings_source_import_has_cycle() for that case. */
-bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_source);
+bool zones_config_set_settings_source(uint8_t zone_index, uint8_t group, uint8_t settings_source);
 
 /* Commit-loop counterpart to the setter above for a multi-entry import/
  * whole-page write that has ALREADY passed
@@ -783,24 +805,26 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_sourc
  * fail" commit loop. Do not call this for a single ad-hoc write outside such
  * a loop -- use zones_config_set_settings_source() for that, which protects
  * itself. */
-bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t settings_source);
+bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t group, uint8_t settings_source);
 
-/* Cross-entry pass-1 check for a multi-zone import/whole-page write:
- * `has_override[z]` true means zone z's proposed NEW settings_source is
- * `override_source[z]`; false means zone z keeps its current LIVE value.
- * Walks every zone's resulting chain (live values everywhere no override is
- * given) and reports whether ANY of them cycles -- catching the case a
- * single zones_config_set_settings_source() call cannot: several zones'
- * links changing in the same import, none of which is a cycle against the
- * old live config alone, but which close one together (e.g. zone 0 -> zone
- * 1 and zone 1 -> zone 0 both newly set in the same import). Returns false
- * (no cycle) with *out_cycle_zone untouched if out_cycle_zone is NULL or no
- * cycle exists; otherwise returns true and, if out_cycle_zone is non-NULL,
- * names one zone that sits on a cycle. Read-only -- never writes to the live
- * config; callers still run their commit loop (calling
- * zones_config_set_settings_source() per entry) only after this returns
- * false. */
-bool zones_config_settings_source_import_has_cycle(const bool has_override[MAX31856_CHANNEL_COUNT],
+/* Cross-entry pass-1 check for a multi-zone import/whole-page write, for ONE
+ * group at a time (callers doing several groups run this once per group):
+ * `has_override[z]` true means zone z's proposed NEW settings_source for
+ * `group` is `override_source[z]`; false means zone z keeps its current
+ * LIVE value for that group. Walks every zone's resulting chain (live
+ * values everywhere no override is given) and reports whether ANY of them
+ * cycles -- catching the case a single zones_config_set_settings_source()
+ * call cannot: several zones' links changing in the same import, none of
+ * which is a cycle against the old live config alone, but which close one
+ * together (e.g. zone 0 -> zone 1 and zone 1 -> zone 0 both newly set in
+ * the same import). Returns false (no cycle) with *out_cycle_zone untouched
+ * if out_cycle_zone is NULL or no cycle exists; otherwise returns true and,
+ * if out_cycle_zone is non-NULL, names one zone that sits on a cycle.
+ * Read-only -- never writes to the live config; callers still run their
+ * commit loop (calling zones_config_set_settings_source() per entry) only
+ * after this returns false, for every group they are importing. */
+bool zones_config_settings_source_import_has_cycle(uint8_t group,
+                                                    const bool has_override[MAX31856_CHANNEL_COUNT],
                                                     const uint8_t override_source[MAX31856_CHANNEL_COUNT],
                                                     uint8_t *out_cycle_zone);
 

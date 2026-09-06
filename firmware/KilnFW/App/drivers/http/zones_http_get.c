@@ -410,7 +410,18 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                z->tuning_tau_consistent ? "true" : "false",
                (double)z->tuning_baseline_c, (double)z->tuning_step_ambient_c,
                (double)z->tuning_raw_rise_c, (double)z->tuning_rise_inf_c, (unsigned)z->tuning_seq);
-        APPEND("\"settings_source\":%u}", z->settings_source);
+        /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): emits both
+         * forms. "settings_source_groups" is the real, current per-group
+         * data -- one key per SRC_GROUP_NAMES entry, current page's own
+         * source of truth. "settings_source" is kept, set to the LIMITS
+         * group's value, purely so an older cached tab / older non-browser
+         * client reading this JSON does not see the key vanish outright;
+         * it is never authoritative once any group differs from another. */
+        APPEND("\"settings_source_groups\":{");
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            APPEND("\"%s\":%u%s", SRC_GROUP_NAMES[g], z->settings_source[g], (g + 1 < SRC_GROUP_COUNT) ? "," : "");
+        }
+        APPEND("},\"settings_source\":%u}", z->settings_source[SRC_GROUP_LIMITS]);
     }
     APPEND("]}");
 

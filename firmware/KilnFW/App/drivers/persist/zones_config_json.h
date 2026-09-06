@@ -60,7 +60,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 20
+#define ZONES_CFG_VERSION 21
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -413,14 +413,24 @@ typedef struct {
      * the same "0 is always a safe, meaningful value" property control_mode/
      * thermo_mask/etc. already have, not a dangling reference. */
     uint8_t timing_profile;
-    /* Section 3.5's UI-only provenance marker: ZONE_SETTINGS_SOURCE_CUSTOM
-     * (0xFF) = "this zone's own settings", otherwise the index of the zone
-     * this one's dropdown claims to copy. Stored ONLY so the settings page
-     * re-opens showing the right dropdown state -- the resolved values are
-     * written into each zone's own fields on save, so NOTHING in the control
-     * loop ever reads this. Note 0 is a real value here ("copies zone 0"),
-     * not an empty default: see convert_zone_v9(). */
-    uint8_t settings_source;
+    /* Section 3.5's UI-only provenance marker, one byte PER MIRRORABLE GROUP
+     * since ZONES_CFG_VERSION 20->21 (WEB_UI_PLAN.md section 2) instead of a
+     * single whole-zone byte: settings_source[SRC_GROUP_LIMITS],
+     * [SRC_GROUP_RELAY_TIMING], [SRC_GROUP_CONTROL], [SRC_GROUP_GUARDS] and
+     * [SRC_GROUP_TC] (see those #defines, zones_config_accessors.h, for
+     * exactly which fields each group covers). Each entry is independently
+     * ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) = "this zone's own settings for
+     * that group", otherwise the index of the zone that group's dropdown
+     * claims to copy. Measured fields (model_*, coupling_*, tuning_*) and
+     * topology fields (name, relay_mask, thermo_mask, ct_mask, relay_type)
+     * are not covered by any group and never mirror. Stored ONLY so the
+     * settings page re-opens showing the right dropdown state per group --
+     * the resolved values are written into each zone's own fields on save,
+     * so NOTHING in the control loop ever reads this array. Note 0 is a
+     * real value here ("copies zone 0"), not an empty default: see
+     * convert_zone_v9() and the v20->v21 migration (every group starts as a
+     * copy of the old single byte, not a fresh CUSTOM). */
+    uint8_t settings_source[SRC_GROUP_COUNT];
     /* ---- ZONES_CFG_VERSION 12->13 (2026-09-01, owner: "in the pid
      * stistics consider, maybe there should be 2 sets, one for the pid
      * tuneing that stays unless retuned, and another for the last fireing
@@ -701,6 +711,106 @@ typedef struct {
      * existing board's heater relays. */
     uint8_t relay_type;
 } zone_cfg_t;
+
+/* Frozen v20 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 20->21, WEB_UI_PLAN.md section 2): a single
+ * whole-zone settings_source byte, predating the per-group split
+ * (settings_source[SRC_GROUP_COUNT] above). Same discipline as
+ * zone_cfg_v19_t below it in this file: field order hand-copied from v20's
+ * actual shape, never derived from the live struct -- critically, never the
+ * bare `zone_cfg_t` name for this purpose, since that name now refers to
+ * the v21 (bigger) shape. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+    float error_band_c;
+    float rate_band_c_per_s;
+    uint8_t relay_type;
+} zone_cfg_v20_t;
+
+/* 212 = 208 (zone_cfg_v19_t's own byte-for-byte size) + 1 (relay_type),
+ * padded to 212 for the struct's 4-byte float alignment (209 rounds up).
+ * Hand-computed, same discipline as every other frozen zone_cfg_vN_t assert
+ * in this file -- never sizeof(zone_cfg_t), which by the time this pass
+ * lands is already the v21 shape, not v20's. */
+_Static_assert(sizeof(zone_cfg_v20_t) == 212,
+               "zone_cfg_v20_t must match the on-flash v20 layout byte-for-byte (212 bytes)"); /* v20 -- predates per-group settings_source */
+
+/* Per-field offsetof assertions for zone_cfg_v20_t -- same rationale as
+ * zone_cfg_v19_t's own block below it (this is a frozen snapshot pinned
+ * against an accidental edit to ITSELF, not a guard against insertion into
+ * the live zone_cfg_t; see that comment for the full reasoning and the
+ * migration-test coverage that actually catches the live-struct case). */
+_Static_assert(offsetof(zone_cfg_v20_t, name) == 0,
+               "zone_cfg_v20_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v20_t, cal_offset_c) == 16,
+               "zone_cfg_v20_t::cal_offset_c must stay at byte offset 16");
+_Static_assert(offsetof(zone_cfg_v20_t, relay_mask) == 148,
+               "zone_cfg_v20_t::relay_mask must stay at byte offset 148");
+_Static_assert(offsetof(zone_cfg_v20_t, control_mode) == 149,
+               "zone_cfg_v20_t::control_mode must stay at byte offset 149");
+_Static_assert(offsetof(zone_cfg_v20_t, settings_source) == 154,
+               "zone_cfg_v20_t::settings_source must stay at byte offset 154");
+_Static_assert(offsetof(zone_cfg_v20_t, coupling_diag_k_dc) == 188,
+               "zone_cfg_v20_t::coupling_diag_k_dc must stay at byte offset 188");
+_Static_assert(offsetof(zone_cfg_v20_t, ease_off_window_mult) == 192,
+               "zone_cfg_v20_t::ease_off_window_mult must stay at byte offset 192");
+_Static_assert(offsetof(zone_cfg_v20_t, approach_rate_cap_c_per_hr) == 196,
+               "zone_cfg_v20_t::approach_rate_cap_c_per_hr must stay at byte offset 196");
+_Static_assert(offsetof(zone_cfg_v20_t, error_band_c) == 200,
+               "zone_cfg_v20_t::error_band_c must stay at byte offset 200");
+_Static_assert(offsetof(zone_cfg_v20_t, rate_band_c_per_s) == 204,
+               "zone_cfg_v20_t::rate_band_c_per_s must stay at byte offset 204");
+_Static_assert(offsetof(zone_cfg_v20_t, relay_type) == 208,
+               "zone_cfg_v20_t::relay_type must stay at byte offset 208");
 
 /* Frozen v19 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 19->20), error_band_c/rate_band_c_per_s and
@@ -2313,6 +2423,29 @@ typedef struct {
 } zones_cfg_v19_t; /* v19 -- what zones_cfg_t looked like immediately before THIS
                      * pass; predates the per-zone relay_type addition. */
 
+/* Frozen v20 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 20->21): zones[] is the per-zone shape that
+ * predates this pass's settings_source[SRC_GROUP_COUNT] split
+ * (zone_cfg_v20_t, frozen above). Same shape as v19's own wrapper -- no
+ * wrapper-level scalar removed here either, just zones[] pinned to the
+ * smaller, historical per-zone type. This is what a LIVE, already-
+ * commissioned v20 board looks like on flash right now -- the exact blob a
+ * v20->v21 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v20_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v20_t; /* v20 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates the settings_source per-group split. */
+
 
 
 typedef enum {
@@ -2353,23 +2486,27 @@ uint32_t zones_config_json_compute_crc(const zones_cfg_t *cfg);
  * failure, *err_reason names the first field that failed. */
 bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason);
 
-/* Bounded chain walk starting at `start`, following settings_source links
- * through `zones[]` (MAX31856_CHANNEL_COUNT-sized, indexed exactly like
- * zones_cfg_t::zones). Returns true if the chain revisits a zone already on
- * it -- a genuine inheritance cycle -- false if it terminates cleanly. See
- * zones_config_json.c's own copy of this function's original comment (moved
- * verbatim) for the full walk semantics. */
+/* Bounded chain walk starting at `start`, following settings_source[group]
+ * links through `zones[]` (MAX31856_CHANNEL_COUNT-sized, indexed exactly
+ * like zones_cfg_t::zones). `group` selects which of the SRC_GROUP_COUNT
+ * independent per-group bytes to walk (WEB_UI_PLAN.md section 2 -- each
+ * group's chain is entirely independent of the others). Returns true if the
+ * chain revisits a zone already on it -- a genuine inheritance cycle --
+ * false if it terminates cleanly. See zones_config_json.c's own copy of
+ * this function's original comment (moved verbatim) for the full walk
+ * semantics. */
 bool zones_config_json_settings_source_chain_has_cycle(const zone_cfg_t zones[MAX31856_CHANNEL_COUNT],
-                                                        uint8_t start, uint8_t thermo_count);
+                                                        uint8_t group, uint8_t start, uint8_t thermo_count);
 
-/* Every-load fixup, LOAD PATH ONLY: collapses any settings_source cycle in
- * *cfg to ZONE_SETTINGS_SOURCE_CUSTOM on just the zones actually ON the
- * cycle, logging each one by name (`partition`, purely for the log line). A
- * cycle can only reach flash via firmware that predates the chain-walk
- * guards, or direct NVS tampering; either way a config that was valid before
- * this guard shipped must keep booting, not get wiped -- see
- * zones_config_json.c's own copy of this function's original comment for
- * the full reasoning and the index-order-independence argument. */
+/* Every-load fixup, LOAD PATH ONLY: collapses any settings_source[group]
+ * cycle in *cfg to ZONE_SETTINGS_SOURCE_CUSTOM on just the zones actually ON
+ * the cycle, for EVERY group independently, logging each one by name
+ * (`partition`, purely for the log line). A cycle can only reach flash via
+ * firmware that predates the chain-walk guards, or direct NVS tampering;
+ * either way a config that was valid before this guard shipped must keep
+ * booting, not get wiped -- see zones_config_json.c's own copy of this
+ * function's original comment for the full reasoning and the
+ * index-order-independence argument. */
 void zones_config_json_normalize_settings_source_cycles(zones_cfg_t *cfg, const char *partition);
 
 /* Parses one application/x-www-form-urlencoded field from `body`: `key`'s

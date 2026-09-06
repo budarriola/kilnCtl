@@ -7,6 +7,20 @@
 
 #include <string.h>
 
+/* ZONES_CFG_VERSION 20->21 (WEB_UI_PLAN.md section 2): every historical
+ * converter below (v1..v19, all predating the per-group split) carried a
+ * single settings_source scalar; the migration rule for all of them is the
+ * same one case 20 in zones_config_migrate.c uses for the one-version hop
+ * it actually owns -- fan the one old value out to every SRC_GROUP_COUNT
+ * group, never leave four of the five at a fresh CUSTOM. Small helper so
+ * every call site below says so once instead of repeating the loop. */
+static void zone_cfg_fanout_settings_source(zone_cfg_t *d, uint8_t v)
+{
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        d->settings_source[g] = v;
+    }
+}
+
 
 size_t zones_cfg_expected_len_for_version(uint8_t version)
 {
@@ -37,6 +51,7 @@ size_t zones_cfg_expected_len_for_version(uint8_t version)
     case 17: return sizeof(zones_cfg_v17_t);
     case 18: return sizeof(zones_cfg_v18_t);
     case 19: return sizeof(zones_cfg_v19_t);
+    case 20: return sizeof(zones_cfg_v20_t);
     case ZONES_CFG_VERSION: return sizeof(zones_cfg_t);
     default: return 0;
     }
@@ -312,7 +327,7 @@ void convert_zone_v9(const zone_cfg_v9_t *s, zone_cfg_t *d)
      * configured" default (see zone_cfg_t's comment). v9 predates coupling
      * entirely (not even the single-pair v10 shape), so there is nothing to
      * map into any row cell here -- unlike convert_zone_v10() below. */
-    d->settings_source = ZONE_SETTINGS_SOURCE_CUSTOM; /* NEVER 0 -- see this function's own comment */
+    zone_cfg_fanout_settings_source(d, ZONE_SETTINGS_SOURCE_CUSTOM); /* NEVER 0 -- see this function's own comment */
 }
 
 /* v10 -> v11: field-for-field carry-through, same shape as convert_zone_v9()
@@ -360,7 +375,7 @@ void convert_zone_v10(const zone_cfg_v10_t *s, zone_cfg_t *d, uint8_t chan_idx)
     d->ct_mask = s->ct_mask;
     d->timing_profile = s->timing_profile;
     d->fuzzy_strength_pct = s->fuzzy_strength_pct;
-    d->settings_source = s->settings_source; /* v10 already has this field for real -- unlike
+    zone_cfg_fanout_settings_source(d, s->settings_source); /* v10 already has this field for real -- unlike
                                                * convert_zone_v9(), never forced to the sentinel */
     /* THE migration this bump exists for -- see this function's own header
      * comment. s->coupling_neighbor_zone is validated (by v10's own setter/
@@ -432,7 +447,7 @@ void convert_zone_v11(const zone_cfg_v11_t *s, zone_cfg_t *d)
      * above already left them at 0, same "not touched" pattern
      * convert_zone_v9()'s own comment uses for fuzzy_strength_pct/
      * coupling_coeff[] there. */
-    d->settings_source = s->settings_source;
+    zone_cfg_fanout_settings_source(d, s->settings_source);
     /* tuning_*: not touched -- the memset above already left tuning_valid at
      * 0 ("unknown"), same convention. A v11 blob never stored a tuning
      * quality record, so there is nothing to carry into it -- see
@@ -487,7 +502,7 @@ void convert_zone_v12(const zone_cfg_v12_t *s, zone_cfg_t *d)
     memcpy(d->coupling_coeff, s->coupling_coeff, sizeof(d->coupling_coeff));
     memcpy(d->coupling_tau_s, s->coupling_tau_s, sizeof(d->coupling_tau_s));
     memcpy(d->coupling_dead_time_s, s->coupling_dead_time_s, sizeof(d->coupling_dead_time_s));
-    d->settings_source = s->settings_source;
+    zone_cfg_fanout_settings_source(d, s->settings_source);
     /* tuning_*: not touched -- the memset above already left tuning_valid at
      * 0 ("unknown"). */
 }
@@ -539,7 +554,7 @@ void convert_zone_v13(const zone_cfg_v13_t *s, zone_cfg_t *d)
     memcpy(d->coupling_coeff, s->coupling_coeff, sizeof(d->coupling_coeff));
     memcpy(d->coupling_tau_s, s->coupling_tau_s, sizeof(d->coupling_tau_s));
     memcpy(d->coupling_dead_time_s, s->coupling_dead_time_s, sizeof(d->coupling_dead_time_s));
-    d->settings_source = s->settings_source;
+    zone_cfg_fanout_settings_source(d, s->settings_source);
     d->tuning_valid = s->tuning_valid;
     d->tuning_method = s->tuning_method;
     d->tuning_rule = s->tuning_rule;
@@ -604,7 +619,7 @@ void convert_zone_v14(const zone_cfg_v14_t *s, zone_cfg_t *d)
     memcpy(d->coupling_coeff, s->coupling_coeff, sizeof(d->coupling_coeff));
     memcpy(d->coupling_tau_s, s->coupling_tau_s, sizeof(d->coupling_tau_s));
     memcpy(d->coupling_dead_time_s, s->coupling_dead_time_s, sizeof(d->coupling_dead_time_s));
-    d->settings_source = s->settings_source;
+    zone_cfg_fanout_settings_source(d, s->settings_source);
     d->tuning_valid = s->tuning_valid;
     d->tuning_method = s->tuning_method;
     d->tuning_rule = s->tuning_rule;

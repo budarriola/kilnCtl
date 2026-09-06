@@ -818,7 +818,15 @@ var INFO_HTML = {
     'rated number of operations, and the board tracks cycles against it and warns as that budget ' +
     'runs down. This is TOPOLOGY, like the relay checkboxes above -- it describes what hardware is ' +
     'actually wired to this zone, not a tuning choice, so it is not one of the settings a zone can ' +
-    'inherit from another via "same as".</p>'
+    'inherit from another via "same as".</p>',
+  settingsSrcGroups: '<p class="hint">Each item below can independently say "same as zone N" or ' +
+    '"custom for this zone" -- the whole-zone select above is a shortcut that sets all five the same ' +
+    'way in one click, not a separate sixth setting. Measured values (the identified plant model, ' +
+    'cross-zone coupling, normals) and topology (name, which relays/thermocouples/CTs are wired ' +
+    'here, relay type) never mirror -- they always describe THIS zone\'s own hardware or its own ' +
+    'measurements, never another zone\'s. The calibration offset is part of "thermocouple type" on ' +
+    'this page\'s single dropdown but is excluded from that group\'s mirroring for the same reason: ' +
+    'it corrects THIS physical sensor, not a policy choice a zone can share.</p>'
 };
 
 function infoOpenStorageKey(key) { return 'zoneInfoOpen:' + key; }
@@ -1089,9 +1097,29 @@ function zoneBlock(z, i, relayCount, thermoCount) {
      * it needs every zone's div in the DOM first, which zoneBlock() alone
      * cannot guarantee while still building this one. */
     bodyHtml +=
-      '<label>Thermocouple type + settings</label>' +
+      '<label>Thermocouple type + settings (quick -- sets every group below the same way)</label>' +
+      infoDetailsHtml('settingsSrcGroups', 'per-item "same as zone N"') +
       '<select class="settingssrc"></select>' +
       '<div class="inheritedSummary hint"></div>' +
+      /* WEB_UI_PLAN.md section 2: the whole-zone select above stays as a
+       * shortcut (it sets all five of these at once, see the 'settingssrc'
+       * change handler below) -- these five are the real, independent
+       * per-group choice. A group set to "Same as zone K" disables its own
+       * fields in .customStack below (still visible, so the operator sees
+       * what it resolved to) and its live values are overwritten from zone
+       * K's own fields at save time, same "resolved at save, not a live
+       * pointer" model the whole-zone select already used. Measured fields
+       * (model/coupling/normals) and topology (name/masks/relay_type) are
+       * not offered here -- see WEB_UI_PLAN.md section 2's table -- they
+       * are never part of any group's <select> because they are rendered
+       * outside settingsStackHtml entirely (relayTypeHtml et al, above). */
+      '<div class="groupsrcList">' +
+        '<label>Limits (max/min temp, ramp, rise rate) <select class="groupsrc" data-group="limits"></select></label>' +
+        '<label>Relay timing (window/min-on/min-off) <select class="groupsrc" data-group="relaytiming"></select></label>' +
+        '<label>Control (mode, Kp/Ki/Kd, fuzzy strength) <select class="groupsrc" data-group="control"></select></label>' +
+        '<label>Guards (the 8 thresholds + cross-zone) <select class="groupsrc" data-group="guards"></select></label>' +
+        '<label>Thermocouple type (not cal offset) <select class="groupsrc" data-group="tc"></select></label>' +
+      '</div>' +
       '<div class="customStack" style="display:none">' + settingsStackHtml + '</div>';
   }
   div.innerHTML = bodyHtml;
@@ -1354,12 +1382,98 @@ function initInheritanceControls() {
   }
   refreshAllInheritance();
   updateZonePanel(zoneDiv(0));
+  initGroupSourceControls();
 }
+
+// WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): the five independent
+// per-group ".groupsrc" selects added next to the whole-zone one. Same
+// option list/format as the whole-zone select (settingsSourceOptionsHtml);
+// initial value comes from the GET response's settings_source_groups[group]
+// (falling back to the legacy scalar settings_source for an older cached
+// response shape, same "old clients/old data keep working" discipline the
+// HTTP layer's own accept-the-scalar-too rule follows).
+function groupSettingsSourceOf(k, group) {
+  if (k === 0) return 255;
+  var div = zoneDiv(k);
+  var sel = div && div.querySelector('.groupsrc[data-group="' + group + '"]');
+  if (!sel) return 255;
+  if (sel.dataset.storedInvalid !== undefined) return parseInt(sel.dataset.storedInvalid, 10);
+  var v = parseInt(sel.value, 10);
+  return isNaN(v) ? 255 : v;
+}
+
+// Same chain walk as resolveTerminal(), independently per group -- a link on
+// one group never affects another group's chain (the firmware's own
+// zones_config_json_settings_source_chain_has_cycle() walks each group's
+// settings_source[] byte separately; this mirrors that on the client).
+function resolveGroupTerminal(k, group, thermoCount) {
+  var visited = {};
+  var cur = k;
+  while (true) {
+    if (visited[cur]) return { terminal: cur, forced: true };
+    visited[cur] = true;
+    if (cur === 0) return { terminal: 0, forced: false };
+    var src = groupSettingsSourceOf(cur, group);
+    if (src === 255 || src === cur || src < 0 || src >= thermoCount) {
+      return { terminal: cur, forced: (src !== 255) };
+    }
+    cur = src;
+  }
+}
+
+function initGroupSourceControls() {
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  for (var k = 1; k < thermoCount; k++) {
+    var div = zoneDiv(k);
+    if (!div) continue;
+    var z = current.zones[k] || {};
+    var groups = z.settings_source_groups || {};
+    var legacy = (z.settings_source != null) ? z.settings_source : 0;
+    SRC_GROUPS.forEach(function (group) {
+      var sel = div.querySelector('.groupsrc[data-group="' + group + '"]');
+      if (!sel) return;
+      var stored = (groups[group] != null) ? groups[group] : legacy;
+      sel.innerHTML = settingsSourceOptionsHtml(k, thermoCount, current.zones || []);
+      var optionExists = false;
+      Array.prototype.forEach.call(sel.options, function (o) { if (parseInt(o.value, 10) === stored) optionExists = true; });
+      if (optionExists) {
+        delete sel.dataset.storedInvalid;
+        sel.value = String(stored);
+      } else {
+        sel.dataset.storedInvalid = stored;
+      }
+    });
+  }
+}
+
+// The names z%u_settings_source_<name> and settings_source_groups.<name> use
+// on the wire (zones_http_post_parse.c's SRC_GROUP_NAMES, zones_http_get.c's
+// matching emit) -- kept in one place so a typo here shows up as every group
+// silently falling back to Custom, not a hard-to-spot per-group mismatch.
+var SRC_GROUPS = ['limits', 'relaytiming', 'control', 'guards', 'tc'];
 
 document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('thermobit')) updateThermoWarnings();
   if (e.target.classList.contains('relaybit')) renderRelayNames();
   if (e.target.classList.contains('mode')) updateZonePanel(e.target.closest('.zone'));
+  if (e.target.classList.contains('settingssrc')) {
+    /* WEB_UI_PLAN.md section 2: the whole-zone select is now a SHORTCUT --
+     * it sets every one of the five independent .groupsrc selects to the
+     * same value in one click, rather than being a separate sixth setting.
+     * An operator who wants different answers per group still uses the
+     * .groupsrc selects directly afterward; this only fires on the
+     * whole-zone select's own change, never the reverse. */
+    var qdiv = e.target.closest('.zone');
+    if (qdiv) {
+      var qval = e.target.value;
+      qdiv.querySelectorAll('.groupsrc').forEach(function (gsel) {
+        delete gsel.dataset.storedInvalid;
+        var has = false;
+        Array.prototype.forEach.call(gsel.options, function (o) { if (o.value === qval) has = true; });
+        if (has) gsel.value = qval;
+      });
+    }
+  }
   if (e.target.classList.contains('settingssrc') && e.target.value === '255') {
     /* PID_EXPANSION_PLAN.md 3.5: switching to Custom must start from what
        this zone was inheriting, not from the pre-edit numbers that have sat
@@ -1751,10 +1865,26 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     div.querySelectorAll('.ctbit').forEach(function (cb) {
       if (cb.checked) ctMask |= (1 << parseInt(cb.dataset.bit, 10));
     });
+    /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): settings_source
+     * is now five INDEPENDENT per-group choices, not one whole-zone one.
+     * srcVal/terminal (the whole-zone select) still exist and are still
+     * sent (zones_http_post_parse.c accepts the legacy scalar key as a
+     * default applied to whichever group has no more-specific key in the
+     * same submission -- older clients keep working), but every field
+     * below is now resolved through ITS OWN group's terminal, computed
+     * fresh here exactly like the whole-zone terminal used to be. */
     var srcVal = settingsSourceOf(i);
     var terminal = resolveTerminal(i, thermoCount).terminal;
-    var tdiv = zoneDiv(terminal);
-    var tstack = tdiv.querySelector('.customStack');
+    var ownStack = div.querySelector('.customStack');
+    var srcLimits = groupSettingsSourceOf(i, 'limits');
+    var srcRelayTiming = groupSettingsSourceOf(i, 'relaytiming');
+    var srcControl = groupSettingsSourceOf(i, 'control');
+    var srcGuards = groupSettingsSourceOf(i, 'guards');
+    var srcTc = groupSettingsSourceOf(i, 'tc');
+    var limitsStack = zoneDiv(resolveGroupTerminal(i, 'limits', thermoCount).terminal).querySelector('.customStack');
+    var relayTimingStack = zoneDiv(resolveGroupTerminal(i, 'relaytiming', thermoCount).terminal).querySelector('.customStack');
+    var controlStack = zoneDiv(resolveGroupTerminal(i, 'control', thermoCount).terminal).querySelector('.customStack');
+    var guardsStack = zoneDiv(resolveGroupTerminal(i, 'guards', thermoCount).terminal).querySelector('.customStack');
     if (srcVal !== 255) dependents.push(i);
 
     /* Wiring -- always this zone's own, never inherited (3.5's "still not
@@ -1767,36 +1897,51 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_thermo_mask=' + thermoMask);
     params.push('z' + i + '_ct_mask=' + ctMask);
 
-    /* The rest of the "thermocouple type downward" stack -- resolved from
-       the terminal zone's (own or inherited-from) .customStack inputs.
-       tc_type is deliberately excluded here; see the channel-type pass
-       below. */
-    params.push('z' + i + '_cal=' + tstack.querySelector('.cal').value);
-    params.push('z' + i + '_kp=' + tstack.querySelector('.kp').value);
-    params.push('z' + i + '_ki=' + tstack.querySelector('.ki').value);
-    params.push('z' + i + '_kd=' + tstack.querySelector('.kd').value);
-    params.push('z' + i + '_ramp=' + tstack.querySelector('.ramp').value);
-    params.push('z' + i + '_sanity=' + tstack.querySelector('.sanity').value);
-    params.push('z' + i + '_mode=' + tstack.querySelector('.mode').value);
-    params.push('z' + i + '_maxtemp=' + tstack.querySelector('.maxtemp').value);
-    params.push('z' + i + '_mintemp=' + tstack.querySelector('.mintemp').value);
-    params.push('z' + i + '_window=' + tstack.querySelector('.window').value);
-    params.push('z' + i + '_minon=' + tstack.querySelector('.minon').value);
-    params.push('z' + i + '_minoff=' + tstack.querySelector('.minoff').value);
-    params.push('z' + i + '_xzone=' + tstack.querySelector('.xzone').value);
-    params.push('z' + i + '_wrongdirwindow=' + tstack.querySelector('.wdwindow').value);
-    params.push('z' + i + '_wrongdirrate=' + tstack.querySelector('.wdrate').value);
-    params.push('z' + i + '_offsettle=' + tstack.querySelector('.offsettle').value);
-    params.push('z' + i + '_runawayrate=' + tstack.querySelector('.runrate').value);
-    params.push('z' + i + '_runawaymargin=' + tstack.querySelector('.runmargin').value);
-    params.push('z' + i + '_driftperiod=' + tstack.querySelector('.driftperiod').value);
-    params.push('z' + i + '_debounce=' + tstack.querySelector('.debounce').value);
-    params.push('z' + i + '_frozenwindow=' + tstack.querySelector('.frozenwindow').value);
-    params.push('z' + i + '_fuzzy_strength=' + tstack.querySelector('.fuzzystrength').value);
-    /* Timing profile: no input on this page either way (see zoneBlock's own
-       comment on div.dataset.timingProfile) -- resolved from the terminal
-       zone's OWN stored assignment, same as every other inherited field. */
-    params.push('z' + i + '_timingprofile=' + tdiv.dataset.timingProfile);
+    /* Calibration offset: per SENSOR, never mirrors regardless of the tc
+       group's choice -- always this zone's own stack, per WEB_UI_PLAN.md
+       section 2's table ("tc_type yes, cal offset no"). */
+    params.push('z' + i + '_cal=' + ownStack.querySelector('.cal').value);
+    /* control group. */
+    params.push('z' + i + '_kp=' + controlStack.querySelector('.kp').value);
+    params.push('z' + i + '_ki=' + controlStack.querySelector('.ki').value);
+    params.push('z' + i + '_kd=' + controlStack.querySelector('.kd').value);
+    params.push('z' + i + '_mode=' + controlStack.querySelector('.mode').value);
+    params.push('z' + i + '_fuzzy_strength=' + controlStack.querySelector('.fuzzystrength').value);
+    /* limits group. */
+    params.push('z' + i + '_ramp=' + limitsStack.querySelector('.ramp').value);
+    params.push('z' + i + '_sanity=' + limitsStack.querySelector('.sanity').value);
+    params.push('z' + i + '_maxtemp=' + limitsStack.querySelector('.maxtemp').value);
+    params.push('z' + i + '_mintemp=' + limitsStack.querySelector('.mintemp').value);
+    /* relay timing group. */
+    params.push('z' + i + '_window=' + relayTimingStack.querySelector('.window').value);
+    params.push('z' + i + '_minon=' + relayTimingStack.querySelector('.minon').value);
+    params.push('z' + i + '_minoff=' + relayTimingStack.querySelector('.minoff').value);
+    /* guards group (the 8 thresholds + cross-zone plausibility). */
+    params.push('z' + i + '_xzone=' + guardsStack.querySelector('.xzone').value);
+    params.push('z' + i + '_wrongdirwindow=' + guardsStack.querySelector('.wdwindow').value);
+    params.push('z' + i + '_wrongdirrate=' + guardsStack.querySelector('.wdrate').value);
+    params.push('z' + i + '_offsettle=' + guardsStack.querySelector('.offsettle').value);
+    params.push('z' + i + '_runawayrate=' + guardsStack.querySelector('.runrate').value);
+    params.push('z' + i + '_runawaymargin=' + guardsStack.querySelector('.runmargin').value);
+    params.push('z' + i + '_driftperiod=' + guardsStack.querySelector('.driftperiod').value);
+    params.push('z' + i + '_debounce=' + guardsStack.querySelector('.debounce').value);
+    params.push('z' + i + '_frozenwindow=' + guardsStack.querySelector('.frozenwindow').value);
+    /* Timing profile: not one of WEB_UI_PLAN.md section 2's five groups --
+       always this zone's OWN stored assignment now, never inherited (no
+       input on this page either way, see zoneBlock's own comment on
+       div.dataset.timingProfile). */
+    params.push('z' + i + '_timingprofile=' + div.dataset.timingProfile);
+    /* Per-group settings_source, one key per SRC_GROUPS entry -- always
+       sent explicitly (an omission is read by the server as "keep the
+       current value", which a whole-page save from this page must never
+       rely on). The legacy whole-zone key is ALSO still sent, as the
+       group with no more specific key would otherwise fall back to
+       (harmless here since every group above always sends its own key). */
+    params.push('z' + i + '_settings_source_limits=' + srcLimits);
+    params.push('z' + i + '_settings_source_relaytiming=' + srcRelayTiming);
+    params.push('z' + i + '_settings_source_control=' + srcControl);
+    params.push('z' + i + '_settings_source_guards=' + srcGuards);
+    params.push('z' + i + '_settings_source_tc=' + srcTc);
 
     /* Echoed back exactly as loaded -- MEASURED per zone (autotune's plant
        model, PID_EXPANSION_PLAN.md 2c's coupling coefficient), never part of
@@ -1820,7 +1965,10 @@ document.getElementById('saveBtn').addEventListener('click', function () {
        "keep the current value" the way the fields above are. */
     params.push('z' + i + '_settings_source=' + srcVal);
 
-    zoneInfo.push({ i: i, thermoMask: thermoMask, terminal: terminal });
+    /* tc_type fan-out below now follows the TC GROUP's own terminal, not
+       the whole-zone one -- a zone can inherit tc_type from a different
+       zone than it inherits, say, its PID gains from. */
+    zoneInfo.push({ i: i, thermoMask: thermoMask, terminal: resolveGroupTerminal(i, 'tc', thermoCount).terminal });
   });
 
   /* zone_cfg_t::tc_type is per CHANNEL (zones_http.c), not per zone -- a

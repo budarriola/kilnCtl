@@ -18,6 +18,14 @@
 #include "http_form.h"
 #include "zone_settings_source_chain.h"
 
+/* SRC_GROUP_LIMITS/RELAY_TIMING/CONTROL/GUARDS/TC order, indexed by the
+ * #defines in zones_config_accessors.h -- see zones_http_internal.h's
+ * declaration of this array for why it lives here (parser and GET emitter
+ * must never disagree on spelling). */
+const char *const SRC_GROUP_NAMES[SRC_GROUP_COUNT] = {
+    "limits", "relaytiming", "control", "guards", "tc",
+};
+
 /* ---- POST /api/zones ------------------------------------------------------
  * Whole-page submit; every field validated into a scratch struct before
  * anything is written to the in-RAM copy or NVS -- reject cleanly, never
@@ -759,61 +767,92 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * POST to be the one updating these two arrays. */
     memcpy(z->coupling_tau_s, current_z->coupling_tau_s, sizeof(z->coupling_tau_s));
     memcpy(z->coupling_dead_time_s, current_z->coupling_dead_time_s, sizeof(z->coupling_dead_time_s));
-    /* settings_source: UNLIKE the three floats above, omitted must NOT
-     * default to 0 -- 0 is a real, different value here ("copies zone 0's
-     * settings"), not a safe empty default. Falls back to the CURRENT stored
-     * value (current_z), same "omit preserves the live setting" convention
-     * z%u_tctype uses just above, rather than to ZONE_SETTINGS_SOURCE_CUSTOM
-     * unconditionally -- this is a whole-page submit, and an older client
-     * that predates this field must not silently flip every zone back to
-     * "custom" on an otherwise ordinary save (see this file's own
-     * whole-page-submit discipline: every other optional field either
-     * defaults to a safe zero or preserves the live value, never invents a
-     * third behavior). */
-    snprintf(key, sizeof(key), "z%u_settings_source", i);
+    /* settings_source[group]: UNLIKE the three floats above, omitted must
+     * NOT default to 0 -- 0 is a real, different value here ("copies zone
+     * 0's settings"), not a safe empty default. Falls back to the CURRENT
+     * stored value (current_z), same "omit preserves the live setting"
+     * convention z%u_tctype uses just above, rather than to
+     * ZONE_SETTINGS_SOURCE_CUSTOM unconditionally -- this is a whole-page
+     * submit, and an older client that predates this field must not
+     * silently flip every zone back to "custom" on an otherwise ordinary
+     * save (see this file's own whole-page-submit discipline: every other
+     * optional field either defaults to a safe zero or preserves the live
+     * value, never invents a third behavior).
+     *
+     * WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): the old single
+     * z%u_settings_source key becomes one key PER GROUP,
+     * z%u_settings_source_<group> for <group> in the SRC_GROUP_NAMES list
+     * below. The legacy scalar key is STILL ACCEPTED, applied to every
+     * group that has no more-specific per-group key in the same submission
+     * -- older clients (pc_tools/MCP, older browser tabs, the many
+     * pre-existing test bodies that predate the per-group split) keep
+     * working exactly as before, whole-zone mirroring all five groups at
+     * once. A submission naming both the legacy key and a specific
+     * per-group key for the same zone lets the per-group key win for that
+     * one group -- the legacy key is a default, not an override. */
     {
+        uint8_t legacy_raw = 0;
+        bool have_legacy = false;
+        snprintf(key, sizeof(key), "z%u_settings_source", i);
         if (zones_config_json_field_present(body, key)) {
-            uint8_t src_raw;
-            if (!zones_config_json_parse_u8_field(body, key, 0, 0xFF, &src_raw)) {
+            if (!zones_config_json_parse_u8_field(body, key, 0, 0xFF, &legacy_raw)) {
                 *err_reason = "zone settings_source missing or invalid";
                 return false;
+            }
+            have_legacy = true;
+        }
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            char gkey[40];
+            snprintf(gkey, sizeof(gkey), "z%u_settings_source_%s", i, SRC_GROUP_NAMES[g]);
+            uint8_t src_raw;
+            bool have_group_key = zones_config_json_field_present(body, gkey);
+            if (have_group_key) {
+                if (!zones_config_json_parse_u8_field(body, gkey, 0, 0xFF, &src_raw)) {
+                    *err_reason = "zone settings_source missing or invalid";
+                    return false;
+                }
+            } else if (have_legacy) {
+                src_raw = legacy_raw;
+            } else {
+                z->settings_source[g] = current_z->settings_source[g];
+                continue;
             }
             if (src_raw != ZONE_SETTINGS_SOURCE_CUSTOM && src_raw >= MAX31856_CHANNEL_COUNT) {
                 *err_reason = "zone settings_source references a zone that doesn't exist";
                 return false;
             }
             /* Self-reference is the degenerate cycle ("zone 1 copies zone
-             * 1"). Phase 5 owns the general cycle/disabled-zone guards, but
-             * this one case is free to reject here and saves Phase 5 having
-             * to unwind it. */
+             * 1"). The zones-POST handler owns the general cycle/disabled-
+             * zone guards for the fully-assembled submission, but this one
+             * case is free to reject here and saves that pass having to
+             * unwind it. */
             if (src_raw == i) {
                 *err_reason = "zone settings_source cannot point at itself";
                 return false;
             }
             /* Longer cycle (2-zone, 3-zone, ...): same chain-walk
              * zones_config_set_settings_source() runs, against the live
-             * s_zones.cfg for every OTHER zone -- this is a single-zone
-             * write (only slot i's link is changing here), so any NEW cycle
-             * must run through zone i; walking from i against everyone
-             * else's live value is sufficient, matching the setter's own
-             * reasoning. A whole-page POST that changes several zones'
-             * links AT ONCE in a way that only cycles once every change is
-             * applied is caught by the zones-POST handler's own re-walk of
-             * every zone's chain across the fully-assembled tmp.zones[],
-             * right after this function's call site's loop and before that
-             * handler's commit point -- see the comment there. */
+             * s_zones.cfg for every OTHER zone, for THIS group only -- this
+             * is a single-zone write (only slot i's link is changing here),
+             * so any NEW cycle must run through zone i; walking from i
+             * against everyone else's live value for this group is
+             * sufficient, matching the setter's own reasoning. A whole-page
+             * POST that changes several zones' links AT ONCE in a way that
+             * only cycles once every change is applied is caught by the
+             * zones-POST handler's own re-walk of every zone's chain (per
+             * group) across the fully-assembled tmp.zones[], right after
+             * this function's call site's loop and before that handler's
+             * commit point -- see the comment there. */
             {
                 zone_cfg_t probe[MAX31856_CHANNEL_COUNT];
                 memcpy(probe, s_zones.cfg.zones, sizeof(probe));
-                probe[i].settings_source = src_raw;
-                if (zones_config_json_settings_source_chain_has_cycle(probe, i, thermo_count)) {
+                probe[i].settings_source[g] = src_raw;
+                if (zones_config_json_settings_source_chain_has_cycle(probe, g, i, thermo_count)) {
                     *err_reason = "zone settings_source would create an inheritance cycle";
                     return false;
                 }
             }
-            z->settings_source = src_raw;
-        } else {
-            z->settings_source = current_z->settings_source;
+            z->settings_source[g] = src_raw;
         }
     }
     return true;

@@ -214,12 +214,14 @@ esp_err_t zones_post_handler(httpd_req_t *req)
      * still bounded out of this walk on principle, since that live value was
      * not part of this submission either, but the "reads back as 0" premise
      * would be wrong if repeated as a reason.) */
-    for (uint8_t i = 0; i < tmp.thermo_count && i < MAX31856_CHANNEL_COUNT; i++) {
-        if (zones_config_json_settings_source_chain_has_cycle(tmp.zones, i, tmp.thermo_count)) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                "zone settings_source would create an inheritance cycle");
-            free(body);
-            return ESP_OK;
+    for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
+        for (uint8_t i = 0; i < tmp.thermo_count && i < MAX31856_CHANNEL_COUNT; i++) {
+            if (zones_config_json_settings_source_chain_has_cycle(tmp.zones, group, i, tmp.thermo_count)) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "zone settings_source would create an inheritance cycle");
+                free(body);
+                return ESP_OK;
+            }
         }
     }
 

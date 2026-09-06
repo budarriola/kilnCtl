@@ -580,12 +580,12 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     return nvs_save() == ESP_OK;
 }
 
-bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_source)
+bool zones_config_get_settings_source(uint8_t zone_index, uint8_t group, uint8_t *out_settings_source)
 {
-    if (!out_settings_source || zone_index >= s_zones.cfg.thermo_count) {
+    if (!out_settings_source || zone_index >= s_zones.cfg.thermo_count || group >= SRC_GROUP_COUNT) {
         return false;
     }
-    *out_settings_source = s_zones.cfg.zones[zone_index].settings_source;
+    *out_settings_source = s_zones.cfg.zones[zone_index].settings_source[group];
     return true;
 }
 
@@ -600,8 +600,11 @@ bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_
  * created running THROUGH zone_index -- walking the chain starting there,
  * against every other zone's live stored value, is sufficient; it does not
  * need to check every zone. */
-bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_source)
+bool zones_config_set_settings_source(uint8_t zone_index, uint8_t group, uint8_t settings_source)
 {
+    if (group >= SRC_GROUP_COUNT) {
+        return false;
+    }
     /* zone_index is bounds-checked against thermo_count, same as every
      * other per-zone setter in this file -- but thermo_count itself is only
      * ever trusted up to MAX31856_CHANNEL_COUNT elsewhere (see
@@ -630,11 +633,11 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_sourc
     }
     zone_cfg_t probe[MAX31856_CHANNEL_COUNT];
     memcpy(probe, s_zones.cfg.zones, sizeof(probe));
-    probe[zone_index].settings_source = settings_source;
-    if (zones_config_json_settings_source_chain_has_cycle(probe, zone_index, thermo_count)) {
+    probe[zone_index].settings_source[group] = settings_source;
+    if (zones_config_json_settings_source_chain_has_cycle(probe, group, zone_index, thermo_count)) {
         return false;
     }
-    s_zones.cfg.zones[zone_index].settings_source = settings_source;
+    s_zones.cfg.zones[zone_index].settings_source[group] = settings_source;
     s_config_generation++;
     return nvs_save() == ESP_OK;
 }
@@ -659,8 +662,11 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_sourc
  * fail. Callers MUST have run zones_config_settings_source_import_has_cycle()
  * over every candidate in this commit loop first -- this function trusts
  * that check, it does not repeat it. */
-bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t settings_source)
+bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t group, uint8_t settings_source)
 {
+    if (group >= SRC_GROUP_COUNT) {
+        return false;
+    }
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
@@ -670,26 +676,30 @@ bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t sett
     if (settings_source == zone_index) {
         return false;
     }
-    s_zones.cfg.zones[zone_index].settings_source = settings_source;
+    s_zones.cfg.zones[zone_index].settings_source[group] = settings_source;
     s_config_generation++;
     return nvs_save() == ESP_OK;
 }
 
-bool zones_config_settings_source_import_has_cycle(const bool has_override[MAX31856_CHANNEL_COUNT],
+bool zones_config_settings_source_import_has_cycle(uint8_t group,
+                                                    const bool has_override[MAX31856_CHANNEL_COUNT],
                                                     const uint8_t override_source[MAX31856_CHANNEL_COUNT],
                                                     uint8_t *out_cycle_zone)
 {
+    if (group >= SRC_GROUP_COUNT) {
+        return true; /* refuse rather than silently walk an out-of-range group */
+    }
     zone_cfg_t probe[MAX31856_CHANNEL_COUNT];
     memcpy(probe, s_zones.cfg.zones, sizeof(probe));
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
         if (has_override[i]) {
-            probe[i].settings_source = override_source[i];
+            probe[i].settings_source[group] = override_source[i];
         }
     }
     uint8_t thermo_count = s_zones.cfg.thermo_count > MAX31856_CHANNEL_COUNT ? MAX31856_CHANNEL_COUNT
                                                                              : s_zones.cfg.thermo_count;
     for (uint8_t i = 0; i < thermo_count; i++) {
-        if (zones_config_json_settings_source_chain_has_cycle(probe, i, thermo_count)) {
+        if (zones_config_json_settings_source_chain_has_cycle(probe, group, i, thermo_count)) {
             if (out_cycle_zone) {
                 *out_cycle_zone = i;
             }
@@ -1386,13 +1396,16 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
     {
     uint8_t import_thermo_count = cand.thermo_count > MAX31856_CHANNEL_COUNT ? MAX31856_CHANNEL_COUNT
                                                                              : cand.thermo_count;
-    for (uint8_t i = 0; i < import_thermo_count; i++) {
-        if (zones_config_json_settings_source_chain_has_cycle(cand.zones, i, import_thermo_count)) {
-            if (reason_out && reason_cap) {
-                snprintf(reason_out, reason_cap,
-                         "zone %u's settings_source forms an inheritance cycle", (unsigned)i);
+    for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
+        for (uint8_t i = 0; i < import_thermo_count; i++) {
+            if (zones_config_json_settings_source_chain_has_cycle(cand.zones, group, i, import_thermo_count)) {
+                if (reason_out && reason_cap) {
+                    snprintf(reason_out, reason_cap,
+                             "zone %u's settings_source (group %u) forms an inheritance cycle", (unsigned)i,
+                             (unsigned)group);
+                }
+                return false;
             }
-            return false;
         }
     }
     }

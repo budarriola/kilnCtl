@@ -10,6 +10,40 @@
 #include "esp_crc.h"
 #include "esp_log.h"
 
+/* ZONES_CFG_VERSION 20->21 (WEB_UI_PLAN.md section 2) widened settings_source
+ * from a single byte to settings_source[SRC_GROUP_COUNT] -- a MID-STRUCT
+ * field, unlike every migration since v12->13, which only ever appended a
+ * new field at the true tail. Every "predates X, byte-for-byte identical
+ * prefix" per-zone raw memcpy in cases 15..19 below relied on that
+ * appended-at-the-tail property to be a valid whole-element memcpy; it no
+ * longer is, now that everything from settings_source onward has shifted.
+ *
+ * This helper does the same job those raw memcpys used to, in two pieces
+ * instead of one: (1) the part of the layout that is IDENTICAL in every
+ * historical version from v12 through v20 -- name..settings_source's OWN
+ * first byte, i.e. everything up to but not including settings_source
+ * itself -- copied as one block, then settings_source fanned out to every
+ * SRC_GROUP_COUNT group; (2) the part that comes immediately AFTER
+ * settings_source -- tuning_valid onward -- which is ALSO byte-for-byte
+ * identical in relative order/type between any vN_t (N>=12) and the current
+ * zone_cfg_t (just possibly shorter, missing whatever the current struct
+ * grew after that historical version), copied as a second block sized to
+ * exactly how much the SOURCE struct actually has past that point. Every
+ * offset is taken from the CALLER's own vN_t type via offsetof(), never
+ * hardcoded, so this stays correct even if an earlier field's size ever
+ * changes. */
+static void zone_cfg_migrate_prefix_and_tail(zone_cfg_t *d, const void *src_zone, size_t src_zone_size,
+                                              size_t src_settings_source_off, size_t src_tuning_valid_off)
+{
+    memcpy(d, src_zone, src_settings_source_off);
+    uint8_t old_scalar = ((const uint8_t *)src_zone)[src_settings_source_off];
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        d->settings_source[g] = old_scalar;
+    }
+    size_t tail_len = src_zone_size - src_tuning_valid_off;
+    memcpy((uint8_t *)d + offsetof(zone_cfg_t, tuning_valid), (const uint8_t *)src_zone + src_tuning_valid_off,
+           tail_len);
+}
 
 static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out)
 {
@@ -446,7 +480,14 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         out->timing_profile_count = src.timing_profile_count;
         memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* src.zones[i] is zone_cfg_v16_t, not zone_cfg_v15_t -- see
+             * zones_cfg_v15_t's own comment: it was repointed at
+             * zone_cfg_v16_t (byte-for-byte identical to what zone_cfg_t
+             * was at v15/v16) once the bare zone_cfg_t name stopped meaning
+             * that shape, rather than freezing a separate, redundant type. */
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+                                              offsetof(zone_cfg_v16_t, settings_source),
+                                              offsetof(zone_cfg_v16_t, tuning_valid));
             /* out->zones[i].ease_off_window_mult already 0 from this
              * function's entry memset -- the sentinel, same as every
              * pre-v16 case. */
@@ -479,7 +520,9 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         out->timing_profile_count = src.timing_profile_count;
         memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+                                              offsetof(zone_cfg_v16_t, settings_source),
+                                              offsetof(zone_cfg_v16_t, tuning_valid));
             out->zones[i].ease_off_window_mult = src.ease_off_window_mult; /* the v16 global, carried verbatim */
         }
         /* src.crc32 deliberately NOT carried over -- it covered the v16
@@ -511,7 +554,9 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         out->timing_profile_count = src.timing_profile_count;
         memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+                                              offsetof(zone_cfg_v17_t, settings_source),
+                                              offsetof(zone_cfg_v17_t, tuning_valid));
             /* out->zones[i].approach_rate_cap_c_per_hr already 0 (uncapped)
              * from this function's entry memset -- brand-new mechanism, no
              * prior global opinion to carry forward, unlike
@@ -544,7 +589,9 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         out->timing_profile_count = src.timing_profile_count;
         memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+                                              offsetof(zone_cfg_v18_t, settings_source),
+                                              offsetof(zone_cfg_v18_t, tuning_valid));
             /* out->zones[i].error_band_c/rate_band_c_per_s already 0 (use
              * firmware default) from this function's entry memset --
              * brand-new mechanism, no prior global opinion to carry
@@ -577,7 +624,9 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         out->timing_profile_count = src.timing_profile_count;
         memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+                                              offsetof(zone_cfg_v19_t, settings_source),
+                                              offsetof(zone_cfg_v19_t, tuning_valid));
             /* out->zones[i].relay_type already 0 (ssr) from this function's
              * entry memset -- brand-new mechanism, no prior global opinion
              * to carry forward, same as error_band_c/rate_band_c_per_s's
@@ -585,6 +634,99 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         }
         /* src.crc32 deliberately NOT carried over -- it covered the v19
          * shape; nvs_save() stamps a fresh one over the current (v20)
+         * struct. */
+        return true;
+    }
+    case 20: {
+        /* v20 -> v21 (THIS pass, WEB_UI_PLAN.md section 2): the single
+         * whole-zone settings_source byte becomes settings_source[
+         * SRC_GROUP_COUNT] -- a MID-STRUCT field growing, unlike relay_type
+         * (v19->v20) or error_band_c/rate_band_c_per_s (v18->v19), which
+         * were appended at the true tail. zone_cfg_v20_t is therefore NOT a
+         * byte-for-byte prefix of the current (v21) zone_cfg_t the way
+         * every other adjacent-version pair in this switch is -- everything
+         * from settings_source onward shifted, so this case copies every
+         * field explicitly instead of memcpy()ing a shared prefix, the same
+         * discipline the v9->v10/v10->v11 coupling-array insertions used
+         * the last time a field grew in the middle rather than at the tail.
+         *
+         * Migration rule: every group starts as a COPY of the old single
+         * byte, not a fresh CUSTOM -- a board mid-firing with zone 1 set to
+         * "same as zone 0" must keep behaving identically after this
+         * upgrade, for every one of the five now-independent groups, not
+         * silently reset to "custom" on four of them. */
+        zones_cfg_v20_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v20 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            const zone_cfg_v20_t *s = &src.zones[i];
+            zone_cfg_t *d = &out->zones[i];
+            memcpy(d->name, s->name, sizeof(d->name));
+            d->cal_offset_c = s->cal_offset_c;
+            d->pid_kp = s->pid_kp;
+            d->pid_ki = s->pid_ki;
+            d->pid_kd = s->pid_kd;
+            d->max_ramp_c_per_hr = s->max_ramp_c_per_hr;
+            d->sanity_rate_c_per_min = s->sanity_rate_c_per_min;
+            d->max_temp_c = s->max_temp_c;
+            d->min_temp_c = s->min_temp_c;
+            d->heater_window_ms = s->heater_window_ms;
+            d->heater_min_on_ms = s->heater_min_on_ms;
+            d->heater_min_off_ms = s->heater_min_off_ms;
+            d->guard_wrong_dir_window_s = s->guard_wrong_dir_window_s;
+            d->guard_wrong_dir_rate_c_per_min = s->guard_wrong_dir_rate_c_per_min;
+            d->guard_off_settle_s = s->guard_off_settle_s;
+            d->guard_runaway_rate_c_per_min = s->guard_runaway_rate_c_per_min;
+            d->guard_runaway_margin_c = s->guard_runaway_margin_c;
+            d->guard_drift_period_s = s->guard_drift_period_s;
+            d->guard_sensor_fault_debounce_ticks = s->guard_sensor_fault_debounce_ticks;
+            d->guard_frozen_window_s = s->guard_frozen_window_s;
+            d->cross_zone_max_delta_c = s->cross_zone_max_delta_c;
+            d->model_k_dc = s->model_k_dc;
+            d->model_tau_s = s->model_tau_s;
+            d->model_dead_time_s = s->model_dead_time_s;
+            d->fuzzy_strength_pct = s->fuzzy_strength_pct;
+            memcpy(d->coupling_coeff, s->coupling_coeff, sizeof(d->coupling_coeff));
+            memcpy(d->coupling_tau_s, s->coupling_tau_s, sizeof(d->coupling_tau_s));
+            memcpy(d->coupling_dead_time_s, s->coupling_dead_time_s, sizeof(d->coupling_dead_time_s));
+            d->relay_mask = s->relay_mask;
+            d->control_mode = s->control_mode;
+            d->tc_type = s->tc_type;
+            d->thermo_mask = s->thermo_mask;
+            d->ct_mask = s->ct_mask;
+            d->timing_profile = s->timing_profile;
+            /* THE migration: one old byte fans out to every group. */
+            for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+                d->settings_source[g] = s->settings_source;
+            }
+            d->tuning_valid = s->tuning_valid;
+            d->tuning_method = s->tuning_method;
+            d->tuning_rule = s->tuning_rule;
+            d->tuning_settled = s->tuning_settled;
+            d->tuning_extrapolation_converged = s->tuning_extrapolation_converged;
+            d->tuning_tau_consistent = s->tuning_tau_consistent;
+            d->tuning_baseline_c = s->tuning_baseline_c;
+            d->tuning_step_ambient_c = s->tuning_step_ambient_c;
+            d->tuning_raw_rise_c = s->tuning_raw_rise_c;
+            d->tuning_rise_inf_c = s->tuning_rise_inf_c;
+            d->tuning_seq = s->tuning_seq;
+            d->adaptive_tune_enabled = s->adaptive_tune_enabled;
+            d->coupling_diag_k_dc = s->coupling_diag_k_dc;
+            d->ease_off_window_mult = s->ease_off_window_mult;
+            d->approach_rate_cap_c_per_hr = s->approach_rate_cap_c_per_hr;
+            d->error_band_c = s->error_band_c;
+            d->rate_band_c_per_s = s->rate_band_c_per_s;
+            d->relay_type = s->relay_type;
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v20
+         * shape; nvs_save() stamps a fresh one over the current (v21)
          * struct. */
         return true;
     }

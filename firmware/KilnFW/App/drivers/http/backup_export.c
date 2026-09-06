@@ -261,8 +261,17 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             zones_config_get_coupling_tau(zi, coupling_tau_row);
             float coupling_dead_row[MAX31856_CHANNEL_COUNT] = {0};
             zones_config_get_coupling_dead_time(zi, coupling_dead_row);
+            /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21) split this
+             * into SRC_GROUP_COUNT independent bytes; the backup format is
+             * NOT part of that pass's scope and keeps its single
+             * "settings_source" key, representative of the LIMITS group
+             * only, same choice zones_http_get.c's legacy scalar key makes.
+             * A zone with per-group groups set to different sources round-
+             * trips through a backup as LIMITS's choice for all five --
+             * accepted for now; a future pass can widen the backup format
+             * the same way if that is ever a real complaint. */
             uint8_t settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-            zones_config_get_settings_source(zi, &settings_source);
+            zones_config_get_settings_source(zi, SRC_GROUP_LIMITS, &settings_source);
 
             /* Each fragment kept comfortably under backup_stream_printf()'s
              * own tmp[192] scratch buffer (including formatted values, not

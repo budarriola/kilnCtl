@@ -70,12 +70,12 @@ const char *ZONES_CFG_TAG = "zones_config_json";
  * a thin wrapper extracting the raw settings_source bytes out of the
  * zone_cfg_t array every caller here actually has, so every existing call
  * site in this file keeps working unchanged. */
-bool zones_config_json_settings_source_chain_has_cycle(const zone_cfg_t zones[MAX31856_CHANNEL_COUNT], uint8_t start,
-                                            uint8_t thermo_count)
+bool zones_config_json_settings_source_chain_has_cycle(const zone_cfg_t zones[MAX31856_CHANNEL_COUNT], uint8_t group,
+                                            uint8_t start, uint8_t thermo_count)
 {
     uint8_t sources[MAX31856_CHANNEL_COUNT];
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        sources[i] = zones[i].settings_source;
+        sources[i] = zones[i].settings_source[group];
     }
     return zone_settings_source_chain_has_cycle(sources, start, thermo_count);
 }
@@ -113,55 +113,61 @@ bool zones_config_json_settings_source_chain_has_cycle(const zone_cfg_t zones[MA
 void zones_config_json_normalize_settings_source_cycles(zones_cfg_t *cfg, const char *partition)
 {
     uint8_t thermo_count = cfg->thermo_count > MAX31856_CHANNEL_COUNT ? MAX31856_CHANNEL_COUNT : cfg->thermo_count;
-    for (uint8_t i = 0; i < thermo_count; i++) {
-        if (!zones_config_json_settings_source_chain_has_cycle(cfg->zones, i, thermo_count)) {
-            continue;
-        }
-        /* Re-walk from i, this time recording the path in order: the first
-         * repeated node's position marks where the cycle actually starts,
-         * and only that node plus everything walked after it are ON the
-         * cycle -- everything recorded before it is a lead-in and must not
-         * be touched. */
-        uint8_t path[MAX31856_CHANNEL_COUNT];
-        uint8_t path_len = 0;
-        uint8_t cur = i;
-        uint8_t cycle_start_pos = 0;
-        /* <= MAX31856_CHANNEL_COUNT, not <: with COUNT distinct zones, path[]
-         * can hold at most COUNT entries before the pigeonhole principle
-         * guarantees a repeat -- the repeat is only OBSERVED on the hop that
-         * revisits it, which is one iteration past the one that appended the
-         * COUNT-th distinct entry. A `hop < MAX31856_CHANNEL_COUNT` bound
-         * here stops exactly one iteration too early and would silently
-         * treat a genuine cycle as "terminated cleanly," leaving it
-         * unbroken. */
-        for (uint8_t hop = 0; hop <= MAX31856_CHANNEL_COUNT; hop++) {
-            uint8_t repeat_pos = 0;
-            bool repeated = false;
-            for (uint8_t p = 0; p < path_len; p++) {
-                if (path[p] == cur) {
-                    repeat_pos = p;
-                    repeated = true;
+    /* Each of the SRC_GROUP_COUNT groups has its own, entirely independent
+     * chain -- a cycle in one group says nothing about any other -- so this
+     * whole walk-and-collapse runs once per group. */
+    for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
+        for (uint8_t i = 0; i < thermo_count; i++) {
+            if (!zones_config_json_settings_source_chain_has_cycle(cfg->zones, group, i, thermo_count)) {
+                continue;
+            }
+            /* Re-walk from i, this time recording the path in order: the first
+             * repeated node's position marks where the cycle actually starts,
+             * and only that node plus everything walked after it are ON the
+             * cycle -- everything recorded before it is a lead-in and must not
+             * be touched. */
+            uint8_t path[MAX31856_CHANNEL_COUNT];
+            uint8_t path_len = 0;
+            uint8_t cur = i;
+            uint8_t cycle_start_pos = 0;
+            /* <= MAX31856_CHANNEL_COUNT, not <: with COUNT distinct zones, path[]
+             * can hold at most COUNT entries before the pigeonhole principle
+             * guarantees a repeat -- the repeat is only OBSERVED on the hop that
+             * revisits it, which is one iteration past the one that appended the
+             * COUNT-th distinct entry. A `hop < MAX31856_CHANNEL_COUNT` bound
+             * here stops exactly one iteration too early and would silently
+             * treat a genuine cycle as "terminated cleanly," leaving it
+             * unbroken. */
+            for (uint8_t hop = 0; hop <= MAX31856_CHANNEL_COUNT; hop++) {
+                uint8_t repeat_pos = 0;
+                bool repeated = false;
+                for (uint8_t p = 0; p < path_len; p++) {
+                    if (path[p] == cur) {
+                        repeat_pos = p;
+                        repeated = true;
+                        break;
+                    }
+                }
+                if (repeated) {
+                    cycle_start_pos = repeat_pos;
                     break;
                 }
+                path[path_len++] = cur;
+                uint8_t src = cfg->zones[cur].settings_source[group];
+                if (src == ZONE_SETTINGS_SOURCE_CUSTOM || src >= thermo_count) {
+                    break; /* terminates cleanly -- can only happen if an earlier loop
+                            * iteration already fixed the cycle this start used to reach */
+                }
+                cur = src;
             }
-            if (repeated) {
-                cycle_start_pos = repeat_pos;
-                break;
+            for (uint8_t p = cycle_start_pos; p < path_len; p++) {
+                uint8_t zone = path[p];
+                ESP_LOGW(ZONES_CFG_TAG, "zones_cfg from '%s': zone %u group %u's settings_source chain forms a "
+                              "cycle -- collapsing zone %u group %u to Custom (was %u)",
+                         partition, (unsigned)zone, (unsigned)group, (unsigned)zone, (unsigned)group,
+                         (unsigned)cfg->zones[zone].settings_source[group]);
+                cfg->zones[zone].settings_source[group] = ZONE_SETTINGS_SOURCE_CUSTOM;
             }
-            path[path_len++] = cur;
-            uint8_t src = cfg->zones[cur].settings_source;
-            if (src == ZONE_SETTINGS_SOURCE_CUSTOM || src >= thermo_count) {
-                break; /* terminates cleanly -- can only happen if an earlier loop
-                        * iteration already fixed the cycle this start used to reach */
-            }
-            cur = src;
-        }
-        for (uint8_t p = cycle_start_pos; p < path_len; p++) {
-            uint8_t zone = path[p];
-            ESP_LOGW(ZONES_CFG_TAG, "zones_cfg from '%s': zone %u's settings_source chain forms a cycle -- "
-                          "collapsing zone %u to Custom (was %u)",
-                     partition, (unsigned)zone, (unsigned)zone, (unsigned)cfg->zones[zone].settings_source);
-            cfg->zones[zone].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
         }
     }
 }
@@ -525,14 +531,17 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone rate_band_c_per_s out of range";
             return false;
         }
-        /* settings_source: either the CUSTOM sentinel, or a real zone index --
-         * never checked against thermo_count (the dropdown offers every
-         * *configured* zone at save time, a page-level decision, not a
+        /* settings_source[group]: either the CUSTOM sentinel, or a real zone
+         * index -- never checked against thermo_count (the dropdown offers
+         * every *configured* zone at save time, a page-level decision, not a
          * storage-layer one; a zone later disabled by lowering thermo_count
-         * still leaves a readable, in-range index here). */
-        if (z->settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && z->settings_source >= MAX31856_CHANNEL_COUNT) {
-            *err_reason = "zone settings_source references a zone that doesn't exist";
-            return false;
+         * still leaves a readable, in-range index here). Checked
+         * independently for each of the SRC_GROUP_COUNT groups. */
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            if (z->settings_source[g] != ZONE_SETTINGS_SOURCE_CUSTOM && z->settings_source[g] >= MAX31856_CHANNEL_COUNT) {
+                *err_reason = "zone settings_source references a zone that doesn't exist";
+                return false;
+            }
         }
         /* ZONES_CFG_VERSION 12->13: the tuning-quality record (set 1 -- see
          * zone_cfg_t::tuning_valid's own doc comment). tuning_valid gates

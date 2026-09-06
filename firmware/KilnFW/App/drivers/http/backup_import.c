@@ -797,12 +797,27 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
             has_override[zone_candidates[i].index] = true;
             override_source[zone_candidates[i].index] = zone_candidates[i].settings_source;
         }
-        uint8_t cycle_zone = 0;
-        if (zones_config_settings_source_import_has_cycle(has_override, override_source, &cycle_zone)) {
-            snprintf(err_msg, err_cap,
-                    "zone %u's settings_source forms an inheritance cycle with this import applied",
-                    (unsigned)cycle_zone);
-            return false;
+        /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): the backup
+         * format's single "settings_source" key is applied to every one of
+         * the SRC_GROUP_COUNT independent groups on commit (see this
+         * file's own comment on the export side, backup_export.c), so the
+         * cross-entry cycle check must run once per group too -- a set that
+         * is acyclic in one group is not automatically acyclic when the
+         * same links are replayed into a different group's independent
+         * chain... except here they ARE the exact same override_source for
+         * every group, so in practice all five checks either all pass or
+         * all fail together; this still checks every group explicitly
+         * rather than assuming that, since nothing enforces it structurally
+         * and a future backup-format change could break the assumption
+         * silently otherwise. */
+        for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
+            uint8_t cycle_zone = 0;
+            if (zones_config_settings_source_import_has_cycle(group, has_override, override_source, &cycle_zone)) {
+                snprintf(err_msg, err_cap,
+                        "zone %u's settings_source forms an inheritance cycle with this import applied",
+                        (unsigned)cycle_zone);
+                return false;
+            }
         }
     }
 
@@ -1017,11 +1032,16 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
          * 2 re-checks only bounds/self-reference (still real defenses
          * against a corrupt override_source) and skips the live-config
          * chain-walk entirely. */
-        if (!zones_config_set_settings_source_unchecked(zc->index, zc->settings_source)) {
-            snprintf(err_msg, err_cap,
-                    "zone tuning entry %u (channel %u) rejected at commit setting settings_source",
-                    (unsigned)i, zc->index);
-            return false;
+        /* Applied to every group -- see this file's pass-1 comment above on
+         * why the single backup-format key fans out to all SRC_GROUP_COUNT
+         * groups on import. */
+        for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
+            if (!zones_config_set_settings_source_unchecked(zc->index, group, zc->settings_source)) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u (channel %u) rejected at commit setting settings_source",
+                        (unsigned)i, zc->index);
+                return false;
+            }
         }
     }
     if (has_safety_tc) {
