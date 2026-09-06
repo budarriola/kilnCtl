@@ -1,6 +1,6 @@
 // flash_layout.h -- the frozen RP2040 flash map, docs/BOOTLOADER.md section 2.
 // Pure constants only, no code, no SDK/RTOS dependency -- host-includable,
-// same discipline as src/board_pins.h ("a plain header, not a driver").
+// same discipline as src/board/board_pins.h ("a plain header, not a driver").
 //
 // These offsets are a commitment (docs/BOOTLOADER.md's own header comment:
 // "once a bootloader is written to a board over SWD it is not going to be

@@ -139,6 +139,14 @@ $sources = @(
     # no new stub file, unlike relay_owner.c's task-creation surface.
     (Join-Path $srcDir "current_sense.c"),
     (Join-Path $hwAbstractionHostDir "fake_adc.c"),
+    # current_task.c's current_task_start() is now exercised too (hal_adc_
+    # init()/hal_adc_gpio_enable() x3, then xTaskCreate) -- reuses the same
+    # xTaskCreate/vTaskCoreAffinitySet/watchdog_task_checkin stubs already
+    # defined once in test_relay_owner_gpio_init_stubs.c for relay_owner.c
+    # (all TUs link into one executable), so no new stub file is needed.
+    # current_task_fn()'s for(;;) loop is never invoked on host, same as
+    # relay_owner_task()'s.
+    (Join-Path $srcDir "tasks\current_task.c"),
     (Join-Path $testDir "test_current_sense_hal_adc.c")
 )
 

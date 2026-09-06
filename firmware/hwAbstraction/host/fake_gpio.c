@@ -43,6 +43,17 @@ void fake_gpio_reset(void)
     s_seq = 0;
 }
 
+void fake_gpio_force_state(int pin, hal_gpio_dir_t dir, bool level)
+{
+    if (!pin_in_range(pin)) return;
+    s_pins[pin].initialized = true;
+    s_pins[pin].dir = dir;
+    s_pins[pin].level = level;
+    s_pins[pin].pull = HAL_GPIO_PULL_NONE;
+    /* Deliberately no record() call -- this seeds a pre-existing boot
+     * state, it is not itself an event under test. */
+}
+
 size_t fake_gpio_event_count(void)
 {
     return s_history_count;

@@ -15,7 +15,7 @@
 #include "hardware/regs/uart.h"
 
 // TEMPORARY (HAL Phase 1b): board_pins.h is a SaftyFW header
-// (firmware/SaftyFW/src/board_pins.h), not part of hwAbstraction/. Left as
+// (firmware/SaftyFW/src/board/board_pins.h), not part of hwAbstraction/. Left as
 // a same-name include resolved via SaftyFW's own include path (this file
 // is compiled into the hwabstraction_pico library, which SaftyFW's
 // CMakeLists.txt gives a private include dir on firmware/SaftyFW/src for

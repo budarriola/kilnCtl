@@ -174,8 +174,21 @@ bool relay_owner_start(void)
     // gpio_init() reset, preserving the original glitch-free guarantee
     // while still giving relay_owner ownership of the init property for
     // host testing (fake_gpio, test/test_relay_owner_gpio_init.c).
-    hal_gpio_set(SAFTYFW_PIN_RELAY, false);
-    hal_gpio_set_direction(SAFTYFW_PIN_RELAY, HAL_GPIO_DIR_OUT);
+    // Both calls' hal_status_t results are checked: this is the relay's
+    // fail-safe de-energized latch, not a best-effort convenience, so a
+    // HAL failure here must abort startup rather than let relay_owner_task
+    // start against a pin that may still be in an unknown state (e.g.
+    // still INPUT, or still HIGH). No console/log facility exists this
+    // early in boot (before the scheduler and console_uart's own task
+    // exist), so there is nothing to log to -- the caller (main_boot_*.c)
+    // is expected to treat relay_owner_start() returning false as fatal,
+    // same as the xQueueCreate/xTaskCreate failure paths below already do.
+    if (hal_gpio_set(SAFTYFW_PIN_RELAY, false) != HAL_OK) {
+        return false;
+    }
+    if (hal_gpio_set_direction(SAFTYFW_PIN_RELAY, HAL_GPIO_DIR_OUT) != HAL_OK) {
+        return false;
+    }
 
     s_cmd_queue = xQueueCreate(RELAY_OWNER_QUEUE_LEN, sizeof(relay_owner_cmd_t));
     if (s_cmd_queue == NULL) {

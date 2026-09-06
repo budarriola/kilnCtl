@@ -11,23 +11,23 @@
 // INPUT before re-latching it, opening a high-Z window on the relay gate
 // that main.c's original boot-time put-then-set_dir sequence never had).
 //
-// Known host/hardware mirror gap this test documents rather than hides:
+// Host/hardware mirror gap this test used to paper over, now closed:
 // fake_gpio.c's hal_gpio_set() refuses to apply a level on a pin that
 // isn't yet marked .initialized (returns HAL_NOT_READY, no SET_LEVEL event
 // recorded) -- a check the real pico backend's gpio_put() does not make,
 // since it writes the output register unconditionally regardless of
-// direction/init state. On a freshly-reset fake_gpio (this test's starting
-// state) the pin is never initialized, so relay_owner_start()'s
-// hal_gpio_set() call is a no-op on host; hal_gpio_set_direction() then
-// marks the pin initialized (dir OUT) and the pin's level field is left at
-// its zero-initialized default (false), which happens to be the desired
-// de-energized value. On real hardware the pin is already OUT+LOW from
-// main.c's boot-time init, so hal_gpio_set(pin, false) there is a genuine
-// (redundant but harmless) latch, not a no-op. This test therefore checks
-// end state and the SET_DIRECTION event, not a SET_LEVEL-then-SET_DIRECTION
-// event pair -- fake_gpio.c would need an "already initialized by a raw,
-// pre-HAL boot call" seam to model the real ordering faithfully, which does
-// not exist today.
+// direction/init state. A fresh fake_gpio_reset() pin starts
+// un-initialized, so without more, relay_owner_start()'s hal_gpio_set()
+// call would silently be a no-op on host and this test could not tell the
+// difference between that call running and it being deleted entirely.
+// fake_gpio_force_state() closes the gap: it seeds the pin as already
+// initialized OUT+HIGH (energized), modeling main.c's raw pre-HAL boot-time
+// init WITHOUT recording an event, so the two calls relay_owner_start()
+// actually makes -- hal_gpio_set(pin, false) then
+// hal_gpio_set_direction(pin, OUT) -- are both real, observable events
+// against a pin that hal_gpio_set() will not refuse. Seeding HIGH (not
+// LOW) also means the final LOW state below is proof the latch happened,
+// not just that it started that way.
 //
 // relay_owner_task()'s for(;;) loop is never entered here -- there is no
 // FreeRTOS scheduler on host -- see test_relay_owner_gpio_init_stubs.c for
@@ -48,6 +48,11 @@ static void test_relay_owner_start_energizes_nothing_and_latches_before_directio
                  "latch-before-direction (HAL Phase 1b)");
 
     fake_gpio_reset();
+    // Seed "already brought up by main.c's raw pre-HAL boot code": OUT
+    // direction, energized (HIGH) -- see file header. Not an event.
+    fake_gpio_force_state(SAFTYFW_PIN_RELAY, HAL_GPIO_DIR_OUT, true);
+    TEST_CHECK(fake_gpio_event_count() == 0,
+               "seeding the pre-existing boot state records no event");
 
     bool ok = relay_owner_start();
     TEST_CHECK(ok, "relay_owner_start() succeeds against the host stubs");
@@ -60,27 +65,59 @@ static void test_relay_owner_start_energizes_nothing_and_latches_before_directio
                "the relay pin is de-energized (LOW) immediately after init -- "
                "a relay must never glitch on at init");
 
-    // See the file header for why this is a SET_DIRECTION event, not a
-    // SET_LEVEL-then-INIT_OUT pair, on a freshly-reset host fake: fake_gpio's
-    // hal_gpio_set() refuses an un-initialized pin, so relay_owner_start()'s
-    // hal_gpio_set() call records nothing here and hal_gpio_set_direction()
-    // is the event that actually initializes the pin.
-    TEST_CHECK(fake_gpio_event_count() >= 1,
-               "at least one fake_gpio event was recorded (SET_DIRECTION)");
+    // With the pin pre-seeded as initialized, hal_gpio_set() is no longer
+    // refused: relay_owner_start() must produce exactly the two events
+    // SET_LEVEL(false) then SET_DIRECTION(OUT), in that order --
+    // latch-before-direction. If the hal_gpio_set(pin, false) call were
+    // ever deleted from relay_owner_start(), this pair collapses to a
+    // single SET_DIRECTION event and these checks fail (see the negative
+    // test in test/host_tests_negative or this file's own comment below).
+    TEST_CHECK(fake_gpio_event_count() >= 2,
+               "at least two fake_gpio events were recorded (SET_LEVEL then SET_DIRECTION)");
 
     const fake_gpio_event_t *e0 = fake_gpio_event(0);
-    TEST_CHECK(e0 != NULL, "the expected event exists");
-    if (e0) {
-        TEST_CHECK(e0->pin == SAFTYFW_PIN_RELAY, "the event is for the relay pin (GPIO6)");
-        TEST_CHECK(e0->kind == FAKE_GPIO_EV_SET_DIRECTION,
-                   "the recorded event is SET_DIRECTION -- if this fails, relay_owner's "
-                   "init sequence changed again and this test's header comment needs "
-                   "re-checking against the new call order");
-        TEST_CHECK(e0->dir == HAL_GPIO_DIR_OUT, "direction is switched to OUT");
+    const fake_gpio_event_t *e1 = fake_gpio_event(1);
+    TEST_CHECK(e0 != NULL && e1 != NULL, "both expected events exist");
+    if (e0 && e1) {
+        TEST_CHECK(e0->pin == SAFTYFW_PIN_RELAY && e1->pin == SAFTYFW_PIN_RELAY,
+                   "both events are for the relay pin (GPIO6)");
+        TEST_CHECK(e0->kind == FAKE_GPIO_EV_SET_LEVEL,
+                   "first event is SET_LEVEL (the latch) -- if this fails, either "
+                   "relay_owner's hal_gpio_set() call was deleted/reordered, or it is "
+                   "no longer driving the level before switching direction");
+        TEST_CHECK(e0->level == false,
+                   "the latched level is LOW (de-energized), not the seeded HIGH");
+        TEST_CHECK(e1->kind == FAKE_GPIO_EV_SET_DIRECTION,
+                   "second event is SET_DIRECTION (OUT), after the latch");
+        TEST_CHECK(e1->dir == HAL_GPIO_DIR_OUT, "direction is switched to OUT");
     }
+}
+
+// relay_owner_start() checks both hal_gpio_set()/hal_gpio_set_direction()
+// hal_status_t results and aborts startup on failure -- this is the
+// relay's fail-safe latch, not best-effort, so a HAL error must not be
+// silently discarded. A freshly-reset (never seeded) fake_gpio pin is an
+// easy, real way to exercise that failure path on host: hal_gpio_set()
+// on an un-initialized pin returns HAL_NOT_READY (fake_gpio.c), so
+// relay_owner_start() must return false WITHOUT ever creating the command
+// queue or the task.
+static void test_relay_owner_start_fails_when_hal_gpio_set_fails(void)
+{
+    TEST_SECTION("relay_owner_start() -- aborts on a hal_gpio_set() failure "
+                 "instead of silently continuing (HAL Phase 1b)");
+
+    fake_gpio_reset(); // pin left un-initialized -- hal_gpio_set() will fail
+
+    bool ok = relay_owner_start();
+    TEST_CHECK(!ok, "relay_owner_start() returns false when hal_gpio_set() fails");
+    TEST_CHECK(fake_gpio_event_count() == 0,
+               "no fake_gpio event was recorded -- the failed call is a true no-op, "
+               "confirming relay_owner_start() did not paper over the failure and "
+               "proceed to create the queue/task on an unknown-state pin");
 }
 
 void run_test_relay_owner_gpio_init(void)
 {
     test_relay_owner_start_energizes_nothing_and_latches_before_direction();
+    test_relay_owner_start_fails_when_hal_gpio_set_fails();
 }

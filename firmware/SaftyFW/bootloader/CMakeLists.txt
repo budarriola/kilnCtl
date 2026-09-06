@@ -77,6 +77,7 @@ add_executable(saftyfw_bootloader
 target_include_directories(saftyfw_bootloader PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/../src
+    ${CMAKE_CURRENT_LIST_DIR}/../src/board
     ${CMAKE_CURRENT_LIST_DIR}/../src/update
 )
 

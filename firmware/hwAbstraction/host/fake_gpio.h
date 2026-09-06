@@ -44,6 +44,22 @@ typedef struct {
 /* Clears all pin state and the event history. Call between test cases. */
 void fake_gpio_reset(void);
 
+/* Seeds a pin's state directly, WITHOUT recording any event and WITHOUT
+ * going through hal_gpio_init_out()/hal_gpio_init_in()'s init gate --
+ * models a pin already brought up by a raw, pre-HAL boot-time call (e.g.
+ * main.c driving GPIO6 low with direct pico-sdk calls before the HAL layer
+ * or the scheduler exists). Without this seam, a fresh fake_gpio_reset()
+ * pin starts un-initialized, so hal_gpio_set() on it returns HAL_NOT_READY
+ * and records nothing -- which silently hides whether a caller's
+ * hal_gpio_set() call happened at all (see relay_owner.c's
+ * relay_owner_start(), which relies on the real hardware backend not
+ * having this gate). Call this to seed the "already initialized by main.c"
+ * starting state, THEN call fake_gpio_reset()'s complement (nothing --
+ * just don't call fake_gpio_reset() again) before exercising the code
+ * under test, so its hal_gpio_set()/hal_gpio_set_direction() calls are
+ * real, observable events. */
+void fake_gpio_force_state(int pin, hal_gpio_dir_t dir, bool level);
+
 /* Ordered event history, oldest first. index >= fake_gpio_event_count()
  * returns NULL. The history is a fixed-capacity log (FAKE_GPIO_HISTORY_CAP)
  * that stops recording once full rather than wrapping -- host test runs are

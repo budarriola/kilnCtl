@@ -6,10 +6,13 @@
 // exist purely so the translation unit links; relay_owner_start()'s
 // pre-task-creation code (the part under test: hal_gpio_init_out(), then
 // xQueueCreate()) runs for real against these stubs.
+#include <string.h>
+
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "task.h"
 
+#include "../src/config_store.h"
 #include "../src/tasks/watchdog_task.h"
 
 static int s_dummy_queue;
@@ -56,6 +59,37 @@ void vTaskCoreAffinitySet(TaskHandle_t task, UBaseType_t affinity_mask)
 {
     (void)task;
     (void)affinity_mask;
+}
+
+// current_task.c's current_task_fn() references this (never invoked on
+// host, see task.h's stub comment) -- body exists purely to link.
+void vTaskDelayUntil(TickType_t *previous_wake_time, TickType_t time_increment)
+{
+    (void)previous_wake_time;
+    (void)time_increment;
+}
+
+// Link-only stubs for current_task.c's current_task_reload_cal()/
+// current_task_reload_ct_cal() (called only from current_task_fn(), which
+// current_task_start()'s host test never invokes -- see above). The real
+// implementations live in config_store_flash.c, which is deliberately NOT
+// in this host build (it needs a real/fake flash backend this test suite
+// doesn't otherwise pull in for current_task.c's sake). These bodies are
+// never exercised; they exist only so the linker resolves the reference.
+void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_CAL_NUM_CHANNELS])
+{
+    for (unsigned n = 0; n < CONFIG_STORE_CT_CAL_NUM_CHANNELS; n++) {
+        out[n].calibrated = false;
+        out[n].gain = 0.0f;
+        out[n].offset = 0.0f;
+    }
+}
+
+void config_store_get_full_record(config_store_record_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
 }
 
 TickType_t xTaskGetTickCount(void)

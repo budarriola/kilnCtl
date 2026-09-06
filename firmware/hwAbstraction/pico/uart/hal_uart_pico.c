@@ -107,7 +107,7 @@
 
 #include "hal_time.h"
 /* TEMPORARY (HAL Phase 1b): board_pins.h is a SaftyFW header
- * (firmware/SaftyFW/src/board_pins.h), not part of hwAbstraction/. See
+ * (firmware/SaftyFW/src/board/board_pins.h), not part of hwAbstraction/. See
  * uart_owner.c's identical note on this same include. */
 #include "board_pins.h"
 
