@@ -20,8 +20,9 @@
  *    output register, so level-then-config is glitch-free; verify the same
  *    holds for any future backend before relying on it.)
  *  - hal_gpio_set_direction/set_pull are a narrow escape hatch for
- *    gpio_probe.c's runtime pin scanning only -- ordinary drivers use
- *    init_out/init_in and must not reach for these.
+ *    gpio_probe.c's runtime pin scanning and for adjusting one property of
+ *    a pin another peripheral owns (safety_link.c's UART RX pull-up) --
+ *    ordinary drivers use init_out/init_in and must not reach for these.
  */
 #ifndef KILNCTL_HAL_GPIO_H
 #define KILNCTL_HAL_GPIO_H

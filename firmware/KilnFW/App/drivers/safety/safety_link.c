@@ -35,12 +35,13 @@
 #include <math.h>
 #include <string.h>
 
-#include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "hal_esp_common.h"
+#include "hal_gpio.h"
 #include "stack_margin.h"
 #include "freertos/idf_additions.h"
 #include "settings.h"
@@ -312,7 +313,7 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
  * state_lock held so the pin and the mask can't disagree. */
 static void safety_apply_fault_locked(SafetyLinkClass *link)
 {
-    gpio_set_level((gpio_num_t)link->fault_io, link->fault_sources != 0u ? 1 : 0);
+    hal_gpio_set(link->fault_io, link->fault_sources != 0u);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -328,14 +329,15 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         return ESP_OK;
     }
 
-    /* Validated before it is shifted into pin_bit_mask below: a bad Kconfig
-     * value would otherwise be a shift past the width of the type, and the
-     * fault line is the last thing on this board that should be driven by
-     * accident. */
-    if (!GPIO_IS_VALID_OUTPUT_GPIO(SAFETY_FAULT_IO)) {
-        ESP_LOGE(TAG, "SAFETY_FAULT_IO (%d) is not a usable output", (int)SAFETY_FAULT_IO);
-        return ESP_ERR_INVALID_ARG;
-    }
+    /* GPIO_IS_VALID_OUTPUT_GPIO's pre-check (a bad Kconfig value would
+     * otherwise be a shift past the width of the type, and the fault line is
+     * the last thing on this board that should be driven by accident) is no
+     * longer done here with the ESP-specific macro -- hal_gpio.h has no
+     * portable equivalent. hal_gpio_init_out() below performs the same
+     * validation (ESP-IDF's gpio_config() rejects an out-of-range/input-only
+     * pin with ESP_ERR_INVALID_ARG, mapped to HAL_INVALID_ARG) and bring-up
+     * still fails before the fault line is ever driven, just slightly later
+     * in the call -- same pattern as panel_spi_bringup.c's ILI9488_init(). */
 
     memset(link, 0, sizeof(*link));
     link->fault_io = SAFETY_FAULT_IO;
@@ -399,19 +401,15 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * undefined fault state at the safety processor. Driving it low (LED off,
      * Pico's mainFault released) is the known-good starting point, and it is
      * the poll task's job -- not bring-up's -- to raise it. */
-    gpio_config_t fault_cfg = {
-        .pin_bit_mask = 1ULL << (uint32_t)link->fault_io,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    err = gpio_config(&fault_cfg);
+    /* Idle level (0, de-asserted) is latched BEFORE the pin switches to
+     * output -- hal_gpio_init_out()'s contract (hal_gpio.h) -- so there is no
+     * longer even the brief post-gpio_config() window the old two-call
+     * sequence had before gpio_set_level(0) ran. */
+    err = hal_status_to_esp_err(hal_gpio_init_out(link->fault_io, false));
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "fault line gpio_config(%d) failed: %s", link->fault_io, esp_err_to_name(err));
+        ESP_LOGE(TAG, "fault line gpio init(%d) failed: %s", link->fault_io, esp_err_to_name(err));
         goto fail_locks;
     }
-    gpio_set_level((gpio_num_t)link->fault_io, 0);
 
     err = uart_owner_init(&link->owner, SAFETY_UART_PORT_NUM, SAFETY_TX_IO, SAFETY_RX_IO,
                            SAFETY_UART_BAUD_RATE, UART_OWNER_QUEUE_LEN, UART_OWNER_TASK_PRIORITY,
@@ -492,7 +490,7 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * window read as idle mark rather than as a break, which is the harmless
      * interpretation. It is belt-and-braces now rather than load-bearing --
      * under the optocouplers it was the only thing defining the level. */
-    err = gpio_set_pull_mode((gpio_num_t)SAFETY_RX_IO, GPIO_PULLUP_ONLY);
+    err = hal_status_to_esp_err(hal_gpio_set_pull(SAFETY_RX_IO, HAL_GPIO_PULL_UP));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "rx pull-up on gpio%d failed: %s", SAFETY_RX_IO, esp_err_to_name(err));
         goto fail_owner;
