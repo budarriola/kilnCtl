@@ -320,10 +320,26 @@ _Static_assert(UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX <= UI_THEME
  * rows, each build_stat_row()-height (measured 23px, see this file's header
  * comment's per-row arithmetic) since the row's fixed-size button
  * (UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX = 22px, set in
- * build_relay_life_row()) is shorter than that. Same n*23 + (n-1)*4 <= 267
- * formula the header comment already uses for every other page. */
+ * build_relay_life_row()) is shorter than that.
+ *
+ * opus review (LOW): the inter-row gap here used to be the page-wide default
+ * (UI_THEME_PADDING_PX / 2 = 4px, build_page()'s own pad_gap), but each
+ * button's own compact touch-area extension (ui_theme_apply_touch_area(),
+ * "true" for compact) reaches out UI_THEME_PADDING_PX / 2 = 4px on every
+ * side -- exactly the whole 4px gap, not half of it (that function's own
+ * comment says the compact extension is "capped at half of the standard
+ * inter-cell gap" so two expanded neighbours can't meet in the middle, but
+ * this page's 4px gap made the extension the WHOLE gap, not half of it: two
+ * vertically-adjacent Reset buttons' extended hit-boxes could touch or
+ * overlap, so a tap near the row boundary during the two-tap confirm could
+ * land on the wrong relay's button). Fixed by giving this one page the
+ * FULL UI_THEME_PADDING_PX (8px) gap the touch-area helper's own math
+ * assumes, rather than the half-padding gap every other stat-row page uses
+ * -- there is no shortage of vertical room here (worst case is 147px against
+ * a 267px budget) to justify staying tight. */
+#define UI_PAGE_DIAGNOSTICS_RELAY_LIFE_ROW_GAP_PX UI_THEME_PADDING_PX
 #define UI_PAGE_DIAGNOSTICS_RELAY_LIFE_WORST_CASE_HEIGHT_PX \
-    ((RELAY_CYCLES_COUNT * 23) + ((RELAY_CYCLES_COUNT - 1) * (UI_THEME_PADDING_PX / 2)))
+    ((RELAY_CYCLES_COUNT * 23) + ((RELAY_CYCLES_COUNT - 1) * UI_PAGE_DIAGNOSTICS_RELAY_LIFE_ROW_GAP_PX))
 _Static_assert(UI_PAGE_DIAGNOSTICS_RELAY_LIFE_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
                "ui_page_diagnostics.c: RELAY_CYCLES_COUNT relay-life rows' worst-case content "
                "exceeds UI_THEME_PAGE_CONTENT_BUDGET_PX -- split across more pages, don't scroll.");
@@ -1438,6 +1454,11 @@ lv_obj_t *ui_page_diagnostics_build(void)
      * relay's own K4 slot (RELAY_CYCLES_SAFETY_INDEX) last. */
     lv_color_t rl_accents[4] = { UI_THEME_ACCENT_1, UI_THEME_ACCENT_2, UI_THEME_ACCENT_3, UI_THEME_ACCENT_4 };
     lv_obj_t *relay_life_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_RELAY_LIFE];
+    /* opus review: override build_page()'s default half-padding gap with the
+     * full UI_PAGE_DIAGNOSTICS_RELAY_LIFE_ROW_GAP_PX -- see that macro's own
+     * comment above for why the tighter default let two Reset buttons'
+     * touch-area extensions reach each other. */
+    lv_obj_set_style_pad_gap(relay_life_page, UI_PAGE_DIAGNOSTICS_RELAY_LIFE_ROW_GAP_PX, 0);
     for (unsigned r = 0; r < KILN_IO_RELAY_COUNT; r++) {
         char name[16];
         snprintf(name, sizeof(name), "Relay %u", r + 1);

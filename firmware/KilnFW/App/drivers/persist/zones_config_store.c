@@ -273,6 +273,21 @@ void zones_config_push_relay_type(uint8_t zone_index)
 
 void zones_config_push_all_relay_types(void)
 {
+    /* opus review finding (MEDIUM): the loop below only ever pushes a type
+     * onto relays named in SOME zone's relay_mask -- a relay dropped from
+     * every zone's mask (config edit, zone deleted, relay reassigned) is
+     * simply never visited again, so relay_cycles' in-RAM/persisted type for
+     * that slot keeps whatever contactor/mercury value it last had forever,
+     * even though no zone claims it any more. Clear every heater-relay slot
+     * (0..KILN_IO_RELAY_COUNT-1) to RELAY_TYPE_SSR first so an orphaned slot
+     * falls back to "no budget" like a never-configured one would, then let
+     * the per-zone loop below re-assert the real type for every relay that
+     * IS still claimed. RELAY_CYCLES_SAFETY_INDEX is deliberately untouched
+     * here -- that slot is safety_cfg_store.c's own, never zones config's
+     * (relay_cycles.h's own doc comment on that index). */
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        relay_cycles_set_type(r, RELAY_TYPE_SSR, 0);
+    }
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
         zones_config_push_relay_type(i);
     }

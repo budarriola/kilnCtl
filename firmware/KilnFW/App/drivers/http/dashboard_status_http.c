@@ -160,7 +160,24 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         o += (size_t)n;                                                                            \
     } while (0)
 
-    dashboard_status_t ds;
+    /* opus review: dashboard_status_t grew ~124B with relay_life[5]/
+     * relay_life_type[5]/relay_life_tier (RELAY_LIFE_BUDGET_PLAN.md step 4)
+     * and now runs well past what an already-tight httpd worker stack can
+     * absorb -- 64 bytes free was MEASURED under load on this exact worker
+     * (project_httpd_stack_near_overflow note) even before this struct grew.
+     * Heap-allocated for the same reason `json` above is: freed on every
+     * return path below (success, truncated, and this malloc-failure path). */
+    dashboard_status_t *dsp = heap_caps_malloc(sizeof(*dsp), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (dsp == NULL) {
+        ESP_LOGE(DASH_TAG, "GET /api/status: malloc(%u) failed for the status snapshot",
+                 (unsigned)sizeof(*dsp));
+        free(json);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+#define ds (*dsp)
     dashboard_get_status(&ds);
 
     APPEND("{\"io_ready\":%s", ds.io_ready ? "true" : "false");
@@ -621,6 +638,8 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     APPEND("}");
 
 #undef APPEND
+#undef ds
+    free(dsp);
 
     httpd_resp_set_type(req, "application/json");
     {
@@ -661,6 +680,7 @@ truncated:
         esp_err_t send_err = httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"status did not fit in the response "
                                   "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
+        free(dsp);
         free(json);
         return send_err;
     }

@@ -461,7 +461,11 @@ static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
 
     bool ok = relay_cycles_reset((unsigned)relay);
 
-    char json[192];
+    /* 256, not 192: opus review's corrected failure-path message (below) is
+     * longer than the old "will retry on the next periodic persist" text --
+     * measured worst case (relay at INT32_MIN's 11-digit width) is 211
+     * bytes; sized with headroom rather than to the exact byte. */
+    char json[256];
     int n;
     if (ok) {
         n = snprintf(json, sizeof(json), "{\"ok\":true,\"relay\":%ld,\"cycles\":0}", relay);
@@ -470,12 +474,18 @@ static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
         /* relay_cycles_reset() only fails on a persist error (the flash
          * worker was unreachable, or the write itself failed) -- the index
          * was already validated above. The count is still zeroed in RAM
-         * (relay_cycles_reset()'s own contract) and will be retried by the
-         * next periodic persist, so this is "not yet durable", not "nothing
-         * happened". */
+         * (relay_cycles_reset()'s own contract), so this is "not yet
+         * durable", not "nothing happened" -- but opus review: it will only
+         * actually become durable if something later calls relay_cycles_
+         * maybe_persist() successfully, and boot_guard.h's RECOVERY MODE
+         * deliberately never starts the tasks (profile_executor/autotune_
+         * engine) that tick it, so the honest statement is "RAM-only until
+         * the next persist, and lost on a reboot before that if the flash
+         * worker is down/in recovery mode" -- not a guaranteed retry. */
         n = snprintf(json, sizeof(json),
-            "{\"ok\":false,\"error\":\"reset applied in RAM but the flash write failed or could not "
-            "be dispatched -- will retry on the next periodic persist\",\"relay\":%ld}", relay);
+            "{\"ok\":false,\"error\":\"reset applied in RAM only -- flash write failed or could not "
+            "be dispatched; lost on reboot unless a later persist succeeds (won't happen "
+            "automatically in recovery mode)\",\"relay\":%ld}", relay);
         httpd_resp_set_status(req, "500 Internal Server Error");
     }
     httpd_resp_set_type(req, "application/json");

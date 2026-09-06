@@ -1202,7 +1202,7 @@ static void test_zones_pid_post_ignores_settings_source(void)
     seed_two_zone_pid_baseline();
     run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_settings_source=1&settings_source=1");
     TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
-    TEST_CHECK(s_zones.cfg.zones[0].settings_source == 0xFF,
+    TEST_CHECK(s_zones.cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == 0xFF,
               "settings_source must remain the seeded value (0xFF, CUSTOM) -- z0_settings_source=1 must be ignored");
 }
 
@@ -1244,7 +1244,9 @@ static void test_post_whole_page_cross_zone_cycle_refused(void)
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones.cfg.thermo_count = 2; /* the getters below refuse zone_index >= thermo_count */
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
     run_zones_post(TWO_ZONE_MINIMAL_BODY("1", "0"));
     TEST_CHECK(s_test_err_called, "the whole submission is refused");
@@ -1252,8 +1254,8 @@ static void test_post_whole_page_cross_zone_cycle_refused(void)
     TEST_CHECK(strstr(s_test_err_msg, "settings_source") != NULL, "the refusal names the field");
     TEST_CHECK(strstr(s_test_err_msg, "cycle") != NULL, "and calls out the cycle specifically");
     uint8_t s0 = 0xAA, s1 = 0xAA;
-    TEST_CHECK(zones_config_get_settings_source(0, &s0) && s0 == ZONE_SETTINGS_SOURCE_CUSTOM &&
-              zones_config_get_settings_source(1, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &s0) && s0 == ZONE_SETTINGS_SOURCE_CUSTOM &&
+              zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
               "NOTHING was committed -- both zones are still at their pre-POST Custom default, not "
               "half-applied with zone 0's individually-legal-looking link written and zone 1's not");
 }
@@ -1269,14 +1271,16 @@ static void test_post_whole_page_cross_zone_legal_chain_accepted(void)
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones.cfg.thermo_count = 2;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
     run_zones_post(TWO_ZONE_MINIMAL_BODY("1", "255"));
     TEST_CHECK(!s_test_err_called, "a legal two-zone chain (0 -> 1 -> Custom) must not be rejected");
     TEST_CHECK(s_test_ok_called, "and must report success");
     uint8_t s0 = 0xAA, s1 = 0xAA;
-    TEST_CHECK(zones_config_get_settings_source(0, &s0) && s0 == 1, "zone 0's link committed as 1");
-    TEST_CHECK(zones_config_get_settings_source(1, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &s0) && s0 == 1, "zone 0's link committed as 1");
+    TEST_CHECK(zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zone 1's link committed as Custom");
 }
 
@@ -1400,13 +1404,15 @@ static void test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes(void)
     src.thermo_count = 3;
     src.timing_profile_count = 1;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        src.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            src.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
     // The stored 2-cycle this same guard refuses at write time -- reachable
     // here only because it predates the guard (or was written by some other
     // means entirely outside this file's own setters/parser).
-    src.zones[0].settings_source = 1;
-    src.zones[1].settings_source = 0;
+    src.zones[0].settings_source[SRC_GROUP_LIMITS] = 1;
+    src.zones[1].settings_source[SRC_GROUP_LIMITS] = 0;
     // A real, meaningful field on the cyclic zone, to prove normalization
     // touches ONLY settings_source and does not zero the rest of the zone.
     src.zones[0].pid_kp = 7.25f;
@@ -1414,7 +1420,7 @@ static void test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes(void)
     // A THIRD zone with a legal (non-cyclic) link, to prove the collapse is
     // scoped to the zone(s) actually on a cycle, not a blanket "any zone
     // with a real link gets wiped" overreaction.
-    src.zones[2].settings_source = 0; // "copies zone 0" -- legal once zone 0 is Custom below
+    src.zones[2].settings_source[SRC_GROUP_LIMITS] = 0; // "copies zone 0" -- legal once zone 0 is Custom below
     src.crc32 = zones_config_json_compute_crc(&src);
     stage_zones_blob(&src, sizeof(src));
 
@@ -1430,11 +1436,11 @@ static void test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes(void)
               "CORRUPT path)");
     TEST_CHECK(out_cfg.thermo_count == 3, "the rest of the config survives the load untouched");
     uint8_t s0 = 0xAA, s1 = 0xAA;
-    TEST_CHECK(out_cfg.zones[0].settings_source != 1 || out_cfg.zones[1].settings_source != 0,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] != 1 || out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS] != 0,
               "the stored 2-cycle no longer exists in the decoded config -- at least one of the two "
               "links was broken by normalization");
-    s0 = out_cfg.zones[0].settings_source;
-    s1 = out_cfg.zones[1].settings_source;
+    s0 = out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS];
+    s1 = out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS];
     TEST_CHECK(s0 == ZONE_SETTINGS_SOURCE_CUSTOM || s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
               "the break was made by collapsing (at least) one of the two cyclic zones to Custom, the "
               "same resolution zones_page.html's own client-side cycle guard already uses -- not some "
@@ -1471,13 +1477,15 @@ static void test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone(v
     src.thermo_count = 3;
     src.timing_profile_count = 1;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        src.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            src.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
     // Zone 0 leads into the cycle (0 -> 1) but is not itself part of it.
-    src.zones[0].settings_source = 1;
+    src.zones[0].settings_source[SRC_GROUP_LIMITS] = 1;
     // The actual 1 <-> 2 cycle.
-    src.zones[1].settings_source = 2;
-    src.zones[2].settings_source = 1;
+    src.zones[1].settings_source[SRC_GROUP_LIMITS] = 2;
+    src.zones[2].settings_source[SRC_GROUP_LIMITS] = 1;
     src.crc32 = zones_config_json_compute_crc(&src);
     stage_zones_blob(&src, sizeof(src));
 
@@ -1487,12 +1495,12 @@ static void test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone(v
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
     TEST_CHECK(found && valid, "a stored cycle collapses, it does not get treated as corrupt");
-    TEST_CHECK(out_cfg.zones[0].settings_source == 1,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == 1,
               "zone 0's link (0 -> 1) survives untouched -- it was never ON the cycle, only LEADING "
               "INTO it, and breaking the real 1<->2 cycle alone is sufficient to fix zone 0's chain too");
-    TEST_CHECK(out_cfg.zones[1].settings_source != 2 || out_cfg.zones[2].settings_source != 1,
+    TEST_CHECK(out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS] != 2 || out_cfg.zones[2].settings_source[SRC_GROUP_LIMITS] != 1,
               "the actual 1<->2 cycle no longer exists -- at least one of its two links was broken");
-    uint8_t s1 = out_cfg.zones[1].settings_source, s2 = out_cfg.zones[2].settings_source;
+    uint8_t s1 = out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS], s2 = out_cfg.zones[2].settings_source[SRC_GROUP_LIMITS];
     TEST_CHECK(s1 == ZONE_SETTINGS_SOURCE_CUSTOM || s2 == ZONE_SETTINGS_SOURCE_CUSTOM,
               "the break was made by collapsing (at least) one of the two cyclic zones to Custom");
 
@@ -1520,7 +1528,9 @@ static void test_import_blob_pass1_rejects_cyclic_settings_source(void)
     s_zones.cfg.thermo_count = 2;
     s_zones.cfg.timing_profile_count = 1;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
     s_zones.cfg.zones[0].max_temp_c = 1234.0f; // a live value the rejected import must not disturb
     s_zones_config_valid = true;
@@ -1532,10 +1542,12 @@ static void test_import_blob_pass1_rejects_cyclic_settings_source(void)
     blob.thermo_count = 2;
     blob.timing_profile_count = 1;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        blob.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            blob.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
-    blob.zones[0].settings_source = 1; // the 2-cycle this pass-1 check must catch
-    blob.zones[1].settings_source = 0;
+    blob.zones[0].settings_source[SRC_GROUP_LIMITS] = 1; // the 2-cycle this pass-1 check must catch
+    blob.zones[1].settings_source[SRC_GROUP_LIMITS] = 0;
     blob.crc32 = zones_config_json_compute_crc(&blob);
 
     char reason[128];
@@ -1548,8 +1560,8 @@ static void test_import_blob_pass1_rejects_cyclic_settings_source(void)
     TEST_CHECK(s_zones.cfg.zones[0].max_temp_c == 1234.0f,
               "the pre-existing live config is completely untouched -- pass 1 rejected before the "
               "commit point, not partway through it");
-    TEST_CHECK(s_zones.cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM &&
-              s_zones.cfg.zones[1].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(s_zones.cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM &&
+              s_zones.cfg.zones[1].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "the live settings_source links are still Custom -- the cyclic blob's links never landed");
     TEST_CHECK(s_config_generation == generation_before, "no config generation bump for a rejected import");
 }
@@ -1566,7 +1578,9 @@ static void test_import_blob_pass1_accepts_acyclic_settings_source(void)
     s_zones.cfg.thermo_count = 2;
     s_zones.cfg.timing_profile_count = 1;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
     s_zones_config_valid = false;
 
@@ -1576,9 +1590,11 @@ static void test_import_blob_pass1_accepts_acyclic_settings_source(void)
     blob.thermo_count = 2;
     blob.timing_profile_count = 1;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        blob.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            blob.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
-    blob.zones[0].settings_source = 1; // 0 -> 1 -> Custom: terminates cleanly, no cycle
+    blob.zones[0].settings_source[SRC_GROUP_LIMITS] = 1; // 0 -> 1 -> Custom: terminates cleanly, no cycle
     blob.crc32 = zones_config_json_compute_crc(&blob);
 
     char reason[128];
@@ -1587,7 +1603,7 @@ static void test_import_blob_pass1_accepts_acyclic_settings_source(void)
 
     TEST_CHECK(ok, "an acyclic settings_source import is accepted");
     TEST_CHECK(s_zones_config_valid, "and marked valid/committed");
-    TEST_CHECK(s_zones.cfg.zones[0].settings_source == 1,
+    TEST_CHECK(s_zones.cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == 1,
               "the imported link is actually live in the committed config");
 }
 
@@ -2670,7 +2686,7 @@ static void test_nvs_load_from_v9_blob_upconverts_new_fields_default_and_setting
         snprintf(msg, sizeof(msg),
                 "zones[%u].settings_source lands at ZONE_SETTINGS_SOURCE_CUSTOM (0xFF), NOT 0 -- "
                 "0 would silently claim \"copies zone 0's settings\"", i);
-        TEST_CHECK(out_cfg.zones[i].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM, msg);
+        TEST_CHECK(out_cfg.zones[i].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM, msg);
     }
 
     // Pre-existing fields must survive the upgrade completely unchanged.
@@ -2795,7 +2811,7 @@ static void test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell(void)
     TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
     TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
     TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source (already a real v10 field) is carried through verbatim, "
               "not re-defaulted the way v9's migration must");
 
@@ -2964,7 +2980,7 @@ static void test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero(
     TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
     TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
     TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
 
     nvs_test_enable(false);
@@ -3285,6 +3301,58 @@ static void test_validate_accepts_relay_type_mercury_rejects_past_it(void)
 //   test_relay_cycles.c's own v1->v2 migration negative test documents in
 //   its own comment).
 
+// opus review finding (MEDIUM): zones_config_push_all_relay_types() only
+// ever pushed a type onto relays named in SOME zone's relay_mask -- a relay
+// dropped from every zone's mask (config edit, relay reassigned away) kept
+// whatever contactor/mercury type it last had FOREVER, since nothing ever
+// visited that slot again. Fixed by clearing every heater-relay slot
+// (0..KILN_IO_RELAY_COUNT-1) to RELAY_TYPE_SSR before the per-zone loop
+// re-asserts the real type for every relay still claimed.
+static void test_push_all_relay_types_clears_orphaned_relay(void)
+{
+    TEST_SECTION("zones_config_push_all_relay_types -- a relay dropped from every zone's "
+                 "relay_mask falls back to RELAY_TYPE_SSR instead of keeping its stale type forever");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.relay_count = 4;
+    // Only zone 0 claims relay 0, as Mercury. Relays 1..3 are claimed by no
+    // zone at all -- exactly the "removed from every zone" scenario.
+    s_zones.cfg.zones[0].relay_mask = 0x01;
+    s_zones.cfg.zones[0].relay_type = 2; // Mercury
+    s_zones.cfg.timing_profile_count = 1;
+    test_relay_cycles_reset_pushes();
+
+    zones_config_push_all_relay_types();
+
+    TEST_CHECK(s_test_relay_type_pushed[0] == RELAY_TYPE_MERCURY,
+              "relay 0 (still claimed by zone 0) ends up Mercury");
+    TEST_CHECK(s_test_relay_type_pushed[1] == RELAY_TYPE_SSR &&
+              s_test_relay_type_pushed[2] == RELAY_TYPE_SSR &&
+              s_test_relay_type_pushed[3] == RELAY_TYPE_SSR,
+              "relays 1..3 (claimed by no zone) are pushed back to RELAY_TYPE_SSR, not left stale");
+    TEST_CHECK(s_test_relay_type_push_count[1] == 1 && s_test_relay_type_push_count[2] == 1 &&
+              s_test_relay_type_push_count[3] == 1,
+              "each orphaned relay is pushed exactly once (the clearing pass), never twice");
+    // RELAY_CYCLES_SAFETY_INDEX must be left completely untouched -- that
+    // slot belongs to safety_cfg_store.c, never to zones config.
+    TEST_CHECK(s_test_relay_type_push_count[RELAY_CYCLES_SAFETY_INDEX] == 0,
+              "the safety relay slot is never touched by zones config's push");
+}
+
+// NEGATIVE TEST (feedback_negative_test_every_check.md): proves the check
+// above can actually fail. Reverted zones_config_push_all_relay_types()'s
+// fix by hand -- removed the `for (r = 0; r < KILN_IO_RELAY_COUNT; r++)
+// relay_cycles_set_type(r, RELAY_TYPE_SSR, 0);` clearing loop, restoring the
+// old orphan-leaving behavior -- and re-ran this test: s_test_relay_type_
+// push_count[1..3] all read 0 (never pushed at all, since RELAY_TYPE_SSR is
+// also the fake stub's zero-initialized default, so the "pushed ==
+// RELAY_TYPE_SSR" check happened to pass on a stale array read, but the
+// "pushed exactly once" push_count checks failed as expected: 0 != 1).
+// Restored the real clearing loop afterward -- verified by hand 2026-09-06,
+// not committed as a standing mutation (same discipline as the negative
+// test immediately above).
+
 static void test_post_mode_pid_fuzzy_accepted_by_parser(void)
 {
     TEST_SECTION("parse_zone_fields -- z0_mode=3 (PID_FUZZY) is accepted, z0_mode=4 is refused (0-3)");
@@ -3519,7 +3587,9 @@ static void test_post_settings_source_self_reference_refused(void)
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones.cfg.thermo_count = 3;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
 
     TEST_CHECK(!post_body_with_extra("z0_settings_source=0", &reason, &out),
@@ -3530,10 +3600,10 @@ static void test_post_settings_source_self_reference_refused(void)
      * check is specifically self-reference and not a blanket refusal. */
     TEST_CHECK(post_body_with_extra("z0_settings_source=255", &reason, &out),
               "ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) is still accepted");
-    TEST_CHECK(out.settings_source == 0xFF, "and is stored as CUSTOM");
+    TEST_CHECK(out.settings_source[SRC_GROUP_LIMITS] == 0xFF, "and is stored as CUSTOM");
     TEST_CHECK(post_body_with_extra("z0_settings_source=1", &reason, &out),
               "pointing at a DIFFERENT zone is still accepted");
-    TEST_CHECK(out.settings_source == 1, "and is stored as that zone index");
+    TEST_CHECK(out.settings_source[SRC_GROUP_LIMITS] == 1, "and is stored as that zone index");
 }
 
 static void test_post_omitting_new_fields_preserves_stored_values(void)
@@ -3552,7 +3622,7 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
     current.fuzzy_strength_pct = 42.0f;
     current.coupling_coeff[1] = 5.0f;
     current.coupling_coeff[2] = 7.5f;
-    current.settings_source = 1; /* "copies zone 1" -- a real, previously-chosen value */
+    current.settings_source[SRC_GROUP_LIMITS] = 1; /* "copies zone 1" -- a real, previously-chosen value */
     /* ZONES_CFG_VERSION 14->15: a real, previously-measured diagonal cell --
      * z0_coupling_diag_k_dc is also absent from body above, so this must
      * survive the same "omit preserves" rule as the four fields already
@@ -3581,7 +3651,7 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
                     "coupling_coeff[1] must be PRESERVED, not zeroed, when omitted");
     TEST_CHECK_NEAR(out.coupling_coeff[2], 7.5f, 1e-6,
                     "coupling_coeff[2] must be PRESERVED, not zeroed, when omitted");
-    TEST_CHECK(out.settings_source == 1,
+    TEST_CHECK(out.settings_source[SRC_GROUP_LIMITS] == 1,
               "settings_source must be PRESERVED at its previously-chosen value, not reset to CUSTOM "
               "or zeroed to \"copies zone 0\"");
     TEST_CHECK_NEAR(out.coupling_diag_k_dc, 18.75f, 1e-6,
@@ -4019,21 +4089,23 @@ static void test_settings_source_setter_round_trip_and_bounds(void)
      * exercises the setter against a realistic starting config, not an
      * artifact of the test harness's own zeroing. */
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
 
-    TEST_CHECK(zones_config_set_settings_source(0, 1), "zone 0 copying zone 1 is legal");
+    TEST_CHECK(zones_config_set_settings_source(0, SRC_GROUP_LIMITS, 1), "zone 0 copying zone 1 is legal");
     uint8_t out = 0;
-    TEST_CHECK(zones_config_get_settings_source(0, &out), "getter succeeds");
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &out), "getter succeeds");
     TEST_CHECK(out == 1, "the exact value set comes back out");
 
-    TEST_CHECK(zones_config_set_settings_source(0, ZONE_SETTINGS_SOURCE_CUSTOM), "0xFF (CUSTOM) is always legal");
-    TEST_CHECK(zones_config_get_settings_source(0, &out) && out == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(zones_config_set_settings_source(0, SRC_GROUP_LIMITS, ZONE_SETTINGS_SOURCE_CUSTOM), "0xFF (CUSTOM) is always legal");
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &out) && out == ZONE_SETTINGS_SOURCE_CUSTOM,
               "CUSTOM round-trips exactly");
 
-    TEST_CHECK(!zones_config_set_settings_source(0, 0), "zone 0 cannot copy itself (self-reference refused)");
-    TEST_CHECK(!zones_config_set_settings_source(0, 3), "zone index 3 does not exist (thermo_count is 3, 0-2 valid)");
-    TEST_CHECK(zones_config_get_settings_source(0, &out) && out == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(!zones_config_set_settings_source(0, SRC_GROUP_LIMITS, 0), "zone 0 cannot copy itself (self-reference refused)");
+    TEST_CHECK(!zones_config_set_settings_source(0, SRC_GROUP_LIMITS, 3), "zone index 3 does not exist (thermo_count is 3, 0-2 valid)");
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &out) && out == ZONE_SETTINGS_SOURCE_CUSTOM,
               "every refused call above left the stored value at CUSTOM (refuse, not clamp)");
 
     nvs_test_enable(false);
@@ -4278,7 +4350,7 @@ static void test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown(void)
     TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 640.0f, 1e-6, "zones[0].model_tau_s survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].model_dead_time_s, 45.0f, 1e-6, "zones[0].model_dead_time_s survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
 
     nvs_test_enable(false);
@@ -4378,7 +4450,7 @@ static void test_nvs_load_from_v13_blob_defaults_adaptive_tune_enabled_to_zero(v
     TEST_CHECK(out_cfg.zones[0].tuning_rule == 3, "zones[0].tuning_rule survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].tuning_baseline_c, 25.5f, 1e-6, "zones[0].tuning_baseline_c survives");
     TEST_CHECK(out_cfg.zones[0].tuning_seq == 7, "zones[0].tuning_seq survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
 
     nvs_test_enable(false);
@@ -4469,7 +4541,7 @@ static void test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero(void
     TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
     TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 1,
               "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
@@ -4573,7 +4645,7 @@ static void test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 19.4f, 1e-6,
                     "zones[0].coupling_diag_k_dc (a real v15 measurement) survives the v15->v16 hop");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
     TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 1,
               "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
@@ -4833,7 +4905,7 @@ static void test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped(v
     TEST_CHECK_NEAR(out_cfg.zones[0].ease_off_window_mult, 3.5f, 1e-6,
                     "zones[0]'s REAL, non-default ease_off_window_mult A/B arm survives the v17->v18 hop");
     TEST_CHECK_NEAR(out_cfg.zones[1].ease_off_window_mult, 2.0f, 1e-6, "zones[1].ease_off_window_mult survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
 
     nvs_test_enable(false);
@@ -5028,7 +5100,7 @@ static void test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default
     TEST_CHECK_NEAR(out_cfg.zones[0].ease_off_window_mult, 3.5f, 1e-6, "zones[0].ease_off_window_mult survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].approach_rate_cap_c_per_hr, 30.0f, 1e-6,
                     "zones[0]'s REAL, non-default approach_rate_cap_c_per_hr A/B arm survives the v18->v19 hop");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
 
     nvs_test_enable(false);
@@ -5108,7 +5180,7 @@ static void test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr(void)
                     "zones[0]'s REAL, non-default rate_band_c_per_s survives the v19->v20 hop");
     TEST_CHECK_NEAR(out_cfg.zones[0].approach_rate_cap_c_per_hr, 30.0f, 1e-6,
                     "zones[0].approach_rate_cap_c_per_hr survives the v19->v20 hop");
-    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
 
     // relay_cycles_set_type() push: nvs_load() (not nvs_load_from() directly,
@@ -5120,6 +5192,122 @@ static void test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr(void)
 
     nvs_test_enable(false);
     nvs_test_clear();
+}
+
+// WEB_UI_PLAN.md section 2, ZONES_CFG_VERSION 20->21: the single whole-zone
+// settings_source byte becomes settings_source[SRC_GROUP_COUNT]. THE thing
+// this test is about: a v20 blob with settings_source=1 must migrate to
+// FIVE 1s (one per group), not a fresh CUSTOM on four of the five -- a board
+// mid-firing with zone 1 set to "same as zone 0" must keep behaving
+// identically on every group after this upgrade.
+static void test_nvs_load_from_v20_blob_fans_out_settings_source_to_every_group(void)
+{
+    TEST_SECTION("nvs_load_from -- a v20 blob upconverts to v21: settings_source=1 fans out to "
+                 "all SRC_GROUP_COUNT groups, and CUSTOM (0xFF) does the same");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v20_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 20;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].settings_source = 1; // "copies zone 1" -- must land as 1 on all five groups
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v20's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v20 blob must migrate to a valid current (v21) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // THE assertion: all five groups, not just one.
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "zone 0's old scalar (1) fanned out to group %u", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == 1, msg);
+    }
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        TEST_CHECK(out_cfg.zones[1].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM,
+                  "zone 1's CUSTOM sentinel fanned out to every group too");
+    }
+
+    // A field from BEFORE settings_source (relay_mask, prefix) and a field
+    // from AFTER it (tuning_valid onward has nothing set here, but
+    // max_temp_c sits in the prefix too) must both still land correctly --
+    // proves the split copy (prefix, then fanned-out settings_source, then
+    // tail) did not corrupt either side of the widened field.
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask (prefix field) must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "max_temp_c (prefix field) survives");
+    TEST_CHECK(out_cfg.zones[0].tuning_valid == 0, "tuning_valid (tail field, v20 never set it) defaults false");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Per-group resolution is cycle-safe INDEPENDENTLY per group: zone 0 -> zone
+// 1 on LIMITS while zone 1 -> zone 0 on CONTROL must be accepted (each
+// group's own chain terminates cleanly), and each door (get/set) must
+// operate on the group actually asked for, not silently cross-talk with any
+// other group on the same zone.
+static void test_settings_source_per_group_resolution_is_independent(void)
+{
+    TEST_SECTION("zones_config_get/set_settings_source -- per-group chains are independent: a link "
+                 "on one group never affects another group's chain on the same zone pair");
+    nvs_test_enable(false);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+
+    TEST_CHECK(zones_config_set_settings_source(0, SRC_GROUP_LIMITS, 1), "zone 0 -> zone 1 on LIMITS");
+    TEST_CHECK(zones_config_set_settings_source(1, SRC_GROUP_CONTROL, 0), "zone 1 -> zone 0 on CONTROL -- "
+              "legal: CONTROL's own chain (1->0->Custom) never touches LIMITS's chain (0->1->Custom)");
+
+    uint8_t limits0 = 0xAA, control1 = 0xAA, limits1 = 0xAA, control0 = 0xAA;
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &limits0) && limits0 == 1,
+              "zone 0's LIMITS link is 1");
+    TEST_CHECK(zones_config_get_settings_source(1, SRC_GROUP_CONTROL, &control1) && control1 == 0,
+              "zone 1's CONTROL link is 0");
+    TEST_CHECK(zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &limits1) &&
+              limits1 == ZONE_SETTINGS_SOURCE_CUSTOM, "zone 1's LIMITS link is untouched (still Custom)");
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_CONTROL, &control0) &&
+              control0 == ZONE_SETTINGS_SOURCE_CUSTOM, "zone 0's CONTROL link is untouched (still Custom)");
+
+    // Now closing a REAL cycle on LIMITS (0->1 already set; 1->0 on LIMITS
+    // too would close it) must still be refused, proving the independence
+    // above is not simply "the cycle-walk is broken and never refuses
+    // anything."
+    TEST_CHECK(!zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 0),
+              "zone 1 -> zone 0 on LIMITS IS refused -- it would close 0 -> 1 -> 0 on that same group");
 }
 
 // PRE-FLIGHT for the actual v18->v19 flash still pending on the physical
@@ -5470,9 +5658,13 @@ static void test_settings_source_save_reload_inheritance_round_trip(void)
         z->max_temp_c = 1300.0f;
         z->timing_profile = 0;
     }
-    s_zones.cfg.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-    s_zones.cfg.zones[1].settings_source = 2; /* zone 1 inherits from zone 2 */
-    s_zones.cfg.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        s_zones.cfg.zones[0].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    s_zones.cfg.zones[1].settings_source[SRC_GROUP_LIMITS] = 2; /* zone 1 inherits from zone 2 */
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        s_zones.cfg.zones[2].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
     /* A distinctive value on the SOURCE zone, so "resolves to the right
      * source zone" is checkable, not just "some link survived". */
     s_zones.cfg.zones[2].tc_type = 5;
@@ -5487,9 +5679,9 @@ static void test_settings_source_save_reload_inheritance_round_trip(void)
     TEST_CHECK(load_err == ESP_OK && found && valid, "nvs_load() must succeed and report found+valid");
 
     uint8_t src = 0xAA;
-    TEST_CHECK(zones_config_get_settings_source(1, &src) && src == 2,
+    TEST_CHECK(zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &src) && src == 2,
               "zone 1's settings_source (2, a real zone) survives the round trip exactly");
-    TEST_CHECK(s_zones.cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(s_zones.cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zone 0's CUSTOM marker round-trips too, not disturbed by zone 1's link");
     /* "resolves to the right source zone": follow the link this test set up
      * and confirm the values sitting there are still the source zone's own
@@ -5507,7 +5699,7 @@ static void test_settings_source_save_reload_inheritance_round_trip(void)
 //
 // PID_EXPANSION_PLAN.md line ~864 requires that a configuration forming an
 // inheritance cycle "must not be storable or must collapse safely". The
-// storage layer (zones_config_set_settings_source(), and zones_http_parse_zone_fields()'s
+// storage layer (zones_config_set_settings_source(), SRC_GROUP_LIMITS, and zones_http_parse_zone_fields()'s
 // identical z%u_settings_source door) used to refuse only SELF-reference
 // (settings_source == zone_index) -- see both functions' own comments -- and
 // never checked the TARGET zone's own settings_source, so a genuine 2-zone
@@ -5544,53 +5736,57 @@ static void test_settings_source_two_and_three_zone_cycles_are_refused(void)
      * ever touches them. Seed CUSTOM so the starting config matches what
      * real firmware actually produces, not a memset artifact. */
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
 
     // ---- Direct setter, 2-cycle: zone 0 -> zone 1, then zone 1 -> zone 0 ----
-    TEST_CHECK(zones_config_set_settings_source(0, 1), "zone 0 -> zone 1 is accepted on its own "
+    TEST_CHECK(zones_config_set_settings_source(0, SRC_GROUP_LIMITS, 1), "zone 0 -> zone 1 is accepted on its own "
               "(0 -> 1 -> Custom terminates cleanly, no cycle yet)");
-    TEST_CHECK(!zones_config_set_settings_source(1, 0), "zone 1 -> zone 0 is REFUSED -- it would close "
+    TEST_CHECK(!zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 0), "zone 1 -> zone 0 is REFUSED -- it would close "
               "a genuine mutual cycle (0 -> 1 -> 0), and the chain-walk now catches that the first call "
               "alone could not");
     uint8_t s0 = 0xAA, s1 = 0xAA;
-    TEST_CHECK(zones_config_get_settings_source(0, &s0) && s0 == 1, "zone 0's link is still 1 (the "
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &s0) && s0 == 1, "zone 0's link is still 1 (the "
               "legal first call)");
-    TEST_CHECK(zones_config_get_settings_source(1, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zone 1 is still Custom -- the refused call left it untouched, not partially applied");
 
     // ---- Direct setter, 3-cycle: 0 -> 1 already set above; 1 -> 2, then 2 -> 0 ----
-    TEST_CHECK(zones_config_set_settings_source(1, 2), "zone 1 -> zone 2 is accepted (1 -> 2 -> Custom, "
+    TEST_CHECK(zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 2), "zone 1 -> zone 2 is accepted (1 -> 2 -> Custom, "
               "no cycle yet -- zone 0's own 0 -> 1 link doesn't participate in THIS chain's termination "
               "check, only in whether closing it later would cycle)");
-    TEST_CHECK(!zones_config_set_settings_source(2, 0), "zone 2 -> zone 0 is REFUSED -- it would close "
+    TEST_CHECK(!zones_config_set_settings_source(2, SRC_GROUP_LIMITS, 0), "zone 2 -> zone 0 is REFUSED -- it would close "
               "the 3-zone cycle 0 -> 1 -> 2 -> 0");
     uint8_t s2 = 0xAA;
-    TEST_CHECK(zones_config_get_settings_source(0, &s0) && s0 == 1 &&
-              zones_config_get_settings_source(1, &s1) && s1 == 2 &&
-              zones_config_get_settings_source(2, &s2) && s2 == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &s0) && s0 == 1 &&
+              zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &s1) && s1 == 2 &&
+              zones_config_get_settings_source(2, SRC_GROUP_LIMITS, &s2) && s2 == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zone 0 -> 1 -> 2 (a legal, acyclic chain) is exactly what's stored -- the refused "
               "2 -> 0 call left zone 2 at Custom, not half-applied");
 
     // ---- Self-reference: still refused (unchanged behaviour, not a regression) ----
-    TEST_CHECK(!zones_config_set_settings_source(0, 0), "self-reference is still refused directly, "
+    TEST_CHECK(!zones_config_set_settings_source(0, SRC_GROUP_LIMITS, 0), "self-reference is still refused directly, "
               "independent of the longer-chain guard added above");
 
     // ---- Positive control: a legal chain (no cycle) is still storable ----
     // Reset zone 2 back to Custom and re-close the SAME 0 -> 1 -> 2 chain
     // from a clean start, proving the guard above refuses ONLY the
     // cycle-closing link and does not over-reject an ordinary acyclic chain.
-    TEST_CHECK(zones_config_set_settings_source(2, ZONE_SETTINGS_SOURCE_CUSTOM),
+    TEST_CHECK(zones_config_set_settings_source(2, SRC_GROUP_LIMITS, ZONE_SETTINGS_SOURCE_CUSTOM),
               "zone 2 reset to Custom (2 -> Custom is never a cycle)");
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones.cfg.thermo_count = 3;
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
-    TEST_CHECK(zones_config_set_settings_source(0, 1), "0 -> 1 (fresh chain)");
-    TEST_CHECK(zones_config_set_settings_source(1, 2), "1 -> 2 (fresh chain, still acyclic: 0->1->2->Custom)");
-    TEST_CHECK(zones_config_get_settings_source(0, &s0) && s0 == 1 &&
-              zones_config_get_settings_source(1, &s1) && s1 == 2,
+    TEST_CHECK(zones_config_set_settings_source(0, SRC_GROUP_LIMITS, 1), "0 -> 1 (fresh chain)");
+    TEST_CHECK(zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 2), "1 -> 2 (fresh chain, still acyclic: 0->1->2->Custom)");
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &s0) && s0 == 1 &&
+              zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &s1) && s1 == 2,
               "the legal 0 -> 1 -> 2 chain is fully storable -- the guard does not over-reject a chain "
               "that never revisits a zone");
 
@@ -5600,9 +5796,9 @@ static void test_settings_source_two_and_three_zone_cycles_are_refused(void)
     // fresh, legal link: 1 -> 0 -> Custom) so a SUBSEQUENT zones_http_parse_zone_fields()
     // call closing zone 0 back onto zone 1 is a genuine 2-cycle, not a
     // freshly-created one.
-    TEST_CHECK(zones_config_set_settings_source(0, ZONE_SETTINGS_SOURCE_CUSTOM),
+    TEST_CHECK(zones_config_set_settings_source(0, SRC_GROUP_LIMITS, ZONE_SETTINGS_SOURCE_CUSTOM),
               "zone 0 reset to Custom, freeing it to be pointed at");
-    TEST_CHECK(zones_config_set_settings_source(1, 0), "zone 1 -> zone 0 now legal (0 is Custom): "
+    TEST_CHECK(zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 0), "zone 1 -> zone 0 now legal (0 is Custom): "
               "live state is now zone 0 = Custom, zone 1 -> 0");
     zone_cfg_t current0 = make_stored_zone();
     zone_cfg_t out0;
@@ -5656,7 +5852,7 @@ static void test_tc_type_write_is_identity_independent_of_settings_source(void)
     s_zones.cfg.thermo_count = 3;
 
     // Zone 0: CUSTOM settings, its own tc_type.
-    TEST_CHECK(zones_config_set_settings_source(0, ZONE_SETTINGS_SOURCE_CUSTOM), "zone 0 is Custom");
+    TEST_CHECK(zones_config_set_settings_source(0, SRC_GROUP_LIMITS, ZONE_SETTINGS_SOURCE_CUSTOM), "zone 0 is Custom");
     TEST_CHECK(zones_config_set_tc_type(0, 2), "zone 0's own channel is set to type 2");
 
     // Zone 1: inherits from a DIFFERENT terminal zone (zone 0), but is
@@ -5666,7 +5862,7 @@ static void test_tc_type_write_is_identity_independent_of_settings_source(void)
     // firmware-side assertion here is simply that whatever value comes in
     // for zone 1's own index is what gets stored for zone 1's own index --
     // it does not derive or override it from settings_source itself.
-    TEST_CHECK(zones_config_set_settings_source(1, 0), "zone 1 is set to inherit from zone 0");
+    TEST_CHECK(zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 0), "zone 1 is set to inherit from zone 0");
     TEST_CHECK(zones_config_set_tc_type(1, 2), "zone 1's own channel is written with the fanned-out value (2)");
 
     // Zone 2: also CUSTOM, but its OWN channel is a genuinely different
@@ -5674,7 +5870,7 @@ static void test_tc_type_write_is_identity_independent_of_settings_source(void)
     // settings_source chain or a mask, this would have been dragged to 2 as
     // well by one of the writes above -- last-write-wins per zone's own
     // index is the only rule actually enforced.
-    TEST_CHECK(zones_config_set_settings_source(2, ZONE_SETTINGS_SOURCE_CUSTOM), "zone 2 is Custom");
+    TEST_CHECK(zones_config_set_settings_source(2, SRC_GROUP_LIMITS, ZONE_SETTINGS_SOURCE_CUSTOM), "zone 2 is Custom");
     TEST_CHECK(zones_config_set_tc_type(2, 6), "zone 2's own channel is set to a DIFFERENT type (6)");
 
     uint8_t t0 = 0xFF, t1 = 0xFF, t2 = 0xFF;
@@ -5694,7 +5890,7 @@ static void test_tc_type_write_is_identity_independent_of_settings_source(void)
     // re-save... on save in renderZones()'s submit path" note -- a firmware
     // guard that re-derived it here on a bare settings_source write would
     // be the identical bug in a different spot.)
-    TEST_CHECK(zones_config_set_settings_source(1, 2), "zone 1's link is repointed to zone 2");
+    TEST_CHECK(zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 2), "zone 1's link is repointed to zone 2");
     TEST_CHECK(zones_config_get_tc_type(1, &t1) && t1 == 2,
               "zone 1's tc_type is STILL 2 (its own last-written value) after its settings_source moved -- "
               "not zone 2's type (6), proving no implicit re-typing on a bare source change");
@@ -8163,6 +8359,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_v9_blob_chains_through_v10_to_v11_with_zero_coupling();
     test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it();
     test_validate_accepts_relay_type_mercury_rejects_past_it();
+    test_push_all_relay_types_clears_orphaned_relay();
     test_post_mode_pid_fuzzy_accepted_by_parser();
     test_post_relay_type_optional_range_and_preserve();
     test_post_fuzzy_strength_out_of_range_refused_not_clamped();
@@ -8179,6 +8376,8 @@ void run_test_zones_http(void)
     test_coupling_single_cell_setter_preserves_other_cells();
     test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed();
     test_settings_source_setter_round_trip_and_bounds();
+    test_nvs_load_from_v20_blob_fans_out_settings_source_to_every_group();
+    test_settings_source_per_group_resolution_is_independent();
     test_tuning_quality_round_trip_asymmetric_per_zone();
     test_zones_config_set_pid_invalidates_tuning_quality();
     test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown();

@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "test_common.h"
+#include "../drivers/persist/relay_cycles.h" /* RELAY_CYCLES_COUNT -- relay_life mirror below */
 
 int g_test_failures = 0;
 int g_test_count = 0;
@@ -631,6 +632,30 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     }
     STATUS_APPEND("]");
 
+    /* RELAY_LIFE_BUDGET_PLAN.md step 4 -- opus review finding: this mirror
+     * had never been updated for relay_life[]/relay_life_tier, so the
+     * headroom assertion below was vacuous. Widths match dashboard_json.h's
+     * DASHBOARD_JSON_STATUS_BUF_SIZE comment's own worst-case entry: type
+     * "contactor" (9 chars, widest of contactor/mercury/ssr), cycles/rated
+     * at uint32 widest, percent at the widest %.2f this codebase's own
+     * relay_cycles_budget() can currently produce through relay_cycles_
+     * set_type()'s only live caller (rated_override always 0, so rated comes
+     * from the type table -- RELAY_RATED_LIFE_CONTACTOR=100000 -- giving
+     * cycles=4294967295 a percent of ~4294967.30; rated is still rendered at
+     * its full uint32 width below since relay_cycles_set_type()'s signature
+     * allows a nonzero override even though nothing calls it with one today,
+     * so this stays a real bound rather than one tied to today's callers),
+     * tier "error" (5 chars, widest of none/warn/error). */
+    STATUS_APPEND(",\"relay_life\":[");
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        STATUS_APPEND(
+            "%s{\"relay\":%u,\"type\":\"%s\",\"cycles\":%lu,\"rated\":%s,\"percent\":%s,\"tier\":\"%s\"}",
+            r == 0 ? "" : ",", 4u, "contactor", (unsigned long)0xFFFFFFFFu, "4294967295",
+            "4294967.30", "error");
+    }
+    STATUS_APPEND("]");
+    STATUS_APPEND(",\"relay_life_tier\":\"%s\"", "error");
+
     STATUS_APPEND(",\"thermo_ready\":%s", "true");
     STATUS_APPEND(",\"thermo_spi_wedged\":%s", "true");
     STATUS_APPEND(",\"flush_last_us\":%u,\"flush_max_us\":%u,\"flush_count\":%u",
@@ -656,6 +681,15 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     STATUS_APPEND(",\"ct_current_a\":[");
     for (unsigned ci = 0; ci < 3; ci++) {
         STATUS_APPEND("%s%.3f", ci == 0 ? "" : ",", -1234.567);
+    }
+    STATUS_APPEND("]");
+
+    /* LINK_PROTOCOL.md Frame E, 2026-09-06 -- raw ADC counts, missing from
+     * this mirror entirely until the opus review caught it. uint16_t widest
+     * is 65535 (5 digits), 3 channels comma-joined. */
+    STATUS_APPEND(",\"ct_counts\":%s", "[");
+    for (unsigned ci = 0; ci < 3; ci++) {
+        STATUS_APPEND("%s%u", ci == 0 ? "" : ",", 65535u);
     }
     STATUS_APPEND("]");
 

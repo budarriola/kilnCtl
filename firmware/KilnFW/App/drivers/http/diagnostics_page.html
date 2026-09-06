@@ -617,7 +617,7 @@ here:</p>
   // are rebuilt wholesale by renderRelayWear() above, so a per-button
   // listener would leak/re-attach every poll) -- same kcConfirm() gate the
   // Danger Zone's dangerEnterBtn handler above uses, and a POST through the
-  // flash worker on the server side (relay_cycles_reset_http.c), never a
+  // flash worker on the server side (diagnostics_http.c), never a
   // direct NVS write from the httpd task.
   document.getElementById('relayWearCard').addEventListener('click', function (e) {
     var btn = e.target.closest('.relay-reset-btn');

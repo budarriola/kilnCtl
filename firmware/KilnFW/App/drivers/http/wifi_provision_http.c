@@ -981,7 +981,25 @@ esp_err_t wifi_provision_http_start(void)
      * pointer slots * 4 bytes = 52 bytes, against the ~12483-byte dram_free
      * measured at the uart_bridges_1 heap stage and the documented ~11.9 kB
      * failure floor -- noise, not a threat. */
-    config.max_uri_handlers = 108;
+    /* 2026-09-06: raised 108 -> 118. diagnostics_http.c's new POST
+     * /api/relay_cycles/reset route (RELAY_LIFE_BUDGET_PLAN.md step 4, commit
+     * 4a940b89) took diagnostics_http.c from 17 routes to 18, and the real
+     * count from 108 to 109 -- one over the 108 cap.
+     * tools/check_uri_handler_cap.ps1 caught it exactly as designed (109
+     * routes counted vs cap 108) rather than letting registration fail
+     * silently. Set to 118: 109 plus 9 spare slots, the same order of
+     * headroom as every bump above (7-13). RAM cost: 10 extra pointer slots *
+     * 4 bytes = 40 bytes, against the ~12483-byte dram_free measured at the
+     * uart_bridges_1 heap stage and the documented ~11.9 kB failure floor --
+     * noise, not a threat. There is no separate Kconfig/sdkconfig knob for
+     * this -- checked firmware/KilnFW/sdkconfig for a CONFIG_HTTPD_* cap on
+     * the URI table itself and found none (CONFIG_HTTPD_MAX_URI_LEN etc. cap
+     * the length of one URI string, not the count of registered handlers);
+     * config.max_uri_handlers here IS the only real cap, and
+     * check_uri_handler_cap.ps1 parses this exact line rather than carrying
+     * a second hardcoded number of its own -- so there is only ever one
+     * value to keep in lockstep, this one. */
+    config.max_uri_handlers = 118;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

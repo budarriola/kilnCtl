@@ -405,9 +405,17 @@ void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_over
         return;
     }
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    s_rc.types[relay] = (uint8_t)type;
-    s_rc.rated_overrides[relay] = rated_override;
-    s_rc.dirty = true; /* type/override are persisted alongside the counts */
+    /* opus review (LOW): only mark dirty when something actually changed --
+     * every boot's zones_config load path calls this once per relay
+     * (zones_config_store.c's zones_config_push_all_relay_types()) even when
+     * the persisted type/override already match, which previously
+     * guaranteed an NVS write on every single boot regardless of whether
+     * anything was new. */
+    if (s_rc.types[relay] != (uint8_t)type || s_rc.rated_overrides[relay] != rated_override) {
+        s_rc.types[relay] = (uint8_t)type;
+        s_rc.rated_overrides[relay] = rated_override;
+        s_rc.dirty = true; /* type/override are persisted alongside the counts */
+    }
     xSemaphoreGive(s_rc.lock);
 }
 
@@ -540,6 +548,19 @@ bool relay_cycles_reset(unsigned relay)
      * httpd-task POST handler) is expected to already be on the worker
      * today, but the check is cheap and this is exactly the class of bug
      * that stays invisible until a caller changes. */
+    /* opus review finding (RELAY_LIFE_BUDGET_PLAN.md audit): persist_locked()
+     * reads/clears s_rc.counts/types/rated_overrides/dirty with NO lock of
+     * its own -- it is written to be called with s_rc.lock already held
+     * (relay_cycles_maybe_persist() does exactly that around its own call a
+     * few lines down). This dispatch used to call it via reset_persist_job()
+     * with the lock already released above, racing relay_cycles_add(): a
+     * concurrent add() between the release above and persist_locked()'s
+     * memcpy could see its increment folded into the blob written to flash
+     * (harmless) OR see dirty cleared by this persist and then never win the
+     * race to set it again (the add()'s own increment silently never gets
+     * persisted). Held across the dispatch instead -- reset_persist_job()
+     * itself takes no lock, so this cannot deadlock the flash worker. */
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     esp_err_t err;
     if (uart_bridge_ext_is_on_flash_worker()) {
         reset_persist_job(&err);
@@ -552,10 +573,21 @@ bool relay_cycles_reset(unsigned relay)
          * case rather than the uninitialized-in-effect job_err. */
         err = (submit_err != ESP_OK) ? submit_err : job_err;
     }
+    xSemaphoreGive(s_rc.lock);
 
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "relay_cycles_reset(%u): persist failed (%s) -- count zeroed in RAM, "
-                      "will retry on the next periodic persist", relay, esp_err_to_name(err));
+        /* opus review finding: "will retry on the next periodic persist" is
+         * only true when something is actually ticking relay_cycles_maybe_
+         * persist() -- boot_guard.h's RECOVERY MODE deliberately does not
+         * start profile_executor/autotune_engine, and this codebase has no
+         * other periodic caller of that function (grep confirms), so a
+         * failed persist while the board is in recovery mode is RAM-only
+         * until the next successful boot/persist and is lost on a reboot in
+         * the meantime. Say so rather than promise a retry that may not
+         * happen. */
+        ESP_LOGW(TAG, "relay_cycles_reset(%u): persist failed (%s) -- count zeroed in RAM only; "
+                      "this is lost on reboot unless something calls relay_cycles_maybe_persist() "
+                      "again first (it will not tick in RECOVERY MODE)", relay, esp_err_to_name(err));
         return false;
     }
 
