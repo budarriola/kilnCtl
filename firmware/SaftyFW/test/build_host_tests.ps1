@@ -131,7 +131,15 @@ $sources = @(
     (Join-Path $hwAbstractionHostDir "fake_gpio.c"),
     (Join-Path $hwAbstractionCommonDir "hal_status.c"),
     (Join-Path $testDir "test_relay_owner_gpio_init_stubs.c"),
-    (Join-Path $testDir "test_relay_owner_gpio_init.c")
+    (Join-Path $testDir "test_relay_owner_gpio_init.c"),
+    # HAL Phase 1b -- current_sense.c host build, now a hal_adc client
+    # (docs/HW_ABSTRACTION_PLAN.md "hal_adc -- pico-only"). Only needs the
+    # freertos_min stub's xTaskGetTickCount()/portTICK_PERIOD_MS (already
+    # pulled in above for relay_owner.c) plus fake_adc.c as its backend --
+    # no new stub file, unlike relay_owner.c's task-creation surface.
+    (Join-Path $srcDir "current_sense.c"),
+    (Join-Path $hwAbstractionHostDir "fake_adc.c"),
+    (Join-Path $testDir "test_current_sense_hal_adc.c")
 )
 
 # A response file for the cl invocation itself (not just $sources) -- this

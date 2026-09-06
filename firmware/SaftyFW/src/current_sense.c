@@ -30,7 +30,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "hardware/adc.h"
+#include "hal_adc.h"
 
 #include "board_pins.h"
 #include "current_presence_policy.h"
@@ -154,15 +154,15 @@ void current_sense_init(void)
 // capture.
 static uint32_t cs_read_channel_counts(int n)
 {
-    adc_select_input(s_adc_channel[n]);
+    hal_adc_select(s_adc_channel[n]);
 
     // "The first conversion after a mux change is the one to distrust;
     // discard it." (ARCHITECTURE.md section 8, CURRENT_SENSE.md section 4.)
-    (void)adc_read();
+    (void)hal_adc_read_raw();
 
     uint32_t sum = 0;
     for (uint32_t i = 0; i < CS_OVERSAMPLE_N; i++) {
-        sum += adc_read();
+        sum += hal_adc_read_raw();
     }
     return sum / CS_OVERSAMPLE_N;
 }

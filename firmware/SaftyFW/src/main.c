@@ -330,7 +330,8 @@ int main(void)
     // request-queue task (THERMOCOUPLE.md section 1: this bus has exactly
     // one device, so there is no contention to serialize). adc_owner's
     // round-robin init remains TODO (Phase 6 -- current_task_start() below
-    // does call adc_init()/adc_gpio_init() itself for now). uart_owner (Phase
+    // does call hal_adc_init()/hal_adc_gpio_enable() itself for now, HAL
+    // Phase 1b). uart_owner (Phase
     // 7) is real as of this pass: UART1 (GPIO4/5), non-blocking TX ring, IRQ-
     // driven RX ring -- must be brought up before link_task_start() (step 7),
     // which assumes both rings already exist.

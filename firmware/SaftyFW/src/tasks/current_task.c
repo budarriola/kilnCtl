@@ -10,7 +10,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "hardware/adc.h"
+#include "hal_adc.h"
 
 #include "board_pins.h"
 #include "config_store.h"
@@ -95,13 +95,13 @@ static void current_task_fn(void *arg)
 
 bool current_task_start(void)
 {
-    adc_init();
-    // adc_gpio_init() disables the digital functions on these pins
+    hal_adc_init();
+    // hal_adc_gpio_enable() disables the digital functions on these pins
     // (ARCHITECTURE.md section 8) -- call it once, here, rather than letting
     // each channel's first read do it implicitly.
-    adc_gpio_init(SAFTYFW_PIN_ADC0_GPIO);
-    adc_gpio_init(SAFTYFW_PIN_ADC1_GPIO);
-    adc_gpio_init(SAFTYFW_PIN_ADC2_GPIO);
+    hal_adc_gpio_enable(SAFTYFW_PIN_ADC0_GPIO);
+    hal_adc_gpio_enable(SAFTYFW_PIN_ADC1_GPIO);
+    hal_adc_gpio_enable(SAFTYFW_PIN_ADC2_GPIO);
 
     BaseType_t ok = xTaskCreate(current_task_fn, "current_task", CURRENT_TASK_STACK_WORDS, NULL,
                                  SAFTYFW_PRIO_CURRENT_TASK, &s_task_handle);

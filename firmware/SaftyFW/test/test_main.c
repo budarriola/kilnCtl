@@ -42,6 +42,7 @@ void run_test_safety_core_s8_wiring(void);
 void run_test_safety_core_polarity_wiring(void);
 void run_test_update_task_relay_wiring(void);
 void run_test_relay_owner_gpio_init(void);
+void run_test_current_sense_hal_adc(void);
 void run_test_guard_nuisance(void);
 void run_test_debounce_policy(void);
 void run_test_debounce_nuisance(void);
@@ -85,6 +86,7 @@ int main(void)
     run_test_safety_core_polarity_wiring();
     run_test_update_task_relay_wiring();
     run_test_relay_owner_gpio_init();
+    run_test_current_sense_hal_adc();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

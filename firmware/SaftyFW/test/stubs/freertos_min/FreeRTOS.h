@@ -22,6 +22,10 @@ typedef uint32_t UBaseType_t;
 
 #define portMAX_DELAY ((TickType_t)0xFFFFFFFFu)
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
+// current_sense.c (HAL Phase 1b hal_adc host build) uses this to convert
+// xTaskGetTickCount() into a millisecond timestamp; 1 here since this stub's
+// xTaskGetTickCount() is a fixed fake value, not a real tick rate.
+#define portTICK_PERIOD_MS ((TickType_t)1)
 
 #define configMINIMAL_STACK_SIZE 128u
 

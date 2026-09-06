@@ -840,6 +840,29 @@ direction-then-level pair, confirmed 2 FAILED, restored, confirmed 2157/2157
 pass -- baseline was 2145). All three SaftyFW/SaftyFW_slotA/SaftyFW_slotB
 targets and `compile_pico_backends.ps1` still build/link clean.
 
+current_sense.c and current_task.c are now hal_adc clients too (second
+package of Phase 1b's SaftyFW half, 2026-09-05): current_sense.c's
+`adc_select_input()`/`adc_read()` pair became `hal_adc_select()`/
+`hal_adc_read_raw()`, and current_task.c's `adc_init()`/three
+`adc_gpio_init()` calls became `hal_adc_init()`/`hal_adc_gpio_enable()` --
+oversampling and discard-first-sample policy stayed above the interface in
+current_sense.c exactly as this section specified. No interface mismatch:
+the pico-sdk shape hal_adc.h/hal_adc_pico.c were written for already matched
+both real callers 1:1. `hwabstraction_pico` now also links
+`pico/adc/hal_adc_pico.c`. New `test/test_current_sense_hal_adc.c` drives
+current_sense_sample() against `firmware/hwAbstraction/host/fake_adc.c` with
+scripted, realistic 12-bit-quantized samples and checks (via fake_adc's read
+counter/pending-count/event history) that each channel does exactly 1
+discarded + 16 oversampled reads and that the discarded sample never enters
+the averaged reading -- negative-tested by deleting the discard read
+(4/5 new checks FAILED plus the total-read-count check, confirmed, restored,
+`git diff` clean on that hunk). 2168/2168 host checks pass (baseline 2157).
+All three SaftyFW/SaftyFW_slotA/SaftyFW_slotB targets and
+`compile_pico_backends.ps1` still build/link clean; `run_all_checks.ps1` is
+48/49 (the one failure, `check_no_duplicate_crc.ps1`, is a pre-existing
+stale-temp-path race in `test_host_fakes.ps1`'s mutant-file cleanup,
+unrelated to this change).
+
 Real pico-side uart/time bodies (`firmware/hwAbstraction/pico/{uart,time}/`)
 landed 2026-09-05, same script extended to cover both: hal_uart_pico.c
 wraps tasks/uart_owner.c's real IRQ ring/drop contract (documented
