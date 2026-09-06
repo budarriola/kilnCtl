@@ -86,8 +86,7 @@ hints). The CH340K reports no per-device serial, so a second CH340K-family
 device on the bench would be ambiguous — `KILNCTL_FIXTURE_PORT` env var /
 `port=` is the fallback.
 
-**Fixed 2026-09-06 (follow-up task; see git log for the commit that added
-this note):** the two identical
+**Fixed in `2545936` (2026-09-06 follow-up task):** the two identical
 VID:PID (303A:1001) native JTAG ports are now told apart everywhere by USB
 serial number. `serial_link.py` gained a board-identity table
 (`MAIN_BOARD_JTAG_SERIAL`/`MAIN_BOARD_UART_SERIAL`/`FIXTURE_JTAG_SERIAL`/
