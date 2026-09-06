@@ -11,7 +11,7 @@
 // persist_locked() directly and exercise it via fake_kv.h's RAM-backed
 // hal_kv fake, plus fake_kv_set_write_safe_here() to simulate a
 // PSRAM-stacked caller (relay_cycles.c's caller_stack_is_external() is now
-// !hal_kv_write_safe_here() -- see HW_ABSTRACTION_PLAN.md Phase 3 item 3,
+// !hal_kv_write_safe_here() -- see HW_ABSTRACTION.md Phase 3 item 3,
 // the nvs.h -> hal_kv.h migration).
 // Own executable (build_host_tests.ps1's own build+run step, /std:c11):
 // relay_cycles.c is compiled alongside run_state.c's identical guard test in
@@ -98,10 +98,169 @@ static void test_persist_locked_proceeds_normally_on_an_internal_ram_stack(void)
                "the persisted counts are the ones that were passed in, unmodified");
 }
 
+// --- RELAY_LIFE_BUDGET_PLAN.md step 1: type table, budget math, fifth slot,
+// v1->v2 blob migration. These tests call relay_cycles_budget()/
+// relay_cycles_set_type()/relay_cycles_note_safety_edge() directly (this
+// file already #includes relay_cycles.c), quantizing counts against a rated
+// life chosen so 79/80/89/90% land on exact integer counts -- rated life
+// 100 (an override, not the real table value) makes count==tier boundaries
+// trivial to hit exactly instead of rounding into or out of a tier.
+
+static void test_budget_ssr_has_no_budget(void)
+{
+    TEST_SECTION("relay_cycles_budget -- ssr relays report has_budget == false regardless of count "
+                 "or override (RELAY_LIFE_BUDGET_PLAN.md: 'ssr = no budget, percent reported as null')");
+    reset_all();
+
+    relay_cycles_set_type(0, RELAY_TYPE_SSR, 100); // override present but must be ignored for ssr
+    s_rc.counts[0] = 1000000;
+
+    relay_cycles_budget_t b;
+    relay_cycles_budget(0, &b);
+    TEST_CHECK(b.has_budget == false, "ssr never has a budget, however high the count");
+    TEST_CHECK(b.tier == RELAY_BUDGET_TIER_NONE, "no budget means no tier either");
+}
+
+static void test_budget_quantized_thresholds(void)
+{
+    TEST_SECTION("relay_cycles_budget -- 79/80/89/90% land exactly on the warn/error tier "
+                 "boundaries (>=80% warn, >=90% error)");
+    reset_all();
+
+    relay_cycles_set_type(1, RELAY_TYPE_CONTACTOR, 100); // override -> rated life of exactly 100
+
+    relay_cycles_budget_t b;
+
+    s_rc.counts[1] = 79;
+    relay_cycles_budget(1, &b);
+    TEST_CHECK(b.has_budget && b.percent == 79.0f && b.tier == RELAY_BUDGET_TIER_NONE,
+               "79%% is below the warn threshold");
+
+    s_rc.counts[1] = 80;
+    relay_cycles_budget(1, &b);
+    TEST_CHECK(b.has_budget && b.percent == 80.0f && b.tier == RELAY_BUDGET_TIER_WARN,
+               "80%% is exactly the warn threshold (>=80%%)");
+
+    s_rc.counts[1] = 89;
+    relay_cycles_budget(1, &b);
+    TEST_CHECK(b.has_budget && b.percent == 89.0f && b.tier == RELAY_BUDGET_TIER_WARN,
+               "89%% is still warn, not yet error");
+
+    s_rc.counts[1] = 90;
+    relay_cycles_budget(1, &b);
+    TEST_CHECK(b.has_budget && b.percent == 90.0f && b.tier == RELAY_BUDGET_TIER_ERROR,
+               "90%% is exactly the error threshold (>=90%%)");
+}
+
+static void test_budget_override_wins_over_table(void)
+{
+    TEST_SECTION("relay_cycles_budget -- a nonzero rated_override wins over the type's table value");
+    reset_all();
+
+    // Table value for contactor is 100000; an override of 10 makes the same
+    // count read as a wildly different percent, proving the override (not
+    // the table) was actually used.
+    relay_cycles_set_type(2, RELAY_TYPE_CONTACTOR, 10);
+    s_rc.counts[2] = 9;
+
+    relay_cycles_budget_t b;
+    relay_cycles_budget(2, &b);
+    TEST_CHECK(b.has_budget && b.rated == 10, "the override value is used as the rated life, not the table's 100000");
+    TEST_CHECK(b.percent == 90.0f && b.tier == RELAY_BUDGET_TIER_ERROR,
+               "9/10 = 90%% -- only reachable if the override, not the 100000 table value, was used");
+
+    // Zero override falls back to the table.
+    relay_cycles_set_type(2, RELAY_TYPE_CONTACTOR, 0);
+    relay_cycles_budget(2, &b);
+    TEST_CHECK(b.has_budget && b.rated == RELAY_RATED_LIFE_CONTACTOR,
+               "override == 0 means 'use the table', per relay_cycles_set_type()'s documented contract");
+}
+
+static void test_safety_slot_edge_and_persistence(void)
+{
+    TEST_SECTION("relay_cycles_note_safety_edge -- increments the fifth slot (K4) independently "
+                 "of relay_cycles_add(), and it round-trips through persist/load like the others");
+    reset_all();
+
+    TEST_CHECK(RELAY_CYCLES_SAFETY_INDEX == KILN_IO_RELAY_COUNT,
+               "the safety slot is the one right after the four heater relays");
+
+    relay_cycles_add(0x0F, 5); // all four heater relays, must NOT touch the safety slot
+    relay_cycles_note_safety_edge();
+    relay_cycles_note_safety_edge();
+    relay_cycles_note_safety_edge();
+
+    TEST_CHECK(s_rc.counts[RELAY_CYCLES_SAFETY_INDEX] == 3, "three edges noted, one each call");
+    TEST_CHECK(s_rc.counts[0] == 42 + 5, "relay_cycles_add() still only touches the four heater slots");
+
+    hal_status_t err = persist_locked();
+    TEST_CHECK(err == HAL_OK, "persist succeeds with the fifth slot populated");
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "reopen for readback");
+    relay_cycles_blob_t blob;
+    size_t len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
+               "the v2 blob round-trips at its full size");
+    hal_kv_close(&h);
+    TEST_CHECK(blob.counts[RELAY_CYCLES_SAFETY_INDEX] == 3,
+               "the persisted blob carries the safety slot's count, not just the four heater ones");
+}
+
+static void test_v1_blob_migrates_to_v2(void)
+{
+    TEST_SECTION("relay_cycles_init -- a v1 blob (bare 4-count array, no types, no fifth slot) "
+                 "migrates to v2: existing counts kept, type defaults to ssr, fifth slot starts at 0");
+    fake_kv_reset_all();
+    fake_kv_set_write_safe_here(true);
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    // Write a v1-shaped blob directly, bypassing persist_locked() (which
+    // only ever writes the current version) -- this simulates a board that
+    // last persisted before this change shipped.
+    relay_cycles_blob_v1_t v1;
+    v1.version = 1;
+    v1.counts[0] = 111;
+    v1.counts[1] = 222;
+    v1.counts[2] = 0;
+    v1.counts[3] = 0;
+    hal_kv_handle_t hw;
+    TEST_CHECK(hal_kv_open(&hw, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "open for the v1 blob write");
+    TEST_CHECK(hal_kv_set_blob(&hw, NVS_KEY_CYCLES, &v1, sizeof(v1)) == HAL_OK, "write the v1-sized blob");
+    TEST_CHECK(hal_kv_commit(&hw) == HAL_OK, "commit the v1 blob");
+    hal_kv_close(&hw);
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    s_rc.lock = NULL;
+    s_rc.initialized = false;
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds against a v1-shaped blob");
+
+    TEST_CHECK(s_rc.counts[0] == 111 && s_rc.counts[1] == 222 && s_rc.counts[2] == 0 && s_rc.counts[3] == 0,
+               "the four heater relays' existing counts survive the migration unchanged");
+    TEST_CHECK(s_rc.counts[RELAY_CYCLES_SAFETY_INDEX] == 0, "the new fifth slot starts at zero, not garbage");
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        TEST_CHECK(s_rc.types[r] == RELAY_TYPE_SSR, "a migrated v1 relay defaults to ssr type");
+    }
+
+    relay_cycles_budget_t b;
+    relay_cycles_budget(0, &b);
+    TEST_CHECK(b.has_budget == false, "a migrated relay's default ssr type means no budget shown yet");
+
+    fake_kv_reset_all();
+}
+
 void run_test_relay_cycles(void)
 {
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
     test_persist_locked_proceeds_normally_on_an_internal_ram_stack();
+    test_budget_ssr_has_no_budget();
+    test_budget_quantized_thresholds();
+    test_budget_override_wins_over_table();
+    test_safety_slot_edge_and_persistence();
+    test_v1_blob_migrates_to_v2();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

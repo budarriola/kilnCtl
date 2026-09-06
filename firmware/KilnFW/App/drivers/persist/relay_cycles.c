@@ -29,16 +29,32 @@ static const char *TAG = "relay_cycles";
  * changes the on-disk layout, which is fine here -- unlike run_state.c's
  * blob, this one is diagnostic-only and already treats any size mismatch as
  * "start at zero", so the version add rides the same tolerant path. */
-#define RELAY_CYCLES_VERSION 1
+/* Version 2 (RELAY_LIFE_BUDGET_PLAN.md step 1): adds a fifth counted slot
+ * (RELAY_CYCLES_SAFETY_INDEX, the safety relay K4) and per-relay type +
+ * rated-life override, both persisted so a budget survives reboot before the
+ * zones/safety config steps that will actually set the type exist. A v1 blob
+ * (bare 4-count array, no types) loads into the first four slots with type
+ * defaulted to RELAY_TYPE_SSR and the fifth slot at 0 -- see the migration
+ * block in relay_cycles_init(). */
+#define RELAY_CYCLES_VERSION 2
 
 typedef struct {
     uint8_t  version;
     uint32_t counts[KILN_IO_RELAY_COUNT];
+} relay_cycles_blob_v1_t;
+
+typedef struct {
+    uint8_t  version;
+    uint32_t counts[RELAY_CYCLES_COUNT];
+    uint8_t  types[RELAY_CYCLES_COUNT];          /* relay_type_t, stored as uint8_t */
+    uint32_t rated_overrides[RELAY_CYCLES_COUNT]; /* 0 = use the type's table value */
 } relay_cycles_blob_t;
 
 typedef struct {
     SemaphoreHandle_t lock;
-    uint32_t          counts[KILN_IO_RELAY_COUNT];
+    uint32_t          counts[RELAY_CYCLES_COUNT];
+    uint8_t           types[RELAY_CYCLES_COUNT];
+    uint32_t          rated_overrides[RELAY_CYCLES_COUNT];
     bool              dirty;
     int64_t           last_persist_us;
     bool              initialized;
@@ -85,18 +101,31 @@ static void migrate_from_default_partition(void)
     if (err != HAL_OK) {
         return;
     }
-    relay_cycles_blob_t old_blob;
-    size_t len = sizeof(old_blob);
-    err = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &old_blob, &len);
+    /* This reads whatever the OLDEST possible sibling wrote to the default
+     * partition before any board ever saw the partition split -- that could
+     * only ever be a v1 blob (bare 4-count array), since the split predates
+     * the v1->v2 type/fifth-slot change. Read it as v1 and upconvert, the
+     * same way relay_cycles_init()'s own migration block does for a v1 blob
+     * already in KILN_NVS_PARTITION. */
+    relay_cycles_blob_v1_t old_blob_v1;
+    size_t len = sizeof(old_blob_v1);
+    err = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &old_blob_v1, &len);
     hal_kv_close(&h);
     if (err != HAL_OK) {
         /* Nothing in the old location either (or it's the pre-version-field
          * bare uint32_t[] blob, a different size) -- nothing to migrate. */
         return;
     }
-    if (len != sizeof(old_blob) || old_blob.version != RELAY_CYCLES_VERSION) {
+    if (len != sizeof(old_blob_v1) || old_blob_v1.version != 1) {
         return;
     }
+
+    relay_cycles_blob_t old_blob;
+    memset(&old_blob, 0, sizeof(old_blob));
+    old_blob.version = RELAY_CYCLES_VERSION;
+    memcpy(old_blob.counts, old_blob_v1.counts, sizeof(old_blob_v1.counts));
+    /* types[]/rated_overrides[] stay zero -- RELAY_TYPE_SSR/no override,
+     * same default the in-place v1->v2 migration uses. */
 
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "migrate_from_default_partition: REFUSING -- calling task's stack is in "
@@ -169,6 +198,8 @@ static hal_status_t persist_locked(void)
     relay_cycles_blob_t blob;
     blob.version = RELAY_CYCLES_VERSION;
     memcpy(blob.counts, s_rc.counts, sizeof(blob.counts));
+    memcpy(blob.types, s_rc.types, sizeof(blob.types));
+    memcpy(blob.rated_overrides, s_rc.rated_overrides, sizeof(blob.rated_overrides));
     err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
@@ -195,6 +226,8 @@ esp_err_t relay_cycles_init(void)
 
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     memset(s_rc.counts, 0, sizeof(s_rc.counts));
+    memset(s_rc.types, RELAY_TYPE_SSR, sizeof(s_rc.types));
+    memset(s_rc.rated_overrides, 0, sizeof(s_rc.rated_overrides));
 
     /* Migrate before the real load so a pre-split board's counts show up on
      * the very first boot after the update, not one boot late. */
@@ -224,6 +257,8 @@ esp_err_t relay_cycles_init(void)
                 ESP_LOGW(TAG, "relay cycle blob claims current version but is the wrong size -- starting at zero");
             } else {
                 memcpy(s_rc.counts, blob.counts, sizeof(s_rc.counts));
+                memcpy(s_rc.types, blob.types, sizeof(s_rc.types));
+                memcpy(s_rc.rated_overrides, blob.rated_overrides, sizeof(s_rc.rated_overrides));
             }
         } else if (err == HAL_OK && blob.version > RELAY_CYCLES_VERSION) {
             /* Newer than this firmware understands -- a firmware-rollback
@@ -232,11 +267,26 @@ esp_err_t relay_cycles_init(void)
              * a subsequent boot on the newer firmware still finds it. */
             ESP_LOGW(TAG, "relay cycle blob version %u is newer than this firmware's %u -- refusing to load, "
                      "leaving flash untouched", blob.version, RELAY_CYCLES_VERSION);
+        } else if (err == HAL_OK && blob.version == 1 && len == sizeof(relay_cycles_blob_v1_t)) {
+            /* v1 -> v2 migration (RELAY_LIFE_BUDGET_PLAN.md step 1): the old
+             * blob is a bare 4-count array read through the SAME `blob`
+             * variable's first sizeof(relay_cycles_blob_v1_t) bytes, since
+             * v1's layout (version byte + 4 counts) is a strict prefix of
+             * v2's (version byte + 5 counts + ...) -- hal_kv_get_blob() above
+             * already wrote those bytes into `blob` before this branch is
+             * reached, only the trailing v2-only fields were left untouched
+             * by whatever hal_kv's fake/real backend does with a
+             * shorter-than-buffer read. Re-read explicitly as v1 to avoid
+             * depending on that. */
+            relay_cycles_blob_v1_t v1;
+            memcpy(&v1, &blob, sizeof(v1));
+            memcpy(s_rc.counts, v1.counts, sizeof(v1.counts));
+            /* Fifth slot (safety relay) starts at 0; types/overrides already
+             * memset to RELAY_TYPE_SSR/0 above. */
+            ESP_LOGI(TAG, "migrated relay cycle blob v1 -> v%u (fifth slot + types added, "
+                     "existing relays default to ssr)", RELAY_CYCLES_VERSION);
         } else if (err == HAL_OK) {
-            /* blob.version < RELAY_CYCLES_VERSION: version 1 is the first
-             * this field has ever had, so there is no older layout to
-             * migrate from yet -- this is the hook point for when one
-             * exists. */
+            /* Anything else older than current with no migration defined. */
             ESP_LOGW(TAG, "relay cycle blob version %u predates this firmware's %u with no migration defined -- "
                      "starting at zero", blob.version, RELAY_CYCLES_VERSION);
         } else if (err != HAL_NOT_FOUND) {
@@ -285,8 +335,31 @@ void relay_cycles_add(uint8_t relay_mask, uint32_t cycles)
     xSemaphoreGive(s_rc.lock);
 }
 
+void relay_cycles_note_safety_edge(void)
+{
+    if (!ensure_lock()) {
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    uint32_t *c = &s_rc.counts[RELAY_CYCLES_SAFETY_INDEX];
+    /* Same saturate-rather-than-wrap rule as relay_cycles_add(). */
+    if (*c < UINT32_MAX) {
+        (*c)++;
+    }
+    s_rc.dirty = true;
+    xSemaphoreGive(s_rc.lock);
+}
+
 void relay_cycles_get(uint32_t *out)
 {
+    /* Deliberately still KILN_IO_RELAY_COUNT entries, not RELAY_CYCLES_COUNT:
+     * dashboard_http.c's only caller passes a KILN_IO_RELAY_COUNT-sized stack
+     * array (TODO.md 6A.1 predates the safety-relay slot), and this step is
+     * explicitly scoped to leave dashboard/HTTP files untouched. Widening
+     * this call's contract would silently overflow that caller's buffer.
+     * relay_cycles_get_all() below is the RELAY_CYCLES_COUNT-sized form for
+     * new callers (a later plan step wiring the fifth slot into the
+     * dashboard). */
     if (!out) {
         return;
     }
@@ -295,8 +368,130 @@ void relay_cycles_get(uint32_t *out)
         return;
     }
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    memcpy(out, s_rc.counts, sizeof(uint32_t) * KILN_IO_RELAY_COUNT);
+    xSemaphoreGive(s_rc.lock);
+}
+
+void relay_cycles_get_all(uint32_t *out)
+{
+    if (!out) {
+        return;
+    }
+    if (!ensure_lock()) {
+        memset(out, 0, sizeof(uint32_t) * RELAY_CYCLES_COUNT);
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     memcpy(out, s_rc.counts, sizeof(s_rc.counts));
     xSemaphoreGive(s_rc.lock);
+}
+
+void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_override)
+{
+    if (relay >= RELAY_CYCLES_COUNT || !ensure_lock()) {
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    s_rc.types[relay] = (uint8_t)type;
+    s_rc.rated_overrides[relay] = rated_override;
+    s_rc.dirty = true; /* type/override are persisted alongside the counts */
+    xSemaphoreGive(s_rc.lock);
+}
+
+void relay_cycles_get_type(uint8_t relay, relay_type_t *type, uint32_t *rated_override)
+{
+    if (relay >= RELAY_CYCLES_COUNT) {
+        if (type) *type = RELAY_TYPE_SSR;
+        if (rated_override) *rated_override = 0;
+        return;
+    }
+    if (!ensure_lock()) {
+        if (type) *type = RELAY_TYPE_SSR;
+        if (rated_override) *rated_override = 0;
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    if (type) *type = (relay_type_t)s_rc.types[relay];
+    if (rated_override) *rated_override = s_rc.rated_overrides[relay];
+    xSemaphoreGive(s_rc.lock);
+}
+
+/* Table lookup for a type with no override -- the plan's rated-life table.
+ * RELAY_TYPE_SSR has no budget (returns 0, meaning "no budget" to callers
+ * that check has_budget rather than relying on this return alone). */
+static uint32_t rated_life_for_type(relay_type_t type)
+{
+    switch (type) {
+        case RELAY_TYPE_CONTACTOR: return RELAY_RATED_LIFE_CONTACTOR;
+        case RELAY_TYPE_MERCURY:   return RELAY_RATED_LIFE_MERCURY;
+        case RELAY_TYPE_SSR:
+        default:                   return 0;
+    }
+}
+
+void relay_cycles_budget(uint8_t relay, relay_cycles_budget_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (relay >= RELAY_CYCLES_COUNT) {
+        return;
+    }
+    if (!ensure_lock()) {
+        return;
+    }
+
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    uint32_t cycles = s_rc.counts[relay];
+    relay_type_t type = (relay_type_t)s_rc.types[relay];
+    uint32_t override_val = s_rc.rated_overrides[relay];
+    xSemaphoreGive(s_rc.lock);
+
+    if (type == RELAY_TYPE_SSR) {
+        /* No budget at all -- ssr never shows a percent (plan's "Design"
+         * section: "ssr = no budget (icon never shown, percent reported as
+         * null)"). An override on an ssr relay is ignored on purpose: the
+         * type itself is the "this relay has no wear budget" statement. */
+        return;
+    }
+
+    uint32_t rated = (override_val != 0) ? override_val : rated_life_for_type(type);
+    if (rated == 0) {
+        /* A non-ssr type with a table value of 0 (shouldn't happen given the
+         * table above, but a future type addition could forget to fill it
+         * in) is treated the same as "no budget" rather than dividing by
+         * zero. */
+        return;
+    }
+
+    out->has_budget = true;
+    out->cycles = cycles;
+    out->rated = rated;
+    /* Computed on read, never stored, per the plan. Saturates past 100%
+     * rather than wrapping -- a relay well past its rated life should read
+     * as, say, 140%, not wrap back toward 0. */
+    out->percent = ((float)cycles / (float)rated) * 100.0f;
+    if (out->percent >= 90.0f) {
+        out->tier = RELAY_BUDGET_TIER_ERROR;
+    } else if (out->percent >= 80.0f) {
+        out->tier = RELAY_BUDGET_TIER_WARN;
+    } else {
+        out->tier = RELAY_BUDGET_TIER_NONE;
+    }
+}
+
+relay_budget_tier_t relay_cycles_max_budget_tier(void)
+{
+    relay_budget_tier_t max_tier = RELAY_BUDGET_TIER_NONE;
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        relay_cycles_budget_t b;
+        relay_cycles_budget(r, &b);
+        if (b.has_budget && b.tier > max_tier) {
+            max_tier = b.tier;
+        }
+    }
+    return max_tier;
 }
 
 void relay_cycles_maybe_persist(void)
