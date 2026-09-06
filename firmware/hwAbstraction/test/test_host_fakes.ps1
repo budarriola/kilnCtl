@@ -14,11 +14,12 @@
 # and run again. If a mutant does not make its test fail, the corresponding
 # assertion is proven vacuous and this script fails loud.
 #
-# fake_kv/fake_time/fake_flash are not covered here: as of this pass
-# firmware/hwAbstraction/interface/ has no hal_kv.h/hal_time.h/hal_flash.h
-# (only hal_status/hal_gpio/hal_adc/hal_uart/hal_spi/hal_i2c exist), and
-# host fakes must follow an existing interface header rather than invent
-# one -- see firmware/hwAbstraction/host/README.md.
+# fake_kv and fake_time landed once hal_kv.h/hal_time.h existed (commit
+# 620c8ca) and are covered below, each with its own negative test (fake_kv's
+# commit-durability contract, fake_time's delay_ms-must-advance-the-clock
+# contract). fake_flash is still not covered here: interface/ has no
+# hal_flash.h yet, and a host fake must follow an existing interface header
+# rather than invent one -- see firmware/hwAbstraction/host/README.md.
 #
 # Usage: powershell -ExecutionPolicy Bypass -File test_host_fakes.ps1
 
@@ -27,6 +28,7 @@ $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
 $hostDir = Join-Path (Split-Path -Parent $here) "host"
 $ifaceDir = Join-Path (Split-Path -Parent $here) "interface"
+$commonDir = Join-Path (Split-Path -Parent $here) "common"
 $workDir = Join-Path $here "_fakes_work"
 if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
 New-Item -ItemType Directory -Path $workDir | Out-Null
@@ -90,14 +92,16 @@ $cases = @(
     @{ Name = "fake_adc";  Fake = "fake_adc.c";  Test = "test_fake_adc.c" },
     @{ Name = "fake_uart"; Fake = "fake_uart.c"; Test = "test_fake_uart.c" },
     @{ Name = "fake_spi";  Fake = "fake_spi.c";  Test = "test_fake_spi.c" },
-    @{ Name = "fake_i2c";  Fake = "fake_i2c.c";  Test = "test_fake_i2c.c" }
+    @{ Name = "fake_i2c";  Fake = "fake_i2c.c";  Test = "test_fake_i2c.c" },
+    @{ Name = "fake_kv";   Fake = "fake_kv.c";   Test = "test_fake_kv.c" },
+    @{ Name = "fake_time"; Fake = "fake_time.c"; Test = "test_fake_time.c" }
 )
 
 foreach ($c in $cases) {
     $fakeSrc = Join-Path $hostDir $c.Fake
     $testSrc = Join-Path $here $c.Test
     $exe = Join-Path $workDir "$($c.Name).exe"
-    $r = Invoke-ClLink -SourceFiles @($fakeSrc, $testSrc, (Join-Path $ifaceDir "hal_status.c")) `
+    $r = Invoke-ClLink -SourceFiles @($fakeSrc, $testSrc, (Join-Path $commonDir "hal_status.c")) `
         -OutExe $exe -IncludeDirs @($ifaceDir, $hostDir)
     if ($r.ExitCode -ne 0) {
         $failures += "$($c.Name): compile failed:`n$($r.Output)"
@@ -151,7 +155,7 @@ if (-not $origContent.Contains($goodBlock)) {
     Set-Content -Path $mutantSrc -Value $mutantContent -Encoding ASCII -NoNewline
 
     $mutantExe = Join-Path $workDir "fake_gpio_mutant.exe"
-    $r = Invoke-ClLink -SourceFiles @($mutantSrc, (Join-Path $here "test_fake_gpio.c"), (Join-Path $ifaceDir "hal_status.c")) `
+    $r = Invoke-ClLink -SourceFiles @($mutantSrc, (Join-Path $here "test_fake_gpio.c"), (Join-Path $commonDir "hal_status.c")) `
         -OutExe $mutantExe -IncludeDirs @($ifaceDir, $hostDir)
     if ($r.ExitCode -ne 0) {
         $failures += "Negative test: mutant fake_gpio.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
@@ -202,7 +206,7 @@ if (-not $spiOrigContent.Contains($spiGoodBlock)) {
     Set-Content -Path $spiMutantSrc -Value $spiMutantContent -Encoding ASCII -NoNewline
 
     $spiMutantExe = Join-Path $workDir "fake_spi_mutant.exe"
-    $r = Invoke-ClLink -SourceFiles @($spiMutantSrc, (Join-Path $here "test_fake_spi.c"), (Join-Path $ifaceDir "hal_status.c")) `
+    $r = Invoke-ClLink -SourceFiles @($spiMutantSrc, (Join-Path $here "test_fake_spi.c"), (Join-Path $commonDir "hal_status.c")) `
         -OutExe $spiMutantExe -IncludeDirs @($ifaceDir, $hostDir)
     if ($r.ExitCode -ne 0) {
         $failures += "Negative test: mutant fake_spi.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
@@ -247,7 +251,7 @@ if (-not $i2cOrigContent.Contains($i2cGoodBlock)) {
     Set-Content -Path $i2cMutantSrc -Value $i2cMutantContent -Encoding ASCII -NoNewline
 
     $i2cMutantExe = Join-Path $workDir "fake_i2c_mutant.exe"
-    $r = Invoke-ClLink -SourceFiles @($i2cMutantSrc, (Join-Path $here "test_fake_i2c.c"), (Join-Path $ifaceDir "hal_status.c")) `
+    $r = Invoke-ClLink -SourceFiles @($i2cMutantSrc, (Join-Path $here "test_fake_i2c.c"), (Join-Path $commonDir "hal_status.c")) `
         -OutExe $i2cMutantExe -IncludeDirs @($ifaceDir, $hostDir)
     if ($r.ExitCode -ne 0) {
         $failures += "Negative test: mutant fake_i2c.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
@@ -260,6 +264,126 @@ if (-not $i2cOrigContent.Contains($i2cGoodBlock)) {
             $failures += "NEGATIVE TEST FAILED: the NACK-returns-HAL_OK mutant passed test_fake_i2c.c cleanly -- the NACK-on-transfer status assertion does not actually catch this bug."
         } else {
             Write-Host "OK   negative test: fake_i2c NACK-status mutant correctly fails test_fake_i2c.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
+            Write-Host "     mutant failure detail:`n$($run.Output)"
+        }
+    }
+}
+
+# --- 5) Negative test: mutate fake_kv's commit-durability contract ---
+# Proves test_fake_kv.c's durability assertion can actually fail: commit()
+# is supposed to merge pending writes into the committed store so they
+# survive fake_kv_simulate_power_loss(); if commit() is short-circuited to a
+# no-op, hal_kv.h's "nothing is durable until hal_kv_commit()" contract is
+# violated in the OTHER direction -- a committed write silently reverts to
+# never-happened after a simulated reset, which is exactly the durability
+# bug this fake exists to catch on host.
+Write-Host "`n--- Negative test: fake_kv commit-durability contract ---"
+
+$kvGoodBlock = (@'
+    if (s_next_write_fail_armed) {
+        s_next_write_fail_armed = false;
+        return s_next_write_fail_status;
+    }
+
+    /* Commit flushes the WHOLE partition's page in real NVS, not just this
+     * handle's namespace -- merge every namespace's pending writes. */
+    fake_kv_partition_t *part = &s_partitions[hs->partition_slot];
+'@) -replace "`r`n", "`n"
+
+$kvMutantBlock = (@'
+    if (s_next_write_fail_armed) {
+        s_next_write_fail_armed = false;
+        return s_next_write_fail_status;
+    }
+
+    /* MUTANT: commit no longer merges pending into committed -- durability
+     * contract silently broken. */
+    return HAL_OK;
+
+    /* Commit flushes the WHOLE partition's page in real NVS, not just this
+     * handle's namespace -- merge every namespace's pending writes. */
+    fake_kv_partition_t *part = &s_partitions[hs->partition_slot];
+'@) -replace "`r`n", "`n"
+
+$kvOrigContent = (Get-Content (Join-Path $hostDir "fake_kv.c") -Raw) -replace "`r`n", "`n"
+if (-not $kvOrigContent.Contains($kvGoodBlock)) {
+    $failures += "Negative test setup FAILED: expected commit-merge block not found verbatim in fake_kv.c -- source drifted from what this script mutates. Update kvGoodBlock/kvMutantBlock together with fake_kv.c."
+} else {
+    $kvMutantContent = $kvOrigContent.Replace($kvGoodBlock, $kvMutantBlock)
+    $kvMutantSrc = Join-Path $workDir "fake_kv_mutant.c"
+    Set-Content -Path $kvMutantSrc -Value $kvMutantContent -Encoding ASCII -NoNewline
+
+    $kvMutantExe = Join-Path $workDir "fake_kv_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($kvMutantSrc, (Join-Path $here "test_fake_kv.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $kvMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -ne 0) {
+        $failures += "Negative test: mutant fake_kv.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
+    } else {
+        $run = Run-Exe -ExePath $kvMutantExe
+        $parsed = Parse-Result -Output $run.Output
+        if (-not $parsed.Matched) {
+            $failures += "Negative test: mutant fake_kv test binary produced no RESULT line:`n$($run.Output)"
+        } elseif ($run.ExitCode -eq 0 -and $parsed.Fail -eq 0) {
+            $failures += "NEGATIVE TEST FAILED: the no-op-commit mutant passed test_fake_kv.c cleanly -- the commit-durability assertion does not actually catch this bug."
+        } else {
+            Write-Host "OK   negative test: fake_kv no-op-commit mutant correctly fails test_fake_kv.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
+            Write-Host "     mutant failure detail:`n$($run.Output)"
+        }
+    }
+}
+
+# --- 6) Negative test: mutate fake_time's delay_ms-advances-the-clock contract ---
+# Proves test_fake_time.c's delay_ms assertion can actually fail: hal_time.h
+# requires hal_time_delay_ms to be the vTaskDelay/sleep_ms replacement, i.e.
+# it must advance the (fake) clock. If it becomes a pure no-op (no real
+# sleep, per this fake's "never real sleeps" contract, but also no clock
+# advance), a caller measuring elapsed time across a delay would see zero
+# elapsed time on host while hardware shows real progress -- silently
+# reintroducing the idealized-input bug class this fake exists to avoid.
+Write-Host "`n--- Negative test: fake_time delay_ms clock advance ---"
+
+$timeGoodBlock = (@'
+hal_status_t hal_time_delay_ms(uint32_t ms)
+{
+    /* Never a real sleep on host -- advances the fake clock instead, per
+     * hal_time.h's "vTaskDelay/sleep_ms replacement" and this fake's
+     * "never real sleeps" contract. */
+    s_clock_us += (uint64_t)ms * 1000u;
+    return HAL_OK;
+}
+'@) -replace "`r`n", "`n"
+
+$timeMutantBlock = (@'
+hal_status_t hal_time_delay_ms(uint32_t ms)
+{
+    /* MUTANT: delay_ms no longer advances the clock. */
+    (void)ms;
+    return HAL_OK;
+}
+'@) -replace "`r`n", "`n"
+
+$timeOrigContent = (Get-Content (Join-Path $hostDir "fake_time.c") -Raw) -replace "`r`n", "`n"
+if (-not $timeOrigContent.Contains($timeGoodBlock)) {
+    $failures += "Negative test setup FAILED: expected delay_ms block not found verbatim in fake_time.c -- source drifted from what this script mutates. Update timeGoodBlock/timeMutantBlock together with fake_time.c."
+} else {
+    $timeMutantContent = $timeOrigContent.Replace($timeGoodBlock, $timeMutantBlock)
+    $timeMutantSrc = Join-Path $workDir "fake_time_mutant.c"
+    Set-Content -Path $timeMutantSrc -Value $timeMutantContent -Encoding ASCII -NoNewline
+
+    $timeMutantExe = Join-Path $workDir "fake_time_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($timeMutantSrc, (Join-Path $here "test_fake_time.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $timeMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -ne 0) {
+        $failures += "Negative test: mutant fake_time.c failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
+    } else {
+        $run = Run-Exe -ExePath $timeMutantExe
+        $parsed = Parse-Result -Output $run.Output
+        if (-not $parsed.Matched) {
+            $failures += "Negative test: mutant fake_time test binary produced no RESULT line:`n$($run.Output)"
+        } elseif ($run.ExitCode -eq 0 -and $parsed.Fail -eq 0) {
+            $failures += "NEGATIVE TEST FAILED: the non-advancing delay_ms mutant passed test_fake_time.c cleanly -- the delay-advances-the-clock assertion does not actually catch this bug."
+        } else {
+            Write-Host "OK   negative test: fake_time non-advancing delay_ms mutant correctly fails test_fake_time.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
             Write-Host "     mutant failure detail:`n$($run.Output)"
         }
     }

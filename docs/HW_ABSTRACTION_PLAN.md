@@ -40,6 +40,8 @@ firmware/hwAbstraction/
                       hal_scratch.h hal_time.h hal_wdt.h hal_pwm.h hal_sysinfo.h
                       No vendor types. C11 (stdalign.h, _Static_assert).
                       Opaque handles, link-time backend, no vtables.
+  common/             vendor-neutral shared code (hal_status.c). Not
+                      headers-only -- interface/ is, this is not.
   esp/                ESP-IDF backends (KilnFW), one dir per interface:
     spi/ i2c/ uart/ gpio/ kv/ time/ wdt/ pwm/ sysinfo/
     board_kiln_s3.h   board descriptor (forwards CONFIG_KILNCTL_*, see below)
@@ -549,10 +551,14 @@ enqueue-timeout (unlogged, request never accepted) from completion-timeout
 hal_spi_bus_is_wedged() until re-init); fake_i2c scripts ack/nack per address
 on the bus so hal_i2c_probe is testable independent of any attached device.
 hal_kv.h and hal_time.h: header written (compile_headers.ps1 passes, negative
-test still fires). fake_flash remains unstarted: interface/ still has no
-hal_flash.h, and a host fake must follow an existing interface header rather
-than invent one -- fake_flash waits on that header landing first. fake_kv
-and fake_time can now start against the headers above.
+test still fires). fake_kv and fake_time landed the same day (117 more
+assertions + two more proven negative tests, 402 total): fake_kv models
+pending-vs-committed durability (fake_kv_simulate_power_loss() discards only
+uncommitted writes) with wrong-type/corruption/no-space error injection;
+fake_time is a manually-advanced, forward-only clock where delay_ms advances
+it instead of sleeping. fake_flash remains unstarted: interface/ still has
+no hal_flash.h, and a host fake must follow an existing interface header
+rather than invent one -- fake_flash waits on that header landing first.
 Still not wired into build_host_tests.ps1 (the response-file switch above is
 still open).
 
@@ -660,7 +666,7 @@ is already up return `HAL_OK` with an INFO log, not `HAL_BUSY` — this is a
 benign, expected re-entry (JTAG-reset case) rather than caller error or a
 retry signal; documented in both headers' doc comments.
 
-check_c_files_in_cmakelists.ps1 now also scans `firmware/hwAbstraction/**/*.c`, treating a basename referenced by one of its three test scripts as covered and flagging interface/'s pre-existing hal_status.c (allowlisted, see the script) plus anything referenced by none — negative-tested 2026-09-05.
+check_c_files_in_cmakelists.ps1 now also scans `firmware/hwAbstraction/**/*.c`, treating a basename referenced by one of its three test scripts as covered and flagging anything referenced by none, plus any .c file found under interface/ (headers-only, always flagged). hal_status.c moved to `common/` 2026-09-05 to actually satisfy that rule instead of being allowlisted around it; the allowlist entry is gone.
 
 **Phase 1a — move only.** The move set above, byte-identical bodies,
 header renames, include fixups, CMake, the MUST-change scripts, the doc

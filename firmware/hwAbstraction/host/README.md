@@ -9,9 +9,13 @@ history, scripted ADC samples, and a real TX-capture/RX-ring UART model with
 drop counters); fake_spi (pump-driven async completions, wedge latch on
 async-pool exhaustion, distinct enqueue/completion-timeout injection) and
 fake_i2c (per-address ack/nack scripting so hal_i2c_probe is testable,
-ordered transfer record, scripted rx) landed the same day. fake_kv/fake_time/
-fake_flash remain unstarted -- interface/ has no hal_kv.h/hal_time.h/
-hal_flash.h yet, and a host fake must follow an existing interface header
-rather than invent one. Standalone MSVC tests + negative tests for all five
-live in ../test/test_host_fakes.ps1 (not yet wired into either firmware's
+ordered transfer record, scripted rx) landed the same day. fake_kv (RAM
+namespace/key store per partition, pending-vs-committed durability model
+with fake_kv_simulate_power_loss() and wrong-type/corruption/no-space error
+injection) and fake_time (manually advanced clock, forward-only, delay_ms
+advances it instead of sleeping) landed once hal_kv.h/hal_time.h existed.
+fake_flash remains unstarted -- interface/ has no hal_flash.h yet, and a
+host fake must follow an existing interface header rather than invent one.
+Standalone MSVC tests + negative tests for all seven live in
+../test/test_host_fakes.ps1 (not yet wired into either firmware's
 build_host_tests.ps1 -- that's the Option A response-file switch still to do).
