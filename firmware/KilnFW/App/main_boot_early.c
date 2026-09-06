@@ -33,6 +33,7 @@
 #include "NS2009.h"
 #include "FT6336U.h"
 #include "hal_i2c.h"
+#include "stack_margin.h"
 #include "touch_dev.h"
 /* ROADMAP.md M15 A1: this is one of the SX1509 write/config owners
  * (SX1509_start()) -- see SX1509_internal.h's top comment. */
@@ -662,6 +663,11 @@ void main_boot_early(main_boot_ctx_t *ctx)
     // NOT-already-initialized path, so passing zero here is fine.
     static hal_i2c_bus_t ft6336u_hal_bus;
     bool ft6336u_hal_bus_ready = false;
+    // stack_margin_register()'s task_handle_slot must be a stable address
+    // holding the real TaskHandle_t -- hal_i2c_get_task_handle() itself
+    // just returns the value, it is not a slot -- so this static holds it,
+    // same shape as SX1509.c's own &e->owner.task_handle call site.
+    static TaskHandle_t ft6336u_hal_i2c_task = NULL;
 #else
     static NS2009Class touch;
 #endif
@@ -679,13 +685,25 @@ void main_boot_early(main_boot_ctx_t *ctx)
         };
         hal_status_t hal_bus_err = hal_i2c_bus_init(&ft6336u_hal_bus, I2C_NUM_0, &ft6336u_bus_cfg);
         ft6336u_hal_bus_ready = (hal_bus_err == HAL_OK);
-        esp_err_t touch_err = ft6336u_hal_bus_ready
-                                   ? FT6336U_start(&ft6336u_touch, &ft6336u_hal_bus)
-                                   : ESP_FAIL;
-        if (!ft6336u_hal_bus_ready) {
+        if (ft6336u_hal_bus_ready) {
+            // Register the owner task hal_i2c_bus_init() just created --
+            // pre-HAL, SX1509.c/NS2009.c/FT6336U.c's own i2c_owner_init()
+            // call sites each did this themselves right after success (see
+            // i2c_owner.c's own comment on why it can't self-register); the
+            // HAL migration moved owner creation behind hal_i2c_bus_init()
+            // but left this call with nobody making it, so this 3072 B task
+            // ran unregistered until now (check_stack_margin_registration.ps1
+            // ratchet did not catch it -- ft6336u_hal_i2c_task is a brand
+            // new name, not a widened `static`).
+            ft6336u_hal_i2c_task = (TaskHandle_t)hal_i2c_get_task_handle(&ft6336u_hal_bus);
+            stack_margin_register("hal_i2c_ft6336u", &ft6336u_hal_i2c_task, 3072);
+        } else {
             ESP_LOGE(MAIN_TAG, "hal_i2c_bus_init for FT6336U failed: %s",
                      hal_status_to_name(hal_bus_err));
         }
+        esp_err_t touch_err = ft6336u_hal_bus_ready
+                                   ? FT6336U_start(&ft6336u_touch, &ft6336u_hal_bus)
+                                   : ESP_FAIL;
         ctx->touch_ready = (touch_err == ESP_OK);
         if (ctx->touch_ready) {
             ctx->touch_dev.ctx = &ft6336u_touch;
@@ -698,6 +716,18 @@ void main_boot_early(main_boot_ctx_t *ctx)
             ESP_LOGW(MAIN_TAG, "FT6336U bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",
                      esp_err_to_name(touch_err));
+            // No FT6336U on the bus (or it failed identity check): the
+            // owner task/queue hal_i2c_bus_init() created above has nothing
+            // to serve -- pre-HAL, i2c_owner_init() for this controller was
+            // only ever called AFTER a successful probe, so no such task
+            // was ever left running for an absent device. Tear it down here
+            // to restore that property, rather than leaving a live 3072 B
+            // task + 8-deep queue idle for the rest of the boot.
+            if (ft6336u_hal_bus_ready) {
+                hal_i2c_bus_deinit(&ft6336u_hal_bus);
+                ft6336u_hal_bus_ready = false;
+                ft6336u_hal_i2c_task = NULL;
+            }
         }
 #else
         esp_err_t touch_err = NS2009_start(&touch, ctx->i2c_bus);

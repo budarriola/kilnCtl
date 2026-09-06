@@ -182,16 +182,28 @@ hal_status_t hal_i2c_bus_deinit(hal_i2c_bus_t *bus) {
     i2c_master_bus_handle_t bus_handle = impl->owner.bus;
     bool bus_owned = impl->bus_owned;
 
+    /* i2c_owner_deinit() only fails today on !owner->initialized, which the
+     * check above already rules out -- but treat a failure defensively
+     * rather than assume that stays true forever: an earlier return here
+     * used to leave `impl` exactly as it was (owner.initialized still true,
+     * bus handle still live) on any error, which reads as "still a valid,
+     * usable bus" to every other hal_i2c_* call even though the caller was
+     * just told deinit happened. Whatever i2c_owner_deinit() returns, still
+     * release the bus handle this instance owns (if any) and zero `impl` so
+     * a later hal_i2c_transfer/probe/device_attach on this bus_t correctly
+     * sees HAL_NOT_READY instead of a half-torn-down owner that reads as
+     * initialized. The error itself is still reported to the caller. */
     esp_err_t err = i2c_owner_deinit(&impl->owner);
-    if (err != ESP_OK) {
-        return hal_esp_err_to_status(err);
-    }
 
     if (bus_owned && bus_handle) {
         i2c_del_master_bus(bus_handle);
     }
 
     memset(impl, 0, sizeof(*impl));
+
+    if (err != ESP_OK) {
+        return hal_esp_err_to_status(err);
+    }
     return HAL_OK;
 }
 
