@@ -165,7 +165,7 @@ def get_device_log(n: int = 50) -> str:
     """Return the last ``n`` lines of firmware console output (ESP_LOGx).
 
     These are forwarded over the reliable UART link instead of going to the
-    USB-Serial-JTAG console (see App/drivers/uart_log_bridge.c), so they're
+    USB-Serial-JTAG console (see App/drivers/bridge/uart_log_bridge.c), so they're
     visible here without a debugger/second cable attached -- this is the
     pull-based equivalent of the GUI's Device Console window. It is also the
     only place a *device-level* failure (an SPI or I2C transfer that didn't

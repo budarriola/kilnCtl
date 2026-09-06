@@ -69,7 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
 
-PROD_REL = "firmware/KilnFW/App/drivers/profile_executor.c"
+PROD_REL = "firmware/KilnFW/App/drivers/control/profile_executor.c"
 MIRROR_REL = "firmware/KilnFW/App/test/test_ramp_lock_onesided.c"
 
 # Anchored on the one-sided condition itself (the exact fix this defect is

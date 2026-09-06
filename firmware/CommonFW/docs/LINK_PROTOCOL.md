@@ -577,7 +577,7 @@ One byte, no arguments — same shape as `SAFETY_CMD_GET_FW_VERSION`.
 The explicit "go back to the previously-running bootloader slot, right now"
 command — the Pico-side half of `tools/PcTools/TODO.md`'s
 `ota_rollback(processor)` line (the ESP half, `POST /api/ota/esp/rollback`,
-already exists in `firmware/KilnFW/App/drivers/ota_http.c`). Fire-and-forget,
+already exists in `firmware/KilnFW/App/drivers/http/ota_http.c`). Fire-and-forget,
 same as `CLEAR_TRIP`/`SET_CONFIG`: never ACKed on the wire.
 
 The refuse/proceed decision — is the other bootloader slot even valid to
@@ -1385,16 +1385,16 @@ Two more, driven by the borrowed-thermocouple option:
 **Pico → ESP**
 - [x] 23-byte status frame, byte-identical to the existing layout, at 500 ms
       (`firmware/SaftyFW/src/tasks/link_task.c`, `link_frame.c`)
-- [x] `DIAG` (0x08) — `firmware/KilnFW/App/drivers/safety_link_frames.c`'s
+- [x] `DIAG` (0x08) — `firmware/KilnFW/App/drivers/safety/safety_link_frames.c`'s
       `safety_apply_diag()` (2026-09-04, M15 C5 verification)
 - [x] `FW_VERSION` (0x0B) on request **and** unsolicited at boot, with config CRC
       (CRC field present and transmitted; value is honestly 0 — no
       `config_store` yet, Phase 9)
 - [x] `TRIP_EVENT` (0x0D) pushed immediately, repeated, deduped on `trip_seq`
-      (`firmware/KilnFW/App/drivers/safety_link_frames.c:883-928`'s
+      (`firmware/KilnFW/App/drivers/safety/safety_link_frames.c:883-928`'s
       `safety_apply_trip_event()`, backed by `safety_trip_decision.c` and
       `test_safety_trip_decision.c`; 2026-09-04, M15 C5 verification)
-- [x] `POWER` (0x0E) — `firmware/KilnFW/App/drivers/safety_link_frames.c`'s
+- [x] `POWER` (0x0E) — `firmware/KilnFW/App/drivers/safety/safety_link_frames.c`'s
       `safety_apply_power()` (2026-09-04, M15 C5 verification)
 - [x] Non-blocking TX ring: drops on full, counts, never blocks
       (`firmware/SaftyFW/src/tasks/uart_owner.c`)
@@ -1407,7 +1407,7 @@ Two more, driven by the borrowed-thermocouple option:
       `safety_link_up_locked()` — gated on `SAFETY_LINK_UP_PERIODS` (3) missed
       500 ms polls, i.e. 1.5 s, matching the doc exactly.
 - [x] 30 s firing-abort wired into `profile_executor`
-      (`firmware/KilnFW/App/drivers/profile_executor.c:1201-1236`'s
+      (`firmware/KilnFW/App/drivers/control/profile_executor.c:1201-1236`'s
       `safety_link_silent_30s`/`SAFETY_LINK_FIRING_ABORT_SILENCE_MS`, pinned
       by `firmware/KilnFW/App/test/test_safety_link.c:77-92`; 2026-09-04,
       M15 C5 verification). **Evidence level: host-tested and CI-pinned
@@ -1431,7 +1431,7 @@ Two more, driven by the borrowed-thermocouple option:
 
 **GUI (§7)**
 - [x] Safety Processor panel: safety temp, enclosure temp, power, energy, link age, state, trip reason.
-      **2026-09-04**: `firmware/KilnFW/App/drivers/safety_page.html` renders
+      **2026-09-04**: `firmware/KilnFW/App/drivers/http/safety_page.html` renders
       all of these (`safetyTemp`, enclosure/cold-junction, `powerW`, energy,
       link age/state, trip reason) from `GET /api/status`.
 - [x] Safety temperature labelled with its placement mode and source.
@@ -1456,6 +1456,6 @@ Two more, driven by the borrowed-thermocouple option:
       above — the page renders `—`/last-known values keyed off explicit
       null checks rather than blocking on a pending fetch.
 - [x] Mirrored on the PC-link `SAFETY` task for `pc_tools`/MCP.
-      **2026-09-04**: `firmware/KilnFW/App/drivers/uart_bridge_safety.c`
+      **2026-09-04**: `firmware/KilnFW/App/drivers/bridge/uart_bridge_safety.c`
       exists and implements task 7 (`"SAFETY (task 7) -- the isolated link
       to the RP2040"`) on the PC UART bridge.

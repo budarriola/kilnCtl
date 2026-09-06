@@ -1,4 +1,4 @@
-"""Python port of ``firmware/KilnFW/App/drivers/cone_table.c``/``.h``
+"""Python port of ``firmware/KilnFW/App/drivers/control/cone_table.c``/``.h``
 (commit d01dfe9), for the "ramp assist" simulator (§7 of
 ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md``).
 

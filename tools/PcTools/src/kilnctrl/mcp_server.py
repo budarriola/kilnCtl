@@ -214,7 +214,7 @@ def _on_device_log_line(line: LogLine) -> None:
 
 
 #: Owns task LOG (5) so the firmware's forwarded ESP_LOGx output (see
-#: App/drivers/uart_log_bridge.c) has somewhere to land -- registered up
+#: App/drivers/bridge/uart_log_bridge.c) has somewhere to land -- registered up
 #: front for the same "don't miss the boot-time backlog" reason as _info.
 _device_log = LogClient(_link, on_line=_on_device_log_line)
 

@@ -1,7 +1,7 @@
 # check_uart_version_independence.ps1 -- SaftyFW/TODO.md's "Shared ids
 # split out of uart_task_ids.h; PC-link ids left behind" item.
 #
-# UART_PROTOCOL_VERSION (firmware/KilnFW/App/drivers/uart_task_ids.h) is the
+# UART_PROTOCOL_VERSION (firmware/KilnFW/App/drivers/common/uart_task_ids.h) is the
 # PC<->ESP link's own wire-protocol version. KILNLINK_PROTOCOL_VERSION
 # (firmware/CommonFW/include/kilnlink/kilnlink_version.h) is the ESP<->Pico
 # isolated safety link's own, independent version. From 2026-08-17 to
@@ -30,7 +30,7 @@
 # only the actual #define matters).
 #
 # What this catches: the #define of UART_PROTOCOL_VERSION in
-# firmware/KilnFW/App/drivers/uart_task_ids.h textually referencing any
+# firmware/KilnFW/App/drivers/common/uart_task_ids.h textually referencing any
 # KILNLINK_* symbol on its value side (an alias, a cast of one, an
 # arithmetic expression built from one -- any textual dependency at all).
 # It deliberately does NOT flag:

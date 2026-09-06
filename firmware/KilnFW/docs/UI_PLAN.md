@@ -31,7 +31,7 @@ or restore anything below — it is a lookup, not a table of contents.
 | 4 item 2 | Sticky Stop control on every page | Built — `app.js`, `ARCHITECTURE_DECISIONS.md` |
 | 4 item 3 | Shared `/app.js` poller (single `/api/status` fetch, visibility-aware) | Built — `app.js`, `ARCHITECTURE_DECISIONS.md` |
 | 4 item 4 | Connection-lost banner, `.kc-stale`/`.kc-live-value` | Built and adopted on every page — `ARCHITECTURE_DECISIONS.md` ("Page organization") |
-| 4 item 5 | Confirm step for destructive actions | Built, and **corrected 2026-08-20**: Start and Stop both confirm now, not just destructive actions — see `ARCHITECTURE_DECISIONS.md` ("Page organization") and `App/drivers/ui_confirm.c` |
+| 4 item 5 | Confirm step for destructive actions | Built, and **corrected 2026-08-20**: Start and Stop both confirm now, not just destructive actions — see `ARCHITECTURE_DECISIONS.md` ("Page organization") and `App/drivers/ui/ui_confirm.c` |
 | 4 item 6 | Auth / session-token layer, scope decision | Still open, explicitly deferred by the owner — see "Open" section above |
 | 4 item 7 | Unit parity (°F/°C) | Built — shared device-backed `unit_pref.c/.h`, see `ARCHITECTURE_DECISIONS.md` ("Page organization") |
 | 4 item 8 | `main_page.html` trim as it splits | Built — see `ARCHITECTURE_DECISIONS.md` ("Page organization") |
@@ -141,7 +141,7 @@ touch dismisses it (which is itself swallowed, same as any other wake touch),
 then resumes normal timeout behaviour.
 
 **Implemented this pass:**
-- `App/drivers/display_power_policy.h/.c` — the pure decision core (no LVGL/
+- `App/drivers/persist/display_power_policy.h/.c` — the pure decision core (no LVGL/
   NVS/FreeRTOS), same split as SaftyFW's `max31856_fault_pin_policy.c`/
   `discrete_pin_policy.c` and this codebase's own `backlight_pwm.h`'s
   `backlight_duty_percent_for_state()`. `display_power_policy_step()` takes
@@ -154,7 +154,7 @@ then resumes normal timeout behaviour.
   error arriving while firing, touch during error-hold resuming normal
   timeout behaviour, "Never" plus error, and a timeout expiring on the exact
   same tick as a touch.
-- `App/drivers/display_power_cfg.h/.c` — persisted settings (brightness
+- `App/drivers/persist/display_power_cfg.h/.c` — persisted settings (brightness
   0-100%, the six-way timeout enum, both switches) in one versioned NVS blob,
   same `kiln_nvs`/`kiln_cfg` pattern as `unit_pref.c`/`ramp_assist_cfg.c`.
   Every failure path (missing key, wrong size/version, an out-of-range field
@@ -168,12 +168,12 @@ then resumes normal timeout behaviour.
   two hazards that allowlist exists to catch applies here; negative-tested by
   temporarily removing the allowlist entry and confirming the lint fails
   naming `drivers\display_power_cfg.c:178`/`:180` exactly, then restoring it.
-- `App/drivers/settings_http.c` — `GET`/`POST /api/settings/display_power`,
+- `App/drivers/http/settings_http.c` — `GET`/`POST /api/settings/display_power`,
   same bounded-body / refuse-don't-clamp shape as the existing
   `/api/settings/tz` handler. `display_power_cfg_start()` is called from
   `settings_http_start()` (this module's own existing app_main call site,
   see that function's comment) rather than adding a new call in `main.c`.
-- `App/drivers/settings_display_page.html` — a new "Display power" card:
+- `App/drivers/http/settings_display_page.html` — a new "Display power" card:
   brightness slider, timeout `<select>`, and the two switches, following the
   existing page's card/row markup and dark/light theme tokens. Loads current
   values on page load, POSTs all four fields together on Save.
@@ -190,7 +190,7 @@ duty (replacing its current Kconfig-constant percentages) is follow-up work
 for whoever verifies that hardware.
 
 **Wired into the running display stack — 2026-09-04, this pass:**
-- `App/drivers/screen_idle.c` — `screen_idle_run_policy_locked()` is now the
+- `App/drivers/ui/screen_idle.c` — `screen_idle_run_policy_locked()` is now the
   single call site for `display_power_policy_step()`, called from
   `screen_idle_task`'s existing 50ms poll tick (`touch_event=false`) and from
   the new `screen_idle_touch_swallow()` on a press EDGE (`touch_event=true`,
@@ -220,7 +220,7 @@ for whoever verifies that hardware.
   `lvgl_port_service_idle_blank()` — unchanged) is now `policy_state !=
   DISPLAY_POWER_OFF`, so `ERROR_HOLD` reads as "on" for that existing wake/
   blank plumbing, exactly as intended.
-- `App/drivers/lvgl_port.c` — `touch_read_cb()`'s physical-NS2009 branch and
+- `App/drivers/ui/lvgl_port.c` — `touch_read_cb()`'s physical-NS2009 branch and
   its LVGL-side injected-touch branch (`TOUCH_CMD_INJECT`) each now call the
   new `screen_idle_touch_swallow()` before arbitration/delivery; when it
   reports `swallow_touch`, `data->state` is forced back to

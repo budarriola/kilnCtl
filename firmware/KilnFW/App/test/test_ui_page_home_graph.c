@@ -3,7 +3,7 @@
 // match to main_page.html's web chart (M:SS x-axis ticks, 0..peak y-axis,
 // current-position bucket index) can be checked without LVGL/esp_log stubs.
 #include "test_common.h"
-#include "../drivers/ui_page_home_graph.h"
+#include "../drivers/ui/ui_page_home_graph.h"
 
 #include <math.h>
 #include <stdint.h>

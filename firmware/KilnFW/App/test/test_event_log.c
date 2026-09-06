@@ -1,4 +1,4 @@
-// Host tests for App/drivers/event_log.c -- event_log_encode()/
+// Host tests for App/drivers/persist/event_log.c -- event_log_encode()/
 // event_log_decode(), the fixed 32-byte binary record format flash logging
 // moved to (2026-09-02, event_log.h's file banner). Pure encode/decode only
 // -- event_log_emit() (the esp_timer_get_time()/flash-worker device glue)
@@ -13,7 +13,7 @@
 int g_test_failures = 0;
 int g_test_count = 0;
 
-#include "../drivers/event_log.h"
+#include "../drivers/persist/event_log.h"
 
 // ---------------------------------------------------------------------------
 // Round trip: encode then decode returns the same values.

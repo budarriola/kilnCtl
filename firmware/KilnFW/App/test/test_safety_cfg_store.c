@@ -1,4 +1,4 @@
-// Host tests for App/drivers/safety_cfg_store.c -- the ESP-side NVS-backed
+// Host tests for App/drivers/safety/safety_cfg_store.c -- the ESP-side NVS-backed
 // cache of the RP2040 safety processor's commissioning parameter set
 // (docs/COMMISSIONING.md sec 3).
 //
@@ -46,7 +46,7 @@ static inline BaseType_t safety_cfg_store_test_xSemaphoreTake(SemaphoreHandle_t 
 }
 #define xSemaphoreTake safety_cfg_store_test_xSemaphoreTake
 
-#include "../drivers/safety_cfg_store.c"
+#include "../drivers/safety/safety_cfg_store.c"
 
 #undef xSemaphoreTake
 

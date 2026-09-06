@@ -10,7 +10,7 @@
  */
 
 #include "test_common.h"
-#include "../drivers/readiness_http.h"
+#include "../drivers/http/readiness_http.h"
 
 void run_test_readiness_commissioning(void)
 {

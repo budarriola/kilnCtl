@@ -1,4 +1,4 @@
-// Host tests for App/drivers/adaptive_tune.c -- PID_EXPANSION_PLAN.md Phase
+// Host tests for App/drivers/control/adaptive_tune.c -- PID_EXPANSION_PLAN.md Phase
 // 7d (learn a zone's steady-state gain from the settled dwells an ordinary
 // firing already produces).
 //
@@ -28,7 +28,7 @@
 
 #include "test_common.h"
 
-#include "../drivers/MAX31856.h" // MAX31856_CHANNEL_COUNT, needed by the coupling-row fakes below,
+#include "../drivers/hw/MAX31856.h" // MAX31856_CHANNEL_COUNT, needed by the coupling-row fakes below,
                                   // ahead of adaptive_tune.c's own #include of it further down this file
 #include "esp_err.h"
 
@@ -37,7 +37,7 @@
 // guard), pulled in explicitly here since adaptive_tune.c's own #include of
 // profile_executor.h (via adaptive_tune.h) does not happen until further
 // down this file.
-#include "../drivers/profile_executor.h"
+#include "../drivers/control/profile_executor.h"
 
 // Own executable (see this file's header comment).
 int g_test_failures = 0;
@@ -206,9 +206,9 @@ void profile_executor_get_status(profile_exec_status_t *out)
 // Ki diagnosis -- both moved to their own files. #include all three here,
 // same "one TU, own executable" convention as test_profile_executor_
 // prestart.c uses for the profile_executor.c split.
-#include "../drivers/adaptive_tune.c"
-#include "../drivers/adaptive_tune_model.c"
-#include "../drivers/adaptive_tune_ki.c"
+#include "../drivers/control/adaptive_tune.c"
+#include "../drivers/control/adaptive_tune_model.c"
+#include "../drivers/control/adaptive_tune_ki.c"
 
 // ---------------------------------------------------------------------
 // Test helpers

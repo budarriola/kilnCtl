@@ -9,7 +9,7 @@
 #include <string.h>
 
 /* Resolve `rel` (a path written relative to the directory this test file
- * itself lives in, e.g. "../drivers/heat_enable.c") into an absolute path
+ * itself lives in, e.g. "../drivers/control/heat_enable.c") into an absolute path
  * anchored to `this_file` (pass __FILE__ from the calling test's own
  * translation unit). Several source-text-scanning tests used to fopen()
  * such paths directly, which only worked when the test binary happened to
@@ -86,7 +86,7 @@ static inline char *test_read_whole_file(const char *path)
  *
  * `this_file` is always __FILE__ from the calling test's own translation
  * unit; `anchor_rel` is that same path family's entry as written relative
- * to this test file's directory (e.g. "../drivers/heat_enable.c").
+ * to this test file's directory (e.g. "../drivers/control/heat_enable.c").
  * Returns a malloc'd string the caller must free(), or NULL if every
  * candidate (anchored and literal) failed -- callers must treat NULL as a
  * hard TEST_CHECK(false, ...) failure, never a silent skip. */

@@ -10,7 +10,7 @@
 // suite reported green, so an unquantized trace here would not actually
 // exercise the real failure modes this module has to survive.
 #include "test_common.h"
-#include "../drivers/ramp_ident.h"
+#include "../drivers/control/ramp_ident.h"
 
 #include <math.h>
 #include <string.h>

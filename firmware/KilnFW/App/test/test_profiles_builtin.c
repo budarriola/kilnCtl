@@ -1,4 +1,4 @@
-// Host test for App/drivers/profiles_builtin.c -- specifically the 2026-09-05
+// Host test for App/drivers/persist/profiles_builtin.c -- specifically the 2026-09-05
 // "Unrated" cone sentinel (PROFILES_BUILTIN_CONE_UNRATED, owner decision):
 // the 10 catalogue entries whose Digital Fire source page states no cone
 // number (FSCG1, FSCGB1, FSCGCL, FSCGWM, FSCRGL, FSHP1, FSHP3, FSNM5, MDDCL,

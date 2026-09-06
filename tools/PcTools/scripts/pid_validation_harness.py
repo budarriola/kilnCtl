@@ -56,7 +56,7 @@ from bench_fixture_session import (  # noqa: E402
     BenchSession, BenchSessionError, HTTP_TIMEOUT_S, _http,
 )
 
-#: zone_control_mode_t (firmware/KilnFW/App/drivers/zones_http.h:695-698):
+#: zone_control_mode_t (firmware/KilnFW/App/drivers/http/zones_http.h:695-698):
 #: OFF=0, BANGBANG=1, PID=2, PID_FUZZY=3. autotune_accept() writes gains and
 #: the fitted model but does NOT change control_mode -- a zone can come out
 #: of "accept" with a freshly-tuned PID and still be sitting in OFF, in which

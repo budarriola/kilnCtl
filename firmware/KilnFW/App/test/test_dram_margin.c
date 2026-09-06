@@ -1,4 +1,4 @@
-// Host tests for App/drivers/dram_margin.h -- the boot-time internal-DRAM
+// Host tests for App/drivers/common/dram_margin.h -- the boot-time internal-DRAM
 // low-water alarm wired into main.c's heap_stage() (2026-08-24 investigation,
 // commit 750dc33's bench log: largest=7680/dram_free=12483 at "uart_bridges_1",
 // close enough to the documented failure zone below to be worth an explicit,
@@ -10,7 +10,7 @@
 // boot_guard.c's next_boot_count(), etc.).
 #include "test_common.h"
 
-#include "../drivers/dram_margin.h"
+#include "../drivers/common/dram_margin.h"
 
 static void test_both_healthy_does_not_trip(void)
 {

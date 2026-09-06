@@ -1,4 +1,4 @@
-// Host test for App/drivers/safety_trip_words.h's safety_trip_words_cause_
+// Host test for App/drivers/safety/safety_trip_words.h's safety_trip_words_cause_
 // numbered() -- 2026-08-28 (ROADMAP.md M13, owner's scope change: "all
 // faults... should come with... what was detected wrong", numbers not a
 // generic sentence). Header-only (static inline), no seam to #include a .c
@@ -18,7 +18,7 @@ int g_test_count = 0;
 
 #include "test_common.h"
 
-#include "../drivers/safety_trip_words.h"
+#include "../drivers/safety/safety_trip_words.h"
 
 static void test_s1_overtemp_has_numbers(void)
 {

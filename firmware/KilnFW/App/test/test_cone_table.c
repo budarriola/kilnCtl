@@ -1,5 +1,5 @@
 #include "test_common.h"
-#include "../drivers/cone_table.h"
+#include "../drivers/control/cone_table.h"
 
 #include <math.h>
 #include <string.h>

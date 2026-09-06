@@ -158,7 +158,7 @@ The signal ordering above is `KILNCTL_DISPLAY_SWAP_DC_RESET = n`, the current
 default, so no Kconfig pin change is needed for the display itself.
 
 The backlight firmware path landed in commit `ad35720`
-(DISPLAY_ST7796_PLAN.md Phase 7): `App/drivers/backlight_pwm.c` drives LEDC and
+(DISPLAY_ST7796_PLAN.md Phase 7): `App/drivers/hw/backlight_pwm.c` drives LEDC and
 follows `screen_idle_get_state()`. It is gated behind a **default-off** Kconfig
 flag, so wire 9 does nothing until that flag is turned on — with it off the
 backlight stays on via the module's own 10k pull-up, exactly as before.

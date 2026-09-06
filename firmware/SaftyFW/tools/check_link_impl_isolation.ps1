@@ -59,21 +59,21 @@
 #     check ran for the first time via tools/run_all_checks.ps1 and reported
 #     14 hits -- 12 of which turned out to be this class of false positive,
 #     not a from-scratch reimplementation of the LINK's CRC16-CCITT-FALSE:
-#       - firmware/KilnFW/App/drivers/boot_guard.c -- crc32_compute()/
+#       - firmware/KilnFW/App/drivers/persist/boot_guard.c -- crc32_compute()/
 #         record_crc(): CRC32/0xEDB88320 integrity check over a boot-guard
 #         NVS record (this module's own host tests run off-target with no
 #         ESP-IDF ROM available, hence a local table-less CRC32 instead of
 #         esp_rom_crc32_le() -- see the file's own comment on crc32_compute()).
-#       - firmware/KilnFW/App/drivers/watchdog_cfg.c -- crc32_compute()/
+#       - firmware/KilnFW/App/drivers/safety/watchdog_cfg.c -- crc32_compute()/
 #         record_crc(): same CRC32/0xEDB88320, same off-target-host-test
 #         reasoning, over a watchdog-config NVS record.
-#       - firmware/KilnFW/App/drivers/crash_report.c -- compute_crc(): CRC32
+#       - firmware/KilnFW/App/drivers/safety/crash_report.c -- compute_crc(): CRC32
 #         (via esp_crc32_le()) over a crash-report NVS record.
-#       - firmware/KilnFW/App/drivers/profiles_http.c -- compute_profile_crc():
+#       - firmware/KilnFW/App/drivers/http/profiles_http.c -- compute_profile_crc():
 #         CRC32 (via esp_crc32_le()) over a saved kiln-profile NVS slot.
-#       - firmware/KilnFW/App/drivers/zones_http.c -- compute_zones_crc():
+#       - firmware/KilnFW/App/drivers/http/zones_http.c -- compute_zones_crc():
 #         CRC32 (via esp_crc32_le()) over a zones-config NVS record.
-#       - firmware/KilnFW/App/drivers/safety_cfg_store.c and its header --
+#       - firmware/KilnFW/App/drivers/safety/safety_cfg_store.c and its header --
 #         safety_cfg_store_cached_crc(): a plain ACCESSOR returning an
 #         already-stored uint16_t field (`s_store.config_crc`), computing
 #         nothing at all. It happens to be named "crc" (the value it returns
@@ -170,10 +170,10 @@ $allowlistPaths = @(
     # why each of these is a different algorithm/purpose (CRC32 record
     # integrity, or a plain accessor/stub computing nothing) than the link's
     # CRC16-CCITT-FALSE, not a from-scratch reimplementation of it.
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\boot_guard.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\watchdog_cfg.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\crash_report.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\profiles_http.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\boot_guard.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\watchdog_cfg.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\crash_report.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\http\profiles_http.c"),
     # zones_http.c's compute_zones_crc() (originally allowlisted here) moved
     # out during the 2026-09-01 zones_http.c split (commits c524ead/b1c072f)
     # into zones_config_json.c/zones_config_store.c, split further into three
@@ -184,18 +184,18 @@ $allowlistPaths = @(
     # just relocated by the split, not newly introduced. zones_http.c itself
     # no longer matches (only a comment referencing the new name remains), so
     # its old entry is replaced rather than kept alongside these.
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_json.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_json.h"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\zones_config_json.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\zones_config_json.h"),
     # zones_config_json.c (1867 lines) was itself split on 2026-09-04 under
     # ROADMAP.md's 1500-line rule; zones_config_json_compute_crc() -- same
     # esp_crc32_le() NVS-record-integrity function as above, just relocated
     # again -- landed in zones_config_migrate.c. Same reasoning, replaced
     # rather than kept alongside since zones_config_json.c no longer defines
     # it.
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_migrate.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_store.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\safety_cfg_store.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\safety_cfg_store.h"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\zones_config_migrate.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\zones_config_store.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\safety_cfg_store.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\safety_cfg_store.h"),
     (Join-Path $firmwareRoot "KilnFW\App\test\test_safety_cfg_http.c"),
     (Join-Path $firmwareRoot "KilnFW\App\test\stubs\esp_crc.h"),
     (Join-Path $firmwareRoot "KilnFW\App\test\stubs\esp_rom_crc.h"),

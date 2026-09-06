@@ -1,4 +1,4 @@
-// Host tests for App/drivers/crash_report.c -- the persisted "what the last
+// Host tests for App/drivers/safety/crash_report.c -- the persisted "what the last
 // crash was" record (owner request: crash diagnostics persisted to flash
 // with an "already read" flag and a CRC, readable later from the
 // diagnostics web page).
@@ -26,7 +26,7 @@
 
 #include "esp_err.h"
 
-#include "../drivers/crash_report.c"
+#include "../drivers/safety/crash_report.c"
 
 static void reset_all(void)
 {

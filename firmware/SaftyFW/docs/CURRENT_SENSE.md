@@ -220,7 +220,7 @@ This is the dominant timing constraint in the whole design, and it comes from
 
 | `KilnFW` constant | Value | Source |
 |---|---|---|
-| `HEATER_WINDOW_MS` | **60000** (60 s) | `App/drivers/profile_executor.c:27` |
+| `HEATER_WINDOW_MS` | **60000** (60 s) | `App/drivers/control/profile_executor.c:27` |
 | `HEATER_MIN_ON_MS` | 2000 | `profile_executor.c:28` |
 | `HEATER_MIN_OFF_MS` | 2000 | `profile_executor.c:29` |
 | `PROFILE_EXECUTOR_TICK_MS` | 1000 | `profile_executor.h:174` |
@@ -429,7 +429,7 @@ outcome §5's table used to imply — with `k_ct_v_per_a <= 0`,
 of converting the operator's own `i_present_a`, and every reported amps/watts
 figure reads `0.0`.
 
-KilnFW's zone current-sweep (`App/drivers/zones_http.c`) now calibrates it. That
+KilnFW's zone current-sweep (`App/drivers/http/zones_http.c`) now calibrates it. That
 sweep is already this section's step 2, run automatically: one zone's relay(s)
 on, every other relay forced off, all three channels recorded separately. It
 therefore has both halves of a calibration nobody has to type:

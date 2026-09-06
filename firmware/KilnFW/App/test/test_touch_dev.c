@@ -10,7 +10,7 @@
 //      branch selection itself -- the one decision the whole Phase 5 design
 //      hinges on (touch_dev.h's header comment).
 #include "test_common.h"
-#include "../drivers/touch_dev.h"
+#include "../drivers/hw/touch_dev.h"
 
 void run_test_touch_dev(void)
 {

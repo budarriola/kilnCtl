@@ -1,4 +1,4 @@
-// Host tests for profile_feasibility_plan_curve() (App/drivers/profile_feasibility.c)
+// Host tests for profile_feasibility_plan_curve() (App/drivers/control/profile_feasibility.c)
 // -- the duration model backing /api/profile_exec's total_planned_s/
 // elapsed_s/remaining_s and GET /api/profile_plan's polyline.
 //
@@ -8,8 +8,8 @@
 
 #include "test_common.h"
 
-#include "../drivers/profile_feasibility.h"
-#include "../drivers/profiles_http.h"
+#include "../drivers/control/profile_feasibility.h"
+#include "../drivers/http/profiles_http.h"
 
 static profile_segment_t seg(float target_c, float ramp_c_per_hr, uint32_t dwell_min)
 {

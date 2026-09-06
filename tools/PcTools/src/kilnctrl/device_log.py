@@ -2,7 +2,7 @@
 
 Unlike INFO, this is a pure broadcast channel: the firmware forwards every
 ESP_LOGx call as its own unsolicited DATA frame (see
-``App/drivers/uart_log_bridge.c``) and never expects anything back on this
+``App/drivers/bridge/uart_log_bridge.c``) and never expects anything back on this
 task_id, so there is no request/response pairing to track -- just an inbox to
 drain and hand off.
 

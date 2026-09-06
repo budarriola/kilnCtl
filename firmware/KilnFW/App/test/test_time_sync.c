@@ -6,7 +6,7 @@
 // decision was factored out instead. Network sync landing, NVS persistence
 // and the wifi_prov.c hook are exercised on real hardware only.
 #include "test_common.h"
-#include "../drivers/time_sync_tz.h"
+#include "../drivers/net/time_sync_tz.h"
 
 #include <string.h>
 

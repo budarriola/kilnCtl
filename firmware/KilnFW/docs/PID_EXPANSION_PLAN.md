@@ -2067,7 +2067,7 @@ The `f89eb2a` fix above diagnosed the grid-pinning as the simulator having
 docstring). That gap is now closed:
 
 - **`MAX31856_QUANTUM_C = 0.0078125` C** — derived, not guessed, from
-  `firmware/KilnFW/App/drivers/max31856_codec.h`'s
+  `firmware/KilnFW/App/drivers/hw/max31856_codec.h`'s
   `MAX31856_TC_TEMP_C_PER_LSB` (1/4096 C per raw 24-bit-word LSB; the low
   5 bits of that word are hardware-fixed 0, so the real step between
   representable temperatures is 32× that — 1/128 C — which the header
@@ -2185,7 +2185,7 @@ directly degrades and IAE does not — commanded-duty variance/chatter, a
 rate limit or PWM-window quantization on the actuator side (explicitly
 NOT modeled...)". Both pieces of that were built this pass.
 
-**The real PWM window** (`firmware/KilnFW/App/drivers/heater_output.c`'s
+**The real PWM window** (`firmware/KilnFW/App/drivers/control/heater_output.c`'s
 `heater_output_duty_ex`, the ordinary non-`force_new_window` path every
 PID-driven zone calls): a fixed window (`HEATER_DEFAULT_WINDOW_MS` =
 60000 ms); at each window boundary, that window's on-time is
@@ -2224,7 +2224,7 @@ transitions. Both are reported, never just one.
 **Actuator-cost grounding, corrected mid-pass.** `RELAY_RATED_LIFE_CYCLES`
 was initially set to 1e6 from a `heater_output.h` comment aside ("their
 own loaded life is 1e6 operations"). Corrected to **1e5** after the
-project's own `firmware/KilnFW/App/drivers/relay_cycles.h` was pointed
+project's own `firmware/KilnFW/App/drivers/persist/relay_cycles.h` was pointed
 to — the module that actually performs persisted, per-relay lifetime
 contact-cycle accounting, not a comment aside: *"the EE2-12NUH relays on
 this board are electromechanical, with a contact life budget on the
@@ -3056,7 +3056,7 @@ report's "Third pass" section.
 **Per-zone `ease_off_window_mult` mechanism shipped, 2026-09-04 (unflashed).**
 `ease_off_window_mult` moved from a single `zones_cfg_t` scalar (ZONES_CFG_
 VERSION 15->16) to a per-zone `zone_cfg_t` field (16->17,
-`firmware/KilnFW/App/drivers/zones_config_json.h`), with a matching NVS
+`firmware/KilnFW/App/drivers/persist/zones_config_json.h`), with a matching NVS
 migration (a v16 board's one global value carries verbatim to every zone --
 `zones_config_migrate.c` case 16), `GET`/`POST /api/zones` wire changes
 (per-zone JSON key, `z<i>_easeoffmult` form field), and PC-tools backward
@@ -5285,7 +5285,7 @@ shaped like that. §7.6.1a's own "confirmed the mechanism itself does work"
 paragraph used a SYNTHETIC two-`DwellStep` schedule to prove credit can
 carry from one dwell to a later one; this section replaces that synthetic
 proof with schedules built from this repo's own shipped profile catalogue
-(`firmware/KilnFW/App/drivers/profiles_builtin_table.inc`, sourced from
+(`firmware/KilnFW/App/drivers/persist/profiles_builtin_table.inc`, sourced from
 digitalfire.com/schedule) — bisque from `BQ1000` ("Plainsman Electric
 Bisque"), cone 6 from `C6DHSC` ("Plainsman Cone 6 Drop-and-hold, Slow
 Cool", cool-down leg dropped — no forced-cooling model exists in this

@@ -50,7 +50,7 @@
 >    staging finishes, rather than holding the HTTP connection open for the
 >    ~35 s+ relay — a design choice this pass made, not something this
 >    section specifies the shape of. `GET /api/ota/pico/status` (new) is the
->    poll-back endpoint. See `firmware/KilnFW/App/drivers/ota_http.h`'s
+>    poll-back endpoint. See `firmware/KilnFW/App/drivers/http/ota_http.h`'s
 >    header comment on `ota_pico_do_stage()`/`ota_pico_post_handler()`.
 > **Keep this file current.** This is a contract between two firmwares and a web
 > UI. If any one of the three changes shape, edit this file in the same change —
@@ -768,7 +768,7 @@ during development will be driven by an agent:
 
 **Authentication**
 - [x] Nonce endpoint: 16 random bytes, single use, 30 s expiry. **2026-08-17**:
-      `GET /api/ota/challenge` (`firmware/KilnFW/App/drivers/ota_http.c`),
+      `GET /api/ota/challenge` (`firmware/KilnFW/App/drivers/http/ota_http.c`),
       `esp_fill_random()` for entropy, backed by the host-tested
       `ota_auth_nonce_issue()`/`_check()` state machine
       (`App/drivers/ota_auth.{h,c}`, 246/246 host tests,
@@ -967,7 +967,7 @@ and "Pico update" sections below for what each actually covers.
 **Pico update**
 - [x] Five frames -- **2026-08-17, mirrored rather than shared**: ids exist in
       both `SaftyFW/src/tasks/link_frame.h` (frozen, previous pass) and
-      `KilnFW/App/drivers/uart_task_ids.h`/`safety_link.h` (this pass), as
+      `KilnFW/App/drivers/common/uart_task_ids.h`/`safety_link.h` (this pass), as
       matching `#define`s/structs in each codebase rather than one shared
       `CommonFW` codec -- the two firmwares are separate build targets and
       `CommonFW`'s own framing layer (`kilnlink_frame.{c,h}`) carries only
@@ -990,7 +990,7 @@ and "Pico update" sections below for what each actually covers.
       that current value is remains a separate, still-open measurement.
 - [x] `UPDATE_DATA` sent unacknowledged; Pico keeps a received-range bitmap
       and emits a gap report every 500 ms (SaftyFW, already frozen);
-      **2026-08-17**: the ESP side (`KilnFW/App/drivers/ota_pico_relay.c`)
+      **2026-08-17**: the ESP side (`KilnFW/App/drivers/net/ota_pico_relay.c`)
       now retransmits only the named ranges, polling `UPDATE_STATUS` for
       gap reports.
 - [x] Retransmission rounds capped, with a clean failure rather than a loop
@@ -1073,7 +1073,7 @@ and "Pico update" sections below for what each actually covers.
 **Surfaces**
 - [x] Web page with per-processor version, slot, interlock state, progress,
       rollback. **Built since this line was last reviewed, 2026-09-04**:
-      `firmware/KilnFW/App/drivers/ota_page.html` exists and renders exactly
+      `firmware/KilnFW/App/drivers/net/ota_page.html` exists and renders exactly
       this — ESP running version/active/inactive slot (`renderEspInfo`),
       Pico protocol version/compatibility, an interlock box, ESP and Pico
       progress bars, and rollback buttons for both processors

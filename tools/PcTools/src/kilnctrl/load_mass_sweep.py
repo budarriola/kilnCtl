@@ -222,7 +222,7 @@ def run_profile7_loaded(mass_mult: float, coupling_mult: float,
 def run_cone_schedule_loaded(mass_mult: float, coupling_mult: float,
                               kp=0.06, ki=0.0003, kd=0.0, ambient=20.0) -> dict:
     """C6DHSC ("Plainsman Cone 6 Drop-and-hold, Slow Cool",
-    firmware/KilnFW/App/drivers/profiles_builtin_table.inc), a real 5-segment
+    firmware/KilnFW/App/drivers/persist/profiles_builtin_table.inc), a real 5-segment
     built-in cone-6 schedule reaching 1204 C, against a load-scaled
     ``PhysicalKilnPlant`` (the >80 C model -- see ``plant_sim_sweep.py``'s
     own regime split). Ramp rates converted from the firmware's C/hr to the

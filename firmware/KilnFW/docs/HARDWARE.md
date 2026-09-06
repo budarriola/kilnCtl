@@ -97,7 +97,7 @@ Two consequences worth stating plainly:
   software so that `kiln_io_set_relay(io, 2, ...)` energizes IO3/K5/J11 and
   `kiln_io_set_relay(io, 4, ...)` energizes IO1/K1/J3 -- i.e. the firmware's
   relay 2/4 numbering matches the panel silkscreen, not this table's raw net
-  names. See `firmware/KilnFW/App/drivers/kiln_io.h` for the full detail.
+  names. See `firmware/KilnFW/App/drivers/owners/kiln_io.h` for the full detail.
 - **The display's D/C and reset are on I2C.** Every command/data transition on
   the ILI9488 costs an I2C transfer to the expander. The display driver batches
   each command's payload into one SPI transaction to keep the number of
@@ -334,7 +334,7 @@ Also worth recording: BIGTREETECH's own documentation and hardware repository
 say the touch controller on this module is an **NS2009** (I2C), not the XPT2046
 (SPI) that third-party listings often claim.
 
-The firmware now drives the NS2009 (App/drivers/NS2009.c) on the same I2C bus
+The firmware now drives the NS2009 (App/drivers/hw/NS2009.c) on the same I2C bus
 as the SX1509 expander, polled by screen_idle_task (App/drivers/
 screen_idle.c) to auto-blank the panel after
 `CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS` of no touches (default 60s). There is

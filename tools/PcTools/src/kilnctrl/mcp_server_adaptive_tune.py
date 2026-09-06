@@ -16,7 +16,7 @@ imported from there because that helper is module-private
 caller; if a third HTTP-tool module needs it too, that is the point to
 promote it to a shared helper instead of a third copy.
 
-Built against firmware/KilnFW/App/drivers/adaptive_tune_http.c/.h and
+Built against firmware/KilnFW/App/drivers/http/adaptive_tune_http.c/.h and
 adaptive_tune.h as they stood 2026-09-01. That surface is actively changing
 under a different agent's work (a revert endpoint is being added, and the
 opt-in flag is being moved off this module's own NVS namespace into the

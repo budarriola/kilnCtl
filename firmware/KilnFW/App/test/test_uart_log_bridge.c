@@ -1,4 +1,4 @@
-// Host test for App/drivers/uart_log_bridge.c -- TODO.md section 1's "Wi-Fi
+// Host test for App/drivers/bridge/uart_log_bridge.c -- TODO.md section 1's "Wi-Fi
 // driver log lines arrive with an empty body" item (~line 97).
 //
 // Investigation summary (see the commit/PR description for the full
@@ -62,7 +62,7 @@
 // reused here, not redefined, to avoid a duplicate-symbol link error.
 unsigned char g_stub_last_queue_item[256];
 
-#include "../drivers/uart_log_bridge.c"
+#include "../drivers/bridge/uart_log_bridge.c"
 
 // ---- Ring-mode backing storage for the eviction tests below (see
 // stubs/freertos/queue.h's 2026-08-24 comments). Defined here, after the

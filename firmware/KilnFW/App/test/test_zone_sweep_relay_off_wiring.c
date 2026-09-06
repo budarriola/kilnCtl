@@ -60,9 +60,9 @@ static char *dup_range(const char *start, size_t len)
 }
 
 static const char *SWEEP_ENGINE_C_CANDIDATES[] = {
-    "../drivers/zones_current_sweep_engine.c",
-    "App/drivers/zones_current_sweep_engine.c",
-    "firmware/KilnFW/App/drivers/zones_current_sweep_engine.c",
+    "../drivers/control/zones_current_sweep_engine.c",
+    "App/drivers/control/zones_current_sweep_engine.c",
+    "firmware/KilnFW/App/drivers/control/zones_current_sweep_engine.c",
 };
 
 static void run_section1_result_checked_and_logged(void)
@@ -71,7 +71,7 @@ static void run_section1_result_checked_and_logged(void)
                  "result and logs a named failure -- source-text scan, zones_current_sweep_"
                  "engine.c is not in this suite's host-compiled source list");
 
-    char *text = test_read_source_anchored(__FILE__, "../drivers/zones_current_sweep_engine.c",
+    char *text = test_read_source_anchored(__FILE__, "../drivers/control/zones_current_sweep_engine.c",
                                             SWEEP_ENGINE_C_CANDIDATES, 3);
     if (!text) {
         TEST_CHECK(false, "could not locate drivers/zones_current_sweep_engine.c from the host "

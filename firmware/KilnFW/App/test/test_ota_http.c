@@ -1,4 +1,4 @@
-// Host tests for App/drivers/ota_http.c's security fixes shipped in commit
+// Host tests for App/drivers/http/ota_http.c's security fixes shipped in commit
 // f58e040 with NO host-test coverage (ota_http.c needs real ESP-IDF headers
 // the host tree had no stubs for) -- verified only by code reading and on
 // real hardware until now. This file closes that gap for the three
@@ -119,7 +119,7 @@ static inline BaseType_t ota_http_test_xSemaphoreTake(SemaphoreHandle_t sem, Tic
 // See this file's header comment for why TAG has to be renamed around each
 // include rather than left alone.
 #define TAG OTA_HTTP_TAG_UNUSED
-#include "../drivers/ota_http.c"
+#include "../drivers/http/ota_http.c"
 #undef TAG
 // ota_http.c split 2026-09-04 (ROADMAP.md M15 A3, "files over 1500 lines
 // should be broken up where it makes sense" -- ota_http.c had grown to 2508
@@ -133,12 +133,12 @@ static inline BaseType_t ota_http_test_xSemaphoreTake(SemaphoreHandle_t sem, Tic
 // internal.h), so the three files below only ever `extern` it, never
 // redefine it. Same wifi_prov.c split precedent as test_wifi_prov.c's own
 // header comment on its four #includes.
-#include "../drivers/ota_http_esp.c"
-#include "../drivers/ota_http_pico.c"
-#include "../drivers/ota_http_recovery.c"
+#include "../drivers/http/ota_http_esp.c"
+#include "../drivers/http/ota_http_pico.c"
+#include "../drivers/http/ota_http_recovery.c"
 
 #define TAG FACTORY_RESET_TAG_UNUSED
-#include "../drivers/factory_reset.c"
+#include "../drivers/http/factory_reset.c"
 #undef TAG
 
 #undef xSemaphoreTake

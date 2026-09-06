@@ -153,24 +153,24 @@ $RatchetHeaders = [ordered]@{
 # esp_ota_ops.h -- measured 2026-09-05 against the current tree: 8 files,
 # matching HW_ABSTRACTION_PLAN.md's Phase 4 estimate exactly.
 $OtaOpsAllowlist = @(
-    @{ RelPath = "firmware/KilnFW/App/drivers/dashboard_http.c";      Header = "esp_ota_ops.h"; Reason = "reads running/next-boot partition info for the dashboard status card"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/ota_http.c";            Header = "esp_ota_ops.h"; Reason = "OTA HTTP handler orchestration -- direct partition/OTA-write owner"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/ota_http_esp.c";        Header = "esp_ota_ops.h"; Reason = "ESP-side OTA write/verify/set-boot-partition implementation"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/ota_http_pico.c";       Header = "esp_ota_ops.h"; Reason = "relays an OTA image to the Pico; still touches the ESP-side esp_ota_ops API for its own state"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/ota_http_recovery.c";   Header = "esp_ota_ops.h"; Reason = "recovery-mode OTA rollback path -- reads/sets boot partition"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/partition_info_http.c"; Header = "esp_ota_ops.h"; Reason = "GET /api/partitions -- reports the RUNNING partition marker used by flash_firmware() verification"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/ui_page_diagnostics.c"; Header = "esp_ota_ops.h"; Reason = "diagnostics LCD page displays running partition/build info"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/dashboard_http.c";      Header = "esp_ota_ops.h"; Reason = "reads running/next-boot partition info for the dashboard status card"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http.c";            Header = "esp_ota_ops.h"; Reason = "OTA HTTP handler orchestration -- direct partition/OTA-write owner"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_esp.c";        Header = "esp_ota_ops.h"; Reason = "ESP-side OTA write/verify/set-boot-partition implementation"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_pico.c";       Header = "esp_ota_ops.h"; Reason = "relays an OTA image to the Pico; still touches the ESP-side esp_ota_ops API for its own state"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_recovery.c";   Header = "esp_ota_ops.h"; Reason = "recovery-mode OTA rollback path -- reads/sets boot partition"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/partition_info_http.c"; Header = "esp_ota_ops.h"; Reason = "GET /api/partitions -- reports the RUNNING partition marker used by flash_firmware() verification"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c"; Header = "esp_ota_ops.h"; Reason = "diagnostics LCD page displays running partition/build info"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/main_network_http.c";           Header = "esp_ota_ops.h"; Reason = "wires the OTA HTTP handlers into the httpd instance at boot"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
 )
 
 # esp_wifi.h / esp_netif.h -- wifi_prov family only, per the plan
 # ("Deliberately out of scope: ... wifi_prov is already a sole owner").
 $WifiAllowlist = @(
-    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov.c";          Header = "esp_wifi.h";  Reason = "wifi_prov family -- sole Wi-Fi driver owner"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov.c";          Header = "esp_netif.h"; Reason = "wifi_prov family -- sole Wi-Fi driver owner"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov_api.c";      Header = "esp_wifi.h";  Reason = "wifi_prov family"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov_link.c";     Header = "esp_wifi.h";  Reason = "wifi_prov family"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
-    @{ RelPath = "firmware/KilnFW/App/drivers/wifi_prov_internal.h"; Header = "esp_netif.h"; Reason = "wifi_prov family -- shared internal header"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov.c";          Header = "esp_wifi.h";  Reason = "wifi_prov family -- sole Wi-Fi driver owner"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov.c";          Header = "esp_netif.h"; Reason = "wifi_prov family -- sole Wi-Fi driver owner"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_api.c";      Header = "esp_wifi.h";  Reason = "wifi_prov family"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_link.c";     Header = "esp_wifi.h";  Reason = "wifi_prov family"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_internal.h"; Header = "esp_netif.h"; Reason = "wifi_prov family -- shared internal header"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
 )
 
 $StrictHeaders = [ordered]@{

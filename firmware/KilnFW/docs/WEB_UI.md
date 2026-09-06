@@ -17,26 +17,26 @@ is the ground truth this section summarizes.
 don't look for them.
 
 Source of truth:
-- `App/drivers/wifi_provision_http.c` — owns the server, `/`, `/wifi`,
+- `App/drivers/http/wifi_provision_http.c` — owns the server, `/`, `/wifi`,
   `/status`, `/scan`, `/provision`, `/networks`, `/forget`, `/ip_config`,
   and the shared static assets `theme.css`, `nav.js`, `app.js`
-- `App/drivers/dashboard_http.c` — `/api/status`, the profile executor and
+- `App/drivers/http/dashboard_http.c` — `/api/status`, the profile executor and
   autotune endpoints, the CSV exports, safety trip/log-level control
-- `App/drivers/zones_http.c` — `/settings/zones`, `/settings/safety`,
+- `App/drivers/http/zones_http.c` — `/settings/zones`, `/settings/safety`,
   `/api/zones`, current-sweep, tuning-recommendation endpoints
-- `App/drivers/profiles_http.c` — `/profiles`, the profile CRUD API
-- `App/drivers/diagnostics_http.c` — `/diagnostics`, `/safety`, crash
+- `App/drivers/http/profiles_http.c` — `/profiles`, the profile CRUD API
+- `App/drivers/http/diagnostics_http.c` — `/diagnostics`, `/safety`, crash
   report, watchdog config, ramp-assist toggle, thermo faults
-- `App/drivers/safety_cfg_http.c` — `/safety/commissioning`,
+- `App/drivers/http/safety_cfg_http.c` — `/safety/commissioning`,
   `/api/safety/commissioning`
-- `App/drivers/readiness_http.c` — `/readiness`, `/api/readiness`
-- `App/drivers/settings_http.c` — `/settings`, `/settings/display`
-- `App/drivers/backup_http.c` — `/settings/backup`, config export/import
-- `App/drivers/ota_http.c` — `/ota`, ESP/Pico OTA and rollback endpoints
-- `App/drivers/kiln_cfg_http.c`, `log_http.c`, `board_temps.c`,
+- `App/drivers/http/readiness_http.c` — `/readiness`, `/api/readiness`
+- `App/drivers/http/settings_http.c` — `/settings`, `/settings/display`
+- `App/drivers/http/backup_http.c` — `/settings/backup`, config export/import
+- `App/drivers/http/ota_http.c` — `/ota`, ESP/Pico OTA and rollback endpoints
+- `App/drivers/http/kiln_cfg_http.c`, `log_http.c`, `board_temps.c`,
   `partition_info_http.c`, `factory_reset.c`, `adaptive_tune_http.c` — API-only,
   no page of their own
-- `App/drivers/sim_backend.c` — `/api/sim`, `CONFIG_KILNCTL_SIM_PLANT` only
+- `App/drivers/sim/sim_backend.c` — `/api/sim`, `CONFIG_KILNCTL_SIM_PLANT` only
 - Pages: `App/drivers/*_page.html` (13 files — run `ls App/drivers/*_page.html`
   rather than trusting a count restated here)
 
@@ -132,7 +132,7 @@ out of flash as `text/html`; there is no filesystem and no templating.
 `rules_page.html` (`/settings/relays`) and `manual_page.html` no longer
 exist — both were deleted 2026-08-27, see above.
 
-Cross-page navigation is `nav.js`'s `NAV_LINKS` table (`App/drivers/nav.js`),
+Cross-page navigation is `nav.js`'s `NAV_LINKS` table (`App/drivers/http/nav.js`),
 injected as a top-bar dropdown menu on every page — not the two or three
 hardcoded links this section used to describe. There is no authentication of
 any kind — anyone who can reach the board's IP can switch a relay.
@@ -141,7 +141,7 @@ any kind — anyone who can reach the board's IP can switch a relay.
 
 Every POST body on this server is `application/x-www-form-urlencoded`,
 parsed by `http_form_find_field()` / `http_form_url_decode()`
-(`App/drivers/http_form.h`) — **not JSON**, in either direction of a POST.
+(`App/drivers/common/http_form.h`) — **not JSON**, in either direction of a POST.
 Responses are JSON, `text/plain`, or `text/csv` depending on the endpoint.
 
 `http_form_find_field()` returns the decoded length, `-1` if the field is
@@ -370,7 +370,7 @@ goes through the same `dashboard_set_relay()` the old endpoint used, which
 `danger_mode_active()` is true — this handler adds only the up-front 409
 check and the `danger_mode_touch()` that extends the window, not a second
 copy of the gating logic. A successful call extends the danger-mode window;
-a refusal does not. See `App/drivers/diagnostics_page.html`'s Danger Zone
+a refusal does not. See `App/drivers/http/diagnostics_page.html`'s Danger Zone
 section for the operator-facing arm/disarm flow this sits behind.
 
 ### `GET /api/profile_exec`

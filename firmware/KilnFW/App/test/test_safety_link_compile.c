@@ -191,7 +191,7 @@ static inline BaseType_t safety_link_test_xSemaphoreTake(SemaphoreHandle_t sem, 
 }
 #define xSemaphoreTake safety_link_test_xSemaphoreTake
 
-#include "../drivers/safety_link.c"
+#include "../drivers/safety/safety_link.c"
 
 // Each of the five files below is its own translation unit in the real
 // firmware build, and each independently declares `static const char *TAG
@@ -208,18 +208,18 @@ static inline BaseType_t safety_link_test_xSemaphoreTake(SemaphoreHandle_t sem, 
 // distinct `static const char *`, so nothing about those files' own logic
 // changes, only which token this test's single merged TU sees for each.
 #define TAG TAG_frames
-#include "../drivers/safety_link_frames.c"
+#include "../drivers/safety/safety_link_frames.c"
 #undef TAG
 #define TAG TAG_inbox
-#include "../drivers/safety_link_inbox.c"
+#include "../drivers/safety/safety_link_inbox.c"
 #undef TAG
 #define TAG TAG_poll
-#include "../drivers/safety_link_poll.c"
+#include "../drivers/safety/safety_link_poll.c"
 #undef TAG
 #define TAG TAG_commands
-#include "../drivers/safety_link_commands.c"
+#include "../drivers/safety/safety_link_commands.c"
 #undef TAG
-#include "../drivers/safety_link_payload.c" // no TAG of its own -- see that file's header comment
+#include "../drivers/safety/safety_link_payload.c" // no TAG of its own -- see that file's header comment
 
 #undef xSemaphoreTake
 
@@ -237,7 +237,7 @@ static inline BaseType_t safety_link_test_xSemaphoreTake(SemaphoreHandle_t sem, 
 // CRITICAL stand-ins (App/test/stubs/freertos/portmacro.h, added alongside
 // this) for its heat-claim spinlock -- host tests are single-threaded, so
 // those expand to nothing.
-#include "../drivers/relay_authority.c"
+#include "../drivers/owners/relay_authority.c"
 
 // ---------------------------------------------------------------------
 

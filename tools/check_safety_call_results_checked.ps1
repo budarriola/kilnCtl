@@ -107,7 +107,7 @@ function Get-CodeOnlyLines {
 # the stripped line itself (post comment-removal), not just file:line, so a
 # genuinely new unchecked call elsewhere in the same file still fails.
 $allowlist = @(
-    @{ RelPath = "firmware/KilnFW/App/drivers/profile_executor.c"; Snippet = "kiln_io_all_relays_off(s_exec.io);" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/control/profile_executor.c"; Snippet = "kiln_io_all_relays_off(s_exec.io);" }
 )
 
 function Test-Allowlisted {

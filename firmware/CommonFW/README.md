@@ -29,7 +29,7 @@ implementation of this exact envelope) via `test/vectors/frame_vectors.json`,
 consumed by both `test/test_frame.c` (built and passing with MSVC via CMake +
 Ninja, verified 2026-08-16) and `tools/PcTools/selfcheck.py`. **Framing is now
 integrated into both firmwares** (as of 2026-08-18): `KilnFW`'s
-`App/drivers/espInterfaces/uart_protocol.c` calls `kilnlink_crc16_ccitt_false`/
+`App/drivers/owners/uart_protocol.c` calls `kilnlink_crc16_ccitt_false`/
 `kilnlink_stuff` instead of its own copies, proven byte-identical against the
 pre-migration implementation (`test/test_uart_protocol_delegate.c`); `SaftyFW`
 now has a real CMake project (`firmware/SaftyFW/CMakeLists.txt`,
@@ -101,7 +101,7 @@ exchange). `kilnlink_get_config_page.{c,h}` / `kilnlink_config_page.{c,h}`
 (`CT_CAL`/`PARAM`/`CONFIG_PAGE`) keep `0x1A`/`0x1E`/`0x1F` unchanged. A
 shared id structurally blocks a length-different refusal reply (neither a
 bare request nor the fixed-size success reply), which is exactly what was
-blocking `firmware/KilnFW/App/drivers/uart_bridge.c`'s SAFETY task from ever
+blocking `firmware/KilnFW/App/drivers/bridge/uart_bridge.c`'s SAFETY task from ever
 telling the PC "driver error" for `GET_CT_CAL` -- see
 `docs/LINK_PROTOCOL.md`'s "Request/reply ids must never be shared" rule for
 the reusable lesson. `GET_FW_VERSION`/Frame C still shares its id
@@ -318,7 +318,7 @@ happens — one implementation updated, the other two not.
 
 `KILNLINK_PROTOCOL_VERSION` lives in `kilnlink_version.h` and is the source of
 truth for the **ESP<->Pico isolated safety link only**. `KilnFW`'s
-`UART_PROTOCOL_VERSION` (`App/drivers/uart_task_ids.h`) is the **PC<->ESP
+`UART_PROTOCOL_VERSION` (`App/drivers/common/uart_task_ids.h`) is the **PC<->ESP
 link**'s own, independent version — the two links are different contracts and
 version separately.
 
@@ -339,7 +339,7 @@ old value: renumbering an id, changing a payload layout or length, or changing
 the envelope. Do not bump for comments or internal refactors, and do not bump
 one because the other moved. It is a human judgement call, deliberately not a
 hash of the file — the reasoning in
-`firmware/KilnFW/App/drivers/uart_task_ids.h:8-20` applies unchanged and should
+`firmware/KilnFW/App/drivers/common/uart_task_ids.h:8-20` applies unchanged and should
 be carried over with each constant.
 
 ---
@@ -379,7 +379,7 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       (already done before this session — confirmed 2026-08-16, no stale
       duplicate remains under `firmware/SaftyFW/docs/`)
 - [x] `kilnlink_version.h` created (2026-08-16). `KilnFW`'s `UART_PROTOCOL_VERSION`
-      (`App/drivers/uart_task_ids.h`) was a real alias of `KILNLINK_PROTOCOL_VERSION`
+      (`App/drivers/common/uart_task_ids.h`) was a real alias of `KILNLINK_PROTOCOL_VERSION`
       from 2026-08-17 to 2026-08-24; that alias is now gone (see "Versioning"
       above) — the two are independent literals again, `UART_PROTOCOL_VERSION`
       frozen at 7, `KILNLINK_PROTOCOL_VERSION`/`KILNLINK_MIN_COMPATIBLE` at 7/5.
@@ -521,7 +521,7 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 
 **Migration**
 - [x] `KilnFW`'s `uart_protocol.c` delegating framing/CRC to `kilnlink_frame`
-      (2026-08-18): `App/drivers/espInterfaces/uart_protocol.c` calls
+      (2026-08-18): `App/drivers/owners/uart_protocol.c` calls
       `kilnlink_crc16_ccitt_false`/`kilnlink_stuff` instead of its own copies.
       `firmware/UnitTestFw`'s fork was a stale mirror, never migrated; moot
       now, since `UnitTestFw` was decommissioned and deleted wholesale

@@ -1411,7 +1411,7 @@ def test_per_zone_gain_holdout_report_shape_and_delta_arithmetic():
 
 def test_max31856_quantum_matches_driver_lsb():
     """MAX31856_QUANTUM_C must be the real per-channel LSB derived from
-    firmware/KilnFW/App/drivers/max31856_codec.h's
+    firmware/KilnFW/App/drivers/hw/max31856_codec.h's
     MAX31856_TC_TEMP_C_PER_LSB (1/4096 C per raw 24-bit-word LSB; the
     driver's own low 5 bits are hardware-fixed 0, so the real step between
     representable temperatures is 32x that -- 1/128 = 0.0078125 C), not an

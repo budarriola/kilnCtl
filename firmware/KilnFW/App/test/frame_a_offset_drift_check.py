@@ -3,7 +3,7 @@
 to be hand-duplicated across THREE independent literal offset tables:
 
   1. SaftyFW/src/tasks/link_frame.c's link_frame_pack_status()   (pack side)
-  2. KilnFW/App/drivers/safety_link_frames.c's safety_apply_status() (parse side)
+  2. KilnFW/App/drivers/safety/safety_link_frames.c's safety_apply_status() (parse side)
   3. SaftyFW/test/test_link_frame_wire.c's mirror_apply_status() (the drift
      test FOR #1/#2, itself formerly a third hand transcription -- ROADMAP
      M15: "the drift test for the item above is itself a third hand-copy")
@@ -57,7 +57,7 @@ SITES = [
     ),
     (
         "parse side",
-        "firmware/KilnFW/App/drivers/safety_link_frames.c",
+        "firmware/KilnFW/App/drivers/safety/safety_link_frames.c",
         r"\bbool safety_apply_status\([^)]*\)\s*\{(.*?)\n    return true;\n\}",
     ),
     (

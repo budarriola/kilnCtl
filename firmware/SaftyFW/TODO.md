@@ -223,7 +223,7 @@ gating items are:
       property tests sweeping `1e30`/`NaN`/`±Inf` (verified 2026-08-22).
 - [x] `KilnFW`'s `uart_protocol.c` delegating framing/CRC, proven byte-identical
       to the pre-refactor output. **Re-swept 2026-09-03: already shipped.**
-      `App/drivers/espInterfaces/uart_protocol.c`'s `frame_and_send()`
+      `App/drivers/owners/uart_protocol.c`'s `frame_and_send()`
       (lines 97-113) calls `kilnlink_stuff()` directly, and the CRC sites
       (lines 165, 204, 740, 847) call `kilnlink_crc16_ccitt_false()`
       directly. The thin wrapper was deliberately removed 2026-08-27 so its
@@ -497,7 +497,7 @@ RP2040/CT hardware attached to any build machine, and the link is bench-dead.
 
 See `../CommonFW/docs/LINK_PROTOCOL.md` §7 for the full panel spec.
 **Correction found this pass**: this section previously listed every bullet
-below as `[ ]` open; `firmware/KilnFW/App/drivers/safety_page.html` already
+below as `[ ]` open; `firmware/KilnFW/App/drivers/http/safety_page.html` already
 implements the core panel — link status, protocol-version compatibility,
 safety + enclosure temperature, power draw, the DIAG card, the trip card, and
 the "Clear latched trip" flow with confirmation. What is still genuinely

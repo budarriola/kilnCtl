@@ -1,4 +1,4 @@
-// Host test for App/drivers/zones_http.c's zones_http_parse_zone_fields(), added
+// Host test for App/drivers/http/zones_http.c's zones_http_parse_zone_fields(), added
 // 2026-08-21 for the whole-page-zone-save data-loss defect found by
 // black-box testing against the live board: a POST to /api/zones that
 // carries fields only for zones 0..thermo_count-1 used to silently ZERO
@@ -57,7 +57,7 @@ int g_test_count = 0;
 
 // zones_http.c split 2026-09-01 into six files along its natural seams (it
 // had grown to 5628 lines, the largest file in the firmware -- see
-// ../drivers/zones_http_internal.h's header comment for the seam
+// ../drivers/persist/zones_http_internal.h's header comment for the seam
 // rationale). One of those six, zones_http_handlers.c, was itself split
 // again 2026-09-04 (ROADMAP.md M15's 1500-line item, it had grown to 1598
 // lines) into zones_http_get.c/zones_http_post_parse.c/zones_http_post.c/
@@ -69,15 +69,15 @@ int g_test_count = 0;
 // mix still resolves exactly the way it does in the real, separately-
 // compiled firmware build, and reach every `static` internal directly.
 // Order matches the original file's top-to-bottom order.
-#include "../drivers/zones_http.c"
-#include "../drivers/zones_config_store.c"
-#include "../drivers/zones_config_accessors.c"
-#include "../drivers/zones_http_get.c"
-#include "../drivers/zones_http_post_parse.c"
-#include "../drivers/zones_http_post.c"
-#include "../drivers/zones_http_pid.c"
-#include "../drivers/zones_current_sweep_engine.c"
-#include "../drivers/zones_current_sweep_task.c"
+#include "../drivers/http/zones_http.c"
+#include "../drivers/persist/zones_config_store.c"
+#include "../drivers/persist/zones_config_accessors.c"
+#include "../drivers/http/zones_http_get.c"
+#include "../drivers/http/zones_http_post_parse.c"
+#include "../drivers/http/zones_http_post.c"
+#include "../drivers/http/zones_http_pid.c"
+#include "../drivers/control/zones_current_sweep_engine.c"
+#include "../drivers/control/zones_current_sweep_task.c"
 
 #undef asm
 

@@ -97,7 +97,7 @@ def control_get_unit_pref() -> bytes:
 
     2026-08-21 (ROADMAP.md shared unit preference) -- additive subcommand on
     the existing CONTROL task, DISPLAY-ONLY: does not affect the units of any
-    other CONTROL/PROFILES field (App/drivers/unit_pref.h)."""
+    other CONTROL/PROFILES field (App/drivers/persist/unit_pref.h)."""
     return struct.pack("<B", CONTROL_CMD_GET_UNIT_PREF)
 
 

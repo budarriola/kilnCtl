@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """safety_cfg_http_client.py -- pure HTTP client for
 GET/POST /api/safety/commissioning
-(firmware/KilnFW/App/drivers/safety_cfg_http.c), the write path for the
+(firmware/KilnFW/App/drivers/http/safety_cfg_http.c), the write path for the
 SAFETY-PROCESSOR (SaftyFW) commissioning parameters that config_presets.py's
 docstring used to describe as out of scope. Same "stdlib urllib.request, no
 framework" convention as zones_http_client.py/ota_http_client.py, and in its

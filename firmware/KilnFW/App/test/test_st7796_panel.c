@@ -1,6 +1,6 @@
-// Host tests for the ST7796 panel_desc_t (../drivers/st7796_panel.c) and for
+// Host tests for the ST7796 panel_desc_t (../drivers/hw/st7796_panel.c) and for
 // the packed init-sequence decoder it and panel_spi.c's ILI9488 descriptor
-// share (panel_codec_init_step(), ../drivers/panel_codec.c).
+// share (panel_codec_init_step(), ../drivers/hw/panel_codec.c).
 // DISPLAY_ST7796_PLAN.md Sec.12 Phase 3.
 //
 // panel_spi.c (the ILI9488.c rename) is NOT host-tested here or anywhere --
@@ -13,8 +13,8 @@
 // table would hit, which nothing else exercises since neither real
 // descriptor is malformed.
 #include "test_common.h"
-#include "../drivers/panel_codec.h"
-#include "../drivers/st7796_panel.h"
+#include "../drivers/hw/panel_codec.h"
+#include "../drivers/hw/st7796_panel.h"
 
 #include <string.h>
 

@@ -1,4 +1,4 @@
-// Host test for App/drivers/partition_info_http.c's GET /api/partitions
+// Host test for App/drivers/http/partition_info_http.c's GET /api/partitions
 // handler (api_partitions_get_handler(), static -- reached here by
 // including the driver file directly, same "no other seam" convention
 // test_zones_http.c/test_board_temps.c already document).
@@ -32,7 +32,7 @@ int g_test_count = 0;
 
 #include "test_common.h"
 
-#include "../drivers/partition_info_http.c"
+#include "../drivers/http/partition_info_http.c"
 
 // ---------------------------------------------------------------------
 // Fake esp_partition table + iterator -- stands in for the real

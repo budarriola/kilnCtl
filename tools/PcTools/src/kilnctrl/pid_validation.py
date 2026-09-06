@@ -89,7 +89,7 @@ def check_hard_max(hottest_c: float, limit_c: float, where: str) -> None:
 
 # ---------------------------------------------------------------------------
 # Profile payload pre-flight. Mirrors the firmware's OWN bounds on
-# POST /api/profile (firmware/KilnFW/App/drivers/profiles_http.c /
+# POST /api/profile (firmware/KilnFW/App/drivers/http/profiles_http.c /
 # profiles_http.h) so the harness refuses to start an hour-long heating stage
 # it can already predict the firmware will reject with a 400 -- exactly what
 # happened when stage 5 (profile_tracking) sent a 23-char name against a
@@ -100,25 +100,25 @@ def check_hard_max(hottest_c: float, limit_c: float, where: str) -> None:
 # Python).
 # ---------------------------------------------------------------------------
 
-#: firmware/KilnFW/App/drivers/profiles_http.h:28
+#: firmware/KilnFW/App/drivers/http/profiles_http.h:28
 PROFILE_FW_MAX_COUNT = 8
-#: firmware/KilnFW/App/drivers/profiles_http.h:29 -- name buffer is
+#: firmware/KilnFW/App/drivers/http/profiles_http.h:29 -- name buffer is
 #: PROFILE_NAME_MAX_LEN+1 bytes; http_form_find_field() returns -2 ("name too
 #: long") the instant the field does not fit that +1 including the NUL, i.e.
 #: an inclusive max of 15 characters.
 PROFILE_FW_NAME_MAX_LEN = 15
-#: firmware/KilnFW/App/drivers/profiles_http.h:30 and profiles_http.c:1382
+#: firmware/KilnFW/App/drivers/http/profiles_http.h:30 and profiles_http.c:1382
 #: ("seg_count out of range (1-12)")
 PROFILE_FW_MAX_SEGMENTS = 12
-#: firmware/KilnFW/App/drivers/profiles_http.c:102-103
+#: firmware/KilnFW/App/drivers/http/profiles_http.c:102-103
 PROFILE_FW_TARGET_C_MIN = 0.0
 PROFILE_FW_TARGET_C_MAX = 1400.0
-#: firmware/KilnFW/App/drivers/profiles_http.c:104-105
+#: firmware/KilnFW/App/drivers/http/profiles_http.c:104-105
 PROFILE_FW_RAMP_C_PER_HR_MIN = 0.0
 PROFILE_FW_RAMP_C_PER_HR_MAX = 1000.0
-#: firmware/KilnFW/App/drivers/profiles_http.c:106 (24h)
+#: firmware/KilnFW/App/drivers/http/profiles_http.c:106 (24h)
 PROFILE_FW_DWELL_MIN_MAX = 1440
-#: firmware/KilnFW/App/drivers/profiles_http.c:1367 -- zone_mask must be
+#: firmware/KilnFW/App/drivers/http/profiles_http.c:1367 -- zone_mask must be
 #: nonzero and fit a uint8_t; which SPECIFIC bits are valid additionally
 #: depends on the board's configured thermocouple count
 #: (zones_config_get_thermo_count()), which this harness has no local copy

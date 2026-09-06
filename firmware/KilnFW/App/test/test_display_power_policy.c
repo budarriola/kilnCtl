@@ -1,11 +1,11 @@
-// Host tests for App/drivers/display_power_policy.c -- the pure display
+// Host tests for App/drivers/persist/display_power_policy.c -- the pure display
 // on/off/error-hold decision core for owner request 2026-09-04 (brightness +
 // selectable idle timeout + keep-on-while-firing + wake-only-swallows-touch +
 // display-on-error). Exercises display_power_policy_step() directly: no
 // LVGL, no NVS, no FreeRTOS, exactly the point of keeping this module pure.
 #include "test_common.h"
 
-#include "../drivers/display_power_policy.c"
+#include "../drivers/persist/display_power_policy.c"
 
 static display_power_input_t base_input(void)
 {

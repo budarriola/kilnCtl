@@ -10,10 +10,10 @@
 #include <stdio.h>
 
 #include "test_common.h"
-#include "../drivers/pid.h"
-#include "../drivers/pid_fuzzy.h"
-#include "../drivers/thermal_guard.h"
-#include "../drivers/heater_output.h"
+#include "../drivers/control/pid.h"
+#include "../drivers/control/pid_fuzzy.h"
+#include "../drivers/control/thermal_guard.h"
+#include "../drivers/control/heater_output.h"
 #include "sim_plant.h"
 
 /* Mirrors profile_executor.c's ZONE_CONTROL_MODE_PID_FUZZY per-tick wiring

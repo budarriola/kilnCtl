@@ -1,7 +1,7 @@
 """KilnCtrl -- PC-side implementation of the ESP32-S3 hardened UART protocol.
 
 Mirrors App/drivers/espInterfaces/uart_protocol.{c,h} and
-App/drivers/uart_task_ids.h. See protocol.py for the wire format, and
+App/drivers/common/uart_task_ids.h. See protocol.py for the wire format, and
 docs/HARDWARE.md for what is actually on the other end of each task.
 """
 

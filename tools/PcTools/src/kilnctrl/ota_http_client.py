@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ota_http_client.py -- pure HTTP client for the ESP's OTA update endpoints
-(firmware/KilnFW/App/drivers/ota_http.c), used by mcp_server.py's ota_* tools.
+(firmware/KilnFW/App/drivers/http/ota_http.c), used by mcp_server.py's ota_* tools.
 
 Talks straight HTTP to /api/ota/{challenge,esp,pico} and GET
 /api/ota/pico/status -- same "stdlib urllib.request, no framework" convention
@@ -12,7 +12,7 @@ response-parsing logic here can be unit-tested with mocked HTTP responses
 (tools/PcTools/tests/test_ota_http_client.py) with no real socket and no
 live board required.
 
-Wire contract source of truth: firmware/KilnFW/App/drivers/ota_http.h/.c and
+Wire contract source of truth: firmware/KilnFW/App/drivers/http/ota_http.h/.c and
 firmware/CommonFW/docs/UPDATE_PROTOCOL.md section 2 (auth) and section 3 (ESP
 transfer)/section 9.5-era pico staging. Mirrored here, not re-derived:
 
@@ -45,8 +45,8 @@ OtaHttpError.detail rather than trying to json.loads() it.
 
 CLOSED GAP (was open through 2026-08-18): there used to be no HTTP endpoint
 exposing ota_http_get_esp_progress() (the ESP self-update's own progress
-counter) or the persisted ota_record (App/drivers/ota_record.h's "last
-update" NVS blob). `GET /api/ota/esp/status` (App/drivers/ota_http.c) now
+counter) or the persisted ota_record (App/drivers/persist/ota_record.h's "last
+update" NVS blob). `GET /api/ota/esp/status` (App/drivers/http/ota_http.c) now
 covers both -- get_esp_status() below reads it. `last_update` is `null`
 when no update has ever run this NVS lifetime (ota_record_load() found
 nothing), or an object with ota_record_t's fields (processor,
@@ -336,7 +336,7 @@ def get_esp_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
 
 def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/esp/rollback -- explicit "revert to the previous image
-    right now" (App/drivers/ota_http.c's ota_esp_rollback_post_handler()).
+    right now" (App/drivers/http/ota_http.c's ota_esp_rollback_post_handler()).
     Unlike push_esp_image()/push_pico_image(), there is no file to send --
     the body is empty, only the challenge/MAC dance and the X-Ota-Mac header
     are needed.
@@ -403,7 +403,7 @@ def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
 def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/esp/recovery_exit -- ask the board to reboot right now
     to exit boot_guard.h's recovery mode, rather than waiting for it to
-    self-clear (App/drivers/ota_http.c's ota_recovery_exit_post_handler()).
+    self-clear (App/drivers/http/ota_http.c's ota_recovery_exit_post_handler()).
 
     Same challenge/MAC dance as rollback_esp(), signed over its own
     "recovery" context (ota_http.h's OTA_HTTP_CONTEXT_RECOVERY_EXIT) -- NOT

@@ -63,7 +63,7 @@ int g_stub_queue_ring_head = 0;
 int g_stub_queue_send_calls = 0;
 unsigned char g_stub_last_queue_item[256];
 
-#include "../drivers/kiln_io_owner.c"
+#include "../drivers/owners/kiln_io_owner.c"
 
 // ---- link-time stub bodies -------------------------------------------------
 // None of these is reachable from sx_mask_touches_relay()/

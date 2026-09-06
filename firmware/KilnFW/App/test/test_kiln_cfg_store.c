@@ -1,4 +1,4 @@
-// Host tests for App/drivers/kiln_cfg_store.c -- the saved "kiln config"
+// Host tests for App/drivers/persist/kiln_cfg_store.c -- the saved "kiln config"
 // slots (owner-report, 2026-08-21 follow-up: "save kiln profiles with
 // different relay/thermocouple/PID configs ... survive a programming cycle
 // ... allow creating a config from an existing one").
@@ -61,7 +61,7 @@ static void *kiln_cfg_store_test_malloc(size_t n)
 }
 #define malloc kiln_cfg_store_test_malloc
 
-#include "../drivers/kiln_cfg_store.c"
+#include "../drivers/persist/kiln_cfg_store.c"
 
 // ---------------------------------------------------------------------------
 // zones_http.h stub state -- controllable export/import behavior.

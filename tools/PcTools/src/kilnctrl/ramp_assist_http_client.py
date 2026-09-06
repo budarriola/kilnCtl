@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ramp_assist_http_client.py -- pure HTTP client for GET/POST /api/ramp_assist
-(firmware/KilnFW/App/drivers/diagnostics_http.c's ramp_assist_get_handler()/
+(firmware/KilnFW/App/drivers/http/diagnostics_http.c's ramp_assist_get_handler()/
 ramp_assist_post_handler(), backed by ramp_assist_cfg.h/.c). Same "stdlib
 urllib.request, no framework" convention as adaptive_tune_http_client.py/
 ota_http_client.py/safety_cfg_http_client.py, unit-tested against mocked HTTP

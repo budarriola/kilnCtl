@@ -14,7 +14,7 @@ code.
 Usage:
   python tools/scripts/gen_builtin_profiles.py SCRAPED.json OUT.inc
 
-where OUT.inc is firmware/KilnFW/App/drivers/profiles_builtin_table.inc
+where OUT.inc is firmware/KilnFW/App/drivers/persist/profiles_builtin_table.inc
 """
 import json
 import re
@@ -116,7 +116,7 @@ with open(out_c, "w", encoding="utf8", newline="\n") as f:
  *
  * Regenerate with:
  *   python tools/scripts/gen_builtin_profiles.py SCRAPED.json \\
- *       firmware/KilnFW/App/drivers/profiles_builtin_table.inc
+ *       firmware/KilnFW/App/drivers/persist/profiles_builtin_table.inc
  *
  * This file holds ONLY the catalogue table. It is #included by
  * profiles_builtin.c, which is hand-written and holds the API implementation

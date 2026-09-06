@@ -1,4 +1,4 @@
-// Host tests for App/drivers/autotune_engine.c's pre-start guard, PLUS (added
+// Host tests for App/drivers/control/autotune_engine.c's pre-start guard, PLUS (added
 // 2026-08-24) STEPPING-loop guard-coverage tests for the thermal_guard
 // setpoint synthesis defect -- see that section below for the full story.
 //
@@ -37,11 +37,11 @@
 int g_test_failures = 0;
 int g_test_count = 0;
 
-#include "../drivers/autotune_engine.c"
-#include "../drivers/autotune_engine_guard.c"
-#include "../drivers/autotune_engine_step_identify.c"
-#include "../drivers/autotune_engine_relay.c"
-#include "../drivers/autotune_engine_coupling.c"
+#include "../drivers/control/autotune_engine.c"
+#include "../drivers/control/autotune_engine_guard.c"
+#include "../drivers/control/autotune_engine_step_identify.c"
+#include "../drivers/control/autotune_engine_relay.c"
+#include "../drivers/control/autotune_engine_coupling.c"
 
 // ---------------------------------------------------------------------------
 // Stub bodies for every extern symbol autotune_engine.c references that

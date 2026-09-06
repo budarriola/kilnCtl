@@ -148,7 +148,7 @@ rather than a promise.
 
 | Module | Purpose |
 |---|---|
-| `max31856.c` | Port of `firmware/KilnFW/App/drivers/MAX31856.c`. Same part, same registers, same conversions — **port it, do not rewrite it.** `firmware/KilnFW/docs/MAX31856.md` is the reference |
+| `max31856.c` | Port of `firmware/KilnFW/App/drivers/hw/MAX31856.c`. Same part, same registers, same conversions — **port it, do not rewrite it.** `firmware/KilnFW/docs/MAX31856.md` is the reference |
 | `uart_frame.c` | `0x7E` framing, `0x7D` stuffing, CRC16/CCITT-FALSE. Byte-compatible with `uart_protocol.c`. **Parse only + emit; no ACK, no retry, no dedup** |
 
 ### Application

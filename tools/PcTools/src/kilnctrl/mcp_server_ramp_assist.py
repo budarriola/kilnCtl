@@ -1,7 +1,7 @@
 """Ramp assist MCP tools -- HTTP, not the UART link.
 
 Exposes ramp_assist_cfg.h's kiln-wide on/off flag (GET/POST /api/ramp_assist,
-firmware/KilnFW/App/drivers/diagnostics_http.c) through the sanctioned tool
+firmware/KilnFW/App/drivers/http/diagnostics_http.c) through the sanctioned tool
 facade -- this repo's standing rule is that AI/tooling must be able to work
 with and around a feature like this, not be left to raw HTTP against the
 board (see CLAUDE.md). Same "own module, plumbed through mcp_server.py's

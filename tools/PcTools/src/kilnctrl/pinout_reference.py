@@ -13,13 +13,13 @@ no UART link, no KiCad runtime.
 
 Source of truth is ``docs/HARDWARE.md``, which this repo's own header calls
 "the authority" above even the firmware's own header comments (see
-App/drivers/kiln_io.h). We parse it rather than duplicate it by hand, so the
+App/drivers/owners/kiln_io.h). We parse it rather than duplicate it by hand, so the
 GUI page can never drift from the doc the way a hand-copied table would.
 
 Parser approach: a small, bounded, line-based state machine -- no markdown
 library dependency, matching this codebase's general preference for
 hand-rolled parsers over pulling in a dependency for one file with a known,
-stable structure (see App/drivers/http_form.h for the same spirit in C). The
+stable structure (see App/drivers/common/http_form.h for the same spirit in C). The
 parser only understands the two constructs HARDWARE.md actually uses:
 ``##``-level section headings and GFM pipe tables. Anything else in a
 section (paragraphs, numbered lists) is kept as prose text, in reading order,

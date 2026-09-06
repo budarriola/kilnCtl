@@ -1,4 +1,4 @@
-// Host tests for App/drivers/heat_enable.c -- the shared, refcounted holder
+// Host tests for App/drivers/control/heat_enable.c -- the shared, refcounted holder
 // of the SAFETY_CMD_REQUEST_ENABLE request that closes K4 on the safety
 // processor.
 //
@@ -34,7 +34,7 @@
 
 #include "test_common.h"
 
-#include "../drivers/heat_enable.h"
+#include "../drivers/control/heat_enable.h"
 
 // ---------------------------------------------------------------------------
 // Fake safety link
@@ -236,11 +236,11 @@ static char *heat_enable_read_source(void)
      * back to these literal candidates (which only covered App/test, App,
      * and the repo root) as a second layer. */
     static const char *const candidates[] = {
-        "../drivers/heat_enable.c",
-        "App/drivers/heat_enable.c",
-        "firmware/KilnFW/App/drivers/heat_enable.c",
+        "../drivers/control/heat_enable.c",
+        "App/drivers/control/heat_enable.c",
+        "firmware/KilnFW/App/drivers/control/heat_enable.c",
     };
-    return test_read_source_anchored(__FILE__, "../drivers/heat_enable.c", candidates,
+    return test_read_source_anchored(__FILE__, "../drivers/control/heat_enable.c", candidates,
                                       sizeof(candidates) / sizeof(candidates[0]));
 }
 

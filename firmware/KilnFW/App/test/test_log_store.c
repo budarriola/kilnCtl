@@ -32,7 +32,7 @@
 
 #include "test_common.h"
 
-#include "../drivers/log_store.h"
+#include "../drivers/persist/log_store.h"
 
 /* Duplicates log_store.c's own private path-building convention on purpose:
  * these tests need to manufacture on-disk fixture state (pre-filled

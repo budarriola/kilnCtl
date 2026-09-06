@@ -1,5 +1,5 @@
 /* heater_output_pwm_drift_harness.c -- links the REAL, unmodified
- * ../drivers/heater_output.c and drives heater_output_duty() with test
+ * ../drivers/control/heater_output.c and drives heater_output_duty() with test
  * vectors read from stdin, one per line:
  *
  *   window_ms min_on_ms min_off_ms duty dt_ms n_ticks
@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../drivers/heater_output.h"
+#include "../drivers/control/heater_output.h"
 
 int main(void)
 {

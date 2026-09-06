@@ -1,4 +1,4 @@
-// Host test for App/drivers/adaptive_tune_http.c's status_get_handler() --
+// Host test for App/drivers/http/adaptive_tune_http.c's status_get_handler() --
 // GET /api/adaptive_tune. Added for the live bug: the zones page's
 // "Continuous Tuning (learn from firings)" panel was stuck on "Loading..."
 // because that endpoint returned exactly 1023 bytes of TRUNCATED JSON,
@@ -51,7 +51,7 @@ int g_test_count = 0;
 // Same relative-include trick test_dashboard_json.c uses (compiled with no
 // driversDir on the include path -- the compiler still finds sibling
 // headers relative to the including file's own directory).
-#include "../drivers/adaptive_tune.h"
+#include "../drivers/control/adaptive_tune.h"
 
 // Mirrors ADAPTIVE_TUNE_STATUS_BUF_BYTES in adaptive_tune_http.c EXACTLY --
 // if that constant changes, this one must change with it (see this file's

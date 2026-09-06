@@ -1,4 +1,4 @@
-// Host tests for App/drivers/backlight_pwm.c -- DISPLAY_ST7796_PLAN.md
+// Host tests for App/drivers/hw/backlight_pwm.c -- DISPLAY_ST7796_PLAN.md
 // Phase 7 / 3.4.1 backlight PWM driver.
 //
 // Only backlight_duty_percent_for_state() is under test here: it is pure
@@ -13,7 +13,7 @@
 // test below confirms directly.
 #include "test_common.h"
 
-#include "../drivers/backlight_pwm.c"
+#include "../drivers/hw/backlight_pwm.c"
 
 // ---------------------------------------------------------------------------
 // backlight_duty_percent_for_state() -- pure on/idle percent mapping.

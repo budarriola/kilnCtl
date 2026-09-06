@@ -1,4 +1,4 @@
-// Host tests for App/drivers/profile_feasibility.c -- TODO.md 5A.1, the
+// Host tests for App/drivers/control/profile_feasibility.c -- TODO.md 5A.1, the
 // "mark the schedule red if the tuning says it cannot be fired" check.
 //
 // The module is pure math (a first-order plant model, no I/O), so all of it
@@ -20,8 +20,8 @@
 
 #include "test_common.h"
 
-#include "../drivers/profile_feasibility.h"
-#include "../drivers/zones_config_accessors.h"
+#include "../drivers/control/profile_feasibility.h"
+#include "../drivers/persist/zones_config_accessors.h"
 
 // ---------------------------------------------------------------------------
 // Stubs for the three zones_http.c getters profile_feasibility.c calls.

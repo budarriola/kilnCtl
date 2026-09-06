@@ -1,4 +1,4 @@
-// Host tests for App/drivers/safety_link.h's pure, host-testable pieces --
+// Host tests for App/drivers/safety/safety_link.h's pure, host-testable pieces --
 // added alongside SaftyFW/TODO.md item 0.6 ("redefine SAFETY_FAULT_SRC_
 // SAFETY_LINK as 'no telemetry within 1.5 s'"). safety_link_is_stale() is a
 // `static inline`, dependency-free comparison (no locking, no hardware, no
@@ -22,7 +22,7 @@
 #include <stdint.h>
 
 #include "test_common.h"
-#include "../drivers/safety_link.h"
+#include "../drivers/safety/safety_link.h"
 
 static void test_is_stale_boundary_at_threshold(void)
 {

@@ -6,7 +6,7 @@ This is TODO.md 6A.8's third bullet ("a test matrix, written down, one row per
 guard"). `docs/PID_CONTROL.md` is the shorter narrative companion to the whole
 control/guard stack; TODO.md section 6A remains the authoritative design doc
 and change log. If this file and the code
-(`App/drivers/thermal_guard.c`, `App/drivers/profile_executor.c`,
+(`App/drivers/control/thermal_guard.c`, `App/drivers/control/profile_executor.c`,
 `App/test/sim_plant.c`) disagree, check the code and fix whichever is wrong.
 
 **HARDWARE STATUS**: as of **2026-08-12** the matrix has been walked for the
@@ -78,7 +78,7 @@ the field a human should actually read.
 ## The matrix
 
 Thresholds below are the firmware-wide **defaults** at the top of
-`App/drivers/thermal_guard.c`. Since 2026-08-16/08-27 essentially every one of
+`App/drivers/control/thermal_guard.c`. Since 2026-08-16/08-27 essentially every one of
 them is per-zone config instead (Settings > Zones, `GET/POST /api/zones`), and
 a configured zone uses its own number, not the default quoted here — read the
 zone's config before concluding a guard "should have" fired at the time in this
@@ -119,7 +119,7 @@ with `dt_s` equal to the tick period; the host tests use `dt_s = 10s`.
 The "How it is provoked" column above is host-side. A firmware build with
 `CONFIG_KILNCTL_SIM_PLANT` set (`idf.py menuconfig` → **KilnCtrl Hardware
 Configuration** → **Simulated plant (development only)**) compiles the same
-`App/test/sim_plant.c` model into the image behind `App/drivers/sim_backend.c`
+`App/test/sim_plant.c` model into the image behind `App/drivers/sim/sim_backend.c`
 and exposes fault injection over HTTP, which is how these same failure modes
 are walked end to end on real firmware — start a profile, inject, watch the
 trip escalate, reach the display, and be cleared. This is exactly how the
@@ -334,7 +334,7 @@ construction).
 - **The operator-facing column.** `fault_reason` strings are quoted from the
   `trip()` format strings in `thermal_guard.c`; the dashboard behavior is read
   from `drawHistoryChart()` and the exec-card renderer in
-  `App/drivers/main_page.html` (the red vertical line is drawn for any history
+  `App/drivers/http/main_page.html` (the red vertical line is drawn for any history
   sample whose `guard` CSV field is non-zero). Five guards' end-to-end paths —
   trip → `state: "faulted"` (or per-zone FAULTED, for guard 1) → `fault_guard`
   and `fault_reason` over `/api/profile_exec` — have now been walked on

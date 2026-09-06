@@ -1,7 +1,7 @@
 """Command payload builders and response parsers for the KilnCtrl UART tasks.
 
 Single source of truth for the byte packing described in
-``App/drivers/uart_task_ids.h`` and consumed by ``App/drivers/uart_bridge.c``.
+``App/drivers/common/uart_task_ids.h`` and consumed by ``App/drivers/bridge/uart_bridge.c``.
 Both the MCP server and the Tkinter GUI build payloads through here so the
 layout lives in exactly one place.
 

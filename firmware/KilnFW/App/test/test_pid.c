@@ -1,5 +1,5 @@
 #include "test_common.h"
-#include "../drivers/pid.h"
+#include "../drivers/control/pid.h"
 
 #include <math.h>
 #include <stdio.h>

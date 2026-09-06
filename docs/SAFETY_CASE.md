@@ -75,7 +75,7 @@ here; none is copied from an unverified summary.
    documented state on 2026-08-28 (`firmware/KilnFW/TODO.md`, and this
    file's own hazard row above, both said `set: true, value: 0`). **Verified
    live 2026-09-04, read-only, via `GET /api/safety/commissioning`
-   (`firmware/KilnFW/App/drivers/safety_cfg_http.c`'s
+   (`firmware/KilnFW/App/drivers/http/safety_cfg_http.c`'s
    `commissioning_get_handler`) against the running board: `abs_max_temp_c`
    is now `{"set":true,"value":80}`, `commissioned:true`, config CRC
    matched (not stale).** Confirmed against source, not assumed: reading

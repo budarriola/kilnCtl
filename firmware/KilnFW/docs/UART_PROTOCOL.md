@@ -28,12 +28,12 @@ the peer — see [`docs/SAFETY_LINK.md`](SAFETY_LINK.md).
 **Version 4** (2026-08-13): four new task_ids — `CONTROL` (8), `PROFILES` (9),
 `AUTOTUNE` (10), `WIFI` (11) — plus a `FACTORY_RESET` subcommand on `SYSTEM`
 (6), so a PC-side GUI can drive everything the HTTP dashboard offers
-(`App/drivers/dashboard_http.c`, `zones_http.c`, `rules_http.c`,
+(`App/drivers/http/dashboard_http.c`, `zones_http.c`, `rules_http.c`,
 `profiles_http.c`, `wifi_provision_http.c`, `factory_reset.c`) without
 needing Wi-Fi — additive to HTTP, not a replacement. Every new command
 mirrors an existing HTTP endpoint's request/response *fields*, not its
 HTTP-specific plumbing (JSON/form-encoding, status codes); see each task's
-doc comment in `App/drivers/uart_task_ids.h` (the frozen contract, and the
+doc comment in `App/drivers/common/uart_task_ids.h` (the frozen contract, and the
 authoritative byte-level reference — this file summarizes it) for exact
 payload layouts. Two deliberate scope caps, both because the 253-byte
 payload ceiling has no honest way around them:
@@ -52,7 +52,7 @@ payload ceiling has no honest way around them:
 **Version 5** (2026-08-17): one new task_id, `TOUCH` (13), for the NS2009
 touch controller on the display panel (J2) — `GET_STATE` (screen on/off +
 idle milliseconds) and `INJECT` (a fire-and-forget synthetic touch). The
-firmware's `screen_idle` state machine (`App/drivers/screen_idle.c`) treats
+firmware's `screen_idle` state machine (`App/drivers/ui/screen_idle.c`) treats
 an injected touch exactly like a real NS2009 press: it resets the auto-blank
 idle timer (`CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS`, default 60s) and wakes
 the panel if it's currently blanked — this is how `pc_tools`' MCP server can
@@ -66,9 +66,9 @@ used to mention alongside it — `GET`/`POST /api/rules` — was removed
 `docs/WEB_UI.md`.)
 
 Source of truth:
-- Firmware: `App/drivers/espInterfaces/uart_protocol.h` / `.c`,
-  `App/drivers/uart_task_ids.h` (the frozen contract),
-  `App/drivers/uart_bridge.c` (the bridges that implement it)
+- Firmware: `App/drivers/owners/uart_protocol.h` / `.c`,
+  `App/drivers/common/uart_task_ids.h` (the frozen contract),
+  `App/drivers/bridge/uart_bridge.c` (the bridges that implement it)
 - PC: `pc_tools/src/`
 
 ## Physical layer
@@ -528,7 +528,7 @@ GET_LINK_STATS response:
 When `TEMP_VALID` is clear the two temperatures are NaN, not 0 — an explicit
 not-a-number is much harder to mistake for a cold kiln than a plausible zero.
 
-### LOG (task 5) — `App/drivers/uart_log_bridge.c`
+### LOG (task 5) — `App/drivers/bridge/uart_log_bridge.c`
 
 Firmware → PC only, unsolicited (fire-and-forget; nothing ever sends a
 request to this `task_id`). `uart_log_bridge_early_init()` installs an

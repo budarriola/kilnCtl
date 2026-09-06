@@ -41,7 +41,7 @@
 #include "test_common.h"
 
 // candidates[0] is always this test's file written relative to its OWN
-// directory (e.g. "../drivers/screen_idle.c") -- test_read_source_anchored()
+// directory (e.g. "../drivers/ui/screen_idle.c") -- test_read_source_anchored()
 // (test_common.h) uses it to resolve an absolute path anchored to __FILE__
 // first, which works from ANY working directory the test binary is
 // launched from, then falls back to the literal candidates[] entries
@@ -162,14 +162,14 @@ static char *strip_c_comments(const char *src)
 }
 
 static const char *SCREEN_IDLE_C_CANDIDATES[] = {
-    "../drivers/screen_idle.c",
-    "App/drivers/screen_idle.c",
-    "firmware/KilnFW/App/drivers/screen_idle.c",
+    "../drivers/ui/screen_idle.c",
+    "App/drivers/ui/screen_idle.c",
+    "firmware/KilnFW/App/drivers/ui/screen_idle.c",
 };
 static const char *LVGL_PORT_C_CANDIDATES[] = {
-    "../drivers/lvgl_port.c",
-    "App/drivers/lvgl_port.c",
-    "firmware/KilnFW/App/drivers/lvgl_port.c",
+    "../drivers/ui/lvgl_port.c",
+    "App/drivers/ui/lvgl_port.c",
+    "firmware/KilnFW/App/drivers/ui/lvgl_port.c",
 };
 
 static void run_section1_screen_idle_calls_policy(void)
@@ -1004,18 +1004,18 @@ static void run_section8_timer_refresh_cb_blocking_denylist(void)
                  "refresh callbacks ... may NOT ... block for long'.");
 
     static const char *const PAGE_FILE_CANDIDATES[][3] = {
-        {"../drivers/ui_page_diagnostics.c", "App/drivers/ui_page_diagnostics.c",
-         "firmware/KilnFW/App/drivers/ui_page_diagnostics.c"},
-        {"../drivers/ui_page_temperature.c", "App/drivers/ui_page_temperature.c",
-         "firmware/KilnFW/App/drivers/ui_page_temperature.c"},
-        {"../drivers/ui_page_home.c", "App/drivers/ui_page_home.c",
-         "firmware/KilnFW/App/drivers/ui_page_home.c"},
-        {"../drivers/ui_page_home_refresh.c", "App/drivers/ui_page_home_refresh.c",
-         "firmware/KilnFW/App/drivers/ui_page_home_refresh.c"},
-        {"../drivers/ui_page_network.c", "App/drivers/ui_page_network.c",
-         "firmware/KilnFW/App/drivers/ui_page_network.c"},
-        {"../drivers/ui_page_network_manage.c", "App/drivers/ui_page_network_manage.c",
-         "firmware/KilnFW/App/drivers/ui_page_network_manage.c"},
+        {"../drivers/ui/ui_page_diagnostics.c", "App/drivers/ui/ui_page_diagnostics.c",
+         "firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c"},
+        {"../drivers/ui/ui_page_temperature.c", "App/drivers/ui/ui_page_temperature.c",
+         "firmware/KilnFW/App/drivers/ui/ui_page_temperature.c"},
+        {"../drivers/ui/ui_page_home.c", "App/drivers/ui/ui_page_home.c",
+         "firmware/KilnFW/App/drivers/ui/ui_page_home.c"},
+        {"../drivers/ui/ui_page_home_refresh.c", "App/drivers/ui/ui_page_home_refresh.c",
+         "firmware/KilnFW/App/drivers/ui/ui_page_home_refresh.c"},
+        {"../drivers/ui/ui_page_network.c", "App/drivers/ui/ui_page_network.c",
+         "firmware/KilnFW/App/drivers/ui/ui_page_network.c"},
+        {"../drivers/ui/ui_page_network_manage.c", "App/drivers/ui/ui_page_network_manage.c",
+         "firmware/KilnFW/App/drivers/ui/ui_page_network_manage.c"},
     };
     const size_t n_files = sizeof(PAGE_FILE_CANDIDATES) / sizeof(PAGE_FILE_CANDIDATES[0]);
 

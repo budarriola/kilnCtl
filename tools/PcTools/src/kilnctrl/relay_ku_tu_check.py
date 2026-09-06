@@ -3,7 +3,7 @@ a describing-function reconciliation against a FOPDT (step-test) model.
 
 BACKGROUND. A completed relay-feedback autotune reports ``relay_ku``/
 ``relay_tu_s`` fitted on-device by ``pid_autotune_fit_relay()``
-(firmware/KilnFW/App/drivers/pid_autotune.c). Those numbers can look
+(firmware/KilnFW/App/drivers/control/pid_autotune.c). Those numbers can look
 surprising against a FOPDT model identified separately by a step test (see
 firmware/KilnFW/docs/PID_EXPANSION_PLAN.md section 2/3.6): naive
 classical relay-feedback theory says the oscillation period Tu should sit

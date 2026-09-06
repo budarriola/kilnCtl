@@ -2,9 +2,9 @@
 
 This document is the map for TODO.md section 6A's design as actually built,
 not as originally planned — check the code
-(`App/drivers/pid.c`, `App/drivers/thermal_guard.c`, `App/drivers/heater_output.c`,
-`App/drivers/pid_autotune.c`, `App/drivers/autotune_engine.c`,
-`App/drivers/profile_executor.c`) if this and the code disagree, and fix
+(`App/drivers/control/pid.c`, `App/drivers/control/thermal_guard.c`, `App/drivers/control/heater_output.c`,
+`App/drivers/control/pid_autotune.c`, `App/drivers/control/autotune_engine.c`,
+`App/drivers/control/profile_executor.c`) if this and the code disagree, and fix
 whichever one is wrong. TODO.md section 6A remains the authoritative design
 doc and change log, with dated "Implemented"/"Not built" notes on every
 bullet; this file is the shorter "how does this actually fit together"
@@ -52,7 +52,7 @@ optional radiative loss term, a read-time `sensor_map[]` for modeling swapped
 connectors, deterministic sensor noise, and injectable per-zone faults. It is
 still test-only by default, but it is no longer *only* a host module: with
 `CONFIG_KILNCTL_SIM_PLANT` set, the same file is compiled into the firmware
-behind `App/drivers/sim_backend.c` (see below).
+behind `App/drivers/sim/sim_backend.c` (see below).
 
 ## Control modes (per zone, `zone_control_mode_t` in `zones_http.h`)
 
@@ -850,7 +850,7 @@ row per guard, in `docs/GUARD_TEST_MATRIX.md`.
 
 The host tests prove the pure modules. They cannot walk a whole firing — HTTP
 start, ramp, guard trip, escalation, fault display, operator clear — because
-`profile_executor.c` links FreeRTOS and ESP-IDF. `App/drivers/sim_backend.c`
+`profile_executor.c` links FreeRTOS and ESP-IDF. `App/drivers/sim/sim_backend.c`
 closes that gap by compiling the *same* `App/test/sim_plant.c` model into the
 firmware (deliberately the same file, not a second on-target copy of a
 thermal model) and substituting it for the MAX31856 channels.

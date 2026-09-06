@@ -8,7 +8,7 @@
 // extraction, not re-derived from scratch -- this phase's whole point is
 // "prove the emitted byte stream did not change".
 #include "test_common.h"
-#include "../drivers/panel_codec.h"
+#include "../drivers/hw/panel_codec.h"
 
 #include <stdint.h>
 

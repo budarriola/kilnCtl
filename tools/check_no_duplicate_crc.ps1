@@ -22,7 +22,7 @@
 # file/image integrity, not link framing) and would be pure noise.
 #
 # KNOWN PRE-EXISTING DEBT (as of 2026-08-18, updated 2026-08-23):
-# firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.c has been migrated
+# firmware/KilnFW/App/drivers/owners/uart_protocol.c has been migrated
 # to delegate its CRC/framing to kilnlink_crc16_ccitt_false/kilnlink_stuff
 # (proven byte-identical against the old local implementation by
 # firmware/CommonFW/test/test_uart_protocol_delegate.c; see ROADMAP.md M2's

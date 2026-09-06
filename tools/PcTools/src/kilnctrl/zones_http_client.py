@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """zones_http_client.py -- pure HTTP client for GET/POST /api/zones
-(firmware/KilnFW/App/drivers/zones_http.c), the ONE real write path for the
+(firmware/KilnFW/App/drivers/http/zones_http.c), the ONE real write path for the
 zones_cfg_t fields config_presets.py could not write over the UART CONTROL
 task: max_temp_c, relay_mask, control_mode, thermo_count, relay_count, and
 the rest of zone_cfg_t. This is the hook config_presets.py's module docstring

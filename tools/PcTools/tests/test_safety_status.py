@@ -3,7 +3,7 @@
 SAFETY_CMD_GET_STATUS (0x01) path -- the PC-facing mirror of the isolated
 Pico<->ESP link's Frame A, described in devices.py's own parse_safety_
 response() docstring and built ESP-side by safety_link_build_status_payload()
-(firmware/KilnFW/App/drivers/safety_link.c).
+(firmware/KilnFW/App/drivers/safety/safety_link.c).
 
 2026-08-23, the DIAG-frame-went-dark investigation: this payload grew from a
 fixed 25 bytes to an ADDITIVE 25-or-27 (byte25 tx_dropped_sat, byte26

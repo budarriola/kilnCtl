@@ -24,7 +24,7 @@ chip read to succeed.
 The current mechanism is ``check_chip_partition_table_via_http()`` /
 ``read_chip_partition_table_from_http()`` below, which ask the RUNNING
 FIRMWARE for its own live partition table over GET /api/partitions
-(``firmware/KilnFW/App/drivers/partition_info_http.c``, via ESP-IDF's
+(``firmware/KilnFW/App/drivers/http/partition_info_http.c``, via ESP-IDF's
 ``esp_partition_find``/``esp_partition_next`` from inside the app -- no
 JTAG, no core halt, works while the board is busy). It also answers a
 better question: not "what raw bytes sit at 0x8000" but "what table is the

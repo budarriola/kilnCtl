@@ -4,7 +4,7 @@ This document states, in one place, what actually stops a KilnCtrl board from
 leaving a heating element energized when it shouldn't be — and, just as
 important, what still does not stop that today. If a claim here and a claim
 in another doc disagree, this file is not automatically right; check the code
-(`App/drivers/uart_bridge.c`, `App/drivers/kiln_io.c`, `App/drivers/safety_link.c`,
+(`App/drivers/bridge/uart_bridge.c`, `App/drivers/owners/kiln_io.c`, `App/drivers/safety/safety_link.c`,
 `App/main.c`) and fix whichever one is wrong.
 
 ## The rule
@@ -22,7 +22,7 @@ from the very fault that is blocking "on".
 
 ## What enforces it today
 
-### 1. The relay-on gate (`App/drivers/uart_bridge.c`, `io_relay_on_blocked`)
+### 1. The relay-on gate (`App/drivers/bridge/uart_bridge.c`, `io_relay_on_blocked`)
 
 `IO_CMD_SET_RELAY` and `IO_CMD_SET_RELAY_MASK` are refused outright — logged,
 no state change, no reply — if `safety_link_get_fault_sources()` is nonzero,
@@ -39,7 +39,7 @@ wrapper over it. Two more real callers exist beside the UART bridge:
 `diagnostics_http.c`'s `POST /api/diagnostics/danger/relay` (the web UI's
 manual relay control, TODO.md section 2 — `dashboard_http.c`'s old
 `POST /api/relay` was removed 2026-08-27, see `docs/WEB_UI.md`) and
-`App/drivers/profile_executor.c` (the profile
+`App/drivers/control/profile_executor.c` (the profile
 execution engine, TODO.md section 6/6A) — both gate every relay-ON command
 through the same function, so the rule stated above ("the safety condition
 wins") holds identically for all three. `profile_executor.c` additionally
@@ -51,9 +51,9 @@ still describes the global gate correctly; treat "the only place" in the
 paragraph above as historical.
 
 **Danger mode is a deliberate, explicit bypass of this gate.**
-`App/drivers/kiln_io_owner.c`'s `relay_on_blocked()` — the single choke point
+`App/drivers/owners/kiln_io_owner.c`'s `relay_on_blocked()` — the single choke point
 every manual relay-ON command reaches — checks `danger_mode_active()`
-(`App/drivers/danger_mode.c`) first, and if the operator has entered that
+(`App/drivers/safety/danger_mode.c`) first, and if the operator has entered that
 mode (an explicit accept-the-risk action from the diagnostics page, time-
 boxed and auto-released on idle timeout — see `danger_mode.h`'s top comment)
 it skips both `relay_authority_on_blocked()` and the OTA heat-interlock
@@ -65,7 +65,7 @@ SaftyFW's independent contactor authority on the RP2040, which stays outside
 this board's reach either way. Confirmed current as of 2026-09-04 (`kiln_io_owner.c:179-209`'s
 `relay_on_blocked()`, `danger_mode.c:174-209`'s `danger_mode_active()`).
 
-### 2. The fault-source mask (`App/drivers/safety_link.c`)
+### 2. The fault-source mask (`App/drivers/safety/safety_link.c`)
 
 `safety_link_set_fault_source(mask, assert)` OR's named reasons into
 `GPIO6`, the isolated line into the RP2040 safety processor:
@@ -83,7 +83,7 @@ No single source can clear another's bit — the mask is closed
 outside it. The relay gate reads this same mask, so **any** asserted source
 blocks "on", not just the ones that are obviously about relays.
 
-### 3. Link-loss watchdog (`App/drivers/uart_bridge.c`)
+### 3. Link-loss watchdog (`App/drivers/bridge/uart_bridge.c`)
 
 A dedicated task at priority 6 (above every bridge task, so it keeps running
 even if a bridge is stuck waiting on a dead host's ACK) checks every 250 ms
@@ -124,7 +124,7 @@ relays off, fault line up — before giving up, because `app_main` returning
 does not stop FreeRTOS; a task that already started stays running with
 whatever state was last set unless something explicitly changes it.
 
-### 5. Payload validation (`App/drivers/uart_bridge.c`)
+### 5. Payload validation (`App/drivers/bridge/uart_bridge.c`)
 
 Independent of the above: every relay/IO/thermo/display/safety subcommand is
 length- and range-checked before it reaches a driver, and rejected — never
@@ -135,7 +135,7 @@ itself a safety-condition check. See `docs/UART_PROTOCOL.md`.
 ## What does NOT enforce it yet — real gaps, not just untested code
 
 **Update (2026-08-11): partially closed, for a running profile executor
-only.** `App/drivers/profile_executor.c` and `App/drivers/thermal_guard.c`
+only.** `App/drivers/control/profile_executor.c` and `App/drivers/control/thermal_guard.c`
 now exist (TODO.md section 6A) and, while a profile is actively running a
 zone, guard 6 (sensor validity — `spi_failed`, `NaN`, `THERMO_FAULT_OPEN`/
 `OVUV`/`TCRANGE`) trips after 3 consecutive bad reads and asserts a **live**
@@ -157,7 +157,7 @@ on top of the unchanged global gate — see the summary table below),
 debounced at 3 consecutive bad reads (not first-bad-read), and `OPEN`/`OVUV`/
 `TCRANGE` are the tripping bits (a single `TCHIGH`/`TCLOW` still does not
 trip — left as the control loop's job, matching the original open question's
-own reasoning). See `App/drivers/thermal_guard.c` and TODO.md section 6A.3
+own reasoning). See `App/drivers/control/thermal_guard.c` and TODO.md section 6A.3
 for the full detail, including guards 1–5 and 7 (also implemented, not yet
 live-tested) and guards 8–9 (not yet implemented).
 

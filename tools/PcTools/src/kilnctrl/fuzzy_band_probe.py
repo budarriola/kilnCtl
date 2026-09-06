@@ -1,5 +1,5 @@
 """Offline membership-band probe for the fuzzy-PID layer
-(``firmware/KilnFW/App/drivers/pid_fuzzy.c``).
+(``firmware/KilnFW/App/drivers/control/pid_fuzzy.c``).
 
 WHY THIS EXISTS. ``pid_fuzzy_adjust()`` is a PURE FUNCTION of
 ``(error_c, error_rate_c_per_s)`` given a band setting, base gains and
@@ -74,7 +74,7 @@ from typing import Optional, Sequence
 from kilnctrl.jsonl_util import iter_jsonl
 
 # ---------------------------------------------------------------------------
-# Line-for-line port of firmware/KilnFW/App/drivers/pid_fuzzy.c.
+# Line-for-line port of firmware/KilnFW/App/drivers/control/pid_fuzzy.c.
 # Keep this section in lockstep with the C file; see this module's docstring
 # and test_fuzzy_band_probe.py's drift-check tests.
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@
 // reading the macro back).
 
 #include "test_common.h"
-#include "../drivers/iter_tune.h"
+#include "../drivers/control/iter_tune.h"
 
 #include <string.h>
 

@@ -70,7 +70,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
 
-PROD_REL = "firmware/KilnFW/App/drivers/profile_executor_pid_tick.c"
+PROD_REL = "firmware/KilnFW/App/drivers/control/profile_executor_pid_tick.c"
 MIRROR_REL = "firmware/KilnFW/App/test/test_closed_loop.c"
 
 # Anchored on the function signature (unique in the file -- this is the only

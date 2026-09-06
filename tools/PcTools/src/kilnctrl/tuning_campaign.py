@@ -9,7 +9,7 @@ tunes once per method on an empty-kiln step/relay test, then evaluates every
 resulting gain set across a peak-temperature x load grid, and writes a small
 flat recommendation artifact for the web GUI to render.
 
-METHOD COVERAGE -- mirrors firmware/KilnFW/App/drivers/pid_autotune.c
+METHOD COVERAGE -- mirrors firmware/KilnFW/App/drivers/control/pid_autotune.c
 exactly, no invented conversions:
   * SIMC       (FOPDT step-test path, ``pid_autotune_tune_from_fopdt``, the
                 default rule)

@@ -1,4 +1,4 @@
-// Host test for App/drivers/board_temps.c's board_temps_get(), added
+// Host test for App/drivers/hw/board_temps.c's board_temps_get(), added
 // 2026-08-27 for the array-position-vs-channel-number indexing defect found
 // by the sensor-correctness audit (TODO.md): MAX31856_read_all() fills
 // readings[0..out_count) for *initialized* channels only, packed by array
@@ -46,7 +46,7 @@ int g_test_count = 0;
 // same convention the scratch harness that proved this fix used.
 #define asm(x)
 
-#include "../drivers/board_temps.c"
+#include "../drivers/hw/board_temps.c"
 
 #undef asm
 

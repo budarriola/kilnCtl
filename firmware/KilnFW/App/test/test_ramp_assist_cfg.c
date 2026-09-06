@@ -1,4 +1,4 @@
-// Host tests for App/drivers/ramp_assist_cfg.c -- the kiln-wide (not
+// Host tests for App/drivers/control/ramp_assist_cfg.c -- the kiln-wide (not
 // per-zone) persisted on/off flag for the forthcoming "ramp assist" feature.
 // #includes ramp_assist_cfg.c directly (same convention as
 // test_watchdog_cfg.c/test_unit_pref-shaped modules) to reach its
@@ -22,7 +22,7 @@
 
 #include "esp_err.h"
 
-#include "../drivers/ramp_assist_cfg.c"
+#include "../drivers/control/ramp_assist_cfg.c"
 
 // ---------------------------------------------------------------------------
 // Simulated reboot: resets everything that would be lost on a real power

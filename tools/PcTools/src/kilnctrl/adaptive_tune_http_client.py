@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """adaptive_tune_http_client.py -- pure HTTP client for
 GET /api/adaptive_tune and POST /api/adaptive_tune/enable
-(firmware/KilnFW/App/drivers/adaptive_tune_http.c), the only surface for
+(firmware/KilnFW/App/drivers/http/adaptive_tune_http.c), the only surface for
 Phase 7d's continuous/adaptive PID-tuning layer. Same "stdlib
 urllib.request, no framework" convention as ota_http_client.py/
 safety_cfg_http_client.py/zones_http_client.py, and unit-tested against
@@ -9,8 +9,8 @@ mocked HTTP only (tools/PcTools/tests/test_adaptive_tune_http_client.py) --
 no real socket, no live board.
 
 Built against the handler as it stood 2026-09-01 in
-firmware/KilnFW/App/drivers/adaptive_tune_http.c/.h and
-firmware/KilnFW/App/drivers/adaptive_tune.h's ``adaptive_tune_zone_status_t``.
+firmware/KilnFW/App/drivers/http/adaptive_tune_http.c/.h and
+firmware/KilnFW/App/drivers/control/adaptive_tune.h's ``adaptive_tune_zone_status_t``.
 That surface is actively changing under a different agent (a revert endpoint
 is being added, and the opt-in flag is being moved into the zone config
 blob) -- this client only reads the fields the GET body actually names below

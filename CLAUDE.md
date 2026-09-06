@@ -71,7 +71,7 @@ factory boot target.
 
 `ota_rollback_esp()` itself has a hazard, 2026-09-04: rolling back past a
 `zones_cfg` schema bump (e.g. v19, `ZONES_CFG_VERSION` in
-`firmware/KilnFW/App/drivers/zones_config_json.h`) makes the older firmware
+`firmware/KilnFW/App/drivers/persist/zones_config_json.h`) makes the older firmware
 refuse the newer-than-it-knows blob and run that boot on **firmware-default
 PID gains**, not the tuned ones — flash is left untouched, so reflashing the
 newer firmware restores everything, but a firing started right after the

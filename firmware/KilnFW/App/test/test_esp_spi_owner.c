@@ -1,4 +1,4 @@
-// Host tests for App/drivers/espInterfaces/esp_spi_owner.c -- specifically
+// Host tests for App/drivers/owners/esp_spi_owner.c -- specifically
 // the bounded-timeout/fail-fast fix for DISPLAY_ST7796_PLAN.md section 9.9 /
 // TODO.md: spi_owner_transfer() used to wait portMAX_DELAY on both the
 // enqueue and the completion wait, which defeated every caller-side timeout
@@ -38,7 +38,7 @@ extern int g_stub_queue_send_calls;
 // enqueue), which needs xQueueSend() to actually succeed.
 extern int g_stub_queue_ring_enabled;
 
-#include "../drivers/espInterfaces/esp_spi_owner.c"
+#include "../drivers/owners/esp_spi_owner.c"
 
 #include <stdint.h>
 

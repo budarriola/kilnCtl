@@ -22,7 +22,7 @@
  * with full round-trip precision (%.9g, more digits than a 32-bit float
  * needs) -- out_kp out_ki out_kd.
  */
-#include "../drivers/pid_fuzzy.h"
+#include "../drivers/control/pid_fuzzy.h"
 
 #include <stdio.h>
 #include <stdlib.h>

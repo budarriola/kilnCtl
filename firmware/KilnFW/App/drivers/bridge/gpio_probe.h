@@ -2,7 +2,7 @@
 #define GPIO_PROBE_H
 
 #include "esp_err.h"
-#include "espInterfaces/uart_protocol.h"
+#include "owners/uart_protocol.h"
 
 #ifdef __cplusplus
 extern "C" {

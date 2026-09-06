@@ -548,7 +548,7 @@ were considered and deliberately excluded:
 - **Moving the embedded web assets into PSRAM.** Rejected — it makes things
   worse, not better. The pages are embedded via `EMBED_TXTFILES` and served
   with `httpd_resp_send(req, _binary_..._start, len)` straight out of
-  memory-mapped flash (see `App/drivers/diagnostics_http.c`). They occupy
+  memory-mapped flash (see `App/drivers/http/diagnostics_http.c`). They occupy
   **zero DRAM and zero PSRAM today.** Relocating them would spend ~266 kB of
   PSRAM plus a boot-time copy in order to obtain the behaviour that is already
   in place. The DRAM pressure comes from task stacks, lwIP/Wi-Fi buffers and
@@ -625,7 +625,7 @@ unblocked/not-unblocked lists).
 
 **Already measurable — an earlier draft of this doc was wrong about this.**
 
-`App/drivers/dashboard_http.c:386-397` already calls
+`App/drivers/http/dashboard_http.c:386-397` already calls
 `heap_caps_get_free_size()`, `heap_caps_get_largest_free_block()`,
 `heap_caps_get_minimum_free_size()` and `heap_caps_get_total_size()` for both
 `MALLOC_CAP_INTERNAL` and `MALLOC_CAP_SPIRAM`, and serialises them into the

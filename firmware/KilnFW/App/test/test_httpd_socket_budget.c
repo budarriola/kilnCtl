@@ -1,4 +1,4 @@
-// Host tests for App/drivers/httpd_socket_budget.h -- see that header's
+// Host tests for App/drivers/common/httpd_socket_budget.h -- see that header's
 // comment for the full 2026-09-01 incident this guards against: a permanent
 // socket held by wifi_prov.c's dns_hijack_task() was never subtracted from
 // wifi_provision_http.c's CONFIG_LWIP_MAX_SOCKETS budget, which silently
@@ -9,7 +9,7 @@
 // every other pure-decision module this project host-tests.
 #include "test_common.h"
 
-#include "../drivers/httpd_socket_budget.h"
+#include "../drivers/common/httpd_socket_budget.h"
 
 // The actual, current, in-tree configuration: CONFIG_LWIP_MAX_SOCKETS=18
 // (sdkconfig.defaults), max_open_sockets=13 (wifi_provision_http.c),

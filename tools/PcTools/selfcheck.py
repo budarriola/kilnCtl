@@ -6,7 +6,7 @@ Run with:  uv run --project tools/PcTools python tools/PcTools/selfcheck.py
 Verifies CRC-16/CCITT-FALSE against the standard check value, round-trips
 stuffing/unstuffing (including bytes that must be escaped), exercises the
 incremental FrameDecoder, and checks every device payload byte layout against
-App/drivers/uart_task_ids.h.
+App/drivers/common/uart_task_ids.h.
 
 Each device task additionally gets a live section that stands up a stub bridge
 task on the "ESP" side of a virtual link, so the query flow (request ACKed,

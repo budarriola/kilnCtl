@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """partition_http_client.py -- thin HTTP client for GET /api/partitions
-(firmware/KilnFW/App/drivers/partition_info_http.c).
+(firmware/KilnFW/App/drivers/http/partition_info_http.c).
 
 FLASH_BUDGET_PLAN.md section 8 item 3 originally read the on-chip partition
 table over JTAG at flash offset 0x8000 (partition_table.py's

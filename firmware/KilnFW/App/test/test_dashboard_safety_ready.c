@@ -1,4 +1,4 @@
-// Host tests for App/drivers/dashboard_http.h's dashboard_safety_ready() --
+// Host tests for App/drivers/http/dashboard_http.h's dashboard_safety_ready() --
 // the pure predicate factored out of dashboard_get_status() and
 // dashboard_http_get_hw_ready() (dashboard_http.c) after an owner-reported
 // bench bug: "Safty link says linked even though the uart between them is
@@ -19,7 +19,7 @@
 // merely non-NULL" contract is host-testable without standing up the whole
 // httpd/kiln_io/MAX31856/WiFi machinery dashboard_http.c otherwise needs.
 #include "test_common.h"
-#include "../drivers/dashboard_http.h"
+#include "../drivers/http/dashboard_http.h"
 
 static void test_no_driver_is_never_ready(void)
 {

@@ -1,4 +1,4 @@
-// Host tests for App/drivers/display_power_cfg.c -- persisted brightness/
+// Host tests for App/drivers/persist/display_power_cfg.c -- persisted brightness/
 // idle-timeout/keep-on-while-firing/display-on-error settings, owner request
 // 2026-09-04. #includes display_power_cfg.c directly (same convention as
 // test_ramp_assist_cfg.c/test_unit_pref-shaped modules) to reach its
@@ -15,7 +15,7 @@
 
 #include "esp_err.h"
 
-#include "../drivers/display_power_cfg.c"
+#include "../drivers/persist/display_power_cfg.c"
 
 // ---------------------------------------------------------------------------
 // Simulated reboot: resets everything that would be lost on a real power

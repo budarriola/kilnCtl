@@ -1,4 +1,4 @@
-// Host tests for App/drivers/dashboard_json.c -- json_escape()/
+// Host tests for App/drivers/http/dashboard_json.c -- json_escape()/
 // append_zone_status_json(), split out of dashboard_http.c specifically so
 // they could be host-tested at all (that file #includes lvgl_port.h at file
 // scope, which pulls in the LCD/touch driver stack and does not compile on
@@ -31,8 +31,8 @@
 int g_test_failures = 0;
 int g_test_count = 0;
 
-#include "../drivers/dashboard_json.c"
-#include "../drivers/safety_trip_words.h"
+#include "../drivers/http/dashboard_json.c"
+#include "../drivers/safety/safety_trip_words.h"
 
 // ---------------------------------------------------------------------------
 // Small helpers: fill a profile_exec_status_t with the WORST-CASE field

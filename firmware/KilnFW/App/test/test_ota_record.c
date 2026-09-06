@@ -1,4 +1,4 @@
-// Host tests for App/drivers/ota_record.c -- specifically ota_record_fill(),
+// Host tests for App/drivers/persist/ota_record.c -- specifically ota_record_fill(),
 // the pure (no ESP-IDF I/O) half of the module. Added 2026-08-21 alongside
 // ota_record_t's new image_sha256_hex field (CommonFW/docs/UPDATE_PROTOCOL.md's
 // "an append-only update record in NVS: timestamp, processor, image SHA-256,
@@ -17,7 +17,7 @@
 
 #include "test_common.h"
 
-#include "../drivers/ota_record.h"
+#include "../drivers/persist/ota_record.h"
 
 static void test_fill_populates_sha256(void)
 {

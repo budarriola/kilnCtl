@@ -1,4 +1,4 @@
-// Host tests for App/drivers/heat_interlock.c -- the OWNER's mutual OTA
+// Host tests for App/drivers/control/heat_interlock.c -- the OWNER's mutual OTA
 // interlock, direction B ("heating is not allowed during updates"). No
 // ESP-IDF dependency, mirrors test_ota_interlock.c's own pattern for
 // direction A.
@@ -6,7 +6,7 @@
 
 #include "test_common.h"
 
-#include "../drivers/heat_interlock.h"
+#include "../drivers/control/heat_interlock.h"
 
 static void test_no_update_is_ok(void)
 {

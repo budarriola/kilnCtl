@@ -1,4 +1,4 @@
-// Host tests for App/drivers/wifi_prov.c's static-IP AP-fallback logic
+// Host tests for App/drivers/net/wifi_prov.c's static-IP AP-fallback logic
 // (TODO.md section 1's 2026-08-21 fix). No ESP-IDF/FreeRTOS runtime --
 // wifi_prov.c is genuinely coupled to esp_wifi/esp_netif/esp_timer/nvs/lwIP/
 // FreeRTOS, far more than any other file under host test today, so this
@@ -70,7 +70,7 @@ httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 int g_stub_time_sync_notify_got_ip_calls = 0;
 void time_sync_notify_got_ip(void) { g_stub_time_sync_notify_got_ip_calls++; }
 
-#include "../drivers/wifi_prov.c"
+#include "../drivers/net/wifi_prov.c"
 // wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3, "files over 1500 lines
 // should be broken up where it makes sense") -- the new wifi_prov_*.c pieces
 // are NOT added as separate compile units in build_host_tests.ps1; this file
@@ -79,9 +79,9 @@ void time_sync_notify_got_ip(void) { g_stub_time_sync_notify_got_ip_calls++; }
 // keeps reaching every split-out module's `static`/file-scope internals
 // (do_ev_got_ip()/do_confirm_static_reachable() among them) the same way it
 // did when this was all one translation unit.
-#include "../drivers/wifi_prov_nvs.c"
-#include "../drivers/wifi_prov_link.c"
-#include "../drivers/wifi_prov_api.c"
+#include "../drivers/net/wifi_prov_nvs.c"
+#include "../drivers/net/wifi_prov_link.c"
+#include "../drivers/net/wifi_prov_api.c"
 
 // ---- Test scaffolding ----------------------------------------------------
 

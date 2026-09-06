@@ -673,7 +673,7 @@ class WifiFiringMixin:
         if state == "idle":
             self.firing_profile_var.set("Idle -- no profile running.")
             return
-        # Mirrors zone_control_mode_t (firmware/KilnFW/App/drivers/zones_http.h)
+        # Mirrors zone_control_mode_t (firmware/KilnFW/App/drivers/http/zones_http.h)
         # -- no shared Python source exists for this enum (devices_control.py
         # only carries the raw int; the web dashboard's MODE_NAMES lives in
         # zones_page.html, a different language). Kept as a local dict rather

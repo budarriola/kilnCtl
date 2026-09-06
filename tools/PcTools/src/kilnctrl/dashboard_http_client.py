@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """dashboard_http_client.py -- thin HTTP client for GET /api/status's heap
-sub-objects (firmware/KilnFW/App/drivers/dashboard_http.c:386-397/837-843).
+sub-objects (firmware/KilnFW/App/drivers/http/dashboard_http.c:386-397/837-843).
 
 DRAM_PSRAM_PLAN.md Phase 0 (4.1): the firmware-side data has existed since
 before this plan was written -- dashboard_get_status() already populates

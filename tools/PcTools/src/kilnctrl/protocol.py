@@ -1,9 +1,9 @@
 """Wire protocol for the KilnCtrl ESP32-S3 <-> PC hardened UART link.
 
 This is the Python side of:
-    App/drivers/espInterfaces/uart_protocol.h
-    App/drivers/espInterfaces/uart_protocol.c
-    App/drivers/uart_task_ids.h
+    App/drivers/owners/uart_protocol.h
+    App/drivers/owners/uart_protocol.c
+    App/drivers/common/uart_task_ids.h
 
 Keep the constants and the byte layout here in lockstep with those files.
 
@@ -53,13 +53,13 @@ UART_PROTO_DEDUP_DEPTH = 4
 #: header(8) + max payload + crc(2), before stuffing
 RAW_FRAME_MAX = HEADER_LEN + UART_PROTO_MAX_PAYLOAD + CRC_LEN
 
-#: UART_OWNER_BAUD_RATE in App/drivers/settings.h -- must match
+#: UART_OWNER_BAUD_RATE in App/drivers/hw/settings.h -- must match
 #: KILNCTL_UART_BAUD_RATE (App/drivers/Kconfig) since neither side negotiates
 #: this. Bumped from 115200; see that Kconfig entry's help text for why this
 #: is safe (CRC'd + retried per frame) and what it does/doesn't fix.
 DEFAULT_BAUD_RATE = 921600
 
-#: Python side of UART_PROTOCOL_VERSION in App/drivers/uart_task_ids.h.
+#: Python side of UART_PROTOCOL_VERSION in App/drivers/common/uart_task_ids.h.
 #: Bump policy lives there -- read it before touching this number. Carried
 #: at a fixed offset (bytes 0-1) in the GET_FW_VERSION response so a
 #: mismatch can always be detected before trusting the rest of that payload;
@@ -168,7 +168,7 @@ class MsgType(enum.IntEnum):
     BROADCAST = 0x04
 
 
-# --- task ids (Python side of App/drivers/uart_task_ids.h) -----------------
+# --- task ids (Python side of App/drivers/common/uart_task_ids.h) -----------------
 UART_TASK_ID_THERMO = 1  # MAX31856 x3 on the thermocouple board (J6)
 UART_TASK_ID_IO = 2  # SX1509 expander: relays, digital I/O, DRDY
 UART_TASK_ID_INFO = 3
@@ -449,11 +449,11 @@ CONTROL_ZONE_RECORD_LEN = 31
 # existing CONTROL task -- no UART_PROTOCOL_VERSION bump, since neither
 # reorders/resizes an existing field (see uart_task_ids.h's doc comment).
 # DISPLAY-ONLY: every zone/profile temperature on this link is still Celsius
-# regardless of this setting -- see App/drivers/unit_pref.h.
+# regardless of this setting -- see App/drivers/persist/unit_pref.h.
 CONTROL_CMD_GET_UNIT_PREF = 0x04
 CONTROL_CMD_SET_UNIT_PREF = 0x05
 
-#: unit_pref_t wire values (App/drivers/unit_pref.h) -- 0 = Celsius, 1 = Fahrenheit.
+#: unit_pref_t wire values (App/drivers/persist/unit_pref.h) -- 0 = Celsius, 1 = Fahrenheit.
 UNIT_PREF_CELSIUS = 0
 UNIT_PREF_FAHRENHEIT = 1
 
@@ -476,7 +476,7 @@ PROFILES_SAVE_ID_NEW = 0xFF
 PROFILES_MAX_COUNT = 8
 
 #: First id of the read-only shipped catalogue -- mirrors
-#: ``PROFILE_BUILTIN_ID_BASE`` in ``App/drivers/profiles_builtin.h``. Ids
+#: ``PROFILE_BUILTIN_ID_BASE`` in ``App/drivers/persist/profiles_builtin.h``. Ids
 #: ``PROFILES_BUILTIN_ID_BASE + index`` address the firing schedules that ship
 #: in flash: readable and runnable, never writable. The two id ranges do not
 #: overlap by construction, so any id is unambiguously one or the other. This
@@ -583,7 +583,7 @@ class LogLevel(enum.IntEnum):
 
     Firmware -> PC only, unsolicited: every ESP_LOGx call is captured and
     forwarded here instead of the USB-Serial-JTAG console (see
-    App/drivers/uart_log_bridge.c), so device logging is visible over the
+    App/drivers/bridge/uart_log_bridge.c), so device logging is visible over the
     same always-on link used for control, with no separate debugger/monitor
     session required.
     """
@@ -614,7 +614,7 @@ INFO_CMD_GET_STACK_MARGIN = 0x04
 
 
 class StackMarginLevel(enum.IntEnum):
-    """Mirrors stack_margin_level_t (App/drivers/stack_margin_calc.h).
+    """Mirrors stack_margin_level_t (App/drivers/common/stack_margin_calc.h).
 
     A first-pass triage heuristic against the task's OWN configured stack
     size, not a measured threshold -- no real high-water-mark reading has

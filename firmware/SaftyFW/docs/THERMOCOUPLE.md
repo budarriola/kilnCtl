@@ -267,7 +267,7 @@ while the zone sensors stay type K, or a shell-mounted safety sensor stays K
 while a high-fire zone moves to S.
 
 The wire already supports it: `THERMO_CMD_CONFIG_CHANNEL`'s `byte2 = tc_type` is
-per-channel (`firmware/KilnFW/App/drivers/uart_task_ids.h`). What does **not** yet support
+per-channel (`firmware/KilnFW/App/drivers/common/uart_task_ids.h`). What does **not** yet support
 it is `KilnFW`'s configuration — all three zone channels are configured
 identically today.
 

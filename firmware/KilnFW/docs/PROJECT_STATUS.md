@@ -235,7 +235,7 @@ an RP2040 safety processor (`firmware/SaftyFW`).
    general-case live thermocouple-fault gating, then implement it — the gap
    most worth closing before unattended operation.
 5. Write the RP2040 safety-processor firmware against the contract in
-   `App/drivers/safety_link.h` (`docs/SAFETY_LINK.md`, no inversion needed on
+   `App/drivers/safety/safety_link.h` (`docs/SAFETY_LINK.md`, no inversion needed on
    that side).
 6. Decide whether a safety-processor-reported fault/E-stop should drop the
    main board's relays, and if so, add the isolated-link path for it.
@@ -344,7 +344,7 @@ comment rather than a measurement. This pass removes that blocker by making
 `uxTaskGetStackHighWaterMark()` readable from the PC side; it changes no
 stack size and was not run against real hardware (bench in use elsewhere).
 
-**Added**: `App/drivers/stack_margin_calc.h` (pure: FreeRTOS's word-
+**Added**: `App/drivers/common/stack_margin_calc.h` (pure: FreeRTOS's word-
 granularity high-water mark → bytes, plus a 15%/30% headroom triage
 classification against each task's own configured stack size — a first-pass
 heuristic, not a measured threshold) and `App/drivers/stack_margin.{h,c}`
@@ -463,7 +463,7 @@ log this investigation had, so whether this recovers by end of boot (as an
 earlier, differently-configured pass's own recorded figures suggest it
 might) is unconfirmed, not assumed.
 
-**Implemented**: `App/drivers/dram_margin.h` (`dram_margin_check()`, pure
+**Implemented**: `App/drivers/common/dram_margin.h` (`dram_margin_check()`, pure
 and host-tested) wired into `main.c`'s `heap_stage()` — logs `ESP_LOGE` at
 any stage where `largest < 8704` or `dram_free < 11903` (the documented
 failure's own figures, not an invented margin). Host-tested in

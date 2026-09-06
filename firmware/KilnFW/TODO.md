@@ -1,4 +1,4 @@
-﻿# TODO — Web UI / Kiln Control Front End
+# TODO — Web UI / Kiln Control Front End
 
 Top-level ordering across both processors lives in [`../../ROADMAP.md`](../../ROADMAP.md);
 this file owns the main-firmware detail. The cross-processor items — the swapped
@@ -765,7 +765,7 @@ time) is closed by section 6A.7's mid-firing ceiling re-check.
 
 ## 6. Firmware-side profile execution engine (implied by sections 2 and 5)
 
-DONE — `App/drivers/profile_executor.c`, 1Hz tick. Segment stepping/ramp
+DONE — `App/drivers/control/profile_executor.c`, 1Hz tick. Segment stepping/ramp
 interpolation, per-zone `OFF`/`BANGBANG`/`PID` control mode (live-reloadable
 since 2026-08-12), the direction/rate sanity monitor (thermal_guard.c guards 1/2,
 full detail in section 6A.3), relay-authority gating, fail-toward-off on pause,
@@ -1284,7 +1284,7 @@ R2/no-PSRAM part would break the LCD memory plan.
 
 DONE — `esp_ota_mark_app_valid_cancel_rollback()` runs from a background
 task gated on NVS-readable + web-server-up + OTA-routes-up
-(`boot_confirm_is_healthy()`, `App/drivers/boot_guard.h`); a live
+(`boot_confirm_is_healthy()`, `App/drivers/persist/boot_guard.h`); a live
 safety-link exchange was dropped from the bar 2026-08-22 (a board with no
 RP2040 answering could otherwise never confirm, silently reverting every OTA
 update). `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` deliberately left off.
@@ -1416,7 +1416,7 @@ sync with the web dashboard rather than duplicating/diverging from it (see
 DONE — LVGL chosen and owns the ILI9488 outright (replacing the old
 UART-remote-drawn `DISPLAY_CMD_*` path; this was an explicit user decision
 once two independent draw-call owners proved to be an unresolvable race).
-`App/drivers/kiln_ui.c`/`.h` is the page registry/switcher; every page is its
+`App/drivers/ui/kiln_ui.c`/`.h` is the page registry/switcher; every page is its
 own `ui_page_<name>.c`/`.h` pair, never inlined into `kiln_ui.c`. Fixed a real
 bug in the process: a touch waking the screen from idle previously set a flag
 with nothing to repaint it — `lvgl_port.c`'s flush callback now forces a
@@ -1451,7 +1451,7 @@ DECISIONS.md`'s LVGL/LCD section for the rule statement.
 
 ### 10.2 Visual style — match KlipperScreen
 
-DONE — `App/drivers/ui_theme.h` + `docs/UI_THEME.md`: dark-navy palette, five
+DONE — `App/drivers/ui/ui_theme.h` + `docs/UI_THEME.md`: dark-navy palette, five
 named accents, minimum touch target (72px), corner radius, padding, and status
 bar height, all as a single shared source of truth (10.6 restyles the web
 dashboard to match). First-pass values inferred from a description of
@@ -2277,7 +2277,7 @@ repeated here. Short version: ~20.5KB of the ~35KB is attributable to six
 internal-only task stacks created in that window (none uses
 `MALLOC_CAP_SPIRAM`); ~14KB is an honest, unfilled gap.
 
-**Shipped**: `App/drivers/dram_margin.h` (`dram_margin_check()`) wired into
+**Shipped**: `App/drivers/common/dram_margin.h` (`dram_margin_check()`) wired into
 `main.c`'s `heap_stage()` — every boot-time heap-stage log line now also
 checks `largest`/`dram_free` against the documented failure's own figures
 and logs `ESP_LOGE` if either is crossed, so a future regression here shows
@@ -2301,7 +2301,7 @@ numbers in this entry alone:
   `App/drivers/rules_task.c`) — removed 2026-08-27 with the rule engine,
   see `docs/PROFILES.md`; no longer a candidate.
 - `system_uart_bridge` (3072B, internal,
-  `App/drivers/uart_bridge.c`) — same two options, same caveat.
+  `App/drivers/bridge/uart_bridge.c`) — same two options, same caveat.
 - The ~14KB unattributed gap itself — worth a live coredump/heap-trace pass
   with real hardware rather than further static-analysis guessing.
 

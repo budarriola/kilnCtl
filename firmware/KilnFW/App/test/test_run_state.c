@@ -1,4 +1,4 @@
-// Host tests for App/drivers/run_state.c -- specifically persist_locked()'s
+// Host tests for App/drivers/control/run_state.c -- specifically persist_locked()'s
 // PSRAM-stack guard (DRAM_PSRAM_PLAN.md section 7: relocating profile_executor
 // to a PSRAM stack is the highest-care candidate in that plan precisely
 // because it calls run_state_note()/run_state_note_progress() -> here ->
@@ -26,7 +26,7 @@
 int g_test_failures = 0;
 int g_test_count = 0;
 
-#include "../drivers/run_state.c"
+#include "../drivers/control/run_state.c"
 
 static run_state_record_t make_sample_record(void)
 {

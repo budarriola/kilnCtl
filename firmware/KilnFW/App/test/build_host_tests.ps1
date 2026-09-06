@@ -87,31 +87,31 @@ $sources = @(
     (Join-Path $testDir "test_zone_sweep_relay_off_wiring.c"),
     (Join-Path $testDir "test_approach_rate_cap.c"),
     (Join-Path $testDir "sim_plant.c"),
-    (Join-Path $driversDir "pid.c"),
-    (Join-Path $driversDir "cone_table.c"),
-    (Join-Path $driversDir "thermal_guard.c"),
-    (Join-Path $driversDir "heater_output.c"),
-    (Join-Path $driversDir "pid_autotune.c"),
-    (Join-Path $driversDir "pid_fuzzy.c"),
-    (Join-Path $driversDir "ota_auth.c"),
-    (Join-Path $driversDir "ota_interlock.c"),
-    (Join-Path $driversDir "ota_record.c"),
-    (Join-Path $driversDir "heat_interlock.c"),
-    (Join-Path $driversDir "heat_enable.c"),
-    (Join-Path $driversDir "thermo_combine.c"),
-    (Join-Path $driversDir "profile_feasibility.c"),
-    (Join-Path $driversDir "ui_page_home_graph.c"),
-    (Join-Path $driversDir "max31856_codec.c"),
-    (Join-Path $driversDir "panel_codec.c"),
-    (Join-Path $driversDir "st7796_panel.c"),
-    (Join-Path $driversDir "panel_detect.c"),
-    (Join-Path $driversDir "owner_slot_pool.c"),
-    (Join-Path $driversDir "stack_margin.c"),
-    (Join-Path $driversDir "time_sync_tz.c"),
-    (Join-Path $driversDir "log_store.c"),
-    (Join-Path $driversDir "touch_dev.c"),
-    (Join-Path $driversDir "ramp_ident.c"),
-    (Join-Path $driversDir "iter_tune.c")
+    (Join-Path $driversDir "control/pid.c"),
+    (Join-Path $driversDir "control/cone_table.c"),
+    (Join-Path $driversDir "control/thermal_guard.c"),
+    (Join-Path $driversDir "control/heater_output.c"),
+    (Join-Path $driversDir "control/pid_autotune.c"),
+    (Join-Path $driversDir "control/pid_fuzzy.c"),
+    (Join-Path $driversDir "net/ota_auth.c"),
+    (Join-Path $driversDir "net/ota_interlock.c"),
+    (Join-Path $driversDir "persist/ota_record.c"),
+    (Join-Path $driversDir "control/heat_interlock.c"),
+    (Join-Path $driversDir "control/heat_enable.c"),
+    (Join-Path $driversDir "control/thermo_combine.c"),
+    (Join-Path $driversDir "control/profile_feasibility.c"),
+    (Join-Path $driversDir "ui/ui_page_home_graph.c"),
+    (Join-Path $driversDir "hw/max31856_codec.c"),
+    (Join-Path $driversDir "hw/panel_codec.c"),
+    (Join-Path $driversDir "hw/st7796_panel.c"),
+    (Join-Path $driversDir "hw/panel_detect.c"),
+    (Join-Path $driversDir "owners/owner_slot_pool.c"),
+    (Join-Path $driversDir "common/stack_margin.c"),
+    (Join-Path $driversDir "net/time_sync_tz.c"),
+    (Join-Path $driversDir "persist/log_store.c"),
+    (Join-Path $driversDir "hw/touch_dev.c"),
+    (Join-Path $driversDir "control/ramp_ident.c"),
+    (Join-Path $driversDir "control/iter_tune.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
@@ -146,6 +146,17 @@ $hostTestsRspLines = @(
     "/I`"$stubDir`""
     "/I`"$commonInc`""
     "/I`"$driversDir`""
+    "/I`"$driversDir\bridge`""
+    "/I`"$driversDir\common`""
+    "/I`"$driversDir\control`""
+    "/I`"$driversDir\http`""
+    "/I`"$driversDir\hw`""
+    "/I`"$driversDir\net`""
+    "/I`"$driversDir\owners`""
+    "/I`"$driversDir\persist`""
+    "/I`"$driversDir\safety`""
+    "/I`"$driversDir\sim`""
+    "/I`"$driversDir\ui`""
 )
 [System.IO.File]::WriteAllText($hostTestsRsp, ($hostTestsRspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
@@ -231,9 +242,9 @@ $exe2ObjDir = Join-Path $outDir "zones_obj\"
 if (-not (Test-Path $exe2ObjDir)) { New-Item -ItemType Directory -Path $exe2ObjDir | Out-Null }
 $cmd2 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
-        "`"$(Join-Path $driversDir 'zones_config_json.c')`" " +
-        "`"$(Join-Path $driversDir 'zones_config_convert.c')`" " +
-        "`"$(Join-Path $driversDir 'zones_config_migrate.c')`""
+        "`"$(Join-Path $driversDir 'persist/zones_config_json.c')`" " +
+        "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
+        "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`""
 
 Invoke-HostTestExe -Name "zones_http" -ExePath $exe2 -BuildCmd $cmd2
 
@@ -272,13 +283,13 @@ New-Item -ItemType Directory -Force -Path $peObjDir | Out-Null
 $cmd4 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$peObjDir\\`" /Fe:`"$exe4`" " +
         "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
-        "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
-        "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
-        "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'pid_fuzzy.c')`" " +
-        "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'zone_coupling_solve.c')`" " +
-        "`"$(Join-Path $driversDir 'adaptive_tune.c')`" `"$(Join-Path $driversDir 'adaptive_tune_model.c')`" " +
-        "`"$(Join-Path $driversDir 'adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`" " +
-        "`"$(Join-Path $driversDir 'cone_table.c')`""
+        "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/thermal_guard.c')`" " +
+        "`"$(Join-Path $driversDir 'control/heater_output.c')`" `"$(Join-Path $driversDir 'control/thermo_combine.c')`" " +
+        "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
+        "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+        "`"$(Join-Path $driversDir 'control/adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/adaptive_tune_model.c')`" " +
+        "`"$(Join-Path $driversDir 'control/adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
+        "`"$(Join-Path $driversDir 'control/cone_table.c')`""
 # profile_executor.c split 2026-09-01 ("files over 1500 lines should be
 # broken up where it makes sense") -- the new profile_executor_*.c pieces
 # are NOT added as separate compile units above; test_profile_executor_
@@ -300,9 +311,9 @@ New-Item -ItemType Directory -Force -Path $aeObjDir | Out-Null
 $cmd5 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" " +
         "/Fo:`"$aeObjDir\\`" /Fe:`"$exe5`" " +
         "`"$(Join-Path $testDir 'test_autotune_engine_prestart.c')`" " +
-        "`"$(Join-Path $driversDir 'thermal_guard.c')`" `"$(Join-Path $driversDir 'heater_output.c')`" " +
-        "`"$(Join-Path $driversDir 'thermo_combine.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`" " +
-        "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'stack_margin.c')`""
+        "`"$(Join-Path $driversDir 'control/thermal_guard.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
+        "`"$(Join-Path $driversDir 'control/thermo_combine.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
+        "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
 # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): autotune_engine.c's
 # autotune_engine_start() now calls stack_margin_register() (registration
 # only, no size change), and this executable #includes autotune_engine.c
@@ -362,9 +373,9 @@ New-Item -ItemType Directory -Force -Path $otaObjDir | Out-Null
 $cmd8 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$otaObjDir\\`" /Fe:`"$exe8`" " +
         "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
-        "`"$(Join-Path $driversDir 'ota_auth.c')`" `"$(Join-Path $driversDir 'ota_interlock.c')`" " +
-        "`"$(Join-Path $driversDir 'ota_record.c')`" `"$(Join-Path $driversDir 'ota_http_util.c')`" " +
-        "`"$(Join-Path $driversDir 'stack_margin.c')`""
+        "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
+        "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+        "`"$(Join-Path $driversDir 'common/stack_margin.c')`""
 # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): ota_http.c's
 # recovery-exit/rollback/pico-rollback reboot task starts now call
 # stack_margin_register() (registration only, no size change), and this
@@ -419,8 +430,8 @@ $kioObjDir = Join-Path $outDir "kio"
 New-Item -ItemType Directory -Force -Path $kioObjDir | Out-Null
 $cmd11 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
-        "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'kiln_io.c')`" " +
-        "`"$(Join-Path $driversDir 'owner_slot_pool.c')`" `"$(Join-Path $driversDir 'stack_margin.c')`""
+        "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
+        "`"$(Join-Path $driversDir 'owners/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
 # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): kiln_io_owner.c's
 # kiln_io_owner_start() now calls stack_margin_register() (registration
 # only, no size change), and this executable #includes kiln_io_owner.c
@@ -460,7 +471,7 @@ $stdObjDir = Join-Path $outDir "std"
 New-Item -ItemType Directory -Force -Path $stdObjDir | Out-Null
 $cmd13 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$stdObjDir\\`" /Fe:`"$exe13`" " +
-        "`"$(Join-Path $testDir 'test_safety_trip_decision.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`""
+        "`"$(Join-Path $testDir 'test_safety_trip_decision.c')`" `"$(Join-Path $driversDir 'safety/safety_trip_decision.c')`""
 
 Invoke-HostTestExe -Name "safety_trip_decision" -ExePath $exe13 -BuildCmd $cmd13
 
@@ -502,8 +513,8 @@ $slExtra = @("kilnlink_config_page.c", "kilnlink_announce.c", "kilnlink_announce
 $cmd14 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$slObjDir\\`" /Fe:`"$exe14`" " +
         "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +
-        "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`" " +
-        "`"$(Join-Path $driversDir 'safety_link_frame.c')`" " +
+        "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'safety/safety_trip_decision.c')`" " +
+        "`"$(Join-Path $driversDir 'safety/safety_link_frame.c')`" " +
         "$($slExtra -join ' ')"
 
 Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
@@ -571,8 +582,8 @@ New-Item -ItemType Directory -Force -Path $atObjDir | Out-Null
 # zones_config_get/set_model/pid fakes.
 $cmd17 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$atObjDir\\`" /Fe:`"$exe17`" " +
-        "`"$(Join-Path $testDir 'test_adaptive_tune.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`" " +
-        "`"$(Join-Path $driversDir 'zone_coupling_solve.c')`""
+        "`"$(Join-Path $testDir 'test_adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
+        "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`""
 
 Invoke-HostTestExe -Name "adaptive_tune" -ExePath $exe17 -BuildCmd $cmd17
 
@@ -588,7 +599,7 @@ $elObjDir = Join-Path $outDir "el"
 New-Item -ItemType Directory -Force -Path $elObjDir | Out-Null
 $cmd18 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$elObjDir\\`" /Fe:`"$exe18`" `"$(Join-Path $testDir 'test_event_log.c')`" " +
-        "`"$(Join-Path $driversDir 'event_log.c')`""
+        "`"$(Join-Path $driversDir 'persist/event_log.c')`""
 
 Invoke-HostTestExe -Name "event_log" -ExePath $exe18 -BuildCmd $cmd18
 
@@ -623,7 +634,7 @@ $zcsObjDir = Join-Path $outDir "zcs"
 New-Item -ItemType Directory -Force -Path $zcsObjDir | Out-Null
 $cmd20 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" " +
         "/Fo:`"$zcsObjDir\\`" /Fe:`"$exe20`" `"$(Join-Path $testDir 'test_zone_coupling_solve.c')`" " +
-        "`"$(Join-Path $driversDir 'zone_coupling_solve.c')`""
+        "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`""
 
 Invoke-HostTestExe -Name "zone_coupling_solve" -ExePath $exe20 -BuildCmd $cmd20
 

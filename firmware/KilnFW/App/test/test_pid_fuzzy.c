@@ -1,5 +1,5 @@
 #include "test_common.h"
-#include "../drivers/pid_fuzzy.h"
+#include "../drivers/control/pid_fuzzy.h"
 
 #include <math.h>
 

@@ -1,4 +1,4 @@
-// Host tests for App/drivers/stack_margin_calc.h -- the pure arithmetic
+// Host tests for App/drivers/common/stack_margin_calc.h -- the pure arithmetic
 // behind TODO.md section 13's stack high-water-mark report. Everything in
 // stack_margin_calc.h is a header-only inline function, no ESP-IDF, no I/O
 // -- included directly here, same as test_dram_margin.c includes
@@ -11,7 +11,7 @@
 // exercised below.
 #include "test_common.h"
 
-#include "../drivers/stack_margin_calc.h"
+#include "../drivers/common/stack_margin_calc.h"
 
 static void test_esp_idf_returns_bytes_so_the_factor_is_one(void)
 {

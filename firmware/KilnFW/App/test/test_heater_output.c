@@ -1,5 +1,5 @@
 #include "test_common.h"
-#include "../drivers/heater_output.h"
+#include "../drivers/control/heater_output.h"
 
 void run_test_heater_output(void)
 {

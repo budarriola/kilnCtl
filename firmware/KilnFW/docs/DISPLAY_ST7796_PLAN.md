@@ -147,7 +147,7 @@ a `panel_desc_t`, with `panel_codec.c` and `st7796_panel.c` alongside it.)*
 | Panel ID read | `ILI9488.c:1603` | RDDID `0x04` on a second 4 MHz device handle. **Nothing branches on it today.** |
 | LVGL | `components/lvgl` 9.5.0, vendored local component | `LV_COLOR_FORMAT_RGB565`, `RENDER_MODE_PARTIAL`, two 480×40×2 = 38400 B buffers in PSRAM (`lvgl_port.c:544`), custom PSRAM allocator. |
 | Flush | `lvgl_port.c:120` | Fully synchronous. The double buffer buys nothing today. |
-| Touch | `App/drivers/NS2009.c` | 4-wire resistive, I²C 0x48/0x49 (probed). 3×3 affine calibration in NVS. PENIRQ unused. |
+| Touch | `App/drivers/hw/NS2009.c` | 4-wire resistive, I²C 0x48/0x49 (probed). 3×3 affine calibration in NVS. PENIRQ unused. |
 | SPI bus | `App/main_boot_early.c:420-439` (was `App/main.c` line 753 area before the boot-phase split) | **SPI2**, `SPI_DMA_CH_AUTO`, `max_transfer_sz = 1440`. SCLK 12 / MOSI 11 / MISO 13 — **these are exactly the SPI2 IOMUX pins**, so clock and data are already on IOMUX, not the GPIO matrix. Display CS = GPIO21 (matrix, fine). |
 | SPI arbitration | `espInterfaces/esp_spi_owner.c` | One owner task + queue; **software CS** (`spics_io_num = -1` everywhere); blocking `spi_device_transmit()`. Display borrows the thermocouples' owner (`main.c:906`). |
 | I²C | `main.c:634`, `i2c_owner.c` | New `i2c_master` driver. SX1509 at 0x3E. Each driver builds its own `i2c_owner_t`. |
@@ -1447,7 +1447,7 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
 - [x] Backlight PWM (dim/off on idle, touch-driven wake) if the bodge in 3.4.1
       was fitted — this is what `KILNCTL_TOUCH_IDLE_TIMEOUT_MS` has been waiting
       for. **Firmware side LANDED 2026-09-03**, same anticipatory/default-off
-      posture as 9.3/9.4/9.6/9.7 above: `App/drivers/backlight_pwm.c/.h`, an
+      posture as 9.3/9.4/9.6/9.7 above: `App/drivers/hw/backlight_pwm.c/.h`, an
       LEDC-PWM driver behind default-OFF `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE`
       (new "Backlight PWM" Kconfig menu, `App/drivers/Kconfig`), polling
       `screen_idle_get_state()` and mapping screen_on ->

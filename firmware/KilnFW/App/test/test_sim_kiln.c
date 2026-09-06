@@ -17,8 +17,8 @@
 #include <stdio.h>
 
 #include "test_common.h"
-#include "../drivers/pid_autotune.h"
-#include "../drivers/thermal_guard.h"
+#include "../drivers/control/pid_autotune.h"
+#include "../drivers/control/thermal_guard.h"
 #include "sim_plant.h"
 
 #define DT_S 10.0f

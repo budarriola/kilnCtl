@@ -1,11 +1,11 @@
-// Host tests for App/drivers/ota_auth.c -- UPDATE_PROTOCOL.md section 2's
+// Host tests for App/drivers/net/ota_auth.c -- UPDATE_PROTOCOL.md section 2's
 // nonce lifecycle, constant-time compare, and lockout/backoff. No ESP-IDF
 // dependency.
 #include <string.h>
 
 #include "test_common.h"
 
-#include "../drivers/ota_auth.h"
+#include "../drivers/net/ota_auth.h"
 
 static void test_nonce_lifecycle(void)
 {

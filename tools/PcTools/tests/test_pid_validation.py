@@ -951,7 +951,7 @@ def test_hard_max_abort_stops_the_dry_run_and_still_tears_down(harness, tmp_path
 # full validation run burned an hour of kiln heating only to discover, at
 # stage 5, that the profile name the harness sent ("pid_validation_tracking",
 # 23 chars) exceeded the firmware's PROFILE_NAME_MAX_LEN (15 chars --
-# firmware/KilnFW/App/drivers/profiles_http.h:29, enforced by the "name too
+# firmware/KilnFW/App/drivers/http/profiles_http.h:29, enforced by the "name too
 # long" check at profiles_http.c:1346-1349). Every check below is proven able
 # to FAIL (break the bound, see the assertion fire, restore) before being
 # trusted to pass -- an assertion that cannot be shown failing has no
@@ -1510,7 +1510,7 @@ def test_on_sample_exception_is_logged_once_not_per_sample(caplog):
 def test_real_sample_response_duty_by_zone_uses_the_firmware_zone_key():
     """DEFECT NEGATIVE TEST (consumer without producer): the firmware's
     /api/profile_exec zone objects use the key "zone", NOT "index" --
-    firmware/KilnFW/App/drivers/dashboard_http.c:1220-1258's
+    firmware/KilnFW/App/drivers/http/dashboard_http.c:1220-1258's
     append_zone_status_json() (shared by /api/profile_exec and
     /api/control) emits ``{"zone":%u,...,"duty":%.3f,...}``. "index" is a
     DIFFERENT endpoint's config key (/api/zones, zones_http.c:4184/4210)

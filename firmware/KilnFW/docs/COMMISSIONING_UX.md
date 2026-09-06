@@ -28,7 +28,7 @@
 
 ## 0. The problem, stated precisely
 
-`App/drivers/safety_commissioning_page.html` renders **58 parameters** as a flat
+`App/drivers/http/safety_commissioning_page.html` renders **58 parameters** as a flat
 list of id/value pairs, grouped only by `CONFIG_REFERENCE.md`'s section numbers.
 Every one is an editable box. The operator is asked, in the same visual weight,
 for `abs_max_temp_c` (🔴, no default, disables the single guard that justifies
@@ -46,7 +46,7 @@ Three facts make it worse than "long":
    the steady state roughly `startup_grace_s` (60 s) after Pico boot. Nothing on
    the page says so.
 3. **The page's values are not the Pico's values.** They come from the ESP-local
-   NVS cache (`safety_cfg_store_*` in `App/drivers/safety_cfg_http.c`), and
+   NVS cache (`safety_cfg_store_*` in `App/drivers/http/safety_cfg_http.c`), and
    `set` has been asserted unconditionally per field, so a never-commissioned
    `abs_max_temp_c` renders as a *commissioned* `0 °C` — which in S1's arithmetic
    is a ceiling no temperature is below, i.e. never trip. Another agent is
@@ -101,7 +101,7 @@ Two fields sit one step outside this list and are deliberately *not* asked:
 ### 1.2 DERIVED — computed from something already known
 
 Sources referenced below:
-**Z** = the zones configuration (`App/drivers/zones_http.h`: `zones_config_get_safety_tc_type()`,
+**Z** = the zones configuration (`App/drivers/http/zones_http.h`: `zones_config_get_safety_tc_type()`,
 `zones_config_get_tc_type()`, `zones_config_get_ct_mask()`, `zones_config_get_relay_mask()`,
 `zones_config_get_thermo_mask()`).
 **M** = the per-zone normal-current measurement of ROADMAP M12 (assumed to

@@ -1,4 +1,4 @@
-// Host tests for App/drivers/watchdog_cfg.c -- the persisted "operator
+// Host tests for App/drivers/safety/watchdog_cfg.c -- the persisted "operator
 // disabled the task-watchdog panic" switch behind the owner's bench-
 // debugging request. #includes watchdog_cfg.c directly (same convention as
 // test_boot_guard.c/test_kiln_cfg_store.c) to reach its static
@@ -22,7 +22,7 @@
 
 #include "esp_err.h"
 
-#include "../drivers/watchdog_cfg.c"
+#include "../drivers/safety/watchdog_cfg.c"
 
 // ---------------------------------------------------------------------------
 // Simulated reboot: resets everything that would be lost on a real power

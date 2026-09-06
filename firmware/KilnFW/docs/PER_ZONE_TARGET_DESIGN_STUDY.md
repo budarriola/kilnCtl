@@ -531,7 +531,7 @@ verified during it.
 
 - This report: `firmware/KilnFW/docs/PER_ZONE_TARGET_DESIGN_STUDY.md`.
 - Linked from `PID_EXPANSION_PLAN.md` §3.6d.
-- Built from: `firmware/KilnFW/App/drivers/profile_executor.c`,
+- Built from: `firmware/KilnFW/App/drivers/control/profile_executor.c`,
   `profile_executor_internal.h`, `profile_feasibility.c`,
   `thermal_guard.c`, `autotune_engine.c`, `safety_link_frames.c` (read only);
   `firmware/CommonFW/docs/LINK_PROTOCOL.md`; `firmware/SaftyFW/src/snapshots.h`,

@@ -1,4 +1,4 @@
-// Host test for App/drivers/profiles_http.c's on-flash blob decoding
+// Host test for App/drivers/http/profiles_http.c's on-flash blob decoding
 // (decode_profile_blob()/nvs_load_all_from(), both `static`) -- added
 // 2026-08-27 for the exact data-loss defect PROFILE_VERSION's own header
 // comment in profiles_http.c documents: an earlier draft of the 1->2 crc32
@@ -226,12 +226,12 @@ static esp_err_t nvs_erase_key(nvs_handle_t h, const char *key)
 // #define it away, same convention test_zones_http.c uses.
 #define asm(x)
 
-#include "../drivers/profiles_http.c"
+#include "../drivers/http/profiles_http.c"
 // profiles_http.c split 2026-09-04 (ROADMAP.md M15, the 1500-line rule) --
 // #include the sibling files alongside it, same convention
 // test_wifi_prov.c/test_autotune_engine_prestart.c use for their own splits.
-#include "../drivers/profiles_catalog_http.c"
-#include "../drivers/profiles_edit_http.c"
+#include "../drivers/http/profiles_catalog_http.c"
+#include "../drivers/http/profiles_edit_http.c"
 
 #undef asm
 #undef TEST_STUB_NVS_H

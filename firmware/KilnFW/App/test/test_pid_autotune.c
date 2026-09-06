@@ -2,7 +2,7 @@
 // truth -- TODO.md 6A.4/6A.8's "autotune against the sim first... the only
 // place the identification math can be validated exactly."
 #include "test_common.h"
-#include "../drivers/pid_autotune.h"
+#include "../drivers/control/pid_autotune.h"
 #include "sim_plant.h"
 #include <string.h>
 

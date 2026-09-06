@@ -1,4 +1,4 @@
-// Host tests for App/drivers/backup_http.c's import validation pass
+// Host tests for App/drivers/http/backup_http.c's import validation pass
 // (backup_import_apply()), added 2026-08-21 alongside backup_http.c itself.
 //
 // backup_import_apply() is `static` with no public seam -- like
@@ -70,10 +70,10 @@ void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_
 // pulled in here, same convention as before the split (backup_import_apply()
 // is `static` with no public seam, and the other three still have to
 // compile and link even though these tests only ever call it).
-#include "../drivers/backup_json.c"
-#include "../drivers/backup_export.c"
-#include "../drivers/backup_import.c"
-#include "../drivers/backup_http.c"
+#include "../drivers/persist/backup_json.c"
+#include "../drivers/http/backup_export.c"
+#include "../drivers/http/backup_import.c"
+#include "../drivers/http/backup_http.c"
 
 #undef asm
 
@@ -86,7 +86,7 @@ void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_
 // so a break in the SHIPPED algorithm (zones_http.c's real
 // zone_settings_source_chain.h use) shows up here too -- see this header's
 // own comment for why that gap existed before today.
-#include "../drivers/zone_settings_source_chain.h"
+#include "../drivers/persist/zone_settings_source_chain.h"
 
 // ---- Embedded-page symbols backup_page_get_handler() references ----------
 // Never actually sent by these tests (that handler is never called), but

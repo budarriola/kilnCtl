@@ -1,4 +1,4 @@
-// Host tests for App/drivers/boot_button.c -- the BOOT-button (GPIO0)
+// Host tests for App/drivers/bridge/boot_button.c -- the BOOT-button (GPIO0)
 // long-press recovery hatch behind the owner's "I lost the AP password"
 // request (see boot_button.h's header comment for the full feature).
 //
@@ -45,11 +45,11 @@
 
 #include "esp_err.h"
 
-#include "../drivers/profile_executor.h"
+#include "../drivers/control/profile_executor.h"
 
 /* See this file's header comment. Never actually invoked by any test below
  * (state_refuses_bypass() and boot_button_step() are pure and call
- * nothing) -- exists purely so ../drivers/boot_button.c links. */
+ * nothing) -- exists purely so ../drivers/bridge/boot_button.c links. */
 void profile_executor_get_status(profile_exec_status_t *out)
 {
     if (out) {
@@ -57,7 +57,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
     }
 }
 
-#include "../drivers/boot_button.c"
+#include "../drivers/bridge/boot_button.c"
 
 // ---------------------------------------------------------------------------
 // boot_button_step() -- the hold-detector state machine.

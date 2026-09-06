@@ -27,7 +27,7 @@ _LOG_LEVEL_LETTER: dict[LogLevel, str] = {
 class LogLine:
     """One decoded LOG frame: a device-side ESP_LOGx call, captured and
     forwarded by ``uart_log_bridge.c`` instead of going to the USB-Serial-JTAG
-    console (see App/drivers/uart_log_bridge.c)."""
+    console (see App/drivers/bridge/uart_log_bridge.c)."""
 
     level: LogLevel
     text: str

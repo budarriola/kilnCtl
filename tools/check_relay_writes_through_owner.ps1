@@ -100,12 +100,12 @@ function Get-CodeOnlyLines {
 # kiln_io_set_relay_mask() call. ---
 $allowlist = @(
     @{
-        RelPath  = "firmware/KilnFW/App/drivers/kiln_io.c"
+        RelPath  = "firmware/KilnFW/App/drivers/owners/kiln_io.c"
         Function = "kiln_io_set_relay_mask"
         Reason   = "definition site of both functions; kiln_io_set_relay() in this same file calls kiln_io_set_relay_mask() as a single-relay convenience wrapper around its own sibling function -- not a second caller bypassing the owner queue."
     },
     @{
-        RelPath  = "firmware/KilnFW/App/drivers/kiln_io.c"
+        RelPath  = "firmware/KilnFW/App/drivers/owners/kiln_io.c"
         Function = "kiln_io_all_relays_off"
         Reason   = "definition site of both functions."
     },
@@ -115,7 +115,7 @@ $allowlist = @(
         Reason   = "kiln_enter_safe_state() -- the shutdown/panic path documented as a licensed exception in kiln_io_owner.h:75-89 (app_main giving up must still be able to drop relays even if the owner task is the thing that's wedged)."
     },
     @{
-        RelPath  = "firmware/KilnFW/App/drivers/profile_executor.c"
+        RelPath  = "firmware/KilnFW/App/drivers/control/profile_executor.c"
         Function = "kiln_io_all_relays_off"
         Reason   = "guard 9 / safety-link-silence watchdog abort path -- documented as a licensed exception in kiln_io_owner.h:75-89 (must still run if the main control task, which is what normally posts to the owner, is the thing that's stuck)."
     }

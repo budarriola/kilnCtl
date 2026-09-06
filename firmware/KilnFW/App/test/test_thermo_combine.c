@@ -1,5 +1,5 @@
 #include "test_common.h"
-#include "../drivers/thermo_combine.h"
+#include "../drivers/control/thermo_combine.h"
 
 void run_test_thermo_combine(void)
 {

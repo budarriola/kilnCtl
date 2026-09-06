@@ -1,4 +1,4 @@
-// Host test for App/drivers/safety_trip_decision.c -- the pure decision
+// Host test for App/drivers/safety/safety_trip_decision.c -- the pure decision
 // factored out of safety_link.c's safety_apply_trip_event() (2026-08-28 opus
 // review: that logic had NO automated test, because no host harness links
 // safety_link.c -- see safety_trip_decision.h's doc comment for the full
@@ -15,7 +15,7 @@ int g_test_count = 0;
 
 #include "test_common.h"
 
-#include "../drivers/safety_trip_decision.h"
+#include "../drivers/safety/safety_trip_decision.h"
 
 // ---------------------------------------------------------------------------
 // The three cases the task brief names as the minimum bar, each stated in

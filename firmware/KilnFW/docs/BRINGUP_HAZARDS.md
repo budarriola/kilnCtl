@@ -144,7 +144,7 @@ only confirmation that command needs.
 
 ## LVGL status-bar icon touch clipping (2026-08-20)
 
-Found wiring the shared LCD top-bar (`App/drivers/ui_topbar.c`), by measuring
+Found wiring the shared LCD top-bar (`App/drivers/ui/ui_topbar.c`), by measuring
 on hardware rather than trusting the layout: `ui_theme_apply_touch_area()`
 cannot rescue a child whose parent clips it. LVGL hit-testing descends the
 widget tree, so a child's extended click area can never reach outside a

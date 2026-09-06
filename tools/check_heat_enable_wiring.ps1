@@ -163,7 +163,7 @@ if ($violations.Count -gt 0) {
     Write-Host ""
     Write-Host "  A run that commands heat without requesting it from the safety processor" -ForegroundColor Red
     Write-Host "  is indistinguishable, from the outside, from a kiln that will not heat." -ForegroundColor Red
-    Write-Host "  See firmware/KilnFW/App/drivers/heat_enable.h." -ForegroundColor Red
+    Write-Host "  See firmware/KilnFW/App/drivers/control/heat_enable.h." -ForegroundColor Red
     throw "$($violations.Count) heat-enable wiring violation(s)"
 }
 

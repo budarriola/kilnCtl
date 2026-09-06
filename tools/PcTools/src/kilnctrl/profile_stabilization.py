@@ -9,7 +9,7 @@ enough for every zone to settle, before the original (unscored) segments
 begin.
 
 WHY A PROFILE SEGMENT AND NOT A RUNNER-SIDE PRE-HOLD. profile_executor's
-segment machinery (``firmware/KilnFW/App/drivers/profiles_http.h``'s
+segment machinery (``firmware/KilnFW/App/drivers/http/profiles_http.h``'s
 ``profile_segment_t``: ``target_c`` / ``ramp_c_per_hr`` / ``dwell_min``, kind
 ``PROFILE_SEG_KIND_ZONE_RAMP``) already expresses exactly "ramp to a target,
 then hold there for N minutes" -- that IS a stabilisation hold. No new
@@ -33,7 +33,7 @@ from typing import Sequence
 
 from .devices_profiles import ProfileSegment
 
-#: Mirrors firmware/KilnFW/App/drivers/profiles_http.h's PROFILE_MAX_SEGMENTS.
+#: Mirrors firmware/KilnFW/App/drivers/http/profiles_http.h's PROFILE_MAX_SEGMENTS.
 #: Not imported (no python binding for the C header) -- kept in sync by hand;
 #: see that header if this ever needs bumping.
 PROFILE_MAX_SEGMENTS = 12

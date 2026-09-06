@@ -1,6 +1,6 @@
 # UI theme -- shared palette (LCD + web)
 
-TODO.md section 10.2. Source of truth: `App/drivers/ui_theme.h` (LVGL, for the
+TODO.md section 10.2. Source of truth: `App/drivers/ui/ui_theme.h` (LVGL, for the
 LCD). This doc mirrors the same values in table form and explains how the web
 dashboard (section 10.6) is meant to consume them.
 
@@ -34,7 +34,7 @@ and update both this table and `ui_theme.h` together if it needs correcting.
 
 | Name | Value | Purpose |
 |---|---|---|
-| `UI_THEME_MIN_TOUCH_TARGET_PX` | 72 px | Minimum touch target edge length. Budgeted against the 480x320 landscape panel (`DISPLAY_WIDTH`/`DISPLAY_HEIGHT`, `App/drivers/settings.h`) -- a round number sized to fit a small grid of large buttons on that resolution, not a measured fingertip size. |
+| `UI_THEME_MIN_TOUCH_TARGET_PX` | 72 px | Minimum touch target edge length. Budgeted against the 480x320 landscape panel (`DISPLAY_WIDTH`/`DISPLAY_HEIGHT`, `App/drivers/hw/settings.h`) -- a round number sized to fit a small grid of large buttons on that resolution, not a measured fingertip size. |
 | `UI_THEME_CORNER_RADIUS_PX` | 10 px | Standard corner radius for buttons/cards. |
 | `UI_THEME_PADDING_PX` | 8 px | Standard padding/gap between grouped elements. Phase 7: now an alias for `UI_THEME_SPACE_2` (same value, see the spacing scale below) rather than its own literal. |
 | `UI_THEME_STATUS_BAR_HEIGHT_PX` | 32 px | Persistent top status bar height. |
@@ -109,7 +109,7 @@ values into a shared CSS custom-properties block, e.g.:
 }
 ```
 
-This document, together with `App/drivers/ui_theme.h`, is the single source
+This document, together with `App/drivers/ui/ui_theme.h`, is the single source
 of truth both front ends should read from -- the LCD (LVGL, `ui_theme.h`) and
 the web dashboard (CSS, not yet built) should not pick their own palettes
 independently, per the 10.5 web/LCD parity rule. That CSS block itself is not

@@ -1,5 +1,5 @@
 """Tests for kilnctrl.event_log_decoder -- the PC-side reader for KilnFW's
-on-flash binary event log (firmware/KilnFW/App/drivers/event_log.h).
+on-flash binary event log (firmware/KilnFW/App/drivers/persist/event_log.h).
 
 Fixtures under tests/fixtures/event_log/ are hand-built byte streams
 matching event_log.c's exact record layout (see

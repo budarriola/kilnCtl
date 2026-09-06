@@ -1562,7 +1562,7 @@ def coupled_hold_feasibility_sweep(matrix: np.ndarray, ambient_c: float,
                                     t_max_above_ambient_c: float = 200.0, t_step_c: float = 0.5
                                     ) -> dict:
     """Reproduce, offline, the feasibility gate ``zone_coupling_solve_hold()``
-    applies on the board (``firmware/KilnFW/App/drivers/zone_coupling_solve.c``):
+    applies on the board (``firmware/KilnFW/App/drivers/control/zone_coupling_solve.c``):
     for a coupled hold solve of ALL THREE zones driven to the SAME setpoint
     (``u = A^-1 @ (T - ambient) * ones(3)``), a candidate is judged
     infeasible the instant any zone's solved duty exceeds 1.0 -- the exact

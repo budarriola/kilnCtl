@@ -4,7 +4,7 @@
 gui_wifi_firing.py:_apply_firing_profile() renders each zone's
 control_mode int through a small hand-maintained dict. That dict must
 stay in sync with zone_control_mode_t
-(firmware/KilnFW/App/drivers/zones_http.h) -- it drifted once already
+(firmware/KilnFW/App/drivers/http/zones_http.h) -- it drifted once already
 (mode 3, PID_FUZZY, rendered as "?" for every zone actually running
 fuzzy control). This test pins all four known values to distinct
 non-"?" strings and pins the "?" fallback for anything outside that

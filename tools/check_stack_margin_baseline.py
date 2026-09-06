@@ -62,7 +62,7 @@ import json
 import sys
 from pathlib import Path
 
-# Mirrors App/drivers/stack_margin_calc.h's STACK_MARGIN_CRITICAL_PCT/
+# Mirrors App/drivers/common/stack_margin_calc.h's STACK_MARGIN_CRITICAL_PCT/
 # STACK_MARGIN_LOW_PCT exactly -- if that header's cut points are ever
 # retuned "from what the bench actually shows" (its own comment's rule),
 # this pair must move with it or check #1 above starts failing every

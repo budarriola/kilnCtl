@@ -4,7 +4,7 @@
 (the sole Python port of this repo's fuzzy-PID math, since ``plant_sim.py``
 was changed to import it rather than carry its own second hand copy) still
 agrees NUMERICALLY with the real, unmodified
-``firmware/KilnFW/App/drivers/pid_fuzzy.c``'s ``pid_fuzzy_adjust()``.
+``firmware/KilnFW/App/drivers/control/pid_fuzzy.c``'s ``pid_fuzzy_adjust()``.
 
 WHY NUMERICAL EQUIVALENCE, NOT A TEXTUAL DIFF (the technique
 ``approach_rate_cap_mirror_drift_check.py``/``power_diag_flag_mirror_drift_
@@ -26,7 +26,7 @@ about what class of drift it can and cannot catch (see LIMITS below).
 
 MECHANISM. This script:
   1. Builds ``pid_fuzzy_drift_harness.c`` (this directory), which links the
-     REAL, unmodified ``../drivers/pid_fuzzy.c`` -- no stub tree needed,
+     REAL, unmodified ``../drivers/control/pid_fuzzy.c`` -- no stub tree needed,
      since pid_fuzzy.c has zero FreeRTOS/ESP-IDF/logging dependencies (see
      pid_fuzzy.h's own header comment). The harness reads 8-float test
      vectors from stdin and prints ``pid_fuzzy_adjust()``'s three output

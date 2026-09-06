@@ -5,7 +5,7 @@ INFO_CMD_GET_STACK_MARGIN (0x04), added to unblock KilnFW TODO.md section 13:
 internal-only FreeRTOS task stacks that must not be resized "from the numbers
 in this entry alone" without a real uxTaskGetStackHighWaterMark() reading.
 This is the PC-side half of that measurement path -- see
-App/drivers/stack_margin.c/build_stack_margin_reply() in uart_bridge_info.c
+App/drivers/common/stack_margin.c/build_stack_margin_reply() in uart_bridge_info.c
 for the firmware side this mirrors byte-for-byte.
 
 No real UART/serial connection is used -- this only checks the byte-exact

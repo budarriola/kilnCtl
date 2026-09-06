@@ -552,7 +552,7 @@ history and are not hypothetical — each has already caused a problem here once
    tests inject a fake `read_memory_fn` in place of the OpenOCD call.
 
    **Current mechanism**: `GET /api/partitions`
-   (`firmware/KilnFW/App/drivers/partition_info_http.c`), a new endpoint
+   (`firmware/KilnFW/App/drivers/http/partition_info_http.c`), a new endpoint
    that reports the RUNNING firmware's own live partition table via
    ESP-IDF's `esp_partition_find()`/`esp_partition_next()` iterator, called
    from inside the app itself — no JTAG, no core halt, works while the

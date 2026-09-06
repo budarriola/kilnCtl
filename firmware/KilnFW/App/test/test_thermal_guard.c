@@ -2,7 +2,7 @@
 #include <string.h>
 
 #include "test_common.h"
-#include "../drivers/thermal_guard.h"
+#include "../drivers/control/thermal_guard.h"
 
 static thermal_guard_input_t base_input(void)
 {

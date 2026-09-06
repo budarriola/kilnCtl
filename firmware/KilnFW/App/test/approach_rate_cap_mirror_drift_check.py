@@ -45,7 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
 
-PROD_REL = "firmware/KilnFW/App/drivers/profile_executor.c"
+PROD_REL = "firmware/KilnFW/App/drivers/control/profile_executor.c"
 MIRROR_REL = "firmware/KilnFW/App/test/test_approach_rate_cap.c"
 
 # profile_executor.c has several loops over MAX31856_CHANNEL_COUNT (the

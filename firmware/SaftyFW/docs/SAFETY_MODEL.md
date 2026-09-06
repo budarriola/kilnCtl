@@ -464,7 +464,7 @@ I'm fine now." The reason lives entirely on the ESP side, as `safety_link.h`'s
 `fault_sources` bitmask (`SAFETY_FAULT_SRC_MANUAL | PC_LINK | THERMO |
 SAFETY_LINK | APP | THERMAL_SANITY`), which the web dashboard and the LCD's
 Diagnostics → Trip Detail page now both decode into words and a suggested
-remedy (`firmware/KilnFW/App/drivers/safety_trip_words.h` — the one shared
+remedy (`firmware/KilnFW/App/drivers/safety/safety_trip_words.h` — the one shared
 table both surfaces read, so they cannot drift). 2026-08-27: the ESP now also
 snapshots that mask **at the instant the trip latches**
 (`safety_link_status_t.trip_fault_sources`, set in `safety_apply_trip_event()`
@@ -563,7 +563,7 @@ The window is 20s (`REBOOT_GRACE_WINDOW_MS`, `safety_core.c`) -- a software
 timeout with generous margin over a plausible ESP32-S3 boot-to-first-
 PUSH_CONTEXT time, in the same "reasonable timeout, not a measured physical
 constant" category as `SAFETY_LINK_STALE_MS`/`SAFETY_LINK_FIRING_ABORT_
-SILENCE_MS` (`firmware/KilnFW/App/drivers/safety_link.h`), *not* the same
+SILENCE_MS` (`firmware/KilnFW/App/drivers/safety/safety_link.h`), *not* the same
 category as S8's rate-of-rise threshold, which this document explicitly
 forbids guessing. 20s sits comfortably below `link_dead_hard_s`'s 120s
 unconditional backstop, so a reboot that genuinely fails to come back is

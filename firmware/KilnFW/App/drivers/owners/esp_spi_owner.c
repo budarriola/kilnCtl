@@ -6,8 +6,8 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 
-#include "../owner_slot_pool.h"
-#include "../stack_margin.h"
+#include "owner_slot_pool.h"
+#include "stack_margin.h"
 
 static const char *TAG = "esp_spi_owner";
 

@@ -4,7 +4,7 @@
 # one model, so a guard trip on the host means the same thing on the board.
 set(SIM_SRCS "")
 if(CONFIG_KILNCTL_SIM_PLANT)
-    set(SIM_SRCS "sim_backend.c" "../test/sim_plant.c")
+    set(SIM_SRCS "sim/sim_backend.c" "../test/sim_plant.c")
 endif()
 
 # TODO.md 10.6a: pre-gzip the embedded web pages (+ theme.css) so
@@ -62,7 +62,7 @@ endif()
 # empty list the same as "no data yet", not an error.
 get_filename_component(KILNCTL_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
 set(KILNCTL_TUNING_REC_REAL "${KILNCTL_REPO_ROOT}/tools/PcTools/config_presets/tuning_recommendations.json")
-set(KILNCTL_TUNING_REC_FALLBACK "${CMAKE_CURRENT_SOURCE_DIR}/tuning_recommendations_fallback.json")
+set(KILNCTL_TUNING_REC_FALLBACK "${CMAKE_CURRENT_SOURCE_DIR}/http/tuning_recommendations_fallback.json")
 if(EXISTS "${KILNCTL_TUNING_REC_REAL}")
     set(KILNCTL_TUNING_REC_SRC "${KILNCTL_TUNING_REC_REAL}")
 else()
@@ -93,19 +93,20 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KILNCTL_TUNING_REC_FALLBACK}")
 
     set(KILNCTL_GZIP_ASSETS
-        "wifi_provision_page.html" "main_page.html"
-        "profiles_page.html" "readiness_page.html" "theme.css"
-        "ota_page.html" "nav.js" "app.js"
-        "diagnostics_page.html" "safety_page.html"
-        "settings_page.html" "backup_page.html"
-        "settings_display_page.html"
-        "safety_commissioning_page.html"
-        "safety_config_page.html"
-        "zones_page.html")
+        "net/wifi_provision_page.html" "http/main_page.html"
+        "http/profiles_page.html" "http/readiness_page.html" "http/theme.css"
+        "net/ota_page.html" "http/nav.js" "http/app.js"
+        "http/diagnostics_page.html" "http/safety_page.html"
+        "http/settings_page.html" "http/backup_page.html"
+        "http/settings_display_page.html"
+        "http/safety_commissioning_page.html"
+        "http/safety_config_page.html"
+        "http/zones_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
+        get_filename_component(kilnctl_gz_basename "${asset}" NAME)
         set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")
-        set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${asset}.gz")
+        set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${kilnctl_gz_basename}.gz")
         execute_process(
             COMMAND "${Python3_EXECUTABLE}" -c
                 "import gzip, shutil, sys; shutil.copyfileobj(open(sys.argv[1], 'rb'), gzip.open(sys.argv[2], 'wb', 9))"
@@ -129,54 +130,54 @@ endif()
 # reports this component unknown, check
 # $IDF_PATH/components/esp_driver_tsens (or wherever temperature_sensor.h
 # actually lives in the installed toolchain) and fix the name here.
-idf_component_register(SRCS "MAX31856.c"
-                       "max31856_codec.c"
-                       "SX1509.c"
-                       "kiln_io.c"
-                       "kiln_io_owner.c"
-                       "thermo_owner.c"
-                       "owner_slot_pool.c"
-                       "panel_spi.c"
-                       "panel_spi_bringup.c"
-                       "panel_spi_draw.c"
-                       "panel_spi_blit.c"
-                       "panel_codec.c"
-                       "st7796_panel.c"
-                       "panel_detect.c"
-                       "lvgl_port.c"
-                       "kiln_ui.c"
-                       "ui_page_home.c"
-                       "ui_page_home_actions.c"
-                       "ui_page_home_chart.c"
-                       "ui_page_home_refresh.c"
-                       "ui_page_home_graph.c"
-                       "ui_page_config.c"
-                       "ui_page_temperature.c"
-                       "ui_page_network.c"
-                       "ui_page_network_manage.c"
-                       "lvgl_mem_psram.c"
-                       "ui_page_diagnostics.c"
-                       "ui_page_touch_cal.c"
-                       "ui_page_touch_test.c"
-                       "ui_page_profiles.c"
-                       "ui_page_profiles_mine.c"
-                       "ui_page_profiles_family.c"
-                       "ui_page_profiles_builtin_list.c"
-                       "ui_page_profile_detail.c"
-                       "ui_page_profile_segments.c"
-                       "ui_page_profile_builder_zones.c"
-                       "ui_page_profile_builder_segment.c"
-                       "ui_page_profile_builder_review.c"
-                       "ui_confirm.c"
-                       "ui_num_pad.c"
-                       "touch_cal_store.c"
-                       "unit_pref.c"
-                       "ramp_assist_cfg.c"
-                       "ui_theme.c"
-                       "ui_topbar.c"
-                       "wifi_status_ui.c"
-                       "NS2009.c"
-                       "touch_dev.c"
+idf_component_register(SRCS "hw/MAX31856.c"
+                       "hw/max31856_codec.c"
+                       "hw/SX1509.c"
+                       "owners/kiln_io.c"
+                       "owners/kiln_io_owner.c"
+                       "owners/thermo_owner.c"
+                       "owners/owner_slot_pool.c"
+                       "hw/panel_spi.c"
+                       "hw/panel_spi_bringup.c"
+                       "hw/panel_spi_draw.c"
+                       "hw/panel_spi_blit.c"
+                       "hw/panel_codec.c"
+                       "hw/st7796_panel.c"
+                       "hw/panel_detect.c"
+                       "ui/lvgl_port.c"
+                       "ui/kiln_ui.c"
+                       "ui/ui_page_home.c"
+                       "ui/ui_page_home_actions.c"
+                       "ui/ui_page_home_chart.c"
+                       "ui/ui_page_home_refresh.c"
+                       "ui/ui_page_home_graph.c"
+                       "ui/ui_page_config.c"
+                       "ui/ui_page_temperature.c"
+                       "ui/ui_page_network.c"
+                       "ui/ui_page_network_manage.c"
+                       "ui/lvgl_mem_psram.c"
+                       "ui/ui_page_diagnostics.c"
+                       "ui/ui_page_touch_cal.c"
+                       "ui/ui_page_touch_test.c"
+                       "ui/ui_page_profiles.c"
+                       "ui/ui_page_profiles_mine.c"
+                       "ui/ui_page_profiles_family.c"
+                       "ui/ui_page_profiles_builtin_list.c"
+                       "ui/ui_page_profile_detail.c"
+                       "ui/ui_page_profile_segments.c"
+                       "ui/ui_page_profile_builder_zones.c"
+                       "ui/ui_page_profile_builder_segment.c"
+                       "ui/ui_page_profile_builder_review.c"
+                       "ui/ui_confirm.c"
+                       "ui/ui_num_pad.c"
+                       "persist/touch_cal_store.c"
+                       "persist/unit_pref.c"
+                       "control/ramp_assist_cfg.c"
+                       "ui/ui_theme.c"
+                       "ui/ui_topbar.c"
+                       "ui/wifi_status_ui.c"
+                       "hw/NS2009.c"
+                       "hw/touch_dev.c"
                        # FT6336U.c: FT6336U capacitive touch controller driver
                        # for the not-yet-connected MSP4031 module -- see its
                        # own header comment. Compiled in (so it stays buildable
@@ -184,122 +185,122 @@ idf_component_register(SRCS "MAX31856.c"
                        # via touch_dev.c's pure mapping split) but never
                        # instantiated anywhere: dead code at runtime on every
                        # board that exists today, which is still the NS2009.
-                       "FT6336U.c"
-                       "screen_idle.c"
-                       "backlight_pwm.c"
-                       "display_power_policy.c"
-                       "display_power_cfg.c"
-                       "safety_link.c"
-                       "safety_link_frame.c"
-                       "safety_link_frames.c"
-                       "safety_link_inbox.c"
-                       "safety_link_poll.c"
-                       "safety_link_commands.c"
-                       "safety_link_payload.c"
-                       "safety_trip_decision.c"
-                       "i2c_scan.c"
-                       "uart_log_bridge.c"
-                       "uart_bridge.c"
-                       "uart_bridge_thermo.c"
-                       "uart_bridge_io.c"
-                       "uart_bridge_touch.c"
-                       "uart_bridge_ui_test.c"
-                       "uart_bridge_safety.c"
-                       "uart_bridge_system.c"
-                       "uart_bridge_info.c"
-                       "uart_bridge_ext.c"
-                       "uart_bridge_ext_control.c"
-                       "uart_bridge_ext_autotune.c"
-                       "uart_bridge_ext_wifi.c"
-                       "telemetry_format.c"
-                       "telemetry_log.c"
-                       "event_log.c"
-                       "event_log_emit.c"
-                       "log_store.c"
-                       "log_store_mount.c"
-                       "log_http.c"
-                       "relay_authority.c"
-                       "relay_cycles.c"
-                       "run_state.c"
-                       "boot_guard.c"
-                       "boot_button.c"
-                       "danger_mode.c"
-                       "watchdog_cfg.c"
-                       "rtc_watchdog.c"
-                       "crash_report.c"
-                       "nvs_report.c"
-                       "factory_reset.c"
-                       "dashboard_http.c"
+                       "hw/FT6336U.c"
+                       "ui/screen_idle.c"
+                       "hw/backlight_pwm.c"
+                       "persist/display_power_policy.c"
+                       "persist/display_power_cfg.c"
+                       "safety/safety_link.c"
+                       "safety/safety_link_frame.c"
+                       "safety/safety_link_frames.c"
+                       "safety/safety_link_inbox.c"
+                       "safety/safety_link_poll.c"
+                       "safety/safety_link_commands.c"
+                       "safety/safety_link_payload.c"
+                       "safety/safety_trip_decision.c"
+                       "hw/i2c_scan.c"
+                       "bridge/uart_log_bridge.c"
+                       "bridge/uart_bridge.c"
+                       "bridge/uart_bridge_thermo.c"
+                       "bridge/uart_bridge_io.c"
+                       "bridge/uart_bridge_touch.c"
+                       "bridge/uart_bridge_ui_test.c"
+                       "bridge/uart_bridge_safety.c"
+                       "bridge/uart_bridge_system.c"
+                       "bridge/uart_bridge_info.c"
+                       "bridge/uart_bridge_ext.c"
+                       "bridge/uart_bridge_ext_control.c"
+                       "bridge/uart_bridge_ext_autotune.c"
+                       "bridge/uart_bridge_ext_wifi.c"
+                       "persist/telemetry_format.c"
+                       "persist/telemetry_log.c"
+                       "persist/event_log.c"
+                       "persist/event_log_emit.c"
+                       "persist/log_store.c"
+                       "persist/log_store_mount.c"
+                       "http/log_http.c"
+                       "owners/relay_authority.c"
+                       "persist/relay_cycles.c"
+                       "control/run_state.c"
+                       "persist/boot_guard.c"
+                       "bridge/boot_button.c"
+                       "safety/danger_mode.c"
+                       "safety/watchdog_cfg.c"
+                       "safety/rtc_watchdog.c"
+                       "safety/crash_report.c"
+                       "persist/nvs_report.c"
+                       "http/factory_reset.c"
+                       "http/dashboard_http.c"
                        # dashboard_http.c split 2026-09-04 (ROADMAP.md M15,
                        # the 1500-line rule) -- see
                        # dashboard_http_internal.h's own doc comment for the
                        # file map.
-                       "dashboard_status_http.c"
-                       "dashboard_settings_http.c"
-                       "dashboard_exec_http.c"
-                       "dashboard_autotune_http.c"
-                       "dashboard_json.c"
-                       "diagnostics_http.c"
-                       "partition_info_http.c"
-                       "settings_http.c"
-                       "time_sync.c"
-                       "time_sync_tz.c"
-                       "backup_http.c"
-                       "backup_json.c"
-                       "backup_export.c"
-                       "backup_import.c"
+                       "http/dashboard_status_http.c"
+                       "http/dashboard_settings_http.c"
+                       "http/dashboard_exec_http.c"
+                       "http/dashboard_autotune_http.c"
+                       "http/dashboard_json.c"
+                       "http/diagnostics_http.c"
+                       "http/partition_info_http.c"
+                       "http/settings_http.c"
+                       "net/time_sync.c"
+                       "net/time_sync_tz.c"
+                       "http/backup_http.c"
+                       "persist/backup_json.c"
+                       "http/backup_export.c"
+                       "http/backup_import.c"
                        # backup_http.c split 2026-09-04 (ROADMAP.md M15's
                        # 1500-line item) -- see backup_http_internal.h's own
                        # doc comment for the file map.
-                       "ota_auth.c"
-                       "ota_interlock.c"
-                       "heat_interlock.c"
-                       "ota_record.c"
-                       "ota_http.c"
-                       "ota_http_esp.c"
-                       "ota_http_pico.c"
-                       "ota_http_recovery.c"
-                       "ota_http_util.c"
-                       "ota_pico_relay.c"
-                       "wifi_prov.c"
+                       "net/ota_auth.c"
+                       "net/ota_interlock.c"
+                       "control/heat_interlock.c"
+                       "persist/ota_record.c"
+                       "http/ota_http.c"
+                       "http/ota_http_esp.c"
+                       "http/ota_http_pico.c"
+                       "http/ota_http_recovery.c"
+                       "http/ota_http_util.c"
+                       "net/ota_pico_relay.c"
+                       "net/wifi_prov.c"
                        # wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3,
                        # "files over 1500 lines should be broken up where it
                        # makes sense") -- see wifi_prov_internal.h's own doc
                        # comment for the file map.
-                       "wifi_prov_nvs.c"
-                       "wifi_prov_link.c"
-                       "wifi_prov_api.c"
-                       "wifi_provision_http.c"
-                       "web_encoding.c"
-                       "zones_http.c"
+                       "net/wifi_prov_nvs.c"
+                       "net/wifi_prov_link.c"
+                       "net/wifi_prov_api.c"
+                       "http/wifi_provision_http.c"
+                       "common/web_encoding.c"
+                       "http/zones_http.c"
                        # zones_http.c split 2026-09-01 (it had grown to 5628
                        # lines, the largest file in the firmware) along its
                        # natural seams -- see zones_http_internal.h's header
                        # comment for the full seam rationale. zones_http.c
                        # itself keeps hw wiring, page/URI registration, and
                        # the small sweep HTTP wrappers.
-                       "zones_config_store.c"
-                       "zones_config_accessors.c"
-                       "zones_http_get.c"
-                       "zones_http_post_parse.c"
-                       "zones_http_post.c"
-                       "zones_http_pid.c"
+                       "persist/zones_config_store.c"
+                       "persist/zones_config_accessors.c"
+                       "http/zones_http_get.c"
+                       "http/zones_http_post_parse.c"
+                       "http/zones_http_post.c"
+                       "http/zones_http_pid.c"
                        # zones_http_handlers.c split 2026-09-04 (ROADMAP.md
                        # M15, the 1500-line rule) -- see
                        # zones_http_internal.h's own doc comment for the file
                        # map.
-                       "zones_current_sweep_engine.c"
-                       "zones_current_sweep_task.c"
-                       "zones_config_json.c"
+                       "control/zones_current_sweep_engine.c"
+                       "control/zones_current_sweep_task.c"
+                       "persist/zones_config_json.c"
                        # zones_config_json.c split 2026-09-04 (ROADMAP.md M15,
                        # the 1500-line rule) -- see zones_config_json_
                        # internal.h's own doc comment for the file map.
-                       "zones_config_convert.c"
-                       "zones_config_migrate.c"
-                       "kiln_cfg_store.c"
-                       "kiln_cfg_http.c"
-                       "safety_cfg_store.c"
-                       "safety_cfg_http.c"
+                       "persist/zones_config_convert.c"
+                       "persist/zones_config_migrate.c"
+                       "persist/kiln_cfg_store.c"
+                       "http/kiln_cfg_http.c"
+                       "safety/safety_cfg_store.c"
+                       "http/safety_cfg_http.c"
                        # rules_http.c/rules_eval.c/rules_task.c (the "Relays &
                        # Rules" engine) were deleted 2026-08-27: relay/IO
                        # control moved into firing profiles as segments (see
@@ -307,75 +308,75 @@ idf_component_register(SRCS "MAX31856.c"
                        # owner's request. See relay_authority.h's
                        # RELAY_OWNER_RULE comment for why that enumerator is
                        # still here even though nothing claims it any more.
-                       "profiles_http.c"
+                       "http/profiles_http.c"
                        # profiles_http.c split 2026-09-04 (ROADMAP.md M15, the
                        # 1500-line rule) -- see profiles_http_internal.h's own
                        # doc comment for the file map.
-                       "profiles_catalog_http.c"
-                       "profiles_edit_http.c"
+                       "http/profiles_catalog_http.c"
+                       "http/profiles_edit_http.c"
                        # profiles_builtin.c is hand-written and #includes the
                        # machine-generated profiles_builtin_table.inc, which is
                        # NOT listed here (it is not a translation unit).
-                       "profiles_builtin.c"
-                       "profile_feasibility.c"
-                       "readiness_http.c"
-                       "board_temps.c"
+                       "persist/profiles_builtin.c"
+                       "control/profile_feasibility.c"
+                       "http/readiness_http.c"
+                       "hw/board_temps.c"
                        # board_temps_http.c split out of board_temps.c 2026-09-05
                        # (HW_ABSTRACTION_PLAN.md "drivers/ layering" item 3): the
                        # httpd handler/registration, kept apart from the hw-layer
                        # driver so board_temps.c has no esp_http_server.h/
                        # wifi_provision_http.h dependency.
-                       "board_temps_http.c"
-                       "pid.c"
-                       "pid_fuzzy.c"
-                       "thermal_guard.c"
-                       "thermo_combine.c"
-                       "cone_table.c"
-                       "heat_enable.c"
-                       "heater_output.c"
-                       "zone_coupling_solve.c"
-                       "profile_executor.c"
+                       "http/board_temps_http.c"
+                       "control/pid.c"
+                       "control/pid_fuzzy.c"
+                       "control/thermal_guard.c"
+                       "control/thermo_combine.c"
+                       "control/cone_table.c"
+                       "control/heat_enable.c"
+                       "control/heater_output.c"
+                       "control/zone_coupling_solve.c"
+                       "control/profile_executor.c"
                        # profile_executor.c split 2026-09-01 ("files over
                        # 1500 lines should be broken up where it makes
                        # sense" -- it had grown to 4962 lines, the last of
                        # that day's four biggest firmware files). See
                        # profile_executor_internal.h's own doc comment for
                        # the seam rationale.
-                       "profile_executor_feedforward.c"
-                       "profile_executor_firing_stats.c"
-                       "profile_executor_relay_io.c"
-                       "profile_executor_config_reload.c"
-                       "profile_executor_pid_tick.c"
-                       "profile_executor_start.c"
-                       "profile_executor_run.c"
-                       "profile_executor_status.c"
-                       "profile_executor_ramp_assist.c"
-                       "adaptive_tune.c"
+                       "control/profile_executor_feedforward.c"
+                       "control/profile_executor_firing_stats.c"
+                       "control/profile_executor_relay_io.c"
+                       "control/profile_executor_config_reload.c"
+                       "control/profile_executor_pid_tick.c"
+                       "control/profile_executor_start.c"
+                       "control/profile_executor_run.c"
+                       "control/profile_executor_status.c"
+                       "control/profile_executor_ramp_assist.c"
+                       "control/adaptive_tune.c"
                        # adaptive_tune.c split 2026-09-01 ("files over 1500
                        # lines should be broken up where it makes sense" --
                        # it had grown to 1498/1500 lines and the P1 baseline
                        # persistence + P2 re-justified cumulative bound would
                        # have pushed it over). See adaptive_tune_internal.h's
                        # own doc comment for the seam rationale.
-                       "adaptive_tune_model.c"
-                       "adaptive_tune_ki.c"
-                       "adaptive_tune_http.c"
-                       "ramp_ident.c"
-                       "iter_tune.c"
-                       "pid_autotune.c"
-                       "autotune_engine.c"
-                       "autotune_engine_guard.c"
-                       "autotune_engine_step_identify.c"
-                       "autotune_engine_relay.c"
-                       "autotune_engine_coupling.c"
-                       "gpio_probe.c"
-                       "stack_margin.c"
-                       "espInterfaces/esp_spi_owner.c"
-                       "espInterfaces/i2c_owner.c"
-                       "espInterfaces/uart_owner.c"
-                       "espInterfaces/uart_protocol.c"
+                       "control/adaptive_tune_model.c"
+                       "control/adaptive_tune_ki.c"
+                       "http/adaptive_tune_http.c"
+                       "control/ramp_ident.c"
+                       "control/iter_tune.c"
+                       "control/pid_autotune.c"
+                       "control/autotune_engine.c"
+                       "control/autotune_engine_guard.c"
+                       "control/autotune_engine_step_identify.c"
+                       "control/autotune_engine_relay.c"
+                       "control/autotune_engine_coupling.c"
+                       "bridge/gpio_probe.c"
+                       "common/stack_margin.c"
+                       "owners/esp_spi_owner.c"
+                       "owners/i2c_owner.c"
+                       "owners/uart_owner.c"
+                       "owners/uart_protocol.c"
                        ${SIM_SRCS}
-                       INCLUDE_DIRS "." "espInterfaces"
+                       INCLUDE_DIRS "." "bridge" "common" "control" "http" "hw" "net" "owners" "persist" "safety" "sim" "ui"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
                        EMBED_TXTFILES ${KILNCTL_GZIP_ASSET_FILES} "${kilnctl_tuning_rec_out}"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio

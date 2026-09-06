@@ -1,4 +1,4 @@
-// Host test for App/drivers/safety_cfg_http.c's pure/static helpers --
+// Host test for App/drivers/http/safety_cfg_http.c's pure/static helpers --
 // parse_set_param_body() (the id=/value= form tokenizer), parse_value_for_
 // type(), build_commissioning_json() and apply_pairs(). Own SEPARATE
 // executable (build_host_tests.ps1's third build+run step), same reason
@@ -53,7 +53,7 @@ bool web_client_accepts_gzip(httpd_req_t *req)
     return true;
 }
 
-#include "../drivers/safety_cfg_http.c"
+#include "../drivers/http/safety_cfg_http.c"
 
 // ---------------------------------------------------------------------------
 // esp_http_server.h stub bodies -- never invoked by these tests (only the

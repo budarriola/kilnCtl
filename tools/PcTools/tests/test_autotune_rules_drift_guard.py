@@ -2,7 +2,7 @@
 """Regression guard for kilnctrl.protocol.AUTOTUNE_RULES against the
 firmware sources it hand-mirrors: firmware/KilnFW/App/drivers/
 pid_autotune.h's autotune_rule_t enum (the rule set that exists) and
-firmware/KilnFW/App/drivers/dashboard_http.c's autotune_start_post_handler()
+firmware/KilnFW/App/drivers/http/dashboard_http.c's autotune_start_post_handler()
 (which method accepts which rule names -- the closest thing to an
 authoritative "supported rule names" string table, since it is what the
 board's own POST /api/autotune/start parses).

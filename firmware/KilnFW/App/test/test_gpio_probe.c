@@ -1,4 +1,4 @@
-// Host test for App/drivers/gpio_probe_denylist.h's gpio_probe_pin_is_
+// Host test for App/drivers/bridge/gpio_probe_denylist.h's gpio_probe_pin_is_
 // denied() -- the thermocouple fault-pin gap this pass closes (verified:
 // THERMO_FAULT0/1/2_IO were missing from gpio_probe.c's old inline
 // `denied[]` array, alongside SAFETY_FAULT_IO which WAS already covered --
@@ -20,7 +20,7 @@
 // dependency-free past settings.h.
 #include "test_common.h"
 
-#include "../drivers/gpio_probe_denylist.h"
+#include "../drivers/bridge/gpio_probe_denylist.h"
 
 static void test_thermo_fault_pins_are_denied(void)
 {

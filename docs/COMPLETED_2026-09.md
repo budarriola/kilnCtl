@@ -754,7 +754,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
 - [x] **Frame A's field layout is hand-duplicated across firmwares.**
       `SaftyFW/src/tasks/link_frame.h:1-16` (pack side) says it is
       "byte-for-byte the layout `safety_link.h` already parses" against
-      `KilnFW/App/drivers/safety_link_frames.c:600-641`'s independent
+      `KilnFW/App/drivers/safety/safety_link_frames.c:600-641`'s independent
       hand-written offset table — an offset mismatch passes CRC and silently
       misdecodes temperatures. Lift the offsets into a shared CommonFW header,
       the way `kilnlink_rollback_result.h` already does for that result type.
@@ -764,7 +764,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `_OFF_TC_FAULT`/`_OFF_AMPS1-3`/`_OFF_TX_DROPPED_SAT`/`_OFF_FLAGS2`/
       `_OFF_BORROWED_ZONE_INDEX`). All three sites now index through it
       instead of a literal `p[N]`/`out[N]`: `SaftyFW/src/tasks/link_frame.c`'s
-      `link_frame_pack_status()`, `KilnFW/App/drivers/safety_link_frames.c`'s
+      `link_frame_pack_status()`, `KilnFW/App/drivers/safety/safety_link_frames.c`'s
       `safety_apply_status()`, and `SaftyFW/test/test_link_frame_wire.c`'s
       `mirror_apply_status()` — plus `safety_link.h`'s and `link_frame.h`'s
       own `_LEN_V1/_V2/_V3` defines, which now alias the shared macro.
@@ -790,7 +790,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       `p[N]`/`out[N]`/`&x[N]` offset table for Frame A's six numeric fields
       (`tc_temp_c`/`cj_temp_c`/`tc_fault`/`amps1-3`) from all three copies —
       `SaftyFW/src/tasks/link_frame.c`'s `link_frame_pack_status()` (pack),
-      `KilnFW/App/drivers/safety_link_frames.c`'s `safety_apply_status()`
+      `KilnFW/App/drivers/safety/safety_link_frames.c`'s `safety_apply_status()`
       (parse), and `SaftyFW/test/test_link_frame_wire.c`'s
       `mirror_apply_status()` (the drift test itself) — and fails naming the
       exact file/field/offset on any disagreement.
@@ -819,7 +819,7 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       reverted. Zero behaviour change; full SaftyFW host suite 2064/2064
       green.
 - [x] **Dead blocking fixed-length `uart_read_bytes` branch stays loaded.**
-      `KilnFW/App/drivers/espInterfaces/uart_owner.c:139`'s `rx_buffer`/
+      `KilnFW/App/drivers/owners/uart_owner.c:139`'s `rx_buffer`/
       `rx_length` branch is the exact pattern behind the 100%-timeout
       incident. No current caller passes `rx_buffer` (grep across
       `App/drivers/*.c` turns up nothing), so it's dead today, but nothing

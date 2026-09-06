@@ -2,7 +2,7 @@
 """The built-in (shipped-in-flash) profile id space over the UART link.
 
 Ids >= PROFILES_BUILTIN_ID_BASE (128) address the read-only firing schedules
-in App/drivers/profiles_builtin.c. They were reachable over HTTP but rejected
+in App/drivers/persist/profiles_builtin.c. They were reachable over HTTP but rejected
 host-side over the PC link, which made every shipped schedule invisible to the
 GUI and the MCP tools. These tests pin the id-space rules both sides now agree
 on:

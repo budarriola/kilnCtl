@@ -6,8 +6,8 @@ top-level scalar fields a POST round-trips) and
 client deliberately never echoes back -- structural arrays/objects handled
 by their own dedicated logic, or read-only telemetry with no POST field at
 all). Together those two dicts/sets are supposed to cover EXACTLY the
-top-level JSON keys ``zones_get_handler`` (``firmware/KilnFW/App/drivers/zones_http_get.c``)
-and ``zones_post_handler`` (``firmware/KilnFW/App/drivers/zones_http_post.c``)
+top-level JSON keys ``zones_get_handler`` (``firmware/KilnFW/App/drivers/http/zones_http_get.c``)
+and ``zones_post_handler`` (``firmware/KilnFW/App/drivers/http/zones_http_post.c``)
 actually emit/accept -- these two handlers used to share one
 ``zones_http_handlers.c`` file; a 2026-09-04 split moved GET and POST into
 their own files (see this module's ``_GET_C_PATH``/``_POST_C_PATH`` below).

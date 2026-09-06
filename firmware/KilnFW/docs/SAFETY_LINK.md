@@ -3,7 +3,7 @@
 The ESP32-S3 main controller and the RP2040 safety processor (A1) live in two
 electrically separate ground domains. This document covers the isolation
 barrier between them, the wire protocol the RP2040 firmware has to implement,
-the C API on the ESP side (`App/drivers/safety_link.h`), the UART subcommands
+the C API on the ESP side (`App/drivers/safety/safety_link.h`), the UART subcommands
 the PC can drive it with, and how to exercise the whole thing with no Pico
 attached.
 
@@ -423,7 +423,7 @@ arrived; the Pico has no clock the ESP trusts.
 
 ## C API
 
-From `App/drivers/safety_link.h`. One `SafetyLinkClass` instance owns a second
+From `App/drivers/safety/safety_link.h`. One `SafetyLinkClass` instance owns a second
 `uart_owner_t` + `uart_protocol_t` on UART1, entirely separate from the PC link
 on UART0.
 
@@ -545,7 +545,7 @@ was in. Tearing the link down is not evidence that the controller is healthy.
 ## UART subcommands (PC <-> ESP)
 
 `task_id = UART_TASK_ID_SAFETY` (7) on the PC link. Full text in
-`App/drivers/uart_task_ids.h`; examples here are payload bytes, hex, as handed
+`App/drivers/common/uart_task_ids.h`; examples here are payload bytes, hex, as handed
 to `uart_protocol_send`.
 
 | Subcommand | Payload example | Meaning |

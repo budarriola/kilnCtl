@@ -1,4 +1,4 @@
-// Host tests for App/drivers/profile_executor.h's profile_executor_wd_decide()
+// Host tests for App/drivers/control/profile_executor.h's profile_executor_wd_decide()
 // -- the pure decision core pulled out of profile_executor.c's
 // watchdog_task_entry() (guard 9) so it could be tested without pulling in
 // FreeRTOS/kiln_io/relay_authority/etc, which the rest of that file needs and
@@ -18,8 +18,8 @@
 #include <string.h>
 
 #include "test_common.h"
-#include "../drivers/profile_executor.h"
-#include "../drivers/safety_trip_words.h"
+#include "../drivers/control/profile_executor.h"
+#include "../drivers/safety/safety_trip_words.h"
 
 static profile_executor_wd_input_t base_input(void)
 {

@@ -4,7 +4,7 @@
 in its own module as "a line-for-line port of ``heater_output_duty_ex``'s
 ordinary, non-``force_new_window`` path ... translated line for line from
 ``heater_output.c``") agrees NUMERICALLY, tick for tick, with the real,
-unmodified ``firmware/KilnFW/App/drivers/heater_output.c``'s
+unmodified ``firmware/KilnFW/App/drivers/control/heater_output.c``'s
 ``heater_output_duty()`` -- ON THE VECTORS SAMPLED. This is a finite sample
 of a continuous input space (duty in particular), not a proof of agreement
 everywhere: it is only as strong as ``build_all_vectors()``'s coverage of
@@ -45,7 +45,7 @@ danger class the fuzzy mirror was in, not a class that fails obviously.
 
 MECHANISM (same shape as pid_fuzzy_drift_check.py):
   1. Builds ``heater_output_pwm_drift_harness.c`` (this directory), which
-     links the REAL, unmodified ``../drivers/heater_output.c`` (no
+     links the REAL, unmodified ``../drivers/control/heater_output.c`` (no
      FreeRTOS/ESP-IDF dependency -- see that file's own header comment) and
      drives ``heater_output_duty()`` tick by tick from stdin vectors.
   2. Generates a table of (window_ms, min_on_ms, min_off_ms, duty, dt_ms,

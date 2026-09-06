@@ -110,7 +110,7 @@ RampStep+DwellStep shape above is not what a real firing looks like -- a
 real bisque/glaze schedule candles, ramps, and only then dwells, often more
 than once. ``BISQUE_MULTI``/``CONE6_MULTI``/``CONE10_MULTI`` below are built
 from this repo's own shipped profile catalogue
-(``firmware/KilnFW/App/drivers/profiles_builtin_table.inc``, sourced from
+(``firmware/KilnFW/App/drivers/persist/profiles_builtin_table.inc``, sourced from
 digitalfire.com/schedule): bisque from ``BQ1000`` ("Plainsman Electric
 Bisque"), cone 6 from ``C6DHSC`` ("Plainsman Cone 6 Drop-and-hold, Slow
 Cool", cool-down leg dropped -- this simulator/plant has no forced-cooling

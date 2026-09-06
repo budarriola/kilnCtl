@@ -58,7 +58,7 @@ if (-not (Test-Path $scratchDir)) {
     New-Item -ItemType Directory -Force -Path $scratchDir | Out-Null
 }
 
-$sourcePid = Join-Path $repoRoot "firmware\KilnFW\App\drivers\pid.c"
+$sourcePid = Join-Path $repoRoot "firmware\KilnFW\App\drivers\control\pid.c"
 if (-not (Test-Path $sourcePid)) {
     throw "test_check_hal_include_boundary: expected $sourcePid not found -- has it moved? Pick another clean, non-allowlisted file if pid.c has been relocated."
 }
@@ -175,7 +175,7 @@ if ($otaDirtyScan.StrictViolations.Count -ne 1) {
 # score ZERO strict violations -- proves the allowlist is consulted by path,
 # not just by header name. dashboard_http.c is on $OtaOpsAllowlist for
 # esp_ota_ops.h. ---
-$allowlistedRel = "firmware/KilnFW/App/drivers/dashboard_http.c"
+$allowlistedRel = "firmware/KilnFW/App/drivers/http/dashboard_http.c"
 $allowlistedScanDir = Join-Path $scratchDir "allowlisted_root"
 $allowlistedFull = Join-Path $allowlistedScanDir ($allowlistedRel -replace '/', '\')
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $allowlistedFull) | Out-Null

@@ -1,4 +1,4 @@
-// Host tests for App/drivers/profile_executor.c's pre-start guard.
+// Host tests for App/drivers/control/profile_executor.c's pre-start guard.
 //
 // Recovery mode (boot_guard.h) deliberately skips profile_executor_start()
 // so the board can come up with just Wi-Fi and the OTA HTTP routes. Other
@@ -40,7 +40,7 @@
 
 #include "esp_err.h"
 #include "esp_http_server.h" /* PID_EXPANSION_PLAN.md Phase 7d -- adaptive_tune.c's httpd_* fakes below need these types */
-#include "../drivers/ota_interlock.h" /* ota_interlock_result_t -- previously transitive via profile_executor.c's
+#include "../drivers/net/ota_interlock.h" /* ota_interlock_result_t -- previously transitive via profile_executor.c's
                                         * old ota_http.h include; profile_executor.c now includes the narrower
                                         * ota_state.h instead (docs/HW_ABSTRACTION_PLAN.md drivers/ layering item 2),
                                         * so this stub's own return type needs an explicit include */
@@ -63,7 +63,7 @@ int g_test_count = 0;
 // Declared here, ahead of both #includes, and the #define placed AFTER this
 // function body so the call inside it still reaches the real symbol instead
 // of recursing into itself.
-#include "../drivers/adaptive_tune.h"
+#include "../drivers/control/adaptive_tune.h"
 static int s_run_end_call_count = 0;
 static bool s_run_end_saw_clean_true = false;
 static void spy_adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
@@ -83,16 +83,16 @@ static void spy_adaptive_tune_run_end(const profile_firing_run_record_t *rec, bo
 // keeps reaching each split-out module's `static` internals (the coupling
 // solve caches below included) exactly as it did when this was all one
 // translation unit.
-#include "../drivers/profile_executor.c"
-#include "../drivers/profile_executor_feedforward.c"
-#include "../drivers/profile_executor_firing_stats.c"
-#include "../drivers/profile_executor_relay_io.c"
-#include "../drivers/profile_executor_config_reload.c"
-#include "../drivers/profile_executor_pid_tick.c"
-#include "../drivers/profile_executor_start.c"
-#include "../drivers/profile_executor_run.c"
-#include "../drivers/profile_executor_status.c"
-#include "../drivers/profile_executor_ramp_assist.c"
+#include "../drivers/control/profile_executor.c"
+#include "../drivers/control/profile_executor_feedforward.c"
+#include "../drivers/control/profile_executor_firing_stats.c"
+#include "../drivers/control/profile_executor_relay_io.c"
+#include "../drivers/control/profile_executor_config_reload.c"
+#include "../drivers/control/profile_executor_pid_tick.c"
+#include "../drivers/control/profile_executor_start.c"
+#include "../drivers/control/profile_executor_run.c"
+#include "../drivers/control/profile_executor_status.c"
+#include "../drivers/control/profile_executor_ramp_assist.c"
 
 // ---------------------------------------------------------------------------
 // Stub bodies for every extern symbol profile_executor.c references that

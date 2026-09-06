@@ -1,4 +1,4 @@
-// Host tests for panel_detect_choose() (../drivers/panel_detect.c).
+// Host tests for panel_detect_choose() (../drivers/hw/panel_detect.c).
 // DISPLAY_ST7796_PLAN.md Sec.6 Step 3 / Sec.12 Phase 4.
 //
 // The real descriptors (ili9488_panel_desc in panel_spi.c, st7796_panel_desc
@@ -11,8 +11,8 @@
 // "today's actual table" fallback test so that test exercises real
 // production data, not just a synthetic stand-in.
 #include "test_common.h"
-#include "../drivers/panel_detect.h"
-#include "../drivers/st7796_panel.h"
+#include "../drivers/hw/panel_detect.h"
+#include "../drivers/hw/st7796_panel.h"
 
 #include <string.h>
 

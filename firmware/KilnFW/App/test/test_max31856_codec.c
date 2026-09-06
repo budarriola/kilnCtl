@@ -12,7 +12,7 @@
 // tolerance because it composes encode+decode of temperatures that do not
 // themselves land on an exact LSB multiple.
 #include "test_common.h"
-#include "../drivers/max31856_codec.h"
+#include "../drivers/hw/max31856_codec.h"
 
 #include <stdint.h>
 

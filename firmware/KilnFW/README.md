@@ -44,7 +44,7 @@ extension treats a workspace folder as a single project and needs a
 `CMakeLists.txt` in it, which the repository root does not have.
 
 Hardware configuration (every pin, bus, clock and timeout) lives under
-`idf.py -C firmware/KilnFW menuconfig` → **KilnCtrl Hardware Configuration**; `App/drivers/settings.h`
+`idf.py -C firmware/KilnFW menuconfig` → **KilnCtrl Hardware Configuration**; `App/drivers/hw/settings.h`
 translates those into the plain names the drivers use.
 
 ### Building against the simulated plant

@@ -27,7 +27,7 @@ class WebUiError(RuntimeError):
 
 
 #: target -> (HTTP method, endpoint path). Populated from the real
-#: onclick/fetch() calls in firmware/KilnFW/App/drivers/main_page.html --
+#: onclick/fetch() calls in firmware/KilnFW/App/drivers/http/main_page.html --
 #: read-only reference, never edited here. Extend this table, never invent a
 #: URL not actually wired to a button in that file.
 _WEB_CLICK_ENDPOINTS = {

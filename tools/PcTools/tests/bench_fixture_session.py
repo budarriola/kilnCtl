@@ -640,7 +640,7 @@ class BenchSession:
             # threshold meant for the other silently misjudges "at clamp".
             #
             # THE KEY IS "zone", NOT "index". append_zone_status_json()
-            # (firmware/KilnFW/App/drivers/dashboard_http.c:1220-1258, shared
+            # (firmware/KilnFW/App/drivers/http/dashboard_http.c:1220-1258, shared
             # by /api/profile_exec and /api/control) emits
             # {"zone":%u,...,"duty":%.3f,...} -- "index" is a DIFFERENT
             # endpoint's config key (/api/zones, zones_http.c:4184/4210) and

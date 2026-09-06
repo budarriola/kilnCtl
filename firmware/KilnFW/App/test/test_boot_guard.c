@@ -1,4 +1,4 @@
-// Host tests for App/drivers/boot_guard.c -- the boot-failure counter and
+// Host tests for App/drivers/persist/boot_guard.c -- the boot-failure counter and
 // recovery-mode decision behind the owner's watchdog-recovery request
 // (ROADMAP.md). #includes boot_guard.c directly (same convention as
 // test_kiln_cfg_store.c/test_wifi_prov.c) to reach its static
@@ -15,7 +15,7 @@
 
 #include "esp_err.h"
 
-#include "../drivers/boot_guard.c"
+#include "../drivers/persist/boot_guard.c"
 
 // ---------------------------------------------------------------------------
 // Simulated reboot: resets everything that would be lost on a real power

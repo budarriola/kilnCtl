@@ -1,4 +1,4 @@
-// Host tests for App/drivers/relay_cycles.c -- specifically persist_locked()'s
+// Host tests for App/drivers/persist/relay_cycles.c -- specifically persist_locked()'s
 // PSRAM-stack guard (DRAM_PSRAM_PLAN.md section 7: relay_cycles_maybe_persist()/
 // relay_cycles_flush() are called directly from profile_executor's tick and
 // stop paths, the same task that plan names as its highest-care relocation
@@ -24,7 +24,7 @@
 
 #include "esp_err.h"
 
-#include "../drivers/relay_cycles.c"
+#include "../drivers/persist/relay_cycles.c"
 
 static void reset_all(void)
 {

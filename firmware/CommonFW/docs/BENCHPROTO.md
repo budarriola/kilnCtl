@@ -159,7 +159,7 @@ interpret payload bytes at all.
   (`IGNORE`, not `NACK_UNROUTABLE`) — the receiver is never obliged to
   reply to a broadcast either way, matching `KilnFW`'s own broadcast
   extension to this same protocol family
-  (`App/drivers/espInterfaces/uart_protocol.c`, added for the safety link's
+  (`App/drivers/owners/uart_protocol.c`, added for the safety link's
   PC-link cousin).
 
 Return values callers can expect from a send (mapped from

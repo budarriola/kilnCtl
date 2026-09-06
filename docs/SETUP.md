@@ -129,7 +129,7 @@ not; the real value is 10). That single fixture fed three modules and produced
 nine of the ten failures, making the tool useless as a health signal. Both
 literals now derive from the real values — the check parses
 `#define UART_PROTOCOL_VERSION` out of
-`firmware/KilnFW/App/drivers/uart_task_ids.h` and asserts PC-vs-firmware
+`firmware/KilnFW/App/drivers/common/uart_task_ids.h` and asserts PC-vs-firmware
 agreement rather than either against a constant, so it cannot go stale on the
 next protocol bump. Fixed in `8536227`.
 

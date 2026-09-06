@@ -108,7 +108,7 @@ GATE_FIELDS: "tuple[GateField, ...]" = (
         tuning_fields=("fuzzy_strength_pct",),
         capture_json_path="exec.zones[].control_mode (also zones.zones[].control_mode "
                            "over GET /api/zones)",
-        source="firmware/KilnFW/App/drivers/profile_executor.c:894-912 (mode dispatch); "
+        source="firmware/KilnFW/App/drivers/control/profile_executor.c:894-912 (mode dispatch); "
                "profile_executor_pid_tick.c:311-364 (pid_fuzzy_prepare_gains, only called "
                "for mode 3)",
     ),
@@ -131,7 +131,7 @@ GATE_FIELDS: "tuple[GateField, ...]" = (
                               "gains -- see profile_executor.c:904-912)",
         tuning_fields=(),
         capture_json_path=None,
-        source="firmware/KilnFW/App/drivers/profile_executor.c:904-912",
+        source="firmware/KilnFW/App/drivers/control/profile_executor.c:904-912",
     ),
     GateField(
         name="ct_installed",
@@ -147,7 +147,7 @@ GATE_FIELDS: "tuple[GateField, ...]" = (
         capture_json_path=None,
         source="firmware/SaftyFW/src/config_params.c:855; safety_core.c:1021 "
                "(cfg_rec.ct_installed == 0u); KilnFW mirror: "
-               "firmware/KilnFW/App/drivers/readiness_http.h:100-109, "
+               "firmware/KilnFW/App/drivers/http/readiness_http.h:100-109, "
                "readiness_http.c:516-539",
         top_level=True,
     ),
@@ -159,7 +159,7 @@ GATE_FIELDS: "tuple[GateField, ...]" = (
         reachable_value_desc="== true",
         tuning_fields=(),
         capture_json_path=None,
-        source="firmware/KilnFW/App/drivers/profile_executor_ramp_assist.c:90,140-142,274 "
+        source="firmware/KilnFW/App/drivers/control/profile_executor_ramp_assist.c:90,140-142,274 "
                "(both gated functions return immediately when disabled); called from "
                "profile_executor.c:540,656,821. Already tracked separately as an HTTP "
                "CAPABILITY (endpoint existence) by capability_preflight.py -- this entry "

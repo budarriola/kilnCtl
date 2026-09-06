@@ -114,7 +114,7 @@ gain search run without them cannot see the ringing an ever-larger
 kp/kd combination would cause on the real noisy sensor and pins its
 "optimum" at whatever grid edge it is given (PID_EXPANSION_PLAN.md sec
 3.4's 2026-09-03 addendum). ``MAX31856_QUANTUM_C`` is derived from
-``firmware/KilnFW/App/drivers/max31856_codec.h``, not assumed;
+``firmware/KilnFW/App/drivers/hw/max31856_codec.h``, not assumed;
 ``MEASURED_THERMO_NOISE_STD_C`` is measured directly off rested/steady
 dwell windows in the ``logs/coupling/cpl_z{0,1,2}_thermo.jsonl`` excitation
 captures already used to identify K_full/tau above (see that constant's
@@ -875,7 +875,7 @@ class FOPDTPlantPerPath:
 
 
 # ---------------------------------------------------------------------------
-# Fuzzy-PID layer. The mirror of firmware/KilnFW/App/drivers/pid_fuzzy.c's
+# Fuzzy-PID layer. The mirror of firmware/KilnFW/App/drivers/control/pid_fuzzy.c's
 # pid_fuzzy_adjust() itself now lives in ``fuzzy_band_probe`` (built and
 # pinned-by-test 2026-09-04 for the offline band-probe tool) -- this module
 # used to carry its OWN hand-copied line-for-line port with the bands
@@ -1198,7 +1198,7 @@ def _broadcast_zone_param(x, n=None):
 # |error| alone cannot see relay chatter, so it correctly (given the
 # question it was asked) answers "more gain, always." This section gives the
 # duty command an actual relay to drive, faithfully mirroring
-# ``firmware/KilnFW/App/drivers/heater_output.c``'s ``heater_output_duty_ex``
+# ``firmware/KilnFW/App/drivers/control/heater_output.c``'s ``heater_output_duty_ex``
 # (the non-``force_new_window`` path -- ``heater_output_duty()``, what every
 # ordinary PID-driven zone actually calls; the ``_relay_step`` early-window
 # variant used only by the bang-bang-mode fuzzy relay law is out of scope
@@ -1225,7 +1225,7 @@ HEATER_DEFAULT_WINDOW_MS = 60000.0
 HEATER_DEFAULT_MIN_OFF_MS = 2000.0
 
 #: Rated mechanical cycle life of the on-board relays (EE2-12NUH), from
-#: ``firmware/KilnFW/App/drivers/relay_cycles.h`` -- the firmware module
+#: ``firmware/KilnFW/App/drivers/persist/relay_cycles.h`` -- the firmware module
 #: that ACTUALLY performs lifetime contact-cycle accounting (persisted,
 #: shown to the operator), not just a comment aside. Its own words:
 #: "the EE2-12NUH relays on this board are electromechanical, with a
@@ -1412,7 +1412,7 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     ``kd`` (see ``_broadcast_zone_param``); quantization rounds to the
     nearest ``measurement_quantum_c`` -- ``MAX31856_QUANTUM_C`` (0.0078125
     C) is the real per-channel LSB, derived from
-    ``firmware/KilnFW/App/drivers/max31856_codec.h``, not the earlier 0.1 C
+    ``firmware/KilnFW/App/drivers/hw/max31856_codec.h``, not the earlier 0.1 C
     placeholder some of this module's own mechanism tests still use as a
     generic exercise value -- and is applied AFTER the additive Gaussian
     noise, matching the real chain (continuous sensor + noise, then ADC
@@ -1798,7 +1798,7 @@ BOARD_ZONE_KD = (0.8401, 1.0548, 1.0690)
 # ---------------------------------------------------------------------------
 
 #: Real MAX31856 thermocouple-channel ADC resolution, derived from
-#: firmware/KilnFW/App/drivers/max31856_codec.h's
+#: firmware/KilnFW/App/drivers/hw/max31856_codec.h's
 #: MAX31856_TC_TEMP_C_PER_LSB (1/4096 C per raw 24-bit-word LSB; the low 5
 #: bits of that word are hardware-fixed 0, so the real step between
 #: representable temperatures is 32x that, i.e. 1/128 = 0.0078125 C per

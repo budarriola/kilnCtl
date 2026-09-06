@@ -8,7 +8,7 @@
 // the comparison the backstop depends on cannot silently regress.
 #include "test_common.h"
 
-#include "../drivers/bx_worker_reentrancy.h"
+#include "../drivers/common/bx_worker_reentrancy.h"
 
 static void test_null_worker_handle_never_matches(void)
 {

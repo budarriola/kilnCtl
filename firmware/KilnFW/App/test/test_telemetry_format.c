@@ -1,4 +1,4 @@
-// Host tests for App/drivers/telemetry_format.c -- telemetry_format_firing()/
+// Host tests for App/drivers/persist/telemetry_format.c -- telemetry_format_firing()/
 // telemetry_format_autotune(), the two pure line formatters telemetry_log.c
 // emits over the debug UART (see that file's own doc comment for the
 // dashboard_json.c-precedent reason these were split into their own no-
@@ -15,7 +15,7 @@
 int g_test_failures = 0;
 int g_test_count = 0;
 
-#include "../drivers/telemetry_format.c"
+#include "../drivers/persist/telemetry_format.c"
 
 // Local mirror of telemetry_log.c's TELEMETRY_LOG_LINE_BUF (320) -- large
 // enough to hold a real 3-zone/full-model line without truncating.

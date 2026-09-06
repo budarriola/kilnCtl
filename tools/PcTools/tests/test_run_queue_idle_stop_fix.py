@@ -6,7 +6,7 @@ driving unattended firings on real hardware, when the review happened).
 THE BUG: run_queue.py's docstring at (current, unpatched) lines ~104-106
 claims "profile_executor_status.c never transitions RUNNING/PAUSED back to
 IDLE, only to DONE or FAULTED." That is false --
-firmware/KilnFW/App/drivers/profile_executor_status.c:77 sets
+firmware/KilnFW/App/drivers/control/profile_executor_status.c:77 sets
 ``s_exec.state = PROFILE_EXEC_IDLE`` directly out of RUNNING/PAUSED on an
 operator Stop, and that file's own comment at lines 65-67 names this exact
 case: "the OTHER ending the tick loop's DONE/FAULTED branch doesn't see".

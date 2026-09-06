@@ -1,10 +1,10 @@
-// Host tests for App/drivers/ota_interlock.c -- TODO.md 9.4's "both update
+// Host tests for App/drivers/net/ota_interlock.c -- TODO.md 9.4's "both update
 // paths refused unless..." precondition list. No ESP-IDF dependency.
 #include <string.h>
 
 #include "test_common.h"
 
-#include "../drivers/ota_interlock.h"
+#include "../drivers/net/ota_interlock.h"
 
 // A snapshot that passes every check -- each test below mutates one field
 // (or one zone) away from this baseline so a failure is attributable to
