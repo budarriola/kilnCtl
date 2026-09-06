@@ -927,10 +927,9 @@ and MAX31856 are now migrated on ESP and Pico. New
 rule going forward -- a driver sharing a port with an existing owner ADOPTS
 via the bridge, it never calls `hal_i2c_bus_init`/`hal_spi_bus_init` itself.
 `hal_i2c_esp.c`'s ALREADY_INIT recovery path is deleted (adopt replaces it).
-Open item: `hal_spi_esp.c:114` still logs `spi host %d already initialized;
-treating as OK` -- mirror the I2C fix and remove it once the display driver
-adopts the shared owner through `hal_spi_esp_owner.h` instead of relying on
-this recovery path.
+Done 2026-09-06 (`5824258`): `hal_spi_esp.c`'s ALREADY_INIT recovery is
+deleted too; `main_boot_early.c` opens the host once and MAX31856 adopts it
+via `hal_spi_bus_adopt()`.
 
 Review checklist: any flash-safety review must read
 `firmware/KilnFW/sdkconfig` (gitignored) for the live `CONFIG_KILNCTL_*`
