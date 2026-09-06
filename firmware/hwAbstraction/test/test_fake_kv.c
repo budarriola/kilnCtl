@@ -244,6 +244,33 @@ int main(void)
     CHECK(hal_kv_get_blob(&h2, "cal", got, &len) == HAL_OK);
     fake_kv_reset_all();
 
+    /* --- overlong key (>= FAKE_KV_MAX_KEY_LEN, 16) is rejected up front on
+     * every entry point, matching the real backend's ESP_ERR_NVS_KEY_TOO_LONG
+     * -> HAL_IO mapping (hal_kv_esp_err_to_status() has no explicit case for
+     * it, so it falls through to hal_esp_err_to_status()'s default). Before
+     * this fix, do_set()/find_key() silently truncated the key via
+     * copy_bounded(), so a set "succeeded" but every later get/erase on the
+     * same overlong key compared the FULL key against the truncated stored
+     * name and missed -- burning a fresh key slot per call. A 15-char key
+     * (one under the limit) must still work normally. --- */
+    CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK);
+    hal_kv_handle_t h3;
+    memset(&h3, 0, sizeof(h3));
+    CHECK(hal_kv_open(&h3, "long_keys", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK);
+    const char *key16 = "0123456789abcdef";       /* 16 chars: at the limit, rejected */
+    const char *key15 = "0123456789abcde";        /* 15 chars: fits, accepted */
+    CHECK(strlen(key16) == 16);
+    CHECK(strlen(key15) == 15);
+    CHECK(hal_kv_set_blob(&h3, key16, "x", 1) == HAL_IO);
+    len = sizeof(buf8);
+    CHECK(hal_kv_get_blob(&h3, key16, buf8, &len) == HAL_IO);
+    CHECK(hal_kv_erase_key(&h3, key16) == HAL_IO);
+    CHECK(hal_kv_set_blob(&h3, key15, "y", 1) == HAL_OK);
+    len = sizeof(buf8);
+    CHECK(hal_kv_get_blob(&h3, key15, buf8, &len) == HAL_OK);
+    CHECK(len == 1 && buf8[0] == 'y');
+    fake_kv_reset_all();
+
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

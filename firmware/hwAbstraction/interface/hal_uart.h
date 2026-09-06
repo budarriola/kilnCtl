@@ -102,7 +102,17 @@ hal_status_t hal_uart_send(hal_uart_t *u, const uint8_t *data, size_t len);
 /* Blocks until the send completes per this backend's wire-complete
  * contract documented above. ESP: today's write + uart_wait_tx_done,
  * unchanged. Pico: send + drain of the software ring (race-free under
- * save_and_disable_interrupts), ring-drained-not-wire-complete. Host: instant. */
+ * save_and_disable_interrupts), ring-drained-not-wire-complete. Host: instant.
+ *
+ * ESP partial-send caveat: for `len` larger than one TX ring
+ * (HAL_UART_ESP_TX_RING_BUF_SIZE, 4096 B today), the ESP backend sends in
+ * ring-sized chunks and a HAL_TIMEOUT on a later chunk does not mean
+ * nothing was queued -- earlier chunks already reached the driver/wire with
+ * no way for this call to report or retract that count. Every real caller's
+ * frames in this tree today are well under one ring (a single chunk), so
+ * this is latent, not exercised -- a caller sending anything close to or
+ * over the ring size must not assume a HAL_TIMEOUT return means zero bytes
+ * went out. */
 hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data,
                                      size_t len, uint32_t timeout_ms);
 

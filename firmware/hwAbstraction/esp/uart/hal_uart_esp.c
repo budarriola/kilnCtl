@@ -297,11 +297,18 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
      * regardless of timeout_ms, even though uart_write_bytes() itself
      * chunks writes larger than the ring just fine. Send in ring-sized
      * chunks instead: wait for room for the NEXT chunk only (bounded by the
-     * remaining timeout budget), write it, then loop for the rest -- this
-     * still queues nothing partial on a timeout within a chunk (the byte
-     * count already written is tracked and reported via written/total
-     * below), and preserves the "whole buffer or a bounded wait" contract
-     * for buffers of any size. */
+     * remaining timeout budget), write it, then loop for the rest -- a
+     * timeout can only ever land BETWEEN chunks, never partway through one,
+     * so nothing partial is queued within a chunk. But for a `len` larger
+     * than one ring (HAL_UART_ESP_TX_RING_BUF_SIZE), a timeout on a later
+     * chunk still leaves the earlier chunk(s) already written to the
+     * driver/wire -- this function has no way to un-send those, so a
+     * HAL_TIMEOUT return in that case is NOT "nothing queued", it is
+     * "queued up through total_written bytes, no way to report or retract
+     * that count via this return value". Every real caller's frames today
+     * are smaller than the 4096 B ring (one chunk), so this is latent; see
+     * hal_uart.h's hal_uart_send_blocking() doc for the caller-facing
+     * caveat. */
     TickType_t start_tick = xTaskGetTickCount();
     TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
     size_t total_written = 0;

@@ -78,10 +78,12 @@ hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled,
 hal_status_t hal_wdt_set_panic_disabled(bool panic_disabled) {
     /* Mirrors the ESP backend's shape -- see fake_wdt.h's own comment on why
      * this fake picks ESP-shaped behavior (the one real production caller
-     * is ESP-only): requires an already-armed watchdog. */
-    if (!s_initialized) {
-        return HAL_NOT_READY;
-    }
+     * is ESP-only). 04a4997 made the ESP backend work pre-init (it just
+     * reconfigures the task-WDT's panic behavior, which does not require an
+     * already-armed watchdog); this fake no longer gates on s_initialized
+     * either, to match. Pico has no such knob at all and returns
+     * HAL_NOT_SUPPORTED unconditionally -- not modeled here, see this
+     * header's top comment. */
     s_panic_disabled = panic_disabled;
     return HAL_OK;
 }

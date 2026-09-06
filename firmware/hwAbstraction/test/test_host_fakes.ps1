@@ -354,6 +354,58 @@ if (-not $kvOrigContent.Contains($kvGoodBlock)) {
     }
 }
 
+# --- 5b) Negative test: mutate fake_kv's overlong-key rejection in do_set() ---
+# Proves test_fake_kv.c's overlong-key assertions can actually fail: without
+# the strlen(key) >= FAKE_KV_MAX_KEY_LEN guard, do_set() falls through to
+# find_key()'s copy_bounded() truncation, so a set on a 16-char key silently
+# "succeeds" (HAL_OK) against a truncated stored name instead of being
+# rejected with HAL_IO.
+Write-Host "`n--- Negative test: fake_kv overlong-key rejection ---"
+
+$kvKeyGoodBlock = (@'
+    if (!hs) return HAL_NOT_READY;
+    if (hs->mode != HAL_KV_MODE_READ_WRITE) return HAL_INVALID_ARG;
+    if (key == NULL) return HAL_INVALID_ARG;
+    if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO; /* see do_get()'s comment */
+    if (buf == NULL && len > 0) return HAL_INVALID_ARG;
+'@) -replace "`r`n", "`n"
+
+$kvKeyMutantBlock = (@'
+    if (!hs) return HAL_NOT_READY;
+    if (hs->mode != HAL_KV_MODE_READ_WRITE) return HAL_INVALID_ARG;
+    if (key == NULL) return HAL_INVALID_ARG;
+    /* MUTANT: overlong-key guard dropped -- do_set() falls through to
+     * find_key()'s silent copy_bounded() truncation. */
+    if (buf == NULL && len > 0) return HAL_INVALID_ARG;
+'@) -replace "`r`n", "`n"
+
+$kvKeyOrigContent = (Get-Content (Join-Path $hostDir "fake_kv.c") -Raw) -replace "`r`n", "`n"
+if (-not $kvKeyOrigContent.Contains($kvKeyGoodBlock)) {
+    $failures += "Negative test setup FAILED: expected overlong-key-guard block not found verbatim in fake_kv.c -- source drifted from what this script mutates. Update kvKeyGoodBlock/kvKeyMutantBlock together with fake_kv.c."
+} else {
+    $kvKeyMutantContent = $kvKeyOrigContent.Replace($kvKeyGoodBlock, $kvKeyMutantBlock)
+    $kvKeyMutantSrc = Join-Path $workDir "fake_kv_key_mutant.c"
+    Set-Content -Path $kvKeyMutantSrc -Value $kvKeyMutantContent -Encoding ASCII -NoNewline
+
+    $kvKeyMutantExe = Join-Path $workDir "fake_kv_key_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($kvKeyMutantSrc, (Join-Path $here "test_fake_kv.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $kvKeyMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -ne 0) {
+        $failures += "Negative test: mutant fake_kv.c (key guard) failed to COMPILE (expected it to compile and fail the test at runtime instead):`n$($r.Output)"
+    } else {
+        $run = Run-Exe -ExePath $kvKeyMutantExe
+        $parsed = Parse-Result -Output $run.Output
+        if (-not $parsed.Matched) {
+            $failures += "Negative test: mutant fake_kv (key guard) test binary produced no RESULT line:`n$($run.Output)"
+        } elseif ($run.ExitCode -eq 0 -and $parsed.Fail -eq 0) {
+            $failures += "NEGATIVE TEST FAILED: the dropped-overlong-key-guard mutant passed test_fake_kv.c cleanly -- the overlong-key rejection assertion does not actually catch this bug."
+        } else {
+            Write-Host "OK   negative test: fake_kv dropped-overlong-key-guard mutant correctly fails test_fake_kv.c (pass=$($parsed.Pass) fail=$($parsed.Fail))"
+            Write-Host "     mutant failure detail:`n$($run.Output)"
+        }
+    }
+}
+
 # --- 6) Negative test: mutate fake_time's delay_ms-advances-the-clock contract ---
 # Proves test_fake_time.c's delay_ms assertion can actually fail: hal_time.h
 # requires hal_time_delay_ms to be the vTaskDelay/sleep_ms replacement, i.e.

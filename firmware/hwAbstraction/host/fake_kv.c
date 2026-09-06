@@ -319,6 +319,14 @@ static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, bool want
 {
     if (!hs) return HAL_NOT_READY;
     if (key == NULL || out_len == NULL) return HAL_INVALID_ARG;
+    /* Matches the real backend: ESP_ERR_NVS_KEY_TOO_LONG has no explicit
+     * case in hal_kv_esp_err_to_status(), so it falls through to
+     * hal_esp_err_to_status()'s default -> HAL_IO. Reject up front rather
+     * than silently truncating (copy_bounded) and comparing the truncated
+     * name against the full key in find_key(), which used to report
+     * HAL_NOT_FOUND for a key that was, from the caller's point of view,
+     * already set. */
+    if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO;
 
     fake_kv_namespace_t *ns = &s_partitions[hs->partition_slot].namespaces[hs->ns_slot];
     fake_kv_key_slot_t *k = find_key(ns, key, false);
@@ -366,6 +374,7 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, bool is_s
     if (!hs) return HAL_NOT_READY;
     if (hs->mode != HAL_KV_MODE_READ_WRITE) return HAL_INVALID_ARG;
     if (key == NULL) return HAL_INVALID_ARG;
+    if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO; /* see do_get()'s comment */
     if (buf == NULL && len > 0) return HAL_INVALID_ARG;
     if (len > FAKE_KV_MAX_VALUE_BYTES) return HAL_INVALID_SIZE;
 
@@ -403,6 +412,7 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
     if (!hs) return HAL_NOT_READY;
     if (hs->mode != HAL_KV_MODE_READ_WRITE) return HAL_INVALID_ARG;
     if (key == NULL) return HAL_INVALID_ARG;
+    if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO; /* see do_get()'s comment */
 
     if (s_next_write_fail_armed) {
         s_next_write_fail_armed = false;

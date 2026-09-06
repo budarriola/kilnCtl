@@ -43,12 +43,19 @@ hal_status_t hal_pwm_init(const hal_pwm_cfg_t *cfg) {
     if (!cfg || cfg->duty_resolution_bits == 0 ||
         cfg->duty_resolution_bits > SOC_LEDC_TIMER_BIT_WIDTH ||
         cfg->start_duty_percent > 100) {
-        /* Real ceiling on this chip's LEDC timers (ESP32-S3:
-         * SOC_LEDC_TIMER_BIT_WIDTH == 14), not the generic ledc_timer_bit_t
-         * enum's 1..20 range -- a duty_resolution_bits beyond 14 is a valid
-         * enumerator but not a valid config on this SoC, and letting it
-         * through to ledc_timer_config() defers the rejection to the IDF
-         * call instead of catching it here per hal_pwm.h's contract. */
+        /* Two independent rejections folded into one branch:
+         *  - duty_resolution_bits == 0 or > SOC_LEDC_TIMER_BIT_WIDTH: the
+         *    real ceiling on this chip's LEDC timers (ESP32-S3:
+         *    SOC_LEDC_TIMER_BIT_WIDTH == 14), not the generic
+         *    ledc_timer_bit_t enum's 1..20 range -- a value beyond 14 is a
+         *    valid enumerator but not a valid config on this SoC, and
+         *    letting it through to ledc_timer_config() defers the rejection
+         *    to the IDF call instead of catching it here per hal_pwm.h's
+         *    contract.
+         *  - start_duty_percent > 100: not a real LEDC/IDF limit (duty is a
+         *    raw 0..duty_max count downstream, not a percent) -- rejected
+         *    here purely per hal_pwm_cfg_t's own percent-typed field
+         *    contract, before it reaches duty_for_percent()'s scaling. */
         return HAL_INVALID_ARG;
     }
 

@@ -18,10 +18,14 @@ static int g_pass = 0, g_fail = 0;
 int main(void) {
     fake_wdt_reset_all();
 
-    /* --- before init: feed/set_panic_disabled refuse, nothing fires --- */
+    /* --- before init: feed refuses, nothing fires. set_panic_disabled now
+     * works pre-init too (04a4997 made the ESP backend work this way; this
+     * fake mirrors it -- see fake_wdt.h/fake_wdt.c comments). --- */
     CHECK(!fake_wdt_is_initialized());
     CHECK(hal_wdt_feed() == HAL_NOT_READY);
-    CHECK(hal_wdt_set_panic_disabled(true) == HAL_NOT_READY);
+    CHECK(hal_wdt_set_panic_disabled(true) == HAL_OK);
+    CHECK(fake_wdt_get_panic_disabled() == true);
+    CHECK(!fake_wdt_is_initialized()); /* still not armed -- only the flag changed */
     CHECK(!fake_wdt_get_pause_on_debug());
     fake_wdt_advance_ms(1000000u); /* un-armed: must not fire */
     CHECK(!fake_wdt_fired());

@@ -31,17 +31,18 @@
  * so a host test can observe that the call happened without hanging the
  * test process the way an accurate never-returns implementation would.
  *
- * hal_wdt_set_panic_disabled(): both real backends require hal_wdt_init()
- * to have run first in practice (ESP reconfigures an armed task-WDT; pico
- * has no such knob at all and returns HAL_NOT_SUPPORTED unconditionally).
- * This fake picks the ESP shape (the one real production caller,
- * watchdog_cfg.c, is ESP-only) -- HAL_NOT_READY if hal_wdt_init() has not
- * been called yet, otherwise updates the recorded panic_disabled flag and
- * returns HAL_OK. A test exercising the pico NOT_SUPPORTED contract talks
- * to the real hal_wdt_pico.c backend, not this fake -- this fake models the
- * generic "watchdog exists" surface both backends share, not either one's
- * ESP/pico-specific quirks (mirroring hal_time.c's stance: one host model,
- * not two backend-specific fakes).
+ * hal_wdt_set_panic_disabled(): pico has no such knob at all and returns
+ * HAL_NOT_SUPPORTED unconditionally. ESP originally required hal_wdt_init()
+ * to have run first too, but 04a4997 made the ESP backend work pre-init (it
+ * only reconfigures the task-WDT's panic behavior, which does not need an
+ * already-armed watchdog). This fake picks the ESP shape (the one real
+ * production caller, watchdog_cfg.c, is ESP-only): it always updates the
+ * recorded panic_disabled flag and returns HAL_OK, with no s_initialized
+ * gate, matching current ESP behavior. A test exercising the pico
+ * NOT_SUPPORTED contract talks to the real hal_wdt_pico.c backend, not this
+ * fake -- this fake models the generic "watchdog exists" surface both
+ * backends share, not either one's ESP/pico-specific quirks (mirroring
+ * hal_time.c's stance: one host model, not two backend-specific fakes).
  */
 #ifndef KILNCTL_FAKE_WDT_H
 #define KILNCTL_FAKE_WDT_H
