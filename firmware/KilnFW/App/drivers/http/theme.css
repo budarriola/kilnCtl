@@ -256,6 +256,28 @@ button { min-height: var(--ui-touch); }
 .kc-menu-panel details.kc-menu-group a { padding-left: 2.2em; border-bottom: 1px solid var(--border); }
 .kc-menu-panel details.kc-menu-group a:last-child { border-bottom: none; }
 
+/* WEB_UI_PLAN.md sec 1: the round "i" disclosure next to a field's one-line
+   label, hiding the longer explanatory paragraphs/tables that used to sit
+   inline on the zones page (relay-timing hints, cross-zone plausibility
+   text, PID/fuzzy notes). Reuses the page's existing <details>/<summary>
+   idiom (see .kc-menu-panel and .advguards above/on that page) and only
+   existing tokens -- no new colour. Small enough not to compete with the
+   field's own label/input for attention at phone width; content wraps in
+   normal flow (no fixed width) so it never causes horizontal scroll. */
+details.info { display: inline-block; margin: 0 0 0.4em; }
+details.info summary { display: inline-flex; align-items: center; justify-content: center;
+                        width: 1.4em; height: 1.4em; border-radius: 50%;
+                        border: 1px solid var(--border); color: var(--muted);
+                        font-size: 0.75em; font-style: italic; line-height: 1;
+                        cursor: pointer; list-style: none; user-select: none; }
+details.info summary::-webkit-details-marker { display: none; }
+details.info[open] summary { color: var(--fg); border-color: var(--fg); }
+/* Info text renders as its own block below the summary, full width of
+   whatever container the field is in -- never inline with the glyph, so a
+   long paragraph or the fuzzy rule table never has to fight the summary's
+   1.4em circle for room, on a phone or otherwise. */
+details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
+
 /* .kc-bottom-nav / .kc-bottom-nav-item deleted outright (2026-08-21 rework
    item 1) along with nav.js's buildBottomNav() -- the Dashboard/Profiles/
    Menu links it held are now the topbar's Home button, the drop-down's own

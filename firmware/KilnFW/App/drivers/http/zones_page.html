@@ -766,6 +766,74 @@ var FUZZY_RULE_TABLE_HTML =
   '<td>Kp&uarr; Ki= Kd=</td><td>Kp&darr; Ki&uarr; Kd&darr;</td></tr>' +
   '</table></div>';
 
+// WEB_UI_PLAN.md section 1 -- the explanatory paragraphs/tables that used to
+// sit inline in settingsStackHtml (relay-timing hints, cross-zone
+// plausibility text, PID/fuzzy notes, min-rise-rate explanation) live here
+// ONCE, keyed by section, instead of once per zone. infoDetailsHtml() below
+// wraps a key's text in the <details class="info"> disclosure; the field's
+// one-line label stays inline where it was.
+var INFO_HTML = {
+  coupling: '<p class="hint">Cross-zone coupling to feedforward: &deg;C per unit duty at the ' +
+    'other zone\'s heater, measured, not a ratio -- 0 means no coupling measured/assumed. There ' +
+    'is no per-pair autotune step yet, so this is an editable field per PID_EXPANSION_PLAN.md 2c: ' +
+    'one number per other zone, diagonal omitted (self-gain is the identified plant model\'s job). ' +
+    'Values are non-negative -- the feedforward\'s own sign carries the direction. Omitting a cell ' +
+    'from a save preserves its stored value, so a zone that scrolls out of view cannot silently ' +
+    'lose a measurement.</p>',
+  fuzzy: FUZZY_RULE_TABLE_HTML +
+    '<p class="hint">Adjustment strength (0-100%) controls how far the fuzzy layer may move ' +
+    'Kp/Ki/Kd away from the base gains above; 0 means the fuzzy layer has no effect and must ' +
+    'reproduce the base gains exactly.</p>',
+  sanity: '<p class="hint">The dead-element check (&deg;C/min, 0 = firmware default 0.5). While ' +
+    'the executor drives this zone below setpoint, its reading must rise at least this much per ' +
+    'minute over the window below, or the zone trips as a detached thermocouple / dead element / ' +
+    'open relay. Too HIGH false-trips a slow, well-insulated or lightly-loaded kiln that is ' +
+    'genuinely heating; too LOW lets a genuinely dead element go unnoticed for longer. Range ' +
+    '0-20. This bench jig runs 0.2. It does not affect the runaway, drift or frozen-sensor ' +
+    'guards, which have their own thresholds.</p>',
+  relayTiming: '<p class="hint"><b>Min on is a hardware-protection minimum, not a tuning knob.</b> ' +
+    'Once the PID closes the relay for this zone it stays closed for at least <b>10000 ms ' +
+    '(10 s)</b>, so the downstream contactor is not cycled to death. Anything between 1 ' +
+    'and 9999 is <b>rejected</b> when you save -- this page shows you the error rather ' +
+    'than accepting a number the kiln would not actually use. Enter 0 for the firmware ' +
+    'default (which is the 10 s floor itself), or any value from 10000 up. A safety trip, ' +
+    'halt, pause or stop still opens the relay immediately -- the minimum never delays a ' +
+    'de-energize.</p>' +
+    '<p class="hint"><b>Window and Min on are not independent.</b> The window is the ' +
+    'period the PID duty is spread over: at 30 % duty the relay is closed for 30 % of it. ' +
+    'If the window is not at least <b>3x the minimum on-time</b>, no fractional duty fits ' +
+    'inside it -- every on-time the PID computes lands under the 10 s minimum and renders ' +
+    'as fully OFF, so the zone silently stops being a proportional controller. That is not ' +
+    'hypothetical: this board ran a 2000 ms window against the 10 s minimum, and an ' +
+    'autotune step at 40 % duty commanded heat for 40 minutes without the relay closing ' +
+    'once. A window under 3x the minimum on-time is therefore <b>rejected</b> when you ' +
+    'save. With the default 10 s minimum that means 30000 or more; the 60000 default ' +
+    'gives duty steps of about 0.17.</p>',
+  crossZone: '<p class="hint">Trips if this zone disagrees with another zone by more than this ' +
+    'for 10 minutes, catching a thermocouple that fell out of the chamber. Needs 2+ zones. Leave ' +
+    'at 0 until you have measured how far this kiln\'s zones legitimately drift apart -- real ' +
+    'kilns stratify, and a too-tight value here stops a good firing.</p>'
+};
+
+function infoOpenStorageKey(key) { return 'zoneInfoOpen:' + key; }
+
+function isInfoSectionOpen(key) {
+  try { return window.localStorage.getItem(infoOpenStorageKey(key)) === '1'; } catch (e) { return false; }
+}
+
+function setInfoSectionOpen(key, open) {
+  try { window.localStorage.setItem(infoOpenStorageKey(key), open ? '1' : '0'); } catch (e) { /* ignore */ }
+}
+
+// Renders the shared disclosure next to a section's one-line label/heading.
+// `key` selects the text from INFO_HTML above (kept once in the file); the
+// open/closed state is remembered per key across zones and reloads.
+function infoDetailsHtml(key, aboutLabel) {
+  var open = isInfoSectionOpen(key) ? ' open' : '';
+  return '<details class="info" data-infokey="' + key + '"' + open + '>' +
+    '<summary aria-label="About ' + aboutLabel + '">i</summary>' + INFO_HTML[key] + '</details>';
+}
+
 function zoneBlock(z, i, relayCount, thermoCount) {
   var div = document.createElement('div');
   div.className = 'zone';
@@ -849,8 +917,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
    * client that predates a given neighbour must not silently erase a
    * measurement -- see saveAll()'s per-cell push below, which always sends
    * every rendered cell explicitly instead of relying on that fallback. */
-  var couplingHtml = '<label>Cross-zone coupling to feedforward (&deg;C per unit duty at ' +
-    'the other zone\'s heater; measured, not a ratio -- 0 = no coupling measured/assumed)</label>';
+  var couplingHtml = '<label>Cross-zone coupling to feedforward</label>' + infoDetailsHtml('coupling', 'cross-zone coupling');
   if (thermoCount <= 1) {
     couplingHtml += '<p class="hint">Only one zone configured -- nothing to couple against.</p>';
   } else {
@@ -883,10 +950,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       modelHtml +
       couplingHtml +
       '<div class="fuzzyPanel">' +
-        FUZZY_RULE_TABLE_HTML +
-        '<label>Adjustment strength (0-100%) -- how far the fuzzy layer may move Kp/Ki/Kd ' +
-        'away from the base gains above; 0 = fuzzy layer has no effect (must reproduce the ' +
-        'base gains exactly)</label>' +
+        '<label>Adjustment strength (0-100%)</label>' + infoDetailsHtml('fuzzy', 'the fuzzy adjustment layer') +
         '<input type="number" class="fuzzystrength" min="0" max="100" step="1" value="' + fuzzyStrength + '">' +
       '</div>' +
     '</div>';
@@ -919,13 +983,8 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     pidPanelHtml +
     '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
     '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
-    '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5) -- the dead-element check. ' +
-    'While the executor drives this zone below setpoint, its reading must rise at least this ' +
-    'much per minute over the window below, or the zone trips as a detached thermocouple / ' +
-    'dead element / open relay. Too HIGH false-trips a slow, well-insulated or lightly-loaded ' +
-    'kiln that is genuinely heating; too LOW lets a genuinely dead element go unnoticed for ' +
-    'longer. Range 0-20. This bench jig runs 0.2. It does not affect the runaway, drift or ' +
-    'frozen-sensor guards, which have their own thresholds.</label>' +
+    '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5)</label>' +
+    infoDetailsHtml('sanity', 'minimum rise rate') +
     '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
     '<div class="row2">' +
       '<div><label>Max temp &deg;C (0 = no ceiling) -- hard safety trip, no debounce</label>' +
@@ -933,36 +992,15 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<div><label>Min temp &deg;C -- below this reads as a broken/disconnected sensor</label>' +
       '<input type="number" step="1" class="mintemp" value="' + z.min_temp_c + '"></div>' +
     '</div>' +
-    '<label>Relay timing (ms, 0 = use firmware default: 60000/10000/2000) -- how this zone\'s ' +
-    'relay(s) are switched in PID mode, and the on/off debounce in both PID and bang-bang mode</label>' +
+    '<label>Relay timing (ms, 0 = use firmware default: 60000/10000/2000)</label>' +
+    infoDetailsHtml('relayTiming', 'relay timing') +
     '<div class="row2">' +
       '<div><label>Window (&ge; 3x min on)</label><input type="number" step="1000" min="30000" class="window" value="' + (z.heater_window_ms || 0) + '"></div>' +
       '<div><label>Min on (&ge; 10000)</label><input type="number" step="1000" min="10000" class="minon" value="' + (z.heater_min_on_ms || 0) + '"></div>' +
       '<div><label>Min off</label><input type="number" step="100" class="minoff" value="' + (z.heater_min_off_ms || 0) + '"></div>' +
     '</div>' +
-    '<p class="hint"><b>Min on is a hardware-protection minimum, not a tuning knob.</b> ' +
-    'Once the PID closes the relay for this zone it stays closed for at least <b>10000 ms ' +
-    '(10 s)</b>, so the downstream contactor is not cycled to death. Anything between 1 ' +
-    'and 9999 is <b>rejected</b> when you save -- this page shows you the error rather ' +
-    'than accepting a number the kiln would not actually use. Enter 0 for the firmware ' +
-    'default (which is the 10 s floor itself), or any value from 10000 up. A safety trip, ' +
-    'halt, pause or stop still opens the relay immediately -- the minimum never delays a ' +
-    'de-energize.</p>' +
-    '<p class="hint"><b>Window and Min on are not independent.</b> The window is the ' +
-    'period the PID duty is spread over: at 30 % duty the relay is closed for 30 % of it. ' +
-    'If the window is not at least <b>3x the minimum on-time</b>, no fractional duty fits ' +
-    'inside it -- every on-time the PID computes lands under the 10 s minimum and renders ' +
-    'as fully OFF, so the zone silently stops being a proportional controller. That is not ' +
-    'hypothetical: this board ran a 2000 ms window against the 10 s minimum, and an ' +
-    'autotune step at 40 % duty commanded heat for 40 minutes without the relay closing ' +
-    'once. A window under 3x the minimum on-time is therefore <b>rejected</b> when you ' +
-    'save. With the default 10 s minimum that means 30000 or more; the 60000 default ' +
-    'gives duty steps of about 0.17.</p>' +
-    '<label>Cross-zone plausibility (&deg;C, 0 = disabled) -- trips if this zone disagrees ' +
-    'with another zone by more than this for 10 minutes, catching a thermocouple that fell ' +
-    'out of the chamber. Needs 2+ zones. Leave at 0 until you have measured how far this ' +
-    'kiln\'s zones legitimately drift apart -- real kilns stratify, and a too-tight value ' +
-    'here stops a good firing</label>' +
+    '<label>Cross-zone plausibility (&deg;C, 0 = disabled)</label>' +
+    infoDetailsHtml('crossZone', 'cross-zone plausibility') +
     '<input type="number" step="5" class="xzone" value="' + (z.cross_zone_max_delta_c || 0) + '">' +
     '<details class="advguards"><summary>Advanced guard thresholds (0 = firmware default -- ' +
     'leave alone unless you know why)</summary>' +
@@ -1321,6 +1359,17 @@ document.getElementById('zones').addEventListener('change', function (e) {
     refreshAllInheritance();
   }
 });
+
+// WEB_UI_PLAN.md section 1: an operator who opens a section's "i" disclosure
+// wants it open on every zone/reload, not just this card -- the 'toggle'
+// event on <details> does not bubble, so this listens in the capture phase
+// instead. Every zone's block for the same key opens/closes in lockstep on
+// the NEXT render (zoneBlock() reads isInfoSectionOpen() at creation time);
+// this only persists the choice.
+document.getElementById('zones').addEventListener('toggle', function (e) {
+  if (!e.target.classList || !e.target.classList.contains('info')) return;
+  setInfoSectionOpen(e.target.dataset.infokey, e.target.open);
+}, true);
 
 /* Union of every zone card's currently-CHECKED relay checkboxes -- bit r set
  * iff relay r+1 is claimed by some zone card as rendered RIGHT NOW, including
