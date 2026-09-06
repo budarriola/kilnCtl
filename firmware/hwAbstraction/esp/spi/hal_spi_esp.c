@@ -43,8 +43,17 @@
 static const char *TAG = "hal_spi_esp";
 
 typedef struct {
-    spi_owner_t owner;
+    spi_owner_t owner_storage; /* used only when this bus_t created its own owner */
+    spi_owner_t *owner;        /* &owner_storage normally; an adopted external
+                                 * spi_owner_t* when hal_spi_bus_adopt() was used
+                                 * instead of hal_spi_bus_init() -- see
+                                 * interface/hal_spi.h's doc comment on that
+                                 * function. NULL when not initialized. */
     spi_host_device_t host;
+    bool owner_owned; /* false when adopted: don't spi_owner_deinit() an
+                        * owner this hal_spi_bus_t instance didn't create --
+                        * some other driver (e.g. MAX31856.c's thermo_bus)
+                        * still uses it. Mirrors hal_i2c_esp's owner_owned. */
 } hal_spi_esp_bus_impl_t;
 
 _Static_assert(sizeof(hal_spi_esp_bus_impl_t) <= sizeof(((hal_spi_bus_t *)0)->storage),
@@ -105,20 +114,26 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id, const hal_spi_bus_
         .max_transfer_sz = (int)cfg->max_transfer_sz, /* 0 -> IDF default, matches header contract */
     };
     esp_err_t err = spi_bus_initialize(impl->host, &bus_config, hal_spi_esp_dma_chan(cfg->dma_chan));
-    if (err == ESP_ERR_INVALID_STATE) {
-        /* ALREADY_INIT decision (hal_spi.h): benign re-entry, not caller
-         * error. Only the FIRST init's config took effect on the underlying
-         * peripheral -- this bus_t still needs its own fresh spi_owner_t
-         * below since it has none yet even though the underlying host
-         * peripheral is already up. */
-        ESP_LOGI(TAG, "spi host %d already initialized; treating as OK", bus_id);
-    } else if (err != ESP_OK) {
-        ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        /* No ALREADY_INIT recovery here any more -- see interface/hal_spi.h's
+         * doc comment on hal_spi_bus_init()/hal_spi_bus_adopt() for why: a
+         * second hal_spi_bus_init() on an already-open host used to log this
+         * and carry on, but that still created a SECOND independent
+         * spi_owner_t/task arbitrating the same physical bus underneath
+         * whichever caller got there first, violating the single-writer
+         * invariant this whole design exists to protect. A caller sharing a
+         * bus another caller already brought up must call hal_spi_bus_adopt()
+         * on the existing hal_spi_bus_t instead of ever reaching this
+         * function on that bus_id again. */
+        ESP_LOGE(TAG, "spi_bus_initialize failed: %s -- if host %d is already open, use "
+                      "hal_spi_bus_adopt() instead of hal_spi_bus_init()",
+                 esp_err_to_name(err), bus_id);
+        memset(impl, 0, sizeof(*impl));
         return hal_esp_err_to_status(err);
     }
 
     esp_err_t owner_err =
-        spi_owner_init(&impl->owner, impl->host, (UBaseType_t)cfg->queue_len,
+        spi_owner_init(&impl->owner_storage, impl->host, (UBaseType_t)cfg->queue_len,
                         (UBaseType_t)cfg->task_priority, cfg->stack_depth,
                         cfg->core_id == HAL_CORE_ANY ? tskNO_AFFINITY : (BaseType_t)cfg->core_id,
                         cfg->dma_use_psram, cfg->async_flush);
@@ -130,9 +145,34 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id, const hal_spi_bus_
      * today's tskNO_AFFINITY usage. */
     if (owner_err != ESP_OK) {
         ESP_LOGE(TAG, "spi_owner_init failed: %s", esp_err_to_name(owner_err));
+        memset(impl, 0, sizeof(*impl));
         return hal_esp_err_to_status(owner_err);
     }
+    impl->owner = &impl->owner_storage;
+    impl->owner_owned = true;
 
+    return HAL_OK;
+}
+
+hal_status_t hal_spi_bus_adopt(hal_spi_bus_t *bus, int bus_id, hal_spi_bus_t *existing) {
+    if (!bus || !existing) {
+        return HAL_INVALID_ARG;
+    }
+    hal_spi_esp_bus_impl_t *existing_impl = bus_impl_of(existing);
+    if (!existing_impl->owner || !existing_impl->owner->initialized) {
+        ESP_LOGE(TAG, "hal_spi_bus_adopt: existing bus is not initialized");
+        return HAL_NOT_READY;
+    }
+    if (bus_id >= 0 && existing_impl->host != (spi_host_device_t)bus_id) {
+        ESP_LOGE(TAG, "hal_spi_bus_adopt: host mismatch (existing=%d, requested=%d)",
+                 (int)existing_impl->host, bus_id);
+        return HAL_INVALID_ARG;
+    }
+    hal_spi_esp_bus_impl_t *impl = bus_impl_of(bus);
+    memset(impl, 0, sizeof(*impl));
+    impl->owner = existing_impl->owner;
+    impl->host = existing_impl->host;
+    impl->owner_owned = false;
     return HAL_OK;
 }
 
@@ -141,16 +181,23 @@ hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus) {
         return HAL_INVALID_ARG;
     }
     hal_spi_esp_bus_impl_t *impl = bus_impl_of(bus);
-    if (!impl->owner.initialized) {
+    if (!impl->owner || !impl->owner->initialized) {
         return HAL_NOT_READY;
     }
 
-    /* CALLER CONTRACT, unchanged from spi_owner_deinit(): the caller must
-     * guarantee no hal_spi_transfer* call is still in flight anywhere before
-     * calling this -- see esp_spi_owner.h's spi_owner_deinit() doc comment
-     * for the full use-after-free reasoning. Unreachable today: nothing in
-     * this firmware calls the equivalent deinit. */
-    esp_err_t err = spi_owner_deinit(&impl->owner);
+    /* Adopted bus (hal_spi_bus_adopt(), owner_owned == false): this bus_t
+     * did not create the owner or the host peripheral, so it must not tear
+     * either down -- some other driver (e.g. MAX31856.c's thermo_bus) still
+     * uses them. Only this instance's own local storage is cleared. */
+    esp_err_t err = ESP_OK;
+    if (impl->owner_owned) {
+        /* CALLER CONTRACT, unchanged from spi_owner_deinit(): the caller must
+         * guarantee no hal_spi_transfer* call is still in flight anywhere
+         * before calling this -- see esp_spi_owner.h's spi_owner_deinit()
+         * doc comment for the full use-after-free reasoning. Unreachable
+         * today: nothing in this firmware calls the equivalent deinit. */
+        err = spi_owner_deinit(impl->owner);
+    }
 
     /* spi_bus_free() is deliberately NOT called here: multiple hal_spi_bus_t
      * instances/devices can share one underlying host peripheral (the
@@ -168,7 +215,10 @@ bool hal_spi_bus_is_wedged(const hal_spi_bus_t *bus) {
         return false;
     }
     const hal_spi_esp_bus_impl_t *impl = bus_impl_of_const(bus);
-    return spi_owner_is_wedged(&impl->owner);
+    if (!impl->owner) {
+        return false;
+    }
+    return spi_owner_is_wedged(impl->owner);
 }
 
 void *hal_spi_get_task_handle(const hal_spi_bus_t *bus) {
@@ -176,10 +226,10 @@ void *hal_spi_get_task_handle(const hal_spi_bus_t *bus) {
         return NULL;
     }
     const hal_spi_esp_bus_impl_t *impl = bus_impl_of_const(bus);
-    if (!impl->owner.initialized) {
+    if (!impl->owner || !impl->owner->initialized) {
         return NULL;
     }
-    return (void *)impl->owner.task_handle;
+    return (void *)impl->owner->task_handle;
 }
 
 /* See hal_spi_esp_owner.h -- ESP-only bridge for the display driver, which
@@ -190,10 +240,10 @@ spi_owner_t *hal_spi_esp_get_owner(hal_spi_bus_t *bus) {
         return NULL;
     }
     hal_spi_esp_bus_impl_t *impl = bus_impl_of(bus);
-    if (!impl->owner.initialized) {
+    if (!impl->owner || !impl->owner->initialized) {
         return NULL;
     }
-    return &impl->owner;
+    return impl->owner;
 }
 
 hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
@@ -202,7 +252,7 @@ hal_status_t hal_spi_device_attach(hal_spi_bus_t *bus, hal_spi_device_t *dev,
         return HAL_INVALID_ARG;
     }
     hal_spi_esp_bus_impl_t *bus_impl = bus_impl_of(bus);
-    if (!bus_impl->owner.initialized) {
+    if (!bus_impl->owner || !bus_impl->owner->initialized) {
         return HAL_NOT_READY;
     }
     hal_spi_esp_device_impl_t *dev_impl = device_impl_of(dev);
@@ -243,7 +293,7 @@ hal_status_t hal_spi_transfer(hal_spi_device_t *dev, const uint8_t *tx, size_t t
     if (!dev_impl->bus || !dev_impl->device) {
         return HAL_NOT_READY;
     }
-    esp_err_t err = spi_owner_transfer(&dev_impl->bus->owner, dev_impl->device, tx, tx_len, rx,
+    esp_err_t err = spi_owner_transfer(dev_impl->bus->owner, dev_impl->device, tx, tx_len, rx,
                                         rx_len, dev_impl->cs_pin);
     return hal_esp_err_to_status(err);
 }
@@ -261,7 +311,7 @@ hal_status_t hal_spi_transfer_polling(hal_spi_device_t *dev, const uint8_t *tx, 
     if (!dev_impl->bus || !dev_impl->device) {
         return HAL_NOT_READY;
     }
-    esp_err_t err = spi_owner_transfer_polling(&dev_impl->bus->owner, dev_impl->device, tx, tx_len,
+    esp_err_t err = spi_owner_transfer_polling(dev_impl->bus->owner, dev_impl->device, tx, tx_len,
                                                 rx, rx_len, dev_impl->cs_pin);
     return hal_esp_err_to_status(err);
 }
@@ -303,7 +353,7 @@ hal_status_t hal_spi_transfer_async(hal_spi_device_t *dev, const uint8_t *tx, si
      * that is a second, narrower consequence of the same interface mismatch,
      * not a separate bug -- fixing the callback-signature mismatch properly
      * would fix this too. */
-    esp_err_t err = spi_owner_transfer(&dev_impl->bus->owner, dev_impl->device, tx, len, NULL, 0,
+    esp_err_t err = spi_owner_transfer(dev_impl->bus->owner, dev_impl->device, tx, len, NULL, 0,
                                         dev_impl->cs_pin);
     if (cb) {
         cb(ctx, hal_esp_err_to_status(err));

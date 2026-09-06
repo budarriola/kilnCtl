@@ -773,18 +773,42 @@ $cmd26 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 
 Invoke-HostTestExe -Name "hal_i2c_adopt" -ExePath $exe26 -BuildCmd $cmd26
 
+# ---- test_hal_spi_adopt.c: its own 27th, separate executable --------------
+# 2026-09-06 fix: hal_spi_bus_init()'s old ALREADY_INIT recovery path (a
+# second hal_spi_bus_t sharing an already-open SPI host, e.g. MAX31856
+# sharing main_boot_early.c's shared thermo/display bus) let a second caller
+# create its OWN spi_owner_t/task on hardware -- see
+# firmware/hwAbstraction/interface/hal_spi.h's hal_spi_bus_adopt() doc
+# comment and main_boot_early.c's shared-SPI-bus bring-up. The replacement,
+# hal_spi_bus_adopt(), is implemented by both the ESP backend (real
+# driver/spi_master.h, cannot link on host) and the host fake
+# (firmware/hwAbstraction/host/fake_spi.c), so this test exercises it
+# directly at the portable hal_spi.h level. Links only fake_spi.c +
+# hal_status.c -- no App/ driver under test here, just the fake backend's
+# own adopt semantics (mirrors test_hal_i2c_adopt.c's own scope note).
+$exe27 = Join-Path $outDir "kilnctl_host_tests_hal_spi_adopt.exe"
+$spiAdoptObjDir = Join-Path $outDir "spiadopt"
+New-Item -ItemType Directory -Force -Path $spiAdoptObjDir | Out-Null
+$cmd27 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+        "/Fo:`"$spiAdoptObjDir\\`" /Fe:`"$exe27`" " +
+        "`"$(Join-Path $testDir 'test_hal_spi_adopt.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_spi.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+
+Invoke-HostTestExe -Name "hal_spi_adopt" -ExePath $exe27 -BuildCmd $cmd27
+
 # ---- summary ----------------------------------------------------------
 #
-# 26 executables are attempted above (main + zones_http + safety_cfg_http +
+# 27 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
 # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
 # zone_coupling_solve + partition_info_http + adaptive_tune_http +
-# profiles_builtin + ft6336u + max31856_hal_spi + hal_i2c_adopt).
+# profiles_builtin + ft6336u + max31856_hal_spi + hal_i2c_adopt +
+# hal_spi_adopt).
 # Report how many of those were even built, separately from how many of the
 # built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 26
+$totalExpected = 27
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {

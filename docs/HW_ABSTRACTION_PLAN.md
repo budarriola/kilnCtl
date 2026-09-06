@@ -819,10 +819,12 @@ along with its test coverage in firmware/hwAbstraction/test/test_fake_uart.c.
 2026-09-05 audit: `uart_owner_transfer()` itself is now unreachable in
 production (uart_protocol.c's frame_and_send() was its only real caller and
 no longer calls it; safety_link.c's remaining textual match is a comment, not
-a call site) -- scheduled for deletion in this same later pass, alongside the
-whole `uart_owner_task()` request/reply queue+worker (both its TX and its
-already-refused RX branch), once nothing depends on uart_owner_t owning the
-driver at all. Measure on hardware after this phase:
+a call site) -- **done: dead request-queue path and uart_owner_transfer()
+deleted; hal_uart_open() still unused on ESP, left for a later phase**
+(the whole `uart_owner_task()` request/reply queue+worker, both its TX and
+its already-refused RX branch, is gone; surviving tasks are
+`uart_owner_event_task` and `uart_protocol_rx_task`). Measure on hardware
+after this phase:
 safety-link reply timing, display frame time, thermo read latency under a
 full-screen redraw. relay_owner becomes a hal_gpio client; hal_adc wraps
 current_task/current_sense. hal_scratch/hal_wdt pico bodies landed the same

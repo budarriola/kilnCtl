@@ -133,6 +133,28 @@ int main(void)
     TEST_CHECK(isnan(reading.tc_temperature_c), "OPEN fault NaNs tc_temperature_c even though the burst decoded fine");
     TEST_CHECK(reading.fault_status == THERMO_FAULT_OPEN, "fault_status reports OPEN");
 
+    // 2026-09-06: MAX31856_bus_adopt() (the replacement for the
+    // MAX31856_bus_init()->hal_spi_bus_init() path that used to hit the now-
+    // removed ALREADY_INIT recovery on the KilnFW shared thermo/display bus
+    // -- see MAX31856.h's doc comment) shares an already-live bus instead of
+    // creating a new one. Verified here by adopting the same bus this test
+    // already brought up above and confirming a channel attached through the
+    // ADOPTED MAX31856BusClass reads back correctly and lands in the SAME
+    // fake_spi transfer log as the channels attached above.
+    MAX31856BusClass adopted_bus = {0};
+    TEST_CHECK(MAX31856_bus_adopt(&adopted_bus, /*host=*/1, &bus.hal_bus) == ESP_OK,
+               "MAX31856_bus_adopt succeeds against the already-live bus");
+    TEST_CHECK(fake_spi_bus_is_live(&adopted_bus.hal_bus), "adopted MAX31856BusClass reads as live");
+
+    static MAX31856Class adopted_ch;
+    memset(&adopted_ch, 0, sizeof(adopted_ch));
+    size_t before_adopt = fake_spi_transfer_count();
+    check_channel(&adopted_bus, &adopted_ch, /*i=*/0);
+    TEST_CHECK(fake_spi_transfer_count() == before_adopt + 1,
+               "the adopted-bus channel's read landed in the SAME shared transfer log as the "
+               "original bus's channels -- adopted and original share one underlying slot, not "
+               "two independent SPI owners on one physical bus");
+
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;
 }

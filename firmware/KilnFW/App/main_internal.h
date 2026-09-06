@@ -63,6 +63,15 @@ typedef struct {
 
     esp_err_t spi_err;
 
+    /* Shared SPI host (thermocouples + display), brought up ONCE here by
+     * main_boot_early.c via hal_spi_bus_init() -- sized for the display,
+     * the larger of the two consumers' needs. MAX31856_start_all() adopts
+     * this bus (MAX31856_bus_adopt()) rather than calling hal_spi_bus_init()
+     * itself; see hal_spi_bus_adopt()'s doc comment (interface/hal_spi.h)
+     * for why a second hal_spi_bus_init() on this host is no longer
+     * tolerated. */
+    hal_spi_bus_t shared_spi_bus;
+
     /* Accumulated across bring-up, applied to the isolated fault line once
      * the safety link exists (main_control_bringup.c). */
     uint32_t boot_fault_sources;

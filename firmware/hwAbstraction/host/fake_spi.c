@@ -9,6 +9,10 @@
 typedef struct {
     uint32_t magic;
     int      slot;
+    bool     owned; /* false for a bus_t stamped by fake_spi_bus_adopt():
+                      * hal_spi_bus_deinit() on it must not free the shared
+                      * slot, mirroring hal_spi_bus_adopt()'s owner_owned on
+                      * the real ESP backend. */
 } fake_spi_tag_t;
 
 _Static_assert(sizeof(fake_spi_tag_t) <= HAL_SPI_BUS_STORAGE_BYTES,
@@ -245,19 +249,59 @@ hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id,
     fake_spi_tag_t tag;
     tag.magic = FAKE_SPI_BUS_MAGIC;
     tag.slot = free_slot;
+    tag.owned = true;
     memset(bus->storage, 0, sizeof(bus->storage));
     memcpy(bus->storage, &tag, sizeof(tag));
     return HAL_OK;
+}
+
+/* Models hal_spi_bus_adopt() (interface/hal_spi.h / hal_spi_esp.c) at the
+ * portable fake level: `bus` becomes a second hal_spi_bus_t pointing at the
+ * SAME underlying slot as `existing` -- transfers/scripts/the transfer log
+ * through either handle share one bus slot -- but is marked !owned, so
+ * hal_spi_bus_deinit(bus) below never frees the shared slot. */
+hal_status_t fake_spi_bus_adopt(hal_spi_bus_t *bus, const hal_spi_bus_t *existing)
+{
+    if (!bus || !existing) return HAL_INVALID_ARG;
+    int slot = get_bus_slot_index(existing);
+    if (slot < 0) return HAL_NOT_READY;
+
+    fake_spi_tag_t tag;
+    tag.magic = FAKE_SPI_BUS_MAGIC;
+    tag.slot = slot;
+    tag.owned = false;
+    memset(bus->storage, 0, sizeof(bus->storage));
+    memcpy(bus->storage, &tag, sizeof(tag));
+    return HAL_OK;
+}
+
+/* Portable-interface entry point (interface/hal_spi.h): bus_id is unused
+ * here, same as hal_spi_bus_init() above -- the host fake has only one
+ * implicit "bus_id" concept per slot and does not model a distinct host
+ * number to cross-check against (the ESP backend does check it). */
+hal_status_t hal_spi_bus_adopt(hal_spi_bus_t *bus, int bus_id, hal_spi_bus_t *existing)
+{
+    (void)bus_id;
+    return fake_spi_bus_adopt(bus, existing);
 }
 
 hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus)
 {
     fake_spi_bus_slot_t *b = get_bus(bus);
     if (!b) return HAL_NOT_READY;
+
+    fake_spi_tag_t tag;
+    memcpy(&tag, bus->storage, sizeof(tag));
+
     /* Deinit orphans any devices still attached to this bus -- their calls
      * will read as HAL_NOT_READY via the bus slot below, matching real
-     * hardware where a torn-down bus cannot serve an attached device. */
-    b->in_use = false;
+     * hardware where a torn-down bus cannot serve an attached device.
+     * Adopted (!owned) handles never free the shared slot -- only a deinit
+     * of the bus that actually created it does, mirroring
+     * hal_spi_esp.c's owner_owned guard. */
+    if (tag.owned) {
+        b->in_use = false;
+    }
     memset(bus->storage, 0, sizeof(bus->storage));
     return HAL_OK;
 }

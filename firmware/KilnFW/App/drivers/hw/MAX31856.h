@@ -331,29 +331,51 @@ struct MAX31856Class {
  *
  *   static MAX31856BusClass thermo_bus;
  *   static MAX31856Class thermo_ch[MAX31856_CHANNEL_COUNT];
- *   MAX31856_start_all(&thermo_bus, thermo_ch);
+ *   MAX31856_start_all(&thermo_bus, thermo_ch, &ctx->shared_spi_bus);
  *
- * Initializes the bus from the KILN_SPI_* settings, attaches all three
- * channels at the THERMO_CSn / THERMO_FAULTn pins, applies
- * MAX31856_config_default() to each, and verifies each part by reading CR1
- * back. Channels that fail are logged as errors and left un-initialized; the
- * others still work, because losing one thermocouple is not a reason to have
- * no thermocouples. Returns ESP_OK only if all three came up, otherwise the
- * last error (the caller is expected to log and carry on, not to abort boot).
+ * Adopts `shared_bus` (must already be live -- main_boot_early.c calls
+ * hal_spi_bus_init() on it, sized for the display, BEFORE this runs; see
+ * MAX31856_bus_adopt()'s doc comment for why this driver no longer brings
+ * the host up itself) via MAX31856_bus_adopt(), attaches all three channels
+ * at the THERMO_CSn / THERMO_FAULTn pins, applies MAX31856_config_default()
+ * to each, and verifies each part by reading CR1 back. Channels that fail
+ * are logged as errors and left un-initialized; the others still work,
+ * because losing one thermocouple is not a reason to have no thermocouples.
+ * Returns ESP_OK only if all three came up, otherwise the last error (the
+ * caller is expected to log and carry on, not to abort boot).
  *
  * `channels` must point at MAX31856_CHANNEL_COUNT structs that outlive the
  * driver -- statics, like the rest of this codebase; nothing here is
  * heap-allocated after init. */
-esp_err_t MAX31856_start_all(MAX31856BusClass *bus, MAX31856Class *channels);
+esp_err_t MAX31856_start_all(MAX31856BusClass *bus, MAX31856Class *channels,
+                             hal_spi_bus_t *shared_bus);
 
-/* Brings up the SPI bus and the owner task. If some other driver (the display)
- * already initialized this host, that is not an error: the bus is reused and
- * only its original owner frees it. */
+/* Brings up the SPI bus and the owner task. 2026-09-06: no longer tolerant
+ * of an already-open host -- see hal_spi_bus_init()'s own doc comment
+ * (interface/hal_spi.h) for why the old "some other driver already
+ * initialized this host, reuse it" recovery was removed. On the KilnFW
+ * shared thermo/display bus, main_boot_early.c is the one that calls
+ * hal_spi_bus_init() (with the display's larger config) BEFORE this driver
+ * ever runs -- MAX31856_start_all() must use MAX31856_bus_adopt() below on
+ * that already-created bus, not this function, in that situation. This
+ * function is for a caller that owns the bus outright (host tests;
+ * hardware where nothing else shares the SPI host). */
 esp_err_t MAX31856_bus_init(MAX31856BusClass *bus,
                             spi_host_device_t host,
                             int sclk_gpio,
                             int mosi_gpio,
                             int miso_gpio);
+
+/* Adopts an already-initialized shared bus (`existing`, e.g.
+ * main_boot_early.c's ctx->shared_spi_bus) instead of calling
+ * hal_spi_bus_init() -- see that function's doc comment above and
+ * hal_spi_bus_adopt()'s own comment (interface/hal_spi.h) for why. `bus`
+ * never owns the underlying host peripheral/owner task afterward:
+ * MAX31856_bus_deinit() on it tears down only this instance's own
+ * bookkeeping, never `existing`'s. */
+esp_err_t MAX31856_bus_adopt(MAX31856BusClass *bus,
+                             spi_host_device_t host,
+                             hal_spi_bus_t *existing);
 esp_err_t MAX31856_bus_deinit(MAX31856BusClass *bus);
 
 /* Attaches one part to an initialized bus: adds an SPI device (mode 1, MSB

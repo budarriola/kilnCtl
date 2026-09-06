@@ -151,25 +151,49 @@ typedef struct {
 #define HAL_SPI_DMA_AUTO 0
 #define HAL_SPI_DMA_NONE (-1)
 
-/* ALREADY_INIT decision (Phase 0, per the plan's open question at
- * "Bus-init semantics"): hal_spi_bus_init() on a bus that is already up
- * (observed on the ESP after a JTAG reset, spi_bus_initialize() returning
- * ESP_ERR_INVALID_STATE) returns HAL_OK, not HAL_BUSY, and logs at INFO.
- * Rationale: this is a benign, expected re-entry on this hardware (not a
- * caller error and not evidence the bus is unusable), so BUSY -- which
- * elsewhere in this table means "retry me" -- would be misleading; callers
- * that treat init as idempotent (main_boot_early.c's bring-up sequence)
- * should not have to special-case a second return value. Only the first
- * init's DMA configuration takes effect, so callers must still ensure the
- * first hal_spi_bus_init() on a shared bus applies the configuration that
- * needs to win (the display's, on the KilnFW thermo/display shared bus).
- * This applies field-by-field to the whole cfg struct, including
- * max_transfer_sz and dma_chan: whichever caller's hal_spi_bus_init() runs
- * first on a shared bus_id fixes those values for every later attach on
- * that bus, so the first caller must request the largest max_transfer_sz
- * any sharer will need (the display's, not the thermocouple driver's). */
+/* ALREADY_INIT decision, SUPERSEDED 2026-09-06 (same class of bug as
+ * hal_i2c_esp_owner.h's 2026-09-06 fix): this used to say a second
+ * hal_spi_bus_init() on an already-open bus_id (observed on the ESP after a
+ * JTAG reset, spi_bus_initialize() returning ESP_ERR_INVALID_STATE) was
+ * treated as benign and returned HAL_OK. That recovery only re-shared the
+ * raw host peripheral -- it did NOT stop a second caller from getting its
+ * OWN spi_owner_t/task, i.e. a second independent single-writer arbiter on
+ * one physical SPI bus, which is exactly the invariant this interface
+ * exists to protect (see the "Single-writer per bus" contract note above).
+ * On this board it fired every boot (main_boot_early.c opens the shared
+ * KilnFW thermo/display bus first with the display's larger config,
+ * MAX31856_bus_init() used to call hal_spi_bus_init() again and hit this
+ * path) and logged a spurious `spi_common` error even though nothing was
+ * actually broken by it -- but the mechanism was fragile by luck, not by
+ * design. hal_spi_bus_init() on an already-open bus_id is now a plain, loud
+ * error (whatever the backend's underlying re-init call reports) -- no
+ * recovery. A caller sharing a bus another caller already brought up must
+ * use hal_spi_bus_adopt() below instead of calling hal_spi_bus_init() at
+ * all. Only the first (real) hal_spi_bus_init() on a shared bus_id's
+ * configuration takes effect, so that first caller must still request the
+ * largest max_transfer_sz any sharer will need (the display's, not the
+ * thermocouple driver's, on the KilnFW shared bus) and the deepest queue_len
+ * any sharer needs. */
 hal_status_t hal_spi_bus_init(hal_spi_bus_t *bus, int bus_id,
                                const hal_spi_bus_cfg_t *cfg);
+
+/* Adopts an already-initialized hal_spi_bus_t (`existing`) into `bus`,
+ * sharing the same underlying host peripheral/owner rather than
+ * re-initializing it -- the replacement for the ALREADY_INIT recovery
+ * removed above, and the SPI analog of hal_i2c_esp_adopt() (see
+ * firmware/hwAbstraction/esp/i2c/hal_i2c_esp_owner.h's header comment for
+ * the fuller rationale on why "recover from a failed re-init" and "adopt
+ * what's already there" are not the same thing). `existing` must already be
+ * a live, successfully-initialized bus -- HAL_NOT_READY if not, HAL_INVALID_ARG
+ * if either pointer is NULL. The adopted `bus` never owns the peripheral or
+ * the underlying owner/task: hal_spi_bus_deinit(bus) tears down only this
+ * instance's own local bookkeeping, never the shared resources -- some other
+ * caller (whoever's hal_spi_bus_init() actually created them) still needs
+ * them. bus_id is passed through for a backend that wants to sanity-check it
+ * against `existing`'s own host (the ESP backend does); the host fake
+ * ignores it, same as hal_spi_bus_init(). */
+hal_status_t hal_spi_bus_adopt(hal_spi_bus_t *bus, int bus_id, hal_spi_bus_t *existing);
+
 hal_status_t hal_spi_bus_deinit(hal_spi_bus_t *bus);
 bool         hal_spi_bus_is_wedged(const hal_spi_bus_t *bus);
 

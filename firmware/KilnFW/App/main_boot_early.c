@@ -439,20 +439,40 @@ void main_boot_early(main_boot_ctx_t *ctx)
 
     // --- Shared SPI bus ----------------------------------------------------
     // Initialized here rather than by either of its two drivers, because only
-    // the FIRST spi_bus_initialize() on a host takes effect and the two want
-    // incompatible buses: MAX31856_bus_init asks for SPI_DMA_DISABLED with
-    // max_transfer_sz 17 (fine for a 17-byte register burst, fatal for the
-    // display, whose scratch buffer is 1440 bytes and needs DMA), while the
-    // ILI9488 driver never initializes a bus at all -- it only adds a device.
-    // Doing it once, here, with the display's requirements is the only order
-    // that cannot depend on which driver happens to start first: both then
-    // find the host already up, which each handles.
-    spi_bus_config_t spi_config = {
-        .mosi_io_num = KILN_SPI_MOSI_IO,
-        .miso_io_num = KILN_SPI_MISO_IO,
-        .sclk_io_num = KILN_SPI_SCLK_IO,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
+    // the FIRST hal_spi_bus_init() on a host takes effect and the two want
+    // incompatible buses: MAX31856 wants SPI_DMA_DISABLED with max_transfer_sz
+    // 17 (fine for a 17-byte register burst, fatal for the display, whose
+    // scratch buffer is 1440 bytes and needs DMA), while the ILI9488 driver
+    // never initializes a bus at all -- it only adds a device. Doing it once,
+    // here, with the display's requirements, and having MAX31856_start_all()
+    // ADOPT this bus (MAX31856_bus_adopt()) rather than calling
+    // hal_spi_bus_init() itself, is the fix for a 2026-09-06 hardware bug:
+    // hal_spi_bus_init() used to have an ALREADY_INIT recovery for exactly
+    // this sharing case (whichever driver ran second would find
+    // ESP_ERR_INVALID_STATE from spi_bus_initialize() and log-and-continue),
+    // but that recovery still let the second caller create its OWN
+    // spi_owner_t/task -- a second independent single-writer arbiter on one
+    // physical bus, the same class of bug hal_i2c_esp_owner.h's own
+    // 2026-09-06 fix documents for I2C (see that header's comment). It was
+    // reliably hit on this board's every boot (visible in the log as
+    // `spi_common: spi_bus_initialize(...) SPI bus already initialized` right
+    // before `hal_spi_esp: spi host N already initialized; treating as OK`),
+    // and is removed -- hal_spi_bus_init() on an already-open host is now a
+    // plain, loud error; a second consumer must adopt instead. Doing it here,
+    // ordered before MAX31856_start_all() below (whichever driver runs first
+    // no longer matters for correctness, only for which caller must be the
+    // real hal_spi_bus_init()), is the only order that cannot depend on which
+    // driver happens to start first.
+    hal_spi_bus_cfg_t spi_config = {
+        .sck_pin = KILN_SPI_SCLK_IO,
+        .mosi_pin = KILN_SPI_MOSI_IO,
+        .miso_pin = KILN_SPI_MISO_IO,
+        .queue_len = 8,
+        .task_priority = 5,
+        .stack_depth = 4096,
+        .core_id = HAL_CORE_ANY,
+        .dma_use_psram = KILNCTL_SPI_DMA_USE_PSRAM ? true : false,
+        .async_flush = KILNCTL_SPI_ASYNC_FLUSH ? true : false,
         /* DISPLAY_ST7796_PLAN.md 9.2: sized to one full LVGL draw buffer
          * (KILNCTL_LVGL_BUF_ROWS default 40 rows x 480px x 2B/px RGB565 =
          * 38400B), not to ILI9488_SCRATCH_BYTES (1440B) -- this is the SPI
@@ -467,39 +487,19 @@ void main_boot_early(main_boot_ctx_t *ctx)
          * ST7796 zero-copy flush (9.7) needs to DMA a whole LVGL buffer in
          * one transaction instead of 27 chunked ones. */
         .max_transfer_sz = KILNCTL_SPI_MAX_TRANSFER_SZ,
+        .dma_chan = HAL_SPI_DMA_AUTO,
     };
-    esp_err_t spi_err = spi_bus_initialize(KILN_SPI_HOST, &spi_config, SPI_DMA_CH_AUTO);
+    hal_status_t spi_hal_st = hal_spi_bus_init(&ctx->shared_spi_bus, KILN_SPI_HOST, &spi_config);
+    esp_err_t spi_err = (spi_hal_st == HAL_OK) ? ESP_OK : ESP_FAIL;
     ctx->spi_err = spi_err;
-    if (spi_err == ESP_ERR_INVALID_STATE) {
-        /* Observed repeatedly on the bench after a JTAG/OpenOCD flash+reset
-         * (never after a real power cycle): spi_bus_initialize() returns
-         * ESP_ERR_INVALID_STATE here (bus_ctx[host] already non-NULL,
-         * spi_common.c), yet MAX31856_start_all() right below finds the bus
-         * genuinely healthy and every channel reads real temperatures
-         * immediately after. Treated as benign on that evidence -- NOT
-         * asserting a boot fault here is what stops a harmless soft reset
-         * from latching a false S6a that nothing then deasserts.
-         *
-         * Opus review 2026-08-27 flagged that the underlying mechanism this
-         * comment used to assert ("the host peripheral's initialized latch
-         * survives a soft reset") does not hold up against spi_common.c's
-         * source: bus_ctx[] is a plain static pointer, zeroed by every
-         * reset's normal .bss init same as any other global, JTAG-triggered
-         * or not -- so by that reading this SHOULD be unreachable on a
-         * genuine full reset. The mechanism is not fully understood; what is
-         * verified is the bench outcome above. thermo_bus.initialized right
-         * below is the real safety net regardless -- it is checked
-         * unconditionally and independently asserts SAFETY_FAULT_SRC_THERMO
-         * if no channel actually answers, whatever this branch decided. The
-         * one thing this exemption does NOT cover is the display (no
-         * equivalent boot-fault path exists for it, since it was never
-         * safety-relevant) -- if this branch is ever reached for a reason
-         * OTHER than the benign case above, a misconfigured shared bus could
-         * make ILI9488_start() fail silently instead of loudly. */
-        ESP_LOGW(MAIN_TAG, "spi_bus_initialize: already initialized (soft reset) -- sharing existing bus");
-    } else if (spi_err != ESP_OK) {
-        ESP_LOGE(MAIN_TAG, "spi_bus_initialize failed: %s -- thermocouples and display are out",
-                 esp_err_to_name(spi_err));
+    if (spi_hal_st != HAL_OK) {
+        /* No ALREADY_INIT tolerance any more -- see the comment above this
+         * block. thermo_bus.initialized right below is the real safety net
+         * regardless: it is checked unconditionally and independently
+         * asserts SAFETY_FAULT_SRC_THERMO if no channel actually answers, on
+         * top of the boot_fault_sources bit this failure sets just below. */
+        ESP_LOGE(MAIN_TAG, "hal_spi_bus_init failed: %s -- thermocouples and display are out",
+                 hal_status_to_name(spi_hal_st));
     }
 
     /* Accumulated across the rest of bring-up and applied to the isolated fault
@@ -532,22 +532,26 @@ void main_boot_early(main_boot_ctx_t *ctx)
         ctx->boot_fault_sources |= SAFETY_FAULT_SRC_APP;
 #endif
     }
-    if (spi_err != ESP_OK && spi_err != ESP_ERR_INVALID_STATE) {
+    if (spi_err != ESP_OK) {
         /* No SPI bus means no MAX31856 can be read: the kiln has no temperature
          * measurement on this side of the barrier. Reported as a thermocouple
          * fault because that is exactly what it is from the safety
-         * processor's point of view. ESP_ERR_INVALID_STATE (already
-         * initialized) is excluded -- that is the benign soft-reset case
-         * logged above, and the real coverage for "no channel actually
-         * came up" is the thermo_bus.initialized check right below. */
+         * processor's point of view. No ESP_ERR_INVALID_STATE exemption any
+         * more -- hal_spi_bus_init() above no longer has an ALREADY_INIT
+         * recovery to be benign about (see that call site's comment); a
+         * real failure here really does mean no bus. The real coverage for
+         * "no channel actually came up" (as opposed to no bus at all) is the
+         * thermo_bus.initialized check right below. */
         ctx->boot_fault_sources |= SAFETY_FAULT_SRC_THERMO;
     }
 
     // --- MAX31856 thermocouple channels (J6) -------------------------------
-    // Finds the bus already up and shares it (and, having not created it, will
-    // not free it). Channels that fail are logged and left out; losing one
-    // thermocouple is not a reason to have no thermocouples.
-    esp_err_t thermo_err = MAX31856_start_all(&ctx->thermo_bus, ctx->thermo_ch);
+    // Adopts the shared bus brought up above (MAX31856_bus_adopt(), via
+    // MAX31856_start_all()) rather than creating its own -- it does not own
+    // the underlying host/owner and will not tear either down. Channels that
+    // fail are logged and left out; losing one thermocouple is not a reason
+    // to have no thermocouples.
+    esp_err_t thermo_err = MAX31856_start_all(&ctx->thermo_bus, ctx->thermo_ch, &ctx->shared_spi_bus);
     if (thermo_err != ESP_OK) {
         ESP_LOGE(MAIN_TAG, "thermocouple bring-up incomplete: %s", esp_err_to_name(thermo_err));
     }

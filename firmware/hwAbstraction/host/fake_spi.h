@@ -97,6 +97,16 @@ const fake_spi_transfer_record_t *fake_spi_transfer(size_t index);
  * (FAKE_SPI_RX_SCRIPT_QUEUE_CAP) is full. */
 hal_status_t fake_spi_script_rx(hal_spi_device_t *dev, const uint8_t *data, size_t len);
 
+/* Host-fake model of hal_spi_bus_adopt() (interface/hal_spi.h, backed on ESP
+ * by hal_spi_esp.c's hal_spi_bus_adopt()): stamps `bus` to share the same
+ * underlying slot as an already-live `existing` bus, so transfers/scripts/
+ * the transfer log through EITHER handle observe the same state, while
+ * hal_spi_bus_deinit() on the adopted `bus` never frees the shared slot
+ * (only a deinit of the ORIGINAL bus that owns it does) -- mirrors
+ * fake_i2c_bus_adopt()'s contract exactly. Returns HAL_NOT_READY if
+ * `existing` is not a live bus, HAL_INVALID_ARG if either pointer is NULL. */
+hal_status_t fake_spi_bus_adopt(hal_spi_bus_t *bus, const hal_spi_bus_t *existing);
+
 /* --- Fault injection, per bus. Cleared by fake_spi_reset_all() and by a
  * fresh hal_spi_bus_init() on that bus_id's slot. --- */
 

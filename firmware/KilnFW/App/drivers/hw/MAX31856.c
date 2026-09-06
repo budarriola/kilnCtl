@@ -401,6 +401,40 @@ esp_err_t MAX31856_bus_init(MAX31856BusClass *bus,
     return ESP_OK;
 }
 
+esp_err_t MAX31856_bus_adopt(MAX31856BusClass *bus, spi_host_device_t host, hal_spi_bus_t *existing)
+{
+    if (!bus || !existing) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (bus->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Same "carry the DRDY provider across the wipe" as MAX31856_bus_init()
+     * above -- a caller is allowed to install it before the bus comes up. */
+    MAX31856_drdy_provider_t saved_provider = bus->drdy_provider;
+    void *saved_ctx = bus->drdy_ctx;
+
+    memset(bus, 0, sizeof(*bus));
+    bus->host = host;
+    bus->drdy_provider = saved_provider;
+    bus->drdy_ctx = saved_ctx;
+
+    /* 2026-09-06: replaces the hal_spi_bus_init() call MAX31856_bus_init()
+     * makes -- see that function's and hal_spi_bus_adopt()'s (interface/
+     * hal_spi.h) doc comments for why. `existing` (main_boot_early.c's
+     * shared bus, brought up with the display's larger config) is not
+     * re-initialized here; bus->hal_bus just shares its owner. */
+    hal_status_t st = hal_spi_bus_adopt(&bus->hal_bus, (int)host, existing);
+    if (st != HAL_OK) {
+        ESP_LOGE(TAG, "hal_spi_bus_adopt failed: %s", hal_status_to_name(st));
+        return max31856_hal_to_esp_err(st);
+    }
+
+    bus->initialized = true;
+    return ESP_OK;
+}
+
 esp_err_t MAX31856_bus_deinit(MAX31856BusClass *bus)
 {
     if (!bus) {
@@ -718,14 +752,20 @@ void MAX31856_config_default(MAX31856Config *cfg)
 #endif
 }
 
-esp_err_t MAX31856_start_all(MAX31856BusClass *bus, MAX31856Class *channels)
+esp_err_t MAX31856_start_all(MAX31856BusClass *bus, MAX31856Class *channels,
+                             hal_spi_bus_t *shared_bus)
 {
-    if (!bus || !channels) {
+    if (!bus || !channels || !shared_bus) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t err = MAX31856_bus_init(bus, KILN_SPI_HOST, KILN_SPI_SCLK_IO, KILN_SPI_MOSI_IO,
-                                      KILN_SPI_MISO_IO);
+    /* 2026-09-06: adopts main_boot_early.c's already-live shared bus instead
+     * of calling MAX31856_bus_init() (which used to call hal_spi_bus_init()
+     * itself and hit that function's now-removed ALREADY_INIT recovery,
+     * since main_boot_early.c always brings the shared host up first with
+     * the display's larger config) -- see MAX31856_bus_adopt()'s doc
+     * comment. */
+    esp_err_t err = MAX31856_bus_adopt(bus, KILN_SPI_HOST, shared_bus);
     if (err != ESP_OK) {
         return err;
     }

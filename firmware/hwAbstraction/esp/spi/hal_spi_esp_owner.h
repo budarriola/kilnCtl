@@ -11,11 +11,14 @@
  * too is a separate, listed follow-up, not folded into this SPI-arbiter-
  * duplication fix.
  *
- * That means whoever brings up the shared bus (MAX31856_bus_init(), which
- * now owns a hal_spi_bus_t, not a raw spi_owner_t) must still be able to
- * hand the display driver a pointer to the SAME owner task/queue/pool --
- * two independent spi_owner_t instances arbitrating one physical bus would
- * violate the single-writer invariant this whole design exists to protect.
+ * That means whoever brings up the shared bus (main_boot_early.c, as of
+ * 2026-09-06 -- see hal_spi_bus_adopt()'s doc comment in interface/hal_spi.h
+ * for why MAX31856_bus_init() no longer does this itself: it now adopts the
+ * bus main_boot_early.c already created, via MAX31856_bus_adopt()) must
+ * still be able to hand the display driver a pointer to the SAME owner
+ * task/queue/pool -- two independent spi_owner_t instances arbitrating one
+ * physical bus would violate the single-writer invariant this whole design
+ * exists to protect.
  * This accessor reaches into hal_spi_esp.c's private bus impl (both files
  * live in firmware/hwAbstraction/esp/spi/, and hal_spi_esp_bus_impl_t is
  * hal_spi_esp.c's own opaque-storage layout, never exposed through the
