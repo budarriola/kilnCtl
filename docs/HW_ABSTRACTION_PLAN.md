@@ -584,9 +584,14 @@ assertions + two more proven negative tests, 402 total): fake_kv models
 pending-vs-committed durability (fake_kv_simulate_power_loss() discards only
 uncommitted writes) with wrong-type/corruption/no-space error injection;
 fake_time is a manually-advanced, forward-only clock where delay_ms advances
-it instead of sleeping. fake_flash remains unstarted: interface/ still has
-no hal_flash.h, and a host fake must follow an existing interface header
-rather than invent one -- fake_flash waits on that header landing first.
+it instead of sleeping. hal_flash.h: header written (compile_headers.ps1
+passes, negative test still fires) -- raw sector erase/page program/read/
+geometry primitive plus the hal_flash_safe_execute()/hal_flash_write_safe_
+here() multicore-XIP execution-context contract; config_store's slot-log/
+CRC/ARMED/format-REFUSE policy deliberately stays out, layered on top by
+config_store_flash.c's later rebase (Phase 3 item 2). fake_flash itself
+remains unstarted -- a host fake must follow an existing interface header
+rather than invent one, and now can.
 Still not wired into build_host_tests.ps1 (the response-file switch above is
 still open).
 
