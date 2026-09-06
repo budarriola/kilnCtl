@@ -35,12 +35,18 @@
 #   esp-idf/App/CMakeFiles/__idf_App.dir/          (firmware/KilnFW/App/*.c)
 #   esp-idf/drivers/CMakeFiles/__idf_drivers.dir/   (firmware/KilnFW/App/drivers/**/*.c)
 #   esp-idf/kilnlink/CMakeFiles/__idf_kilnlink.dir/ (firmware/CommonFW, our shared link code)
-#   esp-idf/esp/CMakeFiles/__idf_esp.dir/           (firmware/hwAbstraction/esp, HAL Phase
-#                                                     1a's new idf_component_register --
+#   esp-idf/hwabstraction_esp/CMakeFiles/__idf_hwabstraction_esp.dir/
+#                                                    (firmware/hwAbstraction/esp via the thin
+#                                                     wrapper component at firmware/hwAbstraction/
+#                                                     idf/hwabstraction_esp/CMakeLists.txt -- HAL
+#                                                     Phase 1a's new idf_component_register --
 #                                                     esp_spi_owner.c/owner_slot_pool.c/
 #                                                     i2c_owner.c/uart_owner.c/uart_protocol.c,
 #                                                     added when this component started
-#                                                     producing its own linked objects)
+#                                                     producing its own linked objects; renamed
+#                                                     from the bare "esp" component name to avoid
+#                                                     colliding in ESP-IDF's flat component
+#                                                     namespace)
 # which are the four components this repository actually authors and edits.
 #
 # SYMBOL FILTERING, why type letters and not names. `nm --defined-only`'s
@@ -98,7 +104,7 @@ $componentDirs = @(
     "esp-idf\App\CMakeFiles\__idf_App.dir",
     "esp-idf\drivers\CMakeFiles\__idf_drivers.dir",
     "esp-idf\kilnlink\CMakeFiles\__idf_kilnlink.dir",
-    "esp-idf\esp\CMakeFiles\__idf_esp.dir"
+    "esp-idf\hwabstraction_esp\CMakeFiles\__idf_hwabstraction_esp.dir"
 )
 
 if (-not (Test-Path $buildDir)) {
@@ -129,7 +135,7 @@ $componentSourceRoots = @{
     "esp-idf\App\CMakeFiles\__idf_App.dir"          = "firmware\KilnFW\App"
     "esp-idf\drivers\CMakeFiles\__idf_drivers.dir"   = "firmware\KilnFW\App\drivers"
     "esp-idf\kilnlink\CMakeFiles\__idf_kilnlink.dir" = "firmware\CommonFW"
-    "esp-idf\esp\CMakeFiles\__idf_esp.dir"           = "firmware\hwAbstraction\esp"
+    "esp-idf\hwabstraction_esp\CMakeFiles\__idf_hwabstraction_esp.dir" = "firmware\hwAbstraction\esp"
 }
 
 # Matched by BASENAME against everything real under the component's source

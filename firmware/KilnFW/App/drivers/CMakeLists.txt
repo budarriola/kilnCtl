@@ -379,7 +379,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
                                 esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
                                 esp_hw_support esp_hal_wdt
-                                espcoredump esp
+                                espcoredump hwabstraction_esp
                        PRIV_REQUIRES spi_flash spiffs)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated

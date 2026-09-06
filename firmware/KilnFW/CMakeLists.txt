@@ -7,10 +7,16 @@ cmake_minimum_required(VERSION 3.22)
 # i2c/spi/uart owners); both need to be pointed to explicitly since neither
 # lives under main/ or components/ where the build would find them
 # automatically.
+# The ESP-IDF component lives at ../hwAbstraction/idf/hwabstraction_esp, a
+# thin wrapper directory named "hwabstraction_esp" (ESP-IDF derives a
+# component's name from its directory name, and that name lives in a flat
+# global namespace) so it does not register under the bare, collision-prone
+# name "esp". Its sources live one level up, under
+# ../hwAbstraction/esp/ -- see that wrapper's CMakeLists.txt.
 set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/App"
     "${CMAKE_CURRENT_LIST_DIR}/App/drivers"
-    "${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction/esp"
+    "${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction/idf/hwabstraction_esp"
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
