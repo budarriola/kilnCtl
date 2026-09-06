@@ -964,6 +964,39 @@ New tests unlocked immediately: pico spi_owner against fake_spi, pico
 uart_owner ring logic against fake_uart, current-sense guards against
 fake_adc, config_store_flash against fake_flash.
 
+Correction (2026-09-05, SaftyFW-half Phase 2 pass): the "pico spi_owner
+against fake_spi" and "pico uart_owner ring logic against fake_uart" bullets
+above are wrong for both owners as they exist today, and are not being done.
+fake_spi.h/fake_uart.h are host fakes for `interface/hal_spi.h`/`hal_uart.h`
+(their own header comments) -- they stand in for a HAL *backend*, to be
+linked under a *client* that calls `hal_spi_*`/`hal_uart_*`. Neither pico
+owner is such a client: `pico/spi/spi_owner.c` includes `hardware/spi.h`
+directly and has no `hal_spi_pico.c` counterpart at all (spi_owner.h's own
+comment: it is "a plain driver module", the MAX31856 driver's only SPI
+dependency, not layered under any HAL yet). `pico/uart/uart_owner.c`
+includes `hardware/uart.h` directly and IS already the backend edge for
+`hal_uart.h`: `hal_uart_pico.c`'s own header comment says it "wraps
+uart_owner.c's PUBLIC functions" -- i.e. the owner sits BELOW hal_uart,
+called BY the adapter, not above it calling into hal_uart_*. Converting
+either owner to call `hal_spi_*`/`hal_uart_*` would be backwards -- it would
+have the backend call its own interface -- so per this task's own branch
+("if the plan says the owner IS the backend, do not convert"), neither
+conversion is happening. Both owners remain testable only through their own
+direct pico-sdk calls (no host stub exists for `hardware/spi.h`/
+`hardware/uart.h` today; SaftyFW's host build links real owner .c files with
+no stub directory at all per this doc's "Host fakes" section above), which
+fake_spi/fake_uart do not intercept. Deferred until a Phase 3 item either
+gives pico SPI a `hal_spi_pico.c` backend that itself calls a stubbable
+pico-sdk shim, or adds a `hardware/spi.h`/`hardware/uart.h` host stub
+directory the way KilnFW's stub headers do. Current-sense guards were
+already covered before this pass: `test_current_presence_policy.c` (pure
+policy, no hardware includes) and `test_current_sense_hal_adc.c` (fake_adc
+against `current_sense.c`, the only real ADC-reading producer of
+`current_snapshot_t.amps[]`) both predate this session and are already
+linked into `build_host_tests.ps1`; `safety_guards.c`, the only guard-level
+consumer, is off-limits to this pass, so the API boundary is the correct and
+already-complete stopping point -- no new test added here.
+
 Status (2026-09-05, KilnFW-half pass): verified KilnFW's
 build_host_tests.ps1 already carries the response-file (Option A) and
 `hwAbstraction/interface/` include dir from an earlier pass. Re-audited
