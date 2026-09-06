@@ -213,6 +213,16 @@ uint16_t config_params_id_for_field_name(const char *name);
 // config_params_all_required_set()), never a false "confirmed."
 void config_params_finalize_ct_channel_map(config_store_record_t *rec);
 
+// CT_COMMISSIONING_PLAN.md step 3: "i_present_a auto-derives as half the
+// smallest zone normal unless set by hand." Called by COMMIT_CONFIG's
+// handler (link_task.c) alongside config_params_finalize_ct_channel_map(),
+// same timing (after config_params_validate() passes, before config_store_
+// write()). No-op whenever rec->i_present_a_manual is true (0x0301's
+// SET_PARAM handler set it) or no i_normal_a[] channel has ever been
+// confirmed (CONFIG_STORE_SET_I_NORMAL_A_0/_1/_2) -- see the .c file for the
+// exact rule.
+void config_params_finalize_i_present_a(config_store_record_t *rec);
+
 // True iff every one of the seven CONFIG_STORE_SET_* bits (config_store.h's
 // bitmask -- the no-safe-default fields CONFIG_REFERENCE.md section 1 names)
 // is set in `rec->fields_set`. COMMIT_CONFIG's handler uses this to decide

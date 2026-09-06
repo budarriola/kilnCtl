@@ -411,6 +411,16 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
     s_guard_cfg.overcurrent_pct    = (uint16_t)rec->overcurrent_pct;
     s_guard_cfg.overcurrent_time_s = (float)rec->overcurrent_time_s;
 
+    // ct_topology (param 0x031F, CT_COMMISSIONING_PLAN.md step 3). rec->
+    // ct_topology is already the DECODED value (config_store.c's unpack does
+    // the marker-byte defaulting for a legacy/erased record) -- 0 = per_zone,
+    // 1 = summed. No fields_set gate: unlike ct_installed this is not an
+    // ASKED question with two equally-plausible answers, it is "which
+    // hardware topology is fitted", and per_zone (today's only shipped
+    // topology) is the only safe silent default for a record that never
+    // answers.
+    s_guard_cfg.ct_topology_summed = (rec->ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED);
+
     // S9's gate on whether the current reading is a MEASUREMENT or a
     // heuristic. 2026-08-27: safety_guards.c gained
     // in->current_sensing_commissioned so an uncommissioned board cannot latch
@@ -1040,8 +1050,16 @@ static safety_guard_input_t safety_core_build_input(void)
     float amps_for_ct[3] = { 0.0f, 0.0f, 0.0f };
     bool  amps_valid_for_ct[3] = { false, false, false };
     bool  relay_commanded_now_for_ct[3] = { false, false, false };
+    bool  ct_summed = (cfg_rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED);
     if (current_fresh && !cts_disabled) {
         for (unsigned ch = 0; ch < 3; ch++) {
+            // Summed topology: only channel 2 (index 2, "channel 3"/GPIO28
+            // per HARDWARE.md) has a CT behind it at all -- channels 0/1
+            // must report "not fitted", never a plausible-looking 0.00 A,
+            // same discipline as ct_installed==0's per-channel treatment.
+            if (ct_summed && ch != 2u) {
+                continue;
+            }
             amps_for_ct[ch] = current.amps[ch];
             amps_valid_for_ct[ch] = true;
         }
@@ -1052,6 +1070,21 @@ static safety_guard_input_t safety_core_build_input(void)
             if (relay_id < 3u) {
                 relay_commanded_now_for_ct[ch] = (ctx.relay_now_mask & (1u << relay_id)) != 0u;
             }
+        }
+    }
+
+    // S14 (summed topology)/S15. Per-ZONE commanded-now, straight off
+    // ctx.relay_now_mask by zone id (0-2) -- unlike relay_commanded_now_
+    // for_ct above this does NOT go through ct_channel_map, because in
+    // summed topology every channel maps to the one shared CT, so the map
+    // cannot answer "which zones are on" for zones other than whichever one
+    // it happens to name. Gated on context_valid alone (not on ct_channel_
+    // map being commissioned) since summed mode's S14/S15 do not consult
+    // that map at all -- see safety_guards.c's summed-topology block.
+    bool relay_commanded_now_for_zone[3] = { false, false, false };
+    if (context_valid) {
+        for (unsigned z = 0; z < 3; z++) {
+            relay_commanded_now_for_zone[z] = (ctx.relay_now_mask & (1u << z)) != 0u;
         }
     }
 
@@ -1129,6 +1162,8 @@ static safety_guard_input_t safety_core_build_input(void)
         .amps_valid = { amps_valid_for_ct[0], amps_valid_for_ct[1], amps_valid_for_ct[2] },
         .relay_commanded_now_for_ct = { relay_commanded_now_for_ct[0], relay_commanded_now_for_ct[1],
                                          relay_commanded_now_for_ct[2] },
+        .relay_commanded_now_for_zone = { relay_commanded_now_for_zone[0], relay_commanded_now_for_zone[1],
+                                           relay_commanded_now_for_zone[2] },
         // 2026-08-27 audit item 1: measured (clamped, fallback-safe) dt_s,
         // computed above via tick_dt_compute_s() -- no longer the raw
         // compile-time SAFTYFW_PERIOD_SAFETY_CORE_MS constant. See that call

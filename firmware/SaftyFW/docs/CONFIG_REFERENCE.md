@@ -107,7 +107,7 @@ breakers remain the electrical protection (`SAFETY_MODEL.md` §3/§4 S14/§7).
 
 | Field | Default | Unit | Guard | Risk | Notes |
 |---|---|---|---|---|---|
-| `i_present_a` | 2.0 | A | S3, S4, S9 | 🟠 | A load-active threshold. Only has to separate noise from a conducting element — one to two orders of magnitude of slack |
+| `i_present_a` | 2.0, or auto | A | S3, S4, S9 | 🟠 | A load-active threshold. Only has to separate noise from a conducting element — one to two orders of magnitude of slack. **2026-09-06:** auto-derives to half the smallest committed `i_normal_a[]` at `COMMIT_CONFIG` unless set directly by hand (a direct `SET_PARAM` on this field always wins, permanently) |
 | `zero_counts[3]` | measured | ADC counts | S3, S4, S9 | 🟠 | Re-measured at runtime after ≥5 min idle. **Not zero** — single-supply offset |
 | `correlation_window_s` | 150 | s | S3, S4 | 🟠 | **≥ 2 × the ESP's 60 s heater window + decay.** Shortening this is the fastest way to make S4 fire on every healthy low-duty firing |
 | `stuck_on_time_s` | 20 | s | S3 | 🟠 | |
@@ -119,6 +119,7 @@ breakers remain the electrical protection (`SAFETY_MODEL.md` §3/§4 S14/§7).
 | `i_normal_a[3]` **NEW** | unset | A | **S14** | 🟠 | Per-zone measured normal (energize-one-zone-at-a-time, ROADMAP M12/zones page). Individually gated — a channel with no measurement is skipped by S14 entirely, never treated as 0 A |
 | `overcurrent_pct` **NEW** | 150 | % | **S14** | 🟠 | WARN threshold, as a percentage of that channel's own `i_normal_a` |
 | `overcurrent_time_s` **NEW** | 30 | s | **S14** | 🟠 | Sustained-above-threshold window before WARN |
+| `ct_topology` **NEW** (0x031F) | 0 (per_zone) | enum | **S14, S15** | 🟠 | `per_zone` (0, default) — one CT per zone, unchanged behaviour above. `summed` (1) — one shared CT (channel 3/GPIO28) reads every zone; S14 compares it against the sum of `i_normal_a[]` for zones commanded on, channels 1-2 report not-fitted, and S15 (new, WARN-only, `0.7×` a zone's normal for 30 s) flags a likely open heater. See `CT_COMMISSIONING_PLAN.md` step 3 |
 
 **2026-08-24 note, made true by this date's commit, not before it.** The
 `*none*`/⚪ badges on `k_ct_v_per_a`/`gain`/`mains_voltage_v` were *aspirational*

@@ -93,7 +93,13 @@
 //               even reach the value -- the marker convention is belt and
 //               braces, deliberately, because the consequence of a
 //               mis-decode here is three disarmed guards.
-//    228   276  reserved, 0xFF-filled (headroom for a future field)
+//    228     1  ct_topology (u8, 0=per_zone/1=summed) -- CT_COMMISSIONING_
+//               PLAN.md step 3, param 0x031F. Plain 0/1 byte; any other
+//               value (legacy 0x00, erased-flash 0xFF) decodes as per_zone.
+//    229     1  i_present_a_manual (u8, 0/1) -- true iff i_present_a (offset
+//               87) was set directly via SET_PARAM rather than auto-derived
+//               from i_normal_a. Same "only 1 means true" decode as above.
+//    230   274  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -156,8 +162,18 @@
 #define REC_OFF_OVERCURRENT_PCT        (REC_OFF_I_NORMAL_A + 3u * 4u)      /* 221 */
 #define REC_OFF_OVERCURRENT_TIME_S     (REC_OFF_OVERCURRENT_PCT + 2u)      /* 223 */
 #define REC_OFF_CT_INSTALLED           (REC_OFF_OVERCURRENT_TIME_S + 4u)  /* 227 */
-#define REC_OFF_RESERVED               (REC_OFF_CT_INSTALLED + 1u)        /* 228 */
-#define REC_RESERVED_LEN               276u
+// ct_topology/i_present_a_manual (CT_COMMISSIONING_PLAN.md step 3), carved
+// out of the front of the reserved tail same as every field above -- plain
+// 0/1 bytes, not the 0xA5-marker convention: this build only ever writes 0
+// or 1 (config_params.c's CHECK_U8_MAX(1u)/CHECK_TYPE(BOOL)), and BOTH
+// decoders below only special-case the value 1 (SUMMED / manual==true) --
+// any other byte, including an old record's never-written 0xFF or a legacy
+// record's zeroed 0x00, already falls through to the safe default (per_zone
+// / auto-derive) without needing a distinct improbable sentinel.
+#define REC_OFF_CT_TOPOLOGY            (REC_OFF_CT_INSTALLED + 1u)        /* 228 */
+#define REC_OFF_I_PRESENT_A_MANUAL     (REC_OFF_CT_TOPOLOGY + 1u)         /* 229 */
+#define REC_OFF_RESERVED               (REC_OFF_I_PRESENT_A_MANUAL + 1u)  /* 230 */
+#define REC_RESERVED_LEN               274u
 
 // The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
 // file's own layout-table comment above for the hardware-confirmed reason:
@@ -367,6 +383,11 @@ void config_store_pack(const config_store_record_t *rec,
     out[REC_OFF_CT_INSTALLED] = rec->ct_installed ? CT_INSTALLED_MARKER_INSTALLED
                                                   : CT_INSTALLED_MARKER_NOT_INSTALLED;
 
+    // Plain 0/1 bytes -- see REC_OFF_CT_TOPOLOGY's own layout-table comment
+    // for why no 0xA5-style marker is needed here.
+    out[REC_OFF_CT_TOPOLOGY] = (rec->ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED) ? 1u : 0u;
+    out[REC_OFF_I_PRESENT_A_MANUAL] = rec->i_present_a_manual ? 1u : 0u;
+
     put_f32_le(&out[REC_OFF_MAX_EXPECTED_POWER_W], rec->max_expected_power_w);
 
     for (unsigned ch = 0; ch < 3; ch++) {
@@ -492,6 +513,16 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     // config_params_all_required_set() both do).
     out->ct_installed =
         (in[REC_OFF_CT_INSTALLED] == CT_INSTALLED_MARKER_NOT_INSTALLED) ? 0u : 1u;
+
+    // ct_topology/i_present_a_manual (CT_COMMISSIONING_PLAN.md step 3):
+    // ONLY the byte value 1 decodes as the non-default state -- a legacy
+    // record (0x00, never wrote this offset) and an erased/never-written
+    // record (0xFF) both fall through to the safe default (per_zone /
+    // auto-derive), same direction as every other decode in this function.
+    out->ct_topology = (in[REC_OFF_CT_TOPOLOGY] == 1u)
+                            ? CONFIG_STORE_CT_TOPOLOGY_SUMMED
+                            : CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+    out->i_present_a_manual = (in[REC_OFF_I_PRESENT_A_MANUAL] == 1u);
 
     // Raw decode only -- CONFIG_STORE_SET_MAX_EXPECTED_POWER_W (already read
     // into out->fields_set above) is what gates whether any caller may trust
@@ -822,6 +853,12 @@ void config_store_default(config_store_record_t *out)
     // NOT written here explicitly, unlike i_present_a etc. above, so a
     // fresh record and a migrated-forward legacy record produce the exact
     // same in-RAM 0 for these two fields.
+
+    // ct_topology: left at memset(0) above == CONFIG_STORE_CT_TOPOLOGY_
+    // PER_ZONE (0) -- the safe default that reproduces every existing
+    // behaviour. i_present_a_manual: left at memset(0) above == false, so a
+    // fresh board's i_present_a is free to be auto-derived once i_normal_a
+    // is commissioned (config_params_finalize_i_present_a()).
 
     // ct_cal: left at the memset(0) above -- calibrated == false on every
     // channel, gain/offset == 0 but IGNORED (never read) as a consequence.

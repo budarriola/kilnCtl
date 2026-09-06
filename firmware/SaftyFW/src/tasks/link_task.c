@@ -1936,6 +1936,7 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 
     config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
+    config_params_finalize_i_present_a(&to_write); // CT_COMMISSIONING_PLAN.md step 3
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
     const char *reason = NULL;

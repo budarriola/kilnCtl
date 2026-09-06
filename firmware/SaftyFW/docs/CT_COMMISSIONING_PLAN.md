@@ -99,6 +99,35 @@ document, do not solve.
    zone normal unless set by hand. Add an **under-current** warn (open
    heater: commanded sum minus measured > 0.7x that zone's normal for 30 s),
    WARN-only like S4/S14 until it has been seen on hardware.
+
+   **Pico side: done** (`safety_guards.c`/`.h`, `safety_core.c`,
+   `config_store.c`/`.h`, `config_params.c`/`.h` — CT_COMMISSIONING_PLAN.md
+   commit). `ct_topology` is param `0x031F` (U8, 0=per_zone/1=summed,
+   `CHECK_U8_MAX(1u)`, no `fields_set` gate — per_zone is already the safe
+   silent default). New guard **S15** (WARN-only, per zone, `0.7×` that
+   zone's `i_normal_a` sustained 30 s, hardcoded not config-exposed) covers
+   the under-current/open-heater case; S14 gains a summed-topology branch
+   (channel 2 vs. the sum of `i_normal_a[]` for zones commanded on right
+   now; channels 0/1 report not-fitted via `amps_valid`). `i_present_a`
+   auto-derivation lives in `config_params_finalize_i_present_a()`, called
+   at `COMMIT_CONFIG` next to the existing `ct_channel_map` finalizer, gated
+   by a new non-`fields_set` marker byte `i_present_a_manual` (fields_set is
+   full — see config_store.h). No `KILNLINK_PROTOCOL_VERSION` bump: SET_
+   PARAM/GET_PARAM/GET_CONFIG_PAGE are already generic by param id, so a new
+   id needs no frame/version change. Host tests: `test/test_safety_guards.c`
+   (summed-topology S14 + new S15 cases, quantized-counts negative test) and
+   `test/test_config_store.c`/`test/test_config_params.c` (topology pack/
+   unpack round-trip, legacy-record decode, `i_present_a` auto-derive).
+
+   **ESP side: pending.** KilnFW needs: a `ct_topology` commissioning
+   question on `safety_commissioning_page.html`, forwarding `SET_PARAM`
+   0x031F, updating the zones-current-sweep flow to skip the channel-map
+   check and derive normals from channel 3 alone in summed mode
+   (`GUARD_TEST_MATRIX.md` §3.3), dashboard/LCD display of the summed amps
+   plus single-zone attribution, and every KilnFW trip/warn name table
+   (`safety_trip_words.h`, `profile_executor.h` and any other place S1-S14
+   are named) gaining an S15 entry — none of that lives in SaftyFW and none
+   of it was touched by this pass.
 4. **Real-amps display**: dashboard and LCD show the summed amps and, in
    summed mode, the per-zone attribution only when exactly one zone is on.
    `safety_get_status` keeps three fields; channels 1-2 report "not fitted"

@@ -121,6 +121,9 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     { 0x031Cu, KILNLINK_PARAM_TYPE_F32 }, // i_normal_a[2] -- S14, NEW
     { 0x031Du, KILNLINK_PARAM_TYPE_U16 }, // overcurrent_pct -- S14, NEW
     { 0x031Eu, KILNLINK_PARAM_TYPE_U16 }, // overcurrent_time_s -- S14, NEW
+    { 0x031Fu, KILNLINK_PARAM_TYPE_U8 },  // ct_topology -- CT_COMMISSIONING_PLAN.md
+                                           // step 3, NEW; next unallocated id
+                                           // after 0x031E in this section-3 group
     { 0x0401u, KILNLINK_PARAM_TYPE_U16 }, // context_max_age_s
     { 0x0402u, KILNLINK_PARAM_TYPE_U16 }, // link_timeout_s
     { 0x0403u, KILNLINK_PARAM_TYPE_U16 }, // link_dead_hard_s
@@ -230,6 +233,7 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x031Cu: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->i_normal_a[2]; return true;
     case 0x031Du: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->overcurrent_pct); return true;
     case 0x031Eu: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->overcurrent_time_s); return true;
+    case 0x031Fu: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_topology; return true;
 
     case 0x0401u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->context_max_age_s); return true;
     case 0x0402u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->link_timeout_s); return true;
@@ -406,7 +410,13 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     // commissioned flag) rather than the four/six no-safe-default fields'.
     case 0x0211u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(1u); rec->safety_tc_installed = value.u8_val; return true;
 
-    case 0x0301u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_present_a = value.f32_val; return true;
+    // A direct write to i_present_a is exactly "set by hand" (CT_
+    // COMMISSIONING_PLAN.md step 3) -- marking i_present_a_manual here means
+    // config_params_finalize_i_present_a() (called at COMMIT_CONFIG) will
+    // never overwrite this operator-supplied value with the auto-derived
+    // half-of-smallest-normal figure, even on a later commit that also
+    // changes i_normal_a.
+    case 0x0301u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_present_a = value.f32_val; rec->i_present_a_manual = true; return true;
     case 0x0302u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->zero_counts[0] = value.u16_val; return true;
     case 0x0303u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->zero_counts[1] = value.u16_val; return true;
     case 0x0304u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->zero_counts[2] = value.u16_val; return true;
@@ -450,6 +460,12 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x031Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_normal_a[2] = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_I_NORMAL_A_2; return true;
     case 0x031Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overcurrent_pct = value.u16_val; return true;
     case 0x031Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overcurrent_time_s = value.u16_val; return true;
+    // ct_topology: 0 (per_zone) or 1 (summed) only -- CONFIG_STORE_CT_
+    // TOPOLOGY_PER_ZONE/_SUMMED. Not fields_set-gated: per_zone (0) is
+    // already the safe default for a never-answered record, the same
+    // reasoning as i_present_a above, not the "no safe default" reasoning
+    // ct_installed/tc_source use.
+    case 0x031Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(CONFIG_STORE_CT_TOPOLOGY_SUMMED); rec->ct_topology = value.u8_val; return true;
 
     case 0x0401u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->context_max_age_s = value.u16_val; return true;
     case 0x0402u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->link_timeout_s = value.u16_val; return true;
@@ -748,6 +764,7 @@ static const config_param_name_id_t CONFIG_PARAM_NAME_TABLE[] = {
     { "i_normal_a[2]", 0x031Cu },
     { "overcurrent_pct", 0x031Du },
     { "overcurrent_time_s", 0x031Eu },
+    { "ct_topology", 0x031Fu },
     { "firing_margin_c", 0x0201u },
     { "overshoot_margin_c", 0x0202u },
     { "max_rate_c_per_min", 0x0204u },
@@ -802,6 +819,47 @@ void config_params_finalize_ct_channel_map(config_store_record_t *rec)
                                 CONFIG_STORE_SET_CT_CHANNEL_MAP_2);
     if (config_store_field_is_set(&rec->fields_set, need)) {
         rec->fields_set |= CONFIG_STORE_SET_CT_CHANNEL_MAP;
+    }
+}
+
+void config_params_finalize_i_present_a(config_store_record_t *rec)
+{
+    if (!rec || rec->i_present_a_manual) {
+        // Either no record, or an operator already wrote i_present_a by
+        // hand (0x0301's SET_PARAM handler set the marker) -- CT_
+        // COMMISSIONING_PLAN.md step 3's "unless set by hand" means a
+        // manual value is NEVER overwritten here, even by a later commit
+        // that also changes i_normal_a.
+        return;
+    }
+    // Half the smallest CONFIRMED zone normal (CONFIG_STORE_SET_I_NORMAL_A_
+    // 0/_1/_2 -- a channel whose bit is clear has never been measured and
+    // must not participate, same "skip entirely" rule i_normal_valid[]
+    // follows in safety_guards.c). If no zone has ever been measured yet,
+    // i_present_a is left exactly as it was (the compiled 2.0A default on a
+    // fresh board, or whatever the previous commit already computed) --
+    // this function only ever narrows a genuine measurement into a
+    // load-active threshold, it never invents one from nothing.
+    static const uint16_t I_NORMAL_A_BITS[3] = {
+        CONFIG_STORE_SET_I_NORMAL_A_0, CONFIG_STORE_SET_I_NORMAL_A_1, CONFIG_STORE_SET_I_NORMAL_A_2
+    };
+    bool  have_any = false;
+    float smallest = 0.0f;
+    for (unsigned z = 0; z < 3; z++) {
+        if (!config_store_field_is_set(&rec->fields_set, I_NORMAL_A_BITS[z])) {
+            continue;
+        }
+        float v = rec->i_normal_a[z];
+        if (!isfinite(v) || v < 0.0f) {
+            continue; // cannot happen via SET_PARAM's own CHECK_F32_NONNEG, defensive only
+        }
+        if (!have_any || v < smallest) {
+            smallest = v;
+            have_any = true;
+        }
+    }
+    if (have_any) {
+        rec->i_present_a = smallest * 0.5f;
     }
 }
 

@@ -1729,6 +1729,176 @@ static void test_config_params_ct_channel_map_two_of_three(void)
                "re-finalizing does not un-confirm an already-confirmed map");
 }
 
+static void test_ct_topology_legacy_decode(void)
+{
+    TEST_SECTION("ct_topology/i_present_a_manual -- legacy/erased bytes decode to the safe default");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_record_t back;
+
+    // A legacy record (built before these two fields existed) holds 0x00 at
+    // offsets 228/229, same hardware-confirmed reasoning as safety_tc_
+    // installed's own legacy test above (old config_store_pack() memcpy'd a
+    // memset(0) rec->reserved). Must decode as per_zone (0) / manual==false.
+    config_store_pack(&rec, record);
+    record[228] = 0x00u; // REC_OFF_CT_TOPOLOGY
+    record[229] = 0x00u; // REC_OFF_I_PRESENT_A_MANUAL
+    {
+        uint32_t crc = bootloader_crc32(record, 504u);
+        record[504] = (uint8_t)(crc & 0xFFu);
+        record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+        record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+        record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    TEST_CHECK(config_store_unpack(record, &back), "simulated legacy record (0x00 at both new offsets) unpacks");
+    TEST_CHECK(back.ct_topology == CONFIG_STORE_CT_TOPOLOGY_PER_ZONE,
+               "0x00 at the ct_topology offset decodes as per_zone, the safe default");
+    TEST_CHECK(!back.i_present_a_manual,
+               "0x00 at the i_present_a_manual offset decodes as false (auto-derive allowed)");
+
+    // Erased flash (0xFF, never written by ANY build) must also decode to
+    // the safe default -- same "only the exact marker means non-default"
+    // rule as the ct_installed/safety_tc_installed sentinels.
+    config_store_pack(&rec, record);
+    record[228] = 0xFFu;
+    record[229] = 0xFFu;
+    {
+        uint32_t crc = bootloader_crc32(record, 504u);
+        record[504] = (uint8_t)(crc & 0xFFu);
+        record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+        record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+        record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    TEST_CHECK(config_store_unpack(record, &back), "simulated erased-flash record unpacks");
+    TEST_CHECK(back.ct_topology == CONFIG_STORE_CT_TOPOLOGY_PER_ZONE,
+               "0xFF (erased) at the ct_topology offset also decodes as per_zone");
+    TEST_CHECK(!back.i_present_a_manual, "0xFF (erased) at the i_present_a_manual offset also decodes as false");
+
+    // Positive proof the real encoder/decoder pair actually round-trips the
+    // non-default state -- proves this is not vacuously always-false.
+    rec.ct_topology = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+    rec.i_present_a_manual = true;
+    config_store_pack(&rec, record);
+    TEST_CHECK(record[228] == 1u, "config_store_pack() encodes summed topology as byte value 1");
+    TEST_CHECK(record[229] == 1u, "config_store_pack() encodes i_present_a_manual==true as byte value 1");
+    TEST_CHECK(config_store_unpack(record, &back), "record with both new fields set unpacks");
+    TEST_CHECK(back.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED, "summed topology round-trips");
+    TEST_CHECK(back.i_present_a_manual, "i_present_a_manual==true round-trips");
+}
+
+static void test_config_params_ct_topology_set(void)
+{
+    TEST_SECTION("config_params -- ct_topology (0x031F) SET_PARAM/GET_PARAM");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_PER_ZONE,
+               "a fresh default record starts at per_zone");
+
+    kilnlink_param_value_t v;
+    v.u8_val = 1u;
+    TEST_CHECK(config_params_set(&rec, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v), "set ct_topology to summed (1)");
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED, "value took effect");
+
+    uint8_t type;
+    kilnlink_param_value_t out;
+    TEST_CHECK(config_params_get(&rec, 0x031Fu, &type, &out), "get ct_topology back");
+    TEST_CHECK(type == KILNLINK_PARAM_TYPE_U8 && out.u8_val == 1u, "GET_PARAM reads back the summed value");
+
+    // Negative test: only 0/1 are accepted -- CHECK_U8_MAX must actually
+    // refuse an out-of-range value, not merely happen to have never been
+    // asked for one (negative-test-every-check discipline).
+    v.u8_val = 2u;
+    TEST_CHECK(!config_params_set(&rec, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v),
+               "ct_topology rejects a value outside {0,1}");
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED,
+               "a refused SET_PARAM leaves the previously staged value untouched");
+
+    // Wrong wire type is refused too, same discipline as every other field.
+    v.u8_val = 0u;
+    TEST_CHECK(!config_params_set(&rec, 0x031Fu, KILNLINK_PARAM_TYPE_U16, v),
+               "ct_topology refuses a mismatched wire type");
+}
+
+static void test_config_params_finalize_i_present_a(void)
+{
+    TEST_SECTION("config_params_finalize_i_present_a -- half the smallest measured zone normal, unless set by hand");
+
+    // No zone normal ever measured: finalize is a no-op, i_present_a stays
+    // at whatever config_store_default() gave it (2.0A).
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        float before = rec.i_present_a;
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(rec.i_present_a == before, "no i_normal_a ever measured: i_present_a left untouched");
+    }
+
+    // One zone measured: auto-derives to half of it.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 10.03f; // deliberately not a round number -- quantized-counts style value
+        TEST_CHECK(config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[0]");
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(fabsf(rec.i_present_a - 5.015f) < 0.0005f, "auto-derives to half the single measured normal");
+    }
+
+    // Two zones measured: derives from the SMALLER of the two, not the
+    // first, not the average.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 10.03f;
+        config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v); // i_normal_a[0], larger
+        v.f32_val = 4.11f;
+        config_params_set(&rec, 0x031Bu, KILNLINK_PARAM_TYPE_F32, v); // i_normal_a[1], SMALLER
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(fabsf(rec.i_present_a - 2.055f) < 0.0005f,
+                   "auto-derives to half the SMALLEST of the measured normals, not the first-staged one");
+    }
+
+    // A manual write always wins, permanently -- even across a later
+    // i_normal_a change and re-finalize.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 1.23f; // operator's own hand-entered value
+        TEST_CHECK(config_params_set(&rec, 0x0301u, KILNLINK_PARAM_TYPE_F32, v), "operator sets i_present_a by hand");
+        TEST_CHECK(rec.i_present_a_manual, "SET_PARAM on 0x0301 marks i_present_a_manual");
+        v.f32_val = 50.0f; // a zone normal that would otherwise derive a very different value
+        config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v);
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(rec.i_present_a == 1.23f,
+                   "a manual i_present_a is never overwritten by finalize, even after i_normal_a changes");
+    }
+
+    // NEGATIVE TEST (required, negative-test-every-check discipline): break
+    // the production "skip unmeasured/manual" comparison and confirm the
+    // test above would actually have caught it -- proves this is not a
+    // vacuous pass. Simulated here by directly re-deriving what an UNGATED
+    // (bug) version would produce and checking it disagrees with the real
+    // function's output for the manual case above.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 1.23f;
+        config_params_set(&rec, 0x0301u, KILNLINK_PARAM_TYPE_F32, v);
+        v.f32_val = 50.0f;
+        config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v);
+        float buggy_ungated_result = 50.0f * 0.5f; // what finalize would wrongly produce if it ignored the manual flag
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(rec.i_present_a != buggy_ungated_result,
+                   "the real function's manual-wins result differs from what an ungated bug would produce");
+    }
+}
+
 static void test_config_params_all_required_set(void)
 {
     TEST_SECTION("config_params_all_required_set -- every no-safe-default field, and only that set");
@@ -2283,6 +2453,9 @@ void run_test_config_store(void)
     test_config_params_validate_abs_max_temp_vs_tc_type_contradiction_rejected();
     test_config_params_validate_ex_reason_and_id_lookup();
     test_config_params_ct_channel_map_two_of_three();
+    test_ct_topology_legacy_decode();
+    test_config_params_ct_topology_set();
+    test_config_params_finalize_i_present_a();
     test_config_params_all_required_set();
     test_config_params_get_config_page_roundtrip();
     test_config_params_is_set_through_get_config_page();

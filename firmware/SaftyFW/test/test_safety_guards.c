@@ -1696,6 +1696,170 @@ static void test_s14(void)
     }
 }
 
+/* CT_COMMISSIONING_PLAN.md step 3: ct_topology == summed. One shared CT
+ * (channel index 2) reads every zone; S14's per-channel comparison moves to
+ * "channel 2 vs. sum of i_normal_a[] for zones commanded on now", channels
+ * 0/1 go inert, and a new WARN-only guard S15 flags a per-zone deficit
+ * (open heater). amps[] values below are deliberately NOT round numbers --
+ * COMMISSIONING_UX.md/repo convention (idealized-input bug class): they are
+ * what a real ADC-counts-derived reading looks like (e.g. 10.04A, not an
+ * exact 10.0A), so a comparison that only happens to work against an exact
+ * boundary cannot pass here by accident. */
+static void test_s14_s15_summed_topology(void)
+{
+    TEST_SECTION("S14/S15 -- ct_topology == summed (shared CT, per-zone attribution)");
+
+    /* Channels 0/1 report inert (no sensor behind them) regardless of what
+     * amps[0]/amps[1] happen to hold -- summed mode never evaluates them. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.03f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[0] = true;
+        in.amps[0] = 1000.0f; /* would trivially warn per_zone-style if evaluated */
+        in.relay_commanded_now_for_zone[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 20; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s14_warn[0], "summed topology: channel 0 never evaluated, stays inert");
+        TEST_CHECK(!s.s14_warn[1], "summed topology: channel 1 never evaluated, stays inert");
+        TEST_CHECK(s.s14_over_elapsed_s[0] == 0.0f, "channel 0 accumulates nothing in summed mode");
+    }
+
+    /* S14 (summed): channel 2 compared against the SUM of the two commanded
+     * zones' normals (10.03 + 5.07 = 15.10A; 150% = 22.65A threshold). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true; cfg.i_normal_a[0] = 10.03f;
+        cfg.i_normal_valid[1] = true; cfg.i_normal_a[1] = 5.07f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 23.11f; /* > 22.65A threshold */
+        in.relay_commanded_now_for_zone[0] = true;
+        in.relay_commanded_now_for_zone[1] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 6; i++) { /* 6*5s = 30s == overcurrent_time_s default */
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s14_warn[2], "summed S14 warns off the SUM of commanded zones' normals, not a single zone's");
+    }
+
+    /* S14 (summed) negative test: a commanded zone with NO measured normal
+     * makes the whole expected sum unknowable -- must skip entirely, never
+     * warn on a partial/guessed sum. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true; cfg.i_normal_a[0] = 10.03f;
+        cfg.i_normal_valid[1] = false; /* zone 1 commanded but never measured */
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 1000.0f; /* absurdly high -- would trivially warn if a partial sum were used */
+        in.relay_commanded_now_for_zone[0] = true;
+        in.relay_commanded_now_for_zone[1] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 20; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s14_warn[2], "summed S14: one commanded zone with no normal makes the whole sum unknowable, skip entirely");
+    }
+
+    /* S15 (new): zone 0 alone commanded, expected 10.03A, measured only
+     * 2.98A -- a 7.05A deficit, well past 0.7*10.03 = 7.02A, sustained 30s. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true; cfg.i_normal_a[0] = 10.03f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 2.98f; /* deficit 7.05A > 0.7*10.03=7.021A */
+        in.relay_commanded_now_for_zone[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 6; i++) { /* 30s */
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s15_warn[0], "S15 warns once the deficit sustains past 0.7x normal for 30s");
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "S15 never escalates to a trip");
+    }
+
+    /* S15 nuisance: a small, healthy deficit under 0.7x never warns even
+     * sustained indefinitely. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true; cfg.i_normal_a[0] = 10.03f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 9.51f; /* deficit 0.52A, well under 7.02A threshold */
+        in.relay_commanded_now_for_zone[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 20; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s15_warn[0], "a healthy small deficit never warns S15");
+    }
+
+    /* S15 negative test: per_zone topology (the default) leaves S15
+     * permanently inert even with a huge, sustained deficit-shaped input --
+     * COMMISSIONING_UX.md's required negative test for the new guard. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg(); /* ct_topology_summed stays false */
+        cfg.i_normal_valid[0] = true; cfg.i_normal_a[0] = 10.03f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 0.0f;
+        in.relay_commanded_now_for_zone[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 20; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s15_warn[0], "per_zone topology: S15 stays inert regardless of input");
+    }
+
+    /* Stale context makes both S14 (summed) and S15 inactive. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true; cfg.i_normal_a[0] = 10.03f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = false;
+        in.amps_valid[2] = true;
+        in.amps[2] = 0.0f;
+        in.relay_commanded_now_for_zone[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 20; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s14_warn[2], "context_valid==false: summed S14 inactive");
+        TEST_CHECK(!s.s15_warn[0], "context_valid==false: S15 inactive");
+    }
+}
+
 static void test_s6(void)
 {
     TEST_SECTION("S6 -- main controller unhealthy");
@@ -3448,6 +3612,7 @@ void run_test_safety_guards(void)
     test_s2();
     test_s3_s4();
     test_s14();
+    test_s14_s15_summed_topology();
     test_s6();
     test_s6b_reboot_grace();
     test_s9();

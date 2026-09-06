@@ -224,6 +224,17 @@ healthy firings and stays silent on the failure it exists to catch.
 | Decay | Relay off | <5 % within ~4 s (τ ≈ 1 s) |
 | Low duty | 15 % duty, 60 s window, 1 h | **No S4 warning storm** |
 
+**2026-09-06, `ct_topology = summed` (`CT_COMMISSIONING_PLAN.md` step 3,
+Pico side done, ESP side pending):** the mapping check above is per_zone-only
+and is *skipped* in summed mode — a single shared CT (channel 3/GPIO28)
+reads every zone, so there is no per-relay mapping to confirm. S14 instead
+compares channel 3 against the sum of `i_normal_a[]` for zones commanded on
+right now (channels 1-2 report not-fitted), and a new WARN-only guard,
+**S15**, flags a zone whose commanded-sum-minus-measured deficit exceeds
+`0.7×` its own normal for 30 s — the summed-CT substitute for "this
+particular zone's heater went open," which per_zone mode gets for free from
+its own dedicated channel.
+
 ### 3.4 Trips — provoke each one that is enabled
 
 With the kiln empty and someone present.
@@ -268,6 +279,7 @@ write, both of which end that run.
 | S11 | `ct_installed = yes` and current sensing commissioned, so `heat_commanded` (= `any_current_present`) can go true for real | Physically isolate the safety thermocouple's junction in a large ambient thermal mass (wrapped away from the elements, or clamped in an unheated metal block) so it reports a genuinely constant, valid reading while a normal firing runs and current actually flows | Trip (`SAFETY_TRIP_FROZEN_SENSOR`) once the identical reading persists for `frozen_window_s` (default 600 s = 10 min) with heat commanded throughout; **do not** try to provoke this by stalling the MAX31856's conversions (halting `~CS`/`DRDY`) — that reads as `spi_failed`/stale and trips S5 first, never reaching S11's own condition | Requires a genuine ~10 minute hold with heat on — budget bench time accordingly. Remove the thermal isolation and confirm the reading tracks the chamber again before `CLEAR_TRIP`; the clear is refused (`guard_condition_still_immediate()`) while the reading is still frozen at the value it tripped on |
 | S13 | **Commissioning gap, must be armed first**: `tc_source` set to `SAFETY_TC_SOURCE_BORROWED_ZONE` (or `BOTH`) and `borrowed_zone_index` set to the specific KilnFW zone (0..2) under test — both default off (`OWN_J7`, category (d) in §6c) | Stall or unplug **that specific zone's** thermocouple on the main board (same physical technique as §3.2's "Stopped converting" row), while the link and every other zone stay healthy so `context_valid` stays true | Graduated like S5: `s13_warn` at `borrowed_stale_s` (default 10 s), trip (`SAFETY_TRIP_BORROWED_STALE`) at `borrowed_stale_trip_s` (default 60 s) once KilnFW's own `sample_counter` for that zone stops incrementing (`safety_link_frames.c`: increments only when a fresh, non-stale conversion is consumed) | Reconnect/unstall only the one zone's thermocouple used for the test. Restore `tc_source` and `borrowed_zone_index` to their prior (or intended production) values afterwards and confirm via the config CRC in telemetry, same as any other temporarily-changed commissioning field |
 | S14 | Per channel: `i_normal_a[ch]` commissioned (`i_normal_valid[ch]` true, a real measured baseline) and `ct_installed = yes`; inert on a `ct_installed = no` board (§9) | With the channel's relay commanded on, add a known extra load in the same CT-monitored leg (a second heater or resistive load clamped in parallel through the same loop) to push measured current above `overcurrent_pct` (default 150 %) of the commissioned normal | **WARN only**, per channel — `s14_warn[ch]` sets after `overcurrent_time_s` (default 30 s) of sustained overcurrent; no relay effect, non-latching | Safe by construction. Remove the extra load and confirm the per-channel WARN clears on its own |
+| S15 **NEW, 2026-09-06** | `ct_topology = summed`; the commanded zone's `i_normal_a` commissioned; not config-exposed (`0.7×`/30 s are compiled constants, `safety_guards.c`) | With only the zone under test commanded on, open its heater circuit (or otherwise remove its load) so the shared CT reads less than expected for the commanded set | **WARN only**, per zone — `s15_warn[z]` sets once (commanded-sum − measured) exceeds `0.7×` that zone's `i_normal_a` for 30 s continuously; no relay effect, non-latching | Safe by construction. Restore the heater circuit and confirm the per-zone WARN clears on its own. Inert in `per_zone` topology and on any zone not currently commanded on |
 
 **S8 is now integrated (2026-09-03) but still cannot be provoked on the
 bench — the reason changed again, to the one this document's other rows

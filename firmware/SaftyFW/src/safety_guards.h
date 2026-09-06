@@ -281,6 +281,23 @@ typedef struct {
     float i_normal_a[3];
     uint16_t overcurrent_pct;
     float    overcurrent_time_s;
+
+    /* ct_topology (config param 0x031F, CT_COMMISSIONING_PLAN.md step 3).
+     * false (default, per_zone) -- one CT per zone, S14 evaluated per
+     * channel exactly as above. true (summed) -- a single CT (channel 2,
+     * "channel 3"/GPIO28) reads the sum of every zone's current, so S14's
+     * per-channel comparison is meaningless for channels 0/1 (no sensor
+     * behind them at all -- they must report inert/not-fitted, same
+     * "current_sensing_disabled" treatment as a genuinely absent CT, never
+     * a false pass) and channel 2's comparison must be against the SUM of
+     * i_normal_a[] for whichever zones are commanded on right now, not a
+     * single channel's own normal. Also arms S15 (new, WARN-only
+     * under-current/open-heater detector), which only means anything when
+     * one CT is shared across zones -- see safety_guards.c's S14/S15 block
+     * and safety_guard_input_t::relay_commanded_now_for_zone below. Zero-
+     * initialized (false/per_zone) so every existing test and caller keeps
+     * today's per-channel behaviour unchanged. */
+    bool ct_topology_summed;
 } safety_guard_cfg_t;
 
 /* One call's worth of input. tc_c/cj_c/fault_bits/spi_failed follow
@@ -537,6 +554,18 @@ typedef struct {
     bool  amps_valid[3];
     bool  relay_commanded_now_for_ct[3];
 
+    /* S14 (summed topology only)/S15. Per-ZONE commanded-now facts,
+     * independent of ct_channel_map -- deliberately a second array rather
+     * than reusing relay_commanded_now_for_ct[3] above, because in summed
+     * mode every channel maps to the SAME shared CT (channel 2), so the
+     * ct_channel_map-indexed array above cannot answer "which zones are
+     * on" for zones 0/1 the way it can in per_zone mode. safety_core reads
+     * this straight from ctx.relay_now_mask by zone id, the same source
+     * relay_commanded_now_for_ct's per-channel lookup already uses. Unused
+     * (left false) when cfg->ct_topology_summed is false -- per_zone mode's
+     * S14 keeps using relay_commanded_now_for_ct exactly as before. */
+    bool  relay_commanded_now_for_zone[3];
+
     float dt_s;
 } safety_guard_input_t;
 
@@ -653,6 +682,16 @@ typedef struct {
      * commanded-relay fact, both of which are context. */
     float s14_over_elapsed_s[3];
     bool  s14_warn[3];
+
+    /* S15 (new, CT_COMMISSIONING_PLAN.md step 3): summed-topology-only,
+     * per-zone sustained-under-current ("open heater") timer + level, WARN
+     * only, same non-latching idiom as S4/S10/S14. Inert (stays at zero/
+     * false) whenever cfg->ct_topology_summed is false -- per_zone mode has
+     * no shared-CT deficit to attribute to a single zone. Reset in the same
+     * !in->context_valid block as S14 above, for the same reason (needs
+     * relay_commanded_now_for_zone, which is context). */
+    float s15_under_elapsed_s[3];
+    bool  s15_warn[3];
 } safety_guard_state_t;
 
 void safety_guards_reset(safety_guard_state_t *state);

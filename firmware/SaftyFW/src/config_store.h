@@ -354,6 +354,24 @@ extern "C" {
 // not a drop-in the way bits 11-15 were.
 #define CONFIG_STORE_SET_CT_INSTALLED         (1u << 15)
 
+// ct_topology (param 0x031F, CT_COMMISSIONING_PLAN.md step 3) and
+// i_present_a_manual are NOT fields_set bits -- fields_set is completely
+// full (the comment above CONFIG_STORE_SET_CT_INSTALLED is the last free
+// bit). Both instead use the same "improbable marker byte in a dedicated
+// record field" convention as safety_tc_installed_marker/ct_installed_marker
+// (config_store.c's REC_OFF_SAFETY_TC_INSTALLED/REC_OFF_CT_INSTALLED): a
+// plain 0/1 byte would make a legacy record's never-written reserved byte
+// (0xFF, config_store_pack()'s own fill -- see config_store.c's header
+// comment) decode as a nonzero, "summed"/"manual" value, silently changing
+// an old record's behaviour on a newer build. Only the specific marker byte
+// decodes as the non-default state; every other byte (0x00 legacy-zeroed,
+// 0xFF erased/never-written, anything else) decodes as the safe default
+// (per_zone / auto-derived) -- see config_store.c's unpack for the exact
+// decode and config_store_record_t::ct_topology/i_present_a_manual below
+// for the DECODED (not wire-marker) values guards and config_params.c see.
+#define CONFIG_STORE_CT_TOPOLOGY_PER_ZONE 0u
+#define CONFIG_STORE_CT_TOPOLOGY_SUMMED   1u
+
 // True iff every bit in `mask` (some OR of CONFIG_STORE_SET_* above) is set
 // in `rec->fields_set`. Small enough to inline; exists so call sites read as
 // "is X commissioned" rather than repeating the `& / ==` bit-test idiom
@@ -622,18 +640,41 @@ typedef struct {
     uint16_t overcurrent_pct;         // %, 0 -> 150 default
     uint32_t overcurrent_time_s;      // s, 0 -> 30 default
 
+    // --- CT_COMMISSIONING_PLAN.md step 3: CT topology (NEW) ------------------
+    // ct_topology: CONFIG_STORE_CT_TOPOLOGY_PER_ZONE (0, default) or _SUMMED
+    // (1) -- param 0x031F. Already the DECODED value by the time any reader
+    // outside config_store.c sees it (unpack applies the marker-byte
+    // defaulting -- see this file's comment above CONFIG_STORE_CT_TOPOLOGY_
+    // PER_ZONE); every reader may compare it directly against the two named
+    // constants. Default per_zone reproduces every existing behaviour
+    // unchanged -- S3/S4/S9 do not read this field at all, only S14/S15
+    // (safety_guards.c) do.
+    uint8_t ct_topology;
+    // i_present_a_manual: true once an operator has written i_present_a
+    // directly via SET_PARAM (config_params.c's 0x0301 handler sets this
+    // alongside the value) -- false means config_params_finalize_i_present_a()
+    // (called at COMMIT_CONFIG, same timing as ct_channel_map's group bit) is
+    // free to auto-derive i_present_a as half the smallest commissioned
+    // i_normal_a[] whenever at least one zone normal is set. A manual write
+    // always wins and is never overwritten by the auto-derivation, even if
+    // i_normal_a changes afterward -- CT_COMMISSIONING_PLAN.md step 3's
+    // "unless set by hand".
+    bool    i_present_a_manual;
+
     // Reserved, unused, packed as 0xFF (matches the erased-flash background,
-    // same convention as metadata.h's per-slot reserved bytes). ~276 B of
+    // same convention as metadata.h's per-slot reserved bytes). ~274 B of
     // headroom (config_store.c's REC_OFF_RESERVED..REC_OFF_CRC; one byte of
     // the original 300 was carved off the FRONT of this block for
-    // safety_tc_installed, 4 more for max_expected_power_w, and 16 more
-    // (3xF32 i_normal_a + U16 overcurrent_pct + U32-on-wire-but-U16-tagged
-    // overcurrent_time_s) for S14, and 1 more for ct_installed -- see REC_OFF_SAFETY_TC_INSTALLED /
-    // REC_OFF_MAX_EXPECTED_POWER_W / REC_OFF_I_NORMAL_A in config_store.c)
-    // -- adding a field later is a struct/pack/unpack/host-test change, not
-    // a layout change, same as metadata.h's own signature/sig_required
-    // reservation.
-    uint8_t  reserved[276];
+    // safety_tc_installed, 4 more for max_expected_power_w, 16 more (3xF32
+    // i_normal_a + U16 overcurrent_pct + U32-on-wire-but-U16-tagged
+    // overcurrent_time_s) for S14, 1 more for ct_installed, and 2 more
+    // (ct_topology + i_present_a_manual, both 1-byte markers) for CT_
+    // COMMISSIONING_PLAN.md step 3 -- see REC_OFF_SAFETY_TC_INSTALLED /
+    // REC_OFF_MAX_EXPECTED_POWER_W / REC_OFF_I_NORMAL_A / REC_OFF_CT_TOPOLOGY
+    // in config_store.c) -- adding a field later is a struct/pack/unpack/
+    // host-test change, not a layout change, same as metadata.h's own
+    // signature/sig_required reservation.
+    uint8_t  reserved[274];
 } config_store_record_t;
 
 // Compile-time budget check, mirroring bootloader/metadata.c's

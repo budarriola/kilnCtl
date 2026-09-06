@@ -64,6 +64,17 @@ current-keyed tier, because "is heat on" has no local answer without a
 sensor. `docs/GUARD_TEST_MATRIX.md` §9 is the per-guard table and the
 reasoning.
 
+**2026-09-06, `ct_topology` (Pico side done, `CT_COMMISSIONING_PLAN.md` step
+3):** this section previously assumed one CT per zone. That is now
+`ct_topology = per_zone` (param `0x031F`, default, unchanged behaviour). A
+`summed` board has ONE CT (channel 3/GPIO28) reading every zone at once:
+channels 1-2 report not-fitted (never a plausible 0.00 A), S14 compares
+channel 3 against the sum of `i_normal_a[]` for zones commanded on right
+now, and a new guard, **S15** (WARN-only, per zone, commanded-sum-minus-
+measured `> 0.7×` that zone's normal for 30 s), flags a likely open heater
+that a shared CT alone cannot attribute to one zone the way three separate
+CTs could. ESP-side commissioning UI/display for this is still pending.
+
 ---
 
 This scope limit makes the calibration burden much lighter than it first

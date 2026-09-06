@@ -31,6 +31,8 @@
 #define TC_DISAGREEMENT_TIME_S_DEFAULT 300.0f /* S10 */
 #define OVERCURRENT_PCT_DEFAULT       150u    /* S14 */
 #define OVERCURRENT_TIME_S_DEFAULT    30.0f   /* S14 */
+#define UNDERCURRENT_FRACTION_DEFAULT 0.7f    /* S15 -- CT_COMMISSIONING_PLAN.md step 3, not config-exposed */
+#define UNDERCURRENT_TIME_S_DEFAULT   30.0f   /* S15 */
 #define RATE_WINDOW_S_DEFAULT         60.0f   /* S8 -- SAFETY_MODEL.md section 4 */
 
 #define S1_OVER_CEILING_STREAK_TO_TRIP 3u /* ~300ms at safety_core's 100ms tick */
@@ -812,6 +814,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         for (int ch = 0; ch < 3; ch++) {
             state->s14_over_elapsed_s[ch] = 0.0f;
             state->s14_warn[ch] = false;
+            state->s15_under_elapsed_s[ch] = 0.0f;
+            state->s15_warn[ch] = false;
         }
     } else {
         /* --- S2: sustained excess over setpoint --------------------------------
@@ -938,24 +942,110 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * normal, never an absolute figure and never compared across
          * channels -- three zones on one kiln can legitimately differ 2x in
          * draw. */
-        for (int ch = 0; ch < 3; ch++) {
-            bool active = !in->current_sensing_disabled && cfg->i_normal_valid[ch] &&
-                          cfg->i_normal_a[ch] > 0.0f &&
-                          in->amps_valid[ch] && in->relay_commanded_now_for_ct[ch];
-            if (!active) {
-                state->s14_over_elapsed_s[ch] = 0.0f;
-                state->s14_warn[ch] = false;
-                continue;
+        if (!cfg->ct_topology_summed) {
+            for (int ch = 0; ch < 3; ch++) {
+                bool active = !in->current_sensing_disabled && cfg->i_normal_valid[ch] &&
+                              cfg->i_normal_a[ch] > 0.0f &&
+                              in->amps_valid[ch] && in->relay_commanded_now_for_ct[ch];
+                if (!active) {
+                    state->s14_over_elapsed_s[ch] = 0.0f;
+                    state->s14_warn[ch] = false;
+                    continue;
+                }
+                uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
+                float threshold_a = cfg->i_normal_a[ch] * (float)pct / 100.0f;
+                if (in->amps[ch] > threshold_a) {
+                    state->s14_over_elapsed_s[ch] += in->dt_s;
+                    float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
+                    state->s14_warn[ch] = (state->s14_over_elapsed_s[ch] >= time_th);
+                } else {
+                    state->s14_over_elapsed_s[ch] = 0.0f;
+                    state->s14_warn[ch] = false;
+                }
             }
-            uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
-            float threshold_a = cfg->i_normal_a[ch] * (float)pct / 100.0f;
-            if (in->amps[ch] > threshold_a) {
-                state->s14_over_elapsed_s[ch] += in->dt_s;
-                float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
-                state->s14_warn[ch] = (state->s14_over_elapsed_s[ch] >= time_th);
+            /* No shared CT in this topology -- S15 (open-heater deficit) has
+             * nothing to attribute a deficit against, so it stays inert. */
+            for (int z = 0; z < 3; z++) {
+                state->s15_under_elapsed_s[z] = 0.0f;
+                state->s15_warn[z] = false;
+            }
+        } else {
+            /* --- Summed topology: one CT (channel 2 / "channel 3", GPIO28)
+             * reads every zone at once (CT_COMMISSIONING_PLAN.md step 3).
+             * Channels 0/1 have no sensor behind them at all -- report
+             * inert, never a false pass on either warn -- so only channel 2
+             * (index CT_SUMMED_CHANNEL) ever evaluates S14 here, compared
+             * against the SUM of i_normal_a[] for every zone commanded on
+             * right now, not a single zone's own normal. */
+            state->s14_over_elapsed_s[0] = 0.0f; state->s14_warn[0] = false;
+            state->s14_over_elapsed_s[1] = 0.0f; state->s14_warn[1] = false;
+
+            const int CT_SUMMED_CHANNEL = 2;
+            bool commanded_normals_known = true;
+            float expected_sum_a = 0.0f;
+            bool any_commanded = false;
+            for (int z = 0; z < 3; z++) {
+                if (!in->relay_commanded_now_for_zone[z]) {
+                    continue;
+                }
+                any_commanded = true;
+                if (!cfg->i_normal_valid[z] || cfg->i_normal_a[z] <= 0.0f) {
+                    /* A commanded zone with no measured normal makes the
+                     * expected sum unknowable, not merely wrong -- treat
+                     * exactly like S14's per-channel "never measured, skip
+                     * entirely" rule, applied to the whole sum. */
+                    commanded_normals_known = false;
+                    break;
+                }
+                expected_sum_a += cfg->i_normal_a[z];
+            }
+            bool sum_valid = any_commanded && commanded_normals_known;
+
+            bool s14_active = !in->current_sensing_disabled && sum_valid &&
+                               in->amps_valid[CT_SUMMED_CHANNEL];
+            if (!s14_active) {
+                state->s14_over_elapsed_s[CT_SUMMED_CHANNEL] = 0.0f;
+                state->s14_warn[CT_SUMMED_CHANNEL] = false;
             } else {
-                state->s14_over_elapsed_s[ch] = 0.0f;
-                state->s14_warn[ch] = false;
+                uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
+                float threshold_a = expected_sum_a * (float)pct / 100.0f;
+                if (in->amps[CT_SUMMED_CHANNEL] > threshold_a) {
+                    state->s14_over_elapsed_s[CT_SUMMED_CHANNEL] += in->dt_s;
+                    float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
+                    state->s14_warn[CT_SUMMED_CHANNEL] =
+                        (state->s14_over_elapsed_s[CT_SUMMED_CHANNEL] >= time_th);
+                } else {
+                    state->s14_over_elapsed_s[CT_SUMMED_CHANNEL] = 0.0f;
+                    state->s14_warn[CT_SUMMED_CHANNEL] = false;
+                }
+            }
+
+            /* --- S15 (new): per-zone under-current / open-heater WARN.
+             * CT_COMMISSIONING_PLAN.md step 3: "commanded sum minus measured
+             * > 0.7x that zone's normal for 30s". Only meaningful when the
+             * expected sum itself is known (sum_valid) and the shared CT
+             * reading is fresh -- otherwise a deficit cannot be attributed
+             * to any single zone and every zone's S15 stays inert, same
+             * "skip entirely, never a false pass" discipline as S14. */
+            bool s15_base_active = !in->current_sensing_disabled && sum_valid &&
+                                    in->amps_valid[CT_SUMMED_CHANNEL];
+            float deficit_a = s15_base_active ? (expected_sum_a - in->amps[CT_SUMMED_CHANNEL]) : 0.0f;
+            for (int z = 0; z < 3; z++) {
+                bool active = s15_base_active && in->relay_commanded_now_for_zone[z] &&
+                              cfg->i_normal_valid[z] && cfg->i_normal_a[z] > 0.0f;
+                if (!active) {
+                    state->s15_under_elapsed_s[z] = 0.0f;
+                    state->s15_warn[z] = false;
+                    continue;
+                }
+                float threshold_a = cfg->i_normal_a[z] * UNDERCURRENT_FRACTION_DEFAULT;
+                if (deficit_a > threshold_a) {
+                    state->s15_under_elapsed_s[z] += in->dt_s;
+                    state->s15_warn[z] = (state->s15_under_elapsed_s[z] >= UNDERCURRENT_TIME_S_DEFAULT);
+                } else {
+                    state->s15_under_elapsed_s[z] = 0.0f;
+                    state->s15_warn[z] = false;
+                }
             }
         }
     }
