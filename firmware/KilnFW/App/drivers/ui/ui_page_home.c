@@ -496,9 +496,16 @@ lv_obj_t *ui_page_home_build(void)
      * IP address. Home has no back/prev/next; the gear is Menu, same
      * destination as before (ui_home_menu_nav_cb() -> ui_page_config_reset_to_first_page()
      * + kiln_ui_show("config")). */
+    /* .warning_icon reserves a second, non-clickable icon slot next to the
+     * gear for RELAY_LIFE_BUDGET_PLAN.md step 5's relay-life indicator.
+     * Starts hidden; ui_page_home_refresh.c's periodic tick calls
+     * ui_topbar_set_warning() with relay_cycles_max_budget_tier() on every
+     * refresh, the same cadence s_ui_home_lag_notice already uses -- no new
+     * task or timer. */
     ui_topbar_create(scr, &(ui_topbar_cfg_t){
         .title = NULL,
         .gear_cb = ui_home_menu_nav_cb,
+        .warning_icon = true,
     }, &s_ui_home_topbar);
     lv_obj_t *bar = s_ui_home_topbar.bar;
 

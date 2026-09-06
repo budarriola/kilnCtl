@@ -27,6 +27,15 @@
 #include "esp_err.h"
 #include "fake_kv.h"
 
+// relay_cycles.c (step 5, RELAY_LIFE_BUDGET_PLAN.md) hand-declares
+// uart_bridge_ext_run_on_flash_worker()/uart_bridge_ext_is_on_flash_worker()
+// (same "declared by hand, not via uart_bridge.h" reasoning as
+// safety_cfg_store.c) for relay_cycles_reset()'s flash-worker dispatch --
+// this shared stub, included before relay_cycles.c below, supplies their
+// definitions and the same busy/re-entrancy modeling test_adaptive_tune.c
+// and test_profile_executor_prestart.c already rely on.
+#include "stubs/bx_worker_stub.h"
+
 #include "../drivers/persist/relay_cycles.c"
 
 static void reset_all(void)
@@ -252,6 +261,68 @@ static void test_v1_blob_migrates_to_v2(void)
     fake_kv_reset_all();
 }
 
+// --- RELAY_LIFE_BUDGET_PLAN.md step 5: relay_cycles_reset() -- the API the
+// LCD diagnostics page's two-tap confirm and diagnostics_http.c's
+// POST /api/relay_cycles/reset both call.
+
+static void test_reset_zeroes_count_and_persists(void)
+{
+    TEST_SECTION("relay_cycles_reset -- zeroes the count, leaves type/override alone, "
+                 "and persists through the flash-worker stub");
+    reset_all();
+    relay_cycles_set_type(0, RELAY_TYPE_CONTACTOR, 55);
+
+    TEST_CHECK(relay_cycles_reset(0) == true, "reset succeeds on the normal (not-on-worker) path");
+    TEST_CHECK(s_rc.counts[0] == 0, "the count is zeroed");
+
+    relay_type_t type;
+    uint32_t override_val;
+    relay_cycles_get_type(0, &type, &override_val);
+    TEST_CHECK(type == RELAY_TYPE_CONTACTOR && override_val == 55,
+               "type/override are untouched -- a reset means 'contact replaced', not 'forget the type'");
+
+    TEST_CHECK(s_rc.dirty == false, "the dispatched persist actually landed (dirty cleared)");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "reopen for readback");
+    relay_cycles_blob_t blob;
+    size_t len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
+               "blob round-trips");
+    hal_kv_close(&h);
+    TEST_CHECK(blob.counts[0] == 0, "the zeroed count is what actually landed in the store, "
+                                    "not just in RAM");
+}
+
+static void test_reset_rejects_out_of_range_relay(void)
+{
+    TEST_SECTION("relay_cycles_reset -- an out-of-range relay index is refused, not undefined behavior");
+    reset_all();
+
+    TEST_CHECK(relay_cycles_reset(RELAY_CYCLES_COUNT) == false, "index == COUNT is out of range");
+    TEST_CHECK(relay_cycles_reset((unsigned)RELAY_CYCLES_COUNT + 10) == false, "well past COUNT is also refused");
+}
+
+static void test_reset_runs_inline_when_already_on_flash_worker(void)
+{
+    TEST_SECTION("relay_cycles_reset -- called from a handler already on the flash worker runs "
+                 "inline instead of dispatching a second job (the re-entrancy deadlock class "
+                 "flash_worker_lint.py's pattern 1 exists to avoid)");
+    reset_all();
+    s_rc.counts[3] = 99;
+
+    s_stub_on_flash_worker = true; // simulate already being on the worker, same as bx_worker_stub.h's
+                                    // own doc comment describes for calling INTO a dispatched job
+    TEST_CHECK(relay_cycles_reset(3) == true, "reset still succeeds via the inline path");
+    TEST_CHECK(s_stub_bx_busy == false, "no dispatch was attempted -- a real dispatch here would "
+                                        "have deadlocked, and the busy-modeling stub would have "
+                                        "failed loudly instead if one had been attempted");
+    s_stub_on_flash_worker = false; // leave shared stub state as every other test expects
+
+    TEST_CHECK(s_rc.counts[3] == 0, "the count was actually reset via the inline path");
+}
+
 void run_test_relay_cycles(void)
 {
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
@@ -261,6 +332,9 @@ void run_test_relay_cycles(void)
     test_budget_override_wins_over_table();
     test_safety_slot_edge_and_persistence();
     test_v1_blob_migrates_to_v2();
+    test_reset_zeroes_count_and_persists();
+    test_reset_rejects_out_of_range_relay();
+    test_reset_runs_inline_when_already_on_flash_worker();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

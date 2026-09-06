@@ -134,6 +134,26 @@ void relay_cycles_budget(uint8_t relay, relay_cycles_budget_t *out);
  * the LCD/web indication (a later step) will actually gate on. */
 relay_budget_tier_t relay_cycles_max_budget_tier(void);
 
+/* Zeroes relay `relay`'s cycle count (type/rated_override are left alone --
+ * a reset is "this contact was replaced", not "forget what kind it is") and
+ * persists immediately through the same guarded path relay_cycles_flush()
+ * uses. `relay` is 0..RELAY_CYCLES_COUNT-1, same indexing as
+ * relay_cycles_get_all()/relay_cycles_set_type(). Returns false for an
+ * out-of-range relay or if the persist write itself fails (the count is
+ * still zeroed in RAM in that case -- same "keep going, retry later"
+ * contract relay_cycles_maybe_persist() uses elsewhere in this module -- but
+ * the caller is told the write did not land yet). RELAY_LIFE_BUDGET_PLAN.md
+ * step 5's LCD two-tap reset and step 4's web `POST /api/relay_cycles/reset`
+ * both call this one function -- keep the signature exactly this simple
+ * (a single unsigned relay index, a bool result) so neither caller has to
+ * special-case the other's needs. MUST be called from a task with an
+ * internal-SRAM stack -- see persist_locked()'s PSRAM guard comment; an LVGL
+ * callback on this board's PSRAM-backed task stack (DRAM_PSRAM_PLAN.md
+ * section 7.2) cannot call this directly and must dispatch through the
+ * flash worker the same way uart_bridge_ext.c's flash-safe worker pattern
+ * does. */
+bool relay_cycles_reset(unsigned relay);
+
 /* Writes to NVS if anything changed and the interval has elapsed. Cheap to
  * call every control tick. */
 void relay_cycles_maybe_persist(void);

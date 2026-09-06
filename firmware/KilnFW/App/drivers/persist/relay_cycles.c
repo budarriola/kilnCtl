@@ -11,6 +11,19 @@
 
 static const char *TAG = "relay_cycles";
 
+/* Hand-declared rather than #include "uart_bridge.h" -- same reasoning as
+ * safety_cfg_store.c's identical block: that header pulls in
+ * ILI9488.h/screen_idle.h/kiln_io.h for hardware-bridge task declarations
+ * this file needs none of, and which are not part of this module's
+ * host-test stub surface. Keep in sync with uart_bridge.h by hand if either
+ * signature ever changes. Used by relay_cycles_reset() (RELAY_LIFE_BUDGET_
+ * PLAN.md step 5) to persist a reset immediately from whichever task calls
+ * it -- the LCD diagnostics page's two-tap confirm runs on the LVGL task,
+ * whose stack is PSRAM-backed (DRAM_PSRAM_PLAN.md), so it cannot call
+ * persist_locked() directly any more than relay_cycles_flush() can. */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+bool uart_bridge_ext_is_on_flash_worker(void);
+
 /* Same namespace as the rest of this board's configuration (zones_http.c,
  * rules_http.c) but its own key -- deliberately NOT folded into the
  * zones_cfg blob, whose loader treats any size change as "corrupt, start
@@ -492,6 +505,62 @@ relay_budget_tier_t relay_cycles_max_budget_tier(void)
         }
     }
     return max_tier;
+}
+
+/* The job run ON the flash worker's own internal-SRAM stack -- see
+ * safety_cfg_store.c's nvs_save_store_job()/adaptive_tune.c's
+ * save_kibase_job() for the identical shape. `arg` points at the calling
+ * task's own esp_err_t local, safe because uart_bridge_ext_run_on_flash_
+ * worker() blocks the caller for the whole call. */
+static void reset_persist_job(void *arg)
+{
+    esp_err_t *out_err = (esp_err_t *)arg;
+    *out_err = hal_status_to_esp_err(persist_locked());
+}
+
+bool relay_cycles_reset(unsigned relay)
+{
+    if (relay >= RELAY_CYCLES_COUNT || !ensure_lock()) {
+        return false;
+    }
+
+    uint32_t old_count = 0;
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    old_count = s_rc.counts[relay];
+    s_rc.counts[relay] = 0;
+    s_rc.dirty = true;
+    xSemaphoreGive(s_rc.lock);
+
+    /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): check whether we are
+     * already ON the flash worker before dispatching a second job onto it --
+     * dispatching from inside an already-dispatched job deadlocks the real
+     * board (see uart_bridge.h's doc comment and adaptive_tune.c's identical
+     * guard). Neither of this function's two known callers (the LCD
+     * diagnostics page's LVGL-task two-tap confirm, and diagnostics_http.c's
+     * httpd-task POST handler) is expected to already be on the worker
+     * today, but the check is cheap and this is exactly the class of bug
+     * that stays invisible until a caller changes. */
+    esp_err_t err;
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        reset_persist_job(&err);
+    } else {
+        esp_err_t job_err = ESP_FAIL;
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &job_err);
+        /* uart_bridge_ext_run_on_flash_worker() itself returning non-OK
+         * (worker not started/queue busy) means reset_persist_job() never
+         * ran and job_err was never written -- report submit_err in that
+         * case rather than the uninitialized-in-effect job_err. */
+        err = (submit_err != ESP_OK) ? submit_err : job_err;
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "relay_cycles_reset(%u): persist failed (%s) -- count zeroed in RAM, "
+                      "will retry on the next periodic persist", relay, esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "relay_cycles_reset(%u): count reset from %lu to 0", relay, (unsigned long)old_count);
+    return true;
 }
 
 void relay_cycles_maybe_persist(void)

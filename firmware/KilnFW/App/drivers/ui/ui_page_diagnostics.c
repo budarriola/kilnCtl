@@ -1,5 +1,6 @@
 #include "ui_page_diagnostics.h"
 
+#include <stdint.h>
 #include <stdio.h>
 
 #include "esp_chip_info.h"
@@ -16,6 +17,7 @@
 #include "MAX31856.h"
 #include "board_temps.h"
 #include "dashboard_http.h"
+#include "relay_cycles.h" /* RELAY_LIFE_BUDGET_PLAN.md step 5 -- the Relay Life page below */
 #include "safety_link.h" /* SAFETY_LINK_DIAG_STATE_*, SAFETY_LINK_STALE_MS */
 #include "safety_trip_words.h"
 #include "thermo_owner.h"
@@ -243,7 +245,18 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
 #define UI_PAGE_DIAGNOSTICS_PAGE_SAFETY_BOARD_HEALTH 3
 #define UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS 4
 #define UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL 5
-#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL + 1)
+/* RELAY_LIFE_BUDGET_PLAN.md step 5: one row per counted relay (the four
+ * heater relays plus the safety relay's K4 slot -- RELAY_CYCLES_COUNT),
+ * showing type/cycles/percent and a two-tap "Reset" button, same paged
+ * pattern as every other page here. */
+#define UI_PAGE_DIAGNOSTICS_PAGE_RELAY_LIFE 6
+#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_RELAY_LIFE + 1)
+
+/* Two-tap confirm window (RELAY_LIFE_BUDGET_PLAN.md's "Reset" design: "press
+ * Reset, button turns into Confirm? for 5 s"). No dialog widget exists on
+ * this page (the plan's own "What exists" note), hence the in-place label
+ * swap instead of a modal. */
+#define UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US (5 * 1000 * 1000)
 
 /* ---- No-scroll budget proofs --------------------------------------------
  * Compile-time mirrors of this file's own header-comment arithmetic, same
@@ -302,6 +315,18 @@ _Static_assert(UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX <= UI_THEME
                "shrink the per-row content or split channels across more pages, don't widen the "
                "budget to match.");
 
+
+/* Relay Life page (RELAY_LIFE_BUDGET_PLAN.md step 5): RELAY_CYCLES_COUNT
+ * rows, each build_stat_row()-height (measured 23px, see this file's header
+ * comment's per-row arithmetic) since the row's fixed-size button
+ * (UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX = 22px, set in
+ * build_relay_life_row()) is shorter than that. Same n*23 + (n-1)*4 <= 267
+ * formula the header comment already uses for every other page. */
+#define UI_PAGE_DIAGNOSTICS_RELAY_LIFE_WORST_CASE_HEIGHT_PX \
+    ((RELAY_CYCLES_COUNT * 23) + ((RELAY_CYCLES_COUNT - 1) * (UI_THEME_PADDING_PX / 2)))
+_Static_assert(UI_PAGE_DIAGNOSTICS_RELAY_LIFE_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
+               "ui_page_diagnostics.c: RELAY_CYCLES_COUNT relay-life rows' worst-case content "
+               "exceeds UI_THEME_PAGE_CONTENT_BUDGET_PX -- split across more pages, don't scroll.");
 
 static ui_topbar_t s_topbar;
 static lv_obj_t *s_pages[UI_PAGE_DIAGNOSTICS_PAGE_COUNT];
@@ -367,11 +392,24 @@ static lv_obj_t *s_td_remedy_label;
 static lv_obj_t *s_td_source_label;
 static lv_obj_t *s_td_latch_label;
 
+/* --- Page 7: Relay Life -- RELAY_LIFE_BUDGET_PLAN.md step 5. One row per
+ * RELAY_CYCLES_COUNT slot (4 heater relays + the safety relay's K4 slot).
+ * s_rl_confirm_deadline_us[r] is 0 when relay r's Reset button is in its
+ * normal state, else the hal_time_now_us() deadline at which a lone first
+ * tap (no second tap yet) reverts -- checked in refresh_cb() below, which
+ * already runs every UI_PAGE_DIAGNOSTICS_REFRESH_MS (2s), well under the 5s
+ * window, so no separate timer is needed for the revert either. */
+static lv_obj_t *s_rl_value_label[RELAY_CYCLES_COUNT];
+static lv_obj_t *s_rl_reset_btn[RELAY_CYCLES_COUNT];
+static lv_obj_t *s_rl_reset_label[RELAY_CYCLES_COUNT];
+static int64_t   s_rl_confirm_deadline_us[RELAY_CYCLES_COUNT];
+
 static void update_title(void)
 {
     static const char *page_names[UI_PAGE_DIAGNOSTICS_PAGE_COUNT] = {
         "Firmware", "Internal RAM", "PSRAM & storage",
         "Safety & Board Health", "Thermocouple Faults", "Trip Detail",
+        "Relay Life",
     };
     char buf[48];
     snprintf(buf, sizeof(buf), "Diagnostics: %s  %u of %u", page_names[s_page_index],
@@ -1003,6 +1041,52 @@ static void refresh_cb(lv_timer_t *timer)
             lv_obj_set_style_text_color(s_tf_status_label[ch], UI_THEME_COLOR_TEXT_SECONDARY, 0);
         }
     }
+
+    /* Relay Life page (RELAY_LIFE_BUDGET_PLAN.md step 5). Two independent
+     * things per relay: the value text (type/cycles/percent, always
+     * refreshed), and the Reset button's two-tap confirm window (only
+     * touched here to REVERT an expired arm -- the arm/actual-reset
+     * transitions happen in relay_reset_btn_clicked_cb() above, on a tap).
+     * hal_time_now_us() matches every other elapsed-time comparison in this
+     * file (format_uptime() above). */
+    int64_t rl_now = (int64_t)hal_time_now_us();
+    for (unsigned r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        if (s_rl_confirm_deadline_us[r] != 0 && rl_now >= s_rl_confirm_deadline_us[r]) {
+            s_rl_confirm_deadline_us[r] = 0;
+            lv_label_set_text(s_rl_reset_label[r], "Reset");
+        }
+
+        relay_type_t rl_type;
+        relay_cycles_get_type((uint8_t)r, &rl_type, NULL);
+        char rl_type_letter;
+        switch (rl_type) {
+            case RELAY_TYPE_CONTACTOR: rl_type_letter = 'C'; break;
+            case RELAY_TYPE_MERCURY:   rl_type_letter = 'M'; break;
+            case RELAY_TYPE_SSR:
+            default:                   rl_type_letter = 'S'; break;
+        }
+
+        relay_cycles_budget_t rl_b;
+        relay_cycles_budget((uint8_t)r, &rl_b);
+
+        char rl_buf[40];
+        if (rl_b.has_budget) {
+            snprintf(rl_buf, sizeof(rl_buf), "%c  %lu cyc  %.0f%%", rl_type_letter,
+                     (unsigned long)rl_b.cycles, (double)rl_b.percent);
+        } else {
+            /* ssr (or a table/override of 0, treated the same by
+             * relay_cycles_budget()) -- "the plan's own "percent reported as
+             * null" wording, an em dash on this display rather than a JSON
+             * null. */
+            snprintf(rl_buf, sizeof(rl_buf), "%c  %lu cyc  --", rl_type_letter, (unsigned long)rl_b.cycles);
+        }
+        lv_label_set_text(s_rl_value_label[r], rl_buf);
+        lv_obj_set_style_text_color(s_rl_value_label[r],
+                                     rl_b.tier == RELAY_BUDGET_TIER_ERROR ? UI_THEME_ACCENT_5 :
+                                     rl_b.tier == RELAY_BUDGET_TIER_WARN  ? UI_THEME_ACCENT_1 :
+                                                                             UI_THEME_COLOR_TEXT_SECONDARY,
+                                     0);
+    }
 }
 
 static lv_obj_t *build_stat_row(lv_obj_t *parent, const char *name, lv_color_t accent)
@@ -1113,6 +1197,107 @@ static void build_thermo_fault_row(lv_obj_t *parent, uint8_t channel, lv_color_t
     lv_label_set_text(status_label, "--");
     s_tf_status_label[channel] = status_label;
 }
+
+/* Reset button tap -- RELAY_LIFE_BUDGET_PLAN.md's two-tap confirm (no dialog
+ * widget exists on this page, so the button's own label does the asking).
+ * First tap: arm a 5s window and relabel to "Confirm?". Second tap inside
+ * that window: actually reset. A tap after the window expired is treated as
+ * a fresh first tap, not a reset -- refresh_cb() below already reverts the
+ * label once the deadline passes, so by the time a real "too late" tap
+ * could land the label has already gone back to "Reset" and this branch is
+ * unreachable in practice; the deadline re-check here is defense in depth
+ * against refresh_cb() not yet having run (a tap that lands in the same
+ * <2s tick refresh_cb() would have caught the expiry in). */
+static void relay_reset_btn_clicked_cb(lv_event_t *e)
+{
+    unsigned relay = (unsigned)(uintptr_t)lv_event_get_user_data(e);
+    if (relay >= RELAY_CYCLES_COUNT) {
+        return;
+    }
+
+    int64_t now = (int64_t)hal_time_now_us();
+    bool armed = s_rl_confirm_deadline_us[relay] != 0 && now < s_rl_confirm_deadline_us[relay];
+
+    if (armed) {
+        s_rl_confirm_deadline_us[relay] = 0;
+        lv_label_set_text(s_rl_reset_label[relay], "Reset");
+        /* relay_cycles_reset() dispatches its own NVS write onto the
+         * flash-safe worker (see that function's header comment) and blocks
+         * this LVGL-task callback until the write lands -- this file must
+         * NOT call anything in relay_cycles.c that writes NVS directly, per
+         * DRAM_PSRAM_PLAN.md section 7.2 (the LVGL task's stack is
+         * PSRAM-backed). A failed persist still zeroes the count in RAM
+         * (relay_cycles_reset()'s documented contract) and is retried by the
+         * next periodic persist -- ESP_LOGW from inside that function
+         * already says so, nothing further to show the operator here beyond
+         * the row simply reading 0 on the next refresh either way. */
+        (void)relay_cycles_reset(relay);
+    } else {
+        s_rl_confirm_deadline_us[relay] = now + UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US;
+        lv_label_set_text(s_rl_reset_label[relay], "Confirm?");
+    }
+}
+
+/* One relay's row: name+type on the left, cycles/percent in the middle,
+ * a two-tap Reset button on the right -- same "label(s) + trailing button"
+ * shape as ui_page_network_manage.c's saved-network rows, sized down to
+ * build_stat_row()'s ~23px row height (fixed button size, not
+ * LV_SIZE_CONTENT, so 5 of these rows are cheap to prove fit the page's
+ * ~267px budget the same way this file proves every other page does -- see
+ * the _Static_assert just above ui_page_diagnostics_build()). */
+#define UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX 64
+#define UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX 22
+static void build_relay_life_row(lv_obj_t *parent, unsigned relay, const char *name, lv_color_t accent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_width(row, 3, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_color(row, accent, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *name_label = lv_label_create(row);
+    lv_obj_set_style_text_color(name_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(name_label, name);
+
+    lv_obj_t *value_label = lv_label_create(row);
+    lv_obj_set_style_text_color(value_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(value_label, "--");
+    s_rl_value_label[relay] = value_label;
+
+    lv_obj_t *btn = lv_button_create(row);
+    lv_obj_set_size(btn, UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX, UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX);
+    lv_obj_set_style_bg_color(btn, UI_THEME_ACCENT_5, 0);
+    lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_add_event_cb(btn, relay_reset_btn_clicked_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)relay);
+    s_rl_reset_btn[relay] = btn;
+
+    lv_obj_t *btn_label = lv_label_create(btn);
+    lv_obj_set_style_text_color(btn_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(btn_label, "Reset");
+    lv_obj_center(btn_label);
+    s_rl_reset_label[relay] = btn_label;
+
+    lv_obj_update_layout(btn);
+    /* COMPACT, not the sparse case -- same measured-on-hardware reasoning as
+     * ui_topbar.c's build_icon(): this button is one of several tappable
+     * things in a tight row and the wide extension has been shown to shadow
+     * a neighbour. There is no neighbouring tappable icon in THIS row (only
+     * one button per row), but the row below/above sits close by, so this
+     * stays compact rather than risk shadowing across rows for the same
+     * reason. */
+    ui_theme_apply_touch_area(btn, true);
+}
+#undef UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX
+#undef UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX
 
 /* One page: a non-scrollable flex column of stat rows, sized to fill
  * whatever `content` has left. Same "create once, toggle HIDDEN" pattern as
@@ -1247,6 +1432,18 @@ lv_obj_t *ui_page_diagnostics_build(void)
     for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
         build_thermo_fault_row(thermo_fault_page, ch, tf_accents[ch % 3]);
     }
+
+    /* Page 7: Relay Life -- RELAY_LIFE_BUDGET_PLAN.md step 5. One row per
+     * RELAY_CYCLES_COUNT slot: the four heater relays, then the safety
+     * relay's own K4 slot (RELAY_CYCLES_SAFETY_INDEX) last. */
+    lv_color_t rl_accents[4] = { UI_THEME_ACCENT_1, UI_THEME_ACCENT_2, UI_THEME_ACCENT_3, UI_THEME_ACCENT_4 };
+    lv_obj_t *relay_life_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_RELAY_LIFE];
+    for (unsigned r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        char name[16];
+        snprintf(name, sizeof(name), "Relay %u", r + 1);
+        build_relay_life_row(relay_life_page, r, name, rl_accents[r % 4]);
+    }
+    build_relay_life_row(relay_life_page, RELAY_CYCLES_SAFETY_INDEX, "Safety (K4)", UI_THEME_ACCENT_5);
 
     /* MUST come after content exists -- ui_topbar.h's own usage note: the
      * icon proxy overlaps whatever's beneath it, and LVGL resolves

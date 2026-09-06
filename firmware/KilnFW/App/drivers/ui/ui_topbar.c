@@ -65,6 +65,31 @@ static lv_obj_t *build_icon(lv_obj_t *parent, const char *symbol, lv_event_cb_t 
     return btn;
 }
 
+/* Non-clickable indicator icon (the relay-life warning). Same fixed size and
+ * card background as build_icon()'s buttons so it sits in the row without
+ * looking out of place, but no button widget, no event callback, and no
+ * touch-area extension -- it navigates nowhere, so it must not steal a tap
+ * from a real neighbour. Starts hidden; ui_topbar_set_warning() toggles it
+ * at runtime. */
+static lv_obj_t *build_indicator(lv_obj_t *parent, const char *symbol)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_set_size(box, UI_TOPBAR_ICON_W_PX, UI_TOPBAR_ICON_H_PX);
+    lv_obj_set_style_bg_color(box, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(box, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *label = lv_label_create(box);
+    lv_label_set_text(label, symbol);
+    lv_obj_center(label);
+
+    lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN);
+    return box;
+}
+
 static void set_icon_enabled(lv_obj_t *btn, bool enabled)
 {
     if (!btn) {
@@ -109,6 +134,7 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
     if (cfg->prev_cb)    icon_count++;
     if (cfg->next_cb)    icon_count++;
     if (cfg->gear_cb)    icon_count++;
+    if (cfg->warning_icon) icon_count++;
 
     if (icon_count > 0) {
         const int32_t icons_w = (int32_t)icon_count * UI_TOPBAR_ICON_W_PX +
@@ -161,6 +187,9 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
         }
         if (cfg->gear_cb) {
             out->gear_btn = build_icon(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL);
+        }
+        if (cfg->warning_icon) {
+            out->warning_btn = build_indicator(icons, LV_SYMBOL_WARNING);
         }
 
         /* Every icon here got its click area extended toward
@@ -247,4 +276,22 @@ void ui_topbar_set_next_enabled(const ui_topbar_t *tb, bool enabled)
     if (tb) {
         set_icon_enabled(tb->next_btn, enabled);
     }
+}
+
+void ui_topbar_set_warning(const ui_topbar_t *tb, ui_topbar_warning_tier_t tier)
+{
+    if (!tb || !tb->warning_btn) {
+        return;
+    }
+    if (tier == UI_TOPBAR_WARNING_NONE) {
+        lv_obj_add_flag(tb->warning_btn, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    /* No dedicated warn/bad colour tokens exist in ui_theme.h -- reuse the
+     * same two accents ui_page_diagnostics.c already treats as
+     * warning/fault colours (ACCENT_1 orange, ACCENT_5 red) rather than add
+     * a new hex value the contrast memory note warns against. */
+    lv_color_t color = (tier == UI_TOPBAR_WARNING_ERROR) ? UI_THEME_ACCENT_5 : UI_THEME_ACCENT_1;
+    lv_obj_set_style_bg_color(tb->warning_btn, color, 0);
+    lv_obj_remove_flag(tb->warning_btn, LV_OBJ_FLAG_HIDDEN);
 }

@@ -81,6 +81,17 @@ extern "C" {
 #define UI_TOPBAR_ICON_H_PX   26
 #define UI_TOPBAR_ICON_GAP_PX 4
 
+/* Relay-life budget indicator tier (RELAY_LIFE_BUDGET_PLAN.md step 5). Kept
+ * as this module's own enum rather than including relay_cycles.h's
+ * relay_budget_tier_t -- ui_topbar.c is generic chrome with no business
+ * knowing what a "relay" is; the caller (ui_page_home.c) maps
+ * relay_cycles_max_budget_tier() onto this 1:1. */
+typedef enum {
+    UI_TOPBAR_WARNING_NONE = 0,
+    UI_TOPBAR_WARNING_WARN = 1,
+    UI_TOPBAR_WARNING_ERROR = 2,
+} ui_topbar_warning_tier_t;
+
 typedef struct {
     /* Left-hand title. NULL for a page that puts something else there --
      * ui_page_home.c shows a live Wi-Fi/IP status string instead. */
@@ -108,6 +119,14 @@ typedef struct {
     /* Settings gear. Home only; every other page reaches config through the
      * hub it came from. */
     lv_event_cb_t gear_cb;
+
+    /* Relay-life budget warning icon (LV_SYMBOL_WARNING). Home only, per
+     * RELAY_LIFE_BUDGET_PLAN.md step 5 -- set true to reserve the slot; the
+     * icon itself starts hidden and is toggled at runtime by
+     * ui_topbar_set_warning() from the page's own periodic refresh. Built as
+     * a plain (non-clickable) indicator, not a button -- it has nothing to
+     * navigate to. */
+    bool warning_icon;
 } ui_topbar_cfg_t;
 
 typedef struct {
@@ -119,6 +138,7 @@ typedef struct {
     lv_obj_t *prev_btn;
     lv_obj_t *next_btn;
     lv_obj_t *gear_btn;
+    lv_obj_t *warning_btn;   /* NULL unless cfg->warning_icon was set; starts hidden */
 
     /* Horizontal px the icon proxy occupies on the right-hand side. A page
      * that puts its own wide widget in the bar (the home page's status
@@ -150,6 +170,20 @@ void ui_topbar_set_title(const ui_topbar_t *tb, const char *text);
  * rather than leaving a live-looking button that ignores taps. */
 void ui_topbar_set_prev_enabled(const ui_topbar_t *tb, bool enabled);
 void ui_topbar_set_next_enabled(const ui_topbar_t *tb, bool enabled);
+
+/* Shows/hides the relay-life warning icon and colours it for the tier.
+ * NONE hides it; WARN/ERROR show it in the existing UI_THEME_ACCENT_1
+ * (orange) / UI_THEME_ACCENT_5 (red) tokens respectively -- this header has
+ * no dedicated "warn"/"bad" colour of its own (see ui_theme.h's provenance
+ * note: this palette has never been measured on real hardware), so this
+ * reuses the two accents diagnostics already treats as warning/fault
+ * colours rather than adding a new hex value. No-op if cfg->warning_icon
+ * was not set at ui_topbar_create() time. Deliberately PERSISTENT once
+ * shown -- unlike every other transient notice on this page, this warning
+ * does not clear itself; see the call site's comment in ui_page_home.c for
+ * why that is intentional rather than the "warning nobody reads" anti-
+ * pattern this codebase otherwise avoids. */
+void ui_topbar_set_warning(const ui_topbar_t *tb, ui_topbar_warning_tier_t tier);
 
 #ifdef __cplusplus
 }

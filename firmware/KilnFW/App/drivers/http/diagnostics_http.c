@@ -409,16 +409,14 @@ static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
  * gated by window.kcConfirm()) posts here after the operator has physically
  * replaced the relay.
  *
- * relay_cycles.h (step 1, 75b338c) has no "reset one slot's count to zero"
- * API -- relay_cycles_add()/relay_cycles_note_safety_edge() only ever
- * increment, by design (they're the wear counters). Rather than add one to
- * that file out of this step's scope (relay_cycles.* is owned by the step-1
- * agent), this handler validates the index and everything else it can,
- * then answers 501 Not Implemented with a message naming exactly the
- * missing API -- so the front end above is fully testable (bad index -> 400,
- * good index -> a clean, diagnosable 501) today, and swapping in a real
- * relay_cycles_reset(relay) call plus the flash-worker dispatch below is a
- * one-function change once that API lands, not a rewrite of this handler. */
+ * Step 5 (RELAY_LIFE_BUDGET_PLAN.md, relay_cycles.c) added
+ * relay_cycles_reset(unsigned relay) -- this handler now calls it instead of
+ * answering the placeholder 501 an earlier pass returned. relay_cycles_reset()
+ * itself owns the flash-worker dispatch (checking uart_bridge_ext_is_on_
+ * flash_worker() first, same as every other guarded write in this codebase --
+ * see that function's own comment) -- httpd handler tasks are not the flash
+ * worker, so this call always takes the dispatch path, never the inline one,
+ * but the function handles both so this handler does not have to know which. */
 #define RELAY_CYCLES_RESET_BODY_MAX 32
 static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
 {
@@ -452,19 +450,34 @@ static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
     }
 
     /* Log before answering, same "old count, before the reset" intent the
-     * plan asks for even though the reset itself is not yet implemented --
-     * this is exactly the number a real reset would need to have logged. */
+     * plan asks for -- relay_cycles_reset() logs the same fact internally,
+     * but that log line does not carry the HTTP caller/relay-mapping
+     * context this one does, so this stays even though it is now somewhat
+     * redundant. */
     relay_cycles_budget_t before;
     relay_cycles_budget((uint8_t)relay, &before);
-    ESP_LOGI(TAG, "relay_cycles reset requested for relay %ld (old count %lu) -- REFUSED, "
-             "relay_cycles.h has no reset-one-slot API yet", relay, (unsigned long)before.cycles);
+    ESP_LOGI(TAG, "relay_cycles reset requested via HTTP for relay %ld (old count %lu)",
+             relay, (unsigned long)before.cycles);
+
+    bool ok = relay_cycles_reset((unsigned)relay);
 
     char json[192];
-    int n = snprintf(json, sizeof(json),
-        "{\"ok\":false,\"error\":\"not implemented: relay_cycles.h has no reset-one-slot API yet "
-        "(RELAY_LIFE_BUDGET_PLAN.md step 4)\",\"relay\":%ld,\"cycles\":%lu}",
-        relay, (unsigned long)before.cycles);
-    httpd_resp_set_status(req, "501 Not Implemented");
+    int n;
+    if (ok) {
+        n = snprintf(json, sizeof(json), "{\"ok\":true,\"relay\":%ld,\"cycles\":0}", relay);
+        httpd_resp_set_status(req, "200 OK");
+    } else {
+        /* relay_cycles_reset() only fails on a persist error (the flash
+         * worker was unreachable, or the write itself failed) -- the index
+         * was already validated above. The count is still zeroed in RAM
+         * (relay_cycles_reset()'s own contract) and will be retried by the
+         * next periodic persist, so this is "not yet durable", not "nothing
+         * happened". */
+        n = snprintf(json, sizeof(json),
+            "{\"ok\":false,\"error\":\"reset applied in RAM but the flash write failed or could not "
+            "be dispatched -- will retry on the next periodic persist\",\"relay\":%ld}", relay);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }

@@ -7,10 +7,35 @@
  * each section below. See ui_page_home_internal.h for the shared
  * statics/prototypes this file reaches across the split. */
 #include "ui_page_home_internal.h"
+#include "relay_cycles.h"
 
 void ui_home_refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
+
+    /* Relay-life budget warning (RELAY_LIFE_BUDGET_PLAN.md step 5). Cheap --
+     * relay_cycles_max_budget_tier() just reads RAM state already loaded at
+     * boot -- so this rides the existing 1 Hz tick rather than getting its
+     * own timer. Map straight onto ui_topbar_warning_tier_t; both enums are
+     * NONE=0/WARN=1/ERROR=2 by construction but this stays an explicit
+     * switch rather than a cast so the two headers can drift independently
+     * without silently miscoloring the icon. DELIBERATELY not debounced or
+     * auto-cleared like the lag notice above: the plan calls for a
+     * *persistent* icon once a relay crosses 80%, on purpose, even though
+     * main_page.html's own comment elsewhere warns "a warning always present
+     * is a warning nobody reads" -- this is the one exception, because the
+     * thing it reports (contact life spent) never goes back down on its own
+     * the way a lag condition does, so hiding it after N ticks would make an
+     * operator believe the wear stopped. See ui_topbar_set_warning()'s
+     * header comment for the same note from the other side. */
+    ui_topbar_warning_tier_t warn_tier;
+    switch (relay_cycles_max_budget_tier()) {
+        case RELAY_BUDGET_TIER_ERROR: warn_tier = UI_TOPBAR_WARNING_ERROR; break;
+        case RELAY_BUDGET_TIER_WARN:  warn_tier = UI_TOPBAR_WARNING_WARN;  break;
+        case RELAY_BUDGET_TIER_NONE:
+        default:                      warn_tier = UI_TOPBAR_WARNING_NONE; break;
+    }
+    ui_topbar_set_warning(&s_ui_home_topbar, warn_tier);
 
     /* wifi_status_ui.h -- TODO.md 10.9 factored this formatter out of this
      * file into its own shared module so ui_page_network.c can call the
