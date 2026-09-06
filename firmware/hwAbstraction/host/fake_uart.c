@@ -125,6 +125,39 @@ hal_status_t hal_uart_deinit(hal_uart_t *u)
     return HAL_OK;
 }
 
+hal_status_t hal_uart_attach(hal_uart_t *u, int port)
+{
+    /* Transitional Phase-1b path (interface/hal_uart.h's doc comment):
+     * uart_protocol.c attaches to a port a real uart_owner_t already
+     * installed the driver for, rather than calling hal_uart_init(), which
+     * on the ESP backend would try to uart_driver_install() a second time.
+     * The host fake has no real driver to double-install, so this is simply
+     * hal_uart_init() with the port recorded (cfg's other fields left at 0 --
+     * nothing here reads them) instead of taken from a caller-supplied cfg.
+     * Uses the same slot pool and the same {magic, slot} tag scheme as
+     * hal_uart_init(), so every other fake_uart_ or hal_uart_ call works
+     * identically on a handle produced by either function. */
+    if (u == NULL) return HAL_INVALID_ARG;
+
+    int free_slot = -1;
+    for (int i = 0; i < FAKE_UART_MAX_INSTANCES; i++) {
+        if (!s_slots[i].in_use) { free_slot = i; break; }
+    }
+    if (free_slot < 0) return HAL_NO_MEM;
+
+    fake_uart_slot_t *s = &s_slots[free_slot];
+    memset(s, 0, sizeof(*s));
+    s->in_use = true;
+    s->cfg.port = port;
+
+    fake_uart_handle_tag_t tag;
+    tag.magic = FAKE_UART_MAGIC;
+    tag.slot = free_slot;
+    memset(u->storage, 0, sizeof(u->storage));
+    memcpy(u->storage, &tag, sizeof(tag));
+    return HAL_OK;
+}
+
 hal_status_t hal_uart_send(hal_uart_t *u, const uint8_t *data, size_t len)
 {
     fake_uart_slot_t *s = get_slot(u);

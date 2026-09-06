@@ -123,6 +123,23 @@ static size_t frame_and_send(uart_protocol_t *proto, const uint8_t *raw, size_t 
      * was queued. */
     hal_status_t hal_result = hal_uart_send_blocking(&proto->hal_uart, out, o, timeout_ms);
     if (hal_result != HAL_OK) {
+        /* Review fix (2026-09-05): hal_result was only ever logged here --
+         * a run of HAL_TIMEOUT/HAL_IO from a genuinely wedged TX ring looked
+         * identical to a healthy link on every counter this module exposes
+         * (frame_and_send's caller already counts RETRIES via
+         * suppressed_retry_logs, but that path fires just as loud for "peer
+         * never answers" as for "we can't even get bytes onto the wire" --
+         * see this file's frames_deframed/etc. doc comment on not adding an
+         * ambiguous counter). uart_protocol_get_tx_send_failures() now
+         * surfaces this specific failure mode (this call site is the only
+         * caller of hal_uart_send_blocking in this module) so a caller (e.g.
+         * safety_link.c's link-stats mirror) can tell "the wire itself is
+         * failing sends" apart from "no reply", which this counter alone
+         * cannot distinguish either but at least makes visible. Single-writer
+         * (tx_lock is held by every caller of frame_and_send -- see
+         * uart_protocol_send_limited()/_send_broadcast()), plain volatile
+         * read from any task, same pattern as the deframe-stats counters. */
+        proto->tx_send_failures++;
         ESP_LOGW(TAG, "frame tx failed: %s", hal_status_to_name(hal_result));
         return 0;
     }
@@ -723,6 +740,16 @@ esp_err_t uart_protocol_get_deframe_stats(uart_protocol_t *proto, uint32_t *out_
         *out_frame_resync = proto->frame_resync;
     }
     return ESP_OK;
+}
+
+uint32_t uart_protocol_get_tx_send_failures(uart_protocol_t *proto)
+{
+    if (!proto || !proto->initialized) {
+        return 0;
+    }
+    /* Single-writer (frame_and_send(), under tx_lock -- see this field's own
+     * doc comment in uart_protocol.h), plain volatile read from any task. */
+    return proto->tx_send_failures;
 }
 
 esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_msg, TickType_t wait_ticks)

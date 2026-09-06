@@ -162,6 +162,28 @@ int main(void)
         CHECK(hal_uart_init(&one_too_many, &cfg) == HAL_OK);
     }
 
+    /* --- hal_uart_attach: transitional Phase-1b entry point (interface/
+     * hal_uart.h) -- attach a handle to a "port already installed elsewhere"
+     * without going through hal_uart_init()/cfg, then prove sends work
+     * exactly as they do on an init'd handle. --- */
+    fake_uart_reset_all();
+    {
+        hal_uart_t attached;
+        memset(&attached, 0, sizeof(attached));
+        CHECK(hal_uart_attach(NULL, 7) == HAL_INVALID_ARG);
+        CHECK(hal_uart_attach(&attached, 7) == HAL_OK);
+        CHECK(fake_uart_is_live(&attached) == true);
+
+        CHECK(hal_uart_send(&attached, (const uint8_t *)"hi", 2) == HAL_OK);
+        CHECK(hal_uart_send_blocking(&attached, (const uint8_t *)"!", 1, 50) == HAL_OK);
+        size_t attach_tx_len = 0;
+        const uint8_t *attach_tx = fake_uart_tx_capture(&attached, &attach_tx_len);
+        CHECK(attach_tx != NULL && attach_tx_len == 3 && memcmp(attach_tx, "hi!", 3) == 0);
+
+        CHECK(hal_uart_deinit(&attached) == HAL_OK);
+        CHECK(fake_uart_is_live(&attached) == false);
+    }
+
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

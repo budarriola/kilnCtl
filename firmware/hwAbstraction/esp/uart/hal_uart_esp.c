@@ -64,6 +64,14 @@ static const char *TAG = "hal_uart_esp";
 #define HAL_UART_ESP_TX_RING_BUF_SIZE 4096
 #define HAL_UART_ESP_EVENT_QUEUE_LEN  16
 
+/* Floor for hal_uart_send_blocking()'s final uart_wait_tx_done() wait -- see
+ * that function's 2026-09-05 review-fix comment. 2 ticks (portTICK_PERIOD_MS
+ * is 1ms on this project's FreeRTOSConfig) is comfortably more than the
+ * microseconds needed to drain the last few bytes of one frame at 230400+
+ * baud, and small enough to never matter next to any real ack_timeout_ms
+ * (200ms default, UART_PROTO_DEFAULT_ACK_TIMEOUT_MS). */
+#define HAL_UART_ESP_MIN_WAIT_TX_DONE_TICKS 2
+
 /* 2026-09-05 review fix: hal_uart_cfg_t (interface/hal_uart.h) now carries
  * queue_len/task_priority/stack_depth/core_id. 0 in any field means
  * "backend default" -- the defaults below match the real
@@ -206,6 +214,21 @@ hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
 hal_status_t hal_uart_attach(hal_uart_t *u, int port) {
     if (!u) {
         return HAL_INVALID_ARG;
+    }
+    if (port < 0 || port >= (int)UART_NUM_MAX) {
+        return HAL_INVALID_ARG;
+    }
+    /* Review fix (2026-09-05): this used to accept any in-range port number
+     * unconditionally, so attaching before the real owner had actually
+     * called uart_driver_install() on it (a caller-ordering bug, not a
+     * hardware fault) would silently produce a "live" handle whose first
+     * real send then failed deep inside uart_write_bytes()/uart_get_tx_
+     * buffer_free_size() with a raw ESP-IDF error instead of a clear
+     * HAL_NOT_READY right here at attach time. uart_is_driver_installed() is
+     * the same check ESP-IDF's own driver functions use internally to refuse
+     * an uninstalled port. */
+    if (!uart_is_driver_installed((uart_port_t)port)) {
+        return HAL_NOT_READY;
     }
 
     /* Transitional Phase-1b path (see interface/hal_uart.h's doc comment):
@@ -371,9 +394,33 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
     }
 
     /* Remaining budget after the free-space wait above, so the total time
-     * spent in this call (wait + wait_tx_done) never exceeds timeout_ms. */
+     * spent in this call (wait + wait_tx_done) never exceeds timeout_ms in
+     * the ordinary case.
+     *
+     * Review fix (2026-09-05): all bytes are already handed to
+     * uart_write_bytes() above -- they are queued in the driver's TX ring,
+     * on their way out the wire -- by the time this line runs. If the
+     * free-space poll used up the ENTIRE timeout budget (remaining_ticks
+     * computes to 0), calling uart_wait_tx_done(port, 0) asks it to check
+     * "already fully drained?" with no wait at all; on a ring that still has
+     * a few bytes left to shift out, that returns ESP_ERR_TIMEOUT even
+     * though nothing is stuck -- the bytes were written and WILL leave the
+     * wire within microseconds, this call just didn't wait for it. Without a
+     * floor, that HAL_TIMEOUT propagates to uart_protocol.c's frame_and_send()
+     * as "the frame was not sent" and it queues a full retransmission (up to
+     * UART_PROTO_MAX_RETRIES times) of a frame that is, in fact, already on
+     * the wire -- a duplicate the receiver's dedup ring then has to absorb,
+     * not a correctness bug, but needless traffic and a misleading TIMEOUT
+     * status for a send that actually succeeded. Floor the wait at
+     * HAL_UART_ESP_MIN_WAIT_TX_DONE_TICKS (a few ticks -- draining the last
+     * few bytes of one worst-case stuffed frame off a >=4096 B/s UART takes
+     * well under 1 ms) so uart_wait_tx_done() always gets a real chance to
+     * observe completion instead of being asked to answer instantly. */
     TickType_t elapsed_ticks = xTaskGetTickCount() - start_tick;
     TickType_t remaining_ticks = (elapsed_ticks < timeout_ticks) ? (timeout_ticks - elapsed_ticks) : 0;
+    if (remaining_ticks < HAL_UART_ESP_MIN_WAIT_TX_DONE_TICKS) {
+        remaining_ticks = HAL_UART_ESP_MIN_WAIT_TX_DONE_TICKS;
+    }
     esp_err_t err = uart_wait_tx_done(impl->port, remaining_ticks);
     if (err != ESP_OK) {
         return hal_esp_err_to_status(err);

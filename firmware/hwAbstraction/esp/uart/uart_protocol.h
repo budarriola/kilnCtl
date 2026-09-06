@@ -245,6 +245,18 @@ typedef struct {
                                                 * frame -- oversized/corrupt, discarded,
                                                 * resynced on the next 0x7E */
 
+    /* 2026-09-05 review fix: frame_and_send()'s hal_uart_send_blocking()
+     * result was only ever logged, with no counter -- a wedged TX ring
+     * (HAL_TIMEOUT/HAL_IO on every send) looked identical to "peer never
+     * replies" on every counter this struct already exposed. Incremented at
+     * frame_and_send()'s one call site, under tx_lock (held by every caller
+     * of frame_and_send -- see uart_protocol_send_limited()/
+     * _send_broadcast()), so this is single-writer despite tx_lock being a
+     * different lock from tasks_lock, which the frame_resync/frames_deframed
+     * group above uses for the same "single-writer, volatile read" pattern.
+     * See uart_protocol_get_tx_send_failures(). */
+    volatile uint32_t tx_send_failures;
+
     bool initialized;
 } uart_protocol_t;
 
@@ -276,6 +288,18 @@ esp_err_t uart_protocol_unregister_task(uart_protocol_t *proto, uint8_t task_id)
  * untouched in that case. Safe to call from any task. */
 esp_err_t uart_protocol_get_task_broadcast_dropped(uart_protocol_t *proto, uint8_t task_id,
                                                     uint32_t *out);
+
+/* Count of frame_and_send() calls whose hal_uart_send_blocking() returned
+ * anything other than HAL_OK (HAL_TIMEOUT: ring never drained within
+ * timeout_ms; HAL_IO: uart_write_bytes()/uart_wait_tx_done() itself failed).
+ * This is the wire-level TX failure counter -- distinct from a NACK/no-reply
+ * timeout at the protocol level, which means the frame WAS sent but nothing
+ * answered it. A caller wanting the raw hal_uart-level drop count instead
+ * (bytes dropped by the ESP backend's own free-space/partial-write guards)
+ * can call hal_uart_get_tx_dropped() directly on the same handle this
+ * function reads from internally. Monotonic since uart_protocol_init(),
+ * never reset. Safe to call from any task. */
+uint32_t uart_protocol_get_tx_send_failures(uart_protocol_t *proto);
 
 /* Reads all five deframer/dispatch-level counters (uart_protocol_t's own
  * doc comment on them has the full "why these five" reasoning) in one call.
