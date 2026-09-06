@@ -25,7 +25,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Callable, Optional
 
-from . import devices, pin_overlay, pinout_reference, settings, wifi_credentials
+from . import dashboard_http_client, devices, pin_overlay, pinout_reference, settings, wifi_credentials
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -303,6 +303,39 @@ class SafetyMixin:
             error_types=(SafetyQueryError,),
             on_error=self._on_safety_query_error,
         )
+        # The borrowed-sensor check below is HTTP (GET /api/status), a
+        # completely separate transport from the UART query above -- and
+        # deliberately NOT run on the quiet 2 s tick (_safety_schedule_poll),
+        # only on an explicit refresh (button click, or popup open via
+        # gui.py's toggle_popup). Firing it every 2 s would add a new HTTP
+        # round trip to a hot polling loop, which is exactly what this
+        # feature must not do.
+        if not quiet:
+            self._safety_refresh_tc_separate_async()
+
+    def _safety_refresh_tc_separate_async(self) -> None:
+        """One-shot fetch of GET /api/status's `safety_tc_is_separate_sensor`
+        (dashboard_status_http.c) -- the ESP's own confirmed-borrowed
+        predicate (safety_tc_is_separate_physical_sensor() in
+        firmware/KilnFW/App/drivers/safety/safety_link.h), same field the
+        KilnFW LCD/web displays already gate on (see b90fcb3).
+
+        Same fail-to-shown semantics as the firmware: a missing field
+        (older firmware) or a failed fetch (board unreachable over HTTP,
+        e.g. serial-only bench setup) leaves `_safety_tc_separate` at
+        whatever it last was -- `None` at startup, which `_apply_safety_status`
+        treats as "shown", never as "confirmed borrowed"."""
+        def apply(data: dict) -> None:
+            if isinstance(data, dict) and "safety_tc_is_separate_sensor" in data:
+                self._safety_tc_separate = bool(data["safety_tc_is_separate_sensor"])
+
+        self.query_async(
+            "Safety TC borrowed-sensor check",
+            lambda: dashboard_http_client.get_status(self._wifi_host()),
+            apply,
+            error_types=(dashboard_http_client.DashboardHttpError,),
+            on_error=lambda exc: None,
+        )
 
     def _on_safety_query_error(self, exc: BaseException) -> None:
         """A failed Safety status read must not leave the last good summary
@@ -389,7 +422,20 @@ class SafetyMixin:
             _OK_COLOR if status.enabled else _MUTED_COLOR,
         )
 
-        if status.temp_valid:
+        # Fail-to-shown: only an explicit False (a fresh GET /api/status
+        # confirmed safety_tc_is_separate_sensor == false) hides the
+        # temperature. `None` (never fetched yet, older firmware, or the
+        # last fetch failed) is treated the same as True -- shown -- exactly
+        # the firmware's own "unknown must fail to shown" rule (see
+        # safety_tc_is_separate_physical_sensor()'s doc comment).
+        tc_separate = getattr(self, "_safety_tc_separate", None)
+        if tc_separate is False:
+            show(
+                "temp",
+                "borrowed from a zone probe (same probe, not a second sensor)",
+                _MUTED_COLOR,
+            )
+        elif status.temp_valid:
             show(
                 "temp",
                 f"{status.temperature_c:.2f} C  (CJ {status.cold_junction_c:.1f} C)",

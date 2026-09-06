@@ -289,6 +289,12 @@ class KilnCtrlApp(
         #: window (or losing the link) actually stops it.
         self._safety_poll_id: Optional[str] = None
 
+        #: Cache of GET /api/status's `safety_tc_is_separate_sensor`, from
+        #: the last non-quiet safety refresh -- see gui_safety.py's
+        #: _safety_refresh_tc_separate_async(). None (never fetched, or the
+        #: fetch failed) is treated as "shown", not as "confirmed borrowed".
+        self._safety_tc_separate: Optional[bool] = None
+
         #: Same idea as _safety_poll_id, for the Firing Status popup's
         #: HTTP poll loop.
         self._firing_poll_id: Optional[str] = None

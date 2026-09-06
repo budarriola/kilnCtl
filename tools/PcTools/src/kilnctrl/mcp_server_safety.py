@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, dashboard_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -83,12 +83,33 @@ def safety_get_status() -> str:
 
     Expected result today: no flags set and "never received" -- the RP2040
     firmware that would answer does not exist yet. That is not a fault.
+
+    Also appends a borrowed-sensor note when GET /api/status's
+    `safety_tc_is_separate_sensor` (dashboard_status_http.c) is reachable and
+    reports False -- the ESP's own confirmed-borrowed predicate
+    (safety_tc_is_separate_physical_sensor() in firmware/KilnFW/App/drivers/
+    safety/safety_link.h), the same field every KilnFW display now gates on
+    (b90fcb3). This is an EXTRA live HTTP round trip beyond the cache-only
+    UART query above -- unlike safety_get_ct_cal, it fails silently (no note
+    appended, temperature still reported) rather than erroring the whole
+    call, since a board with no HTTP reachable (serial-only bench setup) must
+    not lose the cached UART status just because the borrowed check could not
+    run. Fail-to-shown: a missing field or a failed fetch means no note is
+    added, same as the firmware's own "unknown must fail to shown" rule.
     """
     try:
         status = _srv._safety.get_status()
     except SafetyQueryError as exc:
         return f"error: {exc}"
-    return status.describe()
+    text = status.describe()
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as safety_get_commissioning()
+    try:
+        http_status = dashboard_http_client.get_status(_ota_resolve_host(None))
+    except Exception:
+        return text
+    if isinstance(http_status, dict) and http_status.get("safety_tc_is_separate_sensor") is False:
+        text += " | safety TC: borrowed from a zone probe (same probe, not a second sensor)"
+    return text
 
 
 @_srv._tool()
