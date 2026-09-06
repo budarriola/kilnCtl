@@ -58,15 +58,26 @@ typedef struct {
     int      gpio_num;         /* backlight MOSFET gate pin */
     uint32_t freq_hz;          /* backlight_pwm.c: 5000 */
     uint8_t  duty_resolution_bits; /* backlight_pwm.c: 13 (LEDC_TIMER_13_BIT) */
+    uint8_t  start_duty_percent; /* 0..100, applied at hal_pwm_init() time --
+                                   * see below. */
 } hal_pwm_cfg_t;
 
 /* Configures the timer and channel (ledc_timer_config + ledc_channel_config,
- * duty starts at 0 / hpoint 0 -- matching backlight_pwm.c's init order:
+ * then applies start_duty_percent -- matching backlight_pwm.c's init order:
  * timer first, then channel). HAL_INVALID_ARG if duty_resolution_bits would
  * make (1 << duty_resolution_bits) - 1 the wrong scale for a later
  * hal_pwm_set_duty() percent argument (backend validates against its own
  * hardware's max resolution, e.g. LEDC's per-speed-mode timer bit-width
- * ceiling). */
+ * ceiling), or if start_duty_percent > 100.
+ *
+ * start_duty_percent MUST NOT default to 0: production's
+ * backlight_pwm_init() (App/drivers/backlight_pwm.c) configures the
+ * channel with `.duty = duty_for_percent(CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT)`
+ * directly, not a separate post-init hal_pwm_set_duty() call -- the panel
+ * must not start dark if the flying wire IS fitted. A caller passes the
+ * same ON_PERCENT value here; the backend applies it as part of channel
+ * config (ESP: chan_cfg.duty), matching that real call exactly rather than
+ * starting at 0 and relying on a follow-up set_duty(). */
 hal_status_t hal_pwm_init(const hal_pwm_cfg_t *cfg);
 
 /* Sets duty as a 0..100 percentage and applies it immediately -- folds

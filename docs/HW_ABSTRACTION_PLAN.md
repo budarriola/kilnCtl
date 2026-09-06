@@ -437,9 +437,15 @@ reason+magic, [2]/[3] startup diag+magic, [4] RESERVED by pico-sdk
 watchdog_enable (fenced by comment only), [5] shared by watchdog_overdue_diag
 (tag 0xD9) and the stack-overflow hook (tag 0xE3, mutually exclusive by
 construction), [6] boot-stage marker (overwrite-only), [7] clear_trip packed
-checkpoint. Registry: static claim table {slot, owner, tag} with a
-compile-time uniqueness assert; slot 4 hard-reserved in code; typed accessors
-write_u32/read_u32(&magic_ok)/clear supporting both access modes. The four
+checkpoint. Registry: runtime advisory claim table {slot, owner, tag}, keyed
+on (slot, tag) uniqueness checked at the `hal_scratch_claim()` call (not
+compile-time — no `HAL_SCRATCH_CLAIM()` macro exists); slot 4 hard-refused
+in code for claim/write/clear (read still allowed); typed accessors
+write_u32/read_u32(&magic_ok)/clear supporting both access modes, neither of
+which consults the claim table beyond the slot-4 case (Opus review,
+2026-09-05 — header previously overclaimed a compile-time table and a
+uniqueness *check*, reworded to describe the runtime-only behavior actually
+implemented). The four
 direct pokers (main.c, boot_reason.c, watchdog_overdue_diag.c,
 clear_trip_diag.c) become clients. Slot map re-verified against every
 `watchdog_hw->scratch` access (boot_reason.c:28-50, main.c:127/439/440,
@@ -474,11 +480,18 @@ reached.
   (`esp/wdt/hal_wdt_esp.c`) landed Phase 1b, bodies-only, syntax-checked by
   compile_esp_backends.ps1; one interface mismatch found and documented in
   the file (no real `esp_task_wdt_init()` call site in this tree —
-  `hal_wdt_init()` is implemented as `esp_task_wdt_reconfigure()`).
+  `hal_wdt_init()` is implemented as `esp_task_wdt_reconfigure()`). Opus
+  review (2026-09-05) added `pause_on_debug` to `hal_wdt_init()`: pico
+  honours it (SaftyFW's real `main.c:230` passes `true`), ESP's TWDT has no
+  equivalent and ignores it — pico/esp/fake backends and tests all updated.
 - hal_pwm: backlight LEDC only. Thin, last. hal_pwm.h: header written
   (compile_headers.ps1 passes, negative test still fires). ESP backend
   (`esp/pwm/hal_pwm_esp.c`) landed Phase 1b, bodies-only, syntax-checked by
-  compile_esp_backends.ps1; no interface mismatch found.
+  compile_esp_backends.ps1; no interface mismatch found. Opus review
+  (2026-09-05) added `start_duty_percent` to `hal_pwm_cfg_t`, applied inside
+  `hal_pwm_init()`'s channel config: production's `backlight_pwm_init()`
+  starts the panel at `ON_PERCENT`, not dark, if the flying wire is fitted —
+  the backend previously always started at 0.
 
 ### Board descriptors — forward, never freeze
 

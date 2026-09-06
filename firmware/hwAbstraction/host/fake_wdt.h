@@ -21,6 +21,10 @@
  * hal_wdt_init()/hal_wdt_feed() call, both of which clear the latch since
  * they represent a fresh boot or a check-in respectively).
  *
+ * pause_on_debug: pico honours this (watchdog_enable's second arg); ESP's
+ * TWDT has no equivalent and ignores it. This fake mirrors the pico shape
+ * and records it verbatim via fake_wdt_get_pause_on_debug().
+ *
  * Reboot: hal_wdt_reboot() is documented NEVER TO RETURN on a real backend
  * (see hal_wdt.h's threading contract). This fake instead LATCHES a
  * reboot-requested flag (fake_wdt_reboot_requested()) and returns normally,
@@ -65,6 +69,7 @@ bool fake_wdt_is_initialized(void);
  * hal_wdt_init(). */
 uint32_t fake_wdt_get_timeout_ms(void);
 bool     fake_wdt_get_panic_disabled(void);
+bool     fake_wdt_get_pause_on_debug(void);
 
 /* Number of successful hal_wdt_feed() calls since the last
  * fake_wdt_reset_all(). */

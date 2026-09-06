@@ -35,9 +35,11 @@
  *
  * Inspection: fake_scratch_get_claim_count()/fake_scratch_get_claim() let a
  * test walk the live claim table (e.g. to assert a module claimed the slot
- * it was supposed to, or that a build-time collision candidate is actually
- * refused at runtime here since this fake has no compile-time table the way
- * a real HAL_SCRATCH_CLAIM() macro invocation would).
+ * it was supposed to, or that two modules that both claim the same slot at
+ * runtime are actually refused). The registry is runtime-only and advisory
+ * -- see hal_scratch.h's "REGISTRY / UNIQUENESS" note: there is no
+ * compile-time claim table or macro on any backend, and write/clear do not
+ * consult this table at all beyond the slot-4 special case.
  */
 #ifndef KILNCTL_FAKE_SCRATCH_H
 #define KILNCTL_FAKE_SCRATCH_H

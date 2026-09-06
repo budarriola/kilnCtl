@@ -41,7 +41,8 @@ static bool     s_initialized;
 
 hal_status_t hal_pwm_init(const hal_pwm_cfg_t *cfg) {
     if (!cfg || cfg->duty_resolution_bits == 0 ||
-        cfg->duty_resolution_bits > SOC_LEDC_TIMER_BIT_WIDTH) {
+        cfg->duty_resolution_bits > SOC_LEDC_TIMER_BIT_WIDTH ||
+        cfg->start_duty_percent > 100) {
         /* Real ceiling on this chip's LEDC timers (ESP32-S3:
          * SOC_LEDC_TIMER_BIT_WIDTH == 14), not the generic ledc_timer_bit_t
          * enum's 1..20 range -- a duty_resolution_bits beyond 14 is a valid
@@ -65,22 +66,30 @@ hal_status_t hal_pwm_init(const hal_pwm_cfg_t *cfg) {
 
     s_duty_max = (1u << cfg->duty_resolution_bits) - 1u;
 
-    /* Start at duty 0 / hpoint 0, matching backlight_pwm.c's own init order
-     * (timer first, then channel). OPEN INTERFACE ITEM: hal_pwm_init() does
-     * NOT itself apply a starting duty -- the caller must follow up with an
-     * explicit hal_pwm_set_duty() call, same as backlight_pwm_init() does
-     * today. A prior version of this comment claimed backlight_pwm_init()
-     * applies duty "right after init" as if that were this function's own
-     * behavior; that is not the case here and any future interface change
-     * that folds a start-duty into hal_pwm_cfg_t belongs in hal_pwm.h, not
-     * this backend. */
+    /* Start at start_duty_percent / hpoint 0, matching backlight_pwm.c's own
+     * init order (timer first, then channel) AND its real channel config,
+     * which sets `.duty = duty_for_percent(CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT)`
+     * directly rather than starting at 0 and relying on a follow-up
+     * hal_pwm_set_duty() -- the panel must not start dark if the flying wire
+     * IS fitted. Same pct-to-raw rule as hal_pwm_set_duty() below (100 ->
+     * duty_max verbatim, 0 -> 0, else truncated pct*max/100); duplicated
+     * rather than shared because s_initialized is not yet true here. */
+    uint32_t start_duty;
+    if (cfg->start_duty_percent >= 100) {
+        start_duty = s_duty_max;
+    } else if (cfg->start_duty_percent == 0) {
+        start_duty = 0;
+    } else {
+        start_duty = (uint32_t)cfg->start_duty_percent * s_duty_max / 100u;
+    }
+
     ledc_channel_config_t chan_cfg = {
         .gpio_num = cfg->gpio_num,
         .speed_mode = HAL_PWM_ESP_MODE,
         .channel = HAL_PWM_ESP_CHANNEL,
         .intr_type = LEDC_INTR_DISABLE,
         .timer_sel = HAL_PWM_ESP_TIMER,
-        .duty = 0,
+        .duty = start_duty,
         .hpoint = 0,
     };
     err = ledc_channel_config(&chan_cfg);

@@ -6,6 +6,7 @@
 static bool     s_initialized = false;
 static uint32_t s_timeout_ms = 0;
 static bool     s_panic_disabled = false;
+static bool     s_pause_on_debug = false;
 static uint32_t s_feed_count = 0;
 static uint32_t s_elapsed_since_feed_ms = 0;
 static bool     s_fired = false;
@@ -15,6 +16,7 @@ void fake_wdt_reset_all(void) {
     s_initialized = false;
     s_timeout_ms = 0;
     s_panic_disabled = false;
+    s_pause_on_debug = false;
     s_feed_count = 0;
     s_elapsed_since_feed_ms = 0;
     s_fired = false;
@@ -31,6 +33,10 @@ uint32_t fake_wdt_get_timeout_ms(void) {
 
 bool fake_wdt_get_panic_disabled(void) {
     return s_panic_disabled;
+}
+
+bool fake_wdt_get_pause_on_debug(void) {
+    return s_pause_on_debug;
 }
 
 uint32_t fake_wdt_get_feed_count(void) {
@@ -57,10 +63,12 @@ bool fake_wdt_reboot_requested(void) {
 
 /* --- hal_wdt.h implementation --- */
 
-hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled) {
+hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled,
+                           bool pause_on_debug) {
     s_initialized = true;
     s_timeout_ms = timeout_ms;
     s_panic_disabled = panic_disabled;
+    s_pause_on_debug = pause_on_debug;
     s_feed_count = 0;
     s_elapsed_since_feed_ms = 0;
     s_fired = false;

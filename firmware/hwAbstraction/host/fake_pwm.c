@@ -49,13 +49,20 @@ uint8_t fake_pwm_get_last_duty(void) {
 
 hal_status_t hal_pwm_init(const hal_pwm_cfg_t *cfg) {
     /* Mirrors hal_pwm_esp.c's own validation exactly: 1..20 bits, the real
-     * LEDC_TIMER_BIT_MAX ceiling on this port's low-speed timers. */
-    if (cfg == NULL || cfg->duty_resolution_bits == 0 || cfg->duty_resolution_bits > 20) {
+     * LEDC_TIMER_BIT_MAX ceiling on this port's low-speed timers, plus
+     * start_duty_percent <= 100. */
+    if (cfg == NULL || cfg->duty_resolution_bits == 0 || cfg->duty_resolution_bits > 20 ||
+        cfg->start_duty_percent > 100) {
         return HAL_INVALID_ARG;
     }
     s_cfg = *cfg;
     s_initialized = true;
     s_duty_history_count = 0;
+    /* Record the applied start duty as the first history entry, matching
+     * hal_pwm_esp.c's real behavior of applying it as part of channel
+     * config (not a separate hal_pwm_set_duty() call) -- see hal_pwm.h's
+     * doc comment on start_duty_percent. */
+    s_duty_history[s_duty_history_count++] = cfg->start_duty_percent;
     return HAL_OK;
 }
 

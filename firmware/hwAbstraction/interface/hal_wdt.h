@@ -63,14 +63,19 @@ extern "C" {
  *   ESP:  esp_task_wdt_init()-shaped -- timeout_ms is the task-WDT period;
  *         `panic_disabled` selects whether an unfed WDT panics (false,
  *         the safe default) or merely warns (true), matching
- *         watchdog_cfg.c's persisted setting.
+ *         watchdog_cfg.c's persisted setting. `pause_on_debug` has no TWDT
+ *         equivalent and is IGNORED by the ESP backend.
  *   pico: watchdog_enable(timeout_ms, pause_on_debug)-shaped;
  *         `panic_disabled` is unused (pico has no equivalent knob) and
- *         must be passed false by ESP-agnostic callers.
+ *         must be passed false by ESP-agnostic callers. `pause_on_debug`
+ *         is honoured verbatim -- the real call site, main.c:230, passes
+ *         true (do not stall-and-reboot a board sitting at a debugger
+ *         breakpoint).
  * See hal_scratch.h for the scratch[4] side effect this causes on pico
  * (pico-sdk's watchdog_enable() writes that register itself; hal_scratch
  * refuses any caller-side write to it precisely because of this). */
-hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled);
+hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled,
+                           bool pause_on_debug);
 
 /* Re-applies the panic-disabled setting to an already-armed watchdog.
  * ESP-only operation in practice (watchdog_cfg.c's sole use); pico backend

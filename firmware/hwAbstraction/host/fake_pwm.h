@@ -4,12 +4,16 @@
  * hal_sysinfo" and the real backend this fake mirrors (esp/pwm/
  * hal_pwm_esp.c): one timer/channel, init validates duty_resolution_bits
  * (1..20, matching LEDC_TIMER_BIT_MAX on this port's low-speed timers --
- * the exact ceiling hal_pwm_esp.c checks) and computes a duty_max ceiling
- * from it; hal_pwm_set_duty() takes a 0..100 percentage, rejects anything
- * over 100, and folds ledc_set_duty()+ledc_update_duty() into one
- * immediately-applied call -- backlight_pwm.c never calls one without the
- * other, so this fake has no separate "staged, not yet applied" duty
- * state to model.
+ * the exact ceiling hal_pwm_esp.c checks) and start_duty_percent (0..100),
+ * and computes a duty_max ceiling from duty_resolution_bits; hal_pwm_init()
+ * applies start_duty_percent as the first recorded duty (matching
+ * backlight_pwm_init()'s real channel config, which sets the panel's duty
+ * at init time rather than starting at 0 and relying on a later
+ * hal_pwm_set_duty() -- must not start dark if the flying wire IS fitted);
+ * hal_pwm_set_duty() takes a 0..100 percentage, rejects anything over 100,
+ * and folds ledc_set_duty()+ledc_update_duty() into one immediately-applied
+ * call -- backlight_pwm.c never calls one without the other, so this fake
+ * has no separate "staged, not yet applied" duty state to model.
  *
  * Recorded state: the last init cfg (for a test to assert against, e.g.
  * "backlight was configured for the pin main.c expects") and a bounded

@@ -25,11 +25,15 @@
 
 #include "hardware/watchdog.h"
 
-hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled) {
-    /* pico-sdk has no equivalent knob -- see this file's own header comment
-     * and hal_wdt.h's doc comment on this parameter for pico. */
+hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled,
+                           bool pause_on_debug) {
+    /* pico-sdk has no equivalent knob for panic_disabled -- see this file's
+     * own header comment and hal_wdt.h's doc comment on that parameter for
+     * pico. pause_on_debug IS honoured -- passed straight through to
+     * watchdog_enable(), matching main.c:230's real call (true: do not
+     * reboot a board halted at a debugger breakpoint). */
     (void)panic_disabled;
-    watchdog_enable(timeout_ms, false);
+    watchdog_enable(timeout_ms, pause_on_debug);
     return HAL_OK;
 }
 

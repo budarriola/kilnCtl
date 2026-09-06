@@ -22,15 +22,17 @@ int main(void) {
     CHECK(!fake_wdt_is_initialized());
     CHECK(hal_wdt_feed() == HAL_NOT_READY);
     CHECK(hal_wdt_set_panic_disabled(true) == HAL_NOT_READY);
+    CHECK(!fake_wdt_get_pause_on_debug());
     fake_wdt_advance_ms(1000000u); /* un-armed: must not fire */
     CHECK(!fake_wdt_fired());
     CHECK(fake_wdt_get_feed_count() == 0);
 
-    /* --- init records cfg --- */
-    CHECK(hal_wdt_init(500, false) == HAL_OK);
+    /* --- init records cfg, including pause_on_debug --- */
+    CHECK(hal_wdt_init(500, false, true) == HAL_OK);
     CHECK(fake_wdt_is_initialized());
     CHECK(fake_wdt_get_timeout_ms() == 500);
     CHECK(fake_wdt_get_panic_disabled() == false);
+    CHECK(fake_wdt_get_pause_on_debug() == true);
     CHECK(fake_wdt_get_feed_count() == 0);
     CHECK(!fake_wdt_fired());
 
@@ -55,14 +57,16 @@ int main(void) {
     CHECK(!fake_wdt_fired());        /* feed clears the latch */
     CHECK(fake_wdt_get_feed_count() == 3);
 
-    /* --- re-init also clears the latch and resets feed count --- */
+    /* --- re-init also clears the latch, resets feed count, and updates
+     * pause_on_debug --- */
     fake_wdt_advance_ms(1000);
     CHECK(fake_wdt_fired());
-    CHECK(hal_wdt_init(1000, true) == HAL_OK);
+    CHECK(hal_wdt_init(1000, true, false) == HAL_OK);
     CHECK(!fake_wdt_fired());
     CHECK(fake_wdt_get_feed_count() == 0);
     CHECK(fake_wdt_get_timeout_ms() == 1000);
     CHECK(fake_wdt_get_panic_disabled() == true);
+    CHECK(fake_wdt_get_pause_on_debug() == false);
 
     /* --- set_panic_disabled updates the recorded flag once armed --- */
     CHECK(hal_wdt_set_panic_disabled(false) == HAL_OK);
@@ -81,6 +85,7 @@ int main(void) {
     CHECK(fake_wdt_get_feed_count() == 0);
     CHECK(fake_wdt_get_timeout_ms() == 0);
     CHECK(fake_wdt_get_panic_disabled() == false);
+    CHECK(fake_wdt_get_pause_on_debug() == false);
 
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

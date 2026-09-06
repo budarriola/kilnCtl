@@ -64,7 +64,12 @@ static uint32_t hal_wdt_esp_idle_core_mask(void) {
  * bit, per that file's own header comment). */
 static uint32_t s_last_timeout_ms = (uint32_t)CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000u;
 
-hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled) {
+hal_status_t hal_wdt_init(uint32_t timeout_ms, bool panic_disabled,
+                           bool pause_on_debug) {
+    /* No TWDT equivalent to pico's pause-while-halted-at-a-breakpoint knob
+     * -- see hal_wdt.h's doc comment on this parameter. Ignored here, not
+     * fabricated. */
+    (void)pause_on_debug;
     esp_task_wdt_config_t cfg = {
         .timeout_ms = timeout_ms,
         .idle_core_mask = hal_wdt_esp_idle_core_mask(),

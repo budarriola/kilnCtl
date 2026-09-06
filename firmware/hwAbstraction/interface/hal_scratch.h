@@ -17,8 +17,9 @@
  *   [4] RESERVED -- pico-sdk's watchdog_enable() (hardware_watchdog/
  *                   watchdog.c:82) owns this register outright. Fenced by
  *                   comment only today (main.c:230-241); this header makes
- *                   the reservation a compile-time-checked slot claim
- *                   instead.
+ *                   the reservation a runtime-checked refusal instead
+ *                   (claim/write/clear all reject slot 4 outright) --
+ *                   not a compile-time check.
  *   [5] SHARED, two mutually-exclusive writers by construction (never both
  *       active in the same firmware build): watchdog_overdue_diag.c's
  *       overdue-checkin latch (tag 0xD9, watchdog_overdue_diag.c) and
@@ -34,25 +35,38 @@
  *       encoded/decoded by clear_trip_diag_codec.c -- this header does not
  *       touch that packing, only the raw scratch word beneath it).
  *
- * WHAT THIS HEADER OWNS: a compile-time-checked claim table (slot, owner
- * string, tag), typed read/write/clear accessors, and the hard slot-4
- * reservation. It does NOT own the packed encodings living inside slots
+ * WHAT THIS HEADER OWNS: a runtime advisory claim registry (slot, owner
+ * string, tag) plus typed read/write/clear accessors, and the hard slot-4
+ * refusal. It does NOT own the packed encodings living inside slots
  * 2/3/5/7 (startup_diag_codec, watchdog_overdue_diag_codec,
  * clear_trip_diag_codec stay exactly where they are, pure and host-tested,
  * layered on top of hal_scratch_write_u32/read_u32 the same way
  * config_store's policy layer sits on top of hal_flash -- see that header's
  * identical split).
  *
- * REGISTRY / UNIQUENESS. HAL_SCRATCH_CLAIM(slot, owner, tag) below is
- * intended to be invoked once per claimed slot, at file scope, by each
- * claiming module's own .c (mirroring where the four direct pokers already
- * live). Two claims naming the same slot number must fail the build, not
- * silently double-claim it -- slot 5 is the one deliberate exception
- * (co-owned by tag, not by slot number alone) and is expressed as two
- * claims sharing a slot but carrying distinct tags; the backend's
- * uniqueness check keys on (slot, tag), not slot alone, so slot 5's two
- * legitimate co-owners compile clean while a genuine slot collision
- * (same slot, tag 0 / no tag distinction) does not.
+ * REGISTRY / UNIQUENESS -- RUNTIME ONLY, NOT COMPILE-TIME. There is no
+ * HAL_SCRATCH_CLAIM() macro and no compile-time table: a claiming module
+ * calls hal_scratch_claim(slot, owner, tag) once, at boot, from ordinary
+ * runtime code (mirroring where the four direct pokers already live), and
+ * the backend maintains a small runtime array of accepted claims. A second
+ * claim naming the same (slot, tag) pair is refused at that call
+ * (HAL_INVALID_ARG) -- but only if and when both claims actually execute in
+ * the same boot; nothing catches a collision at build time, and two
+ * claiming modules that are never both linked into the same image are
+ * never checked against each other at all. Slot 5 is the one deliberate
+ * two-owner slot (co-owned by tag, not by slot number alone), expressed as
+ * two claims sharing a slot but carrying distinct tags; the uniqueness
+ * check keys on (slot, tag), not slot alone, so slot 5's two legitimate
+ * co-owners register clean while a genuine slot collision (same slot, same
+ * tag) does not.
+ *
+ * IMPORTANT: hal_scratch_write_u32()/hal_scratch_clear() do NOT consult the
+ * claim table at all (beyond the slot-4 special case below) -- a write or
+ * clear to any claimed-or-unclaimed slot 0-3/5-7 succeeds unconditionally.
+ * The registry is advisory bookkeeping for a test or a future audit to walk
+ * (see the host fake's own claim-table inspection helpers), not an
+ * access-control layer; nothing here stops a module from writing a slot it
+ * never claimed, or one another module claimed.
  *
  * SLOT 4 HARD RESERVATION. hal_scratch_claim()/hal_scratch_write_u32() must
  * refuse HAL_SCRATCH_SLOT_WATCHDOG_ENABLE (4) outright -- HAL_INVALID_ARG,
@@ -121,12 +135,12 @@ extern "C" {
  * wrote it. */
 #define HAL_SCRATCH_TAG_NONE 0u
 
-/* One row of the static claim table. Backends build this table at compile
- * time from every HAL_SCRATCH_CLAIM() invocation linked into the image;
- * hal_scratch_claim() below is the runtime-visible half of registering
- * against it (a module still calls this once at init, matching every real
- * site's own single-writer-at-boot pattern), while the table itself is
- * what the compile-time uniqueness check walks. */
+/* One row of the runtime claim registry. Backends build this table entirely
+ * at runtime, from each claiming module's own hal_scratch_claim() call at
+ * boot (matching every real site's own single-writer-at-boot pattern) --
+ * there is no compile-time table and no HAL_SCRATCH_CLAIM() macro; see this
+ * header's "REGISTRY / UNIQUENESS" note above for what that does and does
+ * not catch. */
 typedef struct {
     uint8_t     slot;   /* 0..HAL_SCRATCH_SLOT_COUNT-1 */
     const char *owner;  /* e.g. "boot_reason", "clear_trip_diag" */

@@ -33,18 +33,23 @@ int main(void) {
     /* --- init: bad args, mirroring hal_pwm_esp.c's own validation --- */
     CHECK(hal_pwm_init(NULL) == HAL_INVALID_ARG);
     {
-        hal_pwm_cfg_t bad = { 4, 5000, 0 }; /* duty_resolution_bits == 0 */
+        hal_pwm_cfg_t bad = { 4, 5000, 0, 0 }; /* duty_resolution_bits == 0 */
         CHECK(hal_pwm_init(&bad) == HAL_INVALID_ARG);
         bad.duty_resolution_bits = 21; /* > 20, the real LEDC_TIMER_BIT_MAX ceiling */
+        CHECK(hal_pwm_init(&bad) == HAL_INVALID_ARG);
+        bad.duty_resolution_bits = 13;
+        bad.start_duty_percent = 101; /* > 100 */
         CHECK(hal_pwm_init(&bad) == HAL_INVALID_ARG);
     }
     CHECK(!fake_pwm_is_initialized());
 
-    /* --- init: good cfg is recorded verbatim --- */
+    /* --- init: good cfg is recorded verbatim, and start_duty_percent is
+     * applied immediately (production must not start dark) --- */
     hal_pwm_cfg_t cfg;
     cfg.gpio_num = 4;
     cfg.freq_hz = 5000;
     cfg.duty_resolution_bits = 13;
+    cfg.start_duty_percent = 80;
     CHECK(hal_pwm_init(&cfg) == HAL_OK);
     CHECK(fake_pwm_is_initialized());
     {
@@ -54,24 +59,29 @@ int main(void) {
         CHECK(got.gpio_num == 4);
         CHECK(got.freq_hz == 5000);
         CHECK(got.duty_resolution_bits == 13);
+        CHECK(got.start_duty_percent == 80);
     }
+    CHECK(fake_pwm_get_duty_history_count() == 1); /* init applied the start duty */
+    CHECK(fake_pwm_get_last_duty() == 80);
 
     /* --- set_duty: rejects out-of-range, matching the header's 0..100
      * contract --- */
     CHECK(hal_pwm_set_duty(101) == HAL_INVALID_ARG);
     CHECK(hal_pwm_set_duty(255) == HAL_INVALID_ARG);
-    CHECK(fake_pwm_get_duty_history_count() == 0); /* rejected calls are not recorded */
+    CHECK(fake_pwm_get_duty_history_count() == 1); /* rejected calls are not recorded */
 
-    /* --- set_duty: accepted values recorded in order --- */
+    /* --- set_duty: accepted values recorded in order, after the init-time
+     * start duty --- */
     CHECK(hal_pwm_set_duty(0) == HAL_OK);
     CHECK(hal_pwm_set_duty(50) == HAL_OK);
     CHECK(hal_pwm_set_duty(100) == HAL_OK);
-    CHECK(fake_pwm_get_duty_history_count() == 3);
-    CHECK(fake_pwm_get_duty_history(0) == 0);
-    CHECK(fake_pwm_get_duty_history(1) == 50);
-    CHECK(fake_pwm_get_duty_history(2) == 100);
+    CHECK(fake_pwm_get_duty_history_count() == 4);
+    CHECK(fake_pwm_get_duty_history(0) == 80); /* the init-time start duty */
+    CHECK(fake_pwm_get_duty_history(1) == 0);
+    CHECK(fake_pwm_get_duty_history(2) == 50);
+    CHECK(fake_pwm_get_duty_history(3) == 100);
     CHECK(fake_pwm_get_last_duty() == 100);
-    CHECK(fake_pwm_get_duty_history(3) == 0xFF); /* out of range */
+    CHECK(fake_pwm_get_duty_history(4) == 0xFF); /* out of range */
 
     /* --- history cap: does not overflow past FAKE_PWM_MAX_DUTY_HISTORY --- */
     {
