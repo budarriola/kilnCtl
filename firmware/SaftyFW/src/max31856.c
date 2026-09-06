@@ -1,7 +1,7 @@
 // max31856.c -- see max31856.h for what changed vs. the KilnFW original and
 // why. The register math, fixed-point conversions and fault-invalidation
 // logic below are ported line-for-line from
-// firmware/KilnFW/App/drivers/MAX31856.c; only the transport (spi_owner.h
+// firmware/KilnFW/App/drivers/hw/MAX31856.c; only the transport (spi_owner.h
 // instead of esp_spi_owner.h) and the multi-channel bookkeeping are gone.
 #include "max31856.h"
 

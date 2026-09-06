@@ -64,7 +64,7 @@ against what is found.
 
 ## 1. Independent verification of the single arm
 
-`firmware/KilnFW/App/drivers/pid_fuzzy.c` (read only, not modified):
+`firmware/KilnFW/App/drivers/control/pid_fuzzy.c` (read only, not modified):
 
 - Two axes, each a symmetric triangular membership over
   {NEG, ZERO, POS}/{FALLING, STEADY, RISING}: `ERROR_BAND_C = 20.0f`,
@@ -315,6 +315,6 @@ what the *existing* bands actually did, not what different bands would do.
 Source data: `logs/coupling/fuzzy_ab_20260904d_s50_run1.jsonl` (726 usable
 samples, verified independently in §1) and the 29 files enumerated in §2 (37,008
 zone-samples total). Rule table, membership bands, and nudge scaling from
-`firmware/KilnFW/App/drivers/pid_fuzzy.c` (read, not modified — no firmware
+`firmware/KilnFW/App/drivers/control/pid_fuzzy.c` (read, not modified — no firmware
 change is proposed or made by this report). Prior context:
 `fuzzy_behavior_20260904d_report.md`, `PID_EXPANSION_PLAN.md` §3.6/§3.6b/§3.6f/§3.7.

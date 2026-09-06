@@ -7,7 +7,7 @@
 #
 # WHY THIS EXISTS. Real instance, commit 333dd4e (2026-09-02): a new
 # GET /api/tuning_recommendations handler was added to
-# firmware/KilnFW/App/drivers/zones_http.c referencing
+# firmware/KilnFW/App/drivers/http/zones_http.c referencing
 # tuning_recommendations_json_start/_end -- symbols the real ESP-IDF build
 # produces via EMBED_FILES (see App/drivers/CMakeLists.txt) but that do not
 # exist on the host toolchain. build_kilnfw (the real target) built fine;

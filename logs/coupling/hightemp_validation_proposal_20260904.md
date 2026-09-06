@@ -37,7 +37,7 @@ is capped at 80 C, enforced today by `max_temp_c = 80` on all three zones... a
 fixture threshold, not a kiln limit."
 
 **Enforcement path, verified in code:**
-- `firmware/KilnFW/App/drivers/profile_executor_run.c` lines 252-271: at
+- `firmware/KilnFW/App/drivers/control/profile_executor_run.c` lines 252-271: at
   profile start, every `PROFILE_SEG_KIND_ZONE_RAMP` segment's `target_c` is
   re-checked against the zone's *current* `zones_config_get_temp_limits()`
   ceiling. `target > zone_max_c` is a hard **refusal**, "refused, not
@@ -47,7 +47,7 @@ fixture threshold, not a kiln limit."
   touching a zone whose `max_temp_c==0` ("no absolute temperature ceiling
   configured... commission the zone... before firing it") — so an
   uncommissioned zone cannot fire at all, at any temperature.
-- `firmware/KilnFW/App/drivers/zones_config_accessors.c` line 771:
+- `firmware/KilnFW/App/drivers/persist/zones_config_accessors.c` line 771:
   `zones_config_set_temp_limits()` input-validates `max_temp_c` against
   `ZONE_MAX_TEMP_C_MAX` (a 2500 °C sanity bound mirrored from
   `profiles_http.c`'s `PROFILE_TARGET_C_MAX`, not a safety ceiling — per

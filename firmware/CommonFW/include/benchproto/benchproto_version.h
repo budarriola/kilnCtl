@@ -12,7 +12,7 @@
  * a task_id, changing a payload layout or length, or changing the envelope
  * (benchproto_frame.h). Do not bump for comments or internal refactors --
  * a human judgement call, deliberately not a hash of the file. See
- * firmware/KilnFW/App/drivers/uart_task_ids.h:8-20 for the full reasoning
+ * firmware/KilnFW/App/drivers/common/uart_task_ids.h:8-20 for the full reasoning
  * behind that policy; it applies unchanged to this constant. */
 #define BENCHPROTO_PROTOCOL_VERSION 1
 

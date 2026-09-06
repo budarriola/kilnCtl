@@ -150,7 +150,7 @@ against".</p>
 <!-- Only shown when GET /api/ota/esp/status reports recovery_mode:true --
      see renderEspInfo() below. POST /api/ota/esp/recovery_exit is
      authenticated the same way as every other mutating OTA route (challenge
-     + HMAC over its own "recovery" context) -- App/drivers/ota_http.c's
+     + HMAC over its own "recovery" context) -- App/drivers/http/ota_http.c's
      ota_recovery_exit_post_handler() doc comment has the full reasoning. -->
 <div id="recoveryExitBox" class="blocker" style="display:none">
   This board is running in RECOVERY MODE (a recent update did not
@@ -335,7 +335,7 @@ function readFileBytes(fileInput) {
 }
 
 /* ---- Interlock (before the file picker matters) -------------------------
- * GET /api/ota/interlock (App/drivers/ota_http.c, added this session) --
+ * GET /api/ota/interlock (App/drivers/http/ota_http.c, added this session) --
  * unauthenticated, same exposure level as GET /api/status already has.
  * Named blocker shown right at the top, refreshed on a slow timer so an
  * operator watching this page sees the kiln become idle without reloading. */
@@ -455,7 +455,7 @@ function pollEspStatus() {
 
 /* ---- Pico status ----------------------------------------------------------
  * GET /api/ota/pico/status -- phase/percent/last_error plus protocol_version*
- * fields (App/drivers/ota_http.c, extended this session). There is no A/B
+ * fields (App/drivers/http/ota_http.c, extended this session). There is no A/B
  * "active/inactive slot" concept on the Pico side in this protocol at all --
  * the RP2040 has one firmware image, not two OTA partitions -- so this
  * section has no slot row, unlike the ESP one.
@@ -568,7 +568,7 @@ document.getElementById('espRollbackBtn').addEventListener('click', function () 
 });
 
 // opus-review finding 3: POST /api/ota/pico/rollback used to block for up
-// to ~6.3s (App/drivers/ota_http.c's own comment on ota_pico_rollback_task()
+// to ~6.3s (App/drivers/http/ota_http.c's own comment on ota_pico_rollback_task()
 // explains why -- one httpd worker, a multi-second send-burst/reply-window
 // plus boot_id-reconnect watch). It now returns a 202 "pending" promptly and
 // the actual outcome is polled from GET /api/ota/pico/rollback/status, same

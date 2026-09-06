@@ -156,7 +156,7 @@
 // KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP reboots"
 // line: how long S6b's trip stays suppressed after the most recent
 // ANNOUNCE_REBOOT frame. Chosen the same way SAFETY_LINK_STALE_MS/SAFETY_
-// LINK_FIRING_ABORT_SILENCE_MS (firmware/KilnFW/App/drivers/safety_link.h)
+// LINK_FIRING_ABORT_SILENCE_MS (firmware/KilnFW/App/drivers/safety/safety_link.h)
 // were -- a reasonable software timeout with generous margin, not a measured
 // physical constant (unlike S8's rate-of-rise threshold, which SAFETY_MODEL.md
 // explicitly forbids guessing because it depends on this kiln's actual mass

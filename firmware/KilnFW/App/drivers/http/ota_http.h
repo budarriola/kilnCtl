@@ -9,7 +9,7 @@
 // Serves GET /api/ota/challenge, POST /api/ota/esp, POST /api/ota/pico, and
 // GET /api/ota/pico/status. The Pico path stages the browser upload into
 // the `pico_img` partition here (streamed write + running CRC32), then
-// hands off to App/drivers/ota_pico_relay.c's background task, which speaks
+// hands off to App/drivers/net/ota_pico_relay.c's background task, which speaks
 // the actual UPDATE_BEGIN/UPDATE_DATA/UPDATE_END/UPDATE_ABORT/UPDATE_STATUS
 // protocol over the isolated link (CommonFW/docs/UPDATE_PROTOCOL.md section
 // 4) -- see ota_pico_relay.h's header comment for why that handoff means

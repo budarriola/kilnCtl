@@ -23,7 +23,7 @@ extern "C" {
 /* Capped at 253, not a round number: the wire header's LENGTH field is one
  * byte, so 255 is the hard ceiling; 253 keeps DISPLAY_BLIT_CHUNK_PIXELS
  * (pc_tools) an exact pixel count. Mirrors UART_PROTO_MAX_PAYLOAD in
- * App/drivers/espInterfaces/uart_protocol.h -- the two must never diverge, a
+ * App/drivers/owners/uart_protocol.h -- the two must never diverge, a
  * peer built against a different cap will misparse the LENGTH byte. */
 #define KILNLINK_FRAME_MAX_PAYLOAD 253u
 
@@ -43,7 +43,7 @@ extern "C" {
 #define KILNLINK_FRAME_ESC 0x7Du
 #define KILNLINK_FRAME_ESC_XOR 0x20u
 
-/* uart_proto_msg_type_t (App/drivers/espInterfaces/uart_protocol.h), moved
+/* uart_proto_msg_type_t (App/drivers/owners/uart_protocol.h), moved
  * here since the envelope and the type byte it carries are the same thing on
  * both links. BROADCAST is the isolated link's only type in practice (see
  * docs/LINK_PROTOCOL.md sec 1) -- DATA/ACK/NACK exist for the PC link's
@@ -81,7 +81,7 @@ typedef struct {
 } kilnlink_frame_t;
 
 /* CRC16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no final XOR) --
- * the same algorithm App/drivers/espInterfaces/uart_protocol.c and
+ * the same algorithm App/drivers/owners/uart_protocol.c and
  * pc_tools/src/kilnctrl/protocol.py already implement independently. */
 uint16_t kilnlink_crc16_ccitt_false(const uint8_t *data, size_t len);
 

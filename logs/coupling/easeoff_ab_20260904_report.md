@@ -73,7 +73,7 @@ not acted on.
 
 **No board change and no default change.** The board is already on 2.0 (the
 firmware default, `ZONE_EASE_OFF_WINDOW_MULT_DEFAULT` in
-`firmware/KilnFW/App/drivers/zones_config_accessors.c`) and stays there.
+`firmware/KilnFW/App/drivers/persist/zones_config_accessors.c`) and stays there.
 
 ## Files
 
@@ -94,7 +94,7 @@ field that never reaches the code path it is supposed to affect. This
 campaign was checked:
 
 1. **Gate trace.** `ease_off_window_mult` is read in
-   `firmware/KilnFW/App/drivers/profile_executor_feedforward.c`
+   `firmware/KilnFW/App/drivers/control/profile_executor_feedforward.c`
    (`zone_taper_climb_rate()`, via `zones_config_get_ease_off_window_mult()`)
    and consumed only from `profile_executor_pid_tick.c` (~79-86). The call
    site's gate is `!s_exec.dwelling && ff_rate != 0.0f` (i.e. actively

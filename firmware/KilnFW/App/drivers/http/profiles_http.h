@@ -2,7 +2,7 @@
 // /profiles and its JSON CRUD API.
 //
 // Scope: this module owns profile STORAGE and validation. TODO.md section 6
-// (the profile-execution engine, App/drivers/profile_executor.c) is the
+// (the profile-execution engine, App/drivers/control/profile_executor.c) is the
 // consumer -- it reads a profile through profiles_http_get() below and
 // drives relays from it, but does not itself touch NVS or this module's
 // storage, same one-owner discipline zones_http.c already established for

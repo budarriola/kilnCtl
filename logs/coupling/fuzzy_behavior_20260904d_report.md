@@ -46,7 +46,7 @@ the reset.
 
 ## 1. What the rule base did, per zone, against its actual inputs
 
-`firmware/KilnFW/App/drivers/pid_fuzzy.c` keys on two axes, each a
+`firmware/KilnFW/App/drivers/control/pid_fuzzy.c` keys on two axes, each a
 triangular membership over {NEG, ZERO, POS} / {FALLING, STEADY, RISING}:
 `error_c` (band ±20 °C) and `error_rate_c_per_s` = `pid.c`'s
 `d_filtered` = `-d(measured)/dt` (band ±0.5 °C/s — order-of-magnitude above
@@ -227,7 +227,7 @@ completed A1 arm and a resolved watchdog root cause.
 Source: `logs/coupling/fuzzy_ab_20260904d_s50_run1.jsonl` (726 usable
 control/exec samples, 63.8 min). Base gains from
 `tools/PcTools/config_presets/fuzzy_ab_strength50_20260903.json`. Rule table
-and membership bands from `firmware/KilnFW/App/drivers/pid_fuzzy.c` (read,
+and membership bands from `firmware/KilnFW/App/drivers/control/pid_fuzzy.c` (read,
 not modified). Tracking metrics from
 `tools/PcTools/src/kilnctrl/pid_ab_compare.py run` (unmodified). Prior
 context: `PID_EXPANSION_PLAN.md` §3.6b (09910377, reachability proof) and

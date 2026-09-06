@@ -73,7 +73,7 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
 // page(), which is what closes the defect this exists for: before this
 // function existed, that sender emitted every field's raw value with no way
 // to say "this one is still unset", and the ESP's cache then marked every
-// entry `set = true` unconditionally (KilnFW/App/drivers/safety_cfg_store.c)
+// entry `set = true` unconditionally (KilnFW/App/drivers/safety/safety_cfg_store.c)
 // -- an operator-facing page could show abs_max_temp_c "{set:true, value:0}"
 // for a field this processor itself considers UNSET, and 0 on that specific
 // field means the overtemperature guard NEVER TRIPS.

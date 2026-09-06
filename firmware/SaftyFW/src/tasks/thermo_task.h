@@ -35,7 +35,7 @@ bool thermo_task_get_snapshot(thermo_snapshot_t *out);
 // physical safety MAX31856 exists, by substituting a synthetic reading for
 // what thermo_task_get_snapshot() reports. Same "gated dev switch, reported
 // in status, refused by default" shape as KilnFW's set_watchdog_panic_
-// disabled (firmware/KilnFW/App/drivers/watchdog_cfg.c) -- see that
+// disabled (firmware/KilnFW/App/drivers/safety/watchdog_cfg.c) -- see that
 // function for the precedent this follows.
 //
 // Gated STRUCTURALLY, not just at the call site that wires the wire

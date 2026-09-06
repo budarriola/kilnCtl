@@ -3,7 +3,7 @@
 
 /* The single source of truth for the ESP<->Pico isolated safety link's wire
  * protocol version. From 2026-08-17 to 2026-08-24 KilnFW's
- * UART_PROTOCOL_VERSION (App/drivers/uart_task_ids.h) was a plain alias of
+ * UART_PROTOCOL_VERSION (App/drivers/common/uart_task_ids.h) was a plain alias of
  * this number rather than a second, independently-maintained one -- see
  * CommonFW/README.md "Versioning" for that history. It no longer is: three
  * separate incidents of a bump here silently refusing all PC<->ESP traffic

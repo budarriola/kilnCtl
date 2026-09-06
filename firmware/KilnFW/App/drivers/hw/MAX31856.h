@@ -4,7 +4,7 @@
 // the ESP32-S3 through J6: one shared SPI bus (SCLK 12 / MOSI 11 / MISO 13)
 // with a per-part chip select on GPIO14/17/18, and a per-part ~FAULT output on
 // GPIO38/47/48. See docs/HARDWARE.md -- it is the authority on the wiring, and
-// App/drivers/settings.h turns those numbers into the THERMO_* macros this
+// App/drivers/hw/settings.h turns those numbers into the THERMO_* macros this
 // driver's start-up helper uses.
 //
 // The shape of this driver follows from the shape of the hardware:

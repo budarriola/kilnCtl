@@ -6,12 +6,12 @@
 // MAX31856BusClass) rather than duplicating ownership of them -- this is a
 // second reader/caller alongside the UART bridge, not a second owner.
 // Manual relay-ON commands go through relay_authority_on_blocked()
-// (App/drivers/relay_authority.c), the same chokepoint the UART bridge uses,
+// (App/drivers/owners/relay_authority.c), the same chokepoint the UART bridge uses,
 // so a safety fault refuses this path exactly like it refuses the PC link.
 //
 // Scope (TODO.md section 2): live status/manual control, plus
 // start/stop/pause/status for a running profile (GET/POST /api/profile_exec*),
-// which reads and drives App/drivers/profile_executor.c -- this module owns
+// which reads and drives App/drivers/control/profile_executor.c -- this module owns
 // no execution state of its own, same "one reader, one owner" split as
 // zones_http.c/profiles_http.c. No temperature graph yet (needs the history
 // buffer, TODO.md section 0 -- designed but has no writer yet); that one is

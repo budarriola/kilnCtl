@@ -32,7 +32,7 @@ design into the repo, add an entry here in the same pull request.
   The Edward Orton Jr. Ceramic Foundation — self-supporting cone temperature table
   (cone 022 through 14) at Orton's published 108°F/hr (60°C/hr) "medium speed"
   reference heating rate, transcribed in
-  `firmware/KilnFW/App/drivers/cone_table.c`/`.h`. Cone temperatures are only
+  `firmware/KilnFW/App/drivers/control/cone_table.c`/`.h`. Cone temperatures are only
   meaningful with a stated heating rate, so that rate is part of the attribution, not
   incidental. The module's `cone_table_heat_work_weight()` Arrhenius-form weighting
   (Ea = 300 kJ/mol) is **not** Orton data — it is this project's own engineering
@@ -63,7 +63,7 @@ design into the repo, add an entry here in the same pull request.
   pruned from an untracked ~394 MB vendor drop to ~11 MB of tracked files — see
   `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`).
 
-- **PID tuning rules implemented in `firmware/KilnFW/App/drivers/pid_autotune.c`** —
+- **PID tuning rules implemented in `firmware/KilnFW/App/drivers/control/pid_autotune.c`** —
   classic control-theory formulas coded directly into `pid_autotune_tune_from_fopdt()`
   and `pid_autotune_tune_from_relay()` (selectable via `autotune_rule_t`, surfaced in
   `zones_page.html` and `tools/PcTools/src/kilnctrl/`), not merely referenced:
@@ -95,7 +95,7 @@ design into the repo, add an entry here in the same pull request.
     extension (§2c).
   - Nichols Philips et al., *Application of Auto Tuner Fuzzy PID Controller* — fuzzy
     cascade PID adapting to a changing process model; informs the fuzzy-PID secondary
-    recommendation (§2b), implemented as `App/drivers/pid_fuzzy.c`.
+    recommendation (§2b), implemented as `App/drivers/control/pid_fuzzy.c`.
   - *Implementation of Fuzzy PID Controller on [a PT326 heating rig]* — fuzzy PID over a
     system-identified ARX model, validated against real hardware; also informs §2b.
   - *Research on temperature control with numerical methods* — Cohen-Coon vs.

@@ -2,7 +2,7 @@
  * CRC, proven byte-identical before the old code is deleted" item.
  *
  * This file embeds a verbatim COPY of the pre-migration static functions
- * from firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.c
+ * from firmware/KilnFW/App/drivers/owners/uart_protocol.c
  * (crc16_ccitt_false + the stuff-into-a-buffer loop from stuff_and_send,
  * renamed with an old_ prefix so they don't collide with kilnlink's own
  * symbols) and runs them side-by-side against kilnlink_crc16_ccitt_false /

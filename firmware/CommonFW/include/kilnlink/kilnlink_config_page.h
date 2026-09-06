@@ -43,7 +43,7 @@ extern "C" {
  * existed, an entry's `set`-ness was invented independently by whichever end
  * read the frame -- SaftyFW/src/tasks/link_task.c's link_task_send_config_
  * page() emitted every field's raw value with no way to say "this one is
- * still unset", and KilnFW/App/drivers/safety_cfg_store.c's refetch loop
+ * still unset", and KilnFW/App/drivers/safety/safety_cfg_store.c's refetch loop
  * then set `.set = 1` for every entry it received, unconditionally. The
  * result: an operator-facing page showed abs_max_temp_c "{set:true,
  * value:0}" for a field the Pico itself considered UNSET, and 0 on that

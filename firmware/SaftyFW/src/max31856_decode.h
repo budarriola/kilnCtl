@@ -6,7 +6,7 @@
 // unlike max31856.c itself which needs real hardware/gpio.h and spi_owner.h.
 //
 // Both functions are ported verbatim from KilnFW's MAX31856_decode_cj()/
-// MAX31856_decode_tc() (firmware/KilnFW/App/drivers/MAX31856.c) -- see this
+// MAX31856_decode_tc() (firmware/KilnFW/App/drivers/hw/MAX31856.c) -- see this
 // module's max31856_read() for how they are used together with the
 // SR-register fault bits to decide whether the temperature they produce
 // means anything.

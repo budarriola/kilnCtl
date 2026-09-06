@@ -1,7 +1,7 @@
 /* Chunked-read deframer test for the ONE piece of framing code that is NOT
  * the shared kilnlink implementation: the hand-rolled byte-stuffing state
  * machine inside uart_protocol_rx_task() in
- * firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.c (~lines 275-330),
+ * firmware/KilnFW/App/drivers/owners/uart_protocol.c (~lines 275-330),
  * plus the length/CRC gate in handle_raw_frame() just above it.
  *
  * That state machine reads the UART in 32-byte chunks (uart_read_bytes into

@@ -50,7 +50,7 @@ extern "C" {
  * Reads use the 0Xh address, writes use 8Xh (read address + 0x80). The
  * address auto-increments while ~CS stays low, which is what makes the
  * 6-register burst in max31856_read() one transaction. Ported verbatim from
- * MAX31856_REG_* in firmware/KilnFW/App/drivers/MAX31856.h. */
+ * MAX31856_REG_* in firmware/KilnFW/App/drivers/hw/MAX31856.h. */
 #define MAX31856_REG_CR0     0x00u
 #define MAX31856_REG_CR1     0x01u
 #define MAX31856_REG_MASK    0x02u

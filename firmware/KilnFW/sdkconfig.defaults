@@ -21,7 +21,7 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # ui_page_network.c, real hardware showed "Failed to start io/lvgl_port/
 # safety/control/profiles/autotune/wifi uart bridge task" at boot --
 # internal DRAM was chronically exhausted (only ~104K free of 341K), not
-# a transient WiFi-bringup spike (see App/drivers/espInterfaces/
+# a transient WiFi-bringup spike (see App/drivers/owners/
 # uart_protocol.c's registration-retry comment for that adjacent, real but
 # insufficient-by-itself fix). Switching to CONFIG_LV_USE_CLIB_MALLOC lets
 # LVGL's allocations go through the system malloc(), which is PSRAM-aware
@@ -57,7 +57,7 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # allocator sends them to PSRAM unconditionally.
 # CONFIG_LV_USE_CLIB_MALLOC is not set
 
-# LVGL allocates from PSRAM via App/drivers/lvgl_mem_psram.c, which implements
+# LVGL allocates from PSRAM via App/drivers/ui/lvgl_mem_psram.c, which implements
 # the LV_STDLIB_CUSTOM hooks (lv_malloc_core/lv_realloc_core/lv_free_core/...)
 # on top of heap_caps_malloc(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT).
 #
@@ -81,7 +81,7 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # 1.4s and 2.9s still costs a large contiguous block; that is the next thread
 # to pull if DRAM pressure returns.
 #
-# If this is ever switched away from CUSTOM, App/drivers/lvgl_mem_psram.c
+# If this is ever switched away from CUSTOM, App/drivers/ui/lvgl_mem_psram.c
 # compiles to an empty object (it is guarded on LV_USE_STDLIB_MALLOC ==
 # LV_STDLIB_CUSTOM) and the build still succeeds -- it just silently loses the
 # benefit, so change it deliberately, not incidentally.
@@ -245,7 +245,7 @@ CONFIG_LWIP_STATS=y
 # a minor regression on this board: CONFIG_LV_USE_CLIB_MALLOC above depends
 # on CONFIG_SPIRAM_USE_MALLOC=y to route LVGL's allocator to PSRAM (without
 # it the LCD does not initialize -- see that entry's comment), and
-# App/drivers/uart_bridge_ext.c's xTaskCreatePinnedToCoreWithCaps(...,
+# App/drivers/bridge/uart_bridge_ext.c's xTaskCreatePinnedToCoreWithCaps(...,
 # MALLOC_CAP_SPIRAM) calls for the UART bridge tasks have nowhere to
 # allocate from without PSRAM present, so those tasks would fail to start
 # too. CLK_IO/CS_IO/mode/speed below are this board's actual wiring (copied

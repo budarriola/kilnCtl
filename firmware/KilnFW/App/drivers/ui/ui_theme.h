@@ -124,7 +124,7 @@
 
 /* ---- Spacing / sizing ----------------------------------------------------
  * Budgeted against the 480x320 landscape panel (DISPLAY_WIDTH/HEIGHT,
- * App/drivers/settings.h) -- these are round numbers chosen to fit a small
+ * App/drivers/hw/settings.h) -- these are round numbers chosen to fit a small
  * grid of large touch targets on that resolution, not measured against a
  * finger or a real layout mockup.
  */

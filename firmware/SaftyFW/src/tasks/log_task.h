@@ -3,7 +3,7 @@
 // frame must never be able to displace a telemetry frame").
 //
 // Wire shape: KilnFW's existing LOG payload (CommonFW/docs/LINK_PROTOCOL.md
-// section 6, "Frame F"; firmware/KilnFW/App/drivers/uart_task_ids.h:429-443)
+// section 6, "Frame F"; firmware/KilnFW/App/drivers/common/uart_task_ids.h:429-443)
 // -- byte0 = level, the rest ASCII "TAG: message", not null-terminated,
 // truncated rather than split. No new task id, no new frame type: log_task
 // hands entries to link_task_send_log() (link_task.h), which addresses them

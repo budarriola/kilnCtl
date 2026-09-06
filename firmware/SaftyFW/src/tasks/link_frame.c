@@ -7,7 +7,7 @@
 
 // Extracts the little-endian wire bytes of a 32-bit value. memcpy'ing the
 // float into a uint32_t first (rather than assuming a union layout) is the
-// same convention firmware/KilnFW/App/drivers/safety_link.c already uses for
+// same convention firmware/KilnFW/App/drivers/safety/safety_link.c already uses for
 // this exact frame (safety_link.c:58) -- reused here rather than reinvented.
 // Once `bits` holds the value, shifting it apart always yields correct LE
 // bytes regardless of the host's own endianness, because the shifts operate

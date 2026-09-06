@@ -36,7 +36,7 @@
 #   0x010000..0x187000  factory   1500K   application image
 #   0x187000..0x18D000  wifi_nvs    24K   Wi-Fi credentials ONLY
 #   0x18D000..0x19D000  kiln_nvs    64K   zones, rules, relay_cycles, run_state
-#                                         (2026-08-13 split, see App/drivers/wifi_prov.c
+#                                         (2026-08-13 split, see App/drivers/net/wifi_prov.c
 #                                         nvs_partition_init() for the pattern reused)
 #   0x19D000..0x1FD000  profiles_nvs 384K fire profiles only -- the one section that
 #                                         grows with use, so it gets the most headroom

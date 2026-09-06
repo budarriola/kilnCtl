@@ -2,7 +2,7 @@
 // safety processor through CommonFW/docs/UPDATE_PROTOCOL.md section 4's
 // UPDATE_BEGIN/UPDATE_DATA/UPDATE_END/UPDATE_ABORT/UPDATE_STATUS flow, from
 // an image already staged in the `pico_img` partition by ota_http.c's
-// POST /api/ota/pico handler (App/drivers/ota_http.c). The receiving side
+// POST /api/ota/pico handler (App/drivers/http/ota_http.c). The receiving side
 // (SaftyFW's src/tasks/update_task.c) is fully built and frozen; this file
 // is the ESP-side sender that talks to it, matching its wire contract
 // byte-for-byte (see the header comments on safety_link.h's
@@ -139,7 +139,7 @@ typedef struct {
 // unrecognised value (should be unreachable) maps to "unknown".
 const char *ota_pico_relay_phase_str(ota_pico_relay_phase_t phase);
 
-// Starts the background relay task (App/drivers/ota_http.c's POST
+// Starts the background relay task (App/drivers/http/ota_http.c's POST
 // /api/ota/pico handler is the only intended caller). `link` must already
 // be safety_link_start()'d. `image_length`/`image_crc32` describe the bytes
 // already sitting in pico_img[0, image_length) -- this function does not

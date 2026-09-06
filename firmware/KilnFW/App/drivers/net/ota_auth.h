@@ -16,7 +16,7 @@
 // to verify by test.
 //
 // Pure, no ESP-IDF/mbedTLS dependency -- host-testable, same discipline as
-// firmware/KilnFW/App/drivers/thermal_guard.c and pid.c (see
+// firmware/KilnFW/App/drivers/control/thermal_guard.c and pid.c (see
 // App/test/build_host_tests.ps1).
 #ifndef KILNCTL_OTA_AUTH_H
 #define KILNCTL_OTA_AUTH_H

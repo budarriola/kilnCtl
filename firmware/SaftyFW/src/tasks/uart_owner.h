@@ -10,7 +10,7 @@
 // itself (uart_set_line_inverse on that side) and each opto-isolator inverts
 // once more, so two inversions in series cancel and this side's ordinary
 // hardware/uart.h works unmodified. See docs/HARDWARE.md section 1 and
-// firmware/KilnFW/App/drivers/safety_link.h's polarity comment -- getting
+// firmware/KilnFW/App/drivers/safety/safety_link.h's polarity comment -- getting
 // this backwards on either side kills the link.
 //
 // RX is IRQ-driven into a small ring buffer; link_task drains it by polling

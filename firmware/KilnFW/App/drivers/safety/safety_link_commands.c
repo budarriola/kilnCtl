@@ -802,7 +802,7 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
 
 /* ------------------------------------------------------------------------ */
 /* docs/COMMISSIONING.md sec 2/3 -- commissioning param staging/commit/     */
-/* bulk readback (0x1C/0x1D/0x1F). App/drivers/safety_cfg_store.c and       */
+/* bulk readback (0x1C/0x1D/0x1F). App/drivers/safety/safety_cfg_store.c and       */
 /* safety_cfg_http.c are the only callers.                                  */
 /* ------------------------------------------------------------------------ */
 

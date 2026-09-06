@@ -29,7 +29,7 @@ extern "C" {
 // `fault_gpio_high` is the raw `gpio_get(s_fault_gpio)` reading (converted to
 // bool by the caller). Returns true (fault asserted) whenever the pin reads
 // LOW -- the MAX31856's ~FAULT output is active-low and open-drain (KilnFW's
-// firmware/KilnFW/App/drivers/MAX31856.c line 531: "~FAULT is an active-low
+// firmware/KilnFW/App/drivers/hw/MAX31856.c line 531: "~FAULT is an active-low
 // output from the part with nothing pulling it up [internally]"; MAX31856.h
 // line 482: "Current level of the ~FAULT GPIO: true when asserted (low)").
 // Returns false (healthy / not asserted) when the pin reads HIGH. Do not

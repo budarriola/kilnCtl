@@ -58,7 +58,7 @@
 //     through commissioning, so the "no safe compiled-in ARMED default"
 //     rule this paragraph describes is otherwise unchanged for this field.
 //   - Three-outcome load in config_store_unpack(), mirroring the discipline
-//     KilnFW's NVS loaders use (see e.g. App/drivers/zones_http.c):
+//     KilnFW's NVS loaders use (see e.g. App/drivers/http/zones_http.c):
 //       * stored format_version == CONFIG_STORE_FORMAT_VERSION (2): load
 //         normally.
 //       * stored format_version == 1 (the only older version that has ever

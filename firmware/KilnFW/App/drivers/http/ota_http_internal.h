@@ -17,7 +17,7 @@
 // with unrelated `static` symbols of the same name elsewhere in
 // App/drivers/, which would either fail to link (clash with a non-static
 // definition) or link silently and break later (clash with another file's
-// same-named `static`) -- see App/drivers/wifi_prov_internal.h's own doc
+// same-named `static`) -- see App/drivers/net/wifi_prov_internal.h's own doc
 // comment for the precedent this follows.
 //
 // THIS IS A MOVE-ONLY REFACTOR: no logic, ordering, naming (beyond the
@@ -103,7 +103,7 @@ void ota_http_set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...);
 extern const char *OTA_MAC_HEADER;
 
 // --- Single cross-processor safety-link pointer ----------------------------
-// Read-only after ota_http_start() (App/drivers/ota_http.c), same
+// Read-only after ota_http_start() (App/drivers/http/ota_http.c), same
 // NULL-tolerant meaning as before the split. Needed outside ota_http.c: the
 // ESP rollback-reboot task (ota_http_esp.c) sends the peer an
 // announce-reboot, and the whole Pico update/rollback path (ota_http_pico.c)

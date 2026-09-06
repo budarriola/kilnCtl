@@ -1414,7 +1414,7 @@ esp_err_t safety_link_set_update_in_progress(SafetyLinkClass *link, bool in_prog
 bool      safety_link_get_fault_on_link_loss(SafetyLinkClass *link);
 
 /* --- Phase 10 (SaftyFW) / TODO.md 9.5: Pico firmware-update relay --------
- * Thin, additive wrappers -- App/drivers/ota_pico_relay.c is the only
+ * Thin, additive wrappers -- App/drivers/net/ota_pico_relay.c is the only
  * caller today, but these are general enough for anything that needs to
  * drive the Pico's UPDATE_* state machine. Neither of these touches
  * safety_exchange()'s request/reply machinery: UPDATE_* frames are
@@ -1920,7 +1920,7 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
                                   size_t *out_len);
 
 /* docs/COMMISSIONING.md sec 2/3 -- SAFETY_CMD_SET_PARAM (0x1C) / COMMIT_CONFIG
- * (0x1D) / GET_CONFIG_PAGE (0x1F). App/drivers/safety_cfg_store.c (the
+ * (0x1D) / GET_CONFIG_PAGE (0x1F). App/drivers/safety/safety_cfg_store.c (the
  * NVS-backed ESP-side cache) and safety_cfg_http.c (the /api/safety/
  * commissioning handlers) are the only intended callers -- see safety_link.c's
  * definitions for the full contract.

@@ -71,7 +71,7 @@ typedef struct {
  * ceiling), or if start_duty_percent > 100.
  *
  * start_duty_percent MUST NOT default to 0: production's
- * backlight_pwm_init() (App/drivers/backlight_pwm.c) configures the
+ * backlight_pwm_init() (App/drivers/hw/backlight_pwm.c) configures the
  * channel with `.duty = duty_for_percent(CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT)`
  * directly, not a separate post-init hal_pwm_set_duty() call -- the panel
  * must not start dark if the flying wire IS fitted. A caller passes the

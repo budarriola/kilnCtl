@@ -12,7 +12,7 @@ extern "C" {
  * The explicit "go back to the previously-running bootloader slot, right
  * now" command -- the Pico-side half of tools/PcTools/TODO.md's
  * `ota_rollback(processor)` line (the ESP half, POST /api/ota/esp/rollback,
- * already exists in firmware/KilnFW/App/drivers/ota_http.c). Unlike CLEAR_
+ * already exists in firmware/KilnFW/App/drivers/http/ota_http.c). Unlike CLEAR_
  * TRIP there is no mask to echo back and no cached ESP-side state to derive
  * anything from -- this frame carries no payload at all, cmd byte only, same
  * "no payload needed" shape as SAFETY_CMD_PING.

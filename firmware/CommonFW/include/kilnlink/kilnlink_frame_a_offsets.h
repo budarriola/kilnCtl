@@ -12,7 +12,7 @@ extern "C" {
  * firmwares":
  *
  *   1. SaftyFW/src/tasks/link_frame.c's link_frame_pack_status()   (pack)
- *   2. KilnFW/App/drivers/safety_link_frames.c's safety_apply_status()
+ *   2. KilnFW/App/drivers/safety/safety_link_frames.c's safety_apply_status()
  *      (parse)
  *   3. SaftyFW/test/test_link_frame_wire.c's mirror_apply_status() (the
  *      drift test for #1/#2, itself formerly a third hand transcription)

@@ -1,4 +1,4 @@
-/* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui_theme.h,
+/* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui/ui_theme.h,
    TODO.md 10.6/10.6a). Same hex values as the LCD side. Served at GET /theme.css
    from wifi_provision_http.c (the module that owns httpd_start() / the one
    httpd_handle_t every other *_http.c module registers routes onto -- see

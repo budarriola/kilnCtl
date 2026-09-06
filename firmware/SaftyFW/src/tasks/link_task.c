@@ -206,7 +206,7 @@
 #define LINK_TASK_ID_SAFETY 7u // UART_TASK_ID_SAFETY
 // LOG relay (LINK_PROTOCOL.md section 6, "Frame F"): the Pico's log_task
 // addresses ordinary BROADCAST frames to this task id, same as KilnFW's own
-// log lines (firmware/KilnFW/App/drivers/uart_task_ids.h:58,
+// log lines (firmware/KilnFW/App/drivers/common/uart_task_ids.h:58,
 // UART_TASK_ID_LOG) -- "no new task id, no new payload format" is the
 // document's own framing for why this is not a fresh protocol addition.
 #define LINK_TASK_ID_LOG    5u
@@ -1238,7 +1238,7 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
 // SAFETY_CMD_REQUEST_ENABLE (0x02), CommonFW/docs/LINK_PROTOCOL.md section 4
 // ("Kept, converted to BROADCAST. Advisory only -- the Pico's interlocks
 // always win"). 2-byte payload: cmd (0x02) + a 0/1 enable byte, exactly what
-// firmware/KilnFW/App/drivers/safety_link.c's safety_link_request_enable()
+// firmware/KilnFW/App/drivers/safety/safety_link.c's safety_link_request_enable()
 // sends (`{ SAFETY_CMD_REQUEST_ENABLE, enable ? 1u : 0u }`). No kilnlink_*
 // codec exists for this frame in CommonFW (unlike CLEAR_TRIP/SET_CONFIG/
 // ROLLBACK/ANNOUNCE_REBOOT above) and this pass is not authorised to add one

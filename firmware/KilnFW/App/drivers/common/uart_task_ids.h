@@ -883,7 +883,7 @@
  * is active). All are sent/received as UART_PROTO_MSG_BROADCAST -- "the
  * Pico never participates in the ACK'd DATA/ACK/NACK transport" for these
  * frames, see safety_link.c's safety_link_send_update_frame().
- *   0x10 UPDATE_BEGIN  36 B payload -- see App/drivers/ota_pico_relay.c's
+ *   0x10 UPDATE_BEGIN  36 B payload -- see App/drivers/net/ota_pico_relay.c's
  *                      header comment for the exact field layout (mirrors
  *                      SaftyFW's src/update/image_header.h, the frozen
  *                      source of truth for this frame).
@@ -1032,7 +1032,7 @@
  *
  * 0x1B SET_LOG_LEVEL: ESP -> Pico, unrelated to commissioning (it was the
  *   last unallocated id blocking log_task_set_level() from being reachable
- *   over the wire) -- not used by App/drivers/safety_cfg_http.c /
+ *   over the wire) -- not used by App/drivers/http/safety_cfg_http.c /
  *   safety_cfg_store.c; listed here only to keep the id space contiguous and
  *   documented for whichever caller eventually wants it.
  * 0x1C SET_PARAM: ESP -> Pico. Stages one CONFIG_REFERENCE.md field --

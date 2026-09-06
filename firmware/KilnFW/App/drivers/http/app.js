@@ -93,7 +93,7 @@
   // straight back to the caller to report, exactly as before.
   //
   // The warning text below is duplicated from OTA_INTERLOCK_NO_SAFETY_WARNING
-  // in App/drivers/ota_interlock.h, which is the LCD's copy of the same
+  // in App/drivers/net/ota_interlock.h, which is the LCD's copy of the same
   // sentence. App/test/lint_pages.js compares the two on every run, so an
   // edit to one without the other fails the check rather than shipping two
   // different descriptions of the same risk.
@@ -383,7 +383,7 @@
   //
   // Confirm-on-Stop: per the owner's 2026-08-20 instruction, Start and
   // Stop both require confirmation today, on both surfaces -- the LCD
-  // (see App/drivers/ui_confirm.c, which gained confirm dialogs for Start
+  // (see App/drivers/ui/ui_confirm.c, which gained confirm dialogs for Start
   // and Stop the same day) and the web (main_page.html's stopBtn handler,
   // and this sticky bar, both confirm before stopping).
   // 2026-09-01 follow-up (owner, confirmed live on the board: "the stop

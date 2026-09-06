@@ -42,7 +42,7 @@ extern "C" {
  * half of this). Raise it (up to 255) the same way KilnFW raised its own
  * copy of this constant from 128 to 253 if a future payload genuinely
  * needs the headroom -- see that commit's reasoning in
- * firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.h for the shape
+ * firmware/KilnFW/App/drivers/owners/uart_protocol.h for the shape
  * of that decision; it does not apply here today; this file only forwards
  * the *idea* to future readers, not the number. */
 #define BENCHPROTO_FRAME_MAX_PAYLOAD 128u

@@ -1,6 +1,6 @@
 // link_frame.h -- pure application-layer payload packing for the two Pico->ESP
 // frames this pass implements: the existing 23-byte status frame
-// (SAFETY_CMD_GET_STATUS = 0x01, firmware/KilnFW/App/drivers/safety_link.h)
+// (SAFETY_CMD_GET_STATUS = 0x01, firmware/KilnFW/App/drivers/safety/safety_link.h)
 // and SAFETY_CMD_FW_VERSION (0x0B, CommonFW/docs/LINK_PROTOCOL.md section 6
 // Frame C), plus the pure ANNOUNCE_VERSION compatibility check both sides
 // must agree on.
@@ -35,7 +35,7 @@ extern "C" {
 #endif
 
 // --- Frame A: SAFETY_CMD_GET_STATUS (0x01), 23 or 24 bytes ------------------
-// Byte-for-byte the layout firmware/KilnFW/App/drivers/safety_link.h already
+// Byte-for-byte the layout firmware/KilnFW/App/drivers/safety/safety_link.h already
 // parses -- see that file's header comment for the authoritative offsets.
 #define LINK_FRAME_STATUS_CMD KILNLINK_FRAME_A_CMD
 

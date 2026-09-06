@@ -1,5 +1,5 @@
 // thermo_task.c -- Phase 3: real ~DRDY (GPIO12) interrupt wiring, the ported
-// MAX31856 driver (max31856.c/.h, "port firmware/KilnFW/App/drivers/MAX31856.c,
+// MAX31856 driver (max31856.c/.h, "port firmware/KilnFW/App/drivers/hw/MAX31856.c,
 // do not rewrite it"), and thermo_snapshot_t publication. Replaces the Phase 2
 // timed-fallback skeleton this file used to be -- see git history for that
 // version if it is ever useful as a reference.

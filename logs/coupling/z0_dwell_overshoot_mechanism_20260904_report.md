@@ -607,7 +607,7 @@ needed for the top two):
 
    **Answered, 2026-09-04, zero kiln time spent — the premise is TRUE and
    item (1) is NOT a config change.** `profile_segment_t` (`docs/PROFILES.md`
-   lines 32-36, mirrored in `firmware/KilnFW/App/drivers/profiles_http.h`)
+   lines 32-36, mirrored in `firmware/KilnFW/App/drivers/http/profiles_http.h`)
    carries exactly one `ramp_c_per_hr` per segment, applied against
    "every zone in `zone_mask`" (`PROFILES.md:159-176`) — there is no
    per-zone rate array in the format. The executor confirms this is not
