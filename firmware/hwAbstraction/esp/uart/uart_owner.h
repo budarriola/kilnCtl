@@ -38,8 +38,10 @@ typedef struct {
  * caller, and a 2026-09-05 grep-confirmed audit (see uart_owner.c's prior
  * header comment on this, reproduced in git history) already found
  * uart_owner_transfer() had zero real callers left in KilnFW -- every path
- * that used to reach it goes through uart_protocol.c's hal_uart_attach()/
- * hal_uart_send_blocking() instead. `queue_len` is kept in uart_owner_init's
+ * that used to reach it goes through uart_protocol.c's hal_uart_send_
+ * blocking() instead, on this owner's own `hal` handle directly (hal_uart_
+ * attach() deleted, docs/HW_ABSTRACTION_PLAN.md). `queue_len` is kept in
+ * uart_owner_init's
  * signature for source compatibility with existing call sites but is no
  * longer used for anything. */
 

@@ -31,9 +31,10 @@ static const char *TAG = "uart_owner";
  * handle (hal_uart_get_rx_error_count/hal_uart_restart/hal_uart_deinit)
  * instead of keeping a second, parallel copy of the same counters and task.
  * This was neither a full migration (uart_protocol.c/safety_link.c still
- * reach the port through uart_owner_t, not a bare hal_uart_t -- see
- * HW_ABSTRACTION_PLAN.md's "hal_uart_attach" item for why that stays true
- * until Phase 2/3) nor a permanent allowlist exempting this file from the
+ * reach the port through uart_owner_t, not a bare hal_uart_t of their own --
+ * uart_protocol.c does now point directly at &owner->hal, per
+ * HW_ABSTRACTION_PLAN.md's "delete hal_uart_attach()" item, which is done)
+ * nor a permanent allowlist exempting this file from the
  * HAL: uart_owner_t is now a thin wrapper whose only job is to own the
  * fields callers already reach directly (port, event_task_handle) and to
  * forward everything else onto hal_uart_init/_get_rx_error_count/_restart/

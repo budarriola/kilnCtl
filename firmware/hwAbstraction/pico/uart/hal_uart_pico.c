@@ -176,19 +176,6 @@ hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
     return HAL_OK;
 }
 
-hal_status_t hal_uart_attach(hal_uart_t *u, int port) {
-    (void)u;
-    /* Transitional Phase-1b entry point (interface/hal_uart.h): this backend
-     * has exactly one real, already-owner-initialized link and no
-     * per-instance state (see INTERFACE MISMATCH note 1 above), so attach is
-     * just the same port check hal_uart_init() does -- it does not call
-     * uart_owner_init() again. */
-    if (port != HAL_UART_PICO_EXPECTED_PORT) {
-        return HAL_INVALID_ARG;
-    }
-    return HAL_OK;
-}
-
 hal_status_t hal_uart_deinit(hal_uart_t *u) {
     (void)u;
     /* uart_owner.c exports no teardown -- the real link is brought up once

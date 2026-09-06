@@ -104,24 +104,25 @@ static size_t frame_and_send(uart_protocol_t *proto, const uint8_t *raw, size_t 
         return 0;
     }
 
-    /* Phase 1b (docs/HW_ABSTRACTION_PLAN.md "hal_uart -- two primitives, ESP
-     * backend unchanged"): was uart_owner_transfer(proto->owner, out, o, NULL,
-     * 0, NULL, timeout_ms) -- TX-only (rx=NULL,0), the only real caller of
-     * that function (see uart_owner.h's own doc comment). hal_uart_send_
-     * blocking's ESP backend is uart_write_bytes()+uart_wait_tx_done(), the
-     * same pair uart_owner_task() used internally for this request, so this
-     * still blocks until the bytes are on the wire before returning -- load-
-     * bearing, since the ACK timer at uart_protocol_send_limited() starts
-     * right after this call returns (see hal_uart.h's own doc comment on
-     * why a fire-and-forget send would start that timer early). proto->
-     * hal_uart is attached (not driver-installed) to the same port
-     * proto->owner already owns -- see hal_uart_attach()'s doc comment.
+    /* Phase 1b/2 (docs/HW_ABSTRACTION_PLAN.md "hal_uart -- two primitives, ESP
+     * backend unchanged" / "delete hal_uart_attach()"): was
+     * uart_owner_transfer(proto->owner, out, o, NULL, 0, NULL, timeout_ms) --
+     * TX-only (rx=NULL,0), the only real caller of that function (see
+     * uart_owner.h's own doc comment). hal_uart_send_blocking's ESP backend is
+     * uart_write_bytes()+uart_wait_tx_done(), the same pair uart_owner_task()
+     * used internally for this request, so this still blocks until the bytes
+     * are on the wire before returning -- load-bearing, since the ACK timer at
+     * uart_protocol_send_limited() starts right after this call returns (see
+     * hal_uart.h's own doc comment on why a fire-and-forget send would start
+     * that timer early). proto->hal_uart now points at proto->owner->hal, the
+     * one real driver-installed handle for this port (hal_uart_attach's
+     * second, non-owning handle is gone).
      *
      * Partial-send caveat (hal_uart.h): only matters for `o` larger than the
      * ESP backend's TX ring (4096 B) -- STUFFED_FRAME_MAX here is well under
      * that, so every send is one chunk and a HAL_TIMEOUT return means nothing
      * was queued. */
-    hal_status_t hal_result = hal_uart_send_blocking(&proto->hal_uart, out, o, timeout_ms);
+    hal_status_t hal_result = hal_uart_send_blocking(proto->hal_uart, out, o, timeout_ms);
     if (hal_result != HAL_OK) {
         /* Review fix (2026-09-05): hal_result was only ever logged here --
          * a run of HAL_TIMEOUT/HAL_IO from a genuinely wedged TX ring looked
@@ -486,14 +487,11 @@ esp_err_t uart_protocol_init(uart_protocol_t *proto,
     proto->owner = owner;
     proto->own_device = own_device;
 
-    /* Attach (not init) to the port owner already installed the driver for --
-     * see hal_uart_attach()'s doc comment and frame_and_send()'s Phase 1b
-     * comment. owner->initialized is already checked above. */
-    hal_status_t attach_result = hal_uart_attach(&proto->hal_uart, (int)owner->port);
-    if (attach_result != HAL_OK) {
-        ESP_LOGE(TAG, "hal_uart_attach failed: %s", hal_status_to_name(attach_result));
-        return ESP_ERR_INVALID_STATE;
-    }
+    /* One handle per port (docs/HW_ABSTRACTION_PLAN.md "delete
+     * hal_uart_attach()"): proto shares owner's real, driver-installed
+     * hal_uart_t instead of attaching a second, non-owning handle to the same
+     * port. owner->initialized is already checked above. */
+    proto->hal_uart = &owner->hal;
 
     proto->tasks_lock = xSemaphoreCreateMutex();
     proto->tx_lock = xSemaphoreCreateMutex();

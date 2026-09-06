@@ -89,22 +89,6 @@ typedef struct {
 
 hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg);
 
-/* Transitional Phase-1b entry point: attaches u to a port whose UART driver
- * is ALREADY installed and owned by someone else (today: a uart_owner_t that
- * called uart_driver_install itself) -- unlike hal_uart_init, this does NOT
- * install the driver, configure pins, or start an event task, so it must
- * only be called after the real owner has finished its own init and must
- * never be paired with hal_uart_deinit (which would tear down a driver this
- * handle does not own). Exists so uart_protocol.c's frame_and_send() can
- * route its blocking send through hal_uart_send_blocking() without a second,
- * conflicting uart_driver_install() on the same port while uart_owner_t
- * still owns install/deinit and the RX-side event task -- see
- * docs/HW_ABSTRACTION_PLAN.md "hal_uart -- two primitives, ESP backend
- * unchanged" and uart_protocol.c:107's caller. HAL_INVALID_ARG if u is NULL;
- * backends that have no separate driver-install step (pico, host) may
- * implement this identically to hal_uart_init. */
-hal_status_t hal_uart_attach(hal_uart_t *u, int port);
-
 /* Symmetric with hal_uart_init; releases backend resources (ESP:
  * uart_driver_delete). Not called on any hot path today -- added for
  * lifecycle symmetry (bring-up/teardown pairs elsewhere in this interface

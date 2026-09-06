@@ -158,13 +158,15 @@ typedef struct {
     uart_owner_t *owner;
     uart_proto_device_t own_device;
 
-    /* Attached (not owned) to owner->port -- see hal_uart_attach()'s doc
-     * comment in interface/hal_uart.h. frame_and_send() sends through this
-     * instead of uart_owner_transfer() (Phase 1b, docs/HW_ABSTRACTION_PLAN.md
-     * "hal_uart -- two primitives, ESP backend unchanged"). Never
-     * hal_uart_deinit'd: owner still owns the driver's install/deinit
-     * lifecycle. */
-    hal_uart_t hal_uart;
+    /* Points at owner->hal -- uart_owner_t now embeds a real,
+     * driver-installed hal_uart_t (2026-09-06 uart collapse) instead of this
+     * layer attaching a second, non-owning handle to the same port
+     * (hal_uart_attach(), deleted -- see docs/HW_ABSTRACTION_PLAN.md's
+     * "delete hal_uart_attach()" item). frame_and_send() sends through this
+     * instead of uart_owner_transfer() (Phase 1b). One handle per port now:
+     * never hal_uart_deinit'd here -- owner still owns the driver's
+     * install/deinit lifecycle via uart_owner_deinit(). */
+    hal_uart_t *hal_uart;
 
     uart_proto_task_slot_t tasks[UART_PROTO_MAX_TASKS];
     SemaphoreHandle_t tasks_lock;
