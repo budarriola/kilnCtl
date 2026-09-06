@@ -520,6 +520,12 @@ build_info.h, bx_worker_stub.h, uart_protocol.h, psa/, lwip/. SaftyFW has
 no stub directory — it links the real `.c` files; its spi_owner.c is not in
 the host list today at all (zero off-target coverage until fake_spi).
 
+Progress 2026-09-05: fake_gpio/fake_adc/fake_uart implemented and standalone
+MSVC-tested (133 assertions + one proven negative test) at
+firmware/hwAbstraction/host/ and firmware/hwAbstraction/test/test_host_fakes.ps1;
+not yet wired into build_host_tests.ps1 (the response-file switch above is
+still open), and fake_spi/fake_i2c/fake_kv/fake_time/fake_flash are unstarted.
+
 ## Migration inventories (measured)
 
 Blast radius: KilnFW ≈75-80 owner call sites in 22 files, of which
