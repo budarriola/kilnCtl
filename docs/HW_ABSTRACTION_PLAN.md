@@ -988,6 +988,42 @@ intercepts. Porting it today would just add a second, disconnected fake_spi
 harness alongside the real g_stub_* one. Deferred to whichever Phase 3 item
 rebases esp_spi_owner.c onto hal_spi.h.
 
+Status (2026-09-06, ESP SPI closed): the "does not call into esp_spi_owner.c
+-- it duplicates it" finding above is now stale. `esp/spi/hal_spi_esp.c` is
+rewritten as a thin adapter matching the pico-side collapse shape below:
+every `hal_spi_*` call maps directly to the matching `spi_owner_*` call, and
+the adapter's own impl structs hold near-zero state (a `spi_owner_t` plus a
+device handle/cs-pin/back-pointer, nothing duplicated). Wired into
+`hwabstraction_esp` (`firmware/hwAbstraction/idf/hwabstraction_esp/
+CMakeLists.txt`). The real consumer migrated is `firmware/KilnFW/App/
+drivers/hw/MAX31856.c` (the thermocouple driver): it no longer calls
+`spi_owner_transfer_polling()`/`spi_bus_add_device()` directly, going
+through `hal_spi_transfer_polling()`/`hal_spi_device_attach()` instead. The
+display driver (`ILI9488_start()`, `panel_spi_bringup.c`) is deliberately
+NOT migrated in this pass -- it still takes a raw `spi_owner_t*` and shares
+the same physical bus/host as the thermocouples, so `hal_spi_esp_owner.h`
+(ESP-only, `firmware/hwAbstraction/esp/spi/`) bridges a `hal_spi_bus_t` back
+to the one shared owner underneath it, letting `main_boot_early.c` hand
+`ILI9488_start()` a working pointer without standing up a second, competing
+owner task on the same wire. `hal_spi_device_attach()` has no detach
+counterpart in `interface/hal_spi.h` -- MAX31856.c's two teardown paths are
+`// INTERFACE MISMATCH`-flagged rather than silently dropped or widening the
+interface; both are on paths this firmware does not currently exercise
+(channel-attach failure at boot, and `MAX31856_bus_deinit()`, which nothing
+calls). New host test `test_max31856_hal_spi.c` covers the migrated driver
+against `fake_spi` with realistic scripted register bytes (not idealized
+zeros) plus a fault-invalidating-temperature case; required two small stub
+additions (`GPIO_IS_VALID_GPIO`, `SPI2_HOST`/`SPI3_HOST`) and one stub
+behavior fix (`semphr.h`'s `xSemaphoreTake()` needed an opt-in
+"actually succeed on a valid handle" mode, since MAX31856_read() was the
+first host-tested call to take a real mutex expecting to get it --
+`test_esp_spi_owner.c`'s wedge-simulation, which relies on the opposite,
+keeps its default unchanged). `esp/i2c/hal_i2c_esp.c` and `esp/uart/
+hal_uart_esp.c` are unaffected by this pass -- still open per whatever their
+own correction notes say elsewhere in this doc. `panel_spi.c`/
+`panel_spi_bringup.c`/`panel_spi_blit.c` (display, `KILNCTL_SPI_ASYNC_FLUSH`)
+remain the listed follow-up onto `hal_spi.h`.
+
 New tests unlocked immediately: pico spi_owner against fake_spi, pico
 uart_owner ring logic against fake_uart, current-sense guards against
 fake_adc, config_store_flash against fake_flash.
