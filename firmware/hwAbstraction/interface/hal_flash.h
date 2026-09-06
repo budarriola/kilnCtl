@@ -191,6 +191,46 @@ hal_status_t hal_flash_geometry(hal_flash_region_t *r, hal_flash_geometry_t *out
 hal_status_t hal_flash_read(hal_flash_region_t *r, uint32_t offset,
                              void *buf, size_t len);
 
+/* Zero-copy variant of hal_flash_read(), added for update_task.c's rebase
+ * (docs/HW_ABSTRACTION_PLAN.md item 8's deferred "update_task.c's
+ * flash_range_erase()/_program()/XIP_BASE" note): the whole-slot read-back
+ * CRC in UPDATE_END verification reads up to BOOTLOADER_SLOT_FLASH_SIZE
+ * (832 KiB) in one pass to feed bootloader_crc32(), which takes a single
+ * contiguous buffer and has no incremental/streaming form. Copying 832 KiB
+ * through hal_flash_read() would need a buffer that size, which does not
+ * fit in this part's SRAM -- the ORIGINAL code never copied either; it CRC'd
+ * straight over the XIP-mapped alias via `(const uint8_t *)(XIP_BASE +
+ * offset)`. This function is that same access, expressed through the
+ * region/HAL boundary instead of a bare pointer cast, so hal_flash.h can
+ * still name every raw hardware/flash.h-family access update_task.c makes.
+ *
+ * Same execution-context contract as hal_flash_read() (no safe_execute
+ * lockout required -- see the contract above): the returned pointer aliases
+ * live, already-programmed flash contents for [offset, offset+len) relative
+ * to `r`'s base, valid to read from for as long as no erase/program touches
+ * that range. `r` must have been through hal_flash_region_init() and the
+ * range must fit within it, else HAL_NOT_READY/HAL_INVALID_ARG and
+ * `*out_ptr` left untouched. On the pico backend this is exactly
+ * `(const void *)(XIP_BASE + base + offset)`; the host fake returns a
+ * pointer into its own in-memory image, so callers written against this
+ * function behave identically on both backends -- unlike a bare XIP_BASE
+ * cast, which only pico can satisfy at all.
+ *
+ * ESP NOTE (no backend exists today -- hal_flash.h is Pico-only, see this
+ * header's own opening comment): an eventual ESP implementation could not
+ * satisfy this signature as cheaply as pico's bare pointer arithmetic.
+ * ESP-IDF's equivalent, spi_flash_mmap(), hands back BOTH a pointer and a
+ * spi_flash_mmap_handle_t that must be released via spi_flash_munmap() once
+ * the caller is done -- a bare `const void *` return has no room to carry
+ * that handle or enforce its unmap lifetime, so a future ESP backend would
+ * need either a wider return (region carrying the handle internally, unmapped
+ * on the next hal_flash_region_init() of the same region) or a companion
+ * hal_flash_unmap() this interface does not have yet. Not designed here since
+ * no real consumer exists on that side (KilnFW's own raw-flash touchpoints are
+ * esp_partition_ and esp_ota_ calls, per this header's opening comment). */
+hal_status_t hal_flash_map(hal_flash_region_t *r, uint32_t offset, size_t len,
+                            const void **out_ptr);
+
 /* Erases [offset, offset+len) to all-0xFF. offset and len MUST each be an
  * exact multiple of HAL_FLASH_ERASE_SIZE -- HAL_INVALID_SIZE otherwise. `r`
  * must have been through hal_flash_region_init() -- HAL_NOT_READY otherwise.

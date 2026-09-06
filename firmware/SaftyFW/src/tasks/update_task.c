@@ -65,17 +65,20 @@
 #include "queue.h"
 #include "task.h"
 
-#include "pico/flash.h"
 #include "pico/time.h"
 
-#include "hardware/flash.h"
-#include "hardware/regs/addressmap.h" // XIP_BASE
-// hardware/watchdog.h dropped (this pass): hal_wdt.h now covers this file's
-// sole watchdog_reboot(0, 0, 0) call, see update_task_request_rollback()
-// below. flash_range_erase()/flash_range_program()/XIP_BASE stay raw --
-// hal_flash.h's own header comment notes this file's usage fits that
-// interface too but its rebase "is not scheduled by the current plan pass";
-// this pass does not widen that scope.
+// hardware/watchdog.h dropped earlier: hal_wdt.h covers this file's sole
+// watchdog_reboot(0, 0, 0) call, see update_task_request_rollback() below.
+// hardware/flash.h, hardware/regs/addressmap.h (XIP_BASE), and pico/flash.h
+// dropped THIS pass: every flash_range_erase()/flash_range_program()/
+// XIP_BASE/flash_safe_execute() call below now goes through hal_flash.h
+// instead -- the rebase hal_flash.h's own header comment had deferred
+// ("its rebase is not scheduled by the current plan pass") is done. See
+// update_task_ensure_flash_region() below for the region binding and
+// hal_flash_map()'s own doc comment (hal_flash.h) for why UPDATE_END's
+// whole-slot CRC read-back needed a new HAL primitive rather than
+// hal_flash_read() alone.
+#include "hal_flash.h"
 #include "hal_wdt.h"
 
 #include "task_priorities.h"
@@ -123,6 +126,32 @@
 // alive. Generous relative to that period so this is never the flaky part
 // of the confirm gate.
 #define UPDATE_TASK_ADC_FRESH_MS 2000u
+
+// pico-sdk's FLASH_BLOCK_SIZE (hardware/flash.h), reproduced locally now
+// that header is no longer included: the 64K unit update_task_erase_slot()
+// erases at a time, purely a watchdog-feeding granularity choice (any
+// multiple of HAL_FLASH_ERASE_SIZE would be legal) -- see that function's
+// own header comment for why 64K specifically. BOOTLOADER_SLOT_FLASH_SIZE
+// is exactly 13 * this with no remainder (flash_layout.h).
+#define UPDATE_TASK_ERASE_CHUNK_SIZE (64u * 1024u)
+
+// 2026-09-06 review fix: the old code got this cross-check for free --
+// hardware/flash.h's FLASH_BLOCK_SIZE was a real pico-sdk constant, and the
+// "13 * FLASH_BLOCK_SIZE with no remainder" fact update_task_erase_slot()'s
+// own header comment states was true of THAT constant by construction. Now
+// that this file defines its own chunk size, the same fact must be checked,
+// not just asserted in a comment -- a future edit to either
+// BOOTLOADER_SLOT_FLASH_SIZE (flash_layout.h) or this macro that broke exact
+// divisibility would otherwise silently leave update_task_erase_slot()'s
+// last chunk smaller than UPDATE_TASK_ERASE_CHUNK_SIZE but still passed
+// through hal_flash_erase() unaligned-length-checked (HAL_FLASH_ERASE_SIZE
+// alignment, not this chunk size) -- functionally survivable, but a quiet
+// change to the erase/watchdog-feeding cadence this code was deliberately
+// tuned around.
+_Static_assert(BOOTLOADER_SLOT_FLASH_SIZE % UPDATE_TASK_ERASE_CHUNK_SIZE == 0,
+               "UPDATE_TASK_ERASE_CHUNK_SIZE must evenly divide BOOTLOADER_SLOT_FLASH_SIZE "
+               "(flash_layout.h) -- update_task_erase_slot()'s own header comment relies on "
+               "this exactly like the old FLASH_BLOCK_SIZE-based code did");
 
 // --- Wire layout: SAFETY_CMD_UPDATE_STATUS (0x14) -------------------------
 // CommonFW/docs/UPDATE_PROTOCOL.md section 4 names this frame
@@ -227,6 +256,35 @@ static void put_u16_le(uint8_t *out, uint16_t v)
     out[1] = (uint8_t)((v >> 8) & 0xFFu);
 }
 
+// --- hal_flash region binding ------------------------------------------------
+//
+// Unlike config_store_flash.c (rebased the same pass), which binds one
+// region to its own single 4K sector, this file touches three disjoint
+// regions of flash (the metadata sector, slot A, slot B) at offsets that
+// are only known at a given call site (s_slot_flash_offset varies per
+// transfer). Rather than one hal_flash_region_t per named region, this
+// binds ONE region spanning the WHOLE chip (base 0, size
+// BOOTLOADER_FLASH_TOTAL_SIZE) and keeps every offset below exactly as it
+// was before the rebase -- an absolute, flash-start-relative offset, the
+// same convention flash_layout.h's own macros and the old bare XIP_BASE +
+// offset arithmetic already used. This is the minimal-diff choice: no
+// offset math anywhere in this file needed to change to become
+// region-relative.
+static hal_flash_region_t s_flash_region;
+static bool s_flash_region_ready = false;
+
+static bool update_task_ensure_flash_region(void)
+{
+    if (s_flash_region_ready) {
+        return true;
+    }
+    if (hal_flash_region_init(&s_flash_region, 0u, BOOTLOADER_FLASH_TOTAL_SIZE) != HAL_OK) {
+        return false;
+    }
+    s_flash_region_ready = true;
+    return true;
+}
+
 // --- Metadata read/persist helpers ------------------------------------------
 //
 // Shares bootloader/metadata.c's frozen, host-tested pack/unpack/scan
@@ -240,10 +298,41 @@ static void put_u16_le(uint8_t *out, uint16_t v)
 // flash_range_program() SHAPE is deliberately the same as main.c's, so the
 // two are easy to compare side by side.
 
+// NOT a module-scope staging buffer any more (2026-09-06 review fix): this
+// function is called from TWO task contexts, not one -- update_task_fn()'s
+// own dispatch loop (UPDATE_BEGIN/_END/_ABORT) AND
+// update_task_request_rollback(), which link_task_handle_rollback() calls
+// SYNCHRONOUSLY on link_task's own context (see this file's own comment on
+// update_task_request_rollback() above, and link_task.c's call site). A
+// single static uint8_t[BOOTLOADER_METADATA_FLASH_SIZE] shared by both would
+// let one task's in-progress hal_flash_read() be torn by the other task
+// preempting mid-copy, which bootloader_metadata_find_latest() would then
+// read as "no slot has a valid CRC" -- and update_task_read_latest_metadata_
+// or_default() turns THAT into a freshly-bootstrapped default record
+// (active_slot = A) that a caller may go on to persist, silently repointing
+// the boot target. This is new exposure the pre-rebase code never had: it
+// read straight from the XIP-mapped alias into the CALLER's own local
+// bootloader_metadata_t-sized stack buffer (bootloader_metadata_find_latest()
+// takes a `const uint8_t sector[...]` view, not an owning buffer), with no
+// staging step at all for two callers to race over. hal_flash_map() (added
+// alongside this rebase for exactly this "read a live flash view without
+// copying" shape) restores that: no buffer, no cross-task race, and it costs
+// less RAM than the deleted static ever did.
 static size_t update_task_read_latest_metadata(bootloader_metadata_t *out_meta)
 {
-    const uint8_t *metadata_region = (const uint8_t *)(XIP_BASE + BOOTLOADER_METADATA_FLASH_OFFSET);
-    return bootloader_metadata_find_latest(metadata_region, out_meta);
+    const void *sector_ptr = NULL;
+    if (!update_task_ensure_flash_region() ||
+        hal_flash_map(&s_flash_region, BOOTLOADER_METADATA_FLASH_OFFSET,
+                       BOOTLOADER_METADATA_FLASH_SIZE, &sector_ptr) != HAL_OK) {
+        // Matches the old bare-XIP-pointer path's own failure mode: XIP reads
+        // never actually failed before (the region was always addressable
+        // memory), so this branch is new, but bootloader_metadata_find_latest()
+        // already treats "not a single valid record" as an ordinary, expected
+        // outcome (BOOTLOADER_METADATA_NO_SLOT) -- an unmappable region gets
+        // exactly that same answer rather than a distinct error path.
+        return BOOTLOADER_METADATA_NO_SLOT;
+    }
+    return bootloader_metadata_find_latest((const uint8_t *)sector_ptr, out_meta);
 }
 
 // Same as above, but fills `*out_meta` with a fresh, empty-slots default
@@ -274,17 +363,34 @@ typedef struct {
     size_t next_write_slot;
     bool needs_erase;
     uint8_t record[BOOTLOADER_METADATA_RECORD_LEN];
+    hal_status_t result; // 2026-09-06 review fix: the inner erase/program status
+                          // must survive the callback -- see this struct's
+                          // only reader, update_task_persist_metadata(), for
+                          // why hal_flash_safe_execute()'s own HAL_OK is not
+                          // enough on its own (it only reports whether the
+                          // callback RAN, not whether the op it ran
+                          // succeeded -- pico's flash_range_erase()/_program()
+                          // are void, but the hal_flash_* wrappers around them
+                          // do return a real status now, and discarding it
+                          // would let a failed erase/program still report
+                          // success up the call chain).
 } update_metadata_write_args_t;
 
 static void update_metadata_write_cb(void *param)
 {
     update_metadata_write_args_t *a = (update_metadata_write_args_t *)param;
+    a->result = HAL_OK;
     if (a->needs_erase) {
-        flash_range_erase(BOOTLOADER_METADATA_FLASH_OFFSET, BOOTLOADER_METADATA_FLASH_SIZE);
+        a->result = hal_flash_erase(&s_flash_region, BOOTLOADER_METADATA_FLASH_OFFSET,
+                                     BOOTLOADER_METADATA_FLASH_SIZE);
+        if (a->result != HAL_OK) {
+            return; // do not attempt the program half over a failed erase
+        }
     }
-    flash_range_program(BOOTLOADER_METADATA_FLASH_OFFSET +
-                             (uint32_t)a->next_write_slot * BOOTLOADER_METADATA_RECORD_LEN,
-                         a->record, BOOTLOADER_METADATA_RECORD_LEN);
+    a->result = hal_flash_program(&s_flash_region,
+                                   BOOTLOADER_METADATA_FLASH_OFFSET +
+                                       (uint32_t)a->next_write_slot * BOOTLOADER_METADATA_RECORD_LEN,
+                                   a->record, BOOTLOADER_METADATA_RECORD_LEN);
 }
 
 // Mirrors bootloader/main.c's persist_metadata(meta, latest_slot) exactly in
@@ -295,6 +401,10 @@ static void update_metadata_write_cb(void *param)
 // multi-hundred-millisecond cost, but the discipline is the same either way.
 static bool update_task_persist_metadata(bootloader_metadata_t *meta, size_t latest_slot_index)
 {
+    if (!update_task_ensure_flash_region()) {
+        return false;
+    }
+
     meta->seq = meta->seq + 1u;
 
     update_metadata_write_args_t args;
@@ -302,10 +412,16 @@ static bool update_task_persist_metadata(bootloader_metadata_t *meta, size_t lat
     args.needs_erase = bootloader_metadata_next_write_needs_erase(latest_slot_index);
     bootloader_metadata_pack(meta, args.record);
 
+    args.result = HAL_NOT_READY; // overwritten by the callback if it ever runs
     watchdog_task_checkin(WATCHDOG_CHECKIN_UPDATE_TASK);
-    int rc = flash_safe_execute(update_metadata_write_cb, &args, 1000u);
+    hal_status_t status = hal_flash_safe_execute(update_metadata_write_cb, &args, 1000u);
     watchdog_task_checkin(WATCHDOG_CHECKIN_UPDATE_TASK);
-    return rc == PICO_OK;
+    // Both must succeed: hal_flash_safe_execute() reports whether the
+    // callback ran at all (lockout handshake), args.result reports whether
+    // the erase/program it ran actually landed -- see args.result's own doc
+    // comment on update_metadata_write_args_t for why neither check alone is
+    // sufficient.
+    return status == HAL_OK && args.result == HAL_OK;
 }
 
 // --- Flash erase (UPDATE_BEGIN acceptance) ---------------------------------
@@ -313,12 +429,15 @@ static bool update_task_persist_metadata(bootloader_metadata_t *meta, size_t lat
 typedef struct {
     uint32_t offset;
     size_t count;
+    hal_status_t result; // 2026-09-06 review fix -- see update_metadata_write_args_t's
+                          // own result field comment for why this must be
+                          // checked, not discarded.
 } update_erase_args_t;
 
 static void update_erase_cb(void *param)
 {
     update_erase_args_t *a = (update_erase_args_t *)param;
-    flash_range_erase(a->offset, a->count);
+    a->result = hal_flash_erase(&s_flash_region, a->offset, a->count);
 }
 
 // Erases the whole BOOTLOADER_SLOT_FLASH_SIZE (832K) target slot in
@@ -340,18 +459,22 @@ static void update_erase_cb(void *param)
 // start, so no partial-block tail case exists here to get wrong.
 static bool update_task_erase_slot(uint32_t slot_offset)
 {
+    if (!update_task_ensure_flash_region()) {
+        return false;
+    }
+
     uint32_t offset = slot_offset;
     uint32_t remaining = BOOTLOADER_SLOT_FLASH_SIZE;
 
     while (remaining > 0u) {
-        uint32_t chunk = (remaining < FLASH_BLOCK_SIZE) ? remaining : FLASH_BLOCK_SIZE;
+        uint32_t chunk = (remaining < UPDATE_TASK_ERASE_CHUNK_SIZE) ? remaining : UPDATE_TASK_ERASE_CHUNK_SIZE;
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_UPDATE_TASK);
-        update_erase_args_t args = { .offset = offset, .count = chunk };
-        int rc = flash_safe_execute(update_erase_cb, &args, 2000u);
+        update_erase_args_t args = { .offset = offset, .count = chunk, .result = HAL_NOT_READY };
+        hal_status_t status = hal_flash_safe_execute(update_erase_cb, &args, 2000u);
         watchdog_task_checkin(WATCHDOG_CHECKIN_UPDATE_TASK);
 
-        if (rc != PICO_OK) {
+        if (status != HAL_OK || args.result != HAL_OK) {
             return false;
         }
 
@@ -368,12 +491,15 @@ typedef struct {
     uint32_t offset;
     const uint8_t *data;
     size_t count;
+    hal_status_t result; // 2026-09-06 review fix -- see update_metadata_write_args_t's
+                          // own result field comment for why this must be
+                          // checked, not discarded.
 } update_program_args_t;
 
 static void update_program_cb(void *param)
 {
     update_program_args_t *a = (update_program_args_t *)param;
-    flash_range_program(a->offset, a->data, a->count);
+    a->result = hal_flash_program(&s_flash_region, a->offset, a->data, a->count);
 }
 
 // See this file's header comment ("The 248-byte chunk / 256-byte flash page
@@ -383,22 +509,28 @@ static void update_program_cb(void *param)
 static bool update_task_program_chunk(uint32_t slot_flash_offset, uint32_t rel_offset,
                                        const uint8_t *data, size_t len)
 {
-    uint32_t abs_start = slot_flash_offset + rel_offset;
-    uint32_t first_page = abs_start & ~(uint32_t)(FLASH_PAGE_SIZE - 1u);
-    uint32_t last_byte = abs_start + (uint32_t)len - 1u;
-    uint32_t last_page = last_byte & ~(uint32_t)(FLASH_PAGE_SIZE - 1u);
-    uint32_t page_count = ((last_page - first_page) / FLASH_PAGE_SIZE) + 1u;
+    if (!update_task_ensure_flash_region()) {
+        return false;
+    }
 
-    // UPDATE_CHUNK_LEN (248) < 2 * FLASH_PAGE_SIZE (512), so a chunk can
-    // never legitimately span more than two pages -- defensive check kept
-    // anyway since `len` ultimately comes off the wire.
+    uint32_t abs_start = slot_flash_offset + rel_offset;
+    uint32_t first_page = abs_start & ~(uint32_t)(HAL_FLASH_PROGRAM_SIZE - 1u);
+    uint32_t last_byte = abs_start + (uint32_t)len - 1u;
+    uint32_t last_page = last_byte & ~(uint32_t)(HAL_FLASH_PROGRAM_SIZE - 1u);
+    uint32_t page_count = ((last_page - first_page) / HAL_FLASH_PROGRAM_SIZE) + 1u;
+
+    // UPDATE_CHUNK_LEN (248) < 2 * HAL_FLASH_PROGRAM_SIZE (512), so a chunk
+    // can never legitimately span more than two pages -- defensive check
+    // kept anyway since `len` ultimately comes off the wire.
     if (page_count > 2u) {
         return false;
     }
 
-    uint8_t page_buf[2u * FLASH_PAGE_SIZE];
-    const uint8_t *xip_src = (const uint8_t *)(XIP_BASE + first_page);
-    memcpy(page_buf, xip_src, (size_t)page_count * FLASH_PAGE_SIZE);
+    uint8_t page_buf[2u * HAL_FLASH_PROGRAM_SIZE];
+    if (hal_flash_read(&s_flash_region, first_page, page_buf,
+                        (size_t)page_count * HAL_FLASH_PROGRAM_SIZE) != HAL_OK) {
+        return false;
+    }
 
     uint32_t buf_offset = abs_start - first_page;
     memcpy(page_buf + buf_offset, data, len);
@@ -406,10 +538,11 @@ static bool update_task_program_chunk(uint32_t slot_flash_offset, uint32_t rel_o
     update_program_args_t args = {
         .offset = first_page,
         .data = page_buf,
-        .count = (size_t)page_count * FLASH_PAGE_SIZE,
+        .count = (size_t)page_count * HAL_FLASH_PROGRAM_SIZE,
+        .result = HAL_NOT_READY,
     };
-    int rc = flash_safe_execute(update_program_cb, &args, 1000u);
-    return rc == PICO_OK;
+    hal_status_t status = hal_flash_safe_execute(update_program_cb, &args, 1000u);
+    return status == HAL_OK && args.result == HAL_OK;
 }
 
 // --- UPDATE_STATUS send -----------------------------------------------------
@@ -674,8 +807,19 @@ static void update_task_process_end(const uint8_t *payload, uint8_t length)
     // WRITTEN, not what the receive-side bitmap thinks arrived --
     // docs/BOOTLOADER.md section 5: "the only check that catches a write
     // that reported success and did not land."
-    const uint8_t *slot_data = (const uint8_t *)(XIP_BASE + s_slot_flash_offset);
-    uint32_t actual_crc = bootloader_crc32(slot_data, s_header.length);
+    if (!update_task_ensure_flash_region()) {
+        update_task_send_status_now(UPDATE_TASK_STATE_FAILED, UPDATE_STATUS_ERR_INTERNAL);
+        update_task_revert_target_slot();
+        return;
+    }
+    const void *slot_data_ptr = NULL;
+    if (hal_flash_map(&s_flash_region, s_slot_flash_offset, s_header.length, &slot_data_ptr) !=
+        HAL_OK) {
+        update_task_send_status_now(UPDATE_TASK_STATE_FAILED, UPDATE_STATUS_ERR_INTERNAL);
+        update_task_revert_target_slot();
+        return;
+    }
+    uint32_t actual_crc = bootloader_crc32((const uint8_t *)slot_data_ptr, s_header.length);
 
     if (end_crc != s_header.crc32) {
         // The END frame's repeated CRC should equal the BEGIN header's own

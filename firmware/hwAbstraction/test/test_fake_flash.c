@@ -245,6 +245,65 @@ int main(void) {
     CHECK(geo2.flash_total_size == 2u * HAL_FLASH_ERASE_SIZE);
     CHECK(hal_flash_read(&region, 2u * (uint32_t)HAL_FLASH_ERASE_SIZE, buf, 1) == HAL_INVALID_ARG);
 
+    /* --- hal_flash_map: zero-copy read-only pointer, region-relative,
+     * bounds-checked, and reflects live erase/program state --- */
+    fake_flash_reset_all();
+    CHECK(hal_flash_region_init(&region, 0, (uint32_t)FAKE_FLASH_DEFAULT_SIZE_BYTES) == HAL_OK);
+    {
+        const void *p = NULL;
+        CHECK(hal_flash_map(NULL, 0, 4, &p) == HAL_NOT_READY);
+        hal_flash_region_t unbound;
+        memset(&unbound, 0, sizeof(unbound));
+        CHECK(hal_flash_map(&unbound, 0, 4, &p) == HAL_NOT_READY);
+        CHECK(hal_flash_map(&region, 0, 4, NULL) == HAL_INVALID_ARG);
+        CHECK(hal_flash_map(&region, (uint32_t)FAKE_FLASH_DEFAULT_SIZE_BYTES, 1, &p)
+              == HAL_INVALID_ARG); /* out of bounds */
+
+        CHECK(hal_flash_map(&region, 0, HAL_FLASH_PROGRAM_SIZE, &p) == HAL_OK);
+        const uint8_t *mapped = (const uint8_t *)p;
+        int all_ff = 1;
+        for (size_t i = 0; i < HAL_FLASH_PROGRAM_SIZE; i++) {
+            if (mapped[i] != 0xFF) { all_ff = 0; break; }
+        }
+        CHECK(all_ff); /* freshly reset image reads erased through the mapped pointer too */
+
+        uint8_t pat[HAL_FLASH_PROGRAM_SIZE];
+        for (size_t i = 0; i < sizeof(pat); i++) pat[i] = (uint8_t)(0x5A ^ i);
+        CHECK(hal_flash_erase(&region, 0, HAL_FLASH_ERASE_SIZE) == HAL_OK);
+        CHECK(hal_flash_program(&region, 0, pat, sizeof(pat)) == HAL_OK);
+        /* Same pointer obtained before the program call now observes the
+         * write -- it aliases live image memory, not a snapshot. */
+        CHECK(memcmp(mapped, pat, sizeof(pat)) == 0);
+    }
+    /* --- hal_flash_map on a region bound at a NONZERO base: the returned
+     * pointer must land at base+offset in the underlying image, not at
+     * offset alone -- this is exactly the offset math update_task.c's
+     * whole-chip region relies on (its offsets, e.g.
+     * BOOTLOADER_SLOT_A_FLASH_OFFSET, are absolute device offsets against a
+     * region bound at base 0, but hal_flash_map()'s own base+offset
+     * translation is what any region-relative caller, like
+     * config_store_flash.c's sector-scoped region, depends on too). --- */
+    {
+        hal_flash_region_t sub;
+        CHECK(hal_flash_region_init(&sub, HAL_FLASH_ERASE_SIZE, HAL_FLASH_ERASE_SIZE) == HAL_OK);
+        uint8_t marker[HAL_FLASH_PROGRAM_SIZE];
+        memset(marker, 0x77, sizeof(marker));
+        CHECK(hal_flash_erase(&sub, 0, HAL_FLASH_ERASE_SIZE) == HAL_OK);
+        CHECK(hal_flash_program(&sub, 0, marker, sizeof(marker)) == HAL_OK);
+
+        const void *p2 = NULL;
+        CHECK(hal_flash_map(&sub, 0, HAL_FLASH_PROGRAM_SIZE, &p2) == HAL_OK);
+        CHECK(memcmp(p2, marker, sizeof(marker)) == 0);
+
+        /* Reading through the WHOLE-DEVICE region at the sub-region's
+         * absolute offset must see the same bytes -- confirms hal_flash_map()
+         * really added `sub`'s base rather than ignoring it. */
+        const void *p3 = NULL;
+        CHECK(hal_flash_map(&region, HAL_FLASH_ERASE_SIZE, HAL_FLASH_PROGRAM_SIZE, &p3) == HAL_OK);
+        CHECK(memcmp(p3, marker, sizeof(marker)) == 0);
+        CHECK(p2 == p3); /* same absolute device byte, reached two ways */
+    }
+
     /* --- write_safe_here test hook --- */
     fake_flash_reset_all();
     CHECK(hal_flash_write_safe_here() == true);

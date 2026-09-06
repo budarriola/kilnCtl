@@ -214,6 +214,30 @@ hal_status_t hal_flash_read(hal_flash_region_t *r, uint32_t offset,
     return HAL_OK;
 }
 
+hal_status_t hal_flash_map(hal_flash_region_t *r, uint32_t offset, size_t len,
+                            const void **out_ptr) {
+    fake_flash_region_data_t d;
+    if (!region_get(r, &d)) {
+        return HAL_NOT_READY;
+    }
+    if (out_ptr == NULL) {
+        return HAL_INVALID_ARG;
+    }
+    uint32_t abs_offset;
+    if (!region_bounds_ok(&d, offset, len, &abs_offset)) {
+        return HAL_INVALID_ARG;
+    }
+    /* Pointer into this fake's own in-memory image -- see hal_flash.h's own
+     * doc comment on hal_flash_map(): callers see the same interface shape
+     * as the pico backend's XIP-mapped pointer, without a real memory-mapped
+     * device backing it. No scripted-failure/power-loss injection on this
+     * path (mirrors hal_flash_read()'s own non-injectable-here design intent
+     * for a pure pointer-return op); scripting still works on the erase/
+     * program calls that mutate what this pointer sees. */
+    *out_ptr = (const void *)&s_image[abs_offset];
+    return HAL_OK;
+}
+
 hal_status_t hal_flash_erase(hal_flash_region_t *r, uint32_t offset, size_t len) {
     fake_flash_region_data_t d;
     if (!region_get(r, &d)) {
