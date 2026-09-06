@@ -14,10 +14,13 @@ Two independent text streams feed this today:
   Probe's UART bridge (UART0, GP16/GP17 -- `firmware/SaftyFW/docs/HARDWARE.md`
   §7b). There is no PC-side reader for this yet (`tools/PcTools/TODO.md`
   confirms the wire-protocol LOG-relay path, device SAFETY on task 5, is not
-  implemented in firmware -- `Frame` carries no source-device field to
-  distinguish a relayed Pico line from the ESP's own). Until that relay
-  exists, this module talks to the probe's UART bridge directly as a second,
-  plain serial port -- no framing, one line of ASCII per read.
+  implemented in firmware -- `kilnlink_frame_t` already has a `src_device`
+  field (`kilnlink_frame.h`), so a relayed line COULD be told apart from the
+  ESP's own; what is actually missing is a LOG frame type/codec on either
+  side at all -- `kilnlink_status.h`'s own completion comment lists the LOG
+  relay among the frames "documented ... but not yet coded"). Until that
+  relay exists, this module talks to the probe's UART bridge directly as a
+  second, plain serial port -- no framing, one line of ASCII per read.
 
 Both streams are timestamped on PC arrival (`time.time()`) -- neither
 processor has an RTC this tool trusts, same reasoning as the MCP server's
@@ -51,10 +54,12 @@ that firmware has never emitted at all.
 Not yet done, because it needs firmware or protocol changes this task is not
 scoped to touch (`tools/PcTools/TODO.md` "Logging and consoles" tracks these):
 an RTT-over-SWD console path, and reading the Pico's log over the
-wire-protocol relay once `Frame`/`LogLine` carry a source device (today's
-`kilnlink` `Frame` has no source-device field, so a relayed Pico LOG line
-cannot yet be distinguished from the ESP's own -- see LINK_PROTOCOL.md). The
-per-frame drop counters that already exist on the wire
+wire-protocol relay once a LOG frame type/codec exists on either side at all
+(`kilnlink_frame_t` already carries `src_device`, so a relayed Pico LOG line
+COULD be told apart from the ESP's own once that frame exists -- the missing
+piece is the frame itself, not the field; see `kilnlink_status.h`'s
+completion comment and LINK_PROTOCOL.md). The per-frame drop counters that
+already exist on the wire
 (`tx_frames_dropped`/`tx_dropped_sat`, see `devices_safety.py`) count the
 isolated link's shared TX ring, not LOG frames specifically -- there is no
 way to attribute a drop to "a LOG frame was dropped" until the LOG-frame
@@ -77,10 +82,17 @@ from typing import Callable, Optional
 
 import serial
 
+from . import debug_probe
 from .device_log import LogClient
 from .devices import LogLine
 from .protocol import DEFAULT_BAUD_RATE
-from .serial_link import DEBUG_PROBE_VID_PID, UartLink, list_debug_probe_ports, list_ports
+from .serial_link import (
+    DEBUG_PROBE_VID_PID,
+    UartLink,
+    debug_probe_hwid_serial,
+    list_debug_probe_ports,
+    list_ports,
+)
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +118,14 @@ SOURCE_SAFETY = "SAFETY"
 #: transport wired up in this module.
 TRANSPORT_ESP_USB_CDC = "ESP_USB_CDC"
 TRANSPORT_SAFETY_PROBE_UART = "SAFETY_PROBE_UART"
+
+#: Sentinel for a ConsoleEvent built without an explicit transport. Never a
+#: real transport's default -- every live producer in this module
+#: (`add_esp`, `add_safety_probe_uart`) passes its own TRANSPORT_* value
+#: explicitly, so a line actually tagged UNKNOWN means a caller (or a future
+#: third source) forgot to say which transport it came from, not "assume
+#: ESP_USB_CDC".
+TRANSPORT_UNKNOWN = "UNKNOWN"
 
 #: Transports named in TODO.md's "Logging and consoles" section that this
 #: module knows about but cannot open, because the firmware/protocol side
@@ -134,7 +154,7 @@ class ConsoleEvent:
     source: str  # SOURCE_ESP or SOURCE_SAFETY
     text: str
     level: str = "I"  # single-char level tag, ESP-IDF convention ('?' if unknown)
-    transport: str = TRANSPORT_ESP_USB_CDC  # one of the TRANSPORT_* constants above
+    transport: str = TRANSPORT_UNKNOWN  # one of the TRANSPORT_* constants above; never left as UNKNOWN by a live producer
 
 
 def format_event(evt: ConsoleEvent, *, tag_source: bool) -> str:
@@ -144,6 +164,11 @@ def format_event(evt: ConsoleEvent, *, tag_source: bool) -> str:
     the per-processor files already say which processor they are via the
     filename, so they omit the source but keep the transport tag (it is not
     otherwise implied once a source can have more than one transport).
+
+    Format change: ``tag_source=False`` used to emit no bracket prefix at
+    all; per-processor files now carry a ``[TRANSPORT]`` prefix on every
+    line for the same reason -- a parser or a human reading an old
+    per-processor log file un-prefixed should not assume that still holds.
     """
     stamp = datetime.fromtimestamp(evt.pc_time).strftime(LINE_TIME_FORMAT)[:-3]
     prefix = f"[{evt.source}/{evt.transport}] " if tag_source else f"[{evt.transport}] "
@@ -356,10 +381,25 @@ def check_transport_availability() -> "list[TransportStatus]":
     index pyserial-side, so two interfaces of the same physical probe can
     carry identical or misleading description strings (see that function's
     docstring, and the project memory note on Windows USB names vs
-    descriptors).
+    descriptors). More than one identical-model Debug Probe can also be on
+    the same bench (confirmed on this one -- see `debug_probe.py`'s
+    ``adapter_serial`` comment); ``candidate_ports`` therefore carries each
+    port's ``SER=...`` USB serial number, and the entry matching
+    ``debug_probe.pico_probe_serial()`` (the same pinned/env-overridable
+    serial the SWD/JTAG path binds to) is marked ``[pinned Pico probe]`` so
+    the report says which port is *this* project's Pico, not just that some
+    Debug Probe exists.
     """
     esp_ports = [p for p in list_ports() if p.recommended]
     probe_ports = list_debug_probe_ports()
+    pinned_serial = debug_probe.pico_probe_serial()
+
+    def _label(port) -> str:
+        ser = debug_probe_hwid_serial(port.hwid)
+        label = f"{port.device} (SER={ser})" if ser else port.device
+        if pinned_serial is not None and ser == pinned_serial:
+            label += " [pinned Pico probe]"
+        return label
 
     return [
         TransportStatus(
@@ -371,7 +411,7 @@ def check_transport_availability() -> "list[TransportStatus]":
         TransportStatus(
             transport=TRANSPORT_SAFETY_PROBE_UART,
             present=bool(probe_ports),
-            candidate_ports=tuple(p.device for p in probe_ports),
+            candidate_ports=tuple(_label(p) for p in probe_ports),
             detail=(
                 ""
                 if probe_ports
@@ -381,8 +421,10 @@ def check_transport_availability() -> "list[TransportStatus]":
         TransportStatus(
             transport=TRANSPORT_SAFETY_LOG_RELAY,
             present=False,
-            detail="firmware side pending: kilnlink Frame carries no source-device field yet, "
-            "and the Pico has no LOG-frame relay path (see TODO.md 'Logging and consoles')",
+            detail="firmware side pending: no LOG frame type/codec exists on either side yet "
+            "(kilnlink_status.h lists the LOG relay among frames 'not yet coded'); "
+            "kilnlink_frame_t already has src_device, so that part is not the blocker "
+            "(see TODO.md 'Logging and consoles')",
         ),
         TransportStatus(
             transport=TRANSPORT_RTT_SWD,

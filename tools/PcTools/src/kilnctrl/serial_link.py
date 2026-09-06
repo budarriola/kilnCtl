@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import secrets
 import threading
 from dataclasses import dataclass, field
@@ -184,15 +185,39 @@ def _score_port(port) -> int:
 DEBUG_PROBE_VID_PID = "2E8A:000C"
 
 
-def list_debug_probe_ports() -> list[PortInfo]:
-    """Every enumerated port belonging to the Raspberry Pi Debug Probe
+def debug_probe_hwid_serial(hwid: str) -> Optional[str]:
+    """Pull the ``SER=...`` USB serial number out of a pyserial ``hwid``
+    string (e.g. ``"USB VID:PID=2E8A:000C SER=E66540F0A36C6E21 LOCATION=..."``),
+    or None if the field isn't present.
+
+    Needed because more than one Raspberry Pi Debug Probe can be on the
+    bench at once -- `debug_probe.py` already pins the SWD/JTAG path to one
+    probe's serial (``adapter_serial``/``KILNCTL_PICO_PROBE_SERIAL``) for
+    exactly this reason; :func:`list_debug_probe_ports` exposes the same
+    field so a caller can tell which enumerated port is *that* probe.
+    """
+    match = re.search(r"SER=([^\s]+)", hwid, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def list_debug_probe_ports(*, serial: Optional[str] = None) -> list[PortInfo]:
+    """Every enumerated port belonging to a Raspberry Pi Debug Probe
     (any interface), identified by VID:PID rather than by description text.
 
     Used for honest transport-availability reporting: "is the SAFETY probe's
     UART bridge even plugged in" is a VID:PID question, not a string-match
     one -- see :data:`DEBUG_PROBE_VID_PID`'s comment.
+
+    ``serial``, when given, additionally filters to ports whose ``hwid``
+    carries that exact USB serial number (see :func:`debug_probe_hwid_serial`)
+    -- two identical-model probes on one bench are otherwise indistinguishable
+    by VID:PID alone, the same ambiguity ``debug_probe.py``'s ``adapter_serial``
+    exists to resolve for the SWD/JTAG path.
     """
-    return [p for p in list_ports() if DEBUG_PROBE_VID_PID in p.hwid.upper()]
+    ports = [p for p in list_ports() if DEBUG_PROBE_VID_PID in p.hwid.upper()]
+    if serial is not None:
+        ports = [p for p in ports if debug_probe_hwid_serial(p.hwid) == serial]
+    return ports
 
 
 def list_ports() -> list[PortInfo]:

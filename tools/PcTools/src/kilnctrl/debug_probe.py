@@ -247,6 +247,17 @@ def _adapter_serial(peer_cfg: PeerConfig) -> Optional[str]:
     return peer_cfg.adapter_serial
 
 
+def pico_probe_serial() -> Optional[str]:
+    """Public wrapper on :func:`_adapter_serial` for ``PEER_PICO`` -- the USB
+    serial number this codebase pins the SWD/JTAG path to (env-overridable
+    via :data:`_PROBE_SERIAL_ENV`), for callers outside this module that need
+    to tell *that* probe apart from another identical-model one on the same
+    bench (e.g. ``console_capture.py``'s transport-availability report,
+    matching against ``serial_link.debug_probe_hwid_serial``).
+    """
+    return _adapter_serial(resolve_peer(PEER_PICO))
+
+
 def _adapter_prefix(peer_cfg: PeerConfig) -> str:
     """TCL preamble pinning the adapter and its speed, in that order.
 
