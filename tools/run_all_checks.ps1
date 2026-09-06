@@ -74,6 +74,26 @@ if (Test-Path $halBoundaryNegativeTest) {
     Write-Host "WARNING: expected negative test $halBoundaryNegativeTest not found -- has it moved?" -ForegroundColor Yellow
 }
 
+# firmware/hwAbstraction/test/{compile_esp_backends,compile_pico_backends,
+# test_host_fakes}.ps1 are named compile_*/test_* rather than check_*, so
+# the glob above does not pick them up on its own -- added explicitly here,
+# same pattern as the hal boundary negative test just above. compile_esp_
+# backends.ps1 and compile_pico_backends.ps1 legitimately exit 1 when the
+# matching toolchain/build dir is missing (IDF's compile_commands.json /
+# SaftyFW's build.ninja) -- that is a correct, non-vacuous failure on a
+# machine without that toolchain configured, not a bug in the script.
+$hwAbstractionTestDir = Join-Path $repoRoot "firmware\hwAbstraction\test"
+$hwAbstractionScripts = @("compile_esp_backends.ps1", "compile_pico_backends.ps1", "test_host_fakes.ps1")
+foreach ($name in $hwAbstractionScripts) {
+    $scriptPath = Join-Path $hwAbstractionTestDir $name
+    if (Test-Path $scriptPath) {
+        $checks += Get-Item $scriptPath
+    } else {
+        Write-Host "WARNING: expected hwAbstraction test $scriptPath not found -- has it moved?" -ForegroundColor Yellow
+    }
+}
+$checks = $checks | Sort-Object FullName
+
 # As of 2026-08-28 there are several: some under tools/, two under
 # firmware/SaftyFW/tools/, and the floor is set below the real count on
 # purpose. It exists to catch "the glob found nothing", not to assert an

@@ -265,4 +265,71 @@ if ($headroom -lt 8) {
 } else {
     Write-Host "Stack margin cap check passed: $headroom spare slot(s)." -ForegroundColor Green
 }
+
+# --- hwAbstraction extension ---------------------------------------------
+#
+# firmware/hwAbstraction/**'s ESP backends (esp/uart, esp/i2c, esp/spi)
+# create their own FreeRTOS tasks (xTaskCreate*) but hwAbstraction is a
+# one-way boundary -- it must never #include a KilnFW header such as
+# stack_margin.h, so it cannot call stack_margin_register() itself. The
+# accessor pattern instead: each backend that creates a task exposes a
+# hal_<name>_get_task_handle() function in the SAME file, and a KilnFW-side
+# caller (outside hwAbstraction) is expected to register that handle. Two
+# things are enforced here:
+#
+#   1. any file under firmware/hwAbstraction/ that calls xTaskCreate*()
+#      must define a function matching hal_[a-z0-9_]+_get_task_handle in
+#      the SAME file -- otherwise the task it creates has no way for
+#      KilnFW to ever reach its handle, and it fails naming the file.
+#   2. no file under firmware/hwAbstraction/ may #include stack_margin.h
+#      -- doing so would be the boundary violation this split exists to
+#      prevent (hwAbstraction reaching into KilnFW).
+#
+# If the accessor has not landed in a given backend yet, this legitimately
+# fails naming that file -- that is not a false positive, it is exactly
+# what this check exists to report until the accessor call site is added.
+$hwAbstractionRoot = Join-Path $root "..\firmware\hwAbstraction"
+if (Test-Path $hwAbstractionRoot) {
+    $hwAbstractionRootResolved = (Resolve-Path $hwAbstractionRoot).Path
+    $hwAbstractionFiles = @(Get-ChildItem -Path $hwAbstractionRootResolved -Recurse -File -Include "*.c", "*.h")
+
+    $hwAbstractionViolations = @()
+    $accessorPattern = '\bhal_[a-z0-9_]+_get_task_handle\b'
+    $createPattern = '\bxTaskCreate\w*\s*\('
+    $includePattern = '#\s*include\s*[<"]stack_margin\.h[>"]'
+
+    foreach ($f in $hwAbstractionFiles) {
+        $codeLines = Get-CodeOnlyLines -Path $f.FullName
+        $relPath = "firmware/hwAbstraction/" + (($f.FullName.Substring($hwAbstractionRootResolved.Length + 1)) -replace '\\', '/')
+
+        $createsTask = $false
+        $hasAccessor = $false
+        $includesStackMargin = $false
+        foreach ($line in $codeLines) {
+            if ($line -match $createPattern) { $createsTask = $true }
+            if ($line -match $accessorPattern) { $hasAccessor = $true }
+            if ($line -match $includePattern) { $includesStackMargin = $true }
+        }
+
+        if ($createsTask -and -not $hasAccessor) {
+            $hwAbstractionViolations += "${relPath}: calls xTaskCreate*() but defines no hal_..._get_task_handle() accessor in the same file -- KilnFW has no way to reach this task's handle to register it for stack-margin reporting."
+        }
+        if ($includesStackMargin) {
+            $hwAbstractionViolations += "${relPath}: #includes stack_margin.h -- hwAbstraction must not include KilnFW headers (one-way boundary violation)."
+        }
+    }
+
+    if ($hwAbstractionViolations.Count -gt 0) {
+        Write-Host ""
+        Write-Host "HWABSTRACTION STACK-MARGIN BOUNDARY CHECK FAILED:" -ForegroundColor Red
+        foreach ($v in $hwAbstractionViolations) {
+            Write-Host "  $v" -ForegroundColor Red
+        }
+        throw "$($hwAbstractionViolations.Count) firmware/hwAbstraction/ file(s) violate the stack-margin accessor contract or the one-way KilnFW-include boundary -- see messages above."
+    }
+    Write-Host "hwAbstraction stack-margin boundary check passed: $($hwAbstractionFiles.Count) file(s) scanned under $hwAbstractionRootResolved." -ForegroundColor Green
+} else {
+    Write-Host "WARNING: $hwAbstractionRoot not found -- skipping hwAbstraction stack-margin boundary check." -ForegroundColor Yellow
+}
+
 exit 0

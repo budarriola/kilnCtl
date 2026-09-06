@@ -140,21 +140,63 @@ function Test-Allowlisted {
     return $false
 }
 
-# Pulls every *.c basename referenced (quoted) anywhere in a PowerShell
-# script -- used for the hwAbstraction test-script scan below, where the
-# scripts build paths with Join-Path rather than writing them as literal
-# CMake-style list entries, so only the basename is stable across scripts.
-# Comments are stripped first with the same line-comment convention as
-# CMake (# to end of line), which PowerShell also uses.
+# Pulls the *.c basenames that a hwAbstraction test script ACTUALLY compiles
+# -- i.e. entries in its real source-list array -- not every basename that
+# happens to appear anywhere in the file (a file merely NAMED in a comment,
+# a header block, or an unrelated string was previously credited as
+# "covered" with no source-list membership at all; see the file header's
+# note on this class of bug in check_uri_handler_cap.ps1's history). Each
+# of the three scripts declares its sources in its own literal shape, so
+# each shape is matched explicitly rather than assumed to be uniform:
+#
+#   compile_esp_backends.ps1 / compile_pico_backends.ps1:
+#       $sources = @(
+#           (Join-Path $HalDir "esp\gpio\hal_gpio_esp.c"),
+#           ...
+#       )
+#     -- only the Join-Path string literals inside THIS array count.
+#
+#   test_host_fakes.ps1:
+#       $cases = @(
+#           @{ Name = "fake_gpio"; Fake = "fake_gpio.c"; Test = "test_fake_gpio.c" },
+#           ...
+#       )
+#     -- only the `Fake = "...".c"` value counts (the fake under host/ that
+#     the case actually builds); `Test = "..."` names a file under test/
+#     itself, which Get-RealCFiles already excludes from consideration, and
+#     Name is not a filename at all.
+#
+# A basename appearing only in a comment, a header, or elsewhere in the
+# file (outside these arrays) is NOT counted -- that is precisely the gap
+# this rewrite closes.
 function Get-CBasenamesReferencedInScript {
     param([string]$Path)
     $names = @()
     if (-not (Test-Path $Path)) { return $names }
-    $codeLines = Get-CMakeCodeOnlyLines -Path $Path
-    foreach ($line in $codeLines) {
-        foreach ($m in [regex]::Matches($line, '"([^"]*\.c)"')) {
-            $leaf = ($m.Groups[1].Value -replace '\\', '/') -split '/' | Select-Object -Last 1
-            $names += $leaf
+    $raw = Get-Content -Path $Path -Raw
+    $fileName = Split-Path -Leaf $Path
+
+    if ($fileName -ieq "test_host_fakes.ps1") {
+        $block = [regex]::Match($raw, '\$cases\s*=\s*@\(\s*(.*?)\r?\n\)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        if ($block.Success) {
+            foreach ($m in [regex]::Matches($block.Groups[1].Value, 'Fake\s*=\s*"([^"]+\.c)"')) {
+                $names += (($m.Groups[1].Value -replace '\\', '/') -split '/' | Select-Object -Last 1)
+            }
+        }
+        # hal_status.c (and any future firmware/hwAbstraction/common/*.c file)
+        # is passed straight into every Invoke-ClLink call's -SourceFiles as
+        # `(Join-Path $commonDir "hal_status.c")` rather than living in the
+        # $cases array -- it is a real, always-compiled source, so it counts
+        # too, matched by its own distinct Join-Path variable ($commonDir).
+        foreach ($m in [regex]::Matches($raw, 'Join-Path\s+\$commonDir\s+"([^"]+\.c)"')) {
+            $names += (($m.Groups[1].Value -replace '\\', '/') -split '/' | Select-Object -Last 1)
+        }
+    } else {
+        $block = [regex]::Match($raw, '\$sources\s*=\s*@\(\s*(.*?)\r?\n\)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        if ($block.Success) {
+            foreach ($m in [regex]::Matches($block.Groups[1].Value, 'Join-Path\s+\$HalDir\s+"([^"]+\.c)"')) {
+                $names += (($m.Groups[1].Value -replace '\\', '/') -split '/' | Select-Object -Last 1)
+            }
         }
     }
     return $names

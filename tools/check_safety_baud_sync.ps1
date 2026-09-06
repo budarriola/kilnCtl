@@ -1,13 +1,21 @@
 # check_safety_baud_sync.ps1 -- the ESP<->RP2040 isolated link baud rate is
-# hardcoded in THREE places that must agree, with no negotiation on the wire.
+# hardcoded in FOUR places that must agree, with no negotiation on the wire.
 # A mismatch does not degrade gracefully: it produces framing errors and
 # nothing else. Measured 2026-08-25 with the ESP at 230400 and the Pico at
 # 115200 -- 121 new crc/framing errors in 3 seconds, zero frames delivered.
 #
-# The three sites:
+# The four sites:
 #   1. KilnFW      App/drivers/Kconfig            KILNCTL_SAFETY_BAUD_RATE default
 #   2. SaftyFW     src/tasks/uart_owner.c         UART_OWNER_BAUD_RATE
 #   3. SaftyFW     bootloader/main.c              enter_recovery()'s uart_init
+#   4. hwAbstraction firmware/hwAbstraction/pico/uart/hal_uart_pico.c
+#                                                 HAL_UART_PICO_EXPECTED_BAUD --
+#      a local mirror added by f1f7f3c because uart_owner.c exposes no baud
+#      accessor and hwAbstraction must not #include SaftyFW's uart_owner.h
+#      (one-way boundary, same rule as the KilnFW-side hwAbstraction split).
+#      "hand until Phase 1a [accessor lands]" per that file's own comment --
+#      until then this script is the only thing keeping it from silently
+#      drifting from site 2.
 #
 # WHY A SCRIPT AND NOT A _Static_assert: they live in two separate build
 # systems (ESP-IDF/Kconfig and the Pico SDK), so no compile-time assert can
@@ -44,12 +52,19 @@ if ($bl -notmatch 'uart_init\(uart1,\s*(\d+)u\)') {
 }
 $sites += [pscustomobject]@{ Name = 'SaftyFW bootloader recovery'; Baud = [int]$Matches[1]; Path = $blPath }
 
+$halUartPicoPath = Join-Path $repo 'firmware/hwAbstraction/pico/uart/hal_uart_pico.c'
+$halUartPico = Get-Content -Raw $halUartPicoPath
+if ($halUartPico -notmatch '#define\s+HAL_UART_PICO_EXPECTED_BAUD\s+(\d+)u') {
+    throw "check_safety_baud_sync: could not find HAL_UART_PICO_EXPECTED_BAUD in $halUartPicoPath -- fix the check, do not delete it."
+}
+$sites += [pscustomobject]@{ Name = 'hwAbstraction HAL_UART_PICO_EXPECTED_BAUD'; Baud = [int]$Matches[1]; Path = $halUartPicoPath }
+
 $distinct = $sites.Baud | Sort-Object -Unique
 if ($distinct.Count -ne 1) {
     Write-Host 'Safety-link baud rates DISAGREE:'
     foreach ($s in $sites) { Write-Host ("  {0,-32} {1}" -f $s.Name, $s.Baud) }
-    throw "check_safety_baud_sync: $($distinct.Count) different baud rates across the three hardcoded sites ($($distinct -join ', ')). They must all match -- the link has no baud negotiation, and a mismatch means framing errors, not slow operation."
+    throw "check_safety_baud_sync: $($distinct.Count) different baud rates across the four hardcoded sites ($($distinct -join ', ')). They must all match -- the link has no baud negotiation, and a mismatch means framing errors, not slow operation."
 }
 
-Write-Host ("Safety-link baud sync OK: all three sites agree at {0} baud." -f $distinct[0])
+Write-Host ("Safety-link baud sync OK: all four sites agree at {0} baud." -f $distinct[0])
 foreach ($s in $sites) { Write-Host ("  {0,-32} {1}" -f $s.Name, $s.Baud) }
