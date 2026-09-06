@@ -47,8 +47,10 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+
+#include "hal_kv.h"
+#include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t
+                              * save_kibase_job()'s caller (the flash worker) already branches on */
 
 #include "zones_config_accessors.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
                          // this file now writes the opt-in flag here too (U2) and reads/writes
@@ -459,19 +461,19 @@ typedef struct {
 static void save_kibase_job(void *arg)
 {
     kibase_job_t *job = (kibase_job_t *)arg;
-    nvs_handle_t h;
-    esp_err_t err =
-        nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        job->result = err;
+    hal_kv_handle_t h;
+    hal_status_t err =
+        hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION);
+    if (err != HAL_OK) {
+        job->result = hal_status_to_esp_err(err);
         return;
     }
-    err = nvs_set_blob(h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &job->blob, sizeof(job->blob));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &job->blob, sizeof(job->blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    job->result = err;
+    hal_kv_close(&h);
+    job->result = hal_status_to_esp_err(err);
 }
 
 void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
@@ -698,10 +700,10 @@ bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled)
 // yet at this point; dispatching onto it here would fail or hang.
 static void adaptive_tune_migrate_enable_flags(void)
 {
-    nvs_handle_t h;
-    esp_err_t err =
-        nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err =
+        hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION);
+    if (err != HAL_OK) {
         // Namespace never touched at all (a brand-new board, or one that
         // never opted any zone in under the old scheme) -- nothing to
         // migrate; the new home's struct-zero default (off) is already
@@ -711,14 +713,14 @@ static void adaptive_tune_migrate_enable_flags(void)
     }
 
     uint8_t migrated = 0;
-    if (nvs_get_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, &migrated) == ESP_OK && migrated) {
-        nvs_close(h);
+    if (hal_kv_get_u8(&h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, &migrated) == HAL_OK && migrated) {
+        hal_kv_close(&h);
         return; // already migrated on a previous boot -- en_mask must never be consulted again
     }
 
     uint8_t old_mask = 0;
-    esp_err_t mask_err = nvs_get_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK, &old_mask);
-    if (mask_err == ESP_OK && old_mask != 0) {
+    hal_status_t mask_err = hal_kv_get_u8(&h, ADAPTIVE_TUNE_NVS_KEY_ENMASK, &old_mask);
+    if (mask_err == HAL_OK && old_mask != 0) {
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if ((old_mask & (1u << zi)) != 0) {
                 if (!zones_config_set_adaptive_tune_enabled(zi, true)) {
@@ -726,7 +728,7 @@ static void adaptive_tune_migrate_enable_flags(void)
                              "migrate: zone %u's opt-in write to its new home failed -- will retry next boot "
                              "(en_migrated not set)",
                              (unsigned)zi);
-                    nvs_close(h);
+                    hal_kv_close(&h);
                     return; // do NOT mark migrated -- a partial migration must be retried whole, not
                             // half-applied and then never revisited
                 }
@@ -737,18 +739,18 @@ static void adaptive_tune_migrate_enable_flags(void)
                  "zone config blob",
                  (unsigned)old_mask);
     }
-    // mask_err == ESP_ERR_NVS_NOT_FOUND (key never written) is just as much
+    // mask_err == HAL_NOT_FOUND (key never written) is just as much
     // "nothing to migrate" as a found-but-zero mask -- either way this
     // namespace must never be consulted again after this point.
-    esp_err_t mark_err = nvs_set_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, 1);
-    if (mark_err == ESP_OK) {
-        mark_err = nvs_commit(h);
+    hal_status_t mark_err = hal_kv_set_u8(&h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, 1);
+    if (mark_err == HAL_OK) {
+        mark_err = hal_kv_commit(&h);
     }
-    if (mark_err != ESP_OK) {
+    if (mark_err != HAL_OK) {
         ESP_LOGE(ADAPTIVE_TUNE_TAG, "migrate: failed to persist the migrated marker: %s -- will retry next boot",
-                 esp_err_to_name(mark_err));
+                 hal_status_to_name(mark_err));
     }
-    nvs_close(h);
+    hal_kv_close(&h);
 }
 
 void adaptive_tune_load_enable_flags(void)
@@ -1056,10 +1058,10 @@ void adaptive_tune_init(void)
 
     // Boot-time read, direct (not through the flash worker -- see this
     // file's top comment on why reads are exempt).
-    nvs_handle_t h;
-    esp_err_t err =
-        nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err =
+        hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ADAPTIVE_TUNE_NVS_PARTITION);
+    if (err == HAL_OK) {
         // U2: the opt-in mask is NO LONGER read here -- it moved out of this
         // namespace to the zone config blob (zone_cfg_t::adaptive_tune_
         // enabled). See adaptive_tune_load_enable_flags()/adaptive_tune_
@@ -1085,7 +1087,7 @@ void adaptive_tune_init(void)
         adaptive_tune_kibase_blob_t kb;
         memset(&kb, 0, sizeof(kb));
         size_t kb_len = sizeof(kb);
-        if (nvs_get_blob(h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &kb, &kb_len) == ESP_OK && kb_len == sizeof(kb)) {
+        if (hal_kv_get_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &kb, &kb_len) == HAL_OK && kb_len == sizeof(kb)) {
             for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
                 if (kb.mask & (1u << zi)) {
                     adaptive_tune_zones[zi].ki_baseline_valid = true;
@@ -1093,7 +1095,7 @@ void adaptive_tune_init(void)
                 }
             }
         }
-        nvs_close(h);
+        hal_kv_close(&h);
     }
     // ESP_ERR_NVS_NOT_FOUND (namespace never written) leaves every zone at
     // its struct-zero default: enabled = false. DEFAULT OFF, as required.

@@ -8,11 +8,10 @@
 #include "esp_ota_ops.h" /* esp_ota_get_state_partition()/esp_ota_img_states_t -- not covered by hal_sysinfo, see build_firmware_statics() */
 #include "esp_partition.h"
 #include "esp_timer.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 
 #include <string.h>
 
+#include "hal_kv.h"
 #include "hal_sysinfo.h" /* hal_sysinfo_reset_reason()/_get_build_info()/_get_running_partition() */
 #include "MAX31856.h"
 #include "board_temps.h"
@@ -572,9 +571,9 @@ static void build_firmware_statics(void)
  * rest of this page's static facts. */
 static void build_nvs_statics(void)
 {
-    nvs_stats_t stats;
+    hal_kv_stats_t stats;
     char buf[64];
-    if (nvs_get_stats(NULL, &stats) == ESP_OK) {
+    if (hal_kv_stats(NULL, &stats) == HAL_OK) {
         snprintf(buf, sizeof(buf), "%u used / %u free / %u total",
                  (unsigned)stats.used_entries, (unsigned)stats.free_entries,
                  (unsigned)stats.total_entries);

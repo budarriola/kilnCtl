@@ -131,14 +131,21 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
     if (err == HAL_NOT_FOUND) {
-        /* Namespace/key not found (first boot) -- see this file's own
-         * INTERFACE MISMATCH-adjacent note in hal_kv_esp.c: a genuinely
-         * missing partition table (the old ESP_ERR_NVS_PART_NOT_FOUND case)
-         * is not distinguished from this by hal_kv today and instead falls
-         * into the generic HAL_IO branch below, where it is still treated
-         * as "nothing saved" -- just via the warn-and-continue path instead
-         * of this silent one. Neither is an error worth refusing to bring
-         * Wi-Fi up over -- the board just comes up unprovisioned either way. */
+        /* Namespace/key not found (first boot) -- silently "nothing saved".
+         * A genuinely missing partition table (ESP_ERR_NVS_PART_NOT_FOUND on
+         * the ESP backend) is a DIFFERENT hal_status_t as of the 2026-09-06
+         * flash-safety review: hal_kv_esp.c now maps it to HAL_NOT_READY, not
+         * HAL_NOT_FOUND, precisely so this branch cannot also swallow it. It
+         * falls into the `err != HAL_OK` branch below instead, which surfaces
+         * it as a real error via hal_status_to_esp_err() rather than treating
+         * it as an ordinary unprovisioned board. This call site is safe
+         * either way: by the time wifi_prov_nvs_load_from() runs, WIFI_NVS_
+         * PARTITION has already been brought up successfully earlier in boot
+         * (this module's own partition-init call, gating every caller here),
+         * so a PART_NOT_FOUND at this point would mean that partition failed
+         * to mount after all -- a real fault worth surfacing, not "nothing
+         * saved yet" (2026-09-05 batch 3 review confirmed the gating;
+         * re-confirmed after this remap). */
         return ESP_OK;
     }
     if (err != HAL_OK) {
@@ -302,11 +309,16 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
     if (err == HAL_NOT_FOUND) {
-        /* See wifi_prov_nvs_load_from()'s comment: the old ESP_ERR_NVS_
-         * PART_NOT_FOUND case (partition table missing this partition
-         * entirely) is not distinguished by hal_kv today and falls into the
-         * generic err != HAL_OK branch below instead, which still resolves
-         * to "treat as empty" -- just with a warning log this path skips. */
+        /* See wifi_prov_nvs_load_from()'s comment: as of the 2026-09-06
+         * flash-safety remap, ESP_ERR_NVS_PART_NOT_FOUND (partition table
+         * missing this partition entirely) maps to HAL_NOT_READY, not
+         * HAL_NOT_FOUND, so it no longer reaches this silent branch -- it
+         * falls into the generic `err != HAL_OK` branch below instead, which
+         * logs a warning and STILL resolves to "treat as empty" (this
+         * function has no error return of its own to distinguish the two).
+         * Safe either way: this call site runs only after WIFI_NVS_PARTITION
+         * has already been brought up successfully earlier in boot, so
+         * reaching PART_NOT_FOUND here would itself be a genuine fault. */
         out_blob->version = SAVED_NETS_VERSION;
         return ESP_OK;
     }

@@ -12,9 +12,10 @@
 #include <math.h>
 #include <string.h>
 
-#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "nvs.h"
+
+#include "hal_kv.h"
+#include "hal_esp_common.h" /* hal_status_to_esp_err() -- keeps esp_err_to_name() below meaningful */
 
 /* ---- firing quality stats (PID_EXPANSION_PLAN.md Phase 7a/7a-2/7a-3) ------
  *
@@ -195,25 +196,25 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
     char key[16];
     snprintf(key, sizeof(key), "fs_%u", (unsigned)profile_id);
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(FIRING_STATS_NVS_PARTITION, FIRING_STATS_NVS_NAMESPACE,
-                                             NVS_READONLY, &h);
-    if (err != ESP_OK) {
-        /* ESP_ERR_NVS_NOT_FOUND here means the namespace itself has never
-         * been written to (no profile has ever finished a firing yet) --
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY,
+                                    FIRING_STATS_NVS_PARTITION);
+    if (err != HAL_OK) {
+        /* HAL_NOT_FOUND here means the namespace itself has never been
+         * written to (no profile has ever finished a firing yet) --
          * expected on a fresh board, not worth logging. */
-        return (err == ESP_ERR_NVS_NOT_FOUND);
+        return (err == HAL_NOT_FOUND);
     }
     size_t len = sizeof(*out);
-    err = nvs_get_blob(h, key, out, &len);
-    nvs_close(h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = hal_kv_get_blob(&h, key, out, &len);
+    hal_kv_close(&h);
+    if (err == HAL_NOT_FOUND) {
         memset(out, 0, sizeof(*out));
         return true; /* this profile has never fired -- not an error */
     }
-    if (err != ESP_OK || len != sizeof(*out)) {
+    if (err != HAL_OK || len != sizeof(*out)) {
         ESP_LOGW(PE_TAG, "firing_stats_load(%u) failed: %s (len %u/%u)", (unsigned)profile_id,
-                 esp_err_to_name(err), (unsigned)len, (unsigned)sizeof(*out));
+                 hal_status_to_name(err), (unsigned)len, (unsigned)sizeof(*out));
         memset(out, 0, sizeof(*out));
         return false;
     }
@@ -238,8 +239,7 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
  * module. */
 static bool caller_stack_is_external(void)
 {
-    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
-    return esp_ptr_external_ram((void *)&stack_probe);
+    return !hal_kv_write_safe_here();
 }
 
 void firing_stats_persist(const profile_firing_run_record_t *rec)
@@ -267,27 +267,27 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
 
     char key[16];
     snprintf(key, sizeof(key), "fs_%u", (unsigned)rec->profile_id);
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(FIRING_STATS_NVS_PARTITION, FIRING_STATS_NVS_NAMESPACE,
-                                             NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): nvs_open failed: %s", (unsigned)rec->profile_id,
-                 esp_err_to_name(err));
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE,
+                                    FIRING_STATS_NVS_PARTITION);
+    if (err != HAL_OK) {
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): hal_kv_open failed: %s", (unsigned)rec->profile_id,
+                 hal_status_to_name(err));
         return;
     }
-    err = nvs_set_blob(h, key, &blob, sizeof(blob));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, key, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    if (err != ESP_OK) {
+    if (err != HAL_OK) {
         ESP_LOGE(PE_TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
-                 esp_err_to_name(err));
+                 hal_status_to_name(err));
     } else {
         ESP_LOGI(PE_TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
                  (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob.count,
                  (unsigned)PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
     }
-    nvs_close(h);
+    hal_kv_close(&h);
 }
 
 /* Called from the tick loop's non-RUNNING branch (DONE/FAULTED) and from

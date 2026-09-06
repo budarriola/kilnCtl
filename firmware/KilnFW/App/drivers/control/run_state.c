@@ -2,13 +2,14 @@
 
 #include <string.h>
 
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+
+#include "hal_kv.h"
+#include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t this
+                              * module's callers already branch on */
 
 static const char *TAG = "run_state";
 
@@ -88,16 +89,7 @@ static run_state_ctx_t s_rs;
  * the partition that is actually broken. */
 static esp_err_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_status_to_esp_err(hal_kv_init_partition(partition));
 }
 
 /* Forward declaration -- defined below, but this write path needs it before
@@ -127,16 +119,16 @@ static bool caller_stack_is_external(void);
  * not because a live path was found. */
 static void migrate_from_default_partition(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL);
+    if (err != HAL_OK) {
         return;
     }
     run_state_record_t old_rec;
     size_t len = sizeof(old_rec);
-    err = nvs_get_blob(h, NVS_KEY_RUN, &old_rec, &len);
-    nvs_close(h);
-    if (err != ESP_OK || len != sizeof(old_rec) || old_rec.version != RUN_STATE_RECORD_VERSION) {
+    err = hal_kv_get_blob(&h, NVS_KEY_RUN, &old_rec, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(old_rec) || old_rec.version != RUN_STATE_RECORD_VERSION) {
         /* Nothing there, wrong size, or an old/new version this build's
          * existing check wouldn't have trusted anyway -- nothing to
          * migrate. */
@@ -150,20 +142,20 @@ static void migrate_from_default_partition(void)
         return;
     }
 
-    nvs_handle_t hw;
-    err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &hw);
-    if (err != ESP_OK) {
+    hal_kv_handle_t hw;
+    err = hal_kv_open(&hw, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return;
     }
-    err = nvs_set_blob(hw, NVS_KEY_RUN, &old_rec, sizeof(old_rec));
-    if (err == ESP_OK) {
-        err = nvs_commit(hw);
+    err = hal_kv_set_blob(&hw, NVS_KEY_RUN, &old_rec, sizeof(old_rec));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&hw);
     }
-    nvs_close(hw);
-    if (err == ESP_OK) {
+    hal_kv_close(&hw);
+    if (err == HAL_OK) {
         ESP_LOGI(TAG, "migrated run-state record from default NVS partition to '%s'", KILN_NVS_PARTITION);
     } else {
-        ESP_LOGW(TAG, "run-state record migration to '%s' failed: %s", KILN_NVS_PARTITION, esp_err_to_name(err));
+        ESP_LOGW(TAG, "run-state record migration to '%s' failed: %s", KILN_NVS_PARTITION, hal_status_to_name(err));
     }
 }
 
@@ -228,8 +220,7 @@ static bool ensure_lock(void)
  * reached from the very task the plan is most worried about, had not). */
 static bool caller_stack_is_external(void)
 {
-    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
-    return esp_ptr_external_ram((void *)&stack_probe);
+    return !hal_kv_write_safe_here();
 }
 
 /* Must be called with s_rs.lock held. */
@@ -244,20 +235,20 @@ static esp_err_t persist_locked(const run_state_record_t *rec)
                       "worker for the established pattern.");
         return ESP_ERR_INVALID_STATE;
     }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_blob(h, NVS_KEY_RUN, rec, sizeof(*rec));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_RUN, rec, sizeof(*rec));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    if (err == ESP_OK) {
+    hal_kv_close(&h);
+    if (err == HAL_OK) {
         s_rs.last_write_us = (int64_t)hal_time_now_us();
     }
-    return err;
+    return hal_status_to_esp_err(err);
 }
 
 static void copy_str(char *dst, size_t cap, const char *src)
@@ -321,13 +312,13 @@ esp_err_t run_state_init(void)
         migrate_from_default_partition();
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (kv_err == HAL_OK) {
         run_state_record_t rec;
         size_t len = sizeof(rec);
-        err = nvs_get_blob(h, NVS_KEY_RUN, &rec, &len);
-        if (err == ESP_OK && len == sizeof(rec) && rec.version == RUN_STATE_RECORD_VERSION) {
+        kv_err = hal_kv_get_blob(&h, NVS_KEY_RUN, &rec, &len);
+        if (kv_err == HAL_OK && len == sizeof(rec) && rec.version == RUN_STATE_RECORD_VERSION) {
             /* Strings come out of flash and are about to be logged and later
              * emitted as JSON. Terminate them here rather than trusting the
              * blob: a truncated/garbled write is exactly the failure mode a
@@ -337,15 +328,15 @@ esp_err_t run_state_init(void)
             rec.fault_reason[sizeof(rec.fault_reason) - 1] = '\0';
             s_rs.boot = rec;
             s_rs.boot_valid = true;
-        } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        } else if (kv_err != HAL_NOT_FOUND) {
             /* Missing (first boot), wrong size (a build with a different
              * layout), or an old version: treat as "no record". Same
              * load-tolerant convention as relay_cycles.c -- refusing to boot
              * over a lost breadcrumb would be the wrong trade for a kiln. */
             ESP_LOGW(TAG, "run-state record unreadable (%s, %u bytes) -- treating as no record",
-                     esp_err_to_name(err), (unsigned)len);
+                     hal_status_to_name(kv_err), (unsigned)len);
         }
-        nvs_close(h);
+        hal_kv_close(&h);
     }
 
     run_state_record_t boot = s_rs.boot;

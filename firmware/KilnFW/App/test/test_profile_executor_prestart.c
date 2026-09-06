@@ -6529,8 +6529,8 @@ static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
                  "through NVS, newest-first, and keeps only the last "
                  "PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH entries per profile");
 
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
 
     // Write PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH + 2 runs for the same
     // profile, each carrying a distinguishable duration_s so the ring order
@@ -6574,16 +6574,14 @@ static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
     // this is the common case for most of the board's 8 saved + ~28 builtin
     // profile ids.
     profile_firing_run_record_t empty_out[1];
-    // Clear the stub's single blob slot: firing_stats_load() for a DIFFERENT
-    // profile_id would otherwise still find profile 3's blob sitting there
-    // (the stub does not key by name -- see stubs/nvs.h's own doc comment)
-    // and misreport it as profile 9's history.
-    nvs_test_clear();
+    // fake_kv keys genuinely by (partition, namespace, key), so profile 9's
+    // "fs_9" cannot collide with profile 3's "fs_3" the way the old single-
+    // blob-slot nvs.h stub's key-blind store could -- no explicit clear
+    // needed here, but the profile-9 key was never written either way.
     size_t n_empty = profile_executor_get_firing_history(9, empty_out, 1);
     TEST_CHECK(n_empty == 0, "a profile that has never fired reports 0 history entries, not an error");
 
-    nvs_test_enable(false); // leave the stub in its default state for any test that runs after this one
-    nvs_test_clear();
+    fake_kv_reset_all(); // leave hal_kv in its default state for any test that runs after this one
 }
 
 static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram(void)
@@ -6594,8 +6592,8 @@ static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram
                  "halt paths -- the same task DRAM_PSRAM_PLAN.md section 7 names as its "
                  "highest-care relocation candidate.");
 
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
 
     profile_firing_run_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -6604,7 +6602,7 @@ static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram
     rec.duration_s = 4242;
     rec.zone_mask = 0x01;
 
-    esp_ptr_external_ram_test_set(true); // simulate being called from a PSRAM-stacked task
+    fake_kv_set_write_safe_here(false); // simulate being called from a PSRAM-stacked task
 
     firing_stats_persist(&rec); // void -- success/failure is only observable via the store
 
@@ -6613,13 +6611,12 @@ static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram
     size_t n = profile_executor_get_firing_history(11, out, 1);
     TEST_CHECK(n == 0,
                "the refused write left no blob behind -- firing_stats_persist() returned before "
-               "calling nvs_open_from_partition()/nvs_set_blob() at all -- exactly the class of "
+               "calling hal_kv_open()/hal_kv_set_blob() at all -- exactly the class of "
                "bug (an NVS write reached from a PSRAM-stack task) this net exists to catch "
                "before a future relocation of profile_executor makes it reachable for real");
 
-    esp_ptr_external_ram_test_set(false); // leave shared stub state as every other test expects
-    nvs_test_enable(false);
-    nvs_test_clear();
+    fake_kv_set_write_safe_here(true); // leave shared stub state as every other test expects
+    fake_kv_reset_all();
 }
 
 static void test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack(void)
@@ -6627,8 +6624,8 @@ static void test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack
     TEST_SECTION("firing_stats_persist -- proceeds normally when the calling task's stack is "
                  "internal RAM");
 
-    nvs_test_enable(true);
-    nvs_test_clear();
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
 
     profile_firing_run_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -6637,18 +6634,17 @@ static void test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack
     rec.duration_s = 4242;
     rec.zone_mask = 0x01;
 
-    // esp_ptr_external_ram_test_set(false) is the stub's default state.
+    // fake_kv_set_write_safe_here(true) is the stub's default state.
     firing_stats_persist(&rec);
 
     profile_firing_run_record_t out[1];
     memset(out, 0, sizeof(out));
     size_t n = profile_executor_get_firing_history(11, out, 1);
     TEST_CHECK(n == 1, "the guard does not fire on an internal-RAM stack -- the write proceeds "
-                       "and lands in the stub store");
+                       "and lands in the fake_kv store");
     TEST_CHECK(out[0].duration_s == 4242, "the persisted record is the one that was passed in");
 
-    nvs_test_enable(false);
-    nvs_test_clear();
+    fake_kv_reset_all();
 }
 
 // ROADMAP.md M15 "Mode-state sprawl" -- exec_mode_state_check() (profile_

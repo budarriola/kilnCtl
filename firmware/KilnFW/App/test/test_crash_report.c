@@ -6,9 +6,10 @@
 // crash_report.c is #included directly (same convention as
 // test_safety_cfg_store.c's #include of safety_cfg_store.c) so this file can
 // reach its static compute_crc()/record_valid()/seal_crc()/persist()/load()
-// helpers and exercise them for real, including a genuine NVS round trip via
-// stubs/nvs.h's nvs_test_enable(true) opt-in stub store (same mechanism
-// test_safety_cfg_store.c's version-refuse test uses).
+// helpers and exercise them for real, including a genuine round trip through
+// fake_kv.h's RAM-backed hal_kv fake (HW_ABSTRACTION_PLAN.md Phase 3 item 3
+// migrated crash_report.c off nvs.h onto hal_kv.h) -- same mechanism
+// test_safety_cfg_store.c's version-refuse test uses.
 //
 // crash_report_init() itself (the only function that touches
 // esp_core_dump_get_summary()) is NOT exercised here -- stubs/esp_core_dump.h
@@ -25,6 +26,7 @@
 #include "test_common.h"
 
 #include "esp_err.h"
+#include "fake_kv.h"
 
 #include "../drivers/safety/crash_report.c"
 
@@ -32,8 +34,9 @@
 
 static void reset_all(void)
 {
-    nvs_test_enable(true); // every test in this file needs a real round trip
-    nvs_test_clear();
+    fake_kv_reset_all(); // every test in this file needs a real round trip
+    fake_kv_set_write_safe_here(true);
+    hal_kv_init_partition(KILN_NVS_PARTITION);
 }
 
 static crash_report_record_t make_sample_record(void)
@@ -94,14 +97,28 @@ static void test_corrupted_record_rejected_as_absent(void)
     esp_err_t err = persist(&rec);
     TEST_CHECK(err == ESP_OK, "persist() of the good record succeeds");
 
-    // Flip one bit directly in the stub's stored bytes, AFTER the CRC was
+    // Flip one bit directly in the fake_kv-stored bytes, AFTER the CRC was
     // sealed -- simulates exactly the failure mode a CRC exists to catch: a
     // brownout mid-write or a flash bit error corrupting the record without
-    // going through this module's own write path.
-    TEST_CHECK(s_stub_nvs_has_blob && s_stub_nvs_blob_len == sizeof(rec),
-               "test fixture: the stub actually holds our record before corrupting it");
+    // going through this module's own write path. Read-modify-write through
+    // hal_kv_get_blob()/hal_kv_set_blob() directly (bypassing seal_crc())
+    // rather than poking a stub's internal array -- fake_kv.c has no public
+    // "peek the raw committed bytes" surface, only the real hal_kv_* API.
     size_t cause_off = offsetof(crash_report_record_t, exc_cause);
-    s_stub_nvs_blob[cause_off] ^= 0x01; // a real field (exc_cause), not padding
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+                   "test fixture: corruption handle opens");
+        crash_report_record_t stored;
+        size_t len = sizeof(stored);
+        TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CRASH, &stored, &len) == HAL_OK && len == sizeof(rec),
+                   "test fixture: fake_kv actually holds our record before corrupting it");
+        ((uint8_t *)&stored)[cause_off] ^= 0x01; // a real field (exc_cause), not padding
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_CRASH, &stored, sizeof(stored)) == HAL_OK,
+                   "test fixture: corrupted bytes write back");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "test fixture: corruption commits");
+        hal_kv_close(&h);
+    }
 
     crash_report_record_t loaded;
     memset(&loaded, 0x55, sizeof(loaded));
@@ -379,6 +396,5 @@ void run_test_crash_report(void)
     test_init_reaches_summary_fetch_when_coredump_present();
     test_clear_erases_coredump_via_hal_sysinfo();
 
-    nvs_test_enable(false); // leave shared stub state as every other test file in this binary expects
-    nvs_test_clear();
+    fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

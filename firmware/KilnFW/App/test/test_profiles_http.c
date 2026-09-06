@@ -68,158 +68,131 @@ esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size
 #define HTTPD_404_NOT_FOUND 404
 
 // ---------------------------------------------------------------------------
-// Multi-key NVS stub -- see header comment above for why stubs/nvs.h's
-// single-blob model doesn't fit here. Defining this guard macro BEFORE
-// profiles_http.c's "#include \"nvs.h\"" makes that header's own include
-// guard (`#ifndef TEST_STUB_NVS_H`) skip its body entirely, so nothing here
-// multiply-defines against it.
+// HAL_KV shim -- HW_ABSTRACTION_PLAN.md Phase 3 item 3 migrated
+// profiles_http.c off nvs.h onto hal_kv.h, so this file no longer needs a
+// hand-rolled nvs_* stub: it links the REAL host hal_kv backend (fake_kv.c,
+// see build_host_tests.ps1's cmd7) and keeps only thin nvs_*()-named
+// wrappers so every existing test body below (stage_profile_blob(),
+// nvs_stub_find(), etc.) keeps compiling unchanged. fake_kv.c already models
+// exactly what this file used to hand-roll -- multiple (partition,
+// namespace, key) slots live at once, NOT_FOUND when absent, INVALID_SIZE
+// when the caller's buffer is too small -- so nothing here duplicates that
+// logic anymore.
 // ---------------------------------------------------------------------------
-#define TEST_STUB_NVS_H
+#include "hal_kv.h"
+#include "fake_kv.h"
 
-typedef struct nvs_opaque *nvs_handle_t;
+typedef hal_kv_handle_t *nvs_handle_t;
 
 typedef enum {
     NVS_READONLY = 0,
     NVS_READWRITE,
 } nvs_open_mode_t;
 
-#define NVS_STUB_MAX_ENTRIES 32
-#define NVS_STUB_BLOB_CAP 512
+#define NVS_STUB_BLOB_CAP FAKE_KV_MAX_VALUE_BYTES
+#define NVS_STUB_HANDLE_POOL 8
 
-typedef struct {
-    bool used;
-    char partition[32];
-    char ns[32];
-    char key[16];
-    bool has_u8;
-    uint8_t u8_val;
-    bool has_blob;
-    uint8_t blob[NVS_STUB_BLOB_CAP];
-    size_t blob_len;
-} nvs_stub_entry_t;
+static hal_kv_handle_t s_kv_handle_pool[NVS_STUB_HANDLE_POOL];
+static int s_kv_handle_next = 0;
 
-static nvs_stub_entry_t s_nvs_entries[NVS_STUB_MAX_ENTRIES];
-
-typedef struct {
-    char partition[32];
-    char ns[32];
-} nvs_stub_ctx_t;
-static nvs_stub_ctx_t s_nvs_ctx; /* one open handle at a time is all these tests ever need */
-
-static void nvs_stub_reset(void)
+static esp_err_t hal_to_esp(hal_status_t st)
 {
-    memset(s_nvs_entries, 0, sizeof(s_nvs_entries));
+    switch (st) {
+    case HAL_OK:          return ESP_OK;
+    case HAL_NOT_FOUND:   return ESP_ERR_NVS_NOT_FOUND;
+    case HAL_INVALID_SIZE: return ESP_ERR_INVALID_SIZE;
+    case HAL_INVALID_ARG: return ESP_ERR_INVALID_ARG;
+    case HAL_NO_MEM:      return ESP_ERR_NO_MEM;
+    case HAL_NOT_READY:   return ESP_ERR_INVALID_STATE;
+    default:              return ESP_FAIL;
+    }
 }
 
-static nvs_stub_entry_t *nvs_stub_find(const char *partition, const char *ns, const char *key, bool create)
+// nvs_stub_reset() now also (re)creates both partitions this file's tests
+// stage into -- fake_kv_reset_all() wipes hal_kv_init_partition()'s
+// bookkeeping along with every key, so each test must redo that init, same
+// as profiles_http.c's own nvs_partition_init() would on a real boot.
+static void nvs_stub_reset(void)
 {
-    int free_slot = -1;
-    for (int i = 0; i < NVS_STUB_MAX_ENTRIES; i++) {
-        if (!s_nvs_entries[i].used) {
-            if (free_slot < 0) free_slot = i;
-            continue;
-        }
-        if (strcmp(s_nvs_entries[i].partition, partition) == 0 && strcmp(s_nvs_entries[i].ns, ns) == 0 &&
-            strcmp(s_nvs_entries[i].key, key) == 0) {
-            return &s_nvs_entries[i];
-        }
-    }
-    if (!create || free_slot < 0) {
-        return NULL;
-    }
-    nvs_stub_entry_t *e = &s_nvs_entries[free_slot];
-    memset(e, 0, sizeof(*e));
-    e->used = true;
-    strncpy(e->partition, partition, sizeof(e->partition) - 1);
-    strncpy(e->ns, ns, sizeof(e->ns) - 1);
-    strncpy(e->key, key, sizeof(e->key) - 1);
-    return e;
+    fake_kv_reset_all();
+    hal_kv_init_partition("profiles_nvs"); /* PROFILES_NVS_PARTITION's literal -- that macro isn't
+                                             * defined until profiles_http.c's own #include below */
+    hal_kv_init_partition(NULL); /* the default partition, for the pre-split migration tests */
+    s_kv_handle_next = 0;
 }
 
 static esp_err_t nvs_open_from_partition(const char *partition, const char *ns, int mode, nvs_handle_t *out)
 {
-    (void)mode;
-    strncpy(s_nvs_ctx.partition, partition, sizeof(s_nvs_ctx.partition) - 1);
-    s_nvs_ctx.partition[sizeof(s_nvs_ctx.partition) - 1] = '\0';
-    strncpy(s_nvs_ctx.ns, ns, sizeof(s_nvs_ctx.ns) - 1);
-    s_nvs_ctx.ns[sizeof(s_nvs_ctx.ns) - 1] = '\0';
+    hal_kv_mode_t m = (mode == NVS_READWRITE) ? HAL_KV_MODE_READ_WRITE : HAL_KV_MODE_READ_ONLY;
+    hal_kv_handle_t *h = &s_kv_handle_pool[s_kv_handle_next % NVS_STUB_HANDLE_POOL];
+    s_kv_handle_next++;
+    hal_status_t err = hal_kv_open(h, ns, m, partition);
+    if (err != HAL_OK) {
+        return hal_to_esp(err);
+    }
     if (out) {
-        *out = (nvs_handle_t)&s_nvs_ctx;
+        *out = h;
     }
     return ESP_OK;
 }
 
-static void nvs_close(nvs_handle_t h) { (void)h; }
+static void nvs_close(nvs_handle_t h) { hal_kv_close(h); }
 
-static esp_err_t nvs_commit(nvs_handle_t h)
-{
-    (void)h;
-    return ESP_OK;
-}
+static esp_err_t nvs_commit(nvs_handle_t h) { return hal_to_esp(hal_kv_commit(h)); }
 
 static esp_err_t nvs_get_u8(nvs_handle_t h, const char *key, uint8_t *out)
 {
-    nvs_stub_ctx_t *ctx = (nvs_stub_ctx_t *)h;
-    nvs_stub_entry_t *e = nvs_stub_find(ctx->partition, ctx->ns, key, false);
-    if (!e || !e->has_u8) {
-        return ESP_ERR_NVS_NOT_FOUND;
-    }
-    *out = e->u8_val;
-    return ESP_OK;
+    return hal_to_esp(hal_kv_get_u8(h, key, out));
 }
 
 static esp_err_t nvs_set_u8(nvs_handle_t h, const char *key, uint8_t val)
 {
-    nvs_stub_ctx_t *ctx = (nvs_stub_ctx_t *)h;
-    nvs_stub_entry_t *e = nvs_stub_find(ctx->partition, ctx->ns, key, true);
-    if (!e) {
-        return ESP_ERR_NVS_NOT_FOUND;
-    }
-    e->has_u8 = true;
-    e->u8_val = val;
-    return ESP_OK;
+    return hal_to_esp(hal_kv_set_u8(h, key, val));
 }
 
 static esp_err_t nvs_get_blob(nvs_handle_t h, const char *key, void *out, size_t *len)
 {
-    nvs_stub_ctx_t *ctx = (nvs_stub_ctx_t *)h;
-    nvs_stub_entry_t *e = nvs_stub_find(ctx->partition, ctx->ns, key, false);
-    if (!e || !e->has_blob) {
-        return ESP_ERR_NVS_NOT_FOUND;
-    }
-    if (!out || !len || *len < e->blob_len) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    memcpy(out, e->blob, e->blob_len);
-    *len = e->blob_len;
-    return ESP_OK;
+    return hal_to_esp(hal_kv_get_blob(h, key, out, len));
 }
 
 static esp_err_t nvs_set_blob(nvs_handle_t h, const char *key, const void *val, size_t len)
 {
-    nvs_stub_ctx_t *ctx = (nvs_stub_ctx_t *)h;
-    if (len > NVS_STUB_BLOB_CAP) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    nvs_stub_entry_t *e = nvs_stub_find(ctx->partition, ctx->ns, key, true);
-    if (!e) {
-        return ESP_ERR_INVALID_SIZE; /* stub table full */
-    }
-    memcpy(e->blob, val, len);
-    e->blob_len = len;
-    e->has_blob = true;
-    return ESP_OK;
+    return hal_to_esp(hal_kv_set_blob(h, key, val, len));
 }
 
 static esp_err_t nvs_erase_key(nvs_handle_t h, const char *key)
 {
-    nvs_stub_ctx_t *ctx = (nvs_stub_ctx_t *)h;
-    nvs_stub_entry_t *e = nvs_stub_find(ctx->partition, ctx->ns, key, false);
-    if (!e) {
-        return ESP_ERR_NVS_NOT_FOUND;
+    return hal_to_esp(hal_kv_erase_key(h, key));
+}
+
+// Read-only peek used by test 5 (test_newer_version_refused_not_wiped) to
+// prove a refused blob's on-flash bytes survive byte-for-byte -- same
+// (partition, namespace, key) -> blob lookup the old hand-rolled
+// nvs_stub_entry_t offered, now backed by a real hal_kv_get_blob() call.
+typedef struct {
+    bool   has_blob;
+    uint8_t blob[NVS_STUB_BLOB_CAP];
+    size_t blob_len;
+} nvs_stub_entry_t;
+static nvs_stub_entry_t s_nvs_stub_peek;
+
+static nvs_stub_entry_t *nvs_stub_find(const char *partition, const char *ns, const char *key, bool create)
+{
+    (void)create; /* peek-only: every caller in this file passes false */
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ns, HAL_KV_MODE_READ_ONLY, partition) != HAL_OK) {
+        return NULL;
     }
-    e->used = false;
-    return ESP_OK;
+    memset(&s_nvs_stub_peek, 0, sizeof(s_nvs_stub_peek));
+    size_t len = sizeof(s_nvs_stub_peek.blob);
+    hal_status_t err = hal_kv_get_blob(&h, key, s_nvs_stub_peek.blob, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
+        return NULL;
+    }
+    s_nvs_stub_peek.has_blob = true;
+    s_nvs_stub_peek.blob_len = len;
+    return &s_nvs_stub_peek;
 }
 
 // asm("_binary_...") is a GCC/binutils extension with no MSVC equivalent --
@@ -234,7 +207,6 @@ static esp_err_t nvs_erase_key(nvs_handle_t h, const char *key)
 #include "../drivers/http/profiles_edit_http.c"
 
 #undef asm
-#undef TEST_STUB_NVS_H
 
 // ---- Embedded-page symbol page_get_handler() references -------------------
 const uint8_t profiles_page_html_gz_start[1] = { 0 };
@@ -1168,7 +1140,7 @@ static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
                  "underneath it (DRAM_PSRAM_PLAN.md section 7.2 safety net)");
     memset(&s_profiles, 0, sizeof(s_profiles));
 
-    esp_ptr_external_ram_test_set(true); // simulate being called from a PSRAM-stacked task
+    fake_kv_set_write_safe_here(false); // simulate being called from a PSRAM-stacked task
 
     esp_err_t err = nvs_save_slot(0);
 
@@ -1178,7 +1150,7 @@ static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
                "to catch before a future task relocation (DRAM_PSRAM_PLAN.md section 7) makes it "
                "reachable for real");
 
-    esp_ptr_external_ram_test_set(false); // leave shared stub state as every other test expects
+    fake_kv_set_write_safe_here(true); // leave shared fake state as every other test expects
 }
 
 static void test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack(void)
@@ -1186,7 +1158,7 @@ static void test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack(void)
     TEST_SECTION("nvs_save_slot -- proceeds normally when the calling task's stack is internal RAM");
     memset(&s_profiles, 0, sizeof(s_profiles));
 
-    // esp_ptr_external_ram_test_set(false) is the stub's default state.
+    // fake_kv_set_write_safe_here(true) is the fake's default state.
     esp_err_t err = nvs_save_slot(0);
 
     TEST_CHECK(err == ESP_OK, "the guard does not fire on an internal-RAM stack -- the write "

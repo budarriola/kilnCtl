@@ -14,6 +14,8 @@
 #include "test_common.h"
 
 #include "esp_err.h"
+#include "fake_kv.h" /* hal_kv.h's host fake -- safety_cfg_store.c now calls hal_kv_*() instead of
+                       * nvs_*() directly (HW_ABSTRACTION_PLAN.md Phase 3 item 3) */
 #include "fake_time.h" /* hal_time.h's host fake -- safety_cfg_store.c now calls hal_time_now_us()
                          * instead of esp_timer_get_time(); see reset_all()/the tests below that
                          * used to drive the old stub esp_timer via esp_timer_test_set_now_us(). */
@@ -207,9 +209,11 @@ static void reset_all(void)
     fake_time_reset_all();
     s_fetched_at_us = -1;
     s_dirty = false; /* 2026-08-23 fix -- a prior test's unflushed write must not bleed into the next */
-    esp_ptr_external_ram_test_set(false); /* default: called from a normal, internal-RAM stack */
-    nvs_test_enable(false); /* every test except the version-refuse one runs without real NVS */
-    nvs_test_clear();
+    fake_kv_set_write_safe_here(true); /* default: called from a normal, internal-RAM stack */
+    fake_kv_reset_all(); /* every test except the version-refuse one runs without a real partition up,
+                           * so hal_kv_open() fails closed with HAL_NOT_READY -- same "every test except
+                           * the version-refuse one runs without real NVS" default nvs_test_enable(false)
+                           * used to give */
     s_test_semaphore_take_result = pdTRUE; /* default: lock available, same as every real single-owner take */
 }
 
@@ -472,13 +476,13 @@ static void test_version_refuse_newer_than_firmware(void)
 {
     TEST_SECTION("nvs_load_store -- a blob from NEWER firmware is refused, not reinterpreted");
     reset_all();
-    nvs_test_enable(true); // this test alone needs a real stub NVS round trip
+    hal_kv_init_partition(KILN_NVS_PARTITION); // this test alone needs a real hal_kv round trip
 
     // Simulate what would have been persisted by a hypothetical v2: same
     // struct shape here (no v2 exists yet), but version byte bumped past
     // what this build knows -- nvs_load_store() must refuse it wholesale
     // rather than trust the old-version bytes underneath. Written directly
-    // into the stub's blob storage (not via nvs_save_store(), which always
+    // into the fake_kv store (not via nvs_save_store(), which always
     // stamps the CURRENT version before writing -- exactly the behavior a
     // real save path should have, but it means it cannot be used to
     // manufacture a newer-than-current blob for this test).
@@ -487,9 +491,15 @@ static void test_version_refuse_newer_than_firmware(void)
     fake_newer.version = SAFETY_CFG_STORE_VERSION + 1;
     fake_newer.entries[0].set = 1;
     fake_newer.entries[0].value.u8_val = 3;
-    memcpy(s_stub_nvs_blob, &fake_newer, sizeof(fake_newer));
-    s_stub_nvs_blob_len = sizeof(fake_newer);
-    s_stub_nvs_has_blob = true;
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+                   "setup: stage handle opens");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_SAFETY_CFG, &fake_newer, sizeof(fake_newer)) == HAL_OK,
+                   "setup: newer-version blob stages");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: stage commits");
+        hal_kv_close(&h);
+    }
 
     nvs_load_store(); // should refuse and reset to empty defaults
 
@@ -499,7 +509,7 @@ static void test_version_refuse_newer_than_firmware(void)
                "the newer blob's data was NOT loaded -- refused wholesale, per COMMISSIONING.md "
                "sec 1's own reasoning for the identical rule on the Pico's config_store");
 
-    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+    fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +531,7 @@ static void test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache(void)
     TEST_SECTION("safety_cfg_store_init -- loading a real cache off NVS at boot must NOT "
                  "count as \"just fetched\" (defect c, 2026-08-27 audit)");
     reset_all();
-    nvs_test_enable(true);
+    hal_kv_init_partition(KILN_NVS_PARTITION);
 
     // Persist a real, current-version, already-fetched cache -- exactly what
     // a board that was commissioned on a PREVIOUS boot leaves on flash.
@@ -546,7 +556,7 @@ static void test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache(void)
                "but its age is honestly UNKNOWN this boot -- UINT32_MAX (\"never\"/null), "
                "NOT ~0 ms manufactured from an NVS load that never talked to the Pico");
 
-    nvs_test_enable(false);
+    fake_kv_reset_all();
 }
 
 // ---------------------------------------------------------------------------
@@ -654,9 +664,10 @@ static void test_successful_refetch_flushes_via_the_flash_worker_not_directly(vo
     TEST_SECTION("safety_cfg_store_refetch -- a successful fetch flushes via the flash-safe "
                  "worker, not nvs_save_store() run directly on the caller");
     reset_all();
-    nvs_test_enable(true); // this test checks the flush actually SUCCEEDED (s_dirty cleared), so it
-                            // needs the stub's real NVS round trip, not the "every open fails closed"
-                            // default every other test in this file relies on.
+    hal_kv_init_partition(KILN_NVS_PARTITION); // this test checks the flush actually SUCCEEDED
+                            // (s_dirty cleared), so it needs a real hal_kv round trip, not the
+                            // "every open fails closed (partition never initialized)" default every
+                            // other test in this file relies on.
 
     uint16_t ids[] = { 0x0203 };
     uint16_t vals[] = { 55 };
@@ -673,7 +684,7 @@ static void test_successful_refetch_flushes_via_the_flash_worker_not_directly(vo
                "this is the ONLY route safety_cfg_store.c may use to reach nvs_save_store() now");
     TEST_CHECK(s_dirty == false, "a successful flush clears the dirty flag");
 
-    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+    fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
 }
 
 static void test_flush_is_a_noop_when_nothing_is_dirty(void)
@@ -694,7 +705,7 @@ static void test_flush_worker_unavailable_leaves_store_dirty_for_a_later_retry(v
     TEST_SECTION("safety_cfg_store_flush_if_dirty -- the worker being unavailable leaves the "
                  "cache dirty for the next attempt, rather than silently dropping the write");
     reset_all();
-    nvs_test_enable(true); // the RETRY flush below needs to actually succeed to prove s_dirty clears
+    hal_kv_init_partition(KILN_NVS_PARTITION); // the RETRY flush below needs to actually succeed to prove s_dirty clears
 
     uint16_t ids[] = { 0x0203 };
     uint16_t vals[] = { 77 };
@@ -720,7 +731,7 @@ static void test_flush_worker_unavailable_leaves_store_dirty_for_a_later_retry(v
     TEST_CHECK(s_stub_flash_worker_calls == 2,
                "the worker was asked twice: once inside the failed refetch, once on the explicit retry");
 
-    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+    fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
 }
 
 static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
@@ -728,7 +739,7 @@ static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
     TEST_SECTION("nvs_save_store -- refuses (does not crash) when called with a PSRAM stack underneath it");
     reset_all();
 
-    esp_ptr_external_ram_test_set(true); // simulate being called from a PSRAM-stacked task
+    fake_kv_set_write_safe_here(false); // simulate being called from a PSRAM-stacked task
 
     esp_err_t err = nvs_save_store();
 
@@ -736,24 +747,24 @@ static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
                "the wrong-task guard refuses with a diagnosable error, not a crash, exactly the "
                "class of bug (an NVS write reached from a PSRAM-stack task) this whole fix closes");
 
-    esp_ptr_external_ram_test_set(false); // leave shared stub state as every other test expects
+    fake_kv_set_write_safe_here(true); // leave shared fake state as every other test expects
 }
 
 static void test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack(void)
 {
     TEST_SECTION("nvs_save_store -- proceeds normally when the calling task's stack is internal RAM");
     reset_all();
-    nvs_test_enable(true); // exercise the real stub NVS round trip for this one
+    hal_kv_init_partition(KILN_NVS_PARTITION); // exercise a real hal_kv round trip for this one
 
-    // esp_ptr_external_ram_test_set(false) is reset_all()'s implicit state
-    // (the stub defaults to false and nothing here has set it true).
+    // fake_kv_set_write_safe_here(true) is reset_all()'s implicit state
+    // (nothing here has set it false).
     s_store.config_crc = 0x9999;
     esp_err_t err = nvs_save_store();
 
     TEST_CHECK(err == ESP_OK, "the guard does not fire on an internal-RAM stack -- the write proceeds "
                               "and succeeds exactly as it always did");
 
-    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+    fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
 }
 
 // 2026-08-29 fix. SAFETY_CFG_PARAM_TABLE's row order IS the on-flash layout
@@ -772,7 +783,7 @@ static void test_version_refuse_older_layout_without_a_migration(void)
     TEST_SECTION("nvs_load_store -- a blob from the PRE-ct_installed table layout is refused, "
                  "not loaded one slot out of register");
     reset_all();
-    nvs_test_enable(true);
+    hal_kv_init_partition(KILN_NVS_PARTITION);
 
     // A v1 blob, hand-built: same struct shape (only one layout has ever
     // shipped), version byte stamped 1, carrying a value in the slot that
@@ -784,9 +795,15 @@ static void test_version_refuse_older_layout_without_a_migration(void)
     size_t stale_slot = IDX_OVERSHOOT_TIME_S - 1; // where v1 kept overshoot_time_s
     v1.entries[stale_slot].set = 1;
     v1.entries[stale_slot].value.u16_val = 321;
-    memcpy(s_stub_nvs_blob, &v1, sizeof(v1));
-    s_stub_nvs_blob_len = sizeof(v1);
-    s_stub_nvs_has_blob = true;
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+                   "setup: stage handle opens");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_SAFETY_CFG, &v1, sizeof(v1)) == HAL_OK,
+                   "setup: v1 blob stages");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: stage commits");
+        hal_kv_close(&h);
+    }
 
     TEST_CHECK(SAFETY_CFG_STORE_VERSION > 1u,
                "the table-order change that moved overshoot_time_s bumped the on-flash version -- "
@@ -801,7 +818,7 @@ static void test_version_refuse_older_layout_without_a_migration(void)
     TEST_CHECK(safety_cfg_store_get_by_index(stale_slot, &p) && !p.set,
                "nothing from the old layout leaked in at its old slot either");
 
-    nvs_test_enable(false);
+    fake_kv_reset_all();
 }
 
 void run_test_safety_cfg_store(void)

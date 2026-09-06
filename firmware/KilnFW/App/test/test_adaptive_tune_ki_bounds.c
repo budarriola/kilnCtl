@@ -441,8 +441,8 @@ static void test_ki_diagnosis_cumulative_floor_does_not_block_legitimate_converg
 static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
 {
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true);
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
 
     adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // permanently under ADAPTIVE_TUNE_MIN_OBSERVATIONS -- see the
@@ -496,8 +496,7 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
                      "exact defect that let one power cycle reach an 850.6x runaway (measured: boot 0 "
                      "latch=1.000, boot 1 latch=46.005 from the grown live Ki, boot 2 latch=850.564)");
 
-    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
-    nvs_test_clear();
+    fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
 }
 
 // Q3: adaptive_tune_clear_ki_baseline() is the escape hatch the cumulative-
@@ -513,8 +512,8 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
 static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
 {
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true);
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
 
     adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
@@ -567,8 +566,7 @@ static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
                      "Q3: the re-latched baseline must track the CURRENT live Ki (the whole point of clearing "
                      "it after a re-autotune), not silently keep the value that was just cleared");
 
-    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
-    nvs_test_clear();
+    fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
 }
 
 // ---------------------------------------------------------------------
@@ -619,8 +617,8 @@ static void accept_like_job_calls_clear_ki_baseline(void *arg)
 static void test_accept_path_clear_ki_baseline_does_not_reenter_worker(void)
 {
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true);
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
 
     adaptive_tune_zones[2].enabled = true;
     adaptive_tune_zones[2].ki_baseline_valid = true;
@@ -642,8 +640,7 @@ static void test_accept_path_clear_ki_baseline_does_not_reenter_worker(void)
                "R1: the baseline must still actually be cleared -- the fix must not just avoid the deadlock by "
                "skipping the work");
 
-    nvs_test_enable(false);
-    nvs_test_clear();
+    fake_kv_reset_all();
 }
 
 // ---------------------------------------------------------------------
@@ -693,8 +690,8 @@ static void halt_like_job_calls_run_end(void *arg)
 static void test_halt_path_run_end_does_not_reenter_worker(void)
 {
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true);
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
 
     s_halt_like_zone = 0;
     adaptive_tune_zones[0].enabled = true;
@@ -729,8 +726,7 @@ static void test_halt_path_run_end_does_not_reenter_worker(void)
                "S1: the baseline must still actually be latched and saved -- the fix must not just avoid the "
                "deadlock by skipping the work");
 
-    nvs_test_enable(false);
-    nvs_test_clear();
+    fake_kv_reset_all();
 }
 
 // Q4: the model layer (adaptive_tune_refine_zone_locked(), adaptive_tune_model.c)

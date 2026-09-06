@@ -374,24 +374,24 @@ static void test_run_status_fields_cleared_when_zone_masked_out_of_profile(void)
 
 static void write_old_en_mask(uint8_t mask)
 {
-    nvs_handle_t h;
-    TEST_CHECK(nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READWRITE, &h) ==
-                   ESP_OK,
-               "setup: stub NVS open must succeed once nvs_test_enable(true)");
-    nvs_set_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK, mask);
-    nvs_close(h);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION) ==
+                   HAL_OK,
+               "setup: fake_kv open must succeed once its partition is initialized");
+    hal_kv_set_u8(&h, ADAPTIVE_TUNE_NVS_KEY_ENMASK, mask);
+    hal_kv_close(&h);
 }
 
 static bool read_old_en_migrated(uint8_t *out)
 {
-    nvs_handle_t h;
-    if (nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READONLY, &h) !=
-        ESP_OK) {
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ADAPTIVE_TUNE_NVS_PARTITION) !=
+        HAL_OK) {
         return false;
     }
-    esp_err_t err = nvs_get_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, out);
-    nvs_close(h);
-    return err == ESP_OK;
+    hal_status_t err = hal_kv_get_u8(&h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, out);
+    hal_kv_close(&h);
+    return err == HAL_OK;
 }
 
 // MUST GO RED if adaptive_tune_migrate_enable_flags() (or the call to it
@@ -401,8 +401,8 @@ static bool read_old_en_migrated(uint8_t *out)
 static void test_migrate_pulls_old_mask_into_zone_config(void)
 {
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true);
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
 
     write_old_en_mask((uint8_t)((1u << 0) | (1u << 2))); // zones 0 and 2 were opted in under the old scheme
 
@@ -419,8 +419,7 @@ static void test_migrate_pulls_old_mask_into_zone_config(void)
     TEST_CHECK(read_old_en_migrated(&migrated) && migrated == 1,
                "migration must record en_migrated=1 so it is never re-consulted");
 
-    nvs_test_enable(false);
-    nvs_test_clear();
+    fake_kv_reset_all();
 }
 
 // The idempotency half of "stop consulting the old one": once migrated, an
@@ -432,8 +431,8 @@ static void test_migrate_pulls_old_mask_into_zone_config(void)
 static void test_migrate_does_not_reconsult_old_mask_after_first_migration(void)
 {
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true);
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
 
     write_old_en_mask((uint8_t)(1u << 0)); // zone 0 opted in under the old scheme
     adaptive_tune_load_enable_flags();
@@ -452,8 +451,7 @@ static void test_migrate_does_not_reconsult_old_mask_after_first_migration(void)
                "a second boot must NOT re-apply the stale old en_mask bit over the operator's later, explicit "
                "opt-out in the new home");
 
-    nvs_test_enable(false);
-    nvs_test_clear();
+    fake_kv_reset_all();
 }
 
 // The old key was never written at all (a board that never opted any zone
@@ -464,8 +462,8 @@ static void test_migrate_does_not_reconsult_old_mask_after_first_migration(void)
 static void test_migrate_handles_absent_old_key(void)
 {
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true); // namespace opens, but en_mask itself was never written
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION); // namespace opens, but en_mask itself was never written
 
     adaptive_tune_load_enable_flags();
 
@@ -476,8 +474,7 @@ static void test_migrate_handles_absent_old_key(void)
     TEST_CHECK(read_old_en_migrated(&migrated) && migrated == 1,
                "an absent old key is still a completed migration (nothing to carry) -- must be marked so");
 
-    nvs_test_enable(false);
-    nvs_test_clear();
+    fake_kv_reset_all();
 }
 
 // U1: one-click revert (PID_EXPANSION_PLAN.md 3.3).

@@ -128,16 +128,31 @@ static hal_status_t hal_kv_esp_err_to_status(esp_err_t err) {
     switch (err) {
         case ESP_ERR_NVS_NOT_FOUND:         return HAL_NOT_FOUND;
         /* A missing PARTITION (wifi_nvs/kiln_nvs/profiles_nvs never flashed,
-         * or hal_kv_init_partition() never called for it) vs. a missing KEY
-         * inside a present partition are different ESP-IDF codes, but every
-         * pre-migration caller (wifi_prov_nvs.c's "nothing saved yet" paths
-         * are the concrete example) already treated both as the same "not
-         * found" outcome -- there is no hal_status_t distinct from
-         * HAL_NOT_FOUND that fits "not found" any better, so this maps here
-         * rather than falling through to the shared mapper's HAL_IO
-         * catch-all, which would turn an ordinary "never provisioned" board
-         * into a logged hard-I/O-error case. */
-        case ESP_ERR_NVS_PART_NOT_FOUND:    return HAL_NOT_FOUND;
+         * or hal_kv_init_partition() never called for it) is NOT the same
+         * outcome as a missing KEY inside a present partition, and must not
+         * collapse onto the same HAL_NOT_FOUND a caller uses for "key/
+         * namespace absent, nothing saved yet" -- profiles_http.c's
+         * nvs_load_all_from() and profile_executor_firing_stats.c's
+         * firing_stats_load() both early-return on HAL_NOT_FOUND as their
+         * "not configured yet" case, which would silently swallow a genuine
+         * unmounted/never-flashed profiles_nvs partition as if it were an
+         * ordinary empty board (2026-09-06 flash-safety review). Mapped to
+         * HAL_NOT_READY instead -- matching fake_kv.c's hal_kv_open()
+         * (find_partition_slot() < 0 -> HAL_NOT_READY, "hal_kv_init_
+         * partition() not called yet") so host and target agree on this
+         * case, and distinct enough from HAL_NOT_FOUND that a caller CAN
+         * tell "not configured" apart from "partition trouble" if it ever
+         * needs to. wifi_prov_nvs.c's two "nothing saved" call sites are
+         * unaffected: both are read paths gated on wifi_prov.c's own
+         * wifi_nvs partition already having been brought up successfully
+         * earlier in the same boot (nvs_flash_init_partition()'s ordinary
+         * init, not this backend), so by the time either site runs, a
+         * PART_NOT_FOUND there would mean the partition failed to mount at
+         * all -- already a real error, not "nothing saved yet" -- and both
+         * sites already treat any non-NOT_FOUND status as a load failure to
+         * log, not as "no record" (2026-09-05 batch 3 review confirmed this;
+         * re-confirmed here after this remap). */
+        case ESP_ERR_NVS_PART_NOT_FOUND:    return HAL_NOT_READY;
         case ESP_ERR_NVS_INVALID_LENGTH:    return HAL_INVALID_SIZE;
         case ESP_ERR_NVS_NOT_ENOUGH_SPACE:  return HAL_NO_MEM;
         case ESP_ERR_NVS_INVALID_HANDLE:    return HAL_INVALID_ARG;

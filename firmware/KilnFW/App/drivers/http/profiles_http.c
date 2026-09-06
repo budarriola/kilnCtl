@@ -6,10 +6,11 @@
 #include <string.h>
 
 #include "esp_crc.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+
+#include "hal_kv.h"
+#include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t seen by
+                              * callers of this module's nvs_*()-named wrappers below */
 
 #include "MAX31856.h"
 #include "http_form.h"
@@ -33,9 +34,9 @@ const char *PROFILES_TAG = "profiles_http";
  * own partition with the most headroom rather than sharing kiln_nvs with
  * zones/rules/relay_cycles/run_state. Each module manages its own migration
  * and partition init independently rather than assuming another module
- * already brought its partition up. NVS_DEFAULT_PART_NAME (from
- * nvs_flash.h, expands to "nvs") is the old, still-live home this module's
- * data used to persist to, kept readable for the one-time migration below
+ * already brought its partition up. hal_kv's NULL-partition selector (the
+ * old, still-live default partition this module's data used to persist to)
+ * is kept readable for the one-time migration below
  * and for firmware rollback. */
 #define PROFILES_NVS_PARTITION "profiles_nvs"
 
@@ -417,16 +418,7 @@ esp_err_t nvs_save_slot(uint8_t id);
  * with it. */
 static esp_err_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(PROFILES_TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_status_to_esp_err(hal_kv_init_partition(partition));
 }
 
 /* Loads NVS_NAMESPACE/NVS_KEY_USED + "profN" out of `partition` into *out,
@@ -444,22 +436,23 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         *out_any_found = false;
     }
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (kv_err == HAL_NOT_FOUND) {
         return ESP_OK; /* no kiln_cfg namespace on this partition yet -- nothing configured */
     }
-    if (err != ESP_OK) {
-        return err;
+    if (kv_err != HAL_OK) {
+        return hal_status_to_esp_err(kv_err);
     }
 
     uint8_t bitmap = 0;
-    err = nvs_get_u8(h, NVS_KEY_USED, &bitmap);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        nvs_close(h);
+    kv_err = hal_kv_get_u8(&h, NVS_KEY_USED, &bitmap);
+    esp_err_t err = hal_status_to_esp_err(kv_err);
+    if (kv_err != HAL_OK && kv_err != HAL_NOT_FOUND) {
+        hal_kv_close(&h);
         return err;
     }
-    if (err == ESP_OK) {
+    if (kv_err == HAL_OK) {
         out->used_bitmap = bitmap;
         if (out_any_found) {
             *out_any_found = true;
@@ -474,10 +467,10 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         profile_nvs_key(id, key, sizeof(key));
         profile_persisted_t loaded;
         size_t len = sizeof(loaded);
-        esp_err_t slot_err = nvs_get_blob(h, key, &loaded, &len);
-        if (slot_err != ESP_OK) {
+        hal_status_t slot_kv_err = hal_kv_get_blob(&h, key, &loaded, &len);
+        if (slot_kv_err != HAL_OK) {
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' failed (%s) -- marking unused", id, partition,
-                     esp_err_to_name(slot_err));
+                     hal_status_to_name(slot_kv_err));
             out->used_bitmap &= ~(1u << id);
             continue;
         }
@@ -514,7 +507,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         }
     }
 
-    nvs_close(h);
+    hal_kv_close(&h);
     return ESP_OK;
 }
 
@@ -527,11 +520,14 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
  * call. See DRAM_PSRAM_PLAN.md section 7.2. All of today's callers
  * (control_task et al via uart_bridge_ext.c's bx_run_on_internal_stack(),
  * and the httpd worker directly) already run on internal-stack tasks; this
- * refuses loudly instead of crashing the board if a future caller does not. */
+ * refuses loudly instead of crashing the board if a future caller does not.
+ *
+ * HW_ABSTRACTION_PLAN.md Phase 3 item 3: now delegates to
+ * hal_kv_write_safe_here() (this module's own negation of it) instead of
+ * probing esp_ptr_external_ram() locally -- same predicate, one definition. */
 static bool caller_stack_is_external(void)
 {
-    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
-    return esp_ptr_external_ram((void *)&stack_probe);
+    return !hal_kv_write_safe_here();
 }
 
 esp_err_t nvs_save_slot(uint8_t id)
@@ -545,10 +541,10 @@ esp_err_t nvs_save_slot(uint8_t id)
                       "worker for the established pattern.");
         return ESP_ERR_INVALID_STATE;
     }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
+    if (kv_err != HAL_OK) {
+        return hal_status_to_esp_err(kv_err);
     }
     char key[8];
     profile_nvs_key(id, key, sizeof(key));
@@ -558,15 +554,15 @@ esp_err_t nvs_save_slot(uint8_t id)
         .crc32 = 0,
     };
     persisted.crc32 = compute_profile_crc(&persisted);
-    err = nvs_set_blob(h, key, &persisted, sizeof(persisted));
-    if (err == ESP_OK) {
-        err = nvs_set_u8(h, NVS_KEY_USED, s_profiles.used_bitmap);
+    kv_err = hal_kv_set_blob(&h, key, &persisted, sizeof(persisted));
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, s_profiles.used_bitmap);
     }
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(kv_err);
 }
 
 /* DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
@@ -586,24 +582,24 @@ esp_err_t nvs_erase_slot(uint8_t id)
                       "DRAM_PSRAM_PLAN.md section 7.2/9.");
         return ESP_ERR_INVALID_STATE;
     }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
+    if (kv_err != HAL_OK) {
+        return hal_status_to_esp_err(kv_err);
     }
     char key[8];
     profile_nvs_key(id, key, sizeof(key));
-    esp_err_t erase_err = nvs_erase_key(h, key);
-    if (erase_err != ESP_OK && erase_err != ESP_ERR_NVS_NOT_FOUND) {
-        nvs_close(h);
-        return erase_err;
+    hal_status_t erase_err = hal_kv_erase_key(&h, key);
+    if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
+        hal_kv_close(&h);
+        return hal_status_to_esp_err(erase_err);
     }
-    err = nvs_set_u8(h, NVS_KEY_USED, s_profiles.used_bitmap);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, s_profiles.used_bitmap);
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(kv_err);
 }
 
 /* One-time move of persisted profiles out of the default partition's
@@ -626,16 +622,21 @@ esp_err_t nvs_erase_slot(uint8_t id)
  * back to pre-split firmware. */
 static void migrate_from_default_partition(void)
 {
-    nvs_handle_t old_h;
-    esp_err_t err = nvs_open_from_partition(NVS_DEFAULT_PART_NAME, NVS_NAMESPACE, NVS_READONLY, &old_h);
-    if (err != ESP_OK) {
+    /* NULL partition == hal_kv's default-partition selector, matching
+     * nvs_open()'s shape -- this used to be the explicit
+     * nvs_open_from_partition(NVS_DEFAULT_PART_NAME, ...) form (that macro
+     * expands to "nvs", the same partition), see hal_kv.h's own header
+     * comment on partition==NULL. */
+    hal_kv_handle_t old_h;
+    hal_status_t kv_err = hal_kv_open(&old_h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL);
+    if (kv_err != HAL_OK) {
         return; /* no kiln_cfg namespace on the default partition -- nothing to migrate */
     }
 
     uint8_t old_bitmap = 0;
-    err = nvs_get_u8(old_h, NVS_KEY_USED, &old_bitmap);
-    if (err != ESP_OK || old_bitmap == 0) {
-        nvs_close(old_h);
+    kv_err = hal_kv_get_u8(&old_h, NVS_KEY_USED, &old_bitmap);
+    if (kv_err != HAL_OK || old_bitmap == 0) {
+        hal_kv_close(&old_h);
         return; /* nothing recorded as used in the old location */
     }
 
@@ -652,12 +653,12 @@ static void migrate_from_default_partition(void)
          * version prefix ever existed for them. */
         profile_t old_profile;
         size_t len = sizeof(old_profile);
-        esp_err_t slot_err = nvs_get_blob(old_h, key, &old_profile, &len);
-        if (slot_err != ESP_OK || len != sizeof(old_profile)) {
+        hal_status_t slot_err = hal_kv_get_blob(&old_h, key, &old_profile, &len);
+        if (slot_err != HAL_OK || len != sizeof(old_profile)) {
             ESP_LOGW(PROFILES_TAG,
                      "prof%u migration read failed or wrong size (%s) -- skipping this slot, others still "
                      "attempted",
-                     id, esp_err_to_name(slot_err));
+                     id, hal_status_to_name(slot_err));
             continue;
         }
 
@@ -676,7 +677,7 @@ static void migrate_from_default_partition(void)
         }
     }
 
-    nvs_close(old_h);
+    hal_kv_close(&old_h);
 }
 
 /* ---- Public getter (profile_executor.c) ----------------------------------- */

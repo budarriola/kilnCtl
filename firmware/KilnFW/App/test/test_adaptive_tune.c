@@ -31,6 +31,9 @@
 #include "../drivers/hw/MAX31856.h" // MAX31856_CHANNEL_COUNT, needed by the coupling-row fakes below,
                                   // ahead of adaptive_tune.c's own #include of it further down this file
 #include "esp_err.h"
+#include "fake_kv.h" /* hal_kv.h's host fake -- adaptive_tune.c now calls hal_kv_*() instead of
+                       * nvs_*() directly (HW_ABSTRACTION_PLAN.md Phase 3 item 3); used by
+                       * test_adaptive_tune_status.c's opt-in-migration tests below. */
 
 // profile_exec_status_t/profile_exec_state_t/PROFILE_EXEC_* -- needed by the
 // profile_executor_get_status() fake below (U1 one-click revert's mid-firing

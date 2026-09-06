@@ -3,13 +3,14 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include "esp_heap_caps.h" /* esp_ptr_external_ram() -- the wrong-task guard below */
 #include "esp_log.h"
 #include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h" /* s_store_lock -- 2026-08-27 audit fix (H5), see its own comment */
-#include "nvs.h"
-#include "nvs_flash.h"
+
+#include "hal_kv.h"
+#include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t this
+                              * file's callers already branch on */
 
 #include "kilnlink/kilnlink_config_page.h"
 
@@ -253,16 +254,7 @@ static uint32_t s_refetch_fail_suppressed = 0;
 
 static esp_err_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_status_to_esp_err(hal_kv_init_partition(partition));
 }
 
 static void reset_to_defaults(void)
@@ -282,17 +274,17 @@ static void nvs_load_store(void)
 {
     reset_to_defaults();
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
-        return; /* ESP_ERR_NVS_NOT_FOUND (never saved) or partition trouble -- defaults stand */
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return; /* HAL_NOT_FOUND (never saved) or partition trouble -- defaults stand */
     }
 
     safety_cfg_store_blob_t loaded;
     size_t len = sizeof(loaded);
-    err = nvs_get_blob(h, NVS_KEY_SAFETY_CFG, &loaded, &len);
-    nvs_close(h);
-    if (err != ESP_OK) {
+    err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_CFG, &loaded, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
         return; /* nothing stored, or unreadable -- defaults stand */
     }
     if (len < sizeof(loaded.version)) {
@@ -358,8 +350,7 @@ static void nvs_load_store(void)
  * diagnosable error instead of aborting the board. */
 static bool caller_stack_is_external(void)
 {
-    volatile int stack_probe = 0; /* volatile + initialised: only its ADDRESS matters, but -Werror=maybe-uninitialized rejects a bare declaration and a non-volatile one could be optimised out of the frame entirely. */
-    return esp_ptr_external_ram((void *)&stack_probe);
+    return !hal_kv_write_safe_here();
 }
 
 static esp_err_t nvs_save_store(void)
@@ -373,18 +364,18 @@ static esp_err_t nvs_save_store(void)
                       "uart_bridge_ext_run_on_flash_worker()) instead of directly.");
         return ESP_ERR_INVALID_STATE;
     }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
     s_store.version = SAFETY_CFG_STORE_VERSION;
-    err = nvs_set_blob(h, NVS_KEY_SAFETY_CFG, &s_store, sizeof(s_store));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_SAFETY_CFG, &s_store, sizeof(s_store));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 /* True once s_store has changed in RAM since it was last successfully

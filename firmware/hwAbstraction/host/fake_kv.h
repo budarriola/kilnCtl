@@ -69,7 +69,16 @@ extern "C" {
 
 #define FAKE_KV_MAX_PARTITIONS         4
 #define FAKE_KV_MAX_NAMESPACES_PER_PART 4
-#define FAKE_KV_MAX_KEYS_PER_NS         4
+/* 4 -> 12 (2026-09-06 flash-safety review): profiles_http.c's "kiln_cfg"
+ * namespace alone holds 9 live keys at once in the worst case (prof_used
+ * plus up to PROFILES_MAX_COUNT=8 "profN" slot keys), which sat exactly at
+ * the old cap of 4 -- any test staging more than 4 profile slots at once
+ * would have silently failed to store the later ones (find_key()'s "table
+ * full" HAL_NO_MEM, not a crash) rather than reporting a real capacity
+ * error. 12 gives headroom above today's worst known case (9) rather than
+ * matching it exactly, same "loose headroom, not a tight fit" discipline
+ * stubs/nvs.h's own blob-size bumps used. */
+#define FAKE_KV_MAX_KEYS_PER_NS         12
 #define FAKE_KV_MAX_KEY_LEN            16
 #define FAKE_KV_MAX_NAME_LEN           16
 /* 256 -> 8192 (HW_ABSTRACTION_PLAN.md Phase 3 item 3, the nvs.h -> hal_kv.h

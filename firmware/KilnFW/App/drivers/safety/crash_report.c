@@ -5,12 +5,12 @@
 #include "esp_crc.h"
 #include "esp_core_dump.h" /* esp_core_dump_summary_t/esp_core_dump_get_summary() -- full-summary parsing stays above hal_sysinfo, see that header's top comment */
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 
+#include "hal_kv.h"
 #include "hal_sysinfo.h" /* hal_sysinfo_coredump_present()/_erase(), hal_sysinfo_reset_reason() */
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t from
-                              * hal_sysinfo_coredump_erase() rather than collapsing it to ESP_FAIL */
+                              * hal_sysinfo_coredump_erase()/hal_kv failures rather than collapsing
+                              * to ESP_FAIL */
 
 static const char *TAG = "crash_report";
 
@@ -43,16 +43,7 @@ typedef char crash_report_record_t_size_check[(sizeof(crash_report_record_t) == 
  * once: nvs_flash_init_partition() is a no-op success if already up. */
 static esp_err_t nvs_partition_init(const char *partition)
 {
-    esp_err_t err = nvs_flash_init_partition(partition);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
-                 partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(partition);
-        }
-    }
-    return err;
+    return hal_status_to_esp_err(hal_kv_init_partition(partition));
 }
 
 /* ---------------------------------------------------------------------------
@@ -221,17 +212,17 @@ static uint32_t crash_report_dump_id(const esp_core_dump_summary_t *summary)
 
 static esp_err_t persist(const crash_report_record_t *rec)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
     }
-    err = nvs_set_blob(h, NVS_KEY_CRASH, rec, sizeof(*rec));
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+    err = hal_kv_set_blob(&h, NVS_KEY_CRASH, rec, sizeof(*rec));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
     }
-    nvs_close(h);
-    return err;
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
 }
 
 /* Loads the stored record. Returns true (and fills *out) only if a blob is
@@ -240,17 +231,17 @@ static esp_err_t persist(const crash_report_record_t *rec)
  * record", never as a reason to hand back partially-trusted bytes. */
 static bool load(crash_report_record_t *out)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
         return false;
     }
     crash_report_record_t rec;
     size_t len = sizeof(rec);
-    err = nvs_get_blob(h, NVS_KEY_CRASH, &rec, &len);
-    nvs_close(h);
+    err = hal_kv_get_blob(&h, NVS_KEY_CRASH, &rec, &len);
+    hal_kv_close(&h);
 
-    if (err != ESP_OK || len != sizeof(rec)) {
+    if (err != HAL_OK || len != sizeof(rec)) {
         return false;
     }
     /* Strings come out of flash and are about to be logged/emitted as JSON --
@@ -379,17 +370,17 @@ esp_err_t crash_report_clear(void)
      * has already asked to stop being shown this record. */
     crash_report_acknowledge();
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err == ESP_OK) {
-        err = nvs_erase_key(h, NVS_KEY_CRASH);
-        if (err == ESP_OK) {
-            err = nvs_commit(h);
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_erase_key(&h, NVS_KEY_CRASH);
+        if (kv_err == HAL_OK) {
+            kv_err = hal_kv_commit(&h);
         }
-        nvs_close(h);
+        hal_kv_close(&h);
     }
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGW(TAG, "could not erase crash record from NVS: %s", esp_err_to_name(err));
+    if (kv_err != HAL_OK && kv_err != HAL_NOT_FOUND) {
+        ESP_LOGW(TAG, "could not erase crash record from NVS: %s", hal_status_to_name(kv_err));
     }
 
     hal_status_t erase_status = hal_sysinfo_coredump_erase();
