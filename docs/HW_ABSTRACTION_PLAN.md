@@ -787,7 +787,14 @@ uart_owner.h) for WP2. Each processor's copy stays independent -- no shared
 
 **Phase 1b — adapt.** Each moved owner implements its Phase-0 interface:
 types change at the edge, bodies stay. hal_uart_send_blocking lands here and
-uart_protocol.c:107 switches to it. Measure on hardware after this phase:
+uart_protocol.c:107 switches to it -- DONE 2026-09-05: frame_and_send() now
+calls hal_uart_send_blocking() on a hal_uart_t attached (not driver-owned,
+via the new transitional hal_uart_attach()) to proto->owner->port;
+uart_owner_transfer()'s TX path is left in place but unused by this caller
+(uart_owner.c's request-queue write is not converted -- see its TODO (HAL
+Phase 1b) comment on why). uart_protocol.c is still not host-compiled
+(Phase 2), so no host test exercises this path yet; build_kilnfw and
+run_all_checks.ps1 are the only current coverage. Measure on hardware after this phase:
 safety-link reply timing, display frame time, thermo read latency under a
 full-screen redraw. relay_owner becomes a hal_gpio client; hal_adc wraps
 current_task/current_sense. hal_scratch/hal_wdt pico bodies landed the same

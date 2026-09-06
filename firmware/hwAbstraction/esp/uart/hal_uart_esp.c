@@ -203,6 +203,33 @@ hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
     return HAL_OK;
 }
 
+hal_status_t hal_uart_attach(hal_uart_t *u, int port) {
+    if (!u) {
+        return HAL_INVALID_ARG;
+    }
+
+    /* Transitional Phase-1b path (see interface/hal_uart.h's doc comment):
+     * the driver for `port` is already installed/configured by a uart_owner_t
+     * that this handle does not own -- no uart_driver_install/param_config/
+     * set_pin here, and deliberately no event task of its own (the owner's
+     * own event task, identical in behavior to hal_uart_esp_event_task()
+     * above, already watches this port's FIFO_OVF/BUFFER_FULL/line errors).
+     * rx_error_count/tx_dropped_count on THIS handle therefore only count
+     * activity observed through calls made via this handle (today: sends
+     * from uart_protocol.c's frame_and_send()), not the owner's own RX-side
+     * counters -- the two are intentionally separate views, not a shared
+     * counter. hal_uart_deinit must never be called on a handle produced by
+     * this function: it would call uart_driver_delete() out from under the
+     * owner that still needs the port. */
+    hal_uart_esp_impl_t *impl = impl_of(u);
+    memset(impl, 0, sizeof(*impl));
+    impl->port = (uart_port_t)port;
+    impl->event_queue = NULL;
+    impl->event_task_handle = NULL;
+    impl->initialized = true;
+    return HAL_OK;
+}
+
 hal_status_t hal_uart_deinit(hal_uart_t *u) {
     if (!u) {
         return HAL_INVALID_ARG;

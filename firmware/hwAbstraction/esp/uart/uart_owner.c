@@ -121,6 +121,21 @@ static void uart_owner_task(void *arg)
         esp_err_t result = ESP_OK;
 
         if (request.tx_buffer && request.tx_length > 0) {
+            // TODO (HAL Phase 1b): not converted to hal_uart_send_blocking.
+            // This write is one phase of a request/reply transaction
+            // serialized through THIS owner task's request_queue (TX then,
+            // if requested, the now-refused RX read below, both under one
+            // done_sem/result_out pair) -- routing it through the HAL here
+            // would still need this same queue+task for ordering against
+            // concurrent uart_owner_transfer() callers, so converting only
+            // the write half gains nothing and risks splitting a single
+            // logical transaction across two different completion paths.
+            // uart_protocol.c's frame_and_send() (the only real tx_buffer
+            // caller today, see uart_owner.h's doc comment) already bypasses
+            // this path entirely via hal_uart_attach()/hal_uart_send_blocking
+            // on proto->hal_uart -- this branch is dead code for it and is
+            // left here only for the not-currently-exercised general
+            // request/reply shape uart_owner_transfer() still advertises.
             int written = uart_write_bytes(owner->port, (const char *)request.tx_buffer, request.tx_length);
             if (written != (int)request.tx_length) {
                 result = ESP_FAIL;

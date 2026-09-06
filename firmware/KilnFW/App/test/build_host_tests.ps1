@@ -161,6 +161,7 @@ $hostTestsRspLines = @(
     "/I`"$hwAbsDir\esp\spi`""
     "/I`"$hwAbsDir\esp\i2c`""
     "/I`"$hwAbsDir\esp\uart`""
+    "/I`"$hwAbsDir\interface`""
 )
 [System.IO.File]::WriteAllText($hostTestsRsp, ($hostTestsRspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 

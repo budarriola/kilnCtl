@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "hal_uart.h"
 #include "uart_owner.h"
 
 #ifdef __cplusplus
@@ -156,6 +157,14 @@ typedef struct {
 typedef struct {
     uart_owner_t *owner;
     uart_proto_device_t own_device;
+
+    /* Attached (not owned) to owner->port -- see hal_uart_attach()'s doc
+     * comment in interface/hal_uart.h. frame_and_send() sends through this
+     * instead of uart_owner_transfer() (Phase 1b, docs/HW_ABSTRACTION_PLAN.md
+     * "hal_uart -- two primitives, ESP backend unchanged"). Never
+     * hal_uart_deinit'd: owner still owns the driver's install/deinit
+     * lifecycle. */
+    hal_uart_t hal_uart;
 
     uart_proto_task_slot_t tasks[UART_PROTO_MAX_TASKS];
     SemaphoreHandle_t tasks_lock;
