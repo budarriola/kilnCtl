@@ -812,7 +812,13 @@ var INFO_HTML = {
   crossZone: '<p class="hint">Trips if this zone disagrees with another zone by more than this ' +
     'for 10 minutes, catching a thermocouple that fell out of the chamber. Needs 2+ zones. Leave ' +
     'at 0 until you have measured how far this kiln\'s zones legitimately drift apart -- real ' +
-    'kilns stratify, and a too-tight value here stops a good firing.</p>'
+    'kilns stratify, and a too-tight value here stops a good firing.</p>',
+  relayType: '<p class="hint">Sets the rated contact life used for the wear indication -- SSR has ' +
+    'no budget (it has no mechanical contacts to wear out); Contactor and Mercury each have a ' +
+    'rated number of operations, and the board tracks cycles against it and warns as that budget ' +
+    'runs down. This is TOPOLOGY, like the relay checkboxes above -- it describes what hardware is ' +
+    'actually wired to this zone, not a tuning choice, so it is not one of the settings a zone can ' +
+    'inherit from another via "same as".</p>'
 };
 
 function infoOpenStorageKey(key) { return 'zoneInfoOpen:' + key; }
@@ -844,6 +850,19 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     relayHtml += '<label><input type="checkbox" class="relaybit" data-bit="' + r + '"' + checked + '> ' +
                  RELAY_NAMES[r] + '</label>';
   }
+  /* RELAY_LIFE_BUDGET_PLAN.md step 2 (ZONES_CFG_VERSION 19->20): which
+   * contact-life budget the relay(s) checked above are rated for. Rendered
+   * as TOPOLOGY -- alongside relayHtml, outside settingsStackHtml -- not as
+   * part of the inheritable settings stack (see settingsStackHtml's own
+   * comment): a relay's physical type does not change when a zone picks up
+   * another zone's tuning numbers via "same as", any more than which
+   * relays/thermocouples/CTs are wired to it does. */
+  var relayType = z.relay_type || 0;
+  var relayTypeHtml = '<select class="relaytype">' +
+    '<option value="0"' + (relayType === 0 ? ' selected' : '') + '>SSR</option>' +
+    '<option value="1"' + (relayType === 1 ? ' selected' : '') + '>Contactor</option>' +
+    '<option value="2"' + (relayType === 2 ? ' selected' : '') + '>Mercury</option>' +
+    '</select>';
   /* Channel range matches zones_http.c's parse_zone_fields() validation
    * (valid_thermo_bits derived from thermo_count, exactly like relay_mask's
    * valid_bits is derived from relay_count above) -- channels beyond the
@@ -1034,6 +1053,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<h2>Zone ' + i + '</h2>' +
     '<label>Name</label><input type="text" class="name" maxlength="15" value="' + window.kcEscapeHtml(z.name || '') + '">' +
     '<label>Relays in this zone</label><div class="relaybits">' + relayHtml + '</div>' +
+    '<label>Relay type</label>' + infoDetailsHtml('relayType', 'relay type') + relayTypeHtml +
     '<label>Thermocouples feeding this zone</label><div class="thermobits">' + thermoHtml + '</div>' +
     '<p class="hint">Checking more than one channel averages their valid readings into this ' +
     'zone\'s control temperature. Leaving all unchecked disables control for this zone, the ' +
@@ -1738,9 +1758,12 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     if (srcVal !== 255) dependents.push(i);
 
     /* Wiring -- always this zone's own, never inherited (3.5's "still not
-       covered" list: name/relay/thermo/ct masks). */
+       covered" list: name/relay/thermo/ct masks -- relay_type joins that
+       list per RELAY_LIFE_BUDGET_PLAN.md step 2: it's TOPOLOGY, not tuning,
+       see relayTypeHtml's own comment in zoneBlock()). */
     params.push('z' + i + '_name=' + encodeURIComponent(div.querySelector('.name').value));
     params.push('z' + i + '_relay_mask=' + mask);
+    params.push('z' + i + '_relaytype=' + div.querySelector('.relaytype').value);
     params.push('z' + i + '_thermo_mask=' + thermoMask);
     params.push('z' + i + '_ct_mask=' + ctMask);
 

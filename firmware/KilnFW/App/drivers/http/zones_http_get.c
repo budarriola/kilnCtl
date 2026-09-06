@@ -304,6 +304,12 @@ esp_err_t zones_get_handler(httpd_req_t *req)
              * it straight through untouched must never see an absent key
              * mean something different from a zero. */
             "\"timing_profile\":%u,\"normal_current_measured\":%s,\"normal_current_a\":%.3f,"
+            /* RELAY_LIFE_BUDGET_PLAN.md step 2 (ZONES_CFG_VERSION 19->20):
+             * always emitted, same read-back-and-repost round-trip reasoning
+             * as every other always-emitted field above -- the page reads
+             * this back and reposts it as z%u_relaytype (POST side:
+             * zones_http_post_parse.c). */
+            "\"relay_type\":%u,"
             "\"fuzzy_strength_pct\":%.2f,",
             i == 0 ? "" : ",", i, name_escaped, z->relay_mask, z->thermo_mask, (double)z->cal_offset_c,
             (double)z->pid_kp, (double)z->pid_ki, (double)z->pid_kd, (double)z->max_ramp_c_per_hr,
@@ -317,7 +323,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->cross_zone_max_delta_c, (double)z->model_k_dc,
             (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type, z->ct_mask,
             z->timing_profile, normal_measured ? "true" : "false", (double)normal_a,
-            (double)z->fuzzy_strength_pct);
+            z->relay_type, (double)z->fuzzy_strength_pct);
         /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
          * coupling identification's own diagonal cell -- see zone_cfg_t::
          * coupling_diag_k_dc's own doc comment. Always emitted, same always-

@@ -345,6 +345,15 @@ esp_err_t zones_post_handler(httpd_req_t *req)
      * save. */
     s_zones_config_valid = true;
     s_config_generation++;
+    /* RELAY_LIFE_BUDGET_PLAN.md step 2, "on every successful save": this
+     * whole-page submit just validated cleanly and is now live in
+     * s_zones.cfg (the "successful" part -- a rejected submission returned
+     * long before this line and never reaches here), so push every zone's
+     * relay_type out to relay_cycles.c now, same "applied now either way"
+     * convention as nvs_save()'s own failure handling just below -- an
+     * operator-visible relay type change takes effect immediately whether
+     * or not the NVS write that would make it survive a reboot succeeds. */
+    zones_config_push_all_relay_types();
     esp_err_t err = nvs_save();
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "nvs_save failed: %s -- config applied live but will not survive a reboot",

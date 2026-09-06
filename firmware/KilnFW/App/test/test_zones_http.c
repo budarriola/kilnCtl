@@ -50,6 +50,36 @@ int g_test_count = 0;
 #include "esp_http_server.h"
 #include "fake_kv.h"
 
+// RELAY_LIFE_BUDGET_PLAN.md step 2: zones_config_store.c now calls
+// relay_cycles_set_type() (relay_cycles.h) on load and on every successful
+// save. relay_cycles.c itself is its OWN separate host-test executable
+// (build_host_tests.ps1's "run_state_relay_cycles" step) with real NVS/
+// PSRAM-stack dependencies this executable does not pull in -- so, same
+// convention as every other cross-module dependency in this file (hal_kv.h
+// via fake_kv.h, etc.), this is a fake body, not the real relay_cycles.c,
+// linked into this ONE translation unit. It only needs to record what was
+// pushed so a test can assert on it -- relay_cycles.c's own host tests
+// already cover the real budget math/persistence.
+#include "../drivers/persist/relay_cycles.h"
+static relay_type_t s_test_relay_type_pushed[RELAY_CYCLES_COUNT];
+static uint32_t s_test_relay_override_pushed[RELAY_CYCLES_COUNT];
+static int s_test_relay_type_push_count[RELAY_CYCLES_COUNT];
+static void test_relay_cycles_reset_pushes(void)
+{
+    memset(s_test_relay_type_pushed, 0, sizeof(s_test_relay_type_pushed));
+    memset(s_test_relay_override_pushed, 0, sizeof(s_test_relay_override_pushed));
+    memset(s_test_relay_type_push_count, 0, sizeof(s_test_relay_type_push_count));
+}
+void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_override)
+{
+    if (relay >= RELAY_CYCLES_COUNT) {
+        return;
+    }
+    s_test_relay_type_pushed[relay] = type;
+    s_test_relay_override_pushed[relay] = rated_override;
+    s_test_relay_type_push_count[relay]++;
+}
+
 // asm("_binary_...") is a GCC/binutils extension (EMBED_TXTFILES,
 // CMakeLists.txt) with no MSVC equivalent -- #define it away to nothing so
 // `extern const uint8_t X[] asm("...");` parses as plain
@@ -3187,6 +3217,74 @@ static void test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it(void)
     }
 }
 
+static void test_validate_accepts_relay_type_mercury_rejects_past_it(void)
+{
+    TEST_SECTION("validate_zones_cfg / zones_config_set_relay_type -- ZONE_RELAY_TYPE_MAX "
+                 "(2, Mercury) is accepted, 3 is rejected (RELAY_LIFE_BUDGET_PLAN.md step 2)");
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].relay_type = ZONE_RELAY_TYPE_MAX;
+        const char *reason = NULL;
+        TEST_CHECK(zones_config_json_validate(&cfg, &reason), "relay_type 2 (Mercury) validates");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].relay_type = ZONE_RELAY_TYPE_MAX + 1;
+        const char *reason = NULL;
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "relay_type past ZONE_RELAY_TYPE_MAX is rejected");
+        TEST_CHECK(reason && strstr(reason, "relay_type") != NULL, "the rejection names the field");
+    }
+
+    // zones_config_set_relay_type() enforces the identical bound, and its
+    // success path pushes the new type to relay_cycles_set_type() for every
+    // relay in the zone's relay_mask.
+    {
+        nvs_test_enable(true);
+        nvs_test_clear();
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        s_zones.cfg.thermo_count = 1;
+        s_zones.cfg.relay_count = 2;
+        s_zones.cfg.zones[0].relay_mask = 0x03; // relays 0 and 1
+        s_zones.cfg.timing_profile_count = 1;
+        test_relay_cycles_reset_pushes();
+
+        uint8_t got = 99;
+        TEST_CHECK(zones_config_set_relay_type(0, 2), "zones_config_set_relay_type(zone 0, Mercury) is accepted");
+        TEST_CHECK(zones_config_get_relay_type(0, &got) && got == 2, "the accepted type reads back correctly");
+        TEST_CHECK(!zones_config_set_relay_type(0, 3), "zones_config_set_relay_type(zone 0, 3) is refused");
+        TEST_CHECK(!zones_config_set_relay_type(MAX31856_CHANNEL_COUNT, 0),
+                  "zones_config_set_relay_type() with an out-of-range zone index is refused");
+
+        // THE push proof: both relays named in relay_mask (0 and 1) got the
+        // new type; a relay NOT in the mask (2) was never touched.
+        TEST_CHECK(s_test_relay_type_push_count[0] >= 1 && s_test_relay_type_pushed[0] == RELAY_TYPE_MERCURY,
+                  "relay 0 (in zone 0's mask) was pushed RELAY_TYPE_MERCURY");
+        TEST_CHECK(s_test_relay_type_push_count[1] >= 1 && s_test_relay_type_pushed[1] == RELAY_TYPE_MERCURY,
+                  "relay 1 (in zone 0's mask) was pushed RELAY_TYPE_MERCURY");
+        TEST_CHECK(s_test_relay_type_push_count[2] == 0,
+                  "relay 2 (NOT in zone 0's mask) was never pushed -- the push is scoped to relay_mask");
+        TEST_CHECK(s_test_relay_override_pushed[0] == 0, "rated_override is pushed as 0 (use the type's table)");
+
+        nvs_test_enable(false);
+        nvs_test_clear();
+    }
+}
+
+// NEGATIVE TEST (feedback_negative_test_every_check.md): proves the push-
+// scoping assertion above can actually fail, by temporarily widening the
+// mask check to see relay 2 get touched too, then restoring it.
+//   Broke zones_config_push_relay_type()'s loop condition from
+//   `if (z->relay_mask & (1u << r))` to `if (1)` (push every relay
+//   unconditionally, ignoring relay_mask) and re-ran this test: the
+//   "relay 2 ... was never pushed" TEST_CHECK above failed as expected
+//   (s_test_relay_type_push_count[2] became 1, not 0). Restored the real
+//   `if (z->relay_mask & (1u << r))` condition afterward -- verified by hand
+//   2026-09-06, not committed as a standing test (the same discipline
+//   test_relay_cycles.c's own v1->v2 migration negative test documents in
+//   its own comment).
+
 static void test_post_mode_pid_fuzzy_accepted_by_parser(void)
 {
     TEST_SECTION("parse_zone_fields -- z0_mode=3 (PID_FUZZY) is accepted, z0_mode=4 is refused (0-3)");
@@ -3215,6 +3313,60 @@ static void test_post_mode_pid_fuzzy_accepted_by_parser(void)
     ok = zones_http_parse_zone_fields(body4, 0, 1, 4, 1, &current, &out, &err_reason);
     TEST_CHECK(!ok, "z0_mode=4 must still be refused -- appending PID_FUZZY did not widen the ceiling further");
     TEST_CHECK(err_reason && strstr(err_reason, "control_mode") != NULL, "the refusal names the field");
+}
+
+static void test_post_relay_type_optional_range_and_preserve(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_relaytype: accepted 0-2, out-of-range refused, omitted preserves "
+                 "the currently-stored value (RELAY_LIFE_BUDGET_PLAN.md step 2)");
+
+    // Present and in range (Mercury) is accepted and parsed verbatim.
+    char body_ok[512];
+    snprintf(body_ok, sizeof(body_ok),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_relaytype=2&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=1&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0");
+    zone_cfg_t current = make_stored_zone();
+    current.relay_type = 0; // SSR, the stored value before this submission
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = zones_http_parse_zone_fields(body_ok, 0, 1, 4, 1, &current, &out, &err_reason);
+    TEST_CHECK(ok, "z0_relaytype=2 (Mercury) must be accepted");
+    TEST_CHECK(out.relay_type == 2, "the parsed relay_type is Mercury (2)");
+
+    // Present but out of range (3, past Mercury) is refused, naming the field.
+    char body_bad[512];
+    snprintf(body_bad, sizeof(body_bad),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_relaytype=3&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=1&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0");
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_bad, 0, 1, 4, 1, &current, &out, &err_reason);
+    TEST_CHECK(!ok, "z0_relaytype=3 is out of range (0-2) and must be refused");
+    TEST_CHECK(err_reason && strstr(err_reason, "relay_type") != NULL, "the refusal names the field");
+
+    // Omitted entirely: OPTIONAL, same as tc_type -- preserves current_z's
+    // stored value rather than defaulting to 0, so an older client's
+    // whole-page replay (or any body predating this field) cannot silently
+    // erase an operator's earlier Contactor/Mercury choice.
+    char body_omit[512];
+    snprintf(body_omit, sizeof(body_omit),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=1&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0");
+    zone_cfg_t current_contactor = make_stored_zone();
+    current_contactor.relay_type = 1; // Contactor, previously chosen
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_omit, 0, 1, 4, 1, &current_contactor, &out, &err_reason);
+    TEST_CHECK(ok, "a body omitting z0_relaytype entirely must still be accepted");
+    TEST_CHECK(out.relay_type == 1,
+              "omitting z0_relaytype preserves the currently-stored value (Contactor), not a silent reset to SSR");
 }
 
 /* One clean body with only the field-under-test varied, mirroring
@@ -4878,6 +5030,93 @@ static void test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default
                     "zones[0]'s REAL, non-default approach_rate_cap_c_per_hr A/B arm survives the v18->v19 hop");
     TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr(void)
+{
+    TEST_SECTION("nvs_load_from -- a v19 blob upconverts to v20: every zone's new "
+                 "relay_type lands on the 0 (ssr) sentinel -- while error_band_c/rate_band_c_per_s/"
+                 "approach_rate_cap_c_per_hr/model_k_dc/settings_source/etc survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v19_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 19;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].model_k_dc = 20.969f;
+    src.zones[0].error_band_c = 15.0f; /* a REAL, non-default per-zone fuzzy band -- must survive */
+    src.zones[0].rate_band_c_per_s = 0.8f;
+    src.zones[0].approach_rate_cap_c_per_hr = 30.0f;
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v19's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v19 blob must migrate to a valid current (v20) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // THE thing this test is really about: relay_type must land at the legal
+    // 0 (ssr) sentinel on EVERY zone (v19 never stored this field at all) --
+    // which is also, per RELAY_LIFE_BUDGET_PLAN.md's design, exactly the
+    // correct answer for every existing board's EE2-12NUH heater relays.
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        TEST_CHECK(out_cfg.zones[j].relay_type == 0,
+                  "v19 has no relay_type -- every migrated zone lands on the 0 (ssr) sentinel");
+    }
+
+    // Pre-existing v19 fields, including a REAL, non-default per-zone
+    // error_band_c/rate_band_c_per_s pair, must survive the upgrade
+    // completely unchanged.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].error_band_c, 15.0f, 1e-6,
+                    "zones[0]'s REAL, non-default error_band_c survives the v19->v20 hop");
+    TEST_CHECK_NEAR(out_cfg.zones[0].rate_band_c_per_s, 0.8f, 1e-6,
+                    "zones[0]'s REAL, non-default rate_band_c_per_s survives the v19->v20 hop");
+    TEST_CHECK_NEAR(out_cfg.zones[0].approach_rate_cap_c_per_hr, 30.0f, 1e-6,
+                    "zones[0].approach_rate_cap_c_per_hr survives the v19->v20 hop");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source is carried through verbatim");
+
+    // relay_cycles_set_type() push: nvs_load() (not nvs_load_from() directly,
+    // which this test calls to isolate the migration itself) is the call
+    // site that pushes relay_type out to relay_cycles.c -- covered by
+    // zones_config_push_relay_type_pushes_to_relay_cycles below, which
+    // exercises s_zones.cfg + the push helper directly rather than
+    // duplicating the full nvs_load() path here.
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -7923,7 +8162,9 @@ void run_test_zones_http(void)
     test_nvs_load_from_v10_blob_self_referencing_pair_is_dropped();
     test_nvs_load_from_v9_blob_chains_through_v10_to_v11_with_zero_coupling();
     test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it();
+    test_validate_accepts_relay_type_mercury_rejects_past_it();
     test_post_mode_pid_fuzzy_accepted_by_parser();
+    test_post_relay_type_optional_range_and_preserve();
     test_post_fuzzy_strength_out_of_range_refused_not_clamped();
     test_post_omitting_new_fields_preserves_stored_values();
     test_post_new_fields_present_but_unparseable_are_refused();
@@ -7949,6 +8190,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped();
     test_approach_rate_cap_accessor_get_set_and_range();
     test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default();
+    test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr();
     test_nvs_load_from_v18_blob_real_board_values_migration();
     test_fuzzy_bands_accessor_get_set_and_range();
     test_NEGATIVE_wrong_zone_band_read_is_caught();

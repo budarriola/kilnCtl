@@ -325,6 +325,10 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone control_mode out of range";
             return false;
         }
+        if (z->relay_type > ZONE_RELAY_TYPE_MAX) {
+            *err_reason = "zone relay_type out of range";
+            return false;
+        }
         if (!isfinite(z->max_temp_c) || z->max_temp_c < 0.0f || z->max_temp_c > ZONE_MAX_TEMP_C_MAX) {
             *err_reason = "zone max_temp_c out of range";
             return false;

@@ -17,6 +17,9 @@
 #include "nvs_flash.h"
 
 #include "kiln_io.h"
+#include "relay_cycles.h" /* RELAY_LIFE_BUDGET_PLAN.md step 2: relay_cycles_set_type() push
+                            * on load, zones_config_push_relay_type()/_push_all_relay_types()
+                            * below. */
 
 /* ---- NVS ---------------------------------------------------------------- */
 
@@ -182,6 +185,12 @@ void migrate_from_default_partition(void)
      * successfully migrated -- so this is always something ready to run a
      * kiln against, never a corrupt or refused blob (both return above). */
     s_zones_config_valid = valid_in_default;
+    /* RELAY_LIFE_BUDGET_PLAN.md step 2, "on load": this IS a load into
+     * s_zones.cfg, same as nvs_load()'s own -- a board migrating forward
+     * from the default partition must not run with relay_cycles.c still
+     * holding whatever nvs_load()'s earlier, empty attempt against
+     * KILN_NVS_PARTITION pushed (or nothing at all, on a first boot). */
+    zones_config_push_all_relay_types();
     esp_err_t save_err = nvs_save();
     if (save_err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "migration write to '%s' failed: %s -- running from the old copy this boot, will retry",
@@ -199,7 +208,22 @@ void migrate_from_default_partition(void)
  * get the real found/valid flags instead of guessing from the zeroed struct. */
 esp_err_t nvs_load(bool *out_found, bool *out_valid)
 {
-    return nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid);
+    esp_err_t err = nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid);
+    if (err == ESP_OK && (!out_valid || *out_valid)) {
+        /* RELAY_LIFE_BUDGET_PLAN.md step 2, "on load": s_zones.cfg is now
+         * whatever this boot is actually going to run with (a decoded
+         * current/migrated blob, or the zero-initialized defaults
+         * nvs_load_from() leaves in place on a refused/corrupt load) --
+         * either way its zones[].relay_type is the type relay_cycles.c
+         * should be counting against from here on. Gated on out_valid so a
+         * refused newer-than-firmware blob (found but not valid,
+         * s_zones.cfg zeroed) does not push a fabricated all-SSR answer over
+         * whatever relay_cycles.c already has persisted from a prior boot --
+         * an unusable config load leaves the existing types alone rather
+         * than resetting them to the zeroed struct's default. */
+        zones_config_push_all_relay_types();
+    }
+    return err;
 }
 
 esp_err_t nvs_save(void)
@@ -223,6 +247,35 @@ esp_err_t nvs_save(void)
     }
     hal_kv_close(&h);
     return hal_status_to_esp_err(err);
+}
+
+/* RELAY_LIFE_BUDGET_PLAN.md step 2 -- see zones_http_internal.h's own
+ * comment for when each of these is called. rated_override is always 0
+ * here: there is no per-relay override UI yet (RELAY_LIFE_BUDGET_PLAN.md's
+ * "Design" section calls it out as a later addition), so every push uses
+ * the type's own rated-life table entry. */
+void zones_config_push_relay_type(uint8_t zone_index)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT) {
+        return;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    relay_type_t type = (relay_type_t)z->relay_type;
+    if (z->relay_type > ZONE_RELAY_TYPE_MAX) {
+        type = RELAY_TYPE_SSR; /* defensive, same fallback zones_config_get_relay_type() uses */
+    }
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        if (z->relay_mask & (1u << r)) {
+            relay_cycles_set_type(r, type, 0);
+        }
+    }
+}
+
+void zones_config_push_all_relay_types(void)
+{
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        zones_config_push_relay_type(i);
+    }
 }
 
 /* ---- Relay names (owner request 2026-08-27+1: "the user should be able to

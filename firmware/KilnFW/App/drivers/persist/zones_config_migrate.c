@@ -49,7 +49,17 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
      * C_MIN/MAX/DEFAULT's own comment) -- zones_config_get_error_band_c()/
      * zones_config_get_rate_band_c_per_s() resolve that sentinel to 20.0f/
      * 0.5f, bit-identical to the removed ERROR_BAND_C/RATE_BAND_C_PER_S
-     * #defines, for every zone of every upgrading board. */
+     * #defines, for every zone of every upgrading board.
+     *
+     * ZONES_CFG_VERSION 19->20: relay_type is ALSO brand new
+     * (RELAY_LIFE_BUDGET_PLAN.md step 2) -- same "no prior global scalar to
+     * carry forward" shape as approach_rate_cap_c_per_hr/error_band_c/
+     * rate_band_c_per_s above, so again EVERY case below needs nothing
+     * extra: this function's entry memset already zeroes the field, and 0
+     * (RELAY_TYPE_SSR) is exactly what every existing board's heater relays
+     * already are. zones_config_push_all_relay_types() (zones_config_
+     * store.c) pushes the migrated value out to relay_cycles.c right after
+     * this function returns, same as it does for a same-version load. */
     switch (version) {
     case 1: {
         zones_cfg_v1_t src;
@@ -543,6 +553,38 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         }
         /* src.crc32 deliberately NOT carried over -- it covered the v18
          * shape; nvs_save() stamps a fresh one over the current (v19)
+         * struct. */
+        return true;
+    }
+    case 19: {
+        /* v19 -> v20 (THIS pass, RELAY_LIFE_BUDGET_PLAN.md step 2):
+         * relay_type is brand new -- see this function's own top-of-function
+         * comment for why every zone simply lands on the 0 (ssr) sentinel
+         * via the entry memset, with no explicit per-zone assignment
+         * needed. zone_cfg_v19_t (frozen in zones_config_json.h) is
+         * byte-for-byte identical to what zone_cfg_t was at v19, so a
+         * per-element memcpy of that prefix is exactly equivalent to a
+         * whole-array memcpy, just typed against the smaller historical
+         * shape -- same technique case 18 uses against zone_cfg_v18_t. */
+        zones_cfg_v19_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v19 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].relay_type already 0 (ssr) from this function's
+             * entry memset -- brand-new mechanism, no prior global opinion
+             * to carry forward, same as error_band_c/rate_band_c_per_s's
+             * own v18->v19 migration just above. */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v19
+         * shape; nvs_save() stamps a fresh one over the current (v20)
          * struct. */
         return true;
     }

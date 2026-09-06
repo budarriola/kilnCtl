@@ -60,7 +60,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 19
+#define ZONES_CFG_VERSION 20
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -199,6 +199,13 @@ extern "C" {
  * (MAX31856_configure()) deliberately accepts the wider 0-0x0F range and is
  * untouched by this bound. */
 #define ZONE_TC_TYPE_MAX_REAL THERMO_TC_T
+
+/* relay_type_t (relay_cycles.h: RELAY_TYPE_SSR=0/CONTACTOR=1/MERCURY=2) as
+ * stored on zone_cfg_t below (ZONES_CFG_VERSION 19->20,
+ * RELAY_LIFE_BUDGET_PLAN.md step 2). 0 (ssr) is both the enum's own zero
+ * value and this field's migration default -- see zone_cfg_t::relay_type's
+ * own comment. */
+#define ZONE_RELAY_TYPE_MAX 2
 
 typedef struct {
     char name[ZONE_NAME_MAX_LEN + 1];
@@ -659,7 +666,137 @@ typedef struct {
      * below) stays an exact byte-for-byte prefix of this shape. */
     float error_band_c;
     float rate_band_c_per_s;
+    /* ---- ZONES_CFG_VERSION 19->20 (2026-09-06, RELAY_LIFE_BUDGET_PLAN.md
+     * step 2): which contact-life budget this zone's relay(s) are rated for.
+     * relay_type_t (relay_cycles.h) stored as a plain uint8_t, same
+     * convention control_mode/tc_type/etc. already use. relay_mask lets a
+     * zone drive several physical relays at once; they switch together as
+     * one group (relay_cycles_add() already sums by mask, not per bit), so
+     * the type is naturally per zone rather than per relay -- the counter
+     * itself stays per relay (relay_cycles.c's RELAY_CYCLES_COUNT slots),
+     * this field just tells zones_config_store.c which rated-life table
+     * entry to push into every relay named in relay_mask via
+     * relay_cycles_set_type(), on load and on every successful save (see
+     * that call site's own comment).
+     *
+     * 0 = RELAY_TYPE_SSR, the "no rated-life budget" default -- the same
+     * "0 is always a safe, meaningful value" property control_mode/tc_type/
+     * thermo_mask already have, and exactly what an EE2-12NUH heater relay
+     * on this board's stock zones already is. Bounded by
+     * [0, ZONE_RELAY_TYPE_MAX] -- refused, never clamped, same discipline as
+     * every other setter in this codebase (parse_zone_fields() rejects an
+     * out-of-range value with a specific reason rather than silently
+     * substituting SSR).
+     *
+     * Appended at zone_cfg_t's own true tail, the same safe-growth spot
+     * error_band_c/rate_band_c_per_s used at v18->v19 just above -- so a v19
+     * board's on-flash zone_cfg_v19_t layout (frozen below) stays an exact
+     * byte-for-byte prefix of this shape. Brand new field, no prior global
+     * or per-zone opinion to carry forward (same shape as
+     * approach_rate_cap_c_per_hr's v17->v18 migration, not
+     * ease_off_window_mult's v16->v17 "carry the removed global verbatim"
+     * shape): every migrated zone of every upgrading board lands on the 0
+     * (ssr) sentinel via convert_versioned_blob_to_current()'s entry
+     * memset, which is already today's real, correct answer for every
+     * existing board's heater relays. */
+    uint8_t relay_type;
 } zone_cfg_t;
+
+/* Frozen v19 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 19->20), error_band_c/rate_band_c_per_s and
+ * all, predating relay_type. Same discipline as zone_cfg_v18_t just above it
+ * in this file: field order hand-copied from v19's actual shape, never
+ * derived from the live struct -- critically, NEVER the bare `zone_cfg_t`
+ * name for this purpose, since that name now refers to the v20 (bigger)
+ * shape. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+    float error_band_c;
+    float rate_band_c_per_s;
+} zone_cfg_v19_t;
+
+/* 208 = 200 (zone_cfg_v18_t's own byte-for-byte size) + 4 (2 x float:
+ * error_band_c, rate_band_c_per_s), each already 4-byte aligned so no
+ * further tail padding. Hand-computed, same discipline as every other
+ * frozen zone_cfg_vN_t assert in this file -- never sizeof(zone_cfg_t),
+ * which by the time this pass lands is already the v20 shape, not v19's. */
+_Static_assert(sizeof(zone_cfg_v19_t) == 208,
+               "zone_cfg_v19_t must match the on-flash v19 layout byte-for-byte (208 bytes)"); /* v19 -- predates relay_type */
+
+/* Per-field offsetof assertions for zone_cfg_v19_t -- same rationale as
+ * zone_cfg_v18_t's own block above (this is a frozen snapshot pinned against
+ * an accidental edit to ITSELF, not a guard against insertion into the live
+ * zone_cfg_t; see that comment for the full reasoning and the migration-test
+ * coverage that actually catches the live-struct case). */
+_Static_assert(offsetof(zone_cfg_v19_t, name) == 0,
+               "zone_cfg_v19_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v19_t, cal_offset_c) == 16,
+               "zone_cfg_v19_t::cal_offset_c must stay at byte offset 16");
+_Static_assert(offsetof(zone_cfg_v19_t, relay_mask) == 148,
+               "zone_cfg_v19_t::relay_mask must stay at byte offset 148");
+_Static_assert(offsetof(zone_cfg_v19_t, control_mode) == 149,
+               "zone_cfg_v19_t::control_mode must stay at byte offset 149");
+_Static_assert(offsetof(zone_cfg_v19_t, settings_source) == 154,
+               "zone_cfg_v19_t::settings_source must stay at byte offset 154");
+_Static_assert(offsetof(zone_cfg_v19_t, coupling_diag_k_dc) == 188,
+               "zone_cfg_v19_t::coupling_diag_k_dc must stay at byte offset 188");
+_Static_assert(offsetof(zone_cfg_v19_t, ease_off_window_mult) == 192,
+               "zone_cfg_v19_t::ease_off_window_mult must stay at byte offset 192");
+_Static_assert(offsetof(zone_cfg_v19_t, approach_rate_cap_c_per_hr) == 196,
+               "zone_cfg_v19_t::approach_rate_cap_c_per_hr must stay at byte offset 196");
+_Static_assert(offsetof(zone_cfg_v19_t, error_band_c) == 200,
+               "zone_cfg_v19_t::error_band_c must stay at byte offset 200");
+_Static_assert(offsetof(zone_cfg_v19_t, rate_band_c_per_s) == 204,
+               "zone_cfg_v19_t::rate_band_c_per_s must stay at byte offset 204");
 
 /* Frozen v18 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 18->19), per-zone approach_rate_cap_c_per_hr
@@ -2154,6 +2291,28 @@ typedef struct {
                      * pass; predates the per-zone error_band_c/rate_band_c_per_s
                      * addition. */
 
+/* Frozen v19 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 19->20): zones[] is the per-zone shape that
+ * predates this pass's relay_type addition (zone_cfg_v19_t, frozen above).
+ * Same shape as v18's own wrapper -- no wrapper-level scalar removed here
+ * either, just zones[] pinned to the smaller, historical per-zone type. This
+ * is what a LIVE, already-commissioned v19 board looks like on flash right
+ * now -- the exact blob a v19->v20 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v19_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v19_t; /* v19 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates the per-zone relay_type addition. */
+
 
 
 typedef enum {
@@ -2316,6 +2475,22 @@ bool zones_config_get_error_band_c(uint8_t zone_index, float *out_band_c);
 bool zones_config_set_error_band_c(uint8_t zone_index, float band_c);
 bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_per_s);
 bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s);
+
+/* Runtime accessor pair for zone_cfg_t::relay_type (ZONES_CFG_VERSION
+ * 19->20, RELAY_LIFE_BUDGET_PLAN.md step 2) -- same declaration placement/
+ * rationale as the pairs just above. `zone_index` bounds-checked against
+ * MAX31856_CHANNEL_COUNT, same as every other per-zone accessor.
+ *
+ * zones_config_set_relay_type() rejects (false, no write, no NVS save) a
+ * value outside [0, ZONE_RELAY_TYPE_MAX] -- refused, never clamped, same
+ * discipline as every setter in this file. On success it also pushes the
+ * new type to every relay named in this zone's relay_mask via
+ * relay_cycles_set_type() (zones_config_store.c) -- the load path
+ * (nvs_load_from()) makes the identical push directly rather than through
+ * this setter, since load has no "successful save" to gate it, see that
+ * call site's own comment. */
+bool zones_config_get_relay_type(uint8_t zone_index, uint8_t *out_relay_type);
+bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type);
 
 #ifdef __cplusplus
 }

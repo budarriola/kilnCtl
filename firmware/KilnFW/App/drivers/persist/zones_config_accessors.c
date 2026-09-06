@@ -1100,6 +1100,50 @@ bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
     return nvs_save() == ESP_OK;
 }
 
+/* Getter for zone_cfg_t::relay_type (ZONES_CFG_VERSION 19->20,
+ * RELAY_LIFE_BUDGET_PLAN.md step 2) -- unlike error_band_c/rate_band_c_per_s,
+ * there is no "resolve to a firmware default" step: an out-of-range stored
+ * byte (only reachable via direct NVS tampering or a rollback from newer
+ * firmware with a wider range) defensively reads back as RELAY_TYPE_SSR (0),
+ * the same "no budget" answer relay_cycles_budget() gives any relay it
+ * cannot make sense of, rather than fabricating a contactor/mercury budget
+ * out of a byte that was never really one of those values. */
+bool zones_config_get_relay_type(uint8_t zone_index, uint8_t *out_relay_type)
+{
+    if (!out_relay_type || zone_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    uint8_t v = s_zones.cfg.zones[zone_index].relay_type;
+    if (v > ZONE_RELAY_TYPE_MAX) {
+        v = 0; /* defensive: not a value that should ever be on flash */
+    }
+    *out_relay_type = v;
+    return true;
+}
+
+/* Writer for the getter above. Refused, never clamped, matching every other
+ * setter in this file. On success, pushes the new type to every relay named
+ * in this zone's relay_mask via relay_cycles_set_type() -- RELAY_LIFE_
+ * BUDGET_PLAN.md step 2's "on every successful save" requirement -- with
+ * rated_override left at 0 (use the type's table value; there is no operator
+ * override UI yet). The load path (nvs_load_from(), zones_config_store.c)
+ * makes the identical per-zone push directly after a successful load rather
+ * than routing through this setter, since a load has no "successful save" of
+ * its own to gate the push on. */
+bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || relay_type > ZONE_RELAY_TYPE_MAX) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].relay_type = relay_type;
+    s_config_generation++;
+    if (nvs_save() != ESP_OK) {
+        return false;
+    }
+    zones_config_push_relay_type(zone_index);
+    return true;
+}
+
 /* Bundled setter, same "reject nothing half-written" discipline as every
  * bundled setter above. Each of the 8 fields checked against its own
  * independent bound (matching which ceiling parse_zone_fields() applies to

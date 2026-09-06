@@ -149,6 +149,38 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     }
     z->relay_mask = relay_mask_raw;
 
+    /* RELAY_LIFE_BUDGET_PLAN.md step 2 (ZONES_CFG_VERSION 19->20): which
+     * contact-life budget this zone's relay_mask relays are rated for.
+     * OPTIONAL, same reason tc_type is optional just above (and unlike
+     * relay_mask/control_mode, which are REQUIRED): every pre-existing
+     * client (pc_tools/MCP, older test harnesses, the many host-test bodies
+     * that predate this field) has never heard of z%u_relaytype and must not
+     * start getting 400s on an otherwise-unrelated save, nor silently lose
+     * an operator's earlier Contactor/Mercury choice back to SSR the next
+     * time one of those clients replays a whole-page submit. Falls back to
+     * current_z->relay_type (the live value) rather than to a fixed default
+     * when omitted, same "preserve, don't default" choice tc_type makes.
+     * Present-but-out-of-range is still an error. zones_post_handler()
+     * pushes the validated result to relay_cycles_set_type() after a
+     * successful save -- see that call site's own comment -- not here,
+     * since this function only builds the candidate struct and must not
+     * have any side effect before the whole submission is known to be
+     * valid. */
+    snprintf(key, sizeof(key), "z%u_relaytype", i);
+    {
+        char probe[8];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            uint8_t relay_type_raw;
+            if (!zones_config_json_parse_u8_field(body, key, 0, (long)ZONE_RELAY_TYPE_MAX, &relay_type_raw)) {
+                *err_reason = "zone relay_type out of range (0-2: SSR/Contactor/Mercury)";
+                return false;
+            }
+            z->relay_type = relay_type_raw;
+        } else {
+            z->relay_type = current_z->relay_type;
+        }
+    }
+
     /* 2026-08-27 (ZONES_CFG_VERSION 8->9, owner's request: "assign the zones
      * to them"): which timing_profiles[] slot this zone uses. REQUIRED, unlike
      * the nine fields it replaces (which were each individually OPTIONAL) --

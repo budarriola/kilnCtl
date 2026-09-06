@@ -147,6 +147,23 @@ extern SafetyLinkClass *s_hw_safety;
 esp_err_t nvs_partition_init(const char *partition);
 esp_err_t nvs_load(bool *out_found, bool *out_valid);
 esp_err_t nvs_save(void);
+
+/* RELAY_LIFE_BUDGET_PLAN.md step 2: pushes s_zones.cfg.zones[zone_index]'s
+ * relay_type out to relay_cycles_set_type() for every relay named in that
+ * zone's relay_mask (rated_override left at 0 -- use the type's table value;
+ * there is no per-relay override UI yet). Defined in zones_config_store.c
+ * (the file that already owns s_zones and includes relay_cycles.h);
+ * zones_config_accessors.c's zones_config_set_relay_type() calls this after
+ * a successful nvs_save(), and zones_config_store.c's own nvs_load()/
+ * nvs_load_from() success path calls it for every zone right after loading.
+ * A no-op for zone_index >= MAX31856_CHANNEL_COUNT. */
+void zones_config_push_relay_type(uint8_t zone_index);
+
+/* Calls zones_config_push_relay_type() for every zone 0..MAX31856_CHANNEL_
+ * COUNT-1 -- the whole-config sweep nvs_load()/nvs_load_from() run once
+ * right after a successful load, since a fresh boot has no per-zone "just
+ * changed" edge to key a narrower push off. */
+void zones_config_push_all_relay_types(void);
 void migrate_from_default_partition(void);
 
 void relay_names_load(void);
