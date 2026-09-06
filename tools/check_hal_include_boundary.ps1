@@ -190,6 +190,7 @@ $StrictHeaders = [ordered]@{
 # today (board_pins.h is firmware/SaftyFW/src/board_pins.h, reached via
 # hwabstraction_pico's private SaftyFW/src include dir):
 #   - firmware/hwAbstraction/pico/spi/spi_owner.c
+#   - firmware/hwAbstraction/pico/spi/hal_spi_pico.c
 #   - firmware/hwAbstraction/pico/uart/uart_owner.c
 #   - firmware/hwAbstraction/pico/uart/hal_uart_pico.c
 # and two files legitimately include stack_margin.h as pre-existing, ACCEPTED
@@ -203,6 +204,7 @@ $StrictHeaders = [ordered]@{
 # header is a hard failure, not a ratchet).
 $HalUpwardAllowlist = @(
     @{ RelPath = "firmware/hwAbstraction/pico/spi/spi_owner.c";     Header = "board_pins.h";  Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
+    @{ RelPath = "firmware/hwAbstraction/pico/spi/hal_spi_pico.c";  Header = "board_pins.h";  Reason = "TEMPORARY (HAL Phase 1b): validates hal_spi_bus_init()/hal_spi_device_attach() cfg against SaftyFW's fixed SPI0 pin/CS assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
     @{ RelPath = "firmware/hwAbstraction/pico/uart/uart_owner.c";   Header = "board_pins.h";  Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
     @{ RelPath = "firmware/hwAbstraction/pico/uart/hal_uart_pico.c"; Header = "board_pins.h"; Reason = "TEMPORARY (HAL Phase 1b): needs SaftyFW's pin assignments; see HW_ABSTRACTION_PLAN.md Phase 1b" }
     @{ RelPath = "firmware/hwAbstraction/esp/i2c/i2c_owner.c";      Header = "stack_margin.h"; Reason = "pre-existing owner module relocated byte-identical by HAL Phase 1a; already calls stack_margin_register() directly (accepted, not temporary -- see check_stack_margin_registration.ps1)" }

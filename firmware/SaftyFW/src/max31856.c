@@ -1,8 +1,18 @@
 // max31856.c -- see max31856.h for what changed vs. the KilnFW original and
 // why. The register math, fixed-point conversions and fault-invalidation
 // logic below are ported line-for-line from
-// firmware/KilnFW/App/drivers/hw/MAX31856.c; only the transport (spi_owner.h
-// instead of esp_spi_owner.h) and the multi-channel bookkeeping are gone.
+// firmware/KilnFW/App/drivers/hw/MAX31856.c; only the transport
+// (hal_spi.h/pico's spi_owner.c backend instead of ESP-IDF's spi_master.h /
+// esp_spi_owner.h) and the multi-channel bookkeeping are gone.
+//
+// HAL Phase 1b migration (docs/HW_ABSTRACTION_PLAN.md): this module used to
+// call spi_owner_transfer() (firmware/hwAbstraction/pico/spi/spi_owner.h)
+// directly, with main.c calling spi_owner_init() as a separate boot step.
+// Both now go through interface/hal_spi.h, backed on-target by
+// pico/spi/hal_spi_pico.c's thin adapter over that same spi_owner.c (byte-
+// identical body, unchanged transfer/timing/retry behavior) -- see
+// max31856_bus_init() below, which main.c now calls in place of
+// spi_owner_init().
 #include "max31856.h"
 
 #include <math.h>
@@ -10,11 +20,18 @@
 
 #include "hardware/gpio.h"
 
+#include "board_pins.h" // SAFTYFW_PIN_SPI0_{SCK,MOSI,MISO,CS0}
+#include "hal_spi.h"
 #include "max31856_decode.h"
 #include "max31856_fault_pin_policy.h" // max31856_fault_pin_asserted() -- ~FAULT pin polarity
 #include "max31856_tc_range_policy.h" // max31856_cr1_readback_check() -- Part B CR1 readback verification
 #include "max31856_tc_type_policy.h"
-#include "spi_owner.h"
+
+// 4 MHz / SPI mode 1 -- matches spi_owner.c's SPI_OWNER_BAUDRATE_HZ /
+// SPI_CPOL_0+SPI_CPHA_1 exactly; hal_spi_pico.c's hal_spi_device_attach()
+// validates a device config against these same hardwired values (see that
+// file's INTERFACE MISMATCH note 2) and fails closed on any mismatch.
+#define MAX31856_SPI_CLOCK_HZ 4000000u
 
 // Longest burst this driver ever does: address byte + 6-register temperature
 // burst, or address byte + 1 register register write. 8 bytes covers both
@@ -49,10 +66,49 @@ static uint8_t s_cr1_shadow;
 // once a new one has started, even if the new call itself fails partway.
 static bool s_tc_type_verified = false;
 
+// hal_spi.h handles for the one MAX31856 device on SPI0 -- see this file's
+// top comment. hal_spi_pico.c's backing spi_owner.c is itself a process-wide
+// singleton, so these are the only bus/device instances that will ever
+// exist on this board.
+static hal_spi_bus_t s_spi_bus;
+static hal_spi_device_t s_spi_dev;
+static bool s_spi_dev_ready = false;
+
+hal_spi_device_t *max31856_spi_device_for_test(void)
+{
+    return s_spi_dev_ready ? &s_spi_dev : NULL;
+}
+
+bool max31856_bus_init(void)
+{
+    hal_spi_bus_cfg_t bus_cfg = { 0 };
+    bus_cfg.sck_pin = SAFTYFW_PIN_SPI0_SCK;
+    bus_cfg.mosi_pin = SAFTYFW_PIN_SPI0_MOSI;
+    bus_cfg.miso_pin = SAFTYFW_PIN_SPI0_MISO;
+    // Every other hal_spi_bus_cfg_t field (queue_len/task_priority/
+    // stack_depth/core_id/dma_use_psram/async_flush/max_transfer_sz/
+    // dma_chan) is ESP-owner-task/DMA sizing hal_spi_pico.c does not use --
+    // see that file's INTERFACE MISMATCH note 1 -- left zero-initialized.
+    if (hal_spi_bus_init(&s_spi_bus, 0, &bus_cfg) != HAL_OK) {
+        return false;
+    }
+
+    hal_spi_device_cfg_t dev_cfg = { 0 };
+    dev_cfg.clock_hz = MAX31856_SPI_CLOCK_HZ;
+    dev_cfg.mode = HAL_SPI_MODE_1;
+    dev_cfg.hw_cs = HAL_CS_NONE; // CS is bit-banged by spi_owner.c itself
+    dev_cfg.cs_pin = SAFTYFW_PIN_SPI0_CS0;
+    if (hal_spi_device_attach(&s_spi_bus, &s_spi_dev, &dev_cfg) != HAL_OK) {
+        return false;
+    }
+    s_spi_dev_ready = true;
+    return true;
+}
+
 static bool max31856_write_u8(uint8_t reg, uint8_t value)
 {
     uint8_t tx[2] = { MAX31856_WRITE_ADDR(reg), value };
-    return spi_owner_transfer(tx, NULL, sizeof(tx));
+    return hal_spi_transfer_polling(&s_spi_dev, tx, sizeof(tx), NULL, 0, 0) == HAL_OK;
 }
 
 static bool max31856_read_burst(uint8_t reg, uint8_t *out, size_t len)
@@ -66,7 +122,7 @@ static bool max31856_read_burst(uint8_t reg, uint8_t *out, size_t len)
     memset(tx, 0, sizeof(tx));
     tx[0] = (uint8_t)(reg & 0x7Fu); // bit 7 clear selects a read
 
-    if (!spi_owner_transfer(tx, rx, len + 1u)) {
+    if (hal_spi_transfer_polling(&s_spi_dev, tx, len + 1u, rx, len + 1u, 0) != HAL_OK) {
         return false;
     }
 

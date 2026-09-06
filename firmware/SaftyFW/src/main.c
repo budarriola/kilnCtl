@@ -34,7 +34,10 @@
 #include "startup_diag.h"
 #include "config_store.h"
 #include "max31856.h"
-#include "spi_owner.h"
+/* spi_owner.h's direct include is gone -- HAL Phase 1b routed the SPI0
+ * bring-up used below through max31856_bus_init() (max31856.h), which
+ * itself goes through interface/hal_spi.h / pico/spi/hal_spi_pico.c over
+ * the same spi_owner.c body. */
 
 #include "tasks/console_uart.h"
 #include "tasks/current_task.h"
@@ -345,7 +348,12 @@ int main(void)
     // matching every other bring-up step here, rather than pretending a
     // fatal path exists before there is a log sink (Phase 8) to report
     // through.
-    bool spi_owner_ok = spi_owner_init();
+    // HAL Phase 1b: max31856_bus_init() (max31856.h) now does what
+    // spi_owner_init() used to do directly here -- it brings up the same
+    // spi_owner.c SPI0 singleton through interface/hal_spi.h's
+    // hal_spi_bus_init()/hal_spi_device_attach(), backed by
+    // pico/spi/hal_spi_pico.c. Byte-identical timing/retry behavior.
+    bool spi_owner_ok = max31856_bus_init();
     SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_SPI_UP);
     bool uart_owner_ok = uart_owner_init();
     SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_UART_UP);

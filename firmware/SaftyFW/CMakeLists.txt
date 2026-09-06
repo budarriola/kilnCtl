@@ -175,6 +175,7 @@ set(HWABSTRACTION_DIR ${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction)
 set(HWABSTRACTION_PICO_DIR ${HWABSTRACTION_DIR}/pico)
 add_library(hwabstraction_pico STATIC
     ${HWABSTRACTION_PICO_DIR}/spi/spi_owner.c
+    ${HWABSTRACTION_PICO_DIR}/spi/hal_spi_pico.c
     ${HWABSTRACTION_PICO_DIR}/uart/uart_owner.c
     ${HWABSTRACTION_PICO_DIR}/uart/uart_owner_tx_policy.c
     ${HWABSTRACTION_PICO_DIR}/gpio/hal_gpio_pico.c

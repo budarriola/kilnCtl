@@ -37,6 +37,12 @@ $hwAbstractionInterfaceDir = Join-Path $testDir "..\..\hwAbstraction\interface"
 $hwAbstractionHostDir = Join-Path $testDir "..\..\hwAbstraction\host"
 $hwAbstractionCommonDir = Join-Path $testDir "..\..\hwAbstraction\common"
 $freertosMinStubDir = Join-Path $testDir "stubs\freertos_min"
+# HAL Phase 1b -- max31856.c host build, now a hal_spi client
+# (docs/HW_ABSTRACTION_PLAN.md pico spi_owner adapter). Its only pico-sdk
+# dependency left is the raw hardware/gpio.h CS/~FAULT bring-up in
+# max31856_init() (outside this migration's scope), stubbed to inert no-ops
+# by this dir's hardware/gpio.h -- see that file's own comment.
+$hardwareGpioMinStubDir = Join-Path $testDir "stubs\hardware_gpio_min"
 $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "saftyfw_host_tests.exe"
@@ -147,7 +153,16 @@ $sources = @(
     # current_task_fn()'s for(;;) loop is never invoked on host, same as
     # relay_owner_task()'s.
     (Join-Path $srcDir "tasks\current_task.c"),
-    (Join-Path $testDir "test_current_sense_hal_adc.c")
+    (Join-Path $testDir "test_current_sense_hal_adc.c"),
+    # HAL Phase 1b -- max31856.c host build, now a hal_spi client
+    # (interface/hal_spi.h, pico backend hal_spi_pico.c). fake_spi.c is the
+    # host backend under test; hal_status.c is already linked in above
+    # (relay_owner.c's block). max31856_decode.c/max31856_tc_type_policy.c/
+    # max31856_tc_range_policy.c/max31856_fault_pin_policy.c are already
+    # linked in above for their own standalone host tests.
+    (Join-Path $srcDir "max31856.c"),
+    (Join-Path $hwAbstractionHostDir "fake_spi.c"),
+    (Join-Path $testDir "test_max31856_hal_spi.c")
 )
 
 # A response file for the cl invocation itself (not just $sources) -- this
@@ -155,8 +170,19 @@ $sources = @(
 # relay_owner.c sources/includes were added ("The command line is too
 # long."), so the compiler args and source list are written to a file and
 # passed as @rsp instead of inline on the cmd.exe command line.
-$rspContent = "/nologo /W4 /WX /EHsc /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
+#
+# /std:c17 -- added for max31856.c's HAL Phase 1b hal_spi.h migration:
+# interface/hal_spi.h is the first header this host build pulls in that uses
+# HAL_ALIGNAS8 (hal_status.h: `_Alignas(8)`, C11), and cl's default C dialect
+# here is pre-C11, so `_Alignas` was an unrecognized identifier -- a real gap
+# in this build's dialect, not something the new source files could work
+# around. hal_flash.h/hal_i2c.h/hal_kv.h/hal_uart.h use the same macro but
+# had no host-test consumer in this build until now, so this was latent
+# rather than already fixed elsewhere. Matches the fuzz build's own
+# /std:c17 below.
+$rspContent = "/nologo /W4 /WX /EHsc /std:c17 /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
     "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" " +
+    "/I `"$hardwareGpioMinStubDir`" " +
     "/Fo:`"$outDir\\`" /Fe:`"$exe`" " +
     (($sources | ForEach-Object { '"' + $_ + '"' }) -join " ")
 $rspPath = Join-Path $outDir "saftyfw_host_tests_cl.rsp"

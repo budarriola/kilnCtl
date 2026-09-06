@@ -42,6 +42,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "hal_spi.h" // hal_spi_device_t -- max31856_spi_device_for_test()
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -195,15 +197,34 @@ typedef struct {
 } max31856_reading_t;
 
 /* --- Bring-up ------------------------------------------------------------
- * Configures cs_gpio as a plain output (idling high) and fault_gpio as an
+ * Brings up the hal_spi.h bus/device this module uses for the MAX31856
+ * (interface/hal_spi.h, backed on-target by
+ * firmware/hwAbstraction/pico/spi/hal_spi_pico.c's thin adapter over
+ * spi_owner.c). HAL Phase 1b: replaces the old direct
+ * spi_owner_init()/spi_owner.h call main.c used to make as a separate boot
+ * step -- main.c now calls this instead, in the same boot slot. Must be
+ * called (and succeed) before max31856_init()/_configure()/_read(), which
+ * all transfer through the hal_spi_device_t this sets up. */
+bool max31856_bus_init(void);
+
+/* Test-only accessor (naming convention: reboot_announce.h's
+ * reboot_announce_reset_for_test()) -- returns the hal_spi_device_t this
+ * module attached in max31856_bus_init(), so a host test can script
+ * fake_spi.h responses (fake_spi_script_rx()) and inspect its transfer log
+ * against the SAME instance max31856_write_u8()/_read_burst() transfer
+ * through. Not for production use; NULL if max31856_bus_init() has not
+ * (yet, or successfully) run. */
+hal_spi_device_t *max31856_spi_device_for_test(void);
+
+/* Configures cs_gpio as a plain output (idling high) and fault_gpio as an
  * input with the internal pull-up (the daughterboard's ~FAULT is open-drain
  * with nothing else pulling it up, same reasoning as KilnFW's MAX31856_init
  * -- R1 on THIS board is an *external* pull-up per THERMOCOUPLE.md section 1,
  * so the internal one is redundant-but-harmless belt-and-braces, not load
  * bearing). Seeds the register shadows to the part's documented power-on
  * defaults (CR0=00h, CR1=03h, MASK=FFh) without writing anything -- call
- * max31856_configure() for that. spi_owner_init() must already have run.
- * Does not touch SPI. */
+ * max31856_configure() for that. max31856_bus_init() must already have
+ * succeeded. Does not touch SPI. */
 bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio);
 
 /* Full CR0/CR1/MASK (re)configuration per THERMOCOUPLE.md section 5's table:
