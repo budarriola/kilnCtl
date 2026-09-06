@@ -774,6 +774,17 @@ citations, the git-history checklist. Nothing else in the diff. Verify every
 check script actually ran (not vacuous) and the ESP bin's `fw_build` changed
 on the board after `flash_firmware()`.
 
+Status 2026-09-05: WP1/WP2 in progress. Per-interface colocation was chosen
+over a shared `owners/` subtree: each moved owner lands under its own
+processor tree next to that interface's HAL backend --
+`hwAbstraction/esp/spi/` (esp_spi_owner.{c,h}, owner_slot_pool.{c,h}),
+`hwAbstraction/esp/i2c/` (i2c_owner.{c,h}), `hwAbstraction/esp/uart/`
+(uart_owner.{c,h}, uart_protocol.{c,h}) for WP1; `hwAbstraction/pico/spi/`
+(spi_owner.{c,h}) and `hwAbstraction/pico/uart/` (uart_owner.c,
+uart_owner_tx_policy.{c,h}, and `hal_uart_pico_internal.h` renamed from
+uart_owner.h) for WP2. Each processor's copy stays independent -- no shared
+`owners/` directory.
+
 **Phase 1b — adapt.** Each moved owner implements its Phase-0 interface:
 types change at the edge, bodies stay. hal_uart_send_blocking lands here and
 uart_protocol.c:107 switches to it. Measure on hardware after this phase:

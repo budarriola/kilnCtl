@@ -223,7 +223,7 @@ gating items are:
       property tests sweeping `1e30`/`NaN`/`±Inf` (verified 2026-08-22).
 - [x] `KilnFW`'s `uart_protocol.c` delegating framing/CRC, proven byte-identical
       to the pre-refactor output. **Re-swept 2026-09-03: already shipped.**
-      `App/drivers/owners/uart_protocol.c`'s `frame_and_send()`
+      `firmware/hwAbstraction/esp/uart/uart_protocol.c`'s `frame_and_send()`
       (lines 97-113) calls `kilnlink_stuff()` directly, and the CRC sites
       (lines 165, 204, 740, 847) call `kilnlink_crc16_ccitt_false()`
       directly. The thin wrapper was deliberately removed 2026-08-27 so its

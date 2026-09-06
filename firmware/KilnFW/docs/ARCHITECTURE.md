@@ -58,10 +58,10 @@ urgent.
 | `autotune_uart_bridge` | 5 | 4096 | UART bridge extension task, AUTOTUNE command family | `App/drivers/bridge/uart_bridge_ext_autotune.c:239` (split out of `uart_bridge_ext.c`) |
 | `wifi_uart_bridge` | 5 | **8192** (STALE — was 4096, corrected 2026-09-04) | UART bridge extension task, WIFI command family — dispatches into `wifi_prov`'s public API | `App/drivers/bridge/uart_bridge_ext_wifi.c:404` (split out of `uart_bridge_ext.c`) |
 | `bx_flash_worker` | 5 | configurable (`BX_WORKER_STACK`) | **Missing from this inventory until 2026-09-04.** Single worker for flash-touching UART-bridge-extension jobs (dispatched serially off a queue, plain `xTaskCreatePinnedToCore`, not the `*WithCaps` retry helper the other `uart_bridge_ext_*` tasks use — see the file's own comment) | `App/drivers/bridge/uart_bridge_ext.c:324` |
-| `uart_owner_task` / `uart_owner_evt_task` | configurable (`UART_OWNER_TASK_PRIORITY`) | configurable | `espInterfaces/uart_owner.c` — single owner of the PC-link UART port (TX/RX + event handling) underneath `uart_protocol`/`uart_bridge*` | `App/drivers/owners/uart_owner.c:194`, `:211` |
-| `uart_proto_rx` | configurable | configurable | `espInterfaces/uart_protocol.c` — frame parser reading off `uart_owner`'s RX path | `App/drivers/owners/uart_protocol.c:309` |
-| `esp_spi_owner` (`spi_owner_task`) | configurable | configurable | `espInterfaces/esp_spi_owner.c` — single owner of the shared SPI bus request queue, underneath `thermo_owner`/MAX31856 | `App/drivers/owners/esp_spi_owner.c:81` |
-| `i2c_owner_task` | configurable | configurable | `espInterfaces/i2c_owner.c` — single owner of the shared I2C bus request queue, underneath `kiln_io_owner`/SX1509 | `App/drivers/owners/i2c_owner.c:136` |
+| `uart_owner_task` / `uart_owner_evt_task` | configurable (`UART_OWNER_TASK_PRIORITY`) | configurable | `espInterfaces/uart_owner.c` — single owner of the PC-link UART port (TX/RX + event handling) underneath `uart_protocol`/`uart_bridge*` | `firmware/hwAbstraction/esp/uart/uart_owner.c:194`, `:211` |
+| `uart_proto_rx` | configurable | configurable | `espInterfaces/uart_protocol.c` — frame parser reading off `uart_owner`'s RX path | `firmware/hwAbstraction/esp/uart/uart_protocol.c:309` |
+| `esp_spi_owner` (`spi_owner_task`) | configurable | configurable | `espInterfaces/esp_spi_owner.c` — single owner of the shared SPI bus request queue, underneath `thermo_owner`/MAX31856 | `firmware/hwAbstraction/esp/spi/esp_spi_owner.c:81` |
+| `i2c_owner_task` | configurable | configurable | `espInterfaces/i2c_owner.c` — single owner of the shared I2C bus request queue, underneath `kiln_io_owner`/SX1509 | `firmware/hwAbstraction/esp/i2c/i2c_owner.c:136` |
 | `safety_poll` | `SAFETY_POLL_TASK_PRIORITY` | `SAFETY_POLL_TASK_STACK` | `safety_link.c` — polls/exchanges frames with the RP2040 safety processor over the isolated link, builds the periodic context broadcast | `App/drivers/safety/safety_link.c:533` |
 | `lvgl` (`lvgl_port_task`) | 4 | 8192 | **The only task allowed to call any `lv_*` function.** Owns the on-device LCD UI entirely | `App/drivers/ui/lvgl_port.c` (line unverified this pass; not spot-checked) |
 | `monitor_task` | 4 | 3072 | Heartbeat/liveness monitor | `App/monitor_task.c:130` |
@@ -151,7 +151,7 @@ The fix, and the pattern any **new** owner task in this codebase must
 follow: a small, fixed pool of result slots (`s_slots[]`, sized to the
 command queue depth) owned by the module itself — static storage, never
 freed — with each slot's lifecycle tracked by a two-sided reference count
-(`App/drivers/owners/owner_slot_pool.h`/`.c`, host-tested by
+(`firmware/hwAbstraction/esp/spi/owner_slot_pool.h`/`.c`, host-tested by
 `App/test/test_owner_slot_pool.c`). A slot handed out by
 `owner_slot_pool_alloc()` is held by **both** the producer and the owner
 task; each releases its own half exactly once (the producer after it stops

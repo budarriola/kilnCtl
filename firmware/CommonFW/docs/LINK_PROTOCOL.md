@@ -1397,7 +1397,7 @@ Two more, driven by the borrowed-thermocouple option:
 - [x] `POWER` (0x0E) — `firmware/KilnFW/App/drivers/safety/safety_link_frames.c`'s
       `safety_apply_power()` (2026-09-04, M15 C5 verification)
 - [x] Non-blocking TX ring: drops on full, counts, never blocks
-      (`firmware/SaftyFW/src/tasks/uart_owner.c`)
+      (`firmware/hwAbstraction/pico/uart/uart_owner.c`)
 
 **Liveness (§8)**
 - [x] `SAFETY_FAULT_SRC_SAFETY_LINK` redefined as "no telemetry within 1.5 s".

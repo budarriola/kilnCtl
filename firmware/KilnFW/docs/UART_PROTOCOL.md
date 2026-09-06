@@ -66,7 +66,7 @@ used to mention alongside it — `GET`/`POST /api/rules` — was removed
 `docs/WEB_UI.md`.)
 
 Source of truth:
-- Firmware: `App/drivers/owners/uart_protocol.h` / `.c`,
+- Firmware: `firmware/hwAbstraction/esp/uart/uart_protocol.h` / `.c`,
   `App/drivers/common/uart_task_ids.h` (the frozen contract),
   `App/drivers/bridge/uart_bridge.c` (the bridges that implement it)
 - PC: `pc_tools/src/`

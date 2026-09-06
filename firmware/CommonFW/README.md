@@ -29,7 +29,7 @@ implementation of this exact envelope) via `test/vectors/frame_vectors.json`,
 consumed by both `test/test_frame.c` (built and passing with MSVC via CMake +
 Ninja, verified 2026-08-16) and `tools/PcTools/selfcheck.py`. **Framing is now
 integrated into both firmwares** (as of 2026-08-18): `KilnFW`'s
-`App/drivers/owners/uart_protocol.c` calls `kilnlink_crc16_ccitt_false`/
+`firmware/hwAbstraction/esp/uart/uart_protocol.c` calls `kilnlink_crc16_ccitt_false`/
 `kilnlink_stuff` instead of its own copies, proven byte-identical against the
 pre-migration implementation (`test/test_uart_protocol_delegate.c`); `SaftyFW`
 now has a real CMake project (`firmware/SaftyFW/CMakeLists.txt`,
@@ -521,7 +521,7 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 
 **Migration**
 - [x] `KilnFW`'s `uart_protocol.c` delegating framing/CRC to `kilnlink_frame`
-      (2026-08-18): `App/drivers/owners/uart_protocol.c` calls
+      (2026-08-18): `firmware/hwAbstraction/esp/uart/uart_protocol.c` calls
       `kilnlink_crc16_ccitt_false`/`kilnlink_stuff` instead of its own copies.
       `firmware/UnitTestFw`'s fork was a stale mirror, never migrated; moot
       now, since `UnitTestFw` was decommissioned and deleted wholesale
