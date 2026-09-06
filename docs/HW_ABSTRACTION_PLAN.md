@@ -594,8 +594,12 @@ on the bus so hal_i2c_probe is testable independent of any attached device.
 hal_kv.h and hal_time.h: header written (compile_headers.ps1 passes, negative
 test still fires). fake_kv and fake_time landed the same day (117 more
 assertions + two more proven negative tests, 402 total): fake_kv models
-pending-vs-committed durability (fake_kv_simulate_power_loss() discards only
-uncommitted writes) with wrong-type/corruption/no-space error injection;
+pending-vs-committed durability -- the default fake_kv_simulate_power_loss()
+KEEPS pending (uncommitted) writes, matching real NVS's set-then-crash
+behavior (hal_kv.h: a set MAY already be durable before commit); discarding
+them is opt-in via fake_kv_set_lossy_uncommitted(), for a test that wants to
+exercise the "caller must not rely on a set surviving a crash" side of the
+contract -- with wrong-type/corruption/no-space error injection;
 fake_time is a manually-advanced, forward-only clock where delay_ms advances
 it instead of sleeping. hal_flash.h: header written (compile_headers.ps1
 passes, negative test still fires) -- raw sector erase/page program/read/
@@ -605,9 +609,11 @@ CRC/ARMED/format-REFUSE policy deliberately stays out, layered on top by
 config_store_flash.c's later rebase (Phase 3 item 2). fake_flash landed the
 same way once hal_flash.h existed (65 more assertions + one more proven
 negative test): in-memory sector image, erased-state 0xFF, AND semantics on
-program (hal_flash.h does not pin erase-before-program enforcement, so a
-missing erase is modeled, not invented, as a detectable bit pattern rather
-than an error), per-sector erase counts, per-primitive one-shot failure
+program now pinned explicitly in hal_flash.h itself (programming clears bits
+only -- `existing & new` per byte -- and programming a non-erased byte is
+PERMITTED, not refused; a missing erase is therefore a detectable bit
+pattern rather than an error, matching real NOR flash), per-sector erase
+counts, per-primitive one-shot failure
 injection, and fake_flash_simulate_power_loss_during() leaving a half-
 written page (program) or a partially-completed multi-sector erase.
 Still not wired into build_host_tests.ps1 (the response-file switch above is
@@ -730,7 +736,9 @@ types change at the edge, bodies stay. hal_uart_send_blocking lands here and
 uart_protocol.c:107 switches to it. Measure on hardware after this phase:
 safety-link reply timing, display frame time, thermo read latency under a
 full-screen redraw. relay_owner becomes a hal_gpio client; hal_adc wraps
-current_task/current_sense.
+current_task/current_sense. hal_scratch/hal_wdt pico bodies landed the same
+bodies-only, syntax-checked way as hal_flash_pico.c (`pico/scratch/`,
+`pico/wdt/`) -- no interface mismatch found for either.
 
 ESP-side gpio body landed early (ahead of the Phase 1a move, not wired
 into CMakeLists yet, `firmware/hwAbstraction/esp/{gpio,common}/`,

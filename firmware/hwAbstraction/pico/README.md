@@ -34,6 +34,14 @@ pico-sdk predicate backs hal_flash_write_safe_here(), so it is advisory-only
 and always returns true). config_store_flash.c's own rebase onto this header
 (Phase 3 item 2) has not happened yet.
 
+`scratch/hal_scratch_pico.c` and `wdt/hal_wdt_pico.c` landed the same way
+(bodies-only, syntax-checked by the same script), grounded against the four
+direct pokers (boot_reason.c, startup_diag.h/main.c, watchdog_overdue_diag.c,
+clear_trip_diag.c) and update_task.c:998/watchdog_task.c:161/main.c:230: slot
+4 refused outright, slot 5's two tags coexist by (slot, tag) uniqueness, and
+`hal_wdt_reboot()`'s no-pc/sp form makes the scratch[4..7] stomp hazard
+unreachable through this HAL. No interface mismatch for either.
+
 There is deliberately no `kv/hal_kv_pico.c` -- hal_kv.h explicitly excludes
 pico (config_store is not a key/value store: one fixed 512 B record,
 seq/CRC/ARMED-gated, no partitions/string fields/scoped erase). An earlier
