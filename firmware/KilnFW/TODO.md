@@ -100,7 +100,7 @@ text, and the safety-link config-page hardening. Still open:
       owned one stays in it, danger mode zeroes the mask, and traffic resets
       the liveness timer. No behavior change; this closes the "check what
       this does to a running firing" ask with an automated proof instead of a
-      one-off bench observation.
+      one-off bench observation. (`dac91b32`)
 - [x] **`max_temp_c == 0` and `max_ramp_c_per_hr == 0` mean opposite things**
       on the same uncommissioned zone -- reconciled 2026-09-06 (see
       `docs/PROFILES.md` "Zero-commissioning semantics"). Rule: both mean
@@ -116,7 +116,7 @@ text, and the safety-link config-page hardening. Still open:
       `test_readiness_commissioning.c`. `max_simultaneous_relays == 0` is a
       different field (board-wide load-staggering cap, not a per-zone
       commissioning gate) and correctly keeps its "0 = unlimited" meaning
-      unchanged -- no inconsistency there.
+      unchanged -- no inconsistency there. (`1fc9b1dd`)
 - [x] **The LCD numbered relays from 1 and zones from 0 on the same page** --
       fixed 2026-08-30 (`UI_PLAN.md` 5.2 audit): `ui_page_temperature.c`'s
       relay tiles, relay error toasts and zone rows are now all 0-based,
@@ -1543,11 +1543,14 @@ invisible on the page the operator watches.
       mode occurs in is silently dropped with no eviction, indistinguishable
       from never having logged at all -- exactly the "no corresponding
       failure logged" symptom, even though the producer code did call
-      `ESP_LOG*`. Live board check (`e584067f`): `wifi_get_status()` answers
+      `ESP_LOG*`. Live board check: `wifi_get_status()` answers
       normally, so task 11 is registered on this boot -- confirms
-      "intermittent", not "always broken". Fix: promoted that one log call
-      to `ESP_LOGE`, so a real registration failure for any task id now
-      survives the same boot burst that used to eat it. Host test:
+      "intermittent", not "always broken". Fix (`20c2a5d5`): promoted that one
+      log call to `ESP_LOGE`, so a real registration failure for any task id
+      now survives the same boot burst that used to eat it. Widened further
+      (`b12faf41`, `cb6f3cd5`): eviction now protects WARN as well as ERROR,
+      and prioritizes ERROR over WARN when both compete for the same slot.
+      Host test:
       `test_registration_failure_log_only_survives_as_error()` in
       `App/test/test_uart_log_bridge.c` reproduces the exact
       pre-fix/post-fix line against a full boot-burst queue via the real

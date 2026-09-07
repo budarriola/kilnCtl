@@ -46,12 +46,12 @@ or tablet. and the lcd should not require scrolling." That budget rule and
 its arithmetic convention are recorded once in `ARCHITECTURE_DECISIONS.md`
 ("LVGL / LCD rendering" section) rather than re-derived per page here.
 
-## Open: settings import/export (partial)
+## Open: settings import/export (partial); profile import/export DONE
 
 1. **Settings import/export** — partial (`backup_http.c`, see
    `docs/ARCHITECTURE_DECISIONS.md` "Backup / restore"). Open items tracked
    in `firmware/KilnFW/TODO.md` section 0.5.
-2. **Profile import/export — DONE.** `profiles_export_http.c` (new module,
+2. **Profile import/export — DONE, `cf94b5c3`.** `profiles_export_http.c` (new module,
    not folded into the `profiles_http.c` split): `GET /api/profile/export?id=N`
    downloads one profile as JSON (`Content-Disposition: attachment`);
    `POST /api/profile/import[?id=N]` decodes that JSON with the existing

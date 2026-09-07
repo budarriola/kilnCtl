@@ -83,6 +83,16 @@ open is short:
 | XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
 | — | **Guard evidence is mostly host-tested, not hardware-verified.** Of ~20 tracked guard-level claims, 19 are host-tested and only **3** are hardware-verified (S5's sensor fit/masking finding, KilnFW thermal_guard guard 6, the E-stop polarity fix) — everything else, including all of S1–S4/S6–S14's trip logic and KilnFW guards 1/2/3/4/5/7/9, has never been provoked on real silicon | `docs/SAFETY_CASE.md` §4 rollup; `GUARD_TEST_MATRIX.md` §3 |
 
+**Current owner-dependent items, 2026-09-07 sweep** (nothing in the code can close these; listed together so they don't have to be re-derived per session):
+
+| Item | Blocks | Where |
+|---|---|---|
+| Attach the safety thermocouple to the safety processor's own MAX31856 (J7) | S5 blocks firing while absent | `firmware/SaftyFW/docs/SAFETY_MODEL.md` §S5 |
+| Bench webcam re-aim + LCD colour verification (numeric pixel sampling, not eyeball) | Display power / colour items above | `CLAUDE.md` "Camera aim (2026-09-06)"; `DISPLAY_ST7796_PLAN.md` §4 |
+| `iter_tune.c` wire-vs-delete decision | `control/iter_tune.c` stays dead code either way until decided | `docs/audits/iter_tune_decision_2026-09-07.md`; `PID_EXPANSION_PLAN.md` |
+| CT commissioning step 6 (bench run with the owner) | CT_COMMISSIONING_PLAN close-out | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md` |
+| U10–U12 (3 of the 5 MAX31856 thermocouple channels) are not placed on the PCB | Only channels with placed parts can be bench-verified | `hardware/mainBoard/Thermocouple.kicad_sch` |
+
 ### Software, doable now — no hardware, no decisions
 
 | Size | Item | Where |
@@ -90,8 +100,8 @@ open is short:
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
 | XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict, `esp_random.h` classified 2026-09-06). Open: a hardware timing re-check (safety-link reply, display frame time, thermo read latency) — see `docs/HW_ABSTRACTION.md` | M16; `docs/HW_ABSTRACTION.md` |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
-| S | ~~`thermal_guard_cfg_t.progress_band_c` unwired.~~ Done: `zone_cfg_t::progress_band_c` (ZONES_CFG_VERSION 21->22), `zones_config_get/set_progress_band_c()`, both build sites (`profile_executor_run.c`, `autotune_engine.c`), zones GET/POST wire (`z%u_progressband`). 0 = 3 °C firmware default, matching `error_band_c`'s sentinel convention. See `docs/audits/consumer_without_producer_2026-09-06.md` | M13 |
-| S | `control/iter_tune.c` has zero production callers — `PID_EXPANSION_PLAN.md` marks iterative tuning "[x] built" (`fe14ddf`, `17f7ebd`) and its relative/absolute threshold was subsequently tuned against a measured noise floor (2026-09 entry), but nothing outside the module/test ever constructs an `iter_tune_firing_t`, so none of that is reachable in production. Owner decision needed: wire it into the executor, or delete the module + `test_iter_tune.c` as a parked experiment. See `docs/audits/consumer_without_producer_2026-09-06.md` | `PID_EXPANSION_PLAN.md` |
+| S | ~~`thermal_guard_cfg_t.progress_band_c` unwired.~~ Done (`992f3954`, review conditions landed `e5375594`): `zone_cfg_t::progress_band_c` (ZONES_CFG_VERSION 21->22), `zones_config_get/set_progress_band_c()`, both build sites (`profile_executor_run.c`, `autotune_engine.c`), zones GET/POST wire (`z%u_progressband`). 0 = 3 °C firmware default, matching `error_band_c`'s sentinel convention. See `docs/audits/consumer_without_producer_2026-09-06.md` | M13 |
+| S | `control/iter_tune.c` has zero production callers — `PID_EXPANSION_PLAN.md` marks iterative tuning "[x] built" (`fe14ddf`, `17f7ebd`) and its relative/absolute threshold was subsequently tuned against a measured noise floor (2026-09 entry), but nothing outside the module/test ever constructs an `iter_tune_firing_t`, so none of that is reachable in production. **Owner decision needed** (still open) — decision brief written 2026-09-07 (`3bf773af`, `docs/audits/iter_tune_decision_2026-09-07.md`): wire it into the executor, or delete the module + `test_iter_tune.c` as a parked experiment. See `docs/audits/consumer_without_producer_2026-09-06.md` | `PID_EXPANSION_PLAN.md` |
 
 ### Blocked on hardware that does not exist yet
 
