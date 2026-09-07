@@ -693,6 +693,18 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     }
     STATUS_APPEND("]");
 
+    /* CT_COMMISSIONING_PLAN.md step 4 -- real-amps display. "per_zone" (8
+     * chars) is the worst case of the two topology strings, wider than
+     * "summed" (6). */
+    STATUS_APPEND(",\"ct_topology\":\"%s\"", "per_zone");
+    STATUS_APPEND(",\"ct_fitted\":[");
+    for (unsigned ci = 0; ci < 3; ci++) {
+        STATUS_APPEND("%s%s", ci == 0 ? "" : ",", "false");
+    }
+    STATUS_APPEND("]");
+    /* null is wider than any real zone index (0..4, one digit). */
+    STATUS_APPEND(",\"ct_summed_attrib_zone\":%s", "null");
+
     STATUS_APPEND(",\"safety_relay_energized\":%s", "false");
     STATUS_APPEND(",\"safety_heating_enabled\":%s", "false");
     STATUS_APPEND(",\"heat_block_sources\":%lu", (unsigned long)0xFFFFFFFFu);

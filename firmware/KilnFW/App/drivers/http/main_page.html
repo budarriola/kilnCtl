@@ -693,6 +693,38 @@ function renderSafetyCard(data) {
   return div;
 }
 
+// CT_COMMISSIONING_PLAN.md step 4 -- real-amps display. One badge per raw
+// current-sense channel: a real number with units when data.ct_fitted[i] is
+// true and a reading exists, "not fitted" (never a fabricated "0.00 A")
+// when the channel is flagged not-fitted -- the summed-CT topology reports
+// channels 0/1 that way (CURRENT_SENSE.md: only GPIO28, channel index 2, is
+// wired in that topology). data.ct_topology/ct_fitted are absent on an
+// older firmware build that has never been re-flashed since this field
+// landed -- treated the same as "per_zone, everything fitted" so this card
+// degrades to the old three-real-numbers-or-null behavior rather than
+// hiding itself.
+function renderCurrentCard(data) {
+  if (!data.ct_current_a) return null;
+  const fitted = data.ct_fitted || [true, true, true];
+  const div = document.createElement('div');
+  div.className = 'card';
+  var parts = [];
+  for (var ci = 0; ci < 3; ci++) {
+    var label = 'CT' + ci;
+    var val;
+    if (!fitted[ci]) {
+      val = '<span class="stale">not fitted</span>';
+    } else if (data.ct_current_a[ci] === null || data.ct_current_a[ci] === undefined) {
+      val = '<span class="stale">(no reading yet)</span>';
+    } else {
+      val = '<span class="kc-live-value">' + data.ct_current_a[ci].toFixed(2) + ' A</span>';
+    }
+    parts.push('<span class="stale">' + label + ':</span> ' + val);
+  }
+  div.innerHTML = '<span>Current sense</span><span class="temp">' + parts.join(' &nbsp; ') + '</span>';
+  return div;
+}
+
 // ---------------------------------------------------------------------------
 // Press-and-hold gesture (2026-09-01, owner: "allow the user to hold a zone
 // on the dashboard... create a popup that allows them to adjust the pid
@@ -1057,8 +1089,24 @@ function renderChannels(data) {
       if (zst) {
         dutyTag = ' <span class="stale">(duty ' + (zst.duty * 100).toFixed(0) + '%)</span>';
       }
+      // CT_COMMISSIONING_PLAN.md step 4 -- in summed-CT topology the single
+      // shared channel's reading is attributable to a specific zone's tile
+      // ONLY when exactly one zone is commanded on right now
+      // (ct_summed_attrib_zone, dashboard_status_http.c); every other case
+      // (nothing on, more than one zone on, or per_zone topology where each
+      // zone already has its OWN independent channel and this attribution
+      // concept does not apply) shows nothing extra rather than a guess.
+      var ampsTag = '';
+      if (data.ct_topology === 'summed' && ziForDuty !== null) {
+        if (data.ct_summed_attrib_zone === ziForDuty && data.ct_fitted && data.ct_fitted[2] &&
+            data.ct_current_a[2] !== null && data.ct_current_a[2] !== undefined) {
+          ampsTag = ' <span class="stale">(' + data.ct_current_a[2].toFixed(2) + ' A)</span>';
+        } else {
+          ampsTag = ' <span class="stale">(&mdash;)</span>';
+        }
+      }
       detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' + staleTag + dutyTag +
-               relayStatusHtml(ch.channel, data.relays);
+               ampsTag + relayStatusHtml(ch.channel, data.relays);
     }
     // Label the row with its zone name (operator-set on Thermocouples &
     // Zones) when one claims this channel; otherwise fall back to
@@ -1089,6 +1137,10 @@ function renderChannels(data) {
   const safetyDiv = renderSafetyCard(data);
   if (safetyDiv) {
     el.appendChild(safetyDiv);
+  }
+  const currentDiv = renderCurrentCard(data);
+  if (currentDiv) {
+    el.appendChild(currentDiv);
   }
 }
 

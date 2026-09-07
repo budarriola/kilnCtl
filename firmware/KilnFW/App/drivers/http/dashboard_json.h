@@ -135,7 +135,17 @@
  * says had only ~100B of headroom left. Grown to 5120 (+640) rather than
  * shrinking that headroom to near zero -- re-run the standalone harness
  * mentioned above before adding anything further. */
-#define DASHBOARD_JSON_STATUS_BUF_SIZE 5120
+/* CT_COMMISSIONING_PLAN.md step 4 (real-amps display) added three fields
+ * after ct_counts: ",\"ct_topology\":\"summed\"" (23B, "summed" is wider than
+ * "per_zone" is not true -- "per_zone" is 8 chars vs "summed" 6, so the
+ * real worst case is `,"ct_topology":"per_zone"` = 25B, not 23), ",\"ct_
+ * fitted\":[false,false,false]" (32B, three "false" worst case), and ",\"ct_
+ * summed_attrib_zone\":null" (30B, "null" wider than a single zone-index
+ * digit). Worst-case sum: 25+32+30 = 87B. Grown 5120 -> 5248 (+128, same
+ * step convention as the two bumps above) for real headroom rather than
+ * shaving the existing margin -- see test_dashboard_json.c's
+ * render_worst_case_status_json() for the measured total. */
+#define DASHBOARD_JSON_STATUS_BUF_SIZE 5248
 
 /* Escapes '"' and '\\' for JSON string embedding. Truncates (never writes
  * past out_cap, always NUL-terminates) rather than overflow -- src is

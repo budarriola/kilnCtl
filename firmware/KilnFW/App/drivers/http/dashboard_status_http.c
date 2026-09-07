@@ -26,12 +26,75 @@
 #include "time_sync.h"
 #include "relay_cycles.h"
 #include "run_state.h"
+#include "safety_cfg_store.h" /* CT_COMMISSIONING_PLAN.md step 4 -- ct_topology (0x031F) */
 #include "safety_trip_words.h"
 #include "sim_backend.h"
 #include "uart_task_ids.h"
 #include "unit_pref.h"
 #include "watchdog_cfg.h"
 #include "wifi_provision_http.h"
+#include "zones_config_accessors.h" /* CT_COMMISSIONING_PLAN.md step 4 -- relay_mask, for
+                                     * single-zone attribution in summed CT mode */
+
+/* CT_COMMISSIONING_PLAN.md step 4 -- reads the committed ct_topology (param
+ * 0x031F, U8, 0=per_zone/1=summed) out of the ESP's own cached safety-cfg
+ * params. Same "unset reads as per_zone" convention as zones_current_sweep_
+ * task.c's zone_cfg_committed_ct_topology() (that one is private to the
+ * sweep task and lives in App/drivers/control, not something this file may
+ * reach into) -- duplicated here rather than shared because the two callers
+ * are in different modules with no existing shared seam, and this is a
+ * three-line linear scan over a table capped at SAFETY_CFG_PARAM_COUNT rows,
+ * not logic worth a new header for. */
+static bool dashboard_ct_topology_is_summed(void)
+{
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t row;
+        memset(&row, 0, sizeof(row));
+        if (!safety_cfg_store_get_by_index(i, &row) || row.param_id != 0x031Fu) {
+            continue;
+        }
+        return row.set && row.value.u8_val != 0u;
+    }
+    return false;
+}
+
+/* CT_COMMISSIONING_PLAN.md step 4 -- in summed-CT mode the single shared
+ * channel's reading can only be attributed to one zone's dashboard tile when
+ * exactly one zone is presently commanded on (two or more zones on means the
+ * reading is a mix nobody can separate back out). Returns the 0-based zone
+ * index when exactly one qualifies, or -1 (no zones on, or more than one).
+ * "Commanded on" here is read the same way the /api/status relays[] array
+ * above already reports actual relay state -- ds->relay_on[], not a firing's
+ * zone-status struct, so this also works with relays flipped by hand outside
+ * any profile run. A zone whose relay_mask is 0 (nothing wired) never
+ * qualifies as "on". */
+static int dashboard_ct_summed_attrib_zone(const dashboard_status_t *ds)
+{
+    if (!ds->io_ready) {
+        return -1;
+    }
+    int found = -1;
+    int on_count = 0;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        uint8_t mask = 0;
+        if (!zones_config_get_relay_mask(zi, &mask) || mask == 0u) {
+            continue;
+        }
+        bool zone_on = false;
+        for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
+            if ((mask & (1u << (relay - 1))) != 0u && ds->relay_on[relay - 1]) {
+                zone_on = true;
+                break;
+            }
+        }
+        if (zone_on) {
+            on_count++;
+            found = (int)zi;
+        }
+    }
+    return (on_count == 1) ? found : -1;
+}
 
 /* JSON has no way to spell a NaN or an infinity. printf spells them "nan" and
  * "inf", which are bare identifiers, so a single non-finite float turns the
@@ -339,6 +402,34 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
             APPEND("%s%u", ci == 0 ? "" : ",", (unsigned)ds->ct_counts[ci]);
         }
         APPEND("]");
+    }
+
+    /* CT_COMMISSIONING_PLAN.md step 4 -- real-amps display. `ct_fitted[ci]`
+     * is false for channels 0/1 in summed-CT mode (GPIO28, channel index 2,
+     * is the only wired sense channel in that topology -- CURRENT_SENSE.md);
+     * always true in per_zone mode, where all three channels are physically
+     * distinct probes. The frontend/LCD must render "not fitted" for a
+     * false entry rather than a fabricated 0.00 A, same non-plausible-fake-
+     * reading convention as the null-until-known fields above. */
+    {
+        bool summed = dashboard_ct_topology_is_summed();
+        APPEND(",\"ct_topology\":\"%s\"", summed ? "summed" : "per_zone");
+        APPEND(",\"ct_fitted\":[");
+        for (unsigned ci = 0; ci < 3; ci++) {
+            bool fitted = !summed || ci == 2u;
+            APPEND("%s%s", ci == 0 ? "" : ",", fitted ? "true" : "false");
+        }
+        APPEND("]");
+        /* Per-zone attribution of the shared channel 2 reading -- only
+         * meaningful in summed mode, and only when exactly one zone is
+         * commanded on right now (CT_COMMISSIONING_PLAN.md step 4). null
+         * covers both "not summed" and "not exactly one zone on" -- the
+         * frontend renders "-" for both, so one null convention is enough. */
+        int attrib_zone = summed ? dashboard_ct_summed_attrib_zone(ds) : -1;
+        APPEND(",\"ct_summed_attrib_zone\":%s", attrib_zone >= 0 ? "" : "null");
+        if (attrib_zone >= 0) {
+            APPEND("%d", attrib_zone);
+        }
     }
 
     /* K4, the safety processor's own relay -- dashboard_http.h's field

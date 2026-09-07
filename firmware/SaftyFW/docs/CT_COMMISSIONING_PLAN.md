@@ -153,10 +153,43 @@ document, do not solve.
    on this side before -- wired into `safety_page.html`'s "Warn mask" row.
    Dashboard/LCD real-amps display and the "channels 0/1 read not fitted"
    presentation remain step 4, not touched by this pass.
-4. **Real-amps display**: dashboard and LCD show the summed amps and, in
-   summed mode, the per-zone attribution only when exactly one zone is on.
-   `safety_get_status` keeps three fields; channels 1-2 report "not fitted"
-   rather than 0.00 A.
+4. **Real-amps display: done (2026-09-06)**, ESP + web dashboard + LCD;
+   PcTools' `safety_get_status` renderer NOT done (see below).
+   `dashboard_status_http.c`'s `GET /api/status` gained three fields after
+   `ct_counts`: `ct_topology` ("per_zone"/"summed", read straight off the
+   ESP's own committed safety-cfg cache, param 0x031F -- same "unset reads
+   as per_zone" convention `zones_current_sweep_task.c` already uses),
+   `ct_fitted` (per-channel bool; false for channels 0/1 in summed mode,
+   true otherwise), and `ct_summed_attrib_zone` (0-based zone index or null
+   -- null covers both "not summed" and "not exactly one zone commanded on
+   right now", read from `ds->relay_on[]` against each zone's committed
+   `relay_mask`, so it also works with relays flipped by hand outside a
+   profile run). `DASHBOARD_JSON_STATUS_BUF_SIZE` raised 5120 -> 5248 (+128)
+   for the ~87B these three fields cost worst-case; `test_dashboard_json.c`'s
+   `render_worst_case_status_json()` mirror updated in the same commit --
+   measured worst case 5040B against 5248B, 208B real headroom.
+   `main_page.html` shows a new "Current sense" card (one badge per CT
+   channel: a real `X.XX A` figure, "not fitted" for a `ct_fitted[i]==false`
+   channel, never a fabricated `0.00 A`) and, in summed mode, an amps tag
+   next to whichever single zone `ct_summed_attrib_zone` names (every other
+   zone, and every zone when zero or 2+ are on, shows "-" instead of a
+   guess). `ui_page_diagnostics.c`'s Safety & Board Health page appends the
+   summed channel's amps to the existing Power row (no new row -- that
+   page's own budget comments document it already runs 237-257px of its
+   ~267px no-scroll budget; per_zone topology's three independent channels
+   have no room for a per-channel breakdown on this screen and keep the old
+   behavior unchanged) -- no new theme colors, existing accent token only.
+   **NOT done**: `tools/PcTools/src/kilnctrl/`'s `safety_get_status`
+   renderer (`SafetyStatus.describe()`, `devices_safety.py`) still prints
+   all three raw floats unconditionally. `amps_valid` is a SaftyFW-internal
+   fact (`safety_guards.h`'s `guard_inputs_t::amps_valid[3]`) that never
+   crosses the wire -- `GET_STATUS`'s V1/V2 payload carries only the three
+   raw current floats (`devices_safety.py`'s own layout comment) -- and the
+   one place PcTools reads `ct_topology` at all is `mcp_server_safety.py`,
+   which this pass was told not to edit. Deriving "not fitted" here would
+   need either a wire/protocol addition (SaftyFW, also off-limits to this
+   pass) or a topology read routed through the disallowed file -- left
+   open for whichever pass owns `mcp_server_safety.py` next.
 5. **Docs**: rewrite CURRENT_SENSE.md §0.1/§5 for both topologies; update
    ROADMAP row M (line 75) and `GUARD_TEST_MATRIX.md` §3.3.
 6. **Bench** (owner present): steps 0 and 2 on the test kiln, then one

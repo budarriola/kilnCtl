@@ -1,5 +1,6 @@
 #include "ui_page_diagnostics.h"
 
+#include <math.h> /* CT_COMMISSIONING_PLAN.md step 4 -- isnan() on ct_current_a[] */
 #include <stdint.h>
 #include <stdio.h>
 
@@ -18,6 +19,7 @@
 #include "board_temps.h"
 #include "dashboard_http.h"
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET_PLAN.md step 5 -- the Relay Life page below */
+#include "safety_cfg_store.h" /* CT_COMMISSIONING_PLAN.md step 4 -- ct_topology (0x031F) */
 #include "safety_link.h" /* SAFETY_LINK_DIAG_STATE_*, SAFETY_LINK_STALE_MS */
 #include "safety_trip_words.h"
 #include "thermo_owner.h"
@@ -757,12 +759,51 @@ static void refresh_cb(lv_timer_t *timer)
     } else {
         lv_label_set_text(s_enclosure_temp_label, "Enclosure temp: ---");
     }
-    if (ds.power_valid) {
-        snprintf(buf, sizeof(buf), "Power: %.0f W", (double)ds.power_w);
-        lv_label_set_text(s_safety_power_label, buf);
-    } else {
-        lv_label_set_text(s_safety_power_label, "Power: ---");
+    /* CT_COMMISSIONING_PLAN.md step 4 -- real-amps display. Appended to the
+     * existing Power row (no new row -- ui_page_diagnostics.c's own budget
+     * comments above document this page's Safety & Board Health screen
+     * already runs 237-257px of a ~267px no-scroll budget) rather than
+     * given its own line. Summed-topology only: per_zone's three
+     * independent channels have no single-number summary that would not
+     * mislead, and this LCD page has no room for a 3-line breakdown -- the
+     * full per-channel view lives on the web dashboard (main_page.html).
+     * "not fitted", never a fabricated 0.00A, when channel 2 (GPIO28, the
+     * only wired channel in summed mode) is unreadable. No new color: the
+     * whole row keeps using UI_THEME_ACCENT_3 like every other row here. */
+    bool ct_summed = false;
+    {
+        size_t count = safety_cfg_store_param_count();
+        for (size_t i = 0; i < count; i++) {
+            safety_cfg_param_t row;
+            memset(&row, 0, sizeof(row));
+            if (!safety_cfg_store_get_by_index(i, &row) || row.param_id != 0x031Fu) {
+                continue;
+            }
+            ct_summed = row.set && row.value.u8_val != 0u;
+            break;
+        }
     }
+    char power_buf[64];
+    if (ds.power_valid) {
+        snprintf(power_buf, sizeof(power_buf), "Power: %.0f W", (double)ds.power_w);
+    } else {
+        snprintf(power_buf, sizeof(power_buf), "Power: ---");
+    }
+    if (ct_summed) {
+        /* Channel 2 (GPIO28) IS the fitted channel in summed mode -- a NaN
+         * here means "no reading yet" (link not up / never sampled), not
+         * "not fitted". "not fitted" describes channels 0/1 instead, which
+         * this compact single-line summary has no room to name individually
+         * -- the web dashboard's per-channel card is where that shows. */
+        char amps_tail[24];
+        if (isnan(ds.ct_current_a[2])) {
+            snprintf(amps_tail, sizeof(amps_tail), "  I: ---");
+        } else {
+            snprintf(amps_tail, sizeof(amps_tail), "  I: %.2fA", (double)ds.ct_current_a[2]);
+        }
+        strncat(power_buf, amps_tail, sizeof(power_buf) - strlen(power_buf) - 1);
+    }
+    lv_label_set_text(s_safety_power_label, power_buf);
     /* 2026-09-04 consolidation: shortened to a compact "ESP99/Pico99" form
      * (no spaces around the slash, no "is older" clause -- the remedy is
      * always "update ESP" regardless of which side is older, so naming the
