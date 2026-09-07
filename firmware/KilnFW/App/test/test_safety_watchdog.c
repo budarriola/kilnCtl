@@ -172,6 +172,78 @@ static void test_silent_link_brief_does_not_fault(void)
     TEST_CHECK(out.fault_reason[0] == '\0', "no fault_reason is produced when nothing crossed the threshold");
 }
 
+static void test_firing_abort_stopwatch_simulated_poll_timeline(void)
+{
+    TEST_SECTION("profile_executor_wd_decide + safety_link_is_stale -- 30s firing-abort "
+                 "stopwatch over a SIMULATED poll timeline, not a hand-set bool");
+
+    // ROADMAP.md's "Time the firing abort (30s) with a stopwatch during a
+    // real running firing" item is deferred purely on hardware (a firing has
+    // to actually be running) -- the timing LOGIC itself has no such
+    // dependency. test_silent_link_30s_still_faults_running() above and
+    // test_safety_link.c's own boundary tests each check one real function
+    // in isolation with a hand-set input; this test instead drives the
+    // ACTUAL two-function call chain profile_executor.c's watchdog task
+    // uses every WATCHDOG_CHECK_PERIOD_MS tick --
+    //     safety_link_is_stale(age_ms, SAFETY_LINK_FIRING_ABORT_SILENCE_MS)
+    //     -> profile_executor_wd_decide()
+    // -- across a simulated timeline of increasing link-silence age, exactly
+    // as the real watchdog task would see it if the safety processor went
+    // quiet for 35 real seconds. No field of profile_executor_wd_input_t is
+    // set by hand from a boolean literal here; safety_link_silent_30s is
+    // computed fresh every simulated poll, the same way the production code
+    // computes it. This is the part of the bench requirement a host test CAN
+    // close without a real Pico or a real firing -- see tools/PcTools/
+    // scripts/bench_firing_abort_stopwatch.py for the part that still needs
+    // one (measuring wall-clock latency against a real board).
+    const uint32_t poll_period_ms = 1000u; // matches WATCHDOG_CHECK_PERIOD_MS's order of magnitude
+    const uint32_t simulated_total_ms = 35000u; // 35s of simulated silence -- 5s past the 30s ceiling
+
+    bool first_fault_seen = false;
+    uint32_t first_fault_age_ms = 0;
+
+    for (uint32_t age_ms = 0; age_ms <= simulated_total_ms; age_ms += poll_period_ms) {
+        // The real production comparison, verbatim -- see profile_executor.c's
+        // "safety_link_silent_30s = safety_link_is_stale(safety_age_ms,
+        // SAFETY_LINK_FIRING_ABORT_SILENCE_MS)".
+        bool safety_link_silent_30s =
+            safety_link_is_stale((uint16_t)(age_ms > 0xFFFFu ? 0xFFFFu : age_ms),
+                                  SAFETY_LINK_FIRING_ABORT_SILENCE_MS);
+
+        profile_executor_wd_input_t in = base_input();
+        in.safety_link_silent_30s = safety_link_silent_30s;
+        in.state_running_or_paused = !first_fault_seen; // a real firing stops being
+                                                          // RUNNING once it's FAULTED
+        in.state_faulted = first_fault_seen;
+
+        profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+
+        if (!first_fault_seen) {
+            if (age_ms <= SAFETY_LINK_FIRING_ABORT_SILENCE_MS) {
+                TEST_CHECK(out.action != PROFILE_EXECUTOR_WD_ACTION_FAULT,
+                           "no abort before the 30s ceiling is actually crossed");
+            }
+            if (out.action == PROFILE_EXECUTOR_WD_ACTION_FAULT) {
+                first_fault_seen = true;
+                first_fault_age_ms = age_ms;
+            }
+        } else {
+            TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF,
+                       "once faulted, continued silence keeps retrying the relay-off write "
+                       "(LINK_PROTOCOL.md sec 8: 'dropped and retried until the write succeeds'), "
+                       "never re-fires FAULT a second time");
+        }
+    }
+
+    TEST_CHECK(first_fault_seen, "the simulated 35s timeline actually crosses into FAULTED -- "
+               "a timeline that never faults would make every check above vacuously true");
+    TEST_CHECK(first_fault_age_ms == SAFETY_LINK_FIRING_ABORT_SILENCE_MS + poll_period_ms,
+               "the abort fires on the FIRST simulated poll at/after the 30s ceiling "
+               "(30000ms itself is not-yet-stale, per safety_link_is_stale's strict "
+               "greater-than -- the next poll, 31000ms, is the first stale one), matching "
+               "the same one-poll-period slack the 1.5s bench pass measured for real");
+}
+
 static void test_silent_link_30s_still_retries_when_already_faulted(void)
 {
     TEST_SECTION("profile_executor_wd_decide -- REGRESSION: 30s silence retry-while-faulted still works");
@@ -380,6 +452,7 @@ void run_test_safety_watchdog(void)
     test_no_trip_no_silence_idle_is_a_true_no_op();
     test_silent_link_30s_still_faults_running();
     test_silent_link_brief_does_not_fault();
+    test_firing_abort_stopwatch_simulated_poll_timeline();
     test_silent_link_30s_still_retries_when_already_faulted();
     test_pc_link_sustained_loss_faults_running();
     test_pc_link_brief_loss_does_not_fault();
