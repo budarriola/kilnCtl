@@ -99,15 +99,14 @@ the shape to mirror is KilnFW's `relay_cycles.c`:
 No source files changed in `src/` for this pass; `safety_guards.c` and
 `safety_core.c` were read, not edited.
 
-## Update, 2026-09-06: `docs/RELAY_LIFE_BUDGET_PLAN.md`
+## Update, 2026-09-06: `docs/RELAY_LIFE_BUDGET.md`
 
 The decision above (no counter, no persistence, no link field on the Pico)
 still holds and this doc's analysis is unaffected. What changed is *where*
-K4 gets counted: `RELAY_LIFE_BUDGET_PLAN.md` has the **ESP** count K4 edges
+K4 gets counted: `docs/RELAY_LIFE_BUDGET.md` has the **ESP** count K4 edges
 by observing K4's reported state on the existing safety-status frame, into
 a fifth `relay_cycles.c` slot, rather than adding a Pico-side counter or a
-new link field — see that plan's "Design" section and
+new link field — see that doc's "K4 counting" section and
 `firmware/KilnFW/docs/HARDWARE.md`'s "Relay type and contact-life budget"
-section for the resulting type/threshold/indication behavior. The K4
-edge-counting call site on the ESP is a separate, still-open step of that
-plan as of this writing.
+section for the resulting type/threshold/indication behavior. Shipped in
+`c6d41fc`.

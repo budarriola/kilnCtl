@@ -103,6 +103,6 @@ or a different page — needs the owner's eyes, nothing open in code.
 ## Order
 
 §1 first (pure front-end, no schema), then §2 (schema v21, after the
-relay-type bump to v20 in `docs/RELAY_LIFE_BUDGET_PLAN.md` so the two
+relay-type bump to v20 in `docs/RELAY_LIFE_BUDGET.md` so the two
 migrations do not collide). Both end with `build_kilnfw` and a bench
 check on a phone-width viewport.

@@ -109,7 +109,7 @@ expander pin high = relay energized. J3/J4/J8/J11 are 3-pin terminal blocks
 
 ### Relay type and contact-life budget
 
-`RELAY_LIFE_BUDGET_PLAN.md`. Each relay (the four heater relays K1/K2/K3/K5,
+`docs/RELAY_LIFE_BUDGET.md`. Each relay (the four heater relays K1/K2/K3/K5,
 plus the safety relay K4) has a **type** — `ssr | contactor | mercury` — that
 selects a rated contact-life budget. The board's own heater relays are the
 EE2-12NUH electromechanical parts above, but the type is a per-installation
