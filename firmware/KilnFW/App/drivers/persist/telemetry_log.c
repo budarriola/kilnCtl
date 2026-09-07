@@ -293,7 +293,23 @@ esp_err_t telemetry_log_start(void)
      * through bx_run_on_internal_stack() -- there is no flash call anywhere
      * in this task's call graph to trigger a cache-disable while this stack
      * is live. */
-    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(telemetry_log_task, "telemetry_log", 4096, NULL,
+    /* 2026-09-07: the idle-board high-water mark (4096 B stack, 1048 B free,
+     * 25.6% headroom [LOW]) was measured with s_enabled==false and no firing/
+     * tune active -- telemetry_log_task's own `line[TELEMETRY_LOG_LINE_BUF]`
+     * (320 B) is always resident in the frame regardless, but the deepest
+     * call chain (s_enabled==true during an active firing with several
+     * zones, an AUTOTUNE_ENGINE_DONE STEP-method line chaining ~15 float
+     * conversions through snprintf, plus a same-tick event_log_emit() for a
+     * state transition or ramp-lag edge) never ran on that board and was
+     * never captured. Per CLAUDE.md the idle baseline is a floor, not a
+     * measurement of the worst case, so this task's worst-of-three status
+     * ([LOW] at 25.6%) is closed by growing the stack rather than trusting
+     * the untested margin. This is a PSRAM stack (MALLOC_CAP_SPIRAM below,
+     * same as autotune_engine/profile_executor's control tasks) so the
+     * increase costs PSRAM, not the internal DRAM that is actually under
+     * pressure (~78 kB free, HTTP socket resets seen near 11.9 kB) -- zero
+     * DRAM cost for meaningfully more headroom on the untested deep path. */
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(telemetry_log_task, "telemetry_log", 6144, NULL,
                                                      3, &s_task, tskNO_AFFINITY,
                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
@@ -303,8 +319,8 @@ esp_err_t telemetry_log_start(void)
     }
     /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
      * only reached with a real handle since the failure branch above already
-     * returned. 4096 must match the xTaskCreatePinnedToCoreWithCaps() literal
-     * above. */
-    stack_margin_register("telemetry_log", &s_task, 4096);
+     * returned. 6144 must match the xTaskCreatePinnedToCoreWithCaps() literal
+     * above (grown from 4096 -- see the comment above that call). */
+    stack_margin_register("telemetry_log", &s_task, 6144);
     return ESP_OK;
 }
