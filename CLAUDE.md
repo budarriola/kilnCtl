@@ -139,6 +139,21 @@ region's mean RGB alongside the same for a bezel reference region, so this
 recipe doesn't have to be re-derived by hand each time
 (`.\sample_lcd_region.ps1 -Image full.jpg -X 500 -Y 650 -W 8 -H 8`).
 
+**Camera aim (2026-09-06):** the bench webcam has drifted since the crop
+defaults (`X=339 Y=487 W=594 H=231`, set as a stopgap in `26a8a98`) were
+measured. A fresh `-Full` capture shows the LCD panel's top-left corner
+around `(300-339, 460-490)` in the 1280x720 frame, with the panel's bottom
+edge running off the bottom of the frame (screen content still fully blue
+right at `y=719`, so an unknown slice of the lower UI is not captured at
+all) and the right edge cutting close to frame content near mid-frame
+(perspective-skewed, not a clean rectangle in-frame). Owner action: re-aim
+the camera so the whole panel is inside the frame and roughly centered
+(tilt down / pull back enough that the bottom edge clears `y=719` with
+margin), then re-run `capture_lcd.ps1 -Full`, remeasure the crop box by
+numeric sampling (never by eye), and update `capture_lcd.ps1`'s default
+crop to match. Until then, treat the current crop as showing only the
+upper portion of the panel.
+
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
 ## Project Structure
