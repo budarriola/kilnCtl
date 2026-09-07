@@ -458,27 +458,12 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
 
     /* --- S6a: main controller explicitly asserts fault -----------------------
      * mainFault (GPIO10, active low), already debounced 200ms by
-     * discrete_task -- unambiguous, no further conditions once past the
-     * Pico's own post-boot startup window (SAFETY_MODEL.md section 4, S6a).
-     * Checked early, alongside S7, because both are unconditional electrical
-     * signals rather than thermal evidence.
-     *
-     * s6a_startup_grace_active gates ONLY the trip() call below -- see that
-     * field's doc comment in safety_guards.h for why this is a separate
-     * mechanism from S6b's reboot_grace_active (a debug-probe reset of both
-     * processors together sends no ANNOUNCE_REBOOT frame, so that field would
-     * never suppress this). Once the startup window closes this collapses to
-     * exactly the unconditional behavior above -- no accumulated advantage,
-     * nothing latched, and it can only be true once per boot because it is
-     * keyed to the Pico's own free-running to_ms_since_boot() clock. */
+     * discrete_task -- unambiguous, no further conditions (SAFETY_MODEL.md
+     * section 4, S6a). Checked early, alongside S7, because both are
+     * unconditional electrical signals rather than thermal evidence. */
     if (in->main_fault_asserted) {
-        if (!in->s6a_startup_grace_active) {
-            trip(state, SAFETY_TRIP_MAIN_FAULT, "mainFault asserted (GPIO10 low, debounced)");
-            return true;
-        }
-        /* Suppressed: still inside the Pico's own post-reset startup window
-         * -- the ESP may not yet have driven GPIO6 to its healthy level.
-         * Nothing else about this tick changes. */
+        trip(state, SAFETY_TRIP_MAIN_FAULT, "mainFault asserted (GPIO10 low, debounced)");
+        return true;
     }
 
     /* --- S6b: the link has gone quiet -----------------------------------------

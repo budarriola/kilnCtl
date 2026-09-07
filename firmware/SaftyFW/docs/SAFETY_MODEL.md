@@ -457,35 +457,6 @@ fire unattended from its own LCD/web UI and the PC's absence alone is not a
 hazard. A deployment where the PC link is required equipment can still turn
 that option on to get the old behavior back.
 
-**Startup grace, 2026-09-07 (fc6d30f8 flash incident).** During a bench
-reflash that resets BOTH processors together, a Pico reset that lands while
-the ESP is still mid-boot can see `mainFault` read asserted for the whole
-time the ESP takes to reach the point where its own firmware drives GPIO6
-("Fault") to its healthy level — `HARDWARE.md` section 4 only characterizes
-the "ESP absent" case (reads healthy); it says nothing about the "ESP
-present but not yet initialized" case, and that gap is exactly what this
-incident exposed. That window is comfortably longer than the 200 ms
-consecutive-sample debounce `discrete_task.c` applies (sized for opto/switch
-bounce, not an MCU boot), so the trip was real by the guard's own rules, not
-a debounce failure — and it was cleared with `safety_clear_trip()` afterward,
-which is exactly the kind of "just clear it" response this incident was
-flagged to catch before it became routine.
-
-The fix is qualification, not a weaker guard: `safety_guard_input_t::
-s6a_startup_grace_active` (`safety_guards.h`) is true only for the first
-`S6A_STARTUP_GRACE_MS` (5 s, `safety_core.c`) of **the Pico's own** boot,
-computed from its free-running `to_ms_since_boot()` clock — deliberately a
-different mechanism from S6b's `reboot_grace_active`/`ANNOUNCE_REBOOT`, which
-only exists when the ESP deliberately announces an upcoming self-reboot (an
-OTA restart) and is never sent ahead of a debug-probe-driven reset of both
-boards together. Like `reboot_grace_active`, it gates only the S6a `trip()`
-call, never the debounce, never re-arms mid-boot (the clock only counts up),
-and grants no heating permission. Once the window closes, S6a is exactly as
-unconditional as before — `test_s6a_startup_grace()`
-(`test/test_safety_guards.c`) proves a mainFault still asserted the instant
-the window closes trips immediately, with zero accumulated advantage from
-the suppressed ticks before it.
-
 **Clearing an S6a trip.** SaftyFW sees exactly one bit (`mainFault` LOW) and
 by design cannot know why the ESP asserted it — that independence must never
 be compromised by, say, having the ESP tell the safety processor "trust me,
