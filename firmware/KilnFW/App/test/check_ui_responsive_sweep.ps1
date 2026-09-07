@@ -47,17 +47,56 @@ if (-not $node) {
 # had spawned) running as orphans, which is exactly the kind of leftover
 # process that causes the port/profile-dir collisions this whole fix exists
 # to prevent.
+# Best-effort reap of orphaned Chrome instances left behind by a previous
+# sweep run that was killed before its own finally{} block (in
+# ui_responsive_sweep.mjs's main()) got to run chrome.kill() -- e.g. a prior
+# check_ui_responsive_sweep.ps1 invocation that itself got taskkill'd from
+# outside (another check harness run, a session interrupted mid-check). Each
+# sweep-owned Chrome is identifiable by its own throwaway
+# --user-data-dir=...kc-ui-sweep-profile-... (see ui_responsive_sweep.mjs's
+# mkdtemp call) -- narrow enough to never touch a developer's real Chrome
+# window or another tool's headless Chrome. Run before AND after the sweep:
+# before, so a stale instance does not hold the fixed CDP/static ports and
+# force every pickPort() fallback; after, so this run's own Chrome (already
+# reaped by taskkill /T on a timeout, or by the script's own finally{} on a
+# normal exit) never lingers past this check either.
+function Remove-OrphanedSweepChrome {
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -like '*kc-ui-sweep-profile-*' }
+        foreach ($p in $procs) {
+            Write-Host "check_ui_responsive_sweep.ps1: reaping orphaned sweep Chrome PID $($p.ProcessId)" -ForegroundColor Yellow
+            & taskkill /PID $p.ProcessId /T /F 2>&1 | Out-Null
+        }
+    } catch {
+        # Best-effort only -- Get-CimInstance can fail under WMI load; never
+        # let cleanup itself fail the check.
+    }
+}
+Remove-OrphanedSweepChrome
+
 $stdoutFile = Join-Path $env:TEMP "kc-ui-sweep-stdout-$PID.txt"
 $stderrFile = Join-Path $env:TEMP "kc-ui-sweep-stderr-$PID.txt"
 $proc = Start-Process -FilePath $node.Source -ArgumentList @($sweepScript) `
     -NoNewWindow -PassThru `
     -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 
-$finished = $proc.WaitForExit(180000)
+# 420s, not 180s: 13 *_page.html files x 6 widths (plus zones_page.html's 4
+# tuning-recommendation variants) is ~96 (page,width) rows, each several CDP
+# round trips against a real headless Chrome -- genuinely close to 180s even
+# on an idle machine, and this machine routinely runs other agents' own
+# headless Chrome concurrently (observed: 12 already running during
+# diagnosis). That contention is real, legitimate slowness, not a hang -- the
+# actual hang (a single CDP call Chrome never answered, with no timeout
+# anywhere on it) is now fixed at the source in ui_responsive_sweep.mjs's
+# CdpSession.send(); this cap only needs to cover honest slow-but-progressing
+# work now, not mask a still-unbounded wait.
+$finished = $proc.WaitForExit(420000)
 if (-not $finished) {
     & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
-    Write-Host "check_ui_responsive_sweep.ps1: SKIP -- sweep did not finish within 180s (node/Chrome startup stalled). Environment condition, not evidence of a UI regression -- re-run when the machine is less loaded." -ForegroundColor Yellow
+    Write-Host "check_ui_responsive_sweep.ps1: SKIP -- sweep did not finish within 420s (node/Chrome startup stalled). Environment condition, not evidence of a UI regression -- re-run when the machine is less loaded." -ForegroundColor Yellow
     Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+    Remove-OrphanedSweepChrome
     exit 3
 }
 

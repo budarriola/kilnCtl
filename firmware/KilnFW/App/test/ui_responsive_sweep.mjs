@@ -65,6 +65,7 @@ const DEFAULT_DRIVERS_DIR = resolveDriversDir(__dirname);
 const DEFAULT_WIDTHS = [320, 360, 390, 768, 1280, 1920];
 const VIEWPORT_HEIGHT = 1400; // tall enough that vertical scroll never masks a horizontal-overflow bug
 const MIN_TARGET_PX = 32; // profiles_page.html catalogue Use/Save bug measured 81x19 -- see WEB_UI_RESPONSIVE.md sec 3 item 3
+const CDP_CALL_TIMEOUT_MS = 20000; // see CdpSession.send() -- bounds every single CDP round trip
 
 function findChrome() {
   const candidates = [
@@ -244,11 +245,35 @@ class CdpSession {
     });
   }
 
+  // A per-call timeout on send() itself, not just waitForEvent(): before this
+  // fix, a CDP request (Runtime.evaluate, Page.navigate, ...) that Chrome
+  // never answered -- because it wedged under concurrent load, not because
+  // it crashed (the close/error handlers above already cover that case) --
+  // left its promise pending forever. sweepOnePage() awaits these directly,
+  // so ONE stuck request hung the entire node process indefinitely: not the
+  // 180s wrapper cap, not the 30s DevTools-port timeout, an unbounded wait
+  // with nothing to catch it. Confirmed directly: a run against this machine
+  // under its actual concurrent-agent Chrome load (12 other chrome.exe
+  // already running) got past port pickup and DevTools-port wait -- it never
+  // even reached the "SKIPPED" branch -- and then produced zero output and
+  // never returned inside a 5 minute cap. Reject after CDP_CALL_TIMEOUT_MS
+  // so a wedged Chrome turns into a per-(page,width) failure that the
+  // existing per-row try/catch in main() already handles, instead of an
+  // unrecoverable hang of the whole tool.
   send(method, params = {}) {
     if (this.closed) return Promise.reject(this.closed);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(new Error(`CDP call ${method} timed out after ${CDP_CALL_TIMEOUT_MS}ms (Chrome unresponsive)`));
+        }
+      }, CDP_CALL_TIMEOUT_MS);
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -855,7 +880,34 @@ async function main() {
       }
     }
   } finally {
-    chrome.kill();
+    // chrome.kill() (ChildProcess.kill(), a bare TerminateProcess/SIGTERM)
+    // only signals the ONE pid node spawned -- Chrome's renderer, GPU, and
+    // crashpad-handler children are separate processes it never touches.
+    // Root-caused by direct instrumentation (temporary console.error at
+    // every await in this function): a run with real widths/pages reached
+    // "before rm" and then hung indefinitely, not at Chrome/node startup as
+    // check_ui_responsive_sweep.ps1's SKIP message assumed. Those orphaned
+    // children keep file handles open inside userDataDir (profile lock,
+    // cache/leveldb files), so the rm() below -- even with its documented
+    // maxRetries/retryDelay -- was retrying against files a live process
+    // still held, not a transient release-in-progress; on this machine that
+    // took far longer than the 180s wrapper cap, and the deleted subtree is
+    // large enough (a real Chrome profile: cache, extensions state, several
+    // leveldb stores) that this was never going to be a quick handful of
+    // retries even once nothing was locking it. Use taskkill /T to kill the
+    // whole process tree Chrome actually created (matching what
+    // check_ui_responsive_sweep.ps1's own timeout path already does for the
+    // node process) before ever touching userDataDir, so `rm` runs against
+    // files nothing still holds.
+    if (process.platform === 'win32' && chrome.pid) {
+      await new Promise((resolve) => {
+        const tk = spawn('taskkill', ['/PID', String(chrome.pid), '/T', '/F'], { stdio: 'ignore' });
+        tk.on('exit', resolve);
+        tk.on('error', resolve);
+      });
+    } else {
+      chrome.kill();
+    }
     staticServer.close();
     // Best-effort: wait for the process to actually exit (kill() only
     // requests termination) so Windows has released its open handles on
@@ -875,7 +927,29 @@ async function main() {
       // this Windows EBUSY/EPERM race (a file briefly still locked by an
       // AV scan or a not-quite-gone handle) -- retries on ENOENT/EBUSY/
       // EPERM/EMFILE/ENFILE/ENOTEMPTY with linear backoff.
-      await rm(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      //
+      // That retry budget is NOT a hard bound in practice: root-caused by
+      // direct instrumentation, `rm()` on this machine hung far past its
+      // nominal ~3s retry window (200/400/600/800/1000ms backoff) when
+      // Windows Defender's real-time scanner held an EPERM-producing lock on
+      // freshly-written Chrome cache subdirectories (confirmed directly --
+      // `find` on the exact stuck directory returned "Permission denied" on
+      // Default/Cache/Cache_Data, Default/Cache/No_Vary_Search, and
+      // Default/Shared Dictionary/cache; a standalone repro script running
+      // `rm()` on that same directory in isolation, no Chrome involved,
+      // still had not returned after 30s). Whatever the exact interaction
+      // between AV scan duration and Node's retry loop, this call cannot be
+      // trusted to honor its own retry budget -- so, like every other
+      // slow/unreliable operation in this file (CDP calls, DevTools-port
+      // wait, the per-page navigation), it gets an explicit outer deadline.
+      // Missing the deadline leaves the mkdtemp'd dir behind in TEMP (a
+      // stale profile from a past run, not evidence of a bug) rather than
+      // hanging the whole sweep -- exactly the tradeoff this cleanup's own
+      // comment already called "not load-bearing for correctness".
+      await Promise.race([
+        rm(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
     } catch { /* best-effort */ }
   }
 
@@ -895,8 +969,15 @@ async function main() {
     console.log('Reason: ' + devtoolsSkip);
     console.log('=================================================================');
     console.log('');
-    process.exitCode = 0;
-    return;
+    // process.exit(), not just process.exitCode=0 + return: the rm()
+    // Promise.race above can leave an abandoned fs.rm() operation still
+    // running on the libuv threadpool after its 5s deadline passes -- that
+    // pending op holds the event loop open, so a bare return here would
+    // leave the node process (and, under check_ui_responsive_sweep.ps1,
+    // Start-Process's WaitForExit) waiting on work this tool has already
+    // decided not to wait for. All console output above is synchronous
+    // console.log calls, already written by this point.
+    process.exit(0);
   }
   console.log('UI RESPONSIVE SWEEP -- widths: ' + args.widths.join(', '));
   console.log('');
@@ -912,12 +993,15 @@ async function main() {
       for (const line of r.failures) console.log(line);
     }
     console.log('');
-    process.exitCode = 1;
-    return;
+    // process.exit(), not exitCode+return -- see the matching comment on the
+    // devtoolsSkip branch above: an abandoned rm() can otherwise keep this
+    // process (and the .ps1 wrapper's WaitForExit) alive past its own 5s
+    // cleanup deadline.
+    process.exit(1);
   }
 
   console.log(`All ${rows.length} (page, width) checks passed.`);
-  process.exitCode = 0;
+  process.exit(0);
 }
 
 main().catch((e) => {
