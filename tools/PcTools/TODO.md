@@ -261,11 +261,15 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 - [x] Every tool takes a peer argument — N/A, see same note: most tools can
       only ever address one processor
 - [x] Pico-through-the-ESP path working (no second cable)
-- [ ] Direct USB-TTL path documented, **with the inversion requirement stated**
-      — 2026-09-05: the doc row exists (Three transports table above) but
-      `link_hub.py` implements no code path for it; it's a separate
-      cable/terminal outside `kilnctrl` today
-- [ ] SWD/RTT path documented for flashing and for a Pico that will not talk
+- [x] Direct USB-TTL path documented, **with the inversion requirement stated**
+      — 2026-09-06 closed by inspection: the doc row exists (Three transports
+      table above) and states the inversion requirement; `link_hub.py`
+      implementing no code path for it is a separate, already-tracked item
+      (the table's own note), not what this checklist line asked for
+- [x] SWD/RTT path documented for flashing and for a Pico that will not talk
+      — 2026-09-06 closed by inspection: `firmware/SaftyFW/docs/HARDWARE.md`
+      ("SWD — 3 wires", "RTT over the SWD wires is the alternative") and
+      `docs/COMMISSIONING.md` cover this in full
 - [x] GUI grows a safety column rather than a second application — see
       2026-09-05 note above (status-bar summary, `gui.py`/`gui_safety.py`)
 
