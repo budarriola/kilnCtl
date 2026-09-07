@@ -3745,7 +3745,7 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
 }
 
 // Opus review of 5672719 (item 2): no host test posted a
-// z%u_settings_source_<group> key before this -- WEB_UI_PLAN.md section 2's
+// z%u_settings_source_<group> key before this -- docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs's
 // per-group split (zones_http_post_parse.c's z%u_settings_source_%s block)
 // had zero direct coverage. Three tests below: per-group keys with no legacy
 // scalar present; both keys in the same submission (per-group key must win);
@@ -5415,7 +5415,7 @@ static void test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr(void)
     nvs_test_clear();
 }
 
-// WEB_UI_PLAN.md section 2, ZONES_CFG_VERSION 20->21: the single whole-zone
+// docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs, ZONES_CFG_VERSION 20->21: the single whole-zone
 // settings_source byte becomes settings_source[SRC_GROUP_COUNT]. THE thing
 // this test is about: a v20 blob with settings_source=1 must migrate to
 // FIVE 1s (one per group), not a fresh CUSTOM on four of the five -- a board

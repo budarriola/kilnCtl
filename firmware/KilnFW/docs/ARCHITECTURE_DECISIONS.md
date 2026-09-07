@@ -422,3 +422,34 @@ riskiest, touches the Wi-Fi driver's own event callbacks),
 `profile_executor` (deliberately NOT converted — already correctly
 mutex-guarded, converting a safety-critical state machine to a
 drop-on-full-queue path was reviewed and rejected).
+
+## Zones page clean-up (info disclosure, schema v20->v21, Chart.js)
+
+Closed 2026-09-06 (was tracked in a now-deleted per-feature plan doc — this
+is the surviving reference for the code that cites it):
+
+- **Info-glyph disclosure** (formerly "section 1"): the zones page's
+  explanatory prose/tables that used to sit inline are now behind a round
+  "i" disclosure next to each field, via `zones_page.html`'s `infoHtml()`
+  helper and `<details class="info">`. An operator who opens a section's
+  disclosure sees the same explanation that used to be always-on; nothing
+  was cut, only collapsed by default.
+- **Per-group "same as zone N", `ZONES_CFG_VERSION` 20->21** (formerly
+  "section 2"): the old single whole-zone `settings_source` (one zone-ID
+  a whole zone inherited from, or itself) was replaced by
+  `SRC_GROUP_COUNT` independent per-group `settings_source_<group>` bytes,
+  so each of the five settings groups (PID, guards, timing, thermocouple
+  cal, relay/heater) can independently point at "this zone" or another
+  zone. Landed `5672719`+`0126f24`. The whole-zone select in the UI is now
+  a SHORTCUT that writes all five group bytes at once, not a distinct
+  stored mode. `timing_profile` inheritance was narrowed in the same pass
+  (test provenance for that narrowing split across `09769f5a`/`51c084f9`).
+  Migration (v20 blobs with no per-group bytes) fans the single old value
+  out to all five groups on load; export/import and every accessor keyed
+  off the old single field were updated together so no caller could read a
+  stale whole-zone value after a per-group write.
+- **Chart.js** (formerly "section 3"): assessed, **not adopted**. ~60 KB
+  gzipped for zoom/pan the hand-rolled canvas graph already covers with a
+  ~40-line pointer-drag window if that's ever wanted.
+- **Display-power Save button** (formerly "section 4"): already fixed
+  2026-09-04, confirmed flashed in `05087f0`.

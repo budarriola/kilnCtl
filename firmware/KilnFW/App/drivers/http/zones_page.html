@@ -766,7 +766,7 @@ var FUZZY_RULE_TABLE_HTML =
   '<td>Kp&uarr; Ki= Kd=</td><td>Kp&darr; Ki&uarr; Kd&darr;</td></tr>' +
   '</table></div>';
 
-// WEB_UI_PLAN.md section 1 -- the explanatory paragraphs/tables that used to
+// docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs -- the explanatory paragraphs/tables that used to
 // sit inline in settingsStackHtml (relay-timing hints, cross-zone
 // plausibility text, PID/fuzzy notes, min-rise-rate explanation) live here
 // ONCE, keyed by section, instead of once per zone. infoDetailsHtml() below
@@ -1101,7 +1101,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       infoDetailsHtml('settingsSrcGroups', 'per-item "same as zone N"') +
       '<select class="settingssrc"></select>' +
       '<div class="inheritedSummary hint"></div>' +
-      /* WEB_UI_PLAN.md section 2: the whole-zone select above stays as a
+      /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: the whole-zone select above stays as a
        * shortcut (it sets all five of these at once, see the 'settingssrc'
        * change handler below) -- these five are the real, independent
        * per-group choice. A group set to "Same as zone K" disables its own
@@ -1110,7 +1110,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
        * K's own fields at save time, same "resolved at save, not a live
        * pointer" model the whole-zone select already used. Measured fields
        * (model/coupling/normals) and topology (name/masks/relay_type) are
-       * not offered here -- see WEB_UI_PLAN.md section 2's table -- they
+       * not offered here -- see docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs's table -- they
        * are never part of any group's <select> because they are rendered
        * outside settingsStackHtml entirely (relayTypeHtml et al, above). */
       '<div class="groupsrcList">' +
@@ -1385,7 +1385,7 @@ function initInheritanceControls() {
   initGroupSourceControls();
 }
 
-// WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): the five independent
+// docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): the five independent
 // per-group ".groupsrc" selects added next to the whole-zone one. Same
 // option list/format as the whole-zone select (settingsSourceOptionsHtml);
 // initial value comes from the GET response's settings_source_groups[group]
@@ -1457,7 +1457,7 @@ document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('relaybit')) renderRelayNames();
   if (e.target.classList.contains('mode')) updateZonePanel(e.target.closest('.zone'));
   if (e.target.classList.contains('settingssrc')) {
-    /* WEB_UI_PLAN.md section 2: the whole-zone select is now a SHORTCUT --
+    /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: the whole-zone select is now a SHORTCUT --
      * it sets every one of the five independent .groupsrc selects to the
      * same value in one click, rather than being a separate sixth setting.
      * An operator who wants different answers per group still uses the
@@ -1494,7 +1494,7 @@ document.getElementById('zones').addEventListener('change', function (e) {
   }
 });
 
-// WEB_UI_PLAN.md section 1: an operator who opens a section's "i" disclosure
+// docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: an operator who opens a section's "i" disclosure
 // wants it open on every zone/reload, not just this card -- the 'toggle'
 // event on <details> does not bubble, so this listens in the capture phase
 // instead. Every zone's block for the same key opens/closes in lockstep on
@@ -1877,7 +1877,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     div.querySelectorAll('.ctbit').forEach(function (cb) {
       if (cb.checked) ctMask |= (1 << parseInt(cb.dataset.bit, 10));
     });
-    /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): settings_source
+    /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): settings_source
      * is now five INDEPENDENT per-group choices, not one whole-zone one.
      * srcVal/terminal (the whole-zone select) still exist and are still
      * sent (zones_http_post_parse.c accepts the legacy scalar key as a
@@ -1910,8 +1910,9 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_ct_mask=' + ctMask);
 
     /* Calibration offset: per SENSOR, never mirrors regardless of the tc
-       group's choice -- always this zone's own stack, per WEB_UI_PLAN.md
-       section 2's table ("tc_type yes, cal offset no"). */
+       group's choice -- always this zone's own stack, per
+       docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs
+       ("tc_type yes, cal offset no"). */
     params.push('z' + i + '_cal=' + ownStack.querySelector('.cal').value);
     /* control group. */
     params.push('z' + i + '_kp=' + controlStack.querySelector('.kp').value);
@@ -1938,7 +1939,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_driftperiod=' + guardsStack.querySelector('.driftperiod').value);
     params.push('z' + i + '_debounce=' + guardsStack.querySelector('.debounce').value);
     params.push('z' + i + '_frozenwindow=' + guardsStack.querySelector('.frozenwindow').value);
-    /* Timing profile: not one of WEB_UI_PLAN.md section 2's five groups --
+    /* Timing profile: not one of docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs's five groups --
        always this zone's OWN stored assignment now, never inherited (no
        input on this page either way, see zoneBlock's own comment on
        div.dataset.timingProfile). */

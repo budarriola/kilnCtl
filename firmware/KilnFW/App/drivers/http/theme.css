@@ -256,7 +256,7 @@ button { min-height: var(--ui-touch); }
 .kc-menu-panel details.kc-menu-group a { padding-left: 2.2em; border-bottom: 1px solid var(--border); }
 .kc-menu-panel details.kc-menu-group a:last-child { border-bottom: none; }
 
-/* WEB_UI_PLAN.md sec 1: the round "i" disclosure next to a field's one-line
+/* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: the round "i" disclosure next to a field's one-line
    label, hiding the longer explanatory paragraphs/tables that used to sit
    inline on the zones page (relay-timing hints, cross-zone plausibility
    text, PID/fuzzy notes). Reuses the page's existing <details>/<summary>

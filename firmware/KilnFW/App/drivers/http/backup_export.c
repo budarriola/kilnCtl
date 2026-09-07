@@ -261,7 +261,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             zones_config_get_coupling_tau(zi, coupling_tau_row);
             float coupling_dead_row[MAX31856_CHANNEL_COUNT] = {0};
             zones_config_get_coupling_dead_time(zi, coupling_dead_row);
-            /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21) split this
+            /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21) split this
              * into SRC_GROUP_COUNT independent bytes. Opus review of 5672719
              * (item 4): the backup format now carries all five --
              * "settings_source" stays the LIMITS group's value, kept for

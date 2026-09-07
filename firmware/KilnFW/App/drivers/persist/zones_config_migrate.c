@@ -10,7 +10,7 @@
 #include "esp_crc.h"
 #include "esp_log.h"
 
-/* ZONES_CFG_VERSION 20->21 (WEB_UI_PLAN.md section 2) widened settings_source
+/* ZONES_CFG_VERSION 20->21 (docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs) widened settings_source
  * from a single byte to settings_source[SRC_GROUP_COUNT] -- a MID-STRUCT
  * field, unlike every migration since v12->13, which only ever appended a
  * new field at the true tail. Every "predates X, byte-for-byte identical
@@ -638,7 +638,7 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         return true;
     }
     case 20: {
-        /* v20 -> v21 (THIS pass, WEB_UI_PLAN.md section 2): the single
+        /* v20 -> v21 (THIS pass, docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs): the single
          * whole-zone settings_source byte becomes settings_source[
          * SRC_GROUP_COUNT] -- a MID-STRUCT field growing, unlike relay_type
          * (v19->v20) or error_band_c/rate_band_c_per_s (v18->v19), which

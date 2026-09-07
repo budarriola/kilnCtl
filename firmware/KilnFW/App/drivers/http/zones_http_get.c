@@ -410,7 +410,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                z->tuning_tau_consistent ? "true" : "false",
                (double)z->tuning_baseline_c, (double)z->tuning_step_ambient_c,
                (double)z->tuning_raw_rise_c, (double)z->tuning_rise_inf_c, (unsigned)z->tuning_seq);
-        /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): emits both
+        /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): emits both
          * forms. "settings_source_groups" is the real, current per-group
          * data -- one key per SRC_GROUP_NAMES entry, current page's own
          * source of truth. "settings_source" is kept, set to the LIMITS

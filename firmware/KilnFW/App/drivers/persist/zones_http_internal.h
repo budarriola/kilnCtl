@@ -50,7 +50,7 @@
 
 #include "kiln_io_owner.h" /* kiln_io_owner_relay_result_t, used by zone_sweep_zone_deps_t::energize */
 
-/* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): the URL-key suffix
+/* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): the URL-key suffix
  * for each of the SRC_GROUP_COUNT independent "same as zone N" groups --
  * z%u_settings_source_<SRC_GROUP_NAMES[g]> -- shared between
  * zones_http_post_parse.c (parses it) and zones_http_get.c (emits the

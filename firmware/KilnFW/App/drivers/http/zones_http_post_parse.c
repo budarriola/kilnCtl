@@ -779,7 +779,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * optional field either defaults to a safe zero or preserves the live
      * value, never invents a third behavior).
      *
-     * WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): the old single
+     * docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): the old single
      * z%u_settings_source key becomes one key PER GROUP,
      * z%u_settings_source_<group> for <group> in the SRC_GROUP_NAMES list
      * below. The legacy scalar key is STILL ACCEPTED, applied to every

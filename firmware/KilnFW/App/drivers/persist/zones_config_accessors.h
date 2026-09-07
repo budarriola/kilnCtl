@@ -235,7 +235,7 @@ extern "C" {
  * every zone with zone 0's numbers on the very next save. */
 #define ZONE_SETTINGS_SOURCE_CUSTOM 0xFFu
 
-/* ZONES_CFG_VERSION 20->21 (WEB_UI_PLAN.md section 2): the single whole-zone
+/* ZONES_CFG_VERSION 20->21 (docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs): the single whole-zone
  * settings_source byte above became one byte PER MIRRORABLE GROUP -- the
  * owner wanted "same as zone N" per item, not all-or-nothing. Each group
  * below is independently either ZONE_SETTINGS_SOURCE_CUSTOM or a real zone
@@ -244,7 +244,7 @@ extern "C" {
  * group instead of once per zone. Measured fields (model_*, coupling_*,
  * tuning_*, normals) and topology fields (name, relay_mask, thermo_mask,
  * ct_mask, relay_type) are NOT a group here and never mirror -- see
- * WEB_UI_PLAN.md section 2's table. tc's cal_offset_c also never mirrors
+ * docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs's table. tc's cal_offset_c also never mirrors
  * (per-sensor); only tc_type does, hence "tc" rather than "thermocouple". */
 #define SRC_GROUP_LIMITS 0        /* max_temp_c, min_temp_c, max_ramp_c_per_hr, sanity_rate_c_per_min */
 #define SRC_GROUP_RELAY_TIMING 1  /* heater_window_ms, heater_min_on_ms, heater_min_off_ms */
@@ -765,7 +765,7 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
 
 /* zone_cfg_t::settings_source[group] (PID_EXPANSION_PLAN.md section 3.5's
  * "Same as zone N / Custom settings for this zone" UI dropdown, split into
- * SRC_GROUP_COUNT independent per-group bytes by WEB_UI_PLAN.md section 2)
+ * SRC_GROUP_COUNT independent per-group bytes by docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs)
  * -- see ZONE_SETTINGS_SOURCE_CUSTOM's doc comment above for the full "0 is
  * a real value here" hazard, and SRC_GROUP_LIMITS et al above for which
  * fields each group covers. `group` must be < SRC_GROUP_COUNT. Getter

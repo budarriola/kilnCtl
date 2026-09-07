@@ -414,7 +414,7 @@ typedef struct {
      * thermo_mask/etc. already have, not a dangling reference. */
     uint8_t timing_profile;
     /* Section 3.5's UI-only provenance marker, one byte PER MIRRORABLE GROUP
-     * since ZONES_CFG_VERSION 20->21 (WEB_UI_PLAN.md section 2) instead of a
+     * since ZONES_CFG_VERSION 20->21 (docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs) instead of a
      * single whole-zone byte: settings_source[SRC_GROUP_LIMITS],
      * [SRC_GROUP_RELAY_TIMING], [SRC_GROUP_CONTROL], [SRC_GROUP_GUARDS] and
      * [SRC_GROUP_TC] (see those #defines, zones_config_accessors.h, for
@@ -713,7 +713,7 @@ typedef struct {
 } zone_cfg_t;
 
 /* Frozen v20 zone layout -- what zone_cfg_t looked like immediately before
- * THIS pass (ZONES_CFG_VERSION 20->21, WEB_UI_PLAN.md section 2): a single
+ * THIS pass (ZONES_CFG_VERSION 20->21, docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs): a single
  * whole-zone settings_source byte, predating the per-group split
  * (settings_source[SRC_GROUP_COUNT] above). Same discipline as
  * zone_cfg_v19_t below it in this file: field order hand-copied from v20's
@@ -2489,7 +2489,7 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
 /* Bounded chain walk starting at `start`, following settings_source[group]
  * links through `zones[]` (MAX31856_CHANNEL_COUNT-sized, indexed exactly
  * like zones_cfg_t::zones). `group` selects which of the SRC_GROUP_COUNT
- * independent per-group bytes to walk (WEB_UI_PLAN.md section 2 -- each
+ * independent per-group bytes to walk (docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs -- each
  * group's chain is entirely independent of the others). Returns true if the
  * chain revisits a zone already on it -- a genuine inheritance cycle --
  * false if it terminates cleanly. See zones_config_json.c's own copy of

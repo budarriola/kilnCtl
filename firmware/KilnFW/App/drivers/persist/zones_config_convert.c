@@ -7,7 +7,7 @@
 
 #include <string.h>
 
-/* ZONES_CFG_VERSION 20->21 (WEB_UI_PLAN.md section 2): every historical
+/* ZONES_CFG_VERSION 20->21 (docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs): every historical
  * converter below (v1..v19, all predating the per-group split) carried a
  * single settings_source scalar; the migration rule for all of them is the
  * same one case 20 in zones_config_migrate.c uses for the one-version hop

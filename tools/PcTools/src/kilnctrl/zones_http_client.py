@@ -239,7 +239,7 @@ _ZONE_FIELD_FORM_KEY = {
     # 0xFF (ZONE_SETTINGS_SOURCE_CUSTOM) or another zone's index; self-reference
     # and cycle-forming chains are refused by the firmware itself.
     "settings_source": "settings_source",
-    # settings_source_groups (WEB_UI_PLAN.md section 2, ZONES_CFG_VERSION
+    # settings_source_groups (docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs, ZONES_CFG_VERSION
     # 20->21) is handled separately in _encode_zone() below -- it is a nested
     # dict of {group_name: value}, not a scalar, so it cannot go through
     # _format_scalar() the way every other entry in this table does. See
@@ -303,7 +303,7 @@ _ZONE_FIELD_FORM_KEY = {
     "error_band_c": "errorband",
     "rate_band_c_per_s": "rateband",
 }
-#: WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21, Opus review of
+#: docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21, Opus review of
 #: 5672719 item 4): the five independent settings_source groups, in the
 #: exact order/spelling zones_http_post_parse.c's SRC_GROUP_NAMES array uses
 #: -- GET /api/zones emits "settings_source_groups":{"limits":N,

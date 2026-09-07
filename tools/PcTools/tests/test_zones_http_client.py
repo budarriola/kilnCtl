@@ -89,7 +89,7 @@ def _sample_zone(index: int, **overrides) -> dict:
         **{f"coupling_tau_c{j}": 0.0 for j in range(3)},
         **{f"coupling_dead_time_c{j}": 0.0 for j in range(3)},
         "settings_source": 0xFF,
-        # WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21, Opus review of
+        # docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21, Opus review of
         # 5672719 item 4): zones_http_get.c always emits BOTH forms now --
         # "settings_source" (kept, LIMITS's value, for older clients) and
         # this nested per-group dict, the real current-page source of

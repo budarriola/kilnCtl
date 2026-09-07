@@ -615,7 +615,7 @@ bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
     return true;
 }
 
-/* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21) widened the real
+/* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21) widened the real
  * accessor with a `group` parameter, and the backup format itself now
  * carries a value per SRC_GROUP_COUNT group too (Opus review of 5672719,
  * item 4) -- so this stub keeps s_writes[].settings_source[group], one slot
