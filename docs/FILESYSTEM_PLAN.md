@@ -45,12 +45,29 @@ what 256 KiB/kind covers (~1.9 h of firing telemetry today), OR
 `joltwallet/esp_littlefs` becomes available as a managed component without
 a network fetch at build time being a problem.
 
-### Step 1 — add the managed component, host-build only
-Add `joltwallet/esp_littlefs` to `App/idf_component.yml`. Confirm
-`build_kilnfw` still succeeds (this exercises the registry fetch once).
-No flash. Fully reversible (revert the yml edit).
-Test: `build_kilnfw` green; diff `build/` output shows the new component
-pulled, nothing else changed.
+### Step 1 — add the managed component, host-build only — DONE (`<COMMIT_HASH>`)
+Added `joltwallet/littlefs: "^1"` to `App/idf_component.yml` (the registry
+name is `joltwallet/littlefs`, not `esp_littlefs` as first written above).
+`build_kilnfw` ran green (132.2s) and resolved `joltwallet/littlefs 1.22.3`
+into `firmware/KilnFW/managed_components/joltwallet__littlefs`, hash-pinned
+in `firmware/KilnFW/dependencies.lock`. Nothing in `App/drivers` references
+the component yet — it compiles into a static lib (`libjoltwallet__littlefs.a`)
+that nothing links against, so this build carries zero new RAM/flash cost at
+runtime. No flash to a board, no partition-table change, no mount call, no
+`logs`-partition content touched. Fully reversible (revert the yml edit;
+`dependencies.lock` regenerates on the next build).
+Test: `build_kilnfw` green, confirmed by grepping its log for
+`joltwallet/littlefs (1.22.3)` and the new component's build steps. Added
+`firmware/KilnFW/App/test/check_littlefs_component_pinned.ps1` (picked up by
+`tools/run_all_checks.ps1`'s `check_*.ps1` auto-discovery) asserting
+`idf_component.yml` declares the dependency and `dependencies.lock` has a
+matching hash-pinned entry, so a future revert or a bad resolve fails fast
+without needing a full build. Negative-tested: renamed the yml key to
+`joltwallet/littlefs_typo`, confirmed the check failed with
+`idf_component.yml does not declare 'joltwallet/littlefs' as a dependency`,
+restored the line by hand, re-ran the check green, and confirmed
+`git diff -- firmware/KilnFW/App/idf_component.yml` showed only the intended
+addition.
 
 ### Step 2 — subtype + mount call swap, guarded by a build flag
 In `log_store_mount.c`, add `esp_vfs_littlefs_register()` behind a
