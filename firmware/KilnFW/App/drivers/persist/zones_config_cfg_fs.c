@@ -1,0 +1,236 @@
+// See zones_config_cfg_fs.h for the full design/rationale.
+#include "zones_config_cfg_fs.h"
+
+#include <string.h>
+
+#include "esp_log.h"
+
+#include "cfg_fs.h"
+
+static const char *ZCFG_FS_TAG = "zones_cfg_fs";
+
+static zones_cfg_fs_write_fn_t s_write_fn = cfg_fs_write_atomic;
+
+void zones_config_cfg_fs_set_write_fn(zones_cfg_fs_write_fn_t fn)
+{
+    s_write_fn = fn ? fn : cfg_fs_write_atomic;
+}
+
+void zones_config_cfg_fs_reset_write_fn_for_test(void)
+{
+    s_write_fn = cfg_fs_write_atomic;
+}
+
+/* rev(4 bytes LE) + the on-flash blob. Sized generously above
+ * sizeof(zones_cfg_t) (itself capped at ZONES_CONFIG_BLOB_MAX_SIZE by
+ * zones_config_accessors.h's own _Static_assert) so a future field growth
+ * inside that budget never has to touch this buffer size too. */
+#define ZCFG_FILE_BUF_MAX (4 + 1024)
+
+static void put_u32_le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+static uint32_t get_u32_le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_valid)
+{
+    if (out_cfg) {
+        memset(out_cfg, 0, sizeof(*out_cfg));
+    }
+    if (out_rev) {
+        *out_rev = 0;
+    }
+    if (out_valid) {
+        *out_valid = false;
+    }
+    if (!out_cfg || !out_rev || !out_valid) {
+        return;
+    }
+    if (!cfg_fs_is_available()) {
+        return;
+    }
+
+    uint8_t raw[ZCFG_FILE_BUF_MAX];
+    size_t len = 0;
+    esp_err_t err = cfg_fs_read(ZONES_CFG_FILE_PATH, raw, sizeof(raw), &len);
+    if (err != ESP_OK) {
+        /* ESP_ERR_NOT_FOUND (never migrated yet), ESP_ERR_INVALID_SIZE (file
+         * larger than this buffer -- cannot happen for a well-formed file,
+         * but a corrupted length must not be trusted either), or any other
+         * read failure: none of these are "found but bad", so nothing is
+         * logged here -- the caller's resolve() logic decides whether that
+         * is worth a divergence warning (it is not, on its own; an absent
+         * file is the normal state on every board today). */
+        return;
+    }
+    if (len < 5) { /* need at least the rev prefix + a 1-byte version */
+        ESP_LOGW(ZCFG_FS_TAG, "zones config file is %u bytes, too short to hold a rev + blob -- ignoring",
+                 (unsigned)len);
+        return;
+    }
+
+    uint32_t rev = get_u32_le(raw);
+    const char *reason = "";
+    zones_cfg_t cand;
+    zones_decode_result_t result = zones_config_json_decode_blob(raw + 4, len - 4, &cand, &reason);
+    if (result != ZONES_DECODE_OK) {
+        ESP_LOGW(ZCFG_FS_TAG, "zones config file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides",
+                 (unsigned long)rev, reason);
+        return;
+    }
+
+    *out_cfg = cand;
+    *out_rev = rev;
+    *out_valid = true;
+}
+
+esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
+{
+    if (!cfg) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!cfg_fs_is_available()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t raw[ZCFG_FILE_BUF_MAX];
+    size_t blob_len = sizeof(*cfg);
+    if (4 + blob_len > sizeof(raw)) {
+        /* Cannot happen given the _Static_assert on zones_cfg_t's size, but
+         * fail loudly rather than silently truncate a partial write if that
+         * ever regresses. */
+        ESP_LOGE(ZCFG_FS_TAG, "zones_cfg_t (%u bytes) no longer fits the file buffer -- refusing to write",
+                 (unsigned)blob_len);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    /* Re-stamp the CRC into OUR OWN COPY right before writing, never trust
+     * the caller's embedded cfg->crc32 as still current: zones_config_store.c's
+     * nvs_load_from() can mutate its decoded struct AFTER the CRC was
+     * validated (zones_config_json_normalize_settings_source_cycles() collapsing a
+     * stored settings_source cycle is the one that actually bit this --
+     * 2026-09-07, found by this module's own divergence-resync test writing
+     * a load-time-normalized struct back out and having it fail its OWN
+     * subsequent decode) without ever re-stamping crc32 -- that struct is
+     * still perfectly fine to RUN a kiln against (nothing reads its crc32
+     * except a future save/decode), but it is no longer self-consistent to
+     * serialize verbatim. Recomputing here, in the one place this module
+     * actually writes bytes, means every file this function ever produces
+     * is guaranteed to decode cleanly regardless of what happened to the
+     * caller's copy before it got here. A local, properly-aligned copy (not
+     * a cast of `raw + 4`) avoids any alignment assumption about a byte
+     * buffer. */
+    zones_cfg_t stamped = *cfg;
+    stamped.crc32 = zones_config_json_compute_crc(&stamped);
+    put_u32_le(raw, rev);
+    memcpy(raw + 4, &stamped, blob_len);
+
+    esp_err_t err = s_write_fn(ZONES_CFG_FILE_PATH, raw, 4 + blob_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(ZCFG_FS_TAG, "zones config file write (rev %lu) failed: %s", (unsigned long)rev,
+                 esp_err_to_name(err));
+    }
+    return err;
+}
+
+bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uint32_t nvs_rev, zones_cfg_t *out_cfg,
+                                  uint32_t *out_rev, bool *out_used_file)
+{
+    if (out_cfg) {
+        memset(out_cfg, 0, sizeof(*out_cfg));
+    }
+    if (out_rev) {
+        *out_rev = 0;
+    }
+    if (out_used_file) {
+        *out_used_file = false;
+    }
+    if (!nvs_cfg || !out_cfg || !out_rev || !out_used_file) {
+        return false;
+    }
+
+    zones_cfg_t file_cfg;
+    uint32_t file_rev = 0;
+    bool file_valid = false;
+    zones_config_cfg_fs_load_raw(&file_cfg, &file_rev, &file_valid);
+
+    if (!file_valid) {
+        /* No usable file. Fall back to the NVS candidate, and if it is
+         * itself trustworthy, write it out -- this is the lazy, one-item-
+         * at-a-time migration the plan calls for: the first successful load
+         * after `cfg` becomes available (or after a corrupt file is
+         * detected) writes a fresh file, no separate migration task. */
+        *out_cfg = *nvs_cfg;
+        *out_rev = nvs_rev;
+        *out_used_file = false;
+        if (nvs_valid) {
+            esp_err_t werr = zones_config_cfg_fs_save(nvs_cfg, nvs_rev);
+            if (werr != ESP_OK && werr != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(ZCFG_FS_TAG, "could not migrate NVS zones config to file: %s", esp_err_to_name(werr));
+            }
+        }
+        return nvs_valid;
+    }
+
+    if (!nvs_valid) {
+        /* File is good, NVS side has nothing trustworthy (fresh board with
+         * a pre-populated file, or a refused-newer/corrupt NVS blob) -- use
+         * the file outright. Not logged as a divergence: there is nothing
+         * on the NVS side to disagree WITH. */
+        *out_cfg = file_cfg;
+        *out_rev = file_rev;
+        *out_used_file = true;
+        return true;
+    }
+
+    /* Both sides decoded to something valid -- compare content, not just
+     * rev, so two independently-arrived-at-identical configs never get
+     * logged as a spurious divergence. */
+    bool differs = memcmp(&file_cfg, nvs_cfg, sizeof(file_cfg)) != 0;
+    if (!differs) {
+        *out_cfg = file_cfg;
+        *out_rev = file_rev > nvs_rev ? file_rev : nvs_rev;
+        *out_used_file = true;
+        return true;
+    }
+
+    /* DIVERGENCE TIE-BREAK: higher rev wins. Under normal dual-write
+     * operation (file written first, then NVS, same rev stamped on both)
+     * file_rev >= nvs_rev always holds; nvs_rev being strictly greater means
+     * a prior file write failed after the NVS write already landed. Either
+     * way, log it and resync the loser so the disagreement does not persist
+     * across boots. */
+    if (file_rev >= nvs_rev) {
+        ESP_LOGW(ZCFG_FS_TAG,
+                 "zones config file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting FILE (higher/equal rev)",
+                 (unsigned long)file_rev, (unsigned long)nvs_rev);
+        *out_cfg = file_cfg;
+        *out_rev = file_rev;
+        *out_used_file = true;
+        /* NVS resync happens on the next nvs_save() call driven by the
+         * caller (zones_config_store.c's nvs_load() bumps its own rev and
+         * re-saves both sides once it adopts this result) -- this module
+         * does not write NVS directly, only the file (see header comment:
+         * "this file only decides WHICH bytes win... it does not touch NVS
+         * itself"). */
+    } else {
+        ESP_LOGW(ZCFG_FS_TAG,
+                 "zones config file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting NVS (higher rev), "
+                 "resyncing file",
+                 (unsigned long)file_rev, (unsigned long)nvs_rev);
+        *out_cfg = *nvs_cfg;
+        *out_rev = nvs_rev;
+        *out_used_file = false;
+        esp_err_t werr = zones_config_cfg_fs_save(nvs_cfg, nvs_rev);
+        if (werr != ESP_OK && werr != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(ZCFG_FS_TAG, "could not resync zones config file from NVS: %s", esp_err_to_name(werr));
+        }
+    }
+    return true;
+}

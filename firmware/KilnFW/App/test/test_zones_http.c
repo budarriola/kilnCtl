@@ -9197,9 +9197,15 @@ void run_test_zones_http(void)
     test_zones_current_sweep_start_atomic_gate_closes_the_race();
 }
 
+/* test_zones_config_cfg_fs.c -- separate TU, same executable (see that
+ * file's header comment and build_host_tests.ps1's $cmd2). Declared here
+ * rather than in a shared header since nothing else needs it. */
+extern void run_test_zones_config_cfg_fs(void);
+
 int main(void)
 {
     run_test_zones_http();
+    run_test_zones_config_cfg_fs();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);

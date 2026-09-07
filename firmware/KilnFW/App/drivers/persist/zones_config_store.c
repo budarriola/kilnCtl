@@ -21,6 +21,33 @@
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md: relay_cycles_set_type() push
                             * on load, zones_config_push_relay_type()/_push_all_relay_types()
                             * below. */
+#include "zones_config_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5:
+                            * read-through/dual-write bridge to the `cfg` LittleFS
+                            * partition -- see that header for the full design. */
+
+/* Separate tiny NVS key for the dual-write rev counter, deliberately NOT a
+ * field inside zones_cfg_t: that struct is already close to
+ * ZONES_CONFIG_BLOB_MAX_SIZE (see NVS_KEY_RELAY_NAMES's own comment on why
+ * relay names got their own key for the identical reason) and a rev counter
+ * has nothing to do with a zone's own thermal record. Read once at
+ * nvs_load() time, bumped and rewritten on every nvs_save(). */
+#define NVS_KEY_ZONES_REV "zones_rev"
+NVS_KEY_LEN_CHECK(NVS_KEY_ZONES_REV);
+
+static uint32_t s_zones_cfg_rev = 0;
+
+static uint32_t zones_cfg_rev_load(void)
+{
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return 0;
+    }
+    uint32_t rev = 0;
+    err = hal_kv_get_u32(&h, NVS_KEY_ZONES_REV, &rev);
+    hal_kv_close(&h);
+    return err == HAL_OK ? rev : 0;
+}
 
 /* ---- NVS ---------------------------------------------------------------- */
 
@@ -210,7 +237,35 @@ void migrate_from_default_partition(void)
 esp_err_t nvs_load(bool *out_found, bool *out_valid)
 {
     esp_err_t err = nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid);
-    if (err == ESP_OK && (!out_valid || *out_valid)) {
+
+    /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5: read-through
+     * against the `cfg` file on top of whatever nvs_load_from() just
+     * decoded. zones_config_cfg_fs_resolve() never touches NVS itself -- it
+     * only decides whether the file or the NVS candidate above wins, per
+     * its own header's tie-break rule, and may write a resync copy to
+     * whichever side lost. On every board today (no `cfg` partition) this
+     * is a fast no-op that hands the NVS candidate straight back
+     * unchanged -- see test_zones_config_cfg_fs.c's "partition absent"
+     * case. */
+    bool nvs_valid = out_valid ? *out_valid : false;
+    uint32_t nvs_rev = zones_cfg_rev_load();
+    zones_cfg_t resolved;
+    uint32_t resolved_rev = nvs_rev;
+    bool used_file = false;
+    bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, &resolved, &resolved_rev,
+                                                    &used_file);
+    s_zones_cfg_rev = resolved_rev;
+    if (used_file) {
+        s_zones.cfg = resolved;
+        if (out_found) {
+            *out_found = true;
+        }
+        if (out_valid) {
+            *out_valid = true;
+        }
+    }
+
+    if (err == ESP_OK && trustworthy) {
         /* RELAY_LIFE_BUDGET.md, "on load": s_zones.cfg is now
          * whatever this boot is actually going to run with (a decoded
          * current/migrated blob, or the zero-initialized defaults
@@ -237,12 +292,26 @@ esp_err_t nvs_save(void)
      * blob without also re-stamping it. */
     s_zones.cfg.crc32 = zones_config_json_compute_crc(&s_zones.cfg);
 
+    /* Dual-write, FILE FIRST: requirement 1 of the zones-config-move task.
+     * The file write's own failure is logged inside
+     * zones_config_cfg_fs_save() and otherwise swallowed here -- NVS below
+     * is still authoritative for older firmware and for a board with no
+     * `cfg` partition (ESP_ERR_INVALID_STATE is the expected, silent
+     * outcome on every board today), so a file-write failure must not stop
+     * the NVS write that every existing caller of nvs_save() still depends
+     * on for its actual persistence guarantee. */
+    s_zones_cfg_rev++;
+    (void)zones_config_cfg_fs_save(&s_zones.cfg, s_zones_cfg_rev);
+
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
         return hal_status_to_esp_err(err);
     }
     err = hal_kv_set_blob(&h, NVS_KEY_ZONES, &s_zones.cfg, sizeof(s_zones.cfg));
+    if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_ZONES_REV, s_zones_cfg_rev);
+    }
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }

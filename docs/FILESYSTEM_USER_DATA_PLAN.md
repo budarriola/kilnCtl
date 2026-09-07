@@ -256,9 +256,81 @@ last.
 | 2 | `cfg_fs_write_atomic()` + temp sweep + flash-worker routing. No callers. | no | none | **DONE, 2026-09-07.** `App/drivers/persist/cfg_fs.c`/`.h` (pure, host-testable, mirrors `log_store.c`'s split) provide mount/read/write-atomic/delete/exists/list; `App/drivers/persist/cfg_fs_mount.c`/`.h` are the device-only glue (`esp_vfs_littlefs_register`, `uart_bridge_ext_run_on_flash_worker()` routing — no callers yet). Host test: `test_cfg_fs.c`, obstructs the temp file's location and asserts the old final file survives untouched. **Negative-tested by breaking the production function** (redirected `cfg_fs_write_atomic()`'s `fopen()` from `tmp_path` to `final_path`, bypassing the temp file entirely): `test_cfg_fs.c:231: write_atomic() reports failure when it cannot create its own temp file` went RED, restored by hand, `git diff` empty (new, untracked file — confirmed identical to the pre-break version by re-running the full green suite). |
 | 3 | Migrate **prefs** (10,11,12,14) — the lowest-stakes items. Read-through + dual-write + `rev` counter. | no | Backup export/import must read/write through the same accessors, not NVS directly — verify `/api/backup/export` output is byte-identical before/after. | Host round-trip; bench: change unit pref, reboot, power-cut during write. |
 | 4 | Migrate **profiles** (5,6) and **firing stats** (7). | no | **Highest interaction.** Profile export/import and `backup_import.c` both go through `profiles_http_get()/_save()/_delete()` — keep them as the sole entry points so the storage swap is invisible. Explicitly re-test profile export → factory reset → import. | Host: 8-profile fill, delete, re-save. Bench: export/import round trip; confirm `prof_used` bitmap path is gone, not merely unused. |
-| 5 | Migrate **zones config** (1,2,3) + **kiln config slots** (8) + **adaptive tune** (9). Schema 22 becomes `"schema": 22`; migration chain retained. Add the pre-fire interlock: refuse to start a firing if the config FS did not mount. | no | Backup format version stays as-is; export is regenerated from the same getters. | Host: every version 1..22 fixture file parses to the same struct the blob chain produces — **bind the JSON reader to the C migration chain with vector comparison**, per `project_binding_a_python_mirror_to_c`. Bench: full firing on migrated config, then `ota_rollback_esp()` and confirm the rolled-back build reads the same gains (this is the trap being tested). |
+| 5 | Migrate **zones config** (1,2,3) + **kiln config slots** (8) + **adaptive tune** (9). Schema 22 becomes `"schema": 22`; migration chain retained. Add the pre-fire interlock: refuse to start a firing if the config FS did not mount. | no | Backup format version stays as-is; export is regenerated from the same getters. | Host: every version 1..22 fixture file parses to the same struct the blob chain produces — **bind the JSON reader to the C migration chain with vector comparison**, per `project_binding_a_python_mirror_to_c`. Bench: full firing on migrated config, then `ota_rollback_esp()` and confirm the rolled-back build reads the same gains (this is the trap being tested). **Item 1 only (the `zones_cfg_t` blob itself: PID gains, FOPDT, coupling matrix, guards, wiring, per-zone tc_type) DONE, 2026-09-07, read-through + dual-write** — see the note immediately below the table. Items 2 (zone normals) and 3 (relay names) are SEPARATE NVS keys/blobs (`zone_normals_cfg_t`/`relay_names_cfg_t`, their own `zone_normals_save()`/`relay_names_save()`) and are **NOT done** — still NVS-only, same as kiln config slots (8) and adaptive tune (9). The pre-fire interlock is **NOT done** — no caller refuses a firing on a failed `cfg` mount yet. |
 | 6 | Migrate **relay cycle counters** (4). | no | counters appear in backup export | Bench soak: confirm the 600 s write cadence lands and survives 24 h. |
 | 7 | *(Owner-gated, not scheduled)* Stop dual-writing to NVS. **Not cheaply reversible** — this is the point of no return for rollback. | no | none | Requires an explicit owner decision that no older firmware will be booted again. |
+
+**Step 5 (item 1 only), 2026-09-07 — done, host-proven, board-absent by
+construction.** `App/drivers/persist/zones_config_cfg_fs.c`/`.h` implement
+the read-through/dual-write bridge on top of `cfg_fs.c`, called from
+`zones_config_store.c`'s existing `nvs_load()`/`nvs_save()` (no new call
+sites elsewhere — every existing caller of those two functions gets the new
+behavior for free).
+
+- **File format deviation from this doc's "one file, JSON text" design**:
+  the file is NOT hand-written JSON. It is a 4-byte little-endian `rev`
+  counter followed by the EXACT SAME versioned binary blob
+  `zones_config_json_decode_blob()` already migrates from NVS — i.e. byte 0
+  of the blob is still the on-flash `zones_cfg` version, and the file is
+  migrated by the SAME chain a stored NVS blob is, with zero new parser
+  code. This trades away the "inspectable, diffable" property this doc's
+  section 3 argues for (a real JSON-text format is future work, tracked as
+  not started), in exchange for reusing the tested 22-version migration
+  chain unchanged and untouched for this pass — the file's version tag is
+  real and forward-migratable, just not human-readable yet.
+- **Read/write policy**: reads prefer the file when it decodes valid;
+  fall back to the NVS candidate `zones_config_store.c` already decoded
+  otherwise. Writes go FILE FIRST, then NVS (NVS write failure is a hard
+  error exactly as before; file write failure is logged and swallowed —
+  NVS remains the persistence guarantee every existing caller already
+  depends on).
+- **Divergence tie-break**: a separate NVS key (`zones_rev`, u32 — not a
+  field on `zones_cfg_t`, same reasoning as `NVS_KEY_RELAY_NAMES`'s own
+  split) and a rev prefix in the file. When both sides decode valid and
+  differ, the higher rev wins and the loser is resynced from the winner;
+  logged either way (`ESP_LOGW`) naming both revs.
+- **Rollback trap, explicitly checked**: NVS is written on every save
+  exactly as before this pass (unconditionally, not gated on the file
+  write succeeding), so firmware rolled back past this change reads
+  current NVS data — this pass does not widen the existing
+  `ota_rollback_esp()` / schema-bump hazard already documented in
+  CLAUDE.md.
+- **Partition-absent path is the one every board runs today**: `cfg_fs_is_available()`
+  false makes every file op a fast no-op; `nvs_load()`/`nvs_save()` behave
+  byte-identically to before this pass. Host-tested explicitly
+  (`test_zones_config_cfg_fs.c`'s `test_partition_absent_falls_through_to_nvs_only`).
+- **A real bug found and fixed by this pass's own tests**:
+  `zones_config_store.c`'s `nvs_load_from()` calls
+  `zones_config_json_normalize_settings_source_cycles()` AFTER the blob's
+  CRC has already been validated — that call can mutate the decoded struct
+  (collapsing a stored `settings_source` self/cycle reference) without ever
+  re-stamping `crc32`. Harmless for NVS alone (the next `nvs_save()`
+  restamps unconditionally before writing), but it meant
+  `zones_config_cfg_fs_save()` could write a file whose embedded `crc32` no
+  longer matched its own content, making that file fail its OWN next
+  decode. Fixed by always recomputing/re-stamping the CRC in
+  `zones_config_cfg_fs_save()` itself, on a local copy, immediately before
+  writing — never trusting a caller's embedded `crc32` as still current.
+- **Tests**: `test_zones_config_cfg_fs.c` (partition-absent fallback, NVS-
+  to-file migration-on-read, dual-write stays in sync across repeated
+  saves, divergence tie-break in both directions with resync, a real v21
+  blob decoded through the file path compared byte-for-byte against the
+  same bytes decoded directly through `zones_config_json_decode_blob()`,
+  and an interrupted/orphaned-temp-file write leaving the old committed
+  config intact). **Negative-tested the dual-write itself**: commented out
+  `nvs_save()`'s `hal_kv_set_blob(&h, NVS_KEY_ZONES, ...)` call (production
+  code, not a test-local mirror), reran the suite, got 20+ failures
+  including this project's own pre-existing round-trip test —
+  shortest failing line: `test_zones_http.c:1924: a freshly saved
+  current-version config must load back found+valid`. Restored the line by
+  hand; `git diff -- firmware/KilnFW/App/drivers/persist/zones_config_store.c`
+  confirmed clean of the break afterward. Full suite green again
+  (29/29 executables, `tools/run_all_checks.ps1`).
+- **Not done in this pass**: zone normals (2) and relay names (3) — their
+  own separate NVS blobs, untouched; kiln config slots (8); adaptive tune
+  (9); the pre-fire interlock; the JSON-text file format upgrade noted
+  above; no board has this flashed (no `cfg` partition on any board today,
+  by design of step 1's own gate).
 
 Only **step 1** needs a partition-table change, and it is append-only into the
 free tail — no existing partition moves or resizes, same discipline every prior
