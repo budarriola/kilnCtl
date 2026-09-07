@@ -159,6 +159,7 @@
 #include "freertos/task.h"
 
 #include "kilnlink/kilnlink_frame.h"
+#include "kilnlink/kilnlink_ct_auto_zero_status.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_param_value.h"
 #include "kilnlink/kilnlink_frame_a_offsets.h" /* KILNLINK_FRAME_A_* -- single source of truth for
@@ -967,6 +968,7 @@ typedef struct {
     uint32_t cmd_config_page_count;               /* KILNLINK_CONFIG_PAGE_CMD (0x1F) */
     uint32_t cmd_commit_config_rejected_count;    /* KILNLINK_COMMIT_CONFIG_REJECTED_CMD (0x20) */
     uint32_t cmd_rollback_result_count;           /* KILNLINK_ROLLBACK_RESULT_CMD (0x25) */
+    uint32_t cmd_ct_auto_zero_status_count;       /* KILNLINK_CT_AUTO_ZERO_STATUS_CMD (0x28) */
 
     /* 2026-08-23, size-window follow-up: the histogram above proves WHICH
      * cmd byte a dequeued frame carried, but says nothing about how LONG it
@@ -992,6 +994,7 @@ typedef struct {
     uint8_t last_config_page_len;
     uint8_t last_commit_config_rejected_len;
     uint8_t last_rollback_result_len;
+    uint8_t last_ct_auto_zero_status_len;
 
     /* HW_ABSTRACTION.md "Still open", 2026-09-06: on-board ESP<->Pico link
      * reply latency, measured in safety_exchange() (safety_link_inbox.c)
@@ -1152,6 +1155,23 @@ typedef struct {
     uart_proto_message_t stashed_rollback_result;
     bool                 has_stashed_rollback_result;
     TickType_t           stashed_rollback_result_tick;
+
+    /* CT_COMMISSIONING_PLAN.md step 2 -- SAFETY_CMD_CT_AUTO_ZERO_STATUS
+     * (0x28), same unconditional-stash treatment as the three above: this
+     * frame arrives on the same shared inbox as GET_STATUS/DIAG/POWER, so a
+     * reply landing between safety_link_get_ct_auto_zero_status()'s own
+     * drain window and the caller looking again would otherwise be silently
+     * discarded by the next unrelated drain (typically the 500 ms GET_
+     * STATUS poll). Unlike CT_CAL/CONFIG_PAGE/COMMIT_REJECTED (which have a
+     * `want_*` out-param path threaded through safety_drain_inbox_ex()),
+     * this one is ALWAYS stashed rather than also offering a direct
+     * out-param -- the auto-zero flow only ever has one caller
+     * (safety_cfg_http.c's commissioning POST handler) polling at its own
+     * pace across a multi-second measurement, so the extra out-param
+     * plumbing safety_drain_still_waiting() would need bought nothing here. */
+    uart_proto_message_t stashed_ct_auto_zero_status;
+    bool                 has_stashed_ct_auto_zero_status;
+    TickType_t           stashed_ct_auto_zero_status_tick;
 
     safety_link_stats_t stats;
     /* Running sum backing stats.link_reply_us_mean -- kept outside
@@ -2021,6 +2041,26 @@ esp_err_t safety_link_send_set_ct_cal(SafetyLinkClass *link, uint8_t channel, bo
  * on success. */
 esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out_cap,
                                   size_t *out_len);
+
+/* CT_COMMISSIONING_PLAN.md step 2 -- SAFETY_CMD_CT_AUTO_ZERO_BEGIN (0x26),
+ * fire-and-forget, same contract as safety_link_send_set_ct_cal(): only
+ * arms the Pico's accumulator (current_task.c), never blocks waiting for a
+ * measurement. Returns ESP_ERR_INVALID_ARG for channel out of range or a
+ * NULL link, ESP_ERR_INVALID_STATE if not initialized, otherwise whatever
+ * uart_protocol_send_broadcast() reports (a local send outcome, not proof
+ * the Pico accepted the arm -- follow up with safety_link_get_ct_auto_zero_
+ * status()). */
+esp_err_t safety_link_send_ct_auto_zero_begin(SafetyLinkClass *link, uint8_t channel);
+
+/* CT_COMMISSIONING_PLAN.md step 2 -- SAFETY_CMD_GET_CT_AUTO_ZERO (0x27) /
+ * SAFETY_CMD_CT_AUTO_ZERO_STATUS (0x28 reply). One bounded round trip
+ * (SAFETY_LINK_REPLY_TIMEOUT_MS); the caller polls this repeatedly across
+ * the multi-second measurement rather than this function blocking for all
+ * of it. Returns ESP_ERR_INVALID_ARG for a NULL link/out, ESP_ERR_INVALID_
+ * STATE if not initialized, ESP_ERR_TIMEOUT if no STATUS reply arrived,
+ * ESP_OK with `*out` filled in on success (check out->state). */
+esp_err_t safety_link_get_ct_auto_zero_status(SafetyLinkClass *link,
+                                               kilnlink_ct_auto_zero_status_t *out);
 
 /* docs/COMMISSIONING.md sec 2/3 -- SAFETY_CMD_SET_PARAM (0x1C) / COMMIT_CONFIG
  * (0x1D) / GET_CONFIG_PAGE (0x1F). App/drivers/safety/safety_cfg_store.c (the

@@ -95,14 +95,42 @@ document, do not solve.
    The step-2 auto-zero action itself (writing `source = auto-zero`) is not
    part of this pass -- `safety_cfg_store_set_ct_cal_input()`'s AUTO_ZERO
    path exists and is host-tested, but nothing calls it yet.
-2. **Auto idle offset**: a commissioning action, not a background task.
-   Preconditions checked by the caller (not `current_sense.c`, per
-   `current_sense.h:188-195`): every relay reported off for ≥ 5 s (five
-   peak-hold time constants), K4 closed, no trip latched. Then
-   `current_sense_recalibrate_zero()` over ≥ 10 s. Refuse and say why if the
-   measured zero differs from the stored/nominal by more than 100 mV-at-probe
-   — current flowing with every relay off is S3's fault condition and must
-   not be calibrated away. Result shown before it is committed.
+2. **Auto idle offset: done (2026-09-06).** A commissioning action, not a
+   background task. `current_sense_recalibrate_zero()` itself is still
+   never called directly from the wire path -- it blocks its caller for the
+   whole measurement, which link_task's 30 ms watchdog check-in deadline
+   cannot survive (see `LINK_PROTOCOL.md`'s `SAFETY_CMD_CT_AUTO_ZERO_BEGIN`
+   comment). Instead: three new wire commands, additive, no
+   `KILNLINK_PROTOCOL_VERSION` bump needed (brand-new ids, same "old peer
+   simply never sends/sees it" shape as `SAFETY_CMD_ROLLBACK_RESULT`) --
+   `SAFETY_CMD_CT_AUTO_ZERO_BEGIN` (0x26, ESP→Pico, arms one channel),
+   `SAFETY_CMD_GET_CT_AUTO_ZERO` (0x27, ESP→Pico, poll), `SAFETY_CMD_CT_
+   AUTO_ZERO_STATUS` (0x28, Pico→ESP reply). Pico side:
+   `current_task.c` accumulates one raw ADC sample per its own normal
+   period (`current_task_ct_auto_zero_begin()`/`_poll()`, 200 samples ≈10 s
+   at `SAFTYFW_PERIOD_CURRENT_TASK_MS`) rather than blocking link_task or
+   itself for the whole measurement; `link_task.c` only dispatches the
+   three frames. ESP side: `POST /api/safety/commissioning/ct_auto_zero`
+   (`ct_auto_zero_post_handler()`, `safety_cfg_http.c`) checks every
+   precondition on a fresh read each request (no server-side session
+   between preview and confirm) -- every relay reported off for ≥ 5 s
+   (`kiln_io_relays_off_ms()`, new tracker in `kiln_io.c`/`.h`), K4 closed,
+   no trip latched, no profile/autotune running, and manual-wins-unless-
+   override_manual=1 -- then sends `CT_AUTO_ZERO_BEGIN`, polls `GET_CT_
+   AUTO_ZERO` (blocking the httpd worker thread for the ~10-12 s
+   measurement -- acceptable since httpd runs multiple worker threads,
+   unlike the Pico-side link_task/current_task blocking hazard this whole
+   async design exists to avoid), and refuses with a reason if the measured
+   zero differs from the stored value by more than 100 mV-at-probe. `confirm=1`
+   re-runs the SAME checks and measurement before committing through the
+   exact `ct_cal_post_handler()` path (Pico first, ESP-local record only on
+   success) with `source=auto-zero`. `safety_commissioning_page.html` gained
+   an "Auto-zero" button per channel (measure → `kcConfirm()` preview →
+   confirm → commit). Host tests: `test_ct_auto_zero.c` (CommonFW, the three
+   codecs), `test_safety_cfg_http.c` (`ct_auto_zero_check_preconditions()`
+   -- each refusal, the 5 s boundary, manual-wins, a negative test proving
+   the K4 check is not vacuous -- and `ct_auto_zero_counts_to_mv()` at two
+   front-end gains), SaftyFW's existing suite (2328/2328, unaffected).
 3. **`ct_topology`**: new commissioning question (per_zone | summed). In
    summed mode the sweep records per-zone normals from channel 3 alone
    (`normal_a[zone] = sum(with zone on) - sum(idle)`), skips the

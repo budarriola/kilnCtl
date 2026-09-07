@@ -508,7 +508,13 @@ New-Item -ItemType Directory -Force -Path $kioObjDir | Out-Null
 $cmd11 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
         "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
-        "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
+        "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+        "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+# CT_COMMISSIONING_PLAN.md step 2: kiln_io.c now calls hal_time_now_us()
+# (kiln_io_relays_off_ms()'s relays_all_off_since_us tracking) -- fake_time.c
+# supplies it, same as every other executable that links the real kiln_io.c/
+# any hal_time_now_us() caller (see the "hal_time_now_us() instead of
+# esp_timer_get_time()" notes elsewhere in this file).
 # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): kiln_io_owner.c's
 # kiln_io_owner_start() now calls stack_margin_register() (registration
 # only, no size change), and this executable #includes kiln_io_owner.c
@@ -586,7 +592,8 @@ $slExtra = @("kilnlink_config_page.c", "kilnlink_announce.c", "kilnlink_announce
              "kilnlink_context.c", "kilnlink_get_config_page.c", "kilnlink_get_ct_cal.c",
              "kilnlink_rollback.c", "kilnlink_rollback_result.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
              "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",
-             "kilnlink_param.c", "kilnlink_param_value.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
+             "kilnlink_param.c", "kilnlink_param_value.c", "kilnlink_ct_auto_zero_begin.c",
+             "kilnlink_get_ct_auto_zero.c", "kilnlink_ct_auto_zero_status.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
 $cmd14 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
         "/Fo:`"$slObjDir\\`" /Fe:`"$exe14`" " +
         "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +
@@ -942,17 +949,29 @@ Invoke-HostTestExe -Name "hal_spi_async" -ExePath $exe28 -BuildCmd $cmd28
 
 # ---- summary ----------------------------------------------------------
 #
-# 28 executables are attempted above (main + zones_http + safety_cfg_http +
+# 27 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
 # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
 # zone_coupling_solve + partition_info_http + adaptive_tune_http +
 # profiles_builtin + ft6336u + max31856_hal_spi + hal_i2c_adopt +
-# hal_spi_adopt + hal_spi_async).
-# Report how many of those were even built, separately from how many of the
-# built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 28
+# hal_spi_adopt + hal_spi_async) -- opus review finding (LOW): this used to
+# say 28 (both in this comment and in $totalExpected below) while only 27
+# Invoke-HostTestExe calls actually exist above (the $exeN numbering itself
+# skips from $exe5 to $exe7, a leftover from some earlier executable that no
+# longer exists -- there never was an $exe6). That let the summary print
+# "Built: 27/28 executables" immediately followed by "all 28 host test
+# executables built and passed": the pass/fail gate below only ever checked
+# buildFailures/failedExes, never that the built count matched what was
+# expected, so a silently-skipped executable (never built, never run, never
+# added to either failure list) would read as a full green suite. Fixed two
+# ways: the expected count now matches the real number of calls above, AND
+# the gate below independently checks the built count against it, so a
+# FUTURE executable silently dropped from this list (added to the comment/
+# count but never wired to an Invoke-HostTestExe call, or vice versa) fails
+# loud instead of depending on this comment staying accurate by hand.
+$totalExpected = 27
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {
@@ -965,6 +984,13 @@ if ($script:failedExes.Count -gt 0) {
 }
 
 if ($script:buildFailures.Count -gt 0 -or $script:failedExes.Count -gt 0) {
+    exit 1
+}
+
+if ($script:builtExes.Count -ne $totalExpected) {
+    Write-Host "MISMATCH: $($script:builtExes.Count) executables built but $totalExpected were expected -- " +
+        "at least one was silently never attempted (not a build failure, not a run failure). Refusing to " +
+        "report success."
     exit 1
 }
 

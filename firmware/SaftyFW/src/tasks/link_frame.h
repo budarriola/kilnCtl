@@ -416,6 +416,24 @@ void link_frame_apply_set_ct_cal(const config_store_record_t *committed, uint8_t
 // 0x1A is now used ONLY by the reply.
 #define LINK_FRAME_GET_CT_CAL_CMD 0x22u
 
+// --- CT_COMMISSIONING_PLAN.md step 2: auto idle-offset measurement --------
+// ESP -> Pico SAFETY_CMD_CT_AUTO_ZERO_BEGIN (0x26, kilnlink_ct_auto_zero_
+// begin.h) and SAFETY_CMD_GET_CT_AUTO_ZERO (0x27, kilnlink_get_ct_auto_
+// zero.h, request only); Pico -> ESP reply SAFETY_CMD_CT_AUTO_ZERO_STATUS
+// (0x28, kilnlink_ct_auto_zero_status.h). Same "redefined here as a local
+// dispatch id" convention as LINK_FRAME_GET_CT_CAL_CMD above. BEGIN only
+// ARMS current_task.c's own accumulator (link_task_handle_ct_auto_zero_
+// begin(), current_task_ct_auto_zero_begin()) -- it must never block
+// link_task itself: current_task_recalibrate_zero()'s underlying mechanism
+// (current_sense.h) blocks its caller for the full measurement duration
+// (>=10s at the plan's >=200 samples), which would starve link_task's own
+// 30 ms watchdog check-in deadline (watchdog_task.c's WATCHDOG_CHECKIN_
+// LINK_TASK row) and reset the board. The measurement instead accumulates
+// one sample per current_task's own normal SAFTYFW_PERIOD_CURRENT_TASK_MS
+// pass; the ESP polls GET_CT_AUTO_ZERO until STATUS reports DONE.
+#define LINK_FRAME_CT_AUTO_ZERO_BEGIN_CMD 0x26u
+#define LINK_FRAME_GET_CT_AUTO_ZERO_CMD   0x27u
+
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other
 // command byte in this file -- these are dispatched in src/tasks/link_task.c's

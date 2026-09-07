@@ -617,8 +617,11 @@ relay_type_t safety_cfg_store_get_safety_relay_type(void)
     return s_safety_relay_type;
 }
 
-bool safety_cfg_store_set_safety_relay_type(relay_type_t type)
+bool safety_cfg_store_set_safety_relay_type(relay_type_t type, esp_err_t *out_nvs_err)
 {
+    if (out_nvs_err) {
+        *out_nvs_err = ESP_OK;
+    }
     if (type != RELAY_TYPE_CONTACTOR && type != RELAY_TYPE_MERCURY) {
         /* Refuses RELAY_TYPE_SSR and any other value -- see this function's
          * doc comment. */
@@ -631,6 +634,9 @@ bool safety_cfg_store_set_safety_relay_type(relay_type_t type)
         ESP_LOGE(TAG, "safety_cfg_store_set_safety_relay_type: NVS write failed (%s) -- "
                       "type applied live but will not survive a reboot",
                  esp_err_to_name(err));
+    }
+    if (out_nvs_err) {
+        *out_nvs_err = err;
     }
     return true;
 }
@@ -763,6 +769,11 @@ static float ct_cal_channel_gain(size_t ch)
     return (isfinite(g) && g > 0.0f) ? g : SAFETY_CT_CAL_DEFAULT_GAIN;
 }
 
+float safety_cfg_store_ct_cal_channel_gain(size_t ch)
+{
+    return ct_cal_channel_gain(ch);
+}
+
 bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_zero_mv,
                                         safety_ct_cal_source_t *out_source)
 {
@@ -783,8 +794,11 @@ bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_ze
 
 bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
                                         safety_ct_cal_source_t source, float *out_k_ct_v_per_a,
-                                        uint16_t *out_zero_counts)
+                                        uint16_t *out_zero_counts, esp_err_t *out_nvs_err)
 {
+    if (out_nvs_err) {
+        *out_nvs_err = ESP_OK;
+    }
     if (ch >= SAFETY_CT_CAL_CHANNELS) {
         return false;
     }
@@ -811,6 +825,9 @@ bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
         ESP_LOGE(TAG, "safety_cfg_store_set_ct_cal_input: NVS write failed (%s) -- applied live but "
                       "will not survive a reboot",
                  esp_err_to_name(err));
+    }
+    if (out_nvs_err) {
+        *out_nvs_err = err;
     }
     if (out_k_ct_v_per_a) {
         *out_k_ct_v_per_a = k;

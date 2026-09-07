@@ -40,6 +40,20 @@ static TaskHandle_t s_task_handle = NULL;
 static current_snapshot_t     s_published_snapshot;
 static current_sense_power_t  s_published_power;
 
+// CT_COMMISSIONING_PLAN.md step 2 -- see current_task.h's header comment for
+// why this accumulates incrementally here rather than calling current_
+// sense_recalibrate_zero() (which blocks its caller) from link_task.
+// Guarded by the same taskENTER_CRITICAL()/taskEXIT_CRITICAL() discipline as
+// s_published_snapshot/s_published_power just above -- small fixed fields,
+// no blocking call inside the guarded region.
+#define CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES 200u // >=10s at SAFTYFW_PERIOD_CURRENT_TASK_MS (50ms), CT_COMMISSIONING_PLAN.md step 2's ">= 200 samples at 20 Hz"
+static current_task_auto_zero_state_t s_auto_zero_state = CURRENT_TASK_AUTO_ZERO_IDLE;
+static uint8_t  s_auto_zero_channel = 0;
+static uint32_t s_auto_zero_sum = 0;
+static uint16_t s_auto_zero_count = 0;
+static uint16_t s_auto_zero_target = CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES;
+static uint16_t s_auto_zero_result_counts = 0;
+
 static void current_task_fn(void *arg)
 {
     (void)arg;
@@ -87,6 +101,18 @@ static void current_task_fn(void *arg)
         taskENTER_CRITICAL();
         s_published_snapshot = snap;
         s_published_power = power;
+        // CT_COMMISSIONING_PLAN.md step 2 -- one accumulator step per pass,
+        // never a blocking wait. snap.counts_avg[] is this SAME pass's raw,
+        // pre-conversion ADC mean (snapshots.h), the identical source
+        // SAFETY_CMD_POWER's counts_avg field already publishes.
+        if (s_auto_zero_state == CURRENT_TASK_AUTO_ZERO_IN_PROGRESS) {
+            s_auto_zero_sum += snap.counts_avg[s_auto_zero_channel];
+            s_auto_zero_count++;
+            if (s_auto_zero_count >= s_auto_zero_target) {
+                s_auto_zero_result_counts = (uint16_t)(s_auto_zero_sum / s_auto_zero_count);
+                s_auto_zero_state = CURRENT_TASK_AUTO_ZERO_DONE;
+            }
+        }
         taskEXIT_CRITICAL();
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_CURRENT_TASK);
@@ -195,4 +221,39 @@ void current_task_reload_cal(void)
     }
 
     current_sense_set_cal(&cal);
+}
+
+// CT_COMMISSIONING_PLAN.md step 2 -- see current_task.h's header comment.
+bool current_task_ct_auto_zero_begin(uint8_t channel)
+{
+    if (channel >= 3u) {
+        return false;
+    }
+    bool ok = false;
+    taskENTER_CRITICAL();
+    if (s_auto_zero_state != CURRENT_TASK_AUTO_ZERO_IN_PROGRESS) {
+        s_auto_zero_channel = channel;
+        s_auto_zero_sum = 0;
+        s_auto_zero_count = 0;
+        s_auto_zero_target = CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES;
+        s_auto_zero_result_counts = 0;
+        s_auto_zero_state = CURRENT_TASK_AUTO_ZERO_IN_PROGRESS;
+        ok = true;
+    }
+    taskEXIT_CRITICAL();
+    return ok;
+}
+
+void current_task_ct_auto_zero_poll(current_task_auto_zero_status_t *out)
+{
+    if (!out) {
+        return;
+    }
+    taskENTER_CRITICAL();
+    out->state = s_auto_zero_state;
+    out->channel = s_auto_zero_channel;
+    out->samples_taken = s_auto_zero_count;
+    out->samples_target = s_auto_zero_target;
+    out->zero_counts = s_auto_zero_result_counts;
+    taskEXIT_CRITICAL();
 }

@@ -881,7 +881,7 @@ static void test_safety_relay_type_set_persists_and_roundtrips_after_reload(void
     stub_reset();
     TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup: first boot");
 
-    TEST_CHECK(safety_cfg_store_set_safety_relay_type(RELAY_TYPE_MERCURY) == true,
+    TEST_CHECK(safety_cfg_store_set_safety_relay_type(RELAY_TYPE_MERCURY, NULL) == true,
                "mercury is accepted -- the safety relay may be a contactor or a mercury relay");
     TEST_CHECK(safety_cfg_store_get_safety_relay_type() == RELAY_TYPE_MERCURY,
                "live value updates immediately, before any reboot");
@@ -911,7 +911,7 @@ static void test_safety_relay_type_rejects_ssr(void)
     TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup: first boot, default contactor");
     int calls_before = s_stub_relay_cycles_set_type_calls;
 
-    TEST_CHECK(safety_cfg_store_set_safety_relay_type(RELAY_TYPE_SSR) == false,
+    TEST_CHECK(safety_cfg_store_set_safety_relay_type(RELAY_TYPE_SSR, NULL) == false,
                "ssr is refused -- returns false, nothing changed");
     TEST_CHECK(safety_cfg_store_get_safety_relay_type() == RELAY_TYPE_CONTACTOR,
                "the stored type is untouched by the refused call");
@@ -924,10 +924,41 @@ static void test_safety_relay_type_rejects_ssr(void)
     // also be refused -- if safety_cfg_store_set_safety_relay_type() were
     // accidentally written as "accept anything except literal 0", this
     // would catch it.
-    TEST_CHECK(safety_cfg_store_set_safety_relay_type((relay_type_t)99) == false,
+    TEST_CHECK(safety_cfg_store_set_safety_relay_type((relay_type_t)99, NULL) == false,
                "an unrecognised value is refused the same way ssr is -- 'anything but ssr' would "
                "be the wrong rule");
 
+    fake_kv_reset_all();
+}
+
+// 2026-09-06 audit fix: an NVS write failure (including the PSRAM-stack
+// refusal above) used to be only ESP_LOGE'd while the function still
+// returned true, so an HTTP caller would report {"ok":true} for a value
+// that was applied live but never actually persisted. out_nvs_err must
+// surface that distinctly.
+static void test_safety_relay_type_reports_nvs_failure_via_out_param(void)
+{
+    TEST_SECTION("safety_cfg_store_set_safety_relay_type -- out_nvs_err surfaces an NVS write "
+                 "failure distinctly from the (unchanged) true/false return value");
+
+    fake_kv_reset_all();
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup: first boot");
+
+    fake_kv_set_write_safe_here(false); // simulate the PSRAM-stack refusal -- one concrete NVS failure
+
+    esp_err_t nvs_err = ESP_OK;
+    bool accepted = safety_cfg_store_set_safety_relay_type(RELAY_TYPE_MERCURY, &nvs_err);
+
+    TEST_CHECK(accepted == true,
+               "the type is still valid and applied live -- return value's meaning is unchanged");
+    TEST_CHECK(safety_cfg_store_get_safety_relay_type() == RELAY_TYPE_MERCURY,
+               "applied live even though it will not survive a reboot");
+    TEST_CHECK(nvs_err != ESP_OK,
+               "out_nvs_err reports the write failure -- THIS is the fix: before it, a caller had "
+               "no way to distinguish this from a fully-persisted success");
+
+    fake_kv_set_write_safe_here(true);
     fake_kv_reset_all();
 }
 
@@ -1016,14 +1047,14 @@ static void test_ct_cal_manual_wins_over_sweep(void)
 
     float k = 0.0f;
     uint16_t zc = 0;
-    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 1.0f, 59.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc),
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 1.0f, 59.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc, NULL),
                "operator hand-enters channel 0's calibration");
     TEST_CHECK(fabsf(k - 1.0f) < 1e-6f, "converts using the gain default (0.715) since none is "
                                         "committed from the Pico in this test");
 
     // The sweep's own write attempt must be refused outright -- nothing
     // changes.
-    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 20.0f, 0.0f, SAFETY_CT_CAL_SOURCE_SWEEP, &k, &zc) ==
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 20.0f, 0.0f, SAFETY_CT_CAL_SOURCE_SWEEP, &k, &zc, NULL) ==
                    false,
                "a SWEEP-sourced write against a MANUAL channel is refused, not silently accepted");
 
@@ -1037,7 +1068,7 @@ static void test_ct_cal_manual_wins_over_sweep(void)
     // A channel that has NEVER been set (still sweep-eligible) accepts a
     // sweep write normally -- manual wins over the sweep, but the sweep is
     // not disabled everywhere.
-    TEST_CHECK(safety_cfg_store_set_ct_cal_input(1, 20.0f, 0.0f, SAFETY_CT_CAL_SOURCE_SWEEP, &k, &zc),
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(1, 20.0f, 0.0f, SAFETY_CT_CAL_SOURCE_SWEEP, &k, &zc, NULL),
                "a sweep write against an UNCOMMISSIONED channel succeeds");
     TEST_CHECK(safety_cfg_store_get_ct_cal_input(1, &a_fs, &zero_mv, &src), "channel 1 now has a value");
     TEST_CHECK(src == SAFETY_CT_CAL_SOURCE_SWEEP, "and its source is sweep, not manual");
@@ -1045,7 +1076,7 @@ static void test_ct_cal_manual_wins_over_sweep(void)
     // AUTO_ZERO always applies, even over an existing manual value --
     // see safety_ct_cal_source_t's own header comment for why this is NOT
     // the same rule as the sweep's.
-    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 1.0f, 10.0f, SAFETY_CT_CAL_SOURCE_AUTO_ZERO, &k, &zc),
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 1.0f, 10.0f, SAFETY_CT_CAL_SOURCE_AUTO_ZERO, &k, &zc, NULL),
                "an auto-zero write against a MANUAL channel is applied, unlike the sweep's");
     TEST_CHECK(safety_cfg_store_get_ct_cal_input(0, &a_fs, &zero_mv, &src), "channel 0 still has a value");
     TEST_CHECK(fabsf(zero_mv - 10.0f) < 1e-6f, "zero_mv was updated by the auto-zero action");
@@ -1074,15 +1105,46 @@ static void test_ct_cal_set_rejects_out_of_range_channel_and_value(void)
 
     float k = 0.0f;
     uint16_t zc = 0;
-    TEST_CHECK(safety_cfg_store_set_ct_cal_input(3, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc) ==
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(3, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc, NULL) ==
                    false,
                "channel 3 does not exist (only 0..2) -- refused");
-    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 5000.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc) ==
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 5000.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc, NULL) ==
                    false,
                "A_fs out of range is refused here too, not only in the pure convert function");
     TEST_CHECK(safety_cfg_store_get_ct_cal_input(0, NULL, NULL, NULL) == false,
                "the refused call left channel 0 unset");
 
+    fake_kv_reset_all();
+}
+
+// 2026-09-06 audit fix, same as test_safety_relay_type_reports_nvs_failure_
+// via_out_param() above.
+static void test_ct_cal_set_reports_nvs_failure_via_out_param(void)
+{
+    TEST_SECTION("safety_cfg_store_set_ct_cal_input -- out_nvs_err surfaces an NVS write failure "
+                 "distinctly from the (unchanged) true/false return value");
+
+    fake_kv_reset_all();
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup");
+
+    fake_kv_set_write_safe_here(false); // simulate the PSRAM-stack refusal -- one concrete NVS failure
+
+    float k = 0.0f;
+    uint16_t zc = 0;
+    esp_err_t nvs_err = ESP_OK;
+    bool accepted = safety_cfg_store_set_ct_cal_input(0, 1.0f, 59.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k,
+                                                       &zc, &nvs_err);
+
+    TEST_CHECK(accepted == true, "a valid input is still accepted -- return value's meaning is unchanged");
+    float a_fs = 0.0f;
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(0, &a_fs, NULL, NULL) == true && a_fs == 1.0f,
+               "applied live even though it will not survive a reboot");
+    TEST_CHECK(nvs_err != ESP_OK,
+               "out_nvs_err reports the write failure -- THIS is the fix: before it, a caller had "
+               "no way to distinguish this from a fully-persisted success");
+
+    fake_kv_set_write_safe_here(true);
     fake_kv_reset_all();
 }
 
@@ -1111,8 +1173,10 @@ void run_test_safety_cfg_store(void)
     test_safety_relay_type_defaults_to_contactor_and_pushes_to_relay_cycles();
     test_safety_relay_type_set_persists_and_roundtrips_after_reload();
     test_safety_relay_type_rejects_ssr();
+    test_safety_relay_type_reports_nvs_failure_via_out_param();
     test_ct_cal_convert_at_several_probe_ratings();
     test_ct_cal_convert_rejects_out_of_range();
     test_ct_cal_manual_wins_over_sweep();
     test_ct_cal_set_rejects_out_of_range_channel_and_value();
+    test_ct_cal_set_reports_nvs_failure_via_out_param();
 }

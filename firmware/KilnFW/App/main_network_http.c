@@ -551,7 +551,8 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                  esp_err_to_name(safety_cfg_store_err));
     }
     esp_err_t safety_cfg_http_err =
-        safety_cfg_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+        safety_cfg_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL,
+                               ctx->io_ready ? &ctx->kio : NULL);
     if (safety_cfg_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "safety_cfg_http_start failed: %s -- no /safety/commissioning this boot",
                  esp_err_to_name(safety_cfg_http_err));

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "hal_time.h" /* CT_COMMISSIONING_PLAN.md step 2 -- relays_all_off_since_us, kiln_io_relays_off_ms() */
 #include "settings.h"
 
 static const char *TAG = "kiln_io";
@@ -134,6 +135,10 @@ static uint8_t kiln_io_remap_relay_bits(uint8_t bits)
  * moved. Continuing to report the previous commanded value would be the one lie
  * this layer must never tell: "relay off" while it is energized. Report the
  * mismatch and adopt the expander's view. */
+static void kiln_io_note_relay_shadow_changed(kiln_io_t *io); /* forward decl -- defined below,
+                                                                  used by both this function and
+                                                                  the write paths further down */
+
 static void kiln_io_resync_relay_shadow(kiln_io_t *io)
 {
     uint8_t accepted_phys = (uint8_t)(SX1509_get_shadow(io->exp) & (uint16_t)KILN_IO_RELAY_MASK);
@@ -148,6 +153,7 @@ static void kiln_io_resync_relay_shadow(kiln_io_t *io)
                  io->relay_shadow, accepted);
         io->relay_shadow = accepted;
     }
+    kiln_io_note_relay_shadow_changed(io);
 }
 
 esp_err_t kiln_io_init(kiln_io_t *io, SX1509Class *exp)
@@ -158,6 +164,7 @@ esp_err_t kiln_io_init(kiln_io_t *io, SX1509Class *exp)
     io->exp = exp;
     io->relay_shadow = 0;
     io->io_shadow = 0;
+    io->relays_all_off_since_us = -1; /* stamped below once init leaves every relay off */
     io->lcd_dc_data = (KILN_IO_SAFE_DATA & KILN_BIT(SX1509_LCD_DC_PIN)) != 0;
     io->lcd_reset_asserted = false; /* ~RESET is left high, i.e. not asserted */
 
@@ -231,9 +238,25 @@ esp_err_t kiln_io_init(kiln_io_t *io, SX1509Class *exp)
     (void)SX1509_get_interrupt_source(exp, NULL, true);
 
     io->initialized = true;
+    kiln_io_note_relay_shadow_changed(io); /* relay_shadow is 0 here -- stamps relays_all_off_since_us */
     ESP_LOGI(TAG, "board I/O ready: dir=0x%04X data=0x%04X pullups=0x%04X, all relays off",
              KILN_IO_DIR_MASK, KILN_IO_SAFE_DATA, KILN_IO_PULLUP_MASK);
     return kiln_io_track(io, ESP_OK);
+}
+
+/* CT_COMMISSIONING_PLAN.md step 2 -- called after every write that may have
+ * changed relay_shadow (both success and the failure/resync path), so
+ * relays_all_off_since_us always reflects the CURRENT shadow, never a stale
+ * value from before a failed write's resync. */
+static void kiln_io_note_relay_shadow_changed(kiln_io_t *io)
+{
+    if (io->relay_shadow == 0u) {
+        if (io->relays_all_off_since_us < 0) {
+            io->relays_all_off_since_us = (int64_t)hal_time_now_us();
+        }
+    } else {
+        io->relays_all_off_since_us = -1;
+    }
 }
 
 esp_err_t kiln_io_set_relay(kiln_io_t *io, uint8_t relay, bool on)
@@ -264,6 +287,7 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
     esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)phys_mask, (uint16_t)phys_value);
     if (err == ESP_OK) {
         io->relay_shadow = (uint8_t)((io->relay_shadow & (uint8_t)~mask) | value);
+        kiln_io_note_relay_shadow_changed(io);
         ESP_LOGD(TAG, "relays now 0x%X (mask 0x%X value 0x%X)", io->relay_shadow, mask, value);
     } else {
         /* The commanded state is deliberately NOT updated from `value` on
@@ -296,6 +320,7 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
     esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)KILN_IO_RELAY_MASK, 0);
     if (err == ESP_OK) {
         io->relay_shadow = 0;
+        kiln_io_note_relay_shadow_changed(io);
         ESP_LOGI(TAG, "all relays off");
     } else {
         ESP_LOGE(TAG, "ALL RELAYS OFF FAILED: %s -- the expander is not answering",
@@ -475,4 +500,20 @@ bool kiln_io_irq_asserted(const kiln_io_t *io)
 uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io)
 {
     return io ? io->relay_shadow : 0u;
+}
+
+uint32_t kiln_io_relays_off_ms(const kiln_io_t *io)
+{
+    if (!io || io->relays_all_off_since_us < 0) {
+        return UINT32_MAX;
+    }
+    int64_t elapsed_us = (int64_t)hal_time_now_us() - io->relays_all_off_since_us;
+    if (elapsed_us < 0) {
+        elapsed_us = 0; /* clock anomaly -- never report a negative duration */
+    }
+    int64_t elapsed_ms = elapsed_us / 1000;
+    if (elapsed_ms > (int64_t)UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    return (uint32_t)elapsed_ms;
 }

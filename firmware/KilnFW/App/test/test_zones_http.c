@@ -593,6 +593,13 @@ static bool s_cfg_refetch_ok = true;
 // Set true to make refetch() re-point the store at whatever the pushes have
 // staged -- i.e. model a Pico that really did commit what it was sent.
 static bool s_cfg_refetch_applies_staged = false;
+// opus review finding (MEDIUM): zones_current_sweep_start() now refuses to
+// start when the safety param cache has never been fetched
+// (safety_cfg_store_fetched_ms_ago() == UINT32_MAX). Defaults to "just
+// fetched" (0) so every existing sweep-start test that doesn't care about
+// this predicate keeps behaving exactly as before; a test that wants the
+// unfetched-cache refusal sets this to UINT32_MAX explicitly.
+static uint32_t s_cfg_fetched_ms_ago = 0;
 
 static void test_ct_cal_reset(void); /* defined below -- forward declared so this reset stays first */
 
@@ -602,6 +609,7 @@ static void test_cfg_rows_reset(void)
     s_cfg_row_count = 0;
     s_cfg_refetch_ok = true;
     s_cfg_refetch_applies_staged = false;
+    s_cfg_fetched_ms_ago = 0;
     test_ct_cal_reset();
 }
 
@@ -649,6 +657,10 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
 size_t safety_cfg_store_param_count(void)
 {
     return s_cfg_row_count;
+}
+uint32_t safety_cfg_store_fetched_ms_ago(void)
+{
+    return s_cfg_fetched_ms_ago;
 }
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
 {
@@ -706,12 +718,14 @@ bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_ze
 }
 
 bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv, safety_ct_cal_source_t source,
-                                        float *out_k_ct_v_per_a, uint16_t *out_zero_counts)
+                                        float *out_k_ct_v_per_a, uint16_t *out_zero_counts,
+                                        esp_err_t *out_nvs_err)
 {
     // Not exercised via this path by any test in this file today (the real
     // HTTP handler is what calls this in practice) -- present only so the
     // real header's declaration is satisfied and a future test can drive it.
     (void)out_k_ct_v_per_a; (void)out_zero_counts;
+    if (out_nvs_err) *out_nvs_err = ESP_OK;
     test_ct_cal_set(ch, a_fs, zero_mv, source);
     return true;
 }
@@ -6457,39 +6471,45 @@ static void test_zone_sweep_check_refusal_each_reason_fires(void)
     // what proves the OTHER branches below are actually testing something:
     // without this, a refusal function that always returned the same
     // enumerator would pass every "returns X for input X" check trivially.
-    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, false, false) == ZONE_SWEEP_REFUSE_OK,
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, false, false, false) == ZONE_SWEEP_REFUSE_OK,
               "all-clear inputs refuse nothing");
 
-    TEST_CHECK(zone_sweep_check_refusal(true, true, true, 1, false, false, true, false, false) ==
+    TEST_CHECK(zone_sweep_check_refusal(true, true, true, 1, false, false, true, false, false, false) ==
                   ZONE_SWEEP_REFUSE_ALREADY_RUNNING,
               "already_running is refused");
-    TEST_CHECK(zone_sweep_check_refusal(false, false, true, 1, false, false, true, false, false) ==
+    TEST_CHECK(zone_sweep_check_refusal(false, false, true, 1, false, false, true, false, false, false) ==
                   ZONE_SWEEP_REFUSE_NO_HW,
               "no hardware is refused");
-    TEST_CHECK(zone_sweep_check_refusal(false, true, false, 1, false, false, true, false, false) ==
+    TEST_CHECK(zone_sweep_check_refusal(false, true, false, 1, false, false, true, false, false, false) ==
                   ZONE_SWEEP_REFUSE_CONFIG_INVALID,
               "invalid zones config is refused");
-    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 0, false, false, true, false, false) ==
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 0, false, false, true, false, false, false) ==
                   ZONE_SWEEP_REFUSE_NO_ZONES,
               "thermo_count == 0 is refused");
-    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, true, false, true, false, false) ==
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, true, false, true, false, false, false) ==
                   ZONE_SWEEP_REFUSE_PROFILE_RUNNING,
               "a running/paused profile is refused");
-    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, true, true, false, false) ==
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, true, true, false, false, false) ==
                   ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING,
               "an active autotune is refused");
-    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, false, false, false) ==
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, false, false, false, false) ==
                   ZONE_SWEEP_REFUSE_LINK_DOWN,
               "a down safety link is refused");
-    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, true, false) ==
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, true, false, false) ==
                   ZONE_SWEEP_REFUSE_TRIP_LATCHED,
               "a latched trip is refused");
     // N9 (opus review, 2026-08-28): a relay already on (dashboard, or a
     // profile that just ended) must refuse the start outright, not silently
     // measure a foreign load.
-    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, false, true) ==
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, false, true, false) ==
                   ZONE_SWEEP_REFUSE_RELAYS_ON,
               "N9: any relay already on is refused");
+    // opus review finding (MEDIUM): an unfetched safety param cache
+    // (safety_cfg_store_fetched_ms_ago() == UINT32_MAX) must refuse rather
+    // than silently be read as "per_zone" by zone_cfg_committed_ct_topology().
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, false, false, true) ==
+                  ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN,
+              "unfetched CT topology cache is refused");
 }
 
 static void test_zone_sweep_ceiling_hit(void)
@@ -7432,10 +7452,28 @@ static void test_zone_sweep_summed_normal_a_basic(void)
     TEST_CHECK(zone_sweep_summed_normal_a(3.0f, 0.0f, &n), "converts with a zero idle baseline");
     TEST_CHECK(fabsf(n - 3.0f) < 1e-6f, "no idle draw -- the reading is the normal as-is");
 
-    // The clamp-at-0 floor: a channel reading LOWER with the zone on than at
-    // idle (noise, a settling transient) must not report a negative normal.
-    TEST_CHECK(zone_sweep_summed_normal_a(0.4f, 0.5f, &n), "converts even when on < idle");
-    TEST_CHECK(n == 0.0f, "clamped to 0, never negative");
+    // opus review finding (MEDIUM): a channel reading LOWER with the zone
+    // on than at idle (noise, a settling transient) used to clamp to 0 and
+    // return true, which PERSISTS an indistinguishable-from-real-zero
+    // normal and silently makes S14/S15 inert for that zone forever. It
+    // must now report "not measured" instead.
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(0.4f, 0.5f, &n) == false,
+              "on < idle is refused (unmeasured), not clamped to a persisted zero");
+    TEST_CHECK(n == -1.0f, "out param is left untouched on refusal");
+
+    // Quantized-counts case: two readings that would floor to the same ADC
+    // count as their idle baseline (a real, small negative delta from noise
+    // at the CT's actual resolution, not a contrived exact-equal test input
+    // -- see project_idealized_test_input_bug_class.md) must also refuse.
+    TEST_CHECK(zone_sweep_summed_normal_a(1.996f, 2.001f, &n) == false,
+              "a small quantization-scale negative delta is refused, not clamped");
+
+    // Equal on/idle (delta exactly 0) is a legitimate zero normal, not a
+    // refusal -- draws the line precisely at "would go negative."
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.0f, 2.0f, &n), "on == idle converts (a real zero normal)");
+    TEST_CHECK(n == 0.0f, "on == idle yields exactly zero");
 
     TEST_CHECK(zone_sweep_summed_normal_a(NAN, 0.5f, &n) == false, "a NaN reading is refused");
     TEST_CHECK(zone_sweep_summed_normal_a(5.0f, NAN, &n) == false, "a NaN idle baseline is refused");
@@ -7471,6 +7509,39 @@ static void test_record_ct_channels_summed_mode_derives_normal_from_channel3(voi
     s_ct_topology_summed = false;
     s_ct_summed_idle_a = 0.0f;
     memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmeasured(void)
+{
+    TEST_SECTION("zone_sweep_task_record_ct_channels -- opus review finding (MEDIUM): a "
+                 "with-zone-on reading below the idle baseline must leave the zone UNMEASURED "
+                 "(not persist a clamped zero) and record it in s_sweep.summed_unmeasured_mask");
+
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
+
+    s_ct_topology_summed = true;
+    s_ct_summed_idle_a = 2.0f;
+
+    float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT] = { NAN, NAN, 1.9f }; // below idle -- noise/settling
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/2, /*relay_mask=*/0x04u, per_ch_avg_a);
+
+    float amps = -1.0f;
+    bool measured = true;
+    TEST_CHECK(zones_config_get_normal_current(2, &amps, &measured), "getter still answers for zone 2");
+    TEST_CHECK(!measured, "nothing was persisted for zone 2 -- it stays at its unmeasured default");
+    TEST_CHECK((s_sweep.summed_unmeasured_mask & (1u << 2)) != 0,
+              "zone 2's bit is set in summed_unmeasured_mask so the operator can see it was skipped");
+
+    s_ct_topology_summed = false;
+    s_ct_summed_idle_a = 0.0f;
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
     nvs_test_enable(false);
     nvs_test_clear();
 }
@@ -8757,6 +8828,7 @@ void run_test_zones_http(void)
 
     test_zone_sweep_summed_normal_a_basic();
     test_record_ct_channels_summed_mode_derives_normal_from_channel3();
+    test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmeasured();
 
     test_zone_sweep_derive_k_ct_scales_by_the_measured_over_expected_ratio();
     test_zone_sweep_derive_k_ct_refuses_without_the_nameplate_answers();

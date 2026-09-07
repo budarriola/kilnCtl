@@ -16,6 +16,8 @@
       "kilnlink_context.h:KILNLINK_CONTEXT_FIXED_LEN=15u",
       "kilnlink_context.h:KILNLINK_CONTEXT_MAX_LEN=(KILNLINK_CONTEXT_FIXED_LEN + KILNLINK_CONTEXT_MAX_ZONES * KILNLINK_CONTEXT_ZONE_BLOCK_LEN)",
       "kilnlink_context.h:KILNLINK_CONTEXT_ZONE_BLOCK_LEN=14u",
+      "kilnlink_ct_auto_zero_begin.h:KILNLINK_CT_AUTO_ZERO_BEGIN_LEN=2u",
+      "kilnlink_ct_auto_zero_status.h:KILNLINK_CT_AUTO_ZERO_STATUS_LEN=9u",
       "kilnlink_ct_cal.h:KILNLINK_CT_CAL_CHANNEL_LEN=9u",
       "kilnlink_ct_cal.h:KILNLINK_CT_CAL_LEN=(1u + KILNLINK_CT_CAL_NUM_CHANNELS * KILNLINK_CT_CAL_CHANNEL_LEN)",
       "kilnlink_diag.h:KILNLINK_DIAG_LEN=26u",
@@ -39,6 +41,7 @@
       "kilnlink_fw_version.h:KILNLINK_FW_VERSION_MAX_DATETIME_LEN=32u",
       "kilnlink_fw_version.h:KILNLINK_FW_VERSION_MAX_LEN=(KILNLINK_FW_VERSION_FIXED_LEN + KILNLINK_FW_VERSION_MAX_COMMIT_LEN +         KILNLINK_FW_VERSION_MAX_DATETIME_LEN)",
       "kilnlink_get_config_page.h:KILNLINK_GET_CONFIG_PAGE_LEN=2u",
+      "kilnlink_get_ct_auto_zero.h:KILNLINK_GET_CT_AUTO_ZERO_LEN=1u",
       "kilnlink_get_ct_cal.h:KILNLINK_GET_CT_CAL_LEN=1u",
       "kilnlink_get_fw_version.h:KILNLINK_GET_FW_VERSION_LEN=1u",
       "kilnlink_get_param.h:KILNLINK_GET_PARAM_LEN=3u",
@@ -63,7 +66,9 @@
       "link_frame.h:LINK_FRAME_ANNOUNCE_REBOOT_CMD=0x18u",
       "link_frame.h:LINK_FRAME_ANNOUNCE_VERSION_CMD=0x0Fu",
       "link_frame.h:LINK_FRAME_CLEAR_TRIP_CMD=0x0Au",
+      "link_frame.h:LINK_FRAME_CT_AUTO_ZERO_BEGIN_CMD=0x26u",
       "link_frame.h:LINK_FRAME_FW_VERSION_CMD=0x0Bu",
+      "link_frame.h:LINK_FRAME_GET_CT_AUTO_ZERO_CMD=0x27u",
       "link_frame.h:LINK_FRAME_GET_CT_CAL_CMD=0x22u",
       "link_frame.h:LINK_FRAME_PUSH_CONTEXT_CMD=0x07u",
       "link_frame.h:LINK_FRAME_ROLLBACK_CMD=0x17u",
@@ -112,8 +117,8 @@
       "uart_task_ids.h:SAFETY_CMD_UPDATE_END=0x12u",
       "uart_task_ids.h:SAFETY_CMD_UPDATE_STATUS=0x14u"
     ],
-    "fingerprint": "79cb22fc3a214af8",
-    "version": 11
+    "fingerprint": "c3a4671611f4e3ed",
+    "version": 12
   },
   "uart": {
     "defs": [

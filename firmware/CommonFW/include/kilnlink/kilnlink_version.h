@@ -180,8 +180,27 @@
  * reasoning as 5->6/8->9/9->10: no other frame's shape changed, and the
  * decoder change is itself the thing that makes staying permissive safe --
  * a pre-11 peer's 55-byte POWER frames still decode correctly under this
- * commit's own decoder. */
-#define KILNLINK_PROTOCOL_VERSION 11
+ * commit's own decoder.
+ *
+ * 11 -> 12 (2026-09-06): three brand-new frames, CT_COMMISSIONING_PLAN.md
+ * step 2's auto idle-offset measurement -- SAFETY_CMD_CT_AUTO_ZERO_BEGIN
+ * (0x26, ESP->Pico, kilnlink_ct_auto_zero_begin.h), SAFETY_CMD_GET_CT_
+ * AUTO_ZERO (0x27, ESP->Pico request-only, kilnlink_get_ct_auto_zero.h),
+ * and its reply SAFETY_CMD_CT_AUTO_ZERO_STATUS (0x28, Pico->ESP,
+ * kilnlink_ct_auto_zero_status.h). EXACT same shape as the 8->9
+ * (ROLLBACK_RESULT) precedent: fully additive, three ids nothing on this
+ * link used before. An ESP still on protocol 11 or older simply never
+ * sends CT_AUTO_ZERO_BEGIN/GET_CT_AUTO_ZERO (its commissioning page has no
+ * "Auto-zero" button yet) and would silently drop a CT_AUTO_ZERO_STATUS
+ * reply it has no dispatch case for -- but no old-ESP build ever receives
+ * one, because a pre-12 Pico never sends it either (this pass changes both
+ * sides together). Nothing about the existing frame set (STATUS/DIAG/
+ * POWER/CT_CAL/etc) changed shape.
+ * KILNLINK_MIN_COMPATIBLE is NOT raised alongside this bump, same
+ * reasoning as 8->9/9->10/10->11: a peer built against 7 through 11
+ * remains fully compatible with a 12-built peer for every frame that
+ * existed before this pass. */
+#define KILNLINK_PROTOCOL_VERSION 12
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6
@@ -228,7 +247,12 @@
  * NOT bumped alongside the 10 -> 11 step above either: that step's own
  * decoder change is what makes staying permissive safe (see its own
  * comment) -- a peer built against 7 through 10 sends/reads the 55-byte V1
- * POWER layout, which this build's decoder still accepts. */
+ * POWER layout, which this build's decoder still accepts.
+ *
+ * NOT bumped alongside the 11 -> 12 step above either, same shape as
+ * 8 -> 9: three brand-new frames, nothing existing changed shape, so a
+ * peer built against 7 through 11 remains fully compatible with a
+ * 12-built peer for everything it already knew how to speak. */
 #define KILNLINK_MIN_COMPATIBLE 7
 
 #endif /* KILNLINK_VERSION_H */

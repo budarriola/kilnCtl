@@ -63,5 +63,12 @@ idf_component_register(
          # for a refused SAFETY_CMD_ROLLBACK, safety_link.c decodes this the
          # same way it decodes COMMIT_CONFIG_REJECTED above.
          "${KILNLINK_DIR}/src/kilnlink_rollback_result.c"
+         # CT_COMMISSIONING_PLAN.md step 2 -- SAFETY_CMD_CT_AUTO_ZERO_BEGIN
+         # (0x26) / SAFETY_CMD_GET_CT_AUTO_ZERO (0x27) / SAFETY_CMD_CT_AUTO_
+         # ZERO_STATUS (0x28 reply), safety_link_commands.c's safety_link_
+         # send_ct_auto_zero_begin()/safety_link_get_ct_auto_zero_status().
+         "${KILNLINK_DIR}/src/kilnlink_ct_auto_zero_begin.c"
+         "${KILNLINK_DIR}/src/kilnlink_get_ct_auto_zero.c"
+         "${KILNLINK_DIR}/src/kilnlink_ct_auto_zero_status.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

@@ -62,6 +62,9 @@
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_ct_cal.h"
+#include "kilnlink/kilnlink_ct_auto_zero_begin.h"
+#include "kilnlink/kilnlink_ct_auto_zero_status.h"
+#include "kilnlink/kilnlink_get_ct_auto_zero.h"
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_fw_version.h"
 #include "kilnlink/kilnlink_get_config_page.h"
@@ -151,6 +154,9 @@ typedef struct {
         kilnlink_set_ct_cal_t set_ct_cal;
         kilnlink_get_ct_cal_t get_ct_cal;
         kilnlink_ct_cal_t ct_cal;
+        kilnlink_ct_auto_zero_begin_t ct_auto_zero_begin;
+        kilnlink_get_ct_auto_zero_t get_ct_auto_zero;
+        kilnlink_ct_auto_zero_status_t ct_auto_zero_status;
         kilnlink_set_log_level_t set_log_level;
         kilnlink_set_param_t set_param;
         kilnlink_commit_config_t commit_config;
@@ -228,6 +234,9 @@ DECL_ADAPTER(announce_reboot, KILNLINK_ANNOUNCE_REBOOT_LEN + 32);
 DECL_ADAPTER(set_ct_cal, KILNLINK_SET_CT_CAL_LEN + 32);
 DECL_ADAPTER(get_ct_cal, KILNLINK_GET_CT_CAL_LEN + 32);
 DECL_ADAPTER(ct_cal, KILNLINK_CT_CAL_LEN + 32);
+DECL_ADAPTER(ct_auto_zero_begin, KILNLINK_CT_AUTO_ZERO_BEGIN_LEN + 32);
+DECL_ADAPTER(get_ct_auto_zero, KILNLINK_GET_CT_AUTO_ZERO_LEN + 32);
+DECL_ADAPTER(ct_auto_zero_status, KILNLINK_CT_AUTO_ZERO_STATUS_LEN + 32);
 DECL_ADAPTER(set_log_level, KILNLINK_SET_LOG_LEVEL_LEN + 32);
 DECL_ADAPTER(set_param, KILNLINK_SET_PARAM_MAX_LEN + 32);
 DECL_ADAPTER(commit_config, KILNLINK_COMMIT_CONFIG_LEN + 32);
@@ -351,6 +360,27 @@ static int decode_ct_cal(const uint8_t *p, size_t len)
     arm_canaries(&g_ct_cal);
     int rc = (int)kilnlink_ct_cal_decode(p, len, &g_ct_cal.out.ct_cal);
     check_canaries(&g_ct_cal, "kilnlink_ct_cal_decode", ++g_ct_cal_calls);
+    return rc;
+}
+static int decode_ct_auto_zero_begin(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_ct_auto_zero_begin);
+    int rc = (int)kilnlink_ct_auto_zero_begin_decode(p, len, &g_ct_auto_zero_begin.out.ct_auto_zero_begin);
+    check_canaries(&g_ct_auto_zero_begin, "kilnlink_ct_auto_zero_begin_decode", ++g_ct_auto_zero_begin_calls);
+    return rc;
+}
+static int decode_get_ct_auto_zero(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_get_ct_auto_zero);
+    int rc = (int)kilnlink_get_ct_auto_zero_decode(p, len, &g_get_ct_auto_zero.out.get_ct_auto_zero);
+    check_canaries(&g_get_ct_auto_zero, "kilnlink_get_ct_auto_zero_decode", ++g_get_ct_auto_zero_calls);
+    return rc;
+}
+static int decode_ct_auto_zero_status(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_ct_auto_zero_status);
+    int rc = (int)kilnlink_ct_auto_zero_status_decode(p, len, &g_ct_auto_zero_status.out.ct_auto_zero_status);
+    check_canaries(&g_ct_auto_zero_status, "kilnlink_ct_auto_zero_status_decode", ++g_ct_auto_zero_status_calls);
     return rc;
 }
 static int decode_set_log_level(const uint8_t *p, size_t len)
@@ -588,6 +618,21 @@ static size_t build_valid_set_ct_cal(uint8_t *out, size_t out_cap)
     kilnlink_set_ct_cal_status_t st;
     return kilnlink_set_ct_cal_encode(&msg, out, out_cap, &st);
 }
+static size_t build_valid_ct_auto_zero_begin(uint8_t *out, size_t out_cap)
+{
+    kilnlink_ct_auto_zero_begin_t msg = { .channel = 2 };
+    kilnlink_ct_auto_zero_begin_status_t st;
+    return kilnlink_ct_auto_zero_begin_encode(&msg, out, out_cap, &st);
+}
+static size_t build_valid_ct_auto_zero_status(uint8_t *out, size_t out_cap)
+{
+    kilnlink_ct_auto_zero_status_t msg = {
+        .state = KILNLINK_CT_AUTO_ZERO_STATE_DONE, .channel = 1,
+        .samples_taken = 200, .samples_target = 200, .zero_counts = 61,
+    };
+    kilnlink_ct_auto_zero_status_codec_t st;
+    return kilnlink_ct_auto_zero_status_encode(&msg, out, out_cap, &st);
+}
 static size_t build_valid_ct_cal(uint8_t *out, size_t out_cap)
 {
     kilnlink_ct_cal_t cal;
@@ -750,6 +795,12 @@ static const decoder_case_t k_cases[] = {
     {"kilnlink_announce_reboot_decode", decode_announce_reboot, build_valid_none, announce_reboot_MAX_LEN, 0},
     {"kilnlink_set_ct_cal_decode", decode_set_ct_cal, build_valid_set_ct_cal, set_ct_cal_MAX_LEN, 0},
     {"kilnlink_get_ct_cal_decode", decode_get_ct_cal, build_valid_none, get_ct_cal_MAX_LEN, 0},
+    {"kilnlink_ct_auto_zero_begin_decode", decode_ct_auto_zero_begin, build_valid_ct_auto_zero_begin,
+     ct_auto_zero_begin_MAX_LEN, 0},
+    {"kilnlink_get_ct_auto_zero_decode", decode_get_ct_auto_zero, build_valid_none,
+     get_ct_auto_zero_MAX_LEN, 0},
+    {"kilnlink_ct_auto_zero_status_decode", decode_ct_auto_zero_status, build_valid_ct_auto_zero_status,
+     ct_auto_zero_status_MAX_LEN, 0},
     {"kilnlink_ct_cal_decode", decode_ct_cal, build_valid_ct_cal, ct_cal_MAX_LEN, 0},
     {"kilnlink_set_log_level_decode", decode_set_log_level, build_valid_set_log_level, set_log_level_MAX_LEN, 0},
     {"kilnlink_set_param_decode", decode_set_param, build_valid_set_param, set_param_MAX_LEN, 0},

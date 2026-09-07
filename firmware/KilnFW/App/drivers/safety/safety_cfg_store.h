@@ -248,8 +248,18 @@ relay_type_t safety_cfg_store_get_safety_relay_type(void);
  * safety_cfg_store_refetch() above, this is only ever reached from the httpd
  * worker task's POST handler (internal-SRAM stack), never from
  * safety_poll_task (PSRAM stack); see caller_stack_is_external()'s comment
- * for why that distinction matters on this board. */
-bool safety_cfg_store_set_safety_relay_type(relay_type_t type);
+ * for why that distinction matters on this board.
+ *
+ * `out_nvs_err` (optional, NULL if the caller doesn't care) reports the NVS
+ * write's own esp_err_t -- 2026-09-06 audit fix: before this, an NVS
+ * failure (including caller_stack_is_external()'s own refusal) was only
+ * ESP_LOGE'd and the function still returned true, so safety_cfg_http.c's
+ * POST handler answered "{"ok":true}" while nothing actually persisted.
+ * The return value's own meaning is UNCHANGED (true iff `type` is valid and
+ * applied live, regardless of whether it survives a reboot) -- callers that
+ * only cared about validation keep working unmodified; only a caller that
+ * also wants persistence has to pass a non-NULL out_nvs_err and check it. */
+bool safety_cfg_store_set_safety_relay_type(relay_type_t type, esp_err_t *out_nvs_err);
 
 /* ---------------------------------------------------------------------- */
 /* CT_COMMISSIONING_PLAN.md step 1 -- editable calibration in the user's own
@@ -306,6 +316,19 @@ bool safety_ct_cal_convert(float a_fs, float zero_mv, float gain, float *out_k_c
 bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_zero_mv,
                                         safety_ct_cal_source_t *out_source);
 
+/* Channel `ch`'s current gain[ch] (0x030B/0x030C/0x030D), falling back to
+ * SAFETY_CT_CAL_DEFAULT_GAIN (0.715, the R46/R43 physical default) if that
+ * gain has never been fetched/set -- same fallback safety_cfg_store_set_
+ * ct_cal_input() uses internally. Exposed so a caller (safety_cfg_http.c's
+ * ct_cal_post_handler) can run safety_ct_cal_convert() itself, BEFORE
+ * committing anything to the ESP-local record, to validate/preview a
+ * conversion without persisting -- see that handler's own comment on why
+ * ordering (stage/commit to the Pico first, persist the local record only
+ * on success) matters. Returns SAFETY_CT_CAL_DEFAULT_GAIN for ch out of
+ * range too, same as the internal fallback -- never used to validate `ch`
+ * itself. */
+float safety_cfg_store_ct_cal_channel_gain(size_t ch);
+
 /* Validates ranges, applies the manual-wins-over-sweep rule above, converts
  * via safety_ct_cal_convert() using the channel's current `gain[ch]` (read
  * from this same cache's SAFETY_CFG_PARAM_TABLE row for 0x030B/0x030C/0x030D,
@@ -317,10 +340,15 @@ bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_ze
  * conversion. On success, out_k_ct_v_per_a and out_zero_counts (either may
  * be NULL) receive the values the caller should stage. Returns false (nothing
  * changed) for an out-of-range channel/value, a refused manual-wins-over-
- * sweep write, or a conversion failure. */
+ * sweep write, or a conversion failure.
+ *
+ * `out_nvs_err` (optional) reports the NVS write's own esp_err_t -- same
+ * 2026-09-06 audit fix as safety_cfg_store_set_safety_relay_type() above:
+ * previously a write failure was only logged and this function still
+ * returned true. The return value's meaning is unchanged. */
 bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
                                         safety_ct_cal_source_t source, float *out_k_ct_v_per_a,
-                                        uint16_t *out_zero_counts);
+                                        uint16_t *out_zero_counts, esp_err_t *out_nvs_err);
 
 #ifdef __cplusplus
 }

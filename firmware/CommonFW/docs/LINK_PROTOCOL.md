@@ -566,6 +566,26 @@ Version 7 split the request onto its own id (`0x22`) — see this file's
 "Request/reply ids must never be shared" rule below for why. `0x1A` is now
 used ONLY by the reply; `0x22` is burned for this request going forward.
 
+### `SAFETY_CMD_CT_AUTO_ZERO_BEGIN` = `0x26` (ESP → Pico)
+
+CT_COMMISSIONING_PLAN.md step 2 -- one byte channel argument (0-2). Arms
+current_task.c's own idle-offset accumulator for that channel; the actual
+measurement is NOT synchronous with this frame -- it accumulates one raw ADC
+sample per current_task's own normal period (SAFTYFW_PERIOD_CURRENT_TASK_MS)
+until `CT_AUTO_ZERO_TARGET_SAMPLES` (200, ≥10 s) is reached. Fire-and-forget,
+same as `SAFETY_CMD_SET_CT_CAL`: never ACKed on the wire. Refused silently
+(logged Pico-side) if `channel` is out of range or a measurement is already
+in progress. **Deliberately does not measure synchronously inside link_task's
+own dispatch** -- link_task's watchdog check-in deadline is 30 ms
+(`watchdog_task.c`'s `WATCHDOG_CHECKIN_LINK_TASK` row), and a multi-second
+blocking measurement there would starve it and reset the board.
+
+### `SAFETY_CMD_GET_CT_AUTO_ZERO` = `0x27` (ESP → Pico), request only
+
+One byte, no arguments — same shape as `SAFETY_CMD_GET_CT_CAL`. The ESP polls
+this repeatedly, after a `CT_AUTO_ZERO_BEGIN`, until the reply
+(`SAFETY_CMD_CT_AUTO_ZERO_STATUS`, §6 Frame H) reports `state == DONE`.
+
 ### `SAFETY_CMD_ROLLBACK` = `0x17` (ESP → Pico)
 
 One byte, no arguments — same shape as `SAFETY_CMD_GET_FW_VERSION`.
@@ -1188,6 +1208,25 @@ be displayed or trusted as if they were a real correction. See
 zero" reasoning. (SimFW's `src/sim/ct_calibration.h` used to carry the
 matching header comment for why the same discipline held on its side of
 this exact problem; SimFW was removed 2026-08-28.)
+
+### Frame H: `SAFETY_CMD_CT_AUTO_ZERO_STATUS` = `0x28` — auto idle-offset progress/result
+
+Sent in reply to `SAFETY_CMD_GET_CT_AUTO_ZERO` (§4 above, `0x27`).
+CT_COMMISSIONING_PLAN.md step 2. Reports `current_task.c`'s own auto-zero
+accumulator state exactly, no interpretation — the ESP decides refusal/
+100 mV/manual-wins policy from this raw measurement.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x28` |
+| 1 | u8 | `state` — 0=IDLE, 1=IN_PROGRESS, 2=DONE |
+| 2 | u8 | `channel` |
+| 3..4 | u16 LE | `samples_taken` |
+| 5..6 | u16 LE | `samples_target` |
+| 7..8 | u16 LE | `zero_counts` — mean raw ADC counts, valid only when `state == DONE` |
+
+Fixed 9-byte length always, same "always answer every copy seen" convention
+as `SAFETY_CMD_CT_CAL` above.
 
 ---
 

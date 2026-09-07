@@ -61,6 +61,43 @@ void current_task_reload_ct_cal(void);
 // reboot" reasoning as current_task_reload_ct_cal()'s own doc comment.
 void current_task_reload_cal(void);
 
+// --- CT_COMMISSIONING_PLAN.md step 2: auto idle-offset measurement --------
+//
+// A non-blocking alternative to calling current_sense_recalibrate_zero()
+// directly from link_task: that function blocks its caller for the whole
+// measurement (>=10s at CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES), which
+// link_task's own 30 ms watchdog deadline cannot survive (see link_frame.h's
+// LINK_FRAME_CT_AUTO_ZERO_BEGIN_CMD comment). Instead, current_task_fn()'s
+// own loop accumulates one raw-counts sample per its normal period while a
+// request is armed -- current_task_checkin still happens every pass,
+// unaffected.
+
+typedef enum {
+    CURRENT_TASK_AUTO_ZERO_IDLE = 0,
+    CURRENT_TASK_AUTO_ZERO_IN_PROGRESS = 1,
+    CURRENT_TASK_AUTO_ZERO_DONE = 2,
+} current_task_auto_zero_state_t;
+
+typedef struct {
+    current_task_auto_zero_state_t state;
+    uint8_t  channel;
+    uint16_t samples_taken;
+    uint16_t samples_target;
+    uint16_t zero_counts; // mean raw ADC counts, valid only when state == DONE
+} current_task_auto_zero_status_t;
+
+// Arms a fresh measurement on `channel` (0..2). Refuses (returns false,
+// nothing changed) if channel is out of range or a measurement is already
+// IN_PROGRESS -- a fresh BEGIN while DONE is allowed (starts a new
+// measurement, discarding the previous result) same as SET_CT_CAL always
+// applying regardless of prior state. Safe to call from any task (link_task
+// is the only caller today) -- guarded the same short-critical-section way
+// current_task_get_snapshot() already is.
+bool current_task_ct_auto_zero_begin(uint8_t channel);
+
+// Copies out the current accumulator state. Safe to call from any task.
+void current_task_ct_auto_zero_poll(current_task_auto_zero_status_t *out);
+
 #ifdef __cplusplus
 }
 #endif

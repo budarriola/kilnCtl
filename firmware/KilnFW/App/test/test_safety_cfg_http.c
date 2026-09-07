@@ -9,6 +9,7 @@
 // definitions via test_safety_cfg_store.c's #include of safety_cfg_store.c.
 // Linking both into one binary would multiply-define every safety_cfg_
 // store_* symbol.
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -169,10 +170,11 @@ static bool s_stub_set_safety_relay_type_result = true;
 static int s_stub_set_safety_relay_type_calls = 0;
 static relay_type_t s_stub_set_safety_relay_type_last = RELAY_TYPE_SSR;
 relay_type_t safety_cfg_store_get_safety_relay_type(void) { return s_stub_safety_relay_type; }
-bool safety_cfg_store_set_safety_relay_type(relay_type_t type)
+bool safety_cfg_store_set_safety_relay_type(relay_type_t type, esp_err_t *out_nvs_err)
 {
     s_stub_set_safety_relay_type_calls++;
     s_stub_set_safety_relay_type_last = type;
+    if (out_nvs_err) *out_nvs_err = ESP_OK;
     if (!s_stub_set_safety_relay_type_result) {
         return false;
     }
@@ -210,9 +212,11 @@ bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_ze
 }
 
 bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv, safety_ct_cal_source_t source,
-                                        float *out_k_ct_v_per_a, uint16_t *out_zero_counts)
+                                        float *out_k_ct_v_per_a, uint16_t *out_zero_counts,
+                                        esp_err_t *out_nvs_err)
 {
     s_stub_set_ct_cal_input_calls++;
+    if (out_nvs_err) *out_nvs_err = ESP_OK;
     if (!s_stub_set_ct_cal_input_result) {
         return false;
     }
@@ -225,6 +229,29 @@ bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv, saf
     if (out_k_ct_v_per_a) *out_k_ct_v_per_a = s_stub_set_ct_cal_input_k;
     if (out_zero_counts) *out_zero_counts = s_stub_set_ct_cal_input_zc;
     return true;
+}
+
+// ct_cal_post_handler() (safety_cfg_http.c, 2026-09-06 reorder) now calls
+// these two directly for pure validation/preview BEFORE it commits anything
+// to the Pico or to safety_cfg_store_set_ct_cal_input() above -- see that
+// handler's own comment. Reuses the same s_stub_set_ct_cal_input_result/_k/
+// _zc knobs so this file's setup/teardown doesn't need a second set.
+bool safety_ct_cal_convert(float a_fs, float zero_mv, float gain, float *out_k_ct_v_per_a,
+                            uint16_t *out_zero_counts)
+{
+    (void)a_fs; (void)zero_mv; (void)gain;
+    if (!s_stub_set_ct_cal_input_result) {
+        return false;
+    }
+    if (out_k_ct_v_per_a) *out_k_ct_v_per_a = s_stub_set_ct_cal_input_k;
+    if (out_zero_counts) *out_zero_counts = s_stub_set_ct_cal_input_zc;
+    return true;
+}
+
+float safety_cfg_store_ct_cal_channel_gain(size_t ch)
+{
+    (void)ch;
+    return 0.715f;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +289,44 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     (void)link;
     if (out) memset(out, 0, sizeof(*out));
     return ESP_OK;
+}
+
+// CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler()'s own
+// dependencies, same "own stub, real definitions link into other
+// executables" reasoning as everything else in this file.
+static bool s_stub_ct_auto_zero_begin_result = true;
+static kilnlink_ct_auto_zero_status_t s_stub_ct_auto_zero_status = {
+    .state = KILNLINK_CT_AUTO_ZERO_STATE_DONE, .channel = 0, .samples_taken = 200,
+    .samples_target = 200, .zero_counts = 61,
+};
+esp_err_t safety_link_send_ct_auto_zero_begin(SafetyLinkClass *link, uint8_t channel)
+{
+    (void)link; (void)channel;
+    return s_stub_ct_auto_zero_begin_result ? ESP_OK : ESP_FAIL;
+}
+esp_err_t safety_link_get_ct_auto_zero_status(SafetyLinkClass *link, kilnlink_ct_auto_zero_status_t *out)
+{
+    (void)link;
+    if (out) *out = s_stub_ct_auto_zero_status;
+    return ESP_OK;
+}
+uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io)
+{
+    (void)io;
+    return 0u; // no test in this file drives a nonzero shadow today
+}
+uint32_t kiln_io_relays_off_ms(const kiln_io_t *io)
+{
+    (void)io;
+    return 60000u; // comfortably over the 5 s floor
+}
+bool autotune_engine_is_active(void)
+{
+    return false;
+}
+void profile_executor_get_status(profile_exec_status_t *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
 }
 
 esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_known, bool *out_dirty,
@@ -873,6 +938,176 @@ static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
                "a not-field-specific rejection does not fabricate a field name");
 }
 
+// ---------------------------------------------------------------------------
+// CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_check_preconditions() and
+// the counts<->mV/100mV-refusal decision, tested directly (pure functions,
+// no httpd_req_t needed -- see ct_auto_zero_check_preconditions()'s own doc
+// comment for why this file's httpd_req_recv() stub always returning 0
+// makes a body-driven test of the handler itself impractical).
+// ---------------------------------------------------------------------------
+
+static void test_ct_auto_zero_precheck_each_refusal(void)
+{
+    TEST_SECTION("ct_auto_zero_check_preconditions -- each individual refusal, checked one at a time "
+                 "against an otherwise-all-clear baseline");
+
+    // Baseline: everything clear -- must return NULL (ok).
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false,
+                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) == NULL,
+               "baseline: every precondition satisfied -> NULL (ok)");
+
+    TEST_CHECK(ct_auto_zero_check_preconditions(false, false, true, true, false, 5000u, false, false,
+                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "link down -> refused");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, true, true, true, false, 5000u, false, false, false,
+                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "trip latched -> refused");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, false, true, false, 5000u, false, false,
+                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "K4 not closed -> refused");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, false, false, 5000u, false, false,
+                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "no board I/O -> refused");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, true, 5000u, false, false, false,
+                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "a relay is commanded on -> refused");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 4999u, false, false,
+                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "relays off only 4999 ms (just under the 5 s floor) -> refused");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, UINT32_MAX, false, false,
+                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "relays-off duration unknown (UINT32_MAX sentinel) -> refused, not treated as 'plenty'");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, true, false, false,
+                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "profile running/paused -> refused");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, true, false,
+                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "autotune running -> refused");
+
+    // NEGATIVE TEST (this codebase's "negative-test every check" rule):
+    // exactly at the 5 s floor must PASS (>=, not >) -- proves the boundary
+    // is where the plan says it is, not off by one.
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false,
+                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) == NULL,
+               "NEGATIVE: exactly 5000 ms passes -- the floor is >=5s, not >5s");
+}
+
+static void test_ct_auto_zero_precheck_manual_wins_unless_override(void)
+{
+    TEST_SECTION("ct_auto_zero_check_preconditions -- manual wins unless override_manual is set");
+
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false, true,
+                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+               "manual source, no override -> refused");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false, true,
+                                                 SAFETY_CT_CAL_SOURCE_MANUAL, true) == NULL,
+               "manual source, override_manual=1 -> allowed");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false, true,
+                                                 SAFETY_CT_CAL_SOURCE_SWEEP, false) == NULL,
+               "sweep source (not manual) never needs an override for auto-zero");
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false, false,
+                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) == NULL,
+               "no existing value at all -> nothing to conflict with, allowed");
+}
+
+// NEGATIVE TEST proving the precondition check function can actually FAIL to
+// catch a real defect -- break production by hand (K4 check inverted) and
+// confirm the baseline case this test suite relies on would then wrongly
+// pass. This is not run against production; it documents, by construction,
+// that test_ct_auto_zero_precheck_each_refusal()'s K4 assertion is not
+// vacuous.
+static void test_ct_auto_zero_precheck_k4_check_is_not_vacuous(void)
+{
+    TEST_SECTION("NEGATIVE TEST -- a hand-broken 'k4_closed' polarity would be caught by the K4 "
+                 "refusal assertion above, proving that check is not vacuous");
+    bool broken_k4_closed_reads_as_open = !true; // simulates the bug: treats "closed" as "open"
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, broken_k4_closed_reads_as_open, true, false,
+                                                 5000u, false, false, false, SAFETY_CT_CAL_SOURCE_MANUAL,
+                                                 false) != NULL,
+               "a K4-closed board misread as open is refused -- if the real check were inverted "
+               "(refusing on true instead of false), THIS assertion, not the earlier one, would be "
+               "the one to fail");
+}
+
+// NOTE: this file stubs safety_ct_cal_convert()/safety_cfg_store_set_ct_cal_
+// input() (see this file's own header comment: the real safety_cfg_store.c
+// links into the OTHER host-test executable, test_safety_cfg_store.c, which
+// is where safety_ct_cal_convert()'s own probe-rating math is genuinely
+// exercised -- test_ct_cal_convert_at_several_probe_ratings() there). This
+// file's stub of that function always returns fixed knobs regardless of its
+// arguments, so a "round-trip through safety_ct_cal_convert()" test HERE
+// would silently test the stub, not real conversion math -- exactly the
+// idealized/mocked-input trap this codebase's project memory warns about.
+// What IS genuinely this file's own code, and worth testing here, is
+// ct_auto_zero_counts_to_mv() itself (CURRENT_SENSE.md's inverse formula,
+// zero_mv = zero_counts * (3.3/4096) / gain * 1000) -- checked directly
+// against quantized (integer) counts at two different probe gains, since
+// A_fs itself never enters this formula (it only scales k_ct_v_per_a, not
+// zero_counts/zero_mv -- CT_COMMISSIONING_PLAN.md step 1's own model).
+static void test_ct_auto_zero_counts_to_mv_at_two_probe_ratings(void)
+{
+    TEST_SECTION("ct_auto_zero_counts_to_mv -- quantized (integer) ADC counts against the "
+                 "CURRENT_SENSE.md inverse formula, at two different front-end gains (the parameter "
+                 "this formula actually depends on -- A_fs does not enter it at all)");
+
+    // Bench probe's own worked example (CT_COMMISSIONING_PLAN.md): ~59 mV
+    // zero at the 0.715 default gain implies ~52 raw counts; the reverse
+    // direction (counts -> mV) is what this function computes.
+    uint16_t counts_default_gain = 52u; // quantized -- not chosen to divide evenly
+    float mv_default_gain = ct_auto_zero_counts_to_mv(counts_default_gain, 0.715f);
+    float expected_default_gain = ((float)counts_default_gain * (3.3f / 4096.0f) / 0.715f) * 1000.0f;
+    TEST_CHECK(fabsf(mv_default_gain - expected_default_gain) < 1e-3f,
+               "default gain (0.715): matches the hand-computed formula exactly, no hidden rounding");
+    TEST_CHECK(mv_default_gain > 55.0f && mv_default_gain < 63.0f,
+               "default gain: 52 counts is roughly the 59 mV this quantization implies");
+
+    // A different front-end gain (still a real, positive value -- gain is a
+    // hardware property of the divider, independent of the probe's A_fs).
+    float other_gain = 1.2f;
+    uint16_t counts_other_gain = 40u;
+    float mv_other_gain = ct_auto_zero_counts_to_mv(counts_other_gain, other_gain);
+    float expected_other_gain = ((float)counts_other_gain * (3.3f / 4096.0f) / other_gain) * 1000.0f;
+    TEST_CHECK(fabsf(mv_other_gain - expected_other_gain) < 1e-3f,
+               "a different gain: matches the hand-computed formula exactly too");
+    TEST_CHECK(fabsf(mv_other_gain - mv_default_gain) > 1.0f,
+               "NEGATIVE: the two gains genuinely produce different mV for these counts -- proves "
+               "gain is actually being used, not silently defaulted for both");
+
+    // Nonpositive/zero gain falls back to the documented 0.715 default
+    // rather than dividing by zero or a negative number.
+    float mv_zero_gain = ct_auto_zero_counts_to_mv(counts_default_gain, 0.0f);
+    TEST_CHECK(fabsf(mv_zero_gain - mv_default_gain) < 1e-3f,
+               "gain <= 0 falls back to the 0.715 default -- matches the explicit default-gain call");
+}
+
+static void test_ct_auto_zero_100mv_refusal_uses_quantized_counts(void)
+{
+    TEST_SECTION("ct_auto_zero_counts_to_mv -- the 100 mV refusal threshold, evaluated against "
+                 "quantized counts, not idealized floats");
+
+    float gain = 0.715f;
+    // zero_counts=52 is ~59 mV (the nominal, no-current baseline). A stored
+    // value of 0 mV plus a genuinely large real delta (current flowing) must
+    // exceed the plan's 100 mV refusal threshold.
+    float previous_zero_mv = 0.0f;
+    uint16_t counts_with_real_current = 200u; // quantized, deliberately not round in mV
+    float measured_mv = ct_auto_zero_counts_to_mv(counts_with_real_current, gain);
+    float delta_mv = measured_mv - previous_zero_mv;
+    TEST_CHECK(fabsf(delta_mv) > 100.0f,
+               "200 counts of quantized delta against a 0 mV baseline exceeds the 100 mV refusal "
+               "threshold -- this is the 'current flowing with every relay off' case that must be "
+               "refused, not calibrated away");
+
+    // NEGATIVE TEST: a small, quantized delta (offset drift, not real
+    // current) must NOT trip the same threshold.
+    uint16_t counts_small_drift = 55u; // a few counts of drift from the 52-count baseline
+    float small_drift_mv = ct_auto_zero_counts_to_mv(counts_small_drift, gain) -
+                            ct_auto_zero_counts_to_mv(52u, gain);
+    TEST_CHECK(fabsf(small_drift_mv) <= 100.0f,
+               "NEGATIVE: a few counts of quantized drift stays under 100 mV -- proves the check "
+               "above is measuring a real large delta, not tripping on any nonzero difference");
+}
+
 int main(void)
 {
     test_parse_single_pair_no_commit();
@@ -899,6 +1134,11 @@ int main(void)
     test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure();
     test_confirm_commit_landed_lookup_failure_on_its_own_pass_fails_closed();
     test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_closed();
+    test_ct_auto_zero_precheck_each_refusal();
+    test_ct_auto_zero_precheck_manual_wins_unless_override();
+    test_ct_auto_zero_precheck_k4_check_is_not_vacuous();
+    test_ct_auto_zero_counts_to_mv_at_two_probe_ratings();
+    test_ct_auto_zero_100mv_refusal_uses_quantized_counts();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

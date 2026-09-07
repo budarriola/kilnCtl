@@ -938,8 +938,10 @@ function fieldInputHtml(f, paramsById) {
       '<label>zero_mv <input type="number" step="any" min="-200" max="200" ' +
       'class="ct-cal-zeromv" value="' + window.kcEscapeHtml(String(zmvVal)) + '" placeholder="e.g. 0, 59"> mV</label> ' +
       '<button type="button" class="ct-cal-apply">Apply</button>' +
+      ' <button type="button" class="ct-cal-auto-zero">Auto-zero</button>' +
       ' <span class="ct-cal-source">source: ' + window.kcEscapeHtml(sourceWord) + '</span>' +
       ' <span class="ct-cal-result"></span>' +
+      ' <span class="ct-auto-zero-result"></span>' +
       '</div>';
     return html;
   }
@@ -1088,6 +1090,91 @@ function renderGroups(data) {
   wireCtManualToggles();
   wireCtInstalledToggle();
   wireCtCalButtons();
+  wireCtAutoZeroButtons();
+}
+
+// CT_COMMISSIONING_PLAN.md step 2 -- each ct_cal row's "Auto-zero" button.
+// Two-request flow, both going to the SAME POST /api/safety/commissioning/
+// ct_auto_zero (see that handler's own comment for why there is no server-
+// side session between them): the first request (confirm omitted) measures
+// and returns a preview -- proposed zero_mv-at-probe, the previous value,
+// and the delta -- WITHOUT committing anything; kcConfirm() then shows that
+// preview to the operator, and only on "OK" does a second request (confirm=1)
+// re-run the same measurement and actually commit it. A manual-conflict
+// preview additionally offers an "override manual" checkbox before the
+// operator can confirm, per the handler's own manual-wins-unless-override
+// rule. 32px+ touch targets: this file's own `button { padding: 0.7em
+// 1.5em }` base rule already clears the floor, no extra CSS needed.
+function wireCtAutoZeroButtons() {
+  document.querySelectorAll('.ct-cal-row').forEach(function (row) {
+    var ch = row.getAttribute('data-ct-cal-ch');
+    var btn = row.querySelector('.ct-cal-auto-zero');
+    var result = row.querySelector('.ct-auto-zero-result');
+    if (!btn) return;
+    var overrideManual = false;
+    function postAutoZero(confirm) {
+      var body = 'channel=' + encodeURIComponent(ch) +
+        (confirm ? '&confirm=1' : '') +
+        (overrideManual ? '&override_manual=1' : '');
+      return fetch('/api/safety/commissioning/ct_auto_zero', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body,
+      }).then(function (r) { return r.json().catch(function () { return { ok: false, reason: 'bad response' }; }); });
+    }
+    btn.onclick = function () {
+      btn.disabled = true;
+      overrideManual = false;
+      result.textContent = 'measuring (this takes about 10 seconds, every heater relay must stay off)...';
+      result.className = 'ct-auto-zero-result';
+      postAutoZero(false).then(function (j) {
+        if (!j.ok) {
+          btn.disabled = false;
+          result.textContent = 'REFUSED: ' + (j.reason || 'unknown error');
+          result.className = 'ct-auto-zero-result crc-mismatch';
+          return;
+        }
+        var confirmMsg = 'Auto-zero channel ' + ch + '?\n\n' +
+          'Measured zero: ' + j.measured_zero_mv.toFixed(2) + ' mV\n' +
+          'Previous stored value: ' + j.previous_zero_mv.toFixed(2) + ' mV\n' +
+          'Delta: ' + j.delta_mv.toFixed(2) + ' mV\n\n' +
+          (j.manual_conflict
+            ? 'This channel is currently MANUALLY calibrated. Confirming will ' +
+              'OVERRIDE that manual value with this measurement.\n\n'
+            : '') +
+          'Every heater relay must stay off during this action -- do not start ' +
+          'a firing until it completes.';
+        if (!window.kcConfirm(confirmMsg)) {
+          btn.disabled = false;
+          result.textContent = 'cancelled';
+          result.className = 'ct-auto-zero-result';
+          return;
+        }
+        overrideManual = !!j.manual_conflict;
+        result.textContent = 'committing...';
+        postAutoZero(true).then(function (j2) {
+          btn.disabled = false;
+          if (j2.ok) {
+            result.textContent = 'ok -- zero_mv=' + j2.zero_mv.toFixed(2) +
+              (j2.persisted ? '' : ' (WARNING: not persisted -- ' + (j2.err || 'NVS error') + ')');
+            result.className = 'ct-auto-zero-result';
+            loadCommissioning();
+          } else {
+            result.textContent = 'FAILED: ' + (j2.reason || 'unknown error');
+            result.className = 'ct-auto-zero-result crc-mismatch';
+          }
+        }).catch(function () {
+          btn.disabled = false;
+          result.textContent = 'FAILED: request error';
+          result.className = 'ct-auto-zero-result crc-mismatch';
+        });
+      }).catch(function () {
+        btn.disabled = false;
+        result.textContent = 'FAILED: request error';
+        result.className = 'ct-auto-zero-result crc-mismatch';
+      });
+    };
+  });
 }
 
 // CT_COMMISSIONING_PLAN.md step 1: each ct_cal row's "Apply" button posts

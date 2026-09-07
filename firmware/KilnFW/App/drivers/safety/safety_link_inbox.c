@@ -49,8 +49,11 @@
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_ct_cal.h"
+#include "kilnlink/kilnlink_ct_auto_zero_status.h"
 #include "kilnlink/kilnlink_get_config_page.h"
 #include "kilnlink/kilnlink_get_ct_cal.h"
+#include "kilnlink/kilnlink_get_ct_auto_zero.h"
+#include "kilnlink/kilnlink_ct_auto_zero_begin.h"
 #include "kilnlink/kilnlink_rollback.h"
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
@@ -223,6 +226,10 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
         link->stats.cmd_rollback_result_count++;
         link->stats.last_rollback_result_len = len;
         break;
+    case KILNLINK_CT_AUTO_ZERO_STATUS_CMD:
+        link->stats.cmd_ct_auto_zero_status_count++;
+        link->stats.last_ct_auto_zero_status_len = len;
+        break;
     default:
         /* Not counted here -- the switch in safety_drain_inbox_ex() below
          * already counts and records this exact case via
@@ -367,6 +374,19 @@ bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool want_st
                         link->stashed_rollback_result_tick = xTaskGetTickCount();
                         safety_unlock(link);
                     }
+                }
+                break;
+            case KILNLINK_CT_AUTO_ZERO_STATUS_CMD: /* SAFETY_CMD_CT_AUTO_ZERO_STATUS (0x28) -- see
+                                                      * SafetyLinkClass::stashed_ct_auto_zero_status's
+                                                      * own comment (safety_link.h) for why this is
+                                                      * ALWAYS stashed rather than also offering a
+                                                      * direct out-param the way CT_CAL/CONFIG_PAGE/
+                                                      * COMMIT_CONFIG_REJECTED do above. */
+                if (msg.length == KILNLINK_CT_AUTO_ZERO_STATUS_LEN && safety_lock(link)) {
+                    link->stashed_ct_auto_zero_status = msg;
+                    link->has_stashed_ct_auto_zero_status = true;
+                    link->stashed_ct_auto_zero_status_tick = xTaskGetTickCount();
+                    safety_unlock(link);
                 }
                 break;
             default:
@@ -534,6 +554,27 @@ bool safety_take_stashed_rollback_result(SafetyLinkClass *link, uart_proto_messa
             } else {
                 *out = link->stashed_rollback_result;
                 link->has_stashed_rollback_result = false;
+                took = true;
+            }
+        }
+        safety_unlock(link);
+    }
+    return took;
+}
+
+/* CT_COMMISSIONING_PLAN.md step 2 -- takes the stashed CT_AUTO_ZERO_STATUS
+ * reply, same age-ceiling/take-once contract as safety_take_stashed_
+ * rollback_result() above. */
+bool safety_take_stashed_ct_auto_zero_status(SafetyLinkClass *link, uart_proto_message_t *out)
+{
+    bool took = false;
+    if (safety_lock(link)) {
+        if (link->has_stashed_ct_auto_zero_status) {
+            if (safety_elapsed_ms(link->stashed_ct_auto_zero_status_tick) > SAFETY_STASHED_PAGE_MAX_AGE_MS) {
+                link->has_stashed_ct_auto_zero_status = false; /* too old to be anyone's reply */
+            } else {
+                *out = link->stashed_ct_auto_zero_status;
+                link->has_stashed_ct_auto_zero_status = false;
                 took = true;
             }
         }

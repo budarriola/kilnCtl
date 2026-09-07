@@ -9,6 +9,9 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h" // vTaskDelay/pdMS_TO_TICKS -- ct_auto_zero_post_handler()'s poll loop
+
 #include "http_form.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "safety_cfg_store.h"
@@ -16,9 +19,15 @@
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
 
+// CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler()'s
+// preconditions (no profile/autotune running).
+#include "autotune_engine.h"
+#include "profile_executor.h"
+
 static const char *TAG = "safety_cfg_http";
 
 static SafetyLinkClass *s_link = NULL;
+static kiln_io_t *s_hw_io = NULL; // CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler() only
 
 /* Small bodies -- up to SAFETY_CFG_PARAM_COUNT id/value pairs plus commit=1,
  * "id=<n>&value=<v>" repeated per field (see parse_set_param_body()'s own
@@ -861,7 +870,8 @@ static esp_err_t relay_type_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    if (!safety_cfg_store_set_safety_relay_type(type)) {
+    esp_err_t nvs_err = ESP_OK;
+    if (!safety_cfg_store_set_safety_relay_type(type, &nvs_err)) {
         /* Unreachable given the check above, but never claim success for a
          * call that refused. */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay type rejected");
@@ -869,7 +879,17 @@ static esp_err_t relay_type_post_handler(httpd_req_t *req)
     }
     ESP_LOGI(TAG, "safety relay type set to %s", relay_type_name(type));
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true}");
+    if (nvs_err != ESP_OK) {
+        /* 2026-09-06 audit fix: applied live, but NOT persisted -- the type
+         * reverts to whatever was last saved on the next reboot. Report this
+         * honestly instead of an unconditional {"ok":true}. */
+        char resp[160];
+        int len = snprintf(resp, sizeof(resp),
+                            "{\"ok\":true,\"persisted\":false,\"err\":\"%s\"}",
+                            esp_err_to_name(nvs_err));
+        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+    }
+    return httpd_resp_sendstr(req, "{\"ok\":true,\"persisted\":true}");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -941,10 +961,21 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    /* 2026-09-06 audit fix: this used to persist the ESP-local record
+     * (source=MANUAL) BEFORE apply_pairs() ran. If the Pico commit then
+     * failed, the channel was left permanently MANUAL in the local cache
+     * (zone_sweep_plan_k_ct() skips a manually-calibrated channel forever)
+     * while the Pico still enforced the OLD k_ct/zero_counts -- a silent,
+     * permanent divergence between what this cache claims and what the
+     * Pico actually applies. Fixed by validating/converting FIRST (pure,
+     * no persistence -- safety_cfg_store_ct_cal_channel_gain() +
+     * safety_ct_cal_convert() directly, the same math safety_cfg_store_
+     * set_ct_cal_input() runs internally), staging/committing to the Pico
+     * next, and persisting the local record ONLY once that succeeds. */
+    float gain = safety_cfg_store_ct_cal_channel_gain(ch);
     float k_ct_v_per_a = 0.0f;
     uint16_t zero_counts = 0;
-    if (!safety_cfg_store_set_ct_cal_input(ch, a_fs, zero_mv, SAFETY_CT_CAL_SOURCE_MANUAL, &k_ct_v_per_a,
-                                            &zero_counts)) {
+    if (!safety_ct_cal_convert(a_fs, zero_mv, gain, &k_ct_v_per_a, &zero_counts)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                              "CT calibration input rejected (out of range, or an internal error)");
         return ESP_OK;
@@ -962,11 +993,306 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
     char reason[160];
     bool ok = apply_pairs(s_link, pairs, 2, commit, reason, sizeof(reason));
 
-    char resp[256];
-    int len;
+    bool persisted = false;
+    esp_err_t nvs_err = ESP_OK;
     if (ok) {
-        len = snprintf(resp, sizeof(resp), "{\"ok\":true,\"k_ct_v_per_a\":%.9g,\"zero_counts\":%u}",
+        /* Re-runs the same conversion internally (identical inputs, so an
+         * identical result) and persists the local record only now that the
+         * Pico side has accepted (or staged) the same values. A failure
+         * here is only "applied live but will not survive a reboot" -- the
+         * pure validation above already proved a_fs/zero_mv/gain are sane,
+         * so this can only fail on the NVS write itself. */
+        persisted = safety_cfg_store_set_ct_cal_input(ch, a_fs, zero_mv, SAFETY_CT_CAL_SOURCE_MANUAL,
+                                                        NULL, NULL, &nvs_err) &&
+                    nvs_err == ESP_OK;
+    }
+
+    char resp[300];
+    int len;
+    if (ok && persisted) {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"k_ct_v_per_a\":%.9g,\"zero_counts\":%u,\"persisted\":true}",
                         (double)k_ct_v_per_a, (unsigned)zero_counts);
+    } else if (ok) {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"k_ct_v_per_a\":%.9g,\"zero_counts\":%u,\"persisted\":false,"
+                        "\"err\":\"%s\"}",
+                        (double)k_ct_v_per_a, (unsigned)zero_counts, esp_err_to_name(nvs_err));
+    } else {
+        char escaped[192];
+        size_t o = 0;
+        for (const char *c = reason; *c && o + 2 < sizeof(escaped); c++) {
+            if (*c == '"' || *c == '\\') {
+                escaped[o++] = '\\';
+            }
+            escaped[o++] = *c;
+        }
+        escaped[o] = '\0';
+        len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", escaped);
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+}
+
+/* ---------------------------------------------------------------------- */
+/* POST /api/safety/commissioning/ct_auto_zero                            */
+/* ---------------------------------------------------------------------- */
+
+/* CT_COMMISSIONING_PLAN.md step 2. Body: "channel=<0-2>&confirm=<0|1>&
+ * override_manual=<0|1>". Every request (confirm or not) runs the FULL
+ * precondition check and a FRESH measurement -- there is no server-side
+ * session between a preview and its confirm, deliberately: trusting a
+ * stale preview across two independent HTTP requests would let real
+ * conditions (a relay commanded on, a trip, a profile start) drift between
+ * "shown to the operator" and "committed" with nothing re-checking them.
+ * The cost is one extra ~10s measurement when the operator does confirm --
+ * cheap next to the alternative of committing against stale preconditions.
+ *
+ * confirm=0 (or absent): preconditions + measure + refusal checks, but does
+ * NOT touch safety_cfg_store_set_ct_cal_input()/the Pico -- returns the
+ * proposed zero_mv-at-probe, the previous stored value, and the delta, for
+ * the operator to review.
+ * confirm=1: same checks, then commits through the EXACT ct_cal path
+ * ct_cal_post_handler() uses (safety_ct_cal_convert() -> apply_pairs() ->
+ * safety_cfg_store_set_ct_cal_input(), Pico first, ESP-local record only on
+ * success -- see that handler's own 2026-09-06 reorder comment) with
+ * source=AUTO_ZERO. Refuses if the channel's current source is MANUAL
+ * unless override_manual=1 (manual always wins otherwise, same rule
+ * safety_cfg_store_set_ct_cal_input() itself enforces for the SWEEP
+ * source -- AUTO_ZERO is deliberately allowed to override manual, but only
+ * with this explicit operator opt-in, since AUTO_ZERO overwriting a manual
+ * entry the operator typed on purpose is not "the sweep clobbering it
+ * silently").
+ *
+ * Blocks the httpd worker thread for the full measurement (~10-12s at
+ * CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES/SAFTYFW_PERIOD_CURRENT_TASK_MS,
+ * current_task.c) -- httpd runs multiple worker threads, so this does not
+ * wedge other requests, unlike the link_task/current_task blocking hazard
+ * this whole async-BEGIN/poll design (link_frame.h's own comment) exists to
+ * avoid on the Pico side. */
+#define SAFETY_CT_AUTO_ZERO_BODY_MAX 64
+#define SAFETY_CT_AUTO_ZERO_POLL_MS 200u
+#define SAFETY_CT_AUTO_ZERO_TIMEOUT_MS 15000u
+// CURRENT_SENSE.md's model: zero_mv = zero_counts * (3.3/4096) / gain * 1000.
+// Inverse of safety_ct_cal_convert()'s zero_counts formula.
+static float ct_auto_zero_counts_to_mv(uint16_t zero_counts, float gain)
+{
+    if (!(gain > 0.0f)) {
+        gain = 0.715f; // SAFETY_CT_CAL_DEFAULT_GAIN, kept in sync by inspection
+    }
+    return ((float)zero_counts * (3.3f / 4096.0f) / gain) * 1000.0f;
+}
+
+/* Pure precondition gate, factored out of ct_auto_zero_post_handler() so it
+ * is directly host-testable (this file's static functions have no other
+ * seam, same reasoning apply_pairs()/parse_set_param_body() are tested this
+ * way) without needing a working mock httpd_req_t body-read path. Returns
+ * NULL when every precondition is satisfied, or a static reason string
+ * (never allocated, safe to httpd_resp_sendstr() as-is) naming the first one
+ * that fails, checked in the same order the plan lists them: link/trip/K4,
+ * then relay-off duration, then profile/autotune, then manual-wins. */
+static const char *ct_auto_zero_check_preconditions(bool link_up, bool trip_latched, bool k4_closed,
+                                                     bool have_io, bool relays_on, uint32_t relays_off_ms,
+                                                     bool profile_running_or_paused, bool autotune_active,
+                                                     bool has_existing,
+                                                     safety_ct_cal_source_t existing_source,
+                                                     bool override_manual)
+{
+    if (!link_up) {
+        return "safety link is down";
+    }
+    if (trip_latched) {
+        return "a trip is latched";
+    }
+    if (!k4_closed) {
+        return "K4 (safety relay) is not closed";
+    }
+    if (!have_io) {
+        return "board relay I/O not available this boot";
+    }
+    if (relays_on) {
+        return "at least one heater relay is commanded on";
+    }
+    if (relays_off_ms == UINT32_MAX || relays_off_ms < 5000u) {
+        return "relays have not been off for at least 5 s";
+    }
+    if (profile_running_or_paused) {
+        return "a profile is running or paused";
+    }
+    if (autotune_active) {
+        return "autotune is running";
+    }
+    if (has_existing && existing_source == SAFETY_CT_CAL_SOURCE_MANUAL && !override_manual) {
+        return "channel is manually calibrated -- pass override_manual=1 to replace it";
+    }
+    return NULL;
+}
+
+static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
+{
+    char body[SAFETY_CT_AUTO_ZERO_BODY_MAX];
+    if (!read_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
+        return ESP_OK;
+    }
+
+    char ch_text[8] = {0}, confirm_text[4] = {0}, override_text[4] = {0};
+    if (http_form_find_field(body, "channel", ch_text, sizeof(ch_text)) < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected channel=<0-2>");
+        return ESP_OK;
+    }
+    bool confirm = (http_form_find_field(body, "confirm", confirm_text, sizeof(confirm_text)) >= 0) &&
+                   strcmp(confirm_text, "1") == 0;
+    bool override_manual =
+        (http_form_find_field(body, "override_manual", override_text, sizeof(override_text)) >= 0) &&
+        strcmp(override_text, "1") == 0;
+
+    char *end = NULL;
+    long ch_l = strtol(ch_text, &end, 10);
+    if (end == ch_text || *end != '\0' || ch_l < 0 || ch_l >= (long)SAFETY_CT_CAL_CHANNELS) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "channel must be 0, 1, or 2");
+        return ESP_OK;
+    }
+    uint8_t channel = (uint8_t)ch_l;
+
+    // --- Preconditions -----------------------------------------------------
+    if (!s_link) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"safety link not available this boot\"}");
+    }
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    bool link_up = (safety_link_get_status(s_link, &st) == ESP_OK) && st.link_up;
+    bool trip_latched = st.fault_asserted ||
+                         (st.diag_ever_received && st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED);
+    bool k4_closed = (st.flags & SAFETY_FLAG_RELAY) != 0u;
+    bool have_io = s_hw_io != NULL;
+    bool relays_on = have_io && kiln_io_get_relay_shadow(s_hw_io) != 0u;
+    uint32_t off_ms = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
+    profile_exec_status_t pstat;
+    memset(&pstat, 0, sizeof(pstat));
+    profile_executor_get_status(&pstat);
+    bool profile_running_or_paused = (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED);
+    bool autotune_active = autotune_engine_is_active();
+
+    safety_ct_cal_source_t existing_source = SAFETY_CT_CAL_SOURCE_MANUAL;
+    float existing_a_fs = 0.0f, existing_zero_mv = 0.0f;
+    bool has_existing =
+        safety_cfg_store_get_ct_cal_input(channel, &existing_a_fs, &existing_zero_mv, &existing_source);
+
+    const char *refusal = ct_auto_zero_check_preconditions(
+        link_up, trip_latched, k4_closed, have_io, relays_on, off_ms, profile_running_or_paused,
+        autotune_active, has_existing, existing_source, override_manual);
+    if (refusal) {
+        char resp[192];
+        int len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", refusal);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+    }
+
+    // --- Measure -------------------------------------------------------------
+    esp_err_t begin_err = safety_link_send_ct_auto_zero_begin(s_link, channel);
+    if (begin_err != ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"could not send the auto-zero request\"}");
+    }
+
+    kilnlink_ct_auto_zero_status_t az = {0};
+    uint32_t waited_ms = 0;
+    bool done = false;
+    while (waited_ms < SAFETY_CT_AUTO_ZERO_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(SAFETY_CT_AUTO_ZERO_POLL_MS));
+        waited_ms += SAFETY_CT_AUTO_ZERO_POLL_MS;
+        if (safety_link_get_ct_auto_zero_status(s_link, &az) != ESP_OK) {
+            continue; // transient poll miss -- keep trying within the overall timeout
+        }
+        if (az.state == KILNLINK_CT_AUTO_ZERO_STATE_DONE && az.channel == channel) {
+            done = true;
+            break;
+        }
+    }
+    if (!done) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"measurement did not complete in time -- "
+                                        "check the Pico link\"}");
+    }
+
+    float gain = safety_cfg_store_ct_cal_channel_gain(channel);
+    float measured_zero_mv = ct_auto_zero_counts_to_mv(az.zero_counts, gain);
+    float delta_mv = has_existing ? (measured_zero_mv - existing_zero_mv) : measured_zero_mv;
+
+    // "current flowing with every relay off is S3's fault condition and must
+    // not be calibrated away" -- CT_COMMISSIONING_PLAN.md step 2.
+    if (fabsf(delta_mv) > 100.0f) {
+        char resp[256];
+        int len = snprintf(resp, sizeof(resp),
+                            "{\"ok\":false,\"reason\":\"measured zero (%.2f mV) differs from the stored "
+                            "value (%.2f mV) by more than 100 mV -- this looks like real current, not "
+                            "offset drift; refusing to calibrate it away\",\"measured_zero_mv\":%.3f,"
+                            "\"previous_zero_mv\":%.3f,\"delta_mv\":%.3f}",
+                            (double)measured_zero_mv, (double)existing_zero_mv, (double)measured_zero_mv,
+                            (double)existing_zero_mv, (double)delta_mv);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+    }
+
+    if (!confirm) {
+        char resp[300];
+        int len = snprintf(resp, sizeof(resp),
+                            "{\"ok\":true,\"phase\":\"measured\",\"channel\":%u,\"samples\":%u,"
+                            "\"measured_zero_mv\":%.3f,\"previous_zero_mv\":%.3f,\"delta_mv\":%.3f,"
+                            "\"manual_conflict\":%s}",
+                            (unsigned)channel, (unsigned)az.samples_taken, (double)measured_zero_mv,
+                            (double)existing_zero_mv, (double)delta_mv,
+                            (has_existing && existing_source == SAFETY_CT_CAL_SOURCE_MANUAL) ? "true"
+                                                                                              : "false");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+    }
+
+    // --- Commit (confirm=1) -- same order as ct_cal_post_handler(): Pico
+    // first, ESP-local record only once the Pico side has accepted it. ---
+    float a_fs_for_convert = has_existing ? existing_a_fs : 1.0f; // A_fs is unaffected by a zero-only measurement
+    float k_ct_v_per_a = 0.0f;
+    uint16_t zero_counts = az.zero_counts;
+    if (!safety_ct_cal_convert(a_fs_for_convert, measured_zero_mv, gain, &k_ct_v_per_a, &zero_counts)) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"measured value rejected by conversion "
+                                        "(out of range)\"}");
+    }
+
+    static const uint16_t K_CT_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x0308, 0x0309, 0x030A };
+    static const uint16_t ZERO_COUNTS_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x0302, 0x0303, 0x0304 };
+    safety_cfg_post_pair_t pairs[2];
+    pairs[0].param_id = K_CT_IDS[channel];
+    snprintf(pairs[0].value_text, sizeof(pairs[0].value_text), "%.9g", (double)k_ct_v_per_a);
+    pairs[1].param_id = ZERO_COUNTS_IDS[channel];
+    snprintf(pairs[1].value_text, sizeof(pairs[1].value_text), "%u", (unsigned)zero_counts);
+
+    char reason[160];
+    bool ok = apply_pairs(s_link, pairs, 2, true /* always commit on confirm */, reason, sizeof(reason));
+
+    bool persisted = false;
+    esp_err_t nvs_err = ESP_OK;
+    if (ok) {
+        persisted = safety_cfg_store_set_ct_cal_input(channel, a_fs_for_convert, measured_zero_mv,
+                                                        SAFETY_CT_CAL_SOURCE_AUTO_ZERO, NULL, NULL,
+                                                        &nvs_err) &&
+                    nvs_err == ESP_OK;
+    }
+
+    char resp[300];
+    int len;
+    if (ok && persisted) {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"phase\":\"committed\",\"channel\":%u,\"zero_mv\":%.3f,"
+                        "\"persisted\":true}",
+                        (unsigned)channel, (double)measured_zero_mv);
+    } else if (ok) {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"phase\":\"committed\",\"channel\":%u,\"zero_mv\":%.3f,"
+                        "\"persisted\":false,\"err\":\"%s\"}",
+                        (unsigned)channel, (double)measured_zero_mv, esp_err_to_name(nvs_err));
     } else {
         char escaped[192];
         size_t o = 0;
@@ -1118,9 +1444,10 @@ static esp_err_t commissioning_page_get_handler(httpd_req_t *req)
 
 /* ---------------------------------------------------------------------- */
 
-esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null)
+esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_null)
 {
     s_link = link_or_null;
+    s_hw_io = io_or_null;
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {
@@ -1146,6 +1473,10 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null)
         .uri = "/api/safety/commissioning/ct_cal", .method = HTTP_POST,
         .handler = ct_cal_post_handler,
     };
+    static const httpd_uri_t ct_auto_zero_uri = {
+        .uri = "/api/safety/commissioning/ct_auto_zero", .method = HTTP_POST,
+        .handler = ct_auto_zero_post_handler,
+    };
 
     /* The HTML page. Registered alongside the API rather than in a separate
      * module because the two are useless apart -- and because a missing page
@@ -1159,7 +1490,8 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null)
         .handler = commissioning_page_get_handler,
     };
 
-    const httpd_uri_t *uris[] = { &page_uri, &get_uri, &post_uri, &bench_uri, &relay_type_uri, &ct_cal_uri };
+    const httpd_uri_t *uris[] = { &page_uri, &get_uri, &post_uri, &bench_uri, &relay_type_uri, &ct_cal_uri,
+                                   &ct_auto_zero_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, uris[i]);
         if (err != ESP_OK) {

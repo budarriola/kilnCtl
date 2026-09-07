@@ -94,6 +94,9 @@
 #include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
+#include "kilnlink/kilnlink_ct_auto_zero_status.h" // SAFETY_CMD_CT_AUTO_ZERO_STATUS (0x28), see link_task_send_ct_auto_zero_status()
+#include "kilnlink/kilnlink_ct_auto_zero_begin.h" // SAFETY_CMD_CT_AUTO_ZERO_BEGIN (0x26), see link_task_handle_ct_auto_zero_begin()
+#include "kilnlink/kilnlink_get_ct_auto_zero.h" // SAFETY_CMD_GET_CT_AUTO_ZERO (0x27), see link_task_handle_get_ct_auto_zero()
 #include "kilnlink/kilnlink_get_config_page.h" // SAFETY_CMD_GET_CONFIG_PAGE (0x24), see link_task_handle_get_config_page()
 #include "kilnlink/kilnlink_get_ct_cal.h" // SAFETY_CMD_GET_CT_CAL (0x22), see link_task_handle_get_ct_cal()
 #include "kilnlink/kilnlink_get_param.h" // SAFETY_CMD_GET_PARAM (0x23), see link_task_handle_get_param()
@@ -1554,6 +1557,69 @@ static void link_task_handle_get_ct_cal(const kilnlink_frame_t *frame)
     link_task_send_ct_cal();
 }
 
+// SAFETY_CMD_CT_AUTO_ZERO_BEGIN (0x26), CT_COMMISSIONING_PLAN.md step 2.
+// Fire-and-forget, like SET_CT_CAL: never ACKed on the wire. Only ARMS
+// current_task.c's own accumulator (current_task_ct_auto_zero_begin()) --
+// see link_frame.h's LINK_FRAME_CT_AUTO_ZERO_BEGIN_CMD comment for why the
+// actual multi-second measurement must never run synchronously here. The
+// ESP learns whether the arm succeeded (channel in range, not already
+// IN_PROGRESS) via its own follow-up GET_CT_AUTO_ZERO poll, same
+// "outcome via a subsequent read" convention CLEAR_TRIP/SET_CONFIG use.
+static void link_task_handle_ct_auto_zero_begin(const kilnlink_frame_t *frame)
+{
+    kilnlink_ct_auto_zero_begin_t msg;
+    kilnlink_ct_auto_zero_begin_status_t dstatus =
+        kilnlink_ct_auto_zero_begin_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_CT_AUTO_ZERO_BEGIN_OK) {
+        return; // malformed/wrong-length/wrong-cmd -- untrusted wire input
+    }
+    if (!current_task_ct_auto_zero_begin(msg.channel)) {
+        log_task_log(LOG_LEVEL_WARN, "ct_auto_zero", "refused, channel out of range or already in progress");
+    } else {
+        log_task_log(LOG_LEVEL_INFO, "ct_auto_zero", "armed");
+    }
+}
+
+// SAFETY_CMD_CT_AUTO_ZERO_STATUS (0x28) reply -- sent in answer to
+// SAFETY_CMD_GET_CT_AUTO_ZERO (link_task_handle_get_ct_auto_zero() below).
+// Reports current_task.c's own accumulator state exactly, no interpretation
+// here -- the ESP decides refusal/100mV/manual-wins policy from this raw
+// measurement (CT_COMMISSIONING_PLAN.md step 2), same "this codec only
+// serializes bytes, the receiver decides what they mean" split every other
+// kilnlink reply in this file already uses.
+static void link_task_send_ct_auto_zero_status(void)
+{
+    current_task_auto_zero_status_t st;
+    current_task_ct_auto_zero_poll(&st);
+
+    kilnlink_ct_auto_zero_status_t msg = {
+        .state = (uint8_t)st.state,
+        .channel = st.channel,
+        .samples_taken = st.samples_taken,
+        .samples_target = st.samples_target,
+        .zero_counts = st.zero_counts,
+    };
+    uint8_t payload[KILNLINK_CT_AUTO_ZERO_STATUS_LEN];
+    kilnlink_ct_auto_zero_status_codec_t status;
+    size_t len = kilnlink_ct_auto_zero_status_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return;
+    }
+    link_task_send_broadcast(payload, (uint8_t)len);
+}
+
+static void link_task_handle_get_ct_auto_zero(const kilnlink_frame_t *frame)
+{
+    kilnlink_get_ct_auto_zero_t msg;
+    kilnlink_get_ct_auto_zero_status_t dstatus =
+        kilnlink_get_ct_auto_zero_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_GET_CT_AUTO_ZERO_OK) {
+        return; // malformed/wrong-length/wrong-cmd -- untrusted wire input
+    }
+    (void)msg; // no fields
+    link_task_send_ct_auto_zero_status();
+}
+
 // Forward declaration -- link_task_handle_rollback() below calls this on
 // its refusal path, but the function itself (defined right after) also
 // wants to sit next to link_task_handle_rollback() in the file for
@@ -2185,6 +2251,14 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         // no arguments -- same convention as LINK_FRAME_FW_VERSION_CMD above.
         if (frame.length == 1) {
             link_task_handle_get_ct_cal(&frame);
+        }
+        break;
+    case LINK_FRAME_CT_AUTO_ZERO_BEGIN_CMD:
+        link_task_handle_ct_auto_zero_begin(&frame);
+        break;
+    case LINK_FRAME_GET_CT_AUTO_ZERO_CMD:
+        if (frame.length == 1) {
+            link_task_handle_get_ct_auto_zero(&frame);
         }
         break;
     case KILNLINK_SET_LOG_LEVEL_CMD:

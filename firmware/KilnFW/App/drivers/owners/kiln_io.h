@@ -110,6 +110,17 @@ typedef struct {
      * rather than only in the log. */
     bool last_i2c_failed;
 
+    /* CT_COMMISSIONING_PLAN.md step 2 -- the auto idle-offset commissioning
+     * action needs "every relay reported off for >= 5 s" as a precondition
+     * (five peak-hold time constants). -1 means "not currently all-off" (at
+     * least one relay bit is set in relay_shadow, or this has never been
+     * true since kiln_io_init()); otherwise the hal_time_now_us() timestamp
+     * of the moment relay_shadow most recently BECAME all-zero. Updated only
+     * in kiln_io_set_relay_mask()/kiln_io_all_relays_off() (the two places
+     * relay_shadow itself changes) and at init (all relays start off). See
+     * kiln_io_relays_off_ms() below. */
+    int64_t relays_all_off_since_us;
+
     bool initialized;
 } kiln_io_t;
 
@@ -231,6 +242,16 @@ bool kiln_io_irq_asserted(const kiln_io_t *io);
 
 /* Commanded relay state, bits 0-3 = Relay1..Relay4. Not a device read. */
 uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io);
+
+/* Milliseconds since relay_shadow most recently became ALL-ZERO, or
+ * UINT32_MAX if at least one relay is currently commanded on, or if it has
+ * never been all-off since kiln_io_init() (should not happen in practice --
+ * init leaves every relay off -- but a NULL/uninitialized `io` reports the
+ * same conservative UINT32_MAX rather than a fabricated 0). CT_COMMISSIONING_
+ * PLAN.md step 2's "every relay reported off for >= 5 s" precondition reads
+ * this rather than re-deriving it from kiln_io_get_relay_shadow() alone,
+ * since a point-in-time zero-mask read cannot answer "for how long". */
+uint32_t kiln_io_relays_off_ms(const kiln_io_t *io);
 
 #ifdef __cplusplus
 }

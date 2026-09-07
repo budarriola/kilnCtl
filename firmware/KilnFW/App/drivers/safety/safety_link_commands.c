@@ -45,6 +45,9 @@
 #include "kilnlink/kilnlink_ct_cal.h"
 #include "kilnlink/kilnlink_get_config_page.h"
 #include "kilnlink/kilnlink_get_ct_cal.h"
+#include "kilnlink/kilnlink_ct_auto_zero_begin.h"
+#include "kilnlink/kilnlink_get_ct_auto_zero.h"
+#include "kilnlink/kilnlink_ct_auto_zero_status.h"
 #include "kilnlink/kilnlink_rollback.h"
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
@@ -796,6 +799,116 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
         *out_len = KILNLINK_CT_CAL_LEN;
     }
     xSemaphoreGive(link->xact_lock);
+    return ESP_OK;
+}
+
+/* CT_COMMISSIONING_PLAN.md step 2, SAFETY_CMD_CT_AUTO_ZERO_BEGIN (0x26).
+ * Fire-and-forget, same shape as safety_link_send_set_ct_cal() above: never
+ * ACKed on the wire, no reply expected here -- the caller (safety_cfg_
+ * http.c's commissioning POST handler) learns whether the arm was accepted
+ * by polling safety_link_get_ct_auto_zero_status() afterward. Only ARMS
+ * current_task.c's accumulator on the Pico; the actual multi-second
+ * measurement happens there, one sample per its own normal period -- see
+ * link_frame.h's LINK_FRAME_CT_AUTO_ZERO_BEGIN_CMD comment (SaftyFW) for why
+ * a blocking measurement on this link would be unsafe. */
+esp_err_t safety_link_send_ct_auto_zero_begin(SafetyLinkClass *link, uint8_t channel)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (channel >= KILNLINK_CT_AUTO_ZERO_NUM_CHANNELS) {
+        ESP_LOGW(TAG, "ct_auto_zero_begin: refused locally, channel=%u out of range 0-%u",
+                 (unsigned)channel, (unsigned)KILNLINK_CT_AUTO_ZERO_NUM_CHANNELS - 1u);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_ct_auto_zero_begin_t msg = { .channel = channel };
+    uint8_t payload[KILNLINK_CT_AUTO_ZERO_BEGIN_LEN];
+    kilnlink_ct_auto_zero_begin_status_t status = KILNLINK_CT_AUTO_ZERO_BEGIN_OK;
+    size_t len = kilnlink_ct_auto_zero_begin_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "ct_auto_zero_begin: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "ct_auto_zero_begin: sending, channel=%u", (unsigned)channel);
+    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                         UART_TASK_ID_SAFETY, payload, len);
+}
+
+/* CT_COMMISSIONING_PLAN.md step 2, SAFETY_CMD_GET_CT_AUTO_ZERO (0x27) /
+ * SAFETY_CMD_CT_AUTO_ZERO_STATUS (0x28 reply). One round trip: send the
+ * poll, wait up to SAFETY_LINK_REPLY_TIMEOUT_MS, then check the stash
+ * (SafetyLinkClass::stashed_ct_auto_zero_status) -- the reply is ALWAYS
+ * stashed by safety_drain_inbox_ex() regardless of who is waiting (see that
+ * stash field's own comment), so a plain safety_drain_inbox() wait here is
+ * enough; no want-flag/out-param plumbing needed for this one caller. The
+ * caller (safety_cfg_http.c) is expected to call this repeatedly, once per
+ * HTTP long-poll or busy-wait iteration, until state == DONE -- this
+ * function itself does not loop across the full multi-second measurement. */
+esp_err_t safety_link_get_ct_auto_zero_status(SafetyLinkClass *link, kilnlink_ct_auto_zero_status_t *out)
+{
+    if (!link || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_get_ct_auto_zero_t req = {0};
+    uint8_t request[KILNLINK_GET_CT_AUTO_ZERO_LEN];
+    kilnlink_get_ct_auto_zero_status_t req_status = KILNLINK_GET_CT_AUTO_ZERO_OK;
+    size_t req_len = kilnlink_get_ct_auto_zero_encode(&req, request, sizeof(request), &req_status);
+    if (req_len == 0) {
+        ESP_LOGE(TAG, "get_ct_auto_zero: encode failed (status=%d)", (int)req_status);
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "get_ct_auto_zero: timed out after %ums waiting for the safety link "
+                      "transaction lock", (unsigned)SAFETY_XACT_LOCK_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* Same "fold in anything already queued, but a stale one from before our
+     * own request is not ours" reasoning as safety_link_get_ct_cal() above. */
+    uart_proto_message_t stale;
+    (void)safety_take_stashed_ct_auto_zero_status(link, &stale);
+    (void)safety_drain_inbox(link, 0);
+
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  request, req_len);
+    if (err != ESP_OK) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return err;
+    }
+
+    (void)safety_drain_inbox(link, SAFETY_LINK_REPLY_TIMEOUT_MS);
+
+    uart_proto_message_t status_msg;
+    if (!safety_take_stashed_ct_auto_zero_status(link, &status_msg)) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    kilnlink_ct_auto_zero_status_codec_t dstatus =
+        kilnlink_ct_auto_zero_status_decode(status_msg.payload, status_msg.length, out);
+    xSemaphoreGive(link->xact_lock);
+    if (dstatus != KILNLINK_CT_AUTO_ZERO_STATUS_OK) {
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 

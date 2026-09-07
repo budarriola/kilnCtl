@@ -96,6 +96,7 @@ bool safety_take_stashed_config_page(SafetyLinkClass *link, uint8_t want_page_in
 void safety_clear_stashed_commit_rejected(SafetyLinkClass *link);
 bool safety_take_stashed_rollback_result(SafetyLinkClass *link, uart_proto_message_t *out);
 void safety_clear_stashed_rollback_result(SafetyLinkClass *link);
+bool safety_take_stashed_ct_auto_zero_status(SafetyLinkClass *link, uart_proto_message_t *out);
 
 /* --- safety_link_poll.c (poll task) -------------------------------------- */
 

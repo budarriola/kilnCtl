@@ -61,6 +61,9 @@ add_library(kilnlink STATIC
     src/kilnlink_config_page.c
     src/kilnlink_rollback_result.c
     src/kilnlink_fw_version.c
+    src/kilnlink_ct_auto_zero_begin.c
+    src/kilnlink_get_ct_auto_zero.c
+    src/kilnlink_ct_auto_zero_status.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -270,6 +273,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_get_ct_cal PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_get_ct_cal COMMAND test_get_ct_cal)
+
+    add_executable(test_ct_auto_zero test/test_ct_auto_zero.c)
+    target_link_libraries(test_ct_auto_zero PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_ct_auto_zero PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_ct_auto_zero PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_ct_auto_zero COMMAND test_ct_auto_zero)
 
     add_executable(test_ct_cal test/test_ct_cal.c)
     target_link_libraries(test_ct_cal PRIVATE kilnlink)
