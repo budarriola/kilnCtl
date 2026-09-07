@@ -18,6 +18,13 @@
 #include "safety_cfg_store.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_* for zones_get_safety_wiring() */
 
+/* opus review finding (LOW): zone_sweep_task_record_ct_channels()'s summed-
+ * topology unmeasured path packs zone index zi into a uint8_t bitmask
+ * (s_sweep.summed_unmeasured_mask) via `1u << zi` -- silently dropping any
+ * zone at index >= 8 with no compile-time signal at all if the zone count
+ * ever grew past what a uint8_t mask can hold. Fail the build instead. */
+_Static_assert(MAX31856_CHANNEL_COUNT <= 8, "summed_unmeasured_mask is a uint8_t bitmask, one bit per zone");
+
 static uint8_t zone_sweep_task_relay_mask_for_zone(void *ctx, uint8_t zi)
 {
     (void)ctx;
@@ -117,13 +124,21 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
             float normal_a = 0.0f;
             if (zone_sweep_summed_normal_a(with_on, s_ct_summed_idle_a, &normal_a)) {
                 zone_normals_set(zi, normal_a);
-            } else if (zi < 8) {
+            } else {
                 /* opus review finding (MEDIUM): the shared channel read
                  * LOWER with this zone on than idle -- a wiring/noise
                  * artifact, not a real measurement. Do NOT persist a zero
                  * (that would silently make S14/S15 inert for this zone
                  * forever); record it as unmeasured instead so the operator
-                 * sees which zone needs a re-sweep. */
+                 * sees which zone needs a re-sweep.
+                 *
+                 * opus review finding (LOW): this used to gate on `zi < 8`
+                 * to protect the uint8_t mask below from a wider zone count
+                 * silently dropping high zones with no signal at all. The
+                 * _Static_assert above makes that impossible at compile
+                 * time instead -- MAX31856_CHANNEL_COUNT growing past 8
+                 * without this file being revisited is now a build failure,
+                 * not a silently dropped zone. */
                 ESP_LOGW(ZONES_HTTP_TAG, "zone %u: summed-CT reading with relay on (%.3fA) was below the idle "
                               "baseline (%.3fA) -- treating as unmeasured, not persisting a normal",
                          zi, (double)with_on, (double)s_ct_summed_idle_a);

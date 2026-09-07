@@ -65,6 +65,18 @@ typedef struct {
 
 typedef struct {
     SemaphoreHandle_t lock;
+    /* opus review finding (LOW): serializes persist_snapshot_now()'s whole
+     * snapshot-then-write section against itself -- relay_cycles_maybe_persist()
+     * (tick path) and relay_cycles_flush() (executor stop path) can call it
+     * concurrently, and releasing `lock` between the snapshot and the NVS
+     * write (see persist_snapshot_now()'s own comment) left nothing
+     * ordering the two writes, so an older snapshot could land AFTER a
+     * newer one and silently win. Held only around persist_snapshot_now()'s
+     * body, never nested inside `lock` and never held across anything that
+     * takes `lock` on its own (the producers -- relay_cycles_add(), etc. --
+     * never touch this one), so lock order is persist_lock -> lock, always
+     * in that direction, never the reverse. */
+    SemaphoreHandle_t persist_lock;
     uint32_t          counts[RELAY_CYCLES_COUNT];
     uint8_t           types[RELAY_CYCLES_COUNT];
     uint32_t          rated_overrides[RELAY_CYCLES_COUNT];
@@ -170,6 +182,13 @@ static bool ensure_lock(void)
         s_rc.lock = xSemaphoreCreateMutex();
         if (!s_rc.lock) {
             ESP_LOGE(TAG, "xSemaphoreCreateMutex failed -- cycle counts will not be kept");
+            return false;
+        }
+    }
+    if (!s_rc.persist_lock) {
+        s_rc.persist_lock = xSemaphoreCreateMutex();
+        if (!s_rc.persist_lock) {
+            ESP_LOGE(TAG, "xSemaphoreCreateMutex (persist_lock) failed -- cycle counts will not be kept");
             return false;
         }
     }
@@ -672,6 +691,16 @@ bool relay_cycles_reset(unsigned relay)
  * meantime). */
 static hal_status_t persist_snapshot_now(void)
 {
+    /* opus review finding (LOW): persist_lock brackets the WHOLE snapshot-
+     * then-write section below, so two overlapping callers (the tick path
+     * and the executor-stop flush) serialize into one another instead of
+     * racing to decide whose snapshot lands last. Taken outermost, released
+     * only after the NVS write and its bookkeeping are done; `lock` is
+     * still taken and released independently underneath for each field
+     * access, so a producer (relay_cycles_add(), etc.) that only ever wants
+     * `lock` is never blocked on `persist_lock`. */
+    xSemaphoreTake(s_rc.persist_lock, portMAX_DELAY);
+
     reset_persist_job_arg_t snap;
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
@@ -691,6 +720,8 @@ static hal_status_t persist_snapshot_now(void)
         s_rc.dirty = true;
         xSemaphoreGive(s_rc.lock);
     }
+
+    xSemaphoreGive(s_rc.persist_lock);
     return err;
 }
 

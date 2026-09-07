@@ -413,9 +413,56 @@ static void test_reset_does_not_lose_a_concurrent_add(void)
     TEST_CHECK(blob.counts[0] == 0, "relay 0's reset from earlier is still reflected too");
 }
 
+// opus review finding (LOW): persist_snapshot_now() releases s_rc.lock
+// between snapshotting and writing (see its own comment), which used to
+// leave nothing serializing two overlapping callers -- relay_cycles_maybe_persist()
+// from the executor's tick path and relay_cycles_flush() from its stop path
+// can both decide `dirty` is set and both call persist_snapshot_now() close
+// together. The fix adds s_rc.persist_lock, held around the whole
+// snapshot-then-write section. Host tests are single-threaded (stubs/freertos/
+// semphr.h's xSemaphoreTake()/_Give() are no-ops), so the actual race cannot
+// be reproduced here -- this proves the mechanics instead: ensure_lock()
+// creates persist_lock, and back-to-back persist_snapshot_now() calls (the
+// same sequence maybe_persist()-then-flush() produces) still leave the LAST
+// call's data as the one on flash, not an earlier one silently winning.
+static void test_persist_lock_created_and_back_to_back_persists_keep_the_latest_write(void)
+{
+    TEST_SECTION("relay_cycles persist_snapshot_now -- a dedicated persist_lock exists and "
+                 "back-to-back persists (maybe_persist immediately followed by flush) do not let "
+                 "an earlier snapshot land after a later one");
+    reset_all();
+
+    TEST_CHECK(ensure_lock(), "ensure_lock must succeed");
+    TEST_CHECK(s_rc.persist_lock != NULL, "a dedicated persist_lock is created alongside s_rc.lock");
+
+    // First persist: relay 0 at 42.
+    TEST_CHECK(persist_snapshot_now() == HAL_OK, "first persist succeeds");
+
+    // A change lands, then a second persist immediately follows -- the
+    // scenario relay_cycles_maybe_persist() (tick, due) racing
+    // relay_cycles_flush() (executor stop) produces.
+    relay_cycles_add(0x01, 5); // relay 0 -> 47
+    s_rc.dirty = true;
+    TEST_CHECK(persist_snapshot_now() == HAL_OK, "second, later persist succeeds");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "reopen for readback");
+    relay_cycles_blob_t blob;
+    size_t len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
+               "blob round-trips");
+    hal_kv_close(&h);
+    TEST_CHECK(blob.counts[0] == 47, "the LATER snapshot's value is what's on flash, not the "
+                                     "earlier one -- an older snapshot landing after a newer one "
+                                     "would leave 42 here instead");
+    TEST_CHECK(s_rc.dirty == false, "the second persist cleared dirty; nothing left it stuck set");
+}
+
 void run_test_relay_cycles(void)
 {
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
+    test_persist_lock_created_and_back_to_back_persists_keep_the_latest_write();
     test_persist_locked_proceeds_normally_on_an_internal_ram_stack();
     test_budget_ssr_has_no_budget();
     test_budget_quantized_thresholds();

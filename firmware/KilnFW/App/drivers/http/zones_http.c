@@ -480,10 +480,11 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
     int n = snprintf(json, sizeof(json),
                      "{\"state\":\"%s\",\"zone_index\":%u,\"zones_done\":%u,\"zones_total\":%u,"
                      "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\","
-                     "\"k_ct_derived_mask\":%u,\"k_ct_reason\":\"%s\"}",
+                     "\"k_ct_derived_mask\":%u,\"k_ct_reason\":\"%s\","
+                     "\"summed_unmeasured_mask\":%u}",
                      zone_sweep_state_str(st.state), st.zone_index, st.zones_done, st.zones_total,
                      reason_escaped, st.ct_map_derived_mask, ct_reason_escaped,
-                     st.k_ct_derived_mask, k_reason_escaped);
+                     st.k_ct_derived_mask, k_reason_escaped, st.summed_unmeasured_mask);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n > 0 ? (size_t)n : 0);
 }

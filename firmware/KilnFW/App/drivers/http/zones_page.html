@@ -1750,6 +1750,18 @@ function renderSweepStatus(st) {
       : ' -- CT scale NOT calibrated';
     if (st.k_ct_reason) text += ' (' + st.k_ct_reason + ')';
   }
+  /* opus review finding (MEDIUM), CT_COMMISSIONING_PLAN.md step 3 summed
+     topology: a zone whose shared-channel reading came back lower with the
+     zone on than idle has NO persisted normal from this run -- the operator
+     has to re-sweep it, not just re-read the page, since nothing else will
+     retry it. */
+  if (st.state === 'done' && typeof st.summed_unmeasured_mask === 'number' && st.summed_unmeasured_mask) {
+    var unmeasured = [];
+    for (var u = 0; u < 8; u++) { if (st.summed_unmeasured_mask & (1 << u)) unmeasured.push(u + 1); }
+    if (unmeasured.length) {
+      text += ' -- zone ' + unmeasured.join(', ') + ' not measured -- re-sweep';
+    }
+  }
   msg.textContent = text;
   if (running && !sweepPollTimer) {
     sweepPollTimer = setTimeout(pollSweepStatus, 1000);

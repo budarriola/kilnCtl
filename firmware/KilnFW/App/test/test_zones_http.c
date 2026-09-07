@@ -7546,6 +7546,39 @@ static void test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmea
     nvs_test_clear();
 }
 
+static void test_sweep_status_get_handler_reports_summed_unmeasured_mask(void)
+{
+    TEST_SECTION("sweep_status_get_handler -- opus review finding (MEDIUM): "
+                 "summed_unmeasured_mask is set on s_sweep by the summed-CT unmeasured path but "
+                 "was never emitted in the /api/zones/current_sweep/status JSON; the operator saw "
+                 "a 'done' sweep with no indication a zone still needs a re-sweep");
+
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
+    s_sweep.state = ZONE_SWEEP_DONE;
+    s_sweep.summed_unmeasured_mask = (uint8_t)((1u << 0) | (1u << 2));
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = sweep_status_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "sweep_status_get_handler must return ESP_OK");
+
+    TEST_CHECK(strstr(s_last_resp_body, "\"summed_unmeasured_mask\":5") != NULL,
+              "the JSON carries the mask (bits 0 and 2 -> 5), after k_ct_reason");
+
+    // A clean run (nothing unmeasured) still reports the field, as 0 -- the
+    // page's `typeof st.summed_unmeasured_mask === 'number'` check depends
+    // on it always being present, not omitted-when-zero.
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
+    s_sweep.state = ZONE_SWEEP_DONE;
+    memset(&req, 0, sizeof(req));
+    err = sweep_status_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "sweep_status_get_handler must return ESP_OK for a clean run too");
+    TEST_CHECK(strstr(s_last_resp_body, "\"summed_unmeasured_mask\":0") != NULL,
+              "a clean run reports the field as 0, never omitted");
+
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
+}
+
 // ---------------------------------------------------------------------------
 // Task 2: CT-to-zone mapping mismatch predicate, and its live wiring.
 // ---------------------------------------------------------------------------
@@ -8829,6 +8862,7 @@ void run_test_zones_http(void)
     test_zone_sweep_summed_normal_a_basic();
     test_record_ct_channels_summed_mode_derives_normal_from_channel3();
     test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmeasured();
+    test_sweep_status_get_handler_reports_summed_unmeasured_mask();
 
     test_zone_sweep_derive_k_ct_scales_by_the_measured_over_expected_ratio();
     test_zone_sweep_derive_k_ct_refuses_without_the_nameplate_answers();
