@@ -546,6 +546,50 @@ class SafetyDiag:
         (SAFETY_LINK_DIAG_CONTEXT_AGE_NEVER) is the sentinel, not a real age."""
         return self.context_age_100ms == 0xFF
 
+    def describe(self) -> str:
+        """Human-readable summary, notably the Pico's last-boot reason
+        (kilnlink_diag.h's boot_reason bits) -- the gap this exists to close:
+        nothing else on the PC side names *why* the Pico last rebooted.
+        boot_reason bits are POWERON=0x01/WATCHDOG=0x02/BROWNOUT=0x04; more
+        than one bit set is possible on the wire (e.g. a brownout during a
+        watchdog reset) so all set bits are named, not just the first match.
+        """
+        if not self.ever_received:
+            return "never received (no Pico firmware attached, or link never up)"
+
+        boot_bits = []
+        if self.boot_reason & 0x01:
+            boot_bits.append("power-on")
+        if self.boot_reason & 0x02:
+            boot_bits.append("watchdog")
+        if self.boot_reason & 0x04:
+            boot_bits.append("brownout")
+        boot_desc = "+".join(boot_bits) if boot_bits else f"unknown (0x{self.boot_reason:02x})"
+
+        state_names = {0: "init", 1: "grace", 2: "armed", 3: "warn", 4: "tripped"}
+        state_desc = state_names.get(self.state, f"unknown ({self.state})")
+
+        flag_bits = []
+        if self.flags & 0x01:
+            flag_bits.append("sim_context_seen")
+        if self.flags & 0x02:
+            flag_bits.append("calibration_missing")
+        if self.flags & 0x04:
+            flag_bits.append("estop_unwired_suspect")
+
+        context_age = (
+            "never received" if self.context_never_received else f"{self.context_age_100ms * 100} ms"
+        )
+
+        return (
+            f"boot reason: {boot_desc} | state {state_desc} | "
+            f"trip_reason {self.trip_reason} | warn_mask 0x{self.warn_mask:04x} | "
+            f"trip_mask 0x{self.trip_mask:04x} | uptime {self.uptime_ms} ms | "
+            f"context age {context_age} | context frames ok {self.context_frames_ok}, "
+            f"bad {self.context_frames_bad} | tx frames dropped {self.tx_frames_dropped}"
+            + (f" | flags [{', '.join(flag_bits)}]" if flag_bits else "")
+        )
+
 
 @dataclass(frozen=True)
 class SafetyTripEvent:

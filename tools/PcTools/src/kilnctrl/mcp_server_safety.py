@@ -185,6 +185,28 @@ def safety_get_link_stats() -> str:
 
 
 @_srv._tool()
+def safety_get_diag() -> str:
+    """Read the ESP's cache of the Pico's last DIAG (Frame B) push --
+    guard state, warn/trip masks, PUSH_CONTEXT liveness, and (the reason
+    this exists) the Pico's *last-boot reason*: power-on, watchdog, or
+    brownout (kilnlink_diag.h's boot_reason bits). Before this tool, an
+    unexpected Pico reboot had no PC-side way to say why -- the wire
+    already carries the answer (link_task.c fills boot_reason on every DIAG
+    push from watchdog_caused_reboot()/watchdog_enable_caused_reboot()) but
+    nothing surfaced it. Cache-only, like safety_get_status/
+    safety_get_link_stats: never a live round trip to the Pico.
+
+    "never received" (ever_received=False) is the expected state with no
+    Pico firmware attached or the link never up -- not an error.
+    """
+    try:
+        diag = _srv._safety.get_diag()
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    return diag.describe()
+
+
+@_srv._tool()
 def safety_get_fw_version() -> str:
     """Read the ESP's cache of the Pico's own build identity (FW_VERSION /
     Frame C): commit, build datetime, dirty bit, boot_id, and the active
