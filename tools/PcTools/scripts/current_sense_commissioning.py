@@ -57,7 +57,6 @@ from typing import Optional, Sequence
 
 sys.path.insert(0, __file__.rsplit("scripts", 1)[0] + "src")
 
-from kilnctrl import devices  # noqa: E402
 from kilnctrl.io_expander import IoClient  # noqa: E402
 from kilnctrl.link_hub import get_shared_link  # noqa: E402
 from kilnctrl.safety import SafetyClient, SafetyQueryError  # noqa: E402
@@ -314,8 +313,15 @@ def run_channel(
 
     # Step 2
     out.line(f"-- Step 2: relay {relay} ON at 100% duty --")
-    send_result = io.send(devices.io_set_relay(relay, True))
-    out.line(f"  SET_RELAY({relay}, on) -> {send_result}")
+    relay_result = io.set_relay(relay, True)
+    out.line(f"  SET_RELAY({relay}, on) -> {relay_result}")
+    if not relay_result:
+        result.step2 = Step2Result(
+            [], channel, False,
+            f"relay {relay} ON refused: {relay_result.describe()}",
+        )
+        out.line(f"  FAIL: {result.step2.message}")
+        return result
     time.sleep(settle_s)
     currents = _read_currents(safety)
     out.line(f"  currents: {[f'{a:.3f}' for a in currents]} A")
@@ -357,8 +363,14 @@ def run_channel(
 
     # Step 4
     out.line(f"-- Step 4: relay {relay} OFF, watching decay --")
-    send_result = io.send(devices.io_set_relay(relay, False))
-    out.line(f"  SET_RELAY({relay}, off) -> {send_result}")
+    relay_off_result = io.set_relay(relay, False)
+    out.line(f"  SET_RELAY({relay}, off) -> {relay_off_result}")
+    if not relay_off_result:
+        out.line(
+            f"  WARNING: relay {relay} OFF refused: {relay_off_result.describe()} -- "
+            "falling back to all_relays_off() before continuing"
+        )
+        io.all_relays_off()
     t0 = time.monotonic()
     samples: list[DecaySample] = []
     poll_s = max(0.1, decay_deadline_s / 20)
@@ -443,7 +455,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     results: list[ChannelResult] = []
     try:
         out.line("--- Pre-flight: all relays off ---")
-        io.send(devices.io_all_relays_off())
+        io.all_relays_off()
         time.sleep(args.settle_s)
 
         for relay, channel in sorted(relay_map.items(), key=lambda kv: kv[1]):
@@ -465,7 +477,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     finally:
         out.line("\n--- Restoring: all relays off ---")
         try:
-            io.send(devices.io_all_relays_off())
+            io.all_relays_off()
         except Exception:  # noqa: BLE001 - best-effort cleanup
             log.exception("failed to switch all relays off during cleanup")
         safety.close()
