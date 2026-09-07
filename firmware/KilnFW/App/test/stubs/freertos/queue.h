@@ -128,6 +128,17 @@ static inline BaseType_t xQueueReceive(QueueHandle_t q, void *out, TickType_t ti
     return pdFALSE;
 }
 
+/* Added 2026-09-07 for uart_log_bridge.c's ERROR-over-WARN eviction scan
+ * (log_eviction_2026-09-07.md, point 3), which needs to know how many
+ * entries to drain/reinspect. Real FreeRTOS provides this already; this
+ * stub only needs to answer for ring mode, since that's the only mode any
+ * test exercises a full/partial queue in. */
+static inline UBaseType_t uxQueueMessagesWaiting(QueueHandle_t q)
+{
+    (void)q;
+    return g_stub_queue_ring_enabled ? (UBaseType_t)g_stub_queue_ring_count : 0;
+}
+
 static inline void vQueueDelete(QueueHandle_t q) { (void)q; }
 
 #endif // TEST_STUB_FREERTOS_QUEUE_H

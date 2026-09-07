@@ -115,3 +115,111 @@ All 29 host test executables build and pass
   failure).
 - 0 individual WARN-to-ERROR promotions made.
 - Eviction policy changed: now protects ERROR and WARN uniformly.
+
+## 7. Follow-up: can the protected set itself overflow 64 slots? (2026-09-07, same day)
+
+**Full-queue behavior, traced exactly.** `uart_log_vprintf()` never blocks: every
+`xQueueSend`/`xQueueReceive` in this file uses a 0 tick timeout, and this is true
+whether the caller is an ordinary task or (in principle) an ISR context reaching
+`ESP_LOGx` -- there is no path here that can stall a caller. Before this change,
+when the queue was full and the incoming line was ERROR or WARN, the code evicted
+the OLDEST queued entry unconditionally (regardless of that entry's own level) to
+make room, and counted the eviction in `s_dropped_lines`. That means a full queue
+that is entirely ERROR/WARN was never a special case before today: an incoming
+WARN could evict an oldest-queued ERROR just to admit itself, silently inverting
+the severity ordering the rest of the codebase relies on (ERROR = definite
+failure, WARN = degraded/recoverable). Nothing was dropped *silently* -- the
+`s_dropped_lines` counter and its periodic "N log line(s) dropped (queue full)"
+summary (already implemented, see `uart_log_bridge_task()`) already made every
+eviction and every routine-level drop countable and visible on the PC side --
+but which specific line survived was not honoring severity once the whole queue
+was protected.
+
+**Worst-case protected count vs. 64.** Section 2's table lists ~14 file:line
+groups covering roughly 30 individual WARN/ERROR call sites that are plausibly
+reachable in a single bad boot (no Wi-Fi, TC absent, config decode refusal,
+safety link down, relay-cycle/zones/kiln_cfg/safety_cfg version mismatches, boot
+guard CRC failure, etc.) -- most of these fire at most once per boot, not
+repeatedly, since they guard one-shot init/load paths. ~30 is comfortably under
+64, so the protected set alone is very unlikely to fill the queue by itself
+during an ordinary bad boot. It is the mixed INFO+protected boot burst (the
+2026-08-12/08-19 notes: 33-41+ INFO lines from peripheral bring-up alone) that
+fills the queue; the protected lines were already surviving that burst as
+designed (each evicts one INFO). An ALL-protected full queue (>=64 WARN/ERROR
+lines in one boot) is not the realistic case this codebase produces today, but
+it is not impossible either (a retry loop or a cascading failure logging WARN
+repeatedly could reach it), and the fix below does not depend on the estimate
+being exactly right.
+
+**Fix chosen: prioritize ERROR over WARN within the protected set.** Widened
+the eviction scan (still triggered only when the queue is full and the incoming
+line is ERROR or WARN, still a single admitted line per call) so an incoming
+ERROR may evict anything (unchanged), but an incoming WARN may evict anything
+EXCEPT an ERROR entry -- it walks the queue (bounded by queue length, i.e. at
+most 64 dequeue/requeue operations, only on this already-rare full+protected
+path) to find the oldest non-ERROR victim, preserving FIFO order for everything
+it puts back. If every queued entry is ERROR, an incoming WARN finds no eligible
+victim and is dropped outright (counted via the existing `s_dropped_lines`
+mechanism) rather than displacing an ERROR. This directly answers point 4:
+nothing new was added for "countable and reported" because the drop
+counter + periodic summary line already exists and already covers every drop
+path, including this one -- the fix only changes *which* line is sacrificed
+when both a WARN and older ERRORs are competing for the same 64 slots.
+
+**Rejected:**
+- *Queue size increase* -- rejected per the file's own 2026-08-12/08-19 notes:
+  192 and 256 were each tried and reverted the same session (192: PC link
+  stopped answering; 256: board hung at the boot splash before reaching the
+  home UI). Internal DRAM is already tight enough elsewhere on this board
+  (11.9 kB free has caused HTTP socket resets) that a bump here is a real boot-
+  hang risk, confirmed twice, not a hypothetical one -- not worth revisiting
+  without first isolating whether the hang was heap exhaustion or something in
+  `xQueueCreate`'s own allocation path, which nobody has done yet.
+- *A new/separate drop counter or summary line* -- rejected as unnecessary:
+  `s_dropped_lines` and the periodic "N log line(s) dropped (queue full)" WARN
+  payload already exist, already fire for every drop (including the new
+  ERROR-vs-WARN case), and satisfy point 4's "countable and reported" bar
+  without adding a new field, a new link frame, or touching
+  `KILNLINK_PROTOCOL_VERSION`.
+
+**Where the drop count surfaces:** unchanged from before this follow-up --
+`s_dropped_lines`, drained and reported by `uart_log_bridge_task()` as a
+`UART_LOG_LEVEL_WARN` line of the form `"uart_log_bridge: %u log line(s)
+dropped (queue full)"` after every send, so a burst of drops (whether from
+routine-INFO churn, an evicted line, or a WARN that found no eligible victim)
+shows up promptly on the PC-side transcript as an explicit count rather than an
+unexplained gap.
+
+**Test.** `test_uart_log_bridge.c` gained two cases, both driven through the
+same ring-mode stub as the rest of this file's eviction tests (no ISR/blocking
+path exists to exercise separately, per the trace above):
+- `test_warn_does_not_evict_error_ahead_of_it` -- queue is one ERROR (oldest)
+  followed by 63 INFO; an incoming WARN must skip the ERROR and evict the
+  oldest INFO instead, with the ERROR still at the front afterward.
+- `test_all_error_queue_drops_incoming_warn` -- queue is 64 ERRORs; an incoming
+  WARN finds no eligible victim, is dropped, and the queue's contents are
+  completely unchanged (oldest and newest ERROR both verified untouched).
+
+`freertos/queue.h`'s host stub gained `uxQueueMessagesWaiting()` (ring-mode
+aware) since the new scan needs to know how many entries to drain.
+
+All 29 host test executables built and passed after the change
+(`build_host_tests.ps1` -> "Built: 29/29 executables" / "all 29 host test
+executables built and passed").
+
+**Negative test.** Removed the `s_dropped_lines++` increment inside the final
+`if (!kept)` block in `uart_log_bridge.c` (the path taken when nothing was
+evicted for the incoming line -- routine INFO drops, and the new
+all-ERROR-queue WARN-drop case) and reran `build_host_tests.ps1`. Two checks
+failed as expected, proving the counter is load-bearing and the new test is not
+vacuous:
+```
+FAIL test_uart_log_bridge.c:281: the info line is counted as dropped
+FAIL test_uart_log_bridge.c:371: the warning itself is the drop -- no error was evicted for it
+```
+Restored the increment by hand immediately after (`s_dropped_lines++;` put
+back exactly as it was), reran `build_host_tests.ps1` -- "Built: 29/29
+executables", no failures -- and confirmed `git diff` shows the intended
+3-file diff only (`uart_log_bridge.c`, the two new tests in
+`test_uart_log_bridge.c`, and the `uxQueueMessagesWaiting()` stub addition in
+`stubs/freertos/queue.h`), with no leftover negative-test artifact.

@@ -324,6 +324,61 @@ static void test_registration_failure_log_only_survives_as_error(void)
                "post-fix (E): the same line survives a full boot-burst queue by evicting the oldest INFO");
 }
 
+// 2026-09-07 (log_eviction_2026-09-07.md, point 3): with WARN now
+// eviction-protected too, an incoming WARN must never evict an ERROR that
+// happens to be sitting at the front of the queue -- ERROR outranks WARN.
+// Queue is one ERROR (oldest) followed by 63 INFO; an incoming WARN must
+// skip over the ERROR and evict the oldest INFO instead.
+static void test_warn_does_not_evict_error_ahead_of_it(void)
+{
+    ring_test_setup();
+    call_uart_log_vprintf("E (0) filltag: line0\r\n"); // oldest -- must survive
+    for (int i = 1; i < UART_LOG_BRIDGE_QUEUE_LEN; i++) {
+        call_uart_log_vprintf("I (%d) filltag: line%d", i, i);
+    }
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "setup: queue filled to capacity");
+
+    call_uart_log_vprintf("W (999) noisy: must not evict the error ahead of it\r\n");
+
+    TEST_CHECK(s_dropped_lines == 1, "one drop counted for the evicted INFO line");
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue stays full after evict+reinsert");
+
+    // The ERROR is still there, still oldest -- order preserved, not evicted.
+    char oldest_after[64];
+    ring_entry_text(0, oldest_after, sizeof(oldest_after));
+    TEST_CHECK(strcmp(oldest_after, "E (0) filltag: line0") == 0,
+               "the error at the front survives a warning that needed room");
+
+    // The warning itself made it in, at the tail.
+    char newest[64];
+    ring_entry_text(UART_LOG_BRIDGE_QUEUE_LEN - 1, newest, sizeof(newest));
+    TEST_CHECK(strcmp(newest, "W (999) noisy: must not evict the error ahead of it") == 0,
+               "the warning is queued, at the tail");
+}
+
+// If every queued entry is an ERROR, an incoming WARN has no eligible
+// victim -- it must be dropped outright rather than displacing an ERROR.
+static void test_all_error_queue_drops_incoming_warn(void)
+{
+    ring_test_setup();
+    for (int i = 0; i < UART_LOG_BRIDGE_QUEUE_LEN; i++) {
+        call_uart_log_vprintf("E (%d) filltag: line%d", i, i);
+    }
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "setup: queue filled with errors only");
+
+    call_uart_log_vprintf("W (999) noisy: nowhere to go\r\n");
+
+    TEST_CHECK(s_dropped_lines == 1, "the warning itself is the drop -- no error was evicted for it");
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue unchanged");
+    char oldest_after[64];
+    ring_entry_text(0, oldest_after, sizeof(oldest_after));
+    TEST_CHECK(strcmp(oldest_after, "E (0) filltag: line0") == 0, "oldest error untouched");
+    char newest_after[64];
+    ring_entry_text(UART_LOG_BRIDGE_QUEUE_LEN - 1, newest_after, sizeof(newest_after));
+    TEST_CHECK(strcmp(newest_after, "E (63) filltag: line63") == 0,
+               "newest error untouched, the warning did not get in");
+}
+
 static void test_room_available_no_eviction(void)
 {
     ring_test_setup();
@@ -383,6 +438,8 @@ void run_test_uart_log_bridge(void)
     test_full_queue_warn_now_evicts_oldest();
     test_full_queue_info_not_privileged();
     test_registration_failure_log_only_survives_as_error();
+    test_warn_does_not_evict_error_ahead_of_it();
+    test_all_error_queue_drops_incoming_warn();
     test_room_available_no_eviction();
     test_eviction_bounded_per_call();
 

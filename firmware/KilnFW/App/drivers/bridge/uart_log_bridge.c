@@ -242,12 +242,45 @@ static int uart_log_vprintf(const char *fmt, va_list args)
              * Deliberately one eviction, not a loop: a storm of
              * errors/warnings must not be able to spin here draining the
              * whole queue, and the level filter means this path is rare by
-             * construction. */
+             * construction.
+             *
+             * 2026-09-07 (log_eviction_2026-09-07.md, point 3): with WARN
+             * now protected too, a sustained WARN storm can fill the queue
+             * with nothing but protected entries. The single-eviction rule
+             * above still bounds the cost, but picking the OLDEST entry
+             * unconditionally meant an incoming WARN could evict a
+             * genuinely rarer, higher-severity ERROR that happened to be at
+             * the front -- ERROR and WARN were being treated as equally
+             * disposable once both were "protected", which quietly
+             * undoes the severity ordering (ERROR = definite failure,
+             * WARN = degraded/recoverable) the rest of this codebase relies
+             * on. Fix: an incoming ERROR may still evict anything (as
+             * before); an incoming WARN may evict anything EXCEPT an ERROR.
+             * This still requires draining the queue to find an eligible
+             * victim and reinsert the rest in original order -- bounded by
+             * the queue length (64), and only reached on this already-rare
+             * full-and-protected path. If every queued entry is ERROR, an
+             * incoming WARN finds no eligible victim and is dropped outright
+             * rather than displacing an ERROR -- counted the same as any
+             * other drop. */
             bool kept = false;
             if (level == UART_LOG_LEVEL_ERROR || level == UART_LOG_LEVEL_WARN) {
-                uart_log_entry_t evicted;
-                if (xQueueReceive(s_bridge.queue, &evicted, 0) == pdTRUE) {
-                    s_dropped_lines++; /* the evicted line, not this one */
+                UBaseType_t n = uxQueueMessagesWaiting(s_bridge.queue);
+                bool victim_found = false;
+                for (UBaseType_t i = 0; i < n; i++) {
+                    uart_log_entry_t tmp;
+                    if (xQueueReceive(s_bridge.queue, &tmp, 0) != pdTRUE) {
+                        break; /* shouldn't happen -- single producer/consumer of this scan */
+                    }
+                    bool may_evict = (level == UART_LOG_LEVEL_ERROR) || (tmp.level != UART_LOG_LEVEL_ERROR);
+                    if (!victim_found && may_evict) {
+                        victim_found = true;
+                        s_dropped_lines++; /* tmp is the evicted line, not requeued */
+                        continue;
+                    }
+                    xQueueSend(s_bridge.queue, &tmp, 0); /* not the victim -- put back, order preserved */
+                }
+                if (victim_found) {
                     kept = (xQueueSend(s_bridge.queue, &entry, 0) == pdTRUE);
                 }
             }
