@@ -96,17 +96,61 @@ def safety_get_status() -> str:
     not lose the cached UART status just because the borrowed check could not
     run. Fail-to-shown: a missing field or a failed fetch means no note is
     added, same as the firmware's own "unknown must fail to shown" rule.
+
+    CT_COMMISSIONING_PLAN.md step 4 (PcTools half, 8a124c44 left this open):
+    the three current-sense channels are rendered "not fitted" rather than a
+    fabricated 0.00 A when GET /api/status's `ct_fitted` (dashboard_status_
+    http.c, param 0x031F's committed ct_topology) says so -- channels 0/1 in
+    summed-CT topology, since only GPIO28/channel 2 is wired there.
+    `ct_summed_attrib_zone` is surfaced alongside as "zone N" (exactly one
+    zone presently commanded on) or "-" (none, or more than one). Since
+    amps_valid never crosses the safety-link wire itself, this can only come
+    from GET /api/status; if that call is unreachable, this falls back to
+    the commissioning param's own `ct_topology` (GET /api/safety/
+    commissioning) for the fitted/not-fitted split alone -- attribution to a
+    specific zone is not available from that source, so it reads "-" in the
+    fallback path. With neither source reachable, all three channels print
+    their raw amps (old behaviour, topology unknown).
     """
     try:
         status = _srv._safety.get_status()
     except SafetyQueryError as exc:
         return f"error: {exc}"
-    text = status.describe()
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as safety_get_commissioning()
     try:
-        http_status = dashboard_http_client.get_status(_ota_resolve_host(None))
+        host = _ota_resolve_host(None)
     except Exception:
-        return text
+        host = None
+    http_status: "dict | None" = None
+    if host is not None:
+        try:
+            http_status = dashboard_http_client.get_status(host)
+        except Exception:
+            http_status = None
+
+    ct_fitted: "tuple[bool, bool, bool] | None" = None
+    ct_summed_attrib_zone: "int | None" = None
+    raw_fitted = http_status.get("ct_fitted") if isinstance(http_status, dict) else None
+    if isinstance(raw_fitted, list) and len(raw_fitted) == 3:
+        ct_fitted = (bool(raw_fitted[0]), bool(raw_fitted[1]), bool(raw_fitted[2]))
+        raw_zone = http_status.get("ct_summed_attrib_zone")
+        ct_summed_attrib_zone = raw_zone if isinstance(raw_zone, int) else None
+    elif host is not None:
+        # GET /api/status unavailable/missing the field -- fall back to the
+        # commissioning param's own ct_topology. No per-zone attribution in
+        # this path (ct_summed_attrib_zone stays None -> renders "-").
+        try:
+            commissioning = safety_cfg_http_client.get_commissioning(host)
+        except Exception:
+            commissioning = None
+        if isinstance(commissioning, dict) and commissioning.get("unset_reporting_reliable"):
+            params = safety_cfg_http_client.params_by_name(commissioning)
+            ct_topology_p = params.get("ct_topology")
+            if ct_topology_p and ct_topology_p.get("set"):
+                summed = bool(ct_topology_p.get("value"))
+                ct_fitted = (False, False, True) if summed else (True, True, True)
+
+    text = status.describe(ct_fitted=ct_fitted, ct_summed_attrib_zone=ct_summed_attrib_zone)
     if isinstance(http_status, dict) and http_status.get("safety_tc_is_separate_sensor") is False:
         text += " | safety TC: borrowed from a zone probe (same probe, not a second sensor)"
     if isinstance(http_status, dict):

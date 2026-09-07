@@ -328,7 +328,27 @@ class SafetyStatus:
     def fault_labels(self) -> "list[str]":
         return thermo_fault_labels(int(self.fault_status))
 
-    def describe(self) -> str:
+    def describe(
+        self,
+        ct_fitted: "tuple[bool, bool, bool] | None" = None,
+        ct_summed_attrib_zone: "int | None" = None,
+    ) -> str:
+        """Render the status. ``current_a`` on the wire never carries an
+        "is this channel physically fitted" bit -- amps_valid does not cross
+        this frame (CT_COMMISSIONING_PLAN.md step 4) -- so that has to come
+        from the caller, normally GET /api/status's ``ct_fitted`` (preferred:
+        read straight off the ESP's committed safety-cfg cache) or, as a
+        fallback when that HTTP call is unavailable, the commissioning
+        param's ``ct_topology``. ``ct_fitted=None`` (the default) means
+        "unknown -- assume per_zone", the old behaviour: every channel prints
+        its raw amps. Where an entry is explicitly False (summed-CT
+        topology, channels 0/1 -- only GPIO28/channel 2 is wired there) this
+        prints "not fitted" rather than a fabricated ``0.00 A``.
+        ``ct_summed_attrib_zone`` (0-based zone index, or None for "no single
+        zone currently attributable") is only surfaced when ``ct_fitted`` was
+        supplied -- it has no meaning in per_zone topology or when the
+        caller has no topology information at all.
+        """
         if self.never_received:
             age = "never received"
         else:
@@ -339,7 +359,15 @@ class SafetyStatus:
             if self.temp_valid
             else "safety TC invalid"
         )
-        currents = ", ".join(f"{a:.2f} A" for a in self.current_a)
+        if ct_fitted is None:
+            currents = ", ".join(f"{a:.2f} A" for a in self.current_a)
+        else:
+            currents = ", ".join(
+                f"{a:.2f} A" if fitted else "not fitted"
+                for a, fitted in zip(self.current_a, ct_fitted)
+            )
+            ct_zone = f"zone {ct_summed_attrib_zone}" if ct_summed_attrib_zone is not None else "-"
+            currents += f" | ct zone: {ct_zone}"
         if self.tx_dropped_sat is None:
             tx_dropped = "tx_dropped unknown (peer sent no V2 status frame yet)"
         elif self.tx_dropped_sat >= 254:

@@ -153,8 +153,9 @@ document, do not solve.
    on this side before -- wired into `safety_page.html`'s "Warn mask" row.
    Dashboard/LCD real-amps display and the "channels 0/1 read not fitted"
    presentation remain step 4, not touched by this pass.
-4. **Real-amps display: done (2026-09-06)**, ESP + web dashboard + LCD;
-   PcTools' `safety_get_status` renderer NOT done (see below).
+4. **Real-amps display: done (2026-09-06)**, ESP + web dashboard + LCD +
+   PcTools (`safety_get_status`, `devices_safety.py`/`mcp_server_safety.py`,
+   done 2026-09-06 -- see below).
    `dashboard_status_http.c`'s `GET /api/status` gained three fields after
    `ct_counts`: `ct_topology` ("per_zone"/"summed", read straight off the
    ESP's own committed safety-cfg cache, param 0x031F -- same "unset reads
@@ -179,17 +180,21 @@ document, do not solve.
    ~267px no-scroll budget; per_zone topology's three independent channels
    have no room for a per-channel breakdown on this screen and keep the old
    behavior unchanged) -- no new theme colors, existing accent token only.
-   **NOT done**: `tools/PcTools/src/kilnctrl/`'s `safety_get_status`
-   renderer (`SafetyStatus.describe()`, `devices_safety.py`) still prints
-   all three raw floats unconditionally. `amps_valid` is a SaftyFW-internal
-   fact (`safety_guards.h`'s `guard_inputs_t::amps_valid[3]`) that never
-   crosses the wire -- `GET_STATUS`'s V1/V2 payload carries only the three
-   raw current floats (`devices_safety.py`'s own layout comment) -- and the
-   one place PcTools reads `ct_topology` at all is `mcp_server_safety.py`,
-   which this pass was told not to edit. Deriving "not fitted" here would
-   need either a wire/protocol addition (SaftyFW, also off-limits to this
-   pass) or a topology read routed through the disallowed file -- left
-   open for whichever pass owns `mcp_server_safety.py` next.
+   **PcTools side: done (2026-09-06)**. `SafetyStatus.describe()`
+   (`devices_safety.py`) now takes an optional `ct_fitted`/
+   `ct_summed_attrib_zone` pair -- `None` (default) keeps the old
+   unconditional-raw-floats behavior since `amps_valid` still never crosses
+   the wire (`GET_STATUS`'s V1/V2 payload only ever carried the three raw
+   current floats); when supplied, a `False` entry renders "not fitted"
+   instead of a fabricated amps figure, and the attributed zone renders as
+   "zone N" or "-". `mcp_server_safety.safety_get_status()` supplies these
+   from `GET /api/status`'s `ct_fitted`/`ct_summed_attrib_zone` (preferred,
+   matches the ESP dashboard/LCD exactly) and falls back to `GET /api/
+   safety/commissioning`'s own `ct_topology` param when `/api/status` is
+   unreachable or omits the field (no per-zone attribution available from
+   that source, so it always reads "-" in the fallback path); with neither
+   source reachable it keeps printing raw amps, topology unknown. Tests:
+   `tools/PcTools/tests/test_ct_fitted_display.py`.
 5. **Docs**: rewrite CURRENT_SENSE.md §0.1/§5 for both topologies; update
    ROADMAP row M (line 75) and `GUARD_TEST_MATRIX.md` §3.3.
 6. **Bench** (owner present): steps 0 and 2 on the test kiln, then one
