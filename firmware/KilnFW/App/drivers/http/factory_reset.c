@@ -19,6 +19,17 @@
 
 static const char *TAG = "factory_reset";
 
+/* Hand-declared rather than #include "uart_bridge.h"/"flash_worker.h" -- same
+ * reasoning as relay_cycles.c's/safety_cfg_store.c's identical block: that
+ * header pulls in hardware-bridge task declarations this file needs none of,
+ * and which are not part of this module's host-test stub surface. Keep in
+ * sync with uart_bridge.h/flash_worker.h by hand if either signature ever
+ * changes. Used by execute_scope() (see below) so the NVS erase runs on
+ * bx_flash_worker's own stack, not the caller's (system_uart_bridge or
+ * httpd_worker). */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+bool uart_bridge_ext_is_on_flash_worker(void);
+
 /* TODO.md 8.1: "reset kiln config" is a per-partition operation now that
  * wifi_nvs/kiln_nvs/profiles_nvs are split -- the whole point of the split
  * is that no scope's erase can reach another scope's data. This module is
@@ -107,10 +118,31 @@ static void reboot_task(void *arg)
  * old init state is worse than one that reboots and re-observes reality
  * (same reasoning reset_post_handler() always had). Returns the first
  * partition's erase error, if any. */
-static esp_err_t execute_scope(const reset_scope_t *scope)
+/* The actual erase, run ON bx_flash_worker's own internal-SRAM stack rather
+ * than the caller's -- see uart_bridge_ext_run_on_flash_worker()'s doc
+ * comment (flash_worker.h). This path is reachable both from an HTTP POST
+ * (httpd_worker, 8192 B stack, comfortable) and from the UART SYSTEM task's
+ * SYSTEM_CMD_FACTORY_RESET (system_uart_bridge, 3072 B, reporting only 884 B
+ * / 28.8% free at idle -- get_stack_margin()). nvs_flash_erase_partition()'s
+ * own depth has never been exercised on that task by the idle-board soak
+ * (this route is destructive and not something a soak test triggers), so its
+ * true peak on that stack is unmeasured; dispatching it onto the worker's
+ * larger, purpose-built stack removes the question rather than betting the
+ * remaining headroom on an unmeasured path -- same reasoning as
+ * relay_cycles.c's reset_persist_job() and safety_cfg_store.c's
+ * nvs_save_store_job(). */
+typedef struct {
+    const reset_scope_t *scope;
+    esp_err_t err;
+} execute_scope_job_ctx_t;
+
+static void execute_scope_job(void *arg)
 {
-    ESP_LOGW(TAG, "factory_reset: scope '%s' requested -- erasing", scope->name);
+    execute_scope_job_ctx_t *ctx = (execute_scope_job_ctx_t *)arg;
+    const reset_scope_t *scope = ctx->scope;
     esp_err_t first_err = ESP_OK;
+
+    ESP_LOGW(TAG, "factory_reset: scope '%s' requested -- erasing", scope->name);
 
     /* Before the erase, not after: nvs_flash_erase_partition() de-initializes
      * the partition it wipes, so a save attempted afterwards would have
@@ -143,13 +175,36 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
         }
     }
 
+    ctx->err = first_err;
+}
+
+static esp_err_t execute_scope(const reset_scope_t *scope)
+{
+    execute_scope_job_ctx_t ctx = { .scope = scope, .err = ESP_FAIL };
+
+    /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): neither known caller
+     * (the HTTP handler below, or the UART SYSTEM bridge task) is expected
+     * to already be on the worker today, but the check is cheap and this is
+     * exactly the class of bug that stays invisible until a caller changes
+     * -- same guard as relay_cycles_reset()/adaptive_tune.c. */
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        execute_scope_job(&ctx);
+    } else {
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(execute_scope_job, &ctx);
+        if (submit_err != ESP_OK) {
+            ESP_LOGE(TAG, "factory_reset: could not dispatch erase to flash worker: %s",
+                     esp_err_to_name(submit_err));
+            return submit_err;
+        }
+    }
+
     /* 2026-08-22: PSRAM stack. reboot_task() only vTaskDelay()s and calls
-     * esp_restart() -- the NVS erase this function name suggests already
-     * happened above, in the CALLER's context, before this task is even
-     * created, so nothing on this task's own stack touches flash. */
+     * esp_restart() -- the NVS erase above already happened (either inline
+     * or on the flash worker, both blocking this call until done), so
+     * nothing on this task's own stack touches flash. */
     xTaskCreatePinnedToCoreWithCaps(reboot_task, "factory_reset_reboot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL,
                                     tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    return first_err;
+    return ctx.err;
 }
 
 esp_err_t factory_reset_execute(factory_reset_scope_t scope)

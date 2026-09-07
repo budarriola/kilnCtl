@@ -191,6 +191,24 @@ void hal_wdt_reboot(void) {}
 esp_err_t profiles_builtin_restore_all(void) { return ESP_OK; }
 
 // ---------------------------------------------------------------------------
+// uart_bridge.h/flash_worker.h (2026-09-07) -- execute_scope() now dispatches
+// its NVS erase through uart_bridge_ext_run_on_flash_worker() (see
+// flash_worker_lint.py's factory_reset.c entry) instead of calling
+// hal_kv_erase_partition() inline. Never actually exercised by any test in
+// this file (the interlock check always refuses first, same "never reach a
+// scope that executes" note above), but the symbols must still resolve --
+// trivial stubs that just run fn() inline, not the shared busy-modeling
+// bx_worker_stub.h (that header models re-entrancy across a dispatch this
+// file never performs; a plain pass-through is enough here and keeps this
+// file from taking on a dependency it does not exercise).
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
+{
+    fn(arg);
+    return ESP_OK;
+}
+bool uart_bridge_ext_is_on_flash_worker(void) { return false; }
+
+// ---------------------------------------------------------------------------
 // esp_random.h migration (2026-09-06): ota_http.c now calls
 // hal_sysinfo_fill_random() instead of esp_fill_random() -- fake_sysinfo.c
 // (already linked into this executable, see build_host_tests.ps1's cmd8)
