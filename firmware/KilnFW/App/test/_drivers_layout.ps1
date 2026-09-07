@@ -30,8 +30,27 @@ function Resolve-DriverFile {
         throw "_drivers_layout: expected file '$BaseName' not found anywhere under $DriversDir -- has it moved or been renamed? This check is now blind, which is worse than the bug it looks for."
     }
     if ($found.Count -gt 1) {
+        # An untracked in-flight draft with the same basename as the real,
+        # git-tracked file (e.g. another session's WIP copy dropped straight
+        # into drivers/) must not make every check ambiguous. Prefer the
+        # tracked file(s); only throw if more than one TRACKED file shares
+        # this basename -- that ambiguity is the real defect this check
+        # exists to catch, and an untracked scratch copy is not it.
+        $tracked = git -C $DriversDir ls-files . 2>$null
+        if (-not $tracked) {
+            $tracked = @()
+        }
+        $trackedFull = $tracked | ForEach-Object { (Resolve-Path -LiteralPath (Join-Path $DriversDir $_)).ProviderPath }
+        $trackedMatches = $found | Where-Object { $trackedFull -contains $_.FullName }
+        if ($trackedMatches.Count -eq 1) {
+            return $trackedMatches[0].FullName
+        }
         $paths = ($found | ForEach-Object { $_.FullName }) -join ", "
-        throw "_drivers_layout: '$BaseName' matched more than one file under $DriversDir ($paths) -- cannot tell which one is the real file."
+        if ($trackedMatches.Count -gt 1) {
+            $trackedPaths = ($trackedMatches | ForEach-Object { $_.FullName }) -join ", "
+            throw "_drivers_layout: '$BaseName' matched more than one git-tracked file under $DriversDir ($trackedPaths) -- cannot tell which one is the real file."
+        }
+        throw "_drivers_layout: '$BaseName' matched more than one file under $DriversDir ($paths), and none of them is git-tracked -- cannot tell which one is the real file."
     }
     return $found[0].FullName
 }

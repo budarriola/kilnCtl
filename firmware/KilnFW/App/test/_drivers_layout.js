@@ -23,6 +23,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 /** Default drivers root: <testDir>/../drivers (App/test -> App/drivers). */
 function resolveDriversDir(testDir) {
@@ -45,6 +46,18 @@ function walkFiles(root) {
 /** Find `basename` anywhere under `driversDir`. Throws loudly (never
  * returns a nonexistent/wrong/ambiguous path silently) if it is missing or
  * matched more than once. */
+/** Git-tracked files under `dir`, as absolute paths. Returns null if `git`
+ * is unavailable or the directory isn't inside a repo (caller then skips
+ * the tracked-file preference and falls back to the original behavior). */
+function trackedFiles(dir) {
+  try {
+    const out = execFileSync('git', ['-C', dir, 'ls-files', '.'], { encoding: 'utf8' });
+    return out.split('\n').filter(Boolean).map((p) => path.resolve(dir, p));
+  } catch (err) {
+    return null;
+  }
+}
+
 function resolveDriverFile(driversDir, basename) {
   const matches = walkFiles(driversDir).filter((p) => path.basename(p) === basename);
   if (matches.length === 0) {
@@ -53,6 +66,23 @@ function resolveDriverFile(driversDir, basename) {
     );
   }
   if (matches.length > 1) {
+    // An untracked in-flight draft sharing a basename with the real,
+    // git-tracked file must not make every test ambiguous. Prefer the
+    // tracked file(s); only throw if more than one TRACKED file shares
+    // this basename -- that's the real defect this check exists to catch.
+    const tracked = trackedFiles(driversDir);
+    if (tracked) {
+      const trackedMatches = matches.filter((p) => tracked.includes(p));
+      if (trackedMatches.length === 1) {
+        return trackedMatches[0];
+      }
+      if (trackedMatches.length > 1) {
+        throw new Error(
+          `_drivers_layout: '${basename}' matched more than one git-tracked file under ${driversDir}: ` +
+          `${trackedMatches.join(', ')} -- cannot tell which one is the real file.`
+        );
+      }
+    }
     throw new Error(
       `_drivers_layout: '${basename}' matched more than one file under ${driversDir}: ${matches.join(', ')} -- ` +
       'cannot tell which one is the real file.'
