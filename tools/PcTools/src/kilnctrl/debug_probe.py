@@ -354,7 +354,24 @@ def reset(peer: str, mode: str = "run") -> "tuple[bool, str]":
     # against the every function below that wasn't program(). None of this
     # module's non-program() functions had ever been exercised successfully
     # before that.
-    tcl = f"{_adapter_prefix(peer_cfg)}init; reset {mode}; exit"
+    #
+    # Every target in the chain must be halted first, same reasoning as
+    # `_RESUME_TCL` above (RP2040 SMP grouping: OpenOCD's `reset`/`resume`
+    # against an SMP target fails, and leaves the chip in a stuck state, if
+    # the two cores aren't in a matching state going in -- e.g. core1 left
+    # halted from an earlier read_memory()/read_registers() call while core0
+    # is still running). Found for real 2026-09-06: a `debug_reset(peer=
+    # "pico")` right after a debug read locked the board up (fw_version/
+    # boot_id/frame counters frozen); a second identical call recovered it,
+    # because by then the halt-all-then-reset TCL below (missing on the
+    # first call's code path) was no longer needed to reconcile mismatched
+    # core states. Single-core peers (the ESP) have a one-element target
+    # list, so this is a no-op there.
+    tcl = (
+        f"{_adapter_prefix(peer_cfg)}init; "
+        f"foreach _kctl_t [target names] {{targets $_kctl_t; halt}}; "
+        f"targets [lindex [target names] 0]; reset {mode}; exit"
+    )
     return _run(peer, tcl)
 
 
