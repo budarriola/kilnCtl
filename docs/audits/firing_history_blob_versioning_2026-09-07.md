@@ -199,3 +199,61 @@ Host tests (`build_host_tests.ps1`) were run to prove the asserts compile
 cleanly against the real header; `build_kilnfw` was intentionally NOT run
 (another session had the ESP32 board attached for flashing at the time of
 this pass).
+
+## 4. Follow-up pass (2026-09-07): option (b) implemented
+
+The recommendation above is now implemented, not just written down:
+
+- **Loud discard.** `firing_stats_load()`
+  (`profile_executor_firing_stats.c`) now probes the on-disk size with
+  `hal_kv_get_blob(..., buf=NULL, ...)` before reading, so a real read
+  failure, an unrecognized size, and the new migration case below are
+  distinguishable. The unrecognized-size branch logs
+  `ESP_LOGW(PE_TAG, "firing_stats_load(%u) failed: ... on-disk size %u
+  matches neither current (%u) nor known prior (%u) layout -- discarding
+  history", ...)` naming the module, both sizes, and that history is being
+  discarded. Discard-on-mismatch behaviour is unchanged (per this doc's own
+  reasoning: rejecting instead would strand the key, which is worse).
+- **Tail-append migration hook.** `profile_executor_internal.h` adds
+  `#define PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 1364u`, documented as the one
+  prior on-disk size `firing_stats_load()` knows how to migrate forward by
+  zero-filling the tail. `firing_stats_load()` now has three branches:
+  on-disk size == current `sizeof` (normal path, unchanged behaviour),
+  on-disk size == `PROFILE_FIRING_HISTORY_BLOB_SIZE_V1` and smaller than
+  current (migrate: read the old bytes into the zeroed buffer's front, log
+  at WARN that a migration happened), else (unknown/garbage size: discard
+  loud, as above). Since `PROFILE_FIRING_HISTORY_BLOB_SIZE_V1` equals
+  today's only shipped size, the migration branch is unreachable today --
+  by design, this pass is zero behavioural change. The NEXT field addition
+  (e.g. `start_temp_c`) must leave `PROFILE_FIRING_HISTORY_BLOB_SIZE_V1` at
+  1364 while `sizeof(profile_firing_history_blob_t)` grows, which is what
+  makes the migration path go live instead of every profile's history being
+  silently zeroed on the first load after that flash.
+- **Tests** (`test_profile_executor_prestart.c`, host-run via
+  `build_host_tests.ps1`, using the real `firing_stats_load()` rather than a
+  hand-rolled copy): the existing exact-size round-trip test is unchanged;
+  `test_firing_stats_load_migrates_known_old_size_blob` writes a
+  `PROFILE_FIRING_HISTORY_BLOB_SIZE_V1`-byte blob directly via
+  `hal_kv_set_blob()` and confirms `firing_stats_load()` returns it
+  successfully with the tail zero-filled and the stored fields intact;
+  `test_firing_stats_load_discards_unknown_size_blob` writes a blob at
+  neither known size and confirms the load fails and the caller's buffer is
+  zeroed, exercising the warning path.
+- **Negative-tested.** `PROFILE_FIRING_HISTORY_BLOB_SIZE_V1` was
+  deliberately set to `1360u` (wrong) and `build_host_tests.ps1` re-run: the
+  migration test failed as expected --
+  `FAIL test_profile_executor_prestart.c:6665: today there is only one known
+  layout -- V1 must equal the current size until a field is actually added,
+  per this constant's own doc comment` (4827/4828, 1 failure) -- then the
+  edit was reversed by hand back to `1364u` and `git diff` on
+  `profile_executor_internal.h` shows only this pass's intended addition, no
+  stray leftover from the negative test. Host tests are green again
+  (29/29 executables) after the revert.
+- **Not done in this pass:** `build_kilnfw` (target build) was intentionally
+  skipped per this task's own scope note -- flashing is pending on this
+  board for other reasons; host tests are the verification for this change.
+  Option (a)'s full versioned-migration-chain, and (c) (RAM-only, no
+  persistence), remain unimplemented and are not needed unless a second
+  size-changing edit lands before this one's migration path is exercised for
+  real (see `PROFILE_FIRING_HISTORY_BLOB_SIZE_V1`'s own doc comment in
+  `profile_executor_internal.h` for that escalation condition).

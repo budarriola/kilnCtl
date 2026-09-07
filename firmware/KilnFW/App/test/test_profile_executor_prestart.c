@@ -6636,6 +6636,86 @@ static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
     fake_kv_reset_all(); // leave hal_kv in its default state for any test that runs after this one
 }
 
+static void test_firing_stats_load_migrates_known_old_size_blob(void)
+{
+    TEST_SECTION("firing_stats_load() -- a blob stored at the known prior size "
+                 "(PROFILE_FIRING_HISTORY_BLOB_SIZE_V1) migrates: the stored bytes land at the front "
+                 "of the current layout and the tail is zero-filled, rather than the whole ring being "
+                 "discarded (docs/audits/firing_history_blob_versioning_2026-09-07.md option (b)).");
+
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+
+    // Build a full-size blob with real content, then persist only its first
+    // PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 bytes -- simulating "this is what
+    // an old firmware, whose sizeof(profile_firing_history_blob_t) was
+    // smaller, actually wrote to flash."
+    profile_firing_history_blob_t full;
+    memset(&full, 0, sizeof(full));
+    full.count = 1;
+    full.runs[0].profile_id = 7;
+    strncpy(full.runs[0].profile_name, "OldSize", sizeof(full.runs[0].profile_name) - 1);
+    full.runs[0].duration_s = 1234;
+    full.runs[0].zone_mask = 0x01;
+    full.runs[0].zones[0].active = true;
+    full.runs[0].zones[0].kp = 2.5f;
+
+    TEST_CHECK(PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 == sizeof(full),
+               "today there is only one known layout -- V1 must equal the current size until a "
+               "field is actually added, per this constant's own doc comment");
+
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE,
+                                    FIRING_STATS_NVS_PARTITION);
+    TEST_CHECK(err == HAL_OK, "test setup: hal_kv_open for the write must succeed");
+    err = hal_kv_set_blob(&h, "fs_7", &full, PROFILE_FIRING_HISTORY_BLOB_SIZE_V1);
+    TEST_CHECK(err == HAL_OK, "test setup: writing the truncated (old-size) blob must succeed");
+    hal_kv_close(&h);
+
+    profile_firing_history_blob_t out;
+    memset(&out, 0xAA, sizeof(out)); // poison, so a missed zero-fill would be visible
+    bool ok = firing_stats_load(7, &out);
+
+    TEST_CHECK(ok, "a known-old-size blob must load successfully (migrated), not be discarded");
+    TEST_CHECK(out.count == full.count, "migrated content: count round-trips");
+    TEST_CHECK(out.runs[0].profile_id == 7, "migrated content: profile_id round-trips");
+    TEST_CHECK(out.runs[0].duration_s == 1234, "migrated content: duration_s round-trips");
+    TEST_CHECK(fabsf(out.runs[0].zones[0].kp - 2.5f) < 0.001f, "migrated content: kp round-trips");
+
+    fake_kv_reset_all();
+}
+
+static void test_firing_stats_load_discards_unknown_size_blob(void)
+{
+    TEST_SECTION("firing_stats_load() -- a blob whose on-disk size matches neither the current "
+                 "layout nor the one known prior (V1) size is discarded, loudly (this is the "
+                 "'garbage/unknown size' branch -- distinct from the V1-migration branch above).");
+
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+
+    uint8_t garbage[PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 - 4]; // neither current nor V1 size
+    memset(garbage, 0x5A, sizeof(garbage));
+
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE,
+                                    FIRING_STATS_NVS_PARTITION);
+    TEST_CHECK(err == HAL_OK, "test setup: hal_kv_open for the write must succeed");
+    err = hal_kv_set_blob(&h, "fs_12", garbage, sizeof(garbage));
+    TEST_CHECK(err == HAL_OK, "test setup: writing the garbage-size blob must succeed");
+    hal_kv_close(&h);
+
+    profile_firing_history_blob_t out;
+    memset(&out, 0xAA, sizeof(out));
+    bool ok = firing_stats_load(12, &out);
+
+    TEST_CHECK(!ok, "an unrecognized on-disk size must be reported as a load failure");
+    TEST_CHECK(out.count == 0, "the discard path must zero the caller's buffer, not leave it poisoned "
+                               "or partially filled");
+
+    fake_kv_reset_all();
+}
+
 static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram(void)
 {
     TEST_SECTION("firing_stats_persist -- refuses (does not crash) when called with a PSRAM "
@@ -7069,6 +7149,8 @@ void run_test_profile_executor_prestart(void)
     test_firing_stats_ramp_and_dwell_buckets_are_kept_separate();
     test_firing_stats_normalized_iae_is_length_invariant();
     test_firing_stats_persist_load_round_trip_and_ring_depth();
+    test_firing_stats_load_migrates_known_old_size_blob();
+    test_firing_stats_load_discards_unknown_size_blob();
 
     // PID_EXPANSION_PLAN.md sec 7.1/7.2 -- ramp assist's sustained-lag
     // detection and auto-stretch instrumentation, order-independent.

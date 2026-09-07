@@ -905,6 +905,23 @@ _Static_assert(offsetof(profile_firing_history_blob_t, count) == 0,
 _Static_assert(offsetof(profile_firing_history_blob_t, runs) == 4,
                "profile_firing_history_blob_t::runs moved -- see the VERSIONLESS HAZARD comment above");
 
+/* Tail-append migration hook (docs/audits/firing_history_blob_versioning_
+ * 2026-09-07.md, option (b)): the ONE prior on-disk size firing_stats_load()
+ * knows how to migrate forward, by zero-filling the tail rather than
+ * discarding. Today this equals sizeof(profile_firing_history_blob_t)
+ * exactly -- there is only one layout that has ever shipped, so the
+ * migration path is unreachable right now, which is the point: this pass
+ * adds the mechanism with zero behavioural change. The NEXT field addition
+ * (e.g. start_temp_c, per this doc's section 1) must leave this constant at
+ * 1364 while sizeof(profile_firing_history_blob_t) grows -- that is what
+ * makes an old-size on-disk blob recognizable as "version 1" instead of
+ * being silently discarded by firing_stats_load(). If a SECOND size-changing
+ * edit lands before the first is flashed everywhere, this single-prior-
+ * version scheme becomes ambiguous (see the audit's (b) risk paragraph) --
+ * that is the point at which a real version byte (option (a)) is due, not a
+ * second frozen constant here. */
+#define PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 1364u
+
 typedef struct {
     run_state_snapshot_t snap;
     char name[PROFILE_NAME_MAX_LEN + 1];

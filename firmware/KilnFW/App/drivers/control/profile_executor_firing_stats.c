@@ -222,20 +222,72 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
          * expected on a fresh board, not worth logging. */
         return (err == HAL_NOT_FOUND);
     }
-    size_t len = sizeof(*out);
-    err = hal_kv_get_blob(&h, key, out, &len);
-    hal_kv_close(&h);
+    /* Size-probe first (buf == NULL, hal_kv.h's documented two-call pattern)
+     * so a length mismatch can be told apart from a read failure, and so an
+     * old (but known) on-disk size can be migrated instead of discarded --
+     * see PROFILE_FIRING_HISTORY_BLOB_SIZE_V1's doc comment in
+     * profile_executor_internal.h. */
+    size_t on_disk_len = 0;
+    err = hal_kv_get_blob(&h, key, NULL, &on_disk_len);
     if (err == HAL_NOT_FOUND) {
+        hal_kv_close(&h);
         memset(out, 0, sizeof(*out));
         return true; /* this profile has never fired -- not an error */
     }
-    if (err != HAL_OK || len != sizeof(*out)) {
-        ESP_LOGW(PE_TAG, "firing_stats_load(%u) failed: %s (len %u/%u)", (unsigned)profile_id,
-                 hal_status_to_name(err), (unsigned)len, (unsigned)sizeof(*out));
+    if (err != HAL_OK) {
+        hal_kv_close(&h);
+        ESP_LOGW(PE_TAG, "firing_stats_load(%u) failed: %s (size probe)", (unsigned)profile_id,
+                 hal_status_to_name(err));
         memset(out, 0, sizeof(*out));
         return false;
     }
-    return true;
+
+    if (on_disk_len == sizeof(*out)) {
+        size_t len = sizeof(*out);
+        err = hal_kv_get_blob(&h, key, out, &len);
+        hal_kv_close(&h);
+        if (err != HAL_OK || len != sizeof(*out)) {
+            ESP_LOGW(PE_TAG, "firing_stats_load(%u) failed: %s (len %u/%u) -- discarding history",
+                     (unsigned)profile_id, hal_status_to_name(err), (unsigned)len,
+                     (unsigned)sizeof(*out));
+            memset(out, 0, sizeof(*out));
+            return false;
+        }
+        return true;
+    }
+
+    if (on_disk_len == PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 && on_disk_len < sizeof(*out)) {
+        /* Known-old layout, smaller than today's: read the old bytes into
+         * the front of *out (already zeroed above) and leave the tail
+         * zero-filled -- the tail-append migration this pass's mechanism
+         * exists for. Unreachable today (PROFILE_FIRING_HISTORY_BLOB_SIZE_V1
+         * == sizeof(*out) until a field is actually added), exercised only
+         * by the host tests' synthetic short blob. */
+        size_t len = on_disk_len;
+        err = hal_kv_get_blob(&h, key, out, &len);
+        hal_kv_close(&h);
+        if (err != HAL_OK || len != on_disk_len) {
+            ESP_LOGW(PE_TAG,
+                     "firing_stats_load(%u) failed: %s (len %u/%u) migrating v1 blob -- discarding history",
+                     (unsigned)profile_id, hal_status_to_name(err), (unsigned)len,
+                     (unsigned)on_disk_len);
+            memset(out, 0, sizeof(*out));
+            return false;
+        }
+        ESP_LOGW(PE_TAG,
+                 "firing_stats_load(%u): migrated version-1 blob (%u B) to current layout (%u B), "
+                 "tail zero-filled", (unsigned)profile_id, (unsigned)on_disk_len,
+                 (unsigned)sizeof(*out));
+        return true;
+    }
+
+    hal_kv_close(&h);
+    ESP_LOGW(PE_TAG,
+             "firing_stats_load(%u) failed: on-disk size %u matches neither current (%u) nor known "
+             "prior (%u) layout -- discarding history", (unsigned)profile_id, (unsigned)on_disk_len,
+             (unsigned)sizeof(*out), (unsigned)PROFILE_FIRING_HISTORY_BLOB_SIZE_V1);
+    memset(out, 0, sizeof(*out));
+    return false;
 }
 
 /* Persists rec as the newest entry for its own profile_id -- read-modify-
