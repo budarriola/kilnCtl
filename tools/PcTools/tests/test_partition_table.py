@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for kilnctrl.partition_table -- FLASH_BUDGET_PLAN.md section 8
+"""Unit tests for kilnctrl.partition_table -- FLASH_BUDGET.md section 8
 item 3 ("confirm what table is actually on the chip").
 
 All tests operate on synthetic partition-table blobs and a temp CSV file --

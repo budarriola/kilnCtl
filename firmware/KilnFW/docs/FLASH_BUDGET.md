@@ -1,41 +1,21 @@
-# Flash Budget Plan — 16 MB chip, reclaiming image and partition space
+# Flash Budget — 16 MB chip, partition table and image size
 
-Plan doc for the flash side of KilnFW: what the 16 MB part is currently spent
-on and what has been reclaimed. As of `9ede138`+`0bbb21c` the chip-level
-squeeze this doc was written about is gone — 3880 K is unallocated, 2368 K of
-it contiguous.
+Reference doc for the flash side of KilnFW: what the 16 MB part is spent on
+and how it got there. All phases below landed; kept as reference for the
+partition layout, the size-measurement tooling, and the hazards any future
+partition-table change must respect.
 
-Conventions this doc follows, matching `PID_EXPANSION_PLAN.md`: **the code is
-truth, not the checkboxes.** Nothing is marked done until a commit is named.
-Every number below is measured and attributed, or explicitly labelled as an
-estimate.
-
-Status at time of writing (2026-09-02): **Phase 0 (§4.1/§4.2/§4.3) is built.**
-§5.1 and §5.2 are landed (`9ede138`, `0bbb21c`). §5.3 stays untouched by owner
-decision. §5.4 is decided-not-pursued (§4.1's attribution found the string
-pool is ordinary spread-out `ESP_LOG*` strings, not dead weight). §4.2's size
-baseline is now recorded against `eb17ea5` — see 4.2. §7's checklist for the
-single partition-table revision covering §5.1/§5.2 is closed: a live
+As of `9ede138`+`0bbb21c` the chip-level squeeze this doc was originally
+written to fix is gone — 3880 K is unallocated, 2368 K of it contiguous.
+`attribute_str_pool.py` + `check_flash_partition_map.ps1` (`699f5ab`) are the
+size/layout tooling this doc's measurements were taken with. §4.2's size
+baseline is recorded against `eb17ea5`. §5.3 (`coredump`) stays untouched by
+owner decision — see that section. §5.4 (image-size reclamation) was decided
+not pursued — §4.1's attribution found the string pool is ordinary
+spread-out `ESP_LOG*` strings, not dead weight. §7's checklist for the single
+partition-table revision covering §5.1/§5.2 is closed: a live
 `GET /api/partitions` read on 2026-09-03 confirmed the on-chip table matches
-`partitions.csv`, 12/12 entries — see §8 item 3. **Nothing in this plan is
-still open.**
-
-**Phase 0, done (`699f5ab`):** `attribute_str_pool.py` +
-`check_flash_partition_map.ps1`. Methodology correction for §4.1: the map
-file's size column shows placement in the merged pool, not the input
-section's own size — true per-file sizes come from the "(size before
-relaxing)" lines. Top `.str1.1` contributors: `dashboard_http.c` 11,273 B,
-`mesh_parent.o` 11,108 B, `main.c` 9,671 B. Reconciliation: 239,415 B merged
-vs 309,165 B raw input, a 22.6% coalescing gap from string deduplication.
-The script reproduces §1's 77,824 B reclaimable figure exactly.
-
-**Owner decisions locked in for §5 (2026-09-02):**
-1. §5.2 — the 1 MiB `logs` retention cap is excessive; target 256 kB. Owner's
-   reasoning: logging that much means logging too often, so the *rate* is
-   also in question, not just the cap.
-2. §5.1 — `legacy_app`'s 1500 kB goes to relocating `pico_img` (896 kB), the
-   only one of the three candidate uses that improves contiguity rather than
-   just occupancy.
+`partitions.csv`, 12/12 entries — see §8 item 3.
 
 Companion doc: `DRAM_PSRAM_PLAN.md` covers internal SRAM. The two are
 independent — neither blocks the other, and neither should be justified by the

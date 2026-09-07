@@ -1442,7 +1442,7 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       `components/lvgl/src/libs/tjpgd`, so this is a pure Kconfig flip).
       Confirmed compiled into the tree (`tjpgd.c.obj`/`lv_tjpgd.c.obj`
       present in `build/`) and flash-cost measured via `build_kilnfw`:
-      +4,912 B (see `docs/FLASH_BUDGET_PLAN.md` §4.2a). No caller decodes a
+      +4,912 B (see `docs/FLASH_BUDGET.md` §4.2a). No caller decodes a
       JPEG yet — this only registers the decoder at LVGL init.
 - [x] Backlight PWM (dim/off on idle, touch-driven wake) if the bodge in 3.4.1
       was fitted — this is what `KILNCTL_TOUCH_IDLE_TIMEOUT_MS` has been waiting

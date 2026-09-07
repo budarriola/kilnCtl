@@ -116,7 +116,7 @@ static void test_note_fills_field_exactly(void)
 // ---------------------------------------------------------------------------
 // A record from the OLD text-line format (or any garbage) is refused, not
 // misread as a valid event. This is the compatibility contract:
-// FLASH_BUDGET_PLAN.md's migration note says an old flash log is refused
+// FLASH_BUDGET.md's migration note says an old flash log is refused
 // with a clear signal, never silently misdecoded.
 // ---------------------------------------------------------------------------
 static void test_decode_refuses_bad_magic(void)

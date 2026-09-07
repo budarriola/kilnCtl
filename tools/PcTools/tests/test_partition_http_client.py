@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for kilnctrl.partition_http_client -- the HTTP client backing
-GET /api/partitions, FLASH_BUDGET_PLAN.md section 8 item 3's replacement for
+GET /api/partitions, FLASH_BUDGET.md section 8 item 3's replacement for
 the broken JTAG-based partition table read. All against MOCKED urllib
 responses -- no real socket, no live board. Same shape as
 test_dashboard_http_client.py's GetHeapStatusTest.

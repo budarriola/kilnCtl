@@ -1,4 +1,4 @@
-# check_flash_partition_map.ps1 -- FLASH_BUDGET_PLAN.md section 4.3.
+# check_flash_partition_map.ps1 -- FLASH_BUDGET.md section 4.3.
 #
 # Section 2 of that doc built its partition table (and the "65,536 B
 # contiguous tail" / "12,288 B boxed-in gap" / "57,344 B forced-alignment
@@ -18,7 +18,7 @@
 # by tools/run_all_checks.ps1, not just a one-off report.
 #
 # THIS SCRIPT PERFORMS NO PARTITION-TABLE-CHANGE STEPS. It only computes and
-# reports. FLASH_BUDGET_PLAN.md section 7 lists the hazard checklist for an
+# reports. FLASH_BUDGET.md section 7 lists the hazard checklist for an
 # actual revision (erase otadata, read out coredump first, reflash the
 # bootloader, archive the NVS partitions, append-only discipline) -- this
 # script prints the *inputs* that checklist needs (which partitions are
@@ -37,7 +37,7 @@
 # firmware/KilnFW/partitions.csv. Default FlashSizeBytes is read from
 # firmware/KilnFW/sdkconfig's CONFIG_ESPTOOLPY_FLASHSIZE_* if that
 # (gitignored, build-generated) file exists, else falls back to 16 MB with an
-# explicit warning -- see FLASH_BUDGET_PLAN.md section 2.1's own note that
+# explicit warning -- see FLASH_BUDGET.md section 2.1's own note that
 # sdkconfig drift has bitten this repo before (feedback_gitignored_config_
 # hides_mismatch).
 #
@@ -88,7 +88,7 @@ if (-not $FlashSizeBytes) {
     } else {
         $FlashSizeBytes = 16MB
         Write-Host "WARNING: could not read flash size from $sdkconfigPath (file absent or setting not found)." -ForegroundColor Yellow
-        Write-Host "  Falling back to 16 MB (FLASH_BUDGET_PLAN.md section 2.1's confirmed figure for this board)." -ForegroundColor Yellow
+        Write-Host "  Falling back to 16 MB (FLASH_BUDGET.md section 2.1's confirmed figure for this board)." -ForegroundColor Yellow
         Write-Host "  sdkconfig is gitignored and build-generated -- a fresh clone or CI checkout may not have one yet." -ForegroundColor Yellow
     }
 }
@@ -167,7 +167,7 @@ for ($i = 0; $i -lt $sorted.Count; $i++) {
 #
 #     Two kinds of gap are NOT freely reclaimable, and are labelled as such
 #     rather than folded into one undifferentiated "unallocated" total
-#     (FLASH_BUDGET_PLAN.md section 1 makes exactly this distinction --
+#     (FLASH_BUDGET.md section 1 makes exactly this distinction --
 #     conflating them is the mistake this script exists to prevent):
 #       - the range before the first CSV row: the bootloader and the
 #         partition table itself live there but are NOT rows in
@@ -253,7 +253,7 @@ if ($coredumpRow) {
 $appRows = $sorted | Where-Object { $_.Type -eq 'app' }
 if ($appRows) {
     $distinctSizes = $appRows.Size | Sort-Object -Unique
-    Write-Host "  app-type partitions (must stay equal-sized, per FLASH_BUDGET_PLAN.md section 2): $($appRows.Name -join ', ')"
+    Write-Host "  app-type partitions (must stay equal-sized, per FLASH_BUDGET.md section 2): $($appRows.Name -join ', ')"
     if ($distinctSizes.Count -gt 1) {
         Write-Host "    WARNING: app partitions are NOT equal-sized today ($($distinctSizes -join ', ') B) -- check_sizes.py takes min() across all of them." -ForegroundColor Yellow
     }
@@ -267,13 +267,13 @@ if ($errors.Count -gt 0) {
     foreach ($e in $errors) {
         Write-Host "  $e" -ForegroundColor Red
     }
-    throw "$($errors.Count) partition-table problem(s) found in $CsvPath -- see FLASH_BUDGET_PLAN.md section 4.3"
+    throw "$($errors.Count) partition-table problem(s) found in $CsvPath -- see FLASH_BUDGET.md section 4.3"
 }
 
 Write-Host ""
 Write-Host "Partition map check passed: $($sorted.Count) partitions, no overlaps, nothing exceeds the $($FlashSizeBytes / 1MB) MB flash."
 
-# --- Expected-map assertions (FLASH_BUDGET_PLAN.md section 5, 2026-09-02 pass) ---
+# --- Expected-map assertions (FLASH_BUDGET.md section 5, 2026-09-02 pass) ---
 #
 # The generic checks above (no overlaps, nothing past the chip) pass for a
 # huge range of tables, including a wrong one -- they cannot catch "someone
@@ -314,15 +314,15 @@ if (-not $PSBoundParameters.ContainsKey('CsvPath')) {
         }
     }
     if ($sorted.Name -contains 'legacy_app') {
-        $mapErrors += "'legacy_app' still present -- FLASH_BUDGET_PLAN.md section 5.1 reclaimed this hole into 'pico_img', this placeholder should be gone"
+        $mapErrors += "'legacy_app' still present -- FLASH_BUDGET.md section 5.1 reclaimed this hole into 'pico_img', this placeholder should be gone"
     }
     if ($mapErrors.Count -gt 0) {
         Write-Host ""
-        Write-Host "EXPECTED-MAP CHECK FAILED (FLASH_BUDGET_PLAN.md section 5):" -ForegroundColor Red
+        Write-Host "EXPECTED-MAP CHECK FAILED (FLASH_BUDGET.md section 5):" -ForegroundColor Red
         foreach ($e in $mapErrors) {
             Write-Host "  $e" -ForegroundColor Red
         }
-        throw "$($mapErrors.Count) expected-map mismatch(es) in $CsvPath -- see FLASH_BUDGET_PLAN.md section 5"
+        throw "$($mapErrors.Count) expected-map mismatch(es) in $CsvPath -- see FLASH_BUDGET.md section 5"
     }
     Write-Host "Expected-map check passed: pico_img relocated into the reclaimed legacy_app hole, logs shrunk to 768 KiB, legacy_app gone."
 }

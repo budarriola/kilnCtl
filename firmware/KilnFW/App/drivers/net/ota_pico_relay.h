@@ -101,7 +101,7 @@ extern "C" {
 // ESP_PARTITION_SUBTYPE_DATA_UNDEFINED (0x06), 896K -- offset has moved more
 // than once as partitions.csv was restructured (2026-08-21 OTA/factory
 // move, 2026-09-02 relocation into the reclaimed `legacy_app` hole per
-// FLASH_BUDGET_PLAN.md section 5.1); looked up by name+type+subtype here
+// FLASH_BUDGET.md section 5.1); looked up by name+type+subtype here
 // specifically so this code never has to track the current offset -- see
 // partitions.csv itself for where it actually sits today). Returns
 // NULL if the running partition table has no such entry -- should never

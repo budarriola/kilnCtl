@@ -1,7 +1,7 @@
 """Decoder for KilnFW's on-flash binary event log (firmware/KilnFW/App/
 drivers/event_log.h).
 
-Since 2026-09-02 (owner decision, FLASH_BUDGET_PLAN.md section 5.2 follow-on)
+Since 2026-09-02 (owner decision, FLASH_BUDGET.md section 5.2 follow-on)
 the board's flash log store (log_store.c) holds fixed 32-byte BINARY event
 records -- errors/warnings/info for genuinely-necessary-for-debug events
 (run start/pause/resume/done/fault, autotune start/done/aborted), never a

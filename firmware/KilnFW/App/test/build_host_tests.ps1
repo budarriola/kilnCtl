@@ -758,7 +758,7 @@ $cmd20 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 Invoke-HostTestExe -Name "zone_coupling_solve" -ExePath $exe20 -BuildCmd $cmd20
 
 # ---- test_partition_info_http.c: its own TWENTY-FIRST, separate executable
-# FLASH_BUDGET_PLAN.md sec 8 item 3's replacement for the broken JTAG-based
+# FLASH_BUDGET.md sec 8 item 3's replacement for the broken JTAG-based
 # partition-table read: GET /api/partitions (partition_info_http.c). Own
 # executable, same "no other seam" reason as test_board_temps.c above: it
 # #includes partition_info_http.c directly to reach the static

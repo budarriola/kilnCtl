@@ -690,7 +690,7 @@ def fixture_flash(
 
 
 # ---------------------------------------------------------------------------
-# On-chip partition-table confirmation -- FLASH_BUDGET_PLAN.md section 8 item
+# On-chip partition-table confirmation -- FLASH_BUDGET.md section 8 item
 # 3. flash_firmware() above reports "flashed and verified OK (bootloader +
 # partition table + app)" after a program(), but that is OpenOCD's own
 # byte-compare during the flash operation, not independently re-checkable

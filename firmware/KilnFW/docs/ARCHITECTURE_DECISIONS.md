@@ -16,7 +16,7 @@ the plan.
 - Push (WebSocket/SSE) vs. 2s polling: **polling stays**. Revisit only if a
   real firing shows 2s is too coarse.
 - Embedded pages are stored **gzip-only** in flash (budget: flash is at ~5%
-  free, see `docs/FLASH_BUDGET_PLAN.md`) — there is no uncompressed fallback
+  free, see `docs/FLASH_BUDGET.md`) — there is no uncompressed fallback
   representation. A request whose `Accept-Encoding` excludes `gzip` (an
   explicit `gzip;q=0`, or `identity`/no header value that names `gzip`) gets
   a real `406 Not Acceptable` (`web_encoding.c`'s `web_send_gzip_not_acceptable()`)

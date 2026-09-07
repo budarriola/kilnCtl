@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Attribute the merged `.str1.1` string-literal pool to source object files.
 
-FLASH_BUDGET_PLAN.md section 4.1 background: `esp_idf_size --archive_details
+FLASH_BUDGET.md section 4.1 background: `esp_idf_size --archive_details
 libesp_stdio.a` reports 239,329 B under a single symbol,
 `.rodata.console_access.str1.1`. That is NOT esp_stdio's own data -- `.str1.1`
 is GCC's mergeable string-literal section, and the linker pools every such

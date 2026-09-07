@@ -410,7 +410,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                       "or /safety page this boot", esp_err_to_name(diagnostics_err));
     }
 
-    // FLASH_BUDGET_PLAN.md section 8 item 3: GET /api/partitions reports
+    // FLASH_BUDGET.md section 8 item 3: GET /api/partitions reports
     // the live partition table this running app is actually using (see
     // partition_info_http.h's header comment for why this replaced a JTAG
     // flash read at 0x8000, which does not work on this chip). No hardware

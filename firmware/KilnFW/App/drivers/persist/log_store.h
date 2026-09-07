@@ -7,7 +7,7 @@
 //
 // 2026-09-02: this store used to hold one text FIRE/TUNE line (telemetry_
 // format.c) every 5s/10s -- ~136 KiB/hour, truncating any firing over ~2h
-// against the (then) 1 MiB cap. Owner decision (FLASH_BUDGET_PLAN.md section
+// against the (then) 1 MiB cap. Owner decision (FLASH_BUDGET.md section
 // 5.2 follow-on): flash keeps errors/warnings/info EVENTS only, never
 // per-tick samples, and never as human-readable text -- see event_log.h for
 // the fixed 32-byte binary record format and event_log_emit() for the
@@ -45,7 +45,7 @@
 //     checked and enforced on every rotation, never merely hoped for.
 //   - HARD CAP per kind: LOG_STORE_MAX_TOTAL_BYTES = 256 KiB (8 segments *
 //     32 KiB, reduced from 1 MiB/32 segments 2026-09-02 -- see
-//     FLASH_BUDGET_PLAN.md section 5.2). Two kinds (firing, autotune) => at
+//     FLASH_BUDGET.md section 5.2). Two kinds (firing, autotune) => at
 //     most 512 KiB total, well under the 768 KiB `logs` partition, leaving
 //     headroom for SPIFFS' own metadata overhead (SPIFFS typically wants
 //     slack below 100% full to avoid GC thrashing -- 512 KiB used of 768 KiB
@@ -81,7 +81,7 @@ extern "C" {
  * full arithmetic against the 768 KiB `logs` partition.
  *
  * REDUCED from 32 (1 MiB/kind) to 8 (256 KiB/kind) 2026-09-02, owner
- * decision recorded in FLASH_BUDGET_PLAN.md section 5.2: "1Mb seems
+ * decision recorded in FLASH_BUDGET.md section 5.2: "1Mb seems
  * excessive for logs... maybe 256k?". Applied per-kind (this constant),
  * not as a combined total, to keep firing/autotune rotation independent as
  * before -- worst-case COMBINED retention is therefore 512 KiB (two kinds),

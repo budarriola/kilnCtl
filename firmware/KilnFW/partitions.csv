@@ -337,10 +337,10 @@ logs,         data, spiffs,    0xCF0000, 0xC0000,
 #     way, which is why that split exists.
 
 # --- legacy_app reclaimed (pico_img relocated into it) + logs shrunk to a
-#     256K/kind retention cap, added 2026-09-02 (FLASH_BUDGET_PLAN.md
+#     256K/kind retention cap, added 2026-09-02 (FLASH_BUDGET.md
 #     section 5.1 and 5.2, owner decisions recorded there) --------------
 #
-# TWO changes in this single table revision, per FLASH_BUDGET_PLAN.md
+# TWO changes in this single table revision, per FLASH_BUDGET.md
 # section 8's suggested order ("single partition-table revision covering
 # legacy_app (5.1) and logs (5.2) together"). Section 7's hazard checklist
 # was worked in order before this revision: NVS partitions (nvs, wifi_nvs,
@@ -374,7 +374,7 @@ logs,         data, spiffs,    0xCF0000, 0xC0000,
 #    coredump (0xBF0000, 1024K, unchanged) was deliberately NOT moved down
 #    to close the 896K gap pico_img's old slot leaves behind, even though
 #    that would have merged it with the tail freed by the logs shrink below.
-#    FLASH_BUDGET_PLAN.md section 5.3 already recommends leaving coredump
+#    FLASH_BUDGET.md section 5.3 already recommends leaving coredump
 #    alone, and section 7 item 2 requires reading any live dump out with
 #    espcoredump.py BEFORE a move -- moving it was out of scope for this
 #    pass. Consequence: the 896K freed here stays a separate, boxed-in

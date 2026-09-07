@@ -18,7 +18,7 @@ decisions; both are now resolved -- see §5.1 and §7.5 for the decisions, the
 reasoning, and what was applied vs. declined. §3 items 2 and 4 (previously
 recorded as "does not reproduce under the sweep") are covered; see §4.
 
-Companions: `FLASH_BUDGET_PLAN.md`, `DRAM_PSRAM_PLAN.md`. All three are
+Companions: `FLASH_BUDGET.md`, `DRAM_PSRAM_PLAN.md`. All three are
 independent; none blocks another.
 
 ---
@@ -672,7 +672,7 @@ them. Tailwind would mean rewriting class names across 670 kB of source; Pico
 or Bootstrap would fight `theme.css`, which is deliberate and documented.
 
 Flash is not the objection — the app slot has ~1.15 MiB free
-(`FLASH_BUDGET_PLAN.md` §4.2, which owns that number) and Preact-with-signals
+(`FLASH_BUDGET.md` §4.2, which owns that number) and Preact-with-signals
 or Lit is ~5–6 kB gzipped.
 
 **Re-open the question when, and only when,** the dashboards still hurt after

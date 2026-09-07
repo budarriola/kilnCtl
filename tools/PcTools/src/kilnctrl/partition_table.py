@@ -1,4 +1,4 @@
-"""Read, parse, and diff the ESP32 partition table -- FLASH_BUDGET_PLAN.md
+"""Read, parse, and diff the ESP32 partition table -- FLASH_BUDGET.md
 section 8 item 3 ("confirm what table is actually on the chip").
 
 STATUS (2026-09-02): the original chip-read mechanism here -- raw

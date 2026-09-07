@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Confirms the partition table the RUNNING firmware is actually using
-matches the repo's ``firmware/KilnFW/partitions.csv`` -- FLASH_BUDGET_PLAN.md
+matches the repo's ``firmware/KilnFW/partitions.csv`` -- FLASH_BUDGET.md
 section 8 item 3.
 
 ``flash_firmware()`` reports "flashed and verified OK (bootloader +

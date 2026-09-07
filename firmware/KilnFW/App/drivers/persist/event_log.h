@@ -2,7 +2,7 @@
 //
 // Replaces telemetry_log.c's old behaviour of writing a full text FIRE/TUNE
 // line to flash every 5s/10s (~136 KiB/hour, truncating any firing over
-// ~2 hours against the old 1 MiB cap -- see FLASH_BUDGET_PLAN.md section
+// ~2 hours against the old 1 MiB cap -- see FLASH_BUDGET.md section
 // 5.2). Owner decision, verbatim: "dont log the temps to flash, log
 // errors,warnings,infos that are nessary for debug. be frugal. dont do it
 // in human readable form. loging of temps for debug should be done over the

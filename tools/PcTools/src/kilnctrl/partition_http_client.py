@@ -2,7 +2,7 @@
 """partition_http_client.py -- thin HTTP client for GET /api/partitions
 (firmware/KilnFW/App/drivers/http/partition_info_http.c).
 
-FLASH_BUDGET_PLAN.md section 8 item 3 originally read the on-chip partition
+FLASH_BUDGET.md section 8 item 3 originally read the on-chip partition
 table over JTAG at flash offset 0x8000 (partition_table.py's
 ``read_chip_partition_table_bytes``, via ``debug_probe.read_memory``). That
 does not work: 0x8000 is a FLASH offset, and OpenOCD's ``read_memory``

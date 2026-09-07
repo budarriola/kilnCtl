@@ -3,7 +3,7 @@
 // esp_partition iterator, not the repo's partitions.csv and not a raw JTAG
 // flash read.
 //
-// FLASH_BUDGET_PLAN.md section 8 item 3 asked "confirm what table is
+// FLASH_BUDGET.md section 8 item 3 asked "confirm what table is
 // actually on the chip" and built tools/PcTools/src/kilnctrl/
 // partition_table.py's read_chip_partition_table_bytes() to answer it via
 // debug_probe.read_memory() at flash offset 0x8000. That does not work:

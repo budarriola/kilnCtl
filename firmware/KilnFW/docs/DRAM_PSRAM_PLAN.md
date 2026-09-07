@@ -619,7 +619,7 @@ were considered and deliberately excluded:
   tool.
 
 Flash is not a constraint either, and no part of this plan should be justified
-by flash pressure. `FLASH_BUDGET_PLAN.md` §4.2 owns that number (1,936,320 B
+by flash pressure. `FLASH_BUDGET.md` §4.2 owns that number (1,936,320 B
 against a 3,145,728 B app slot at `eb17ea5`, 38.4% free); do not restate it
 here.
 
@@ -798,7 +798,7 @@ plus 24 h of idle-with-Wi-Fi-connected afterwards. Latent allocation failures
 surface under sustained fragmentation, not in a smoke test.
 
 **Do not run this soak concurrently with a partition-table revision.**
-`FLASH_BUDGET_PLAN.md` §5 moves flash regions and erases `otadata`; this phase
+`FLASH_BUDGET.md` §5 moves flash regions and erases `otadata`; this phase
 changes where allocations land. Both can produce boot failures and flash-path
 asserts. Interleaved, neither is attributable.
 
