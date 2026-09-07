@@ -379,3 +379,33 @@ only — when **all** of these hold on the bench board:
 
 Only then does the step that removes the NVS writers land. Until all three
 are met the dual write stays, regardless of elapsed time.
+
+## `cfg` partition flashed, 2026-09-07 -- table change applied
+
+Built and flashed from a clean detached worktree (`C:/wt/espflash`) at
+`b7919ecc` (HEAD at flash time, includes both gate preconditions:
+`234ce9f3` partition design and `b7919ecc` backup-gate closure) so
+in-progress uncommitted work on `cfg_fs`/zones dual-write elsewhere did not
+land in this image. Pre-flash backup: `full_board_backup.py`, 12/12
+endpoints, archived at
+`tools/PcTools/board-backups/20260907T194936Z/board_backup.json`
+(gitignored). Pre-flash board state: not firing, heap clean, no
+unacknowledged crash, gains/coupling matched the bench values in this doc's
+"Measured starting point" section exactly.
+
+`flash_firmware(verify=True)` passed on the first attempt -- `otadata`
+already pointed at `factory`, so `ota_rollback_esp()` was not needed.
+Post-flash: `debug_check_partition_table` reports the on-chip table matches
+`partitions.csv` exactly, 13 partitions including `cfg` at 0xDB0000/0x80000
+with every pre-existing partition at its original offset/size (checked
+against a `mcp_servers.ps1 restart`, since the running server still had the
+pre-`234ce9f3` subtype-0x83 rejection cached the first time). PID gains and
+coupling matrix read back byte-identical to the pre-flash capture above.
+Profiles list intact (8 user + 28 built-in). `get_fw_version` reports
+protocol 11 compatible, board running HEAD `b7919ecc` clean. `get_heap_status`
+clean, no LOW margins, link up, board reachable over Wi-Fi throughout (no
+re-provisioning needed).
+
+No data loss, as the append-only analysis predicted. The `cfg` partition
+itself is not yet mounted/used by any code on this build -- that is the
+dual-write work in progress elsewhere, out of scope for this flash.
