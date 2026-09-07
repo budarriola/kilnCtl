@@ -135,3 +135,68 @@ a formatting-tool gap, not a missing value) match
 - [x] S1 (80 C ceiling) and S8 (33.3 C/min rate) guards armed and commissioned.
 - [ ] Owner aware: S3/S4/S9/S11/S14 cannot fire on this bench (no per-channel
       CT) — a welded contactor or per-channel overcurrent would go undetected.
+
+## Re-checked 2026-09-07 (live, `kilnctrl` MCP, read-only)
+
+- **ESP now at HEAD.** `get_fw_version()` → commit `20c2a5d5`, tree clean,
+  built `2026-09-07 11:43:30Z`, protocol v11, compatible=yes, "board is
+  running HEAD (20c2a5d5)". The `C:/wt/espflash` reflash completed; no
+  firmware-affecting commits pending.
+- **Pico:** `safety_get_fw_version()` → commit `b25663e2`, built
+  `2026-09-07 11:40:31Z`, boot_id=145, config_version=103, config CRC 0x0B8D
+  (commissioned), protocol v12 (min v7). `4f1b9a4f` is in — this is the
+  post-fix build, superseding `bdb1c504`.
+- **Safety state: still TRIPPED, but this is live, not a stale latch.**
+  `safety_get_diag()` → `state tripped | trip_reason 5 | warn_mask 0x0010 |
+  trip_mask 0x0010`, uptime 208 s, context frames ok 340/bad 0.
+  `safety_get_status()` → "safety TC invalid", currents 0.00 A all three,
+  `ct zone: -`. Same S5 sensor-invalid condition as before, now re-armed:
+  expected with **no bench thermocouple attached**, not a firmware defect —
+  the original NO-GO's concern (a latch surviving reflash) is resolved
+  (boot_id changed 145, fresh trip on the current, real condition), but the
+  board is *still* not clear to fire until a TC is connected.
+- **Link:** `safety_get_link_stats()` → 0 CRC/framing errors, 4 timeouts,
+  19 frames deframed/dequeued, 0 routed-nowhere, 0 length/CRC mismatch — clean.
+- **Commissioning:** `safety_get_commissioning()` → `commissioned=True`,
+  config CRC 2957 matches live, S1 (80 C) and S8 (33.3 C/min) ARMED, S14/S15
+  DORMANT as before (no per-channel CT).
+- **Zones:** `control_get_zones()` unchanged in shape — 3 zones, mode 3,
+  same PID/coupling values as §2. `progress_band_c=0.000` on all zones is
+  **not a defect**: it is the "use firmware default (3.0 C)" sentinel;
+  guard 1 runs at 3.0 C as intended.
+- **Protocol fields, corrected:** `get_fw_version()`'s `protocol_version 11`
+  is the PC-link UART version; `/api/status`'s `self_protocol_version 12`
+  (seen via `safety_get_fw_version`'s protocol v12) is the separate kilnlink
+  version. Both read correctly for their respective links — not a mismatch.
+- **Relays:** `io_read()` (via `get_board_state`) → `relays=0`, all off.
+- **Crash:** `get_heap_status(host=192.168.1.156)` → no unacknowledged-crash
+  banner, `reset_reason='software (esp_restart)'`, `uptime_s=28` (fresh clean
+  reboot from the flash, not a panic).
+- **Partitions:** `debug_check_partition_table()` → MATCH.
+- **`capability_preflight_check`:** still no preset named for a firing gate;
+  tried `default` and `tuned_baseline_20260831`, both fail (no such preset /
+  preset missing a required `name` field). Item unchanged from §1 — still
+  needs an owner decision, not itself a blocker for the mechanical checks
+  above.
+
+### Revised GO / NO-GO (2026-09-07, re-checked)
+
+**NO-GO** — one live blocker remains, everything else clear:
+
+- [ ] **Blocking:** safety processor is genuinely tripped right now
+      (`trip_reason 5`, S5 TC invalid) because no bench thermocouple is
+      connected. Connect a TC (or otherwise satisfy S5) and re-check
+      `safety_get_diag()` before heating.
+- [x] ESP running HEAD (`20c2a5d5`), clean tree, verified build timestamp.
+- [x] Pico running post-`4f1b9a4f` build (`b25663e2`, boot_id 145),
+      commissioned, config CRC matches live.
+- [x] Trip-latch-survives-reflash concern from the original NO-GO is
+      resolved — boot_id advanced, current trip is a fresh, real condition.
+- [x] Relays off, no unacknowledged crash, partition table matches.
+- [x] Link healthy (0 CRC/framing errors, 0 mismatches).
+- [x] Zone commissioning intact; `progress_band_c=0.000` and protocol
+      version fields confirmed correct, not defects.
+- [ ] `capability_preflight_check` still has no named firing-gate preset —
+      owner decision still open, same as original report.
+- [ ] Owner aware: S3/S4/S9/S11/S14 still cannot fire on this bench (no
+      per-channel CT) — unchanged.
