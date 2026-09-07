@@ -88,7 +88,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
-| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict). Open: a hardware timing re-check and `esp_random.h`'s hal_sysinfo classification — see `docs/HW_ABSTRACTION.md` | M16; `docs/HW_ABSTRACTION.md` |
+| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict, `esp_random.h` classified 2026-09-06). Open: a hardware timing re-check (safety-link reply, display frame time, thermo read latency) — see `docs/HW_ABSTRACTION.md` | M16; `docs/HW_ABSTRACTION.md` |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
 
 ### Blocked on hardware that does not exist yet
@@ -1377,7 +1377,7 @@ file maps and the "patterns worth copying" list:
 
 ---
 
-## M16 — Source layering and hardware abstraction · *opened 2026-09-05, HAL work done, two items open*
+## M16 — Source layering and hardware abstraction · *opened 2026-09-05, HAL work done, one item open (hardware-only)*
 
 Two related reorganisations of the firmware trees, documented in full in
 [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md). Both are done:
@@ -1385,14 +1385,16 @@ the `drivers/` directory move (`9f18ca5`, 2026-09-05) and all five HAL
 phases (0-4 — every interface has a real ESP and/or Pico backend plus a
 host fake, every named production consumer is migrated, and
 `check_hal_include_boundary.ps1`'s enforcement is strict, not just a
-ratchet). Durable conventions and the holdout list moved to
-`firmware/hwAbstraction/README.md`. Two items remain open, tracked in the
-plan doc's "Open" section: a hardware timing re-check (safety-link reply,
-display frame time, thermo read latency — host tests can't see this) and
-classifying `esp_random.h` (10 files) into `hal_sysinfo`. Everything else
-named as unmigrated in the plan (Wi-Fi/httpd/LVGL, OTA partition writes,
-the SaftyFW bootloader, `firmware/UnitTestFw`) is an owner-decided
-permanent holdout, not open work.
+ratchet), including `esp_random.h`'s hal_sysinfo classification (2026-09-06,
+the plan's last open header). Durable conventions and the holdout list
+moved to `firmware/hwAbstraction/README.md`. One item remains open, tracked
+in the plan doc's "Still open" section: a hardware timing re-check
+(safety-link reply, display frame time, thermo read latency — host tests
+can't see this; the display/thermo half is already measurable via
+`GET /api/diagnostics/timing`, the safety-link reply half still needs an
+external timer). Everything else named as unmigrated in the plan
+(Wi-Fi/httpd/LVGL, OTA partition writes, the SaftyFW bootloader,
+`firmware/UnitTestFw`) is an owner-decided permanent holdout, not open work.
 
 1. **KilnFW `drivers/` layering** (KilnFW only) — DONE (`9f18ca5`,
    2026-09-05). `App/drivers/` reorganised into
