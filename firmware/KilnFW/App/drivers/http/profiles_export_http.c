@@ -56,7 +56,7 @@ static esp_err_t export_get_handler(httpd_req_t *req)
     }
     char *end = NULL;
     long id = strtol(id_str, &end, 10);
-    if (end == id_str || id < 0 || id >= PROFILES_MAX_COUNT) {
+    if (end == id_str || *end != '\0' || id < 0 || id >= PROFILES_MAX_COUNT) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
     }
@@ -237,7 +237,9 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         seg->target_c = (float)dt;
         seg->ramp_c_per_hr = (float)dr;
 
-        if (!backup_json_field_num(se, "dwell_min", &dd) || dd < 0) {
+        uint32_t bound_dwell_max = 0;
+        profiles_http_get_bounds(NULL, NULL, NULL, NULL, &bound_dwell_max);
+        if (!backup_json_field_num(se, "dwell_min", &dd) || dd < 0 || dd > (double)bound_dwell_max) {
             FAIL("segment missing or invalid dwell_min");
         }
         seg->dwell_min = (uint32_t)dd;
@@ -298,7 +300,7 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         httpd_query_key_value(query, "id", id_str, sizeof(id_str)) == ESP_OK) {
         char *end = NULL;
         long rid = strtol(id_str, &end, 10);
-        if (end != id_str && rid >= 0 && rid < PROFILES_MAX_COUNT) {
+        if (end != id_str && *end == '\0' && rid >= 0 && rid < PROFILES_MAX_COUNT) {
             requested_id = (uint8_t)rid;
         }
     }

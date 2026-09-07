@@ -947,31 +947,52 @@ $cmd28 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
 
 Invoke-HostTestExe -Name "hal_spi_async" -ExePath $exe28 -BuildCmd $cmd28
 
+# ---- test_profile_export_import.c: its own 29th, separate executable ------
+# Same reason as test_zones_http.c/test_profiles_http.c above: it #includes
+# profiles_export_http.c directly to reach import_post_handler(), `static`
+# with no public seam, and defines its own fake profiles_http_get()/
+# profiles_http_save()/profiles_http_get_bounds()/profiles_http_delete() --
+# the main executable and test_profiles_http.c each already link (or fake)
+# those same names differently, so this must be its own binary. Added
+# 2026-09-06 for the dwell_min upper-bound fix (previously only `dd < 0` was
+# checked before the (uint32_t) cast, so "dwell_min":1e30 was undefined
+# behavior instead of a clean 400).
+$exe29 = Join-Path $outDir "kilnctl_host_tests_profile_export_import.exe"
+$exe29ObjDir = Join-Path $outDir "profile_export_import_obj"
+New-Item -ItemType Directory -Force -Path $exe29ObjDir | Out-Null
+$cmd29 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+        "/Fo:`"$exe29ObjDir\\`" /Fe:`"$exe29`" " +
+        "`"$(Join-Path $testDir 'test_profile_export_import.c')`" " +
+        "`"$(Join-Path $driversDir 'persist/backup_json.c')`""
+
+Invoke-HostTestExe -Name "profile_export_import" -ExePath $exe29 -BuildCmd $cmd29
+
 # ---- summary ----------------------------------------------------------
 #
-# 27 executables are attempted above (main + zones_http + safety_cfg_http +
+# 28 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
 # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
 # zone_coupling_solve + partition_info_http + adaptive_tune_http +
 # profiles_builtin + ft6336u + max31856_hal_spi + hal_i2c_adopt +
-# hal_spi_adopt + hal_spi_async) -- opus review finding (LOW): this used to
-# say 28 (both in this comment and in $totalExpected below) while only 27
-# Invoke-HostTestExe calls actually exist above (the $exeN numbering itself
-# skips from $exe5 to $exe7, a leftover from some earlier executable that no
-# longer exists -- there never was an $exe6). That let the summary print
-# "Built: 27/28 executables" immediately followed by "all 28 host test
-# executables built and passed": the pass/fail gate below only ever checked
-# buildFailures/failedExes, never that the built count matched what was
-# expected, so a silently-skipped executable (never built, never run, never
-# added to either failure list) would read as a full green suite. Fixed two
-# ways: the expected count now matches the real number of calls above, AND
-# the gate below independently checks the built count against it, so a
-# FUTURE executable silently dropped from this list (added to the comment/
-# count but never wired to an Invoke-HostTestExe call, or vice versa) fails
-# loud instead of depending on this comment staying accurate by hand.
-$totalExpected = 27
+# hal_spi_adopt + hal_spi_async + profile_export_import) -- opus review
+# finding (LOW): this used to say 28 (both in this comment and in
+# $totalExpected below) while only 27 Invoke-HostTestExe calls actually
+# existed above (the $exeN numbering itself skips from $exe5 to $exe7, a
+# leftover from some earlier executable that no longer exists -- there never
+# was an $exe6). That let the summary print "Built: 27/28 executables"
+# immediately followed by "all 28 host test executables built and passed":
+# the pass/fail gate below only ever checked buildFailures/failedExes, never
+# that the built count matched what was expected, so a silently-skipped
+# executable (never built, never run, never added to either failure list)
+# would read as a full green suite. Fixed two ways: the expected count now
+# matches the real number of calls above, AND the gate below independently
+# checks the built count against it, so a FUTURE executable silently dropped
+# from this list (added to the comment/count but never wired to an
+# Invoke-HostTestExe call, or vice versa) fails loud instead of depending on
+# this comment staying accurate by hand.
+$totalExpected = 28
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {
