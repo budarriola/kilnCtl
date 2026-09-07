@@ -224,7 +224,7 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     } while (0)
 
     /* opus review: dashboard_status_t grew ~124B with relay_life[5]/
-     * relay_life_type[5]/relay_life_tier (RELAY_LIFE_BUDGET_PLAN.md step 4)
+     * relay_life_type[5]/relay_life_tier (RELAY_LIFE_BUDGET.md)
      * and now runs well past what an already-tight httpd worker stack can
      * absorb -- 64 bytes free was MEASURED under load on this exact worker
      * (project_httpd_stack_near_overflow note) even before this struct grew.
@@ -262,7 +262,7 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     }
     APPEND("]");
 
-    /* RELAY_LIFE_BUDGET_PLAN.md step 4: budget state for all five counted
+    /* RELAY_LIFE_BUDGET.md: budget state for all five counted
      * slots (four heater relays + the safety relay, RELAY_CYCLES_SAFETY_INDEX),
      * plus the overall tier the LCD/web indication gates on. percent/rated
      * are JSON null for an SSR-typed relay (has_budget false) rather than 0,

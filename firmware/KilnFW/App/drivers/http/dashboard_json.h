@@ -127,7 +127,7 @@
  * 4480 (same 128-byte-step convention as the earlier 4096->4224 bump) for
  * ~157 bytes of real, test-measured headroom rather than a folklore
  * figure. */
-/* RELAY_LIFE_BUDGET_PLAN.md step 4 added ",\"relay_life\":[...]" (5 entries,
+/* RELAY_LIFE_BUDGET.md added ",\"relay_life\":[...]" (5 entries,
  * each up to `{"relay":N,"type":"contactor","cycles":4294967295,"rated":
  * 4294967295,"percent":12345.68,"tier":"error"}` -- ~95B literal/field
  * worst case per entry, ~475B for all five, plus a ~30B "relay_life_tier"

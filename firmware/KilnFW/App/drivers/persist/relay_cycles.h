@@ -38,7 +38,7 @@ extern "C" {
 #define RELAY_CYCLES_PERSIST_INTERVAL_S 600
 
 /* A fifth counted slot, alongside the four heater relays (index 0..3 =
- * Relay1..Relay4), for the safety relay K4. RELAY_LIFE_BUDGET_PLAN.md step 1:
+ * Relay1..Relay4), for the safety relay K4. RELAY_LIFE_BUDGET.md:
  * the ESP observes K4's state on every safety-status frame and can count its
  * own transitions even though K4 itself is driven by the Pico (relay_owner.c)
  * -- see relay_cycles_note_safety_edge()'s comment. The edge-counting call
@@ -48,7 +48,7 @@ extern "C" {
 #define RELAY_CYCLES_COUNT (KILN_IO_RELAY_COUNT + 1u)
 
 /* Relay type, used to pick a rated contact-life budget
- * (RELAY_LIFE_BUDGET_PLAN.md "Design" section). Persisted per relay so a
+ * (RELAY_LIFE_BUDGET.md "Design" section). Persisted per relay so a
  * budget survives reboot before the zones/safety config steps that will
  * actually set it (relay_cycles_set_type()) land. */
 typedef enum {
@@ -58,14 +58,14 @@ typedef enum {
 } relay_type_t;
 
 /* Table values are industry-typical placeholders, not datasheet numbers for
- * a specific part -- RELAY_LIFE_BUDGET_PLAN.md "What exists" is explicit that
+ * a specific part -- RELAY_LIFE_BUDGET.md "What exists" is explicit that
  * no contactor/mercury datasheet is in this tree. `rated_override` (set via
  * relay_cycles_set_type()) exists so a real number can be typed in per relay
  * without touching this table. */
 #define RELAY_RATED_LIFE_CONTACTOR 100000u
 #define RELAY_RATED_LIFE_MERCURY   1000000u
 
-/* Budget tiers, per RELAY_LIFE_BUDGET_PLAN.md's 80%/90% thresholds. Computed
+/* Budget tiers, per RELAY_LIFE_BUDGET.md's 80%/90% thresholds. Computed
  * on read in relay_cycles_budget(); never stored. */
 typedef enum {
     RELAY_BUDGET_TIER_NONE = 0,   /* no budget (ssr), or below 80% */
@@ -95,7 +95,7 @@ void relay_cycles_add(uint8_t relay_mask, uint32_t cycles);
 
 /* Adds one transition to the safety relay (K4) slot. The edge-counting call
  * site (the safety-link status consumer noticing an observed K4 transition)
- * is a later RELAY_LIFE_BUDGET_PLAN.md step; this is just the increment API
+ * is covered elsewhere -- see docs/RELAY_LIFE_BUDGET.md; this is just the increment API
  * and the slot it writes. */
 void relay_cycles_note_safety_edge(void);
 
@@ -142,8 +142,8 @@ relay_budget_tier_t relay_cycles_max_budget_tier(void);
  * out-of-range relay or if the persist write itself fails (the count is
  * still zeroed in RAM in that case -- same "keep going, retry later"
  * contract relay_cycles_maybe_persist() uses elsewhere in this module -- but
- * the caller is told the write did not land yet). RELAY_LIFE_BUDGET_PLAN.md
- * step 5's LCD two-tap reset and step 4's web `POST /api/relay_cycles/reset`
+ * the caller is told the write did not land yet). See docs/RELAY_LIFE_BUDGET.md:
+ * the LCD two-tap reset and the web `POST /api/relay_cycles/reset` route
  * both call this one function -- keep the signature exactly this simple
  * (a single unsigned relay index, a bool result) so neither caller has to
  * special-case the other's needs. MUST be called from a task with an

@@ -1139,7 +1139,7 @@ bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
 }
 
 /* Getter for zone_cfg_t::relay_type (ZONES_CFG_VERSION 19->20,
- * RELAY_LIFE_BUDGET_PLAN.md step 2) -- unlike error_band_c/rate_band_c_per_s,
+ * RELAY_LIFE_BUDGET.md) -- unlike error_band_c/rate_band_c_per_s,
  * there is no "resolve to a firmware default" step: an out-of-range stored
  * byte (only reachable via direct NVS tampering or a rollback from newer
  * firmware with a wider range) defensively reads back as RELAY_TYPE_SSR (0),

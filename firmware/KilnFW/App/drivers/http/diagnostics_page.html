@@ -570,7 +570,7 @@ here:</p>
   // truth is the physical part, and this page's <p class="note"> above
   // already quotes and cites where the figure comes from.
   var RELAY_CYCLE_BUDGET_ORDER = 100000;
-  // RELAY_LIFE_BUDGET_PLAN.md step 4: /api/status now carries "relay_life"
+  // RELAY_LIFE_BUDGET.md: /api/status now carries "relay_life"
   // (real per-relay type/rated/percent/tier, relay_cycles_budget()) --
   // prefer that and only fall back to the old order-of-magnitude estimate
   // off "relay_cycles" for a board whose firmware predates this field.
@@ -613,7 +613,7 @@ here:</p>
     card.innerHTML = html;
   }
 
-  // RELAY_LIFE_BUDGET_PLAN.md "Reset": event delegation on the card (rows
+  // RELAY_LIFE_BUDGET.md "Reset": event delegation on the card (rows
   // are rebuilt wholesale by renderRelayWear() above, so a per-button
   // listener would leak/re-attach every poll) -- same kcConfirm() gate the
   // Danger Zone's dangerEnterBtn handler above uses, and a POST through the

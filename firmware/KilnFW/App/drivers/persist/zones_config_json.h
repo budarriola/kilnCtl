@@ -202,7 +202,7 @@ extern "C" {
 
 /* relay_type_t (relay_cycles.h: RELAY_TYPE_SSR=0/CONTACTOR=1/MERCURY=2) as
  * stored on zone_cfg_t below (ZONES_CFG_VERSION 19->20,
- * RELAY_LIFE_BUDGET_PLAN.md step 2). 0 (ssr) is both the enum's own zero
+ * RELAY_LIFE_BUDGET.md). 0 (ssr) is both the enum's own zero
  * value and this field's migration default -- see zone_cfg_t::relay_type's
  * own comment. */
 #define ZONE_RELAY_TYPE_MAX 2
@@ -676,7 +676,7 @@ typedef struct {
      * below) stays an exact byte-for-byte prefix of this shape. */
     float error_band_c;
     float rate_band_c_per_s;
-    /* ---- ZONES_CFG_VERSION 19->20 (2026-09-06, RELAY_LIFE_BUDGET_PLAN.md
+    /* ---- ZONES_CFG_VERSION 19->20 (2026-09-06, RELAY_LIFE_BUDGET.md
      * step 2): which contact-life budget this zone's relay(s) are rated for.
      * relay_type_t (relay_cycles.h) stored as a plain uint8_t, same
      * convention control_mode/tc_type/etc. already use. relay_mask lets a
@@ -2614,7 +2614,7 @@ bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_pe
 bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s);
 
 /* Runtime accessor pair for zone_cfg_t::relay_type (ZONES_CFG_VERSION
- * 19->20, RELAY_LIFE_BUDGET_PLAN.md step 2) -- same declaration placement/
+ * 19->20, RELAY_LIFE_BUDGET.md) -- same declaration placement/
  * rationale as the pairs just above. `zone_index` bounds-checked against
  * MAX31856_CHANNEL_COUNT, same as every other per-zone accessor.
  *

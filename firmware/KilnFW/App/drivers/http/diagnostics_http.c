@@ -410,12 +410,12 @@ static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
 }
 #undef WATCHDOG_CFG_BODY_MAX
 
-/* POST /api/relay_cycles/reset {relay: N} -- RELAY_LIFE_BUDGET_PLAN.md step 4.
+/* POST /api/relay_cycles/reset {relay: N} -- RELAY_LIFE_BUDGET.md.
  * The web diagnostics page's "Reset count" button (diagnostics_page.html,
  * gated by window.kcConfirm()) posts here after the operator has physically
  * replaced the relay.
  *
- * Step 5 (RELAY_LIFE_BUDGET_PLAN.md, relay_cycles.c) added
+ * relay_cycles.c (see docs/RELAY_LIFE_BUDGET.md) added
  * relay_cycles_reset(unsigned relay) -- this handler now calls it instead of
  * answering the placeholder 501 an earlier pass returned. relay_cycles_reset()
  * itself owns the flash-worker dispatch (checking uart_bridge_ext_is_on_

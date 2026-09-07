@@ -81,7 +81,7 @@ extern "C" {
 #define UI_TOPBAR_ICON_H_PX   26
 #define UI_TOPBAR_ICON_GAP_PX 4
 
-/* Relay-life budget indicator tier (RELAY_LIFE_BUDGET_PLAN.md step 5). Kept
+/* Relay-life budget indicator tier (RELAY_LIFE_BUDGET.md). Kept
  * as this module's own enum rather than including relay_cycles.h's
  * relay_budget_tier_t -- ui_topbar.c is generic chrome with no business
  * knowing what a "relay" is; the caller (ui_page_home.c) maps
@@ -121,7 +121,7 @@ typedef struct {
     lv_event_cb_t gear_cb;
 
     /* Relay-life budget warning icon (LV_SYMBOL_WARNING). Home only, per
-     * RELAY_LIFE_BUDGET_PLAN.md step 5 -- set true to reserve the slot; the
+     * RELAY_LIFE_BUDGET.md -- set true to reserve the slot; the
      * icon itself starts hidden and is toggled at runtime by
      * ui_topbar_set_warning() from the page's own periodic refresh. Built as
      * a plain (non-clickable) indicator, not a button -- it has nothing to

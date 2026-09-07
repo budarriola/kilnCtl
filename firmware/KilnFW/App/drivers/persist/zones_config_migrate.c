@@ -86,7 +86,7 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
      * #defines, for every zone of every upgrading board.
      *
      * ZONES_CFG_VERSION 19->20: relay_type is ALSO brand new
-     * (RELAY_LIFE_BUDGET_PLAN.md step 2) -- same "no prior global scalar to
+     * (RELAY_LIFE_BUDGET.md) -- same "no prior global scalar to
      * carry forward" shape as approach_rate_cap_c_per_hr/error_band_c/
      * rate_band_c_per_s above, so again EVERY case below needs nothing
      * extra: this function's entry memset already zeroes the field, and 0
@@ -604,7 +604,7 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         return true;
     }
     case 19: {
-        /* v19 -> v20 (THIS pass, RELAY_LIFE_BUDGET_PLAN.md step 2):
+        /* v19 -> v20 (THIS pass, RELAY_LIFE_BUDGET.md):
          * relay_type is brand new -- see this function's own top-of-function
          * comment for why every zone simply lands on the 0 (ssr) sentinel
          * via the entry memset, with no explicit per-zone assignment

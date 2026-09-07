@@ -27,7 +27,7 @@
 #include "esp_err.h"
 #include "fake_kv.h"
 
-// relay_cycles.c (step 5, RELAY_LIFE_BUDGET_PLAN.md) hand-declares
+// relay_cycles.c (RELAY_LIFE_BUDGET.md) hand-declares
 // uart_bridge_ext_run_on_flash_worker()/uart_bridge_ext_is_on_flash_worker()
 // (same "declared by hand, not via uart_bridge.h" reasoning as
 // safety_cfg_store.c) for relay_cycles_reset()'s flash-worker dispatch --
@@ -107,7 +107,7 @@ static void test_persist_locked_proceeds_normally_on_an_internal_ram_stack(void)
                "the persisted counts are the ones that were passed in, unmodified");
 }
 
-// --- RELAY_LIFE_BUDGET_PLAN.md step 1: type table, budget math, fifth slot,
+// --- RELAY_LIFE_BUDGET.md: type table, budget math, fifth slot,
 // v1->v2 blob migration. These tests call relay_cycles_budget()/
 // relay_cycles_set_type()/relay_cycles_note_safety_edge() directly (this
 // file already #includes relay_cycles.c), quantizing counts against a rated
@@ -118,7 +118,7 @@ static void test_persist_locked_proceeds_normally_on_an_internal_ram_stack(void)
 static void test_budget_ssr_has_no_budget(void)
 {
     TEST_SECTION("relay_cycles_budget -- ssr relays report has_budget == false regardless of count "
-                 "or override (RELAY_LIFE_BUDGET_PLAN.md: 'ssr = no budget, percent reported as null')");
+                 "or override (RELAY_LIFE_BUDGET.md: 'ssr = no budget, percent reported as null')");
     reset_all();
 
     relay_cycles_set_type(0, RELAY_TYPE_SSR, 100); // override present but must be ignored for ssr
@@ -261,7 +261,7 @@ static void test_v1_blob_migrates_to_v2(void)
     fake_kv_reset_all();
 }
 
-// --- RELAY_LIFE_BUDGET_PLAN.md step 5: relay_cycles_reset() -- the API the
+// --- RELAY_LIFE_BUDGET.md: relay_cycles_reset() -- the API the
 // LCD diagnostics page's two-tap confirm and diagnostics_http.c's
 // POST /api/relay_cycles/reset both call.
 

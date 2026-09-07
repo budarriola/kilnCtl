@@ -103,7 +103,7 @@ typedef struct {
     bool     io_read_failed;  /* only meaningful when io_ready */
     uint32_t relay_cycles[KILN_IO_RELAY_COUNT];
 
-    /* RELAY_LIFE_BUDGET_PLAN.md step 4: budget state for all five counted
+    /* RELAY_LIFE_BUDGET.md: budget state for all five counted
      * slots (the four heater relays plus RELAY_CYCLES_SAFETY_INDEX),
      * computed on read via relay_cycles_budget() -- never stored. Kept as
      * its own array rather than widening relay_cycles[] above, which stays

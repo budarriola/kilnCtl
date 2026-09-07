@@ -157,7 +157,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     }
     z->relay_mask = relay_mask_raw;
 
-    /* RELAY_LIFE_BUDGET_PLAN.md step 2 (ZONES_CFG_VERSION 19->20): which
+    /* RELAY_LIFE_BUDGET.md (ZONES_CFG_VERSION 19->20): which
      * contact-life budget this zone's relay_mask relays are rated for.
      * OPTIONAL, same reason tc_type is optional just above (and unlike
      * relay_mask/control_mode, which are REQUIRED): every pre-existing

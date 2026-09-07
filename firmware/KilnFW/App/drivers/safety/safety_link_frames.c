@@ -83,7 +83,7 @@
  * safety_sync_cfg_cache() below. */
 #include "safety_cfg_store.h"
 
-/* RELAY_LIFE_BUDGET_PLAN.md step 3: K4 edge counting off the observed
+/* RELAY_LIFE_BUDGET.md: K4 edge counting off the observed
  * SAFETY_FLAG_RELAY bit in safety_apply_status() below -- another real,
  * deliberate cross-module dependency, same shape as safety_cfg_store.h just
  * above (this driver otherwise knows nothing about relay-life accounting). */
@@ -300,7 +300,7 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
              * blanking it would erase evidence rather than refresh it. */
             link->cached.trip_event_ever_received = false;
             link->cached.trip_last_seq = 0u;
-            /* RELAY_LIFE_BUDGET_PLAN.md step 3: the Pico rebooting may have
+            /* RELAY_LIFE_BUDGET.md: the Pico rebooting may have
              * left K4 in either state before it ever comes up -- this ESP's
              * last-observed safety_relay_state predates that reboot and must
              * not be compared against the new boot's first status frame
@@ -672,7 +672,7 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
         link->cached.borrowed = false;
         link->cached.borrowed_zone_index = SAFETY_LINK_BORROWED_ZONE_UNKNOWN;
     }
-    /* RELAY_LIFE_BUDGET_PLAN.md step 3: count an observed off->on or on->off
+    /* RELAY_LIFE_BUDGET.md: count an observed off->on or on->off
      * transition of K4 (SAFETY_FLAG_RELAY). safety_relay_state_known starts
      * false (this driver's own boot, or a just-applied Pico boot_id change --
      * see safety_apply_fw_version() above) so the FIRST frame after either

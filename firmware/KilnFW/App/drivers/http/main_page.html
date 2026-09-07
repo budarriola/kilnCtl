@@ -305,7 +305,7 @@
                       line-height: 1; padding: 0 0.2em; vertical-align: middle; }
   #profileFeasIcon.feas-icon-warn { color: var(--bad); }
   #profileFeasIcon.feas-icon-unknown { color: var(--muted); }
-  /* RELAY_LIFE_BUDGET_PLAN.md step 4: same button-icon shape as
+  /* RELAY_LIFE_BUDGET.md: same button-icon shape as
      #profileFeasIcon above, next to it. Reuses .feas-icon-warn's colour
      (var(--bad)) for BOTH the warn and error tiers -- "No new colours
      (contrast memory)" is explicit in the plan, and this repo's status-
@@ -3514,7 +3514,7 @@ function pollAutotune() {
 // status-only or exec-only hiccup still lets the other half's render run
 // and still runs updateChartMode() once, off whatever is cached from the
 // last successful fetch of the half that failed.
-// RELAY_LIFE_BUDGET_PLAN.md step 4: shown PERSISTENTLY (never auto-hides
+// RELAY_LIFE_BUDGET.md: shown PERSISTENTLY (never auto-hides
 // itself back below the operator's attention once a tier is active) as long
 // as relay_life_tier is warn/error. This is deliberate and DOES contradict
 // this file's own pidPopupBumplessHazard() comment a few thousand lines up

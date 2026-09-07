@@ -158,7 +158,7 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t crc)
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t crc) { (void)link; (void)crc; return false; }
 esp_err_t safety_cfg_store_init(void) { return ESP_OK; }
 
-// RELAY_LIFE_BUDGET_PLAN.md step 3 -- this file's own fake, same convention
+// RELAY_LIFE_BUDGET.md -- this file's own fake, same convention
 // as every other safety_cfg_store_* stub above (this test #includes safety_
 // cfg_http.c directly, and the real safety_cfg_store.c is linked into the
 // OTHER host-test executable via test_safety_cfg_store.c's #include of it --

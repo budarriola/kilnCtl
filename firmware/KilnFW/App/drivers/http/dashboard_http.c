@@ -172,7 +172,7 @@ void dashboard_get_status(dashboard_status_t *out)
         memcpy(out->relay_cycles, cycles, sizeof(cycles));
     }
 
-    /* RELAY_LIFE_BUDGET_PLAN.md step 4: budget state for all five counted
+    /* RELAY_LIFE_BUDGET.md: budget state for all five counted
      * slots, including the safety relay (RELAY_CYCLES_SAFETY_INDEX), which
      * relay_cycles[] above deliberately excludes. */
     for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {

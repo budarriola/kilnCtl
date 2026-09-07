@@ -13,7 +13,7 @@ void ui_home_refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
 
-    /* Relay-life budget warning (RELAY_LIFE_BUDGET_PLAN.md step 5). Cheap --
+    /* Relay-life budget warning (RELAY_LIFE_BUDGET.md). Cheap --
      * relay_cycles_max_budget_tier() just reads RAM state already loaded at
      * boot -- so this rides the existing 1 Hz tick rather than getting its
      * own timer. Map straight onto ui_topbar_warning_tier_t; both enums are

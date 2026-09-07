@@ -17,7 +17,7 @@
 #include "nvs_flash.h"
 
 #include "kiln_io.h"
-#include "relay_cycles.h" /* RELAY_LIFE_BUDGET_PLAN.md step 2: relay_cycles_set_type() push
+#include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md: relay_cycles_set_type() push
                             * on load, zones_config_push_relay_type()/_push_all_relay_types()
                             * below. */
 
@@ -185,7 +185,7 @@ void migrate_from_default_partition(void)
      * successfully migrated -- so this is always something ready to run a
      * kiln against, never a corrupt or refused blob (both return above). */
     s_zones_config_valid = valid_in_default;
-    /* RELAY_LIFE_BUDGET_PLAN.md step 2, "on load": this IS a load into
+    /* RELAY_LIFE_BUDGET.md, "on load": this IS a load into
      * s_zones.cfg, same as nvs_load()'s own -- a board migrating forward
      * from the default partition must not run with relay_cycles.c still
      * holding whatever nvs_load()'s earlier, empty attempt against
@@ -210,7 +210,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
 {
     esp_err_t err = nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid);
     if (err == ESP_OK && (!out_valid || *out_valid)) {
-        /* RELAY_LIFE_BUDGET_PLAN.md step 2, "on load": s_zones.cfg is now
+        /* RELAY_LIFE_BUDGET.md, "on load": s_zones.cfg is now
          * whatever this boot is actually going to run with (a decoded
          * current/migrated blob, or the zero-initialized defaults
          * nvs_load_from() leaves in place on a refused/corrupt load) --
@@ -249,9 +249,9 @@ esp_err_t nvs_save(void)
     return hal_status_to_esp_err(err);
 }
 
-/* RELAY_LIFE_BUDGET_PLAN.md step 2 -- see zones_http_internal.h's own
+/* RELAY_LIFE_BUDGET.md -- see zones_http_internal.h's own
  * comment for when each of these is called. rated_override is always 0
- * here: there is no per-relay override UI yet (RELAY_LIFE_BUDGET_PLAN.md's
+ * here: there is no per-relay override UI yet (RELAY_LIFE_BUDGET.md's
  * "Design" section calls it out as a later addition), so every push uses
  * the type's own rated-life table entry. */
 void zones_config_push_relay_type(uint8_t zone_index)

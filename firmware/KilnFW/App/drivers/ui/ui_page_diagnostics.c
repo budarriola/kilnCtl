@@ -18,7 +18,7 @@
 #include "MAX31856.h"
 #include "board_temps.h"
 #include "dashboard_http.h"
-#include "relay_cycles.h" /* RELAY_LIFE_BUDGET_PLAN.md step 5 -- the Relay Life page below */
+#include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md -- the Relay Life page below */
 #include "safety_cfg_store.h" /* CT_COMMISSIONING_PLAN.md step 4 -- ct_topology (0x031F) */
 #include "safety_link.h" /* SAFETY_LINK_DIAG_STATE_*, SAFETY_LINK_STALE_MS */
 #include "safety_trip_words.h"
@@ -247,14 +247,14 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
 #define UI_PAGE_DIAGNOSTICS_PAGE_SAFETY_BOARD_HEALTH 3
 #define UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS 4
 #define UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL 5
-/* RELAY_LIFE_BUDGET_PLAN.md step 5: one row per counted relay (the four
+/* RELAY_LIFE_BUDGET.md: one row per counted relay (the four
  * heater relays plus the safety relay's K4 slot -- RELAY_CYCLES_COUNT),
  * showing type/cycles/percent and a two-tap "Reset" button, same paged
  * pattern as every other page here. */
 #define UI_PAGE_DIAGNOSTICS_PAGE_RELAY_LIFE 6
 #define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_RELAY_LIFE + 1)
 
-/* Two-tap confirm window (RELAY_LIFE_BUDGET_PLAN.md's "Reset" design: "press
+/* Two-tap confirm window (RELAY_LIFE_BUDGET.md's "Reset" design: "press
  * Reset, button turns into Confirm? for 5 s"). No dialog widget exists on
  * this page (the plan's own "What exists" note), hence the in-place label
  * swap instead of a modal. */
@@ -318,7 +318,7 @@ _Static_assert(UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX <= UI_THEME
                "budget to match.");
 
 
-/* Relay Life page (RELAY_LIFE_BUDGET_PLAN.md step 5): RELAY_CYCLES_COUNT
+/* Relay Life page (RELAY_LIFE_BUDGET.md): RELAY_CYCLES_COUNT
  * rows, each build_stat_row()-height (measured 23px, see this file's header
  * comment's per-row arithmetic) since the row's fixed-size button
  * (UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX = 22px, set in
@@ -410,7 +410,7 @@ static lv_obj_t *s_td_remedy_label;
 static lv_obj_t *s_td_source_label;
 static lv_obj_t *s_td_latch_label;
 
-/* --- Page 7: Relay Life -- RELAY_LIFE_BUDGET_PLAN.md step 5. One row per
+/* --- Page 7: Relay Life -- RELAY_LIFE_BUDGET.md. One row per
  * RELAY_CYCLES_COUNT slot (4 heater relays + the safety relay's K4 slot).
  * s_rl_confirm_deadline_us[r] is 0 when relay r's Reset button is in its
  * normal state, else the hal_time_now_us() deadline at which a lone first
@@ -1099,7 +1099,7 @@ static void refresh_cb(lv_timer_t *timer)
         }
     }
 
-    /* Relay Life page (RELAY_LIFE_BUDGET_PLAN.md step 5). Two independent
+    /* Relay Life page (RELAY_LIFE_BUDGET.md). Two independent
      * things per relay: the value text (type/cycles/percent, always
      * refreshed), and the Reset button's two-tap confirm window (only
      * touched here to REVERT an expired arm -- the arm/actual-reset
@@ -1255,7 +1255,7 @@ static void build_thermo_fault_row(lv_obj_t *parent, uint8_t channel, lv_color_t
     s_tf_status_label[channel] = status_label;
 }
 
-/* Reset button tap -- RELAY_LIFE_BUDGET_PLAN.md's two-tap confirm (no dialog
+/* Reset button tap -- RELAY_LIFE_BUDGET.md's two-tap confirm (no dialog
  * widget exists on this page, so the button's own label does the asking).
  * First tap: arm a 5s window and relabel to "Confirm?". Second tap inside
  * that window: actually reset. A tap after the window expired is treated as
@@ -1490,7 +1490,7 @@ lv_obj_t *ui_page_diagnostics_build(void)
         build_thermo_fault_row(thermo_fault_page, ch, tf_accents[ch % 3]);
     }
 
-    /* Page 7: Relay Life -- RELAY_LIFE_BUDGET_PLAN.md step 5. One row per
+    /* Page 7: Relay Life -- RELAY_LIFE_BUDGET.md. One row per
      * RELAY_CYCLES_COUNT slot: the four heater relays, then the safety
      * relay's own K4 slot (RELAY_CYCLES_SAFETY_INDEX) last. */
     lv_color_t rl_accents[4] = { UI_THEME_ACCENT_1, UI_THEME_ACCENT_2, UI_THEME_ACCENT_3, UI_THEME_ACCENT_4 };

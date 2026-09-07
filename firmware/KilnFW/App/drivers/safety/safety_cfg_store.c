@@ -42,7 +42,7 @@ static const char *TAG = "safety_cfg_store";
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_SAFETY_CFG "safetycfg"
 
-/* RELAY_LIFE_BUDGET_PLAN.md step 3 -- the safety relay type, stored
+/* RELAY_LIFE_BUDGET.md -- the safety relay type, stored
  * separately from the SAFETY_CFG_PARAM_TABLE blob above (see
  * safety_cfg_store_get_safety_relay_type()'s doc comment for why: it is not
  * one of that table's Pico-fetched answers). Own key (<=15 chars, same NVS
@@ -877,7 +877,7 @@ esp_err_t safety_cfg_store_init(void)
         return part_err;
     }
     nvs_load_store();
-    /* RELAY_LIFE_BUDGET_PLAN.md step 3 -- load the safety relay type on every
+    /* RELAY_LIFE_BUDGET.md -- load the safety relay type on every
      * boot, not only after a fresh POST, and push it into relay_cycles.c
      * immediately so the budget calculation is correct from the first
      * dashboard/LCD read. relay_cycles_init() runs earlier in boot

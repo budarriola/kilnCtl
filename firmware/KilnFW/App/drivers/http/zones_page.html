@@ -858,7 +858,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     relayHtml += '<label><input type="checkbox" class="relaybit" data-bit="' + r + '"' + checked + '> ' +
                  RELAY_NAMES[r] + '</label>';
   }
-  /* RELAY_LIFE_BUDGET_PLAN.md step 2 (ZONES_CFG_VERSION 19->20): which
+  /* RELAY_LIFE_BUDGET.md (ZONES_CFG_VERSION 19->20): which
    * contact-life budget the relay(s) checked above are rated for. Rendered
    * as TOPOLOGY -- alongside relayHtml, outside settingsStackHtml -- not as
    * part of the inheritable settings stack (see settingsStackHtml's own
@@ -1889,7 +1889,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
 
     /* Wiring -- always this zone's own, never inherited (3.5's "still not
        covered" list: name/relay/thermo/ct masks -- relay_type joins that
-       list per RELAY_LIFE_BUDGET_PLAN.md step 2: it's TOPOLOGY, not tuning,
+       list per RELAY_LIFE_BUDGET.md: it's TOPOLOGY, not tuning,
        see relayTypeHtml's own comment in zoneBlock()). */
     params.push('z' + i + '_name=' + encodeURIComponent(div.querySelector('.name').value));
     params.push('z' + i + '_relay_mask=' + mask);

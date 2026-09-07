@@ -1059,7 +1059,7 @@ typedef struct {
     TickType_t           cached_tick; /* when `cached` arrived */
     bool                 ever_received;
 
-    /* RELAY_LIFE_BUDGET_PLAN.md step 3 -- K4 edge counting. Previous observed
+    /* RELAY_LIFE_BUDGET.md -- K4 edge counting. Previous observed
      * SAFETY_FLAG_RELAY bit off consecutive GET_STATUS frames, so
      * safety_apply_status() can call relay_cycles_note_safety_edge() once per
      * OBSERVED transition rather than once per frame. Deliberately starts

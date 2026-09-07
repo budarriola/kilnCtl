@@ -116,7 +116,7 @@ void safety_link_clear_stashed_config_page(SafetyLinkClass *link)
 // describes) without needing a real second task.
 // ---------------------------------------------------------------------------
 
-// relay_cycles_set_type() stub -- RELAY_LIFE_BUDGET_PLAN.md step 3.
+// relay_cycles_set_type() stub -- RELAY_LIFE_BUDGET.md.
 // safety_cfg_store.c now calls this (both at init/load and from
 // safety_cfg_store_set_safety_relay_type()) instead of linking the real
 // relay_cycles.c, same "fake the cross-module dependency, don't drag in its
@@ -847,7 +847,7 @@ static void test_version_refuse_older_layout_without_a_migration(void)
 }
 
 // ---------------------------------------------------------------------------
-// RELAY_LIFE_BUDGET_PLAN.md step 3 -- the safety relay (K4) type.
+// RELAY_LIFE_BUDGET.md -- the safety relay (K4) type.
 // ---------------------------------------------------------------------------
 
 static void test_safety_relay_type_defaults_to_contactor_and_pushes_to_relay_cycles(void)
@@ -903,7 +903,7 @@ static void test_safety_relay_type_set_persists_and_roundtrips_after_reload(void
 static void test_safety_relay_type_rejects_ssr(void)
 {
     TEST_SECTION("safety_cfg_store_set_safety_relay_type -- RELAY_TYPE_SSR is REFUSED: the "
-                 "safety relay never offers ssr (RELAY_LIFE_BUDGET_PLAN.md's Request section) -- "
+                 "safety relay never offers ssr (RELAY_LIFE_BUDGET.md's Request section) -- "
                  "this is the second line of defense behind the HTTP POST validator");
 
     fake_kv_reset_all();

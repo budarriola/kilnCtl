@@ -236,7 +236,7 @@
   details#advancedDetails > summary { font-size: 1.05em; cursor: pointer;
     min-height: 32px; display: flex; align-items: center; }
   /* Same 32px touch-target floor and fix shape as details#advancedDetails
-     just above, for the relay-type disclosure (RELAY_LIFE_BUDGET_PLAN.md
+     just above, for the relay-type disclosure (RELAY_LIFE_BUDGET.md
      step 3). */
   details#relayTypeDetails > summary { font-size: 1.05em; cursor: pointer;
     min-height: 32px; display: flex; align-items: center; }
@@ -276,7 +276,7 @@ form fields were last fetched at, shown purely so a mismatch is visible.</p>
 page is UNKNOWN, not a real confirmation, until it reports a newer build.</p>
 
 
-<!-- RELAY_LIFE_BUDGET_PLAN.md step 3: the safety relay (K4) type. Deliberately
+<!-- RELAY_LIFE_BUDGET.md: the safety relay (K4) type. Deliberately
      OUTSIDE the guided flow/Advanced-fields section below -- unlike every
      field there, this is never a Pico param, never staged, and never part
      of the SET_PARAM/COMMIT_CONFIG round trip; it is a local ESP setting
@@ -1395,7 +1395,7 @@ function loadCommissioning() {
     setBodyFlags(data);
     renderCrcLine(data);
     renderGroups(data);
-    // RELAY_LIFE_BUDGET_PLAN.md step 3: reflect the stored safety relay
+    // RELAY_LIFE_BUDGET.md: reflect the stored safety relay
     // type -- ESP-only, always present in this response (never gated on
     // link_up/commissioned the way the Pico-fetched fields above are).
     var relaySel = document.getElementById('relayTypeSelect');
@@ -1447,7 +1447,7 @@ function applyContradictionRule() {
   sync();
 }
 
-// RELAY_LIFE_BUDGET_PLAN.md step 3: saved immediately on change, independent
+// RELAY_LIFE_BUDGET.md: saved immediately on change, independent
 // of the guided flow's/Advanced section's own staged-and-committed writes --
 // see this control's own HTML comment for why. "ssr" is never an option in
 // this <select> at all, so there is nothing for this handler itself to

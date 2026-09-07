@@ -42,7 +42,7 @@ bool uart_bridge_ext_is_on_flash_worker(void);
  * changes the on-disk layout, which is fine here -- unlike run_state.c's
  * blob, this one is diagnostic-only and already treats any size mismatch as
  * "start at zero", so the version add rides the same tolerant path. */
-/* Version 2 (RELAY_LIFE_BUDGET_PLAN.md step 1): adds a fifth counted slot
+/* Version 2 (RELAY_LIFE_BUDGET.md): adds a fifth counted slot
  * (RELAY_CYCLES_SAFETY_INDEX, the safety relay K4) and per-relay type +
  * rated-life override, both persisted so a budget survives reboot before the
  * zones/safety config steps that will actually set the type exist. A v1 blob
@@ -281,7 +281,7 @@ esp_err_t relay_cycles_init(void)
             ESP_LOGW(TAG, "relay cycle blob version %u is newer than this firmware's %u -- refusing to load, "
                      "leaving flash untouched", blob.version, RELAY_CYCLES_VERSION);
         } else if (err == HAL_OK && blob.version == 1 && len == sizeof(relay_cycles_blob_v1_t)) {
-            /* v1 -> v2 migration (RELAY_LIFE_BUDGET_PLAN.md step 1): the old
+            /* v1 -> v2 migration (RELAY_LIFE_BUDGET.md): the old
              * blob is a bare 4-count array read through the SAME `blob`
              * variable's first sizeof(relay_cycles_blob_v1_t) bytes, since
              * v1's layout (version byte + 4 counts) is a strict prefix of
@@ -579,7 +579,7 @@ bool relay_cycles_reset(unsigned relay)
         return false;
     }
 
-    /* opus review finding (MEDIUM, RELAY_LIFE_BUDGET_PLAN.md follow-up audit):
+    /* opus review finding (MEDIUM, RELAY_LIFE_BUDGET.md follow-up audit):
      * the previous version held s_rc.lock across the ENTIRE flash-worker
      * dispatch below to close a data race (see the superseded comment this
      * replaced) -- but uart_bridge_ext_run_on_flash_worker() blocks for a

@@ -89,7 +89,7 @@ esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_reading
 bool zones_config_get_safety_tc_type(uint8_t *out_tc_type) { (void)out_tc_type; return false; }
 bool zones_config_is_valid(void) { return true; }
 
-// relay_cycles_note_safety_edge() -- RELAY_LIFE_BUDGET_PLAN.md step 3.
+// relay_cycles_note_safety_edge() -- RELAY_LIFE_BUDGET.md.
 // safety_apply_status() (safety_link_frames.c) now calls this once per
 // OBSERVED K4 (SAFETY_FLAG_RELAY) transition. Faked as a plain counter, same
 // "cross-module dependency, don't drag in its own NVS machinery" convention
@@ -668,7 +668,7 @@ static void test_fw_version_known_and_dirty_roundtrips(void)
 }
 
 // ---------------------------------------------------------------------
-// RELAY_LIFE_BUDGET_PLAN.md step 3 -- K4 edge counting off consecutive
+// RELAY_LIFE_BUDGET.md -- K4 edge counting off consecutive
 // GET_STATUS frames. relay_cycles_note_safety_edge() is faked as a plain
 // counter above; these tests pin how many times safety_apply_status() (and
 // safety_apply_fw_version()'s boot_id_changed branch) call it.
@@ -710,7 +710,7 @@ static void test_k4_edge_counting_first_frame_counts_zero(void)
 {
     TEST_SECTION("safety_apply_status -- K4 edge counting: the very FIRST status frame this "
                  "link ever sees counts ZERO edges, however K4 reads -- there is no prior "
-                 "observed state to compare against (RELAY_LIFE_BUDGET_PLAN.md step 3's "
+                 "observed state to compare against (RELAY_LIFE_BUDGET.md's "
                  "'unknown, not off' starting state)");
 
     s_stub_relay_cycles_safety_edge_calls = 0;

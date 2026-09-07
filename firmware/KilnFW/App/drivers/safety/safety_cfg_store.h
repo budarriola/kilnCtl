@@ -218,7 +218,7 @@ bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_
  * risking a direct nvs_save_store() call of its own. */
 esp_err_t safety_cfg_store_flush_if_dirty(void);
 
-/* RELAY_LIFE_BUDGET_PLAN.md step 3 -- the safety relay (K4) type. Lives in
+/* RELAY_LIFE_BUDGET.md -- the safety relay (K4) type. Lives in
  * THIS store, next to the SAFETY_CFG_PARAM_TABLE answers above, but is not
  * one of them: unlike every field in that table, it is never fetched from
  * the Pico -- it is purely an ESP-side commissioning answer (the Pico drives
@@ -239,7 +239,7 @@ relay_type_t safety_cfg_store_get_safety_relay_type(void);
  * type, 0) on success, same as the load path.
  *
  * Refuses (nothing changed, returns false) RELAY_TYPE_SSR: the safety relay
- * never offers ssr (RELAY_LIFE_BUDGET_PLAN.md's "Request" section) -- this is
+ * never offers ssr (RELAY_LIFE_BUDGET.md's "Request" section) -- this is
  * the second line of defense behind the HTTP POST validator's own check, so
  * a future caller that reaches this function directly (an MCP tool, a
  * backup restore path) cannot silently persist an invalid type either.

@@ -982,7 +982,7 @@ esp_err_t wifi_provision_http_start(void)
      * measured at the uart_bridges_1 heap stage and the documented ~11.9 kB
      * failure floor -- noise, not a threat. */
     /* 2026-09-06: raised 108 -> 118. diagnostics_http.c's new POST
-     * /api/relay_cycles/reset route (RELAY_LIFE_BUDGET_PLAN.md step 4, commit
+     * /api/relay_cycles/reset route (RELAY_LIFE_BUDGET.md, commit
      * 4a940b89) took diagnostics_http.c from 17 routes to 18, and the real
      * count from 108 to 109 -- one over the 108 cap.
      * tools/check_uri_handler_cap.ps1 caught it exactly as designed (109

@@ -105,7 +105,7 @@ typedef struct {
     bool borrowed;
     uint8_t borrowed_zone_index; /* SAFETY_LINK_BORROWED_ZONE_UNKNOWN if not commissioned on the Pico */
 
-    /* RELAY_LIFE_BUDGET_PLAN.md step 3 -- ESP-only, never fetched from the
+    /* RELAY_LIFE_BUDGET.md -- ESP-only, never fetched from the
      * Pico (see safety_cfg_store_get_safety_relay_type()'s doc comment), so
      * unlike every other field above this is always known/valid, never
      * gated on link_up. */
@@ -830,7 +830,7 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
 /* POST /api/safety/commissioning/relay_type                              */
 /* ---------------------------------------------------------------------- */
 
-/* RELAY_LIFE_BUDGET_PLAN.md step 3. Body: "type=contactor" or "type=mercury"
+/* RELAY_LIFE_BUDGET.md. Body: "type=contactor" or "type=mercury"
  * (http_form's usual application/x-www-form-urlencoded shape) -- deliberately
  * NOT routed through parse_set_param_body()/apply_pairs() above, since this
  * is not a Pico param at all (see safety_cfg_store_get_safety_relay_type()'s

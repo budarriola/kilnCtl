@@ -50,7 +50,7 @@ int g_test_count = 0;
 #include "esp_http_server.h"
 #include "fake_kv.h"
 
-// RELAY_LIFE_BUDGET_PLAN.md step 2: zones_config_store.c now calls
+// RELAY_LIFE_BUDGET.md: zones_config_store.c now calls
 // relay_cycles_set_type() (relay_cycles.h) on load and on every successful
 // save. relay_cycles.c itself is its OWN separate host-test executable
 // (build_host_tests.ps1's "run_state_relay_cycles" step) with real NVS/
@@ -3313,7 +3313,7 @@ static void test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it(void)
 static void test_validate_accepts_relay_type_mercury_rejects_past_it(void)
 {
     TEST_SECTION("validate_zones_cfg / zones_config_set_relay_type -- ZONE_RELAY_TYPE_MAX "
-                 "(2, Mercury) is accepted, 3 is rejected (RELAY_LIFE_BUDGET_PLAN.md step 2)");
+                 "(2, Mercury) is accepted, 3 is rejected (RELAY_LIFE_BUDGET.md)");
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
@@ -3463,7 +3463,7 @@ static void test_post_mode_pid_fuzzy_accepted_by_parser(void)
 static void test_post_relay_type_optional_range_and_preserve(void)
 {
     TEST_SECTION("parse_zone_fields -- z0_relaytype: accepted 0-2, out-of-range refused, omitted preserves "
-                 "the currently-stored value (RELAY_LIFE_BUDGET_PLAN.md step 2)");
+                 "the currently-stored value (RELAY_LIFE_BUDGET.md)");
 
     // Present and in range (Mercury) is accepted and parsed verbatim.
     char body_ok[512];
@@ -5375,7 +5375,7 @@ static void test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr(void)
 
     // THE thing this test is really about: relay_type must land at the legal
     // 0 (ssr) sentinel on EVERY zone (v19 never stored this field at all) --
-    // which is also, per RELAY_LIFE_BUDGET_PLAN.md's design, exactly the
+    // which is also, per RELAY_LIFE_BUDGET.md's design, exactly the
     // correct answer for every existing board's EE2-12NUH heater relays.
     for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
         TEST_CHECK(out_cfg.zones[j].relay_type == 0,

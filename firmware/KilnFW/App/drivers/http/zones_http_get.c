@@ -304,7 +304,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
              * it straight through untouched must never see an absent key
              * mean something different from a zero. */
             "\"timing_profile\":%u,\"normal_current_measured\":%s,\"normal_current_a\":%.3f,"
-            /* RELAY_LIFE_BUDGET_PLAN.md step 2 (ZONES_CFG_VERSION 19->20):
+            /* RELAY_LIFE_BUDGET.md (ZONES_CFG_VERSION 19->20):
              * always emitted, same read-back-and-repost round-trip reasoning
              * as every other always-emitted field above -- the page reads
              * this back and reposts it as z%u_relaytype (POST side:

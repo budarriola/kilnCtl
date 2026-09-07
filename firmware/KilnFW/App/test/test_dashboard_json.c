@@ -632,7 +632,7 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     }
     STATUS_APPEND("]");
 
-    /* RELAY_LIFE_BUDGET_PLAN.md step 4 -- opus review finding: this mirror
+    /* RELAY_LIFE_BUDGET.md -- opus review finding: this mirror
      * had never been updated for relay_life[]/relay_life_tier, so the
      * headroom assertion below was vacuous. Widths match dashboard_json.h's
      * DASHBOARD_JSON_STATUS_BUF_SIZE comment's own worst-case entry: type

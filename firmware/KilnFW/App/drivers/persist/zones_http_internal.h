@@ -156,7 +156,7 @@ esp_err_t nvs_partition_init(const char *partition);
 esp_err_t nvs_load(bool *out_found, bool *out_valid);
 esp_err_t nvs_save(void);
 
-/* RELAY_LIFE_BUDGET_PLAN.md step 2: pushes s_zones.cfg.zones[zone_index]'s
+/* RELAY_LIFE_BUDGET.md: pushes s_zones.cfg.zones[zone_index]'s
  * relay_type out to relay_cycles_set_type() for every relay named in that
  * zone's relay_mask (rated_override left at 0 -- use the type's table value;
  * there is no per-relay override UI yet). Defined in zones_config_store.c

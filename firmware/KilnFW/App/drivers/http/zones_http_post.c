@@ -347,7 +347,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
      * save. */
     s_zones_config_valid = true;
     s_config_generation++;
-    /* RELAY_LIFE_BUDGET_PLAN.md step 2, "on every successful save": this
+    /* RELAY_LIFE_BUDGET.md, "on every successful save": this
      * whole-page submit just validated cleanly and is now live in
      * s_zones.cfg (the "successful" part -- a rejected submission returned
      * long before this line and never reaches here), so push every zone's
