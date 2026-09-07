@@ -154,7 +154,14 @@ function Get-CodeOnlyLines {
         }
         $result += $code
     }
-    return $result
+    # NOTE: `return $result` alone would let PowerShell's pipeline unroll a
+    # single-element (or single-line-file) array down to a bare scalar --
+    # for a one-line source file this silently turns $result from a
+    # 1-element string array into the line's plain String, so the caller's
+    # $codeLines[0] then indexes a single CHARACTER instead of the line and
+    # the CRC/stuff patterns never match. The unary comma forces this to
+    # stay an array of exactly the lines read, regardless of count.
+    return ,$result
 }
 
 # Scope: every .c/.h under firmware/, excluding CommonFW (the one legal
@@ -226,9 +233,30 @@ $allowlistPaths = @(
     (Join-Path $firmwareRoot "UnitTestFw\UnitTest\App\drivers\espInterfaces\uart_protocol.c")
 )
 
+# Concurrent sessions are the norm in this repo: another agent's in-flight
+# negative-test/mutant build can drop a *.c/*.h file under firmware/ (e.g.
+# firmware/KilnFW/App/test/) that exists on disk for only as long as that
+# agent's own check run needs it. This check's purpose (see header comment)
+# is catching a real, committed from-scratch CRC/byte-stuffing reimplementation
+# in OUR code -- a transient untracked scratch file is not that, and letting
+# it fail this build is a false positive with no fix available to whichever
+# session/reader hits it (the file is not theirs to delete). Scope to
+# git-tracked files only: `git ls-files` from $firmwareRoot's repo.
+$repoRootForGit = Split-Path -Parent $firmwareRoot
+$trackedRelPaths = git -C $repoRootForGit ls-files -- 'firmware/*.c' 'firmware/*.h'
+if ($LASTEXITCODE -ne 0 -or $null -eq $trackedRelPaths) {
+    throw "check_link_impl_isolation.ps1: 'git ls-files' failed -- cannot determine which firmware/*.c|*.h files are tracked, refusing to scan untracked/stray files as a substitute"
+}
+$trackedFullPaths = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
+    $trackedRelPaths | ForEach-Object { (Join-Path $repoRootForGit ($_ -replace '/', '\')) }
+), [System.StringComparer]::OrdinalIgnoreCase)
+
 $candidateFiles = Get-ChildItem -Path $firmwareRoot -Recurse -Include *.c, *.h -File |
     Where-Object {
         $full = $_.FullName
+        if (-not $trackedFullPaths.Contains($full)) {
+            return $false  # untracked -- another agent's in-flight file? not this check's concern
+        }
         ($full -notmatch '\\CommonFW\\') -and
         ($full -notmatch '\\build\\') -and
         ($full -notmatch '\\components\\') -and

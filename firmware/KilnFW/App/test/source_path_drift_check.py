@@ -75,6 +75,7 @@ Exit 1: otherwise (missing path, skip-guard-over-missing-path, or the
         fail-closed extraction floor was not met).
 """
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -169,7 +170,33 @@ def resolve_under_bases(repo_root: Path, rel_literal: str) -> bool:
     return False
 
 
-def build_filename_index(repo_root: Path) -> dict:
+def get_tracked_files(repo_root: Path) -> set:
+    """Concurrent sessions are the norm in this repo: another agent's
+    in-flight negative-test/mutant run can drop a stray file (e.g. a
+    fake_bypass_script.py fixture) anywhere under firmware/ or tools/,
+    including directly inside one of this check's own scanned globs
+    (firmware/KilnFW/App/test/*.py). That file is real on disk for only as
+    long as the other agent's own run needs it -- it is not a source-path
+    reference this project actually ships, so it must never be treated as
+    a scan TARGET nor count as evidence a referenced filename exists.
+    Restricting both to `git ls-files` makes this check see the same
+    checked-in tree every session sees, regardless of what else is
+    mid-flight on disk right now."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--", "firmware", "tools"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            f"source_path_drift_check.py: 'git ls-files' failed ({exc}) -- "
+            f"cannot determine which files are tracked, refusing to fall "
+            f"back to scanning untracked/stray files on disk"
+        ) from exc
+    return {repo_root / line for line in out.stdout.splitlines() if line}
+
+
+def build_filename_index(repo_root: Path, tracked_files: set) -> dict:
     index = {}
     for top in ("firmware", "tools"):
         top_dir = repo_root / top
@@ -181,6 +208,8 @@ def build_filename_index(repo_root: Path) -> dict:
             parts = p.relative_to(repo_root).parts
             if any(part in ("build", "node_modules") or part.startswith(".") for part in parts):
                 continue
+            if p not in tracked_files:
+                continue  # untracked -- another agent's in-flight file?
             index.setdefault(p.name, []).append(p)
     return index
 
@@ -270,7 +299,30 @@ def main() -> int:
               "means a directory moved or the globs above are wrong")
         return 1
 
-    filename_index = build_filename_index(repo_root)
+    try:
+        tracked_files = get_tracked_files(repo_root)
+    except RuntimeError as exc:
+        print("SOURCE PATH DRIFT CHECK: FAILED")
+        print(f"  {exc}")
+        return 1
+
+    untracked_targets = [t for t in targets if t not in tracked_files]
+    targets = [t for t in targets if t in tracked_files]
+    for t in untracked_targets:
+        print(
+            f"SOURCE PATH DRIFT CHECK: skipping untracked target "
+            f"{t.relative_to(repo_root).as_posix()} -- another agent's "
+            f"in-flight file?"
+        )
+
+    if not targets:
+        print("SOURCE PATH DRIFT CHECK: FAILED")
+        print("  every discovered target file is untracked -- fail closed, "
+              "this almost certainly means nothing real is checked in under "
+              "the scanned globs")
+        return 1
+
+    filename_index = build_filename_index(repo_root, tracked_files)
     refs_counter = [0]
     problems: list[str] = []
 
