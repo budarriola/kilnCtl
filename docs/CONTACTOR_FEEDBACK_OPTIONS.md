@@ -261,65 +261,19 @@ assessment resolves.
   investigation only, per this task's constraints, with a thermal campaign
   live on the bench rig throughout.
 
-## 7. CT coupling transformer (Hammond 140QEX) — datasheet check before ordering
+## 7. Correction: no coupling transformer, part number was mis-recorded
 
-Roadmap flagged this part for a one-look-before-ordering check: its headline
-inductance spec, 10.62 H, is quoted at 1 kHz, while any CT signal path here
-runs at 60 Hz mains. This section resolves that.
+The Hammond 140QEX referenced in the earlier version of this section, and
+the datasheet analysis built on it (1 kHz vs. 60 Hz inductance, burden
+loading, saturation/distortion margin), do not apply to this hardware. The
+part number was a mis-record. There is no CT coupling/isolation transformer
+in this design.
 
-**What the part actually is.** The 140QEX (Hammond datasheet,
-https://www.hammfg.com/files/parts/pdf/140QEX.pdf) is not a current
-transformer — it is a "Studio Grade" 1:1 audio impedance-matching/isolation
-transformer, 600 Ω center-tapped on both windings. If it is being considered
-here, it would be as a galvanic-isolation coupling stage between a CT
-secondary/burden and an ADC input, not as the CT core itself.
-
-**Datasheet numbers:**
-- Inductance: 10.62 H (primary and secondary), measured at 1.0 kHz, 1.0 V
-  open-circuit (small-signal).
-- Impedance: 64.5 kΩ at 1.0 kHz (consistent with the inductance figure:
-  X_L = 2·π·1000·10.62 ≈ 66.7 kΩ).
-- DCR: primary 72.4 Ω end-to-end (36.2 Ω each half of the center tap);
-  secondary the same.
-- Power rating: 150 mW at ±1.5 dB, but only over **300 Hz–50 kHz**.
-- Frequency response: 20 Hz–20 kHz, ±1 dB, referenced to 1 kHz.
-
-**60 Hz math.** If the 1 kHz inductance held unchanged down to 60 Hz:
-X_L(60 Hz) = 2·π·60·10.62 ≈ 4.0 kΩ. The only burden value in this repo for
-a CT signal path is `R72` = 100 Ω, and it is DNP on all three populated
-channels because the fitted SCT-013-000 clamps are self-burdened
-(`firmware/SaftyFW/docs/CURRENT_SENSE.md` line 214-217) — so no channel
-today actually routes through a burden resistor this transformer would load.
-Even taking a deliberately pessimistic view — the core's permeability
-dropping enough to cut inductance 5x at 60 Hz versus 1 kHz — X_L would still
-be ≈800 Ω, comfortably above a 100 Ω (or even a few-hundred-ohm) burden. So
-as a pure loading question, a 60 Ω–ish burden sees an inductor that is not
-the bottleneck at mains frequency; that part of the "1 kHz quoted, 60 Hz
-applied" worry does not hold up numerically.
-
-**Where the worry does hold up.** The manufacturer's own ±1 dB frequency
-response curve covers 20 Hz–20 kHz — 60 Hz is inside that band, over an
-octave above the low end, which is reassuring for small-signal use. But the
-**power/level spec (150 mW, ±1.5 dB) is only characterized from 300 Hz up.**
-60 Hz is outside the envelope Hammond warrants for level-dependent behavior
-(core saturation, distortion) — this part was designed and tested as an
-audio coupling transformer, and nothing in the datasheet says how it behaves
-at mains frequency under a real signal level, only under a 1 V small-signal
-open-circuit test. The 10.62 H number is real but comes from a measurement
-condition (1 kHz, 1 V OC) that does not match either the intended frequency
-(60 Hz) or likely signal levels of a CT application.
-
-**Conclusion: marginal, not disqualifying.** Electrically, the impedance
-margin at 60 Hz is generous enough (≈4 kΩ nominal, ≈800 Ω even under a
-pessimistic 5x derate, versus a ≤100 Ω burden) that loading/attenuation is
-not expected to be a real problem. What is not covered by the datasheet is
-core behavior — saturation and distortion — at 60 Hz and at whatever signal
-level this design would actually drive it at, since Hammond's own power
-spec starts at 300 Hz. Before ordering: either get a low-frequency
-inductance/distortion figure from Hammond directly, or bench-verify at 60 Hz
-with the actual expected signal level once a sample is in hand, rather than
-extrapolating the 1 kHz number as-is. Also note this part is not currently
-wired into any populated CT channel in this repo (§3/§4 above; the three
-populated channels use self-burdened clamps with no isolation transformer
-in the signal path), so this check has no live circuit to fall out of —
-it is pure pre-purchase due diligence against the datasheet.
+The actual current-sense hardware is split-core current transformer probes
+with a 1 V output at full scale, where the amp rating equals the full-scale
+value (the bench unit is a 1 A probe: 1 A : 1 V, with a ~+59 mV idle
+offset). A summed-heater CT is fitted on RP2040 GPIO28 (2026-09-05). The
+calibration model is `amps_at_full_scale` plus a zero offset. See
+`firmware/SaftyFW/docs/CURRENT_SENSE.md` and `CT_COMMISSIONING_PLAN.md`
+for the full model and commissioning procedure. The 60 Hz inductance
+question this section previously raised is moot and has been dropped.

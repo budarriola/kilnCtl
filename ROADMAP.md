@@ -95,7 +95,6 @@ open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| S | ~~The CT coupling transformer (Hammond 140QEX): one look at the PDF before ordering — 10.62 H is quoted at 1 kHz and applied at 60 Hz~~ Checked 2026-09-06: `docs/CONTACTOR_FEEDBACK_OPTIONS.md` §7 | M5 |
 | S | Time the link-staleness ceiling (1.5 s) and the firing abort (30 s) with a stopwatch. Code is flashed; nobody has held the link down | M6 |
 | M | S9's welded-contactor escalation — by definition needs a welded contactor. **Checked 2026-09-03: SimFW cannot do this — SimFW itself no longer exists** (removed `8553244`, 2026-08-28; `firmware/UnitTestFw` took its place and is unrelated ESP32-S3 bench-instrument firmware — DAC/AD9833/OLED/PCF8575 — with no path to the safety processor's current-sense input at all). Even when SimFW existed, its own removal commit records that `ct_calibration` "needs the fixture to physically drive current into the CT" — S9 (`firmware/SaftyFW/src/safety_guards.c:363-389`) latches only on real `any_current_present`, gated by `in->context_valid`, `in->current_sensing_commissioned` and NOT `in->current_sensing_disabled`; that flag comes from the CT's analog current-transformer signal through `current_sense.c`, not a GPIO a simulator MCU could assert. What would actually be required: a fixture that injects genuine AC current through the CT sense loop while the K4 drive line is confirmed de-energized — i.e. a hardware jig, not firmware simulation — plus a CT actually fitted and commissioned (`ct_installed=yes`; on the bare bench today `ct_installed=no` switches S9 off and reports it off). | M4 |
 | M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
@@ -244,9 +243,9 @@ waiting, not unwritten:
   physically driving current through the CT — a hardware jig, not something
   any firmware simulator asserts over GPIO — plus a CT actually fitted and
   commissioned, since `ct_installed=no` switches S9 off on today's bare bench.
-- The CT coupling transformer: the part is now selected (Hammond 140QEX) and
-  ordering is unblocked, but its 10.62 H figure is quoted at 1 kHz and applied
-  at 60 Hz — one look at the PDF before the order goes in.
+- CT hardware: split-core current transformer probes, 1 V output at full
+  scale (amp rating = full-scale value); no coupling/isolation transformer
+  is used. See `docs/CONTACTOR_FEEDBACK_OPTIONS.md` §7.
 - Link-staleness *timing* (the 1.5 s ceiling, the 30 s firing abort). The Pico
   is on the bench and the code is flashed; nobody has held the link down and
   timed it.
