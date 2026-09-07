@@ -253,7 +253,7 @@ def actions_checks() -> None:
         version_text_again = actions.ACTIONS["INFO: Get FW Version"].run(ctx)
         check(
             "INFO queries stay allowed while incompatible",
-            version_text_again.startswith("protocol_version:"),
+            version_text_again.startswith("uart_protocol_version:"),
             True,
         )
     finally:
