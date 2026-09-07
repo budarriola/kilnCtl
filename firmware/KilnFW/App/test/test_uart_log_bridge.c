@@ -236,7 +236,39 @@ static void test_full_queue_error_evicts_oldest(void)
                "the error line is now queued, at the tail");
 }
 
-static void test_full_queue_non_error_not_privileged(void)
+// 2026-09-07 (log_eviction_2026-09-07.md): eviction protection was widened
+// from ERROR-only to ERROR-or-WARN, since this codebase logs plenty of
+// genuine failures at WARN (persist/NVS failures, safety-link loss,
+// ZONES_DECODE_NEWER-style config refusals) that were previously dropped
+// with no eviction attempt at all under a full boot-burst queue -- silently
+// indistinguishable from never having been logged, the same failure mode
+// commit 20c2a5d5 found and fixed for one specific ERROR-promoted line.
+// This test proves a WARN now survives that same pressure by evicting the
+// oldest routine INFO line, exactly like an ERROR always has; only INFO
+// (routine, non-privileged) is still dropped outright with no eviction.
+static void test_full_queue_warn_now_evicts_oldest(void)
+{
+    ring_test_setup();
+    fill_queue_with_info();
+
+    call_uart_log_vprintf("W (999) noisy: a real failure reported as warning\r\n");
+
+    // Post-fix: the WARN is privileged like an ERROR -- one INFO evicted to
+    // make room, queue stays full, and the WARN itself is queued (not lost).
+    TEST_CHECK(s_dropped_lines == 1, "one drop counted for the evicted INFO line, not the warning");
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue stays full after evict+reinsert");
+
+    char oldest_after[64];
+    ring_entry_text(0, oldest_after, sizeof(oldest_after));
+    TEST_CHECK(strcmp(oldest_after, "I (1) filltag: line1") == 0, "oldest entry (line0) was evicted to make room");
+
+    char newest[64];
+    ring_entry_text(UART_LOG_BRIDGE_QUEUE_LEN - 1, newest, sizeof(newest));
+    TEST_CHECK(strcmp(newest, "W (999) noisy: a real failure reported as warning") == 0,
+               "the warning line itself survived, at the tail");
+}
+
+static void test_full_queue_info_not_privileged(void)
 {
     ring_test_setup();
     fill_queue_with_info();
@@ -244,34 +276,28 @@ static void test_full_queue_non_error_not_privileged(void)
     char oldest_before[64];
     ring_entry_text(0, oldest_before, sizeof(oldest_before));
 
-    call_uart_log_vprintf("W (999) noisy: just a warning\r\n");
-
-    // Not queued: dropped, no eviction attempted, queue contents unchanged.
-    TEST_CHECK(s_dropped_lines == 1, "the warning itself is counted as dropped");
+    // INFO is still routine/non-privileged: dropped outright, no eviction.
+    call_uart_log_vprintf("I (1000) noisy: just info\r\n");
+    TEST_CHECK(s_dropped_lines == 1, "the info line is counted as dropped");
     TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue still full, nothing removed");
     char oldest_after[64];
     ring_entry_text(0, oldest_after, sizeof(oldest_after));
-    TEST_CHECK(strcmp(oldest_before, oldest_after) == 0, "oldest entry untouched -- no eviction for a non-error");
-
-    // Try INFO too, for the same claim.
-    call_uart_log_vprintf("I (1000) noisy: just info\r\n");
-    TEST_CHECK(s_dropped_lines == 2, "the info line is also counted as dropped");
-    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue still full after the info line too");
+    TEST_CHECK(strcmp(oldest_before, oldest_after) == 0, "oldest entry untouched -- no eviction for routine INFO");
 }
 
 // TODO.md's "UART_TASK_ID_WIFI (11) sometimes doesn't register at boot" item:
 // uart_protocol.c's registration-failure log ("task %u: xQueueCreate still
-// failing after 5 attempts...") used to be ESP_LOGW. This test reproduces
-// that exact line, at both the old (W) and fixed (E) level, against a full
-// boot-burst queue -- the state a wifi/thermo/etc. registration failure
-// actually races against per this file's own comment a few lines above
-// (uart_log_bridge_start's HAZARD note names UART_TASK_ID_WIFI directly).
-// It proves the bug mechanically: at W, the board's own account of *why*
-// task 11 didn't register is silently discarded, indistinguishable from the
-// line never having been logged at all -- exactly the "no corresponding
-// failure logged" symptom TODO.md describes, even though the producer code
-// did call ESP_LOG. Promoting it to E (the fix applied alongside this test)
-// makes it eviction-protected like every other boot-critical failure.
+// failing after 5 attempts...") used to be ESP_LOGW, and back when eviction
+// protected ERROR only, that meant it was dropped outright under a full
+// boot-burst queue -- silently indistinguishable from the line never having
+// been logged at all, exactly the "no corresponding failure logged" symptom
+// TODO.md describes. Two fixes have landed since: the callsite was promoted
+// to ESP_LOGE (this file's original fix), and separately, 2026-09-07's audit
+// (log_eviction_2026-09-07.md) widened the eviction policy itself to protect
+// WARN as well as ERROR, since this codebase has plenty of other genuine
+// failures still logged at WARN. This test now proves the line survives a
+// full boot-burst queue at EITHER level -- the callsite's own promotion to E
+// is no longer the only thing standing between this line and being dropped.
 static void test_registration_failure_log_only_survives_as_error(void)
 {
     const char *wifi_failure_line = "task 11: xQueueCreate still failing after 5 attempts -- "
@@ -279,13 +305,13 @@ static void test_registration_failure_log_only_survives_as_error(void)
 
     ring_test_setup();
     fill_queue_with_info();
-    char before_at_w[192];
-    ring_entry_text(0, before_at_w, sizeof(before_at_w));
     call_uart_log_vprintf("W (1234) uart_protocol: %s", wifi_failure_line);
-    char after_at_w[192];
-    ring_entry_text(0, after_at_w, sizeof(after_at_w));
-    TEST_CHECK(strcmp(before_at_w, after_at_w) == 0,
-               "pre-fix (W): the registration-failure line is dropped with no eviction -- silently lost");
+    char newest_at_w[192];
+    ring_entry_text(UART_LOG_BRIDGE_QUEUE_LEN - 1, newest_at_w, sizeof(newest_at_w));
+    char expected_w[192];
+    snprintf(expected_w, sizeof(expected_w), "W (1234) uart_protocol: %s", wifi_failure_line);
+    TEST_CHECK(strcmp(newest_at_w, expected_w) == 0,
+               "post-policy-fix (W): the same line now also survives a full boot-burst queue");
 
     ring_test_setup();
     fill_queue_with_info();
@@ -354,7 +380,8 @@ void run_test_uart_log_bridge(void)
     test_forwards_empty_message_faithfully();
     test_one_enqueue_per_call();
     test_full_queue_error_evicts_oldest();
-    test_full_queue_non_error_not_privileged();
+    test_full_queue_warn_now_evicts_oldest();
+    test_full_queue_info_not_privileged();
     test_registration_failure_log_only_survives_as_error();
     test_room_available_no_eviction();
     test_eviction_bounded_per_call();

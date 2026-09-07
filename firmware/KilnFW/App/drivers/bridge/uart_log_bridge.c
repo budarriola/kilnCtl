@@ -209,31 +209,42 @@ static int uart_log_vprintf(const char *fmt, va_list args)
         memcpy(entry.text + copy_len, marker, marker_len);
         entry.len = (uint8_t)(copy_len + marker_len);
         if (xQueueSend(s_bridge.queue, &entry, 0) != pdTRUE) {
-            /* An ERROR line is the one kind this queue must not lose. The
-             * 2026-08-12 note above says it exactly: the lines dropped
-             * during the boot burst "are exactly app_main's peripheral
-             * bring-up results ... gone precisely when something failed to
-             * come up". That is not hypothetical -- it is why
-             * UART_TASK_ID_WIFI failing to register at boot has never been
-             * chased down (KilnFW TODO.md): the code checks the return value
-             * and logs the failure twice, and both lines land here, in a
-             * full queue, and are discarded. The board's own account of the
-             * failure is destroyed by the transport meant to carry it.
+            /* An ERROR or WARN line is the kind this queue must not lose.
+             * The 2026-08-12 note above says it exactly for ERROR: the lines
+             * dropped during the boot burst "are exactly app_main's
+             * peripheral bring-up results ... gone precisely when something
+             * failed to come up". 2026-09-07 audit (log_eviction_2026-09-07.md):
+             * the same class hits WARN too -- this codebase logs plenty of
+             * genuine failures at WARN, not just ERROR (persist/NVS
+             * failures, safety-link loss, config-decode refusals like
+             * ZONES_DECODE_NEWER, task-start failures), and the eviction
+             * policy used to protect ERROR only. Under boot-burst or
+             * sustained-load pressure those WARN failures were dropped with
+             * no eviction attempted at all -- silently indistinguishable
+             * from never having been logged. Rather than hunt down and
+             * promote each such WARN to ERROR one at a time (a losing game
+             * against every WARN added later), the eviction policy itself
+             * now protects both severities: this is a level-based
+             * "important" flag, not a per-callsite fix. Widening protection
+             * to WARN does not risk an ERROR flood -- promotion of
+             * individual WARNs to ERROR is unnecessary and undesirable now.
              *
              * Growing the queue is NOT the fix and must not be tried again
              * -- see the two reverted attempts above (192, then 256: boot
-             * hang). Instead, buy room for an error by evicting the OLDEST
-             * queued line, which during a boot burst is almost always
-             * routine INFO progress. The evicted line is still counted as
-             * dropped, so the PC-side total stays honest; what changes is
-             * only WHICH line survives when the queue is full, and an error
-             * outranks whatever was queued before it.
+             * hang). Instead, buy room for an error/warning by evicting the
+             * OLDEST queued line, which during a boot burst is almost
+             * always routine INFO progress. The evicted line is still
+             * counted as dropped, so the PC-side total stays honest; what
+             * changes is only WHICH line survives when the queue is full,
+             * and an error or warning outranks whatever routine line was
+             * queued before it.
              *
-             * Deliberately one eviction, not a loop: a storm of errors must
-             * not be able to spin here draining the whole queue, and the
-             * level filter means this path is rare by construction. */
+             * Deliberately one eviction, not a loop: a storm of
+             * errors/warnings must not be able to spin here draining the
+             * whole queue, and the level filter means this path is rare by
+             * construction. */
             bool kept = false;
-            if (level == UART_LOG_LEVEL_ERROR) {
+            if (level == UART_LOG_LEVEL_ERROR || level == UART_LOG_LEVEL_WARN) {
                 uart_log_entry_t evicted;
                 if (xQueueReceive(s_bridge.queue, &evicted, 0) == pdTRUE) {
                     s_dropped_lines++; /* the evicted line, not this one */
