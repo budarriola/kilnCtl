@@ -688,18 +688,65 @@ bool relay_cycles_reset(unsigned relay)
  * snapshot + clear `dirty` under the lock, write the snapshot with the lock
  * released, and on failure re-arm `dirty` with a plain assignment (never
  * clobbering a `dirty=true` a concurrent add() may have set in the
- * meantime). */
-static hal_status_t persist_snapshot_now(void)
+ * meantime).
+ *
+ * REVIEW FOLLOW-UP (MEDIUM, commit 1a04994's own persist_lock): that fix
+ * closed the ordering race but held persist_lock across the inline NVS
+ * commit itself, so relay_cycles_maybe_persist() (executor tick, every 10
+ * min) and relay_cycles_flush() (profile_executor_halt(), reachable from an
+ * httpd Stop request) could still stall each other for a full flash commit
+ * -- exactly the class of stall this module's own tick/lock comments above
+ * already call out for `lock`, just moved one level up to `persist_lock`.
+ * Two changes here:
+ *
+ *   1. The actual write now goes through the flash worker
+ *      (uart_bridge_ext_run_on_flash_worker(), with the same
+ *      uart_bridge_ext_is_on_flash_worker() re-entrancy check
+ *      relay_cycles_reset() already uses above) instead of calling
+ *      persist_snapshot() inline on whichever task is doing the persisting.
+ *      Both known callers' tasks already have internal-SRAM stacks today
+ *      (profile_executor_start.c's tick-loop comment and profile_executor_
+ *      status.c's halt()/httpd-task path), so this is not closing a live
+ *      PSRAM hazard -- it is matching relay_cycles_reset()'s established
+ *      pattern so the flash op always runs on the worker's own stack
+ *      regardless of which task later calls this, and it makes the
+ *      "resource in use" case below (2) meaningful: run_on_flash_worker()'s
+ *      own s_bx_lock is what actually serializes two overlapping writers
+ *      once persist_lock hands one off.
+ *
+ *   2. persist_lock is now taken with a caller-supplied wait instead of
+ *      portMAX_DELAY, and a failure to take it returns HAL_BUSY rather than
+ *      blocking. relay_cycles_maybe_persist() passes 0 (non-blocking): the
+ *      executor tick never waits on someone else's in-flight commit, it
+ *      just leaves `dirty` set and retries on the next tick.
+ *      relay_cycles_flush() passes a bounded wait
+ *      (RELAY_CYCLES_FLUSH_LOCK_WAIT_MS) instead of an unbounded one, so an
+ *      operator's Stop request can no longer be stalled indefinitely behind
+ *      a tick's commit -- it waits a bounded amount, then gives up and
+ *      reports failure (dirty stays set, so the counts are not lost, only
+ *      not yet on flash).
+ *
+ * persist_lock is still needed even with the write itself now serialized by
+ * the flash worker's own s_bx_lock: without it, two callers could each
+ * finish their own snapshot-then-release-lock step in either order and then
+ * race each other into run_on_flash_worker() as separate dispatches, in
+ * which case the OLDER snapshot could win the race into the worker's queue
+ * and be written after the newer one -- the exact bug 1a04994 fixed.
+ * persist_lock brackets snapshot-through-dispatch-completion for that
+ * reason, same as before; only how long a caller is willing to wait for it
+ * changed. Lock order is still persist_lock -> s_rc.lock, never the
+ * reverse -- unchanged from 1a04994. */
+#define RELAY_CYCLES_FLUSH_LOCK_WAIT_MS 3000
+
+static hal_status_t persist_snapshot_now(TickType_t persist_lock_wait_ticks)
 {
-    /* opus review finding (LOW): persist_lock brackets the WHOLE snapshot-
-     * then-write section below, so two overlapping callers (the tick path
-     * and the executor-stop flush) serialize into one another instead of
-     * racing to decide whose snapshot lands last. Taken outermost, released
-     * only after the NVS write and its bookkeeping are done; `lock` is
-     * still taken and released independently underneath for each field
-     * access, so a producer (relay_cycles_add(), etc.) that only ever wants
-     * `lock` is never blocked on `persist_lock`. */
-    xSemaphoreTake(s_rc.persist_lock, portMAX_DELAY);
+    if (xSemaphoreTake(s_rc.persist_lock, persist_lock_wait_ticks) != pdTRUE) {
+        /* Someone else (the other of maybe_persist()/flush()) is already
+         * mid-persist. Nothing to undo -- this call never touched `dirty`
+         * or took a snapshot, so whatever made a persist "due" is still
+         * true and will be retried by the next caller. */
+        return HAL_BUSY;
+    }
 
     reset_persist_job_arg_t snap;
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
@@ -709,7 +756,19 @@ static hal_status_t persist_snapshot_now(void)
     s_rc.dirty = false;
     xSemaphoreGive(s_rc.lock);
 
-    hal_status_t err = persist_snapshot(&snap);
+    /* Same re-entrancy guard as relay_cycles_reset(): run inline if already
+     * on the flash worker's own task, else dispatch (which blocks this
+     * caller until the write completes, same as reset()'s dispatch). */
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
+    esp_err_t submit_err;
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        reset_persist_job(&ctx);
+        submit_err = ctx.err;
+    } else {
+        esp_err_t dispatch_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
+        submit_err = (dispatch_err != ESP_OK) ? dispatch_err : ctx.err;
+    }
+    hal_status_t err = (submit_err == ESP_OK) ? HAL_OK : hal_esp_err_to_status(submit_err);
 
     if (err == HAL_OK) {
         xSemaphoreTake(s_rc.lock, portMAX_DELAY);
@@ -735,9 +794,16 @@ void relay_cycles_maybe_persist(void)
                ((int64_t)hal_time_now_us() - s_rc.last_persist_us) >= (int64_t)RELAY_CYCLES_PERSIST_INTERVAL_S * 1000000;
     xSemaphoreGive(s_rc.lock);
 
-    hal_status_t err = due ? persist_snapshot_now() : HAL_OK;
+    /* Non-blocking: if relay_cycles_flush() (executor stop / httpd Stop) is
+     * already mid-persist, skip this tick entirely rather than stall the
+     * executor tick behind someone else's flash commit -- `dirty` was never
+     * cleared, so the next due tick (or the flush already in flight) picks
+     * it up. */
+    hal_status_t err = due ? persist_snapshot_now(0) : HAL_OK;
 
-    if (err != HAL_OK) {
+    if (err == HAL_BUSY) {
+        ESP_LOGD(TAG, "periodic persist deferred -- a flush is already in progress");
+    } else if (err != HAL_OK) {
         ESP_LOGW(TAG, "periodic persist failed: %s (counts kept in RAM, will retry)", hal_status_to_name(err));
     }
 }
@@ -751,8 +817,16 @@ esp_err_t relay_cycles_flush(void)
     bool dirty = s_rc.dirty;
     xSemaphoreGive(s_rc.lock);
 
-    hal_status_t err = dirty ? persist_snapshot_now() : HAL_OK;
-    if (err != HAL_OK) {
+    /* Bounded wait, not portMAX_DELAY: an operator's Stop request must not
+     * hang indefinitely behind the executor tick's periodic persist. On
+     * timeout the counts are left dirty in RAM (not lost) and this reports
+     * failure rather than pretending the flush happened. */
+    hal_status_t err = dirty ? persist_snapshot_now(pdMS_TO_TICKS(RELAY_CYCLES_FLUSH_LOCK_WAIT_MS)) : HAL_OK;
+    if (err == HAL_BUSY) {
+        ESP_LOGW(TAG, "flush timed out waiting %d ms for an in-progress persist -- counts remain "
+                      "dirty in RAM, will retry on the next persist", RELAY_CYCLES_FLUSH_LOCK_WAIT_MS);
+        return ESP_ERR_TIMEOUT;
+    } else if (err != HAL_OK) {
         ESP_LOGW(TAG, "flush failed: %s", hal_status_to_name(err));
         return hal_status_to_esp_err(err);
     }

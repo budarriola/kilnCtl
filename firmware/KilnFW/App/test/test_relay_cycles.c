@@ -436,14 +436,14 @@ static void test_persist_lock_created_and_back_to_back_persists_keep_the_latest_
     TEST_CHECK(s_rc.persist_lock != NULL, "a dedicated persist_lock is created alongside s_rc.lock");
 
     // First persist: relay 0 at 42.
-    TEST_CHECK(persist_snapshot_now() == HAL_OK, "first persist succeeds");
+    TEST_CHECK(persist_snapshot_now(portMAX_DELAY) == HAL_OK, "first persist succeeds");
 
     // A change lands, then a second persist immediately follows -- the
     // scenario relay_cycles_maybe_persist() (tick, due) racing
     // relay_cycles_flush() (executor stop) produces.
     relay_cycles_add(0x01, 5); // relay 0 -> 47
     s_rc.dirty = true;
-    TEST_CHECK(persist_snapshot_now() == HAL_OK, "second, later persist succeeds");
+    TEST_CHECK(persist_snapshot_now(portMAX_DELAY) == HAL_OK, "second, later persist succeeds");
 
     hal_kv_handle_t h;
     TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
@@ -459,8 +459,55 @@ static void test_persist_lock_created_and_back_to_back_persists_keep_the_latest_
     TEST_CHECK(s_rc.dirty == false, "the second persist cleared dirty; nothing left it stuck set");
 }
 
+// MEDIUM follow-up fix: persist_snapshot_now() now takes s_rc.persist_lock
+// with a caller-supplied wait via xSemaphoreTake() and actually branches on
+// its return value (BUSY vs got-the-lock) -- every earlier test in this file
+// (and every xSemaphoreTake() call the rest of relay_cycles.c makes) ignores
+// that return value entirely, so stubs/freertos/semphr.h defaults it to
+// pdFALSE ("host tests are single-threaded, nothing distinguishes semaphore
+// identities" -- see that header's own comment on
+// g_test_stub_semaphore_take_default). Left at its default, EVERY
+// xSemaphoreTake() in this executable would now read as "failed to take" the
+// moment code starts checking it, which would make persist_snapshot_now()
+// report HAL_BUSY on every call above rather than the successes those tests
+// assert. Set pdTRUE here (nothing in this executable runs after
+// run_test_relay_cycles() -- see test_run_state.c's main()) so "the lock is
+// free" is the default for this file's own tests, matching every existing
+// call site's assumption; the negative test below flips it back to pdFALSE
+// for the one case that specifically wants to prove the busy path.
+static void test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy(void)
+{
+    TEST_SECTION("relay_cycles_maybe_persist -- when persist_lock cannot be taken immediately "
+                 "(a flush is already mid-persist), the tick path skips this cycle instead of "
+                 "blocking, and does not lose the pending change (opus review MEDIUM follow-up: "
+                 "persist_lock used to be portMAX_DELAY on both callers, so the tick and the "
+                 "executor-stop flush could stall each other for a full NVS commit)");
+    reset_all();
+    TEST_CHECK(ensure_lock(), "lock (re-)created after reset_all()'s memset");
+
+    // Force the very next xSemaphoreTake() (persist_snapshot_now()'s
+    // non-blocking take of persist_lock) to report "busy", simulating a
+    // flush() already holding it.
+    g_test_stub_semaphore_take_default = 0; // pdFALSE
+    s_rc.last_persist_us = 0; // guarantees the interval check alone would say "due"
+
+    relay_cycles_maybe_persist();
+
+    TEST_CHECK(s_rc.dirty == true, "a deferred persist must leave dirty set -- the change is not "
+                                   "lost, only not yet written");
+
+    hal_kv_handle_t h;
+    hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    TEST_CHECK(open_err == HAL_NOT_FOUND, "the deferred persist never touched flash at all -- it "
+                                          "returned before taking s_rc.lock or dispatching a write, "
+                                          "so no namespace was ever created");
+
+    g_test_stub_semaphore_take_default = 1; // restore pdTRUE for every test after this one
+}
+
 void run_test_relay_cycles(void)
 {
+    g_test_stub_semaphore_take_default = 1; // pdTRUE -- see comment above test_maybe_persist_skips_...
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
     test_persist_lock_created_and_back_to_back_persists_keep_the_latest_write();
     test_persist_locked_proceeds_normally_on_an_internal_ram_stack();
@@ -473,6 +520,7 @@ void run_test_relay_cycles(void)
     test_reset_rejects_out_of_range_relay();
     test_reset_runs_inline_when_already_on_flash_worker();
     test_reset_does_not_lose_a_concurrent_add();
+    test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }
