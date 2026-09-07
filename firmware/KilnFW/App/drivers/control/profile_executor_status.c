@@ -112,7 +112,15 @@ void profile_executor_halt(void)
      * rather than waiting out the 10-minute interval, so a firing's relay
      * wear survives a power-down right after it stops. Outside the lock --
      * relay_cycles.c takes its own. */
-    relay_cycles_flush();
+    esp_err_t flush_err = relay_cycles_flush();
+    if (flush_err != ESP_OK) {
+        /* No tick will retry this -- the executor is already halted -- so the
+         * contact-cycle counts stay dirty in RAM only until the next periodic
+         * relay_cycles_maybe_persist() from some other run, or a reboot loses
+         * them. Log loudly rather than silently swallow it. */
+        ESP_LOGW(PE_TAG, "relay_cycles_flush() failed at halt: %s -- cycle counts stay dirty in RAM",
+                 esp_err_to_name(flush_err));
+    }
     ESP_LOGI(PE_TAG, "profile executor halted");
 }
 

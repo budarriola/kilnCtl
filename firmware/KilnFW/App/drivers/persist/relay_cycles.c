@@ -720,11 +720,15 @@ bool relay_cycles_reset(unsigned relay)
  *      executor tick never waits on someone else's in-flight commit, it
  *      just leaves `dirty` set and retries on the next tick.
  *      relay_cycles_flush() passes a bounded wait
- *      (RELAY_CYCLES_FLUSH_LOCK_WAIT_MS) instead of an unbounded one, so an
- *      operator's Stop request can no longer be stalled indefinitely behind
- *      a tick's commit -- it waits a bounded amount, then gives up and
- *      reports failure (dirty stays set, so the counts are not lost, only
- *      not yet on flash).
+ *      (RELAY_CYCLES_FLUSH_LOCK_WAIT_MS) instead of an unbounded one, so
+ *      waiting on `persist_lock` itself is now bounded -- it waits a bounded
+ *      amount, then gives up and reports failure (dirty stays set, so the
+ *      counts are not lost, only not yet on flash). This bounds only the
+ *      `persist_lock` wait: once past it, the dispatch into
+ *      bx_run_on_internal_stack() (uart_bridge_ext_run_on_flash_worker())
+ *      still waits portMAX_DELAY on the flash worker, so an operator's Stop
+ *      request can in principle still block indefinitely behind that call,
+ *      not just a tick's commit.
  *
  * persist_lock is still needed even with the write itself now serialized by
  * the flash worker's own s_bx_lock: without it, two callers could each

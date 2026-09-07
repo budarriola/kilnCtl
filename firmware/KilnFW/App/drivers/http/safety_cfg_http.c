@@ -1256,10 +1256,10 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
      * BEGIN frame is lost on the wire, the very first poll below can see a
      * DONE that is actually the previous measurement's stale result --
      * accepting it silently would commit an old channel's old reading under
-     * this request's name. The disambiguator is samples_taken/IN_PROGRESS:
-     * a fresh BEGIN always drives the state to IN_PROGRESS (samples_taken
-     * climbing from 0) before it ever reaches DONE, so DONE is only trusted
-     * once this loop has actually observed that transition for itself. */
+     * this request's name. The disambiguator is `state` reaching IN_PROGRESS:
+     * a fresh BEGIN always drives the state to IN_PROGRESS before it ever
+     * reaches DONE, so DONE is only trusted once this loop has actually
+     * observed that transition for itself. */
     kilnlink_ct_auto_zero_status_t az = {0};
     uint32_t waited_ms = 0;
     bool done = false;
@@ -1305,11 +1305,13 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     // ct_auto_zero_check_postconditions()'s own comment. ---
     bool relays_on_after = have_io && kiln_io_get_relay_shadow(s_hw_io) != 0u;
     uint32_t off_ms_after = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
-    profile_exec_status_t pstat_after;
-    memset(&pstat_after, 0, sizeof(pstat_after));
-    profile_executor_get_status(&pstat_after);
+    // Reuse `pstat` (no longer needed after the precondition check above) rather
+    // than declaring a second ~550 B profile_exec_status_t in this httpd frame --
+    // the httpd task stack is 8192 B with a known 64 B worst-case margin.
+    memset(&pstat, 0, sizeof(pstat));
+    profile_executor_get_status(&pstat);
     bool profile_running_or_paused_after =
-        (pstat_after.state == PROFILE_EXEC_RUNNING || pstat_after.state == PROFILE_EXEC_PAUSED);
+        (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED);
     bool autotune_active_after = autotune_engine_is_active();
     const char *post_refusal = ct_auto_zero_check_postconditions(
         relays_on_after, off_ms_after, waited_ms, profile_running_or_paused_after, autotune_active_after);
