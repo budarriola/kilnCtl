@@ -256,7 +256,7 @@ last.
 | 2 | `cfg_fs_write_atomic()` + temp sweep + flash-worker routing. No callers. | no | none | **DONE, 2026-09-07.** `App/drivers/persist/cfg_fs.c`/`.h` (pure, host-testable, mirrors `log_store.c`'s split) provide mount/read/write-atomic/delete/exists/list; `App/drivers/persist/cfg_fs_mount.c`/`.h` are the device-only glue (`esp_vfs_littlefs_register`, `uart_bridge_ext_run_on_flash_worker()` routing — no callers yet). Host test: `test_cfg_fs.c`, obstructs the temp file's location and asserts the old final file survives untouched. **Negative-tested by breaking the production function** (redirected `cfg_fs_write_atomic()`'s `fopen()` from `tmp_path` to `final_path`, bypassing the temp file entirely): `test_cfg_fs.c:231: write_atomic() reports failure when it cannot create its own temp file` went RED, restored by hand, `git diff` empty (new, untracked file — confirmed identical to the pre-break version by re-running the full green suite). |
 | 3 | Migrate **prefs** (10,11,12,14) — the lowest-stakes items. Read-through + dual-write + `rev` counter. | no | Backup export/import must read/write through the same accessors, not NVS directly — verify `/api/backup/export` output is byte-identical before/after. | Host round-trip; bench: change unit pref, reboot, power-cut during write. **Items 11 (unit pref), 10 (ramp assist), 12 (display power), 14 (TZ) DONE, 2026-09-07.** Item 3 (relay names) **DONE, 2026-09-07** (see step 5's close-out note, since it travels with zones config administratively but reuses this same generic bridge). |
 | 4 | Migrate **profiles** (5,6) and **firing stats** (7). | no | **Highest interaction.** Profile export/import and `backup_import.c` both go through `profiles_http_get()/_save()/_delete()` — keep them as the sole entry points so the storage swap is invisible. Explicitly re-test profile export → factory reset → import. | Host: 8-profile fill, delete, re-save. Bench: export/import round trip; confirm `prof_used` bitmap path is gone, not merely unused. **Item 5 (user profile slots 0..7) DONE, 2026-09-07** — see the note immediately below the table. Item 6 (hidden-builtin mask) and item 7 (firing stats) are **NOT done**, still NVS-only. |
-| 5 | Migrate **zones config** (1,2,3) + **kiln config slots** (8) + **adaptive tune** (9). Schema 22 becomes `"schema": 22`; migration chain retained. Add the pre-fire interlock: refuse to start a firing if the config FS did not mount. | no | Backup format version stays as-is; export is regenerated from the same getters. | Host: every version 1..22 fixture file parses to the same struct the blob chain produces — **bind the JSON reader to the C migration chain with vector comparison**, per `project_binding_a_python_mirror_to_c`. Bench: full firing on migrated config, then `ota_rollback_esp()` and confirm the rolled-back build reads the same gains (this is the trap being tested). **Item 1 (the `zones_cfg_t` blob itself: PID gains, FOPDT, coupling matrix, guards, wiring, per-zone tc_type) DONE, 2026-09-07, read-through + dual-write** — see the note immediately below the table. Item 3 (relay names) is **also DONE, 2026-09-07** — a SEPARATE NVS key/blob (`relay_names_cfg_t`, its own `relay_names_save()`), dual-written through the generic `pref_cfg_fs.h` bridge rather than this bespoke module — see "Step 3/5 close-out: relay names + TZ" below the step-3 note. Item 2 (zone normals) is **NOT done** — still NVS-only, same as kiln config slots (8) and adaptive tune (9). The pre-fire interlock is **NOT done** — no caller refuses a firing on a failed `cfg` mount yet. |
+| 5 | Migrate **zones config** (1,2,3) + **kiln config slots** (8) + **adaptive tune** (9). Schema 22 becomes `"schema": 22`; migration chain retained. Add the pre-fire interlock: refuse to start a firing if the config FS did not mount. | no | Backup format version stays as-is; export is regenerated from the same getters. | Host: every version 1..22 fixture file parses to the same struct the blob chain produces — **bind the JSON reader to the C migration chain with vector comparison**, per `project_binding_a_python_mirror_to_c`. Bench: full firing on migrated config, then `ota_rollback_esp()` and confirm the rolled-back build reads the same gains (this is the trap being tested). **Item 1 (the `zones_cfg_t` blob itself: PID gains, FOPDT, coupling matrix, guards, wiring, per-zone tc_type) DONE, 2026-09-07, read-through + dual-write** — see the note immediately below the table. Item 3 (relay names) is **also DONE, 2026-09-07** — a SEPARATE NVS key/blob (`relay_names_cfg_t`, its own `relay_names_save()`), dual-written through the generic `pref_cfg_fs.h` bridge rather than this bespoke module — see "Step 3/5 close-out: relay names + TZ" below the step-3 note. Item 8 (kiln config slots) is **also DONE, 2026-09-07** — see the "Step 5 (item 8 — kiln config slots only)" note below the step-4 note. Item 2 (zone normals) and item 9 (adaptive tune) are **NOT done** — still NVS-only. The pre-fire interlock is **NOT done** — no caller refuses a firing on a failed `cfg` mount yet. |
 | 6 | Migrate **relay cycle counters** (4). | no | counters appear in backup export | Bench soak: confirm the 600 s write cadence lands and survives 24 h. |
 | 7 | *(Owner-gated, not scheduled)* Stop dual-writing to NVS. **Not cheaply reversible** — this is the point of no return for rollback. | no | none | Requires an explicit owner decision that no older firmware will be booted again. |
 
@@ -620,6 +620,87 @@ and item 7 (firing stats) are NOT done — still NVS-only.
   `git diff` shows nothing for it by construction — confirmed instead by
   rerunning the full suite green again and diffing the restored line
   character-for-character against what was there before the break.
+
+**Step 5 (item 8 — kiln config slots only), 2026-09-07 — done, host-proven,
+board-absent by construction.** Item 2 (zone normals) and item 9 (adaptive
+tune) are still **NOT done** — NVS-only. The pre-fire interlock (refuse a
+firing if `cfg` did not mount) is still **NOT done** either.
+
+- **Shape**: unlike `profiles_cfg_fs.c`'s per-slot files, the whole saved-
+  configs store — every slot, `active_id`, `next_id` — was ALREADY one NVS
+  blob under one key (`kiln_cfg_store.c`'s `NVS_KEY_STORE`/`kilncfgs`), so
+  this bridge copies `zones_config_cfg_fs.c`'s single-document shape instead:
+  one file (`kiln_configs.json`), one rev counter for the whole document.
+  Every mutating call (save/clone/apply/delete/rename) already funnels
+  through `kiln_cfg_store.c`'s one `nvs_save_store()`, so bumping the rev
+  there once — including on delete — satisfies the "bump the rev on both
+  save and delete" rule `profiles_cfg_fs.c` established, generalized to a
+  single document rather than a per-slot array.
+- **New files**: `App/drivers/persist/kiln_cfg_store_internal.h` (the
+  current-version `kiln_cfg_entry_t`/`kiln_cfg_store_blob_t` layout, moved out
+  of `kiln_cfg_store.c` so the bridge module can share it without the whole
+  internal layout becoming part of the public `kiln_cfg_store.h`) and
+  `App/drivers/persist/kiln_cfg_store_cfg_fs.c`/`.h`. File format: 4-byte
+  little-endian `rev` + a byte-for-byte `kiln_cfg_store_blob_t`, always at the
+  CURRENT version — this store has no wire-format migration chain of its own
+  beyond `kiln_cfg_store.c`'s existing v1→v2 NVS migration, which only ever
+  runs against the NVS blob (a `cfg`-file was never produced by a v1-era
+  build, since this bridge postdates v2); a file found at any other version
+  is simply treated as invalid, same as absent/corrupt.
+- **Tie-break, STRICT**: `file_rev > nvs_rev`, never `>=` — same reasoning as
+  `zones_config_cfg_fs.c`/`profiles_cfg_fs.c`, written correctly from the
+  start. `check_cfg_fs_tie_break.ps1` passes against it.
+- **Delete handling / stale-delete-not-resurrected**: proven directly rather
+  than via a second per-slot rev array (there is only one rev for the whole
+  document): a delete whose file write fails leaves the file at the
+  pre-delete rev still showing the deleted slot `in_use`; NVS advances past
+  it. A later load adopts NVS (strictly higher rev) and resyncs the file,
+  confirmed to no longer carry the deleted slot —
+  `test_cfg_fs_stale_delete_not_resurrected` in `test_kiln_cfg_store.c`.
+- **Partition-absent / mount-failed**: `cfg_fs_is_available()` false (every
+  board today) makes every call a no-op deferring to the NVS candidate,
+  proven by `test_cfg_fs_partition_absent_falls_through_to_nvs_only` and
+  `test_cfg_fs_mount_failed_falls_through_to_nvs_only`.
+- **Stack**: `kiln_cfg_store_blob_t` is several KB (`KILN_CFG_MAX_COUNT`
+  slots, each a full `ZONES_CONFIG_BLOB_MAX_SIZE` zones-config blob) — too
+  large for a bare local array on a task stack given this codebase's incident
+  history. Every buffer of that size in `kiln_cfg_store_cfg_fs.c` is
+  heap-allocated (`malloc`/`free`), the same choice `kiln_cfg_store.c`'s own
+  v1-migration path already made for the identical reason.
+- **Flash-worker wiring (requirement 6) explicitly NOT done in this pass**:
+  `cfg_fs_mount.c`'s device-write-function wiring/assert
+  (`cfg_fs_assert_device_write_fns_installed()`/
+  `cfg_fs_install_device_write_fns()`) is out of this task's scope by brief
+  — `kiln_cfg_store_cfg_fs_*_write_fn()` defaults to the host-safe
+  `cfg_fs_write_atomic()` and is never wired to
+  `cfg_fs_write_atomic_device()`. This is a real gap (flagged, not silently
+  left): once that wiring lands for `zones_config_cfg_fs.c`/`pref_cfg_fs.c`/
+  `profiles_cfg_fs.c`, this module needs the identical line added alongside
+  them. No flash-worker reentrancy hazard is live today either way — every
+  caller of `kiln_cfg_store.c`'s public API already runs off the flash worker
+  (same `caller_stack_is_external()` guard the module already had).
+- **Tests**: added to the existing `test_kiln_cfg_store.c` (kept in the
+  "main" host-test executable, since `kiln_cfg_store.c` is `#include`d
+  directly there for its `static` state) — partition-absent, mount-failed,
+  NVS-fallback-then-migrate, dual-write sync across a mixed save/delete
+  sequence, divergence tie-break both directions, equal-rev-adopts-NVS (the
+  rollback round trip), stale-delete-not-resurrected, interrupted-write-
+  leaves-old-store-intact. Full suite green (6839/6844; the 5 failures are
+  `test_dualwrite_window.c`, another session's in-flight, explicitly
+  off-limits work). `tools/run_all_checks.ps1`: 62/64; the 2 failures
+  (`check_source_path_drift.ps1`'s `dualwrite_window.c` allowlist entry,
+  `check_test_has_assertions.ps1`'s `test_dualwrite_window.c` vacuous test)
+  are the same concurrent, out-of-scope pass — `check_cfg_fs_tie_break.ps1`
+  and `check_c_files_in_cmakelists.ps1` are both green against this module.
+- **Negative-tested the tie-break fix itself**: flipped
+  `kiln_cfg_store_cfg_fs_resolve()`'s `if (file_rev > nvs_rev)` to
+  `if (file_rev >= nvs_rev)` (production code). `check_cfg_fs_tie_break.ps1`
+  correctly flagged it (warning, since the file was still untracked at that
+  point); reran the host-test suite: went RED, shortest failing line
+  `test_kiln_cfg_store.c:1071: NVS wins the EQUAL-rev tie -- the edit made on
+  rolled-back firmware is NOT discarded in favour of the stale file`.
+  Restored the line by hand; `diff` against a saved pre-break copy of the
+  file confirmed byte-identical, and the full suite passed green again.
 
 Only **step 1** needs a partition-table change, and it is append-only into the
 free tail — no existing partition moves or resizes, same discipline every prior

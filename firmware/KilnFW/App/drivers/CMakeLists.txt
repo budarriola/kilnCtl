@@ -219,9 +219,12 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/log_store.c"
                        "persist/log_store_mount.c"
                        "persist/cfg_fs.c"
+                       "persist/cfg_fs_format_gate.c"
                        "persist/cfg_fs_mount.c"
                        "persist/cfg_fs_status.c"
                        "persist/pref_cfg_fs.c"
+                       "persist/dualwrite_window.c"
+                       "http/dualwrite_window_http.c"
                        "http/log_http.c"
                        "owners/relay_authority.c"
                        "persist/relay_cycles.c"
@@ -234,6 +237,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "safety/crash_report.c"
                        "persist/nvs_report.c"
                        "http/factory_reset.c"
+                       "http/cfg_fs_format_http.c"
                        "http/dashboard_http.c"
                        # dashboard_http.c split 2026-09-04 (ROADMAP.md M15,
                        # the 1500-line rule) -- see
@@ -309,6 +313,14 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/zones_config_convert.c"
                        "persist/zones_config_migrate.c"
                        "persist/kiln_cfg_store.c"
+                       "persist/kiln_cfg_store_cfg_fs.c"
+                       # kiln config slots filesystem move, 2026-09-07
+                       # (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, "kiln
+                       # config slots" item) -- read-through/dual-write
+                       # bridge to the `cfg` LittleFS partition for the
+                       # whole saved-configs store (one document, unlike
+                       # profiles_cfg_fs.c's per-slot files -- see that
+                       # module's own header comment for why).
                        "http/kiln_cfg_http.c"
                        "safety/safety_cfg_store.c"
                        "http/safety_cfg_http.c"

@@ -1123,7 +1123,12 @@ try {
     # from this list (added to the comment/count but never wired to an
     # Invoke-HostTestExe call, or vice versa) fails loud instead of depending on
     # this comment staying accurate by hand.
-    $totalExpected = 30
+    # 30 -> 31 (this pass): a concurrent pass added test_cfg_fs_mount_
+    # reentrancy.c as its own 31st Invoke-HostTestExe call (grep count above
+    # confirms 31 real calls exist) without bumping this constant, which is
+    # exactly the silent-mismatch failure mode this comment's own history
+    # describes -- caught by this same gate, not introduced by it.
+    $totalExpected = 31
     Write-Host ""
     Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
     if ($script:buildFailures.Count -gt 0) {

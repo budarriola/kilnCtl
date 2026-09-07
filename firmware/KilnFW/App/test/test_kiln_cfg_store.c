@@ -38,11 +38,25 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#define TKCF_MKDIR(p) _mkdir(p)
+#define TKCF_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define TKCF_MKDIR(p) mkdir((p), 0755)
+#define TKCF_RMDIR(p) rmdir(p)
+#endif
 
 #include "test_common.h"
 
 #include "esp_err.h"
 #include "fake_kv.h"
+
+#include "cfg_fs.h"
 
 // Test-only malloc seam for nvs_load_store()'s v1-migration-buffer
 // allocation (kiln_cfg_store.c:234ish, `malloc(sizeof(*v1))`) -- proves the
@@ -790,6 +804,371 @@ static void test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack(void)
     fake_kv_reset_all();
 }
 
+// ---------------------------------------------------------------------------
+// kiln_cfg_store_cfg_fs.c coverage -- the `cfg` LittleFS read-through/
+// dual-write bridge for the WHOLE saved-configs store (one document, one
+// rev counter -- see that module's header comment for why this differs
+// from profiles_cfg_fs.c's per-slot files). Same test shapes as
+// test_zones_config_cfg_fs.c/test_relay_names_cfg_fs.c, driven here through
+// the real public API (kiln_cfg_store_save_current/_delete/_apply) plus
+// direct access to s_store/s_kiln_cfg_rev/nvs_save_store()/
+// nvs_load_store_with_cfg_fs(), all reachable because kiln_cfg_store.c is
+// #included directly into this TU.
+// ---------------------------------------------------------------------------
+
+static const char *KCFG_SCRATCH_BASE = "cfg_fs_test_kiln_cfg_store";
+
+static void reset_state_cfg_fs(void)
+{
+    reset_state(); // s_store to empty/no-active, stubs, interlock
+
+    // Same "delete known filenames before rmdir" fix class as
+    // test_zones_config_cfg_fs.c's reset_all() -- a leftover file from a
+    // prior run of this binary otherwise defeats TKCF_RMDIR (only succeeds
+    // against an empty directory).
+    char path[600];
+    snprintf(path, sizeof(path), "%s/.tmp/%s", KCFG_SCRATCH_BASE, KILN_CFG_STORE_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", KCFG_SCRATCH_BASE, KILN_CFG_STORE_FILE_PATH);
+    remove(path);
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", KCFG_SCRATCH_BASE);
+    TKCF_RMDIR(tmp);
+    TKCF_RMDIR(KCFG_SCRATCH_BASE);
+    TKCF_MKDIR(KCFG_SCRATCH_BASE);
+
+    cfg_fs_deinit();
+    kiln_cfg_store_cfg_fs_reset_write_fn_for_test();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    s_kiln_cfg_rev = 0; // process-wide dual-write rev static -- see its own comment
+}
+
+// 1. Partition absent (today's real state on every board): save/load must
+//    behave exactly like plain NVS save/load.
+static void test_cfg_fs_partition_absent_falls_through_to_nvs_only(void)
+{
+    TEST_SECTION("kiln_cfg_store cfg_fs: partition absent -- behaves exactly like NVS-only");
+    reset_state_cfg_fs();
+    TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
+
+    int32_t id = -1;
+    char reason[96];
+    TEST_CHECK(kiln_cfg_store_save_current("absent", -1, &id, reason, sizeof(reason)), "save-as-new succeeds");
+
+    kiln_cfg_store_blob_t raw;
+    uint32_t rev = 999;
+    bool raw_valid = true;
+    kiln_cfg_store_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(!raw_valid && rev == 0, "no file was ever written -- cfg_fs_is_available() gated every file op");
+}
+
+// 2. Mount failed: cfg_fs_init() against a nonexistent directory fails, and
+//    behavior degrades to NVS-only, same as partition-absent.
+static void test_cfg_fs_mount_failed_falls_through_to_nvs_only(void)
+{
+    TEST_SECTION("kiln_cfg_store cfg_fs: cfg_fs mount FAILED -- falls through to NVS, non-fatal");
+    reset_state_cfg_fs();
+
+    esp_err_t mount_err = cfg_fs_init("this_directory_does_not_exist_at_all_kcfg", NULL);
+    TEST_CHECK(mount_err != ESP_OK, "cfg_fs_init() against a nonexistent base dir fails, as documented");
+    TEST_CHECK(!cfg_fs_is_available(), "cfg_fs reports unavailable after a failed mount");
+
+    int32_t id = -1;
+    char reason[96];
+    TEST_CHECK(kiln_cfg_store_save_current("unmounted", -1, &id, reason, sizeof(reason)),
+               "save-as-new still succeeds (NVS side, unaffected by the failed file-side mount)");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id, "the NVS value is still adopted correctly");
+
+    cfg_fs_deinit();
+}
+
+// 3. NVS fallback + lazy migration: first load with no file migrates one to
+//    disk; a second load (in-RAM wiped) proves the file, not just NVS,
+//    holds the same content.
+static void test_cfg_fs_nvs_fallback_then_file_preferred_after_migration(void)
+{
+    TEST_SECTION("kiln_cfg_store cfg_fs: NVS fallback on first load migrates to file; second load prefers "
+                 "the file");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    int32_t id = -1;
+    char reason[96];
+    TEST_CHECK(kiln_cfg_store_save_current("migrate", -1, &id, reason, sizeof(reason)),
+               "save-as-new succeeds (dual-write: file first, then NVS)");
+
+    bool exists = false;
+    TEST_CHECK(cfg_fs_exists(KILN_CFG_STORE_FILE_PATH, &exists) == ESP_OK && exists,
+               "the save's dual-write actually created the file");
+
+    // Simulate a fresh boot: wipe in-RAM state, re-run the load path.
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id, "reloaded store's active id matches what was saved");
+    char name_buf[KILN_CFG_NAME_MAX_LEN + 1];
+    TEST_CHECK(kiln_cfg_store_get_name(id, name_buf, sizeof(name_buf)) && strcmp(name_buf, "migrate") == 0,
+               "reloaded store's name matches what was saved");
+
+    kiln_cfg_store_blob_t raw;
+    uint32_t rev = 0;
+    bool raw_valid = false;
+    kiln_cfg_store_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 1, "the file itself holds a valid, rev-1 copy");
+    TEST_CHECK(raw.active_id == id, "file content matches the saved store");
+}
+
+// 4. Dual-write keeps both sides in sync across several mutations (a save
+//    AND a delete), each bumping the shared whole-document rev.
+static void test_cfg_fs_dual_write_keeps_file_and_nvs_in_sync(void)
+{
+    TEST_SECTION("kiln_cfg_store cfg_fs: repeated saves/deletes keep file and NVS in sync (incrementing "
+                 "rev on both)");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char reason[96];
+    int32_t id_a = -1, id_b = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("A", -1, &id_a, reason, sizeof(reason)), "save 1 (rev 1)");
+    TEST_CHECK(kiln_cfg_store_save_current("B", -1, &id_b, reason, sizeof(reason)), "save 2 (rev 2)");
+    TEST_CHECK(kiln_cfg_store_delete(id_a), "delete of A (rev 3)");
+
+    kiln_cfg_store_blob_t raw;
+    uint32_t rev = 0;
+    bool raw_valid = false;
+    kiln_cfg_store_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 3, "file rev tracks all three mutations, including the delete");
+
+    int found_b = 0, found_a = 0;
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        if (raw.entries[i].in_use && raw.entries[i].id == id_b) {
+            found_b = 1;
+        }
+        if (raw.entries[i].in_use && raw.entries[i].id == id_a) {
+            found_a = 1;
+        }
+    }
+    TEST_CHECK(found_b && !found_a, "the file reflects the delete -- B present, A gone");
+
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    char name_buf[KILN_CFG_NAME_MAX_LEN + 1];
+    TEST_CHECK(kiln_cfg_store_get_name(id_b, name_buf, sizeof(name_buf)) && strcmp(name_buf, "B") == 0,
+               "NVS agrees with the file -- no divergence after the mixed save/delete sequence");
+    TEST_CHECK(!kiln_cfg_store_get_name(id_a, name_buf, sizeof(name_buf)),
+               "the deleted entry is gone on both sides");
+}
+
+// 5. Divergence tie-break, BOTH directions.
+static esp_err_t kcfg_failing_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
+static void test_cfg_fs_divergence_tie_break_both_directions(void)
+{
+    TEST_SECTION("kiln_cfg_store cfg_fs: divergence tie-break picks the higher rev in both directions, "
+                 "and resyncs the loser");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char reason[96];
+    int32_t id1 = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("rev1", -1, &id1, reason, sizeof(reason)), "rev 1 saved to both sides");
+
+    // Simulate a file write failure: NVS advances to rev 2, file stays at
+    // rev 1 with the OLD content.
+    kiln_cfg_store_cfg_fs_set_write_fn(kcfg_failing_write_fn);
+    int32_t id2 = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("rev2_nvs_only", -1, &id2, reason, sizeof(reason)),
+               "rev 2 save still reports OK -- NVS write is what it depends on, not the file write");
+    kiln_cfg_store_cfg_fs_reset_write_fn_for_test();
+
+    kiln_cfg_store_blob_t raw_before;
+    uint32_t rev_before = 0;
+    bool raw_valid_before = false;
+    kiln_cfg_store_cfg_fs_load_raw(&raw_before, &rev_before, &raw_valid_before);
+    TEST_CHECK(raw_valid_before && rev_before == 1, "file is stuck at rev 1 -- the failed write never landed");
+
+    // NVS rev (2) > file rev (1): load must adopt NVS and resync the file.
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    char name_buf[KILN_CFG_NAME_MAX_LEN + 1];
+    TEST_CHECK(kiln_cfg_store_get_name(id2, name_buf, sizeof(name_buf)) &&
+                   strcmp(name_buf, "rev2_nvs_only") == 0,
+               "NVS (higher rev) wins the tie-break, not the stale file");
+
+    kiln_cfg_store_blob_t raw_after;
+    uint32_t rev_after = 0;
+    bool raw_valid_after = false;
+    kiln_cfg_store_cfg_fs_load_raw(&raw_after, &rev_after, &raw_valid_after);
+    TEST_CHECK(raw_valid_after && rev_after == 2, "the file was resynced from NVS as a side effect");
+
+    // Normal direction: one more ordinary dual-write, both sides in sync
+    // again.
+    int32_t id3 = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("rev3", -1, &id3, reason, sizeof(reason)), "rev 3 saved normally");
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    TEST_CHECK(kiln_cfg_store_get_name(id3, name_buf, sizeof(name_buf)) && strcmp(name_buf, "rev3") == 0,
+               "file/NVS agree again after the normal save");
+}
+
+// 6. EQUAL revs with differing content must adopt NVS, not the stale file --
+//    the rollback round trip the rev counter exists for.
+static void test_cfg_fs_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
+{
+    TEST_SECTION("kiln_cfg_store cfg_fs: equal revs with differing content adopt NVS (rolled-back-firmware "
+                 "edit survives a roll-forward)");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char reason[96];
+    int32_t id1 = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("before_rollback", -1, &id1, reason, sizeof(reason)),
+               "rev 1 dual-written to both sides");
+
+    // Act like firmware that predates the rev counter: rewrite ONLY the NVS
+    // blob (via the module's own save path minus the rev bump), leaving
+    // kilncfgrv at 1 and the file at rev 1/old content.
+    kiln_cfg_store_blob_t rolled_back = s_store;
+    strncpy(rolled_back.entries[0].name, "rolled_edit", KILN_CFG_NAME_MAX_LEN);
+    rolled_back.entries[0].name[KILN_CFG_NAME_MAX_LEN] = '\0';
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+                   "test setup: NVS opened for the pre-dual-write-style blob rewrite");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_STORE, &rolled_back, sizeof(rolled_back)) == HAL_OK,
+                   "test setup: NVS blob rewritten WITHOUT touching kilncfgrv, exactly as older firmware would");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "test setup: NVS commit");
+        hal_kv_close(&h);
+    }
+
+    // Confirm the fixture really is the equal-rev case.
+    kiln_cfg_store_blob_t file_raw;
+    uint32_t file_rev = 0;
+    bool file_raw_valid = false;
+    kiln_cfg_store_cfg_fs_load_raw(&file_raw, &file_rev, &file_raw_valid);
+    TEST_CHECK(file_raw_valid && file_rev == 1 && strcmp(file_raw.entries[0].name, "before_rollback") == 0,
+               "fixture check: the file still holds the OLD content at rev 1");
+    {
+        hal_kv_handle_t h;
+        uint32_t nvs_rev = 0;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+                   "fixture check: NVS opened read-only");
+        TEST_CHECK(hal_kv_get_u32(&h, NVS_KEY_STORE_REV, &nvs_rev) == HAL_OK && nvs_rev == 1,
+                   "fixture check: kilncfgrv is still 1 -- file_rev == nvs_rev, the EQUAL-rev case");
+        hal_kv_close(&h);
+    }
+
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    TEST_CHECK(strcmp(s_store.entries[0].name, "rolled_edit") == 0,
+               "NVS wins the EQUAL-rev tie -- the edit made on rolled-back firmware is NOT discarded in "
+               "favour of the stale file");
+
+    kiln_cfg_store_cfg_fs_load_raw(&file_raw, &file_rev, &file_raw_valid);
+    TEST_CHECK(file_raw_valid && strcmp(file_raw.entries[0].name, "rolled_edit") == 0,
+               "the losing file was resynced from NVS, so the divergence does not persist across boots");
+}
+
+// 7. Stale-delete-not-resurrected: a delete that only lands on NVS (file
+//    write fails) must not let the stale file's still-in_use entry come
+//    back on a later load -- proven through the SAME strict tie-break
+//    (higher rev wins) rather than a separate per-slot mechanism, since
+//    this store is one document (see kiln_cfg_store_cfg_fs.h "SHAPE").
+static void test_cfg_fs_stale_delete_not_resurrected(void)
+{
+    TEST_SECTION("kiln_cfg_store cfg_fs: a delete that fails to land on the file cannot resurrect the "
+                 "deleted slot on a later load");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char reason[96];
+    int32_t id = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("doomed", -1, &id, reason, sizeof(reason)),
+               "rev 1: slot saved to both sides");
+
+    // Delete lands on NVS (rev 2) but the file write for it fails -- the
+    // file is left holding the pre-delete document (the slot still in_use)
+    // at rev 1.
+    kiln_cfg_store_cfg_fs_set_write_fn(kcfg_failing_write_fn);
+    TEST_CHECK(kiln_cfg_store_delete(id), "rev 2: delete succeeds on NVS even though the file write fails");
+    kiln_cfg_store_cfg_fs_reset_write_fn_for_test();
+
+    kiln_cfg_store_blob_t file_raw;
+    uint32_t file_rev = 0;
+    bool file_raw_valid = false;
+    kiln_cfg_store_cfg_fs_load_raw(&file_raw, &file_rev, &file_raw_valid);
+    TEST_CHECK(file_raw_valid && file_rev == 1, "fixture check: the stale file is still at rev 1");
+    int stale_still_in_use = 0;
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        if (file_raw.entries[i].in_use && file_raw.entries[i].id == id) {
+            stale_still_in_use = 1;
+        }
+    }
+    TEST_CHECK(stale_still_in_use, "fixture check: the stale file still shows the deleted slot as in_use");
+
+    // A later boot's load must adopt NVS (rev 2, higher), NOT the stale
+    // file -- the deleted slot must not come back.
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    char name_buf[KILN_CFG_NAME_MAX_LEN + 1];
+    TEST_CHECK(!kiln_cfg_store_get_name(id, name_buf, sizeof(name_buf)),
+               "the deleted slot did NOT resurrect -- NVS's higher rev (reflecting the delete) won");
+
+    kiln_cfg_store_cfg_fs_load_raw(&file_raw, &file_rev, &file_raw_valid);
+    TEST_CHECK(file_raw_valid && file_rev == 2, "the stale file was resynced -- it no longer shows the "
+                                                 "deleted slot as in_use");
+    stale_still_in_use = 0;
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        if (file_raw.entries[i].in_use && file_raw.entries[i].id == id) {
+            stale_still_in_use = 1;
+        }
+    }
+    TEST_CHECK(!stale_still_in_use, "resynced file no longer carries the deleted slot");
+}
+
+// 8. Interrupted write leaves old-or-new: an orphaned temp file (crash
+//    between fsync and rename) must never be visible through
+//    kiln_cfg_store_cfg_fs_load_raw() -- only the last COMMITTED content is
+//    ever readable.
+static void test_cfg_fs_interrupted_write_leaves_old_or_new(void)
+{
+    TEST_SECTION("kiln_cfg_store cfg_fs: an interrupted file write leaves the OLD committed store intact, "
+                 "never a partial one");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char reason[96];
+    int32_t id = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("committed", -1, &id, reason, sizeof(reason)),
+               "an initial, fully-committed save lands");
+
+    // Manufacture a crash-orphaned temp file directly on disk, same fixture
+    // style as test_cfg_fs.c/test_zones_config_cfg_fs.c.
+    char tmp_path[600];
+    snprintf(tmp_path, sizeof(tmp_path), "%s/.tmp/%s", KCFG_SCRATCH_BASE, KILN_CFG_STORE_FILE_PATH);
+    FILE *f = fopen(tmp_path, "wb");
+    TEST_CHECK(f != NULL, "test setup: orphaned temp file created");
+    if (f) {
+        static const char partial[] = "not even close to a valid rev+blob";
+        fwrite(partial, 1, sizeof(partial), f);
+        fclose(f);
+    }
+
+    kiln_cfg_store_blob_t raw;
+    uint32_t rev = 0;
+    bool raw_valid = false;
+    kiln_cfg_store_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 1 && strcmp(raw.entries[0].name, "committed") == 0,
+               "the OLD committed store reads back untouched -- the orphaned temp file (rename never ran) "
+               "is invisible through the real read path");
+}
+
 void run_test_kiln_cfg_store(void)
 {
     test_save_clone_apply_roundtrip();
@@ -811,4 +1190,15 @@ void run_test_kiln_cfg_store(void)
     test_nvs_load_store_current_version_full_size_happy_path();
     test_nvs_save_store_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack();
+
+    test_cfg_fs_partition_absent_falls_through_to_nvs_only();
+    test_cfg_fs_mount_failed_falls_through_to_nvs_only();
+    test_cfg_fs_nvs_fallback_then_file_preferred_after_migration();
+    test_cfg_fs_dual_write_keeps_file_and_nvs_in_sync();
+    test_cfg_fs_divergence_tie_break_both_directions();
+    test_cfg_fs_equal_rev_divergence_adopts_nvs_not_the_stale_file();
+    test_cfg_fs_stale_delete_not_resurrected();
+    test_cfg_fs_interrupted_write_leaves_old_or_new();
+
+    cfg_fs_deinit();
 }

@@ -12,6 +12,9 @@
 #include "ota_state.h"
 #include "zones_config_accessors.h"
 
+#include "kiln_cfg_store_internal.h"
+#include "kiln_cfg_store_cfg_fs.h"
+
 static const char *TAG = "kiln_cfg_store";
 
 /* kiln_nvs (0x18D000, 64KB) already holds zones/rules/relay_cycles/run_state
@@ -32,18 +35,29 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
  * namespace. */
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_STORE "kilncfgs"
+/* Separate tiny NVS key for the dual-write rev counter, deliberately NOT a
+ * field inside kiln_cfg_store_blob_t -- same reasoning as
+ * zones_config_store.c's NVS_KEY_ZONES_REV: a rev counter that lived inside
+ * the versioned blob would itself need a migration branch every time it
+ * changed, and older firmware rewriting the blob without knowing about the
+ * counter is exactly the rolled-back-firmware case the STRICT tie-break
+ * (kiln_cfg_store_cfg_fs.c) has to detect. */
+#define NVS_KEY_STORE_REV "kilncfgrv"
 NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_STORE);
+NVS_KEY_LEN_CHECK(NVS_KEY_STORE_REV);
 
-/* Bump whenever kiln_cfg_store_blob_t's on-flash layout changes -- mirrors
- * ZONES_CFG_VERSION's role in zones_http.c. Version 2 is current; version 1
- * is still readable via nvs_load_store()'s migration branch
- * (migrate_store_v1_to_current() below), the same discipline
- * migrate_zones_cfg_v1_to_current() established for zones_cfg_t. A future
- * bump needs another branch added alongside that one. */
-#define KILN_CFG_STORE_VERSION 2
-
-/* v1's blob ceiling. ZONES_CONFIG_BLOB_MAX_SIZE was widened 512 -> 640 on
+/* KILN_CFG_STORE_VERSION (currently 2) and the current-version
+ * kiln_cfg_entry_t/kiln_cfg_store_blob_t layout now live in
+ * kiln_cfg_store_internal.h, shared with kiln_cfg_store_cfg_fs.c (the `cfg`
+ * LittleFS dual-write bridge for this whole store, docs/
+ * FILESYSTEM_USER_DATA_PLAN.md section 5's "kiln config slots" item) -- see
+ * that header for the version-bump/migration discipline this mirrors from
+ * zones_http.c's ZONES_CFG_VERSION. The frozen v1 layout below stays
+ * private here: nothing outside this file's own migration path ever needs
+ * it.
+ *
+ * v1's blob ceiling. ZONES_CONFIG_BLOB_MAX_SIZE was widened 512 -> 640 on
  * 2026-08-30 (zone_cfg_t gained the four PID_EXPANSION_PLAN.md Phase 2
  * fields), and because that macro sizes a member of the PERSISTED struct
  * below -- not just a runtime ceiling -- widening it changed
@@ -52,36 +66,6 @@ NVS_KEY_LEN_CHECK(NVS_KEY_STORE);
  * corruption and silently discarded every named kiln config and active_id.
  * Frozen here so the v1 layout can still be read and migrated. */
 #define KILN_CFG_STORE_BLOB_MAX_SIZE_V1 512u
-
-/* One saved kiln config slot. blob/blob_len hold whatever
- * zones_config_export_blob() produced at save time -- an opaque byte string
- * to this module, sized against zones_http.h's ZONES_CONFIG_BLOB_MAX_SIZE
- * ceiling so this struct's layout never has to change just because
- * zone_cfg_t grew a field (that only ever changes zones_config_blob_size()'s
- * RUNTIME return value, not this fixed-size array). */
-typedef struct {
-    uint8_t in_use;
-    int32_t id;
-    char name[KILN_CFG_NAME_MAX_LEN + 1];
-    uint16_t blob_len;
-    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
-} kiln_cfg_entry_t;
-
-typedef struct {
-    uint8_t version;
-    /* KILN_CFG_NO_ACTIVE_ID (-1) if nothing is currently applied-and-tracked
-     * as the "starting point" config -- see kiln_cfg_store_init()'s doc
-     * comment (kiln_cfg_store.h) for the three boot-fallback outcomes this
-     * drives. */
-    int32_t active_id;
-    /* Monotonic; never reused, even across a delete -- so a stale id a
-     * client cached from before a delete can never silently resolve to a
-     * DIFFERENT config that later reused the same number. Starts at 1 (0 is
-     * never assigned) purely so "id == 0" reads as obviously-uninitialized
-     * in a debug dump; nothing tests against 0 specially otherwise. */
-    int32_t next_id;
-    kiln_cfg_entry_t entries[KILN_CFG_MAX_COUNT];
-} kiln_cfg_store_blob_t;
 
 /* ---- Frozen v1 on-flash layout -------------------------------------------
  * Used ONLY to reinterpret a stored v1 blob during migration. Never grown,
@@ -152,6 +136,18 @@ static void migrate_store_v1_to_current(const kiln_cfg_store_blob_v1_t *src, kil
 
 static kiln_cfg_store_blob_t s_store;
 
+/* Dual-write rev counter for the whole store document -- see
+ * kiln_cfg_store_cfg_fs.h's header comment ("SHAPE") for why this is ONE
+ * counter for the whole blob rather than a per-slot one like profiles_cfg_fs.c:
+ * every mutation (save/clone/apply/delete/rename) already funnels through
+ * nvs_save_store() below, so bumping it there once covers every slot,
+ * including a delete -- exactly the "bump the rev on both save and delete"
+ * discipline profiles_cfg_fs.c established, generalized to a single-document
+ * store. Process-wide static, same convention as zones_config_store.c's
+ * s_zones_cfg_rev: it is NOT reset by anything short of a real
+ * nvs_load_store() resync. */
+static uint32_t s_kiln_cfg_rev = 0;
+
 /* ---- NVS ------------------------------------------------------------------ */
 
 /* Copied from zones_http.c's nvs_partition_init() (see that file for the
@@ -185,14 +181,20 @@ static void reset_to_defaults(void)
  * the current layout. */
 static hal_status_t nvs_save_store(void);
 
-static void nvs_load_store(void)
+/* Returns true iff s_store now holds something trustworthy from NVS (either
+ * the current-version happy path, or a successful v1 migration); false for
+ * every "defaults stand" branch. kiln_cfg_store_cfg_fs_resolve() needs this
+ * flag as its own `nvs_valid` input -- the same "found/valid must never be
+ * reconstructed from a zeroed struct" fix zones_http.c's nvs_load_from()
+ * already applies (see that function's FIX 1 comment). */
+static bool nvs_load_store(void)
 {
     reset_to_defaults();
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
-        return; /* HAL_NOT_FOUND (never saved) or partition trouble -- defaults stand */
+        return false; /* HAL_NOT_FOUND (never saved) or partition trouble -- defaults stand */
     }
 
     /* Read the size first, so a v1-sized blob can be migrated instead of
@@ -201,7 +203,7 @@ static void nvs_load_store(void)
     err = hal_kv_get_blob(&h, NVS_KEY_STORE, NULL, &stored_len);
     if (err != HAL_OK) {
         hal_kv_close(&h);
-        return; /* nothing stored, or unreadable -- defaults stand */
+        return false; /* nothing stored, or unreadable -- defaults stand */
     }
 
     if (stored_len == sizeof(kiln_cfg_store_blob_v1_t)) {
@@ -224,7 +226,7 @@ static void nvs_load_store(void)
         if (!v1) {
             hal_kv_close(&h);
             ESP_LOGW(TAG, "kiln_cfg_store v1 migration buffer alloc failed -- defaults stand");
-            return;
+            return false;
         }
         size_t v1_len = sizeof(*v1);
         err = hal_kv_get_blob(&h, NVS_KEY_STORE, v1, &v1_len);
@@ -232,13 +234,13 @@ static void nvs_load_store(void)
         if (err != HAL_OK || v1_len != sizeof(*v1)) {
             ESP_LOGW(TAG, "kiln_cfg_store v1 blob could not be re-read -- defaults stand");
             free(v1);
-            return;
+            return false;
         }
         if (v1->version != 1) {
             ESP_LOGW(TAG, "kiln_cfg_store blob is v1-SIZED but claims version %u -- treating as corrupt",
                      (unsigned)v1->version);
             free(v1);
-            return;
+            return false;
         }
         migrate_store_v1_to_current(v1, &s_store);
         free(v1);
@@ -250,7 +252,7 @@ static void nvs_load_store(void)
             ESP_LOGW(TAG, "kiln_cfg_store v1->v%u rewrite failed: %s -- will re-migrate next boot",
                      (unsigned)KILN_CFG_STORE_VERSION, hal_status_to_name(save_err));
         }
-        return;
+        return true;
     }
 
     /* Read directly into s_store -- no separate whole-store scratch buffer.
@@ -266,7 +268,7 @@ static void nvs_load_store(void)
     hal_kv_close(&h);
     if (err != HAL_OK) {
         reset_to_defaults(); /* nothing stored, or unreadable, or a partial read -- defaults stand */
-        return;
+        return false;
     }
     if (len != sizeof(s_store)) {
         /* Wrong size for ANY version's claimed layout is genuine corruption
@@ -276,10 +278,10 @@ static void nvs_load_store(void)
         ESP_LOGW(TAG, "kiln_cfg_store blob is the wrong size -- treating as corrupt, resetting to an "
                       "empty store rather than risking a half-understood layout");
         reset_to_defaults();
-        return;
+        return false;
     }
     if (s_store.version == KILN_CFG_STORE_VERSION) {
-        return; /* current version, right size -- happy path, s_store already holds it */
+        return true; /* current version, right size -- happy path, s_store already holds it */
     }
     if (s_store.version < KILN_CFG_STORE_VERSION) {
         /* Reachable only for a version between 1 (handled by the size-based
@@ -292,7 +294,7 @@ static void nvs_load_store(void)
                       "migration chain exists yet -- treating as corrupt, resetting to an empty store",
                  (unsigned)s_store.version, (unsigned)KILN_CFG_STORE_VERSION);
         reset_to_defaults();
-        return;
+        return false;
     }
     /* s_store.version > KILN_CFG_STORE_VERSION: written by newer firmware
      * than this build -- the same firmware-rollback case zones_http.c's
@@ -314,6 +316,51 @@ static void nvs_load_store(void)
                   "load, flash data left untouched",
              (unsigned)s_store.version, (unsigned)KILN_CFG_STORE_VERSION);
     reset_to_defaults();
+    return false;
+}
+
+/* Reads NVS_KEY_STORE_REV -- the whole-store dual-write rev counter (see
+ * s_kiln_cfg_rev's own comment). Same "0 if never written" convention as
+ * zones_config_store.c's zones_cfg_rev_load(). */
+static uint32_t kiln_cfg_rev_load(void)
+{
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return 0;
+    }
+    uint32_t rev = 0;
+    err = hal_kv_get_u32(&h, NVS_KEY_STORE_REV, &rev);
+    hal_kv_close(&h);
+    return err == HAL_OK ? rev : 0;
+}
+
+/* Wraps nvs_load_store() with the `cfg` LittleFS read-through/dual-write
+ * policy (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, "kiln config slots"
+ * item) -- exactly the shape zones_config_store.c's nvs_load() wraps
+ * nvs_load_from() with. kiln_cfg_store_cfg_fs_resolve() never touches NVS
+ * itself; it only decides whether the file or the NVS candidate above wins,
+ * and may write a resync copy to whichever side lost. On every board today
+ * (no `cfg` partition mounted) this is a fast no-op that hands the NVS
+ * candidate straight back unchanged. */
+static void nvs_load_store_with_cfg_fs(void)
+{
+    bool nvs_valid = nvs_load_store();
+    uint32_t nvs_rev = kiln_cfg_rev_load();
+
+    kiln_cfg_store_blob_t resolved;
+    uint32_t resolved_rev = nvs_rev;
+    bool used_file = false;
+    bool trustworthy =
+        kiln_cfg_store_cfg_fs_resolve(&s_store, nvs_valid, nvs_rev, &resolved, &resolved_rev, &used_file);
+    s_kiln_cfg_rev = resolved_rev;
+    if (used_file) {
+        s_store = resolved;
+    }
+    /* !trustworthy means neither side had anything valid -- s_store is
+     * already the defaults nvs_load_store()'s own invalid-branch left in
+     * place; nothing further to do. */
+    (void)trustworthy;
 }
 
 /* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
@@ -344,13 +391,31 @@ static hal_status_t nvs_save_store(void)
                       "worker for the established pattern.");
         return HAL_NOT_READY;
     }
+    s_store.version = KILN_CFG_STORE_VERSION;
+
+    /* Dual-write, FILE FIRST -- docs/FILESYSTEM_USER_DATA_PLAN.md's
+     * "kiln config slots" item, requirement 1: the file write's own failure
+     * is logged inside kiln_cfg_store_cfg_fs_save() and otherwise swallowed
+     * here, since NVS below is still authoritative for older firmware and
+     * for every board today (no `cfg` partition mounted -- ESP_ERR_INVALID_
+     * STATE is the expected, silent outcome). Every mutating public
+     * function in this module (save/clone/apply/delete/rename) funnels
+     * through this one function, so bumping the rev here once covers a
+     * delete exactly the same as a save -- see s_kiln_cfg_rev's own comment
+     * for why this store needs no separate per-slot rev the way
+     * profiles_cfg_fs.c does. */
+    s_kiln_cfg_rev++;
+    (void)kiln_cfg_store_cfg_fs_save(&s_store, s_kiln_cfg_rev);
+
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
         return err;
     }
-    s_store.version = KILN_CFG_STORE_VERSION;
     err = hal_kv_set_blob(&h, NVS_KEY_STORE, &s_store, sizeof(s_store));
+    if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_STORE_REV, s_kiln_cfg_rev);
+    }
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
@@ -479,7 +544,7 @@ esp_err_t kiln_cfg_store_init(void)
         reset_to_defaults();
         return hal_status_to_esp_err(part_err);
     }
-    nvs_load_store();
+    nvs_load_store_with_cfg_fs();
 
     /* Boot-time active-config restore -- see kiln_cfg_store_init()'s doc
      * comment (kiln_cfg_store.h) for the exact three-outcome fallback this
