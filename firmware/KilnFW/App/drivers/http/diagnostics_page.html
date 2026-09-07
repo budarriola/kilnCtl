@@ -389,6 +389,43 @@ survives a reboot; it is shown here and in the dashboard status so it is never s
   <div class="row"><span class="label">Touch calibration</span><span class="value" id="touchCal">--</span></div>
 </div>
 <div class="card" id="nvsCard"><div class="row"><span class="label">NVS sections</span><span class="value">loading&hellip;</span></div></div>
+
+<h2>Config filesystem</h2>
+<!-- docs/CONFIG_FILESYSTEM.md -- GET /api/cfgfs (diagnostics_http.c,
+     cfgfs_status_get_handler()) already exists and already reports
+     mounted/status/reason, capacity, file_count/files, tmp_entries_now and
+     dual_write -- this section is the first place any of that becomes
+     visible to an operator instead of only curl. Own independent poll
+     (pollCfgFs below), same pattern as pollPartitions()/pollCrash(): a
+     slow/failed fetch here must never delay or blank any other section.
+     UNMOUNTED-BANNER PLACEMENT: #cfgFsUnmountedBanner below is the loud,
+     always-checked-first element; #cfgFsFormatSlot right after it is the
+     deliberately-left-empty slot for the format/reformat control and its
+     confirmation dialog -- a separate pass owns that flow end to end
+     (button, confirmation copy, POST handler) and should render into that
+     slot rather than adding a new one. Nothing in this section writes to
+     cfg_fs_status.c, cfg_fs_format_gate.[ch] or pref_cfg_fs.c. -->
+<div class="card" id="cfgFsUnmountedBanner" style="display:none; background:var(--ui-accent-5); color:#fff;">
+  <div class="row" style="border-bottom-color:rgba(255,255,255,0.35);">
+    <span class="label" style="color:#fff;">Config filesystem is NOT mounted</span>
+    <span class="value" style="color:#fff;" id="cfgFsUnmountedReason">--</span>
+  </div>
+  <p style="margin:0.3em 0 0; color:#fff;">Every setting is running from NVS only right now.
+  Changes made while this banner is showing are <strong>not file-backed</strong> and will not
+  appear in a filesystem backup or the raw <code>cfg</code> files -- they still take effect and
+  still survive a reboot via NVS, this only affects the migration this page tracks.</p>
+</div>
+<!-- Left empty on purpose -- see the block comment above this section. -->
+<div id="cfgFsFormatSlot"></div>
+<div class="card" id="cfgFsCard"><div class="row"><span class="label">Config filesystem</span><span class="value">loading&hellip;</span></div></div>
+<p class="note">"Stale-temp reaped" above 0 means the last write to that item was interrupted
+(power cut or reset) before its atomic rename committed -- the previously-committed file is
+untouched and still what gets read, so this is not data loss, but a count that stays nonzero
+across repeated checks (rather than clearing itself) is worth a look. "Diverged" on any item
+means its file and NVS copies briefly disagreed; the newer revision wins and resyncs the older
+one automatically, so a diverged flag that keeps recurring rather than clearing is the thing to
+report, not a single occurrence.</p>
+
 <h2>Danger Zone</h2>
 <div class="danger-card" id="dangerCard">
   <p><strong>Manual relay/heater/thermocouple bench test.</strong> This section
@@ -908,6 +945,100 @@ here:</p>
     });
   }
 
+  // --- Config filesystem (docs/CONFIG_FILESYSTEM.md, GET /api/cfgfs) ------
+  // fmtBytes/renderCfgFs/pollCfgFs are new; everything else in this block
+  // (fetchJsonTimeout, the .card/.row idiom, kcEscapeHtml) is reused as-is.
+  function fmtBytes(n) {
+    if (n == null) return 'unknown';
+    if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MiB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KiB';
+    return n + ' B';
+  }
+  // Named items this page knows how to explain rather than just echo --
+  // anything /api/cfgfs reports that ISN'T one of these still gets a row
+  // via the generic fallback path in renderCfgFs() below, so a newly
+  // migrated item shows up (as "file-backed") the moment the endpoint
+  // reports it, with no page-side allowlist edit required.
+  var CFG_FS_ITEM_LABELS = { zones: 'Zone configuration' };
+  function cfgFsItemLabel(key) {
+    return CFG_FS_ITEM_LABELS[key] || key;
+  }
+  function renderCfgFs(j) {
+    var banner = document.getElementById('cfgFsUnmountedBanner');
+    if (!j.mounted) {
+      banner.style.display = 'block';
+      document.getElementById('cfgFsUnmountedReason').textContent = j.reason || j.status || 'unknown reason';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    var rows = '';
+    rows += '<div class="row"><span class="label">Mounted</span><span class="value" style="color:' +
+            (j.mounted ? 'var(--ok)' : 'var(--ui-accent-5)') + '">' +
+            (j.mounted ? 'yes' : 'NO -- ' + window.kcEscapeHtml(j.status || 'unmounted')) + '</span></div>';
+
+    if (j.capacity && j.capacity.known) {
+      rows += '<div class="row"><span class="label">Used</span><span class="value">' +
+              fmtBytes(j.capacity.used_bytes) + ' of ' + fmtBytes(j.capacity.total_bytes) + '</span></div>';
+      rows += '<div class="row"><span class="label">Free</span><span class="value">' +
+              fmtBytes(j.capacity.free_bytes) + '</span></div>';
+    } else {
+      rows += '<div class="row"><span class="label">Capacity</span><span class="value">unknown</span></div>';
+    }
+
+    rows += '<div class="row"><span class="label">File count</span><span class="value">' +
+            (j.file_count != null ? j.file_count : 'n/a') + '</span></div>';
+
+    var tmp = j.tmp_entries_now;
+    var tmpColor = (tmp != null && tmp > 0) ? 'var(--ui-accent-1)' : 'var(--muted)';
+    rows += '<div class="row"><span class="label">Stale-temp reaped</span><span class="value" style="color:' +
+            tmpColor + '">' + (tmp != null ? tmp : 'n/a') + '</span></div>';
+
+    var dw = j.dual_write || {};
+    var fileBacked = [];
+    var nvsOnly = Array.isArray(dw.nvs_only) ? dw.nvs_only.slice() : [];
+    var anyDiverged = false;
+    for (var key in dw) {
+      if (key === 'nvs_only' || !Object.prototype.hasOwnProperty.call(dw, key)) continue;
+      var item = dw[key];
+      if (item && item.file_backed) {
+        fileBacked.push({ key: key, item: item });
+        if (item.diverged) anyDiverged = true;
+      } else {
+        nvsOnly.push(key);
+      }
+    }
+    for (var i = 0; i < fileBacked.length; i++) {
+      var fb = fileBacked[i];
+      var divergedNote = fb.item.diverged ?
+        ' <span style="color:var(--ui-accent-5); font-weight:bold;">DIVERGED</span>' : '';
+      rows += '<div class="row"><span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(fb.key)) +
+              '</span><span class="value">file-backed (rev ' + fb.item.file_rev + ')' + divergedNote +
+              '</span></div>';
+    }
+    for (var n = 0; n < nvsOnly.length; n++) {
+      rows += '<div class="row"><span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(nvsOnly[n])) +
+              '</span><span class="value" style="color:var(--muted)">NVS-only</span></div>';
+    }
+    if (anyDiverged) {
+      rows += '<div class="row"><span class="label" style="color:var(--ui-accent-5)">Warning</span>' +
+              '<span class="value" style="color:var(--ui-accent-5)">at least one item diverged between its file ' +
+              'and NVS copies at last check -- see the note below.</span></div>';
+    }
+
+    document.getElementById('cfgFsCard').innerHTML = rows;
+  }
+  function pollCfgFs() {
+    return fetchJsonTimeout('/api/cfgfs', 4000).then(function (j) {
+      if (!j || typeof j.mounted !== 'boolean') throw new Error('malformed /api/cfgfs response');
+      renderCfgFs(j);
+    }).catch(function () {
+      document.getElementById('cfgFsCard').innerHTML =
+        '<div class="row"><span class="label">Config filesystem</span><span class="value">' +
+        'could not load (board unreachable, or the request failed/timed out)</span></div>';
+    });
+  }
+
   // --- Thermocouple faults (folded in from thermo_faults_page.html) -------
   // Same MAX31856_MASK_xxx / MAX31856_FAULT_xxx bit layout as MAX31856.h and
   // ui_page_thermo_faults.c's format_fault_summary() -- SR shares bit
@@ -1126,6 +1257,7 @@ here:</p>
   pollThermoFaults();
   scheduleThermoFaults();
   pollPartitions();
+  pollCfgFs();
 
   // UI_PLAN.md item 7: re-render the board-health temperatures and the
   // thermocouple-fault cards' CJ readings in the new unit immediately on
@@ -1356,6 +1488,11 @@ here:</p>
   }, 1000);
   setInterval(dangerPoll, 3000);
   dangerPoll(); // authoritative state on load/refresh, before any local countdown runs
+  // A failed mount / a stuck tmp_entries_now count is not something to only
+  // catch on page load -- 10s (slower than dangerPoll's 3s; this state is
+  // far less time-critical) so a mount that fails mid-session still shows
+  // up without a manual refresh.
+  setInterval(pollCfgFs, 10000);
 })();
 </script>
 </body>
