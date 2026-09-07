@@ -211,6 +211,74 @@ def get_heap_status(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def get_cfgfs_status(host: Optional[str] = None) -> str:
+    """Report the `cfg` LittleFS partition's live state, over HTTP GET
+    /api/cfgfs (diagnostics_http.c: cfgfs_status_get_handler()).
+
+    docs/FILESYSTEM_USER_DATA_PLAN.md's user-data-on-a-filesystem migration
+    left the `cfg` partition otherwise invisible -- mounted or not, how full,
+    what files exist, and whether the zones-config dual-write's file and NVS
+    copies agree were only findable by grepping the boot log. This is the
+    fix: mounted/status/reason, capacity (total/used/free bytes, "unknown" if
+    esp_littlefs_info() itself failed -- never reported as a fake zero),
+    file_count/files (name + size_bytes), tmp_entries_now (files currently
+    sitting in `.tmp/` -- nonzero shortly after boot on an otherwise-idle
+    board suggests an interrupted write; see cfgfs's own field-level doc for
+    why this is a live snapshot, not the historical count reaped at mount),
+    and dual_write.zones (file_backed/file_rev/nvs_rev/diverged -- diverged
+    means a prior file write failed and only NVS advanced) plus nvs_only, the
+    list of items docs/FILESYSTEM_USER_DATA_PLAN.md section 5 has not yet
+    migrated off NVS.
+
+    Same host-resolution order as get_heap_status()."""
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+
+    resolved = _ota_resolve_host(host)
+    try:
+        cfgfs = dashboard_http_client.get_cfgfs_status(resolved)
+    except dashboard_http_client.DashboardHttpError as exc:
+        return f"error: {exc} (host={resolved})"
+
+    lines = [f"host={resolved}", f"mounted={cfgfs.get('mounted')} status={cfgfs.get('status')!r}"]
+    if not cfgfs.get("mounted"):
+        lines.append(f"reason: {cfgfs.get('reason')}")
+
+    cap = cfgfs.get("capacity") or {}
+    if cap.get("known"):
+        lines.append(
+            f"capacity: total={cap.get('total_bytes')} B used={cap.get('used_bytes')} B "
+            f"free={cap.get('free_bytes')} B"
+        )
+    else:
+        lines.append("capacity: unknown")
+
+    files = cfgfs.get("files") or []
+    lines.append(f"file_count={cfgfs.get('file_count')}")
+    for f in files:
+        size = f.get("size_bytes")
+        lines.append(f"  {f.get('name')}: {size if size is not None else 'unknown'} B")
+
+    tmp_now = cfgfs.get("tmp_entries_now")
+    if tmp_now:
+        lines.append(f"!!! tmp_entries_now={tmp_now} -- a write may be interrupted or repeatedly failing")
+    else:
+        lines.append(f"tmp_entries_now={tmp_now}")
+
+    dual = cfgfs.get("dual_write") or {}
+    zones = dual.get("zones") or {}
+    if zones.get("file_backed"):
+        diverged_note = " !!! DIVERGED -- a prior file write failed, only NVS advanced" if zones.get("diverged") else ""
+        lines.append(f"dual_write.zones: file_rev={zones.get('file_rev')} nvs_rev={zones.get('nvs_rev')}{diverged_note}")
+    else:
+        lines.append("dual_write.zones: not file-backed yet (NVS only)")
+    nvs_only = dual.get("nvs_only") or []
+    if nvs_only:
+        lines.append(f"still NVS-only: {', '.join(nvs_only)}")
+
+    return "\n".join(lines)
+
+
+@_srv._tool()
 def get_fw_version() -> str:
     """Report the running firmware's git commit, dirty flag, build time, and
     whether its UART protocol version matches this copy of pc_tools.

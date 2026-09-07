@@ -357,5 +357,149 @@ class FacadeDiscoverabilityTest(unittest.TestCase):
         self.assertNotIn("get_heap_status", published)
 
 
+def _sample_cfgfs(**overrides) -> dict:
+    """A realistic GET /api/cfgfs body (cfg_fs_status.c's shape), mounted
+    with a couple of files and a healthy (non-diverged) dual-write."""
+    body = {
+        "mounted": True,
+        "status": "mounted",
+        "capacity": {"known": True, "total_bytes": 524288, "used_bytes": 4096, "free_bytes": 520192},
+        "file_count": 2,
+        "files": [
+            {"name": "zones.json", "size_bytes": 640},
+            {"name": "prefs.json", "size_bytes": 96},
+        ],
+        "tmp_entries_now": 0,
+        "dual_write": {
+            "zones": {"file_backed": True, "file_rev": 5, "nvs_rev": 5, "diverged": False},
+            "nvs_only": ["prefs", "profiles", "kilncfg_slots", "adaptive_tune", "relay_cycles"],
+        },
+    }
+    body.update(overrides)
+    return body
+
+
+class GetCfgfsStatusClientTest(unittest.TestCase):
+    """dashboard_http_client.get_cfgfs_status() -- GET /api/cfgfs, mocked."""
+
+    def test_parses_mounted_body(self):
+        body = json.dumps(_sample_cfgfs()).encode("utf-8")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            cfgfs = dh.get_cfgfs_status("10.0.0.5")
+        self.assertTrue(cfgfs["mounted"])
+        self.assertEqual(cfgfs["file_count"], 2)
+        self.assertEqual(cfgfs["dual_write"]["zones"]["file_rev"], 5)
+
+    def test_unmounted_body_parses_too(self):
+        body = json.dumps({
+            "mounted": False, "status": "unmounted", "reason": "not mounted this boot",
+            "capacity": {"known": False}, "file_count": 0, "files": [], "tmp_entries_now": 0,
+            "dual_write": {"zones": {"file_backed": False}, "nvs_only": ["prefs"]},
+        }).encode("utf-8")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            cfgfs = dh.get_cfgfs_status("10.0.0.5")
+        self.assertFalse(cfgfs["mounted"])
+        self.assertFalse(cfgfs["capacity"]["known"])
+
+    def test_http_error_surfaced_as_dashboard_http_error(self):
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=OSError("connection refused")):
+            with self.assertRaises(dh.DashboardHttpError):
+                dh.get_cfgfs_status("10.0.0.5")
+
+    def test_non_json_body_surfaced_as_dashboard_http_error(self):
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(b"not json")):
+            with self.assertRaises(dh.DashboardHttpError):
+                dh.get_cfgfs_status("10.0.0.5")
+
+
+class GetCfgfsStatusMcpToolTest(unittest.TestCase):
+    """get_cfgfs_status() as wired into mcp_server_info.py -- the text a
+    caller actually sees, including the diverged-dual-write warning."""
+
+    def test_reports_mounted_capacity_and_files(self):
+        from kilnctrl import mcp_server as m
+
+        body = json.dumps(_sample_cfgfs()).encode("utf-8")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            result = m.get_cfgfs_status(host="10.0.0.5")
+        self.assertIn("mounted=True", result)
+        self.assertIn("free=520192", result)
+        self.assertIn("zones.json", result)
+        self.assertIn("640 B", result)
+        self.assertIn("file_rev=5", result)
+        self.assertNotIn("DIVERGED", result)
+
+    def test_diverged_dual_write_is_flagged(self):
+        from kilnctrl import mcp_server as m
+
+        cfgfs = _sample_cfgfs()
+        cfgfs["dual_write"]["zones"] = {"file_backed": True, "file_rev": 5, "nvs_rev": 6, "diverged": True}
+        body = json.dumps(cfgfs).encode("utf-8")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            result = m.get_cfgfs_status(host="10.0.0.5")
+        self.assertIn("DIVERGED", result)
+
+    def test_unmounted_reports_reason_and_unknown_capacity(self):
+        from kilnctrl import mcp_server as m
+
+        body = json.dumps({
+            "mounted": False, "status": "unavailable", "reason": "mount was attempted and failed",
+            "capacity": {"known": False}, "file_count": 0, "files": [], "tmp_entries_now": 0,
+            "dual_write": {"zones": {"file_backed": False}, "nvs_only": ["prefs"]},
+        }).encode("utf-8")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            result = m.get_cfgfs_status(host="10.0.0.5")
+        self.assertIn("mounted=False", result)
+        self.assertIn("reason: mount was attempted and failed", result)
+        self.assertIn("capacity: unknown", result)
+        self.assertIn("not file-backed yet", result)
+
+    def test_unreachable_board_reported_not_raised(self):
+        from kilnctrl import mcp_server as m
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=OSError("connection refused")):
+            result = m.get_cfgfs_status(host="10.0.0.5")
+        self.assertTrue(result.startswith("error"))
+
+
+class CfgfsStatusFacadeDiscoverabilityTest(unittest.TestCase):
+    """Same real-registry discoverability guarantee as
+    FacadeDiscoverabilityTest above, for get_cfgfs_status -- both the task's
+    named example queries ("filesystem", "cfg partition") and a keyword-only
+    query must land on it, and it must stay off the directly-published wire
+    surface like every other facade-only tool."""
+
+    def test_found_by_filesystem_query(self):
+        from kilnctrl import mcp_server as m
+
+        hits = [h.name for h in m.registry.search("filesystem")]
+        self.assertIn("get_cfgfs_status", hits[:5])
+
+    def test_found_by_cfg_partition_query(self):
+        from kilnctrl import mcp_server as m
+
+        hits = [h.name for h in m.registry.search("cfg partition")]
+        self.assertIn("get_cfgfs_status", hits[:5])
+
+    def test_found_via_keyword_synonym_alone(self):
+        # Avoids "cfgfs"/"status"/"get" -- only passes if mcp_facade.py's
+        # KEYWORDS row is actually wired up.
+        from kilnctrl import mcp_server as m
+
+        hits = [h.name for h in m.registry.search("is the dual-write diverged")]
+        self.assertIn("get_cfgfs_status", hits[:5])
+
+    def test_registered_in_the_registry(self):
+        from kilnctrl import mcp_server as m
+
+        self.assertIn("get_cfgfs_status", m.registry.by_name)
+
+    def test_not_directly_published_on_the_wire(self):
+        from kilnctrl import mcp_server as m
+
+        published = set(m.mcp._tool_manager._tools)
+        self.assertNotIn("get_cfgfs_status", published)
+
+
 if __name__ == "__main__":
     unittest.main()

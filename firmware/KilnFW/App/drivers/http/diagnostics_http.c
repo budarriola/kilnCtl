@@ -6,12 +6,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_littlefs.h"
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "cfg_fs.h"
+#include "cfg_fs_status.h"
 #include "crash_report.h"
 #include "danger_mode.h"
 #include "dashboard_http.h"
+#include "hal_kv.h"
 #include "http_form.h"
 #include "kiln_io.h"
 #include "lvgl_port.h"
@@ -21,6 +25,7 @@
 #include "watchdog_cfg.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
+#include "zones_config_cfg_fs.h" /* zones_config_cfg_fs_load_raw() -- dual-write picture for /api/cfgfs */
 
 #if CONFIG_LWIP_STATS
 #include "lwip/stats.h"
@@ -907,6 +912,67 @@ static esp_err_t danger_enable_post_handler(httpd_req_t *req)
 }
 #undef DANGER_ENABLE_BODY_MAX
 
+/* GET /api/cfgfs -- observability for the `cfg` LittleFS partition
+ * (docs/FILESYSTEM_USER_DATA_PLAN.md). The `cfg` partition is invisible
+ * otherwise: mounted or not, how full, what's on it, and whether the
+ * zones-config dual-write's file and NVS copies agree are all things that
+ * were previously only findable by grepping the boot log. Most of the work
+ * is in cfg_fs_status.c (pure, host-tested against a real temp directory);
+ * this handler supplies the two things that module deliberately does NOT
+ * know how to get itself -- LittleFS capacity (esp_littlefs_info(), ESP-IDF
+ * only) and the zones NVS rev counter (own copy of the "zones_rev" key,
+ * same duplication precedent as every other *_http.c file in this
+ * component that reads one small NVS value for a status page rather than
+ * pulling in zones_config_store.c's whole surface). */
+#define CFGFS_NVS_NAMESPACE "kiln_cfg"
+#define CFGFS_NVS_PARTITION "kiln_nvs"
+#define CFGFS_NVS_KEY_ZONES_REV "zones_rev"
+
+static uint32_t cfgfs_read_zones_nvs_rev(void)
+{
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, CFGFS_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, CFGFS_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return 0;
+    }
+    uint32_t rev = 0;
+    err = hal_kv_get_u32(&h, CFGFS_NVS_KEY_ZONES_REV, &rev);
+    hal_kv_close(&h);
+    return err == HAL_OK ? rev : 0;
+}
+
+static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
+{
+    bool mounted = cfg_fs_is_available();
+
+    cfg_fs_capacity_info_t cap = { .known = false };
+    if (mounted) {
+        size_t total = 0, used = 0;
+        if (esp_littlefs_info("cfg", &total, &used) == ESP_OK) {
+            cap.known = true;
+            cap.total_bytes = total;
+            cap.used_bytes = used;
+        }
+    }
+
+    cfg_fs_zones_dualwrite_info_t dual;
+    zones_cfg_t raw;
+    zones_config_cfg_fs_load_raw(&raw, &dual.file_rev, &dual.file_valid);
+    dual.nvs_rev = cfgfs_read_zones_nvs_rev();
+
+    char json[2048];
+    size_t len = 0;
+    esp_err_t err = cfg_fs_status_build_json(mounted ? "/cfg" : NULL, &cap, &dual, json, sizeof(json), &len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cfg_fs_status_build_json() failed: %s (buffer too small?)", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status build failed");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, len);
+}
+
 esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
 {
     s_diag_safety = safety;
@@ -927,6 +993,9 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     };
     static const httpd_uri_t crash_report_api_uri = {
         .uri = "/api/crash_report", .method = HTTP_GET, .handler = crash_report_get_handler,
+    };
+    static const httpd_uri_t cfgfs_status_api_uri = {
+        .uri = "/api/cfgfs", .method = HTTP_GET, .handler = cfgfs_status_get_handler,
     };
     static const httpd_uri_t crash_report_ack_uri = {
         .uri = "/api/crash_report/ack", .method = HTTP_POST, .handler = crash_report_ack_post_handler,
@@ -992,6 +1061,11 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     err = httpd_register_uri_handler(server, &crash_report_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &cfgfs_status_api_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/cfgfs) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &lwip_stats_get_uri);

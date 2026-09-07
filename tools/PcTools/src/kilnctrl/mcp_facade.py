@@ -65,6 +65,7 @@ GROUP_OVERRIDES = {
     "get_fw_version": "system",
     "get_stack_margin": "system",
     "get_heap_status": "system",
+    "get_cfgfs_status": "system",
     "get_watchdog_panic_disabled": "system",
     "set_watchdog_panic_disabled": "system",
     # OpenOCD, shared by both processors.
@@ -129,6 +130,10 @@ KEYWORDS = {
                         "display flush", "flush time", "thermocouple read latency",
                         "display_flush_us", "thermo_read_us", "timing"),
     "get_device_log": ("console", "printf", "esp_logx", "serial", "tail"),
+    "get_cfgfs_status": ("filesystem", "littlefs", "cfg partition", "cfg_fs", "mounted",
+                         "capacity", "free space", "used bytes", "file list",
+                         "dual-write", "dual write", "zones_rev", "tmp", "stale",
+                         "corruption", "zones.json", "prefs.json"),
     "debug_program": ("flash", "swd", "jtag", "elf", "burn", "openocd"),
     "debug_read_symbol": ("variable", "global", "inspect", "elf", "nm"),
     "debug_read_registers": ("pc", "sp", "primask", "core", "cpu"),

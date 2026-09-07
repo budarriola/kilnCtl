@@ -130,6 +130,28 @@ def get_crash_report(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> di
             f"GET /api/crash_report response was not valid JSON: {body_text!r}") from exc
 
 
+def get_cfgfs_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/cfgfs and return the full decoded JSON object
+    (diagnostics_http.c: cfgfs_status_get_handler()) -- observability for the
+    `cfg` LittleFS partition (docs/FILESYSTEM_USER_DATA_PLAN.md): mounted/
+    status/reason, capacity, the file list with sizes, how many entries are
+    currently sitting in .tmp/ (see cfg_fs_status.c's own doc comment on why
+    this is a live snapshot, not the historical at-mount reap count), and the
+    zones-config dual-write picture (file_rev vs nvs_rev, and whether they
+    have diverged)."""
+    req = urllib.request.Request(_url(host, "/api/cfgfs"), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise DashboardHttpError(f"GET /api/cfgfs failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise DashboardHttpError(f"GET /api/cfgfs response was not valid JSON: {body_text!r}") from exc
+
+
 def get_diagnostics_timing(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
     """GET /api/diagnostics/timing (diagnostics_http.c:
     diagnostics_timing_get_handler) -- HW_ABSTRACTION.md "Still open": display
