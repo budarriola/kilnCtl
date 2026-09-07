@@ -9,6 +9,39 @@ truth, not the checkboxes.** Nothing below is marked done until a commit is
 named. Every number is either measured and attributed, or explicitly labelled
 as an estimate.
 
+**Update 2026-09-06 (tenth pass) — `ctx$0` (`main.c`'s `static main_boot_ctx_t
+ctx`, 5024 B per `KilnCtrl.map`, the next item this doc had carried as "not
+traced" since the eighth pass) traced and NOT moved.** This is a real
+verdict, not a deferral: `main_boot_ctx_t` (`main_internal.h`) is not a
+self-contained scratch buffer like the eighth pass's httpd statics — it
+bundles `hal_spi_bus_t shared_spi_bus` (the SPI host shared by the
+thermocouples and the display, initialized via `spi_bus_initialize()` with
+`SPI_DMA_CH_AUTO` — confirmed in `hal_spi_esp.c`, a DMA-capable bus) and
+`uart_owner_t`/`uart_protocol_t` (interrupt-driven `uart_driver_install()`
+UART, confirmed in `uart_owner.c`) alongside the boot-only fields. Both are
+DMA/ISR-adjacent by this doc's own §7.2 rule ("PSRAM is reached *through*
+the flash cache" — a DMA engine or ISR touching PSRAM-resident state during
+a flash-cache-disabled window is the same hazard class as a PSRAM task
+stack, just for data instead of a stack) and, unlike a per-request httpd
+buffer, these fields are live for the rest of the process's lifetime and
+read continuously by long-running driver tasks, not just briefly during one
+handler call — so the safe "only touched while cache is up" argument that
+justified the eighth pass's move does not carry over. Splitting the struct
+to move only the boot-only fields would still leave one `EXT_RAM_BSS_ATTR`
+touching a struct whose other fields are DMA/ISR-live, and is exactly the
+kind of wider-blast-radius change this plan defers per-task rather than
+per-field. **Verdict: leave `ctx` internal, same as `s_store` — do not
+re-propose without first splitting `main_boot_ctx_t` into a boot-only struct
+and a driver-handle struct, which is out of scope for a DRAM/PSRAM pass.**
+No source changed this pass. Host-test build attempted for a baseline check
+turned up unrelated build breakage already in the tree
+(`nvs_key_check.h(17)`, `wifi_prov_internal.h(66)`, and cascading `TAG`/
+`hal_esp_err_to_status` errors across `boot_guard.c`, `display_power_cfg.c`,
+`safety_cfg_store.c` etc.) — this is a concurrent session's in-progress NVS
+refactor ("Fourteen modules stop opening NVS themselves"), not anything
+this pass touched; left as-is per this project's concurrent-session
+convention.
+
 **Update 2026-09-06 (ninth pass) — `s_at` (autotune_engine.c, 10428 B, the
 largest still-internal single static named in the eighth-pass table) moved
 to PSRAM via `EXT_RAM_BSS_ATTR`, source/host-test only, not yet flashed.**
