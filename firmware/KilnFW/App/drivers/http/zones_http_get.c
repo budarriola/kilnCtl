@@ -367,6 +367,16 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * above. */
         APPEND("\"error_band_c\":%.3f,\"rate_band_c_per_s\":%.4f,",
                (double)z->error_band_c, (double)z->rate_band_c_per_s);
+        /* ZONES_CFG_VERSION 21->22 (docs/audits/consumer_without_producer_
+         * 2026-09-06.md finding 1): guard 1's arrival band --
+         * z%u_progressband on the POST side (parse_zone_fields()). Emits
+         * the RAW stored value (including the legal 0 sentinel), same
+         * "page shows what is actually stored, not the resolved default"
+         * convention error_band_c above uses (0 means "use the firmware
+         * default", see zones_config_get_progress_band_c()'s own comment).
+         * Always emitted, same always-emit/read-back-and-repost reasoning
+         * as every field above. */
+        APPEND("\"progress_band_c\":%.3f,", (double)z->progress_band_c);
         /* 2026-08-30 (ZONES_CFG_VERSION 10->11): the coupling row, one
          * indexed key per cell (z%u_coupling_c%u is the matching POST-side
          * wire name -- see parse_zone_fields()) rather than a JSON array, so

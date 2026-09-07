@@ -531,6 +531,16 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone rate_band_c_per_s out of range";
             return false;
         }
+        /* ZONES_CFG_VERSION 21->22 (docs/audits/consumer_without_producer_
+         * 2026-09-06.md finding 1): same "0 = use the firmware default"
+         * sentinel convention as error_band_c/rate_band_c_per_s just
+         * above -- see ZONE_PROGRESS_BAND_C_MIN/MAX/DEFAULT's own comment. */
+        if (!isfinite(z->progress_band_c) ||
+            (z->progress_band_c != 0.0f &&
+             (z->progress_band_c < ZONE_PROGRESS_BAND_C_MIN || z->progress_band_c > ZONE_PROGRESS_BAND_C_MAX))) {
+            *err_reason = "zone progress_band_c out of range";
+            return false;
+        }
         /* settings_source[group]: either the CUSTOM sentinel, or a real zone
          * index -- never checked against thermo_count (the dropdown offers
          * every *configured* zone at save time, a page-level decision, not a

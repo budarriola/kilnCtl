@@ -730,6 +730,39 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * struct. */
         return true;
     }
+    case 21: {
+        /* v21 -> v22 (THIS pass, docs/audits/consumer_without_producer_
+         * 2026-09-06.md finding 1): progress_band_c is brand new, appended
+         * at the true tail after relay_type -- zone_cfg_v21_t is therefore
+         * a byte-for-byte prefix of the current (v22) zone_cfg_t, same
+         * "plain memcpy of the smaller historical shape" technique case 17/
+         * case 18 use, not case 20's field-by-field copy (that one was
+         * needed only because settings_source grew MID-struct at v20->v21;
+         * this hop is a pure tail append like every other one since). Every
+         * zone's progress_band_c lands on the 0 (use PROGRESS_BAND_C)
+         * sentinel via this function's entry memset -- brand-new mechanism,
+         * no prior global opinion to carry forward, same shape as relay_
+         * type's own v19->v20 migration. */
+        zones_cfg_v21_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v21 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].progress_band_c already 0 from this function's
+             * entry memset -- see this case's own top comment. */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v21
+         * shape; nvs_save() stamps a fresh one over the current (v22)
+         * struct. */
+        return true;
+    }
     default:
         /* No known historical (or current) layout for this version --
          * zones_cfg_expected_len_for_version() already returned 0 for it and

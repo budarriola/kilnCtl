@@ -731,6 +731,23 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
             z->rate_band_c_per_s = current_z->rate_band_c_per_s;
         }
     }
+    /* ZONES_CFG_VERSION 21->22 (docs/audits/consumer_without_producer_
+     * 2026-09-06.md finding 1): guard 1's arrival band. Same OPTIONAL/
+     * omit-PRESERVES convention as z%u_errorband/z%u_rateband just above,
+     * and the same [0, MAX] then (0, MIN)-sliver split. */
+    snprintf(key, sizeof(key), "z%u_progressband", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_PROGRESS_BAND_C_MAX,
+                                   &z->progress_band_c) ||
+                (z->progress_band_c != 0.0f && z->progress_band_c < ZONE_PROGRESS_BAND_C_MIN)) {
+                *err_reason = "zone progress_band_c out of range (0 = firmware default)";
+                return false;
+            }
+        } else {
+            z->progress_band_c = current_z->progress_band_c;
+        }
+    }
     /* 2026-08-30 (ZONES_CFG_VERSION 10->11): one indexed key per cell,
      * z%u_coupling_c%u -- e.g. z1_coupling_c0 is zone 1's measured response
      * to zone 0's heater. Same per-cell "omit preserves the currently-stored

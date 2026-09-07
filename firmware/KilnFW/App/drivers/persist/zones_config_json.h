@@ -60,7 +60,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 21
+#define ZONES_CFG_VERSION 22
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -206,6 +206,24 @@ extern "C" {
  * value and this field's migration default -- see zone_cfg_t::relay_type's
  * own comment. */
 #define ZONE_RELAY_TYPE_MAX 2
+
+/* thermal_guard_cfg_t::progress_band_c (ZONES_CFG_VERSION 21->22,
+ * docs/audits/consumer_without_producer_2026-09-06.md finding 1): guard 1's
+ * arrival band, mirrored into zone_cfg_t with the exact "0 = use the
+ * firmware default" convention error_band_c/rate_band_c_per_s already use
+ * (thermal_guard.c's effective_f() does the substitution, same as every
+ * other guard threshold) -- NOT approach_rate_cap_c_per_hr's "0 = off"
+ * convention, since there is no "no band" answer guard 1's arrival test can
+ * accept. DEFAULT matches thermal_guard.c's PROGRESS_BAND_C compile-time
+ * constant exactly, so an unconfigured zone's behaviour is unchanged by this
+ * field's introduction. MIN/MAX bound a genuine degrees-C band the same way
+ * ZONE_ERROR_BAND_C_MIN/MAX do for the fuzzy layer's error axis -- 0.5 is
+ * comfortably below PROFILES.md's documented 3 C default without being
+ * indistinguishable from sensor noise, and 20.0 is far past any setpoint
+ * offset a healthy PID loop should ever settle at. */
+#define ZONE_PROGRESS_BAND_C_MIN 0.5f
+#define ZONE_PROGRESS_BAND_C_MAX 20.0f
+#define ZONE_PROGRESS_BAND_C_DEFAULT 3.0f
 
 typedef struct {
     char name[ZONE_NAME_MAX_LEN + 1];
@@ -710,7 +728,88 @@ typedef struct {
      * memset, which is already today's real, correct answer for every
      * existing board's heater relays. */
     uint8_t relay_type;
+    /* ---- ZONES_CFG_VERSION 21->22 (2026-09-06, docs/audits/
+     * consumer_without_producer_2026-09-06.md finding 1): thermal_guard_
+     * cfg_t::progress_band_c was read by thermal_guard.c's effective_f()
+     * but never set at either build site (profile_executor_run.c,
+     * autotune_engine.c) and had no accessor at all -- every zone silently
+     * ran guard 1's arrival band on the PROGRESS_BAND_C firmware constant
+     * with no way for an operator to override it, despite PROGRESS.md
+     * documenting it as tunable. See ZONE_PROGRESS_BAND_C_MIN/MAX/DEFAULT's
+     * own comment above for the bounds and the 0-is-the-firmware-default
+     * convention.
+     *
+     * Appended at zone_cfg_t's own true tail, the same safe-growth spot
+     * relay_type used at v19->v20 just above -- so a v21 board's on-flash
+     * zone_cfg_v21_t layout (frozen below) stays an exact byte-for-byte
+     * prefix of this shape. Brand new field, no prior global or per-zone
+     * opinion to carry forward: every migrated zone of every upgrading
+     * board lands on the 0 (use PROGRESS_BAND_C) sentinel via
+     * convert_versioned_blob_to_current()'s entry memset, which is already
+     * today's real, correct behaviour for every existing board. */
+    float progress_band_c;
 } zone_cfg_t;
+
+/* Frozen v21 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 21->22): predates progress_band_c. Field
+ * order hand-copied from v21's actual shape, never derived from the live
+ * struct -- critically, never the bare `zone_cfg_t` name for this purpose,
+ * since that name now refers to the v22 (bigger) shape. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source[SRC_GROUP_COUNT];
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+    float error_band_c;
+    float rate_band_c_per_s;
+    uint8_t relay_type;
+} zone_cfg_v21_t;
 
 /* Frozen v20 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 20->21, docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs): a single
@@ -2446,6 +2545,26 @@ typedef struct {
 } zones_cfg_v20_t; /* v20 -- what zones_cfg_t looked like immediately before THIS
                      * pass; predates the settings_source per-group split. */
 
+/* Frozen v21 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 21->22): zones[] is the per-zone shape that
+ * predates progress_band_c (zone_cfg_v21_t, frozen above). This is what a
+ * LIVE, already-commissioned v21 board looks like on flash right now -- the
+ * exact blob a v21->v22 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v21_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v21_t; /* v21 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates progress_band_c. */
+
 
 
 typedef enum {
@@ -2628,6 +2747,25 @@ bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s);
  * call site's own comment. */
 bool zones_config_get_relay_type(uint8_t zone_index, uint8_t *out_relay_type);
 bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type);
+
+/* Runtime accessor pair for zone_cfg_t::progress_band_c (ZONES_CFG_VERSION
+ * 21->22, docs/audits/consumer_without_producer_2026-09-06.md finding 1) --
+ * same declaration placement/rationale as the pairs above. `zone_index`
+ * bounds-checked against MAX31856_CHANNEL_COUNT, same as every other
+ * per-zone accessor.
+ *
+ * Like zones_config_get_error_band_c() (and UNLIKE
+ * zones_config_get_approach_rate_cap_c_per_hr()), 0 and anything outside
+ * [MIN, MAX] resolve to ZONE_PROGRESS_BAND_C_DEFAULT -- there is no "band
+ * disabled" state guard 1's arrival test can accept, so every caller always
+ * gets back a usable, finite, positive band width.
+ *
+ * zones_config_set_progress_band_c() rejects (false, no write, no NVS save)
+ * a non-finite value or one outside {0.0f} union [ZONE_PROGRESS_BAND_C_MIN,
+ * ZONE_PROGRESS_BAND_C_MAX] -- refused, never clamped, same discipline as
+ * every setter in this file. */
+bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c);
+bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c);
 
 #ifdef __cplusplus
 }

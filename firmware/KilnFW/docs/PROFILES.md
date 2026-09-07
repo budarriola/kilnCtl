@@ -361,7 +361,11 @@ against it — the opposite is the more useful thing to know:
   setpoint closely, so it spends far more time in guard 2's branch (120 s
   window, falling-while-heating test) than in guard 1's (which arms only
   once the commanded setpoint has pulled `progress_band_c`, 3 °C by default,
-  ahead of `actual_c`). At a 20 °C/hr cap that is roughly 9 extra minutes of
+  ahead of `actual_c`). `progress_band_c` is per-zone operator config as of
+  ZONES_CFG_VERSION 22 (`zones_config_get_progress_band_c()`/`z%u_progressband`
+  on the zones POST wire) -- 0 still resolves to the 3 °C firmware default,
+  and every existing zone migrates onto that default with no operator
+  action required. At a 20 °C/hr cap that is roughly 9 extra minutes of
   latency before guard 1 can arm after an element dies; a smaller cap adds
   more. This is intrinsic to any slow ramp (an equally slow profile segment
   has the identical property today) and is an accepted trade-off, not a

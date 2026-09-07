@@ -657,6 +657,21 @@ bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_pe
     return true;
 }
 
+/* ZONES_CFG_VERSION 21->22 (docs/audits/consumer_without_producer_2026-09-06.md
+ * finding 1): guard 1's arrival band. Settable, same "a test can prove a
+ * configured value actually reaches the control path" reasoning as
+ * g_stub_error_band_c above -- 0 resolves to PROGRESS_BAND_C's 3.0 default,
+ * so every pre-existing test in this file that predates this field sees
+ * unchanged behaviour. */
+static float g_stub_progress_band_c[MAX31856_CHANNEL_COUNT];
+bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c)
+{
+    if (!out_band_c || zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    float v = g_stub_progress_band_c[zone_index];
+    *out_band_c = (v == 0.0f) ? 3.0f : v;
+    return true;
+}
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     (void)zone_index;
@@ -2040,6 +2055,43 @@ static void test_warm_start_cold_kiln_is_a_regression_noop(void)
     TEST_CHECK(s_exec.warm_start_replayed_count == 0, "nothing was skipped, so nothing was replayed");
 
     profile_executor_halt();
+}
+
+// ZONES_CFG_VERSION 21->22 (docs/audits/consumer_without_producer_2026-09-06.md
+// finding 1): progress_band_c was read by thermal_guard.c's effective_f()
+// but never set at this build site. Proves the REAL wire: a non-default,
+// per-zone configured value (via the zones_config_get_progress_band_c()
+// stub above) reaches z->guard_cfg.progress_band_c through a REAL, complete
+// profile_executor_run() -- not a hand-built thermal_guard_cfg_t the way
+// test_thermal_guard.c's own progress_band_c case (which proves guard 1
+// honours the field, not that anything sets it) does.
+static void test_configured_progress_band_c_reaches_zone_guard_cfg(void)
+{
+    TEST_SECTION("profile_executor_run() -- a non-default, per-zone progress_band_c reaches "
+                 "z->guard_cfg.progress_band_c, not the bare 0/unset field a missing build-site "
+                 "assignment would leave behind");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 0);
+
+    warm_start_test_setup(&p, 50.0f);
+    memset(g_stub_progress_band_c, 0, sizeof(g_stub_progress_band_c));
+    g_stub_progress_band_c[0] = 12.5f; /* deliberately far from PROGRESS_BAND_C's 3.0 default */
+
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed run must succeed");
+    TEST_CHECK(fabsf(s_exec.zones[0].guard_cfg.progress_band_c - 12.5f) < 1e-6f,
+              "zone 0's guard_cfg.progress_band_c must be the configured 12.5, not 0.0 (which a "
+              "missing/removed build-site assignment -- or thermal_guard.c's own bare 3.0 default -- "
+              "would both leave behind)");
+
+    profile_executor_halt();
+    memset(g_stub_progress_band_c, 0, sizeof(g_stub_progress_band_c));
 }
 
 // Test 2 (mandatory coverage item 2): warm kiln mid-ramp -- segment 1 ramps
@@ -6981,6 +7033,7 @@ void run_test_profile_executor_prestart(void)
     // friends above assume the opposite (fresh process state) and must run
     // first.
     test_warm_start_cold_kiln_is_a_regression_noop();
+    test_configured_progress_band_c_reaches_zone_guard_cfg();
     test_warm_start_mid_ramp_entry_never_below_current();
     test_warm_start_replays_skipped_relay_io_and_registers_it();
     test_warm_start_reached_dwell_is_not_shortened();

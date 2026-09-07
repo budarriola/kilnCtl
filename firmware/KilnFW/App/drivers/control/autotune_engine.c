@@ -1145,6 +1145,15 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
     float runaway_margin = 0.0f, drift_period_s = 0.0f, debounce_ticks = 0.0f, frozen_window_s = 0.0f;
     zones_config_get_guard_thresholds(zone_index, &wd_window_s, &wd_rate, &off_settle_s, &runaway_rate,
                                       &runaway_margin, &drift_period_s, &debounce_ticks, &frozen_window_s);
+    /* Guard 1's arrival band (ZONES_CFG_VERSION 21->22, docs/audits/
+     * consumer_without_producer_2026-09-06.md finding 1) -- same reasoning
+     * as profile_executor_run.c's identical block: this getter already does
+     * the 0->default substitution, so the value here is final. An autotune
+     * run arms the full thermal_guard suite exactly like a firing does (this
+     * file's own doc note above), so it must see the same per-zone override
+     * a firing would, not silently fall back to the firmware-wide constant. */
+    float progress_band_c = 0.0f;
+    zones_config_get_progress_band_c(zone_index, &progress_band_c);
     s_at.guard_cfg = (thermal_guard_cfg_t){
         .max_temp_c = max_temp_c, .min_temp_c = min_temp_c,
         .sanity_rate_c_per_min = (sanity_rate > 0.0f) ? sanity_rate : PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN,
@@ -1156,6 +1165,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         .drift_period_s = drift_period_s,
         .sensor_fault_debounce_ticks = debounce_ticks,
         .frozen_window_s = frozen_window_s,
+        .progress_band_c = progress_band_c,
     };
     thermal_guard_reset(&s_at.guard_state);
 

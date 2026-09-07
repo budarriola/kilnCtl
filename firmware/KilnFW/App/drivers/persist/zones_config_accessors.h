@@ -1026,6 +1026,16 @@ bool zones_config_get_executor_thresholds(uint8_t zone_index, float *out_bangban
                                           float *out_ramp_lock_band_c);
 bool zones_config_get_pc_link_abort_silence_ms(float *out_ms);
 
+/* Runtime accessor pair for zone_cfg_t::progress_band_c (ZONES_CFG_VERSION
+ * 21->22, docs/audits/consumer_without_producer_2026-09-06.md finding 1) --
+ * guard 1's arrival band. Declared here (not only zones_config_json.h) so
+ * both profile_executor_run.c and autotune_engine.c -- neither of which
+ * includes zones_config_json.h directly, both of which #include this header
+ * -- see the getter's real definition and full contract at its
+ * zones_config_json.h declaration. */
+bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c);
+bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c);
+
 /* Setter for the getter above, one bundled call matching
  * zones_config_get_guard_thresholds()'s own "bundle the related group"
  * precedent. Each of the 8 fields is checked against its own independent

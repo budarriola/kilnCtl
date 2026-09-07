@@ -545,6 +545,18 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         float frozen_eps_c = 0.0f, cross_zone_period_s = 0.0f;
         zones_config_get_guard_extra(zi, &progress_duty_min, &progress_window_s, &drift_hysteresis_c,
                                      &frozen_eps_c, &cross_zone_period_s);
+        /* Guard 1's arrival band (ZONES_CFG_VERSION 21->22, docs/audits/
+         * consumer_without_producer_2026-09-06.md finding 1): unlike the
+         * five v8 overrides above, this one's own getter already does the
+         * 0->default substitution (same shape as error_band_c/rate_band_c_
+         * per_s, since there is no "no band" answer guard 1's arrival test
+         * can accept) -- so the value handed to thermal_guard_cfg_t here is
+         * already final, and thermal_guard.c's own effective_f(cfg->
+         * progress_band_c, PROGRESS_BAND_C) substitution is now a no-op in
+         * practice for this field (kept anyway, defence in depth, same as
+         * every other guard threshold). */
+        float progress_band_c = 0.0f;
+        zones_config_get_progress_band_c(zi, &progress_band_c);
         z->guard_cfg = (thermal_guard_cfg_t){
             .max_temp_c = max_temp_c, .min_temp_c = min_temp_c,
             .sanity_rate_c_per_min = (sanity_rate > 0.0f) ? sanity_rate : PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN,
@@ -570,6 +582,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             .progress_window_s = progress_window_s,
             .drift_hysteresis_c = drift_hysteresis_c,
             .frozen_eps_c = frozen_eps_c,
+            .progress_band_c = progress_band_c,
         };
         thermal_guard_reset(&z->guard_state);
 

@@ -1182,6 +1182,40 @@ bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type)
     return true;
 }
 
+/* Getter for zone_cfg_t::progress_band_c (ZONES_CFG_VERSION 21->22,
+ * docs/audits/consumer_without_producer_2026-09-06.md finding 1) -- same
+ * shape as zones_config_get_error_band_c() just above: 0 and anything
+ * outside [MIN, MAX] resolve to ZONE_PROGRESS_BAND_C_DEFAULT, since there is
+ * no "band disabled" state guard 1's arrival test can accept. */
+bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c)
+{
+    if (!out_band_c || zone_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    float v = s_zones.cfg.zones[zone_index].progress_band_c;
+    if (v == 0.0f) {
+        v = ZONE_PROGRESS_BAND_C_DEFAULT; /* the sentinel */
+    } else if (!isfinite(v) || v < ZONE_PROGRESS_BAND_C_MIN || v > ZONE_PROGRESS_BAND_C_MAX) {
+        v = ZONE_PROGRESS_BAND_C_DEFAULT; /* defensive: not a value that should ever be on flash */
+    }
+    *out_band_c = v;
+    return true;
+}
+
+/* Writer for the getter above. Refused, never clamped, matching every other
+ * setter in this file. 0 is accepted as an explicit "reset to the firmware
+ * default." Setting one zone's value never touches any other zone's. */
+bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(band_c) ||
+        (band_c != 0.0f && (band_c < ZONE_PROGRESS_BAND_C_MIN || band_c > ZONE_PROGRESS_BAND_C_MAX))) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].progress_band_c = band_c;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 /* Bundled setter, same "reject nothing half-written" discipline as every
  * bundled setter above. Each of the 8 fields checked against its own
  * independent bound (matching which ceiling parse_zone_fields() applies to

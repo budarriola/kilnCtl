@@ -5762,6 +5762,163 @@ static void test_fuzzy_bands_accessor_get_set_and_range(void)
     nvs_test_clear();
 }
 
+// Accessor pair for zone_cfg_t::progress_band_c (ZONES_CFG_VERSION 21->22,
+// docs/audits/consumer_without_producer_2026-09-06.md finding 1) -- same
+// shape as test_fuzzy_bands_accessor_get_set_and_range() just above: 0
+// means "use the firmware default" (thermal_guard.c's PROGRESS_BAND_C,
+// 3.0), resolved by the getter, never reported verbatim.
+static void test_progress_band_c_accessor_get_set_and_range(void)
+{
+    TEST_SECTION("zones_config_get/set_progress_band_c() -- round trip, per-zone isolation, "
+                 "refuse-don't-clamp bounds, and the 0 sentinel resolving to the firmware default "
+                 "3.0, NOT reported verbatim");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.relay_count = 2;
+    s_zones.cfg.zones[0].relay_mask = 0x01;
+    s_zones.cfg.zones[0].thermo_mask = 0x01;
+    s_zones.cfg.zones[0].max_temp_c = 1300.0f;
+    s_zones.cfg.zones[1].relay_mask = 0x02;
+    s_zones.cfg.zones[1].thermo_mask = 0x02;
+    s_zones.cfg.zones[1].max_temp_c = 1300.0f;
+    s_zones.cfg.timing_profile_count = 1;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(nvs_save() == ESP_OK, "initial save must succeed");
+
+    float got = -1.0f;
+    TEST_CHECK(zones_config_get_progress_band_c(0, &got) && fabsf(got - ZONE_PROGRESS_BAND_C_DEFAULT) < 1e-6,
+              "zone 0's progress band defaults to 3.0 -- bit-identical to thermal_guard.c's PROGRESS_BAND_C");
+
+    float ignored = -1.0f;
+    TEST_CHECK(!zones_config_get_progress_band_c(MAX31856_CHANNEL_COUNT, &ignored),
+              "get(progress_band_c) with an out-of-range zone index is refused");
+    TEST_CHECK(!zones_config_set_progress_band_c(MAX31856_CHANNEL_COUNT, 7.0f),
+              "set(progress_band_c) with an out-of-range zone index is refused");
+
+    TEST_CHECK(zones_config_set_progress_band_c(0, 10.0f), "set(zone 0, progress_band_c=10.0) succeeds");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_progress_band_c(0, &got) && fabsf(got - 10.0f) < 1e-6,
+              "get(zone 0) reads back exactly the band just set, from LIVE state");
+
+    float got1 = -1.0f;
+    TEST_CHECK(zones_config_get_progress_band_c(1, &got1) && fabsf(got1 - ZONE_PROGRESS_BAND_C_DEFAULT) < 1e-6,
+              "zone 1's progress band is UNTOUCHED by zone 0's set() -- still the 3.0 default, not zone 0's 10.0");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg)); // wipe the live struct, force a real reload
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "reload after set() must succeed");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_progress_band_c(0, &got) && fabsf(got - 10.0f) < 1e-6,
+              "10.0 survives a genuine NVS round trip, not just an in-RAM poke");
+
+    TEST_CHECK(!zones_config_set_progress_band_c(0, ZONE_PROGRESS_BAND_C_MAX + 1.0f), "set() above the ceiling is refused");
+    TEST_CHECK(!zones_config_set_progress_band_c(0, ZONE_PROGRESS_BAND_C_MIN / 2.0f), "set() below the floor (but nonzero) is refused");
+    TEST_CHECK(!zones_config_set_progress_band_c(0, -1.0f), "set() of a negative value is refused");
+    TEST_CHECK(!zones_config_set_progress_band_c(0, NAN), "set() of NaN is refused");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_progress_band_c(0, &got) && fabsf(got - 10.0f) < 1e-6,
+              "every refused set() above left the live progress band at 10.0, untouched -- refuse, not clamp");
+
+    TEST_CHECK(zones_config_set_progress_band_c(0, 0.0f), "set(zone 0, 0.0) -- reset to firmware default -- succeeds");
+    got = -1.0f;
+    TEST_CHECK(zones_config_get_progress_band_c(0, &got) && fabsf(got - ZONE_PROGRESS_BAND_C_DEFAULT) < 1e-6,
+              "the getter resolves the stored 0 sentinel to the firmware default 3.0 -- NOT reported verbatim");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_NEGATIVE_wrong_zone_progress_band_read_is_caught(void)
+{
+    TEST_SECTION("NEGATIVE TEST -- the REAL zones_config_get_progress_band_c() must return zone "
+                 "0's OWN progress_band_c, not zone 1's, after zones_config_set_progress_band_c(0, ...)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = MAX31856_CHANNEL_COUNT;
+    s_zones.cfg.relay_count = MAX31856_CHANNEL_COUNT;
+
+    TEST_CHECK(zones_config_set_progress_band_c(0, 10.0f), "set(zone 0, 10.0) via the REAL setter succeeds");
+
+    float got0 = -1.0f, got1 = -1.0f;
+    TEST_CHECK(zones_config_get_progress_band_c(0, &got0) && fabsf(got0 - 10.0f) < 1e-6,
+              "the REAL getter reads zone 0's own 10.0 back");
+    TEST_CHECK(zones_config_get_progress_band_c(1, &got1) && fabsf(got1 - ZONE_PROGRESS_BAND_C_DEFAULT) < 1e-6,
+              "CAUGHT (would fail if the getter read the wrong zone): zone 1's progress_band_c is "
+              "UNTOUCHED by zone 0's set() -- still resolves to the 3.0 firmware default, not zone 0's 10.0");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_nvs_load_from_v21_blob_defaults_progress_band_c_to_default(void)
+{
+    TEST_SECTION("nvs_load_from -- a v21 blob upconverts to v22: every zone's new progress_band_c "
+                 "lands on the 0 sentinel, resolved by the REAL accessor to the 3.0 firmware default "
+                 "-- while error_band_c/rate_band_c_per_s/relay_type/settings_source/etc survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v21_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 21;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].error_band_c = 15.0f; /* a REAL, non-default sibling field -- must survive untouched */
+    src.zones[0].relay_type = 1; /* RELAY_TYPE_CONTACTOR -- must also survive untouched */
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src.zones[0].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src.zones[1].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+
+    src.crc32 = 0; // v21's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v21 blob must migrate to a valid current (v22) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    for (uint8_t j = 0; j < 2; j++) {
+        TEST_CHECK_NEAR(out_cfg.zones[j].progress_band_c, 0.0f, 1e-9,
+                        "v21 has no progress_band_c -- the raw migrated field lands on the 0 sentinel");
+    }
+    TEST_CHECK_NEAR(out_cfg.zones[0].error_band_c, 15.0f, 1e-6, "sibling error_band_c survives the hop unchanged");
+    TEST_CHECK(out_cfg.zones[0].relay_type == 1, "sibling relay_type survives the hop unchanged");
+
+    s_zones.cfg = out_cfg;
+    float got = -1.0f;
+    TEST_CHECK(zones_config_get_progress_band_c(0, &got) && fabsf(got - ZONE_PROGRESS_BAND_C_DEFAULT) < 1e-6,
+              "CAUGHT (would fail if the accessor stopped resolving the sentinel): the REAL accessor "
+              "resolves the migrated 0 sentinel to the 3.0 firmware default, not the raw 0.0 -- a "
+              "board upgrading from v21 gets today's guard-1 arrival-band behaviour, not a near-zero "
+              "band that demands a rise the moment it settles");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // ---------------------------------------------------------------------------
 // MANDATORY negative tests (PID_EXPANSION_PLAN.md sec 3.6g task instructions).
 // Both call the REAL production functions through the same direct seam
@@ -8801,6 +8958,9 @@ void run_test_zones_http(void)
     test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr();
     test_nvs_load_from_v18_blob_real_board_values_migration();
     test_fuzzy_bands_accessor_get_set_and_range();
+    test_progress_band_c_accessor_get_set_and_range();
+    test_NEGATIVE_wrong_zone_progress_band_read_is_caught();
+    test_nvs_load_from_v21_blob_defaults_progress_band_c_to_default();
     test_NEGATIVE_wrong_zone_band_read_is_caught();
     test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught();
     test_settings_source_save_reload_inheritance_round_trip();

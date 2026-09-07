@@ -364,6 +364,19 @@ bool zones_config_get_guard_extra(uint8_t zone_index, float *o1, float *o2, floa
     return g_stub_guard_extra_present;
 }
 
+/* ZONES_CFG_VERSION 21->22 (docs/audits/consumer_without_producer_2026-09-06.md
+ * finding 1): guard 1's arrival band. Settable, same "a test can prove a
+ * configured value actually reaches the control path" reasoning as
+ * g_stub_guard_extra above; defaults to 0 (use the firmware default),
+ * matching every pre-existing test in this file. */
+float g_stub_progress_band_c = 0.0f;
+bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c)
+{
+    (void)zone_index;
+    if (out_band_c) *out_band_c = g_stub_progress_band_c;
+    return true;
+}
+
 bool zones_config_get_executor_thresholds(uint8_t zone_index, float *o1, float *o2, float *o3, float *o4)
 {
     (void)zone_index;
