@@ -27,6 +27,19 @@
 # number. Narrow and mechanical on purpose -- see check_doc_citations.ps1's
 # header for why a check like this stays narrow rather than growing a general
 # prose-vs-reality parser.
+#
+# 2026-09-07: this check was blind to a whole registration path and passed
+# while the docs said 146 and the live server actually carried 151.
+# tools/PcTools/src/mcpkit/workbench.py registers build/test-runner tools
+# (build_kilnfw, build_saftyfw, build_saftyfw_host_tests, run_pctools_tests,
+# run_repo_checks) by calling `tool()(fn)` from `workbench.attach(_tool,
+# ("dut", "common"))` in mcp_server.py -- a plain function call, not a
+# `@_srv._tool()` decorator line, so the line-anchored regex above could never
+# see them (this mechanism predates both wrong doc counts, per
+# `29ce9970`). The fix below adds those 5 by reading workbench.py's `BUNDLES`
+# table and the bundle names actually passed to `attach(...)` in
+# mcp_server.py, rather than assuming a fixed number -- so a future bundle
+# addition/removal is still caught.
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -46,6 +59,42 @@ foreach ($f in $serverFiles) {
         }
     }
 }
+
+# Tools attached dynamically via workbench.attach(_tool, (bundle, ...)) --
+# `tool()(fn)` calls, not `@_srv._tool()` decorator lines, so the scan above
+# never sees them. Read which bundle names mcp_server.py actually attaches,
+# then count the entries in those bundles from workbench.py's BUNDLES table.
+$mcpServerPyPath = Join-Path $repoRoot "tools\PcTools\src\kilnctrl\mcp_server.py"
+$workbenchPyPath = Join-Path $repoRoot "tools\PcTools\src\mcpkit\workbench.py"
+$mcpServerPy = Get-Content -LiteralPath $mcpServerPyPath -Raw
+$workbenchPy = Get-Content -LiteralPath $workbenchPyPath -Raw
+
+$attachMatch = [regex]::Match($mcpServerPy, 'workbench\.attach\(\s*\w+\s*,\s*\(([^)]*)\)\s*\)')
+if (-not $attachMatch.Success) {
+    Write-Error "check_mcp_tool_count_doc: could not find 'workbench.attach(_tool, (...))' call in mcp_server.py"
+    exit 1
+}
+$attachedBundles = [regex]::Matches($attachMatch.Groups[1].Value, '"([^"]+)"|''([^'']+)''') |
+    ForEach-Object { if ($_.Groups[1].Success) { $_.Groups[1].Value } else { $_.Groups[2].Value } }
+
+$bundlesMatch = [regex]::Match($workbenchPy, 'BUNDLES:.*?=\s*\{(.*)\n\}', 'Singleline')
+if (-not $bundlesMatch.Success) {
+    Write-Error "check_mcp_tool_count_doc: could not find BUNDLES table in workbench.py"
+    exit 1
+}
+$bundlesBody = $bundlesMatch.Groups[1].Value
+
+$attachedCount = 0
+foreach ($bundleName in $attachedBundles) {
+    $bundleMatch = [regex]::Match($bundlesBody, "`"$bundleName`"\s*:\s*\{([^}]*)\}", 'Singleline')
+    if (-not $bundleMatch.Success) {
+        Write-Error "check_mcp_tool_count_doc: attached bundle '$bundleName' not found in workbench.py BUNDLES"
+        exit 1
+    }
+    $entryMatches = [regex]::Matches($bundleMatch.Groups[1].Value, '^\s*"[^"]+"\s*:', 'Multiline')
+    $attachedCount += $entryMatches.Count
+}
+$realCount += $attachedCount
 
 $failed = $false
 
@@ -79,5 +128,5 @@ if ($failed) {
     exit 1
 }
 
-Write-Host "check_mcp_tool_count_doc: OK ($realCount tools, both docs agree)"
+Write-Host "check_mcp_tool_count_doc: OK ($realCount tools: $($realCount - $attachedCount) decorated + $attachedCount workbench-attached, both docs agree)"
 exit 0

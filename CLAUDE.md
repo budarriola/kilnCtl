@@ -22,8 +22,8 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (146 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-06).
+the rest behind a search facade (151 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-07).
 
 ```
 kiln_help()                      # kilnctrl: main board (ESP32-S3) + RP2040 safety processor
@@ -76,6 +76,14 @@ bootloader keeps booting that image and every later `flash_firmware()` reports
 success while the board keeps running the OLD code (a change you added — a log
 line, say — looks like it "vanished"). Fix: `ota_rollback_esp()` to restore the
 factory boot target.
+
+Resetting both processors close together (a dual reflash) correctly trips
+S6a (mainFault) while the ESP's safety-link handshake is still coming up —
+expected, not a bug. Confirm link-up via `safety_get_status()` and that
+`trip_reason`/`trip_mask` show only `SAFETY_TRIP_MAIN_FAULT` (bit 6,
+`0x0040`) before calling `safety_clear_trip()`. Full procedure and rationale:
+`docs/MCP_SERVERS.md`'s flash section and
+`docs/audits/s6a_startup_grace_revert_2026-09-07.md`.
 
 `ota_rollback_esp()` itself has a hazard, 2026-09-04: rolling back past a
 `zones_cfg` schema bump (e.g. v22, `ZONES_CFG_VERSION` in

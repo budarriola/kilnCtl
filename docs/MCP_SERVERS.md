@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 146 tools and `kicad` 86. Published as MCP
+`kilnctrl` registers 151 tools and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
 *every* context window before the model has read a word of the request.
 
@@ -240,6 +240,24 @@ a path to the full log under the system temp directory.
 Flashing is not in this table on purpose. It already exists as
 `debug_program(peer=...)` with `esp` / `pico` peers, each pinned to the
 right probe serial (`kilnctrl/debug_probe.py`).
+
+**Dual reflash (both processors reset close together) trips S6a -- this is
+correct, not a bug.** The Pico starts polling `mainFault` almost immediately
+on its own reset; the ESP takes longer to reach `safety_link_init()` and
+complete the FW_VERSION handshake, and correctly drives GPIO6 (asserted)
+for that whole window per its own link-down policy (`safety_link_poll.c`).
+See `docs/audits/s6a_startup_grace_revert_2026-09-07.md` -- a guard-side
+suppression of this was tried and reverted as unsafe. Procedure:
+
+1. Flash/reset both processors as needed.
+2. Call `safety_get_status()` and confirm link is up and FW_VERSION has
+   been exchanged (not just that the tool call succeeded).
+3. Confirm the trip is this one, not something else: `trip_reason` /
+   `trip_mask` should show only `SAFETY_TRIP_MAIN_FAULT` (bit 6, `0x0040`)
+   -- if any other bit is set, do not clear, investigate instead.
+4. Only then call `safety_clear_trip()`. Clearing before the link is
+   actually up just re-trips (`safety_guards_try_clear()` re-checks live
+   inputs and refuses while the condition still holds).
 
 ## Flash provenance and the sensitive-dirty-file guard
 
