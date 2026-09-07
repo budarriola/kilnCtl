@@ -587,18 +587,16 @@ to raw ADC counts exists today, on either the wire protocol or the debug
   not yet know a CT is fitted at all (channel 3's 2026-09-05 fit, §5.2,
   predates re-running commissioning), so S14 reads DORMANT.
 
-**Why no raw-counts path exists (traced in code, `current_sense.c`):**
-- `current_sense_sample()` (`src/current_sense.c:230-250`) computes
-  `counts_avg` via `cs_read_channel_counts()` as a **local variable inside
-  the sampling loop**. It is converted to `amps[n]` and `present[n]`
-  immediately and never written to any `static`/global storage — there is
-  no symbol a debug read could target.
-- `current_snapshot_t` (`src/snapshots.h:58-64`, the only thing
-  `current_task_get_snapshot()` publishes) carries `amps[3]`, `clipped[3]`,
-  `present[3]`, `calibrated` — **no counts field**.
-- The wire protocol's `SAFETY_CMD_POWER` frame (`link_task_send_power()`)
-  likewise only ever carries derived amps/watts (`current_sense_power_t`),
-  never counts.
+**RESOLVED 2026-09-06 — the raw-counts path now exists end to end** (see
+"Tooling gap" below, all three items landed): `current_sense_sample()`
+(`src/current_sense.c:230-250`) stores `counts_avg` into
+`current_snapshot_t.counts_avg[3]` (`src/snapshots.h:74`), `link_task.c:1099`
+carries it over the wire in `SAFETY_CMD_POWER`'s V2 (61-byte) layout
+(`CommonFW/docs/LINK_PROTOCOL.md` Frame E, `KILNLINK_POWER_FLAG_COUNTS_VALID`),
+and `tools/PcTools/src/kilnctrl/kilnlink_codec.py`'s `decode_power()` plus
+`safety_capture_ct_counts()`/`mcp_server_safety.py` read it PC-side. The
+paragraph below describes the **pre-2026-09-06** state and is kept for
+history; do not use it to conclude the gap is still open.
 - With every channel uncalibrated (`k_ct_v_per_a == 0`), `amps[n]` reads a
   hard `0.0f` (`cs_counts_to_amps()`'s documented behavior, §5's
   2026-08-24 note) — so even the amps path carries no information to invert
@@ -625,36 +623,28 @@ noise on this board has never been measured.
 
 See "Tooling gap" immediately below for what closes this.
 
-### Tooling gap
+### Tooling gap — CLOSED 2026-09-06
 
-To make CT_COMMISSIONING_PLAN.md step 0 (and the commissioning check in §5
-above) actually runnable, one of the following is needed — implementation
-intentionally NOT done as part of this pass:
+All three items below have landed; kept as a record of what was needed, not
+as an open task list.
 
-1. **Firmware**: publish `counts_avg[3]` (or the full pre-conversion
-   `uint32_t` per channel) into `current_snapshot_t` (`src/snapshots.h`)
-   alongside `amps[3]`, written by `current_sense_sample()`
-   (`src/current_sense.c:230-250`) the same tick it already computes
-   `counts_avg` locally. Cheap (3 more `uint32_t`, no new sampling), and it
-   is the only way to see the ADC's actual value independent of whether
-   `k_ct_v_per_a`/`zero_counts` have been committed.
-2. **Link protocol**: a way to get that value off the Pico — either add it
-   to the existing `SAFETY_CMD_POWER` frame, or a new lightweight
-   diagnostic/debug command (`CommonFW/docs/LINK_PROTOCOL.md`), since the
-   commissioning page and any future noise-floor tooling both need it live,
-   not just over SWD.
-3. **PcTools MCP**: a `kiln_call` tool (e.g. `safety_get_ct_raw_counts` or a
-   `current_sense` group) that polls whatever the above exposes at a known
-   rate and returns `{channel, counts, timestamp_ms}` per sample, so a
-   noise-floor capture script can log CSV rows without hand-rolling framing.
-   `tools/PcTools/src/kilnctrl/noise_floor.py` is a different, unrelated
-   tool (PID run-to-run repeat spread) — do not confuse the two; a CT
-   equivalent does not exist yet.
+1. **Firmware, done**: `counts_avg[3]` is published in `current_snapshot_t`
+   (`src/snapshots.h:74`), written by `current_sense_sample()`
+   (`src/current_sense.c:230-250`) the same tick it already computed
+   `counts_avg` locally.
+2. **Link protocol, done**: added to the existing `SAFETY_CMD_POWER` frame
+   as its V2 (61-byte) extension — `CommonFW/docs/LINK_PROTOCOL.md` §6
+   Frame E, `kilnlink_power.h`'s `KILNLINK_POWER_LEN_V2`/
+   `KILNLINK_POWER_FLAG_COUNTS_VALID`.
+3. **PcTools MCP, done**: `decode_power()`
+   (`tools/PcTools/src/kilnctrl/kilnlink_codec.py`) and
+   `safety_capture_ct_counts()`/`mcp_server_safety.py` expose it PC-side.
+   `tools/PcTools/src/kilnctrl/noise_floor.py` remains a different,
+   unrelated tool (PID run-to-run repeat spread) — do not confuse the two.
 
-Until one of these lands, CT_COMMISSIONING_PLAN.md step 0 cannot be executed
-against this board, and its downstream steps that depend on "is per-heater
-open detection viable on this bench" (step 3's under-current warn) remain
-undecided rather than merely unmeasured.
+CT_COMMISSIONING_PLAN.md step 0 can now be executed against this board with
+this path; whether it has actually been run and what it measured is tracked
+there, not here.
 
 ---
 
