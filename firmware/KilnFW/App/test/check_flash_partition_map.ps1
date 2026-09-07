@@ -296,7 +296,13 @@ if (-not $PSBoundParameters.ContainsKey('CsvPath')) {
         @('ota_1',       0x510000,   0x300000),
         @('factory',     0x810000,   0x300000),
         @('coredump',    0xBF0000,   0x100000),
-        @('logs',        0xCF0000,   0xC0000)
+        @('logs',        0xCF0000,   0xC0000),
+        # cfg: added 2026-09-07, append-only into the free tail, sized from the
+        # measured user-data inventory -- see partitions.csv's own `cfg` comment
+        # block and docs/FILESYSTEM_PLAN.md. Pinned here so a later pass cannot
+        # quietly resize or relocate it: the data it will hold (tuned PID gains,
+        # the coupling matrix) costs hours of bench firings to regenerate.
+        @('cfg',         0xDB0000,   0x80000)
     )
     $mapErrors = @()
     foreach ($e in $expected) {
@@ -324,7 +330,7 @@ if (-not $PSBoundParameters.ContainsKey('CsvPath')) {
         }
         throw "$($mapErrors.Count) expected-map mismatch(es) in $CsvPath -- see FLASH_BUDGET.md section 5"
     }
-    Write-Host "Expected-map check passed: pico_img relocated into the reclaimed legacy_app hole, logs shrunk to 768 KiB, legacy_app gone."
+    Write-Host "Expected-map check passed: pico_img relocated into the reclaimed legacy_app hole, logs shrunk to 768 KiB, legacy_app gone, cfg appended at 0xDB0000 (512 KiB)."
 }
 
 exit 0

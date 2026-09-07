@@ -99,6 +99,11 @@ _DATA_SUBTYPE_NUM = {
     "esphttpd": 0x80,
     "fat": 0x81,
     "spiffs": 0x82,
+    # 0x83 per ESP-IDF v6 components/partition_table/gen_esp32part.py. Added
+    # 2026-09-07 with the `cfg` LittleFS partition -- without it every tool
+    # that parses partitions.csv (debug_check_partition_table included) fails
+    # the whole table with "unknown partition subtype 'littlefs'".
+    "littlefs": 0x83,
 }
 
 

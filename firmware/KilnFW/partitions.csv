@@ -279,6 +279,7 @@ ota_1,        app,  ota_1,     0x510000, 0x300000,
 factory,      app,  factory,   0x810000, 0x300000,
 coredump,     data, coredump,  0xBF0000, 0x100000,
 logs,         data, spiffs,    0xCF0000, 0xC0000,
+cfg,          data, littlefs,  0xDB0000, 0x80000,
 
 # --- `logs` partition, added 2026-09-01 (external-flash log storage gap) ---
 #
@@ -448,3 +449,114 @@ logs,         data, spiffs,    0xCF0000, 0xC0000,
 #   single reclaimed chunk this table has ever had, and the first with real
 #   headroom for a future large `data` or (with further reclamation) `app`
 #   partition without another restructure.
+
+# --- `cfg` partition, added 2026-09-07 (user runtime state moves onto a
+#     filesystem -- docs/FILESYSTEM_PLAN.md, docs/FILESYSTEM_USER_DATA_PLAN.md)
+#
+# Owner decision 2026-09-07: user-changeable runtime state (zone/PID config,
+# user-created fire profiles, named kiln-config slots, preferences) moves off
+# NVS blobs and onto a filesystem, and "do the best option for flash space and
+# organization; ignore implementation time". This row is the flash-layout half
+# of that decision. NOTHING IS IMPLEMENTED AGAINST IT YET -- no mount call, no
+# reader, no writer; see FILESYSTEM_USER_DATA_PLAN.md section 5 step 1.
+#
+# APPEND-ONLY CHANGE, same discipline as every revision since the OTA pass:
+# nothing above this line moved, resized, or changed subtype. Diff the CSV
+# against the previous commit to confirm -- the only edit is this row plus this
+# comment block. Because no partition moves, NO PARTITION LOSES DATA when this
+# table is flashed, and because no `app` partition's offset or size changes,
+# `otadata` stays valid and does NOT need erasing for this revision (unlike
+# the 2026-08-21 `factory` move, whose OPERATIONAL NOTE above is specific to
+# that pass). The region this row claims is currently unallocated, so there is
+# nothing in it to lose either.
+#
+# ITS OWN PARTITION, not a corner of `logs`: same rationale the
+# `wifi_nvs`/`kiln_nvs`/`profiles_nvs` split at the top of this file records --
+# a filesystem-wide failure (SPIFFS/LittleFS reformat, GC corruption, a
+# near-full volume) is partition-wide, so a log-volume problem must not be able
+# to reach the tuned PID gains and the coupling matrix, which are the most
+# expensive data on this board to regenerate (hours of bench firings each).
+# Sharing a partition across unrelated data is exactly what once cost the Wi-Fi
+# credentials.
+#
+# SUBTYPE `littlefs` (0x83), a real subtype in this IDF's gen_esp32part.py
+# (v6.0.2, components/partition_table/gen_esp32part.py: 'fat' 0x81, 'spiffs'
+# 0x82, 'littlefs' 0x83), NOT `spiffs` reused. LittleFS, not SPIFFS, because
+# this partition holds the data whose loss is unacceptable: LittleFS is
+# power-loss-safe by design and its atomic rename() is what the plan's
+# temp-then-rename write helper depends on, and it will be mounted with
+# format_if_mount_failed=FALSE -- the opposite of `logs` -- so a corrupt volume
+# is reported, never silently reformatted. The managed component is already
+# pinned in idf_component.yml/dependencies.lock (ca5d90c5).
+#
+# SIZED 512K (0x80000), from the measured inventory, not a round guess.
+# Measured on the live board 2026-09-07 via GET /api/backup/export (compact
+# JSON): the whole export is 4,828 B, of which the 3-zone `zones` document
+# (PID gains, FOPDT, coupling matrix, guards, wiring) is 3,241 B and all 8
+# profile slots together are 1,411 B. Projected worst case, pretty-printed,
+# every cap filled (5 zones = MAX31856_CHANNEL_COUNT, 8 profiles =
+# PROFILES_MAX_COUNT at 12 segments each = PROFILE_MAX_SEGMENTS, 8 named
+# kiln-config slots, 5 runs/profile = PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH
+# from a 1,364 B PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 record):
+#
+#   /cfg/zones.json            1 x ~8K   =   8K   (3,241 B x 5/3 zones x ~1.4 pretty)
+#   /cfg/kilncfg/<slot>.json   8 x ~8K   =  64K   (same document shape as zones)
+#   /cfg/profiles/<id>.json    8 x ~2K   =  16K
+#   /cfg/stats/<id>.json       8 x ~4K   =  32K
+#   /cfg/{prefs,tune,hidden,relay_cycles}.json  4 x ~1K = 4K
+#   ------------------------------------------------------
+#   logical worst case                    ~124K across ~30 files
+#
+# On-media that is not 124K: LittleFS's block size here is the 4 KiB flash
+# sector, every file occupies whole blocks, each directory is a 2-block
+# metadata pair (4 directories = 32K), and copy-on-write plus the atomic
+# temp-then-rename write transiently need a second copy of the file being
+# written. Block-rounded that is ~160K, and LittleFS's own guidance is to keep
+# roughly 2x the live set free so garbage collection is not running against a
+# near-full volume -- ~320K. 512K is the next 64K-aligned size above that:
+# ~4x the block-rounded worst case, ~100x what the board actually holds today.
+#
+# Why not smaller (256K): ~1.6x the block-rounded worst case leaves LittleFS
+# almost no CoW headroom in exactly the near-full regime where it degrades,
+# and the atomic-write helper doubles the largest file in flight. Why not
+# larger (1M+): every count in the inventory above is HARD-CAPPED by a
+# compile-time constant -- there is no unbounded growth vector here -- and
+# 512K already absorbs a 4x rise in firing-history depth on its own. The
+# 1.81 MiB left contiguous above it is worth more unspent: it is the only
+# region large enough to raise `logs` retention back toward the 1 MiB/kind
+# that this file's own LOGGING-RATE FINDING says a real 8-12 hour firing
+# needs (256 KiB/kind holds ~1.9 hours).
+#
+# `logs` was deliberately NOT converted to `littlefs` in this same revision
+# even though the table is being edited anyway. The subtype row and
+# log_store_mount.c's register call have to land together, so bundling them
+# makes one flash a flag day for two filesystems at once, and
+# FILESYSTEM_PLAN.md's trigger for that swap has not fired (retention moved
+# DOWN, 1 MiB -> 256 KiB/kind, 2026-09-02). The saving from bundling is small:
+# a logs subtype change moves no offsets and needs no otadata erase either, so
+# the second table revision costs one more ordinary flash_firmware(), not a
+# restructure.
+#
+# Recomputed fit arithmetic:
+#   logs:            0xCF0000 + 0xC0000 = 0xDB0000
+#   cfg (new):       0xDB0000 + 0x80000 = 0xE30000
+#   contiguous tail: 0xE30000 .. 0x1000000 = 0x1D0000 (1,900,544 B, ~1.81 MiB)
+#   0xDB0000 = 219 x 0x10000 and 0x80000 = 8 x 0x10000, so both offset and
+#   size are 64K-aligned, matching every other entry in this table (a `data`
+#   partition only requires 4K, but the arithmetic stays simple).
+#
+# No build wiring is needed: sdkconfig.defaults already sets
+# CONFIG_PARTITION_TABLE_CUSTOM=y and CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=
+# "partitions.csv", so this row is picked up by the next build with no
+# further change.
+#
+# FLASHING THIS TABLE: flash_firmware() writes all three images -- bootloader
+# @0x0, partition-table @0x8000, app @0x810000 (mcp_server_flash.py's TCL
+# script) -- so it DOES apply a table change. What it does not do is touch
+# `otadata` or write anything but `factory`. If otadata points at ota_0/ota_1
+# (it does after any OTA), the board comes up on the OLD app image running
+# against the NEW table; that is harmless for an append-only revision like
+# this one, but it means the new `cfg` row is live before any firmware knows
+# about it. `ota_rollback_esp()` restores the factory boot target. See
+# docs/FILESYSTEM_PLAN.md "Applying the table change" for the ordered
+# procedure and the mandatory pre-change backup.
