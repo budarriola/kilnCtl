@@ -42,6 +42,7 @@
 #include "ramp_assist_cfg.h"
 #include "unit_pref.h"
 #include "profiles_http.h"
+#include "profiles_export_http.h"
 #include "log_http.h"
 #include "adaptive_tune.h"
 #include "adaptive_tune_http.h"
@@ -321,6 +322,14 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (profiles_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_http_start failed: %s -- no Profiles page this boot",
                  esp_err_to_name(profiles_err));
+    }
+    // Must run AFTER profiles_http_start() just above -- see
+    // profiles_export_http.h's own comment: both handlers read/write the
+    // NVS-backed slot state that call just loaded.
+    esp_err_t profiles_export_err = profiles_export_http_start();
+    if (profiles_export_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "profiles_export_http_start failed: %s -- no single-profile export/import this boot",
+                 esp_err_to_name(profiles_export_err));
     }
 
     // TODO.md 8.1: the explicit-scope reset/factory-default endpoint. Only

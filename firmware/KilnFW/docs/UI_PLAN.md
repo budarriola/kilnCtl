@@ -24,7 +24,7 @@ or restore anything below — it is a lookup, not a table of contents.
 | 3, LCD items 1-6 | Status-card overrun fix, relay-row height cap, touch-target borders, touch-cal/test budget check, config-hub grid scrolling, touch-cal Cancel button | Completed, removed (touch-hit-testing gotchas kept in `BRINGUP_HAZARDS.md`) |
 | 3, Web items 1-6 | Table `.table-scroll` wrapper, button min-height, AP-mode QR viewport, coupling-matrix zone count, fixed-width canvas audit, DHCP/static IP toggle | Completed, removed |
 | LCD: profile creation page (planned) | New profile-builder page (graph view, point stepper) | Built as `ui_page_profile_builder_{zones,segment,review}.c` — see `ARCHITECTURE_DECISIONS.md` ("Page organization"); note the shipped flow uses stepper cards, not the originally-planned graph/drag view |
-| Web: settings/profile import-export (planned) | Same feature, pre-prune draft | Settings half partially built as `backup_http.c` 2026-08-21; profile half still open — see "Open: settings import/export (partial) and profile import/export" above |
+| Web: settings/profile import-export (planned) | Same feature, pre-prune draft | Settings half partially built as `backup_http.c` 2026-08-21 (open items in `TODO.md` 0.5); profile half DONE — `profiles_export_http.c`, see "Open: settings import/export (partial)" above |
 | Web: page structure rework (planned) | Route map, dashboard reorg | Built — `safety_page.html`, `diagnostics_page.html`, `manual_page.html`, `settings_page.html` trimmed to the danger zone, `main_page.html` reordered/trimmed, `nav.js`/`app.js` — see `ARCHITECTURE_DECISIONS.md` ("Page organization") |
 | Web: global-chrome rework (planned 2026-08-21) | Drop-down nav, Home button, dashboard reorder, settings trim | Built same day — see `ARCHITECTURE_DECISIONS.md` ("Page organization", "Global chrome rework") |
 | 4 item 1 | Shared `nav.js` header + bottom nav bar | Built, then the bottom nav was deleted entirely in the chrome rework — `ARCHITECTURE_DECISIONS.md` ("Page organization") |
@@ -46,29 +46,28 @@ or tablet. and the lcd should not require scrolling." That budget rule and
 its arithmetic convention are recorded once in `ARCHITECTURE_DECISIONS.md`
 ("LVGL / LCD rendering" section) rather than re-derived per page here.
 
-## Open: settings import/export (partial) and profile import/export
-
-Two separate import/export features, kept independent (different data,
-different failure modes if merged into one blob).
+## Open: settings import/export (partial)
 
 1. **Settings import/export** — partial (`backup_http.c`, see
    `docs/ARCHITECTURE_DECISIONS.md` "Backup / restore"). Open items tracked
    in `firmware/KilnFW/TODO.md` section 0.5.
-2. **Profile import/export.** Covers kiln firing profiles only
-   (`profiles_save`/`profiles_get`/`profiles_list` imply existing schema) —
-   export a single profile or all profiles as JSON from `profiles_page.html`,
-   import via file-picker + upload. Should reuse whatever point/segment
-   schema the LCD profile-creation flow (`ui_page_profile_builder_*.c`)
-   writes, so a profile authored on the LCD round-trips through web
-   export/import unchanged.
-3. **Shared mechanics, not shared data:** both likely want the same
-   file-picker + `POST` upload + JSON-parse-and-validate pattern on the
-   ESP32 HTTP server side, so implementation can share a helper, but the two
-   export files/endpoints stay separate (`/api/settings/export`,
-   `/api/profiles/export` style) — a settings file should never accidentally
-   double as a profile file or vice versa.
-4. Needs confirming actual field lists in firmware source before
-   implementation starts.
+2. **Profile import/export — DONE.** `profiles_export_http.c` (new module,
+   not folded into the `profiles_http.c` split): `GET /api/profile/export?id=N`
+   downloads one profile as JSON (`Content-Disposition: attachment`);
+   `POST /api/profile/import[?id=N]` decodes that JSON with the existing
+   `backup_json.h` reader (already shared with `backup_import.c`) and
+   commits through `profiles_http_save()` — the same range/feasibility
+   validation the interactive Save path and the whole-board backup restore
+   both already run, not a third copy of those rules. Covers the richer
+   `seg_kind`/`io_target`/`io_state`/`io_blocking`/`io_leave_on_at_end`
+   segment fields (RELAY_IO segments), so a profile round-trips unchanged
+   regardless of which kind of segment it uses — the whole-board backup
+   format (`backup_export.c`/`backup_import.c`) only ever carried
+   `target_c`/`ramp_c_per_hr`/`dwell_min`, a pre-existing, separate gap this
+   does not need to fix. `profiles_page.html` gained an Export link per
+   saved profile and an Import file-picker; the pure client-side helpers
+   (`profileExportUrl`, `validateImportJson`) are covered by
+   `App/test/test_profile_export_import.js`.
 
 ## Open, explicitly deferred by the owner: auth / session layer
 

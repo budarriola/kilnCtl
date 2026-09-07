@@ -193,6 +193,15 @@ to catch up before advancing (ramp-lock, TODO.md 6A.5) -- each zone still
 runs its own PID/bang-bang loop and thermal guards independently.</p>
 
 <h2>Saved profiles</h2>
+<p class="hint">Export a profile to a .json file, or import one exported from this
+board (or another kilnCtl board running the same firmware). Import always creates or
+overwrites a slot the same way Save does -- feasibility/range checks run identically
+either way.</p>
+<div>
+  <input type="file" id="importFile" accept="application/json,.json" style="display:none">
+  <button id="importBtn" type="button" class="small">Import profile&hellip;</button>
+</div>
+<div id="importMsg"></div>
 <div id="list"><p class="empty">Loading&hellip;</p></div>
 
 <h2>Shipped schedules <button id="restoreBtn" type="button" class="small" style="display:none;float:right">Restore removed</button></h2>
@@ -766,6 +775,16 @@ function loadList() {
         if (!kcConfirm('Delete fire profile "' + p.name + '"? This cannot be undone.')) return;
         deleteProfile(p.id);
       });
+      var exportLink = document.createElement('a');
+      exportLink.className = 'small';
+      exportLink.textContent = 'Export';
+      exportLink.href = profileExportUrl(p.id);
+      // download is cosmetic only (a suggested filename); the server's own
+      // Content-Disposition header (profiles_export_http.c) is what actually
+      // names the saved file, matching backup_http.c's existing convention.
+      exportLink.setAttribute('download', '');
+      exportLink.style.marginRight = '0.5em';
+      btnGroup.appendChild(exportLink);
       btnGroup.appendChild(editBtn);
       btnGroup.appendChild(delBtn);
       div.appendChild(btnGroup);
@@ -1009,6 +1028,75 @@ function deleteProfile(id) {
     document.getElementById('msg').innerHTML = '<span class="err">Could not reach the board -- delete not confirmed.</span>';
   });
 }
+
+// ---- Profile export/import (UI_PLAN.md "Profile import/export") ----------
+// Pure/extractable so App/test/test_profile_export_import.js can exercise
+// them without a DOM -- same split as segProfileCurve() above.
+
+function profileExportUrl(id) {
+  return '/api/profile/export?id=' + encodeURIComponent(id);
+}
+
+// Cheap client-side pre-check before spending a round trip: the file must at
+// least parse as JSON and look like a profile object (name/segments), so an
+// obviously-wrong file (a settings backup, a picture, garbage) is rejected
+// with a clear message here instead of via the server's generic 400. This is
+// NOT the authoritative validation -- profiles_http_save() on the board runs
+// the real range/feasibility checks the same way Save does; this only saves
+// a round trip for the common "wrong file" mistake.
+function validateImportJson(text) {
+  var data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, error: 'Not a valid JSON file.' };
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, error: 'File does not contain a profile object.' };
+  }
+  if (typeof data.name !== 'string' || !Array.isArray(data.segments)) {
+    return { ok: false, error: 'File is missing "name" or "segments" -- not a profile export.' };
+  }
+  return { ok: true, data: data };
+}
+
+document.getElementById('importBtn').addEventListener('click', function () {
+  document.getElementById('importFile').click();
+});
+
+document.getElementById('importFile').addEventListener('change', function (evt) {
+  var msg = document.getElementById('importMsg');
+  var file = evt.target.files && evt.target.files[0];
+  evt.target.value = ''; // allow importing the same filename twice in a row
+  if (!file) return;
+  msg.textContent = 'Reading file…';
+  var reader = new FileReader();
+  reader.onload = function () {
+    var check = validateImportJson(String(reader.result));
+    if (!check.ok) {
+      msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(check.error) + '</span>';
+      return;
+    }
+    msg.textContent = 'Importing…';
+    fetch('/api/profile/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(check.data),
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+      .then(function (res) {
+        if (!res.ok || res.data.ok === false) {
+          msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(res.data.error || 'Import failed.') + '</span>';
+          return;
+        }
+        msg.textContent = 'Imported into profile slot ' + res.data.id + '.';
+        loadList();
+      }).catch(function () {
+        msg.innerHTML = '<span class="err">Import failed -- could not reach the board.</span>';
+      });
+  };
+  reader.onerror = function () {
+    msg.innerHTML = '<span class="err">Could not read that file.</span>';
+  };
+  reader.readAsText(file);
+});
 
 document.getElementById('newBtn').addEventListener('click', resetEditor);
 

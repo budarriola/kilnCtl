@@ -313,6 +313,11 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # doc comment for the file map.
                        "http/profiles_catalog_http.c"
                        "http/profiles_edit_http.c"
+                       # profiles_export_http.c -- single-profile JSON export/
+                       # import (UI_PLAN.md "Open: ... profile import/export"),
+                       # a separate module rather than a fourth split file: see
+                       # its own header comment for why.
+                       "http/profiles_export_http.c"
                        # profiles_builtin.c is hand-written and #includes the
                        # machine-generated profiles_builtin_table.inc, which is
                        # NOT listed here (it is not a translation unit).
