@@ -44,20 +44,28 @@
 #define DIAGNOSTICS_HTTP_H
 
 #include "esp_err.h"
+#include "safety_link.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Registers the three page routes above on the httpd instance
- * wifi_provision_http.c already started. Takes no hardware pointers --
- * unlike dashboard_http_start()/ota_http_start(), these are pure static
- * pages with no server-side data gathering of their own, same shape as
- * readiness_http_start(). Non-fatal to app_main on failure, same convention
- * as every other *_http_start() in this directory: logs and returns the
- * esp_err_t, and a failed registration just means those routes 404 this
- * boot rather than app_main refusing to come up. */
-esp_err_t diagnostics_http_start(void);
+ * wifi_provision_http.c already started. Takes no hardware pointers of its
+ * own for the pages themselves -- unlike dashboard_http_start()/
+ * ota_http_start(), these are pure static pages with no server-side data
+ * gathering, same shape as readiness_http_start(). `safety` is the one
+ * exception: GET /api/diagnostics/timing (HW_ABSTRACTION.md "Still open")
+ * reads safety_link_get_stats()'s link_reply_us_* fields directly, so this
+ * needs the same NULL-tolerant safety pointer dashboard_http_start() takes
+ * (ctx->safety_err == ESP_OK ? &ctx->safety : NULL at the call site) --
+ * NULL just means that block of the timing response reports all zeros/
+ * count 0 rather than a real measurement, same as any other reading taken
+ * before the safety link came up. Non-fatal to app_main on failure, same
+ * convention as every other *_http_start() in this directory: logs and
+ * returns the esp_err_t, and a failed registration just means those routes
+ * 404 this boot rather than app_main refusing to come up. */
+esp_err_t diagnostics_http_start(SafetyLinkClass *safety);
 
 #ifdef __cplusplus
 }

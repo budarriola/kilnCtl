@@ -133,12 +133,14 @@ def get_crash_report(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> di
 def get_diagnostics_timing(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
     """GET /api/diagnostics/timing (diagnostics_http.c:
     diagnostics_timing_get_handler) -- HW_ABSTRACTION.md "Still open": display
-    flush time and thermocouple read-cycle latency, made reportable rather
-    than requiring a bench session with a scope. Returns
-    ``{"display_flush_us": {...}, "thermo_read_us": {...}}``, each with
-    count/last/min/max/mean in microseconds; count == 0 means that path has
-    not run yet on this boot (min/mean are 0 until then, not a real
-    measurement)."""
+    flush time, thermocouple read-cycle latency, and (2026-09-06) the ESP<->
+    Pico safety-link reply latency, made reportable rather than requiring a
+    bench session with a scope. Returns ``{"display_flush_us": {...},
+    "thermo_read_us": {...}, "link_reply_us": {...}}``, each with
+    count/last/min/max/mean in microseconds (link_reply_us also carries
+    ``timeouts``, safety_link_stats_t's existing counter, not a new one);
+    count == 0 means that path has not run yet on this boot (min/mean are 0
+    until then, not a real measurement)."""
     req = urllib.request.Request(_url(host, "/api/diagnostics/timing"), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -206,5 +208,12 @@ def get_heap_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dic
         if isinstance(timing, dict):
             result["display_flush_us"] = timing.get("display_flush_us")
             result["thermo_read_us"] = timing.get("thermo_read_us")
+            # HW_ABSTRACTION.md "Still open": on-board ESP<->Pico safety-link
+            # reply latency (safety_link.c's safety_exchange(), timed with
+            # hal_time_now_us() -- see safety_link_stats_t::link_reply_us_
+            # count's doc comment). Also carries a `timeouts` sub-field --
+            # NOT a separate counter, it is safety_link_stats_t's existing
+            # `timeouts` field surfaced under this block for convenience.
+            result["link_reply_us"] = timing.get("link_reply_us")
 
     return result

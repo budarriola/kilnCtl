@@ -349,6 +349,14 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * SafetyLinkClass::tc_type_last_sent's comment and safety_sync_tc_type()
      * below. */
     link->tc_type_last_sent = 0xFFu;
+    /* Same "memset zeroed it, but 0 is not the honest starting value"
+     * reasoning as tc_type_last_sent just above -- a real min_us of 0 would
+     * misreport a legitimate reply as taking no time at all, and would
+     * never be overwritten by safety_exchange()'s "if elapsed < min" check
+     * once latched at 0. See safety_link_stats_t::link_reply_us_min's doc
+     * comment; MAX31856.c's s_read_all_min_us uses the same UINT32_MAX
+     * sentinel for the identical reason. */
+    link->stats.link_reply_us_min = UINT32_MAX;
     /* Diagnostic identity only (Phase 7b.2), same spirit as SaftyFW's own
      * s_boot_id (link_task.c: "not a security or safety value, so true
      * entropy is not required") -- but the ESP has a real hardware RNG
@@ -755,6 +763,12 @@ esp_err_t safety_link_get_stats(SafetyLinkClass *link, safety_link_stats_t *out)
     }
     *out = link->stats;
     out->poll_period_ms = link->poll_period_ms;
+    /* Same "report 0, not the UINT32_MAX sentinel, before any sample has
+     * landed" convention as MAX31856_get_read_all_stats() -- see this
+     * struct field's own doc comment. */
+    if (out->link_reply_us_count == 0u) {
+        out->link_reply_us_min = 0u;
+    }
     safety_unlock(link);
     /* uart_owner counts the physical line errors (break/parity/frame and ring
      * overflows) for this port; they are the same class of problem as a

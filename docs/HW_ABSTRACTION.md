@@ -35,6 +35,34 @@ the goal, tree shape, decisions, changelog, and remaining open items.
   timing; no lvgl/display diagnostics tool exists in this server's 147
   tools). No measurement path via kilnctrl MCP today — still open, and would
   need either a new diagnostic endpoint or saleae/logic-analyzer capture.
+
+  2026-09-06 follow-up: `GET /api/diagnostics/timing` (`a55d791`) already
+  closed the display/thermo half of this with `display_flush_us`/
+  `thermo_read_us` (`lvgl_port_get_flush_stats_ex`/`MAX31856_get_read_all_
+  stats`). The remaining safety-link-reply half is now instrumented the same
+  way: `link_reply_us` (`{count,last,min,max,mean}`, plus a `timeouts`
+  sub-field that reuses `safety_link_stats_t::timeouts` rather than
+  duplicating it) is measured in `safety_exchange()`
+  (`firmware/KilnFW/App/drivers/safety/safety_link_inbox.c`) with
+  `hal_time_now_us()`, from the instant a `GET_STATUS` request is handed to
+  `uart_protocol_send_broadcast()` to the instant `safety_drain_inbox_for_
+  status()` reports the matching reply decoded. Correlation is by
+  `safety_exchange()`'s own `xact_lock` serialization, not a wire seq/msg id
+  — `SAFETY_CMD_GET_STATUS` carries none (see `safety_link_stats_t::
+  link_reply_us_count`'s doc comment in `safety_link.h` for why that is
+  still a sound match). Wired into the same `GET /api/diagnostics/timing`
+  endpoint and into `get_heap_status`'s printed output
+  (`tools/PcTools/src/kilnctrl/`). Host-tested in
+  `test_safety_link_compile.c` against a fake inbox and `fake_time.c`'s
+  scripted clock, including a negative test that breaks the drain/reply
+  match and confirms the counters do NOT advance.
+
+  **No hardware measurement exists yet** — this only adds the on-board
+  metric; the board has not been reflashed with it as of this writing. Once
+  flashed, `get_heap_status`'s `link_reply_us` block is what replaces the
+  pre-HAL paper figures (345 ms reply window, ≈40 ms flight) and the
+  contaminated MCP-timed `safety_ping` (~592 ms, client/HTTP overhead
+  included) above — do not treat this paragraph itself as that measurement.
 - ~~Remaining SaftyFW hardware/ includes~~ — closed 2026-09-06:
   `main.c`, `console_uart.c`, `thermo_task.c` re-reviewed line by line.
   `main.c`'s GPIO6-low latch/direction pair matches `hal_gpio_init_out()`'s

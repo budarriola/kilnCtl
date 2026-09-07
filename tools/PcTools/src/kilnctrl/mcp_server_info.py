@@ -187,17 +187,26 @@ def get_heap_status(host: Optional[str] = None) -> str:
         # diagnostics_timing_get_handler(). count==0 means that path has not
         # run yet on this boot (min/mean report as 0 until then, not a real
         # zero-length measurement).
-        for label, key in (("display_flush_us", "display_flush_us"), ("thermo_read_us", "thermo_read_us")):
+        for label, key in (("display_flush_us", "display_flush_us"), ("thermo_read_us", "thermo_read_us"),
+                           ("link_reply_us", "link_reply_us")):
             t = heap.get(key)
             if not t:
                 continue
             if t.get("count", 0) == 0:
                 lines.append(f"{label}: no samples yet")
             else:
-                lines.append(
+                line = (
                     f"{label}: count={t['count']} last={t['last']} min={t['min']} "
                     f"max={t['max']} mean={t['mean']} (us)"
                 )
+                # link_reply_us only: `timeouts` is safety_link_stats_t's
+                # existing counter (requests with no matching reply at all),
+                # surfaced here rather than as a separate metric -- see
+                # dashboard_http_client.py's get_diagnostics_timing() doc
+                # comment.
+                if key == "link_reply_us" and "timeouts" in t:
+                    line += f" timeouts={t['timeouts']}"
+                lines.append(line)
     return "\n".join(lines)
 
 

@@ -992,6 +992,44 @@ typedef struct {
     uint8_t last_config_page_len;
     uint8_t last_commit_config_rejected_len;
     uint8_t last_rollback_result_len;
+
+    /* HW_ABSTRACTION.md "Still open", 2026-09-06: on-board ESP<->Pico link
+     * reply latency, measured in safety_exchange() (safety_link_inbox.c)
+     * from the moment a GET_STATUS request frame is handed to
+     * uart_protocol_send_broadcast() to the moment safety_drain_inbox_
+     * for_status() reports the matching STATUS reply decoded. This replaces
+     * the pre-HAL paper figures (345 ms reply window, ~40 ms flight) and the
+     * MCP-timed safety_ping() (~592 ms, contaminated by client/HTTP/serial
+     * round-trip overhead outside this board) with a number measured
+     * entirely on this side of the isolated link, using hal_time_now_us().
+     *
+     * Correlation is NOT by a wire seq/msg id -- SAFETY_CMD_GET_STATUS
+     * carries none, and SaftyFW's link_task never runs the ACK'd DATA/ACK/
+     * NACK transport (see safety_exchange()'s own comment). The correlation
+     * is safety_exchange()'s own xact_lock: only one exchange is ever in
+     * flight on this link at a time, so the next STATUS frame
+     * safety_drain_inbox_for_status() decodes while that lock is held is,
+     * by construction, the reply to the request this same call just sent --
+     * there is no second candidate it could be. Only the expect_status path
+     * (safety_link_ping()/the periodic poll) is measured; the fire-and-
+     * forget BROADCAST path (safety_link_request_enable()) has no defined
+     * "matching reply" to time.
+     *
+     * A timed-out exchange (safety_drain_inbox_for_status() returns false)
+     * contributes to none of these fields -- there is no reply to time --
+     * and is already counted by the `timeouts` field above; no separate
+     * link_reply_timeouts counter exists, since that would just duplicate
+     * `timeouts` under this feature's own name (LINK_PROTOCOL.md's own
+     * "reuse, don't duplicate" convention -- see get_heap_status's/the
+     * diagnostics/timing endpoint's use of `timeouts` for this purpose). */
+    uint32_t link_reply_us_count;
+    uint32_t link_reply_us_last;
+    uint32_t link_reply_us_min;
+    uint32_t link_reply_us_max;
+    uint32_t link_reply_us_mean;    /* recomputed on every update from the
+                                     * running sum kept in SafetyLinkClass::
+                                     * link_reply_us_sum -- always current in
+                                     * *out, no separate query needed */
 } safety_link_stats_t;
 
 typedef struct {
@@ -1116,6 +1154,14 @@ typedef struct {
     TickType_t           stashed_rollback_result_tick;
 
     safety_link_stats_t stats;
+    /* Running sum backing stats.link_reply_us_mean -- kept outside
+     * safety_link_stats_t itself (which is a plain snapshot struct copied
+     * whole by safety_link_get_stats()) so the mean field in that snapshot
+     * can be recomputed from this exact sum/count pair every time it is
+     * updated, same "sum kept separately, mean derived at read/update time"
+     * shape as MAX31856.c's s_read_all_sum_us. Read/written under
+     * state_lock, same as every other stats field. */
+    uint64_t            link_reply_us_sum;
     uint16_t            poll_period_ms;
     /* 2026-08-20 congestion fix -- see SAFETY_LINK_BACKOFF_MAX_STREAK's
      * comment. Poll-task-only, no lock needed. */

@@ -59,6 +59,11 @@
 #include <string.h>
 
 #include "test_common.h"
+#include "fake_time.h" /* hal_time.h's host fake -- safety_link_inbox.c's safety_exchange() now
+                        * calls hal_time_now_us() for link_reply_us (HW_ABSTRACTION.md "Still
+                        * open") -- see fake_time.c already linked into this executable's build
+                        * command (build_host_tests.ps1) for the safety_cfg_store hal_time
+                        * migration, same fake now doubles for this. */
 
 #include "MAX31856.h"
 #include "kiln_io.h"
@@ -168,11 +173,39 @@ esp_err_t uart_protocol_send(uart_protocol_t *proto, uart_proto_device_t dst_dev
                               size_t length, uint32_t ack_timeout_ms)
 { (void)proto; (void)dst_device; (void)dst_task; (void)src_task; (void)payload; (void)length;
   (void)ack_timeout_ms; return ESP_FAIL; }
+// Every existing test in this file relies on the always-ESP_FAIL default
+// (this file's own top comment: safety_exchange()'s blocking request/reply
+// cycle is explicitly out of scope for those) -- so the link_reply_us tests
+// below opt IN via this flag rather than changing the default for everyone
+// else. Reset to false at the top of every test that touches it, same
+// "explicit per-test state, no leftover from a previous test" convention as
+// fake_inbox_reset()/s_stub_relay_cycles_safety_edge_calls.
+static bool s_stub_broadcast_send_succeeds = false;
+// link_reply_us tests drive the fake clock from INSIDE this stub, not the
+// test body: safety_exchange() captures reply_start_us immediately before
+// this call and reply_stop_us immediately after safety_drain_inbox_for_
+// status() returns, with the whole drain (including the fake
+// uart_protocol_receive() above) happening synchronously inside THIS
+// function call -- there is no other point at which "N us elapsed between
+// send and reply" can be injected. When s_stub_broadcast_reply_push is
+// true, the stub advances the fake clock by s_stub_broadcast_advance_us and
+// enqueues s_stub_broadcast_reply_msg, simulating a real reply landing
+// exactly that long after the request was handed to the UART.
+static bool s_stub_broadcast_reply_push = false;
+static uint64_t s_stub_broadcast_advance_us = 0;
+static uart_proto_message_t s_stub_broadcast_reply_msg;
 esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto, uart_proto_device_t dst_device,
                                         uint8_t dst_task, uint8_t src_task,
                                         const uint8_t *payload, size_t length)
 { (void)proto; (void)dst_device; (void)dst_task; (void)src_task; (void)payload; (void)length;
-  return ESP_FAIL; }
+  if (!s_stub_broadcast_send_succeeds) {
+      return ESP_FAIL;
+  }
+  if (s_stub_broadcast_reply_push) {
+      fake_time_advance_us(s_stub_broadcast_advance_us);
+      fake_inbox_push(&s_stub_broadcast_reply_msg);
+  }
+  return ESP_OK; }
 
 // Same reasoning/precedent as test_ota_http.c and test_safety_cfg_store.c
 // (both header-commented at length): stubs/freertos/semphr.h's
@@ -1371,6 +1404,114 @@ static void test_link_loss_during_update_denies_heat_end_to_end(void)
                "the reported source is exactly the link-loss bit, not something update-specific");
 }
 
+// --------------------------------------------------------------------------
+// HW_ABSTRACTION.md "Still open", 2026-09-06: link_reply_us. safety_exchange()
+// (safety_link_inbox.c) now times the request/reply exchange itself with
+// hal_time_now_us() -- these tests are the first coverage of that function's
+// blocking path at all (this file's own header comment used to list it as
+// explicitly out of scope; the controllable uart_protocol_send_broadcast/
+// uart_protocol_receive stubs above make it reachable now). Uses fake_time.c
+// (App/test's existing hal_time.h host fake) as the clock; per that header's
+// own "must not reintroduce the idealized-input bug class" contract, the two
+// advances below are deliberately non-round (3001us, 987us), not 1000/2000.
+// --------------------------------------------------------------------------
+
+static void reset_link_reply_us_test_state(void)
+{
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_stub_broadcast_send_succeeds = false;
+    s_stub_broadcast_reply_push = false;
+    s_stub_broadcast_advance_us = 0;
+}
+
+static void set_stub_status_reply(void)
+{
+    memset(&s_stub_broadcast_reply_msg, 0, sizeof(s_stub_broadcast_reply_msg));
+    set_status_frame(s_stub_broadcast_reply_msg.payload, (uint8_t)SAFETY_FLAG_TEMP_VALID,
+                      123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
+    s_stub_broadcast_reply_msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+}
+
+static void test_link_reply_us_records_a_matched_exchange(void)
+{
+    TEST_SECTION("safety_exchange() -- link_reply_us records count/last/min/max/mean across "
+                 "two real request/reply round trips, timed on the fake clock");
+
+    reset_link_reply_us_test_state();
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+    // make_link() is a bare memset(0), not full safety_link_start() bring-up
+    // -- real bring-up seeds this to UINT32_MAX (safety_link.c) specifically
+    // so the first real sample can ever beat it; without this line here a
+    // memset-0 min would never update (elapsed < 0 is never true).
+    link.stats.link_reply_us_min = UINT32_MAX;
+
+    s_stub_broadcast_send_succeeds = true;
+    s_stub_broadcast_reply_push = true;
+    set_stub_status_reply();
+    s_stub_broadcast_advance_us = 3001; // first round trip: 3001us
+
+    const uint8_t request[] = { SAFETY_CMD_GET_STATUS };
+    esp_err_t err = safety_exchange(&link, request, sizeof(request), true);
+
+    TEST_CHECK(err == ESP_OK, "first exchange succeeds -- the reply was pushed and matched");
+    TEST_CHECK(link.stats.link_reply_us_count == 1, "one matched exchange counted");
+    TEST_CHECK(link.stats.link_reply_us_last == 3001, "last == the exact simulated round trip");
+    TEST_CHECK(link.stats.link_reply_us_min == 3001, "min == the only sample so far");
+    TEST_CHECK(link.stats.link_reply_us_max == 3001, "max == the only sample so far");
+    TEST_CHECK(link.stats.link_reply_us_mean == 3001, "mean == the only sample so far");
+    TEST_CHECK(link.stats.timeouts == 0, "a matched reply is not counted as a timeout");
+
+    // Second round trip, a different (non-round) duration -- proves min/max/
+    // mean are tracked across calls, not just latched from the first one.
+    set_stub_status_reply();
+    s_stub_broadcast_advance_us = 987;
+    err = safety_exchange(&link, request, sizeof(request), true);
+
+    TEST_CHECK(err == ESP_OK, "second exchange also succeeds");
+    TEST_CHECK(link.stats.link_reply_us_count == 2, "two matched exchanges counted");
+    TEST_CHECK(link.stats.link_reply_us_last == 987, "last updates to the second, faster reply");
+    TEST_CHECK(link.stats.link_reply_us_min == 987, "min drops to the faster of the two");
+    TEST_CHECK(link.stats.link_reply_us_max == 3001, "max stays at the slower of the two");
+    TEST_CHECK(link.stats.link_reply_us_mean == (3001 + 987) / 2,
+               "mean is the running average of both samples, not just the latest");
+}
+
+// Negative-test companion (project convention: prove a check CAN fail, not
+// just that it passes on the happy path -- feedback_negative_test_every_
+// check.md). This exercises the real "no matching reply" path -- the
+// request is sent successfully but nothing answers -- and pins that
+// link_reply_us must NOT advance in that case (the exchange has nothing to
+// time), while the existing `timeouts` counter still does. Manually
+// confirmed this test fails if safety_link_inbox.c's timeout branch is
+// changed to increment link_reply_us_count/link_reply_us_last instead of
+// (or in addition to) stats.timeouts -- i.e. this is not a vacuous check
+// against a mirror, it pins the real production correlation.
+static void test_link_reply_us_not_recorded_when_nothing_answers(void)
+{
+    TEST_SECTION("safety_exchange() -- REGRESSION PIN: a request that is sent but never "
+                 "answered must NOT advance link_reply_us (there is no reply to time); it "
+                 "must still advance the existing stats.timeouts counter, not a new one");
+
+    reset_link_reply_us_test_state();
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    s_stub_broadcast_send_succeeds = true;
+    s_stub_broadcast_reply_push = false; // nothing lands in the inbox -- fake_inbox stays empty
+
+    const uint8_t request[] = { SAFETY_CMD_GET_STATUS };
+    esp_err_t err = safety_exchange(&link, request, sizeof(request), true);
+
+    TEST_CHECK(err == ESP_ERR_TIMEOUT, "no reply arrives -- the exchange reports a timeout");
+    TEST_CHECK(link.stats.link_reply_us_count == 0,
+               "link_reply_us_count is untouched -- no matched reply to time");
+    TEST_CHECK(link.stats.link_reply_us_last == 0, "last is untouched (still its zeroed initial value)");
+    TEST_CHECK(link.stats.timeouts == 1,
+               "the EXISTING timeouts counter records this, not a new/duplicate counter");
+}
+
 int g_test_failures = 0;
 int g_test_count = 0;
 
@@ -1403,6 +1544,8 @@ int main(void)
     test_frames_gated_above_a_version_are_not_expected_from_that_peer();
     test_update_in_progress_does_not_relax_link_loss_block();
     test_link_loss_during_update_denies_heat_end_to_end();
+    test_link_reply_us_records_a_matched_exchange();
+    test_link_reply_us_not_recorded_when_nothing_answers();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

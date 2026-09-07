@@ -34,6 +34,7 @@
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "hal_time.h" /* hal_time_now_us() -- link_reply_us timing in safety_exchange() below */
 #include "stack_margin.h"
 #include "freertos/idf_additions.h"
 #include "settings.h"
@@ -662,6 +663,18 @@ esp_err_t safety_exchange(SafetyLinkClass *link, const uint8_t *request, size_t 
      * old ACK'd send's failure was; that counter now means "asked, and got no
      * reply", which is decided below by whether a reply frame actually
      * showed up, not by whether the send itself succeeded. */
+    /* HW_ABSTRACTION.md "Still open": link_reply_us. Started right before the
+     * frame is handed to the UART, same instant frames_sent above already
+     * commits to -- NOT before safety_drain_inbox(link, 0)'s opportunistic
+     * drain a few lines up, which can itself take an unbounded-looking (but
+     * in practice tiny) amount of time reading whatever already queued from
+     * a PRIOR exchange and has nothing to do with THIS request's latency.
+     * Only meaningful for the expect_status path below; the fire-and-forget
+     * branch never stops this timer, deliberately -- see safety_link_stats_t
+     * ::link_reply_us_count's doc comment for why only a real matched reply
+     * is timed. */
+    uint64_t reply_start_us = expect_status ? hal_time_now_us() : 0;
+
     esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
                                                   UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
                                                   request, length);
@@ -674,7 +687,29 @@ esp_err_t safety_exchange(SafetyLinkClass *link, const uint8_t *request, size_t 
     }
 
     if (expect_status) {
-        if (!safety_drain_inbox_for_status(link, SAFETY_LINK_REPLY_TIMEOUT_MS)) {
+        if (safety_drain_inbox_for_status(link, SAFETY_LINK_REPLY_TIMEOUT_MS)) {
+            /* A real matched reply -- see the doc comment on
+             * safety_link_stats_t::link_reply_us_count for why this counts
+             * as "matched" without a wire seq/msg id: this whole function is
+             * serialized by xact_lock, so the STATUS frame that just
+             * satisfied the wait above cannot be anything other than the
+             * answer to the request sent a few lines up. */
+            uint32_t elapsed_us = (uint32_t)(hal_time_now_us() - reply_start_us);
+            if (safety_lock(link)) {
+                link->stats.link_reply_us_last = elapsed_us;
+                if (elapsed_us < link->stats.link_reply_us_min) {
+                    link->stats.link_reply_us_min = elapsed_us;
+                }
+                if (elapsed_us > link->stats.link_reply_us_max) {
+                    link->stats.link_reply_us_max = elapsed_us;
+                }
+                link->link_reply_us_sum += elapsed_us;
+                link->stats.link_reply_us_count++;
+                link->stats.link_reply_us_mean =
+                    (uint32_t)(link->link_reply_us_sum / link->stats.link_reply_us_count);
+                safety_unlock(link);
+            }
+        } else {
             /* ACKed but no answer: the peer's protocol layer is alive and its
              * application layer is not. Counted as a timeout, since the result
              * for the caller is the same -- no fresh data. */

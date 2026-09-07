@@ -28,6 +28,12 @@
 
 static const char *TAG = "diagnostics_http";
 
+/* Set by diagnostics_http_start()'s `safety` argument. NULL-tolerant, same
+ * convention as every other hardware pointer in this codebase (kio/
+ * thermo_bus in dashboard_http.c, etc.) -- diagnostics_timing_get_handler()
+ * below checks it before calling safety_link_get_stats(). */
+static SafetyLinkClass *s_diag_safety;
+
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
  * App/drivers/CMakeLists.txt -- same convention as every other *_page.html
  * in this component (see web_encoding.h's header comment for the flash-
@@ -575,16 +581,46 @@ static esp_err_t diagnostics_timing_get_handler(httpd_req_t *req)
     uint32_t t_last, t_min, t_max, t_count, t_mean;
     MAX31856_get_read_all_stats(&t_last, &t_min, &t_max, &t_count, &t_mean);
 
-    char json[320];
+    /* link_reply_us -- HW_ABSTRACTION.md "Still open", added 2026-09-06:
+     * see safety_link_stats_t::link_reply_us_count's doc comment
+     * (safety_link.h) for exactly what this spans and why it replaces the
+     * pre-HAL paper figures/the contaminated MCP-timed safety_ping(). NULL-
+     * tolerant like every other hardware read in this handler's siblings --
+     * s_diag_safety is NULL until the safety link comes up (or if it never
+     * does this boot), and this block just reports all zeros rather than
+     * failing the whole response, same as every other block here would if
+     * its own hardware were absent. */
+    uint32_t l_last = 0, l_min = 0, l_max = 0, l_count = 0, l_mean = 0;
+    uint32_t l_timeouts = 0;
+    if (s_diag_safety) {
+        safety_link_stats_t stats;
+        if (safety_link_get_stats(s_diag_safety, &stats) == ESP_OK) {
+            l_last = stats.link_reply_us_last;
+            l_min = stats.link_reply_us_min;
+            l_max = stats.link_reply_us_max;
+            l_count = stats.link_reply_us_count;
+            l_mean = stats.link_reply_us_mean;
+            /* Not a separate counter -- reuses the existing `timeouts` field
+             * (safety_link_stats_t's own doc comment on link_reply_us_count
+             * explains why a second one would only duplicate it). */
+            l_timeouts = stats.timeouts;
+        }
+    }
+
+    char json[480];
     int n = snprintf(json, sizeof(json),
                      "{\"display_flush_us\":{\"count\":%lu,\"last\":%lu,\"min\":%lu,\"max\":%lu,"
                      "\"mean\":%lu},"
                      "\"thermo_read_us\":{\"count\":%lu,\"last\":%lu,\"min\":%lu,\"max\":%lu,"
-                     "\"mean\":%lu}}",
+                     "\"mean\":%lu},"
+                     "\"link_reply_us\":{\"count\":%lu,\"last\":%lu,\"min\":%lu,\"max\":%lu,"
+                     "\"mean\":%lu,\"timeouts\":%lu}}",
                      (unsigned long)d_count, (unsigned long)d_last, (unsigned long)d_min,
                      (unsigned long)d_max, (unsigned long)d_mean,
                      (unsigned long)t_count, (unsigned long)t_last, (unsigned long)t_min,
-                     (unsigned long)t_max, (unsigned long)t_mean);
+                     (unsigned long)t_max, (unsigned long)t_mean,
+                     (unsigned long)l_count, (unsigned long)l_last, (unsigned long)l_min,
+                     (unsigned long)l_max, (unsigned long)l_mean, (unsigned long)l_timeouts);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, (n < 0) ? 0 : (size_t)n);
 }
@@ -801,8 +837,9 @@ static esp_err_t danger_enable_post_handler(httpd_req_t *req)
 }
 #undef DANGER_ENABLE_BODY_MAX
 
-esp_err_t diagnostics_http_start(void)
+esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
 {
+    s_diag_safety = safety;
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {
         ESP_LOGE(TAG, "no HTTP server -- wifi_provision_http_start() must run first");

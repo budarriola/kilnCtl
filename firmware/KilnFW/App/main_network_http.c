@@ -392,7 +392,10 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // just above. Registered right after readiness for the same reason: no
     // ordering dependency on anything below it, so placement only matters for
     // reading this boot sequence top-to-bottom.
-    esp_err_t diagnostics_err = diagnostics_http_start();
+    // link_reply_us (HW_ABSTRACTION.md "Still open") reads safety_link_get_
+    // stats() directly -- same safety pointer/NULL-tolerant convention as
+    // dashboard_http_start() above.
+    esp_err_t diagnostics_err = diagnostics_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
     if (diagnostics_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "diagnostics_http_start failed: %s -- no /diagnostics, /diagnostics/thermo "
                       "or /safety page this boot", esp_err_to_name(diagnostics_err));

@@ -152,6 +152,56 @@ static void test_buffer_always_terminated(void)
                "buffer stays NUL-terminated even when the sentence is truncated");
 }
 
+// LINK_PROTOCOL.md Frame B (SAFETY_CMD_DIAG) warn_mask, per SaftyFW commit
+// 7175078a: bit15 (S15, zone under-current/open-heater) is now a REAL
+// per-guard warn bit -- previously always 0 (S15 did not decode a live
+// condition on the Pico side yet). This pins that the ESP-side decode
+// already understands it correctly: it is not a NEW addition to
+// safety_warn_words_short() (S14/S15 were already in its bit table), but
+// there was no host coverage proving bit15 actually resolves to the S15
+// name rather than falling into the "unrecognised" branch -- this closes
+// that gap.
+static void test_warn_mask_bit15_decodes_to_s15(void)
+{
+    char buf[64];
+    const char *s = safety_warn_words_short((uint16_t)(1u << 15), buf, sizeof(buf));
+    TEST_CHECK(strstr(s, "S15") != NULL, "bit15 alone decodes to the S15 warn name");
+    TEST_CHECK(strstr(s, "unrecognised") == NULL, "bit15 is NOT reported as an unrecognised bit");
+}
+
+static void test_warn_mask_bit14_decodes_to_s14(void)
+{
+    char buf[64];
+    const char *s = safety_warn_words_short((uint16_t)(1u << 14), buf, sizeof(buf));
+    TEST_CHECK(strstr(s, "S14") != NULL, "bit14 alone decodes to the S14 warn name");
+}
+
+static void test_warn_mask_bits_14_and_15_together(void)
+{
+    char buf[128];
+    const char *s = safety_warn_words_short((uint16_t)((1u << 14) | (1u << 15)), buf, sizeof(buf));
+    TEST_CHECK(strstr(s, "S14") != NULL, "both-bits mask still names S14");
+    TEST_CHECK(strstr(s, "S15") != NULL, "both-bits mask still names S15");
+}
+
+static void test_warn_mask_zero_reports_none(void)
+{
+    char buf[16];
+    const char *s = safety_warn_words_short(0u, buf, sizeof(buf));
+    TEST_CHECK(strcmp(s, "none") == 0, "mask 0 reports \"none\", not an empty string or S-something");
+}
+
+// Negative test: an unrecognised bit (bit 11 has no assigned guard per
+// LINK_PROTOCOL.md's table) must NOT be silently swallowed as "none" --
+// proves the fallback branch is reachable, not vacuous.
+static void test_warn_mask_unrecognised_bit_is_named_not_hidden(void)
+{
+    char buf[64];
+    const char *s = safety_warn_words_short((uint16_t)(1u << 11), buf, sizeof(buf));
+    TEST_CHECK(strstr(s, "unrecognised") != NULL,
+               "an unassigned bit is reported as unrecognised, not silently dropped as \"none\"");
+}
+
 int main(void)
 {
     TEST_SECTION("safety_trip_words_cause_numbered");
@@ -167,6 +217,11 @@ int main(void)
     test_s12_enclosure_never_claims_wrong_sensor();
     test_unknown_reason_never_crashes();
     test_buffer_always_terminated();
+    test_warn_mask_bit15_decodes_to_s15();
+    test_warn_mask_bit14_decodes_to_s14();
+    test_warn_mask_bits_14_and_15_together();
+    test_warn_mask_zero_reports_none();
+    test_warn_mask_unrecognised_bit_is_named_not_hidden();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
