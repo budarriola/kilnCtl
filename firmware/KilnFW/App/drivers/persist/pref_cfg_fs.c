@@ -21,6 +21,11 @@ void pref_cfg_fs_reset_write_fn_for_test(void)
     s_write_fn = cfg_fs_write_atomic;
 }
 
+pref_cfg_fs_write_fn_t pref_cfg_fs_get_write_fn(void)
+{
+    return s_write_fn;
+}
+
 static void put_u32_le(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)(v & 0xFF);
@@ -167,13 +172,18 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
         return true;
     }
 
-    // DIVERGENCE TIE-BREAK: higher rev wins, same rule
-    // zones_config_cfg_fs.c uses. Under normal dual-write operation
-    // (file written first, then NVS, same rev on both) file_rev >= nvs_rev
-    // always holds; nvs_rev strictly higher means a prior file write failed
-    // after the NVS write already landed.
-    if (file_rev >= nvs_rev) {
-        ESP_LOGW(PREF_FS_TAG, "%s file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting FILE (higher/equal rev)",
+    // DIVERGENCE TIE-BREAK: STRICTLY higher rev wins, same rule
+    // zones_config_cfg_fs.c uses (docs/audits/filesystem_migration_review_
+    // 2026-09-07.md section 2). Under normal dual-write operation (file
+    // written first, then NVS, same rev on both) file_rev > nvs_rev always
+    // holds after a successful save; EQUAL revs with differing bytes can
+    // only mean an NVS-only writer (firmware from before this dual-write
+    // existed, rolled back to) wrote the blob without touching the rev --
+    // the NVS side is then the newer one, never the file. `>=` here would
+    // silently discard that edit and then overwrite it permanently on the
+    // next save.
+    if (file_rev > nvs_rev) {
+        ESP_LOGW(PREF_FS_TAG, "%s file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting FILE (strictly higher rev)",
                  rel_path, (unsigned long)file_rev, (unsigned long)nvs_rev);
         memcpy(out_bytes, file_bytes, item_size);
         *out_rev = file_rev;

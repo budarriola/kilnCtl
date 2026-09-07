@@ -24,6 +24,14 @@
 #include "zones_config_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5:
                             * read-through/dual-write bridge to the `cfg` LittleFS
                             * partition -- see that header for the full design. */
+#include "pref_cfg_fs.h" /* item 3 (relay names), section 5 step 5 close-out: relay
+                            * names is a small fixed-size struct (69 bytes) with no
+                            * migration chain of its own -- unlike the zones blob it
+                            * does not need a bespoke bridge, it reuses the SAME
+                            * generic module unit_pref.c/ramp_assist_cfg.c/
+                            * display_power_cfg.c already share (see pref_cfg_fs.h's
+                            * "WHY GENERIC"). PREF_CFG_FS_MAX_ITEM was raised from 32
+                            * to 128 bytes to fit it -- see that constant's comment. */
 
 /* Separate tiny NVS key for the dual-write rev counter, deliberately NOT a
  * field inside zones_cfg_t: that struct is already close to
@@ -426,6 +434,7 @@ void zones_config_push_all_relay_types(void)
  * zones_http_handlers.c need the type too, not just this file. */
 
 zones_relay_names_state_t s_relay_names;
+static uint32_t s_relay_names_rev = 0;
 
 /* Same "compute over a zeroed-crc-field copy" convention as zones_config_json_compute_crc(). */
 static uint32_t compute_relay_names_crc(const relay_names_cfg_t *cfg)
@@ -433,6 +442,29 @@ static uint32_t compute_relay_names_crc(const relay_names_cfg_t *cfg)
     relay_names_cfg_t tmp = *cfg;
     tmp.crc32 = 0;
     return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+}
+
+/* pref_cfg_fs_validate_fn_t for the relay-names file -- re-runs the EXACT
+ * same version+CRC check relay_names_load()'s NVS path already applies
+ * below, per this task's "validated on load exactly as its NVS path
+ * validates today" requirement. Defensively NUL-terminates every name in
+ * `bytes` in place before accepting it, same reason relay_names_load() does
+ * it for the NVS candidate. */
+static bool relay_names_validate(const void *bytes, size_t len)
+{
+    if (len != sizeof(relay_names_cfg_t)) {
+        return false;
+    }
+    relay_names_cfg_t cand;
+    memcpy(&cand, bytes, sizeof(cand));
+    if (cand.version != RELAY_NAMES_CFG_VERSION) {
+        return false;
+    }
+    uint32_t computed = compute_relay_names_crc(&cand);
+    if (computed != cand.crc32) {
+        return false;
+    }
+    return true;
 }
 
 /* Loads s_relay_names.cfg from NVS_KEY_RELAY_NAMES (same namespace/partition
@@ -453,51 +485,84 @@ static uint32_t compute_relay_names_crc(const relay_names_cfg_t *cfg)
 void relay_names_load(void)
 {
     memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
+    s_relay_names_rev = 0;
+
+    relay_names_cfg_t nvs_cand;
+    memset(&nvs_cand, 0, sizeof(nvs_cand));
+    bool nvs_valid = false;
+    uint32_t nvs_rev = 0;
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return; /* namespace not yet created -- first boot, names stay blank */
+    if (err == HAL_OK) {
+        uint8_t raw[sizeof(relay_names_cfg_t)];
+        size_t len = sizeof(raw);
+        hal_status_t rerr = hal_kv_get_blob(&h, NVS_KEY_RELAY_NAMES, raw, &len);
+        if (rerr == HAL_OK) {
+            if (len != sizeof(relay_names_cfg_t)) {
+                ESP_LOGE(ZONES_HTTP_TAG,
+                         "relay_names blob is %u bytes, expected %u -- discarding NVS candidate",
+                         (unsigned)len, (unsigned)sizeof(relay_names_cfg_t));
+            } else if (!relay_names_validate(raw, sizeof(raw))) {
+                ESP_LOGE(ZONES_HTTP_TAG,
+                         "relay_names NVS blob failed version/CRC validation -- discarding NVS candidate");
+            } else {
+                memcpy(&nvs_cand, raw, sizeof(nvs_cand));
+                nvs_valid = true;
+            }
+        } /* else HAL_NOT_FOUND (never saved) or a real error -- blank NVS candidate is safe either way */
+        if (nvs_valid) {
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, NVS_KEY_RELAY_NAMES_REV, &rev) == HAL_OK) {
+                nvs_rev = rev;
+            }
+        }
+        hal_kv_close(&h);
+    } /* else namespace not yet created -- first boot, blank NVS candidate */
+
+    /* Hand off to the generic file-vs-NVS read-through/tie-break policy
+     * (pref_cfg_fs.h) -- see this file's top-of-file include comment. On
+     * every board today (no `cfg` partition mounted) this is a pass-through:
+     * the file is absent, resolve() returns exactly the NVS candidate. */
+    relay_names_cfg_t resolved;
+    memset(&resolved, 0, sizeof(resolved));
+    uint32_t resolved_rev = 0;
+    bool used_file = false;
+    bool have_value = pref_cfg_fs_resolve(RELAY_NAMES_FILE_PATH, &nvs_cand, sizeof(relay_names_cfg_t), nvs_valid,
+                                           nvs_rev, relay_names_validate, &resolved, &resolved_rev, &used_file);
+    if (!have_value) {
+        return; /* neither side trustworthy -- names stay blank, exactly the pre-existing behavior */
     }
-    uint8_t raw[sizeof(relay_names_cfg_t)];
-    size_t len = sizeof(raw);
-    err = hal_kv_get_blob(&h, NVS_KEY_RELAY_NAMES, raw, &len);
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        return; /* HAL_NOT_FOUND (never saved) or a real error -- blank is safe either way */
-    }
-    if (len != sizeof(relay_names_cfg_t)) {
-        ESP_LOGE(ZONES_HTTP_TAG, "relay_names blob is %u bytes, expected %u -- discarding, names reset to blank",
-                 (unsigned)len, (unsigned)sizeof(relay_names_cfg_t));
-        return;
-    }
-    relay_names_cfg_t cand;
-    memcpy(&cand, raw, sizeof(cand));
-    if (cand.version != RELAY_NAMES_CFG_VERSION) {
-        ESP_LOGE(ZONES_HTTP_TAG, "relay_names blob version %u is not %u -- discarding, names reset to blank",
-                 cand.version, RELAY_NAMES_CFG_VERSION);
-        return;
-    }
-    uint32_t computed = compute_relay_names_crc(&cand);
-    if (computed != cand.crc32) {
-        ESP_LOGE(ZONES_HTTP_TAG, "relay_names blob CRC mismatch (stored 0x%08lx, computed 0x%08lx) -- discarding, "
-                      "names reset to blank",
-                 (unsigned long)cand.crc32, (unsigned long)computed);
-        return;
-    }
-    /* Defensive NUL-termination against a corrupted-but-CRC-lucky blob --
-     * every name must be a valid C string before JSON emission or a POST
-     * scratch-buffer strncpy touches it. */
+
+    /* Defensive NUL-termination against a corrupted-but-CRC-lucky blob (or
+     * a file byte-copy) -- every name must be a valid C string before JSON
+     * emission or a POST scratch-buffer strncpy touches it. */
     for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
-        cand.names[r][RELAY_NAME_MAX_LEN] = '\0';
+        resolved.names[r][RELAY_NAME_MAX_LEN] = '\0';
     }
-    s_relay_names.cfg = cand;
+    s_relay_names.cfg = resolved;
+    s_relay_names_rev = resolved_rev;
+    ESP_LOGI(ZONES_HTTP_TAG, "relay names loaded (source=%s, rev=%lu)", used_file ? "file" : "NVS",
+             (unsigned long)s_relay_names_rev);
 }
 
 esp_err_t relay_names_save(void)
 {
     s_relay_names.cfg.version = RELAY_NAMES_CFG_VERSION;
     s_relay_names.cfg.crc32 = compute_relay_names_crc(&s_relay_names.cfg);
+    uint32_t new_rev = s_relay_names_rev + 1;
+
+    /* FILE FIRST (best-effort; a failure here is logged and swallowed --
+     * NVS below remains the persistence guarantee every existing caller
+     * already depends on), THEN NVS (authoritative, failure returned to the
+     * caller) -- same policy unit_pref_set()/zones_config_cfg_fs.c's step-5
+     * note document. */
+    esp_err_t file_err =
+        pref_cfg_fs_save(RELAY_NAMES_FILE_PATH, &s_relay_names.cfg, sizeof(s_relay_names.cfg), new_rev);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(ZONES_HTTP_TAG, "relay names file write failed: %s -- NVS remains the source of truth this boot",
+                 esp_err_to_name(file_err));
+    }
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
@@ -506,12 +571,17 @@ esp_err_t relay_names_save(void)
     }
     err = hal_kv_set_blob(&h, NVS_KEY_RELAY_NAMES, &s_relay_names.cfg, sizeof(s_relay_names.cfg));
     if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_RELAY_NAMES_REV, new_rev);
+    }
+    if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
     if (err != HAL_OK) {
         ESP_LOGW(ZONES_HTTP_TAG, "relay_names_save failed: %s -- relay names will not survive a reboot",
                  hal_status_to_name(err));
+    } else {
+        s_relay_names_rev = new_rev;
     }
     return hal_status_to_esp_err(err);
 }

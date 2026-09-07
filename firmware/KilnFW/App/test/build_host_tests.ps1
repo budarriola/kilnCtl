@@ -70,6 +70,7 @@ try {
         (Join-Path $testDir "test_display_power_wiring.c"),
         (Join-Path $testDir "test_dashboard_protocol_version.c"),
         (Join-Path $testDir "test_crash_report.c"),
+        (Join-Path $testDir "test_dualwrite_window.c"),
         (Join-Path $testDir "test_watchdog_cfg.c"),
         (Join-Path $testDir "test_ramp_assist_cfg.c"),
         (Join-Path $testDir "test_ui_page_home_graph.c"),
@@ -81,9 +82,9 @@ try {
         (Join-Path $testDir "test_dram_margin.c"),
         (Join-Path $testDir "test_httpd_socket_budget.c"),
         (Join-Path $testDir "test_stack_margin.c"),
-        (Join-Path $testDir "test_time_sync.c"),
         (Join-Path $testDir "test_log_store.c"),
         (Join-Path $testDir "test_cfg_fs.c"),
+        (Join-Path $testDir "test_cfg_fs_format_gate.c"),
         (Join-Path $testDir "test_cfg_fs_status.c"),
         (Join-Path $testDir "test_unit_pref.c"),
         (Join-Path $testDir "test_esp_spi_owner.c"),
@@ -133,8 +134,16 @@ try {
         (Join-Path $driversDir "net/time_sync_tz.c"),
         (Join-Path $driversDir "persist/log_store.c"),
         (Join-Path $driversDir "persist/cfg_fs.c"),
+        (Join-Path $driversDir "persist/cfg_fs_format_gate.c"),
         (Join-Path $driversDir "persist/cfg_fs_status.c"),
         (Join-Path $driversDir "persist/pref_cfg_fs.c"),
+        # kiln config slots filesystem move (docs/FILESYSTEM_USER_DATA_PLAN.md
+        # section 5) -- kiln_cfg_store.c (#included directly by
+        # test_kiln_cfg_store.c above) now calls into
+        # kiln_cfg_store_cfg_fs.c's whole-document read-through/dual-write
+        # bridge, so this executable needs it linked in as a plain separate
+        # .c file, same convention as cfg_fs.c/pref_cfg_fs.c just above.
+        (Join-Path $driversDir "persist/kiln_cfg_store_cfg_fs.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/iter_tune.c")
@@ -294,10 +303,12 @@ try {
     $cmd2 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
             "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
+            "`"$(Join-Path $testDir 'test_relay_names_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_json.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
@@ -1021,6 +1032,73 @@ try {
 
     Invoke-HostTestExe -Name "link_watchdog" -ExePath $exe30 -BuildCmd $cmd30
 
+    # ---- test_time_sync.c: its own THIRTY-FIRST, separate executable ---------
+    # docs/FILESYSTEM_USER_DATA_PLAN.md item 14 (TZ) close-out: this file used
+    # to live in the "main" executable's $sources list, testing only
+    # time_sync_tz.c's pure validation logic -- time_sync.c itself was
+    # untested because it pulls in esp_netif_sntp.h with no host stub
+    # (test_time_sync.c's own OLD header comment documented this gap
+    # explicitly). test/stubs/esp_netif_sntp.h now exists, so this file
+    # #includes time_sync.c directly (same convention as test_unit_pref.c)
+    # and exercises its real NVS load / cfg_fs dual-write / tie-break paths.
+    # Moved to its OWN executable rather than staying in "main": time_sync.c
+    # defines the REAL time_sync_notify_got_ip(), which collides at link
+    # time with test_wifi_prov.c's fake body of that name (wifi_prov.c calls
+    # it; that test fakes it rather than pulling in the whole SNTP surface)
+    # -- two definitions of the same external symbol cannot share one link.
+    $exe31 = Join-Path $outDir "kilnctl_host_tests_time_sync.exe"
+    $tsObjDir = Join-Path $outDir "ts"
+    New-Item -ItemType Directory -Force -Path $tsObjDir | Out-Null
+    $cmd31 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$tsObjDir\\`" /Fe:`"$exe31`" " +
+            "`"$(Join-Path $testDir 'test_time_sync.c')`" " +
+            "`"$(Join-Path $driversDir 'net/time_sync_tz.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "time_sync" -ExePath $exe31 -BuildCmd $cmd31
+
+    # ---- test_cfg_fs_mount_reentrancy.c: its own THIRTY-SECOND, separate
+    # executable ---------------------------------------------------------
+    # docs/audits/filesystem_migration_review_2026-09-07.md section 1 /
+    # check_flash_worker_lint.ps1's reentrancy-guard rule (bac50dbc):
+    # cfg_fs_mount.c's cfg_fs_write_atomic_device() is the write function
+    # installed into every *_cfg_fs.c bridge, and it used to dispatch onto
+    # bx_flash_worker unconditionally -- a real deadlock when a bridge's
+    # save() is reached from a caller already running ON that worker (e.g.
+    # CONTROL_CMD_SET_UNIT_PREF -> unit_pref_set() -> pref_cfg_fs_save() ->
+    # this same function, called again from inside itself). cfg_fs_mount.c
+    # was previously "Not part of any host test build" (its own header
+    # comment) because it #includes esp_littlefs.h/esp_partition.h -- new
+    # stubs/esp_littlefs.h plus two added declarations in stubs/
+    # esp_partition.h (esp_partition_find_first/esp_partition_read) close
+    # that gap just enough for THIS translation unit to link. OWN, separate
+    # executable rather than folded into "main": cfg_fs_mount.c needs its
+    # own trivial per-exe stub bodies for esp_vfs_littlefs_register() and
+    # friends (same "declared once, defined per test file" convention as
+    # test_ota_http.c/test_partition_info_http.c), which would collide with
+    # "main"'s own use of the real cfg_fs.c/cfg_fs_format_gate.c against a
+    # DIFFERENT (real, mounted) filesystem in test_cfg_fs_status.c/test_cfg_
+    # fs_format_gate.c's tests.
+    $exe32 = Join-Path $outDir "kilnctl_host_tests_cfg_fs_mount_reentrancy.exe"
+    $cfgMountObjDir = Join-Path $outDir "cfm"
+    New-Item -ItemType Directory -Force -Path $cfgMountObjDir | Out-Null
+    $cmd32 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$cfgMountObjDir\\`" /Fe:`"$exe32`" " +
+            "`"$(Join-Path $testDir 'test_cfg_fs_mount_reentrancy.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_mount.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_format_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/boot_guard.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "cfg_fs_mount_reentrancy" -ExePath $exe32 -BuildCmd $cmd32
+
     # ---- summary ----------------------------------------------------------
     #
     # 28 executables are attempted above (main + zones_http + safety_cfg_http +
@@ -1030,7 +1108,8 @@ try {
     # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
     # zone_coupling_solve + partition_info_http + adaptive_tune_http +
     # profiles_builtin + ft6336u + max31856_hal_spi + hal_i2c_adopt +
-    # hal_spi_adopt + hal_spi_async + profile_export_import + link_watchdog) --
+    # hal_spi_adopt + hal_spi_async + profile_export_import + link_watchdog +
+    # time_sync) --
     # opus review
     # finding (LOW): this used to say 28 (both in this comment and in
     # $totalExpected below) while only 27 Invoke-HostTestExe calls actually
@@ -1047,7 +1126,7 @@ try {
     # from this list (added to the comment/count but never wired to an
     # Invoke-HostTestExe call, or vice versa) fails loud instead of depending on
     # this comment staying accurate by hand.
-    $totalExpected = 29
+    $totalExpected = 30
     Write-Host ""
     Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
     if ($script:buildFailures.Count -gt 0) {

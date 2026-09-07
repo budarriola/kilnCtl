@@ -136,6 +136,19 @@ extern zones_state_t s_zones;
 #define NVS_KEY_RELAY_NAMES "relay_names_cfg"
 NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
 
+/* docs/FILESYSTEM_USER_DATA_PLAN.md item 3 (relay names), section 5 step 5
+ * close-out: separate tiny NVS key for the dual-write rev counter, same
+ * reasoning as NVS_KEY_ZONES_REV in zones_config_store.c -- a rev counter has
+ * nothing to do with the operator-entered labels themselves, so it is not a
+ * field on relay_names_cfg_t. */
+#define NVS_KEY_RELAY_NAMES_REV "relnames_rev"
+NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES_REV);
+
+/* The `cfg` LittleFS file relay names dual-writes to, via the generic
+ * pref_cfg_fs.h bridge (see zones_config_store.c's relay_names_load()/
+ * relay_names_save()). */
+#define RELAY_NAMES_FILE_PATH "relay_names.dat"
+
 typedef struct {
     uint8_t version;
     char names[KILN_IO_RELAY_COUNT][RELAY_NAME_MAX_LEN + 1];

@@ -84,7 +84,6 @@ $badPattern = '(file_rev\s*>=\s*nvs_rev)|(nvs_rev\s*<=\s*file_rev)'
 # filename -> the pass that owns fixing it. Delete an entry the moment its
 # file is fixed; the "grace entry is stale" failure below enforces that.
 $graceList = @{
-    'pref_cfg_fs.c'     = 'prefs move (FILESYSTEM_USER_DATA_PLAN.md section 5 step 3)'
 }
 
 $failures = @()

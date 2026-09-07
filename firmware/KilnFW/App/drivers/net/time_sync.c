@@ -9,6 +9,29 @@
 #include "freertos/portmacro.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+#include "pref_cfg_fs.h" /* item 14 (TZ), docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+                            * step 3 close-out: TZ is a small fixed-CAPACITY string
+                            * (<=TIME_SYNC_TZ_MAX_LEN bytes) with no migration chain of
+                            * its own -- reuses the SAME generic bridge unit_pref.c/
+                            * relay names (zones_config_store.c) share, not a bespoke
+                            * module. See tz_file_validate() below for how a
+                            * NUL-padded fixed buffer maps onto pref_cfg_fs's
+                            * fixed-item_size contract. */
+
+/* Real ESP-IDF/newlib provide setenv()/tzset(); MSVC (this file's host-test
+ * build) has neither under those names -- _putenv_s()/_tzset() are its
+ * nearest equivalents. Device behavior is completely unchanged: this branch
+ * compiles out entirely on the real toolchain. */
+#ifdef _MSC_VER
+#include <stdlib.h>
+static void time_sync_setenv_compat(const char *name, const char *value, int overwrite)
+{
+    (void)overwrite; /* MSVC's _putenv_s() always overwrites -- matches our one call site's overwrite=1 */
+    _putenv_s(name, value);
+}
+#define setenv(name, value, overwrite) time_sync_setenv_compat((name), (value), (overwrite))
+#define tzset() _tzset()
+#endif
 
 static const char *TAG = "time_sync";
 
@@ -21,6 +44,52 @@ static const char *TAG = "time_sync";
 NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_TZ);
+
+/* Separate tiny NVS key for the dual-write rev counter -- same reasoning as
+ * NVS_KEY_ZONES_REV/NVS_KEY_RELAY_NAMES_REV: a rev counter is not part of
+ * the value itself. */
+#define NVS_KEY_TZ_REV "tz_rev"
+NVS_KEY_LEN_CHECK(NVS_KEY_TZ_REV);
+
+/* The `cfg` LittleFS file TZ dual-writes to, via the generic pref_cfg_fs.h
+ * bridge. */
+#define TIME_SYNC_TZ_FILE_PATH "tz.dat"
+
+/* Fixed item_size pref_cfg_fs.h's contract requires -- one byte more than
+ * TIME_SYNC_TZ_MAX_LEN so a maximum-length string's NUL terminator always
+ * has room. Every write fills this whole buffer (memset 0 first, then the
+ * string), so file content and item_size never depend on the live string's
+ * actual length -- avoids the "variable-length item" complication a naive
+ * string bridge would otherwise have. */
+#define TZ_ITEM_SIZE (TIME_SYNC_TZ_MAX_LEN + 1)
+
+static uint32_t s_tz_rev = 0;
+
+/* pref_cfg_fs_validate_fn_t for the TZ file: `bytes` is always exactly
+ * TZ_ITEM_SIZE raw bytes (fixed by contract, never a raw NVS string length).
+ * Requires a NUL terminator within the buffer (a corrupted file might have
+ * none) and re-runs time_sync_tz_is_valid() -- the EXACT same check
+ * time_sync_start()'s NVS path already applies to a stored string, per this
+ * task's "validated on load exactly as its NVS path validates today"
+ * requirement. */
+static bool tz_file_validate(const void *bytes, size_t len)
+{
+    if (len != TZ_ITEM_SIZE) {
+        return false;
+    }
+    const char *s = (const char *)bytes;
+    bool has_nul = false;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\0') {
+            has_nul = true;
+            break;
+        }
+    }
+    if (!has_nul) {
+        return false;
+    }
+    return time_sync_tz_is_valid(s);
+}
 
 #define SNTP_DEFAULT_SERVER "pool.ntp.org"
 
@@ -70,13 +139,17 @@ esp_err_t time_sync_start(void)
 {
     memset(&s_status, 0, sizeof(s_status));
     s_sntp_init_ok = false;
-    time_sync_tz_effective(NULL, s_status.tz, sizeof(s_status.tz)); /* UTC default until NVS says otherwise */
+    s_tz_rev = 0;
+    time_sync_tz_effective(NULL, s_status.tz, sizeof(s_status.tz)); /* UTC default until NVS/file says otherwise */
 
     hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    bool nvs_valid = false;
+    uint32_t nvs_rev = 0;
+    uint8_t nvs_item[TZ_ITEM_SIZE];
+    memset(nvs_item, 0, sizeof(nvs_item));
     if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- defaulting to %s this boot",
                  KILN_NVS_PARTITION, hal_status_to_name(part_err), s_status.tz);
-        apply_tz(s_status.tz);
     } else {
         hal_kv_handle_t h;
         hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
@@ -87,16 +160,38 @@ esp_err_t time_sync_start(void)
             if (hal_kv_get_str(&h, NVS_KEY_TZ, stored, &len) == HAL_OK) {
                 have_stored = true;
             }
+            if (have_stored && time_sync_tz_is_valid(stored)) {
+                strncpy((char *)nvs_item, stored, TZ_ITEM_SIZE - 1);
+                nvs_valid = true;
+                uint32_t rev = 0;
+                if (hal_kv_get_u32(&h, NVS_KEY_TZ_REV, &rev) == HAL_OK) {
+                    nvs_rev = rev;
+                }
+            }
             hal_kv_close(&h);
         } else if (err != HAL_NOT_FOUND) {
             ESP_LOGW(TAG, "nvs_open_from_partition failed: %s -- defaulting to %s this boot",
                      hal_status_to_name(err), s_status.tz);
         }
-        char effective[TIME_SYNC_TZ_MAX_LEN + 1];
-        time_sync_tz_effective(have_stored ? stored : NULL, effective, sizeof(effective));
-        apply_tz(effective);
     }
-    ESP_LOGI(TAG, "timezone: %s", s_status.tz);
+
+    /* Hand off to the generic file-vs-NVS read-through/tie-break policy
+     * (pref_cfg_fs.h) -- on every board today (no `cfg` partition mounted)
+     * this is a pass-through to whatever the NVS candidate above produced. */
+    uint8_t resolved_item[TZ_ITEM_SIZE];
+    uint32_t resolved_rev = 0;
+    bool used_file = false;
+    bool have_value = pref_cfg_fs_resolve(TIME_SYNC_TZ_FILE_PATH, nvs_item, TZ_ITEM_SIZE, nvs_valid, nvs_rev,
+                                           tz_file_validate, resolved_item, &resolved_rev, &used_file);
+
+    char effective[TIME_SYNC_TZ_MAX_LEN + 1];
+    time_sync_tz_effective(have_value ? (const char *)resolved_item : NULL, effective, sizeof(effective));
+    apply_tz(effective);
+    if (have_value) {
+        s_tz_rev = resolved_rev;
+    }
+    ESP_LOGI(TAG, "timezone: %s (source=%s, rev=%lu)", s_status.tz, have_value ? (used_file ? "file" : "NVS") : "default",
+             (unsigned long)s_tz_rev);
 
     /* start = false, wait_for_sync = false: prepared but NOT armed and NOT
      * blocking -- see this module's header comment. time_sync_notify_got_
@@ -159,6 +254,20 @@ esp_err_t time_sync_set_tz(const char *tz)
      * unit_pref_set() -- an NVS write failure below must not leave the
      * board running the OLD timezone after reporting success. */
     apply_tz(tz);
+    uint32_t new_rev = s_tz_rev + 1;
+
+    /* FILE FIRST (best-effort; a failure here is logged and swallowed --
+     * NVS below remains the persistence guarantee every existing caller
+     * already depends on), THEN NVS (authoritative, failure returned/logged
+     * as before) -- same policy unit_pref_set()/relay_names_save() use. */
+    uint8_t file_item[TZ_ITEM_SIZE];
+    memset(file_item, 0, sizeof(file_item));
+    strncpy((char *)file_item, tz, TZ_ITEM_SIZE - 1);
+    esp_err_t file_err = pref_cfg_fs_save(TIME_SYNC_TZ_FILE_PATH, file_item, TZ_ITEM_SIZE, new_rev);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "TZ file write failed: %s -- NVS remains the source of truth this boot",
+                 esp_err_to_name(file_err));
+    }
 
     hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
     if (part_err != HAL_OK) {
@@ -175,11 +284,16 @@ esp_err_t time_sync_set_tz(const char *tz)
     }
     err = hal_kv_set_str(&h, NVS_KEY_TZ, tz);
     if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_TZ_REV, new_rev);
+    }
+    if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
     if (err != HAL_OK) {
         ESP_LOGW(TAG, "TZ persist failed: %s -- applied live for this boot only", hal_status_to_name(err));
+    } else {
+        s_tz_rev = new_rev;
     }
     return ESP_OK;
 }

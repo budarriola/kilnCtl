@@ -52,10 +52,14 @@ extern "C" {
 #endif
 
 // Generous upper bound on any one preference item's raw byte size --
-// display_power_cfg_blob_t (5 bytes) is the largest today. Callers whose
-// item exceeds this fail loudly (ESP_ERR_INVALID_SIZE) rather than silently
-// truncate.
-#define PREF_CFG_FS_MAX_ITEM 32
+// relay_names_cfg_t (docs/FILESYSTEM_USER_DATA_PLAN.md item 3, 1 + 4*16 + 4 =
+// 69 bytes) is the largest today, previously display_power_cfg_blob_t
+// (5 bytes). Raised from 32 to 128 to fit relay names with headroom, rather
+// than giving relay names its own bespoke bridge module -- it has no
+// migration chain of its own, just a fixed-size struct, exactly the shape
+// this generic module targets. Callers whose item exceeds this fail loudly
+// (ESP_ERR_INVALID_SIZE) rather than silently truncate.
+#define PREF_CFG_FS_MAX_ITEM 128
 
 // Matches cfg_fs_write_atomic()'s signature (cfg_fs.h) and
 // cfg_fs_write_atomic_device()'s (cfg_fs_mount.h) -- same seam
@@ -71,6 +75,12 @@ void pref_cfg_fs_set_write_fn(pref_cfg_fs_write_fn_t fn);
 // Test-only reset back to the default write function (cfg_fs_write_atomic).
 // No on-device call site.
 void pref_cfg_fs_reset_write_fn_for_test(void);
+
+/* Read the currently-installed write function -- used by cfg_fs_mount.c's
+ * real-build assert that the device writer is installed whenever the
+ * filesystem is mounted (docs/audits/filesystem_migration_review_2026-09-07.md
+ * section 1). */
+pref_cfg_fs_write_fn_t pref_cfg_fs_get_write_fn(void);
 
 // Returns true if `bytes` (exactly `len` bytes, always == the call site's
 // item_size) is a value this build considers valid and safe to adopt --
