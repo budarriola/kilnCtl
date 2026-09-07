@@ -725,7 +725,9 @@ _register(
     lambda ctx: _info_query(
         ctx,
         lambda version: (
-            f"protocol_version: {version.protocol_version}\n"
+            # PC<->ESP link number (UART_PROTOCOL_VERSION), not the
+            # ESP<->Pico KILNLINK_PROTOCOL_VERSION -- see mcp_server_info.py.
+            f"uart_protocol_version: {version.protocol_version}\n"
             f"compatible: {'yes' if version.compatible else 'NO'}\n"
             f"commit: {version.commit}\n"
             f"tree: {'dirty' if version.dirty else 'clean'}\n"

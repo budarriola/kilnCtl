@@ -231,7 +231,16 @@ def get_fw_version() -> str:
         f"v{devices.UART_PROTOCOL_VERSION}; device commands will be refused"
     )
     lines = [
-        f"protocol_version: {version.protocol_version}",
+        # Labelled uart_protocol_version, not protocol_version: this is the
+        # PC<->ESP bench-link number (uart_task_ids.h's UART_PROTOCOL_VERSION,
+        # which the compat gate just above compares against), NOT CommonFW's
+        # KILNLINK_PROTOCOL_VERSION carried by /api/status's
+        # self_protocol_version for the ESP<->Pico link. The two are
+        # deliberately independent since uart_task_ids.h stopped aliasing
+        # kilnlink_version.h, so they legitimately read different (11 vs 12 as
+        # of e584067f) and the bare old name invited reading that as a stale
+        # source.
+        f"uart_protocol_version: {version.protocol_version}",
         f"compatible: {compat}",
         f"commit: {version.commit}",
         f"tree: {'dirty' if version.dirty else 'clean'}",
