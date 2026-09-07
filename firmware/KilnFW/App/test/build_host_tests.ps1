@@ -83,6 +83,8 @@ try {
         (Join-Path $testDir "test_stack_margin.c"),
         (Join-Path $testDir "test_time_sync.c"),
         (Join-Path $testDir "test_log_store.c"),
+        (Join-Path $testDir "test_cfg_fs.c"),
+        (Join-Path $testDir "test_cfg_fs_status.c"),
         (Join-Path $testDir "test_esp_spi_owner.c"),
         (Join-Path $testDir "test_touch_dev.c"),
         (Join-Path $testDir "test_ramp_ident.c"),
@@ -129,6 +131,8 @@ try {
         (Join-Path $driversDir "common/stack_margin.c"),
         (Join-Path $driversDir "net/time_sync_tz.c"),
         (Join-Path $driversDir "persist/log_store.c"),
+        (Join-Path $driversDir "persist/cfg_fs.c"),
+        (Join-Path $driversDir "persist/cfg_fs_status.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/iter_tune.c")
@@ -275,11 +279,23 @@ try {
     $exe2 = Join-Path $outDir "kilnctl_host_tests_zones.exe"
     $exe2ObjDir = Join-Path $outDir "zones_obj\"
     if (-not (Test-Path $exe2ObjDir)) { New-Item -ItemType Directory -Path $exe2ObjDir | Out-Null }
+    # test_zones_config_cfg_fs.c (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+    # step 5, zones-config-move task): a separate TU in this same executable
+    # exercising zones_config_cfg_fs.c's read-through/dual-write policy
+    # through the REAL nvs_load()/nvs_save() (defined in
+    # zones_config_store.c, #included by test_zones_http.c above) plus a
+    # real cfg_fs.c against a temp directory -- see that test file's own
+    # header comment. cfg_fs.c/zones_config_cfg_fs.c link in here as plain
+    # separate .c files (like zones_config_json.c below), not textually
+    # included -- neither defines anything test_zones_http.c's #includes
+    # already define, so there is no multiple-definition risk.
     $cmd2 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
+            "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_json.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3

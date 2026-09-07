@@ -63,9 +63,16 @@ if (-not (Test-Path $SourceRoot)) { throw "check_partition_labels_vs_firmware.ps
 #     check pass; forgetting to remove it is the only way this list rots, so
 #     keep the "remove when" clause concrete. ---
 $DeclaredButUnused = @{
-    'cfg' = 'Added 2026-09-07 as the flash-layout half of the user-data-on-a-filesystem decision (docs/FILESYSTEM_PLAN.md). No mount call exists yet -- FILESYSTEM_USER_DATA_PLAN.md section 5 step 1 adds cfg_fs_mount(); REMOVE THIS ENTRY in that step.'
     'nvs' = 'The stock default NVS partition, kept unresized on purpose so pre-2026-08-13 firmware still finds working data there and the one-time split migration has somewhere to read from (see partitions.csv). Current firmware never opens it by name. Do not remove the partition; this entry stays until that rollback window is closed.'
 }
+# 'cfg' entry removed 2026-09-07: FILESYSTEM_USER_DATA_PLAN.md section 5 step
+# 1's cfg_fs_mount_device() (App/drivers/persist/cfg_fs_mount.c) now names
+# the partition_label "cfg" for real, exactly the step this reminder called
+# out. The mount call fails gracefully (esp_vfs_littlefs_register with
+# format_if_mount_failed=false) on any board whose bootloader/otadata have
+# not yet been re-flashed for this table revision -- that hazard is
+# unrelated to this check, which only verifies string agreement between
+# partitions.csv and firmware source.
 
 # ---------------------------------------------------------------- CSV parse --
 function ConvertFrom-PartitionSize {

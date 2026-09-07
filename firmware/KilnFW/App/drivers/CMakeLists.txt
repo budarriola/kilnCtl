@@ -218,6 +218,9 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/event_log_emit.c"
                        "persist/log_store.c"
                        "persist/log_store_mount.c"
+                       "persist/cfg_fs.c"
+                       "persist/cfg_fs_mount.c"
+                       "persist/cfg_fs_status.c"
                        "http/log_http.c"
                        "owners/relay_authority.c"
                        "persist/relay_cycles.c"
@@ -280,6 +283,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # itself keeps hw wiring, page/URI registration, and
                        # the small sweep HTTP wrappers.
                        "persist/zones_config_store.c"
+                       "persist/zones_config_cfg_fs.c"
                        "persist/zones_config_accessors.c"
                        "http/zones_http_get.c"
                        "http/zones_http_post_parse.c"
@@ -386,7 +390,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                                 esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
                                 esp_hw_support esp_hal_wdt
                                 espcoredump hwabstraction_esp
-                       PRIV_REQUIRES spi_flash spiffs)
+                       PRIV_REQUIRES spi_flash spiffs joltwallet__littlefs)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated
 # on *every* build invocation -- not just when CMake reconfigures -- so it
