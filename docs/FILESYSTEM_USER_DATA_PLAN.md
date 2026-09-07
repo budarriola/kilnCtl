@@ -421,8 +421,8 @@ for a follow-up pass rather than shipped untested.
   has no call site yet, confirmed by grep, same gap step 1's own note
   already describes for zones).
 
-**Step 4 (item 5 — user profile slots 0..7 only), 2026-09-07 — done,
-host-proven, board-absent by construction.** Item 6 (hidden-builtin mask)
+**Step 4 (item 5 — user profile slots 0..7 only), 2026-09-07 — done
+(`530dc2f7`), host-proven, board-absent by construction.** Item 6 (hidden-builtin mask)
 and item 7 (firing stats) are NOT done — still NVS-only.
 
 - **File layout**: one file per slot, `profiles/prof<id>.json` (matches this
