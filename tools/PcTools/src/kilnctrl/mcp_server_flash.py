@@ -561,7 +561,6 @@ def flash_firmware(
     )
 
 
-@_srv._tool()
 def _reject_kiln_fw_build_path(path: str) -> Optional[str]:
     """None if `path` does NOT resolve under the MAIN board's
     (KilnFW's) build directory; otherwise an error string.

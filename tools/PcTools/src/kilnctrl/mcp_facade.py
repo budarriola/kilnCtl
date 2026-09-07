@@ -44,6 +44,8 @@ GROUP_PREFIXES = (
     ("build_", "build"),
     ("run_", "build"),
     ("log_analyze", "analysis"),
+    ("coupled_ident_", "coupled_ident"),
+    ("plant_sim_", "plant_sim"),
 )
 
 GROUP_OVERRIDES = {
@@ -163,6 +165,17 @@ KEYWORDS = {
     "log_analyze": ("firing", "tuning", "autotune", "windowed", "overshoot", "undershoot",
                      "settle", "iae", "fopdt", "refit", "compare", "saturation", "jsonl",
                      "trace", "poll", "capture", "report"),
+    "coupled_ident_report": ("coupling matrix", "fit", "score", "nonlinearity",
+                            "self-check", "dwell", "joint", "settled", "jsonl",
+                            "profile_exec", "capture", "k_dc", "gain"),
+    "coupled_ident_single_zone": ("coupling matrix", "single-zone", "excitation",
+                                 "assemble", "k_dc", "gain", "one zone at a time"),
+    "coupled_ident_settle_audit": ("dwell", "settle", "drifting", "oscillating",
+                                   "steady state", "duty", "dc-gain", "coupid6",
+                                   "steady-state check", "trust"),
+    "plant_sim_compare": ("simulation", "model", "kp", "ki", "kd", "gains",
+                          "climb", "integral floor", "prediction", "coupled",
+                          "compare against capture"),
 }
 
 #: Query word -> tokens to also score against. One-way on purpose: expanding
