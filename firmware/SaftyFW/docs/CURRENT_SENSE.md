@@ -567,7 +567,7 @@ firmware change needed.
 
 ---
 
-## 4. Measured noise floor 2026-09-06 — BLOCKED, not measured
+## 4. Measured noise floor — MEASURED 2026-09-06 (history below predates the measurement)
 
 `CT_COMMISSIONING_PLAN.md` step 0 asked for a 60 s, 20 Hz raw-counts capture
 on channel 3 (GPIO28/ADC2, the only fitted probe) with all relays off and no
@@ -645,6 +645,44 @@ as an open task list.
 CT_COMMISSIONING_PLAN.md step 0 can now be executed against this board with
 this path; whether it has actually been run and what it measured is tracked
 there, not here.
+
+### Measured noise floor — RUN 2026-09-06
+
+Executed via `safety_capture_ct_counts()` (default 60 s, relays off, no
+firing, no autotune): 262 samples over 60.1 s (4.36 Hz achieved poll rate;
+every 0.2 s poll recorded, not just samples where the count changed).
+
+| Channel | mean (counts) | std (counts) | min | max |
+|---|---|---|---|---|
+| 1 (unfitted) | 16.23 | 0.418 | 16 | 17 |
+| 2 (unfitted) | 17.00 | 0.000 | 17 | 17 |
+| 3 (GPIO28/ADC2, fitted summed-heater CT) | 66.89 | 4.678 | 60 | 76 |
+
+Channels 1 and 2 have no CT installed (§0.2/§5.2 — only channel 3 is
+fitted) and read a near-constant low floor; not meaningful as a noise-floor
+measurement, just recorded for completeness.
+
+Conversion, RP2040 12-bit ADC against the unregulated `3.3v_Safty` rail
+(`LSB = 3.3 V / 4096 = 0.8057 mV/count`), channel 3's fitted probe at 1 A : 1
+V transconductance with its measured +59 mV idle offset:
+
+```
+mA = (counts * 0.8057 mV/count - 59 mV) / (1 V/A) * 1000
+```
+
+Mean: 66.89 counts -> 53.90 mV -> (53.90 - 59) = -5.1 mA (near zero, as
+expected with no current flowing — within the offset's own measurement
+error; per standing practice, sub-10 mA disagreements are not chased).
+Noise std: 4.678 counts -> 3.77 mV -> **std ≈ 3.8 mA**. Observed range
+(min/max over the 60 s window): 60-76 counts -> 48.34-61.23 mV ->
+roughly -10.7 mA to +2.2 mA around zero, i.e. **~13 mA peak-to-peak** on
+this fitted channel with the board idle.
+
+This closes step 0 of `CT_COMMISSIONING_PLAN.md`: the ADC reference noise on
+this board, measured rather than assumed, is on the order of a few mA std /
+~13 mA peak-to-peak on the one fitted (1 A:1 V) probe. Use this figure, not a
+datasheet estimate, when picking `i_present_a`/S14's `overcurrent_pct`
+margins against real board noise.
 
 ---
 
