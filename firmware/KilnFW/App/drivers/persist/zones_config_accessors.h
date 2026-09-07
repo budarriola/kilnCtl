@@ -807,6 +807,23 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t group, uint8_t
  * itself. */
 bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t group, uint8_t settings_source);
 
+/* Same bounds/self-reference checks as zones_config_set_settings_source_unchecked()
+ * above, but does NOT call nvs_save() -- for a caller committing several
+ * (zone, group) pairs in one import (backup_import.c's per-zone SRC_GROUP_COUNT
+ * fan-out, item 3 of the 5672719 review) that would otherwise trigger one
+ * flash write per pair. Caller MUST call nvs_save() itself once after the
+ * whole batch of _no_save() calls, or the writes are live-only and do not
+ * survive a reboot. */
+bool zones_config_set_settings_source_unchecked_no_save(uint8_t zone_index, uint8_t group, uint8_t settings_source);
+
+/* Persists whatever is currently live in s_zones.cfg -- the batch-commit
+ * counterpart to the individual setters above, which each save on their own.
+ * Callers using the _no_save() setter (or any other no-save mutation) MUST
+ * call this exactly once after their whole batch to make the writes survive
+ * a reboot. Returns true on success, matching the other setters' convention
+ * (they return `nvs_save() == ESP_OK` directly). */
+bool zones_config_save_now(void);
+
 /* Cross-entry pass-1 check for a multi-zone import/whole-page write, for ONE
  * group at a time (callers doing several groups run this once per group):
  * `has_override[z]` true means zone z's proposed NEW settings_source for

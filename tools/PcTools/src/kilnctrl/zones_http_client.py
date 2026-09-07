@@ -239,6 +239,11 @@ _ZONE_FIELD_FORM_KEY = {
     # 0xFF (ZONE_SETTINGS_SOURCE_CUSTOM) or another zone's index; self-reference
     # and cycle-forming chains are refused by the firmware itself.
     "settings_source": "settings_source",
+    # settings_source_groups (WEB_UI_PLAN.md section 2, ZONES_CFG_VERSION
+    # 20->21) is handled separately in _encode_zone() below -- it is a nested
+    # dict of {group_name: value}, not a scalar, so it cannot go through
+    # _format_scalar() the way every other entry in this table does. See
+    # _SRC_GROUP_NAMES/_SRC_GROUP_FORM_SUFFIX below.
     # ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md section 3.2 follow-up,
     # 2026-09-02): coupling_diag_k_dc -- the coupling identification's own
     # diagonal cell, a SEPARATE measured DC gain from model_k_dc/ff_k_dc (see
@@ -298,6 +303,15 @@ _ZONE_FIELD_FORM_KEY = {
     "error_band_c": "errorband",
     "rate_band_c_per_s": "rateband",
 }
+#: WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21, Opus review of
+#: 5672719 item 4): the five independent settings_source groups, in the
+#: exact order/spelling zones_http_post_parse.c's SRC_GROUP_NAMES array uses
+#: -- GET /api/zones emits "settings_source_groups":{"limits":N,
+#: "relaytiming":N,"control":N,"guards":N,"tc":N} (zones_http_get.c) and
+#: parse_zone_fields() accepts each back as z%u_settings_source_<name>. Kept
+#: as a plain tuple, not a dict, since it is only ever iterated, never
+#: looked up by name.
+_SRC_GROUP_NAMES = ("limits", "relaytiming", "control", "guards", "tc")
 #: Integer-valued zone fields -- posted as a plain int string (parse_u8_field()
 #: on the firmware side), never a float repr like "2.0".
 _ZONE_INT_FIELDS = {
@@ -424,6 +438,29 @@ def _encode_zone(index: int, zone: dict) -> "dict[str, str]":
     fields: "dict[str, str]" = {}
     for key, value in zone.items():
         if key in _ZONE_READONLY_KEYS:
+            continue
+        if key == "settings_source_groups":
+            # Item 4 (Opus review of 5672719): before this, this nested dict
+            # had no entry in _ZONE_FIELD_FORM_KEY at all, so a whole-page
+            # save either raised ZonesHttpUnknownFieldError outright or (an
+            # earlier version of this module) silently dropped it -- either
+            # way the five independent groups never round-tripped and a
+            # save collapsed every zone back to whatever "settings_source"
+            # (the LIMITS value) happened to be. Expand it into one
+            # z{index}_settings_source_<group> key per _SRC_GROUP_NAMES
+            # entry instead, matching parse_zone_fields()'s own per-group
+            # wire format exactly.
+            if not isinstance(value, dict):
+                raise ZonesHttpUnknownFieldError(
+                    f"zone {index}: settings_source_groups is {value!r}, not a dict -- "
+                    "GET /api/zones payload shape has changed")
+            for group_name in _SRC_GROUP_NAMES:
+                if group_name not in value:
+                    raise ZonesHttpUnknownFieldError(
+                        f"zone {index}: settings_source_groups is missing group {group_name!r} -- "
+                        "GET /api/zones payload shape has changed")
+                fields[f"z{index}_settings_source_{group_name}"] = _format_scalar(
+                    "settings_source", value[group_name], _ZONE_INT_FIELDS)
             continue
         if _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.match(key):
             continue
@@ -658,7 +695,7 @@ _PRESET_ZONE_KNOWN_IGNORED_FIELDS = {
     "index",
     "k_dc", "tau_s", "dead_time_s",
     "model_k_dc", "model_tau_s", "model_dead_time_s",
-    "settings_source",
+    "settings_source", "settings_source_groups",
     "normal_current_measured", "normal_current_a",
     "tuning_valid", "tuning_method", "tuning_rule", "tuning_settled",
     "tuning_extrapolation_converged", "tuning_tau_consistent",

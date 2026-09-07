@@ -594,12 +594,15 @@ static bool s_cfg_refetch_ok = true;
 // staged -- i.e. model a Pico that really did commit what it was sent.
 static bool s_cfg_refetch_applies_staged = false;
 
+static void test_ct_cal_reset(void); /* defined below -- forward declared so this reset stays first */
+
 static void test_cfg_rows_reset(void)
 {
     memset(s_cfg_rows, 0, sizeof(s_cfg_rows));
     s_cfg_row_count = 0;
     s_cfg_refetch_ok = true;
     s_cfg_refetch_applies_staged = false;
+    test_ct_cal_reset();
 }
 
 static void test_cfg_set_f32(uint16_t param_id, float v, bool is_set)
@@ -655,6 +658,61 @@ bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
     if (out) {
         *out = s_cfg_rows[index];
     }
+    return true;
+}
+
+// CT_COMMISSIONING_PLAN.md steps 1/3 -- a programmable stand-in for
+// safety_cfg_store's ct_cal record, same "empty by default, a test that
+// wants it populates it explicitly" convention as s_cfg_rows above.
+// zone_sweep_plan_k_ct() (manual-wins-over-sweep) and
+// zone_sweep_task_record_normal()/_record_ct_channels() (summed topology)
+// both call the real safety_cfg_store_get_ct_cal_input() signature; this
+// test binary never links safety_cfg_store.c itself (see s_cfg_rows'
+// comment), so it needs its own stub the same way get_by_index() does.
+static bool s_ct_cal_has_value[SAFETY_CT_CAL_CHANNELS];
+static float s_ct_cal_a_fs[SAFETY_CT_CAL_CHANNELS];
+static float s_ct_cal_zero_mv[SAFETY_CT_CAL_CHANNELS];
+static safety_ct_cal_source_t s_ct_cal_source[SAFETY_CT_CAL_CHANNELS];
+
+static void test_ct_cal_reset(void)
+{
+    memset(s_ct_cal_has_value, 0, sizeof(s_ct_cal_has_value));
+    memset(s_ct_cal_a_fs, 0, sizeof(s_ct_cal_a_fs));
+    memset(s_ct_cal_zero_mv, 0, sizeof(s_ct_cal_zero_mv));
+    memset(s_ct_cal_source, 0, sizeof(s_ct_cal_source));
+}
+
+static void test_ct_cal_set(size_t ch, float a_fs, float zero_mv, safety_ct_cal_source_t source)
+{
+    if (ch >= SAFETY_CT_CAL_CHANNELS) {
+        return;
+    }
+    s_ct_cal_has_value[ch] = true;
+    s_ct_cal_a_fs[ch] = a_fs;
+    s_ct_cal_zero_mv[ch] = zero_mv;
+    s_ct_cal_source[ch] = source;
+}
+
+bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_zero_mv,
+                                        safety_ct_cal_source_t *out_source)
+{
+    if (ch >= SAFETY_CT_CAL_CHANNELS || !s_ct_cal_has_value[ch]) {
+        return false;
+    }
+    if (out_a_fs) *out_a_fs = s_ct_cal_a_fs[ch];
+    if (out_zero_mv) *out_zero_mv = s_ct_cal_zero_mv[ch];
+    if (out_source) *out_source = s_ct_cal_source[ch];
+    return true;
+}
+
+bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv, safety_ct_cal_source_t source,
+                                        float *out_k_ct_v_per_a, uint16_t *out_zero_counts)
+{
+    // Not exercised via this path by any test in this file today (the real
+    // HTTP handler is what calls this in practice) -- present only so the
+    // real header's declaration is satisfied and a future test can drive it.
+    (void)out_k_ct_v_per_a; (void)out_zero_counts;
+    test_ct_cal_set(ch, a_fs, zero_mv, source);
     return true;
 }
 
@@ -2980,8 +3038,13 @@ static void test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero(
     TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
     TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
     TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source is carried through verbatim");
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char ss_msg[96];
+        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
+                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
+                "just LIMITS)", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM, ss_msg);
+    }
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -3667,6 +3730,115 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
               "operator's back and persists that to NVS");
 }
 
+// Opus review of 5672719 (item 2): no host test posted a
+// z%u_settings_source_<group> key before this -- WEB_UI_PLAN.md section 2's
+// per-group split (zones_http_post_parse.c's z%u_settings_source_%s block)
+// had zero direct coverage. Three tests below: per-group keys with no legacy
+// scalar present; both keys in the same submission (per-group key must win);
+// and every key omitted (must preserve the live per-group values, not reset
+// any group to CUSTOM).
+static void test_post_settings_source_group_keys_only(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_settings_source_<group> keys with no legacy "
+                 "z0_settings_source scalar present: each group takes its own posted value");
+    char body[512];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0&"
+             "z0_settings_source_limits=1&z0_settings_source_relaytiming=2&"
+             "z0_settings_source_control=255&z0_settings_source_guards=1&z0_settings_source_tc=2");
+
+    zone_cfg_t current = make_stored_zone();
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        current.settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+
+    TEST_CHECK(ok, "a submission naming only the per-group keys must succeed");
+    TEST_CHECK(out.settings_source[SRC_GROUP_LIMITS] == 1, "LIMITS took its own posted value (1)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_RELAY_TIMING] == 2, "RELAY_TIMING took its own posted value (2)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_CONTROL] == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "CONTROL took its own posted value (255/CUSTOM)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_GUARDS] == 1, "GUARDS took its own posted value (1)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_TC] == 2, "TC took its own posted value (2)");
+}
+
+static void test_post_settings_source_group_key_wins_over_legacy_scalar(void)
+{
+    TEST_SECTION("parse_zone_fields -- a submission with BOTH the legacy z0_settings_source "
+                 "scalar AND a per-group key for the same zone: the per-group key wins for that "
+                 "one group, the legacy scalar is the default for every other group");
+    char body[512];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0&"
+             "z0_settings_source=1&z0_settings_source_control=2");
+
+    zone_cfg_t current = make_stored_zone();
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        current.settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+
+    TEST_CHECK(ok, "legacy scalar + one per-group key together must succeed");
+    TEST_CHECK(out.settings_source[SRC_GROUP_CONTROL] == 2,
+              "the per-group z0_settings_source_control key WINS over the legacy scalar for CONTROL");
+    TEST_CHECK(out.settings_source[SRC_GROUP_LIMITS] == 1,
+              "LIMITS has no per-group key, so it falls back to the legacy scalar (1)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_RELAY_TIMING] == 1,
+              "RELAY_TIMING has no per-group key either, same legacy-scalar fallback (1)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_GUARDS] == 1,
+              "GUARDS has no per-group key either, same legacy-scalar fallback (1)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_TC] == 1,
+              "TC has no per-group key either, same legacy-scalar fallback (1)");
+}
+
+static void test_post_settings_source_all_keys_omitted_preserves_every_group(void)
+{
+    TEST_SECTION("parse_zone_fields -- omitting BOTH the legacy scalar and every per-group "
+                 "settings_source key preserves every group's own previously-stored value "
+                 "independently, never collapsing them to one another or to CUSTOM");
+    char body[512];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0"); // no settings_source key of any kind
+
+    zone_cfg_t current = make_stored_zone();
+    current.settings_source[SRC_GROUP_LIMITS] = 1;
+    current.settings_source[SRC_GROUP_RELAY_TIMING] = 2;
+    current.settings_source[SRC_GROUP_CONTROL] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    current.settings_source[SRC_GROUP_GUARDS] = 1;
+    current.settings_source[SRC_GROUP_TC] = 2;
+
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+
+    TEST_CHECK(ok, "a submission with no settings_source key at all must still succeed");
+    TEST_CHECK(out.settings_source[SRC_GROUP_LIMITS] == 1, "LIMITS preserved at its own live value (1)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_RELAY_TIMING] == 2,
+              "RELAY_TIMING preserved at its own DIFFERENT live value (2), not LIMITS's 1");
+    TEST_CHECK(out.settings_source[SRC_GROUP_CONTROL] == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "CONTROL preserved at CUSTOM");
+    TEST_CHECK(out.settings_source[SRC_GROUP_GUARDS] == 1, "GUARDS preserved at its own live value (1)");
+    TEST_CHECK(out.settings_source[SRC_GROUP_TC] == 2, "TC preserved at its own live value (2)");
+}
+
 // End-to-end round trip through the real handlers: a POST carrying real
 // values for all four new fields, then a GET, must report exactly what was
 // posted. Uses run_zones_post() (the real zones_post_handler()) and
@@ -4350,8 +4522,13 @@ static void test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown(void)
     TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 640.0f, 1e-6, "zones[0].model_tau_s survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].model_dead_time_s, 45.0f, 1e-6, "zones[0].model_dead_time_s survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source is carried through verbatim");
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char ss_msg[96];
+        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
+                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
+                "just LIMITS)", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM, ss_msg);
+    }
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -4450,8 +4627,13 @@ static void test_nvs_load_from_v13_blob_defaults_adaptive_tune_enabled_to_zero(v
     TEST_CHECK(out_cfg.zones[0].tuning_rule == 3, "zones[0].tuning_rule survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].tuning_baseline_c, 25.5f, 1e-6, "zones[0].tuning_baseline_c survives");
     TEST_CHECK(out_cfg.zones[0].tuning_seq == 7, "zones[0].tuning_seq survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source is carried through verbatim");
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char ss_msg[96];
+        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
+                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
+                "just LIMITS)", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM, ss_msg);
+    }
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -4541,8 +4723,13 @@ static void test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero(void
     TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source is carried through verbatim");
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char ss_msg[96];
+        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
+                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
+                "just LIMITS)", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM, ss_msg);
+    }
     TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 1,
               "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
     TEST_CHECK(out_cfg.zones[1].adaptive_tune_enabled == 0,
@@ -4591,7 +4778,7 @@ static void test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default
     src.zones[0].model_dead_time_s = 45.0f;
     src.zones[0].coupling_coeff[1] = 10.887f;
     src.zones[0].coupling_diag_k_dc = 19.4f; /* a REAL, already-measured v15 value -- must survive */
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    src.zones[0].settings_source = 1; /* real link to zone 1 -- not self-referencing, so normalize_settings_source_cycles() cannot silently mask a fan-out bug the way the CUSTOM/0 sentinel could for zone 0 */
     src.zones[0].adaptive_tune_enabled = 1;
 
     src.zones[1].relay_mask = 0x02;
@@ -4645,8 +4832,13 @@ static void test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 19.4f, 1e-6,
                     "zones[0].coupling_diag_k_dc (a real v15 measurement) survives the v15->v16 hop");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source is carried through verbatim");
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char ss_msg[96];
+        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
+                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
+                "just LIMITS)", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == 1, ss_msg);
+    }
     TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 1,
               "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
 
@@ -4855,7 +5047,7 @@ static void test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped(v
     src.zones[0].coupling_coeff[1] = 10.887f;
     src.zones[0].coupling_diag_k_dc = 19.4f;
     src.zones[0].ease_off_window_mult = 3.5f; /* a REAL, already-running A/B arm -- must survive */
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    src.zones[0].settings_source = 1; /* real link to zone 1 -- not self-referencing, so normalize_settings_source_cycles() cannot silently mask a fan-out bug the way the CUSTOM/0 sentinel could for zone 0 */
 
     src.zones[1].relay_mask = 0x02;
     src.zones[1].thermo_mask = 0x02;
@@ -4905,8 +5097,13 @@ static void test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped(v
     TEST_CHECK_NEAR(out_cfg.zones[0].ease_off_window_mult, 3.5f, 1e-6,
                     "zones[0]'s REAL, non-default ease_off_window_mult A/B arm survives the v17->v18 hop");
     TEST_CHECK_NEAR(out_cfg.zones[1].ease_off_window_mult, 2.0f, 1e-6, "zones[1].ease_off_window_mult survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source is carried through verbatim");
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char ss_msg[96];
+        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
+                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
+                "just LIMITS)", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == 1, ss_msg);
+    }
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -5043,7 +5240,7 @@ static void test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default
     src.zones[0].coupling_diag_k_dc = 19.4f;
     src.zones[0].ease_off_window_mult = 3.5f;
     src.zones[0].approach_rate_cap_c_per_hr = 30.0f; /* a REAL, already-running A/B arm -- must survive */
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    src.zones[0].settings_source = 1; /* real link to zone 1 -- not self-referencing, so normalize_settings_source_cycles() cannot silently mask a fan-out bug the way the CUSTOM/0 sentinel could for zone 0 */
 
     src.zones[1].relay_mask = 0x02;
     src.zones[1].thermo_mask = 0x02;
@@ -5100,8 +5297,13 @@ static void test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default
     TEST_CHECK_NEAR(out_cfg.zones[0].ease_off_window_mult, 3.5f, 1e-6, "zones[0].ease_off_window_mult survives");
     TEST_CHECK_NEAR(out_cfg.zones[0].approach_rate_cap_c_per_hr, 30.0f, 1e-6,
                     "zones[0]'s REAL, non-default approach_rate_cap_c_per_hr A/B arm survives the v18->v19 hop");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source is carried through verbatim");
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char ss_msg[96];
+        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
+                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
+                "just LIMITS)", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == 1, ss_msg);
+    }
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -5133,7 +5335,7 @@ static void test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr(void)
     src.zones[0].error_band_c = 15.0f; /* a REAL, non-default per-zone fuzzy band -- must survive */
     src.zones[0].rate_band_c_per_s = 0.8f;
     src.zones[0].approach_rate_cap_c_per_hr = 30.0f;
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    src.zones[0].settings_source = 1; /* real link to zone 1 -- not self-referencing, so normalize_settings_source_cycles() cannot silently mask a fan-out bug the way the CUSTOM/0 sentinel could for zone 0 */
 
     src.zones[1].relay_mask = 0x02;
     src.zones[1].thermo_mask = 0x02;
@@ -5180,8 +5382,13 @@ static void test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr(void)
                     "zones[0]'s REAL, non-default rate_band_c_per_s survives the v19->v20 hop");
     TEST_CHECK_NEAR(out_cfg.zones[0].approach_rate_cap_c_per_hr, 30.0f, 1e-6,
                     "zones[0].approach_rate_cap_c_per_hr survives the v19->v20 hop");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source is carried through verbatim");
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        char ss_msg[96];
+        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
+                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
+                "just LIMITS)", (unsigned)g);
+        TEST_CHECK(out_cfg.zones[0].settings_source[g] == 1, ss_msg);
+    }
 
     // relay_cycles_set_type() push: nvs_load() (not nvs_load_from() directly,
     // which this test calls to isolate the migration itself) is the call
@@ -7209,6 +7416,66 @@ static void test_zone_normals_get_set_round_trip(void)
 }
 
 // ---------------------------------------------------------------------------
+// CT_COMMISSIONING_PLAN.md step 3 -- summed-topology normal derivation, and
+// step 1's "manual wins over the sweep" gate on zone_sweep_plan_k_ct().
+// ---------------------------------------------------------------------------
+
+static void test_zone_sweep_summed_normal_a_basic(void)
+{
+    TEST_SECTION("zone_sweep_summed_normal_a -- normal_a[zone] = sum(with zone on) - sum(idle), "
+                 "CT_COMMISSIONING_PLAN.md step 3's own formula");
+
+    float n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(5.0f, 0.5f, &n), "converts with a real idle baseline");
+    TEST_CHECK(fabsf(n - 4.5f) < 1e-6f, "5.0 - 0.5 = 4.5A");
+
+    TEST_CHECK(zone_sweep_summed_normal_a(3.0f, 0.0f, &n), "converts with a zero idle baseline");
+    TEST_CHECK(fabsf(n - 3.0f) < 1e-6f, "no idle draw -- the reading is the normal as-is");
+
+    // The clamp-at-0 floor: a channel reading LOWER with the zone on than at
+    // idle (noise, a settling transient) must not report a negative normal.
+    TEST_CHECK(zone_sweep_summed_normal_a(0.4f, 0.5f, &n), "converts even when on < idle");
+    TEST_CHECK(n == 0.0f, "clamped to 0, never negative");
+
+    TEST_CHECK(zone_sweep_summed_normal_a(NAN, 0.5f, &n) == false, "a NaN reading is refused");
+    TEST_CHECK(zone_sweep_summed_normal_a(5.0f, NAN, &n) == false, "a NaN idle baseline is refused");
+}
+
+static void test_record_ct_channels_summed_mode_derives_normal_from_channel3(void)
+{
+    TEST_SECTION("zone_sweep_task_record_ct_channels -- CT_COMMISSIONING_PLAN.md step 3: in "
+                 "summed mode, records normal_a[zone] from channel 3 (index 2) minus the sampled "
+                 "idle baseline, and skips the one-relay-one-channel derivation entirely");
+
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+
+    s_ct_topology_summed = true;
+    s_ct_summed_idle_a = 0.3f;
+
+    float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT] = { NAN, NAN, 2.3f }; // channels 0/1 not fitted in this mode
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/1, /*relay_mask=*/0x02u, per_ch_avg_a);
+
+    float amps = -1.0f;
+    bool measured = false;
+    TEST_CHECK(zones_config_get_normal_current(1, &amps, &measured), "getter answers for zone 1");
+    TEST_CHECK(measured, "summed mode still records a normal for the energized zone");
+    TEST_CHECK(fabsf(amps - 2.0f) < 1e-6f, "2.3 - 0.3 idle = 2.0A, from channel index 2 alone");
+
+    TEST_CHECK(s_ct_derive.derived_mask == 0,
+               "s_ct_derive (the ct_channel_map derivation) is left completely untouched in summed "
+               "mode -- the one-relay-one-channel check never even runs, it is not run-and-refused");
+
+    s_ct_topology_summed = false;
+    s_ct_summed_idle_a = 0.0f;
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------------
 // Task 2: CT-to-zone mapping mismatch predicate, and its live wiring.
 // ---------------------------------------------------------------------------
 
@@ -7633,6 +7900,41 @@ static void test_zone_sweep_plan_k_ct_clean_run_plans_every_derived_channel(void
                "every channel the map resolved is calibrated");
     TEST_CHECK(note[0] == '\0', "a clean plan says nothing");
     TEST_CHECK(fabsf(k[1] - 0.0333f) < 1e-6f, "a matching measurement leaves the scale where it was");
+}
+
+static void test_zone_sweep_plan_k_ct_skips_a_manually_calibrated_channel(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- CT_COMMISSIONING_PLAN.md step 1: manual wins over the "
+                 "sweep, so a channel the operator hand-entered A_fs/zero_mv for is never planned");
+
+    kct_setup_clean_run();
+    test_ct_cal_set(0, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL);
+
+    float k_new[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96];
+    uint8_t plan_mask = zone_sweep_plan_k_ct(k_new, note, sizeof(note));
+
+    TEST_CHECK((plan_mask & 0x01u) == 0, "channel 0 (manually calibrated) is excluded from the plan");
+    TEST_CHECK((plan_mask & 0x02u) != 0, "channel 1 (untouched) is still planned normally");
+    TEST_CHECK((plan_mask & 0x04u) != 0, "channel 2 (untouched) is still planned normally");
+
+    test_ct_cal_reset();
+}
+
+static void test_zone_sweep_plan_k_ct_plans_every_channel_when_none_are_manual(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- NEGATIVE TEST: with no manual channel at all, every "
+                 "resolved channel IS planned -- proves the exclusion above is the ct_cal source "
+                 "check actually firing, not some channel being unconditionally skipped");
+
+    kct_setup_clean_run();
+    // Deliberately leave every channel's ct_cal record unset (test_ct_cal_
+    // reset()'s default) -- if zone_sweep_plan_k_ct() unconditionally
+    // excluded channel 0 regardless of source, this would catch it.
+    float k_new[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96];
+    uint8_t plan_mask = zone_sweep_plan_k_ct(k_new, note, sizeof(note));
+    TEST_CHECK(plan_mask == 0x07u, "all three channels are planned when none is manually calibrated");
 }
 
 static void test_zone_sweep_plan_k_ct_refuses_an_incomplete_run(void)
@@ -8367,6 +8669,9 @@ void run_test_zones_http(void)
     test_post_new_fields_present_but_unparseable_are_refused();
     test_post_coupling_diagonal_must_be_zero();
     test_post_settings_source_self_reference_refused();
+    test_post_settings_source_group_keys_only();
+    test_post_settings_source_group_key_wins_over_legacy_scalar();
+    test_post_settings_source_all_keys_omitted_preserves_every_group();
     test_post_then_get_round_trips_new_fields();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();
     test_zones_get_handler_malloc_failure_returns_clean_500();
@@ -8450,12 +8755,17 @@ void run_test_zones_http(void)
     test_zone_sweep_run_all_zones_energize_refused_reason_decodes_fault_words();
     test_zone_normals_get_set_round_trip();
 
+    test_zone_sweep_summed_normal_a_basic();
+    test_record_ct_channels_summed_mode_derives_normal_from_channel3();
+
     test_zone_sweep_derive_k_ct_scales_by_the_measured_over_expected_ratio();
     test_zone_sweep_derive_k_ct_refuses_without_the_nameplate_answers();
     test_zone_sweep_derive_k_ct_refuses_without_a_measurement();
     test_zone_sweep_derive_k_ct_refuses_an_uncommissioned_prior_k();
     test_zone_sweep_derive_k_ct_refuses_an_implausible_correction();
     test_zone_sweep_plan_k_ct_clean_run_plans_every_derived_channel();
+    test_zone_sweep_plan_k_ct_skips_a_manually_calibrated_channel();
+    test_zone_sweep_plan_k_ct_plans_every_channel_when_none_are_manual();
     test_zone_sweep_plan_k_ct_refuses_an_incomplete_run();
     test_zone_sweep_plan_k_ct_refuses_after_a_failed_map_push();
     test_zone_sweep_plan_k_ct_refuses_an_unanswered_nameplate();

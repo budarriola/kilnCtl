@@ -710,13 +710,13 @@ during development will be driven by an agent:
       **Hazard, 2026-09-04**: `ota_rollback_esp()` rolls the running image back
       to `factory`, but the `zones_cfg` NVS blob is not versioned per-partition
       — it is whatever was last written. If `zones_cfg` has ever been saved by
-      v19 firmware (`ZONES_CFG_VERSION` 19, `904db54` — adds per-zone
-      `error_band_c`/`rate_band_c_per_s`) and the board is then rolled back to
-      v18, `zones_config_store.c`'s `ZONES_DECODE_NEWER` path refuses the
+      v21 firmware (`ZONES_CFG_VERSION` 21, `5672719` — per-group "same as
+      zone N" settings_source) and the board is then rolled back to an older
+      version, `zones_config_store.c`'s `ZONES_DECODE_NEWER` path refuses the
       newer-than-firmware blob and falls back to **firmware defaults for that
       boot** — including default PID gains, not the tuned ones — while leaving
       the on-flash blob untouched (`zones_config_store.c:116-128`). Nothing is
-      lost: flashing v19 again re-reads the same untouched blob and every
+      lost: flashing v21 again re-reads the same untouched blob and every
       tuned value comes back. But a session that rolls back and then fires
       without noticing is firing on default gains. Check `GET
       /api/zones/config` (or `kiln_call(name="control_get_zones")`) reads back

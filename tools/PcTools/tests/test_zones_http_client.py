@@ -89,6 +89,15 @@ def _sample_zone(index: int, **overrides) -> dict:
         **{f"coupling_tau_c{j}": 0.0 for j in range(3)},
         **{f"coupling_dead_time_c{j}": 0.0 for j in range(3)},
         "settings_source": 0xFF,
+        # WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21, Opus review of
+        # 5672719 item 4): zones_http_get.c always emits BOTH forms now --
+        # "settings_source" (kept, LIMITS's value, for older clients) and
+        # this nested per-group dict, the real current-page source of
+        # truth. Default: every group at CUSTOM, matching settings_source's
+        # own default above.
+        "settings_source_groups": {
+            "limits": 0xFF, "relaytiming": 0xFF, "control": 0xFF, "guards": 0xFF, "tc": 0xFF,
+        },
         # ZONES_CFG_VERSION 12->13: tuning-quality record (set 1), always
         # emitted alongside everything else above -- see
         # zh._ZONE_TUNING_READONLY_KEYS's own comment for why these 11 keys
@@ -314,6 +323,62 @@ class BuildPostBodyTest(unittest.TestCase):
         current["zones"][0]["settings_source"] = 0xFF
         form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
         self.assertEqual(form["z0_settings_source"], "255")
+
+    # ---- Opus review of 5672719, item 4: settings_source_groups round trip
+    # (before this fix, this nested dict had no _ZONE_FIELD_FORM_KEY entry at
+    # all, so a whole-page save either raised ZonesHttpUnknownFieldError or
+    # silently collapsed every zone's five groups to the LIMITS value). ----
+
+    def test_settings_source_groups_round_trips_each_group_independently(self):
+        current = _sample_get_response()
+        current["zones"][1]["settings_source_groups"] = {
+            "limits": 1, "relaytiming": 2, "control": 0xFF, "guards": 0, "tc": 1,
+        }
+        form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
+        self.assertEqual(form["z1_settings_source_limits"], "1")
+        self.assertEqual(form["z1_settings_source_relaytiming"], "2")
+        self.assertEqual(form["z1_settings_source_control"], "255")
+        self.assertEqual(form["z1_settings_source_guards"], "0")
+        self.assertEqual(form["z1_settings_source_tc"], "1")
+        # guards == 0 is a REAL distinct value (a chain link to zone 0), not
+        # a "not set" sentinel -- same "0 is real" discipline the legacy
+        # scalar's own test above already enforces, now per group.
+        self.assertIn("z1_settings_source_guards", form)
+
+    def test_settings_source_groups_and_legacy_scalar_both_posted(self):
+        """Both forms are posted together -- the per-group keys carry the
+        real per-group state, and the legacy z%u_settings_source scalar
+        (still posted from the ordinary "settings_source" field) is what an
+        older firmware build would need; the firmware's own parse_zone_
+        fields() lets the per-group key win when both are present (see
+        zones_http_post_parse.c's comment), so posting both is safe."""
+        current = _sample_get_response()
+        current["zones"][0]["settings_source"] = 1
+        current["zones"][0]["settings_source_groups"] = {
+            "limits": 1, "relaytiming": 1, "control": 2, "guards": 1, "tc": 1,
+        }
+        form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
+        self.assertEqual(form["z0_settings_source"], "1")
+        self.assertEqual(form["z0_settings_source_control"], "2")
+
+    def test_settings_source_groups_missing_group_raises_BREAK_PROOF(self):
+        """If GET /api/zones' settings_source_groups payload shape ever
+        drops a group (a firmware regression, or this module's own
+        _SRC_GROUP_NAMES drifting from SRC_GROUP_NAMES), this must raise
+        loudly rather than silently posting only 4 of 5 groups."""
+        current = _sample_get_response()
+        current["zones"][0]["settings_source_groups"] = {
+            "limits": 1, "relaytiming": 1, "control": 1, "guards": 1,
+            # "tc" missing
+        }
+        with self.assertRaises(zh.ZonesHttpUnknownFieldError):
+            zh.build_post_body(current, {"name": "p", "zones": []})
+
+    def test_settings_source_groups_non_dict_raises_BREAK_PROOF(self):
+        current = _sample_get_response()
+        current["zones"][0]["settings_source_groups"] = 1  # not a dict
+        with self.assertRaises(zh.ZonesHttpUnknownFieldError):
+            zh.build_post_body(current, {"name": "p", "zones": []})
 
     def test_coupling_diagonal_never_posted_nonzero(self):
         """Semantics test: the diagonal (j == the zone's own index) must

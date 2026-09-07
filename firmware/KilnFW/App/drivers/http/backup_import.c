@@ -291,7 +291,14 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
          * written, an older board's stored value survives untouched). */
         bool has_coupling_diag_k_dc;
         float coupling_diag_k_dc;
-        uint8_t settings_source; /* defaults to ZONE_SETTINGS_SOURCE_CUSTOM -- see comment above */
+        /* Opus review of 5672719 (item 4): one value per SRC_GROUP_COUNT
+         * group, not a single scalar fanned out to all five -- see
+         * backup_export.c's matching comment on the "settings_source_g%u"
+         * keys. Each defaults to ZONE_SETTINGS_SOURCE_CUSTOM (see comment
+         * above); an older (version <=4) backup that only has the legacy
+         * "settings_source" scalar has every group set to that one value
+         * instead, preserving the old fan-out behavior for old backups. */
+        uint8_t settings_source[SRC_GROUP_COUNT];
     } zone_candidate_t;
     zone_candidate_t zone_candidates[MAX31856_CHANNEL_COUNT];
     size_t zone_candidate_count = 0;
@@ -311,7 +318,9 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
          * older-format import (or a version-3 entry that simply omits the
          * key) commits this exact sentinel rather than the zero a plain
          * memset would leave. */
-        zc->settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            zc->settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
 
         double didx;
         if (!backup_json_field_num(ze, "index", &didx) || didx < 0 || didx >= MAX31856_CHANNEL_COUNT) {
@@ -729,47 +738,92 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         }
 
         /* settings_source -- UNLIKE the three floats above, an absent key
-         * must NOT leave zc->settings_source at 0 (see zone_candidate_t's own
-         * comment): zc->settings_source was already pre-seeded to
+         * must NOT leave zc->settings_source[g] at 0 (see zone_candidate_t's
+         * own comment): every group was already pre-seeded to
          * ZONE_SETTINGS_SOURCE_CUSTOM right after this candidate's memset,
-         * above, so this block only ever OVERWRITES it when the key is
-         * actually present. No has_* flag: pass 2 always commits
-         * zc->settings_source for every candidate. */
-        double dsrc;
-        if (backup_json_field_num(ze, "settings_source", &dsrc)) {
-            if (dsrc < 0 || dsrc > 255) {
-                snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source out of range",
-                        (unsigned)zone_candidate_count);
-                return false;
+         * above, so this block only ever OVERWRITES a group when a value for
+         * it is actually present. No has_* flag: pass 2 always commits every
+         * group for every candidate.
+         *
+         * Opus review of 5672719 (item 4): prefer the per-group
+         * "settings_source_g%u" keys (0..SRC_GROUP_COUNT-1) written by this
+         * build's own exporter; a backup that lacks them (anything exported
+         * before this fix) falls back to the single legacy "settings_source"
+         * scalar applied to every group, matching the old fan-out
+         * behavior exactly for old backups. */
+        {
+            bool any_group_key = false;
+            for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+                char key[24];
+                snprintf(key, sizeof(key), "settings_source_g%u", (unsigned)g);
+                double dsrc;
+                if (!backup_json_field_num(ze, key, &dsrc)) {
+                    continue;
+                }
+                any_group_key = true;
+                if (dsrc < 0 || dsrc > 255) {
+                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s out of range",
+                            (unsigned)zone_candidate_count, key);
+                    return false;
+                }
+                if (dsrc != floor(dsrc)) {
+                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s must be a whole zone index",
+                            (unsigned)zone_candidate_count, key);
+                    return false;
+                }
+                uint8_t src_raw = (uint8_t)dsrc;
+                if (src_raw != ZONE_SETTINGS_SOURCE_CUSTOM && src_raw >= MAX31856_CHANNEL_COUNT) {
+                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s references a zone that doesn't exist",
+                            (unsigned)zone_candidate_count, key);
+                    return false;
+                }
+                if (src_raw == zc->index) {
+                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s cannot point at itself",
+                            (unsigned)zone_candidate_count, key);
+                    return false;
+                }
+                zc->settings_source[g] = src_raw;
             }
-            /* Same "reject a fractional index, never truncate" rule as
-             * coupling_neighbor_zone above: settings_source is a zone INDEX
-             * (or the ZONE_SETTINGS_SOURCE_CUSTOM sentinel) living in a
-             * float here, and (uint8_t)dsrc below would otherwise silently
-             * truncate e.g. 1.7 to 1 -- a hand-edited backup could make a
-             * zone inherit a DIFFERENT zone's settings than the one written
-             * in the file, with no error. */
-            if (dsrc != floor(dsrc)) {
-                snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source must be a whole zone index",
-                        (unsigned)zone_candidate_count);
-                return false;
+            if (!any_group_key) {
+                /* Legacy (version <=4) backup: single "settings_source"
+                 * scalar, fanned out to every group -- same rules as above,
+                 * checked once. */
+                double dsrc;
+                if (backup_json_field_num(ze, "settings_source", &dsrc)) {
+                    if (dsrc < 0 || dsrc > 255) {
+                        snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source out of range",
+                                (unsigned)zone_candidate_count);
+                        return false;
+                    }
+                    /* Same "reject a fractional index, never truncate" rule
+                     * as coupling_neighbor_zone above: settings_source is a
+                     * zone INDEX (or the ZONE_SETTINGS_SOURCE_CUSTOM
+                     * sentinel) living in a float here, and (uint8_t)dsrc
+                     * below would otherwise silently truncate e.g. 1.7 to 1
+                     * -- a hand-edited backup could make a zone inherit a
+                     * DIFFERENT zone's settings than the one written in the
+                     * file, with no error. */
+                    if (dsrc != floor(dsrc)) {
+                        snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source must be a whole zone index",
+                                (unsigned)zone_candidate_count);
+                        return false;
+                    }
+                    uint8_t src_raw = (uint8_t)dsrc;
+                    if (src_raw != ZONE_SETTINGS_SOURCE_CUSTOM && src_raw >= MAX31856_CHANNEL_COUNT) {
+                        snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source references a zone that doesn't exist",
+                                (unsigned)zone_candidate_count);
+                        return false;
+                    }
+                    if (src_raw == zc->index) {
+                        snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source cannot point at itself",
+                                (unsigned)zone_candidate_count);
+                        return false;
+                    }
+                    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+                        zc->settings_source[g] = src_raw;
+                    }
+                }
             }
-            uint8_t src_raw = (uint8_t)dsrc;
-            /* Same bound zones_config_set_settings_source()/
-             * parse_zone_fields()'s z%u_settings_source enforce: either
-             * ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) or a real zone index other
-             * than this entry's own. */
-            if (src_raw != ZONE_SETTINGS_SOURCE_CUSTOM && src_raw >= MAX31856_CHANNEL_COUNT) {
-                snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source references a zone that doesn't exist",
-                        (unsigned)zone_candidate_count);
-                return false;
-            }
-            if (src_raw == zc->index) {
-                snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source cannot point at itself",
-                        (unsigned)zone_candidate_count);
-                return false;
-            }
-            zc->settings_source = src_raw;
         }
 
         zone_candidate_count++;
@@ -791,26 +845,19 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
      * reasoning). Checked here, before pass 2 starts, against every
      * candidate's proposed NEW value at once. */
     {
-        bool has_override[MAX31856_CHANNEL_COUNT] = {0};
-        uint8_t override_source[MAX31856_CHANNEL_COUNT] = {0};
-        for (size_t i = 0; i < zone_candidate_count; i++) {
-            has_override[zone_candidates[i].index] = true;
-            override_source[zone_candidates[i].index] = zone_candidates[i].settings_source;
-        }
-        /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21): the backup
-         * format's single "settings_source" key is applied to every one of
-         * the SRC_GROUP_COUNT independent groups on commit (see this
-         * file's own comment on the export side, backup_export.c), so the
-         * cross-entry cycle check must run once per group too -- a set that
-         * is acyclic in one group is not automatically acyclic when the
-         * same links are replayed into a different group's independent
-         * chain... except here they ARE the exact same override_source for
-         * every group, so in practice all five checks either all pass or
-         * all fail together; this still checks every group explicitly
-         * rather than assuming that, since nothing enforces it structurally
-         * and a future backup-format change could break the assumption
-         * silently otherwise. */
+        /* Opus review of 5672719 (item 4): each group now carries its OWN
+         * override_source (a per-group backup can legitimately point
+         * different groups at different zones), so has_override/
+         * override_source are rebuilt per group inside the loop below,
+         * rather than once outside it -- unlike before this fix, the five
+         * checks are no longer guaranteed to see identical inputs. */
         for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
+            bool has_override[MAX31856_CHANNEL_COUNT] = {0};
+            uint8_t override_source[MAX31856_CHANNEL_COUNT] = {0};
+            for (size_t i = 0; i < zone_candidate_count; i++) {
+                has_override[zone_candidates[i].index] = true;
+                override_source[zone_candidates[i].index] = zone_candidates[i].settings_source[group];
+            }
             uint8_t cycle_zone = 0;
             if (zones_config_settings_source_import_has_cycle(group, has_override, override_source, &cycle_zone)) {
                 snprintf(err_msg, err_cap,
@@ -845,6 +892,7 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
             return false;
         }
     }
+    bool settings_source_dirty = false; /* set true once any _no_save() commit below succeeds; see item 3 comment */
     for (size_t i = 0; i < zone_candidate_count; i++) {
         zone_candidate_t *zc = &zone_candidates[i];
         if (!zones_config_set_pid(zc->index, zc->kp, zc->ki, zc->kd)) {
@@ -1032,20 +1080,33 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
          * 2 re-checks only bounds/self-reference (still real defenses
          * against a corrupt override_source) and skips the live-config
          * chain-walk entirely. */
-        /* Applied to every group -- see this file's pass-1 comment above on
-         * why the single backup-format key fans out to all SRC_GROUP_COUNT
-         * groups on import. */
+        /* Item 4: zc->settings_source[group] now carries each group's own
+         * value (see zone_candidate_t's own comment) instead of one scalar
+         * fanned out to all five.
+         *
+         * Item 3 (Opus review of 5672719): the _no_save() variant is used
+         * here instead of zones_config_set_settings_source_unchecked() --
+         * that function calls nvs_save() on every single (zone, group) pair,
+         * which for a 3-zone import meant 15 flash writes for this block
+         * alone. settings_source_dirty is set below and a single
+         * zones_config_save_now() call, after this whole per-zone loop
+         * finishes, persists the lot in one write. */
         for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
-            if (!zones_config_set_settings_source_unchecked(zc->index, group, zc->settings_source)) {
+            if (!zones_config_set_settings_source_unchecked_no_save(zc->index, group, zc->settings_source[group])) {
                 snprintf(err_msg, err_cap,
                         "zone tuning entry %u (channel %u) rejected at commit setting settings_source",
                         (unsigned)i, zc->index);
                 return false;
             }
+            settings_source_dirty = true;
         }
     }
     if (has_safety_tc) {
         zones_config_set_safety_tc_type((uint8_t)dsafety); /* only fails on out-of-range, already checked above */
+    }
+    if (settings_source_dirty && !zones_config_save_now()) {
+        snprintf(err_msg, err_cap, "settings_source commit succeeded live but failed to persist to flash");
+        return false;
     }
 
     return true;

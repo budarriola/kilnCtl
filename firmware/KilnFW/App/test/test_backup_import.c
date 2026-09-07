@@ -317,8 +317,12 @@ typedef struct {
      * per-cell way. */
     float coupling_tau_s[MAX31856_CHANNEL_COUNT];
     float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
-    bool set_settings_source_called;
-    uint8_t settings_source;
+    /* One flag/value PER GROUP now (Opus review of 5672719, item 1/4): the
+     * backup format widened from a single scalar fanned out to every group
+     * to one value per SRC_GROUP_COUNT group, so this stub must be able to
+     * tell groups apart to prove the fan-out (or its absence) for real. */
+    bool set_settings_source_called[SRC_GROUP_COUNT];
+    uint8_t settings_source[SRC_GROUP_COUNT];
     /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
      * coupling identification's own diagonal cell -- same "settable, called
      * flag observable" convention as set_fuzzy_strength_called above. */
@@ -356,7 +360,9 @@ static void reset_stub_state(void)
      * below manufacture a false cycle out of zones no test ever actually
      * linked. */
     for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
-        s_writes[i].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_writes[i].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
     }
     s_relay_count = 4;
     s_safety_tc_set = false;
@@ -610,19 +616,16 @@ bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
 }
 
 /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21) widened the real
- * accessor with a `group` parameter, but backup_http.c's format still
- * carries only ONE settings_source per zone and fans it out to every group
- * on import (see backup_import.c's own comment on that decision) -- so this
- * stub keeps a single s_writes[].settings_source scalar and simply ignores
- * which group is asked for/written; every group reads/writes the same
- * value, matching the real backup behavior this stub is standing in for. */
+ * accessor with a `group` parameter, and the backup format itself now
+ * carries a value per SRC_GROUP_COUNT group too (Opus review of 5672719,
+ * item 4) -- so this stub keeps s_writes[].settings_source[group], one slot
+ * per group, matching the real per-group behavior it stands in for. */
 bool zones_config_get_settings_source(uint8_t zone_index, uint8_t group, uint8_t *out_settings_source)
 {
-    (void)group;
-    if (!out_settings_source || zone_index >= STUB_ZONE_COUNT) {
+    if (!out_settings_source || zone_index >= STUB_ZONE_COUNT || group >= SRC_GROUP_COUNT) {
         return false;
     }
-    *out_settings_source = s_writes[zone_index].settings_source;
+    *out_settings_source = s_writes[zone_index].settings_source[group];
     return true;
 }
 
@@ -810,7 +813,7 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     return true;
 }
 /* Faithful to zones_http.c's real (checked) zones_config_set_settings_source():
- * bounds, SRC_GROUP_LIMITS, self-reference, AND the chain-walk against the LIVE (s_writes[])
+ * bounds, self-reference, AND the chain-walk against the LIVE (s_writes[])
  * config via the same shared zone_settings_source_chain_has_cycle() the real
  * setter uses -- not just bounds/self-reference like the sibling _unchecked
  * stub below. This is deliberately the STRICTER of the two doors: it exists
@@ -821,19 +824,18 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
  * unconditionally. */
 bool zones_config_set_settings_source(uint8_t zone_index, uint8_t group, uint8_t settings_source)
 {
-    (void)group; /* stub keeps one scalar per zone -- see the getter's own comment above */
-    if (zone_index >= STUB_ZONE_COUNT) return false;
+    if (zone_index >= STUB_ZONE_COUNT || group >= SRC_GROUP_COUNT) return false;
     if (settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && settings_source >= MAX31856_CHANNEL_COUNT) return false;
     if (settings_source == zone_index) return false;
     uint8_t probe[STUB_ZONE_COUNT];
     for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
-        probe[i] = s_writes[i].settings_source;
+        probe[i] = s_writes[i].settings_source[group];
     }
     probe[zone_index] = settings_source;
     uint8_t thermo_count = zones_config_get_thermo_count();
     if (zone_settings_source_chain_has_cycle(probe, zone_index, thermo_count)) return false;
-    s_writes[zone_index].set_settings_source_called = true;
-    s_writes[zone_index].settings_source = settings_source;
+    s_writes[zone_index].set_settings_source_called[group] = true;
+    s_writes[zone_index].settings_source[group] = settings_source;
     g_total_write_calls++;
     return true;
 }
@@ -849,12 +851,35 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t group, uint8_t
  * check would show up here as well if this stub regressed to match. */
 bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t group, uint8_t settings_source)
 {
-    (void)group; /* stub keeps one scalar per zone -- see the getter's own comment above */
-    if (zone_index >= STUB_ZONE_COUNT) return false;
+    if (zone_index >= STUB_ZONE_COUNT || group >= SRC_GROUP_COUNT) return false;
     if (settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && settings_source >= MAX31856_CHANNEL_COUNT) return false;
     if (settings_source == zone_index) return false;
-    s_writes[zone_index].set_settings_source_called = true;
-    s_writes[zone_index].settings_source = settings_source;
+    s_writes[zone_index].set_settings_source_called[group] = true;
+    s_writes[zone_index].settings_source[group] = settings_source;
+    g_total_write_calls++;
+    return true;
+}
+
+/* Item 3 (Opus review of 5672719): no-save counterpart, matching the real
+ * accessor's split -- writes the value but does NOT count as a persisted
+ * save; test_backup_import_settings_source_single_save_per_import() below
+ * checks the pairing (a nvs-save stand-in counter, g_settings_source_save_calls)
+ * increments exactly once per import regardless of zone/group count. */
+bool zones_config_set_settings_source_unchecked_no_save(uint8_t zone_index, uint8_t group, uint8_t settings_source)
+{
+    if (zone_index >= STUB_ZONE_COUNT || group >= SRC_GROUP_COUNT) return false;
+    if (settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && settings_source >= MAX31856_CHANNEL_COUNT) return false;
+    if (settings_source == zone_index) return false;
+    s_writes[zone_index].set_settings_source_called[group] = true;
+    s_writes[zone_index].settings_source[group] = settings_source;
+    return true;
+}
+
+static int g_settings_source_save_calls;
+
+bool zones_config_save_now(void)
+{
+    g_settings_source_save_calls++;
     g_total_write_calls++;
     return true;
 }
@@ -874,10 +899,10 @@ bool zones_config_settings_source_import_has_cycle(uint8_t group,
                                                     const uint8_t override_source[MAX31856_CHANNEL_COUNT],
                                                     uint8_t *out_cycle_zone)
 {
-    (void)group; /* stub keeps one scalar per zone -- see the getter's own comment above */
+    if (group >= SRC_GROUP_COUNT) return true;
     uint8_t chain[STUB_ZONE_COUNT];
     for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
-        chain[i] = s_writes[i].settings_source;
+        chain[i] = s_writes[i].settings_source[group];
     }
     uint8_t thermo_count = zones_config_get_thermo_count();
     return zone_settings_source_chain_import_has_cycle(chain, has_override, override_source, thermo_count,
@@ -1205,8 +1230,8 @@ static void test_v4_new_fields_round_trip_distinct_values(void)
     TEST_CHECK_NEAR(s_writes[1].coupling_coeff[2], 3.332, 1e-6,
                     "coupling_coeff[2] comes back exactly, DISTINCT from coupling_coeff[0] -- the "
                     "whole point of the 10->11 widening, round-tripped through a real import");
-    TEST_CHECK(s_writes[1].set_settings_source_called, "settings_source was committed");
-    TEST_CHECK(s_writes[1].settings_source == 0, "settings_source comes back exactly (zone 1 copies zone 0)");
+    TEST_CHECK(s_writes[1].set_settings_source_called[SRC_GROUP_LIMITS], "settings_source was committed");
+    TEST_CHECK(s_writes[1].settings_source[SRC_GROUP_LIMITS] == 0, "settings_source comes back exactly (zone 1 copies zone 0)");
 }
 
 // ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
@@ -1260,8 +1285,8 @@ static void test_v2_body_imports_new_fields_default_floats_zero_source_custom(vo
      * -- this is the field the task brief calls out as "the identical trap
      * that nearly destroyed commissioned configs in the v9->v10 NVS migration
      * earlier today" if it defaulted to 0 instead. */
-    TEST_CHECK(s_writes[0].set_settings_source_called, "settings_source is ALWAYS committed, even when absent");
-    TEST_CHECK(s_writes[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+    TEST_CHECK(s_writes[0].set_settings_source_called[SRC_GROUP_LIMITS], "settings_source is ALWAYS committed, even when absent");
+    TEST_CHECK(s_writes[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
               "and lands at ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) exactly -- asserted explicitly, not \"some value\"");
 }
 
@@ -1432,7 +1457,7 @@ static void test_v3_settings_source_self_reference_rejected(void)
 // (a plain 0 -> 1 link, legal against the pre-import Custom/Custom live
 // config), and only zone 1's entry, arriving second in pass 2's commit
 // loop, would discover the cycle -- at zones_config_set_settings_source()
-// itself, SRC_GROUP_LIMITS, AFTER zone 0 was already written live. That is precisely the
+// itself, AFTER zone 0 was already written live. That is precisely the
 // half-applied-import failure mode this file's two-pass split exists to
 // prevent (see this function's own header comment, and the self-reference
 // test above, which the same reasoning already protects against for the
@@ -1543,7 +1568,7 @@ static void test_settings_source_restore_onto_differently_configured_board_succe
               "intermediate state");
     TEST_CHECK(zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zone 1's settings_source landed as the backup's value (Custom) too -- nothing half-applied");
-    TEST_CHECK(s_writes[0].set_settings_source_called && s_writes[1].set_settings_source_called,
+    TEST_CHECK(s_writes[0].set_settings_source_called[SRC_GROUP_LIMITS] && s_writes[1].set_settings_source_called[SRC_GROUP_LIMITS],
               "both entries' settings_source were actually committed, not just accepted on paper");
 }
 
@@ -1739,7 +1764,7 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     TEST_CHECK(s_writes[1].coupling_coeff[1] == 0.0f, "the diagonal cell round-trips as 0");
     TEST_CHECK_NEAR(s_writes[1].coupling_diag_k_dc, 33.5, 1e-3,
                     "coupling_diag_k_dc round-trips through export->import");
-    TEST_CHECK(s_writes[1].settings_source == 2, "settings_source round-trips (NOT the 0 left over from the "
+    TEST_CHECK(s_writes[1].settings_source[SRC_GROUP_LIMITS] == 2, "settings_source round-trips (NOT the 0 left over from the "
               "pre-import poison state above, proving import actually ran, not a no-op that left it alone)");
 
     TEST_CHECK(g_profile_save_calls == 1, "the one exported profile was re-committed");

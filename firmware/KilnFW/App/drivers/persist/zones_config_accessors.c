@@ -681,6 +681,34 @@ bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t grou
     return nvs_save() == ESP_OK;
 }
 
+/* Same checks as zones_config_set_settings_source_unchecked() above, minus
+ * the nvs_save() -- see this function's header comment in
+ * zones_config_accessors.h. Caller owns calling nvs_save() once after the
+ * whole batch. */
+bool zones_config_set_settings_source_unchecked_no_save(uint8_t zone_index, uint8_t group, uint8_t settings_source)
+{
+    if (group >= SRC_GROUP_COUNT) {
+        return false;
+    }
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && settings_source >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    if (settings_source == zone_index) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].settings_source[group] = settings_source;
+    s_config_generation++;
+    return true;
+}
+
+bool zones_config_save_now(void)
+{
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_settings_source_import_has_cycle(uint8_t group,
                                                     const bool has_override[MAX31856_CHANNEL_COUNT],
                                                     const uint8_t override_source[MAX31856_CHANNEL_COUNT],

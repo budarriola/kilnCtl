@@ -54,6 +54,28 @@ copy values at save time:
 - Host test: chain resolution per group, cycle collapse, migration from a
   v20 blob with `settings_source = 1` gives five 1s.
 
+**Status (2026-09-06, Opus review of `5672719`):** landed. Two follow-on
+notes from that review:
+
+- **`timing_profile` inheritance narrowed.** Before this pass, a zone's
+  effective `timing_profile` came from the whole-zone `settings_source`
+  terminal (the zone it ultimately resolves to, following the chain). After
+  the per-group split, `timing_profile` is not one of the five groups above
+  and is always read as the zone's own stored value, never inherited. A
+  board that upgrades from v20 with zone 1 set to "same as zone 0" keeps
+  reading zone 0's `timing_profile` for zone 1 until the first post-upgrade
+  save of zone 1 — at that point zone 1's own (till-then-inherited, now
+  merely stale) stored value takes over, which can be a silent behavior
+  change if the two zones' stored `timing_profile` values had drifted apart
+  while zone 1 was mirroring zone 0. This is an intentional effect of the
+  migration, not a defect, but is easy to miss when reading a v20 board's
+  post-upgrade behavior.
+- **Test provenance.** The host tests for this section landed in `09769f5a`
+  (a concurrent-session sweep unrelated to this feature), not in `5672719`
+  itself — so `09769f5a` and its sibling commit `51c084f9` are the ones that
+  actually compile the zones host tests for the first time after the
+  `settings_source[SRC_GROUP_COUNT]` schema bump; `5672719` alone does not.
+
 ## 3. Chart.js — assessed, not adopted
 
 Dashboard graph is hand-rolled Canvas 2D in `main_page.html` (~line 391):

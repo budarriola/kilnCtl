@@ -262,16 +262,22 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             float coupling_dead_row[MAX31856_CHANNEL_COUNT] = {0};
             zones_config_get_coupling_dead_time(zi, coupling_dead_row);
             /* WEB_UI_PLAN.md section 2 (ZONES_CFG_VERSION 20->21) split this
-             * into SRC_GROUP_COUNT independent bytes; the backup format is
-             * NOT part of that pass's scope and keeps its single
-             * "settings_source" key, representative of the LIMITS group
-             * only, same choice zones_http_get.c's legacy scalar key makes.
-             * A zone with per-group groups set to different sources round-
-             * trips through a backup as LIMITS's choice for all five --
-             * accepted for now; a future pass can widen the backup format
-             * the same way if that is ever a real complaint. */
-            uint8_t settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-            zones_config_get_settings_source(zi, SRC_GROUP_LIMITS, &settings_source);
+             * into SRC_GROUP_COUNT independent bytes. Opus review of 5672719
+             * (item 4): the backup format now carries all five --
+             * "settings_source" stays the LIMITS group's value, kept for
+             * older readers of a backup taken from this build, and
+             * "settings_source_g%u" (0..SRC_GROUP_COUNT-1) carries every
+             * group explicitly so a zone whose groups point at different
+             * sources round-trips exactly instead of collapsing to LIMITS's
+             * choice for all five. An import from a version-4 backup that
+             * only has the scalar key falls back to applying it to every
+             * group -- see backup_import_apply()'s matching parse. */
+            uint8_t settings_source_group[SRC_GROUP_COUNT];
+            for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+                settings_source_group[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+                zones_config_get_settings_source(zi, g, &settings_source_group[g]);
+            }
+            uint8_t settings_source = settings_source_group[SRC_GROUP_LIMITS];
 
             /* Each fragment kept comfortably under backup_stream_printf()'s
              * own tmp[192] scratch buffer (including formatted values, not
@@ -331,10 +337,15 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             float coupling_diag_k_dc = 0.0f;
             zones_config_get_coupling_diag_k_dc(zi, &coupling_diag_k_dc);
             backup_stream_printf(&s, "\"coupling_diag_k_dc\":%.4f,", (double)coupling_diag_k_dc);
-            backup_stream_printf(&s, "\"settings_source\":%u", (unsigned)settings_source);
+            backup_stream_printf(&s, "\"settings_source\":%u,", (unsigned)settings_source);
+            for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+                backup_stream_printf(&s, "\"settings_source_g%u\":%u%s", (unsigned)g,
+                                    (unsigned)settings_source_group[g],
+                                    (g + 1 < SRC_GROUP_COUNT) ? "," : "");
+            }
         }
-        /* settings_source above is the last key of this object now (it was
-         * cross_zone_max_delta_c before settings_source was added) and is
+        /* settings_source_g%u above is now the last key of this object (it
+         * was settings_source before the per-group keys were added) and is
          * always emitted (every entry that reaches this point already
          * emitted pid_kp, have_model/have_tc are the only optional keys and
          * both come before this block) -- no trailing-comma guard needed, so
