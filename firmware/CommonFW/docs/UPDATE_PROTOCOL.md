@@ -741,11 +741,12 @@ during development will be driven by an agent:
       landed in `LINK_PROTOCOL.md` §4, protocol 9+. This bullet's own
       deviation note is now stale — corrected here rather than deleted, so
       the "why it was missing" history stays legible.
-      **Hazard, 2026-09-04**: `ota_rollback_esp()` rolls the running image back
+      **Hazard, 2026-09-04 (numbers refreshed 2026-09-06)**: `ota_rollback_esp()`
+      rolls the running image back
       to `factory`, but the `zones_cfg` NVS blob is not versioned per-partition
       — it is whatever was last written. If `zones_cfg` has ever been saved by
-      v21 firmware (`ZONES_CFG_VERSION` 21, `5672719` — per-group "same as
-      zone N" settings_source) and the board is then rolled back to an older
+      v22 firmware (`ZONES_CFG_VERSION` 22, `992f395` — per-zone
+      `progress_band_c`) and the board is then rolled back to an older
       version, `zones_config_store.c`'s `ZONES_DECODE_NEWER` path refuses the
       newer-than-firmware blob and falls back to **firmware defaults for that
       boot** — including default PID gains, not the tuned ones — while leaving

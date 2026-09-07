@@ -90,7 +90,24 @@ esp_err_t zones_get_handler(httpd_req_t *req)
      * of the entire 8192-byte task stack. Freed on every return path
      * (success and truncated). */
     const size_t json_cap = 7360; /* heap buffer (heap_caps_malloc below, not
-                      * stack). 6528 -> 7360 (2026-09-01, ZONES_CFG_VERSION
+                      * stack). STILL 7360 as of ZONES_CFG_VERSION 21->22
+                      * (2026-09-06, progress_band_c, Opus review of
+                      * 992f3954 item 3): the per-field comment chain below
+                      * stopped being updated at v13, but every field added
+                      * since (coupling_diag_k_dc, ease_off_window_mult,
+                      * approach_rate_cap_c_per_hr, error_band_c/
+                      * rate_band_c_per_s, settings_source_groups, and now
+                      * progress_band_c) fits without a bump -- confirmed by
+                      * test_zones_get_handler_max_width_response_fits_json_
+                      * cap() (test_zones_http.c), which drives the REAL
+                      * handler with every zone/profile/relay field pinned
+                      * at its documented MAX bound rather than hand-
+                      * estimating byte counts the way every entry below
+                      * this one did. Measured worst-case render: 6465
+                      * bytes, leaving 895 bytes of headroom -- no bump
+                      * needed. Re-run that test (not a hand recount) before
+                      * concluding a future field addition is still safe.
+                      * 6528 -> 7360 (2026-09-01, ZONES_CFG_VERSION
                       * 12->13, the tuning-quality record): 11 new keys a
                       * zone (tuning_valid/method/rule/settled/extrapolation_
                       * converged/tau_consistent/baseline_c/step_ambient_c/

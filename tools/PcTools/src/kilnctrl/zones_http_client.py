@@ -302,6 +302,15 @@ _ZONE_FIELD_FORM_KEY = {
     # convention as every other field in this dict.
     "error_band_c": "errorband",
     "rate_band_c_per_s": "rateband",
+    # ZONES_CFG_VERSION 21->22 (Opus review of 992f3954, 2026-09-06): the
+    # per-zone dwell-progress band width. zones_http_post_parse.c:
+    # snprintf(key, ..., "z%u_progressband", i) -- same JSON key on the GET
+    # side (zones_http_get.c's "progress_band_c"), a shorter form-key suffix
+    # on POST, same split as error_band_c/rate_band_c_per_s above. 0.0 =
+    # "use the firmware default" (see zones_config_get_progress_band_c()'s
+    # own comment). Omitted-on-POST preserves the current per-zone value,
+    # same convention as every other field in this dict.
+    "progress_band_c": "progressband",
 }
 #: docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21, Opus review of
 #: 5672719 item 4): the five independent settings_source groups, in the

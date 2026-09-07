@@ -365,7 +365,13 @@ against it — the opposite is the more useful thing to know:
   ZONES_CFG_VERSION 22 (`zones_config_get_progress_band_c()`/`z%u_progressband`
   on the zones POST wire) -- 0 still resolves to the 3 °C firmware default,
   and every existing zone migrates onto that default with no operator
-  action required. At a 20 °C/hr cap that is roughly 9 extra minutes of
+  action required. The bound is `[ZONE_PROGRESS_BAND_C_MIN, ZONE_PROGRESS_BAND_C_MAX]`
+  = `[0.5, 20.0]` °C; an operator narrowing this to arm guard 1 sooner
+  should not set it near the 0.5 °C floor without first checking the
+  zone's own steady-state tracking offset — on this bench's zone 0, actual
+  temperature has settled 1.3 °C below the commanded setpoint (50.7 vs
+  52.0 °C) during ordinary dwell, which alone exceeds a 0.5 °C band and
+  will trip guard 1 on a perfectly healthy zone. At a 20 °C/hr cap that is roughly 9 extra minutes of
   latency before guard 1 can arm after an element dies; a smaller cap adds
   more. This is intrinsic to any slow ramp (an equally slow profile segment
   has the identical property today) and is an accepted trade-off, not a

@@ -76,6 +76,10 @@ def _sample_zone(index: int, **overrides) -> dict:
         # overrides one -- bit-identical to the removed ERROR_BAND_C/
         # RATE_BAND_C_PER_S compile-time constants.
         "error_band_c": 20.0, "rate_band_c_per_s": 0.5,
+        # ZONES_CFG_VERSION 21->22 (Opus review of 992f3954): the per-zone
+        # dwell-progress band width, always emitted alongside
+        # error_band_c/rate_band_c_per_s above. 0.0 = firmware default.
+        "progress_band_c": 0.0,
         # Coupling row: MAX31856_CHANNEL_COUNT (3, uart_task_ids.h's
         # THERMO_CHANNEL_COUNT) cells, diagonal (j == index) always 0 --
         # zones_http.c always emits the full row for every zone regardless
@@ -307,12 +311,14 @@ class BuildPostBodyTest(unittest.TestCase):
         current["zones"][1]["coupling_c2"] = 1.25
         current["zones"][1]["settings_source"] = 0
         current["zones"][1]["coupling_diag_k_dc"] = 18.75
+        current["zones"][1]["progress_band_c"] = 3.5
         form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
         self.assertEqual(form["z1_fuzzy_strength"], repr(37.5))
         self.assertEqual(form["z1_coupling_c0"], repr(0.0))
         self.assertEqual(form["z1_coupling_c2"], repr(1.25))
         self.assertEqual(form["z1_settings_source"], "0")
         self.assertEqual(form["z1_coupling_diag_k_dc"], repr(18.75))
+        self.assertEqual(form["z1_progressband"], repr(3.5))
         # settings_source == 0 is a REAL distinct value (a chain link to
         # zone 0), not the "not set" sentinel -- must round-trip as "0",
         # never coerced to something else or dropped as falsy.

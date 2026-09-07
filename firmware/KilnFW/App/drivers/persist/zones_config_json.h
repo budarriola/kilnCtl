@@ -811,6 +811,45 @@ typedef struct {
     uint8_t relay_type;
 } zone_cfg_v21_t;
 
+/* 216 = 212 (zone_cfg_v20_t's own byte-for-byte size) + 4 (settings_source
+ * widened from a single byte to settings_source[SRC_GROUP_COUNT==5], a net
+ * +4 bytes with no new padding since the array's tail already lands on the
+ * next float's natural 4-byte alignment). Confirmed against a standalone
+ * layout replica of this exact struct (same field order/types, no firmware
+ * headers involved) rather than guessed -- same discipline as every other
+ * frozen zone_cfg_vN_t assert in this file -- never sizeof(zone_cfg_t),
+ * which by the time this pass lands is already the v22 shape, not v21's. */
+_Static_assert(sizeof(zone_cfg_v21_t) == 216,
+               "zone_cfg_v21_t must match the on-flash v21 layout byte-for-byte (216 bytes)"); /* v21 -- predates progress_band_c */
+
+/* Per-field offsetof assertions for zone_cfg_v21_t -- same rationale as
+ * zone_cfg_v20_t's own block below it (this is a frozen snapshot pinned
+ * against an accidental edit to ITSELF, not a guard against insertion into
+ * the live zone_cfg_t; see that comment for the full reasoning and the
+ * migration-test coverage that actually catches the live-struct case). */
+_Static_assert(offsetof(zone_cfg_v21_t, name) == 0,
+               "zone_cfg_v21_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v21_t, cal_offset_c) == 16,
+               "zone_cfg_v21_t::cal_offset_c must stay at byte offset 16");
+_Static_assert(offsetof(zone_cfg_v21_t, relay_mask) == 148,
+               "zone_cfg_v21_t::relay_mask must stay at byte offset 148");
+_Static_assert(offsetof(zone_cfg_v21_t, control_mode) == 149,
+               "zone_cfg_v21_t::control_mode must stay at byte offset 149");
+_Static_assert(offsetof(zone_cfg_v21_t, settings_source) == 154,
+               "zone_cfg_v21_t::settings_source must stay at byte offset 154");
+_Static_assert(offsetof(zone_cfg_v21_t, coupling_diag_k_dc) == 192,
+               "zone_cfg_v21_t::coupling_diag_k_dc must stay at byte offset 192");
+_Static_assert(offsetof(zone_cfg_v21_t, ease_off_window_mult) == 196,
+               "zone_cfg_v21_t::ease_off_window_mult must stay at byte offset 196");
+_Static_assert(offsetof(zone_cfg_v21_t, approach_rate_cap_c_per_hr) == 200,
+               "zone_cfg_v21_t::approach_rate_cap_c_per_hr must stay at byte offset 200");
+_Static_assert(offsetof(zone_cfg_v21_t, error_band_c) == 204,
+               "zone_cfg_v21_t::error_band_c must stay at byte offset 204");
+_Static_assert(offsetof(zone_cfg_v21_t, rate_band_c_per_s) == 208,
+               "zone_cfg_v21_t::rate_band_c_per_s must stay at byte offset 208");
+_Static_assert(offsetof(zone_cfg_v21_t, relay_type) == 212,
+               "zone_cfg_v21_t::relay_type must stay at byte offset 212");
+
 /* Frozen v20 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 20->21, docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs): a single
  * whole-zone settings_source byte, predating the per-group split

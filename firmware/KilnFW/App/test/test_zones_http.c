@@ -3898,6 +3898,150 @@ static void test_post_then_get_round_trips_new_fields(void)
               "GET reports the posted settings_source (CUSTOM) exactly");
 }
 
+// Opus review of 992f3954 (zones v22, progress_band_c), item 3: json_cap in
+// zones_get_handler() (7360 bytes, heap_caps_malloc) has a hand-maintained
+// comment chain of every bump's worst-case reasoning, but that chain stopped
+// at ZONES_CFG_VERSION 13 -- five fields landed since then without a
+// matching entry (coupling_diag_k_dc, ease_off_window_mult,
+// approach_rate_cap_c_per_hr, error_band_c/rate_band_c_per_s, the
+// settings_source_groups nested object, and now progress_band_c) with no
+// check that the buffer still has room. Rather than re-deriving the
+// worst-case byte count by hand (fragile, and already proven to drift),
+// this test drives the REAL handler with every zone field pinned at its
+// documented MAX bound (ZONE_*_MAX from zones_config_accessors.h/
+// zones_config_json.h), all relay names and timing-profile names at their
+// max length, and asserts the actual produced length stays under json_cap
+// -- so a future field addition that finally exhausts the buffer fails
+// loudly here instead of silently truncating a live board's GET response.
+static void test_zones_get_handler_max_width_response_fits_json_cap(void)
+{
+    TEST_SECTION("zones_get_handler -- every zone/profile/relay field at its documented max width "
+                 "must still fit within json_cap (Opus review of 992f3954, item 3)");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = MAX31856_CHANNEL_COUNT;
+    s_zones.cfg.relay_count = KILN_IO_RELAY_COUNT;
+    s_zones.cfg.max_simultaneous_relays = 255;
+    s_zones.cfg.continue_on_zone_trip = true;
+    s_zones.cfg.safety_tc_type = 255;
+    s_zones.cfg.pc_link_abort_silence_ms = 600000.0f;
+
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        memset(s_relay_names.cfg.names[r], 'X', RELAY_NAME_MAX_LEN);
+        s_relay_names.cfg.names[r][RELAY_NAME_MAX_LEN] = '\0';
+    }
+
+    s_zones.cfg.timing_profile_count = MAX31856_CHANNEL_COUNT;
+    for (uint8_t p = 0; p < MAX31856_CHANNEL_COUNT; p++) {
+        zone_timing_profile_t *tp = &s_zones.cfg.timing_profiles[p];
+        memset(tp->name, 'P', TIMING_PROFILE_NAME_MAX_LEN);
+        tp->name[TIMING_PROFILE_NAME_MAX_LEN] = '\0';
+        tp->guard_progress_duty_min = 1.0f;
+        tp->guard_progress_window_s = ZONE_GUARD_TIME_S_MAX;
+        tp->guard_drift_hysteresis_c = ZONE_GUARD_MARGIN_C_MAX;
+        tp->guard_frozen_eps_c = ZONE_GUARD_EPS_C_MAX;
+        tp->guard_cross_zone_period_s = ZONE_GUARD_TIME_S_MAX;
+        tp->bangbang_hysteresis_c = ZONE_GUARD_MARGIN_C_MAX;
+        tp->cooling_limited_margin_c = ZONE_GUARD_MARGIN_C_MAX;
+        tp->cooling_limited_hold_s = ZONE_GUARD_TIME_S_MAX;
+        tp->ramp_lock_band_c = ZONE_GUARD_MARGIN_C_MAX;
+    }
+
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        zone_cfg_t *z = &s_zones.cfg.zones[i];
+        memset(z->name, 'Z', ZONE_NAME_MAX_LEN);
+        z->name[ZONE_NAME_MAX_LEN] = '\0';
+        z->relay_mask = 255;
+        z->thermo_mask = 255;
+        z->cal_offset_c = ZONE_CAL_OFFSET_MAX_C;
+        z->pid_kp = ZONE_PID_GAIN_MAX;
+        z->pid_ki = ZONE_PID_GAIN_MAX;
+        z->pid_kd = ZONE_PID_GAIN_MAX;
+        z->max_ramp_c_per_hr = ZONE_MAX_RAMP_C_PER_HR_MAX;
+        z->sanity_rate_c_per_min = ZONE_SANITY_RATE_MAX_C_PER_MIN;
+        z->control_mode = 255;
+        z->max_temp_c = ZONE_MAX_TEMP_C_MAX;
+        z->min_temp_c = ZONE_MIN_TEMP_C_MAX;
+        z->heater_window_ms = ZONE_HEATER_WINDOW_MS_MAX;
+        z->heater_min_on_ms = ZONE_HEATER_MIN_ON_OFF_MS_MAX;
+        z->heater_min_off_ms = ZONE_HEATER_MIN_ON_OFF_MS_MAX;
+        z->guard_wrong_dir_window_s = ZONE_GUARD_TIME_S_MAX;
+        z->guard_wrong_dir_rate_c_per_min = ZONE_GUARD_RATE_C_PER_MIN_MAX;
+        z->guard_off_settle_s = ZONE_GUARD_TIME_S_MAX;
+        z->guard_runaway_rate_c_per_min = ZONE_GUARD_RATE_C_PER_MIN_MAX;
+        z->guard_runaway_margin_c = ZONE_GUARD_MARGIN_C_MAX;
+        z->guard_drift_period_s = ZONE_GUARD_TIME_S_MAX;
+        z->guard_sensor_fault_debounce_ticks = ZONE_GUARD_DEBOUNCE_TICKS_MAX;
+        z->guard_frozen_window_s = ZONE_GUARD_TIME_S_MAX;
+        z->cross_zone_max_delta_c = ZONE_CROSS_ZONE_DELTA_C_MAX;
+        z->model_k_dc = ZONE_MODEL_K_MAX;
+        z->model_tau_s = ZONE_MODEL_TIME_MAX_S;
+        z->model_dead_time_s = ZONE_MODEL_TIME_MAX_S;
+        z->tc_type = 255;
+        z->ct_mask = 255;
+        z->timing_profile = 255;
+        z->relay_type = ZONE_RELAY_TYPE_MAX;
+        z->fuzzy_strength_pct = ZONE_FUZZY_STRENGTH_PCT_MAX;
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            z->coupling_coeff[j] = ZONE_COUPLING_COEFF_MAX;
+            z->coupling_tau_s[j] = ZONE_MODEL_TIME_MAX_S;
+            z->coupling_dead_time_s[j] = ZONE_MODEL_TIME_MAX_S;
+        }
+        z->coupling_diag_k_dc = ZONE_MODEL_K_MAX;
+        z->ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_MAX;
+        z->approach_rate_cap_c_per_hr = ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX;
+        z->error_band_c = ZONE_ERROR_BAND_C_MAX;
+        z->rate_band_c_per_s = ZONE_RATE_BAND_C_PER_S_MAX;
+        z->progress_band_c = ZONE_PROGRESS_BAND_C_MAX;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            z->settings_source[g] = 255;
+        }
+        /* tuning_valid/settled/extrapolation_converged/tau_consistent render
+         * as "true"/"false" -- "false" (5 chars) is the wider literal, so 0
+         * (not 1) is the worst case for these four. */
+        z->tuning_valid = 0;
+        z->tuning_method = 255;
+        z->tuning_rule = 255;
+        z->tuning_settled = 0;
+        z->tuning_extrapolation_converged = 0;
+        z->tuning_tau_consistent = 0;
+        z->tuning_baseline_c = ZONE_MAX_TEMP_C_MAX;
+        z->tuning_step_ambient_c = ZONE_MAX_TEMP_C_MAX;
+        z->tuning_raw_rise_c = ZONE_MAX_TEMP_C_MAX;
+        z->tuning_rise_inf_c = ZONE_MAX_TEMP_C_MAX;
+        z->tuning_seq = 0xFFFFFFFFu;
+        z->adaptive_tune_enabled = 255;
+    }
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_last_resp_body[0] = '\0';
+    s_last_resp_len = 0;
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK even at max field width");
+    /* zones_get_handler()'s own truncated: label sends a SHORT error body
+     * ("...did not fit...firmware sizing bug...") on overflow, so a bare
+     * s_last_resp_len < json_cap check would pass even in the failure case
+     * (the short error string is always well under json_cap). Check for the
+     * absence of that marker directly, so an actual overflow fails loudly
+     * here instead of being masked by the small length of its own error
+     * response. */
+    TEST_CHECK(strstr(s_last_resp_body, "did not fit") == NULL,
+              "max-width GET /api/zones must NOT hit the handler's own truncation path");
+    TEST_CHECK(strstr(s_last_resp_body, "\"zones\":[{") != NULL,
+              "max-width GET /api/zones must actually render zone content, not an error body");
+    /* json_cap itself (zones_http_get.c, zones_get_handler()) -- kept in
+     * sync by hand, same discipline as this file's own MINIMAL_TIMING_
+     * PROFILE_BODY macro; if that constant changes, update this literal
+     * alongside it. */
+    const size_t json_cap = 7360;
+    TEST_CHECK(s_last_resp_len > 0 && s_last_resp_len < json_cap,
+              "max-width GET /api/zones response must fit inside json_cap with room to spare");
+    printf("  GET /api/zones max-width render: %zu bytes, against json_cap=%zu -- measured "
+          "headroom = %zd bytes\n",
+          s_last_resp_len, json_cap, (ptrdiff_t)json_cap - (ptrdiff_t)s_last_resp_len);
+}
+
 // tuning_rec_body_len() (2026-09-02 host-link fix, commit 333dd4e): the
 // real tuning_recommendations_json_start/_end symbols are ESP-IDF
 // EMBED_FILES symbols this host build cannot reproduce (see this file's
@@ -8934,6 +9078,7 @@ void run_test_zones_http(void)
     test_post_settings_source_group_key_wins_over_legacy_scalar();
     test_post_settings_source_all_keys_omitted_preserves_every_group();
     test_post_then_get_round_trips_new_fields();
+    test_zones_get_handler_max_width_response_fits_json_cap();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();
     test_zones_get_handler_malloc_failure_returns_clean_500();
     test_zones_get_handler_succeeds_when_malloc_does_not_fail();
