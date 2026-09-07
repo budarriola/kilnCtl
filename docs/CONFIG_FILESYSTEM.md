@@ -208,3 +208,23 @@ count.
   already exist for this (`BOOTLOADER_CONFIG_FLASH_SIZE` is 64 KiB against
   a 4 KiB store), so no flash-layout change is needed. Not started.
   Full detail: `docs/audits/flash_endurance_review_2026-09-07.md` §5, R2.
+
+## Dual-write window: now measured (2026-09-07)
+
+The "Dual-write window" open item above previously had nothing checking
+whether its three conditions were actually met — see
+`docs/FILESYSTEM_PLAN.md`'s "Closing-criterion measurement added,
+2026-09-07" section for the full design. Summary for anyone landing here
+first: `firmware/KilnFW/App/drivers/persist/dualwrite_window.{c,h}` counts
+consecutive clean boots (reset on an unclean reset reason, a pending
+unacknowledged crash, `cfg_fs` not mounted, or an explicit mount-failure
+note) and records the two one-time achievements (a file-backed firing
+completed; a restore round trip verified) in plain NVS — deliberately not
+on `cfg` itself, so a `cfg` bug cannot corrupt the evidence being used to
+judge `cfg`. Read progress at `GET /api/dualwrite_window`; a
+`dual_write_window` field on `/api/cfgfs` has been requested from that
+endpoint's owner as a follow-up, not yet added. The reported
+`window_may_close` is a **report only** — closing the window (removing the
+NVS writers) stays a deliberate, reviewed, owner-visible step performed by
+hand once all three conditions read true; nothing in this codebase acts on
+that flag automatically.

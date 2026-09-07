@@ -409,3 +409,216 @@ re-provisioning needed).
 No data loss, as the append-only analysis predicted. The `cfg` partition
 itself is not yet mounted/used by any code on this build -- that is the
 dual-write work in progress elsewhere, out of scope for this flash.
+
+## Backup/restore audit vs. the file-backed accessors (2026-09-07)
+
+**Storage-agnostic audit.** Every existing backup/export and restore/import
+path was checked against whether it reads the SAME source the running
+firmware treats as authoritative (dual-write: file-preferred, NVS fallback),
+not a raw NVS read that would go stale once NVS copies are dropped:
+
+- `backup_export.c`/`backup_import.c` (zones, profiles) already go through
+  `zones_config_accessors.h` and `profiles_http_get()`/`profiles_cfg_fs_*` --
+  both are the dual-write-aware accessors, not a direct NVS read. No bypass
+  found; nothing to fix here.
+- `unit_pref.c` (prefs) resolves file-vs-NVS once at boot
+  (`pref_cfg_fs_resolve()`) into a RAM cache; every reader (including
+  `GET /api/status`, which `full_board_backup.py` pulls) reads that cache,
+  never NVS directly. No bypass found.
+- `full_board_backup.py` itself only ever calls HTTP GET endpoints -- it has
+  no NVS/filesystem access of its own to bypass anything with.
+
+**Conclusion:** no live bypass was found in the backup/restore path as it
+stands today -- every item that has actually migrated onto `cfg` already
+reads through its accessor on both the firmware and the export/import side.
+The latent risk this task was told to look for is real for the items that
+have NOT migrated yet: `kiln_cfg_store.c`, `relay_cycles.c`,
+`display_power_cfg.c`/`display_power_policy.c`, and `touch_cal_store.c` all
+still read/write NVS directly with no `cfg_fs`-aware accessor at all. Two
+correctness notes on `cfg_fs_status.c`'s own `"nvs_only":["prefs","profiles",
+"kilncfg_slots","adaptive_tune","relay_cycles"]` field (`/api/cfgfs`'s own
+response, which `full_board_backup.py` also captures) -- **this list is
+stale in TWO of its five entries**, reported here rather than fixed since
+`cfg_fs_status.c` is out of scope to edit for this task: `prefs` is
+file-backed today (`unit_pref.c`'s `pref_cfg_fs_resolve()`/`_save()`, proven
+above), and `profiles` is ALSO file-backed today (`profiles_cfg_fs.c`,
+wired into `profiles_http.c`'s save/resolve path, proven above) -- only
+`kilncfg_slots`, `adaptive_tune`, and `relay_cycles` are actually still
+NVS-only. A reader of `/api/cfgfs`'s JSON (this backup script included)
+is told two false negatives today; not a functional bug (nothing reads that
+field to make a storage decision), but worth fixing the next time
+`cfg_fs_status.c` is in scope. **Latent bug, once each of the three real
+NVS-only items migrates**: whichever HTTP
+handler backs its GET endpoint must be re-pointed at that item's new
+file-preferred accessor at migration time, or a backup taken after the
+dual-write window closes silently captures a dead NVS key. This is not a
+bug today (NVS is still authoritative for all of them) -- it is a checklist
+item for whoever performs each future migration step, called out here so it
+is not missed the way this task's brief warned about.
+
+**Filesystem coverage added.** `full_board_backup.py` previously captured
+only HTTP JSON endpoints -- nothing about the `cfg` filesystem's own
+contents. Added, reusing the EXISTING `/api/cfgfs` listing rather than a
+parallel surface:
+
+- `GET /api/cfgfs/file?name=<name>` (new, `diagnostics_http.c`) -- returns
+  one named file's raw bytes.
+- `POST /api/cfgfs/file?name=<name>` (new, `diagnostics_http.c`) -- writes
+  raw bytes back via `cfg_fs_write_atomic()`, dispatched onto the flash
+  worker exactly like `relay_cycles_reset()`/`factory_reset.c` do (write
+  buffer deliberately allocated in INTERNAL DRAM, not PSRAM, since a flash
+  operation disables the cache and makes PSRAM unreachable for its
+  duration -- see that handler's own comment).
+- `full_board_backup.py`: `/api/cfgfs` added to `GET_ENDPOINTS` (optional --
+  an unmounted/unformatted `cfg` partition is today's expected state, not a
+  failure); `_capture_cfgfs_files()` then fetches every listed file's bytes
+  and base64-encodes them into the archive's new `cfgfs_files` section;
+  `restore_cfgfs_files()` (also new) decodes and validates every entry
+  BEFORE writing any of them back (`--restore-cfgfs-from <archive.json>`),
+  same validate-everything-then-apply discipline `backup_import_apply()`
+  uses for zones/profiles.
+
+**Restore proof.** `tools/PcTools/tests/test_full_board_backup_cfgfs.py`
+(5 tests, mocked HTTP, no live board):
+
+- `test_capture_then_restore_round_trips_file_backed_board_byte_for_byte` --
+  **the case that matters most**: a simulated board whose data lives in
+  FILES (`cfg` mounted, several files present, including a JSON config file
+  and a binary rev-prefixed pref blob) is captured, archived, and restored;
+  every POST body is asserted byte-identical to the originally captured
+  file. PROVEN.
+- `test_unmounted_cfg_partition_is_empty_not_an_error` -- an unmounted `cfg`
+  (today's live-board reality) yields an empty, error-free section. PROVEN.
+- `test_restore_refuses_on_corrupted_base64_and_writes_nothing` and
+  `test_restore_refuses_on_size_mismatch_and_writes_nothing` -- NEGATIVE
+  TESTS: a corrupted/truncated archive field makes `restore_cfgfs_files()`
+  refuse the whole restore with ZERO POSTs issued (asserted against the
+  mock's own POST log, not just the return value). PROVEN.
+- `test_restore_dry_run_validates_but_writes_nothing` -- PROVEN.
+
+**What is NOT proven:** this is a Python-mocked-HTTP proof of the SCRIPT's
+logic (capture/archive/restore-decision), not an on-target proof of the new
+firmware handlers themselves -- `cfgfs_file_get_handler()`/
+`cfgfs_file_post_handler()` were not exercised by a host C test (httpd
+handler unit-testing in this codebase requires a mock `httpd_req_t`
+harness that does not exist for this file, and building one was out of
+scope for this pass) nor against the live board, because **the `cfg`
+partition on the bench board is currently UNFORMATTED/unmounted** (per this
+doc's own "Measured starting point" and the 2026-09-07 flash notes above) --
+`GET /api/cfgfs` on that board answers `mounted:false`, so there is nothing
+on it to fetch yet. Also NOT proven: cross-request atomicity of a multi-file
+filesystem restore -- unlike `backup_import_apply()`'s single-HTTP-call
+two-pass commit, `restore_cfgfs_files()` validates every file up front (so a
+corrupted archive writes nothing) but each accepted file is still POSTed in
+a separate HTTP request; a transport failure partway through a multi-file
+restore leaves earlier files written and later ones not (`restore_cfgfs_files()`
+reports exactly how many were written before the failure, but does not roll
+them back). Whoever formats/mounts `cfg` on the bench board next should
+re-run this proof against the real firmware endpoints before relying on it.
+
+**Closing-criterion evaluability.** The dual-write window's third closing
+condition ("one proven backup/restore round trip against the file path")
+is **NOT YET evaluable**, for the same reason: it requires a live board with
+`cfg` mounted and file-backed zones config to export/erase/re-import
+against, and the bench board's `cfg` partition is unformatted today. This
+pass makes the round trip MECHANICALLY POSSIBLE for the first time (the
+filesystem-file capture/restore machinery now exists end-to-end and is
+proven at the script-logic level) but does not itself satisfy the
+criterion -- that still requires formatting/mounting `cfg` on the bench
+board, running a real dual-write firing, and then performing the round trip
+this pass's tooling now supports. The other two closing conditions (20
+clean boots, one file-backed firing) are unaffected by this pass and remain
+separately unmet as of 2026-09-07.
+
+## Closing-criterion measurement added, 2026-09-07
+
+The three-condition closing criterion above (20 clean boots, one file-backed
+firing, one verified restore round trip) had nothing measuring it -- meaning
+it could only ever be declared closed on vibes, or never declared closed at
+all. This pass adds a small standalone module,
+`firmware/KilnFW/App/drivers/persist/dualwrite_window.{c,h}`, that counts
+all three conditions and reports on them, without ever acting on the report.
+
+**Where the counters live, and why NVS.** All three counters live in plain
+NVS (`kiln_cfg` namespace, `kiln_nvs` partition, own key `"dwwin"`) -- the
+SAME already-proven persistence path `run_state.c`/`crash_report.c` use, own
+key so a corrupt/rejected record here cannot take another module's
+breadcrumb down with it, and vice versa. Deliberately **not** on `cfg` (the
+filesystem this module exists to evaluate): if the counters' own storage
+depended on the thing under evaluation, a `cfg` bug -- exactly the failure
+mode the window exists to catch -- could corrupt or lose the evidence needed
+to prove `cfg` is NOT yet trustworthy. That is backwards for a measurement
+instrument.
+
+**What resets the clean-boot streak, and what does not.**
+`consecutive_clean_boots` resets to 0 on: an unclean reset reason (anything
+other than `HAL_RESET_POWERON`/`HAL_RESET_SW`), an unacknowledged crash
+report pending from that boot, `cfg_fs` not mounted at check time, or an
+explicit `dualwrite_window_note_mount_failure()` call for a mount failure
+discovered *after* the once-per-boot check already ran. `firing_complete`
+and `restore_verified` are separate, **sticky, one-time achievements** --
+an unclean boot after a real firing or restore already happened does not
+erase that it happened. This is the module's own answer to CLAUDE.md's
+"reset one side of a pair" bug class: the only thing ever derived from
+`consecutive_clean_boots` is the reported `window_may_close` flag, and that
+flag is **never stored** -- `dualwrite_window_compute_status()` recomputes
+it fresh from the record on every single call, so there is no second copy
+of "may it close" anywhere in the system that the boot-counter reset could
+leave stale. See the module's own header comment for the full accounting.
+
+**How to read the progress.** `GET /api/dualwrite_window` reports
+`consecutive_clean_boots`, `clean_boots_target` (20), `firing_complete`,
+`restore_verified`, and the fully-derived `window_may_close`. This is a
+**separate small endpoint**, not a field on `GET /api/cfgfs` -- `cfg_fs_
+status.c` is owned by another pass as of this writing and states its own
+scope as "calls ONLY `cfg_fs.h`'s public API", which this module's NVS-only
+data does not fit. **A request is filed here for `cfg_fs_status.c`'s owner**:
+if useful, add a `dual_write_window` field to `/api/cfgfs`'s JSON, sourced
+from `dualwrite_window_get_status()`; until/unless that lands,
+`GET /api/dualwrite_window` is the only place this progress is visible.
+`POST /api/dualwrite_window/restore_verified` lets PC-side backup/restore
+tooling (`full_board_backup.py`/the backup-over-filesystem work, owned
+elsewhere as of this writing) attest that it completed and verified one
+round trip against the file path -- this module does not perform or check
+that round trip itself, only records the attestation.
+
+**Gate, not automation.** `window_may_close` is a REPORT. Nothing in this
+codebase reads it back and stops writing NVS on its own, and nothing here
+ever calls an NVS-erase for any key belonging to the items still being
+migrated. Dropping the NVS copies once the window closes stays a deliberate,
+reviewed, owner-visible step performed by hand -- see this module's header
+comment, which states this explicitly as a standing contract, not merely a
+current-state fact.
+
+**What still needs wiring, by whoever owns each area:**
+- `dualwrite_window_note_mount_failure()` is not yet called from
+  `cfg_fs_mount.c` (that file's boot/mount wiring is owned elsewhere as of
+  this writing) -- wanted for a mount failure discovered after the
+  once-per-boot check already passed. Until wired, only the once-per-boot
+  check's own `cfg_fs_is_available()` read (folded directly into the
+  clean-boot predicate) covers mount failures, which is the common case.
+- The once-per-boot check itself
+  (`dualwrite_window_boot_check()`) runs from `dualwrite_window_http_start()`
+  (HTTP bring-up, `main_network_http.c`) rather than from
+  `main_boot_early.c`, because that file's boot/mount wiring is owned
+  elsewhere as of this writing. HTTP bring-up is late enough to see
+  `cfg_fs`'s real mount result and `crash_report_init()`'s real result
+  (both already ran by then), so this is not a correctness gap, just later
+  in boot than the natural home for this check.
+- The `firing_complete` note is wired today: `profile_executor.c`'s two
+  `PROFILE_EXEC_DONE` transitions call
+  `dualwrite_window_note_firing_complete()` when `cfg_fs_is_available()` at
+  that moment. No further wiring needed for this leg.
+- The `restore_verified` note has no wiring into the actual backup/restore
+  round trip (out of this pass's scope) -- whoever finishes that work should
+  call `POST /api/dualwrite_window/restore_verified` (or
+  `dualwrite_window_note_restore_verified()` directly, board-side) once a
+  round trip against the file path is confirmed.
+
+Host tests: `firmware/KilnFW/App/test/test_dualwrite_window.c`, covering the
+clean-boot predicate, the counter reset/increment logic (including a REAL
+negative test performed against this checkout -- see that file's own
+comment for the exact line broken, the failure produced, and the by-hand
+restore + confirmed-empty `git diff` that followed), the derived-status
+computation, the sticky/idempotent notes, and the "report only, never an
+automation" contract.
