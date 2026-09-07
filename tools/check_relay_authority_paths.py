@@ -37,6 +37,17 @@ IO_CMD_ALL_RELAYS_OFF as of this writing), and a regex broad enough to catch
 a hypothetical future one reliably would also flag `protocol.py`'s constant
 definitions and `devices_io.py`'s own frame builders.
 
+2026-09-07 extension: this script also scans firmware/KilnFW/App's C sources
+for a direct call to kiln_io_set_relay()/kiln_io_set_relay_mask()/
+kiln_io_all_relays_off() from outside kiln_io.c (where they're defined),
+kiln_io_owner.c (the one module allowed to call them directly), and a small
+allowlist of documented fail-safe paths that must keep working even if the
+owner task itself is wedged (main.c's panic/shutdown path, profile_
+executor.c's watchdog). See the FW_* section below for the full reasoning
+-- this is the mechanical half of the "bypassed owner module" bug class
+audit (docs/audits/relay_write_paths_2026-09-07.md), which found every
+existing call site already correctly routed or allowlisted.
+
 Usage: python tools/check_relay_authority_paths.py [--root REPO_ROOT]
 """
 from __future__ import annotations
@@ -68,6 +79,151 @@ WRAPPER_METHOD_RE = re.compile(
 )
 
 SCAN_DIRS = ("tools/PcTools/src", "tools/PcTools/scripts")
+
+# --- Firmware side (2026-09-07 extension) -----------------------------------
+#
+# The PC-side check above answers "did the PC observe a firmware refusal".
+# It says nothing about the firmware itself: kiln_io_owner.h documents a
+# 2026-08-19 audit that found FIVE independent callers writing the SX1509
+# relay register through kiln_io_set_relay()/kiln_io_set_relay_mask() with
+# no shared ownership/safety-fault gate and no serialization against each
+# other's read-modify-write -- the "bypassed owner module" bug class (see
+# CLAUDE.md/memory). All five were fixed by routing through kiln_io_owner.c's
+# queue. Nothing mechanical stopped a SIXTH caller from reintroducing a
+# direct call later, which is what this half of the script checks for.
+#
+# What counts as a write: a call to kiln_io_set_relay(), kiln_io_set_relay_
+# mask(), or kiln_io_all_relays_off() (kiln_io.h) -- the three functions that
+# reach the SX1509 relay bits. SX1509_write_masked/_port/_pin are one layer
+# lower still and are used ONLY by kiln_io.c itself (grepped as of this
+# writing) -- not scanned separately because a regex loose enough to catch a
+# hypothetical future direct SX1509 call would also flag SX1509.c's own
+# definitions and kiln_io.c's legitimate use of its own primitives.
+#
+# Legitimate direct callers (allowlisted below, WHY inline at each entry):
+#   - kiln_io.c: defines the three functions.
+#   - kiln_io_owner.c: the owner module itself -- the one task that is
+#     allowed to reach the expander, per kiln_io_owner.h's whole design.
+#   - main.c's main_kiln_enter_safe_state(): the panic/shutdown path.
+#     kiln_io_owner.h's top comment explains why this and the two entries
+#     below stay direct: they must still work when the owner task ITSELF is
+#     the thing that's wedged, so routing them through its queue would be
+#     exactly backwards. kiln_io_all_relays_off() is unconditional and
+#     only ever turns things off, so a race with owner_task here is benign
+#     (worst case a redundant I2C transaction, never an unsafe state).
+#   - profile_executor.c's watchdog_task_entry() (guard 9 / FAULT /
+#     RETRY_RELAYS_OFF): same reasoning -- must still force relays off when
+#     the main control task has stopped ticking, which is a symptom the
+#     owner task's own health says nothing about.
+#
+# kiln_io_set_relay()/kiln_io_set_relay_mask() (as opposed to _all_relays_
+# off()) have NO documented direct-call exception anywhere in this codebase
+# -- every legitimate caller of those two goes through kiln_io_owner's
+# MANUAL producers (kiln_io_owner_command_set_relay[_mask]()) or its
+# AUTHORIZED producer (kiln_io_owner_command_set_relay_mask_authorized()).
+# A direct call to either from outside kiln_io.c/kiln_io_owner.c is always
+# flagged, with no allowlist entry available.
+FW_SCAN_DIRS = ("firmware/KilnFW/App",)
+FW_EXCLUDE_DIR_PARTS = ("test", "__pycache__", "build")
+
+FW_DEFINITION_FILES = {"kiln_io.c", "kiln_io.h"}
+FW_OWNER_FILES = {"kiln_io_owner.c", "kiln_io_owner.h"}
+
+#: (filename, function-name substring) -- a direct kiln_io_all_relays_off()
+#: call is allowed only inside one of these functions in one of these files.
+#: Anywhere else (including a DIFFERENT function in the same file) is flagged.
+FW_ALL_OFF_ALLOWLIST = {
+    ("main.c", "main_kiln_enter_safe_state"),
+    ("profile_executor.c", "watchdog_task_entry"),
+}
+
+FW_CALL_RE = re.compile(
+    r"\b(kiln_io_set_relay_mask|kiln_io_set_relay|kiln_io_all_relays_off)\s*\("
+)
+#: Crude but sufficient for this codebase's style: a function definition
+#: line is a name at column 0 (no indent) followed by "(" somewhere before
+#: the line's end, with a return-type-looking token before it. We only need
+#: "what function am I currently inside", found by scanning upward for the
+#: nearest such line -- good enough given the file sizes involved (checked
+#: against every file this scans as of writing; no false split found).
+FUNC_DEF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_ \*]*\b([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*$")
+
+
+def _strip_c_comments(text: str) -> str:
+    # Block comments first (non-greedy, DOTALL), then line comments. Good
+    # enough for this repo's style -- it does not need to survive a string
+    # literal containing "/*", which none of these call sites do. Each
+    # block comment is replaced by the SAME number of newlines it spanned
+    # (rather than deleted outright) so line numbers reported below stay
+    # aligned with the original file -- a multi-line block comment
+    # collapsing to zero lines was found, during this check's own negative
+    # test, to shift every subsequent match's reported line number.
+    def _blank_block(m: re.Match) -> str:
+        return "\n" * m.group(0).count("\n")
+
+    text = re.sub(r"/\*.*?\*/", _blank_block, text, flags=re.DOTALL)
+    text = re.sub(r"//.*", "", text)
+    return text
+
+
+def _enclosing_function(lines: list[str], call_line_idx: int) -> str | None:
+    for i in range(call_line_idx, -1, -1):
+        line = lines[i]
+        if line.startswith(("    ", "\t", "}")) or not line.strip():
+            continue
+        m = FUNC_DEF_RE.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def find_fw_c_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for rel in FW_SCAN_DIRS:
+        base = root / rel
+        if not base.exists():
+            continue
+        for p in list(base.rglob("*.c")) + list(base.rglob("*.h")):
+            if any(part in FW_EXCLUDE_DIR_PARTS for part in p.parts):
+                continue
+            files.append(p)
+    return files
+
+
+def check_fw_file(path: Path) -> list[str]:
+    if path.name in FW_DEFINITION_FILES or path.name in FW_OWNER_FILES:
+        return []
+    raw = path.read_text(encoding="utf-8")
+    stripped = _strip_c_comments(raw)
+    stripped_lines = stripped.splitlines()
+    raw_lines = raw.splitlines()
+    violations: list[str] = []
+    for i, line in enumerate(stripped_lines):
+        m = FW_CALL_RE.search(line)
+        if not m:
+            continue
+        fn = m.group(1)
+        source_line = raw_lines[i].strip() if i < len(raw_lines) else line.strip()
+        if fn == "kiln_io_all_relays_off":
+            enclosing = _enclosing_function(stripped_lines, i)
+            if (path.name, enclosing) in FW_ALL_OFF_ALLOWLIST:
+                continue
+            violations.append(
+                f"{path}:{i + 1}: direct kiln_io_all_relays_off() call outside "
+                f"the allowlisted fail-safe paths (in "
+                f"{enclosing or '<unknown function>'}()) -- route through "
+                f"kiln_io_owner instead, or add a justified allowlist entry "
+                f"if this really is a wedged-owner-task fail-safe: {source_line}"
+            )
+        else:
+            violations.append(
+                f"{path}:{i + 1}: direct {fn}() call bypasses kiln_io_owner -- "
+                f"use kiln_io_owner_command_set_relay()/set_relay_mask()/"
+                f"set_relay_mask_authorized() so the ownership/safety-fault gate "
+                f"and the SX1509 read-modify-write serialization actually apply: "
+                f"{source_line}"
+            )
+    return violations
 
 
 def find_py_files(root: Path) -> list[Path]:
@@ -118,6 +274,8 @@ def main() -> int:
     violations: list[str] = []
     for path in find_py_files(root):
         violations.extend(check_file(path))
+    for path in find_fw_c_files(root):
+        violations.extend(check_fw_file(path))
 
     if violations:
         print("check_relay_authority_paths: relay-write bypass(es) found:")
@@ -125,8 +283,10 @@ def main() -> int:
             print(f"  {v}")
         return 1
 
-    print("check_relay_authority_paths: OK -- every relay-write call site "
-          "goes through IoClient's refusal-aware wrapper.")
+    print("check_relay_authority_paths: OK -- every PC-side relay-write call "
+          "site goes through IoClient's refusal-aware wrapper, and every "
+          "firmware-side relay write goes through kiln_io_owner or a "
+          "documented fail-safe allowlist entry.")
     return 0
 
 
