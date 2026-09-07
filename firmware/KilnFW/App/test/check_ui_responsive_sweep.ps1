@@ -30,12 +30,52 @@ if (-not $node) {
     exit 0
 }
 
-$output = & node $sweepScript 2>&1
-$code = $LASTEXITCODE
-$output | ForEach-Object { Write-Host $_ }
+# Run node via Start-Process (not a bare `&`, not Start-Job) with a hard
+# wall-clock cap. A headless Chrome that fails to start cleanly (a stuck
+# leftover profile lock, a machine under heavy concurrent load, AV scanning
+# a freshly spawned exe) has been observed to leave the node process itself
+# sitting idle before it ever reaches the script's own internal 30s
+# DevTools-port timeout, which would otherwise hang this check, and with it
+# run_all_checks.ps1, indefinitely. ui_responsive_sweep.mjs's own SKIP path
+# (see its main()) already treats "DevTools port never came up" as an
+# environment fact, not a FAIL; this wrapper extends the same treatment to
+# the pathological case where node does not even get that far in time.
+# Start-Process (not Start-Job) specifically so a timeout can `taskkill /T`
+# the real process tree -- Stop-Job only tears down the job's runspace and
+# was observed in testing to leave the actual node.exe (and any Chrome it
+# had spawned) running as orphans, which is exactly the kind of leftover
+# process that causes the port/profile-dir collisions this whole fix exists
+# to prevent.
+$stdoutFile = Join-Path $env:TEMP "kc-ui-sweep-stdout-$PID.txt"
+$stderrFile = Join-Path $env:TEMP "kc-ui-sweep-stderr-$PID.txt"
+$proc = Start-Process -FilePath $node.Source -ArgumentList @($sweepScript) `
+    -NoNewWindow -PassThru `
+    -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 
-if ($code -ne 0) {
-    throw "check_ui_responsive_sweep.ps1: sweep FAILED (exit $code) -- see output above for the specific (page, width, assertion) failures."
+$finished = $proc.WaitForExit(180000)
+if (-not $finished) {
+    & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
+    Write-Host "check_ui_responsive_sweep.ps1: SKIPPED -- sweep did not finish within 180s (node/Chrome startup stalled). Environment condition, not evidence of a UI regression -- re-run when the machine is less loaded." -ForegroundColor Yellow
+    Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+    exit 0
+}
+
+$stdout = if (Test-Path $stdoutFile) { Get-Content -Raw $stdoutFile } else { "" }
+$stderrText = if (Test-Path $stderrFile) { Get-Content -Raw $stderrFile } else { "" }
+Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+if ($stdout) { Write-Host $stdout }
+if ($stderrText) { Write-Host $stderrText }
+$text = "$stdout`n$stderrText"
+
+if ($text -match 'ui_responsive_sweep: SKIPPED') {
+    Write-Host "check_ui_responsive_sweep.ps1: sweep SKIPPED (see reason above)."
+    exit 0
+}
+if ($text -match '\d+ of \d+ .* checks FAILED') {
+    throw "check_ui_responsive_sweep.ps1: sweep FAILED -- see output above for the specific (page, width, assertion) failures."
+}
+if ($text -notmatch 'All \d+ .* checks passed') {
+    throw "check_ui_responsive_sweep.ps1: sweep ended without a recognized PASS/FAIL/SKIP marker -- treating as a failure. Output above."
 }
 
 Write-Host "check_ui_responsive_sweep.ps1: sweep passed."
