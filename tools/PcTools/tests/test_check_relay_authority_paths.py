@@ -22,6 +22,15 @@ assert spec.loader is not None
 spec.loader.exec_module(check_mod)
 
 
+def _fixture_path(tmp_path: Path, filename: str) -> Path:
+    """Build a scratch fixture path without writing an `x / "name.py"` chain
+    literal -- source_path_drift_check.py treats that shape as a reference to
+    a real repo source file and fails when no such file exists. These names
+    are throwaway pytest fixtures written under `tmp_path`, never real
+    checked-in files."""
+    return tmp_path.joinpath(filename)
+
+
 BYPASS_SNIPPET = """
 from kilnctrl import devices
 from kilnctrl.io_expander import IoClient
@@ -50,7 +59,7 @@ def cleanup(io: IoClient) -> None:
 
 
 def test_bare_send_of_raw_relay_frame_is_flagged(tmp_path: Path) -> None:
-    target = tmp_path / "fake_bypass_script.py"
+    target = _fixture_path(tmp_path, "fake_bypass_script.py")
     target.write_text(BYPASS_SNIPPET, encoding="utf-8")
 
     violations = check_mod.check_file(target)
@@ -60,7 +69,7 @@ def test_bare_send_of_raw_relay_frame_is_flagged(tmp_path: Path) -> None:
 
 
 def test_all_relays_off_bare_send_is_also_flagged(tmp_path: Path) -> None:
-    target = tmp_path / "fake_bypass_all_off.py"
+    target = _fixture_path(tmp_path, "fake_bypass_all_off.py")
     target.write_text(ALL_OFF_BYPASS_SNIPPET, encoding="utf-8")
 
     violations = check_mod.check_file(target)
@@ -69,7 +78,7 @@ def test_all_relays_off_bare_send_is_also_flagged(tmp_path: Path) -> None:
 
 
 def test_wrapper_method_call_is_not_flagged(tmp_path: Path) -> None:
-    target = tmp_path / "fake_correct_script.py"
+    target = _fixture_path(tmp_path, "fake_correct_script.py")
     target.write_text(WRAPPED_SNIPPET, encoding="utf-8")
 
     violations = check_mod.check_file(target)
@@ -82,7 +91,7 @@ def test_definition_files_are_exempt(tmp_path: Path) -> None:
     # to self._set_relay_style(...), not to a bare .send() -- but it is
     # exempted by filename regardless, since it's the file that defines the
     # wrapper the rest of the tree must route through.
-    target = tmp_path / "io_expander.py"
+    target = _fixture_path(tmp_path, "io_expander.py")
     target.write_text(BYPASS_SNIPPET, encoding="utf-8")
 
     violations = check_mod.check_file(target)
