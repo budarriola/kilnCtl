@@ -45,7 +45,7 @@ what 256 KiB/kind covers (~1.9 h of firing telemetry today), OR
 `joltwallet/esp_littlefs` becomes available as a managed component without
 a network fetch at build time being a problem.
 
-### Step 1 — add the managed component, host-build only — DONE (`<COMMIT_HASH>`)
+### Step 1 — add the managed component, host-build only — DONE (`ca5d90c5`)
 Added `joltwallet/littlefs: "^1"` to `App/idf_component.yml` (the registry
 name is `joltwallet/littlefs`, not `esp_littlefs` as first written above).
 `build_kilnfw` ran green (132.2s) and resolved `joltwallet/littlefs 1.22.3`
