@@ -255,7 +255,7 @@ last.
 | 1 | Add `cfg` partition (512 K at `0xDB0000`, append-only), `cfg_fs_mount()` with `format_if_mount_failed=false`, recovery-mode gate, mount-failure banner, `/api/cfgfs` status. Mounts and does nothing else. | **YES** — `partitions.csv` already carries the `cfg` row (another pass, 2026-09-07). `cfg_fs_mount_device()` (`App/drivers/persist/cfg_fs_mount.c`, 2026-09-07) registers it (`format_if_mount_failed=false`) and delegates to `cfg_fs_mount_or_skip()` for the recovery-mode gate. `check_partition_labels_vs_firmware.ps1`'s `cfg` declared-but-unused reminder removed accordingly. `/api/cfgfs` status endpoint and the LCD/`/api/status` banner are **NOT done yet** — no HTTP surface exists for cfg_fs today. | none | Host: `cfg_fs_mount_or_skip(recovery_mode, ...)` is the real gate function, host-tested directly with a bool in place of `boot_guard_is_recovery_mode()` (`test_cfg_fs.c`). Bench: **NOT done** — no board has been flashed with this table revision in this pass (otadata/bootloader reflash obligation still outstanding; out of scope here, owned by the partition-table track). |
 | 2 | `cfg_fs_write_atomic()` + temp sweep + flash-worker routing. No callers. | no | none | **DONE, 2026-09-07.** `App/drivers/persist/cfg_fs.c`/`.h` (pure, host-testable, mirrors `log_store.c`'s split) provide mount/read/write-atomic/delete/exists/list; `App/drivers/persist/cfg_fs_mount.c`/`.h` are the device-only glue (`esp_vfs_littlefs_register`, `uart_bridge_ext_run_on_flash_worker()` routing — no callers yet). Host test: `test_cfg_fs.c`, obstructs the temp file's location and asserts the old final file survives untouched. **Negative-tested by breaking the production function** (redirected `cfg_fs_write_atomic()`'s `fopen()` from `tmp_path` to `final_path`, bypassing the temp file entirely): `test_cfg_fs.c:231: write_atomic() reports failure when it cannot create its own temp file` went RED, restored by hand, `git diff` empty (new, untracked file — confirmed identical to the pre-break version by re-running the full green suite). |
 | 3 | Migrate **prefs** (10,11,12,14) — the lowest-stakes items. Read-through + dual-write + `rev` counter. | no | Backup export/import must read/write through the same accessors, not NVS directly — verify `/api/backup/export` output is byte-identical before/after. | Host round-trip; bench: change unit pref, reboot, power-cut during write. **Items 11 (unit pref), 10 (ramp assist), 12 (display power) DONE, 2026-09-07** — see the note immediately below the table. Item 14 (TZ) and item 3 (relay names, tied to zones config) are **NOT done**, see that note. |
-| 4 | Migrate **profiles** (5,6) and **firing stats** (7). | no | **Highest interaction.** Profile export/import and `backup_import.c` both go through `profiles_http_get()/_save()/_delete()` — keep them as the sole entry points so the storage swap is invisible. Explicitly re-test profile export → factory reset → import. | Host: 8-profile fill, delete, re-save. Bench: export/import round trip; confirm `prof_used` bitmap path is gone, not merely unused. |
+| 4 | Migrate **profiles** (5,6) and **firing stats** (7). | no | **Highest interaction.** Profile export/import and `backup_import.c` both go through `profiles_http_get()/_save()/_delete()` — keep them as the sole entry points so the storage swap is invisible. Explicitly re-test profile export → factory reset → import. | Host: 8-profile fill, delete, re-save. Bench: export/import round trip; confirm `prof_used` bitmap path is gone, not merely unused. **Item 5 (user profile slots 0..7) DONE, 2026-09-07** — see the note immediately below the table. Item 6 (hidden-builtin mask) and item 7 (firing stats) are **NOT done**, still NVS-only. |
 | 5 | Migrate **zones config** (1,2,3) + **kiln config slots** (8) + **adaptive tune** (9). Schema 22 becomes `"schema": 22`; migration chain retained. Add the pre-fire interlock: refuse to start a firing if the config FS did not mount. | no | Backup format version stays as-is; export is regenerated from the same getters. | Host: every version 1..22 fixture file parses to the same struct the blob chain produces — **bind the JSON reader to the C migration chain with vector comparison**, per `project_binding_a_python_mirror_to_c`. Bench: full firing on migrated config, then `ota_rollback_esp()` and confirm the rolled-back build reads the same gains (this is the trap being tested). **Item 1 only (the `zones_cfg_t` blob itself: PID gains, FOPDT, coupling matrix, guards, wiring, per-zone tc_type) DONE, 2026-09-07, read-through + dual-write** — see the note immediately below the table. Items 2 (zone normals) and 3 (relay names) are SEPARATE NVS keys/blobs (`zone_normals_cfg_t`/`relay_names_cfg_t`, their own `zone_normals_save()`/`relay_names_save()`) and are **NOT done** — still NVS-only, same as kiln config slots (8) and adaptive tune (9). The pre-fire interlock is **NOT done** — no caller refuses a firing on a failed `cfg` mount yet. |
 | 6 | Migrate **relay cycle counters** (4). | no | counters appear in backup export | Bench soak: confirm the 600 s write cadence lands and survives 24 h. |
 | 7 | *(Owner-gated, not scheduled)* Stop dual-writing to NVS. **Not cheaply reversible** — this is the point of no return for rollback. | no | none | Requires an explicit owner decision that no older firmware will be booted again. |
@@ -420,6 +420,125 @@ for a follow-up pass rather than shipped untested.
   still not wired into the boot sequence on any board — `cfg_fs_mount_device()`
   has no call site yet, confirmed by grep, same gap step 1's own note
   already describes for zones).
+
+**Step 4 (item 5 — user profile slots 0..7 only), 2026-09-07 — done,
+host-proven, board-absent by construction.** Item 6 (hidden-builtin mask)
+and item 7 (firing stats) are NOT done — still NVS-only.
+
+- **File layout**: one file per slot, `profiles/prof<id>.json` (matches this
+  doc's section 3 path shape), still **slot-addressed by numeric id 0..7**,
+  not renamed to a user-chosen filename — the existing API surface
+  (requirement 2) never exposed a filename, only a slot id, so nothing about
+  the on-disk naming needed to change for callers to keep working unchanged.
+  Same file-format deviation as `zones_config_cfg_fs.c`'s step-5 note: the
+  file is a 4-byte little-endian `rev` counter followed by the EXACT SAME
+  version-1/2/3 on-flash wrapper bytes `profiles_http.c`'s
+  `decode_profile_blob()` already migrates from NVS (widened non-static as
+  `profile_decode_blob()`, declared in `profiles_http_internal.h` alongside
+  the new `profile_encode_current_blob()` encoder) — one decoder for both
+  backends, not two parsers to keep in sync across three historical
+  versions.
+- **New module**: `App/drivers/persist/profiles_cfg_fs.c`/`.h` — per-slot
+  (not a single document, since profiles are individually creatable/
+  deletable), otherwise the same shape as `zones_config_cfg_fs.c`: injectable
+  write/delete functions (defaulting to `cfg_fs_write_atomic`/`cfg_fs_delete`,
+  host-safe no-ops when unmounted), same higher-STRICTLY-rev-wins divergence
+  tie-break (`file_rev > nvs_rev`, not `>=` — see
+  `check_cfg_fs_tie_break.ps1` and `docs/audits/filesystem_migration_review_2026-09-07.md`,
+  which found the `>=` defect in `zones_config_cfg_fs.c` first; this module
+  was written with the corrected comparison from the start and passes that
+  check).
+- **API surface unchanged (requirement 2)**: `profiles_http_get()`/
+  `_save()`/`_delete()` — the only entry points `profile_executor.c`,
+  `uart_bridge_ext.c`'s UART CONTROL bridge, and `profiles_export_http.c`'s
+  export/import handlers call — kept their exact signatures and behavior.
+  The dual-write/read-through logic lives entirely inside
+  `nvs_save_slot()`/`nvs_erase_slot()`/`nvs_load_all_from()`
+  (`profiles_http.c`), none of which are part of the public API. The builtin
+  profile table (`profiles_builtin.c`, `.rodata`, read-only) is untouched —
+  it was never NVS- or file-backed to begin with.
+- **Export/import unaffected, proof**: `profiles_export_http.c`'s
+  `export_get_handler()`/`import_post_handler()` call only
+  `profiles_http_get()`/`profiles_http_save()` — no direct NVS or file
+  access. Since this pass changed nothing about those two functions'
+  signatures or externally-observable behavior (same validation, same
+  warnings, same "portable across kilns" ceiling handling), the export JSON
+  format is provably unaffected: `test_profile_export_import.c` (unmodified
+  by this pass) still passes 16/16 unchanged, confirming the export/import
+  round trip is still byte-identical.
+- **Read/write policy**: reads prefer the file when it decodes valid,
+  falling back to the NVS candidate otherwise (and opportunistically
+  migrating a valid NVS profile out to the file, one slot at a time, no
+  separate migration task or marker key — the file's existence IS
+  "already migrated," same as every other module in this plan). Writes go
+  FILE FIRST (best-effort — `profiles_cfg_fs_save()`/`_delete()` log and
+  swallow a failure), THEN NVS (authoritative — a write failure there is
+  still surfaced as `ESP_LOGE`, same as before this pass; the profile stays
+  applied live in RAM either way, matching `profiles_http_save()`'s
+  pre-existing "applied live but will not survive a reboot" convention,
+  since the public API's return value could not change per requirement 2).
+- **Rev counter also covers DELETE, not just save** — the one place this
+  module's design differs from `zones_config_cfg_fs.c` (which never deletes
+  its single document): a new persisted `prof_rev` NVS blob
+  (`uint32_t[PROFILES_MAX_COUNT]`) is bumped on BOTH `nvs_save_slot()` and
+  `nvs_erase_slot()`. This is what lets `profiles_cfg_fs_resolve()` tell "the
+  file is ahead because a save's NVS write failed" apart from "this slot was
+  legitimately deleted after its file was written" when NVS shows a slot
+  unused but a file still exists for it — without the delete-side rev bump,
+  a stale file left behind by an interrupted delete would be silently
+  resurrected on the next boot. See `profiles_cfg_fs.h`'s header comment for
+  the full four-way resolve table (file-only, NVS-only, both-agree,
+  diverged).
+- **Validate on load exactly as NVS does (requirement 4)**: guaranteed by
+  construction, not by parallel logic — both paths call the same
+  `profile_decode_blob()`, so there is no sentinel-value question specific to
+  the file path (profiles have no "0 means default" field; every bound is an
+  explicit range check in `profiles_http_save()`, unaffected by this pass).
+- **Partition-absent / mount-failed**: `cfg_fs_is_available()` false (every
+  board today) makes every `profiles_cfg_fs_*` call a no-op deferring
+  entirely to the NVS candidate — `nvs_save_slot()`/`nvs_erase_slot()`/
+  `nvs_load_all_from()` behave byte-identically to before this pass, proven
+  by dedicated host tests (`test_pcfg_partition_absent_behaves_exactly_like_before`,
+  `test_pcfg_mount_failed_behaves_like_absent`).
+- **`/api/cfgfs` surface**: `cfg_fs_status.c` is off-limits/owned elsewhere
+  in this task's brief, so its hardcoded `nvs_only` array (which lists
+  `"profiles"`) was left untouched — same call this task's brief asked for:
+  flagged here instead of edited. Once `cfg_fs_status.c` grows a
+  `dual_write` entry for prefs (per step 3's identical flag), `"profiles"`
+  should move there too, one entry per slot or an aggregate
+  file-backed-count.
+- **Flash-worker / reentrancy (requirement 6)**: no on-device wiring installs
+  a flash-worker-routed write/delete function for this module yet — this
+  matches `zones_config_cfg_fs.c`'s own CURRENT state exactly (grep-confirmed:
+  nothing in `main*.c` calls `zones_config_cfg_fs_set_write_fn()` either), so
+  writes today go through the default `cfg_fs_write_atomic()`/`cfg_fs_delete()`
+  (host-safe no-ops while `cfg` is unmounted, which is every board today).
+  Both `nvs_save_slot()`/`nvs_erase_slot()` already run only on the httpd
+  worker task (an internal-SRAM stack, per their existing
+  `caller_stack_is_external()` guard) — never on the flash worker itself —
+  so the reentrancy hazard (`project_flash_worker_reentrancy`) is not live
+  today. Wiring the device write/delete functions (mirroring
+  `cfg_fs_write_atomic_device()`'s flash-worker dispatch) is a follow-up,
+  shared with the identical gap already open for zones.
+- **Tests**: added to the existing `test_profiles_http.c` (its own
+  executable, since `nvs_load_all_from()` is `static` — no separate TU could
+  reach it) rather than a new file: migration-on-load, divergence tie-break
+  both directions, stale-file-after-delete-not-resurrected, partition-absent,
+  mount-failed, interrupted-write-leaves-old-file-intact, and a save/load/
+  delete round trip through the unmodified public API confirming the file
+  backs the slot and is removed on delete. Full suite: 261/261 checks in this
+  executable, all 29 host-test executables build and pass,
+  `tools/run_all_checks.ps1` 63/64 (the one failure, `check_cfg_fs_tie_break.ps1`
+  flagging `pref_cfg_fs.c`'s pre-existing `>=`, is step 3's file, not this
+  one — this module's own line passes that check).
+- **Negative-tested the divergence tie-break**: flipped
+  `profiles_cfg_fs_resolve()`'s `file_rev > nvs_rev` to `file_rev < nvs_rev`
+  (production code). Reran the suite: 3 tests went RED, shortest failing
+  line: `test_profiles_http.c:505: FILE content wins (higher rev): name
+  preserved`. Restored the line by hand; the file is new/untracked so
+  `git diff` shows nothing for it by construction — confirmed instead by
+  rerunning the full suite green again and diffing the restored line
+  character-for-character against what was there before the break.
 
 Only **step 1** needs a partition-table change, and it is append-only into the
 free tail — no existing partition moves or resizes, same discipline every prior

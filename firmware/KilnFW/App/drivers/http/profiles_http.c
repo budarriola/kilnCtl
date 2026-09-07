@@ -23,6 +23,12 @@
 
 #include "profiles_http_internal.h"
 
+#include "cfg_fs.h"
+#include "profiles_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4:
+                                * read-through/dual-write bridge to the `cfg`
+                                * LittleFS partition, one file per slot. See
+                                * that header for the full policy. */
+
 const char *PROFILES_TAG = "profiles_http";
 
 #define NVS_NAMESPACE "kiln_cfg"
@@ -30,6 +36,18 @@ const char *PROFILES_TAG = "profiles_http";
 NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_USED);
 /* "prof0".."prof7" -- see profile_nvs_key() below. */
+
+/* Per-slot rev counter, PROFILES_MAX_COUNT uint32_t, one blob -- see
+ * profiles_http_internal.h's s_profile_rev doc comment for why this must be
+ * bumped on delete too, not just save (docs/FILESYSTEM_USER_DATA_PLAN.md
+ * section 5 step 4, user-profiles filesystem move). Separate key from
+ * NVS_KEY_USED, same reasoning zones_http.c's NVS_KEY_ZONES_REV split from
+ * its cfg blob: a rev counter is bookkeeping for the file/NVS bridge, not
+ * part of any profile's own persisted shape. */
+#define NVS_KEY_PROFILE_REV "prof_rev"
+NVS_KEY_LEN_CHECK(NVS_KEY_PROFILE_REV);
+
+uint32_t s_profile_rev[PROFILES_MAX_COUNT];
 
 /* profiles_nvs is the 2026-08-13 split target for fire profiles (see
  * partitions.csv and TODO.md 8.1) -- profiles are the one section of the old
@@ -292,15 +310,29 @@ static uint32_t compute_profile_crc(const profile_persisted_t *p)
     return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
 }
 
-typedef enum {
-    PROFILE_DECODE_OK,      /* *out is a valid, current-format profile_t, ready to adopt */
-    PROFILE_DECODE_CORRUPT, /* reject outright: version 0, wrong length for the claimed
-                             * version, unknown version, or CRC mismatch -- *out is
-                             * zeroed, nothing is adopted */
-    PROFILE_DECODE_NEWER,   /* version > PROFILE_VERSION -- refuse without guessing;
-                             * *out is zeroed, but the caller must leave the SOURCE
-                             * bytes untouched (see nvs_load_all_from()) */
-} profile_decode_result_t;
+/* profile_encode_current_blob() -- see profiles_http_internal.h. The one
+ * place a profile_t is turned into the CURRENT-version on-flash wrapper,
+ * shared by nvs_save_slot() below and profiles_cfg_fs.c's file writer, so a
+ * file and an NVS blob are always byte-identical for the same profile_t. */
+size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t cap)
+{
+    if (!profile || !out || cap < sizeof(profile_persisted_t)) {
+        return 0;
+    }
+    profile_persisted_t persisted = {
+        .version = PROFILE_VERSION,
+        .profile = *profile,
+        .crc32 = 0,
+    };
+    persisted.crc32 = compute_profile_crc(&persisted);
+    memcpy(out, &persisted, sizeof(persisted));
+    return sizeof(persisted);
+}
+
+/* profile_decode_result_t is now declared in profiles_http_internal.h
+ * (widened non-static, docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4)
+ * so profiles_cfg_fs.c can share this exact decode path for the `cfg`
+ * filesystem file, not just the NVS blob -- see that header's comment. */
 
 /* The one place a stored profile blob is turned into a trustworthy,
  * current-format profile_t -- mirrors zones_http.c's decode_zones_blob()
@@ -312,8 +344,8 @@ typedef enum {
  * is neither PROFILE_VERSION nor greater than it, so it falls straight into
  * the "unknown version" branch below and is rejected before a single byte of
  * the payload is looked at. */
-static profile_decode_result_t decode_profile_blob(const void *blob, size_t len, profile_t *out,
-                                                    const char **err_reason)
+profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profile_t *out,
+                                             const char **err_reason)
 {
     static const char *unused_reason;
     const char **reason = err_reason ? err_reason : &unused_reason;
@@ -463,6 +495,21 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         }
     }
 
+    /* Per-slot rev counters (see profiles_http_internal.h's s_profile_rev doc
+     * comment) -- best-effort: a missing/short/corrupt blob leaves every
+     * entry at 0, which is the correct default for a slot that has never
+     * been through the file bridge before (an all-zero rev array on a board
+     * upgrading to this firmware for the first time just means "no opinion
+     * yet," not corruption). Read into a LOCAL array first; s_profile_rev is
+     * only updated once, after the resolve pass below, so a load failure
+     * partway through never leaves s_profile_rev half from-NVS/half-stale. */
+    uint32_t nvs_rev[PROFILES_MAX_COUNT];
+    memset(nvs_rev, 0, sizeof(nvs_rev));
+    size_t rev_len = sizeof(nvs_rev);
+    hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len); /* ignore result -- see above */
+
+    bool nvs_slot_valid[PROFILES_MAX_COUNT] = {0};
+
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (!(out->used_bitmap & (1u << id))) {
             continue;
@@ -494,10 +541,11 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
          * (or the newer firmware itself) still needs. */
         profile_t decoded;
         const char *reason = "";
-        profile_decode_result_t dres = decode_profile_blob(&loaded, len, &decoded, &reason);
+        profile_decode_result_t dres = profile_decode_blob(&loaded, len, &decoded, &reason);
         switch (dres) {
         case PROFILE_DECODE_OK:
             out->profiles[id] = decoded;
+            nvs_slot_valid[id] = true;
             break;
         case PROFILE_DECODE_NEWER:
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' refused: %s", id, partition, reason);
@@ -512,6 +560,37 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     }
 
     hal_kv_close(&h);
+
+    /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4: read-through/
+     * dual-write resolve against the `cfg` filesystem, one slot at a time.
+     * Only meaningful for the real profiles partition -- this function is
+     * never actually called with any other partition today (the pre-split
+     * migration path reads the default partition directly, not through
+     * here), but the guard keeps that assumption explicit rather than
+     * silently relying on it. cfg_fs_is_available() is false on every board
+     * today (no `cfg` partition mounted yet), so profiles_cfg_fs_resolve()
+     * degrades to "trust whatever NVS decoded" for every slot, unchanged
+     * from this function's pre-existing behavior. */
+    if (strcmp(partition, PROFILES_NVS_PARTITION) == 0) {
+        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+            profile_t resolved;
+            uint32_t resolved_rev = 0;
+            bool used_file = false;
+            bool trustworthy = profiles_cfg_fs_resolve(id, &out->profiles[id], nvs_slot_valid[id], nvs_rev[id],
+                                                        &resolved, &resolved_rev, &used_file);
+            if (trustworthy) {
+                out->profiles[id] = resolved;
+                out->used_bitmap |= (uint8_t)(1u << id);
+            } else {
+                memset(&out->profiles[id], 0, sizeof(out->profiles[id]));
+                out->used_bitmap &= (uint8_t)~(1u << id);
+            }
+            s_profile_rev[id] = resolved_rev;
+        }
+    } else {
+        memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    }
+
     return ESP_OK;
 }
 
@@ -545,6 +624,16 @@ esp_err_t nvs_save_slot(uint8_t id)
                       "worker for the established pattern.");
         return ESP_ERR_INVALID_STATE;
     }
+    /* FILE FIRST, then NVS (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step
+     * 4 requirement 1). A file write failure is logged and swallowed here --
+     * profiles_cfg_fs_save() already does that logging -- NVS below remains
+     * the persistence guarantee every existing caller of nvs_save_slot()
+     * already depends on; a subsequent NVS write failure is a hard error
+     * (ESP_LOGE below, exactly as before this pass) even though the profile
+     * is still applied live in RAM, same convention as before. */
+    uint32_t new_rev = s_profile_rev[id] + 1;
+    (void)profiles_cfg_fs_save(id, &s_profiles.profiles[id], new_rev);
+
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
     if (kv_err != HAL_OK) {
@@ -562,10 +651,23 @@ esp_err_t nvs_save_slot(uint8_t id)
     if (kv_err == HAL_OK) {
         kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, s_profiles.used_bitmap);
     }
+    uint32_t rev_snapshot[PROFILES_MAX_COUNT];
+    memcpy(rev_snapshot, s_profile_rev, sizeof(rev_snapshot));
+    rev_snapshot[id] = new_rev;
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, rev_snapshot, sizeof(rev_snapshot));
+    }
     if (kv_err == HAL_OK) {
         kv_err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
+    /* Update the in-RAM rev regardless of NVS outcome: it is ephemeral for
+     * this boot only (a reboot re-derives it from whatever actually got
+     * persisted, via nvs_load_all_from()'s resolve pass), and keeping it in
+     * lockstep with the file (already written above) means a subsequent
+     * save/delete this boot bumps from the true latest rev instead of
+     * replaying an already-used one. */
+    s_profile_rev[id] = new_rev;
     return hal_status_to_esp_err(kv_err);
 }
 
@@ -586,6 +688,15 @@ esp_err_t nvs_erase_slot(uint8_t id)
                       "DRAM_PSRAM_PLAN.md section 7.2/9.");
         return ESP_ERR_INVALID_STATE;
     }
+    /* A delete is a mutation of this slot's rev too (docs/
+     * FILESYSTEM_USER_DATA_PLAN.md section 5 step 4 requirement 1 /
+     * profiles_cfg_fs.h's header comment) -- bumping it here, and deleting
+     * the file FIRST, is what lets profiles_cfg_fs_resolve() tell "this
+     * slot was legitimately deleted" apart from "a save's NVS write failed
+     * after its file write succeeded" on the next boot. */
+    uint32_t new_rev = s_profile_rev[id] + 1;
+    (void)profiles_cfg_fs_delete(id); /* logged internally on failure, best-effort */
+
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
     if (kv_err != HAL_OK) {
@@ -599,10 +710,17 @@ esp_err_t nvs_erase_slot(uint8_t id)
         return hal_status_to_esp_err(erase_err);
     }
     kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, s_profiles.used_bitmap);
+    uint32_t rev_snapshot[PROFILES_MAX_COUNT];
+    memcpy(rev_snapshot, s_profile_rev, sizeof(rev_snapshot));
+    rev_snapshot[id] = new_rev;
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, rev_snapshot, sizeof(rev_snapshot));
+    }
     if (kv_err == HAL_OK) {
         kv_err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
+    s_profile_rev[id] = new_rev; /* ephemeral this boot, see nvs_save_slot()'s identical comment */
     return hal_status_to_esp_err(kv_err);
 }
 

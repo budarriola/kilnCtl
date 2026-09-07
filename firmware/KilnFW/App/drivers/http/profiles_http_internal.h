@@ -82,6 +82,60 @@ typedef struct {
 
 extern profiles_state_t s_profiles;
 
+/* ---- shared on-flash blob encode/decode (profiles_http.c) -----------------
+ * Widened non-static (2026-09-07, docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+ * step 4, user-profiles filesystem move) so profiles_cfg_fs.c's read-through/
+ * dual-write bridge can validate and produce a `cfg`-partition file using the
+ * EXACT SAME version-1/2/3 migration chain and CRC check the NVS path already
+ * uses -- one decoder, two storage backends, never two parsers to keep in
+ * sync. See profiles_http.c's decode_profile_blob()/PROFILE_VERSION comment
+ * for the full version history and the "growing profile_segment_t itself"
+ * hazard this discipline exists to avoid repeating. */
+typedef enum {
+    PROFILE_DECODE_OK,      /* *out is a valid, current-format profile_t, ready to adopt */
+    PROFILE_DECODE_CORRUPT, /* reject outright: version 0, wrong length for the claimed
+                             * version, unknown version, or CRC mismatch -- *out is
+                             * zeroed, nothing is adopted */
+    PROFILE_DECODE_NEWER,   /* version > PROFILE_VERSION -- refuse without guessing;
+                             * *out is zeroed, but the caller must leave the SOURCE
+                             * bytes untouched */
+} profile_decode_result_t;
+
+/* Generous upper bound on the encoded (version-prefixed, CRC-tailed) blob
+ * size for ANY version this build knows about, current version included --
+ * sized off sizeof(profile_t) rather than the private profile_persisted_t
+ * struct (defined in profiles_http.c only) so a caller outside that file
+ * never needs to know the on-flash wrapper's exact layout, only a safe
+ * buffer size to allocate. 32 bytes of headroom covers the version + crc32
+ * tail (5 bytes) with room to spare for a future small header field. */
+#define PROFILE_BLOB_MAX_SIZE (sizeof(profile_t) + 32u)
+
+/* The one place a stored profile blob (NVS OR a `cfg`-partition file) is
+ * turned into a trustworthy, current-format profile_t. `blob` must point at
+ * the version byte (offset 0 of the on-flash wrapper); a `cfg` file caller
+ * (profiles_cfg_fs.c) passes its own bytes starting after its 4-byte rev
+ * prefix. See profiles_http.c's definition for the full per-version decode
+ * path (CRC check for v2/v3, typed field-by-field conversion for v1/v2). */
+profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profile_t *out, const char **err_reason);
+
+/* Encodes `profile` into the CURRENT-version on-flash wrapper (version tag +
+ * fields + freshly-recomputed CRC) into `out` (capacity `cap`). Returns the
+ * number of bytes written, or 0 if `cap` is too small (nothing is written in
+ * that case) -- mirrors zones_config_json_encode-style helpers' "0 means
+ * failed" convention used elsewhere in this codebase. */
+size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t cap);
+
+/* ---- persisted per-slot rev counters (profiles_http.c) --------------------
+ * PROFILES_MAX_COUNT uint32_t revs, bumped on BOTH nvs_save_slot() and
+ * nvs_erase_slot() (a delete is a mutation too) and persisted under
+ * NVS_KEY_PROFILE_REV so profiles_cfg_fs_resolve() can tell "the file is
+ * ahead because the NVS write half of a save failed" apart from "this slot
+ * was legitimately deleted after the file was written" -- see
+ * profiles_cfg_fs.h's header comment. Exposed here (rather than kept purely
+ * static) only because test_profiles_cfg_fs.c inspects it directly to set up
+ * fixtures without going through the full NVS load path. */
+extern uint32_t s_profile_rev[PROFILES_MAX_COUNT];
+
 /* ---- profiles_http.c -------------------------------------------------------
  * NVS persistence primitives -- profiles_catalog_http.c never calls these
  * (read-only), profiles_edit_http.c's post/delete/builtin-hide handlers do. */
