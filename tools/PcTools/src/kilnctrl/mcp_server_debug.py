@@ -62,6 +62,69 @@ from .thermo import ThermoClient, ThermoQueryError
 from . import mcp_server as _srv
 
 
+# Cap on how much raw OpenOCD output gets written to the session log per
+# failed invocation -- generous enough to hold a whole failed reset/program
+# transcript, small enough that a wedged board spamming retries can't blow
+# the log file up.
+_OPENOCD_LOG_TRUNCATE_BYTES = 16 * 1024
+
+# Lines matching one of these (checked in order) are the ones worth quoting
+# on their own as "the decisive line" in a tool's returned error -- these are
+# the substrings OpenOCD/this codebase's own checks (see
+# openocd_util.run_openocd's `ok = ...` line) treat as failure markers, plus
+# a couple of common Tcl-level failures seen in practice (invalid command
+# name against a not-yet-inited target, "Polling failed" for a probe/board
+# that vanished mid-session).
+_DECISIVE_MARKERS = ("Verify Failed", "Error:", "invalid command name", "Polling failed")
+
+
+def _decisive_openocd_line(output: str) -> str:
+    """Picks the one line out of a (possibly long) OpenOCD transcript that
+    most likely explains a failure, for use in a tool's returned `error`
+    message. Falls back to the last non-blank line, then a fixed string, so
+    this never returns an empty message."""
+    lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
+    for marker in _DECISIVE_MARKERS:
+        for line in lines:
+            if marker in line:
+                return line
+    return lines[-1] if lines else "(no OpenOCD output captured)"
+
+
+def _log_openocd_result(op: str, ok: bool, output: str) -> None:
+    """Persists an OpenOCD invocation's outcome to the session log.
+
+    On success this is a single short line -- ``ok=True`` alone was already
+    logged by most callers before this helper existed, and a healthy board
+    doing routine debug_reset/debug_halt calls should not spam the session
+    log with full OpenOCD transcripts.
+
+    On failure, the FULL stdout+stderr capture (``output``, as returned by
+    ``openocd_util.run_openocd`` via debug_probe.py) is written to the
+    session log, truncated to ``_OPENOCD_LOG_TRUNCATE_BYTES`` -- this is the
+    only place that transcript is ever persisted; the MCP tool's return value
+    is not logged anywhere by itself, so without this a failed reset/program/
+    halt could only be diagnosed after the fact by reproducing it again.
+    """
+    if ok:
+        _srv._session_log.warning("%s: ok", op)
+        return
+    text = output or "(no output captured)"
+    if len(text) > _OPENOCD_LOG_TRUNCATE_BYTES:
+        text = text[-_OPENOCD_LOG_TRUNCATE_BYTES:]
+        text = "...[truncated]...\n" + text
+    _srv._session_log.warning("%s: FAILED\n%s", op, text)
+
+
+def _openocd_error_message(action_desc: str, output: str) -> str:
+    """Builds the string an MCP tool returns for a failed OpenOCD call:
+    the decisive line up front (so it's the first thing read), then the last
+    ~20 lines of raw output for context."""
+    decisive = _decisive_openocd_line(output)
+    tail = "\n".join((output or "").strip().splitlines()[-20:])
+    return f"error: {action_desc}: {decisive}\n\n{tail}"
+
+
 # ---------------------------------------------------------------------------
 # Generic debug (OpenOCD program/reset/halt/step/memory/registers), both
 # peers. See debug_probe.py's module docstring for the full design rationale
@@ -168,11 +231,10 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
             stale_prefix = f"WARNING: flashed a stale binary anyway ({stale.reason})\n"
 
     ok, output = debug_probe.program(peer, elf_path)
-    _srv._session_log.warning("debug_program: %s peer=%s ok=%s", "programmed" if ok else "FAILED to program", peer, ok)
+    _log_openocd_result(f"debug_program(peer={peer})", ok, output)
     if ok:
         return stale_prefix + f"programmed {peer} OK, reset and running"
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: program failed for {peer}:\n{tail}"
+    return _openocd_error_message(f"program failed for {peer}", output)
 
 
 @_srv._tool()
@@ -181,11 +243,10 @@ def debug_reset(peer: str, mode: str = "run") -> str:
     execution), "halt" (resets and halts), or "init" (resets and runs any
     OpenOCD target init sequence, then halts)."""
     ok, output = debug_probe.reset(peer, mode)
-    _srv._session_log.warning("debug_reset: peer=%s mode=%s ok=%s", peer, mode, ok)
+    _log_openocd_result(f"debug_reset(peer={peer}, mode={mode})", ok, output)
     if ok:
         return f"reset {peer} ({mode}) OK"
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: reset failed for {peer}:\n{tail}"
+    return _openocd_error_message(f"reset failed for {peer}", output)
 
 
 @_srv._tool()
@@ -212,22 +273,20 @@ def debug_halt(peer: str) -> str:
                 "stop tools if you really need to interrupt it."
             )
     ok, output = debug_probe.halt(peer)
+    _log_openocd_result(f"debug_halt(peer={peer})", ok, output)
     if ok:
-        _srv._session_log.warning("debug_halt: halted %s", peer)
         return f"halted {peer}"
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: halt failed for {peer}:\n{tail}"
+    return _openocd_error_message(f"halt failed for {peer}", output)
 
 
 @_srv._tool()
 def debug_resume(peer: str) -> str:
     """Resumes `peer`'s core from a halt."""
     ok, output = debug_probe.resume(peer)
+    _log_openocd_result(f"debug_resume(peer={peer})", ok, output)
     if ok:
-        _srv._session_log.warning("debug_resume: resumed %s", peer)
         return f"resumed {peer}"
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: resume failed for {peer}:\n{tail}"
+    return _openocd_error_message(f"resume failed for {peer}", output)
 
 
 @_srv._tool()
@@ -236,11 +295,10 @@ def debug_step(peer: str) -> str:
     halts it first (it does not resume running after the step -- it stays
     halted at the next instruction)."""
     ok, output = debug_probe.step(peer)
+    _log_openocd_result(f"debug_step(peer={peer})", ok, output)
     if ok:
-        _srv._session_log.warning("debug_step: stepped %s", peer)
         return f"stepped {peer}:\n{output.strip()}"
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: step failed for {peer}:\n{tail}"
+    return _openocd_error_message(f"step failed for {peer}", output)
 
 
 @_srv._tool()
@@ -264,10 +322,10 @@ def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
     ok, output = debug_probe.read_memory(peer, address, count, width,
                                          leave_halted=leave_halted,
                                          target=target)
+    _log_openocd_result(f"debug_read_memory(peer={peer}, address=0x{address:x})", ok, output)
     if ok:
         return output.strip()
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: read_memory failed for {peer}:\n{tail}"
+    return _openocd_error_message(f"read_memory failed for {peer}", output)
 
 
 @_srv._tool()
@@ -295,10 +353,10 @@ def debug_read_symbol(peer: str, symbol: str, count: Optional[int] = None, width
                                              elf_path=elf_path, leave_halted=leave_halted)
     except (ValueError, FileNotFoundError, RuntimeError) as exc:
         return f"error: {exc}"
+    _log_openocd_result(f"debug_read_symbol(peer={peer}, symbol={symbol})", ok, output)
     if ok:
         return output.strip()
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: read_symbol failed for {peer}:\n{tail}"
+    return _openocd_error_message(f"read_symbol failed for {peer}", output)
 
 
 @_srv._tool()
@@ -356,13 +414,15 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
                 return f"error: write refused -- could not confidently determine Pico ARMED state ({detail})"
             return f"error: write refused -- Pico is ARMED ({detail})"
     ok, output = debug_probe.write_memory(peer, address, value, width)
-    _srv._session_log.warning(
-        "debug_write_memory: peer=%s address=0x%x value=0x%x width=%d ok=%s", peer, address, value, width, ok
-    )
     if ok:
+        _srv._session_log.warning(
+            "debug_write_memory: peer=%s address=0x%x value=0x%x width=%d ok=True", peer, address, value, width
+        )
         return f"wrote 0x{value:x} ({width}-bit) to {peer} 0x{address:x}"
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: write_memory failed for {peer}:\n{tail}"
+    _log_openocd_result(
+        f"debug_write_memory(peer={peer}, address=0x{address:x}, value=0x{value:x}, width={width})", ok, output
+    )
+    return _openocd_error_message(f"write_memory failed for {peer}", output)
 
 
 @_srv._tool()
@@ -380,9 +440,9 @@ def debug_read_registers(peer: str, target: str | None = None,
     """
     ok, output = debug_probe.read_registers(peer, target=target,
                                             leave_halted=leave_halted)
+    _log_openocd_result(f"debug_read_registers(peer={peer}, target={target})", ok, output)
     if ok:
         return output.strip()
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    return f"error: read_registers failed for {peer}:\n{tail}"
+    return _openocd_error_message(f"read_registers failed for {peer}", output)
 
 
