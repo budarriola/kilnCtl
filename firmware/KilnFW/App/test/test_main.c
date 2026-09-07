@@ -58,6 +58,7 @@ void run_test_time_sync(void);
 void run_test_log_store(void);
 void run_test_cfg_fs(void);
 void run_test_cfg_fs_status(void);
+void run_test_unit_pref(void);
 void run_test_esp_spi_owner(void);
 void run_test_touch_dev(void);
 void run_test_ramp_ident(void);
@@ -130,6 +131,7 @@ int main(void)
     run_test_log_store();
     run_test_cfg_fs();
     run_test_cfg_fs_status();
+    run_test_unit_pref();
     run_test_esp_spi_owner();
     run_test_touch_dev();
     run_test_ramp_ident();

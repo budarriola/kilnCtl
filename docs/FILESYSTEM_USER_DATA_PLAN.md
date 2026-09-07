@@ -254,7 +254,7 @@ last.
 | 0 | (prereq) `logs` LittleFS track steps 1–4 in `FILESYSTEM_PLAN.md` land first — do not stand up a second filesystem implementation. | no | none | as documented there |
 | 1 | Add `cfg` partition (512 K at `0xDB0000`, append-only), `cfg_fs_mount()` with `format_if_mount_failed=false`, recovery-mode gate, mount-failure banner, `/api/cfgfs` status. Mounts and does nothing else. | **YES** — `partitions.csv` already carries the `cfg` row (another pass, 2026-09-07). `cfg_fs_mount_device()` (`App/drivers/persist/cfg_fs_mount.c`, 2026-09-07) registers it (`format_if_mount_failed=false`) and delegates to `cfg_fs_mount_or_skip()` for the recovery-mode gate. `check_partition_labels_vs_firmware.ps1`'s `cfg` declared-but-unused reminder removed accordingly. `/api/cfgfs` status endpoint and the LCD/`/api/status` banner are **NOT done yet** — no HTTP surface exists for cfg_fs today. | none | Host: `cfg_fs_mount_or_skip(recovery_mode, ...)` is the real gate function, host-tested directly with a bool in place of `boot_guard_is_recovery_mode()` (`test_cfg_fs.c`). Bench: **NOT done** — no board has been flashed with this table revision in this pass (otadata/bootloader reflash obligation still outstanding; out of scope here, owned by the partition-table track). |
 | 2 | `cfg_fs_write_atomic()` + temp sweep + flash-worker routing. No callers. | no | none | **DONE, 2026-09-07.** `App/drivers/persist/cfg_fs.c`/`.h` (pure, host-testable, mirrors `log_store.c`'s split) provide mount/read/write-atomic/delete/exists/list; `App/drivers/persist/cfg_fs_mount.c`/`.h` are the device-only glue (`esp_vfs_littlefs_register`, `uart_bridge_ext_run_on_flash_worker()` routing — no callers yet). Host test: `test_cfg_fs.c`, obstructs the temp file's location and asserts the old final file survives untouched. **Negative-tested by breaking the production function** (redirected `cfg_fs_write_atomic()`'s `fopen()` from `tmp_path` to `final_path`, bypassing the temp file entirely): `test_cfg_fs.c:231: write_atomic() reports failure when it cannot create its own temp file` went RED, restored by hand, `git diff` empty (new, untracked file — confirmed identical to the pre-break version by re-running the full green suite). |
-| 3 | Migrate **prefs** (10,11,12,14) — the lowest-stakes items. Read-through + dual-write + `rev` counter. | no | Backup export/import must read/write through the same accessors, not NVS directly — verify `/api/backup/export` output is byte-identical before/after. | Host round-trip; bench: change unit pref, reboot, power-cut during write. |
+| 3 | Migrate **prefs** (10,11,12,14) — the lowest-stakes items. Read-through + dual-write + `rev` counter. | no | Backup export/import must read/write through the same accessors, not NVS directly — verify `/api/backup/export` output is byte-identical before/after. | Host round-trip; bench: change unit pref, reboot, power-cut during write. **Items 11 (unit pref), 10 (ramp assist), 12 (display power) DONE, 2026-09-07** — see the note immediately below the table. Item 14 (TZ) and item 3 (relay names, tied to zones config) are **NOT done**, see that note. |
 | 4 | Migrate **profiles** (5,6) and **firing stats** (7). | no | **Highest interaction.** Profile export/import and `backup_import.c` both go through `profiles_http_get()/_save()/_delete()` — keep them as the sole entry points so the storage swap is invisible. Explicitly re-test profile export → factory reset → import. | Host: 8-profile fill, delete, re-save. Bench: export/import round trip; confirm `prof_used` bitmap path is gone, not merely unused. |
 | 5 | Migrate **zones config** (1,2,3) + **kiln config slots** (8) + **adaptive tune** (9). Schema 22 becomes `"schema": 22`; migration chain retained. Add the pre-fire interlock: refuse to start a firing if the config FS did not mount. | no | Backup format version stays as-is; export is regenerated from the same getters. | Host: every version 1..22 fixture file parses to the same struct the blob chain produces — **bind the JSON reader to the C migration chain with vector comparison**, per `project_binding_a_python_mirror_to_c`. Bench: full firing on migrated config, then `ota_rollback_esp()` and confirm the rolled-back build reads the same gains (this is the trap being tested). **Item 1 only (the `zones_cfg_t` blob itself: PID gains, FOPDT, coupling matrix, guards, wiring, per-zone tc_type) DONE, 2026-09-07, read-through + dual-write** — see the note immediately below the table. Items 2 (zone normals) and 3 (relay names) are SEPARATE NVS keys/blobs (`zone_normals_cfg_t`/`relay_names_cfg_t`, their own `zone_normals_save()`/`relay_names_save()`) and are **NOT done** — still NVS-only, same as kiln config slots (8) and adaptive tune (9). The pre-fire interlock is **NOT done** — no caller refuses a firing on a failed `cfg` mount yet. |
 | 6 | Migrate **relay cycle counters** (4). | no | counters appear in backup export | Bench soak: confirm the 600 s write cadence lands and survives 24 h. |
@@ -331,6 +331,95 @@ behavior for free).
   (9); the pre-fire interlock; the JSON-text file format upgrade noted
   above; no board has this flashed (no `cfg` partition on any board today,
   by design of step 1's own gate).
+
+**Step 3 (items 11, 10, 12 — unit pref, ramp assist, display power),
+2026-09-07 — done, host-proven, board-absent by construction.** Relay names
+(3) is explicitly OUT of scope for this pass: the plan groups it with zones
+config (item 1, "travels with (1)"), which is owned by the parallel
+zones-config-move pass — moving it here would risk a second, divergent write
+path onto the same file. Item 14 (TZ) is also NOT done: `time_sync.c` (the
+module that actually loads/saves `time_tz`) pulls in `esp_netif_sntp.h` and
+has no host stub written for it (confirmed by grep — `test_time_sync.c`
+tests only the pure `time_sync_tz.c` validation half, never `time_sync.c`
+itself), so a dual-write there could not be host-tested to the same standard
+as the other three without first building that stub infrastructure — left
+for a follow-up pass rather than shipped untested.
+
+- **New module**: `App/drivers/persist/pref_cfg_fs.c`/`.h` — a GENERIC
+  read-through/dual-write bridge (path + item size + validator function,
+  parameterized) rather than three hand-copies of
+  `zones_config_cfg_fs.c`'s policy. Same file format
+  (`<4-byte LE rev><raw item bytes>`), same read-through policy, same
+  higher-rev-wins divergence tie-break, same partition-absent/mount-failed
+  degrade-to-NVS-only behavior as that module — see `pref_cfg_fs.h`'s header
+  comment for why one generic module was chosen over three copies (the
+  "reset one side of a pair" bug class this codebase already tracks).
+- **Validation**: each item's file bytes are validated by the SAME function
+  its NVS load has always used (`unit_pref_validate()`/
+  `ramp_assist_validate()`/`display_power_validate()`, extracted from each
+  module's existing range checks, not new logic) — no bounds relaxed by the
+  move. None of the three has a "0 means use default" sentinel to protect
+  (unlike `progress_band_c`, the trap this task's brief calls out) — checked
+  explicitly per item: `unit_pref_t`'s 0 IS Celsius (a real value, not a
+  sentinel), `ramp_assist`'s 0 IS disabled, and `display_power`'s fields are
+  each range-checked independently with no "0 = default" convention.
+- **Read/write policy**: reads prefer the file when it decodes valid,
+  falling back to the NVS candidate otherwise (and opportunistically
+  migrating a valid NVS value out to the file). Writes go FILE FIRST
+  (best-effort, a failure is logged and swallowed), THEN NVS (authoritative,
+  a failure is returned to the caller) — identical ordering and rationale to
+  `zones_config_cfg_fs.c`'s step-5 note.
+- **Divergence tie-break**: a separate NVS key per item (`u_pref_rev`,
+  `ramp_a_rev`, `disp_pow_rev` — all `NVS_KEY_LEN_CHECK`'d, all under the
+  15-character limit) plus a rev prefix in the file. Higher rev wins when
+  both sides decode valid and differ; logged (`ESP_LOGW`) naming the path and
+  both revs either way, and the losing side is resynced from the winner.
+- **Partition-absent / mount-failed**: `cfg_fs_is_available()` false (every
+  board today, and the explicit `cfg_fs_init()`-against-a-nonexistent-path
+  case) makes every `pref_cfg_fs_*` call a no-op deferring entirely to the
+  NVS candidate — every pre-existing test in `test_ramp_assist_cfg.c`/
+  `test_display_power_cfg.c` already ran this path unmodified and still
+  passes, which is the partition-absent proof; a new explicit
+  mount-failed test was added per item too.
+- **`/api/cfgfs` surface (requirement 4)**: `cfg_fs_status.c` is
+  off-limits/owned in this task's brief, so its hardcoded
+  `"nvs_only":["prefs","profiles","kilncfg_slots","adaptive_tune","relay_cycles"]`
+  array was left untouched rather than edited. **Flagging here instead**:
+  once this lands, `"prefs"` should move out of `nvs_only` into a new
+  `dual_write` entry (mirroring the existing `dual_write.zones` shape:
+  `file_backed`/`file_rev`/`nvs_rev`/`diverged`, one per migrated pref item
+  or one aggregate) — that edit needs a new field on
+  `cfg_fs_zones_dualwrite_info_t`-equivalent input and a caller change in
+  whatever builds it for the HTTP handler, neither of which this pass
+  touched.
+- **Tests**: `test_unit_pref.c` (NEW — no host test existed for `unit_pref.c`
+  before this pass, confirmed absent from `build_host_tests.ps1`'s
+  `$sources`; added both the module's pre-existing default/round-trip/
+  corrupt-value coverage it never had, and the new dual-write suite) plus
+  extensions to `test_ramp_assist_cfg.c`/`test_display_power_cfg.c`: dual-
+  write-lands-on-both-sides, NVS-fallback-then-migrates, divergence tie-
+  break (both directions on `unit_pref`/`ramp_assist`), mount-failed, and
+  (ramp_assist only) an interrupted-write-leaves-old-file-intact case using
+  an always-fails write-fn injection. Full suite: 6782/6782 checks in the
+  main host-test executable, `tools/run_all_checks.ps1` 64/64 green.
+- **Negative-tested the dual-write itself** (ramp_assist, chosen as the
+  representative item): commented out `ramp_assist_cfg_set_enabled()`'s
+  `hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, raw)` call (production code, not a
+  test-local mirror) by replacing it with `err = HAL_OK;`. Reran the suite:
+  5 tests went RED, shortest failing line:
+  `test_ramp_assist_cfg.c:113: ramp_assist_cfg_start() on the next boot
+  reloads enabled=true from NVS` (a PRE-EXISTING test, not one added by this
+  pass) — proving the break was caught by more than just the new coverage.
+  Restored the line by hand; `git diff -- firmware/KilnFW/App/drivers/control/ramp_assist_cfg.c`
+  showed only the intended dual-write addition (the `hal_kv_set_u8` call
+  present, plus the new `hal_kv_set_u32` rev-write line), confirmed clean of
+  the break. Full suite green again afterward.
+- **Not done in this pass**: item 14 (TZ) and item 3 (relay names) — see
+  above; the `/api/cfgfs` `dual_write` surface for these items (flagged,
+  not implemented); no board has this flashed (`cfg` partition mount is
+  still not wired into the boot sequence on any board — `cfg_fs_mount_device()`
+  has no call site yet, confirmed by grep, same gap step 1's own note
+  already describes for zones).
 
 Only **step 1** needs a partition-table change, and it is append-only into the
 free tail — no existing partition moves or resizes, same discipline every prior

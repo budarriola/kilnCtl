@@ -221,6 +221,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/cfg_fs.c"
                        "persist/cfg_fs_mount.c"
                        "persist/cfg_fs_status.c"
+                       "persist/pref_cfg_fs.c"
                        "http/log_http.c"
                        "owners/relay_authority.c"
                        "persist/relay_cycles.c"
@@ -284,6 +285,12 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # the small sweep HTTP wrappers.
                        "persist/zones_config_store.c"
                        "persist/zones_config_cfg_fs.c"
+                       "persist/profiles_cfg_fs.c"
+                       # profiles filesystem move, 2026-09-07
+                       # (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4)
+                       # -- read-through/dual-write bridge to the `cfg`
+                       # LittleFS partition, one file per profile slot. See
+                       # that file's header comment.
                        "persist/zones_config_accessors.c"
                        "http/zones_http_get.c"
                        "http/zones_http_post_parse.c"

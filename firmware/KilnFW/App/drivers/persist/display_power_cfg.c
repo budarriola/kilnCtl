@@ -6,6 +6,7 @@
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+#include "pref_cfg_fs.h"
 
 static const char *TAG = "display_power_cfg";
 
@@ -15,9 +16,20 @@ static const char *TAG = "display_power_cfg";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE      "kiln_cfg"
 #define NVS_KEY_DISPLAY_POWER "display_power"
+// rev counter for the cfg-filesystem dual-write below (docs/FILESYSTEM_USER_DATA_PLAN.md
+// section 5 step 3) -- see unit_pref.c's identical NVS_KEY_UNIT_PREF_REV for
+// why this is a separate key rather than a field on the stored blob.
+#define NVS_KEY_DISPLAY_POWER_REV "disp_pow_rev"
 NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_DISPLAY_POWER);
+NVS_KEY_LEN_CHECK(NVS_KEY_DISPLAY_POWER_REV);
+
+// docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 3 (prefs move): the file
+// this preference dual-writes to on the `cfg` LittleFS partition, once
+// mounted -- see pref_cfg_fs.h for the read-through/dual-write/tie-break
+// policy this module hands its NVS candidate to.
+#define DISPLAY_POWER_FILE_PATH "display_power.dat"
 
 // Versioned blob rather than four loose keys -- see display_power_cfg.h's
 // PERSISTENCE note. version bumps only if a field is ever added/reinterpreted;
@@ -41,6 +53,7 @@ static uint8_t s_brightness_percent = 100;
 static display_timeout_setting_t s_timeout_setting = DISPLAY_TIMEOUT_NEVER;
 static bool s_keep_on_while_firing = true;
 static bool s_display_on_error = true;
+static uint32_t s_display_power_rev = 0;
 
 // Copied verbatim from unit_pref.c/ramp_assist_cfg.c's identical
 // nvs_partition_init() -- same partition, same rationale, same erase-only-
@@ -59,9 +72,32 @@ static void apply_defaults(void)
     s_display_on_error = true;
 }
 
+// Same size/version/field-range checks display_power_cfg_start() has always
+// applied to a stored NVS blob -- reused verbatim as the
+// pref_cfg_fs_validate_fn_t for the file, so the moved item is validated
+// exactly as its NVS path validates today.
+static bool display_power_validate(const void *bytes, size_t len)
+{
+    if (len != sizeof(display_power_cfg_blob_t)) {
+        return false;
+    }
+    const display_power_cfg_blob_t *blob = (const display_power_cfg_blob_t *)bytes;
+    if (blob->version != DISPLAY_POWER_CFG_VERSION) {
+        return false;
+    }
+    if (blob->brightness_percent > 100 ||
+        !display_power_timeout_setting_is_valid((display_timeout_setting_t)blob->timeout_setting) ||
+        (blob->keep_on_while_firing != 0 && blob->keep_on_while_firing != 1) ||
+        (blob->display_on_error != 0 && blob->display_on_error != 1)) {
+        return false;
+    }
+    return true;
+}
+
 esp_err_t display_power_cfg_start(void)
 {
     apply_defaults(); // safe defaults stand until proven otherwise below
+    s_display_power_rev = 0;
 
     hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
     if (part_err != HAL_OK) {
@@ -72,56 +108,68 @@ esp_err_t display_power_cfg_start(void)
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    bool nvs_valid = false;
+    display_power_cfg_blob_t nvs_blob;
+    memset(&nvs_blob, 0, sizeof(nvs_blob));
+    uint32_t nvs_rev = 0;
     if (err == HAL_NOT_FOUND) {
-        return ESP_OK; // namespace never written -- defaults are the expected steady state
-    }
-    if (err != HAL_OK) {
+        // namespace never written -- defaults are the expected steady state
+    } else if (err != HAL_OK) {
         ESP_LOGW(TAG, "nvs_open_from_partition failed: %s -- display power settings stay at defaults this boot",
                  hal_status_to_name(err));
-        return ESP_OK;
+    } else {
+        display_power_cfg_blob_t blob;
+        memset(&blob, 0, sizeof(blob));
+        size_t len = sizeof(blob);
+        hal_status_t rerr = hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, &len);
+        if (rerr == HAL_OK) {
+            if (display_power_validate(&blob, len)) {
+                nvs_valid = true;
+                nvs_blob = blob;
+            } else {
+                // Wrong size or unrecognized version (corruption, or a newer
+                // firmware's wider schema read by this older build), or an
+                // out-of-range field inside an otherwise well-formed blob --
+                // refuse it rather than trust a layout/value this build
+                // cannot vouch for. Same "corrupt must resolve to the SAFE
+                // state" rule ramp_assist_cfg.c's out-of-range-byte guard
+                // documents.
+                ESP_LOGW(TAG, "stored display_power blob is size %u (expected %u) / version %u -- defaulting",
+                         (unsigned)len, (unsigned)sizeof(blob), (unsigned)blob.version);
+            }
+        } else if (rerr != HAL_NOT_FOUND) {
+            ESP_LOGW(TAG, "display_power_cfg read failed: %s -- defaults stay in effect this boot",
+                     hal_status_to_name(rerr));
+        }
+        if (nvs_valid) {
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, NVS_KEY_DISPLAY_POWER_REV, &rev) == HAL_OK) {
+                nvs_rev = rev;
+            }
+        }
+        hal_kv_close(&h);
     }
 
-    display_power_cfg_blob_t blob;
-    memset(&blob, 0, sizeof(blob));
-    size_t len = sizeof(blob);
-    err = hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, &len);
-    hal_kv_close(&h);
-    if (err == HAL_NOT_FOUND) {
-        return ESP_OK; // key never set -- defaults stand
-    }
-    if (err != HAL_OK) {
-        ESP_LOGW(TAG, "display_power_cfg read failed: %s -- defaults stay in effect this boot", hal_status_to_name(err));
-        return ESP_OK;
-    }
-    if (len != sizeof(blob) || blob.version != DISPLAY_POWER_CFG_VERSION) {
-        // Wrong size or unrecognized version (corruption, or a newer
-        // firmware's wider schema read by this older build) -- refuse it
-        // rather than trust a layout this build cannot vouch for. Same
-        // "corrupt must resolve to the SAFE state" rule ramp_assist_cfg.c's
-        // out-of-range-byte guard documents.
-        ESP_LOGW(TAG, "stored display_power blob is size %u (expected %u) / version %u (expected %u) -- "
-                      "defaulting", (unsigned)len, (unsigned)sizeof(blob), (unsigned)blob.version,
-                 (unsigned)DISPLAY_POWER_CFG_VERSION);
-        return ESP_OK;
-    }
-    if (blob.brightness_percent > 100 || !display_power_timeout_setting_is_valid((display_timeout_setting_t)blob.timeout_setting) ||
-        (blob.keep_on_while_firing != 0 && blob.keep_on_while_firing != 1) ||
-        (blob.display_on_error != 0 && blob.display_on_error != 1)) {
-        // LOAD-BEARING, same reasoning as ramp_assist_cfg.c's raw!=0&&raw!=1
-        // guard: a bit-flipped/garbage field must not be trusted as a valid
-        // in-range value just because the blob's size and version matched.
-        ESP_LOGW(TAG, "stored display_power blob has an out-of-range field -- defaulting");
-        return ESP_OK;
+    display_power_cfg_blob_t resolved = nvs_blob;
+    uint32_t resolved_rev = nvs_rev;
+    bool used_file = false;
+    bool have_value = pref_cfg_fs_resolve(DISPLAY_POWER_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
+                                           display_power_validate, &resolved, &resolved_rev, &used_file);
+    if (!have_value) {
+        return ESP_OK; // neither side had anything trustworthy -- defaults stand
     }
 
-    s_brightness_percent = blob.brightness_percent;
-    s_timeout_setting = (display_timeout_setting_t)blob.timeout_setting;
-    s_keep_on_while_firing = (blob.keep_on_while_firing != 0);
-    s_display_on_error = (blob.display_on_error != 0);
-    ESP_LOGI(TAG, "display power settings loaded: brightness=%u%% timeout_setting=%u keep_on_while_firing=%s "
-                  "display_on_error=%s",
-             (unsigned)s_brightness_percent, (unsigned)s_timeout_setting,
-             s_keep_on_while_firing ? "true" : "false", s_display_on_error ? "true" : "false");
+    s_brightness_percent = resolved.brightness_percent;
+    s_timeout_setting = (display_timeout_setting_t)resolved.timeout_setting;
+    s_keep_on_while_firing = (resolved.keep_on_while_firing != 0);
+    s_display_on_error = (resolved.display_on_error != 0);
+    s_display_power_rev = resolved_rev;
+    ESP_LOGI(TAG,
+             "display power settings loaded (source=%s, rev=%lu): brightness=%u%% timeout_setting=%u "
+             "keep_on_while_firing=%s display_on_error=%s",
+             used_file ? "file" : "NVS", (unsigned long)s_display_power_rev, (unsigned)s_brightness_percent,
+             (unsigned)s_timeout_setting, s_keep_on_while_firing ? "true" : "false",
+             s_display_on_error ? "true" : "false");
     return ESP_OK;
 }
 
@@ -148,6 +196,23 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     s_keep_on_while_firing = keep_on_while_firing;
     s_display_on_error = display_on_error;
 
+    uint32_t new_rev = s_display_power_rev + 1;
+    display_power_cfg_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.version = DISPLAY_POWER_CFG_VERSION;
+    blob.brightness_percent = brightness_percent;
+    blob.timeout_setting = (uint8_t)timeout_setting;
+    blob.keep_on_while_firing = keep_on_while_firing ? 1 : 0;
+    blob.display_on_error = display_on_error ? 1 : 0;
+
+    // FILE FIRST (best-effort, failure logged and swallowed -- NVS below
+    // remains the persistence guarantee), THEN NVS (authoritative).
+    esp_err_t file_err = pref_cfg_fs_save(DISPLAY_POWER_FILE_PATH, &blob, sizeof(blob), new_rev);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "display power file write failed: %s -- NVS remains the source of truth this boot",
+                 esp_err_to_name(file_err));
+    }
+
     hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
     if (part_err != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- display power settings not persisted",
@@ -163,15 +228,10 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
         return hal_status_to_esp_err(err);
     }
 
-    display_power_cfg_blob_t blob;
-    memset(&blob, 0, sizeof(blob));
-    blob.version = DISPLAY_POWER_CFG_VERSION;
-    blob.brightness_percent = brightness_percent;
-    blob.timeout_setting = (uint8_t)timeout_setting;
-    blob.keep_on_while_firing = keep_on_while_firing ? 1 : 0;
-    blob.display_on_error = display_on_error ? 1 : 0;
-
     err = hal_kv_set_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_DISPLAY_POWER_REV, new_rev);
+    }
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
@@ -181,6 +241,7 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
         ESP_LOGE(TAG, "could not persist display power settings: %s -- will not survive a reboot",
                  hal_status_to_name(err));
     } else {
+        s_display_power_rev = new_rev;
         ESP_LOGI(TAG, "display power settings saved: brightness=%u%% timeout_setting=%u keep_on_while_firing=%s "
                       "display_on_error=%s",
                  (unsigned)brightness_percent, (unsigned)timeout_setting,

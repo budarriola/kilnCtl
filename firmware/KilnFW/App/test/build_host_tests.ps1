@@ -85,6 +85,7 @@ try {
         (Join-Path $testDir "test_log_store.c"),
         (Join-Path $testDir "test_cfg_fs.c"),
         (Join-Path $testDir "test_cfg_fs_status.c"),
+        (Join-Path $testDir "test_unit_pref.c"),
         (Join-Path $testDir "test_esp_spi_owner.c"),
         (Join-Path $testDir "test_touch_dev.c"),
         (Join-Path $testDir "test_ramp_ident.c"),
@@ -133,6 +134,7 @@ try {
         (Join-Path $driversDir "persist/log_store.c"),
         (Join-Path $driversDir "persist/cfg_fs.c"),
         (Join-Path $driversDir "persist/cfg_fs_status.c"),
+        (Join-Path $driversDir "persist/pref_cfg_fs.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/iter_tune.c")
@@ -412,11 +414,22 @@ try {
     # header comment. Own executable so that stub, and this file's fake bodies
     # for zones_http.h/profile_feasibility.h/profiles_builtin.h, never collide
     # with any other test file's definitions of those same symbols.
+    # docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4 (user-profiles
+    # filesystem move): profiles_http.c (#included directly above) now calls
+    # into profiles_cfg_fs.c's per-slot read-through/dual-write bridge, so
+    # this executable needs cfg_fs.c/profiles_cfg_fs.c linked in as plain
+    # separate .c files -- same convention as cmd2's cfg_fs.c/
+    # zones_config_cfg_fs.c. The new dual-write/divergence/migration tests
+    # for this live inside test_profiles_http.c itself (new test functions,
+    # same file) rather than a separate TU, because nvs_load_all_from() is
+    # `static` -- exactly the reason this whole executable already exists as
+    # its own binary (see this section's header comment).
     $exe7 = Join-Path $outDir "kilnctl_host_tests_profiles_http.exe"
     $phObjDir = Join-Path $outDir "profiles_http_obj"
     New-Item -ItemType Directory -Force -Path $phObjDir | Out-Null
     $cmd7 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
