@@ -9,6 +9,32 @@ truth, not the checkboxes.** Nothing below is marked done until a commit is
 named. Every number is either measured and attributed, or explicitly labelled
 as an estimate.
 
+**Update 2026-09-06 (ninth pass) — `s_at` (autotune_engine.c, 10428 B, the
+largest still-internal single static named in the eighth-pass table) moved
+to PSRAM via `EXT_RAM_BSS_ATTR`, source/host-test only, not yet flashed.**
+The eighth pass deferred it citing "wider blast radius to verify" because
+`extern s_at_t s_at;` is shared across the module's five-way file split and
+read by `dashboard_http.c` for status; checked this pass —
+`dashboard_http.c` does not actually reference `s_at` directly, only through
+this module's accessor functions, and since `EXT_RAM_BSS_ATTR` keeps `s_at`
+a plain global at the same symbol (not a pointer), every `extern` reference
+in the other four split files (`autotune_engine_guard.c`,
+`_relay.c`, `_step_identify.c`, `_coupling.c`) needed no change — same
+one-file-touched shape as the eighth pass. Call-graph re-check (grep for
+`&s_at` and `nvs_get_blob\|nvs_set_blob` across all five files): the only
+NVS write reachable from this engine copies `s_at.model`/`s_at.coupling`
+into locals first and persists through the flash worker (see
+`autotune_engine_step_identify.c`'s 2026-08-31 PANIC FIX comment) — `s_at`
+itself is never handed to NVS as a buffer, unlike `kiln_cfg_store.c`'s
+`s_store` (still correctly left internal). `build_host_tests.ps1` needed one
+addition: `autotune_engine.c` now `#include "esp_attr.h"` directly (the
+eighth pass's stub already exists at `App/test/stubs/esp_attr.h`, just
+wasn't pulled in by this file before) — all 27 host-test executables pass;
+`run_all_checks.ps1` 50/51 (the one failure, `check_no_duplicate_crc.ps1`,
+is an unrelated concurrent-session race against another agent's temp
+`_fakes_work_*` directory, not this change). Not yet flashed/re-baselined —
+`dram_margin.h`'s `KILN_DRAM_*_KNOWN_BYTES` update waits for that.
+
 **Update 2026-09-05 (eighth pass) — first actual internal-DRAM relocation
 landed: `safety_cfg_http.c`'s three httpd-handler scratch buffers moved to
 PSRAM via `EXT_RAM_BSS_ATTR`, ~12.8 kB reclaimed, source/host-test only, not
@@ -21,7 +47,7 @@ from `KilnCtrl.map` (static data only; task-stack numbers are the sixth-pass
 
 | symbol | size | file | verdict |
 |---|---|---|---|
-| `s_at` | 10428 B | `autotune_engine.c` | clean (no NVS/flash call in file) — candidate for a future pass, not moved this pass to keep the change to one file |
+| `s_at` | 10428 B | `autotune_engine.c` | clean (no NVS/flash call in file) — not moved this pass to keep the change to one file; **moved in the ninth pass, see update above** |
 | `s_store` | 7468 B | `kiln_cfg_store.c` | **do not move** — this exact struct is the source/dest buffer `nvs_get_blob()`/`nvs_set_blob()` read/write directly; same hazard class as "PSRAM stack + NVS = panic," for a data buffer instead of a stack |
 | `json`/`body`/`pairs` (3 statics) | 8576+2560+1690 = 12826 B | `safety_cfg_http.c` | **moved this pass** — see below |
 | `ctx$0` | 4384 B | `main.c` | not traced this pass |

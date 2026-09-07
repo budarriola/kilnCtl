@@ -1,13 +1,28 @@
 #include "autotune_engine_internal.h"
 #include "heat_enable.h"
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_at's definition below */
+
 /* Task/lifecycle, the shared tick state machine, run setup and the plain
  * lifecycle/status API. See autotune_engine_internal.h's top comment for the
  * full five-way split this file is one piece of. */
 
 const char *AT_TAG = "autotune_engine";
 
-s_at_t s_at;
+/* Moved off internal DRAM to PSRAM 2026-09-06 (DRAM_PSRAM_PLAN.md's
+ * ranked-consumer table): 10428 B, second-largest single static after
+ * kiln_cfg_store.c's s_store. Safe to move -- unlike s_store, nothing in
+ * this file or its four siblings (autotune_engine_guard.c,
+ * autotune_engine_relay.c, autotune_engine_step_identify.c,
+ * autotune_engine_coupling.c) passes &s_at or a field of it as an
+ * nvs_get_blob()/nvs_set_blob() buffer; the one NVS write reachable from
+ * this engine (autotune_finalize_fit() -> zones_config_set_coupling_cell())
+ * already reads s_at.model/s_at.coupling into locals and persists through
+ * the flash worker (see autotune_engine_step_identify.c's 2026-08-31 PANIC
+ * FIX comment) rather than handing NVS a pointer into this struct. Still a
+ * plain global (not heap_caps_malloc'd), so every extern s_at_t s_at;
+ * reference in the other four files needs no change. */
+EXT_RAM_BSS_ATTR s_at_t s_at;
 
 /* "A test is in progress" -- the one definition of it. There are four running
  * states across two methods now, and every place that used to spell out
