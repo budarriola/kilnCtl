@@ -516,6 +516,19 @@ typedef struct {
      * etc. are DERIVED, computed once by firing_stats_snapshot() rather than
      * divided every tick. Zeroed by profile_executor_run()'s
      * memset(s_exec.zones, ...). */
+    /* docs/audits/iter_tune_decision_2026-09-07.md: the one field iter_tune.h's
+     * INTEGRATION POINT comment calls out as "not currently captured
+     * anywhere" -- this zone's own actual_c at its first accumulated
+     * (actual_valid) tick of the run, i.e. the same instant fs_sample_count
+     * goes 0->1 (see firing_stats_zone_tick()'s write site). Zeroed by
+     * profile_executor_run()'s memset(s_exec.zones, ...) like every other
+     * fs_* field above -- a zone that never accumulates a valid sample this
+     * run (all-excluded or zero-duration) reports 0.0f here, same
+     * degenerate-default convention firing_stats_snapshot() already uses
+     * for a never-ticked span. Prep-only: nothing reads this yet
+     * (iter_tune_process_firing() is deliberately not wired in by this
+     * change -- see the audit doc's recommendation). */
+    float    fs_start_temp_c;
     float    fs_err_sum;             /* sum of (actual - target) over valid samples */
     float    fs_iae_raw_sum;         /* running integral(|error|)dt */
     float    fs_max_overshoot_c;

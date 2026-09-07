@@ -37,8 +37,25 @@
    1.29 °C), so the floor is called a conservative overestimate, not exact.
 
 3. **Cost.**
-   - **Wire:** add `start_temp_c` capture to `zone_runtime_t`/
-     `profile_executor_run.c` (~10-20 LOC, mirrors existing pattern); add a
+   - **DONE (2026-09-06, prep only, decision-neutral):** `start_temp_c`
+     capture landed as `zone_runtime_t.fs_start_temp_c`
+     (`profile_executor_internal.h`), written by `firing_stats_zone_tick()`
+     (`profile_executor_firing_stats.c`) at this zone's first accumulated
+     tick -- not in `profile_executor_run.c` as originally sketched, since
+     the tick loop already has the exact "first accumulated tick" moment
+     `iter_tune_firing_t.start_temp_c`'s doc comment asks for, matching the
+     existing `fs_*` running-accumulator pattern instead of a separate
+     warm-start-style read. Surfaced live-only as `profile_exec_zone_
+     status_t.start_temp_c` / `/api/profile_exec`'s per-zone
+     `start_temp_c` -- NOT added to `profile_exec_firing_stats_t` itself,
+     because that struct is embedded byte-for-byte in `profile_firing_
+     history_blob_t`, persisted to NVS as a fixed-size versionless blob;
+     widening it would be a schema bump, refused as out of scope for this
+     reversible pass. So the persisted run-history JSON does not yet carry
+     `start_temp_c` -- adding it there still needs the schema-bump call
+     this brief flags as a separate, larger decision. `iter_tune_process_
+     firing()` is still not called from anywhere.
+   - **Remaining wire cost:** add a
      persisted `iter_tune_zone_state_t` per zone — new NVS namespace per the
      header's explicit instruction not to reuse `adap_tune`'s (~40-60 LOC in
      `kiln_cfg_store.c`, a schema/version bump); call

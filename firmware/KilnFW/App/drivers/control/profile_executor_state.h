@@ -272,6 +272,20 @@ typedef struct {
      * comment for units and sign. */
     profile_exec_firing_stats_t firing_stats;
 
+    /* docs/audits/iter_tune_decision_2026-09-07.md prep: this zone's
+     * actual_c at its first accumulated tick this run -- see zone_runtime_t.
+     * fs_start_temp_c's own doc comment (profile_executor_internal.h) for
+     * the exact capture rule. Deliberately NOT added to profile_exec_
+     * firing_stats_t/profile_firing_zone_record_t above: that struct is
+     * embedded byte-for-byte in profile_firing_history_blob_t, which is
+     * persisted to NVS as a fixed-size blob with no version field
+     * (profile_executor_firing_stats.c's firing_stats_persist()/
+     * firing_stats_load()) -- widening it changes that blob's sizeof and is
+     * a schema bump, out of scope for this reversible prep pass. This
+     * field is LIVE-ONLY (profile_executor_get_status(), /api/profile_exec)
+     * and carries no persisted counterpart yet. */
+    float    start_temp_c;
+
     /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag detection, reported
      * REGARDLESS of ramp_assist_enabled (dashboard_http.c's own field of
      * that name) -- see profile_executor_ramp_assist.c and EXEC_SUSTAINED_

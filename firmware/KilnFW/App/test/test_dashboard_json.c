@@ -105,6 +105,11 @@ static void fill_worst_case_zone(profile_exec_zone_status_t *z, uint8_t zi)
     z->firing_stats.sample_count = 0xFFFFFFFFu;
     z->firing_stats.excluded_sample_count = 0xFFFFFFFFu;
     z->firing_stats.duration_s = 0xFFFFFFFFu;
+    /* docs/audits/iter_tune_decision_2026-09-07.md prep: start_temp_c is
+     * live-only (profile_exec_zone_status_t, NOT profile_exec_firing_
+     * stats_t -- see that field's own comment for why), same worst-case
+     * magnitude convention as the rest of this helper. */
+    z->start_temp_c = -1234.56f;
     (void)zi;
 }
 
@@ -239,6 +244,13 @@ static void test_exec_status_json_is_complete_and_well_formed_at_3_zones(void)
               "needs to see, not just an internal accumulator");
     TEST_CHECK(strstr(json, "\"iae_normalized\"") != NULL, "must contain iae_normalized");
     TEST_CHECK(strstr(json, "\"mean_error_c\"") != NULL, "must contain mean_error_c");
+
+    /* docs/audits/iter_tune_decision_2026-09-07.md prep: start_temp_c is
+     * live-only, present in every zone object, same "not just once at the
+     * end" discipline as firing_stats above. */
+    int start_temp_objects = 0;
+    for (const char *p = json; (p = strstr(p, "\"start_temp_c\":")) != NULL; p += 15) start_temp_objects++;
+    TEST_CHECK(start_temp_objects == 3, "all 3 zones must carry start_temp_c");
 
     /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag fields must survive
      * the same worst-case 3-zone render, present in every zone object. */

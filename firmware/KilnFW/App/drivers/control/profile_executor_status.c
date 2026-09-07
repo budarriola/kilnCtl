@@ -332,6 +332,11 @@ void profile_executor_get_status(profile_exec_status_t *out)
                 }
                 firing_stats_snapshot(z, span, &zo->firing_stats);
             }
+            /* docs/audits/iter_tune_decision_2026-09-07.md prep -- live-only,
+             * see profile_exec_zone_status_t.start_temp_c's own comment for
+             * why this stays outside firing_stats_snapshot()/firing_stats
+             * (that struct is also embedded in the persisted history blob). */
+            zo->start_temp_c = z->fs_start_temp_c;
 
             /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag reporting,
              * ALWAYS (not gated on ramp_assist_enabled -- see profile_

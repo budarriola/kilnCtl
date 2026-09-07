@@ -150,7 +150,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         "\"max_undershoot_segment\":%u,\"iae_raw_c_s\":%.2f,\"iae_normalized\":%.4f,"
                         "\"ramp_err_mean_c\":%.2f,\"ramp_err_max_c\":%.2f,\"dwell_err_mean_c\":%.2f,"
                         "\"dwell_err_max_c\":%.2f,\"sample_count\":%lu,\"excluded_sample_count\":%lu,"
-                        "\"duration_s\":%lu}}",
+                        "\"duration_s\":%lu,\"start_temp_c\":%.2f}}",
                         first ? "" : ",", zi, (double)(z->actual_valid ? z->actual_c : 0.0f),
                         z->actual_valid ? "true" : "false", z->relay_commanded_on ? "true" : "false",
                         (double)z->duty, z->control_mode, z->faulted ? "true" : "false", reason_escaped,
@@ -168,7 +168,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         (double)fs->ramp_err_mean_c, (double)fs->ramp_err_max_c,
                         (double)fs->dwell_err_mean_c, (double)fs->dwell_err_max_c,
                         (unsigned long)fs->sample_count, (unsigned long)fs->excluded_sample_count,
-                        (unsigned long)fs->duration_s);
+                        (unsigned long)fs->duration_s, (double)z->start_temp_c);
         }
         if (n < 0 || (size_t)n >= cap - o) goto truncated;
         o += (size_t)n;

@@ -91,6 +91,15 @@ void firing_stats_zone_tick(zone_runtime_t *z, float target_c, bool dwelling, ui
         return;
     }
     float error = z->actual_c - target_c;
+    /* docs/audits/iter_tune_decision_2026-09-07.md prep: capture this
+     * zone's actual_c at the FIRST accumulated (actual_valid) tick, before
+     * fs_sample_count increments below -- matches iter_tune.h's own
+     * "start_temp_c: this zone's actual_c at the first accumulated tick"
+     * wording exactly. Written once per run: fs_sample_count only reads 0
+     * on this same tick. */
+    if (z->fs_sample_count == 0) {
+        z->fs_start_temp_c = z->actual_c;
+    }
     z->fs_sample_count++;
     z->fs_err_sum += error;
     z->fs_iae_raw_sum += fabsf(error) * dt_s;
