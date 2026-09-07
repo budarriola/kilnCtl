@@ -882,3 +882,19 @@ settled to steady state `state warn`, `warn_mask 0x0010`, `trip_mask
 0x0000` (S5 sensor-invalid WARN, expected -- no safety TC attached on this
 bench unit). `safety_get_link_stats` showed 1 crc error and 3 timeouts
 during the reset transient, not climbing afterward.
+
+## 2026-09-07 -- ESP+Pico flashed to 292a2aff (S6a revert included)
+
+Both processors flashed and verified at commit `292a2aff` (includes `49078173`
+reverting the S6a startup-grace suppression). ESP: gains/coupling read back
+identical to pre-flash (Zone0/1/2 Kp/Ki/Kd and coupling matrix all matched),
+partition/build verified by `flash_firmware`'s automatic check, `uart_protocol_version`
+11, compatible with the Pico's protocol 12. Pico: new `boot_id=54`, build
+timestamp matches the sha, link up and protocol-compatible both directions.
+
+The expected post-reset S6a `MAIN_FAULT` trip occurred (`cmd_trip_event_count`
+incremented) and was cleared with `safety_clear_trip()` once the link was
+confirmed up on both sides; it did not return afterward, and frame discards
+did not climb. Settled Pico diag: `warn_mask 0x0010` (S5, no bench safety TC --
+expected), `trip_mask 0x0000`.
+
