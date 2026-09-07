@@ -1,0 +1,438 @@
+# On/Off Device Zones — plan
+
+> **Status:** design only, nothing implemented. **Opened:** 2026-09-07.
+> Owner request, verbatim: *"add a feature that a zone may instead of being a
+> heater it can be a on off device. this should be an option to set in a profile
+> at a specific part of a ramp or dwell. for this if the dwell time if
+> significantly accumulateing then the dwel should be considered on. give options
+> for turning it on/off baised on ramp, direction, temp, time think about how our
+> dynamic changes in profile effect this."*
+
+**Interpretation (confirm or correct before step 1).** A zone's relay drives
+something that is not a heating element — vent, damper, fan, blower, water feed
+— switched ON/OFF rather than PID-modulated. A profile schedules that switching
+at points inside a ramp or dwell segment. "Dwell significantly accumulating"
+= a ramp segment that is stalled/lagging and piling up hold time should count
+as *dwell* for triggering purposes, not as *ramp*. Triggers on four axes: ramp
+(which segment/phase), direction (heating vs cooling), temperature, time.
+
+**Already exists, and is not this feature.** `PROFILE_SEG_KIND_RELAY_IO`
+(`persist/profiles_types.h`) already lets a *segment* command one relay or IO
+line, blocking or non-blocking, with `io_leave_on_at_end`. That is a
+**timeline event on a non-zone output**. This feature is different in three
+ways and must not be folded into it: (a) it is *state-driven*, re-evaluated
+every tick against temperature/direction/lag, not fired once at a segment
+boundary; (b) the output is a **zone** — it has a `relay_mask`, appears in
+`zone_mask`, is counted by the load cap, and is walked by every guard loop;
+(c) it must survive a stalled ramp, a mid-run edit and a resume. Where
+RELAY_IO suffices (a one-shot "open the damper at the start of segment 4"),
+tell the user to use RELAY_IO; this feature is for "vent whenever we are
+above 600 °C and cooling."
+
+---
+
+## 1. Zone typing — the safety core
+
+New per-zone field `zone_type`: `ZONE_TYPE_HEATER = 0` (default, every
+migrated zone), `ZONE_TYPE_ON_OFF = 1`. It is **not** a new
+`zone_control_mode_t` value (`OFF=0/BANGBANG=1/PID=2/PID_FUZZY=3`,
+`persist/zones_config_accessors.h:891`). Control mode answers "how is duty
+computed"; zone type answers "is this thing a heat source at all". Overloading
+mode would make every `mode >= PID` test in the tree silently correct-looking
+and semantically wrong, and would make the coupling matrix's meaning depend on
+a control-mode field it currently never reads.
+
+**One rule governs everything below: an on/off zone is never a heat source and
+never a heat *victim*. It contributes nothing to the thermal model and no
+thermal-model conclusion may be drawn from it.**
+
+| Consumer | File | For `ZONE_TYPE_ON_OFF` |
+|---|---|---|
+| PID tick | `control/profile_executor_pid_tick.c`, `control/pid.c` | Not called. `z->duty` is forced to 0.0 or 1.0 by the trigger evaluator; no integrator, no fuzzy gains. `pid_reset()` on every type change so a stale integral cannot resurface. |
+| Feedforward | `control/profile_executor_feedforward.c` | Not called. `ff_hold`/`ff_climb`/`coupling_correction` all 0. |
+| Coupling matrix | `control/zone_coupling_solve.c`, `zone_cfg_t::coupling_coeff` | **Row and column both forced to zero, at load and at solve time — belt and braces.** Column zero = "this zone injects no heat into anyone" (true: it is a fan). Row zero = "no neighbour's heat is corrected for on this zone" (it has no setpoint to correct). A non-zero row would put a fan into the Jacobi solve as an actuator with commandable duty and the solve would allocate real duty to it. Zeroing at *load* alone is not enough — the matrix is editable over the API and by autotune's coupling pass. Add a `_Static`-style assertion in the solve: refuse (log + treat as identity row) if any on/off zone has a non-zero row or column. |
+| Autotune | `control/autotune_engine.c:978` refuses `thermo_mask == 0` | **Refuse at start, same shape, same place, before any heating** — `zone %u is an on/off device, not a heater — autotune has nothing to identify`. Also refuse in `autotune_engine_run_relay()` and in the coupling pass (`autotune_engine_coupling.c`): an on/off zone must never be *excited* as the perturbing zone nor *fitted* as the responding zone. `iter_tune`/`adaptive_tune` likewise skip it. |
+| `thermal_guard` | `control/thermal_guard.c/.h` | Per-guard, below. Simplest correct implementation: the executor **does not call `thermal_guard_tick()` at all** for an on/off zone, and instead calls a new narrow `on_off_guard_tick()` covering only guards 5/6/7 (see below). Not calling it is safer than passing a "disable everything" flag, because a flag has to be threaded through every branch and a missed branch fails *open*. |
+| Load cap | `control/profile_executor.c` ~line 980 | See §6. |
+| Firing stats / IAE | `control/profile_executor_firing_stats.c` | Skip. An on/off zone has no `target_c` to have an error against; accumulating it would corrupt `iae_normalized` for the whole run. Report on-time seconds and switch count instead. |
+| Relay life budget | `persist/relay_cycles.c` | **Unchanged, and important** — an on/off vent on a temperature trigger can cycle far more often than a 60 s-window heater. `relay_type`/rated-life accounting applies as-is; this is why §3 mandates min-on/min-off times. |
+| Ramp-lock | `control/profile_executor.c:484` | **Excluded from the lock loop.** An on/off zone has no `actual_c` obligation; leaving it in means a zone with no thermocouple, or one sitting at ambient while the kiln climbs, freezes the shared setpoint forever. This is a *hard* requirement, not an optimisation. |
+| Auto-stretch / lag | `control/profile_executor_ramp_assist.c` | Excluded (it is fed by the lock loop above). |
+| Dwell credit | same | Excluded. Documented structurally unreachable anyway; do not add a second unreachable path. |
+| Executor watchdog inputs | `control/profile_executor.c`, `run_state.c` | An on/off zone counts as `active` for "is the run alive", but **must not** count toward "every active zone faulted ⇒ `PROFILE_EXEC_FAULTED`". A run whose only surviving zone is a fan is not a running firing — it is a stuck run. Rule: `PROFILE_EXEC_FAULTED` when every active **heater** zone is faulted, regardless of on/off zone state. |
+| Feasibility | `control/profile_feasibility.c` | Skip on/off zones entirely — no ramp rate is achievable or unachievable for a damper. |
+| PC tools / MCP | `tools/PcTools/src/kilnctrl/` | `capability_preflight` and the tuning tools must refuse to tune, and must not report an on/off zone as "untuned". |
+
+### Guard-by-guard
+
+| # | Guard | On/off zone |
+|---|---|---|
+| 1 | `HEATING_FAILED` (stall) | **DISABLE. This is the false-trip found in this design.** Guard 1 arms when commanded duty ≥ `progress_duty_min` and trips if the measurement does not rise within `progress_window_s`. A correctly working vent commands duty 1.0 for hours and produces *no rise at all* — often a *fall*. Guard 1 as written fires a HEATING_FAILED on a perfectly healthy device, and because guard-1 trips are per-zone-faulting, the vent stops mid-firing exactly when it is needed. **Nothing about guard 1's own logic can distinguish this**: "duty high, temperature flat" is the guard's entire trip condition and is also the vent's normal operating signature. The only correct fix is to not run guard 1 on an on/off zone. The arrival-band and `expected_rate` relaxations do **not** rescue it. |
+| 2 | `WRONG_DIRECTION` | **DISABLE**, same reason with the sign flipped: a vent's whole purpose is falling temperature while its relay is on. Guard 2 would trip immediately on the intended use case. |
+| 3 | `RUNAWAY` (welded contact) | **DISABLE as written**; it infers a welded output from temperature *rising while commanded off*, which an on/off zone's channel cannot express. Replace with nothing on the ESP — the useful welded-contactor detection for this output is CT-based (S14/S15 on the Pico) or contactor feedback, both out of scope here. Record this as an accepted coverage gap in `docs/SAFETY_CASE.md`. |
+| 4 | `DRIFT` | **DISABLE.** Drift is "sustained excursion from setpoint"; there is no setpoint. |
+| 5 | `MAX_TEMP` | **KEEP, if the zone has a thermocouple.** A ceiling on a measured channel is meaningful whatever the relay drives, and it is the one guard that protects the *kiln*, not the control loop. Trip action for an on/off zone = drive to its fail-safe state (§5), and fault the run globally as today. |
+| 6 | `MIN_TEMP` | **KEEP if TC present**, same reasoning. |
+| 7 | `SENSOR_INVALID` | **KEEP if TC present**; if no TC is assigned, not applicable (§2). |
+| 8 | `FROZEN` (value identity) | **KEEP if TC present.** Independent of duty. |
+| 9 | `CROSS_ZONE` | **Exclude from both sides of every comparison.** An on/off zone's channel is not comparable to a heater channel — a vent zone reading 200 °C below its neighbours is the design working. Leaving it in produces a global trip on a healthy kiln. |
+| `RELAY_STALLED` | guards 1/2 discriminator | Dead with 1/2 disabled. |
+| **S8** (Pico rate guard, `SAFETY_TRIP_RATE = 9`) | `firmware/SaftyFW/src/safety_guards.*` | **No change, and do not try to make one.** S8 runs on the Pico's *own* safety thermocouples against `abs`-scoped config; it does not know about ESP zone indices or zone types, and per the standing rule the Pico's limits are never made tighter or more conditional than the ESP's. If a vent causes a legitimately fast *fall*, S8 is a rise guard and is unaffected. **Open question for the owner if a vent is ever fitted near a safety TC.** |
+
+---
+
+## 2. Does an on/off zone need a thermocouple?
+
+**Optional, and the semantics must be settled explicitly, because two "zero
+means" conventions collide here.**
+
+- **With a TC** (recommended, and required for any temperature trigger):
+  guards 5/6/7/8 stay live; `max_temp_c == 0` keeps today's meaning —
+  *uncommissioned, refuse to start* (`control/profile_executor_run.c` ~line 330,
+  `control/profile_executor_start.c:165`). Do **not** carve an exception:
+  a channel that is measured must have a ceiling.
+- **Without a TC** (`thermo_mask == 0`): legal *only* for
+  `ZONE_TYPE_ON_OFF`, and only if the zone's trigger rules use no
+  temperature axis. `profile_executor_run()` must refuse at start if a
+  TC-less on/off zone is referenced by any rule with a temperature
+  condition — checked at start, not at the tick, matching the existing
+  refuse-before-heating discipline.
+- **`max_temp_c == 0` for a TC-less on/off zone:** must **not** block the
+  run. The "0 = uncommissioned, refuse" rule exists because an unmeasured
+  ceiling on a *heater* is lethal; a TC-less fan has no measurement for a
+  ceiling to apply to. Encode this as `zone_needs_ceiling(zi) = (zone_type ==
+  HEATER) || (thermo_mask != 0)` — one predicate, one place, so the two
+  call sites cannot drift. This is the only relaxation of the settled
+  `max_temp_c == 0` semantics and it must be spelled out in
+  `docs/SAFETY_CASE.md`.
+- **Autotune prestart refusal:** the just-added `thermo_mask == 0` refusal
+  (`autotune_engine.c:978`) already covers the TC-less case. Add the
+  `zone_type` refusal *before* it so a TC-equipped on/off zone gets the
+  accurate message rather than passing the TC check and failing later on a
+  flat trace.
+
+---
+
+## 3. Trigger model
+
+Per **(profile, segment, zone)** a rule. Storage lives with the **profile**,
+not the zone: the same vent is used differently by a bisque and a glaze
+firing. Zone config holds only *type*, *fail-safe state*, *hysteresis* and
+*min on/off times* — the physical properties of the device.
+
+```c
+typedef struct {                 /* one per on/off zone per segment */
+    uint8_t  zone_index;
+    uint8_t  enable;             /* 0 = rule absent, device follows profile default (OFF) */
+    uint8_t  phase_mask;         /* bit0 RAMP, bit1 DWELL — "which part of the segment" */
+    uint8_t  direction_mask;     /* bit0 HEATING (target rising), bit1 COOLING, bit2 FLAT */
+    uint8_t  temp_source;        /* 0 = none, 1 = measured (this zone's TC),
+                                  * 2 = measured (named zone's TC), 3 = executor setpoint */
+    uint8_t  temp_ref_zone;      /* for temp_source == 2 */
+    uint8_t  temp_cmp;           /* 0 = none, 1 = ABOVE threshold, 2 = BELOW threshold */
+    float    temp_threshold_c;
+    uint16_t time_start_s;       /* offset into the segment at which the rule becomes eligible */
+    uint16_t time_stop_s;        /* 0 = to end of segment; else eligible window ends here */
+    uint8_t  invert;             /* device ON when conditions are FALSE (a "close the damper
+                                  * while soaking" rule, without needing a second rule kind) */
+} profile_on_off_rule_t;
+```
+
+**Composition and precedence — defined, not emergent.** Evaluated top-down
+each tick; the first level that decides, wins:
+
+1. **Fail-safe override.** Safety trip, `PROFILE_EXEC_FAULTED`, halt, abort,
+   `relay_authority_zone_blocked()` — device goes to its configured fail-safe
+   state (§5). Nothing below can override this.
+2. **Guard 5/6 trip on this zone** — fail-safe state.
+3. **Run not `RUNNING`** (IDLE / PAUSED / DONE) — fail-safe state on
+   FAULTED/halt; on PAUSE, hold last commanded state *unless*
+   `failsafe_on_pause` is set (default: go to fail-safe, matching how
+   `io_segs_force_all_off()` treats PAUSE today).
+4. **Minimum on/off dwell not yet satisfied** — hold current state. This sits
+   *above* the rule evaluation so no rule can chatter the relay, and *below*
+   the safety levels so safety is never delayed by it.
+5. **Segment rule for this zone**, if `enable`. All configured axes are
+   **ANDed**: phase ∧ direction ∧ temperature ∧ time window. An axis left at
+   its "none/all" value is a tautology and drops out. `invert` negates the
+   AND result.
+6. **No rule for this segment** — device **OFF**. Not "hold last state":
+   a profile author who deletes a rule expects the device to stop, and
+   holding-last is how a vent gets left open across a whole glaze soak.
+
+Only one rule per (segment, zone) — no rule stacking. Multiple simultaneous
+conditions are what the AND is for; multiple *alternatives* are what multiple
+segments are for. This is a deliberate simplification: OR-composition across
+rules has no natural precedence and would need its own conflict policy.
+
+**Hysteresis.** Two mechanisms, both mandatory:
+
+- **Temperature hysteresis** `hyst_c`, default **2.0 °C**, range 0.5–25 °C,
+  per zone. An ABOVE rule turns on at `threshold + hyst_c/2` and off at
+  `threshold - hyst_c/2` (BELOW mirrored). Why 2.0: the K/S-type noise on
+  this board's channels is well under 1 °C sample-to-sample, so 2 °C is
+  several noise bands wide and cannot be crossed by noise, while being small
+  enough that a 100 °C/hr ramp crosses it in 72 s — the operator does not
+  perceive a lag. Anything below ~0.5 °C is inside the combine/calibration
+  quantisation and *will* chatter.
+- **Minimum on/off time** `min_on_s` / `min_off_s`, default **30 s** each.
+  Hysteresis alone is not enough near a dwell setpoint, where the temperature
+  sits *on* the threshold and PID ripple can straddle any band. 30 s bounds
+  the worst case at 120 cycles/hr; at contactor rated life
+  (`docs/RELAY_LIFE_BUDGET.md`) that is visible in the budget within one
+  firing, so the UI must show projected cycles for an on/off zone.
+
+---
+
+## 4. The dwell-accumulation rule
+
+**How dwell works today** (`control/profile_executor.c`, segment stepping,
+~lines 484–760):
+
+- `s_exec.dwelling` flips true only when `target_c == seg->target_c`, and
+  `segment_elapsed_s` then counts the dwell.
+- `segment_elapsed_s` and `target_c` advance **only when `lock_ok ||
+  stretched_this_tick`**. `lock_ok` is false while any active heater zone is
+  more than `EXEC_RAMP_LOCK_BAND_C(zi)` (default
+  `PROFILE_EXECUTOR_RAMP_LOCK_BAND_C = 25.0f`,
+  `control/profile_executor.h:351` — **25 °C, not 3**) below the shared
+  setpoint.
+- So a lagging ramp **freezes**: the setpoint stops, the clock stops, and the
+  kiln sits at a near-constant temperature for as long as it takes. That is
+  the owner's "dwell time significantly accumulating" — and today
+  `s_exec.dwelling` reads **false** throughout it. A DWELL-phase rule would
+  never fire during the exact stall the owner wants it to cover.
+
+**Definition.** Add an executor-computed `effective_dwell` used by *this
+feature only* (never fed back into `dwelling`, firing stats, or credit — see
+the reset-one-side bug class):
+
+```
+quasi_dwell ENTERS  when s_exec.ramp_lock_held has been continuously true
+                    for >= ON_OFF_QUASI_DWELL_ENTER_S  = 120.0f seconds
+quasi_dwell EXITS   when ramp_lock_held has been continuously false
+                    for >= ON_OFF_QUASI_DWELL_EXIT_S   =  30.0f seconds
+                    OR the segment index changes (hard reset)
+effective_dwell = s_exec.dwelling || quasi_dwell
+```
+
+**Why 120 s enter.** `EXEC_SUSTAINED_LAG_S = 30.0f`
+(`control/profile_executor_internal.h:1023`) is already the repo's answer to
+"how long before a lag is real rather than settling noise". 120 s is 4× that:
+long enough that no plausible sequence of noise, a load-cap-deferred window,
+or a single PWM window landing badly can reach it, and short enough to be a
+small fraction of any real ramp segment (hours). Directly reusing 30 s was
+rejected — 30 s is calibrated for *warning an operator*, and acting on a relay
+deserves a wider margin than lighting a status field.
+
+**Why 30 s exit, and why it is asymmetric.** Exit is deliberately 4× *faster*
+than entry, because the failure modes are asymmetric: entering late costs a
+vent a couple of minutes; leaving late means a vent stays open into a genuine
+ramp, fighting the elements and possibly *causing* the next lag. Asymmetric
+thresholds with a 4:1 ratio give ≥ 150 s of total round-trip dead time, which
+is far longer than the lock's own oscillation period.
+
+**Why it cannot flap.** Three independent stops: (a) the two thresholds are
+disjoint, so a single boundary crossing cannot toggle both; (b) the per-zone
+`min_on_s`/`min_off_s` (§3 level 4) sits below this and bounds the relay
+regardless of how the classifier behaves; (c) `quasi_dwell` is reset hard on
+any segment change, so it can never leak across a boundary. The classifier is
+recomputed from `ramp_lock_held` each tick and holds no state beyond the two
+timers, which are the only new state this feature adds to `s_exec`.
+
+**Reported, not inferred.** `effective_dwell`, `quasi_dwell` and the two
+timers go into `/api/status` and the dashboard. An operator seeing a vent open
+must be able to see *why* — "segment 3, quasi-dwell for 14 min (ramp-locked,
+zone 2 lagging 31 °C)".
+
+---
+
+## 5. Dynamic profile changes
+
+| Event | On/off behaviour |
+|---|---|
+| **Ramp-lock engages** | §4. Rules keyed to DWELL start firing after 120 s. Rules keyed to RAMP stop. |
+| **Auto-stretch engages** | `stretched_this_tick` means the setpoint *is* advancing, so `ramp_lock_held` may still be true while real progress happens. **Decision:** quasi-dwell's timer is gated on `ramp_lock_held && !stretched_this_tick` — a stretched ramp is a ramp, slowly. Not doing this would classify every stretched segment as a dwell. |
+| **Approach-rate cap** | Caps the *commanded* setpoint, not the phase. Direction is evaluated from `s_exec.target_rate_c_per_s` sign, which the cap preserves. No change. |
+| **Dwell credit** | Documented structurally unreachable. On/off triggering reads `s_exec.dwelling`, which credit can only end *earlier*, never start later. No special handling; do not add code for it. |
+| **Feedforward hold vs climb** | Irrelevant — an on/off zone runs no feedforward. But note: `zone_feedforward()` must not be called with an on/off zone's `ff_tau_s`/`k_dc`, which are meaningless and may be garbage from a type change. Zero them on type change. |
+| **Setpoint edited mid-run** | Temperature rules read the *live* value each tick, so an edit takes effect immediately — correct. Direction is recomputed from the new rate. A rule whose threshold is now unreachable simply never fires; the UI must warn at save time, not silently. |
+| **Profile edited mid-run (rule changed)** | Rules are re-read at the same point config reload already happens (`control/profile_executor_config_reload.c`). A rule removed mid-segment sends its device to OFF (precedence level 6), *subject to `min_on_s`*. |
+| **Resume after power cycle** | The warm-start path (`profile_executor_run.c` ~line 680, `plan.entry_dwelling`) restores `dwelling` but there is no persisted `quasi_dwell` and there must not be — the lock state after a reboot is unknown. **Resume starts every on/off device in its fail-safe state and `quasi_dwell = false`,** then re-derives from the first tick's real conditions. Re-entry costs at most 120 s. Persisting it would be a reset-one-side bug: `ramp_lock_held` is rebuilt from scratch on resume while a restored timer would not be. |
+| **Abort / halt** | Fail-safe state. |
+| **Fault (`PROFILE_EXEC_FAULTED`)** | Fail-safe state. |
+| **Safety trip / `relay_authority_zone_blocked()`** | Fail-safe state — **and here is the hard part.** |
+
+**Fail-safe state is per zone, and its default is OFF.**
+
+```c
+uint8_t failsafe_state;   /* 0 = OFF (default), 1 = ON */
+```
+
+A vent's safe state is arguably ON (dump heat), which is the opposite of a
+heater's. But **the default must stay OFF**, for the same reason
+`io_leave_on_at_end` defaults to 0: a zero-initialised struct — a fresh save,
+a partial form, a migrated v22 blob — must never leave a relay energised with
+nothing owning it. An owner who wants a fail-safe-ON vent sets it explicitly,
+and the UI must require a confirmation for that choice and show it on the
+zones page and in diagnostics.
+
+**Fail-safe ON has a real limit that must be stated to the owner:** on a
+safety trip the Pico opens K4, which de-energises the whole heating chain. If
+the vent's contactor is fed from the same interlocked supply, `failsafe_state
+= ON` is a *request* the hardware cannot honour. **Question for the owner:
+which supply feeds the intended on/off device?** If it is behind K4, fail-safe
+ON is unachievable and the UI must say so rather than imply protection that
+does not exist.
+
+---
+
+## 6. Relay authority and interlocks
+
+- **All writes go through `apply_relay()`
+  (`control/profile_executor_relay_io.c`) exactly as a heater does** — same
+  `claimed_relay_mask` accumulation, same `relay_authority_zone_blocked()`
+  evaluation every tick, same `kiln_io_owner` write. No new relay path, no
+  direct `kiln_io_*` call. Six features in this repo have bypassed
+  `kiln_io_owner` and every one produced a one-directional interlock; there
+  is no reason for a seventh.
+- `relay_authority_zone_blocked()` currently means "may this zone *heat*". For
+  an on/off zone it means "may this zone *actuate*". **Keep the same gate**:
+  it is the conservative choice, and a vent that stops when the safety
+  processor is unhappy is defensible. The consequence — a fail-safe-ON vent
+  cannot be commanded on while blocked — is the same limitation as above and
+  must be documented in one place, not two.
+- **`max_simultaneous_relays`: an on/off zone counts, and its suppression
+  order is different.** It counts because the cap exists to bound *coil and
+  supply current*, and a contactor coil draws the same whatever it switches.
+  But the load-cap victim selection (`profile_executor.c` ~980) picks the zone
+  with the least `deferred_on_ms`, and defers the denied on-time for later
+  repayment — which is meaningless for an on/off device (there is no window to
+  repay into, exactly the documented bang-bang gap). **Rule: on/off zones are
+  chosen as load-cap victims LAST**, after every heater has been considered,
+  and their denial is logged rather than deferred. Rationale: suppressing a
+  vent to run an element is the wrong trade in a kiln that is already at its
+  relay budget, and silently deferring it would make a vent look commanded-on
+  while being off.
+- If the cap is *reached* by on/off zones alone, that is a configuration
+  error; refuse at run start rather than discovering it mid-firing.
+
+---
+
+## 7. Schema and storage
+
+**Two separate schema surfaces; do them in separate steps.**
+
+1. **Zones config — `ZONES_CFG_VERSION 22 → 23`**
+   (`persist/zones_config_json.h:63`). Tail-append to `zone_cfg_t`, exactly
+   the `relay_type` precedent (v19→v20, offset 208) and `progress_band_c`
+   (v21→v22):
+   ```c
+   uint8_t zone_type;       /* ZONE_TYPE_HEATER = 0 (migration default) */
+   uint8_t failsafe_state;  /* 0 = OFF (migration default) */
+   float   hyst_c;          /* 0 -> 2.0f default at read */
+   uint16_t min_on_s;       /* 0 -> 30 */
+   uint16_t min_off_s;      /* 0 -> 30 */
+   ```
+   Freeze `zone_cfg_v22_t` byte-for-byte with its `_Static_assert` on the
+   `progress_band_c` offset, add `convert_zone_v22()`, and extend
+   `convert_versioned_blob_to_current()`. Every migration default is the
+   value that reproduces today's behaviour, so a v22 board upgrading gains
+   nothing but a zero.
+   **Rollback hazard:** per `docs/UPDATE_PROTOCOL.md`, an `ota_rollback_esp()`
+   past v23 makes the older firmware reject the blob and run on
+   firmware-default PID gains. Same standing warning; read back
+   `control_get_zones` after any rollback.
+
+2. **Profiles — per-segment rules.** `profile_segment_t` is
+   `PROFILE_MAX_SEGMENTS = 12` and already 20-odd bytes; adding an array of
+   up to 5 rules inline multiplies the profile blob by ~4 and would blow the
+   existing profile storage budget. **Instead: one `profile_on_off_rule_t`
+   array per profile, `PROFILE_MAX_ON_OFF_RULES = 8`, each carrying its own
+   `segment_index`.** Sparse, since most segments have no rule, and it keeps
+   `profile_segment_t`'s layout — and the RELAY_IO fields — untouched.
+   Version the profile blob with the same tail-append discipline.
+
+3. **`cfg` filesystem migration is in flight and must not be collided with.**
+   `zones_config_cfg_fs.c`, `profiles_cfg_fs.c`, `dualwrite_window.c`,
+   `cfg_fs_mount.c`, `pref_cfg_fs.c` and the format policy are all owned by
+   another workstream right now (`docs/CONFIG_FILESYSTEM.md`). **Do not touch
+   them.** Sequencing rule: land the v22→v23 zones bump and the profile rule
+   array through the *existing* NVS/serialiser path only, and let the
+   dual-write layer carry them for free — the dual-write window serialises
+   whatever the current struct is. If the filesystem work lands its cutover
+   first, this plan's schema step needs no change; if this lands first, the
+   filesystem work picks up two extra fields in the same blob it already
+   copies. **Neither ordering requires a merge, provided this feature never
+   edits a `cfg_fs*` file.** Confirm with that workstream before step 5.
+
+---
+
+## 8. UI and API
+
+- **Zones page** (`http/zones_page.html`, `http/zones_http_post_parse.c`):
+  a **Zone type** select (Heater / On-off device) at the top of each zone
+  card. Selecting On-off device **hides** PID gains, coupling row, autotune
+  button, ramp/approach fields, and guard 1/2/3/4/9 thresholds — they are
+  inert, and showing an inert field is how the fuzzy-mode-2 campaign went
+  silently inert for weeks. Reveals: fail-safe state (with a confirm on ON),
+  hysteresis, min on/off, projected cycles/hr.
+- **Profiles page** (`http/profiles_page.html`): per segment, a compact row
+  per on/off zone — `[zone] [phase ▾] [direction ▾] [temp ▾ ABOVE 600 °C]
+  [from 0 s to end] [invert]`. Save-time validation rejects a temperature
+  rule on a TC-less zone and warns on an unreachable threshold.
+- **API:** `zone_type`/`failsafe_state`/`hyst_c`/`min_on_s`/`min_off_s` as
+  ordinary form fields on `POST /api/zones/config`, echoed by `GET`. Rules go
+  on the existing profile POST/GET as an indexed field family
+  (`rule0_zone=3&rule0_phase=2&...`), matching how segments are already
+  encoded. `/api/status` gains `effective_dwell`, `quasi_dwell`,
+  `quasi_dwell_held_s`, and per on/off zone `commanded_on`, `on_time_s`,
+  `switch_count`, `rule_reason` (short string).
+- **LCD (480×320 landscape, no scroll, no new colours):** on/off zones render
+  in the existing zone strip with the temperature slot replaced by
+  `ON`/`OFF` and the duty bar replaced by a filled/empty block, reusing the
+  relay-state colours already on the topbar. One extra line on the Home page
+  when quasi-dwell is active: `SEG 3 HOLD 14m`. No new page.
+
+---
+
+## 9. Ordered steps
+
+Riskiest last. Every step is independently shippable and leaves the tree
+green.
+
+| # | Step | Flash? | Reversible? | Test |
+|---|---|---|---|---|
+| 1 | `zone_type`/`failsafe_state`/`hyst_c`/`min_on_s`/`min_off_s` in `zone_cfg_t`, v22→v23, `zone_cfg_v22_t` frozen, converters. **No consumer reads them yet.** | No (host only until flashed with step 3) | Yes — pure tail-append | `test_zones_http.c`: round-trip, v22-blob upgrade, `_Static_assert` offsets, defaults-on-zero |
+| 2 | Read-only predicates + exclusions: `zone_is_on_off()`, `zone_needs_ceiling()`, exclude on/off zones from ramp-lock, lag, feasibility, firing stats, cross-zone guard 9, coupling row/column zeroing. **Still no zone is typed on/off, so behaviour is bit-identical.** | No | Yes | Host tests asserting bit-identical executor output with all zones HEATER; negative test forcing a zone on/off and asserting the lock loop skips it (break the real predicate, restore by hand) |
+| 3 | Guard gating: `on_off_guard_tick()` (5/6/7/8 only), autotune/iter_tune/adaptive_tune refusals, `PROFILE_EXEC_FAULTED` counts heaters only. | Yes | Yes | `test_thermal_guard*`: assert guard 1 **cannot** trip an on/off zone under duty 1.0 + flat temperature for 10× `progress_window_s` — this is the false-trip regression test and it must fail before the fix |
+| 4 | `effective_dwell`/`quasi_dwell` classifier + status/API reporting. **Reporting only — nothing acts on it.** | Yes | Yes | Host test driving `ramp_lock_held` patterns across the 120 s/30 s boundaries, stretched-ramp gating, segment-change reset, and an anti-flap sweep |
+| 5 | Profile rule storage + validation + profiles API/UI. Rules parse and persist; **the executor still ignores them.** | Yes | Yes | Profile round-trip, rule-count limits, TC-less + temperature-rule refusal at save and at run start |
+| 6 | Zones UI: type select, field hiding, fail-safe confirm. | Yes | Yes | Manual + `check_*` lint; verify hidden fields are actually inert, not just invisible |
+| 7 | Trigger evaluator, precedence levels 4–6, hysteresis, min on/off. Output computed and reported, **relay still not written** (dry-run flag). | Yes | Yes | Host test per precedence level; a chatter test at threshold ± noise asserting ≤ 2 switches/min |
+| 8 | **Wire the relay** through `apply_relay()`; load-cap victim ordering; fail-safe on abort/fault/trip/pause/resume. | Yes | Yes (config: set every zone back to HEATER) | Host tests for each termination path; bench test on a **spare relay with no load connected**, no firing |
+| 9 | Bench firing with a real device, owner present. | Yes | — | Owner-supervised; verify quasi-dwell on a deliberately lagging segment |
+
+**Risks I would not take**
+
+- Shipping steps 3 and 8 in one flash. Guard gating disables four guards; it
+  gets its own flash and its own bench observation before anything actuates.
+- Any bench run at step 8 with a load on the relay. Dry contacts only.
+- Making S8 or any Pico guard conditional on ESP zone type. The Pico's limits
+  stay unconditional and never tighter than the ESP's.
+- Persisting `quasi_dwell` across a reboot.
+- Defaulting `failsafe_state` to ON for any zone, however obviously a vent it
+  looks.
+- Touching any `cfg_fs*` file while the filesystem migration is in flight.
+
+**Questions for the owner**
+
+1. Which supply feeds the intended on/off device — is it behind K4? If yes,
+   `failsafe_state = ON` cannot be honoured on a safety trip (§5).
+2. Is the device near a safety thermocouple? If so, S8's rate window may see
+   its effect (§1).
+3. Confirm the interpretation at the top, and confirm that
+   `PROFILE_SEG_KIND_RELAY_IO` is *not* what you actually wanted — it already
+   does one-shot "turn relay 2 on at segment 4" today, without any of this.
+4. Expected switching frequency, so the relay-life budget can be sized before
+   step 1 rather than after step 9.
