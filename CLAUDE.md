@@ -174,26 +174,17 @@ server stopped, submodule remounted at the new `.gitmodules` path, every
 `.claude/settings.json` allowlist entry walked one at a time rather than bulk-
 edited). `pdfMcp/` moved to `tools/pdfMcp/` the same day — its own running
 server process couldn't be moved out from under itself mid-session, so that
-directory was copied rather than renamed, and `tools/pdfMcp/.venv` therefore
-kept the copied `pyvenv.cfg`/shim-exe shebangs pointing at the old
-`pdfMcp\.venv\Scripts\python.exe` even though `.mcp.json` launches
-`tools/pdfMcp/.venv/Scripts/pdf-mcp.exe`. The leftover root `mykicadMcp/` (an
-empty agent-worktree remnant containing only a stray `.claude/` folder, no
-source, not its own git checkout) was confirmed untracked and unheld by any
-process and deleted 2026-09-06. The root `pdfMcp/` copy (full `.venv`) is
-**still present as of 2026-09-06**: six live `pdf-mcp.exe` processes were
-found running from `tools/pdfMcp/.venv/Scripts/pdf-mcp.exe`, whose shim
-still resolves to the root venv's interpreter, so Windows holds those exe/DLL
-files open and the directory cannot be safely renamed or rebuilt in place
-without killing those servers first. Fix is queued, not applied: next time
-the pdf-mcp servers are restarted, rebuild `tools/pdfMcp/.venv` from scratch
-(`pip install pdf-mcp==2.0.0`, a plain PyPI package — there is no local
-source tree for it, `pip show pdf-mcp` confirms `Home-page:
-https://github.com/jztan/pdf-mcp`) so its own shebangs point at itself, then
-delete the root `pdfMcp/` copy. `.mcp.json` already points only at
-`tools/pdfMcp/.venv/Scripts/pdf-mcp.exe` — no config change needed, only the
-venv rebuild. Do not treat the root-level `pdfMcp/` copy as current; the
-paths in this file reflect `tools/mykicadMcp/` and `tools/pdfMcp/` only.
+directory was copied rather than renamed, and `tools/pdfMcp/.venv`'s shims
+still resolved to the root venv's interpreter. The leftover root
+`mykicadMcp/` remnant was deleted 2026-09-06. As of 2026-09-06 six live
+`pdf-mcp.exe`/`python.exe` processes still held both the root `pdfMcp/`
+and `tools/pdfMcp/.venv`, so a self-referential replacement was built
+side-by-side at `tools/pdfMcp/.venv_new` instead (`pip install
+pdf-mcp==2.0.0`, shebangs confirmed pointing at `.venv_new`). **Pending
+swap**: next time no `pdf-mcp.exe` is running, rename `tools/pdfMcp/.venv_new`
+to `tools/pdfMcp/.venv` and delete the root `pdfMcp/` copy — `.mcp.json`
+already points only at `tools/pdfMcp/.venv/Scripts/pdf-mcp.exe`, no config
+change needed.
 
 All main-board KiCad project files live under **hardware/mainBoard/** (paths below are relative to that
 directory unless noted). A second, independent board — the 5-channel thermocouple daughterboard —
