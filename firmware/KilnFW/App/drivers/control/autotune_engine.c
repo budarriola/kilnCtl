@@ -954,6 +954,37 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         return false;
     }
 
+    /* Autotune readiness audit (docs/audits/autotune_readiness_2026-09-07.md,
+     * item 3): a zone with no thermocouple channel assigned (thermo_mask ==
+     * 0) is not caught by any existing prestart check -- zones_config_
+     * is_valid() only confirms the config blob loaded, and the relay_mask
+     * check above is a completely independent field. Left unchecked, such a
+     * zone sails through autotune_begin_run_locked() and even through
+     * check_thermal_readiness_locked()'s SETTLING-phase gate, because that
+     * function's own "cannot judge it, so it cannot block the run" degrade
+     * path (see its doc comment) skips exactly this zone's own row whenever
+     * ok_by_zone[zone_index] is false -- which it always is here, since
+     * thermo_combine() over an empty mask can never produce a valid reading.
+     * The run then proceeds to STEPPING with actual_valid permanently false,
+     * sensor_ok gating every commanded duty to 0.0f (see the thermal_guard_
+     * input_t.commanded_duty comment below), and drives nothing for the
+     * FULL step-test budget (up to AUTOTUNE_ENGINE_WHOLE_RUN_MAX_DURATION_S,
+     * hours) before autotune_finalize_fit() finally refuses the trace as
+     * "flat or noise-dominated" -- exactly the wasted-tune shape this refusal
+     * exists to prevent cheaply, up front, instead of hours in. Checked here,
+     * not only in the tick, for the same "refuse before any heating starts"
+     * convention as every other check in this function. */
+    uint8_t tmask = 0;
+    if (!zones_config_get_thermo_mask(zone_index, &tmask) || tmask == 0) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "zone %u has no thermocouple channel assigned -- autotune cannot measure a "
+                     "response with no sensor to read",
+                     zone_index);
+        }
+        return false;
+    }
+
     /* TODO.md 6A.5: per-zone, not "any profile anywhere" -- a profile
      * running on a *different* zone no longer blocks autotune here, now
      * that concurrent multi-zone execution exists. Zones must still be

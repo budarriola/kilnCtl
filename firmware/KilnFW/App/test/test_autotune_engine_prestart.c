@@ -590,14 +590,18 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     return true;
 }
 
+// Configurable per-test (default 0x01, i.e. this stub's original hardcoded
+// behavior -- zone 0 -> channel 0, matching MAX31856_read_all()'s stub above
+// and every STEPPING-loop test below). test_run_refuses_zone_with_no_
+// thermo_mask() sets this to 0 to exercise the new prestart refusal in
+// autotune_begin_run_locked(); every other test leaves it at the default and
+// is unaffected.
+static uint8_t s_stub_thermo_mask = 0x01;
+
 bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
 {
-    // Zone 0 -> channel 0 (bit 0), matching MAX31856_read_all()'s stub
-    // above and every STEPPING-loop test below, which all test zone 0.
-    // Unreached by the prestart tests (see this file's header comment), so
-    // this is not a behavior change for them.
     (void)zone_index;
-    if (out_mask) *out_mask = 0x01;
+    if (out_mask) *out_mask = s_stub_thermo_mask;
     return true;
 }
 
@@ -2612,6 +2616,53 @@ static void test_run_refuses_while_zone_sweep_is_active(void)
     errbuf[0] = '\0';
     ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
     TEST_CHECK(ok, "control: with no sweep active, the identical setup must succeed");
+}
+
+// docs/audits/autotune_readiness_2026-09-07.md item 3: a zone with no
+// thermocouple channel assigned (thermo_mask == 0) used to sail through
+// autotune_begin_run_locked() -- neither zones_config_is_valid() nor the
+// relay_mask check above it says anything about thermo_mask -- and would
+// have run the FULL step-test budget with actual_valid permanently false
+// before autotune_finalize_fit() finally refused the flat trace, hours in.
+// Exercises the real prestart path (autotune_engine_run(), not the tick),
+// same convention as test_run_refuses_while_zone_sweep_is_active() above.
+static void test_run_refuses_zone_with_no_thermo_mask(void)
+{
+    TEST_SECTION("autotune_engine_run() refuses a zone with no thermocouple channel assigned");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_stub_thermo_mask = 0x00;
+
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+
+    TEST_CHECK(!ok, "a zone with thermo_mask==0 must refuse the autotune run before any heating starts");
+    TEST_CHECK(strstr(errbuf, "thermocouple") != NULL, "the refusal must name the missing sensor assignment");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE,
+               "a refused run must never leave the engine in a running state");
+
+    // Control case: with a real thermo_mask restored, the identical setup
+    // succeeds -- proves the refusal above is really about the mask, not
+    // some other side effect of this test's setup.
+    s_stub_thermo_mask = 0x01;
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    errbuf[0] = '\0';
+    ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "control: with a thermo_mask assigned, the identical setup must succeed");
 }
 
 // The shared heat claim's atomic gate (relay_authority.h) -- proves the LATE
@@ -5850,6 +5901,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_relay_switching_is_counted();
 
     test_run_refuses_while_zone_sweep_is_active();
+    test_run_refuses_zone_with_no_thermo_mask();
     test_run_refuses_at_atomic_heat_claim_gate();
 
     // Heat-enable (K4) wiring -- each starts from its own
