@@ -847,3 +847,18 @@ worktree, `C:/wt/pico_flash`, off this commit). Post-flash: boot_id 155 ->
 243, `safety_get_diag` shows `state warn`, `warn_mask 0x0010` (S5
 sensor-invalid WARN, expected with no safety TC attached on this bench
 unit) and `trip_mask 0x0000` -- no S5 trip, confirming this fix's purpose.
+
+Flashed to bench Pico 2026-09-07 at `b25663e2` (built from a clean detached
+worktree, `C:/wt/picoflash`, off this commit) to carry forward the
+`config_store_write_cb` fix -- a masked `hal_flash_program` failure on the
+SET_CONFIG / SET_CT_CAL / COMMIT_CONFIG write path, plus 5 unlogged
+metadata-persist failures. Pre-flash the board was latched TRIPPED with
+`trip_reason 5` (safety TC invalid, the known CR1-type-byte-unverified
+class this bench sees on reset); relays confirmed off, no firing.
+Post-flash: boot_id 145, `safety_get_fw_version` shows protocol v12 (min
+compatible v7), `get_fw_version` on the ESP shows protocol v11 compatible
+yes. `safety_get_diag` shows `state warn`, `warn_mask 0x0010` (S5
+sensor-invalid WARN, expected, no safety TC attached on this bench unit)
+and `trip_mask 0x0000` -- the boot-time trip did not survive the reflash;
+no `debug_reset` was needed. `safety_get_link_stats` showed 1 crc/framing
+error immediately after the reset transient, not climbing afterward.
