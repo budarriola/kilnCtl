@@ -660,10 +660,17 @@ current image is.
       skewing the linker script's `LENGTH` — build stopped with both
       mismatched numbers named.
 - [x] 10.8's remaining half — see Phase 9's `config_crc_ok` entry above.
-- [ ] 10.8c, remaining caveat: the retransmit-round cap (10 rounds) is a real
-      backstop, but one "round" can take far longer in practice than
-      `UPDATE_PROTOCOL.md`'s throughput section seems to assume — not measured
-      against a real link (blocked on 10.0).
+- [ ] 10.8c, narrowed 2026-09-06: bench measurement only. Computed from code
+      (`ota_pico_relay.c`'s `RELAY_MAX_RETRANSMIT_ROUNDS`/`RELAY_GAP_ROUND_WAIT_MS`
+      and `safety_link.h`'s `SAFETY_LINK_UPDATE_STATUS_MAX_GAPS`), not a real
+      capture: each retransmit round repairs at most 32 chunks (7.75 KB) and
+      is paced by the Pico's ~500 ms status cadence rather than the 230400
+      baud wire rate, giving ≈15.5 kB/s best case / ≈3.9 kB/s worst case per
+      round, and 5–20 s to exhaust the full 10-round cap (≈77.5 KiB
+      repairable) before `UPDATE_END`'s CRC even runs. Recorded in
+      `UPDATE_PROTOCOL.md` §4 ("Retransmit-round throughput — computed, not
+      yet measured"). Still blocked on 10.0 for a real capture to confirm
+      or replace these numbers.
 - [x] **10.9 RESOLVED 2026-08-25 — bootloader hand-off was never broken; the
       slot-A image tested on 2026-08-23 was stale.** Re-tested with a
       freshly built slot-A image: 60 s window, ESP frames-deframed +195,

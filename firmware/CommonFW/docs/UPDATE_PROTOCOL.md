@@ -417,6 +417,40 @@ Before building this:
       the physical isolated link (U6, 230400 baud); no hardware access this
       pass. Matches the duplicate of this item under §7's "Pico update"
       checklist, also left unchecked there.
+
+**Retransmit-round throughput — computed, not yet measured (2026-09-06).**
+The paragraphs above compute whole-transfer throughput for the *old*
+stop-and-wait design; they say nothing about the *current* broadcast +
+gap-report design's per-round repair rate, which is what 10.8c's cap
+actually bounds. Worked from code, not a capture:
+
+- `ota_pico_relay.c`'s retransmit loop (`RELAY_MAX_RETRANSMIT_ROUNDS = 10`)
+  waits up to `RELAY_GAP_ROUND_WAIT_MS = 2000` ms per round for a fresh
+  `UPDATE_STATUS` gap report, then resends every named gap once. A round
+  can name at most `SAFETY_LINK_UPDATE_STATUS_MAX_GAPS = 32` missing
+  248-byte chunks (`safety_link.h`).
+- Sending 32 `UPDATE_DATA` frames (253 B payload + 5 B offset+cmd header,
+  ~260 B on the wire before byte-stuffing, same 10-bit/byte 8N1 arithmetic
+  the doc already uses above) at 230400 baud takes 32 × 260 × 10 / 230400 ≈
+  0.36 s — negligible next to the wait.
+- The round's own cadence is therefore set by the Pico's ~500 ms
+  `UPDATE_STATUS` cadence, not the wire: **best case ≈ 32 × 248 B / 0.5 s ≈
+  15.5 kB/s** of gap repaired per round; **worst case** (a round where no
+  fresh status lands before the 2 s `RELAY_GAP_ROUND_WAIT_MS` timeout) **≈
+  32 × 248 B / 2 s ≈ 3.9 kB/s**.
+- Over the full 10-round cap that bounds total repairable damage at 10 ×
+  32 × 248 B ≈ 77.5 KiB, taking between 5 s (10 × 500 ms, gap reports never
+  missed) and 20 s (10 × 2 s, every round times out waiting for a status
+  frame) of wall clock — **before** `UPDATE_END`'s CRC check even runs, and
+  on top of whatever the initial unacknowledged sequential streaming pass
+  already took.
+- No capture evidence exists yet (checked `tools/PcTools/logs/*.log` and
+  `docs/bench_snapshots/` for gap-count/round timing lines — none present);
+  the 15.5 kB/s / 3.9 kB/s / 5–20 s figures above are computed from the
+  constants in `ota_pico_relay.c` and `safety_link.h`, not measured against
+  the physical link. Re-derive from a real capture once 10.0's bench
+  measurement lands, and replace this note rather than adding beside it.
+
 - [ ] Decide whether to raise the baud rate for the duration of an update.
       **Blocked on the measurement above** — this is a real engineering
       decision (not just a software task), and it needs that data first.
