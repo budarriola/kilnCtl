@@ -24,8 +24,36 @@
 #   powershell -ExecutionPolicy Bypass -File tools\run_all_checks.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\run_all_checks.ps1 -ListOnly
 #
-# Exit code is 0 only if every discovered check passed and at least
-# $MinimumChecks of them were found.
+# Exit code is 0 only if every discovered check passed (or was legitimately
+# skipped) and at least $MinimumChecks of them were found.
+#
+# SKIP STATUS. A check script may find its own prerequisite missing (no
+# `node` on PATH, no build directory yet, a toolchain not installed) without
+# that being a defect -- these are documented, deliberate non-failures
+# (docs/audits/check_independence_2026-09-07.md category 4). Before this
+# revision, such a check reported that by printing a yellow warning and
+# calling `exit 0`, which is indistinguishable, to this runner and to its
+# exit code, from an actual PASS -- a check silently loses all its coverage
+# on a machine missing its prerequisite while run_all_checks.ps1 keeps
+# reporting a clean sweep. That is exactly the "guard reports green with
+# zero coverage" shape this repo has been burned by before (see
+# check_source_path_drift.ps1's `if not path.is_file(): skipTest(...)`
+# history) and the audit above found three fresh instances of it.
+#
+# THE CONTRACT (applies to both .ps1 and .py checks -- this is a reserved
+# EXIT CODE, not a PowerShell-only mechanism):
+#   exit 0  -- PASS. The check ran its real assertion and it held.
+#   exit 3  -- SKIP. The check's own prerequisite (toolchain, build output,
+#              external tool) was absent. The check MUST still print, to
+#              stdout/stderr, a line containing the word "SKIP" followed by
+#              the specific reason (e.g. "SKIP: no `node` on PATH") -- this
+#              runner greps that line back out for the skip summary below,
+#              so a skip with no stated reason is itself a bug in the check.
+#   anything else -- FAIL. Includes PowerShell `throw`, a non-zero/non-3 exit
+#              from a Python check, or any other exit code.
+# A check that can never legitimately skip should simply never exit 3; there
+# is no opt-in required beyond using this exit code correctly.
+$SkipExitCode = 3
 
 param(
     # Print what would run, run nothing. For confirming the glob sees what you
@@ -158,6 +186,7 @@ Write-Host ""
 
 $failed = @()
 $passed = @()
+$skipped = @()
 
 foreach ($c in $checks) {
     $rel = $c.FullName.Substring($repoRoot.Length + 1)
@@ -198,6 +227,17 @@ foreach ($c in $checks) {
     if ($code -eq 0) {
         $passed += $rel
         Write-Host "  PASS  $rel" -ForegroundColor Green
+    } elseif ($code -eq $SkipExitCode) {
+        # Pull the check's own stated reason back out of its output (see the
+        # SKIP contract in this file's header) rather than inventing one --
+        # the check is the authority on why it couldn't run.
+        $outText = ($output | Out-String)
+        $reasonLine = ($outText -split "`r?`n" | Where-Object { $_ -match 'SKIP' } | Select-Object -First 1)
+        if (-not $reasonLine) {
+            $reasonLine = "(no SKIP reason line found in output -- check violates the SKIP contract, see header)"
+        }
+        $skipped += [pscustomobject]@{ Path = $rel; Reason = $reasonLine.Trim() }
+        Write-Host "  SKIP  $rel" -ForegroundColor Yellow
     } else {
         $failed += [pscustomobject]@{ Path = $rel; Code = $code; Output = ($output | Out-String) }
         Write-Host "  FAIL  $rel (exit $code)" -ForegroundColor Red
@@ -205,6 +245,15 @@ foreach ($c in $checks) {
 }
 
 Write-Host ""
+
+if ($skipped.Count -gt 0) {
+    Write-Host "$($skipped.Count) check(s) SKIPPED (prerequisite absent -- not counted as passed):" -ForegroundColor Yellow
+    foreach ($s in $skipped) {
+        Write-Host "  SKIP  $($s.Path)" -ForegroundColor Yellow
+        Write-Host "        $($s.Reason)" -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
 
 if ($failed.Count -gt 0) {
     Write-Host "$($failed.Count) of $($checks.Count) checks FAILED:" -ForegroundColor Red
@@ -214,8 +263,18 @@ if ($failed.Count -gt 0) {
         Write-Host $f.Output.TrimEnd()
     }
     Write-Host ""
+    Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($failed.Count) failed." -ForegroundColor Red
     exit 1
 }
 
-Write-Host "All $($checks.Count) checks passed." -ForegroundColor Green
+# A skip is deliberately NOT a suite failure -- these are documented,
+# environment-dependent non-failures (missing `node`, no build directory
+# yet), and forcing every developer machine without the full toolchain
+# installed to show a red run_all_checks.ps1 would make the failure signal
+# noisier, not clearer. But it must never be silently indistinguishable from
+# a full pass either (that was exactly this mechanism's reason for existing)
+# -- so the summary line always states the skip count explicitly, never
+# folds it into "passed", and the per-check SKIP lines above always print
+# even on an otherwise-green run.
+Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($failed.Count) failed." -ForegroundColor Green
 exit 0

@@ -6,9 +6,14 @@
 # missing ESP-IDF installation is a LEGITIMATE, expected state on plenty of
 # machines that build/run the host tests just fine (the host tests exist
 # specifically to need no ESP-IDF at all) -- so the underlying Python script
-# skips gracefully (prints why, exits 0) when it cannot find one, and this
-# wrapper does not second-guess that. Only a MISSING PYTHON is treated as a
-# genuine failure here, same reasoning as check_flash_worker_lint.ps1.
+# skips gracefully (prints why, exits 3 -- run_all_checks.ps1's reserved
+# SKIP status, see that script's header) when it cannot find one, and this
+# wrapper passes that exit code straight through via $LASTEXITCODE rather
+# than second-guessing it. Only a MISSING PYTHON is treated as a genuine
+# failure here, same reasoning as check_flash_worker_lint.ps1. (Previously
+# this skip was folded into exit 0, indistinguishable from a real pass --
+# fixed alongside docs/audits/check_independence_2026-09-07.md's other three
+# instances of the same shape.)
 #
 # --fatal-on-clean is passed: the 2026-09-04 audit run (see this script's
 # neighbor .py file's own header) found the stub tree currently clean --

@@ -127,14 +127,75 @@ against, `not verified this pass` where I did not re-run a break/fix cycle).
    the literal category-4 ask ("exits 0 when its input is absent") and mean
    a machine with no Node on PATH silently loses UI-layout and
    colour-contrast coverage while `run_all_checks.ps1` still reports green.
-   Not fixed this pass (would require `run_all_checks.ps1` itself to gain a
-   SKIP status distinct from PASS — a design change to the runner, out of
-   this audit's scope, flagged for a follow-up).
 
-3. **No fixes were needed this pass.** The specific defect this audit was
-   commissioned to sweep for had already been remediated before this audit
-   began; the remaining ~55 checks sampled all derive their expected value
-   from a source materially independent of the artifact under test.
+   **FIXED as of this follow-up pass (2026-09-07, same day).**
+   `tools/run_all_checks.ps1` now recognizes a third status: exit code `3`
+   is a reserved SKIP status (documented in that script's own header),
+   distinct from `0` (PASS) and anything else (FAIL). The runner's summary
+   now reads e.g. "60 passed, 1 skipped, 0 failed" and prints a dedicated
+   "N check(s) SKIPPED" section naming each one and its stated reason,
+   pulled straight from the check's own SKIP-line output — a skip with no
+   stated reason is itself flagged as a contract violation. A skip does
+   **not** fail the suite (an environment missing an optional toolchain
+   should not go red), but it can no longer be silently indistinguishable
+   from a pass: the SKIP line and the summary count are unconditional,
+   printed on an otherwise all-green run same as a red one.
+
+   Converted to the new exit code:
+   - `tools/check_duplicate_symbols.ps1` — all three internal skip paths
+     (no build dir; build dir present but component object dirs missing;
+     toolchain `nm` not found) now `exit 3` instead of `exit 0`.
+   - `firmware/KilnFW/App/test/check_ui_status_color.ps1` — no `node` on
+     PATH now `exit 3`.
+   - `firmware/KilnFW/App/test/check_ui_responsive_sweep.ps1` — all three
+     skip paths (no `node`; sweep process wall-clock timeout; the wrapped
+     `ui_responsive_sweep.mjs`'s own internal SKIP) now `exit 3`.
+   - `firmware/KilnFW/App/test/stub_signature_drift_check.py` (wrapped by
+     `check_stub_signature_drift.ps1`) — found during the sweep for further
+     instances (see below); this one was not in the original three but has
+     the identical shape: "no ESP-IDF installation found" and "does not
+     look like an ESP-IDF checkout" both returned `0`, and the `.ps1`
+     wrapper passes `$LASTEXITCODE` straight through, so this was a fourth
+     silent-pass-as-skip case invisible to the aggregate. Both paths now
+     `return 3`; the reserved code is a plain integer exit code so it
+     applies identically to a `.py` check as to a `.ps1` one — no
+     PowerShell-specific mechanism was needed.
+
+   Swept the rest of the `check_*.ps1`/`check_*.py` inventory (all ~61
+   entries `run_all_checks.ps1` discovers, plus the standalone
+   `check_mcp_facade_coverage.py`, `check_relay_authority_paths.py`,
+   `check_stack_margin_baseline.py`, `check_chip_partition_table.py`,
+   `check_gcov_coverage.py`) for the same "early exit/return 0 on a missing
+   prerequisite" shape. No further instances found — the mirror-drift
+   family of checks (`check_*_mirror_drift.ps1` etc.) explicitly FAILS
+   (non-zero) rather than skips when Python is missing, on the stated
+   reasoning that Python is expected to always be present, which is a
+   different (and correct) choice, not the same bug.
+   `check_stack_margin_registration.ps1` has one `WARNING: ... skipping
+   hwAbstraction stack-margin boundary check` branch when that directory is
+   absent, but it is a partial sub-check inside a script that still runs
+   its other real assertions and still exits 0 only because those passed —
+   not the "whole check is a no-op" shape this audit and the follow-up were
+   sweeping for, so it was left as-is.
+
+   **Negative-tested twice** on `check_duplicate_symbols.ps1` (temporary
+   hand-edits, reversed by hand afterward, `git diff` confirmed empty —
+   never `git checkout --`):
+   (a) pointed `$buildDir` at a nonexistent path — confirmed `exit 3` with
+   a `SKIP:` line, and confirmed the runner's own pass/skip/fail
+   classification logic reports `SKIP`, not `PASS`, for that exit code.
+   (b) injected one fake entry directly into the `$definers` hashtable to
+   force a real duplicate-symbol violation — confirmed the check still
+   throws and exits `1`, classified `FAIL`, proving the SKIP-code addition
+   did not accidentally swallow real failures.
+
+3. **No other fixes were needed for the self-referential ("checks itself")
+   shape.** The specific defect this audit was originally commissioned to
+   sweep for had already been remediated before this audit began; the
+   remaining ~55 checks sampled all derive their expected value from a
+   source materially independent of the artifact under test. The
+   silent-skip-on-missing-input category (finding 2, above) is now fixed as
+   described.
 
 ## Scope note
 

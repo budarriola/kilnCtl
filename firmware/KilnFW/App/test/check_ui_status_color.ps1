@@ -28,8 +28,11 @@ if (-not $node) {
     # PATH is an environment fact, not a code defect. This check is pure
     # regex/arithmetic on the *_page.html files, but it's still written in
     # Node for the same reason the sweep is, so it skips the same way.
-    Write-Host "check_ui_status_color.ps1: SKIPPED -- no `node` on PATH, cannot run the check." -ForegroundColor Yellow
-    exit 0
+    Write-Host "check_ui_status_color.ps1: SKIP -- no `node` on PATH, cannot run the check." -ForegroundColor Yellow
+    # exit 3 is run_all_checks.ps1's reserved SKIP status (see that script's
+    # header) -- distinct from exit 0/PASS so a machine with no Node on PATH
+    # shows up in the suite summary as skipped, not as a clean pass.
+    exit 3
 }
 
 $output = & node $checkScript 2>&1

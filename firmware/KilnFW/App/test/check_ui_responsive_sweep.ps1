@@ -22,12 +22,13 @@ if (-not (Test-Path $sweepScript)) {
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
-    Write-Host "check_ui_responsive_sweep.ps1: SKIPPED -- no `node` on PATH, cannot run the sweep." -ForegroundColor Yellow
+    Write-Host "check_ui_responsive_sweep.ps1: SKIP -- no `node` on PATH, cannot run the sweep." -ForegroundColor Yellow
     # Node not being installed is an environment fact, not a code defect --
     # this repo's other UI checks (label overflow-wrap, kv narrow stack) are
-    # pure grep/regex and still run without it. Exit 0 rather than fail every
-    # machine that has never needed Node before today.
-    exit 0
+    # pure grep/regex and still run without it. exit 3 is run_all_checks.ps1's
+    # reserved SKIP status (see that script's header) -- distinct from exit
+    # 0/PASS so this shows up in the suite summary as skipped, not passed.
+    exit 3
 }
 
 # Run node via Start-Process (not a bare `&`, not Start-Job) with a hard
@@ -55,9 +56,9 @@ $proc = Start-Process -FilePath $node.Source -ArgumentList @($sweepScript) `
 $finished = $proc.WaitForExit(180000)
 if (-not $finished) {
     & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
-    Write-Host "check_ui_responsive_sweep.ps1: SKIPPED -- sweep did not finish within 180s (node/Chrome startup stalled). Environment condition, not evidence of a UI regression -- re-run when the machine is less loaded." -ForegroundColor Yellow
+    Write-Host "check_ui_responsive_sweep.ps1: SKIP -- sweep did not finish within 180s (node/Chrome startup stalled). Environment condition, not evidence of a UI regression -- re-run when the machine is less loaded." -ForegroundColor Yellow
     Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
-    exit 0
+    exit 3
 }
 
 $stdout = if (Test-Path $stdoutFile) { Get-Content -Raw $stdoutFile } else { "" }
@@ -68,8 +69,8 @@ if ($stderrText) { Write-Host $stderrText }
 $text = "$stdout`n$stderrText"
 
 if ($text -match 'ui_responsive_sweep: SKIPPED') {
-    Write-Host "check_ui_responsive_sweep.ps1: sweep SKIPPED (see reason above)."
-    exit 0
+    Write-Host "check_ui_responsive_sweep.ps1: SKIP -- sweep SKIPPED internally (see reason above)."
+    exit 3
 }
 if ($text -match '\d+ of \d+ .* checks FAILED') {
     throw "check_ui_responsive_sweep.ps1: sweep FAILED -- see output above for the specific (page, width, assertion) failures."

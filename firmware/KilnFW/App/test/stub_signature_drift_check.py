@@ -42,9 +42,16 @@ spurious-on-machines-without-IDF result ROADMAP.md's B8 item calls out.
 Usage: python stub_signature_drift_check.py [--idf-root PATH] [--fatal-on-clean]
 
 Exit codes:
-  0 -- skipped (no IDF found), or ran clean, or ran with mismatches but
-       --fatal-on-clean was not requested (first-light "report only" mode).
+  0 -- ran clean, or ran with mismatches but --fatal-on-clean was not
+       requested (first-light "report only" mode).
   1 -- ran and found mismatches, with --fatal-on-clean passed.
+  3 -- SKIPPED (no ESP-IDF installation found). This is
+       tools/run_all_checks.ps1's reserved SKIP exit code (see that
+       script's header for the cross-language contract) -- it used to be
+       folded into exit 0 here, which is indistinguishable from a real
+       clean run once check_stub_signature_drift.ps1 passes this script's
+       $LASTEXITCODE straight through, exactly the "skip reports as pass"
+       shape flagged in docs/audits/check_independence_2026-09-07.md.
 """
 import argparse
 import json
@@ -253,18 +260,18 @@ def main():
 
     idf_root = find_idf_root(args.idf_root)
     if idf_root is None:
-        print("stub_signature_drift_check: no ESP-IDF installation found "
+        print("stub_signature_drift_check: SKIP -- no ESP-IDF installation found "
               "(checked --idf-root, $IDF_PATH, build/project_description.json, "
-              "common install paths) -- SKIPPING. This is not a failure: the "
+              "common install paths). This is not a failure: the "
               "check needs a real IDF tree to compare stubs against, and none "
               "is required just to build/run the host tests.")
-        return 0
+        return 3
 
     by_suffix, by_basename = index_idf_headers(idf_root)
     if not by_suffix:
-        print(f"stub_signature_drift_check: {idf_root} does not look like an "
-              f"ESP-IDF checkout (no components/*/include found) -- SKIPPING.")
-        return 0
+        print(f"stub_signature_drift_check: SKIP -- {idf_root} does not look like an "
+              f"ESP-IDF checkout (no components/*/include found).")
+        return 3
 
     mismatches = []
     not_found_headers = []

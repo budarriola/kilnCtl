@@ -84,15 +84,20 @@
 # other allowlist in this repo: named, dated, justified, and removed the
 # moment it stops applying.
 #
-# NO-BUILD BEHAVIOR: this check SKIPS (exit 0, clearly labeled) rather than
-# failing when firmware/KilnFW/build/ or its object files don't exist yet.
-# Reasoning: build_kilnfw is a separate, expensive step (a full ESP-IDF
-# build) that this fast guard should not silently force on every run of
-# run_all_checks.ps1 -- every existing check_*.ps1 here inspects source
+# NO-BUILD BEHAVIOR: this check SKIPS (exit 3, run_all_checks.ps1's reserved
+# SKIP status, clearly labeled -- see that script's header for the contract)
+# rather than failing when firmware/KilnFW/build/ or its object files don't
+# exist yet. Reasoning: build_kilnfw is a separate, expensive step (a full
+# ESP-IDF build) that this fast guard should not silently force on every run
+# of run_all_checks.ps1 -- every existing check_*.ps1 here inspects source
 # trees, not build output, and turning this one into a hard failure on a
 # clean checkout would make run_all_checks.ps1 red on every fresh clone
 # until someone builds firmware, for a check that has nothing to say yet.
-# The skip message says exactly what to run to make it meaningful.
+# The skip message says exactly what to run to make it meaningful. It used
+# to exit 0 -- indistinguishable from a real pass in the aggregate -- until
+# docs/audits/check_independence_2026-09-07.md flagged that as the same
+# "reports green with zero coverage" shape this repo has been burned by
+# before; exit 3 makes run_all_checks.ps1 report it as SKIPPED, not PASS.
 #
 # Usage: powershell -File tools\check_duplicate_symbols.ps1
 $ErrorActionPreference = "Stop"
@@ -110,7 +115,7 @@ $componentDirs = @(
 if (-not (Test-Path $buildDir)) {
     Write-Host "SKIP: no firmware/KilnFW/build/ found -- run the build_kilnfw tool (or 'idf.py build' in firmware/KilnFW) first." -ForegroundColor Yellow
     Write-Host "      This check inspects real build output; it has nothing to check on a clean checkout."
-    exit 0
+    exit 3
 }
 
 # Each component's .c.obj tree mirrors its source tree's relative layout
@@ -191,7 +196,7 @@ if ($objFiles.Count -eq 0) {
     Write-Host "SKIP: firmware/KilnFW/build/ exists but none of this project's own component object directories were found:" -ForegroundColor Yellow
     foreach ($c in $componentDirs) { Write-Host "        $c" }
     Write-Host "      Run the build_kilnfw tool to produce them, then re-run this check."
-    exit 0
+    exit 3
 }
 
 # Locate the toolchain's nm rather than assuming a fixed path -- the ESP-IDF
@@ -200,7 +205,7 @@ if ($objFiles.Count -eq 0) {
 $nmCandidates = Get-ChildItem -Path "$env:USERPROFILE\.espressif\tools\xtensa-esp-elf" -Recurse -File -Filter "xtensa-esp32s3-elf-nm.exe" -ErrorAction SilentlyContinue
 if (-not $nmCandidates -or $nmCandidates.Count -eq 0) {
     Write-Host "SKIP: could not locate xtensa-esp32s3-elf-nm.exe under $env:USERPROFILE\.espressif\tools\xtensa-esp-elf -- is the ESP-IDF toolchain installed?" -ForegroundColor Yellow
-    exit 0
+    exit 3
 }
 $nm = ($nmCandidates | Sort-Object FullName -Descending | Select-Object -First 1).FullName
 
