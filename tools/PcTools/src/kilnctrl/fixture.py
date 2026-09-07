@@ -202,10 +202,6 @@ class _Pending:
         self.value: object = None
 
 
-def _pack_u16_le(value: int) -> bytes:
-    return bytes((value & 0xFF, (value >> 8) & 0xFF))
-
-
 def _unpack_u16_le(data: bytes, offset: int) -> int:
     return data[offset] | (data[offset + 1] << 8)
 
