@@ -153,6 +153,40 @@ function startStaticServer(dir, port) {
   });
 }
 
+// Chrome's --remote-debugging-port has no EADDRINUSE fallback of its own --
+// unlike startStaticServer()'s http.Server above, a busy CDP port just makes
+// Chrome silently pick something else (or refuse), leaving waitForPort()
+// spinning until its own timeout with no clue why. Rather than let Chrome
+// guess, check the requested port for availability the same way
+// startStaticServer() does, and fall back to an OS-assigned ephemeral port
+// on conflict -- so a leftover process (or a concurrent sweep on this same
+// machine) holding 9333 is the same non-failure it already is for 9334.
+function tryListen(port) {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', (err) => {
+      probe.close();
+      reject(err);
+    });
+    probe.once('listening', () => {
+      const bound = probe.address().port;
+      probe.close(() => resolve(bound));
+    });
+    probe.listen(port, '127.0.0.1');
+  });
+}
+
+async function pickPort(preferred) {
+  try {
+    return await tryListen(preferred);
+  } catch (err) {
+    if (err && err.code === 'EADDRINUSE') {
+      return tryListen(0);
+    }
+    throw err;
+  }
+}
+
 async function waitForPort(port, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastErr;
@@ -650,6 +684,18 @@ async function main() {
     process.exit(2);
   }
 
+  const cdpPort = await pickPort(args.port);
+  if (cdpPort !== args.port) {
+    // console.log, not console.error: this is a handled fallback, not a
+    // failure -- check_ui_responsive_sweep.ps1 runs this script with
+    // `$ErrorActionPreference = "Stop"` and captures via `2>&1`, under which
+    // Windows PowerShell treats ANY stderr line from a native command as a
+    // terminating error (turning a successful port fallback into a hard
+    // abort of the whole check, before the sweep itself ever ran).
+    console.log(`ui_responsive_sweep: CDP port ${args.port} was busy, using ${cdpPort} instead`);
+  }
+  args.port = cdpPort;
+
   const chrome = spawn(chromePath, [
     `--remote-debugging-port=${args.port}`,
     '--headless=new',
@@ -668,7 +714,10 @@ async function main() {
   // a server that isn't there.
   const staticPort = staticServer.address().port;
   if (staticPort !== args.staticPort) {
-    console.error(`ui_responsive_sweep: static port ${args.staticPort} was busy, using ${staticPort} instead`);
+    // console.log, not console.error -- see the matching comment on the CDP
+    // port fallback above: a stderr line here aborts check_ui_responsive_sweep.ps1
+    // outright under its `$ErrorActionPreference = "Stop"` + `2>&1` capture.
+    console.log(`ui_responsive_sweep: static port ${args.staticPort} was busy, using ${staticPort} instead`);
   }
 
   const rows = [];
