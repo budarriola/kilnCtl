@@ -254,6 +254,23 @@ three channels instead of all three. S14/S15 do not need channels 0/1 valid
 in this topology (they read channel 2 / the shared deficit instead), so they
 are unaffected by this.
 
+**2026-09-06, sweep refusal and unmeasured-zone reporting (Opus flash-gate
+review, `31a59aa`).** Two gaps in the summed-topology sweep itself, both
+fixed the same commit: `zones_current_sweep_start()` now refuses
+(`ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN`) when the ESP's safety-param cache
+has never been fetched from the Pico (`safety_cfg_store_fetched_ms_ago() ==
+UINT32_MAX`), instead of the old behaviour of silently reading an unfetched
+cache as `per_zone` and running the wrong derivation. And
+`zone_sweep_summed_normal_a()` no longer clamps a negative
+(with-zone-on minus idle) delta to a persisted zero — a persisted zero used
+to make that zone's S14/S15 checks silently inert forever, since a zero
+`i_normal_a` reads as "any current is excess." A negative delta is now
+reported as **not measured** (a bit in the sweep status's new
+`summed_unmeasured_mask`) and nothing is persisted for that zone, so the
+operator can see from the sweep result which zone(s) still need a re-sweep
+rather than getting a clean-looking result that has quietly disarmed a
+guard.
+
 ### 3.4 Trips — provoke each one that is enabled
 
 With the kiln empty and someone present.

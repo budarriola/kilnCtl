@@ -1,6 +1,6 @@
 # Current Sensing
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-09-06
 > **Keep this file current.** If the front end, the sampling, or the calibration
 > procedure changes, update it in the same commit. If it disagrees with the
 > code, **the code wins.** Checklist at the bottom.
@@ -119,6 +119,16 @@ this topology (`amps_valid[0]`/`[1]` always false); S14 compares channel 3
 against the sum of commanded zones' `i_normal_a[]`, and a new WARN-only
 guard S15 flags a likely open heater. Per-zone remains the default and the
 safe silent choice for an uncommissioned board.
+
+**2026-09-06, sweep refusal and unmeasured zones (`31a59aa`).** The summed
+sweep now refuses outright (`ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN`) if the
+ESP's safety-param cache has never been fetched from the Pico, rather than
+defaulting an unfetched cache to `per_zone` and running the wrong
+derivation. And a zone whose `sum(with zone on) - sum(idle)` comes out
+negative is reported as **not measured** (`summed_unmeasured_mask`, in the
+sweep status) instead of clamping to a persisted zero — a persisted zero
+would otherwise leave that zone's S14/S15 checks silently inert forever,
+since a zero `i_normal_a` reads as "any current is excess."
 
 ## 1. The circuit
 

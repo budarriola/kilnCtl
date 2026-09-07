@@ -223,8 +223,12 @@ document, do not solve.
    that source, so it always reads "-" in the fallback path); with neither
    source reachable it keeps printing raw amps, topology unknown. Tests:
    `tools/PcTools/tests/test_ct_fitted_display.py`.
-5. **Docs**: rewrite CURRENT_SENSE.md §0.1/§5 for both topologies; update
-   ROADMAP row M (line 75) and `GUARD_TEST_MATRIX.md` §3.3.
+5. **Docs: done (2026-09-06).** `CURRENT_SENSE.md` §0.1/§0.2/§5 now describe
+   both topologies (model, calibration sources, auto-zero preconditions/
+   refusal, S14/S15, the sweep's cache-unfetched refusal and
+   `summed_unmeasured_mask`); `GUARD_TEST_MATRIX.md` §3.3 covers the same
+   sweep behaviour; `ROADMAP.md` row M and `CONFIG_REFERENCE.md` (`ct_topology`,
+   `0x031F`) updated. Finished detail lives in those files, not here.
 6. **Bench** (owner present): steps 0 and 2 on the test kiln, then one
    heating run to record the three zone normals and check the 70 mA figure.
 
