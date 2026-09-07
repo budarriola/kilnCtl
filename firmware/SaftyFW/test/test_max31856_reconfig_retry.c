@@ -107,67 +107,19 @@ static void test_respects_interval(void)
                "next attempt fires once the interval elapses again");
 }
 
-// Broken stand-in for max31856_reconfig_retry_note_result() -- as if the
-// failure-path update (advancing retry_count/next_attempt_due_ms) were
-// accidentally deleted, leaving only the success-path reset. This is the
-// exact shape of regression a future edit to the real function could
-// introduce silently (host tests calling only the real, correct function
-// would never notice such a regression existed).
-static void broken_note_result(max31856_reconfig_retry_state_t *state, bool verified)
-{
-    if (verified) {
-        state->retry_count = 0;
-        state->gave_up = false;
-    }
-    // BUG: on failure, does nothing -- retry_count/next_attempt_due_ms/
-    // gave_up never move, so should_attempt() (deadline already in the
-    // past) fires again on literally every subsequent call forever, and
-    // gave_up can never become true.
-}
-
-// NEGATIVE TEST -- proves the "gives up after the bound" check above has
-// teeth: wiring the SAME scenario through the broken function above must
-// fail that scenario's assertions (it never gives up, and it "succeeds" on
-// an attempt count the real bound would have refused). This demonstrates
-// test_gives_up_after_bound() is actually capable of catching a regression
-// in the production note_result(), not just confirming its own tautology.
-static void test_negative_broken_retry_is_caught(void)
-{
-    TEST_SECTION("max31856_reconfig_retry: negative test -- a broken retry is distinguishable");
-
-    max31856_reconfig_retry_state_t state;
-    max31856_reconfig_retry_init(&state);
-
-    uint32_t now_ms = 0;
-    uint32_t attempts_made = 0;
-    // Drive well past the real bound -- a correct implementation would have
-    // set gave_up by MAX31856_RECONFIG_RETRY_MAX_ATTEMPTS attempts.
-    for (uint32_t i = 0; i < MAX31856_RECONFIG_RETRY_MAX_ATTEMPTS + 20u; i++) {
-        now_ms += MAX31856_RECONFIG_RETRY_INTERVAL_MS + 1u;
-        if (max31856_reconfig_retry_should_attempt(&state, /*verified=*/false, now_ms)) {
-            attempts_made++;
-            broken_note_result(&state, /*verified=*/false);
-        }
-    }
-
-    // This is the failure the broken function produces: it never gives up,
-    // and it fires on every single iteration rather than stopping at the
-    // bound -- the opposite of test_gives_up_after_bound()'s assertions
-    // against the real function. Asserting that HERE (against the broken
-    // stand-in) shows those real assertions would indeed have failed had
-    // this bug been in the shipped note_result() instead.
-    TEST_CHECK(state.gave_up == false,
-               "broken note_result() never sets gave_up (demonstrates the real check's "
-               "gave_up==true assertion is not vacuous)");
-    TEST_CHECK(attempts_made == MAX31856_RECONFIG_RETRY_MAX_ATTEMPTS + 20u,
-               "broken note_result() lets attempts run past the real bound (demonstrates the "
-               "real check's attempt-count assertion is not vacuous)");
-}
-
+// Negative-test procedure for this file's coverage (per project standing
+// practice: every check must be shown capable of failing, not just
+// confirmed to pass) was done by hand against the PRODUCTION function,
+// not a test-local mirror -- see the commit message body for the exact
+// failing-line transcript. A test-local copy of note_result() proves only
+// that the copy behaves as written, never that the real
+// max31856_reconfig_retry_note_result() would be caught if it regressed;
+// the honest version is to temporarily break the production function
+// itself, confirm test_gives_up_after_bound()/test_respects_interval()
+// fail, then revert by hand.
 void run_test_max31856_reconfig_retry(void)
 {
     test_recovers_after_n_failures();
     test_gives_up_after_bound();
     test_respects_interval();
-    test_negative_broken_retry_is_caught();
 }

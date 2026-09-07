@@ -27,6 +27,7 @@
 
 #include "board_pins.h"
 #include "config_store.h" // safety_tc_installed (0x0211) -- the structural injection gate, see thermo_task.h
+#include "log_task.h" // log_task_log() -- one WARN line when the reconfig retry gives up, see below
 #include "max31856.h"
 #include "max31856_reconfig_retry.h" // periodic re-probe while tc_type is unverified, see its own header
 #include "max31856_tc_range_policy.h" // per-tc_type plausibility band, see its own header for the full argument
@@ -347,10 +348,32 @@ static void thermo_task_fn(void *arg)
                                                     retry_now_ms)) {
             (void)max31856_configure(config_store_get_tc_type());
             bool verified_after_retry = max31856_tc_type_verified();
+            if (verified_after_retry && !verified_before_retry) {
+                // max31856_configure() just wrote fresh CR1 tc-type bits, but a
+                // conversion started under the OLD CR1 may already be in
+                // flight and could deliver its DRDY edge (and stale-format
+                // result) any time after this point. Discard any notification
+                // already pending -- and any that arrives from that in-flight
+                // conversion -- so the wait below only ever wakes on a
+                // conversion started after the reconfigure, never decodes a
+                // burst read against the type that is now live.
+                (void)ulTaskNotifyTake(pdTRUE, 0);
+            }
             max31856_reconfig_retry_note_result(&s_reconfig_retry, verified_after_retry,
                                                  retry_now_ms);
             s_reconfig_retries = s_reconfig_retry.retry_count;
+            bool gave_up_before = s_reconfig_gave_up;
             s_reconfig_gave_up = s_reconfig_retry.gave_up;
+            if (s_reconfig_gave_up && !gave_up_before) {
+                // Bound reached with no success -- log once, loudly, per the
+                // bug report's "then give up loudly" (see
+                // max31856_reconfig_retry.h's MAX31856_RECONFIG_RETRY_MAX_ATTEMPTS
+                // comment). No new wire field: this reuses the existing
+                // best-effort log path the same way safety_core.c's trip
+                // logging does.
+                log_task_log(LOG_LEVEL_WARN, "thermo_task",
+                             "safety MAX31856 reconfig retry gave up, tc_type unverified");
+            }
         }
 
         uint32_t conv_ms = max31856_conversion_time_ms();
