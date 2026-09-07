@@ -1754,7 +1754,7 @@ function renderProgress(st) {
 var SAFETY_TRIP_WORDS = {
   0: 'none', 1: 'chamber over absolute temperature limit (S1)',
   2: 'chamber over setpoint for too long (S2)', 3: 'relay/contactor stuck on, no heat commanded (S3)',
-  5: 'safety thermocouple reading invalid (S5)', 6: 'main controller (ESP) reported a fault (S6a)',
+  5: 'safety thermocouple reading invalid or missing (S5)', 6: 'main controller (ESP) reported a fault (S6a)',
   7: 'safety link to main controller went silent (S6b)', 8: 'E-stop pressed (S7)',
   9: 'rising faster than physically possible (S8)', 10: 'contactor welded on, trip did NOT cut power (S9)',
   12: 'safety sensor reading frozen, not updating (S11)', 13: 'enclosure/cold-junction over-temperature (S12)',

@@ -683,6 +683,29 @@ The I2C bus (GPIO7/8, 2.2k pull-ups, out to J7 pins 6/8) has **no device on
 it** in the current design. `SaftyFW` should leave it unconfigured — not
 half-initialised — and `TODO.md` tracks it as a deliberate no-op.
 
+### 8.1 Before a firing: the safety TC must actually be attached to J7
+
+The daughterboard's MAX31856 being populated (above) is not the same fact as
+a thermocouple probe being plugged into it. **S5** (`safety_guards.c`, see
+`SAFETY_MODEL.md` §4) trips whenever the safety processor's own thermocouple
+reading is invalid past its grace period — no `~DRDY` edge (part not
+converting: open circuit / no probe on J7), a SPI transfer failure, a NaN
+reading, or the MAX31856's own `~FAULT` pin asserted (open TC, over/under
+voltage, bad cold-junction). This is a **different failure** from the
+CR1-verify class (`s_tc_type_verified`, `max31856_reconfig_retry.h`): that one
+means the part answered but its config readback didn't match what was
+programmed; S5 means the part isn't giving the safety processor a usable
+temperature at all, most often because no probe is connected.
+
+**Bench checklist before requesting a firing:** confirm a working
+thermocouple is plugged into the daughterboard at J7 (not just the daughterboard
+itself being present), then read back `safety_get_status()` /
+`GET /api/safety/status` and confirm it does **not** read "safety TC
+invalid" before proceeding. A fresh trip with `trip_reason 5` after power-up
+is the expected, correct behavior of a safety processor with no temperature
+reference — it is not a firmware defect, and there is no commissioning/bench
+mode that allows firing without a real safety thermocouple attached.
+
 ---
 
 ## 9. Current sense

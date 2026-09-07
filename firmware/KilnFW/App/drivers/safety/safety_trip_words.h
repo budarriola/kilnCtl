@@ -32,7 +32,7 @@ static inline const char *safety_trip_words_short(uint8_t reason)
     case 1:  return "S1 over-temp limit";
     case 2:  return "S2 over setpoint";
     case 3:  return "S3 relay stuck on";
-    case 5:  return "S5 TC invalid";
+    case 5:  return "S5 TC invalid/missing";
     case 6:  return "S6a main ctrl fault";
     case 7:  return "S6b link dead";
     case 8:  return "S7 E-stop";
@@ -64,7 +64,9 @@ static inline const char *safety_trip_words_cause(uint8_t reason)
     case 1:  return "Chamber temperature exceeded the absolute over-temp limit";
     case 2:  return "Chamber stayed above setpoint longer than the over-setpoint window allows";
     case 3:  return "Relay/contactor read ON while the safety processor commanded it OFF";
-    case 5:  return "Safety thermocouple reading was invalid past its grace period";
+    case 5:  return "Safety thermocouple reading invalid past its grace period -- most often "
+                     "no probe is connected to the safety processor (open circuit); can also "
+                     "be a wiring fault or damaged probe";
     case 6:  return "The ESP main controller asserted the isolated fault line -- see fault source below";
     case 7:  return "The safety link between ESP and safety processor went silent past its timeout";
     case 8:  return "E-stop input was asserted";
@@ -236,7 +238,8 @@ static inline const char *safety_trip_words_remedy(uint8_t reason)
     case 1:  return "Let the kiln cool below the limit, then press Clear Trip.";
     case 2:  return "Let the chamber return under setpoint, then press Clear Trip.";
     case 3:  return "De-energize the relay/contactor and confirm it opens, then press Clear Trip.";
-    case 5:  return "Check/replace the safety thermocouple and its wiring, then press Clear Trip.";
+    case 5:  return "Connect a working thermocouple to the safety processor (or check its "
+                     "wiring if one is already attached), then press Clear Trip.";
     case 6:  return "Resolve the fault source named below, then press Clear Trip.";
     case 7:  return "Restore the wired link between the ESP and safety processor, then press Clear Trip.";
     case 8:  return "Release the E-stop, then press Clear Trip.";
@@ -270,7 +273,7 @@ static inline const char *safety_warn_words_short(uint16_t warn_mask, char *buf,
     }
     static const struct { uint16_t bit; const char *word; } bits[] = {
         { 1u << 3,  "S4 load-should-be-off current present" },
-        { 1u << 4,  "S5 sensor invalid (pre-trip)" },
+        { 1u << 4,  "S5 sensor invalid/missing (pre-trip)" },
         { 1u << 9,  "S9 current present, uncommissioned" },
         { 1u << 10, "S10 safety TC disagrees with zone TCs" },
         { 1u << 12, "S12 enclosure/CJ over-temp (pre-trip)" },

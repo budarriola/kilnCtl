@@ -917,8 +917,8 @@ static void refresh_cb(lv_timer_t *timer)
         lv_label_set_text(s_td_cause_label, td_cause_buf);
 
         /* 144, not 112: the longest safety_fault_source_remedy_one() string
-         * is 131 bytes and the longest safety_trip_words_remedy() is 109, so
-         * "To clear: " + either overflows 112 and the target build refuses it
+         * is 131 bytes and the longest safety_trip_words_remedy() is 127
+         * (S5, 2026-09-07 wording pass), so "To clear: " + either overflows 112 and the target build refuses it
          * (-Werror=format-truncation). Sized against the tables rather than
          * rounded up by eye -- if a remedy sentence grows past this the build
          * fails again, which is the desired outcome: a silently truncated
