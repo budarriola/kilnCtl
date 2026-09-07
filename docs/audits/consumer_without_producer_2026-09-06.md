@@ -1,5 +1,30 @@
 # Consumer-without-producer sweep, 2026-09-06
 
+**Status as of 2026-09-07:** Finding 1 (`progress_band_c`) is CLOSED --
+`zones_config_get/set_progress_band_c()` (persist/zones_config_accessors.c),
+JSON parse/validate (http/zones_http_post_parse.c,
+persist/zones_config_json.c) and both designated-initializer call sites
+(control/autotune_engine.c, control/profile_executor_run.c) now all reference
+it; the field has a real producer end to end. A narrow mechanical check,
+`firmware/KilnFW/App/test/check_thermal_guard_cfg_producers.ps1` (sibling of
+the existing `check_thermal_guard_input_producers.ps1`), now guards every
+`thermal_guard_cfg_t` field the same way and is picked up automatically by
+`tools/run_all_checks.ps1`'s recursive `check_*.ps1` discovery. Negative-tested
+2026-09-07: renaming every production `progress_band_c` assignment site made
+the check fail with `thermal_guard_cfg_t.progress_band_c is never assigned by
+any production file in App/drivers`; reverted by hand, `git diff` empty.
+
+Finding 2 (`iter_tune`) is STILL OPEN, unchanged in substance: no production
+caller ever constructs an `iter_tune_firing_t` and the whole module remains
+unintegrated dead code. `08db04d7`/`3bf773af` added the one field
+(`fs_start_temp_c`, `profile_executor_internal.h` and
+`profile_executor_firing_stats.c`/`profile_executor_status.c`) that iter_tune
+would need if it were ever wired in, but deliberately stopped short of
+calling `iter_tune_process_firing()` -- see
+`docs/audits/iter_tune_decision_2026-09-07.md` for that decision. Left alone
+per standing instruction (iter_tune is out of scope for this pass; work on it
+is already tracked in that decision doc).
+
 Mechanical sweep of `firmware/KilnFW/App/drivers/` (recursive, `test/`/`stubs/`
 excluded): extracted struct fields from headers, checked every field read in a
 `.c` file for at least one non-test assignment (`.field =`, `->field =`,
