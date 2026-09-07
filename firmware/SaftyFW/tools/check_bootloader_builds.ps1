@@ -29,8 +29,21 @@
 
 $ErrorActionPreference = "Stop"
 
+# Two concurrent runs of this script (e.g. overlapping run_all_checks.ps1
+# invocations) reconfigure/build the SAME firmware/SaftyFW/bootloader/build
+# tree and race each other's cmake/ninja recompaction -- reproduced
+# 2026-09-06 by running this script twice concurrently, which threw
+# "CMake Error ... generate_config_header.cmake:29 (configure_file): No
+# such file or directory" on one side while the other side succeeded.
+# Serialize via a global named mutex so concurrent invocations queue up
+# instead of corrupting the shared build tree.
+. (Join-Path $PSScriptRoot "..\..\..\tools\build_lock.ps1")
+$buildLock = Enter-BuildLock -Name "saftyfw_bootloader_build"
+
 $bootloaderDir = Join-Path $PSScriptRoot "..\bootloader"
 $buildDir = Join-Path $bootloaderDir "build"
+
+try {
 
 if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
     Write-Host "No $buildDir\CMakeCache.txt -- first-time configure (cmake -G Ninja -B build .) ..."
@@ -109,3 +122,8 @@ if (-not (Test-Path $elf)) {
 
 Write-Host "OK: saftyfw_bootloader.elf built successfully" -ForegroundColor Green
 exit 0
+
+}
+finally {
+    Exit-BuildLock -Lock $buildLock
+}
