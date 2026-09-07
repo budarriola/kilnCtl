@@ -74,15 +74,27 @@ document, do not solve.
    (3σ) and therefore whether per-heater open detection is viable on this
    bench. Tool: a PcTools MCP call that reads the existing raw-counts
    diagnostic (add one if only amps are exposed).
-1. **Editable calibration fields** (KilnFW page + SaftyFW params):
-   `A_fs[3]` and `zero_mv[3]` as ASKED fields on the commissioning page,
-   pushed via the existing `SET_PARAM`/`COMMIT_CONFIG` ids for
-   `k_ct_v_per_a`/`zero_counts` (conversion on the ESP; Pico storage
-   unchanged, so `config_store` needs no migration). A `source` marker per
-   field: manual | sweep | auto-zero; manual wins over the sweep. `A_fs`
-   must accept **any** probe rating — real kilns will use 10-100 A probes,
-   the bench probe is 1 A. Range checks are sanity only: `A_fs` in
-   [0.1, 2000], `zero_mv` in [-200, 200]. Nothing may assume 1 A.
+1. **Editable calibration fields** (KilnFW page + SaftyFW params). **ESP
+   side: done (2026-09-06).** `A_fs[3]`/`zero_mv[3]` are ASKED fields on
+   `safety_commissioning_page.html` (section 3), each with its own "Apply"
+   button posting to the new `POST /api/safety/commissioning/ct_cal`
+   (`ch=<0-2>&a_fs=<v>&zero_mv=<v>&commit=1`); that handler converts
+   (`safety_ct_cal_convert()`: `k_ct_v_per_a = 1/A_fs`,
+   `zero_counts = zero_mv/1000 * gain * 4096/3.3`, `gain` read from this
+   same cache's committed `gain[ch]`, falling back to the 0.715 physical
+   default) and stages the two derived fields through the existing generic
+   `SET_PARAM`/`COMMIT_CONFIG` path (`safety_cfg_http.c`'s `apply_pairs()`)
+   -- Pico storage/`config_store` unchanged, no migration. A `source` marker
+   per channel (manual | sweep | auto-zero) lives in a new ESP-local NVS
+   record (`safetyctcal`, `safety_cfg_store.c`); manual always wins over the
+   sweep (`zone_sweep_plan_k_ct()` skips a manually-calibrated channel
+   entirely, so the sweep's own k_ct derivation is never even computed for
+   it). `A_fs` accepts any probe rating; range checks are sanity only:
+   `A_fs` in [0.1, 2000], `zero_mv` in [-200, 200]. The derived
+   `k_ct_v_per_a`/`zero_counts` stay visible, readonly, next to the inputs.
+   The step-2 auto-zero action itself (writing `source = auto-zero`) is not
+   part of this pass -- `safety_cfg_store_set_ct_cal_input()`'s AUTO_ZERO
+   path exists and is host-tested, but nothing calls it yet.
 2. **Auto idle offset**: a commissioning action, not a background task.
    Preconditions checked by the caller (not `current_sense.c`, per
    `current_sense.h:188-195`): every relay reported off for ≥ 5 s (five
@@ -123,15 +135,24 @@ document, do not solve.
    `test/test_config_store.c`/`test/test_config_params.c` (topology pack/
    unpack round-trip, legacy-record decode, `i_present_a` auto-derive).
 
-   **ESP side: pending.** KilnFW needs: a `ct_topology` commissioning
-   question on `safety_commissioning_page.html`, forwarding `SET_PARAM`
-   0x031F, updating the zones-current-sweep flow to skip the channel-map
-   check and derive normals from channel 3 alone in summed mode
-   (`GUARD_TEST_MATRIX.md` §3.3), dashboard/LCD display of the summed amps
-   plus single-zone attribution, and every KilnFW trip/warn name table
-   (`safety_trip_words.h`, `profile_executor.h` and any other place S1-S14
-   are named) gaining an S15 entry — none of that lives in SaftyFW and none
-   of it was touched by this pass.
+   **ESP side: done (2026-09-06)**, except the dashboard/LCD real-amps
+   display, which is step 4. `ct_topology` is a new commissioning question
+   on `safety_commissioning_page.html` (enum, per_zone/summed), forwarding
+   `SET_PARAM` 0x031F through the same generic apply_pairs()/COMMIT_CONFIG
+   path every other field on that page uses. `zones_current_sweep_task.c`'s
+   `zone_sweep_task_record_ct_channels()`/`zone_cfg_committed_ct_topology()`
+   read the committed topology fresh at the start of every sweep; in summed
+   mode the one-relay-one-channel derivation (`GUARD_TEST_MATRIX.md` §3.3)
+   is skipped entirely (`s_ct_derive` is left untouched, so the map/k_ct
+   pushes that follow naturally no-op) and `normal_a[zone] = sum(with zone
+   on) - sum(idle)` is derived from channel 3 (index 2) alone, using an idle
+   baseline sampled once per sweep with every relay off
+   (`zone_sweep_summed_normal_a()`, pure and host-tested). `safety_trip_
+   words.h` gained `safety_warn_words_short()`, decoding the Frame B
+   `warn_mask` bits (S4/S5/S9/S10/S12/S13/S14/S15) that had no name anywhere
+   on this side before -- wired into `safety_page.html`'s "Warn mask" row.
+   Dashboard/LCD real-amps display and the "channels 0/1 read not fitted"
+   presentation remain step 4, not touched by this pass.
 4. **Real-amps display**: dashboard and LCD show the summed amps and, in
    summed mode, the per-zone attribution only when exactly one zone is on.
    `safety_get_status` keeps three fields; channels 1-2 report "not fitted"

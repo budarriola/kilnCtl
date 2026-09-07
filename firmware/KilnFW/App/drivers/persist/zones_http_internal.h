@@ -286,6 +286,18 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch);
 zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_power_w, float mains_voltage_v,
                                          float k_old, float *out_k);
 const char *zone_kct_derive_str(zone_kct_derive_t r);
+
+/* CT_COMMISSIONING_PLAN.md step 3, `ct_topology = summed`: the shared CT
+ * (channel 3, index 2) reads every zone, so a zone's own normal is not the
+ * raw reading -- it is that reading minus whatever the same channel already
+ * read with every zone off (`normal_a[zone] = sum(with zone on) - sum(idle)`,
+ * the plan's own formula). Pure and host-testable, no I/O: `sum_idle_a` is
+ * whatever the caller sampled once, before the per-zone loop, with every
+ * relay off. Returns false (out untouched) if either input is non-finite;
+ * clamps the result at 0 rather than reporting a negative normal (a channel
+ * that reads LOWER with the zone on than idle is a wiring/noise artifact,
+ * not evidence of negative current). */
+bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, float *out_normal_a);
 zone_sweep_refusal_t zone_sweep_check_refusal(bool already_running, bool have_hw, bool config_valid,
                                               uint8_t thermo_count, bool profile_running_or_paused,
                                               bool autotune_active, bool link_up, bool trip_latched,

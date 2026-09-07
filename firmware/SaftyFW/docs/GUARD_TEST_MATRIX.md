@@ -225,7 +225,11 @@ healthy firings and stays silent on the failure it exists to catch.
 | Low duty | 15 % duty, 60 s window, 1 h | **No S4 warning storm** |
 
 **2026-09-06, `ct_topology = summed` (`CT_COMMISSIONING_PLAN.md` step 3,
-Pico side done, ESP side pending):** the mapping check above is per_zone-only
+Pico and ESP sides both done -- `ct_topology` is a KilnFW commissioning-page
+question that forwards `SET_PARAM` 0x031F, and `zones_current_sweep_task.c`'s
+`zone_sweep_task_record_ct_channels()` skips this section's mapping check and
+derives `normal_a[zone] = sum(with zone on) - sum(idle)` from channel 3 alone
+whenever it is armed):** the mapping check above is per_zone-only
 and is *skipped* in summed mode — a single shared CT (channel 3/GPIO28)
 reads every zone, so there is no per-relay mapping to confirm. S14 instead
 compares channel 3 against the sum of `i_normal_a[]` for zones commanded on

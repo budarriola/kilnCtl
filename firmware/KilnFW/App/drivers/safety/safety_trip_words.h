@@ -251,6 +251,54 @@ static inline const char *safety_trip_words_remedy(uint8_t reason)
     }
 }
 
+/* Decodes Frame B (SAFETY_CMD_DIAG)'s warn_mask, per LINK_PROTOCOL.md's
+ * "warn_mask bit numbering" table -- one bit per WARN-capable guard, where a
+ * guard with a real SAFETY_TRIP_* code uses (that code - 1) and S4/S10 (WARN-
+ * only, no trip code) use their reserved gap bits 3/10. S14/S15
+ * (CT_COMMISSIONING_PLAN.md) postdate that scheme and had no reserved gap, so
+ * they take bits 14/15 directly (codes 15/16 already belong to the unrelated
+ * CONFIG_CORRUPT/SELF_TEST trip guards) -- see that doc's own bit table for
+ * the authoritative list this mirrors. Until this function existed, S14/S15
+ * (and S4/S5/S9/S10/S12/S13's WARN bits) had no decoded name on this side at
+ * all -- safety_page.html printed the mask as raw hex only. Writes a comma-
+ * joined, short, operator-facing list into buf (buf_len bytes, always
+ * NUL-terminated); mask == 0 (or no recognised bit set) writes "none". */
+static inline const char *safety_warn_words_short(uint16_t warn_mask, char *buf, size_t buf_len)
+{
+    if (buf == NULL || buf_len == 0) {
+        return buf;
+    }
+    static const struct { uint16_t bit; const char *word; } bits[] = {
+        { 1u << 3,  "S4 load-should-be-off current present" },
+        { 1u << 4,  "S5 sensor invalid (pre-trip)" },
+        { 1u << 9,  "S9 current present, uncommissioned" },
+        { 1u << 10, "S10 safety TC disagrees with zone TCs" },
+        { 1u << 12, "S12 enclosure/CJ over-temp (pre-trip)" },
+        { 1u << 13, "S13 borrowed channel not updating (pre-trip)" },
+        { 1u << 14, "S14 current above measured normal" },
+        { 1u << 15, "S15 zone under-current (open heater)" },
+    };
+    buf[0] = '\0';
+    if (warn_mask == 0u) {
+        snprintf(buf, buf_len, "none");
+        return buf;
+    }
+    bool first = true;
+    for (size_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
+        if (warn_mask & bits[i].bit) {
+            size_t used = strlen(buf);
+            snprintf(buf + used, buf_len - used, "%s%s", first ? "" : ", ", bits[i].word);
+            first = false;
+        }
+    }
+    if (first) {
+        /* No recognised bit matched (an unlisted/future bit only) -- do not
+         * silently claim "none" for a mask that is genuinely non-zero. */
+        snprintf(buf, buf_len, "unrecognised warn bits 0x%04X", (unsigned)warn_mask);
+    }
+    return buf;
+}
+
 /* Decodes safety_link.h's safety_fault_source_t bitmask (the ESP's OWN
  * reason for driving the isolated fault line, one bit per source -- see
  * that header's comment: SaftyFW sees only the resulting single bit and

@@ -577,9 +577,21 @@ var GROUPS = [
       { id: 769, name: 'i_present_a', type: 'f32', risk: 'nuisance', unit: 'A', def: 2.0,
         guards: ['S3', 'S4', 'S9'], note: 'A load-active threshold -- only has to separate noise ' +
           'from a conducting element.' },
+      { id: 800, name: 'CT0 probe rating (A_fs)', type: 'ct_cal', chIndex: 0, unit: 'A', risk: 'nuisance',
+        guards: ['S3', 'S4', 'S9'],
+        note: 'The number printed on the probe: amps at 1V full-scale output (1A bench probe, ' +
+          '10-100A on a real kiln -- any rating is accepted). Also asks the probe\'s own zero-current ' +
+          'output (zero_mv, mV) -- both are converted here into k_ct_v_per_a and zero_counts below, ' +
+          'which is what actually gets sent to the safety processor. A value you type here (source ' +
+          '"manual") is never silently overwritten by the zone-current sweep\'s own calibration.' },
+      { id: 801, name: 'CT1 probe rating (A_fs)', type: 'ct_cal', chIndex: 1, unit: 'A', risk: 'nuisance',
+        guards: ['S3', 'S4', 'S9'], note: 'Same as CT0, for channel 1.' },
+      { id: 802, name: 'CT2 probe rating (A_fs)', type: 'ct_cal', chIndex: 2, unit: 'A', risk: 'nuisance',
+        guards: ['S3', 'S4', 'S9'], note: 'Same as CT0, for channel 2.' },
       { id: 770, name: 'zero_counts[0]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true,
         guards: ['S3', 'S4', 'S9'], note: 'Re-measured at runtime after >=5 min idle. Not zero -- ' +
-          'single-supply offset.' },
+          'single-supply offset. DERIVED from CT0\'s zero_mv above (or by the auto-zero action) -- ' +
+          'not typed here directly.' },
       { id: 771, name: 'zero_counts[1]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true, guards: ['S3', 'S4', 'S9'] },
       { id: 772, name: 'zero_counts[2]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true, guards: ['S3', 'S4', 'S9'] },
       { id: 773, name: 'correlation_window_s', type: 'u16', risk: 'nuisance', unit: 's', def: 150,
@@ -592,7 +604,9 @@ var GROUPS = [
       { id: 776, name: 'k_ct_v_per_a[0]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true,
         guards: ['(power estimate only)'], derivedK: 0,
         note: 'M12b: CALIBRATED by the zone current-sweep, from the mains voltage and ' +
-              'full-output power already answered above -- not typed in V/A.' },
+              'full-output power already answered above -- or DERIVED from CT0\'s probe rating ' +
+              '(A_fs) above (k_ct_v_per_a = 1/A_fs), whichever was entered manually most recently. ' +
+              'Not typed in V/A directly.' },
       { id: 777, name: 'k_ct_v_per_a[1]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true,
         guards: ['(power estimate only)'], derivedK: 1, note: 'Same as k_ct_v_per_a[0], for CT1.' },
       { id: 778, name: 'k_ct_v_per_a[2]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true,
@@ -636,6 +650,12 @@ var GROUPS = [
           'protection remains the breakers\' job by design (SAFETY_MODEL.md sec 3/7); this guard ' +
           'exists to catch a CT on the wrong jack or an element/wiring change.' },
       { id: 798, name: 'overcurrent_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 30, guards: ['S14'] },
+      { id: 799, name: 'ct_topology', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
+        enumOpts: [ [0, 'Per-zone (one CT per zone -- default)'], [1, 'Summed (one shared CT, channel 3, reads every zone)'] ],
+        note: 'CT_COMMISSIONING_PLAN.md step 3. In "summed" mode the zone current sweep records ' +
+          'per-zone normals from channel 3 alone and skips the one-relay-one-channel check; ' +
+          'channels 0/1 report "not fitted" wherever amps are shown. S15 (new, WARN-only) flags a ' +
+          'likely open heater in this mode.' },
     ] },
 
   { title: '4. Link and liveness', fields: [
@@ -898,6 +918,31 @@ function fieldInputHtml(f, paramsById) {
       '" placeholder="zone/relay id, 0-2">';
     return h;
   }
+  // CT_COMMISSIONING_PLAN.md step 1: A_fs/zero_mv are NOT Pico param ids --
+  // they live entirely on this ESP (safety_cfg_store's ct_cal record) and
+  // are converted here into the real wire fields (k_ct_v_per_a/zero_counts)
+  // by POST /api/safety/commissioning/ct_cal, not by this page's ordinary
+  // "Save all" pass. Deliberately NO data-id on these two inputs, so the
+  // generic save() below (`#fields input[data-id]`) can never sweep them up
+  // and try to SET_PARAM a param id that does not exist -- ctCalApply()
+  // (wired by wireCtCalButtons()) is the only thing that ever reads them.
+  if (f.type === 'ct_cal') {
+    var ch = f.chIndex;
+    var c = (window.kcCtCal && window.kcCtCal[ch]) || {};
+    var afsVal = c.has_value ? c.a_fs : '';
+    var zmvVal = c.has_value ? c.zero_mv : '';
+    var sourceWord = c.has_value ? c.source : 'not commissioned';
+    var html = '<div class="ct-cal-row" data-ct-cal-ch="' + ch + '">' +
+      '<label>A_fs <input type="number" step="any" min="' + 0.1 + '" max="2000" ' +
+      'class="ct-cal-afs" value="' + window.kcEscapeHtml(String(afsVal)) + '" placeholder="e.g. 1, 20, 100"> A</label> ' +
+      '<label>zero_mv <input type="number" step="any" min="-200" max="200" ' +
+      'class="ct-cal-zeromv" value="' + window.kcEscapeHtml(String(zmvVal)) + '" placeholder="e.g. 0, 59"> mV</label> ' +
+      '<button type="button" class="ct-cal-apply">Apply</button>' +
+      ' <span class="ct-cal-source">source: ' + window.kcEscapeHtml(sourceWord) + '</span>' +
+      ' <span class="ct-cal-result"></span>' +
+      '</div>';
+    return html;
+  }
   if (f.type === 'enum') {
     var html = '<select data-id="' + f.id + '" data-type="' + f.type + '">';
     if (!isSet) html += '<option value="" selected disabled>-- not set --</option>';
@@ -1042,6 +1087,58 @@ function renderGroups(data) {
   wireVoltageSelects();
   wireCtManualToggles();
   wireCtInstalledToggle();
+  wireCtCalButtons();
+}
+
+// CT_COMMISSIONING_PLAN.md step 1: each ct_cal row's "Apply" button posts
+// straight to POST /api/safety/commissioning/ct_cal (source=manual always --
+// see that handler's own comment) and reports the derived k_ct_v_per_a/
+// zero_counts inline, then reloads the whole commissioning page so every
+// other row (the readonly k_ct_v_per_a/zero_counts displays, the source
+// badge) reflects the just-applied values. Separate from the page's big
+// "Save all" pass on purpose: A_fs/zero_mv are not Pico param ids at all
+// (fieldInputHtml's 'ct_cal' comment), so they cannot ride that pass.
+function wireCtCalButtons() {
+  document.querySelectorAll('.ct-cal-row').forEach(function (row) {
+    var ch = row.getAttribute('data-ct-cal-ch');
+    var btn = row.querySelector('.ct-cal-apply');
+    var result = row.querySelector('.ct-cal-result');
+    if (!btn) return;
+    btn.onclick = function () {
+      var afs = row.querySelector('.ct-cal-afs').value;
+      var zmv = row.querySelector('.ct-cal-zeromv').value;
+      if (afs === '' || zmv === '') {
+        result.textContent = 'enter both A_fs and zero_mv first';
+        result.className = 'ct-cal-result crc-mismatch';
+        return;
+      }
+      btn.disabled = true;
+      result.textContent = 'applying...';
+      result.className = 'ct-cal-result';
+      var body = 'ch=' + encodeURIComponent(ch) + '&a_fs=' + encodeURIComponent(afs) +
+        '&zero_mv=' + encodeURIComponent(zmv) + '&commit=1';
+      fetch('/api/safety/commissioning/ct_cal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body,
+      }).then(function (r) { return r.json().catch(function () { return { ok: false, reason: 'bad response' }; }); })
+        .then(function (j) {
+          btn.disabled = false;
+          if (j.ok) {
+            result.textContent = 'ok -- k_ct_v_per_a=' + j.k_ct_v_per_a + ', zero_counts=' + j.zero_counts;
+            result.className = 'ct-cal-result';
+            loadCommissioning();
+          } else {
+            result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
+            result.className = 'ct-cal-result crc-mismatch';
+          }
+        }).catch(function () {
+          btn.disabled = false;
+          result.textContent = 'FAILED: request error';
+          result.className = 'ct-cal-result crc-mismatch';
+        });
+    };
+  });
 }
 
 // ROADMAP.md M12, "CTs are optional hardware". ct_installed (0x0109) answered
@@ -1203,6 +1300,11 @@ function loadCommissioning() {
   fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (data) {
     latest = data;
     gLoadFailed = false;
+    // CT_COMMISSIONING_PLAN.md step 1: stash ct_cal BEFORE renderGroups(),
+    // since fieldInputHtml()'s 'ct_cal' branch reads window.kcCtCal
+    // synchronously during that render pass -- same "has to be in hand
+    // first" ordering ctMapDerived/ctKDerived above already follow.
+    window.kcCtCal = Array.isArray(data.ct_cal) ? data.ct_cal : [];
     setBodyFlags(data);
     renderCrcLine(data);
     renderGroups(data);

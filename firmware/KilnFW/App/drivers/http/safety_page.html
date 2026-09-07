@@ -303,7 +303,7 @@ if the Pico's diagnostics are too stale to trust.</p>
         row('Trip reason', window.kcEscapeHtml(st.diag_trip_reason_words) + ' (0x' + hex(st.diag_trip_reason) + ')') +
         row('Cause', window.kcEscapeHtml(st.diag_trip_reason_cause)) +
         row('Remedy', window.kcEscapeHtml(st.diag_trip_reason_remedy)) +
-        row('Warn mask', '0x' + hex(st.diag_warn_mask)) +
+        row('Warn mask', window.kcEscapeHtml(warnMaskWords(st.diag_warn_mask)) + ' (0x' + hex16(st.diag_warn_mask) + ')') +
         row('Trip mask', '0x' + hex(st.diag_trip_mask)) +
         row('Context age', (st.diag_context_age_100ms * 100) + ' ms') +
         row('Context frames ok/bad', st.diag_context_frames_ok + ' / ' + st.diag_context_frames_bad) +
@@ -345,6 +345,31 @@ if the Pico's diagnostics are too stale to trust.</p>
   }
   function hex(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(2, '0'); }
   function hex16(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(4, '0'); }
+  // JS mirror of safety_trip_words.h's safety_warn_words_short() -- same
+  // "kept in sync by hand across the C/JS boundary" split that file's own
+  // header comment documents for main_page.html's SAFETY_TRIP_WORDS. Decodes
+  // Frame B (SAFETY_CMD_DIAG)'s warn_mask (LINK_PROTOCOL.md "warn_mask bit
+  // numbering" table) so this page's "Warn mask" row shows names, not just
+  // raw hex -- S14/S15 (CT_COMMISSIONING_PLAN.md) had no decoded name
+  // anywhere on the ESP side before this.
+  var WARN_MASK_WORDS = {
+    3: 'S4 load-should-be-off current present',
+    4: 'S5 sensor invalid (pre-trip)',
+    9: 'S9 current present, uncommissioned',
+    10: 'S10 safety TC disagrees with zone TCs',
+    12: 'S12 enclosure/CJ over-temp (pre-trip)',
+    13: 'S13 borrowed channel not updating (pre-trip)',
+    14: 'S14 current above measured normal',
+    15: 'S15 zone under-current (open heater)',
+  };
+  function warnMaskWords(mask) {
+    if (!mask) { return 'none'; }
+    var words = [];
+    for (var bit in WARN_MASK_WORDS) {
+      if ((mask >> bit) & 1) { words.push(WARN_MASK_WORDS[bit]); }
+    }
+    return words.length ? words.join(', ') : 'unrecognised warn bits 0x' + hex16(mask);
+  }
   // SaftyFW's safety_trip_t (firmware/SaftyFW/docs/ARCHITECTURE.md) --
   // SAFETY_TRIP_INEFFECTIVE = 10 (S9): the contactor is welded/bypassed and
   // current is still flowing after the relay opened. Every other trip means

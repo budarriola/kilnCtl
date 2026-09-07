@@ -1,5 +1,6 @@
 #include "safety_cfg_store.h"
 
+#include <math.h> /* isfinite() -- safety_ct_cal_convert() */
 #include <stdbool.h>
 #include <string.h>
 
@@ -50,12 +51,47 @@ static const char *TAG = "safety_cfg_store";
 #define NVS_KEY_SAFETY_RELAY "safetyrelay"
 #define SAFETY_RELAY_TYPE_BLOB_VERSION 1u
 
+/* CT_COMMISSIONING_PLAN.md step 1 -- the operator's A_fs/zero_mv inputs and
+ * which mechanism last wrote them, per channel. Own key/version for the same
+ * "not one of the Pico-fetched answers" reason the relay type above gets
+ * one. "safetyctcal" is 11 characters, well inside the 15-char NVS key
+ * limit -- checked below like every other literal this file/tree uses,
+ * same discipline zones_config_store.c's NVS_KEY_LEN_CHECK documents. */
+#define NVS_KEY_SAFETY_CT_CAL "safetyctcal"
+#define SAFETY_CT_CAL_BLOB_VERSION 1u
+
+/* Compile-time guard, same as zones_config_store.c's NVS_KEY_LEN_CHECK:
+ * every NVS key literal used in this file must fit ESP-IDF's real
+ * NVS_KEY_NAME_MAX_SIZE (16 bytes including the NUL, 15 usable chars) --
+ * sizeof() on a string literal includes its own NUL, so `sizeof(lit) - 1` is
+ * the character count nvs_page.cpp's strlen(key) check uses. */
+#define NVS_KEY_LEN_CHECK(lit) \
+    _Static_assert(sizeof(lit) - 1 <= 15, #lit " exceeds NVS's 15-character key limit (NVS_KEY_NAME_MAX_SIZE=16 including NUL)")
+NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_CFG);
+NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_RELAY);
+NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_CT_CAL);
+
 typedef struct {
     uint8_t version;
     uint8_t type; /* relay_type_t */
 } safety_relay_type_blob_t;
 
 static relay_type_t s_safety_relay_type = RELAY_TYPE_CONTACTOR;
+
+/* CT_COMMISSIONING_PLAN.md step 1 -- per-channel calibration input state. */
+typedef struct {
+    uint8_t has_value; /* 0/1 -- never set means "unset", not a real 0 A_fs */
+    uint8_t source;    /* safety_ct_cal_source_t */
+    float a_fs;
+    float zero_mv;
+} safety_ct_cal_entry_t;
+
+typedef struct {
+    uint8_t version;
+    safety_ct_cal_entry_t ch[SAFETY_CT_CAL_CHANNELS];
+} safety_ct_cal_blob_t;
+
+static safety_ct_cal_blob_t s_ct_cal;
 
 /* Bump whenever safety_cfg_store_blob_t's on-flash layout changes -- mirrors
  * ZONES_CFG_VERSION/KILN_CFG_STORE_VERSION's role in their own files.
@@ -81,8 +117,14 @@ static relay_type_t s_safety_relay_type = RELAY_TYPE_CONTACTOR;
  * nvs_load_store()'s "older version, no migration path" branch now rejects
  * v1 for the actual reason it is unusable, and the next
  * safety_cfg_store_refetch() refills the empty cache from the Pico, which is
- * the authority on every one of these values anyway. */
-#define SAFETY_CFG_STORE_VERSION 2u
+ * the authority on every one of these values anyway.
+ *
+ * 2 -> 3 (2026-09-06, CT_COMMISSIONING_PLAN.md step 3): ct_topology (0x031F)
+ * appended at the END of the table (not mid-array, so no remap hazard this
+ * time) -- bumped anyway, principled rather than relying again on the size
+ * check alone to save an unbumped version, per this comment's own "the
+ * version gets bumped" rule for every table growth. */
+#define SAFETY_CFG_STORE_VERSION 3u
 
 /* CONFIG_REFERENCE.md secs 1-5 / COMMISSIONING.md sec 2.1's param_id table,
  * in that document's own order -- table POSITION is what
@@ -185,6 +227,12 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUN
     { 0x0502, KILNLINK_PARAM_TYPE_U16, "estop_debounce_ms" },
     { 0x0503, KILNLINK_PARAM_TYPE_U16, "watchdog_timeout_ms" },
     { 0x0504, KILNLINK_PARAM_TYPE_U16, "config_check_period_s" },
+    /* CT_COMMISSIONING_PLAN.md step 3 -- appended at the very end (never
+     * mid-array, see this table's own header comment), so no version bump
+     * is needed beyond the one SAFETY_CFG_PARAM_COUNT's own growth already
+     * requires. 0 = per_zone (safe default, matches every board before this
+     * field existed). */
+    { 0x031F, KILNLINK_PARAM_TYPE_U8, "ct_topology" },
 };
 
 typedef struct {
@@ -587,6 +635,192 @@ bool safety_cfg_store_set_safety_relay_type(relay_type_t type)
     return true;
 }
 
+/* ---------------------------------------------------------------------- */
+/* CT_COMMISSIONING_PLAN.md step 1                                        */
+/* ---------------------------------------------------------------------- */
+
+static void reset_ct_cal_to_defaults(void)
+{
+    memset(&s_ct_cal, 0, sizeof(s_ct_cal));
+    s_ct_cal.version = SAFETY_CT_CAL_BLOB_VERSION;
+}
+
+/* Same current/migrate(none-yet)/refuse discipline as load_safety_relay_
+ * type() -- see that function's own comment for the reasoning, identical
+ * here. */
+static void load_ct_cal(void)
+{
+    reset_ct_cal_to_defaults();
+
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return; /* never saved, or partition trouble -- defaults stand */
+    }
+    safety_ct_cal_blob_t loaded;
+    size_t len = sizeof(loaded);
+    err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_CT_CAL, &loaded, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(loaded)) {
+        return; /* nothing stored, unreadable, or wrong size -- defaults stand */
+    }
+    if (loaded.version != SAFETY_CT_CAL_BLOB_VERSION) {
+        ESP_LOGW(TAG, "safety CT calibration-input blob is version %u, this build knows only %u -- "
+                      "resetting to defaults",
+                 (unsigned)loaded.version, (unsigned)SAFETY_CT_CAL_BLOB_VERSION);
+        return;
+    }
+    s_ct_cal = loaded;
+}
+
+/* Direct write, no flash-worker indirection -- same "httpd-worker-only
+ * caller" reasoning as save_safety_relay_type()'s own comment; this is only
+ * ever reached from the httpd worker's commissioning POST handler. */
+static esp_err_t save_ct_cal(void)
+{
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "save_ct_cal: REFUSING -- calling task's stack is in external RAM (PSRAM). "
+                      "A flash/NVS write from here would abort the whole board -- see "
+                      "caller_stack_is_external()'s comment.");
+        return ESP_ERR_INVALID_STATE;
+    }
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
+    }
+    s_ct_cal.version = SAFETY_CT_CAL_BLOB_VERSION;
+    err = hal_kv_set_blob(&h, NVS_KEY_SAFETY_CT_CAL, &s_ct_cal, sizeof(s_ct_cal));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
+}
+
+/* R46/R43 physical default -- same constant the bench preset table and the
+ * commissioning page both already use for gain[0..2] (0x030B-0x030D). Used
+ * here only as the fallback when a channel's gain has never been
+ * fetched/set, so a conversion is never simply refused for want of a gain
+ * this board legitimately doesn't have yet. */
+#define SAFETY_CT_CAL_DEFAULT_GAIN 0.715f
+
+bool safety_ct_cal_convert(float a_fs, float zero_mv, float gain, float *out_k_ct_v_per_a,
+                            uint16_t *out_zero_counts)
+{
+    if (!isfinite(a_fs) || a_fs < SAFETY_CT_CAL_A_FS_MIN || a_fs > SAFETY_CT_CAL_A_FS_MAX) {
+        return false;
+    }
+    if (!isfinite(zero_mv) || zero_mv < SAFETY_CT_CAL_ZERO_MV_MIN || zero_mv > SAFETY_CT_CAL_ZERO_MV_MAX) {
+        return false;
+    }
+    if (!isfinite(gain) || gain <= 0.0f) {
+        return false;
+    }
+    float k = 1.0f / a_fs;
+    if (!isfinite(k) || k <= 0.0f) {
+        return false;
+    }
+    /* zero_counts = zero_mv/1000 * gain * 4096/3.3 -- CURRENT_SENSE.md's
+     * model, CT_COMMISSIONING_PLAN.md step 1's own formula verbatim. A
+     * negative zero_mv can drive this negative; the ADC itself cannot report
+     * negative counts, so clamp the floor at 0 rather than let a cast to
+     * uint16_t wrap a negative float into a huge unsigned value -- that wrap
+     * is the actual failure this clamp exists to prevent, not a cosmetic
+     * nicety. */
+    float counts_f = (zero_mv / 1000.0f) * gain * (4096.0f / 3.3f);
+    if (!isfinite(counts_f)) {
+        return false;
+    }
+    if (counts_f < 0.0f) {
+        counts_f = 0.0f;
+    }
+    if (counts_f > 65535.0f) {
+        counts_f = 65535.0f; /* wire type is u16 -- never overflow it either */
+    }
+    if (out_k_ct_v_per_a) {
+        *out_k_ct_v_per_a = k;
+    }
+    if (out_zero_counts) {
+        *out_zero_counts = (uint16_t)(counts_f + 0.5f); /* round to nearest */
+    }
+    return true;
+}
+
+static int index_for_id(uint16_t id); /* defined below -- forward declared for ct_cal_channel_gain() */
+
+static float ct_cal_channel_gain(size_t ch)
+{
+    static const uint16_t GAIN_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x030B, 0x030C, 0x030D };
+    if (ch >= SAFETY_CT_CAL_CHANNELS) {
+        return SAFETY_CT_CAL_DEFAULT_GAIN;
+    }
+    int idx = index_for_id(GAIN_IDS[ch]);
+    if (idx < 0 || !s_store.entries[idx].set) {
+        return SAFETY_CT_CAL_DEFAULT_GAIN;
+    }
+    float g = s_store.entries[idx].value.f32_val;
+    return (isfinite(g) && g > 0.0f) ? g : SAFETY_CT_CAL_DEFAULT_GAIN;
+}
+
+bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_zero_mv,
+                                        safety_ct_cal_source_t *out_source)
+{
+    if (ch >= SAFETY_CT_CAL_CHANNELS || !s_ct_cal.ch[ch].has_value) {
+        return false;
+    }
+    if (out_a_fs) {
+        *out_a_fs = s_ct_cal.ch[ch].a_fs;
+    }
+    if (out_zero_mv) {
+        *out_zero_mv = s_ct_cal.ch[ch].zero_mv;
+    }
+    if (out_source) {
+        *out_source = (safety_ct_cal_source_t)s_ct_cal.ch[ch].source;
+    }
+    return true;
+}
+
+bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
+                                        safety_ct_cal_source_t source, float *out_k_ct_v_per_a,
+                                        uint16_t *out_zero_counts)
+{
+    if (ch >= SAFETY_CT_CAL_CHANNELS) {
+        return false;
+    }
+    /* Manual wins over the sweep -- CT_COMMISSIONING_PLAN.md step 1: "the
+     * sweep must not overwrite a manual value." AUTO_ZERO is a deliberate
+     * per-channel operator action, always applied regardless of the current
+     * source (see the header comment on safety_ct_cal_source_t). */
+    if (source == SAFETY_CT_CAL_SOURCE_SWEEP && s_ct_cal.ch[ch].has_value &&
+        (safety_ct_cal_source_t)s_ct_cal.ch[ch].source == SAFETY_CT_CAL_SOURCE_MANUAL) {
+        return false;
+    }
+    float gain = ct_cal_channel_gain(ch);
+    float k = 0.0f;
+    uint16_t zc = 0;
+    if (!safety_ct_cal_convert(a_fs, zero_mv, gain, &k, &zc)) {
+        return false;
+    }
+    s_ct_cal.ch[ch].has_value = 1;
+    s_ct_cal.ch[ch].source = (uint8_t)source;
+    s_ct_cal.ch[ch].a_fs = a_fs;
+    s_ct_cal.ch[ch].zero_mv = zero_mv;
+    esp_err_t err = save_ct_cal();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "safety_cfg_store_set_ct_cal_input: NVS write failed (%s) -- applied live but "
+                      "will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    if (out_k_ct_v_per_a) {
+        *out_k_ct_v_per_a = k;
+    }
+    if (out_zero_counts) {
+        *out_zero_counts = zc;
+    }
+    return true;
+}
+
 static int index_for_id(uint16_t id)
 {
     for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT; i++) {
@@ -636,6 +870,10 @@ esp_err_t safety_cfg_store_init(void)
      * comment), so the ordering isn't even load-bearing here. */
     load_safety_relay_type();
     relay_cycles_set_type(RELAY_CYCLES_SAFETY_INDEX, s_safety_relay_type, 0);
+    /* CT_COMMISSIONING_PLAN.md step 1 -- load the operator's A_fs/zero_mv
+     * inputs and their source markers, same "every boot, not only after a
+     * fresh POST" reasoning as the relay type just above. */
+    load_ct_cal();
     /* 2026-08-27 audit fix (defect c): this used to stamp s_fetched_at_us =
      * hal_time_now_us() here whenever the loaded blob's config_crc != 0
      * ("a load from NVS counts as fetched"). That was a DIFFERENT and worse

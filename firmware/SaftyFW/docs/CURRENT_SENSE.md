@@ -104,6 +104,22 @@ exactly as before. That is the right way round.
 
 ---
 
+### 0.2 Two topologies: per-zone or one summed CT (2026-09-06)
+
+Everything above and through §5.2 describes the **per-zone** design: one CT
+per zone, `ct_channel_map` resolving which channel belongs to which relay.
+Since `CT_COMMISSIONING_PLAN.md` step 3, a board may instead answer
+`ct_topology = summed` (`0x031F`, KilnFW commissioning page): one shared CT
+(channel 3, Current3/GPIO28-ADC2, §5.2) reads every zone at once. In that
+mode the mapping check (§5's Commissioning check, `GUARD_TEST_MATRIX.md`
+§3.3) is skipped entirely — there is no per-relay mapping to resolve — and
+the zone current-sweep instead derives each zone's normal as `sum(with zone
+on) - sum(idle)` from channel 3 alone. Channels 1/2 are simply not fitted in
+this topology (`amps_valid[0]`/`[1]` always false); S14 compares channel 3
+against the sum of commanded zones' `i_normal_a[]`, and a new WARN-only
+guard S15 flags a likely open heater. Per-zone remains the default and the
+safe silent choice for an uncommissioned board.
+
 ## 1. The circuit
 
 Traced from `hardware/mainBoard/output/kiln.pdf` p.4. Designators are channel 1's;
@@ -374,7 +390,7 @@ Per channel, stored in flash, all **measured**:
 |---|---|---|---|
 | `zero_counts` | **both** | Mean ADC reading with the CT fitted and **no primary current**, over ≥ 10 s | small positive; op-amp Vos and D14 leakage, *not* 0 |
 | `i_present_a` | **guards** | Set between the noise floor and a conducting element. Coarse by design | 2.0 A |
-| `k_ct_v_per_a` | power estimate, **and the presence threshold's domain conversion** | **Calibrated by the ESP's zone current-sweep (§5.1)**; CT datasheet or a clamp meter as the manual override | e.g. 0.0333 V/A for a 1 V/30 A CT |
+| `k_ct_v_per_a` | power estimate, **and the presence threshold's domain conversion** | **Calibrated by the ESP's zone current-sweep (§5.1)**, or manually via the commissioning page's A_fs/zero_mv fields (below) — the operator types the probe's own rated amps and zero-current output, and the ESP derives `k_ct_v_per_a = 1/A_fs`/`zero_counts` and pushes them | e.g. 0.0333 V/A for a 1 V/30 A CT |
 | `gain` | power estimate only | 0.715 nominal, refined if the resistors are not 1 % | 0.715 |
 | `mains_voltage_v` | power estimate only | The installation's nominal supply voltage | 240 |
 
@@ -509,6 +525,20 @@ guard fed by a mis-mapped CT is worse than no guard: it will trip on healthy
 firings and stay quiet on the failure it exists to catch. Steps 1 and 4 are
 also guard-relevant (zero, and decay behaviour). Step 3 is cosmetic.
 
+
+### 5.1b Manual entry: probe rating and zero offset, in the operator's own units (2026-09-06)
+
+`CT_COMMISSIONING_PLAN.md` step 1. §5.1's sweep derives `k_ct_v_per_a` from
+the nameplate power/voltage and a measured total; the commissioning page
+also accepts a direct, per-channel `A_fs` (the number printed on the probe —
+amps at 1 V full-scale output) and `zero_mv` (the probe's own output at zero
+current, mV), converted on the ESP: `k_ct_v_per_a = 1/A_fs`,
+`zero_counts = zero_mv/1000 · gain · 4096/3.3`. Sanity ranges only —
+`A_fs` in [0.1, 2000] A, `zero_mv` in [-200, 200] mV — nothing assumes a 1 A
+probe. Each channel's last write is tagged manual/sweep/auto-zero
+(ESP-local, `safety_cfg_store.c`); **manual always wins over the sweep** —
+a manually-entered channel is skipped by §5.1's derivation outright, never
+silently overwritten on the next sweep run.
 
 ### 5.2 Channel 3 (Current3/GPIO28-ADC2): the summed-heater CT (2026-09-05)
 

@@ -213,6 +213,21 @@ zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_
     return ZONE_KCT_DERIVE_OK;
 }
 
+bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, float *out_normal_a)
+{
+    if (!isfinite(sum_with_zone_on_a) || !isfinite(sum_idle_a)) {
+        return false;
+    }
+    float normal_a = sum_with_zone_on_a - sum_idle_a;
+    if (normal_a < 0.0f) {
+        normal_a = 0.0f; /* see this function's own header comment */
+    }
+    if (out_normal_a) {
+        *out_normal_a = normal_a;
+    }
+    return true;
+}
+
 const char *zone_kct_derive_str(zone_kct_derive_t r)
 {
     switch (r) {

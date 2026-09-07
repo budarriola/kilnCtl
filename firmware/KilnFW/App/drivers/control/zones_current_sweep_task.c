@@ -30,9 +30,44 @@ static void zone_sweep_task_set_zone_index(void *ctx, uint8_t zi)
     s_sweep.zone_index = zi;
 }
 
+/* CT_COMMISSIONING_PLAN.md step 3. Sampled fresh at the start of every
+ * zone_sweep_task() run (never persisted across runs -- a stale idle sample
+ * from a previous sweep would silently misattribute today's baseline draw).
+ * s_ct_topology_summed false (per_zone, the default and every board before
+ * this field existed) leaves both callbacks below on their original,
+ * unmodified per-zone-CT behaviour. */
+static bool s_ct_topology_summed = false;
+static float s_ct_summed_idle_a = 0.0f;
+
+/* CT_COMMISSIONING_PLAN.md step 3 -- 0x031F, U8, 0=per_zone/1=summed. Same
+ * committed-cache read as zone_cfg_committed_f32() above, u8 twin. Unset
+ * (never fetched -- an older Pico, or an uncommissioned one) reads as
+ * per_zone: the safe, silent default this field was designed to have
+ * (CONFIG_REFERENCE.md). */
+static uint8_t zone_cfg_committed_ct_topology(void)
+{
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t row;
+        memset(&row, 0, sizeof(row));
+        if (!safety_cfg_store_get_by_index(i, &row) || row.param_id != 0x031Fu) {
+            continue;
+        }
+        return row.set ? row.value.u8_val : 0u;
+    }
+    return 0u;
+}
+
 static void zone_sweep_task_record_normal(void *ctx, uint8_t zi, float avg_a)
 {
     (void)ctx;
+    if (s_ct_topology_summed) {
+        /* CT_COMMISSIONING_PLAN.md step 3: in summed mode the normal comes
+         * from channel 3 alone (zone_sweep_task_record_ct_channels() below),
+         * not from sample_current()'s ct_mask-based sum -- avg_a here is
+         * simply not the right number in this topology. */
+        return;
+    }
     zone_normals_set(zi, avg_a);
 }
 
@@ -65,6 +100,27 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
                                                 const float *per_ch_avg_a)
 {
     (void)ctx;
+    if (s_ct_topology_summed) {
+        /* CT_COMMISSIONING_PLAN.md step 3: summed topology has no per-relay
+         * channel mapping to derive at all -- one shared CT (channel 3,
+         * index ZONE_CT_CHANNEL_COUNT-1) reads every zone, so the one-relay-
+         * one-channel check (GUARD_TEST_MATRIX.md sec 3.3) is skipped
+         * entirely rather than attempted and refused: s_ct_derive is left
+         * untouched (derived_mask stays 0), which is also what makes
+         * zone_sweep_push_ct_channel_map()/zone_sweep_push_k_ct_v_per_a()
+         * naturally no-op afterward -- neither of those Pico-side fields
+         * means anything in this topology. Instead, this zone's normal is
+         * derived straight from the shared channel and recorded here (the
+         * only place with both per_ch_avg_a and zi in hand). */
+        float with_on = per_ch_avg_a[ZONE_CT_CHANNEL_COUNT - 1];
+        if (!isnan(with_on)) {
+            float normal_a = 0.0f;
+            if (zone_sweep_summed_normal_a(with_on, s_ct_summed_idle_a, &normal_a)) {
+                zone_normals_set(zi, normal_a);
+            }
+        }
+        return;
+    }
     uint8_t ch = 0;
     /* ct_channel_map[] is indexed into the Pico's relay_now_mask directly
      * (safety_core.c: `ctx.relay_now_mask & (1u << ct_channel_map[ch])`), so
@@ -524,6 +580,21 @@ static uint8_t zone_sweep_plan_k_ct(float *out_k, char *note, size_t note_cap)
         if ((s_ct_derive.derived_mask & (1u << c)) == 0) {
             continue;
         }
+        /* CT_COMMISSIONING_PLAN.md step 1: "manual wins over the sweep (the
+         * sweep must not overwrite a manual value)". A channel the operator
+         * hand-entered an A_fs/zero_mv for (safety_cfg_store's ct_cal
+         * record, source MANUAL) is skipped here entirely -- the sweep's own
+         * derivation for it is simply never computed or staged, same as an
+         * unresolved channel. safety_cfg_store_set_ct_cal_input() itself
+         * refuses the mirror-image write (a SWEEP-sourced write attempted
+         * against a MANUAL channel), but that refusal never runs at all
+         * because this loop is what would have produced it. */
+        float existing_a_fs = 0.0f, existing_zero_mv = 0.0f;
+        safety_ct_cal_source_t existing_source = SAFETY_CT_CAL_SOURCE_SWEEP;
+        if (safety_cfg_store_get_ct_cal_input(c, &existing_a_fs, &existing_zero_mv, &existing_source) &&
+            existing_source == SAFETY_CT_CAL_SOURCE_MANUAL) {
+            continue;
+        }
         float k_old = 0.0f;
         if (!zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &k_old)) {
             k_old = 0.0f; /* never committed -- zone_sweep_derive_k_ct() refuses on it */
@@ -667,6 +738,19 @@ static void zone_sweep_task(void *arg)
     memset(&s_ct_derive, 0, sizeof(s_ct_derive));
     zone_ct_map_clear(); /* a re-sweep must not leave a stale channel claim visible as current */
     zone_k_ct_clear();   /* M12b: same reasoning, for the derived CT scale */
+
+    /* CT_COMMISSIONING_PLAN.md step 3 -- read fresh every run, never cached
+     * across sweeps. zones_current_sweep_start() already refused to start
+     * with any relay on (zone_sweep_check_refusal()'s RELAYS_ON case), so
+     * this sample is genuinely an idle baseline. */
+    s_ct_topology_summed = (zone_cfg_committed_ct_topology() != 0u);
+    s_ct_summed_idle_a = 0.0f;
+    if (s_ct_topology_summed) {
+        float idle_ch[ZONE_CT_CHANNEL_COUNT];
+        zone_sweep_hw_sample_channels(NULL, idle_ch);
+        float idle = idle_ch[ZONE_CT_CHANNEL_COUNT - 1];
+        s_ct_summed_idle_a = isnan(idle) ? 0.0f : idle;
+    }
 
     zone_sweep_all_result_t result;
     zone_sweep_run_all_zones(s_sweep.zones_total, &hw_deps, &hw_hooks, &result);

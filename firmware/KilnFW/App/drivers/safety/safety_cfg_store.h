@@ -67,12 +67,13 @@ extern "C" {
  * max_expected_power_w (0x0319, ROADMAP.md M12) = 59, plus S14's five new
  * ids (i_normal_a[0..2], overcurrent_pct, overcurrent_time_s -- 0x031A-
  * 0x031E, COMMISSIONING_UX.md sec 3.3) = 64, plus ct_installed (0x0109,
- * ROADMAP.md M12's "CTs are optional hardware" pass) = 65. Bump this (and
- * safety_cfg_store.c's SAFETY_CFG_PARAM_TABLE) only when CONFIG_REFERENCE.md
+ * ROADMAP.md M12's "CTs are optional hardware" pass) = 65, plus ct_topology
+ * (0x031F, CT_COMMISSIONING_PLAN.md step 3, per_zone/summed) = 66. Bump this
+ * (and safety_cfg_store.c's SAFETY_CFG_PARAM_TABLE) only when CONFIG_REFERENCE.md
  * itself grows a field -- ids are permanent (COMMISSIONING.md sec 2.1: "a
  * field that is removed leaves its id burned, never reused"), so this count
  * only ever goes up. */
-#define SAFETY_CFG_PARAM_COUNT 65u
+#define SAFETY_CFG_PARAM_COUNT 66u
 
 /* One row of safety_cfg_store_get_by_index()'s output -- everything
  * safety_cfg_http.c's GET handler needs to emit one `params[]` entry.
@@ -249,6 +250,77 @@ relay_type_t safety_cfg_store_get_safety_relay_type(void);
  * safety_poll_task (PSRAM stack); see caller_stack_is_external()'s comment
  * for why that distinction matters on this board. */
 bool safety_cfg_store_set_safety_relay_type(relay_type_t type);
+
+/* ---------------------------------------------------------------------- */
+/* CT_COMMISSIONING_PLAN.md step 1 -- editable calibration in the user's own
+ * units (probe rating and zero offset), converted on this ESP into the wire
+ * quantities the Pico actually stores (k_ct_v_per_a / zero_counts). Lives in
+ * THIS store for the same reason the safety relay type does: it is never
+ * fetched from the Pico (the Pico only ever sees the derived
+ * k_ct_v_per_a/zero_counts, pushed over SET_PARAM/COMMIT_CONFIG like any
+ * other field), so it needs its own ESP-local persistence and versioning,
+ * separate from SAFETY_CFG_PARAM_TABLE's blob. */
+
+/* Who last wrote a channel's A_fs/zero_mv pair. MANUAL always wins: a write
+ * with source SWEEP is silently refused (returns false, nothing changed) if
+ * the channel's current source is already MANUAL -- CT_COMMISSIONING_PLAN.md
+ * step 1's "manual wins over the sweep (the sweep must not overwrite a
+ * manual value)". AUTO_ZERO (the step-2 idle-offset measurement) is always
+ * applied regardless of the current source -- it is a deliberate,
+ * operator-triggered action on this specific channel, not a passive
+ * recomputation the way the zone-current sweep's k_ct calibration is. */
+typedef enum {
+    SAFETY_CT_CAL_SOURCE_MANUAL = 0,
+    SAFETY_CT_CAL_SOURCE_SWEEP = 1,
+    SAFETY_CT_CAL_SOURCE_AUTO_ZERO = 2,
+} safety_ct_cal_source_t;
+
+#define SAFETY_CT_CAL_CHANNELS 3u
+
+/* Sanity ranges only -- CT_COMMISSIONING_PLAN.md step 1: "Nothing may assume
+ * 1 A." A_fs is the probe's rated amps at 1V output (1-100A bench/kiln
+ * probes all fit comfortably inside this); zero_mv is the probe's own output
+ * at zero current, in mV, either side of 0. */
+#define SAFETY_CT_CAL_A_FS_MIN 0.1f
+#define SAFETY_CT_CAL_A_FS_MAX 2000.0f
+#define SAFETY_CT_CAL_ZERO_MV_MIN (-200.0f)
+#define SAFETY_CT_CAL_ZERO_MV_MAX 200.0f
+
+/* Pure conversion, host-testable with no I/O: CURRENT_SENSE.md's model,
+ * `k_ct_v_per_a = 1/A_fs` and `zero_counts = zero_mv/1000 * gain * 4096/3.3`.
+ * Returns false (outputs untouched) if a_fs or zero_mv is outside the sanity
+ * ranges above, non-finite, or gain <= 0 -- never silently clamps a bad input
+ * into a plausible-looking wire value. A derived zero_counts that would come
+ * out negative (a zero_mv negative enough, relative to gain, to imply a
+ * below-zero ADC offset) is clamped to 0 rather than wrapping/truncating into
+ * a huge unsigned value -- the ADC itself cannot report negative counts
+ * either, so 0 is the honest floor. */
+bool safety_ct_cal_convert(float a_fs, float zero_mv, float gain, float *out_k_ct_v_per_a,
+                            uint16_t *out_zero_counts);
+
+/* Reads channel `ch` (0..SAFETY_CT_CAL_CHANNELS-1)'s last-written A_fs/
+ * zero_mv/source. Returns false (outputs untouched) for an out-of-range
+ * channel or a channel that has never been set (out_has_value would be
+ * false, but callers may pass NULL for it and rely on the false return
+ * instead). */
+bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_zero_mv,
+                                        safety_ct_cal_source_t *out_source);
+
+/* Validates ranges, applies the manual-wins-over-sweep rule above, converts
+ * via safety_ct_cal_convert() using the channel's current `gain[ch]` (read
+ * from this same cache's SAFETY_CFG_PARAM_TABLE row for 0x030B/0x030C/0x030D,
+ * falling back to the 0.715 physical default if that gain has never been
+ * fetched/set), and persists the input pair + source to NVS. Does NOT itself
+ * push k_ct_v_per_a/zero_counts to the Pico -- that is safety_cfg_http.c's
+ * job (same generic SET_PARAM/COMMIT_CONFIG path every other field uses);
+ * this function only owns the ESP-local calibration-input record and the
+ * conversion. On success, out_k_ct_v_per_a and out_zero_counts (either may
+ * be NULL) receive the values the caller should stage. Returns false (nothing
+ * changed) for an out-of-range channel/value, a refused manual-wins-over-
+ * sweep write, or a conversion failure. */
+bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
+                                        safety_ct_cal_source_t source, float *out_k_ct_v_per_a,
+                                        uint16_t *out_zero_counts);
 
 #ifdef __cplusplus
 }

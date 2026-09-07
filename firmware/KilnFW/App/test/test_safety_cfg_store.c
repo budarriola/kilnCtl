@@ -9,6 +9,7 @@
 // as a plain, controllable C function returning canned pages -- there is no
 // real SafetyLinkClass/UART in a host test, same split test_kiln_cfg_store.c
 // uses for zones_config_export_blob()/_import_blob().
+#include <math.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -242,12 +243,15 @@ static void test_index_for_id_finds_known_and_rejects_unknown(void)
 {
     TEST_SECTION("index_for_id -- every table row is reachable by its own id, an unknown id is not");
 
-    // 0x0101 is the table's first row (tc_source); 0x0504 is its last
-    // (config_check_period_s). Both ends, not just one, so a future
-    // off-by-one in the table's bounds shows up here.
+    // 0x0101 is the table's first row (tc_source); 0x031F (ct_topology,
+    // CT_COMMISSIONING_PLAN.md step 3) is now its last, appended at the very
+    // end per this table's own "only ever appended to" rule. Both ends, not
+    // just one, so a future off-by-one in the table's bounds shows up here.
     TEST_CHECK(index_for_id(0x0101) == 0, "first table row (tc_source) is index 0");
-    TEST_CHECK(index_for_id(0x0504) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
-               "last table row (config_check_period_s) is the last index");
+    TEST_CHECK(index_for_id(0x031F) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
+               "last table row (ct_topology) is the last index");
+    TEST_CHECK(index_for_id(0x0504) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
+               "config_check_period_s, the last row before ct_topology was appended, is second-to-last");
     TEST_CHECK(index_for_id(0xBEEF) == -1, "an id no CONFIG_REFERENCE.md section uses is not found");
     TEST_CHECK(safety_cfg_store_param_count() == SAFETY_CFG_PARAM_COUNT,
                "safety_cfg_store_param_count() matches the table size exactly");
@@ -927,6 +931,161 @@ static void test_safety_relay_type_rejects_ssr(void)
     fake_kv_reset_all();
 }
 
+// ---------------------------------------------------------------------------
+// CT_COMMISSIONING_PLAN.md step 1 -- safety_ct_cal_convert() /
+// safety_cfg_store_set/get_ct_cal_input().
+// ---------------------------------------------------------------------------
+
+static void test_ct_cal_convert_at_several_probe_ratings(void)
+{
+    TEST_SECTION("safety_ct_cal_convert -- k_ct_v_per_a = 1/A_fs and zero_counts = "
+                 "zero_mv/1000 * gain * 4096/3.3, at several real probe ratings (quantized counts, "
+                 "not idealized amps -- 'idealized test input' class)");
+
+    float k = 0.0f;
+    uint16_t zc = 0;
+
+    // 1 A bench probe, +59 mV offset (project's actual bench probe, per
+    // MEMORY.md's "CT sensor on GPIO28" note), gain 0.715 (R46/R43 default).
+    TEST_CHECK(safety_ct_cal_convert(1.0f, 59.0f, 0.715f, &k, &zc), "1A probe converts");
+    TEST_CHECK(fabsf(k - 1.0f) < 1e-6f, "k_ct_v_per_a = 1/1 = 1.0 V/A");
+    // 0.059 * 0.715 * 4096/3.3 = 52.35... -> rounds to 52.
+    TEST_CHECK(zc == 52, "zero_counts quantizes to 52 counts, not a fractional value");
+
+    // 20 A probe, 0 mV offset.
+    TEST_CHECK(safety_ct_cal_convert(20.0f, 0.0f, 0.715f, &k, &zc), "20A probe converts");
+    TEST_CHECK(fabsf(k - 0.05f) < 1e-6f, "k_ct_v_per_a = 1/20 = 0.05 V/A");
+    TEST_CHECK(zc == 0, "zero_mv=0 quantizes to exactly 0 counts");
+
+    // 50 A probe, -30 mV offset (negative zero_mv is legal per the sanity range).
+    TEST_CHECK(safety_ct_cal_convert(50.0f, -30.0f, 0.715f, &k, &zc), "50A probe converts");
+    TEST_CHECK(fabsf(k - 0.02f) < 1e-6f, "k_ct_v_per_a = 1/50 = 0.02 V/A");
+    TEST_CHECK(zc == 0, "a negative implied offset clamps to the ADC's honest floor of 0 counts, "
+                        "never wraps a negative float into a huge unsigned value");
+
+    // 100 A probe, +100 mV offset, a non-default gain (0.5, as if R46/R43
+    // were refined per the commissioning page's own note).
+    TEST_CHECK(safety_ct_cal_convert(100.0f, 100.0f, 0.5f, &k, &zc), "100A probe converts");
+    TEST_CHECK(fabsf(k - 0.01f) < 1e-6f, "k_ct_v_per_a = 1/100 = 0.01 V/A");
+    // 0.1 * 0.5 * 4096/3.3 = 62.06... -> 62.
+    TEST_CHECK(zc == 62, "zero_counts scales with gain too, not just zero_mv");
+}
+
+static void test_ct_cal_convert_rejects_out_of_range(void)
+{
+    TEST_SECTION("safety_ct_cal_convert -- sanity ranges only, but real ones: 'nothing may "
+                 "assume 1 A' means A_fs in [0.1, 2000], zero_mv in [-200, 200]");
+
+    float k = 0.0f;
+    uint16_t zc = 0;
+
+    TEST_CHECK(safety_ct_cal_convert(0.05f, 0.0f, 0.715f, &k, &zc) == false,
+               "A_fs below 0.1A is refused");
+    TEST_CHECK(safety_ct_cal_convert(2001.0f, 0.0f, 0.715f, &k, &zc) == false,
+               "A_fs above 2000A is refused -- a real kiln's 10-100A probe must never be treated "
+               "as an edge case, but this is still a sanity ceiling");
+    TEST_CHECK(safety_ct_cal_convert(1.0f, -201.0f, 0.715f, &k, &zc) == false,
+               "zero_mv below -200 is refused");
+    TEST_CHECK(safety_ct_cal_convert(1.0f, 201.0f, 0.715f, &k, &zc) == false,
+               "zero_mv above 200 is refused");
+    TEST_CHECK(safety_ct_cal_convert(1.0f, 0.0f, 0.0f, &k, &zc) == false,
+               "a zero or negative gain is refused rather than dividing/producing garbage");
+    TEST_CHECK(safety_ct_cal_convert(NAN, 0.0f, 0.715f, &k, &zc) == false, "non-finite A_fs is refused");
+
+    // Boundary values PASS (the range is inclusive at both ends) -- this is
+    // the NEGATIVE TEST half of this check: if safety_ct_cal_convert() had
+    // been written with a strict `<`/`>` where the header comment promises
+    // an inclusive [min, max] (or vice-versa), one of these two would flip
+    // and this assertion would fail. Proves the boundary constants
+    // themselves are load-bearing, not just "some number in the right
+    // ballpark".
+    TEST_CHECK(safety_ct_cal_convert(SAFETY_CT_CAL_A_FS_MIN, 0.0f, 0.715f, &k, &zc),
+               "A_fs exactly at the minimum (0.1A) is accepted, not rejected");
+    TEST_CHECK(safety_ct_cal_convert(SAFETY_CT_CAL_A_FS_MAX, 0.0f, 0.715f, &k, &zc),
+               "A_fs exactly at the maximum (2000A) is accepted, not rejected");
+}
+
+static void test_ct_cal_manual_wins_over_sweep(void)
+{
+    TEST_SECTION("safety_cfg_store_set_ct_cal_input -- CT_COMMISSIONING_PLAN.md step 1: manual "
+                 "wins over the sweep, the sweep must not overwrite a manual value");
+
+    fake_kv_reset_all();
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup");
+
+    float k = 0.0f;
+    uint16_t zc = 0;
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 1.0f, 59.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc),
+               "operator hand-enters channel 0's calibration");
+    TEST_CHECK(fabsf(k - 1.0f) < 1e-6f, "converts using the gain default (0.715) since none is "
+                                        "committed from the Pico in this test");
+
+    // The sweep's own write attempt must be refused outright -- nothing
+    // changes.
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 20.0f, 0.0f, SAFETY_CT_CAL_SOURCE_SWEEP, &k, &zc) ==
+                   false,
+               "a SWEEP-sourced write against a MANUAL channel is refused, not silently accepted");
+
+    float a_fs = 0.0f, zero_mv = 0.0f;
+    safety_ct_cal_source_t src = SAFETY_CT_CAL_SOURCE_SWEEP;
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(0, &a_fs, &zero_mv, &src), "channel 0 still has a value");
+    TEST_CHECK(fabsf(a_fs - 1.0f) < 1e-6f, "the manual A_fs (1.0) was NOT overwritten by the "
+                                           "refused sweep write (which tried 20.0)");
+    TEST_CHECK(src == SAFETY_CT_CAL_SOURCE_MANUAL, "source stays manual");
+
+    // A channel that has NEVER been set (still sweep-eligible) accepts a
+    // sweep write normally -- manual wins over the sweep, but the sweep is
+    // not disabled everywhere.
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(1, 20.0f, 0.0f, SAFETY_CT_CAL_SOURCE_SWEEP, &k, &zc),
+               "a sweep write against an UNCOMMISSIONED channel succeeds");
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(1, &a_fs, &zero_mv, &src), "channel 1 now has a value");
+    TEST_CHECK(src == SAFETY_CT_CAL_SOURCE_SWEEP, "and its source is sweep, not manual");
+
+    // AUTO_ZERO always applies, even over an existing manual value --
+    // see safety_ct_cal_source_t's own header comment for why this is NOT
+    // the same rule as the sweep's.
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 1.0f, 10.0f, SAFETY_CT_CAL_SOURCE_AUTO_ZERO, &k, &zc),
+               "an auto-zero write against a MANUAL channel is applied, unlike the sweep's");
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(0, &a_fs, &zero_mv, &src), "channel 0 still has a value");
+    TEST_CHECK(fabsf(zero_mv - 10.0f) < 1e-6f, "zero_mv was updated by the auto-zero action");
+    TEST_CHECK(src == SAFETY_CT_CAL_SOURCE_AUTO_ZERO, "source is now auto-zero");
+
+    // Reload from NVS -- the calibration input and its source must survive
+    // a reboot, same discipline as the relay type above.
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "reload succeeds");
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(0, &a_fs, &zero_mv, &src), "channel 0 survives reload");
+    TEST_CHECK(src == SAFETY_CT_CAL_SOURCE_AUTO_ZERO, "and its source survives too");
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(2, NULL, NULL, NULL) == false,
+               "channel 2, never set, correctly reports false -- not a fabricated zero");
+
+    fake_kv_reset_all();
+}
+
+static void test_ct_cal_set_rejects_out_of_range_channel_and_value(void)
+{
+    TEST_SECTION("safety_cfg_store_set_ct_cal_input -- rejects an out-of-range channel or value, "
+                 "same ranges safety_ct_cal_convert() enforces");
+
+    fake_kv_reset_all();
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup");
+
+    float k = 0.0f;
+    uint16_t zc = 0;
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(3, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc) ==
+                   false,
+               "channel 3 does not exist (only 0..2) -- refused");
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(0, 5000.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL, &k, &zc) ==
+                   false,
+               "A_fs out of range is refused here too, not only in the pure convert function");
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(0, NULL, NULL, NULL) == false,
+               "the refused call left channel 0 unset");
+
+    fake_kv_reset_all();
+}
+
 void run_test_safety_cfg_store(void)
 {
     test_index_for_id_finds_known_and_rejects_unknown();
@@ -952,4 +1111,8 @@ void run_test_safety_cfg_store(void)
     test_safety_relay_type_defaults_to_contactor_and_pushes_to_relay_cycles();
     test_safety_relay_type_set_persists_and_roundtrips_after_reload();
     test_safety_relay_type_rejects_ssr();
+    test_ct_cal_convert_at_several_probe_ratings();
+    test_ct_cal_convert_rejects_out_of_range();
+    test_ct_cal_manual_wins_over_sweep();
+    test_ct_cal_set_rejects_out_of_range_channel_and_value();
 }

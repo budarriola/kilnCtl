@@ -101,7 +101,27 @@ typedef struct {
      * unlike every other field above this is always known/valid, never
      * gated on link_up. */
     relay_type_t relay_type;
+
+    /* CT_COMMISSIONING_PLAN.md step 1 -- ESP-local, never fetched from the
+     * Pico, same "always known" reasoning as relay_type above. has_value
+     * false means "never commissioned"; a_fs/zero_mv/source are then
+     * meaningless, same "set:false omits value" contract the Pico-fetched
+     * params[] entries already use. */
+    bool ct_cal_has_value[SAFETY_CT_CAL_CHANNELS];
+    float ct_cal_a_fs[SAFETY_CT_CAL_CHANNELS];
+    float ct_cal_zero_mv[SAFETY_CT_CAL_CHANNELS];
+    safety_ct_cal_source_t ct_cal_source[SAFETY_CT_CAL_CHANNELS];
 } safety_cfg_http_snapshot_t;
+
+static const char *ct_cal_source_name(safety_ct_cal_source_t s)
+{
+    switch (s) {
+    case SAFETY_CT_CAL_SOURCE_MANUAL:    return "manual";
+    case SAFETY_CT_CAL_SOURCE_SWEEP:     return "sweep";
+    case SAFETY_CT_CAL_SOURCE_AUTO_ZERO: return "auto-zero";
+    default:                             return "unknown";
+    }
+}
 
 /* "contactor"/"mercury" only -- ssr is never a legal safety relay type, so
  * this never needs to represent it. Used both to render GET's JSON and to
@@ -204,6 +224,16 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
         }
     }
     APPEND(",\"relay_type\":\"%s\"", relay_type_name(s->relay_type));
+    APPEND(",\"ct_cal\":[");
+    for (size_t ch = 0; ch < SAFETY_CT_CAL_CHANNELS; ch++) {
+        APPEND("%s{\"has_value\":%s", ch == 0 ? "" : ",", s->ct_cal_has_value[ch] ? "true" : "false");
+        if (s->ct_cal_has_value[ch]) {
+            APPEND(",\"a_fs\":%.6g,\"zero_mv\":%.6g,\"source\":\"%s\"", (double)s->ct_cal_a_fs[ch],
+                   (double)s->ct_cal_zero_mv[ch], ct_cal_source_name(s->ct_cal_source[ch]));
+        }
+        APPEND("}");
+    }
+    APPEND("]");
     APPEND(",\"params\":[");
 
     size_t count = safety_cfg_store_param_count();
@@ -295,6 +325,10 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
         snap.unset_reliable = peer_reports_unset_reliably(peer_version_known, peer_protocol_version);
     }
     snap.relay_type = safety_cfg_store_get_safety_relay_type();
+    for (size_t ch = 0; ch < SAFETY_CT_CAL_CHANNELS; ch++) {
+        snap.ct_cal_has_value[ch] = safety_cfg_store_get_ct_cal_input(
+            ch, &snap.ct_cal_a_fs[ch], &snap.ct_cal_zero_mv[ch], &snap.ct_cal_source[ch]);
+    }
     snap.cached_crc = safety_cfg_store_cached_crc();
     uint32_t fetched = safety_cfg_store_fetched_ms_ago();
     snap.fetched_ms_ago_or_neg1 = (fetched == UINT32_MAX) ? -1 : (int64_t)fetched;
@@ -839,6 +873,117 @@ static esp_err_t relay_type_post_handler(httpd_req_t *req)
 }
 
 /* ---------------------------------------------------------------------- */
+/* POST /api/safety/commissioning/ct_cal                                  */
+/* ---------------------------------------------------------------------- */
+
+/* CT_COMMISSIONING_PLAN.md step 1: the operator types the probe's rated
+ * A_fs and its zero_mv output in their own units; this handler converts
+ * (safety_ct_cal_store_set_ct_cal_input()) and stages the derived
+ * k_ct_v_per_a[ch]/zero_counts[ch] through the SAME generic apply_pairs()/
+ * confirm_commit_landed() path every other field on this page already uses
+ * -- no separate write/verify story for these two fields. Body:
+ * "ch=<0-2>&a_fs=<v>&zero_mv=<v>&commit=1"; commit is optional the same way
+ * the generic endpoint's is (stage-only submissions are legitimate). Always
+ * writes with source=MANUAL -- this endpoint IS manual entry by an operator;
+ * the sweep and auto-zero paths call safety_cfg_store_set_ct_cal_input()
+ * directly with their own source, never through this HTTP surface. */
+#define SAFETY_CT_CAL_BODY_MAX 128
+
+static esp_err_t ct_cal_post_handler(httpd_req_t *req)
+{
+    char body[SAFETY_CT_CAL_BODY_MAX];
+    if (!read_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
+        return ESP_OK;
+    }
+
+    char ch_text[8] = {0}, a_fs_text[24] = {0}, zero_mv_text[24] = {0}, commit_text[4] = {0};
+    if (http_form_find_field(body, "ch", ch_text, sizeof(ch_text)) < 0 ||
+        http_form_find_field(body, "a_fs", a_fs_text, sizeof(a_fs_text)) < 0 ||
+        http_form_find_field(body, "zero_mv", zero_mv_text, sizeof(zero_mv_text)) < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected ch=<0-2>&a_fs=<v>&zero_mv=<v>");
+        return ESP_OK;
+    }
+    bool commit = (http_form_find_field(body, "commit", commit_text, sizeof(commit_text)) >= 0) &&
+                  strcmp(commit_text, "1") == 0;
+
+    char *end = NULL;
+    long ch_l = strtol(ch_text, &end, 10);
+    if (end == ch_text || *end != '\0' || ch_l < 0 || ch_l >= (long)SAFETY_CT_CAL_CHANNELS) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ch must be 0, 1, or 2");
+        return ESP_OK;
+    }
+    size_t ch = (size_t)ch_l;
+
+    float a_fs = strtof(a_fs_text, &end);
+    if (end == a_fs_text || *end != '\0' || !isfinite(a_fs)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid a_fs value");
+        return ESP_OK;
+    }
+    if (a_fs < SAFETY_CT_CAL_A_FS_MIN || a_fs > SAFETY_CT_CAL_A_FS_MAX) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "a_fs must be between %g and %g A",
+                 (double)SAFETY_CT_CAL_A_FS_MIN, (double)SAFETY_CT_CAL_A_FS_MAX);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        return ESP_OK;
+    }
+
+    float zero_mv = strtof(zero_mv_text, &end);
+    if (end == zero_mv_text || *end != '\0' || !isfinite(zero_mv)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid zero_mv value");
+        return ESP_OK;
+    }
+    if (zero_mv < SAFETY_CT_CAL_ZERO_MV_MIN || zero_mv > SAFETY_CT_CAL_ZERO_MV_MAX) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "zero_mv must be between %g and %g mV",
+                 (double)SAFETY_CT_CAL_ZERO_MV_MIN, (double)SAFETY_CT_CAL_ZERO_MV_MAX);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        return ESP_OK;
+    }
+
+    float k_ct_v_per_a = 0.0f;
+    uint16_t zero_counts = 0;
+    if (!safety_cfg_store_set_ct_cal_input(ch, a_fs, zero_mv, SAFETY_CT_CAL_SOURCE_MANUAL, &k_ct_v_per_a,
+                                            &zero_counts)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                             "CT calibration input rejected (out of range, or an internal error)");
+        return ESP_OK;
+    }
+
+    static const uint16_t K_CT_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x0308, 0x0309, 0x030A };
+    static const uint16_t ZERO_COUNTS_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x0302, 0x0303, 0x0304 };
+
+    safety_cfg_post_pair_t pairs[2];
+    pairs[0].param_id = K_CT_IDS[ch];
+    snprintf(pairs[0].value_text, sizeof(pairs[0].value_text), "%.9g", (double)k_ct_v_per_a);
+    pairs[1].param_id = ZERO_COUNTS_IDS[ch];
+    snprintf(pairs[1].value_text, sizeof(pairs[1].value_text), "%u", (unsigned)zero_counts);
+
+    char reason[160];
+    bool ok = apply_pairs(s_link, pairs, 2, commit, reason, sizeof(reason));
+
+    char resp[256];
+    int len;
+    if (ok) {
+        len = snprintf(resp, sizeof(resp), "{\"ok\":true,\"k_ct_v_per_a\":%.9g,\"zero_counts\":%u}",
+                        (double)k_ct_v_per_a, (unsigned)zero_counts);
+    } else {
+        char escaped[192];
+        size_t o = 0;
+        for (const char *c = reason; *c && o + 2 < sizeof(escaped); c++) {
+            if (*c == '"' || *c == '\\') {
+                escaped[o++] = '\\';
+            }
+            escaped[o++] = *c;
+        }
+        escaped[o] = '\0';
+        len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", escaped);
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+}
+
+/* ---------------------------------------------------------------------- */
 /* POST /api/safety/commissioning/bench_preset                            */
 /* ---------------------------------------------------------------------- */
 
@@ -997,6 +1142,10 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null)
         .uri = "/api/safety/commissioning/relay_type", .method = HTTP_POST,
         .handler = relay_type_post_handler,
     };
+    static const httpd_uri_t ct_cal_uri = {
+        .uri = "/api/safety/commissioning/ct_cal", .method = HTTP_POST,
+        .handler = ct_cal_post_handler,
+    };
 
     /* The HTML page. Registered alongside the API rather than in a separate
      * module because the two are useless apart -- and because a missing page
@@ -1010,7 +1159,7 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null)
         .handler = commissioning_page_get_handler,
     };
 
-    const httpd_uri_t *uris[] = { &page_uri, &get_uri, &post_uri, &bench_uri, &relay_type_uri };
+    const httpd_uri_t *uris[] = { &page_uri, &get_uri, &post_uri, &bench_uri, &relay_type_uri, &ct_cal_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, uris[i]);
         if (err != ESP_OK) {

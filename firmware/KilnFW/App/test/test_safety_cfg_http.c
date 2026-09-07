@@ -180,6 +180,53 @@ bool safety_cfg_store_set_safety_relay_type(relay_type_t type)
     return true;
 }
 
+// CT_COMMISSIONING_PLAN.md step 1 -- this file's own fakes, same "own stub,
+// real store links into the OTHER executable" reasoning as the relay-type
+// pair just above. Controllable so ct_cal_post_handler()'s tests can
+// exercise both accept and refuse (manual-wins-over-sweep is exercised
+// against the REAL safety_cfg_store_set_ct_cal_input() in
+// test_safety_cfg_store.c -- this fake only has to satisfy the linker and
+// let this file's own handler-level tests control success/failure and the
+// derived k_ct_v_per_a/zero_counts the handler stages).
+static bool s_stub_ct_cal_has_value[SAFETY_CT_CAL_CHANNELS];
+static float s_stub_ct_cal_a_fs[SAFETY_CT_CAL_CHANNELS];
+static float s_stub_ct_cal_zero_mv[SAFETY_CT_CAL_CHANNELS];
+static safety_ct_cal_source_t s_stub_ct_cal_source[SAFETY_CT_CAL_CHANNELS];
+static bool s_stub_set_ct_cal_input_result = true;
+static float s_stub_set_ct_cal_input_k = 1.0f;
+static uint16_t s_stub_set_ct_cal_input_zc = 0;
+static int s_stub_set_ct_cal_input_calls = 0;
+
+bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_zero_mv,
+                                        safety_ct_cal_source_t *out_source)
+{
+    if (ch >= SAFETY_CT_CAL_CHANNELS || !s_stub_ct_cal_has_value[ch]) {
+        return false;
+    }
+    if (out_a_fs) *out_a_fs = s_stub_ct_cal_a_fs[ch];
+    if (out_zero_mv) *out_zero_mv = s_stub_ct_cal_zero_mv[ch];
+    if (out_source) *out_source = s_stub_ct_cal_source[ch];
+    return true;
+}
+
+bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv, safety_ct_cal_source_t source,
+                                        float *out_k_ct_v_per_a, uint16_t *out_zero_counts)
+{
+    s_stub_set_ct_cal_input_calls++;
+    if (!s_stub_set_ct_cal_input_result) {
+        return false;
+    }
+    if (ch < SAFETY_CT_CAL_CHANNELS) {
+        s_stub_ct_cal_has_value[ch] = true;
+        s_stub_ct_cal_a_fs[ch] = a_fs;
+        s_stub_ct_cal_zero_mv[ch] = zero_mv;
+        s_stub_ct_cal_source[ch] = source;
+    }
+    if (out_k_ct_v_per_a) *out_k_ct_v_per_a = s_stub_set_ct_cal_input_k;
+    if (out_zero_counts) *out_zero_counts = s_stub_set_ct_cal_input_zc;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // safety_link.h stub bodies -- controllable fakes.
 // ---------------------------------------------------------------------------
@@ -293,6 +340,14 @@ static void reset_all(void)
     s_stub_lookup_fail_at_call = -1;
     s_stub_lookup_type_override_call = -1;
     s_stub_lookup_type_override_value = 0;
+    memset(s_stub_ct_cal_has_value, 0, sizeof(s_stub_ct_cal_has_value));
+    memset(s_stub_ct_cal_a_fs, 0, sizeof(s_stub_ct_cal_a_fs));
+    memset(s_stub_ct_cal_zero_mv, 0, sizeof(s_stub_ct_cal_zero_mv));
+    memset(s_stub_ct_cal_source, 0, sizeof(s_stub_ct_cal_source));
+    s_stub_set_ct_cal_input_result = true;
+    s_stub_set_ct_cal_input_k = 1.0f;
+    s_stub_set_ct_cal_input_zc = 0;
+    s_stub_set_ct_cal_input_calls = 0;
 }
 
 static void test_parse_single_pair_no_commit(void)
