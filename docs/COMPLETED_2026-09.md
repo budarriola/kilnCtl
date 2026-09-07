@@ -1203,7 +1203,7 @@ inert again for a different reason.** Both original presets had
 `control_mode: 2`, so the fuzzy layer (only runs under mode 3) never engaged
 and the campaign was silently comparing PID against itself (`8906686`).
 Presets fixed and the campaign restarted as `fuzzy_ab_20260904c`, with live
-`bd_*` proof effective gains now differed from base (`91c5d6c`). A separate
+`bd_*` proof effective gains now differed from base (`91c5d6d3`). A separate
 audit of the *ease-off* A/B against the same inert-campaign bug class
 confirmed it was **not** inert and its "indistinguishable" conclusion stands;
 it also added a standing pre-flight check (`PID_EXPANSION_PLAN.md` §3.6b)
