@@ -245,7 +245,11 @@ static void nvs_load_store(void)
         ESP_LOGI(TAG, "kiln_cfg_store migrated v1 -> v%u (blob ceiling %u -> %u); saved kiln configs kept",
                  (unsigned)KILN_CFG_STORE_VERSION, (unsigned)KILN_CFG_STORE_BLOB_MAX_SIZE_V1,
                  (unsigned)ZONES_CONFIG_BLOB_MAX_SIZE);
-        nvs_save_store(); /* rewrite in the current layout so the next boot takes the fast path */
+        hal_status_t save_err = nvs_save_store(); /* rewrite in the current layout so the next boot takes the fast path */
+        if (save_err != HAL_OK) {
+            ESP_LOGW(TAG, "kiln_cfg_store v1->v%u rewrite failed: %s -- will re-migrate next boot",
+                     (unsigned)KILN_CFG_STORE_VERSION, hal_status_to_name(save_err));
+        }
         return;
     }
 
@@ -489,7 +493,11 @@ esp_err_t kiln_cfg_store_init(void)
                           "whatever zones config already loaded",
                      (long)s_store.active_id);
             s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
-            (void)nvs_save_store();
+            hal_status_t clear_err = nvs_save_store();
+            if (clear_err != HAL_OK) {
+                ESP_LOGW(TAG, "clearing missing active kiln config id failed to persist: %s -- will retry next boot",
+                         hal_status_to_name(clear_err));
+            }
         } else {
             char reason[96];
             reason[0] = '\0';
@@ -499,7 +507,11 @@ esp_err_t kiln_cfg_store_init(void)
                               "it, keeping whatever zones config already loaded",
                          (long)s_store.active_id, reason);
                 s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
-                (void)nvs_save_store();
+                hal_status_t clear_err = nvs_save_store();
+                if (clear_err != HAL_OK) {
+                    ESP_LOGW(TAG, "clearing invalid active kiln config id failed to persist: %s -- will retry next boot",
+                             hal_status_to_name(clear_err));
+                }
             } else {
                 ESP_LOGI(TAG, "restored active kiln config id=%ld ('%s') at boot", (long)s_store.active_id,
                          s_store.entries[idx].name);

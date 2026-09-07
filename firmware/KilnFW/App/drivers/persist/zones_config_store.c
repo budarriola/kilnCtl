@@ -440,6 +440,10 @@ esp_err_t relay_names_save(void)
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
+    if (err != HAL_OK) {
+        ESP_LOGW(ZONES_HTTP_TAG, "relay_names_save failed: %s -- relay names will not survive a reboot",
+                 hal_status_to_name(err));
+    }
     return hal_status_to_esp_err(err);
 }
 
@@ -481,8 +485,11 @@ esp_err_t relay_names_save(void)
  * commissioning page reporting writes that never landed") and was invisible
  * because the pre-migration host stub (stubs/nvs.h) modeled ONE shared blob
  * slot with no key-length check of any kind, and the board's own
- * zone_normals_save() logs nothing on a non-OK return (unlike every sibling
- * setter in this file). So on real hardware, EVERY zone_normals_set()/
+ * zone_normals_save() logged nothing on a non-OK return (unlike every
+ * sibling setter in this file) -- fixed in the 2026-09-07 persist-logging
+ * audit (docs/audits/persist_save_logging_2026-09-07.md), zone_normals_save()
+ * now logs an ESP_LOGW naming the module and esp_err_to_name() on failure.
+ * At the time the key-length bug was live, EVERY zone_normals_set()/
  * zone_ct_map_set()/zone_k_ct_set() write since that commit has silently
  * failed at nvs_set_blob() with ESP_ERR_NVS_KEY_TOO_LONG -- measured normal
  * currents and derived CT-channel/k_ct_v_per_a maps have never actually
@@ -591,6 +598,11 @@ static esp_err_t zone_normals_save(void)
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
+    if (err != HAL_OK) {
+        ESP_LOGW(ZONES_HTTP_TAG, "zone_normals_save failed: %s -- measured normals/CT map/k_ct will not "
+                                  "survive a reboot",
+                 hal_status_to_name(err));
+    }
     return hal_status_to_esp_err(err);
 }
 
@@ -633,8 +645,10 @@ void zone_ct_map_clear(void)
     /* Persisted immediately, not left for the first zone_ct_map_set() to
      * flush: a sweep that clears the map and then fails outright never
      * reaches a set(), and leaving the old map in NVS would resurrect it on
-     * the next boot as though it were still current. */
-    (void)zone_normals_save();
+     * the next boot as though it were still current. Failure is already
+     * logged inside zone_normals_save() itself. */
+    esp_err_t clear_err = zone_normals_save();
+    (void)clear_err;
 }
 
 bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
@@ -656,7 +670,9 @@ void zone_k_ct_clear(void)
 {
     s_zone_normals.cfg.k_ct_derived_mask = 0;
     memset(s_zone_normals.cfg.k_ct_v_per_a, 0, sizeof(s_zone_normals.cfg.k_ct_v_per_a));
-    (void)zone_normals_save();
+    /* Failure is already logged inside zone_normals_save() itself. */
+    esp_err_t clear_err = zone_normals_save();
+    (void)clear_err;
 }
 
 bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a)

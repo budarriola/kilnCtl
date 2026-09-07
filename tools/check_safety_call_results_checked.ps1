@@ -15,6 +15,20 @@
 # all -- and two more (heat_enable.c's two release sends). All four are now
 # fixed; this check exists so a fifth does not ship the same way.
 #
+# WIDENED 2026-09-07 (docs/audits/persist_save_logging_2026-09-07.md): the
+# same discard shape shows up on the persist/save side, not just relay
+# writes -- zones_config_store.c's zone_normals_save() logged nothing on
+# failure at all (root cause of project_nvs_key_too_long_zone_normals: every
+# zone_normals_set()/zone_ct_map_set()/zone_k_ct_set() write silently failed
+# on real hardware for weeks with zero log trace). Added nvs_save_store() and
+# zone_normals_save() to $patterns below so a persisted-state write whose
+# result is dropped on the floor fails this check the same way an unchecked
+# relay write does. Both names are reused as `static` function names in more
+# than one file (kiln_cfg_store.c and safety_cfg_store.c each define their
+# own nvs_save_store()) -- the check is text-pattern based, not symbol-based,
+# so this is fine: every call site of either symbol must still assign its
+# result, in every file.
+#
 # WHAT THIS CHECKS. Every call to one of the functions in $patterns below,
 # anywhere under firmware/KilnFW/App (excluding App/test/ -- test doubles and
 # fakes are not a production code path), MUST be immediately preceded on the
@@ -130,7 +144,9 @@ $patterns = @(
     "kiln_io_owner_command_set_relay_mask",
     "kiln_io_owner_command_set_io",
     "kiln_io_all_relays_off",
-    "safety_link_request_enable"
+    "safety_link_request_enable",
+    "nvs_save_store",
+    "zone_normals_save"
 )
 
 # A definition line looks like "esp_err_t kiln_io_owner_command_all_relays_off(void)"
