@@ -284,16 +284,23 @@ deliberately configured off by default, §6 category (d)) — this table now has
 a row, or an explicit refusal, for every one of those 11.
 
 **S8 gained a pure-module implementation the same day** (`safety_guards.c`,
-this file's own §3.4 row below is updated accordingly) but is **still not
-integrated**: `safety_core_load_guard_cfg()` does not yet copy
+this file's own §3.4 row below is updated accordingly). ~~but is still not
+integrated: `safety_core_load_guard_cfg()` does not yet copy
 `max_rate_c_per_min`/`rate_window_s` out of `config_store` into the guard
 config the pure module reads, so on real hardware today it still evaluates
 against the zero-initialised default regardless of what an operator
 commissions — the guard stays inert exactly as it did before this pass,
 just for a slightly different reason (uncopied config rather than absent
-code). This is the same "built and host-tested" vs. "integrated" distinction
-`SAFETY_MODEL.md`'s completion checklist already tracks for every other
-guard, applied to a brand-new one instead of a regression in an old one.
+code).~~ **Wired 2026-09-03** (`5455cf03`, "Wire S8 rate-of-rise config
+through safety_core, closing the wiring gap"): `safety_core.c`'s
+`safety_core_load_guard_cfg()` now copies both fields
+(`fields_set`-gated for `max_rate_c_per_min`, unconditional for
+`rate_window_s`, matching the `blind_grace_s` idiom), and
+`test_safety_core_s8_wiring.c` proves the chain end to end. §6c's row below
+(line ~1032) already recorded this; this paragraph was the one place still
+describing the pre-fix gap as current. `max_rate_c_per_min` defaulting to 0
+remains a deliberate ships-disabled choice (`SAFETY_MODEL.md` §4), not a
+bug — see that section before setting it non-zero.
 
 **Read each row's Precondition column before touching anything.** Several
 guards are deliberately shipped inert and must be armed first — restore every
