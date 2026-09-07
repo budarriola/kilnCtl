@@ -200,15 +200,37 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
         return true;
     }
 
-    /* DIVERGENCE TIE-BREAK: higher rev wins. Under normal dual-write
-     * operation (file written first, then NVS, same rev stamped on both)
-     * file_rev >= nvs_rev always holds; nvs_rev being strictly greater means
-     * a prior file write failed after the NVS write already landed. Either
-     * way, log it and resync the loser so the disagreement does not persist
-     * across boots. */
-    if (file_rev >= nvs_rev) {
+    /* DIVERGENCE TIE-BREAK: the file wins only on a STRICTLY higher rev.
+     * An EQUAL rev with differing content means NVS, and the comparison
+     * must be `>` not `>=`. Enumerate how each side can get ahead:
+     *
+     *  - file strictly ahead: the file write landed and the crash/failure
+     *    came before the NVS write. file_rev = N+1, nvs_rev = N. File wins,
+     *    correctly, and this branch is what does it.
+     *  - NVS strictly ahead: a file write failed after NVS already
+     *    advanced. nvs_rev = N+1, file_rev = N. NVS wins in the else.
+     *  - EQUAL revs, differing content: this can ONLY happen when NVS was
+     *    written by something that does not know about `zones_rev` --
+     *    i.e. firmware rolled back past this change (it rewrites
+     *    NVS_KEY_ZONES and leaves zones_rev at N), or a crash between
+     *    hal_kv_set_blob() and hal_kv_set_u32() in nvs_save(). In BOTH
+     *    cases the NVS copy is the NEWER one and the file is stale. Both
+     *    dual-write sides always stamp the SAME new rev, so an equal rev
+     *    can never mean "the file is the newer of the two".
+     *
+     * `>=` here silently discarded every edit made on rolled-back firmware
+     * and then overwrote it on the next save -- exactly the downgrade
+     * hazard docs/FILESYSTEM_USER_DATA_PLAN.md section 4 introduced the rev
+     * counter to close. Fixed 2026-09-07
+     * (docs/audits/filesystem_migration_review_2026-09-07.md), pinned by
+     * check_cfg_fs_tie_break.ps1 and by
+     * test_zones_config_cfg_fs.c's equal-rev case.
+     *
+     * Either way, log it and resync the loser so the disagreement does not
+     * persist across boots. */
+    if (file_rev > nvs_rev) {
         ESP_LOGW(ZCFG_FS_TAG,
-                 "zones config file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting FILE (higher/equal rev)",
+                 "zones config file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting FILE (strictly higher rev)",
                  (unsigned long)file_rev, (unsigned long)nvs_rev);
         *out_cfg = file_cfg;
         *out_rev = file_rev;

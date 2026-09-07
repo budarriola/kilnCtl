@@ -385,6 +385,82 @@ static void test_interrupted_file_write_leaves_old_or_new(void)
                "is invisible through the real read path");
 }
 
+// ---------------------------------------------------------------------
+// 7. EQUAL revs with differing content must adopt NVS, not the file.
+//    This is the rollback round trip the plan's rev counter exists for:
+//    firmware rolled back past the dual-write rewrites NVS_KEY_ZONES but
+//    knows nothing about "zones_rev", so it leaves the rev where it was.
+//    Rolling forward then sees file_rev == nvs_rev with different bytes --
+//    and the NVS side is the newer of the two. A `>=` tie-break adopts the
+//    STALE FILE here and the rolled-back edit is lost for good on the very
+//    next save.
+//
+//    Staged through the real production write paths: nvs_save() to get
+//    both sides to the same rev, then the NVS blob alone is rewritten
+//    exactly the way pre-dual-write firmware would (hal_kv_set_blob on
+//    NVS_KEY_ZONES, nothing touching NVS_KEY_ZONES_REV).
+// ---------------------------------------------------------------------
+static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
+{
+    TEST_SECTION("zones cfg_fs: equal revs with differing content adopt NVS (rolled-back-firmware edit "
+                 "survives a roll-forward)");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+
+    // Both sides land at rev 1 with the same content.
+    stage("before_rollback", 1.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "rev 1 dual-written to both sides");
+
+    // Now act like firmware that predates this change: rewrite ONLY the
+    // NVS blob, leaving zones_rev at 1 and the file at rev 1/old content.
+    zones_cfg_t rolled_back;
+    fill_valid_cfg(&rolled_back, "rolled_edit", 42.0f);
+    rolled_back.version = ZONES_CFG_VERSION;
+    rolled_back.crc32 = zones_config_json_compute_crc(&rolled_back);
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+                   "test setup: NVS opened for the pre-dual-write-style blob rewrite");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_ZONES, &rolled_back, sizeof(rolled_back)) == HAL_OK,
+                   "test setup: NVS blob rewritten WITHOUT touching zones_rev, exactly as older firmware "
+                   "would");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "test setup: NVS commit");
+        hal_kv_close(&h);
+    }
+
+    // Confirm the fixture really is the equal-rev case, not an accidental
+    // strictly-higher one -- otherwise this test would pass for the wrong
+    // reason under a `>=` tie-break too.
+    zones_cfg_t file_raw;
+    uint32_t file_rev = 0;
+    bool file_raw_valid = false;
+    zones_config_cfg_fs_load_raw(&file_raw, &file_rev, &file_raw_valid);
+    TEST_CHECK(file_raw_valid && file_rev == 1 && strcmp(file_raw.zones[0].name, "before_rollback") == 0,
+               "fixture check: the file still holds the OLD content at rev 1");
+    {
+        hal_kv_handle_t h;
+        uint32_t nvs_rev = 0;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+                   "fixture check: NVS opened read-only");
+        TEST_CHECK(hal_kv_get_u32(&h, "zones_rev", &nvs_rev) == HAL_OK && nvs_rev == 1,
+                   "fixture check: zones_rev is still 1 -- file_rev == nvs_rev, the EQUAL-rev case");
+        hal_kv_close(&h);
+    }
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "roll-forward load succeeds");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "rolled_edit") == 0 &&
+                   s_zones.cfg.zones[0].pid_kp == 42.0f,
+               "NVS wins the EQUAL-rev tie -- the edit made on rolled-back firmware is NOT discarded in "
+               "favour of the stale file");
+
+    zones_config_cfg_fs_load_raw(&file_raw, &file_rev, &file_raw_valid);
+    TEST_CHECK(file_raw_valid && strcmp(file_raw.zones[0].name, "rolled_edit") == 0,
+               "the losing file was resynced from NVS, so the divergence does not persist across boots");
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
     test_partition_absent_falls_through_to_nvs_only();
@@ -393,6 +469,7 @@ void run_test_zones_config_cfg_fs(void)
     test_divergence_tie_break_both_directions();
     test_file_migration_matches_direct_blob_decode_v21();
     test_interrupted_file_write_leaves_old_or_new();
+    test_equal_rev_divergence_adopts_nvs_not_the_stale_file();
 
     reset_all();
 }

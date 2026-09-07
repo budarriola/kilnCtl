@@ -28,10 +28,15 @@
 // file that just failed validation.
 //
 // DIVERGENCE TIE-BREAK: when both sides decode to a valid config and their
-// bytes differ, the higher `rev` wins (dual-write always bumps rev and
-// writes the file first, so under normal operation file_rev >= nvs_rev;
-// nvs_rev being strictly higher means a prior file write failed and NVS
-// alone advanced). Either way this is logged (ESP_LOGW) naming which side
+// bytes differ, the file wins only on a STRICTLY higher rev; an EQUAL rev
+// goes to NVS. Dual-write stamps the SAME new rev on both sides and writes
+// the file first, so file_rev > nvs_rev means the NVS write never landed
+// (file is newer) and nvs_rev > file_rev means the file write failed (NVS
+// is newer). Equal revs with differing bytes can only come from an NVS
+// writer that does not know about `zones_rev` -- rolled-back firmware, or a
+// crash between nvs_save()'s blob and rev writes -- and in both of those
+// the NVS copy is the newer one. See zones_config_cfg_fs.c's own comment
+// on that branch. Either way this is logged (ESP_LOGW) naming which side
 // won and which rev each side reported -- the two are never left silently
 // disagreeing. The losing side is resynced from the winner's bytes so the
 // divergence does not persist across boots.
