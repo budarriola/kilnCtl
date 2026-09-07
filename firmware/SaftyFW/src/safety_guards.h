@@ -502,6 +502,41 @@ typedef struct {
      * discrete_task -- same division as estop_pressed above. */
     bool main_fault_asserted;
 
+    /* S6a startup grace (2026-09-07, fc6d30f8 flash incident): a plain,
+     * already-computed fact -- "the Pico's own to_ms_since_boot() clock is
+     * still inside its post-reset startup window" -- same discipline as
+     * reboot_grace_active just below (this module has no clock of its own;
+     * safety_core.c's safety_core_build_input() is the only place allowed to
+     * compare now_ms against S6A_STARTUP_GRACE_MS).
+     *
+     * Why this exists and why it is NOT the same field as reboot_grace_active:
+     * ANNOUNCE_REBOOT only arrives when the ESP deliberately tells the Pico a
+     * reboot is coming (an OTA self-restart) -- a debug-probe-driven reset of
+     * BOTH processors together (e.g. a bench reflash) sends no such frame, so
+     * reboot_grace_active is false the entire time. But GPIO6 ("Fault") is an
+     * ESP output the ESP's own firmware has to actively drive to the healthy
+     * (low) level; before that firmware runs, GPIO6's state is whatever the
+     * ESP's boot ROM/second-stage loader leaves it at, which HARDWARE.md
+     * section 4 does not characterize for the "ESP mid-boot" case (only
+     * "ESP absent" is documented, and that reads healthy). A Pico reset that
+     * coincides with an ESP reset -- exactly the fc6d30f8 incident -- can
+     * therefore see mainFault read asserted for the whole time the ESP takes
+     * to reach its own GPIO6 init, comfortably longer than the 200ms
+     * consecutive-sample debounce discrete_task.c applies (that debounce is
+     * sized for opto/switch bounce, not a multi-hundred-ms MCU boot).
+     *
+     * Scope is exactly as narrow as reboot_grace_active's: this ONLY gates
+     * the S6a trip() call below. It does not touch discrete_task's debounce,
+     * does not weaken S6a once the window closes (the very next tick after
+     * S6A_STARTUP_GRACE_MS trips on a still-asserted mainFault exactly as if
+     * this field had never existed), and grants no heating permission --
+     * relay_owner has no path to this field. Because it is keyed to the
+     * Pico's OWN to_ms_since_boot() clock rather than a stored timestamp
+     * that could re-arm, it also cannot be re-triggered mid-run: it is true
+     * only once, for the first S6A_STARTUP_GRACE_MS after this boot, and
+     * false for the remainder of this boot's lifetime. */
+    bool s6a_startup_grace_active;
+
     /* S6b. link_up is the producer's "a valid frame arrived within
      * link_timeout_s" fact -- this module still needs its own elapsed-time
      * accumulator for the two-tier timeout (10s conditional / 120s

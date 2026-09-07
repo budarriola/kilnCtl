@@ -169,6 +169,18 @@
 // window closes, not held open indefinitely).
 #define REBOOT_GRACE_WINDOW_MS 20000u
 
+// safety_guard_input_t::s6a_startup_grace_active (2026-09-07, fc6d30f8 flash
+// incident): how long after THIS Pico boot S6a's trip stays suppressed while
+// mainFault reads asserted, to cover the window before the ESP's own firmware
+// has driven GPIO6 ("Fault") to its healthy level -- see that field's doc
+// comment in safety_guards.h for the full reasoning and why this cannot reuse
+// REBOOT_GRACE_WINDOW_MS/reboot_grace_active. 5s is generous margin over the
+// couple hundred ms an ESP32-S3 boot ROM/second-stage loader needs before
+// app_main() runs and sets the pin, without getting anywhere near S6b's own
+// 20s/120s windows -- a mainFault that is still asserted 5s after a Pico
+// reset is treated as real, not as more boot noise.
+#define S6A_STARTUP_GRACE_MS 5000u
+
 // SAFETY_MODEL.md section 5 rule 2: "Stale context is no context. Older than
 // context_max_age_s (default 5s, i.e. 10 poll periods) and the context-
 // consuming guards go inactive, not pessimistic." Not a
@@ -796,6 +808,21 @@ static safety_guard_input_t safety_core_build_input(void)
         reboot_grace_active = age_ms < REBOOT_GRACE_WINDOW_MS;
     }
 
+    // S6a startup grace: keyed to the Pico's OWN to_ms_since_boot() clock,
+    // never a stored/announced timestamp, so it is true only once (the first
+    // S6A_STARTUP_GRACE_MS of this boot) and cannot be re-armed mid-run.
+    // clock_stalled is deliberately NOT consulted here the way it is for
+    // reboot_grace_active/context_valid above: those default to "not
+    // suppressed" when the clock cannot be trusted because their unsuppressed
+    // default is the safe one for guards actively watching for staleness.
+    // s6a_startup_grace_active's unsuppressed default is also safe here (a
+    // stalled clock leaves now_ms pinned near its last good value, and a
+    // pinned-low now_ms only ever makes this window READ AS shorter or
+    // already-closed than S6A_STARTUP_GRACE_MS, never longer -- it cannot
+    // extend the suppression window past what a healthy clock would have
+    // given).
+    bool s6a_startup_grace_active = now_ms < S6A_STARTUP_GRACE_MS;
+
     // --- Context from link_task (SAFETY_MODEL.md section 5) ----------------
     // Pulled here, never pushed -- same "safety_core pulls, link_task never
     // pushes into it" discipline as the thermo snapshot above. This was the
@@ -1120,6 +1147,7 @@ static safety_guard_input_t safety_core_build_input(void)
         // block trips on directly. No inversion, and no extra conditioning,
         // belongs at this call site -- same division of labour as S7's.
         .main_fault_asserted = discrete_task_main_fault(),
+        .s6a_startup_grace_active = s6a_startup_grace_active,
         .heat_commanded = any_current_present,
         .context_valid = context_valid,
         .zone_count = zone_count,

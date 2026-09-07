@@ -2052,6 +2052,113 @@ static void test_s6(void)
     }
 }
 
+static void test_s6a_startup_grace(void)
+{
+    TEST_SECTION("S6a -- Pico post-reset startup grace window suppression");
+
+    /* Suppressed: mainFault asserted while s6a_startup_grace_active is true
+     * does NOT trip, no matter how many consecutive ticks it stays asserted
+     * for -- this is the fc6d30f8 incident (a dual ESP+Pico reset leaving
+     * the ESP's GPIO6 undriven-healthy for longer than the 200ms debounce)
+     * reproduced directly against the guard module. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.main_fault_asserted = true;
+        in.s6a_startup_grace_active = true;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "s6a_startup_grace_active suppresses S6a even with mainFault asserted the whole time");
+    }
+
+    /* The load-bearing property, same as S6b's reboot-grace test: once the
+     * caller flips s6a_startup_grace_active back to false (safety_core.c's
+     * own now_ms >= S6A_STARTUP_GRACE_MS bookkeeping), a STILL-asserted
+     * mainFault trips on that very next tick -- no separate grace period of
+     * its own, no accumulated advantage from the suppressed ticks before
+     * it. This is the property that proves the guard is not weakened once
+     * armed: a genuine, sustained fault is caught the instant the window
+     * closes. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t grace = base_input();
+        grace.main_fault_asserted = true;
+        grace.s6a_startup_grace_active = true;
+
+        bool tripped = false;
+        for (int i = 0; i < 50 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &grace);
+        }
+        TEST_CHECK(!tripped, "still suppressed while s6a_startup_grace_active stays true");
+
+        safety_guard_input_t expired = grace;
+        expired.s6a_startup_grace_active = false;
+        tripped = safety_guards_tick(&s, &cfg, &expired);
+        TEST_CHECK(tripped, "window-expired tick trips immediately on a still-asserted mainFault -- no grace of its own");
+        TEST_CHECK(s.reason == SAFETY_TRIP_MAIN_FAULT, "reason is SAFETY_TRIP_MAIN_FAULT, same as an unsuppressed trip");
+    }
+
+    /* Sustained fault still trips normally in the NORMAL (post-startup)
+     * case, i.e. s6a_startup_grace_active false throughout -- proves this
+     * change has not weakened S6a's ordinary, already-armed behaviour.
+     * A single-poll transient with the field false is not a real scenario
+     * this guard is asked to tolerate (main_fault_asserted already comes in
+     * pre-debounced from discrete_task), so what matters here is that the
+     * unconditional trip from test_s6() is completely undisturbed. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.main_fault_asserted = true;
+        in.s6a_startup_grace_active = false;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true,
+                   "outside the startup window, mainFault still trips S6a on the first tick");
+        TEST_CHECK(s.reason == SAFETY_TRIP_MAIN_FAULT, "reason is SAFETY_TRIP_MAIN_FAULT");
+    }
+
+    /* Isolation: s6a_startup_grace_active must not affect any OTHER guard.
+     * Cross-check against S1 with the field true throughout -- S1 must trip
+     * exactly as it does with the field false. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.s6a_startup_grace_active = true;
+        in.tc_c = cfg.abs_max_temp_c + 50.0f; /* well over the S1 ceiling */
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "s6a_startup_grace_active does not suppress S1 -- an unrelated over-temperature trip fires normally");
+        TEST_CHECK(s.reason == SAFETY_TRIP_OVERTEMP, "reason is SAFETY_TRIP_OVERTEMP, not affected by the S6a-only suppression");
+    }
+
+    /* Isolation: s6a_startup_grace_active with mainFault deasserted is a
+     * no-op -- there is nothing to suppress, confirming this is scoped to
+     * S6a's trip condition specifically. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.main_fault_asserted = false;
+        in.s6a_startup_grace_active = true;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "s6a_startup_grace_active with mainFault deasserted never trips (nothing to suppress)");
+    }
+}
+
 static void test_s6b_reboot_grace(void)
 {
     TEST_SECTION("S6b -- ANNOUNCE_REBOOT grace window suppression");
@@ -3718,6 +3825,7 @@ void run_test_safety_guards(void)
     test_s14();
     test_s14_s15_summed_topology();
     test_s6();
+    test_s6a_startup_grace();
     test_s6b_reboot_grace();
     test_s9();
     test_s10();
