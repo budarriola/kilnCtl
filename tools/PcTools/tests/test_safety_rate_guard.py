@@ -199,6 +199,37 @@ class SafetyGetRateGuardTests(unittest.TestCase):
             result = mcp_server.safety_get_rate_guard()
         self.assertTrue(result.startswith("error"))
 
+    def test_reports_stale_warning(self):
+        payload = self._get_payload(rate=33.3, stale=True)
+        payload["cached_config_crc"] = 1
+        payload["live_config_crc"] = 2
+        with unittest.mock.patch.object(sc, "get_commissioning", return_value=payload):
+            result = mcp_server.safety_get_rate_guard()
+        self.assertIn("STALE", result)
+        self.assertIn("cached=1", result)
+        self.assertIn("live=2", result)
+
+    def test_no_stale_warning_when_not_stale(self):
+        with unittest.mock.patch.object(sc, "get_commissioning", return_value=self._get_payload(stale=False)):
+            result = mcp_server.safety_get_rate_guard()
+        self.assertNotIn("STALE", result)
+
+    def test_reports_unreliable_warning(self):
+        with unittest.mock.patch.object(sc, "get_commissioning", return_value=self._get_payload(reliable=False)):
+            result = mcp_server.safety_get_rate_guard()
+        self.assertIn("unset_reporting_reliable=false", result)
+        # unreliable reporting must fall back to DORMANT/not-commissioned,
+        # never fabricate ARMED from a value it cannot trust
+        self.assertIn("DORMANT", result)
+
+    def test_window_set_reports_value_without_default_note(self):
+        with unittest.mock.patch.object(
+            sc, "get_commissioning", return_value=self._get_payload(window=90, window_set=True)
+        ):
+            result = mcp_server.safety_get_rate_guard()
+        self.assertIn("rate_window_s=90", result)
+        self.assertNotIn("firmware default", result)
+
 
 if __name__ == "__main__":
     unittest.main()

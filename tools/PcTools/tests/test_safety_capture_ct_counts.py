@@ -148,6 +148,117 @@ class TestSafetyCaptureCtCounts(unittest.TestCase):
         self.assertIn("5 samples", out, out)
         self.assertNotIn("1 samples", out, out)
 
+    # --- Argument validation ------------------------------------------------
+
+    def test_seconds_zero_is_rejected_without_touching_the_wire(self):
+        with unittest.mock.patch.object(mss.dashboard_http_client, "get_status") as mock_get:
+            out = mss.safety_capture_ct_counts(seconds=0.0)
+        self.assertTrue(out.startswith("error"), out)
+        self.assertIn("seconds must be > 0", out)
+        mock_get.assert_not_called()
+
+    def test_seconds_negative_is_rejected(self):
+        with unittest.mock.patch.object(mss.dashboard_http_client, "get_status") as mock_get:
+            out = mss.safety_capture_ct_counts(seconds=-5.0)
+        self.assertTrue(out.startswith("error"), out)
+        mock_get.assert_not_called()
+
+    # --- Error paths ---------------------------------------------------------
+
+    def test_http_failure_surfaces_as_error_string_not_exception(self):
+        """GET /api/status raising mid-capture must be reported as an
+        `error: ...` string, same convention as every other tool here --
+        never let the exception propagate out of the MCP tool call."""
+        clock = FakeClock()
+
+        def fake_get_status(host):
+            raise OSError("connection refused")
+
+        with unittest.mock.patch.object(
+            mcp_server_ota, "_ota_resolve_host", return_value="10.0.0.5"
+        ), unittest.mock.patch.object(
+            mss.dashboard_http_client, "get_status", side_effect=fake_get_status
+        ), unittest.mock.patch.object(
+            mss.time, "monotonic", side_effect=clock.monotonic
+        ), unittest.mock.patch.object(
+            mss.time, "sleep", side_effect=clock.sleep
+        ):
+            out = mss.safety_capture_ct_counts(seconds=1.0)
+        self.assertTrue(out.startswith("error"), out)
+        self.assertIn("GET /api/status failed", out)
+
+    def test_wrong_length_ct_counts_not_counted_as_valid(self):
+        """A `ct_counts` present but not exactly 3 elements (e.g. a
+        mid-rollout firmware sending a different channel count) must not be
+        treated as a valid sample -- it should behave like `ct_counts`
+        absent, not silently unpack a wrong shape."""
+        out = self._run_with_fake_clock_and_statuses(
+            ({"ct_counts": [1, 2]} for _ in iter(int, 1)), seconds=1.0
+        )
+        self.assertIn("error", out, out)
+        self.assertIn("ct_counts never present", out)
+
+    def test_csv_written_when_out_dir_given(self):
+        import tempfile
+        same = {"ct_counts": [10, 20, 30]}
+        with tempfile.TemporaryDirectory() as tmp:
+            # out_dir is not accepted by the helper above, so wire the mocks
+            # through directly here, same convention as elsewhere in this file.
+            clock = FakeClock()
+            it = iter(same for _ in iter(int, 1))
+
+            def fake_get_status(host):
+                return next(it)
+
+            with unittest.mock.patch.object(
+                mcp_server_ota, "_ota_resolve_host", return_value="10.0.0.5"
+            ), unittest.mock.patch.object(
+                mss.dashboard_http_client, "get_status", side_effect=fake_get_status
+            ), unittest.mock.patch.object(
+                mss.time, "monotonic", side_effect=clock.monotonic
+            ), unittest.mock.patch.object(
+                mss.time, "sleep", side_effect=clock.sleep
+            ):
+                out_with_csv = mss.safety_capture_ct_counts(seconds=0.4, out_dir=tmp)
+            self.assertIn("csv:", out_with_csv, out_with_csv)
+            m = re.search(r"csv: (\S+)", out_with_csv)
+            self.assertIsNotNone(m, out_with_csv)
+            csv_path = m.group(1)
+            self.assertTrue(os.path.isfile(csv_path), csv_path)
+            with open(csv_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertTrue(content.startswith("ts_ms,ch0,ch1,ch2\n"))
+            self.assertIn("10,20,30", content)
+
+    def test_csv_write_failure_reported_as_warning_not_fatal(self):
+        """An OSError writing the CSV (e.g. out_dir not creatable) must not
+        blow up the whole capture -- the summary is still returned, with a
+        warning appended, per the tool's own docstring/handling."""
+        same = {"ct_counts": [1, 2, 3]}
+        clock = FakeClock()
+        it = iter(same for _ in iter(int, 1))
+
+        def fake_get_status(host):
+            return next(it)
+
+        with unittest.mock.patch.object(
+            mcp_server_ota, "_ota_resolve_host", return_value="10.0.0.5"
+        ), unittest.mock.patch.object(
+            mss.dashboard_http_client, "get_status", side_effect=fake_get_status
+        ), unittest.mock.patch.object(
+            mss.time, "monotonic", side_effect=clock.monotonic
+        ), unittest.mock.patch.object(
+            mss.time, "sleep", side_effect=clock.sleep
+        ), unittest.mock.patch.object(
+            mss.os, "makedirs", side_effect=OSError("permission denied")
+        ):
+            out = mss.safety_capture_ct_counts(seconds=0.4, out_dir="/no/such/place")
+        self.assertNotIn("csv:", out, out)
+        self.assertIn("warning", out, out)
+        self.assertIn("CSV write failed", out, out)
+        # summary stats must still be present -- the failure is non-fatal
+        self.assertIn("samples over", out, out)
+
 
 if __name__ == "__main__":
     unittest.main()
