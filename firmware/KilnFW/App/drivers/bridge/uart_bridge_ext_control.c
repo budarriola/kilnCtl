@@ -173,6 +173,16 @@ static void control_task(void *arg)
             continue;
         }
         bx_handler_args_t args = { .ctx = ctx, .msg = &msg };
+        /* Not reachable on-worker today: control_task() is the top-level
+         * consumer of this task's own inbox queue, never itself invoked as
+         * a job callback on bx_flash_worker, so THIS dispatch site cannot
+         * be the re-entrant case. (A downstream re-entrancy hazard DOES
+         * exist below control_handle_message() -- CONTROL_CMD_SET_UNIT_PREF
+         * reaches unit_pref_set() -> pref_cfg_fs_save() -> the cfg_fs
+         * device write_fn, which dispatches onto this same worker a SECOND
+         * time -- but that is a property of the write_fn's own dispatch
+         * call, flagged separately by flash_worker_lint.py at its own call
+         * site, not of this one.) */
         uart_bridge_ext_run_on_flash_worker(control_handle_message, &args);
     }
 }
@@ -571,6 +581,12 @@ static void profiles_task(void *arg)
         }
 
         bx_handler_args_t args = { .ctx = ctx, .msg = &msg };
+        /* Not reachable on-worker today: profiles_task() is the top-level
+         * consumer of this task's own inbox queue (GET_EXEC_STATUS above is
+         * the only subcommand answered off this dispatch), never itself
+         * invoked as a job callback on bx_flash_worker, so this dispatch
+         * cannot be the re-entrant case flash_worker_lint.py's
+         * scan_reentrancy() checks for. */
         uart_bridge_ext_run_on_flash_worker(profiles_handle_message, &args);
     }
 }

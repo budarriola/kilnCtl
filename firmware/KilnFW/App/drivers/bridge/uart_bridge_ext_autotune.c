@@ -207,6 +207,14 @@ static void autotune_task(void *arg)
             continue;
         }
         bx_handler_args_t args = { .ctx = ctx, .msg = &msg };
+        /* Not reachable on-worker today: autotune_task() is the top-level
+         * consumer of this task's own inbox queue, never itself invoked as
+         * a job callback on bx_flash_worker, so this dispatch can never be
+         * the re-entrant case flash_worker_lint.py's scan_reentrancy()
+         * checks for -- unlike a generic write-function callback (e.g.
+         * cfg_fs's *_set_write_fn() indirection), nothing else calls
+         * autotune_task() or autotune_handle_message() from any other
+         * context. */
         uart_bridge_ext_run_on_flash_worker(autotune_handle_message, &args);
     }
 }

@@ -46,8 +46,49 @@ esp_partition_write()/esp_partition_erase_range() directly has, by
 definition, not been through that reasoning -- it fails this lint naming
 the exact file:line, rather than shipping a fourth hardware incident.
 
+EXTENDED 2026-09-07 (filesystem write paths): the FILESYSTEM_PLAN.md work
+added a second write surface, `cfg_fs` (LittleFS-backed, cfg_fs.c), sitting
+ON TOP of the flash worker rather than replacing it -- cfg_fs_write_atomic()/
+cfg_fs_delete()/cfg_fs_format() are themselves just filesystem calls, so a
+caller reaching them directly is exactly as unsafe on a PSRAM stack or a
+small stack as calling nvs_set_*()/hal_kv_set_*() directly was. Two more
+rules cover this surface (see CFG_FS_CALL_RE and scan_reentrancy() below):
+one extends the same allowlist-or-justify scan to the cfg_fs_* call names,
+the other is new -- it catches the RE-ENTRANCY half of the hazard
+specifically, because a `cfg_fs_*` write is nearly always reached through a
+*_set_write_fn()-installed callback (pref_cfg_fs.c/profiles_cfg_fs.c/
+zones_config_cfg_fs.c's `s_write_fn`), so the caller who dispatches onto the
+flash worker and the eventual cfg_fs_write_atomic() call are in DIFFERENT
+files, and neither file's own text shows the hazard -- only the fact that
+SOME dispatcher exists with no visible re-entrancy guard nearby is visible
+from either side.
+
+This is exactly the "static analysis genuinely cannot decide" case: whether
+a given uart_bridge_ext_run_on_flash_worker() call site can ever be reached
+from a caller already on the worker depends on the whole call graph (who
+calls the function that dispatches, transitively), which this line-oriented
+lint does not build and should not try to fake. So scan_reentrancy() does
+not try to prove reachability either way -- it requires every dispatch call
+site to carry ONE of: (a) a nearby uart_bridge_ext_is_on_flash_worker() check
+(the sanctioned re-entrant-safe pattern), or (b) the explicit justification
+phrase "not reachable on-worker" in a comment near the call, the same
+phrase log_store_mount.c's and autotune_engine_step_identify.c's own
+pre-existing dispatch sites already used before this rule existed (kept
+verbatim rather than inventing a new tag, so those two sites needed no
+change to pass). A dispatch site with neither is flagged BY NAME, not
+guessed at -- this is how it caught cfg_fs_write_atomic_device() (cfg_fs_
+mount.c) missing the guard every other generic-callback dispatcher in this
+codebase carries: see this script's own test suite / the audit that added
+this rule for the live re-entrancy path that makes it a real bug, not a
+theoretical one (CONTROL_CMD_SET_UNIT_PREF, dispatched onto bx_flash_worker
+by uart_bridge_ext_control.c's control_task, ends in unit_pref_set() ->
+pref_cfg_fs_save() -> the installed cfg_fs_write_atomic_device() write_fn,
+which dispatches onto bx_flash_worker AGAIN with no re-entrancy check --
+deadlock).
+
 Usage: python flash_worker_lint.py [drivers_dir]
 Exit 0: clean. Exit 1: violation(s) found (printed as file:line).
+Exit 3: SKIPPED -- drivers dir not found (missing prerequisite, not a pass).
 """
 import re
 import sys
@@ -188,12 +229,108 @@ ALLOWLIST = {
     # loads/saves run from the settings HTTP handler's own
     # internal-SRAM-stack httpd task.
     "zones_config_store.c",
+    # cfg_fs.c DEFINES cfg_fs_write_atomic()/cfg_fs_delete() -- it is the
+    # primitive layer CFG_FS_CALL_RE exists to gate callers of, not a caller
+    # of them itself (its own writes go through LittleFS's fopen/fwrite/
+    # rename, which this lint has no reason to model). Its two definition
+    # lines are excluded from CFG_FS_CALL_RE matching by
+    # CFG_FS_DEFINITION_RE below (so this allowlist entry is documentation,
+    # not the thing doing the work) -- listed anyway so a future direct
+    # cfg_fs_write_atomic()/cfg_fs_delete() CALL added to this file (as
+    # opposed to another definition) still has to be reasoned about like any
+    # other caller, the same way kiln_cfg_store.c's own nvs_save_store()
+    # entry above does not exempt a second, different call site in that file.
+    "cfg_fs.c",
+    # Pattern 1 (worker dispatch): cfgfs_file_post_handler()'s
+    # cfg_fs_write_atomic() call (job.name/job.bytes/job.len, dispatched via
+    # cfgfs_file_write_job()) checks uart_bridge_ext_is_on_flash_worker()
+    # first, same shape as adaptive_tune.c's entry above -- see this file's
+    # own comment on cfgfs_file_post_handler() ("Same flash-worker dispatch
+    # shape relay_cycles_reset()/factory_reset.c use").
+    "diagnostics_http.c",
+    # profiles_cfg_fs_delete() (profiles_cfg_fs.c) is the sanctioned
+    # generic wrapper -- see profiles_cfg_fs.c's own entry below for the
+    # write_fn/delete_fn indirection story; this file's only cfg_fs-surface
+    # call site is THROUGH that wrapper, never the bare cfg_fs_delete().
+    "profiles_http.c",
+}
+
+# ---- cfg_fs (LittleFS-backed) write/delete/format surface -------------
+# Extended 2026-09-07 (FILESYSTEM_PLAN.md's `cfg_fs` write paths) -- see
+# this file's module banner "EXTENDED" section for the full story. Kept as
+# its own regex/allowlist pair, not folded into WRITE_CALL_RE/ALLOWLIST
+# above, because the two surfaces have different definers: nvs_set_*()/
+# hal_kv_*()/esp_partition_*() are never DEFINED anywhere under drivers/ (so
+# WRITE_CALL_RE never needs a definition exclusion), but cfg_fs_write_atomic()/
+# cfg_fs_delete() ARE defined in-tree (cfg_fs.c) -- folding the two together
+# would require every future WRITE_CALL_RE addition to also worry about
+# definition-line exclusion, which today it correctly does not have to.
+CFG_FS_CALL_RE = re.compile(
+    r"\b(cfg_fs_write_atomic(?:_device)?|cfg_fs_delete|cfg_fs_format\w*)\s*\("
+)
+
+# Excludes the two lines in cfg_fs.c that DEFINE cfg_fs_write_atomic()/
+# cfg_fs_delete() (esp_err_t cfg_fs_write_atomic(const char *rel_path, ...)
+# -- a bare return-type-then-name-then-'(' on its own line, never how a call
+# site is written in this codebase's style) from being mistaken for a call
+# to themselves. Deliberately narrow (anchored at line start, requires a
+# recognizable C type token first) rather than a blanket "this file is
+# exempt" special case, so a real call site later ADDED to cfg_fs.c (e.g. if
+# it grew a second internal helper that calls cfg_fs_write_atomic()) would
+# still be caught.
+CFG_FS_DEFINITION_RE = re.compile(
+    r"^\s*(?:static\s+)?[A-Za-z_]\w*\s+(?:cfg_fs_write_atomic(?:_device)?|cfg_fs_delete|cfg_fs_format\w*)\s*\("
+)
+
+CFG_FS_ALLOWLIST = {
+    # See CFG_FS_ALLOWLIST's twin entries in ALLOWLIST above for the same
+    # filenames -- kept as a separate set (not merged) because a file can be
+    # justified for the nvs_set_*/hal_kv_* surface without having reasoned
+    # about the cfg_fs_* surface at all, or vice versa, and merging them
+    # would let a justification for one silently cover the other.
+    "cfg_fs.c",
+    "cfg_fs_mount.c",
+    "diagnostics_http.c",
+    "profiles_http.c",
+    "pref_cfg_fs.c",
+    "profiles_cfg_fs.c",
+    "zones_config_cfg_fs.c",
 }
 
 WRITE_CALL_RE = re.compile(
     r"\b(nvs_set_\w+|nvs_commit|hal_kv_set_\w+|hal_kv_commit|hal_kv_erase_\w+|"
     r"esp_partition_write(?:_raw)?|esp_partition_erase_range)\s*\("
 )
+
+# ---- flash-worker dispatch re-entrancy scan ----------------------------
+# Extended 2026-09-07. Every uart_bridge_ext_run_on_flash_worker() call site
+# must show ONE of: (a) a nearby uart_bridge_ext_is_on_flash_worker() check
+# (the sanctioned re-entrant-safe shape adaptive_tune.c/factory_reset.c/
+# relay_cycles.c/safety_cfg_store.c/diagnostics_http.c all use), or (b) the
+# justification phrase "not reachable on-worker" in a nearby comment (the
+# phrase log_store_mount.c's and autotune_engine_step_identify.c's dispatch
+# sites already used before this rule existed -- reused verbatim rather than
+# inventing a new tag). See the module banner for why this is a "static
+# analysis cannot decide, require an explicit comment" rule rather than an
+# attempt at real call-graph reachability analysis.
+DISPATCH_CALL_RE = re.compile(r"\buart_bridge_ext_run_on_flash_worker\s*\(")
+# Several files hand-declare this function's prototype rather than
+# #include-ing flash_worker.h (relay_cycles.c/safety_cfg_store.c/
+# factory_reset.c/diagnostics_http.c all do this -- see e.g. factory_reset.c's
+# own comment on why). That declaration line, `esp_err_t
+# uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);`
+# (with or without a leading `extern`), textually matches DISPATCH_CALL_RE
+# but is not a call site -- its parameter list is always a bare function-
+# pointer TYPE, never an actual `(some_fn, &some_arg)` argument pair the way
+# every real call site in this codebase is written. Anchored on that shape
+# specifically (not just "any line with this name") so a real call that
+# happened to start a line the same way would still be caught.
+DISPATCH_DECLARATION_RE = re.compile(
+    r"^\s*(?:extern\s+)?esp_err_t\s+uart_bridge_ext_run_on_flash_worker\s*\(\s*void\s*\(\s*\*"
+)
+REENTRANCY_GUARD_RE = re.compile(r"uart_bridge_ext_is_on_flash_worker\s*\(")
+REENTRANCY_JUSTIFICATION_RE = re.compile(r"not reachable on-worker", re.IGNORECASE)
+REENTRANCY_CONTEXT_LINES = 15  # lines of lookback for the guard/justification
 
 # Matches this file's own definitions/declarations of the sanctioned
 # dispatch wrappers so a match inside uart_bridge_ext.c itself (which never
@@ -219,8 +356,12 @@ def strip_string_literals(line: str) -> str:
     return STRING_LITERAL_RE.sub('""', line)
 
 
-def scan_file(path: Path):
-    violations = []
+def stripped_lines(path: Path):
+    """Yields (lineno, stripped_line, raw_line) with block/line comments and
+    string literals removed -- shared by every scan below so the three
+    checks (WRITE_CALL_RE, CFG_FS_CALL_RE, DISPATCH_CALL_RE/guard search) see
+    an identical view of the file rather than three slightly-different
+    comment-stripping implementations drifting apart over time."""
     text = path.read_text(encoding="utf-8", errors="replace")
     in_block_comment = False
     for lineno, raw_line in enumerate(text.splitlines(), start=1):
@@ -231,6 +372,7 @@ def scan_file(path: Path):
         if in_block_comment:
             end = line.find("*/")
             if end == -1:
+                yield (lineno, "", raw_line)
                 continue
             line = line[end + 2:]
             in_block_comment = False
@@ -252,8 +394,51 @@ def scan_file(path: Path):
         # "hal_kv_erase_partition('%s') failed: %s") as if they were real
         # call sites -- a log message naming a function is not a call to it.
         line = strip_string_literals(line)
+        yield (lineno, line, raw_line)
+
+
+def scan_file(path: Path):
+    """WRITE_CALL_RE violations (nvs_set_*/hal_kv_*/esp_partition_*)."""
+    violations = []
+    for lineno, line, raw_line in stripped_lines(path):
         if WRITE_CALL_RE.search(line):
             violations.append((lineno, raw_line.strip()))
+    return violations
+
+
+def scan_cfg_fs(path: Path):
+    """CFG_FS_CALL_RE violations (cfg_fs_write_atomic()/cfg_fs_delete()/
+    cfg_fs_format*()), excluding the in-tree DEFINITION lines (cfg_fs.c)."""
+    violations = []
+    for lineno, line, raw_line in stripped_lines(path):
+        if CFG_FS_DEFINITION_RE.match(line):
+            continue
+        if CFG_FS_CALL_RE.search(line):
+            violations.append((lineno, raw_line.strip()))
+    return violations
+
+
+def scan_reentrancy(path: Path):
+    """Every uart_bridge_ext_run_on_flash_worker() dispatch call site must
+    show a nearby is_on_flash_worker() guard or "not reachable on-worker"
+    justification within REENTRANCY_CONTEXT_LINES lines above it (comments
+    included -- the justification IS a comment, so this check does not use
+    stripped_lines() for the lookback, only for finding the dispatch call
+    itself, matching the other two scans' comment-immune call detection)."""
+    violations = []
+    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    stripped = list(stripped_lines(path))
+    for lineno, line, raw_line in stripped:
+        if not DISPATCH_CALL_RE.search(line):
+            continue
+        if DISPATCH_DECLARATION_RE.match(line):
+            continue
+        lo = max(0, lineno - 1 - REENTRANCY_CONTEXT_LINES)
+        hi = lineno  # 0-based slice end == this line's own index+1
+        context = "\n".join(raw_lines[lo:hi])
+        if REENTRANCY_GUARD_RE.search(context) or REENTRANCY_JUSTIFICATION_RE.search(context):
+            continue
+        violations.append((lineno, raw_line.strip()))
     return violations
 
 
@@ -261,8 +446,16 @@ def main(argv):
     default_drivers = Path(__file__).resolve().parent.parent / "drivers"
     drivers_dir = Path(argv[1]) if len(argv) > 1 else default_drivers
     if not drivers_dir.is_dir():
-        print(f"flash_worker_lint: drivers dir not found: {drivers_dir}", file=sys.stderr)
-        return 1
+        # SKIP (exit 3), not FAIL -- tools/run_all_checks.ps1's reserved
+        # skip status for "missing prerequisite" (see
+        # stub_signature_drift_check.py's identical convention). A missing
+        # drivers_dir means this check has nothing to scan, which is a
+        # different fact than "scanned it and found nothing wrong" -- the
+        # old exit-1-on-missing-dir behavior collapsed those two into one
+        # code, and exit 1 for "wrong argument" reads identically to exit 1
+        # for "found a violation" to anything just checking $LASTEXITCODE.
+        print(f"flash_worker_lint: SKIP -- drivers dir not found: {drivers_dir}", file=sys.stderr)
+        return 3
 
     # rglob, not glob: the 2026-09 drivers/ layering reorg (tools/drivers_reorg/)
     # split every file that used to live flat in drivers/*.c into subdirectories
@@ -275,24 +468,54 @@ def main(argv):
     # hal_kv.h migration) -- this lint had been vacuously passing since the
     # reorg landed.
     all_driver_files = sorted(drivers_dir.rglob("*.c"))
-    all_violations = []
+    write_violations = []
+    cfg_fs_violations = []
+    reentrancy_violations = []
     for c_file in all_driver_files:
-        if c_file.name in ALLOWLIST:
-            continue
-        for lineno, text in scan_file(c_file):
-            all_violations.append(f"{c_file.relative_to(drivers_dir.parent)}:{lineno}: {text}")
+        rel = c_file.relative_to(drivers_dir.parent)
+        if c_file.name not in ALLOWLIST:
+            for lineno, text in scan_file(c_file):
+                write_violations.append(f"{rel}:{lineno}: {text}")
+        if c_file.name not in CFG_FS_ALLOWLIST:
+            for lineno, text in scan_cfg_fs(c_file):
+                cfg_fs_violations.append(f"{rel}:{lineno}: {text}")
+        # Re-entrancy scan runs on EVERY file, allowlisted or not: the
+        # allowlists above are about whether a stack is safe to write flash
+        # from, which is orthogonal to whether a given dispatch call risks
+        # deadlocking a caller already on the worker -- a file can be
+        # correctly allowlisted for the first and still be missing the
+        # second (that is exactly what this rule caught in cfg_fs_mount.c).
+        for lineno, text in scan_reentrancy(c_file):
+            reentrancy_violations.append(f"{rel}:{lineno}: {text}")
 
-    if all_violations:
-        print("FLASH WORKER LINT: direct flash/NVS write(s) outside the allowlist:")
-        for v in all_violations:
-            print(f"  {v}")
-        print("")
-        print("See flash_worker_lint.py's header comment for the three sanctioned")
-        print("patterns and how to add a justified allowlist entry.")
+    if write_violations or cfg_fs_violations or reentrancy_violations:
+        if write_violations:
+            print("FLASH WORKER LINT: direct flash/NVS write(s) outside the allowlist:")
+            for v in write_violations:
+                print(f"  {v}")
+            print("See this file's header comment for the three sanctioned patterns")
+            print("and how to add a justified allowlist entry.")
+        if cfg_fs_violations:
+            print("FLASH WORKER LINT: direct cfg_fs write/delete/format call(s) outside")
+            print("the CFG_FS_ALLOWLIST:")
+            for v in cfg_fs_violations:
+                print(f"  {v}")
+            print("Add a CFG_FS_ALLOWLIST entry naming the sanctioned pattern, same as")
+            print("ALLOWLIST above.")
+        if reentrancy_violations:
+            print("FLASH WORKER LINT: uart_bridge_ext_run_on_flash_worker() dispatch(es)")
+            print("with no nearby is_on_flash_worker() guard or \"not reachable on-worker\"")
+            print("justification comment -- a caller already on the worker at this call")
+            print("site deadlocks the board:")
+            for v in reentrancy_violations:
+                print(f"  {v}")
+            print("Add the guard, or a comment containing the exact phrase")
+            print("\"not reachable on-worker\" explaining why this dispatch's caller can")
+            print("never already be on the worker.")
         return 1
 
     print(f"flash_worker_lint: clean ({len(all_driver_files)} driver files scanned, "
-          f"{len(ALLOWLIST)} allowlisted)")
+          f"{len(ALLOWLIST)} write-allowlisted, {len(CFG_FS_ALLOWLIST)} cfg_fs-allowlisted)")
     return 0
 
 
