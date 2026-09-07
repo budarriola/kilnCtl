@@ -1,5 +1,20 @@
 # LittleFS assessment — 2026-09-06
 
+**Superseded, 2026-09-07 — see below the original analysis.** This
+document's "not adopted" conclusion was the right answer to the question it
+was asked (would LittleFS help *log retention*), but the owner came back
+with a different question the next day — wear leveling — and after that was
+answered too (`docs/audits/flash_endurance_review_2026-09-07.md`: no
+endurance problem exists, by 100x-1000x), the owner directed the migration
+to proceed anyway, for a reason neither document argues against: structured,
+inspectable, diffable, backup/restore-able user data beats opaque
+`_Static_assert`-pinned C structs in NVS blobs, independent of wear. See
+`docs/FILESYSTEM_USER_DATA_PLAN.md` for the design and
+`docs/CONFIG_FILESYSTEM.md` for what actually shipped. **Everything below
+this line is the original analysis and its numbers are still correct** —
+NVS wear/fragmentation genuinely was never the problem; it just stopped
+being the deciding question.
+
 Owner question: should flash writes go through LittleFS for wear leveling,
 possibly relaxing the strict partition layout? Is that safe, does it
 fragment? Answer below is from a read-only survey of every persistent write
@@ -60,7 +75,7 @@ cable-free fallback; `pico_img` is a raw range by design. Merging
 partitions under one filesystem re-opens the credential-loss coupling that
 the layout was built to fix. This holds regardless of filesystem.
 
-## Decision
+## Decision (as of 2026-09-06 — see supersession note at top)
 
 **No change.** Not adopted as a submodule.
 

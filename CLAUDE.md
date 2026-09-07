@@ -96,6 +96,14 @@ Read back `control_get_zones` (or `GET /api/zones/config`) after any rollback
 before heating. Full detail: `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
 ("`ota_rollback(processor)`" bullet).
 
+Zones config (and profiles, and several preferences) now also dual-write to
+a new `cfg` LittleFS partition alongside NVS — NVS stays authoritative and
+unconditional, so the rollback hazard above is unchanged. The `cfg`
+partition itself is unformatted on the bench board and not yet mounted at
+boot, so this is inert today. Full detail, including a real unfixed
+atomicity defect in the RP2040's own config store found by the same
+review: `docs/CONFIG_FILESYSTEM.md`.
+
 `flash_firmware()` now checks this **automatically** after every flash (the
 `verify` parameter, default `True`): it polls the board's own HTTP API for the
 running partition (`/api/partitions`'s RUNNING marker) and for its reported
