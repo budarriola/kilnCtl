@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 static const char *TAG = "relay_cycles";
 
@@ -31,11 +32,14 @@ bool uart_bridge_ext_is_on_flash_worker(void);
  * setup on the first boot after the update. */
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_CYCLES "relay_cyc"
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_CYCLES);
 
 /* TODO.md 8.1: this module's persisted store, split out of the default NVS
  * partition into its own partition so a corrupt/erased default partition
  * cannot take relay history with it. */
 #define KILN_NVS_PARTITION "kiln_nvs"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
 /* The blob has no version field of its own on disk before this change (a
  * bare uint32_t[KILN_IO_RELAY_COUNT]); wrapping it in a versioned struct
