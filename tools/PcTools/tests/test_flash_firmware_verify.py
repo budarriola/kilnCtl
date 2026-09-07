@@ -21,6 +21,7 @@ Run with: python -m pytest tools/PcTools/tests/test_flash_firmware_verify.py -q
 from __future__ import annotations
 
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -386,6 +387,107 @@ class PreFlashProbeWiringTest(FlashFirmwareVerifyWiringTest):
             mf.flash_firmware(verify=False)
         verify_mock.assert_not_called()
         self.preflash_mock.assert_not_called()
+
+
+class KilnFwRootOverrideTest(unittest.TestCase):
+    """flash_firmware(kiln_fw_root=...) -- the worktree-build override.
+
+    See tools/PcTools/src/kilnctrl/debug_probe.py's `_kiln_fw_root()`
+    hardcoding the main tree, and flash_firmware()'s new `kiln_fw_root`
+    parameter that lets a build produced in a separate git worktree (checked
+    out clean at HEAD, used when the main tree carries another session's
+    WIP) be flashed without that WIP riding along.
+    """
+
+    def setUp(self):
+        self.tmp_root = tempfile.mkdtemp()
+        self.worktree_root = os.path.join(self.tmp_root, "worktree")
+        self.override_kiln_fw_root = os.path.join(self.worktree_root, "firmware", "KilnFW")
+        self.build_dir = os.path.join(self.override_kiln_fw_root, "build")
+        os.makedirs(os.path.join(self.build_dir, "bootloader"))
+        os.makedirs(os.path.join(self.build_dir, "partition_table"))
+        with open(os.path.join(self.build_dir, "bootloader", "bootloader.bin"), "wb") as f:
+            f.write(b"\x00")
+        with open(os.path.join(self.build_dir, "partition_table", "partition-table.bin"), "wb") as f:
+            f.write(b"\x00")
+        with open(os.path.join(self.build_dir, "KilnCtrl.bin"), "wb") as f:
+            f.write(b"\x00")
+        self.addCleanup(shutil.rmtree, self.tmp_root, ignore_errors=True)
+
+        self._openocd_patch = unittest.mock.patch.object(mf, "_find_openocd_exe", return_value="fake-openocd.exe")
+        self._openocd_patch.start()
+        self.addCleanup(self._openocd_patch.stop)
+
+        self._kill_patch = unittest.mock.patch.object(mf, "kill_openocd_sessions", return_value="")
+        self._kill_patch.start()
+        self.addCleanup(self._kill_patch.stop)
+
+        self._run_patch = unittest.mock.patch.object(mf, "_run_openocd", return_value=(True, "verified"))
+        self.run_mock = self._run_patch.start()
+        self.addCleanup(self._run_patch.stop)
+
+        stale_ok = unittest.mock.Mock(stale=False, reason="")
+        self._stale_patch = unittest.mock.patch.object(mf.stale_check, "check_kilnfw_stale", return_value=stale_ok)
+        self._stale_patch.start()
+        self.addCleanup(self._stale_patch.stop)
+
+        self._adapter_patch = unittest.mock.patch.object(mf, "_refuse_if_adapter_absent", return_value=None)
+        self._adapter_patch.start()
+        self.addCleanup(self._adapter_patch.stop)
+
+        self._preflash_patch = unittest.mock.patch.object(mf, "_preflash_board_address", return_value=None)
+        self._preflash_patch.start()
+        self.addCleanup(self._preflash_patch.stop)
+
+    def test_missing_kiln_fw_root_path_is_refused(self):
+        result = mf.flash_firmware(kiln_fw_root=os.path.join(self.tmp_root, "does-not-exist"), verify=False)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("does not exist", result)
+
+    def test_non_absolute_kiln_fw_root_is_refused(self):
+        result = mf.flash_firmware(kiln_fw_root="relative/path/firmware/KilnFW", verify=False)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("absolute", result)
+
+    def test_kiln_fw_root_missing_binaries_is_refused(self):
+        empty_root = os.path.join(self.tmp_root, "empty", "firmware", "KilnFW")
+        os.makedirs(empty_root)
+        result = mf.flash_firmware(kiln_fw_root=empty_root, verify=False)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("missing build output", result)
+        self.assertIn("override", result)
+
+    def test_valid_override_flashes_from_that_tree(self):
+        with unittest.mock.patch.object(
+            mf.flash_provenance, "capture_tree_state", wraps=mf.flash_provenance.capture_tree_state
+        ) as capture_mock:
+            result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertIn("flashed and verified OK", result)
+        # cwd for the OpenOCD invocation must be the OVERRIDE tree, not the
+        # main tree's firmware/KilnFW.
+        self.assertEqual(self.run_mock.call_args[1]["cwd"], self.override_kiln_fw_root)
+        # provenance must have been captured against the override tree's own
+        # root (two levels above kiln_fw_root), not the main repo root.
+        expected_repo_root = os.path.normpath(os.path.join(self.override_kiln_fw_root, "..", ".."))
+        capture_mock.assert_called_with(repo_root=expected_repo_root)
+
+    def test_provenance_json_records_the_override_path(self):
+        mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        prov_path = os.path.join(self.build_dir, "flash_provenance.json")
+        prov = mf.flash_provenance.read_provenance_json(prov_path)
+        self.assertIsNotNone(prov)
+        self.assertEqual(prov["kiln_fw_root_override"], self.override_kiln_fw_root)
+        self.assertEqual(prov["outcome"], mf.flash_provenance.OUTCOME_FLASHED_OK)
+
+    def test_no_override_omits_it_from_provenance_json(self):
+        # Default path (no override) must still write None -- proves the
+        # field is not just always the main tree's path by accident.
+        with unittest.mock.patch.object(mf, "_kiln_fw_root", return_value=self.override_kiln_fw_root):
+            mf.flash_firmware(verify=False)
+        prov_path = os.path.join(self.build_dir, "flash_provenance.json")
+        prov = mf.flash_provenance.read_provenance_json(prov_path)
+        self.assertIsNotNone(prov)
+        self.assertIsNone(prov["kiln_fw_root_override"])
 
 
 if __name__ == "__main__":

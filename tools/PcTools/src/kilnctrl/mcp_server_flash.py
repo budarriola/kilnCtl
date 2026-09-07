@@ -344,6 +344,7 @@ def flash_firmware(
     verify: bool = True,
     host: Optional[str] = None,
     allow_sensitive_dirty: bool = False,
+    kiln_fw_root: Optional[str] = None,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
@@ -443,13 +444,42 @@ def flash_firmware(
     config -- see flash_provenance.SENSITIVE_PATTERNS), which is exactly
     what the incident above involved. Pass allow_sensitive_dirty=True only
     after you have actually looked at the named files and intend them to be
-    on the board -- this is a deliberate, visible override, not a default."""
+    on the board -- this is a deliberate, visible override, not a default.
+
+    `kiln_fw_root`: overrides which `firmware/KilnFW`-shaped directory the
+    build output (and provenance) is read from -- defaults to exactly the
+    main working tree's `firmware/KilnFW` (unchanged behaviour when omitted).
+    Use this for the sanctioned "build from a clean git worktree checked out
+    at HEAD" workflow, when the main working tree carries another session's
+    foreign WIP that would otherwise ride along (or trip the sensitive-dirty
+    guard above) -- point this at that worktree's `firmware/KilnFW` instead
+    of stashing/committing someone else's in-progress edits. Must be an
+    ABSOLUTE path to an existing directory whose `build/` already holds the
+    three expected binaries (bootloader.bin, partition-table.bin,
+    KilnCtrl.bin) -- a relative path or a directory missing any of those is
+    refused with a clear error before OpenOCD is touched. The git-provenance
+    record and the sensitive-dirty-file guard are evaluated against THAT
+    tree (its own `git status --porcelain`/HEAD, taken as two levels above
+    this path), not the main tree, and the persisted
+    `flash_provenance.json` (still written under the override's own
+    `build/`) records `kiln_fw_root_override` so a later reader knows this
+    flash did not come from the ordinary path. Post-flash verification
+    (`verify=True`) compares against THAT tree's `.bin`, unchanged
+    otherwise."""
     openocd_exe = _find_openocd_exe()
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
 
-    kiln_fw_root = _kiln_fw_root()
-    build_dir = os.path.join(kiln_fw_root, "build")
+    if kiln_fw_root is not None:
+        if not os.path.isabs(kiln_fw_root):
+            return f"error: kiln_fw_root must be an absolute path, got {kiln_fw_root!r}"
+        if not os.path.isdir(kiln_fw_root):
+            return f"error: kiln_fw_root does not exist or is not a directory: {kiln_fw_root}"
+        effective_kiln_fw_root = kiln_fw_root
+    else:
+        effective_kiln_fw_root = _kiln_fw_root()
+
+    build_dir = os.path.join(effective_kiln_fw_root, "build")
     required = [
         os.path.join(build_dir, "bootloader", "bootloader.bin"),
         os.path.join(build_dir, "partition_table", "partition-table.bin"),
@@ -457,14 +487,21 @@ def flash_firmware(
     ]
     missing = [p for p in required if not os.path.isfile(p)]
     if missing:
-        return "error: missing build output(s), run `idf.py build` first: " + ", ".join(missing)
+        override_note = " (kiln_fw_root override)" if kiln_fw_root else ""
+        return f"error: missing build output(s){override_note}, run `idf.py build` first: " + ", ".join(missing)
 
     adapter_refusal = _refuse_if_adapter_absent(MAIN_BOARD_JTAG_SERIAL, "main board (ESP32-S3)")
     if adapter_refusal:
         return adapter_refusal
 
     provenance_path = os.path.join(build_dir, "flash_provenance.json")
-    tree_state = flash_provenance.capture_tree_state()
+    # An override tree's own git identity, not the main tree's: kiln_fw_root
+    # is expected to be `<some-tree-root>/firmware/KilnFW`, so its tree root
+    # is two levels up. See flash_firmware()'s `kiln_fw_root` docstring.
+    provenance_repo_root = (
+        os.path.normpath(os.path.join(kiln_fw_root, "..", "..")) if kiln_fw_root else None
+    )
+    tree_state = flash_provenance.capture_tree_state(repo_root=provenance_repo_root)
     guard_reason = flash_provenance.decide_guard(tree_state, allow_sensitive_dirty=allow_sensitive_dirty)
     if guard_reason:
         # Persist the REFUSAL itself, not just the tree snapshot that led to
@@ -476,14 +513,20 @@ def flash_firmware(
             tree_state, provenance_path,
             outcome=flash_provenance.OUTCOME_REFUSED_SENSITIVE_DIRTY,
             detail=guard_reason,
+            kiln_fw_root_override=kiln_fw_root,
         )
         _srv._session_log.warning("flash_firmware: refused -- sensitive dirty files: %s", tree_state.sensitive_files)
         return "error: " + guard_reason + "\n\n" + flash_provenance.format_report(tree_state)
-    flash_provenance.write_provenance_json(tree_state, provenance_path, outcome=flash_provenance.OUTCOME_PENDING)
+    flash_provenance.write_provenance_json(
+        tree_state, provenance_path, outcome=flash_provenance.OUTCOME_PENDING,
+        kiln_fw_root_override=kiln_fw_root,
+    )
     provenance_note = flash_provenance.format_report(tree_state)
+    if kiln_fw_root:
+        provenance_note += f"\nprovenance: kiln_fw_root override in use: {kiln_fw_root}"
     _srv._session_log.info("flash_firmware: %s", provenance_note.replace("\n", " | "))
 
-    stale = stale_check.check_kilnfw_stale(kiln_fw_root)
+    stale = stale_check.check_kilnfw_stale(effective_kiln_fw_root)
     if stale.stale:
         _srv._session_log.warning("flash_firmware: stale binary detected: %s", stale.reason)
         if not allow_stale:
@@ -491,6 +534,7 @@ def flash_firmware(
                 tree_state, provenance_path,
                 outcome=flash_provenance.OUTCOME_REFUSED_STALE_BINARY,
                 detail=stale.reason,
+                kiln_fw_root_override=kiln_fw_root,
             )
             return (
                 "error: refusing to flash a stale binary -- " + stale.reason + "\n\n"
@@ -532,16 +576,22 @@ def flash_firmware(
             return f"{base_msg}\n{landed_note}"
         return f"{base_msg}, and post-flash verification confirmed the board is running factory with the matching build"
 
-    ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=kiln_fw_root, timeout_s=90)
+    ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_kiln_fw_root, timeout_s=90)
     if ok:
-        flash_provenance.write_provenance_json(tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK)
+        flash_provenance.write_provenance_json(
+            tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK,
+            kiln_fw_root_override=kiln_fw_root,
+        )
         return _post_flash(stale_prefix + "flashed and verified OK (bootloader + partition table + app), board reset and running")
 
     if retry_once:
         _srv._session_log.warning("flash_firmware: first attempt failed, retrying once (known benign quirk)")
-        ok2, output2 = _run_openocd(openocd_exe, board_cfg, tcl, cwd=kiln_fw_root, timeout_s=90)
+        ok2, output2 = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_kiln_fw_root, timeout_s=90)
         if ok2:
-            flash_provenance.write_provenance_json(tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK)
+            flash_provenance.write_provenance_json(
+                tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK,
+                kiln_fw_root_override=kiln_fw_root,
+            )
             return _post_flash("flashed and verified OK on retry (first attempt hit the known benign Verify-Failed quirk)")
         output = output2
 
@@ -550,6 +600,7 @@ def flash_firmware(
         tree_state, provenance_path,
         outcome=flash_provenance.OUTCOME_FLASH_FAILED,
         detail=tail,
+        kiln_fw_root_override=kiln_fw_root,
     )
     return (
         "error: flash failed" + (" twice" if retry_once else "") + f":\n{tail}\n\n"

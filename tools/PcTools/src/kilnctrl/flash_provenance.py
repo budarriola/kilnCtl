@@ -211,6 +211,7 @@ def write_provenance_json(
     out_path: str,
     outcome: str = OUTCOME_PENDING,
     detail: Optional[str] = None,
+    kiln_fw_root_override: Optional[str] = None,
 ) -> None:
     """Persists the capture alongside the build output (e.g.
     KilnFW/build/flash_provenance.json) so "what was actually on the board
@@ -224,7 +225,16 @@ def write_provenance_json(
     are expected to write once per state transition (pending -> refused, or
     pending -> flashed_ok/flash_failed) so the file on disk always names
     what actually happened to the LAST attempt, not just what was dirty at
-    the time. See OUTCOME_* constants above."""
+    the time. See OUTCOME_* constants above.
+
+    `kiln_fw_root_override`: non-None when the image being flashed was built
+    in a tree other than the main working tree (e.g. a git worktree checked
+    out at HEAD, used to build cleanly while the main tree carries another
+    session's WIP -- see flash_firmware()'s `kiln_fw_root` parameter). `state`
+    passed in this case is already scoped to THAT tree (its own
+    `git status --porcelain`/HEAD), not the main tree's -- this field just
+    records which path produced it, so a later reader isn't misled into
+    thinking `head`/`dirty_files` describe the main working tree."""
     try:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
@@ -237,6 +247,7 @@ def write_provenance_json(
                     "git_available": state.git_available,
                     "outcome": outcome,
                     "detail": detail,
+                    "kiln_fw_root_override": kiln_fw_root_override,
                 },
                 f,
                 indent=2,

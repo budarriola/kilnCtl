@@ -62,6 +62,14 @@ OpenOCD at all, because that generic single-ELF path reliably fails flash-bank
 detection/verify on this board (confirmed repeatedly); `flash_firmware()` is the
 sanctioned working path, still OpenOCD, never esptool.
 
+`flash_firmware()` accepts an optional `kiln_fw_root` override (absolute path
+to a `firmware/KilnFW`-shaped directory whose `build/` already holds the
+three binaries) for the sanctioned "build from a clean git worktree at HEAD"
+workflow, when the main tree carries another session's foreign WIP that
+would otherwise ride along or trip the sensitive-dirty guard below; the
+git-provenance record and verification then reflect that worktree, not the
+main tree, and `flash_provenance.json` records which path was used.
+
 `flash_firmware()` writes the **`factory`** partition only — it does not touch
 `otadata`. If an OTA has ever pointed the boot target at `ota_0`/`ota_1`, the
 bootloader keeps booting that image and every later `flash_firmware()` reports
