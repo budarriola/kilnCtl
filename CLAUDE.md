@@ -133,6 +133,12 @@ fails with ffmpeg exit `-5`, check for another process holding the C920
 first — the device still enumerates fine (`ffmpeg -list_devices true -f dshow
 -i dummy`), it is just busy.
 
+`tools/PcTools/scripts/sample_lcd_region.ps1` wraps that pipeline: given a
+capture from `capture_lcd.ps1` and a region (`-X -Y -W -H`), it prints the
+region's mean RGB alongside the same for a bezel reference region, so this
+recipe doesn't have to be re-derived by hand each time
+(`.\sample_lcd_region.ps1 -Image full.jpg -X 500 -Y 650 -W 8 -H 8`).
+
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
 ## Project Structure
