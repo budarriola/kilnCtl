@@ -146,6 +146,41 @@ seven shippable steps, and the risks live in the companion doc:
 
 **→ `docs/FILESYSTEM_USER_DATA_PLAN.md`**
 
+## Pre-partition-change backup/restore runbook (2026-09-07)
+
+Before any partition-table flash, run in order:
+
+1. `python tools/PcTools/scripts/full_board_backup.py --host <board-ip>` —
+   pulls all 12 inventoried HTTP-reachable endpoints (zones config incl. PID/
+   coupling, profiles, kiln config slots, adaptive-tune, status/relay
+   counters, ramp-assist, display power, safety commissioning mirror) into
+   one timestamped archive under `tools/PcTools/board-backups/<ts>/`
+   (gitignored — never commit). Exit code 0 and "0 failed" required before
+   proceeding.
+2. Verify the archive: confirm `endpoints./api/backup/export.zones[i]` shows
+   the expected `pid_kp/pid_ki/pid_kd` and `coupling_c1/coupling_c2` for
+   every zone against the known bench values before trusting the backup.
+3. **Provably restorable today** (host-test-proven byte-equality, fake-KV
+   harness, `firmware/KilnFW/App/test/test_backup_import.c ::
+   test_export_round_trips_through_import_to_identical_config`): zones
+   config (PID gains, FOPDT model, coupling matrix, guards, wiring) and user
+   fire profiles — the two items that actually gate the flash, per the
+   irreplaceable-data list in this runbook's originating task. Restore path:
+   `POST /api/backup/export`'s output back through `backup_import_apply()`
+   (`/api/backup/import`).
+4. **Captured but NOT provably restorable via existing firmware**: kiln
+   config slots, adaptive-tune state, relay cycle counters, ramp-assist,
+   display power policy, RP2040 safety commissioning mirror — no
+   corresponding import/POST-replay path was exercised or proven in this
+   pass. Treat these as read-only diagnostic capture; do not assume a
+   restore works for them without separately testing it.
+5. Wi-Fi credentials are deliberately NOT captured (no GET endpoint exists
+   by design) — re-provision manually via `/wifi` after any restore that
+   follows an `otadata` erase / bootloader reflash.
+6. After the partition change and any restore, re-verify zone0/1/2
+   `pid_kp/pid_ki/pid_kd` and `coupling_c1/coupling_c2` against the bench
+   values above via `GET /api/zones` before starting any firing.
+
 Headlines: 11 items MOVE, 11 KEEP, 2 undecided. Wi-Fi credentials, boot-guard
 state, touch calibration, watchdog/OTA/crash records and the RP2040 config
 store all stay in NVS — every one of them is read before any mount, or lives on
@@ -153,3 +188,101 @@ the other chip. A new `cfg` LittleFS partition (append-only into the free tail)
 mounts with `format_if_mount_failed=false` and is skipped entirely in recovery
 mode; a mount failure degrades to firmware defaults with a banner and never
 blocks boot.
+
+## Applying the table change — runbook (`cfg` partition, 2026-09-07)
+
+Staged, **not flashed**. The CSV row is in `firmware/KilnFW/partitions.csv`
+(`cfg, data, littlefs, 0xDB0000, 0x80000`) with its full sizing rationale in
+that file's own `cfg` comment block; `firmware/KilnFW/App/test/check_flash_partition_map.ps1`
+pins its offset/size and `firmware/KilnFW/App/test/check_partition_labels_vs_firmware.ps1`
+cross-checks every label/subtype in the table against the firmware sources.
+
+### Measured starting point (live board, 2026-09-07, `GET /api/partitions`)
+
+12 partitions, byte-identical to the committed CSV, `running: factory`
+(so `otadata` currently selects the factory slot, not an OTA one).
+`otadata` 0x200000/8K; `ota_0` 0x210000, `ota_1` 0x510000, `factory` 0x810000,
+each 0x300000 (app image 2,065,872 B → 34.3% free); NVS partitions `nvs`
+0x9000/24K, `wifi_nvs` 0x187000/24K, `kiln_nvs` 0x18D000/64K, `profiles_nvs`
+0x19D000/384K; `coredump` 0xBF0000/1M; `logs` 0xCF0000/768K SPIFFS.
+**Free contiguous tail today: 0xDB0000..0x1000000 = 2,424,832 B (2.31 MiB)**
+of the 16 MB N16R8 chip. After `cfg` takes 512K the tail is 0xE30000..0x1000000
+= 1,900,544 B (1.81 MiB), reserved for raising `logs` retention later.
+
+### HARD GATE — do not flash until both are true
+
+1. **A backup/restore round trip has been *proven*** on this board (the
+   separate backup/restore proof track): export, wipe, re-import, and confirm
+   the tuned PID gains, FOPDT parameters and the coupling matrix read back
+   identical. Those are hours of bench firings; this gate exists for them.
+   *No exceptions — an append-only table change is low risk, not zero risk,
+   and the bootloader/partition-table write is not itself reversible on a
+   board that fails to boot afterwards.*
+2. `tools/run_all_checks.ps1` green, including both partition checks above.
+
+### Procedure
+
+1. `GET /api/backup/export` → save to a dated file off-board. Also archive
+   `nvs`, `wifi_nvs`, `kiln_nvs`, `profiles_nvs` (checklist item 4 in
+   `docs/FLASH_BUDGET.md` section 5) and read out `coredump` with
+   `espcoredump.py` if anything is in it.
+2. `debug_check_partition_table` / `GET /api/partitions` → record the
+   pre-change table.
+3. `build_kilnfw` (picks the CSV up automatically: `sdkconfig.defaults`
+   already sets `CONFIG_PARTITION_TABLE_CUSTOM=y` and
+   `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"`).
+4. `flash_firmware()` — writes bootloader @0x0, **partition table @0x8000**,
+   and app @0x810000 (`factory`). This is what makes the table change take
+   effect; the bootloader is reflashed in the same call, which is required
+   against any new table.
+5. **`otadata`:** `flash_firmware()` never writes it. For *this* revision no
+   app partition moves or changes size, so `otadata` stays valid and **must
+   not** be erased. But if it points at `ota_0`/`ota_1` (any board that has
+   ever OTA'd), the board boots the OLD app against the NEW table and the
+   just-flashed `factory` image is not what is running — `flash_firmware(verify=True)`
+   fails loudly in that case. Fix with `ota_rollback_esp()` to restore the
+   factory boot target, then re-verify. *This board reads `running: factory`
+   today, so no rollback is expected.* A future revision that DOES move or
+   resize an app partition must erase `otadata` as part of the flash — an
+   OTA-selected boot against moved app offsets does not boot.
+6. Re-read `GET /api/partitions` and confirm 13 partitions with `cfg` at
+   0xDB0000/524288, then `GET /api/zones/config` before any heating (the
+   rollback hazard in CLAUDE.md).
+
+### Data loss
+
+**None.** The change is append-only: no partition above the new row moves,
+resizes, or changes subtype (diff `partitions.csv` against the previous
+commit to confirm — that is checklist item 5 and cannot be verified from a
+snapshot). The region `cfg` claims was unallocated, so there is nothing in
+it to lose. `nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs`/`logs`/`coredump`
+keep their contents. The backups in step 1 are insurance against a failed
+flash, not against an expected loss.
+
+### Rollback
+
+Reverting the CSV row and reflashing restores the previous 12-partition
+table; nothing else is disturbed, because nothing moved. The only thing lost
+is whatever had been written into `cfg` itself. So the *table* change is
+reversible. What is **one-way** is the data migration built on top of it —
+once NVS copies are dropped (below), going back to a pre-`cfg` firmware
+means restoring from a backup export, not from NVS.
+
+### Bounded dual-write window and its closing criterion
+
+Per the owner decision: while user data migrates onto `cfg`, every write goes
+to **both** the file and the existing NVS blob, and reads prefer the file and
+fall back to NVS. That window closes — NVS copies dropped, writes go to files
+only — when **all** of these hold on the bench board:
+
+- **20 consecutive clean boots** on the file-backed path with no mount
+  failure, no fallback-to-NVS read, and no defaults banner; and
+- **one complete firing** (start → ramp → dwell → cool, a real profile, not a
+  bench smoke test) run entirely from file-backed config, with the tuned PID
+  gains and coupling matrix read back from `/cfg/zones.json` and confirmed
+  byte-identical to the NVS copy afterwards; and
+- **one proven backup/restore round trip against the file path** (export,
+  erase `cfg`, re-import, verify).
+
+Only then does the step that removes the NVS writers land. Until all three
+are met the dual write stays, regardless of elapsed time.
