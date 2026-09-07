@@ -988,9 +988,9 @@ if ($script:buildFailures.Count -gt 0 -or $script:failedExes.Count -gt 0) {
 }
 
 if ($script:builtExes.Count -ne $totalExpected) {
-    Write-Host "MISMATCH: $($script:builtExes.Count) executables built but $totalExpected were expected -- " +
+    Write-Host ("MISMATCH: $($script:builtExes.Count) executables built but $totalExpected were expected -- " +
         "at least one was silently never attempted (not a build failure, not a run failure). Refusing to " +
-        "report success."
+        "report success.")
     exit 1
 }
 

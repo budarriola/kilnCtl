@@ -10,6 +10,7 @@
 #include "freertos/semphr.h" /* s_store_lock -- 2026-08-27 audit fix (H5), see its own comment */
 
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t this
                               * file's callers already branch on */
 
@@ -41,6 +42,8 @@ static const char *TAG = "safety_cfg_store";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_SAFETY_CFG "safetycfg"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 
 /* RELAY_LIFE_BUDGET.md -- the safety relay type, stored
  * separately from the SAFETY_CFG_PARAM_TABLE blob above (see
@@ -60,13 +63,9 @@ static const char *TAG = "safety_cfg_store";
 #define NVS_KEY_SAFETY_CT_CAL "safetyctcal"
 #define SAFETY_CT_CAL_BLOB_VERSION 1u
 
-/* Compile-time guard, same as zones_config_store.c's NVS_KEY_LEN_CHECK:
- * every NVS key literal used in this file must fit ESP-IDF's real
- * NVS_KEY_NAME_MAX_SIZE (16 bytes including the NUL, 15 usable chars) --
- * sizeof() on a string literal includes its own NUL, so `sizeof(lit) - 1` is
- * the character count nvs_page.cpp's strlen(key) check uses. */
-#define NVS_KEY_LEN_CHECK(lit) \
-    _Static_assert(sizeof(lit) - 1 <= 15, #lit " exceeds NVS's 15-character key limit (NVS_KEY_NAME_MAX_SIZE=16 including NUL)")
+/* Compile-time guard -- macro now shared via nvs_key_check.h (see that
+ * header) so every module with NVS key literals gets the identical check;
+ * this file used to define NVS_KEY_LEN_CHECK locally. */
 NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_CFG);
 NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_RELAY);
 NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_CT_CAL);
@@ -704,12 +703,9 @@ static esp_err_t save_ct_cal(void)
     return hal_status_to_esp_err(err);
 }
 
-/* R46/R43 physical default -- same constant the bench preset table and the
- * commissioning page both already use for gain[0..2] (0x030B-0x030D). Used
- * here only as the fallback when a channel's gain has never been
- * fetched/set, so a conversion is never simply refused for want of a gain
- * this board legitimately doesn't have yet. */
-#define SAFETY_CT_CAL_DEFAULT_GAIN 0.715f
+/* SAFETY_CT_CAL_DEFAULT_GAIN (0.715, R46/R43 physical default) is declared in
+ * safety_cfg_store.h now -- shared with safety_cfg_http.c's
+ * ct_auto_zero_counts_to_mv() fallback, see that header comment. */
 
 bool safety_ct_cal_convert(float a_fs, float zero_mv, float gain, float *out_k_ct_v_per_a,
                             uint16_t *out_zero_counts)

@@ -951,44 +951,49 @@ static void test_ct_auto_zero_precheck_each_refusal(void)
     TEST_SECTION("ct_auto_zero_check_preconditions -- each individual refusal, checked one at a time "
                  "against an otherwise-all-clear baseline");
 
+    // Baseline uses has_existing=true/SOURCE_SWEEP throughout -- has_existing
+    // itself is exercised separately below (test_ct_auto_zero_precheck_
+    // requires_existing_a_fs()) and SOURCE_SWEEP keeps the unrelated
+    // manual-wins rule from interfering with these single-condition checks.
+
     // Baseline: everything clear -- must return NULL (ok).
     TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false,
-                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) == NULL,
+                                                 true, SAFETY_CT_CAL_SOURCE_SWEEP, false) == NULL,
                "baseline: every precondition satisfied -> NULL (ok)");
 
     TEST_CHECK(ct_auto_zero_check_preconditions(false, false, true, true, false, 5000u, false, false,
-                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+                                                 true, SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "link down -> refused");
-    TEST_CHECK(ct_auto_zero_check_preconditions(true, true, true, true, false, 5000u, false, false, false,
-                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, true, true, true, false, 5000u, false, false, true,
+                                                 SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "trip latched -> refused");
     TEST_CHECK(ct_auto_zero_check_preconditions(true, false, false, true, false, 5000u, false, false,
-                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+                                                 true, SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "K4 not closed -> refused");
     TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, false, false, 5000u, false, false,
-                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+                                                 true, SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "no board I/O -> refused");
-    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, true, 5000u, false, false, false,
-                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, true, 5000u, false, false, true,
+                                                 SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "a relay is commanded on -> refused");
     TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 4999u, false, false,
-                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+                                                 true, SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "relays off only 4999 ms (just under the 5 s floor) -> refused");
     TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, UINT32_MAX, false, false,
-                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+                                                 true, SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "relays-off duration unknown (UINT32_MAX sentinel) -> refused, not treated as 'plenty'");
-    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, true, false, false,
-                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, true, false, true,
+                                                 SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "profile running/paused -> refused");
-    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, true, false,
-                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) != NULL,
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, true, true,
+                                                 SAFETY_CT_CAL_SOURCE_SWEEP, false) != NULL,
                "autotune running -> refused");
 
     // NEGATIVE TEST (this codebase's "negative-test every check" rule):
     // exactly at the 5 s floor must PASS (>=, not >) -- proves the boundary
     // is where the plan says it is, not off by one.
     TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false,
-                                                 false, SAFETY_CT_CAL_SOURCE_MANUAL, false) == NULL,
+                                                 true, SAFETY_CT_CAL_SOURCE_SWEEP, false) == NULL,
                "NEGATIVE: exactly 5000 ms passes -- the floor is >=5s, not >5s");
 }
 
@@ -1005,9 +1010,103 @@ static void test_ct_auto_zero_precheck_manual_wins_unless_override(void)
     TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false, true,
                                                  SAFETY_CT_CAL_SOURCE_SWEEP, false) == NULL,
                "sweep source (not manual) never needs an override for auto-zero");
+}
+
+// HIGH review finding on b8f0f47: the commit path used to fabricate
+// a_fs_for_convert=1.0f when has_existing was false and write a matching
+// k_ct=1.0 (V/A) to the Pico for a channel that had never been calibrated at
+// all -- a silently wrong gain, not a "zero-only measurement is unaffected
+// by A_fs" no-op the removed comment claimed. The fix moved the refusal into
+// this same precondition gate so the wrong-gain write can never be reached.
+static void test_ct_auto_zero_precheck_requires_existing_a_fs(void)
+{
+    TEST_SECTION("ct_auto_zero_check_preconditions -- refuses outright when the channel has no A_fs yet "
+                 "(HIGH finding on b8f0f47: no fabricated A_fs, ever)");
+
+    const char *reason = ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false,
+                                                            false, false, SAFETY_CT_CAL_SOURCE_MANUAL, false);
+    TEST_CHECK(reason != NULL, "has_existing=false -> refused, not silently allowed with a fabricated A_fs");
+    TEST_CHECK(reason != NULL && strstr(reason, "A_fs") != NULL,
+               "refusal names the actual problem (no A_fs yet), not a generic message");
+
+    // override_manual must NOT bypass this -- it only overrides the manual-
+    // wins rule, which has nothing to do with A_fs existing at all.
     TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false, false,
-                                                 SAFETY_CT_CAL_SOURCE_MANUAL, false) == NULL,
-               "no existing value at all -> nothing to conflict with, allowed");
+                                                 SAFETY_CT_CAL_SOURCE_MANUAL, true) != NULL,
+               "override_manual=1 does not bypass the missing-A_fs refusal");
+
+    // Existing value present (any source) -> this refusal does not fire.
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false, true,
+                                                 SAFETY_CT_CAL_SOURCE_SWEEP, false) == NULL,
+               "has_existing=true -> the missing-A_fs refusal does not fire");
+}
+
+// NEGATIVE TEST proving the has_existing check above can actually FAIL to
+// catch the HIGH defect it exists for -- simulate the old (reverted)
+// behavior by short-circuiting has_existing to "true" regardless of the
+// real value, the same shape the original bug had (the caller silently
+// treated has_existing=false as fine and fabricated a value instead of
+// refusing). Confirms the assertions above are not vacuous.
+static void test_ct_auto_zero_precheck_missing_a_fs_check_is_not_vacuous(void)
+{
+    TEST_SECTION("NEGATIVE TEST -- simulating the original 'fabricate A_fs' bug (has_existing forced "
+                 "true) would be caught by the missing-A_fs refusal assertion above");
+    bool original_has_existing = false;
+    bool bug_ignores_has_existing = true; // simulates the bug: caller never looks at has_existing at all
+    (void)original_has_existing;
+    // SOURCE_SWEEP (not MANUAL) so the unrelated manual-wins rule cannot
+    // also refuse this call for a different reason and mask the point.
+    TEST_CHECK(ct_auto_zero_check_preconditions(true, false, true, true, false, 5000u, false, false,
+                                                 bug_ignores_has_existing, SAFETY_CT_CAL_SOURCE_SWEEP,
+                                                 false) == NULL,
+               "if has_existing were wrongly reported/ignored as true, the refusal would NOT fire here -- "
+               "proving test_ct_auto_zero_precheck_requires_existing_a_fs()'s has_existing=false assertion "
+               "is the one actually doing the work, not a tautology");
+}
+
+// ---------------------------------------------------------------------------
+// MEDIUM finding on b8f0f47: postconditions must be re-checked AFTER the
+// ~10-12s measurement, not just before it -- ct_auto_zero_check_
+// postconditions() is the same kind of pure, host-testable gate as
+// ct_auto_zero_check_preconditions() above.
+// ---------------------------------------------------------------------------
+
+static void test_ct_auto_zero_postcheck_each_refusal(void)
+{
+    TEST_SECTION("ct_auto_zero_check_postconditions -- each individual refusal, checked one at a time");
+
+    uint32_t waited_ms = 10000u;
+
+    TEST_CHECK(ct_auto_zero_check_postconditions(false, 5000u + waited_ms, waited_ms, false, false) == NULL,
+               "baseline: relays off the whole window, no profile/autotune -> NULL (ok)");
+
+    TEST_CHECK(ct_auto_zero_check_postconditions(true, 5000u + waited_ms, waited_ms, false, false) != NULL,
+               "a relay is commanded on right now -> refused");
+
+    // A relay that pulsed on and back off mid-measurement resets kiln_io_
+    // relays_off_ms() to a small value even though a point-in-time read
+    // afterward already shows it off again -- this is the actual case the
+    // MEDIUM finding is about.
+    TEST_CHECK(ct_auto_zero_check_postconditions(false, 1000u, waited_ms, false, false) != NULL,
+               "relay pulsed on mid-measurement (off_ms far short of 5000+waited_ms) -> refused, even "
+               "though relays_on_after reads false");
+
+    TEST_CHECK(ct_auto_zero_check_postconditions(false, UINT32_MAX, waited_ms, false, false) != NULL,
+               "relays-off duration unknown (UINT32_MAX sentinel) -> refused, not treated as 'plenty'");
+
+    TEST_CHECK(ct_auto_zero_check_postconditions(false, 5000u + waited_ms, waited_ms, true, false) != NULL,
+               "a profile started during the measurement -> refused");
+
+    TEST_CHECK(ct_auto_zero_check_postconditions(false, 5000u + waited_ms, waited_ms, false, true) != NULL,
+               "autotune started during the measurement -> refused");
+
+    // NEGATIVE TEST: exactly at the floor (off_ms_after == 5000+waited_ms)
+    // must PASS (>=, not >).
+    TEST_CHECK(ct_auto_zero_check_postconditions(false, 5000u + waited_ms, waited_ms, false, false) == NULL,
+               "NEGATIVE: off_ms_after exactly 5000+waited_ms passes -- the floor is >=, not >");
+    TEST_CHECK(ct_auto_zero_check_postconditions(false, 5000u + waited_ms - 1u, waited_ms, false, false) !=
+                   NULL,
+               "NEGATIVE: one ms under the floor is refused");
 }
 
 // NEGATIVE TEST proving the precondition check function can actually FAIL to
@@ -1136,6 +1235,9 @@ int main(void)
     test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_closed();
     test_ct_auto_zero_precheck_each_refusal();
     test_ct_auto_zero_precheck_manual_wins_unless_override();
+    test_ct_auto_zero_precheck_requires_existing_a_fs();
+    test_ct_auto_zero_precheck_missing_a_fs_check_is_not_vacuous();
+    test_ct_auto_zero_postcheck_each_refusal();
     test_ct_auto_zero_precheck_k4_check_is_not_vacuous();
     test_ct_auto_zero_counts_to_mv_at_two_probe_ratings();
     test_ct_auto_zero_100mv_refusal_uses_quantized_counts();

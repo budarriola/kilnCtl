@@ -296,6 +296,15 @@ typedef enum {
 #define SAFETY_CT_CAL_ZERO_MV_MIN (-200.0f)
 #define SAFETY_CT_CAL_ZERO_MV_MAX 200.0f
 
+/* R46/R43 physical default -- the fallback used whenever a channel's gain
+ * (0x030B/0x030C/0x030D) has never been fetched/set. Shared here (rather
+ * than kept file-local to safety_cfg_store.c) so every other caller that
+ * needs the same fallback -- e.g. safety_cfg_http.c's
+ * ct_auto_zero_counts_to_mv(), for a channel whose gain read comes back
+ * non-positive -- uses this one constant instead of a second hand-copied
+ * literal that can drift out of sync with it. */
+#define SAFETY_CT_CAL_DEFAULT_GAIN 0.715f
+
 /* Pure conversion, host-testable with no I/O: CURRENT_SENSE.md's model,
  * `k_ct_v_per_a = 1/A_fs` and `zero_counts = zero_mv/1000 * gain * 4096/3.3`.
  * Returns false (outputs untouched) if a_fs or zero_mv is outside the sanity

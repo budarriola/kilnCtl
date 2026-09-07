@@ -250,7 +250,18 @@ uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io);
  * same conservative UINT32_MAX rather than a fabricated 0). CT_COMMISSIONING_
  * PLAN.md step 2's "every relay reported off for >= 5 s" precondition reads
  * this rather than re-deriving it from kiln_io_get_relay_shadow() alone,
- * since a point-in-time zero-mask read cannot answer "for how long". */
+ * since a point-in-time zero-mask read cannot answer "for how long".
+ *
+ * This tracks the CHOPPED relay shadow -- the post-PWM commanded state
+ * actually written to the expander -- not any zone's intended pre-PWM duty
+ * (project_pwm_chopping_disarms_guards: four other guards were fooled by
+ * exactly this distinction before 78d233f taught them to read intended duty
+ * instead of chopped relay state). A duty-cycled zone reads "all off" for
+ * most of its chop window even while a profile or autotune run is actively
+ * commanding it, so this alone is NOT sufficient to prove "nothing is
+ * running" -- callers (e.g. the CT auto-zero precondition gate in
+ * safety_cfg_http.c) must separately refuse when a profile or autotune is
+ * active rather than inferring it from this value. */
 uint32_t kiln_io_relays_off_ms(const kiln_io_t *io);
 
 #ifdef __cplusplus

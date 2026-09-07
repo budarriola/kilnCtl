@@ -1064,12 +1064,20 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
  * entry the operator typed on purpose is not "the sweep clobbering it
  * silently").
  *
- * Blocks the httpd worker thread for the full measurement (~10-12s at
- * CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES/SAFTYFW_PERIOD_CURRENT_TASK_MS,
- * current_task.c) -- httpd runs multiple worker threads, so this does not
- * wedge other requests, unlike the link_task/current_task blocking hazard
- * this whole async-BEGIN/poll design (link_frame.h's own comment) exists to
- * avoid on the Pico side. */
+ * Blocks the ENTIRE esp_http_server task for the full measurement
+ * (~10-12s at CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES/SAFTYFW_PERIOD_
+ * CURRENT_TASK_MS, current_task.c) -- esp_http_server here runs as a single
+ * task, not one worker thread per connection, so every other HTTP request
+ * (dashboard poll, another commissioning action, OTA, etc.) is stalled for
+ * up to ~15s while this handler runs. That is accepted, not overlooked:
+ * this is an operator-driven, one-at-a-time commissioning action that
+ * itself requires every relay off and no profile/autotune running (see the
+ * precondition gate below), so nothing else on the board should be making
+ * HTTP calls that matter during the window anyway. This is a DIFFERENT
+ * hazard from the link_task/current_task blocking problem this whole
+ * async-BEGIN/poll design (link_frame.h's own comment) exists to avoid on
+ * the Pico side -- that one risks the 30ms link watchdog deadline, not just
+ * HTTP responsiveness. */
 #define SAFETY_CT_AUTO_ZERO_BODY_MAX 64
 #define SAFETY_CT_AUTO_ZERO_POLL_MS 200u
 #define SAFETY_CT_AUTO_ZERO_TIMEOUT_MS 15000u
@@ -1078,7 +1086,7 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
 static float ct_auto_zero_counts_to_mv(uint16_t zero_counts, float gain)
 {
     if (!(gain > 0.0f)) {
-        gain = 0.715f; // SAFETY_CT_CAL_DEFAULT_GAIN, kept in sync by inspection
+        gain = SAFETY_CT_CAL_DEFAULT_GAIN;
     }
     return ((float)zero_counts * (3.3f / 4096.0f) / gain) * 1000.0f;
 }
@@ -1124,6 +1132,52 @@ static const char *ct_auto_zero_check_preconditions(bool link_up, bool trip_latc
     }
     if (has_existing && existing_source == SAFETY_CT_CAL_SOURCE_MANUAL && !override_manual) {
         return "channel is manually calibrated -- pass override_manual=1 to replace it";
+    }
+    if (!has_existing) {
+        /* A zero-only measurement has nothing to say about A_fs -- the old
+         * code filled in a fabricated a_fs_for_convert=1.0f here and wrote a
+         * matching k_ct=1.0 (V/A) to the Pico, which is not "unaffected by a
+         * zero-only measurement" the way the removed comment claimed, it is
+         * a wrong gain silently committed for any channel that had never
+         * been calibrated at all. Refuse instead -- auto-zero only ever
+         * refines an existing A_fs, never invents one. */
+        return "channel has no A_fs yet -- set it manually before auto-zeroing";
+    }
+    return NULL;
+}
+
+/* Pure post-measurement re-check, factored out the same way as
+ * ct_auto_zero_check_preconditions() above so it is directly host-testable.
+ * The precondition gate above only proves the preconditions held at the
+ * MOMENT it ran -- the measurement that follows takes ~10-12s, during which
+ * a relay could be commanded on and back off, or a profile/autotune could
+ * start, without ever being caught by a check that only ran before the
+ * measurement began. Returns NULL when every postcondition still holds, or
+ * a static reason string naming the first violation.
+ *
+ * off_ms_after is read fresh AFTER the poll loop completes; requiring it to
+ * be at least 5000 + waited_ms (not just >= 5000) is what actually proves
+ * continuity -- kiln_io_relays_off_ms() resets to a small value the instant
+ * relay_shadow becomes nonzero even briefly, so a relay that pulsed on and
+ * back off mid-measurement shows up here as a value far short of that sum,
+ * even though a POINT-IN-TIME "relays on now?" read afterward would already
+ * show them off again. */
+static const char *ct_auto_zero_check_postconditions(bool relays_on_after, uint32_t off_ms_after,
+                                                       uint32_t waited_ms, bool profile_running_or_paused_after,
+                                                       bool autotune_active_after)
+{
+    if (relays_on_after) {
+        return "a heater relay is commanded on now -- refusing to commit a measurement that may have been "
+               "taken with current flowing";
+    }
+    if (off_ms_after == UINT32_MAX || off_ms_after < 5000u + waited_ms) {
+        return "a relay was energized during the measurement window -- refusing to commit a stale reading";
+    }
+    if (profile_running_or_paused_after) {
+        return "a profile started during the measurement";
+    }
+    if (autotune_active_after) {
+        return "autotune started during the measurement";
     }
     return NULL;
 }
@@ -1197,24 +1251,73 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"could not send the auto-zero request\"}");
     }
 
+    /* "Reset one side of a pair" hazard: DONE latches on the Pico until the
+     * NEXT BEGIN (see kilnlink_ct_auto_zero_status.h), so if THIS request's
+     * BEGIN frame is lost on the wire, the very first poll below can see a
+     * DONE that is actually the previous measurement's stale result --
+     * accepting it silently would commit an old channel's old reading under
+     * this request's name. The disambiguator is samples_taken/IN_PROGRESS:
+     * a fresh BEGIN always drives the state to IN_PROGRESS (samples_taken
+     * climbing from 0) before it ever reaches DONE, so DONE is only trusted
+     * once this loop has actually observed that transition for itself. */
     kilnlink_ct_auto_zero_status_t az = {0};
     uint32_t waited_ms = 0;
     bool done = false;
+    bool stale_done = false;
+    bool observed_in_progress = false;
     while (waited_ms < SAFETY_CT_AUTO_ZERO_TIMEOUT_MS) {
         vTaskDelay(pdMS_TO_TICKS(SAFETY_CT_AUTO_ZERO_POLL_MS));
         waited_ms += SAFETY_CT_AUTO_ZERO_POLL_MS;
         if (safety_link_get_ct_auto_zero_status(s_link, &az) != ESP_OK) {
             continue; // transient poll miss -- keep trying within the overall timeout
         }
-        if (az.state == KILNLINK_CT_AUTO_ZERO_STATE_DONE && az.channel == channel) {
-            done = true;
+        if (az.channel != channel) {
+            continue; // status for some other channel's earlier request
+        }
+        if (az.state == KILNLINK_CT_AUTO_ZERO_STATE_IN_PROGRESS) {
+            observed_in_progress = true;
+            continue;
+        }
+        if (az.state == KILNLINK_CT_AUTO_ZERO_STATE_DONE) {
+            if (!observed_in_progress) {
+                stale_done = true;
+            } else {
+                done = true;
+            }
             break;
         }
+    }
+    if (stale_done) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"measurement did not start -- the Pico "
+                                        "still reports a stale result from an earlier request; check the "
+                                        "safety link\"}");
     }
     if (!done) {
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"measurement did not complete in time -- "
                                         "check the Pico link\"}");
+    }
+
+    // --- Re-check preconditions: the measurement above took ~10-12s, during
+    // which a relay, profile, or autotune could have started and stopped
+    // again without ever being caught by the point-in-time gate above. See
+    // ct_auto_zero_check_postconditions()'s own comment. ---
+    bool relays_on_after = have_io && kiln_io_get_relay_shadow(s_hw_io) != 0u;
+    uint32_t off_ms_after = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
+    profile_exec_status_t pstat_after;
+    memset(&pstat_after, 0, sizeof(pstat_after));
+    profile_executor_get_status(&pstat_after);
+    bool profile_running_or_paused_after =
+        (pstat_after.state == PROFILE_EXEC_RUNNING || pstat_after.state == PROFILE_EXEC_PAUSED);
+    bool autotune_active_after = autotune_engine_is_active();
+    const char *post_refusal = ct_auto_zero_check_postconditions(
+        relays_on_after, off_ms_after, waited_ms, profile_running_or_paused_after, autotune_active_after);
+    if (post_refusal) {
+        char resp[192];
+        int len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", post_refusal);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
     }
 
     float gain = safety_cfg_store_ct_cal_channel_gain(channel);
@@ -1252,7 +1355,10 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
 
     // --- Commit (confirm=1) -- same order as ct_cal_post_handler(): Pico
     // first, ESP-local record only once the Pico side has accepted it. ---
-    float a_fs_for_convert = has_existing ? existing_a_fs : 1.0f; // A_fs is unaffected by a zero-only measurement
+    // has_existing is guaranteed true here -- ct_auto_zero_check_preconditions()
+    // above already refused the whole request when the channel has no A_fs
+    // yet, so existing_a_fs is always a real, previously-validated value.
+    float a_fs_for_convert = existing_a_fs;
     float k_ct_v_per_a = 0.0f;
     uint16_t zero_counts = az.zero_counts;
     if (!safety_ct_cal_convert(a_fs_for_convert, measured_zero_mv, gain, &k_ct_v_per_a, &zero_counts)) {
