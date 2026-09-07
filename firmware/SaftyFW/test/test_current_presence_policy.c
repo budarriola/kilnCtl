@@ -101,6 +101,34 @@ static void test_uncommissioned_zero_i_present_a_also_falls_back(void)
                "i_present_a==0.0 -- fallback path -- delta=200 > 25-count margin -> flowing");
 }
 
+static void test_uncommissioned_real_measured_noise_does_not_false_trigger(void)
+{
+    TEST_SECTION("uncommissioned -- fed the ACTUAL measured board noise (docs/CURRENT_SENSE.md "
+                  "'Measured noise floor', 2026-09-06 capture on the one fitted 1A:1V CT: mean 66.89 "
+                  "counts, std 4.678 counts, observed range 60-76 counts over a 60s idle window), "
+                  "not an idealized round delta -- proves the 25-count fallback margin actually "
+                  "survives real ADC noise rather than a synthetic value chosen to be safely small");
+
+    // zero_counts calibrated at the measured idle mean (rounded, as
+    // current_task_ct_auto_zero_begin()/_poll() would compute it).
+    const uint16_t zero_counts = 67u;
+
+    // Worst observed excursion in the 60s capture: max=76 -> delta=9,
+    // nowhere near the 25-count margin. If this ever trips, either the
+    // margin has been narrowed unsafely or the board's real noise has
+    // gotten worse than the 2026-09-06 measurement -- either way it is a
+    // real regression, not a test artifact.
+    TEST_CHECK(!current_presence_is_flowing(76u, zero_counts, 2.0f, 0.0f, 0.715f),
+               "measured worst-case idle noise (delta=9 counts, from the 60-76 observed range) "
+               "stays well clear of the 25-count fallback margin -- no false 'current present'");
+
+    // Same check three std above the measured mean (3 * 4.678 =~ 14 counts)
+    // -- a more conservative "how much noise could plausibly occur" bound
+    // than the one 60s window happened to show.
+    TEST_CHECK(!current_presence_is_flowing(zero_counts + 14u, zero_counts, 2.0f, 0.0f, 0.715f),
+               "3-sigma of measured noise (delta=14 counts) still under the 25-count margin");
+}
+
 static void test_uncommissioned_exactly_at_margin_not_present(void)
 {
     TEST_SECTION("uncommissioned -- delta exactly at the fallback margin -> not present "
@@ -126,5 +154,6 @@ void run_test_current_presence_policy(void)
     test_uncommissioned_large_delta_present();
     test_uncommissioned_negative_k_ct_also_falls_back();
     test_uncommissioned_zero_i_present_a_also_falls_back();
+    test_uncommissioned_real_measured_noise_does_not_false_trigger();
     test_uncommissioned_exactly_at_margin_not_present();
 }
