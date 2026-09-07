@@ -840,4 +840,10 @@ Also note `watchdog_enable(..., true)` sets
 `pause_on_debug`, so an attached probe suspends the 1000 ms watchdog — a core
 in a fault state will sit there indefinitely under the debugger instead of
 being reset, which makes a debugger session look worse than the real
-untethered behaviour. Both already flagged in `docs/ARCHITECTURE.md` §8.
+untethered behaviour. Both already flagged in `docs/ARCHITECTURE.md`.
+
+Flashed to bench Pico 2026-09-06 at `bdb1c504` (built from a clean detached
+worktree, `C:/wt/pico_flash`, off this commit). Post-flash: boot_id 155 ->
+243, `safety_get_diag` shows `state warn`, `warn_mask 0x0010` (S5
+sensor-invalid WARN, expected with no safety TC attached on this bench
+unit) and `trip_mask 0x0000` -- no S5 trip, confirming this fix's purpose.
