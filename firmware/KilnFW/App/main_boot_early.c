@@ -30,6 +30,7 @@
 #include "board_temps.h"
 #include "boot_button.h"
 #include "boot_guard.h"
+#include "cfg_fs_mount.h"
 #include "watchdog_cfg.h"
 #include "crash_report.h"
 #include "MAX31856.h"
@@ -405,6 +406,40 @@ void main_boot_early(main_boot_ctx_t *ctx)
     boot_guard_init();
     ctx->recovery_mode = boot_guard_is_recovery_mode();
     rtc_watchdog_start();
+
+    // cfg_fs_mount_device() (persist/cfg_fs_mount.h): mounts the `cfg`
+    // LittleFS partition that zones_config_cfg_fs.c/profiles_cfg_fs.c/
+    // pref_cfg_fs.c bridge onto. Placed HERE -- right after recovery_mode
+    // is known and before anything else in this file or a later phase runs
+    // -- for two reasons: (1) cfg_fs_mount_device() re-derives
+    // boot_guard_is_recovery_mode() itself and skips the mount entirely in
+    // recovery mode, matching the "RECOVERY MODE... skipped entirely" gate
+    // main_control_bringup.c already applies to profile_executor/autotune
+    // (same signal, applied to the filesystem too, before either of those
+    // subsystems -- or anything else -- gets a chance to read a cfg_fs-
+    // backed item off NVS and cache it as though no newer file copy could
+    // exist); (2) it is the earliest point after that decision, so no
+    // consumer initialized by a later phase (main_control_bringup.c
+    // onward) can read its config before the mount has had a chance to
+    // land. Never blocks boot: a missing/corrupt/UNFORMATTED `cfg` partition
+    // (today's real state on the bench board -- the partition itself is
+    // present in partitions.csv and was flashed at c4b4e65d, but has never
+    // been through the format step a separate agent owns, so the mount
+    // fails until that lands) logs loudly and leaves cfg_fs_is_available()
+    // false; every bridge above it degrades to NVS-only, same as before
+    // this call existed.
+    {
+        UBaseType_t stack_words_before = uxTaskGetStackHighWaterMark(NULL);
+        esp_err_t cfg_fs_err = cfg_fs_mount_device();
+        UBaseType_t stack_words_after = uxTaskGetStackHighWaterMark(NULL);
+        ESP_LOGI(MAIN_TAG,
+                 "cfg_fs_mount_device(): %s -- main task stack high-water mark "
+                 "before=%u after=%u words (%u/%u bytes free)",
+                 (cfg_fs_err == ESP_OK) ? "mounted" : esp_err_to_name(cfg_fs_err),
+                 (unsigned)stack_words_before, (unsigned)stack_words_after,
+                 (unsigned)(stack_words_before * sizeof(StackType_t)),
+                 (unsigned)(stack_words_after * sizeof(StackType_t)));
+    }
 
     // watchdog_cfg_init(): the task watchdog itself already exists by this
     // point (CONFIG_ESP_TASK_WDT_EN=y creates it automatically before
