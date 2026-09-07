@@ -96,6 +96,46 @@ If either `help()` or `status` reports stale, restart:
 start command can exceed a 120s tool timeout and finish in the background;
 re-check with `status` rather than assuming it failed.
 
+### Restart checklist
+
+1. **Preconditions — nothing is mid-build/mid-flash, nothing is firing.**
+   `build_kilnfw`/`build_saftyfw_host_tests`/`flash_firmware` all serialize
+   through the cross-process lock in `tools/PcTools/src/mcpkit/buildlock.py`;
+   a live one holds a `*.lock` file under
+   `%TEMP%\kilnctl-builds\locks\` (age vs. the 2100s stale timeout tells you
+   if it's a live holder or an abandoned one — see that file's docstring).
+   Tail the newest `tools/PcTools/logs/session_*.log` for recent
+   `flash_firmware`/`build_kilnfw` activity as a second signal. Then call
+   `safety_get_status` — restart only once it shows no active firing (heating
+   disabled / relays off).
+2. **Restart and confirm freshness.** `.\tools\PcTools\scripts\mcp_servers.ps1
+   restart`, then confirm via either `kiln_help()` (top line reads `server
+   code fresh: started <time>, at commit <hash>`, no `STALE` line) or
+   `mcp_servers.ps1 status`, which shows the same fresh/stale line per server
+   off `/health` — e.g. today, before restart: `STALE  12 file(s) changed
+   since started 2026-09-06 00:38:32 (commit 484846d) -- restart to pick up
+   the change`. Confirm the commit hash now matches current `HEAD`.
+3. **Post-restart smoke test (kilnctrl):**
+   - `kiln_find(query="reset reason")` returns `safety_get_diag` among the
+     results (it's indexed under `"reset reason"`/`"boot reason"` in
+     `tools/PcTools/src/kilnctrl/mcp_facade.py`).
+   - `safety_get_diag` decodes the Pico's last-boot reason live
+     (`tools/PcTools/src/kilnctrl/mcp_server_safety.py`).
+   - `safety_get_status` again first — proceed to `debug_reset(peer="pico")`
+     only once it shows no firing and relays off. Then verify the link comes
+     back up in ~100 ms and `boot_id` changes.
+   - `safety_get_rate_guard` reads back cleanly (paired with
+     `safety_set_rate_guard` — don't call the setter as part of a smoke test).
+4. **pdf-mcp — separate from the above, not part of `mcp_servers.ps1`.**
+   `pdf-mcp` is launched by the editor via `.mcp.json`
+   (`"command": "tools/pdfMcp/.venv/Scripts/pdf-mcp.exe"`), so picking up a
+   rebuilt venv is an editor/session reload, not a `mcp_servers.ps1` action.
+   The queued fix (CLAUDE.md, "Where to start" section further up in this
+   repo's root docs): kill the six live `pdf-mcp.exe` processes, rebuild
+   `tools/pdfMcp/.venv` from scratch (`pip install pdf-mcp==2.0.0`), then
+   delete the stale root-level `pdfMcp/` copy that the current venv's shims
+   still point at.
+
 ### Decision 1 — HTTP instead of stdio
 
 A stdio server is spawned by, and dies with, whichever client launched it. For a
