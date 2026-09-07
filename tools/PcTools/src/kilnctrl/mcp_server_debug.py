@@ -233,7 +233,17 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     ok, output = debug_probe.program(peer, elf_path)
     _log_openocd_result(f"debug_program(peer={peer})", ok, output)
     if ok:
-        return stale_prefix + f"programmed {peer} OK, reset and running"
+        note = ""
+        if peer == debug_probe.PEER_PICO:
+            note = (
+                "\n\nNOTE: this reset the Pico. If the ESP was also reset around the "
+                "same time (a dual reflash), expect a correct S6a (mainFault) trip "
+                "while the ESP's safety link handshake is still coming up -- see "
+                "docs/audits/s6a_startup_grace_revert_2026-09-07.md. Confirm the "
+                "link is up (safety_get_status shows link up and FW_VERSION "
+                "exchanged) before calling safety_clear_trip()."
+            )
+        return stale_prefix + f"programmed {peer} OK, reset and running" + note
     return _openocd_error_message(f"program failed for {peer}", output)
 
 

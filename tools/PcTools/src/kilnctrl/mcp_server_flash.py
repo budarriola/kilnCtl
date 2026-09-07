@@ -563,7 +563,16 @@ def flash_firmware(
     app_bin_path = os.path.join(build_dir, "KilnCtrl.bin")
 
     def _post_flash(base_msg: str) -> str:
-        base_msg = f"{base_msg}\n\n{provenance_note}"
+        base_msg = (
+            f"{base_msg}\n\n{provenance_note}\n\n"
+            "NOTE: this reset the ESP. If the Pico was also reset around the same "
+            "time (a dual reflash), expect a correct S6a (mainFault) trip while the "
+            "ESP's safety link handshake is still coming up -- see docs/audits/"
+            "s6a_startup_grace_revert_2026-09-07.md. Confirm the link is up "
+            "(safety_get_status shows link up and FW_VERSION exchanged) before "
+            "calling safety_clear_trip() -- it will just re-trip if the link isn't "
+            "actually up yet."
+        )
         if not verify:
             return base_msg
         try:
