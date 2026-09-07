@@ -222,14 +222,14 @@ no-safe-default guard disabled — do not invent values to fill the gaps.
 
 ## Completion checklist
 
-- [ ] `config_store.c` implemented: versioned, CRC'd, last flash sector
-- [ ] Written via `flash_safe_execute()` with multicore lockout (`ARCHITECTURE.md` §8)
-- [ ] Writes **refused while ARMED**
-- [ ] CRC failure ⇒ compiled-in defaults **and** `calibration_missing` set **and** no-safe-default guards stay disabled
-- [ ] `config_crc` reported in the version frame and shown in the GUI
-- [ ] Periodic in-RAM re-CRC against flash (`config_check_period_s`)
-- [ ] Every field in §§1–5 present, with these defaults
-- [ ] **The §1 commissioning fields have no compiled-in default** (except `tc_type`, which keeps K but is still required for `calibration_missing` to clear) and their guards refuse to arm until set
-- [ ] `tc_placement_mode` rejected (not silently reconciled) if it contradicts `tc_source`
-- [ ] Config read-back over the link, so the GUI can display what is actually enforced
-- [ ] §6's ESP-side coupling re-checked whenever `KilnFW` changes a heater or poll constant
+- [x] `config_store.c` implemented: versioned, CRC'd, last flash sector
+- [x] Written via `flash_safe_execute()` with multicore lockout (`ARCHITECTURE.md` §8) — `config_store_flash.c` calls `hal_flash_safe_execute()`
+- [x] Writes **refused while ARMED** — `config_store_decide_write()`, `test_config_store.c`'s `test_config_store_decide_write`/`test_config_params_commit_refused_while_armed`
+- [x] CRC failure ⇒ compiled-in defaults **and** `calibration_missing` set **and** no-safe-default guards stay disabled — `config_store_confirm_crc_ok()` + `config_store_default()` (`calibration_missing = true`), `test_config_store.c`'s `test_confirm_crc_ok`
+- [x] `config_crc` reported in the version frame and shown in the GUI — `link_task.c`'s FW_VERSION handler (`config_store_get_config_crc()`), rendered on `safety_page.html`
+- [ ] Periodic in-RAM re-CRC against flash (`config_check_period_s`) — field is round-tripped (`config_params.c` 0x0504) but nothing ticks it yet; still open
+- [x] Every field in §§1–5 present, with these defaults
+- [x] **The §1 commissioning fields have no compiled-in default** (except `tc_type`, which keeps K but is still required for `calibration_missing` to clear) and their guards refuse to arm until set
+- [x] `tc_placement_mode` rejected (not silently reconciled) if it contradicts `tc_source` — `config_params.c`'s contradiction check, `test_config_store.c`'s `test_config_params_validate_tc_placement_contradiction`
+- [x] Config read-back over the link, so the GUI can display what is actually enforced — `SAFETY_CMD_GET_PARAM`/`GET_CONFIG_PAGE` (0x23/0x24)
+- [ ] §6's ESP-side coupling re-checked whenever `KilnFW` changes a heater or poll constant — manual review item, not mechanically checkable
