@@ -550,7 +550,18 @@ Audit complete 2026-08-30. Findings:
 `ui_page_profile_builder_zones.c:161`, `ui_page_profile_detail.c:386`, and all
 of `tools/PcTools`.
 
-### 5.3 LCD chart markers to match the web — DECIDED, IN PROGRESS
+### 5.3 LCD chart markers to match the web — DONE (shipped at 6 ticks, not 11)
+
+**Status as of 2026-09-06:** built and in the tree (`ui_page_home.c`,
+`ui_page_home_chart.c`) — labelled ticks outside the plot on both axes,
+`UI_PAGE_HOME_X_TICK_COUNT` (4, matching the web's time axis exactly) and
+`UI_PAGE_HOME_Y_TICK_COUNT` (6, not the owner-decided 11 — see the
+2026-09-01 note beside that macro's definition: a real-panel check found
+the 11-tick, scaled-down-14px-font attempt aliased badly, so the shipped
+version uses a real `montserrat_10` face at 6 ticks instead of a scaled
+bitmap at 11). If the owner wants the literal 11-tick count restored now
+that a real small font is compiled in, that is a follow-up, not a defect —
+the deviation is deliberate and documented at the code site.
 
 The owner asked for "10 vertical markers like the web GUI" plus matching
 horizontal markers on the LCD home chart.
