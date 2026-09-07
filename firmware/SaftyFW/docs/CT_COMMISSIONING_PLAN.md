@@ -257,21 +257,15 @@ document, do not solve.
    during the 60s post-reset GRACE window, same rule `safety_set_rate_guard`
    documents.
 
-   Exact command (run from a Python shell with `tools/PcTools/src` on
-   `sys.path`, or wire the two lines into a one-off MCP tool the way
-   `safety_set_rate_guard` wraps `apply_safety_fields`):
+   Exact command: `kiln_call(name="safety_set_commissioning_fields", args={"fields": {"ct_installed": 1, "ct_topology": 1}})`
+   -- the MCP-facade tool (`tools/PcTools/src/kilnctrl/mcp_server_safety.py`)
+   that wraps this exact GET/POST/read-back-verify cycle, refuses outright
+   during a live firing or autotune run, and fails loudly naming the field
+   on a read-back mismatch. (Fallback if the tool is unavailable: the raw
+   `safety_cfg_http_client.apply_safety_fields(host, fields, verify=True)`
+   snippet this step used to document.)
 
-   ```python
-   from kilnctrl import safety_cfg_http_client as cfg
-
-   host = "<board host/IP>"          # e.g. from mcp_server_ota._ota_resolve_host(None)
-   fields = {"ct_installed": 1, "ct_topology": 1}
-   result = cfg.apply_safety_fields(host, fields, verify=True)
-   print(result.ok, result.confirmed, result.mismatches,
-         result.commissioned_after, result.still_unset)
-   ```
-
-   If it refuses with "ARMED" in `result.post_reason`: `debug_reset(peer="pico")`,
+   If it refuses with "ARMED" in the reply: `debug_reset(peer="pico")`,
    then re-run the same call within 60 seconds.
 
    Readback verification (independent of the above -- confirm the board's

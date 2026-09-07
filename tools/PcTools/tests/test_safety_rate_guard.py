@@ -2,7 +2,11 @@
 """Unit tests for mcp_server.safety_set_rate_guard()/safety_get_rate_guard()
 -- the S8 (rate-of-rise) commissioning write/read path over
 GET/POST /api/safety/commissioning (config_store ids 0x0204
-max_rate_c_per_min / 0x0205 rate_window_s).
+max_rate_c_per_min / 0x0205 rate_window_s) -- plus
+safety_set_commissioning_fields(), the generic named-field write path over
+the same endpoint (the MCP-facade replacement for the paste-ready
+apply_safety_fields() snippet CT_COMMISSIONING_PLAN.md step 6a used to
+document).
 
 No real socket and no live board: safety_cfg_http_client's
 apply_safety_fields()/get_commissioning() are mocked directly, same
@@ -229,6 +233,119 @@ class SafetyGetRateGuardTests(unittest.TestCase):
             result = mcp_server.safety_get_rate_guard()
         self.assertIn("rate_window_s=90", result)
         self.assertNotIn("firmware default", result)
+
+
+class SafetySetCommissioningFieldsTests(unittest.TestCase):
+    def setUp(self):
+        self._patches = [
+            unittest.mock.patch.object(mcp_server._profiles, "get_exec_status", return_value=_idle_profile()),
+            unittest.mock.patch.object(mcp_server._autotune, "get_status", return_value=_idle_autotune()),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_empty_fields_refused_without_touching_the_wire(self):
+        with unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
+            result = mcp_server.safety_set_commissioning_fields({})
+        self.assertTrue(result.startswith("error"))
+        mock_apply.assert_not_called()
+
+    def test_refused_while_profile_running(self):
+        # Same busy-gate as safety_set_rate_guard: a firing in progress must
+        # refuse before anything reaches the wire, not rely on the Pico's own
+        # ARMED rejection to catch it.
+        running = unittest.mock.MagicMock(state=1, state_name="running", profile_id=3, name="Cone 6")
+        with unittest.mock.patch.object(mcp_server._profiles, "get_exec_status", return_value=running), \
+             unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+        self.assertTrue(result.startswith("refused"))
+        self.assertIn("running", result)
+        mock_apply.assert_not_called()
+
+    def test_refused_while_autotune_running(self):
+        at = unittest.mock.MagicMock(state=3, state_name="relay_approach", zone=1)
+        with unittest.mock.patch.object(mcp_server._autotune, "get_status", return_value=at), \
+             unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+        self.assertTrue(result.startswith("refused"))
+        self.assertIn("autotune", result)
+        mock_apply.assert_not_called()
+
+    def test_success_reports_confirmed_fields_and_commissioned_state(self):
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields",
+            return_value=sc.SafetyApplyResult(
+                ok=True, confirmed=["ct_installed", "ct_topology"], commissioned_after=True,
+            ),
+        ) as mock_apply:
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1, "ct_topology": 1})
+        self.assertTrue(result.startswith("ok"))
+        self.assertIn("ct_installed=1", result)
+        self.assertIn("commissioned: True", result)
+        (host, fields), kwargs = mock_apply.call_args
+        self.assertEqual(fields, {"ct_installed": 1, "ct_topology": 1})
+        self.assertTrue(kwargs.get("verify", True))
+
+    def test_unknown_field_refused_before_write(self):
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields",
+            side_effect=sc.SafetyCfgUnknownParamError("the board's parameter table has no field named 'bogus_field'"),
+        ):
+            result = mcp_server.safety_set_commissioning_fields({"bogus_field": 1})
+        self.assertTrue(result.startswith("error"))
+        self.assertIn("bogus_field", result)
+
+    def test_armed_rejection_names_the_grace_window_fix(self):
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields",
+            return_value=sc.SafetyApplyResult(
+                ok=False,
+                post_reason="commit rejected: ct_installed (id 265) -- relay is ARMED -- "
+                            "config writes are refused while ARMED -- values were staged but NOT written",
+            ),
+        ):
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+        self.assertTrue(result.startswith("refused"))
+        self.assertIn('debug_reset(peer="pico")', result)
+        self.assertIn("60 seconds", result)
+
+    def test_readback_mismatch_fails_loudly_naming_the_field(self):
+        # This is the exact hazard apply_safety_fields()'s verify=True path
+        # exists to catch -- an {"ok":true} POST is not proof anything
+        # landed. The tool must surface the mismatch, naming the field, not
+        # report success on the strength of the POST's own reply.
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields",
+            return_value=sc.SafetyApplyResult(
+                ok=False, post_reason="",
+                mismatches=["ct_topology: expected 1, board reports 0"],
+            ),
+        ):
+            result = mcp_server.safety_set_commissioning_fields({"ct_topology": 1})
+        self.assertTrue(result.startswith("failed"))
+        self.assertIn("ct_topology", result)
+        self.assertIn("expected 1, board reports 0", result)
+
+    def test_http_error_surfaces_as_error_string_not_exception(self):
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields", side_effect=sc.SafetyCfgHttpError("unreachable")
+        ):
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+        self.assertTrue(result.startswith("error"))
+
+    def test_still_unset_fields_reported(self):
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields",
+            return_value=sc.SafetyApplyResult(
+                ok=True, confirmed=["ct_installed"], commissioned_after=False,
+                still_unset=["abs_max_temp_c"],
+            ),
+        ):
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+        self.assertTrue(result.startswith("ok"))
+        self.assertIn("still UNSET", result)
+        self.assertIn("abs_max_temp_c", result)
 
 
 if __name__ == "__main__":

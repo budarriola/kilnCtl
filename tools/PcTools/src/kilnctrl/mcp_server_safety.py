@@ -667,6 +667,93 @@ def safety_get_commissioning(host: Optional[str] = None) -> str:
     return _describe_commissioning(data)
 
 
+@_srv._tool()
+def safety_set_commissioning_fields(fields: "dict[str, Any]", host: Optional[str] = None) -> str:
+    """Commission ARBITRARY named fields on the safety processor's config
+    record over GET/POST /api/safety/commissioning -- the MCP-facade
+    replacement for the paste-ready ``safety_cfg_http_client.apply_safety_
+    fields(host, {...}, verify=True)`` snippet CT_COMMISSIONING_PLAN.md step
+    6a documented (``ffea6114``) because no dedicated tool existed. Per
+    CLAUDE.md, anything that touches the boards belongs behind the MCP
+    facade, not a snippet the operator pastes by hand.
+
+    THIS WRITES THE SAFETY PROCESSOR'S (RP2040/SaftyFW) FLASH -- every
+    accepted field is staged via SET_PARAM and landed with COMMIT_CONFIG,
+    the same generic path safety_set_rate_guard()/safety_set_tc_type() use
+    (safety_cfg_store.c / config_store.c). `fields` is a name -> value
+    mapping using the board's OWN field names, exactly as
+    GET /api/safety/commissioning reports them (``ct_installed``,
+    ``ct_topology``, ``abs_max_temp_c``, ``max_rate_c_per_min``, ...) --
+    call safety_get_commissioning() first to see the live names/types. This
+    is INCREMENTAL, not a whole-page submit: a field not named in `fields`
+    is left exactly as it was, set or unset (safety_cfg_http_client.py's own
+    module docstring explains why echoing the whole page back would be
+    wrong here).
+
+    REFUSES if a profile is firing or an autotune run is in progress,
+    checked via profiles_get_exec_status()/autotune_get_status() BEFORE
+    anything is sent over the wire -- same check safety_set_rate_guard()
+    uses, and for the same reason: the Pico's own relay_owner refuses
+    config writes while ARMED anyway, but a live run is also not a safe
+    time to change safety-guard commissioning out from under it.
+
+    REQUIRES the Pico to be in its post-reset GRACE window (config writes
+    are refused while ARMED -- relay_owner.h's INIT -> GRACE -> ARMED state
+    machine, SAFTYFW_STARTUP_GRACE_MS, 60s default). This tool does **not**
+    reset the Pico itself: a refusal for that reason names it explicitly
+    and says to call ``debug_reset(peer="pico")`` then retry within 60
+    seconds, rather than resetting behind the caller's back.
+
+    FAILS LOUDLY, NAMING THE FIELD, if an independent read-back after the
+    write disagrees with what was sent -- an ``{"ok":true}`` POST reply is
+    never trusted alone (safety_cfg_http_client.apply_safety_fields()'s own
+    verify=True path: a fresh GET, compared field by field). A field that
+    reads back UNSET after the commit is reported as a mismatch, not a
+    pass. An unrecognised field name is refused before anything is sent
+    (SafetyCfgUnknownParamError, wrapped into the same 'error:' string
+    here) rather than silently dropped.
+
+    Host is auto-resolved the same way safety_get_commissioning()/
+    safety_set_rate_guard() do; pass `host` explicitly for kilnctl.local or
+    a board reachable only from a different network than this link's
+    serial port.
+    """
+    if not fields:
+        return "error: fields is empty -- nothing to write"
+
+    busy = _profile_or_autotune_running()
+    if busy is not None:
+        return f"refused: {busy} -- writing commissioning fields mid-run is not safe; stop it first"
+
+    from .mcp_server_ota import _ota_resolve_host
+
+    resolved = _ota_resolve_host(host)
+    try:
+        result = safety_cfg_http_client.apply_safety_fields(resolved, dict(fields), verify=True)
+    except safety_cfg_http_client.SafetyCfgUnknownParamError as exc:
+        return f"error: {exc}"
+    except safety_cfg_http_client.SafetyCfgHttpError as exc:
+        return f"error writing safety commissioning fields over HTTP (host={resolved}): {exc}"
+
+    if not result.ok:
+        reason = result.post_reason or "; ".join(result.mismatches) or "unknown failure"
+        if "ARMED" in reason:
+            return (
+                "refused: the safety processor rejected the write because the relay is ARMED "
+                "-- config writes only land during the 60s post-reset GRACE window. Call "
+                'debug_reset(peer="pico") and then call safety_set_commissioning_fields(...) '
+                f"again within 60 seconds. (board said: {reason})"
+            )
+        return f"failed: {reason}"
+
+    lines = [f"ok - safety commissioning fields written and confirmed by read-back: "
+             + ", ".join(f"{k}={v!r}" for k, v in fields.items())]
+    lines.append(f"board reports commissioned: {result.commissioned_after}")
+    if result.still_unset:
+        lines.append("still UNSET (required for commissioning): " + ", ".join(result.still_unset))
+    return " | ".join(lines)
+
+
 #: safety_guards.c line ~733: ``if (cfg->max_rate_c_per_min > 0.0f)`` -- any
 #: value at or below 0 leaves S8 dormant, matching _describe_commissioning()'s
 #: own ARMED/DORMANT split above. Not a firmware constant, just the same
