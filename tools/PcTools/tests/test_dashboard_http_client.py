@@ -214,6 +214,112 @@ class McpToolTest(unittest.TestCase):
         self.assertTrue(result.startswith("error"))
 
 
+_TIMING_FULL_BODY = json.dumps({
+    "display_flush_us": {"count": 42, "last": 1200, "min": 900, "max": 2100, "mean": 1300},
+    "thermo_read_us": {"count": 10, "last": 500, "min": 400, "max": 700, "mean": 480},
+    "link_reply_us": {"count": 5, "last": 40000, "min": 35000, "max": 50000, "mean": 41000, "timeouts": 2},
+}).encode("utf-8")
+
+_TIMING_ZERO_BODY = json.dumps({
+    "display_flush_us": {"count": 0, "last": 0, "min": 0, "max": 0, "mean": 0},
+    "thermo_read_us": {"count": 0, "last": 0, "min": 0, "max": 0, "mean": 0},
+    "link_reply_us": {"count": 0, "last": 0, "min": 0, "max": 0, "mean": 0, "timeouts": 0},
+}).encode("utf-8")
+
+
+class DiagnosticsTimingTest(unittest.TestCase):
+    """get_diagnostics_timing() / its wiring into get_heap_status() and the
+    get_heap_status MCP tool text -- covers HW_ABSTRACTION.md's
+    display_flush_us/thermo_read_us metrics and 2026-09-06's addition,
+    link_reply_us (the on-board ESP<->Pico safety-link reply latency, added
+    alongside safety_link_stats_t.link_reply_us_* in 9eecb0ff). None of this
+    had test coverage before this file's change."""
+
+    def test_get_diagnostics_timing_parses_all_three_blocks(self):
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(_TIMING_FULL_BODY)):
+            timing = dh.get_diagnostics_timing("10.0.0.5")
+        self.assertEqual(timing["link_reply_us"]["count"], 5)
+        self.assertEqual(timing["link_reply_us"]["timeouts"], 2)
+        self.assertEqual(timing["display_flush_us"]["mean"], 1300)
+        self.assertEqual(timing["thermo_read_us"]["max"], 700)
+
+    def test_get_diagnostics_timing_http_error_surfaced(self):
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=OSError("connection refused")):
+            with self.assertRaises(dh.DashboardHttpError):
+                dh.get_diagnostics_timing("10.0.0.5")
+
+    def test_get_diagnostics_timing_non_json_surfaced(self):
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(b"not json")):
+            with self.assertRaises(dh.DashboardHttpError):
+                dh.get_diagnostics_timing("10.0.0.5")
+
+    def test_get_heap_status_carries_all_three_timing_blocks(self):
+        responses = {
+            "/api/status": json.dumps(_sample_status()).encode(),
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/diagnostics/timing": _TIMING_FULL_BODY,
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            heap = dh.get_heap_status("10.0.0.5")
+        self.assertEqual(heap["link_reply_us"]["count"], 5)
+        self.assertEqual(heap["link_reply_us"]["timeouts"], 2)
+        self.assertEqual(heap["display_flush_us"]["last"], 1200)
+        self.assertEqual(heap["thermo_read_us"]["min"], 400)
+        self.assertNotIn("diagnostics_timing_check_error", heap)
+
+    def test_get_heap_status_older_firmware_missing_endpoint_is_non_fatal(self):
+        """NEGATIVE-shaped case: a board whose firmware predates
+        /api/diagnostics/timing must not blow up get_heap_status() -- the
+        heap figures still have to come back, with the timing gap reported
+        under diagnostics_timing_check_error, not silently dropped."""
+
+        def _fake_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else req
+            if "/api/diagnostics/timing" in url:
+                raise OSError("404 not found")
+            if "/api/crash_report" in url:
+                return _fake_response(_CRASH_NONE_BODY)
+            return _fake_response(json.dumps(_sample_status()).encode())
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            heap = dh.get_heap_status("10.0.0.5")
+        self.assertIn("diagnostics_timing_check_error", heap)
+        self.assertNotIn("link_reply_us", heap)
+        self.assertEqual(heap["heap_internal"]["min_free"], 8875)
+
+    def test_mcp_tool_text_reports_link_reply_us_with_timeouts(self):
+        from kilnctrl import mcp_server as m
+
+        responses = {
+            "/api/status": json.dumps(_sample_status()).encode(),
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/diagnostics/timing": _TIMING_FULL_BODY,
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            result = m.get_heap_status(host="10.0.0.5")
+        self.assertIn("link_reply_us: count=5 last=40000 min=35000 max=50000 mean=41000 (us) timeouts=2", result)
+        self.assertIn("display_flush_us: count=42", result)
+        self.assertIn("thermo_read_us: count=10", result)
+
+    def test_mcp_tool_text_reports_no_samples_yet_when_count_zero(self):
+        """PROOF the count==0 branch (path never ran this boot) reads as 'no
+        samples yet' rather than a misleading 'mean=0' that looks like a real
+        zero-length measurement."""
+        from kilnctrl import mcp_server as m
+
+        responses = {
+            "/api/status": json.dumps(_sample_status()).encode(),
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/diagnostics/timing": _TIMING_ZERO_BODY,
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            result = m.get_heap_status(host="10.0.0.5")
+        self.assertIn("link_reply_us: no samples yet", result)
+        self.assertIn("display_flush_us: no samples yet", result)
+        self.assertIn("thermo_read_us: no samples yet", result)
+        self.assertNotIn("timeouts=0", result)
+
+
 class FacadeDiscoverabilityTest(unittest.TestCase):
     """Exercises the REAL production kilnctrl registry (kilnctrl.mcp_server),
     not a synthetic stand-in -- the failure mode this test guards against is
