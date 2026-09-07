@@ -41,6 +41,7 @@
 #include "profile_executor.h"
 
 #include <stdbool.h>
+#include <stddef.h> /* offsetof() -- profile_firing_history_blob_t layout asserts below */
 #include <stdint.h>
 
 #include "freertos/FreeRTOS.h"
@@ -858,6 +859,51 @@ typedef struct {
     uint8_t count; /* 0..PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH */
     profile_firing_run_record_t runs[PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH]; /* runs[0] = newest */
 } profile_firing_history_blob_t;
+
+/* VERSIONLESS HAZARD (docs/audits/firing_history_blob_versioning_2026-09-07.md):
+ * unlike zones_cfg_t (ZONES_CFG_VERSION + per-version decode in
+ * zones_config_json.c/zones_config_store.c), this blob carries no version
+ * byte, no CRC, and no migration path. firing_stats_load()'s only defence
+ * is a raw hal_kv_get_blob() length check (`len != sizeof(*out)`) -- any
+ * field added, removed, reordered, or resized in
+ * profile_exec_firing_stats_t / profile_firing_zone_record_t /
+ * profile_firing_run_record_t changes sizeof(profile_firing_history_blob_t)
+ * and makes every existing on-flash "fs_<id>" key fail that check. That is
+ * NOT a loud rejection: firing_stats_load() logs one ESP_LOGW and returns an
+ * all-zero blob, and firing_stats_persist() calls it ignoring the bool
+ * return ("empty blob on any failure -- still safe to prepend into"), so a
+ * layout change silently DISCARDS every profile's persisted firing-history
+ * ring on the next firing after a flash, with no operator-visible failure
+ * beyond a log line. These asserts pin today's layout byte-for-byte so a
+ * future edit here is a deliberate, visible build break instead of a silent
+ * on-flash format change -- see the doc above for the extensibility options
+ * this does NOT itself decide between. Values captured 2026-09-07 with a
+ * standalone MSVC layout replica (same discipline as zone_cfg_v21_t's own
+ * frozen-snapshot asserts in zones_config_json.h), not guessed. */
+_Static_assert(sizeof(profile_exec_firing_stats_t) == 64,
+               "profile_exec_firing_stats_t changed size -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(sizeof(profile_firing_zone_record_t) == 80,
+               "profile_firing_zone_record_t changed size -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(sizeof(profile_firing_run_record_t) == 272,
+               "profile_firing_run_record_t changed size -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(sizeof(profile_firing_history_blob_t) == 1364,
+               "profile_firing_history_blob_t changed size -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(offsetof(profile_firing_run_record_t, profile_id) == 0,
+               "profile_firing_run_record_t::profile_id moved -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(offsetof(profile_firing_run_record_t, profile_name) == 1,
+               "profile_firing_run_record_t::profile_name moved -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(offsetof(profile_firing_run_record_t, run_started_unix_s) == 20,
+               "profile_firing_run_record_t::run_started_unix_s moved -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(offsetof(profile_firing_run_record_t, duration_s) == 24,
+               "profile_firing_run_record_t::duration_s moved -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(offsetof(profile_firing_run_record_t, zone_mask) == 28,
+               "profile_firing_run_record_t::zone_mask moved -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(offsetof(profile_firing_run_record_t, zones) == 32,
+               "profile_firing_run_record_t::zones moved -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(offsetof(profile_firing_history_blob_t, count) == 0,
+               "profile_firing_history_blob_t::count moved -- see the VERSIONLESS HAZARD comment above");
+_Static_assert(offsetof(profile_firing_history_blob_t, runs) == 4,
+               "profile_firing_history_blob_t::runs moved -- see the VERSIONLESS HAZARD comment above");
 
 typedef struct {
     run_state_snapshot_t snap;
