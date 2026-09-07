@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 static const char *TAG = "display_power_cfg";
 
@@ -14,6 +15,9 @@ static const char *TAG = "display_power_cfg";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE      "kiln_cfg"
 #define NVS_KEY_DISPLAY_POWER "display_power"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_DISPLAY_POWER);
 
 // Versioned blob rather than four loose keys -- see display_power_cfg.h's
 // PERSISTENCE note. version bumps only if a field is ever added/reinterpreted;

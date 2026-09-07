@@ -10,6 +10,7 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t this
                               * module's callers already branch on */
+#include "nvs_key_check.h"
 
 static const char *TAG = "run_state";
 
@@ -24,11 +25,14 @@ static const char *TAG = "run_state";
  * losing one breadcrumb, and it must stay that way. */
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_RUN "run_state"
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_RUN);
 
 /* TODO.md 8.1: this module's persisted store, split out of the default NVS
  * partition into its own partition, shared with relay_cycles.c/zones_http.c/
  * rules_http.c, each of which manages its own init/migration independently. */
 #define KILN_NVS_PARTITION "kiln_nvs"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
 /* WRITE CADENCE AND FLASH WEAR
  * ---------------------------------------------------------------------

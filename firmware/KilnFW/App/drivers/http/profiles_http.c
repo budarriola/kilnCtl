@@ -11,6 +11,7 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t seen by
                               * callers of this module's nvs_*()-named wrappers below */
+#include "nvs_key_check.h"
 
 #include "MAX31856.h"
 #include "http_form.h"
@@ -26,6 +27,8 @@ const char *PROFILES_TAG = "profiles_http";
 
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_USED "prof_used"
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_USED);
 /* "prof0".."prof7" -- see profile_nvs_key() below. */
 
 /* profiles_nvs is the 2026-08-13 split target for fire profiles (see
@@ -39,6 +42,7 @@ const char *PROFILES_TAG = "profiles_http";
  * is kept readable for the one-time migration below
  * and for firmware rollback. */
 #define PROFILES_NVS_PARTITION "profiles_nvs"
+NVS_KEY_LEN_CHECK(PROFILES_NVS_PARTITION);
 
 /* Bump whenever the on-flash per-slot layout (profile_persisted_t) changes,
  * OR whenever profile_t/profile_segment_t itself grows a field -- the latter

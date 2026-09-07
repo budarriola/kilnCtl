@@ -69,10 +69,14 @@
  *   esptool erase_flash                   -> nothing survives, credentials
  *                                            included */
 #define NVS_NAMESPACE "wifi_cfg"
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 
 #define NVS_KEY_SSID "ssid"
 #define NVS_KEY_PASS "pass"
 #define NVS_KEY_HAS_CREDS "has_creds"
+NVS_KEY_LEN_CHECK(NVS_KEY_SSID);
+NVS_KEY_LEN_CHECK(NVS_KEY_PASS);
+NVS_KEY_LEN_CHECK(NVS_KEY_HAS_CREDS);
 /* Legacy single-network keys (NVS_KEY_SSID/NVS_KEY_PASS/NVS_KEY_HAS_CREDS)
  * are never written by this build any more -- see NVS_KEY_SAVED_NETS below --
  * but are still READ once, by the one-time list-format migration in
@@ -89,6 +93,13 @@
 #define NVS_KEY_HAS_AP_SSID "has_ap_ssid"
 #define NVS_KEY_AP_PASS "ap_pass"
 #define NVS_KEY_HAS_AP_PASS "has_ap_pass"
+NVS_KEY_LEN_CHECK(NVS_KEY_SAVED_NETS);
+NVS_KEY_LEN_CHECK(NVS_KEY_MODE);
+NVS_KEY_LEN_CHECK(NVS_KEY_LOCAL_ONLY);
+NVS_KEY_LEN_CHECK(NVS_KEY_AP_SSID);
+NVS_KEY_LEN_CHECK(NVS_KEY_HAS_AP_SSID);
+NVS_KEY_LEN_CHECK(NVS_KEY_AP_PASS);
+NVS_KEY_LEN_CHECK(NVS_KEY_HAS_AP_PASS);
 
 /* 2026-08-20, web-GUI-only static-IP addition (see wifi_prov.h's "Static IP"
  * section). New keys, same partition/namespace as everything else in this
@@ -99,6 +110,10 @@
 #define NVS_KEY_STATIC_IP "static_ip"
 #define NVS_KEY_STATIC_NETMASK "static_netmask"
 #define NVS_KEY_STATIC_GW "static_gw"
+NVS_KEY_LEN_CHECK(NVS_KEY_IP_MODE);
+NVS_KEY_LEN_CHECK(NVS_KEY_STATIC_IP);
+NVS_KEY_LEN_CHECK(NVS_KEY_STATIC_NETMASK);
+NVS_KEY_LEN_CHECK(NVS_KEY_STATIC_GW);
 
 /* Winning legacy single-network credential (pre-8.4 NVS_KEY_SSID/PASS/
  * HAS_CREDS format), set by wifi_prov_migrate_from_default_partition() and consumed

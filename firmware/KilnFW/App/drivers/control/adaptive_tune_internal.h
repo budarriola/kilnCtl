@@ -122,8 +122,12 @@ extern const char *ADAPTIVE_TUNE_TAG;
 
 #define ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION 0.05f
 
+#include "nvs_key_check.h" /* NVS_KEY_LEN_CHECK -- see that header */
+
 #define ADAPTIVE_TUNE_NVS_PARTITION "kiln_nvs"
 #define ADAPTIVE_TUNE_NVS_NAMESPACE "adap_tune"
+NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_NAMESPACE);
 // PID_EXPANSION_PLAN.md 3.3 "consolidate the opt-in flag": en_mask is no
 // longer this module's own source of truth for the opt-in (that moved to
 // zone_cfg_t::adaptive_tune_enabled, zones_config_get/set_adaptive_tune_
@@ -134,6 +138,8 @@ extern const char *ADAPTIVE_TUNE_TAG;
 // consults en_mask again after that.
 #define ADAPTIVE_TUNE_NVS_KEY_ENMASK "en_mask"
 #define ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED "en_migrated"
+NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_ENMASK);
+NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED);
 
 // P1/K6: the Ki-diagnosis baseline (adaptive_tune_zone_t.ki_baseline/
 // ki_baseline_valid) persisted alongside en_mask above -- see adaptive_
@@ -142,6 +148,7 @@ extern const char *ADAPTIVE_TUNE_TAG;
 // blob (not a second u8 key) so the two guard values for a given zone can
 // never desync in storage -- see adaptive_tune_kibase_blob_t's own comment.
 #define ADAPTIVE_TUNE_NVS_KEY_KIBASE "ki_base"
+NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE);
 
 #define ADAPTIVE_TUNE_FIT_MIN_DENOM 1e-4
 

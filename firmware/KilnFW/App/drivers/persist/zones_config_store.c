@@ -11,6 +11,7 @@
 
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 /* nvs_flash.h kept for NVS_DEFAULT_PART_NAME only -- see wifi_prov_nvs.c's
  * identical comment; every actual nvs_*() call in this file below now goes
  * through hal_kv_*() instead. */
@@ -496,11 +497,9 @@ esp_err_t relay_names_save(void)
 /* Compile-time guard so this class of bug (a >15-char NVS key that silently
  * never persists on real hardware) cannot recur in this file: every
  * NVS_KEY_* literal used here must fit ESP-IDF's real NVS_KEY_NAME_MAX_SIZE
- * (16 bytes INCLUDING the NUL terminator, i.e. 15 usable characters) --
- * sizeof() on a string literal includes its own NUL, so `sizeof(lit) - 1`
- * is the same character count nvs_page.cpp's `strlen(key)` check uses. */
-#define NVS_KEY_LEN_CHECK(lit) \
-    _Static_assert(sizeof(lit) - 1 <= 15, #lit " exceeds NVS's 15-character key limit (NVS_KEY_NAME_MAX_SIZE=16 including NUL)")
+ * (16 bytes INCLUDING the NUL terminator, i.e. 15 usable characters). Macro
+ * shared via nvs_key_check.h so every other module with NVS key literals
+ * gets the identical check. */
 NVS_KEY_LEN_CHECK(NVS_KEY_ZONES);
 NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
 NVS_KEY_LEN_CHECK(NVS_KEY_ZONE_NORMALS);

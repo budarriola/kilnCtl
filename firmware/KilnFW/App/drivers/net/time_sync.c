@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 static const char *TAG = "time_sync";
 
@@ -17,6 +18,9 @@ static const char *TAG = "time_sync";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE      "kiln_cfg"
 #define NVS_KEY_TZ         "time_tz"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_TZ);
 
 #define SNTP_DEFAULT_SERVER "pool.ntp.org"
 

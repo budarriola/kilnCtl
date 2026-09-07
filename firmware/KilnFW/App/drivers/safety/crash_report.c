@@ -7,6 +7,7 @@
 #include "esp_log.h"
 
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 #include "hal_sysinfo.h" /* hal_sysinfo_coredump_present()/_erase(), hal_sysinfo_reset_reason() */
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t from
                               * hal_sysinfo_coredump_erase()/hal_kv failures rather than collapsing
@@ -20,10 +21,13 @@ static const char *TAG = "crash_report";
  * module's breadcrumb down with it, and vice versa. */
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_CRASH "crash_rpt"
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_CRASH);
 
 /* TODO.md 8.1's shared partition, split out of the default NVS partition,
  * managed independently by each module that uses it -- see run_state.c. */
 #define KILN_NVS_PARTITION "kiln_nvs"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
 /* Pins the on-disk layout, same reasoning and same portability trick as
  * ota_record.c's ota_record_t_size_check: this file is ALSO compiled

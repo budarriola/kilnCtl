@@ -16,6 +16,7 @@
 
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- keeps esp_err_to_name() below meaningful */
+#include "nvs_key_check.h"
 
 /* ---- firing quality stats (PID_EXPANSION_PLAN.md Phase 7a/7a-2/7a-3) ------
  *
@@ -57,6 +58,13 @@
 
 #define FIRING_STATS_NVS_PARTITION "profiles_nvs"
 #define FIRING_STATS_NVS_NAMESPACE "fire_stats"
+NVS_KEY_LEN_CHECK(FIRING_STATS_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(FIRING_STATS_NVS_NAMESPACE);
+/* NOTE: the per-profile key ("fs_%u", snprintf'd into a 16-byte buffer at
+ * each call site below) is NOT a literal and cannot be checked at compile
+ * time -- it stays within the 15-usable-char limit only because profile_id
+ * is a small integer; a compile-time check would need to bound profile_id's
+ * range instead of the string. */
 
 /* One tick's worth of firing-quality accumulation for one zone -- pure
  * (touches only *z and its own arguments, no s_exec, no lock, no I/O), so a

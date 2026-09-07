@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 static const char *TAG = "boot_guard";
 
@@ -16,6 +17,9 @@ static const char *TAG = "boot_guard";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE "boot_guard"
 #define NVS_KEY_REC "count"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_REC);
 
 /* Bumped whenever boot_guard_record_t's layout changes. Same "discard rather
  * than migrate" convention as run_state.h -- a lost boot-guard record across

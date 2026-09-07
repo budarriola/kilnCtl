@@ -11,6 +11,7 @@
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "hal_wdt.h"
+#include "nvs_key_check.h"
 #include "http_form.h"
 #include "ota_http.h" /* interlocks + challenge/response auth -- see reset_post_handler() */
 #include "profiles_builtin.h"
@@ -35,6 +36,9 @@ static const char *TAG = "factory_reset";
 #define WIFI_NVS_PARTITION "wifi_nvs"
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define PROFILES_NVS_PARTITION "profiles_nvs"
+NVS_KEY_LEN_CHECK(WIFI_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(PROFILES_NVS_PARTITION);
 
 /* application/x-www-form-urlencoded, "scope=profiles" plus headroom --
  * generous over the longest legal value ("profiles", 8 chars) the same way

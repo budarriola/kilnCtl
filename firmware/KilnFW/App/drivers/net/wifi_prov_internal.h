@@ -60,7 +60,10 @@ extern const char *WIFI_PROV_TAG;
  * doc comment (moved there from the top of the original single file) for
  * the full rationale. Needed here too: wifi_prov.c's wifi_prov_start()
  * calls wifi_prov_nvs_partition_init()/wifi_prov_nvs_load_from() on it directly. */
+#include "nvs_key_check.h" /* NVS_KEY_LEN_CHECK -- see that header */
+
 #define WIFI_NVS_PARTITION "wifi_nvs"
+NVS_KEY_LEN_CHECK(WIFI_NVS_PARTITION);
 
 /* TODO.md 8.4: a bounded list of saved networks. WIFI_PROV_MAX_SAVED_NETWORKS
  * and SAVED_NETS_VERSION are needed here (not just in wifi_prov_nvs.c) because

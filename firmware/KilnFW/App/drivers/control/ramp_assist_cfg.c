@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 static const char *TAG = "ramp_assist_cfg";
 
@@ -13,6 +14,9 @@ static const char *TAG = "ramp_assist_cfg";
 #define KILN_NVS_PARTITION   "kiln_nvs"
 #define NVS_NAMESPACE        "kiln_cfg"
 #define NVS_KEY_RAMP_ASSIST  "ramp_assist"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_RAMP_ASSIST);
 
 // SAFE DEFAULT: disabled. See ramp_assist_cfg.h's header comment -- a board
 // that has never heard of this key, or whose stored value is unreadable/

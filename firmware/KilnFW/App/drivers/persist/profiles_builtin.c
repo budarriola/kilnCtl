@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 static const char *TAG = "profiles_builtin";
 
@@ -28,6 +29,9 @@ static const char *TAG = "profiles_builtin";
 #define PROFILES_NVS_PARTITION "profiles_nvs"
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_HIDDEN "prof_bihid"
+NVS_KEY_LEN_CHECK(PROFILES_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_HIDDEN);
 
 /* ---- The generated catalogue table --------------------------------------- */
 

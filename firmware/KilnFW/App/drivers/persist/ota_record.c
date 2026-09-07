@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 /* ESP_ERR_NVS_NOT_FOUND only -- no nvs_*()/nvs_flash_*() function call in
  * this file reaches NVS directly any more (see hal_kv_* below). Reinstated
  * per ota_record.h's doc contract: ota_record_load()'s "no record yet" case
@@ -21,9 +22,12 @@ static const char *TAG = "ota_record";
  * with it, and vice versa). */
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_OTA_RECORD "ota_record"
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_OTA_RECORD);
 
 /* TODO.md 8.1's shared partition, split out of the default NVS partition. */
 #define KILN_NVS_PARTITION "kiln_nvs"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
 /* Pins the on-disk layout the same way run_state.c's own _Static_assert
  * does: a silent field add/reorder would otherwise look like corruption to

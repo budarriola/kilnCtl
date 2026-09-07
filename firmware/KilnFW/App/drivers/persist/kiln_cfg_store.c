@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 #include "ota_state.h"
 #include "zones_config_accessors.h"
@@ -22,6 +23,7 @@ static const char *TAG = "kiln_cfg_store";
  * partition or the default `nvs` one -- see kiln_cfg_store.h's header
  * comment for the fuller version of this note. */
 #define KILN_NVS_PARTITION "kiln_nvs"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
 /* Shared namespace name with zones_http.c/rules_http.c/relay_cycles.c/
  * run_state.c/ota_record.c/profiles_builtin.c/profiles_http.c/unit_pref.c --
@@ -30,6 +32,8 @@ static const char *TAG = "kiln_cfg_store";
  * namespace. */
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_STORE "kilncfgs"
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_STORE);
 
 /* Bump whenever kiln_cfg_store_blob_t's on-flash layout changes -- mirrors
  * ZONES_CFG_VERSION's role in zones_http.c. Version 2 is current; version 1

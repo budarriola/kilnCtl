@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 static const char *TAG = "unit_pref";
 
@@ -14,6 +15,9 @@ static const char *TAG = "unit_pref";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE      "kiln_cfg"
 #define NVS_KEY_UNIT_PREF  "unit_pref"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_UNIT_PREF);
 
 static unit_pref_t s_unit_pref = UNIT_PREF_CELSIUS;
 

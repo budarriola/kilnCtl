@@ -83,6 +83,10 @@ extern const char *ZONES_HTTP_TAG;
  * zones_http.c's own zones_http_start(). */
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_ZONES "zones_cfg"
+#include "nvs_key_check.h" /* NVS_KEY_LEN_CHECK -- see that header; namespace is
+                             * subject to the same 15-usable-char NVS limit as
+                             * a key. */
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 
 /* kiln_nvs is the 2026-08-13 split target for zones/rules/relay_cycles/
  * run_state (see partitions.csv and TODO.md 8.1); each module manages its own
@@ -92,6 +96,7 @@ extern const char *ZONES_HTTP_TAG;
  * data used to persist to, kept readable for the one-time migration below and
  * for firmware rollback. */
 #define KILN_NVS_PARTITION "kiln_nvs"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
 /* application/x-www-form-urlencoded whole-page submit: thermo_count,
  * relay_count, and 27 fields per zone (name/relay_mask/thermo_mask/cal/kp/
@@ -129,6 +134,7 @@ extern zones_state_t s_zones;
  * need the type too, not just zones_config_store.c which owns the storage. */
 #define RELAY_NAMES_CFG_VERSION 1
 #define NVS_KEY_RELAY_NAMES "relay_names_cfg"
+NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
 
 typedef struct {
     uint8_t version;

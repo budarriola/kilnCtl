@@ -10,6 +10,7 @@
 
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 #include "hal_wdt.h"
 
 static const char *TAG = "watchdog_cfg";
@@ -21,6 +22,9 @@ static const char *TAG = "watchdog_cfg";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE "watchdog_cfg"
 #define NVS_KEY_REC "panic_dis"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_REC);
 
 /* Bumped whenever watchdog_cfg_record_t's layout changes. Same "discard
  * rather than migrate" convention as boot_guard.c/run_state.c -- a lost

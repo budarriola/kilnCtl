@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "nvs_key_check.h"
 
 static const char *TAG = "touch_cal_store";
 
@@ -17,6 +18,9 @@ static const char *TAG = "touch_cal_store";
 #define NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE "touch_cal"
 #define NVS_KEY_CAL "affine_v1"
+NVS_KEY_LEN_CHECK(NVS_PARTITION);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_CAL);
 
 #define TOUCH_CAL_RECORD_VERSION 1u
 
