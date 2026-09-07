@@ -113,3 +113,26 @@ bench smoke test.
   second filesystem implementation for a problem (`logs` capacity) that
   is currently *shrinking*, not growing. That is the actual reason to wait
   for the trigger rather than start now.
+
+## Scope expansion, 2026-09-07 — user data moves to the filesystem
+
+Owner decision: **configs and user-created profiles should live on the
+filesystem too, and anything else the user can change at runtime should
+probably be there as well.** That is a larger, separate track from the `logs`
+swap staged above (which stays exactly as written and is a prerequisite — do
+not stand up a second filesystem implementation for it).
+
+The inventory (24 runtime-changeable items), the MOVE/KEEP/UNDECIDED
+classification, the JSON-on-LittleFS format with atomic temp-then-rename
+writes, the read-through NVS→file migration with dual-write (no flag day), the
+seven shippable steps, and the risks live in the companion doc:
+
+**→ `docs/FILESYSTEM_USER_DATA_PLAN.md`**
+
+Headlines: 11 items MOVE, 11 KEEP, 2 undecided. Wi-Fi credentials, boot-guard
+state, touch calibration, watchdog/OTA/crash records and the RP2040 config
+store all stay in NVS — every one of them is read before any mount, or lives on
+the other chip. A new `cfg` LittleFS partition (append-only into the free tail)
+mounts with `format_if_mount_failed=false` and is skipped entirely in recovery
+mode; a mount failure degrades to firmware defaults with a banner and never
+blocks boot.
