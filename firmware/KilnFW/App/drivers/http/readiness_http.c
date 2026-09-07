@@ -241,36 +241,52 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 5. Guard limits (max_temp_c). 0 == "no ceiling", an explicit,
-     * legitimate choice per zones_http.h's own doc comment on the field --
-     * bullet 3 names this exact field as the example. Reported
-     * deliberately_off (not not_done) whenever every configured zone reads
-     * 0, so operators who genuinely want no ceiling are never nagged. */
+    /* 5. Guard limits (max_temp_c). TODO.md 96's reconciliation
+     * (2026-09-06): max_temp_c == 0 on a zone that CANNOT heat
+     * (control_mode == OFF) is a legitimate, permanent choice -- that zone
+     * will never command a relay, so it needs no ceiling and is reported
+     * deliberately_off. On a zone that CAN heat, max_temp_c == 0 means
+     * "uncommissioned", and profile_executor_run()'s guard-5 refusal
+     * (zones_config_accessors.h's doc comment on zones_config_get_temp_limits)
+     * already refuses to start ANY firing while such a zone is active -- so
+     * reporting that state as ok/deliberately_off here, as a prior version
+     * of this item did, told the operator the board was ready when starting
+     * a firing would immediately be refused. Such a zone is now reported
+     * not_done instead. */
     {
         readiness_status_t st;
-        char detail[96];
+        char detail[112];
         if (thermo_count == 0) {
             st = READY_CANNOT_YET;
             snprintf(detail, sizeof(detail), "set thermocouple count first");
         } else {
-            uint8_t set_count = 0;
+            uint8_t set_count = 0, off_unset_count = 0, heating_unset_count = 0;
             for (uint8_t i = 0; i < thermo_count; i++) {
                 float max_c = 0.0f, min_c = 0.0f;
-                if (zones_config_get_temp_limits(i, &max_c, &min_c) && max_c > 0.0f) {
+                zones_config_get_temp_limits(i, &max_c, &min_c);
+                if (max_c > 0.0f) {
                     set_count++;
+                    continue;
+                }
+                zone_control_mode_t m = ZONE_CONTROL_MODE_OFF;
+                if (zones_config_get_control_mode(i, &m) && m != ZONE_CONTROL_MODE_OFF) {
+                    heating_unset_count++;
+                } else {
+                    off_unset_count++;
                 }
             }
-            if (set_count == thermo_count) {
-                st = READY_OK;
+            st = readiness_guard_max_temp_status(thermo_count, set_count, heating_unset_count);
+            if (st == READY_NOT_DONE) {
+                snprintf(detail, sizeof(detail),
+                         "%u zone(s) can heat but have no max_temp_c ceiling -- starting a firing will be refused",
+                         (unsigned)heating_unset_count);
+            } else if (st == READY_OK) {
                 snprintf(detail, sizeof(detail), "all %u zones have an explicit max_temp_c ceiling",
                          thermo_count);
-            } else if (set_count == 0) {
-                st = READY_DELIBERATELY_OFF;
-                snprintf(detail, sizeof(detail), "max_temp_c is 0 (no ceiling) on all %u zones", thermo_count);
             } else {
-                st = READY_OK; /* mixed: every zone has SOME definite choice, 0 or set */
-                snprintf(detail, sizeof(detail), "%u of %u zones have a max_temp_c ceiling, rest have none set",
-                         set_count, thermo_count);
+                snprintf(detail, sizeof(detail),
+                         "%u zone(s) have max_temp_c 0, but all are OFF and cannot heat",
+                         (unsigned)off_unset_count);
             }
         }
         size_t before_o = o;

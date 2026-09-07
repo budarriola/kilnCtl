@@ -93,13 +93,22 @@ text, and the safety-link config-page hardening. Still open:
       relay control within seconds every time. Check what this does to a
       running firing before a real one is attempted -- "relays stay off until
       the host commands them" during a profile would be a silent halt.
-- [ ] **`max_temp_c == 0` and `max_ramp_c_per_hr == 0` mean opposite things**
-      on the same uncommissioned zone: the temperature ceiling fails OPEN (no
-      ceiling at all, already tracked below under guard 5) while the ramp
-      ceiling fails CLOSED (no profile can start -- `/api/profile_exec/start`
-      refuses with "exceeds zone 1's current 0.0 C/hr ceiling"). One unset
-      value, two contradictory policies. `max_simultaneous_relays == 0` is a
-      third instance of the same ambiguity and should be checked too.
+- [x] **`max_temp_c == 0` and `max_ramp_c_per_hr == 0` mean opposite things**
+      on the same uncommissioned zone -- reconciled 2026-09-06 (see
+      `docs/PROFILES.md` "Zero-commissioning semantics"). Rule: both mean
+      "not commissioned, refuse to start a firing/autotune" on any zone that
+      can heat (`profile_executor_run()`'s existing guard-5/ramp-ceiling
+      refusals, `autotune_engine.c`'s prestart checks); everywhere else that
+      reads them mid-run treats 0 as "no extra limit", since the start-time
+      refusal already made that state unreachable in a real firing. The one
+      consumer out of step with this rule, `GET /api/readiness`'s "Guard
+      limits (max_temp_c)" item, reported a heating zone's `max_temp_c == 0`
+      as ok/deliberately_off instead of not_done -- fixed in
+      `readiness_http.h`'s new `readiness_guard_max_temp_status()`, tested in
+      `test_readiness_commissioning.c`. `max_simultaneous_relays == 0` is a
+      different field (board-wide load-staggering cap, not a per-zone
+      commissioning gate) and correctly keeps its "0 = unlimited" meaning
+      unchanged -- no inconsistency there.
 - [x] **The LCD numbered relays from 1 and zones from 0 on the same page** --
       fixed 2026-08-30 (`UI_PLAN.md` 5.2 audit): `ui_page_temperature.c`'s
       relay tiles, relay error toasts and zone rows are now all 0-based,

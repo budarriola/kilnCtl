@@ -151,3 +151,42 @@ void run_test_readiness_ct_installed_zero_reads_ok(void)
     TEST_CHECK(readiness_commissioning_status(true, 0xBEEF, unset, applicable) == READY_NOT_DONE,
                 "a missing non-CT param must read not_done even when ct_installed == 0");
 }
+
+/* Host tests for readiness_http.h's readiness_guard_max_temp_status()
+ * (TODO.md 96, 2026-09-06): max_temp_c == 0 must read not_done -- not ok or
+ * deliberately_off -- on any zone that can still heat, because
+ * profile_executor_run()'s guard-5 refusal already blocks a firing start on
+ * exactly that condition. Only when every zone with max_temp_c == 0 is OFF
+ * (cannot heat, cannot trip the refusal) is 0 a legitimate, permanent
+ * choice. */
+void run_test_readiness_guard_max_temp(void)
+{
+    TEST_SECTION("readiness guard_max_temp item -- fail-open/fail-closed reconciliation");
+
+    /* No zones configured yet: cannot_yet, same as every other item gated on
+     * thermo_count. */
+    TEST_CHECK(readiness_guard_max_temp_status(0, 0, 0) == READY_CANNOT_YET,
+                "thermo_count == 0 must read cannot_yet");
+
+    /* Every zone has an explicit ceiling: ok. */
+    TEST_CHECK(readiness_guard_max_temp_status(3, 3, 0) == READY_OK,
+                "all zones with an explicit ceiling must read ok");
+
+    /* One heating zone with max_temp_c == 0: this is the exact case that
+     * used to read ok/deliberately_off while a firing start would be
+     * refused -- must now read not_done regardless of the other zones. */
+    TEST_CHECK(readiness_guard_max_temp_status(3, 2, 1) == READY_NOT_DONE,
+                "a heating zone with max_temp_c == 0 must read not_done, matching the start-time refusal");
+
+    /* Every zone reads max_temp_c == 0, but none of them can heat (all
+     * heating_unset_count == 0): a genuinely all-OFF, no-ceiling board is a
+     * legitimate deliberately_off, not a nag. */
+    TEST_CHECK(readiness_guard_max_temp_status(2, 0, 0) == READY_DELIBERATELY_OFF,
+                "an all-OFF board with max_temp_c == 0 on every zone must read deliberately_off, not not_done");
+
+    /* Mixed: one zone set, one zone OFF with max_temp_c == 0, no heating zone
+     * left unset -- still a legitimate deliberately_off, not ok (set_count
+     * != thermo_count) and not not_done (nothing heating is unset). */
+    TEST_CHECK(readiness_guard_max_temp_status(2, 1, 0) == READY_DELIBERATELY_OFF,
+                "a mix of an explicit ceiling and an OFF zone with none must read deliberately_off");
+}

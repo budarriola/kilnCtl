@@ -127,6 +127,34 @@ static inline readiness_status_t readiness_commissioning_status(bool link_up, ui
     return (unset_count == 0) ? READY_OK : READY_NOT_DONE;
 }
 
+/* Pure decision for the "Guard limits (max_temp_c)" item (TODO.md 96's
+ * fail-open/fail-closed reconciliation, 2026-09-06). `thermo_count` is the
+ * number of configured zones; `heating_unset_count` is how many of them can
+ * heat (control_mode != OFF) yet have max_temp_c == 0; `set_count` is how
+ * many have an explicit (>0) ceiling.
+ *
+ * A zone that can heat with max_temp_c == 0 is "uncommissioned", and
+ * profile_executor_run()'s guard-5 refusal (zones_config_accessors.h's doc
+ * comment on zones_config_get_temp_limits) already refuses to start ANY
+ * firing while such a zone is active. Reporting that state as ok or
+ * deliberately_off, as this item did before the reconciliation, told the
+ * operator the board was ready when starting a firing would be refused
+ * immediately -- so any such zone forces NOT_DONE regardless of the other
+ * zones' state. Only once every heating zone has an explicit ceiling (or
+ * every zone with max_temp_c == 0 is OFF and therefore can never trip
+ * guard 5's refusal) is the item OK/DELIBERATELY_OFF. */
+static inline readiness_status_t readiness_guard_max_temp_status(uint8_t thermo_count, uint8_t set_count,
+                                                                  uint8_t heating_unset_count)
+{
+    if (thermo_count == 0) {
+        return READY_CANNOT_YET;
+    }
+    if (heating_unset_count > 0) {
+        return READY_NOT_DONE;
+    }
+    return (set_count == thermo_count) ? READY_OK : READY_DELIBERATELY_OFF;
+}
+
 /* Registers /readiness + GET /api/readiness on the server
  * wifi_provision_http.c already started. No hardware pointers needed --
  * every hardware-adjacent fact (io_ready/thermo_ready/safety_ready) is read

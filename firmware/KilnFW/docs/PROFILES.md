@@ -394,6 +394,35 @@ convention `ease_off_window_mult` uses (ZONES_CFG_VERSION 16→17). Bounds:
 (`ZONE_MAX_RAMP_C_PER_HR_MAX`, 1000.0 °C/hr)] or exactly 0 — refused, never
 clamped.
 
+### Zero-commissioning semantics (TODO.md 96)
+
+Three zone_cfg_t fields are legitimately 0 on an uncommissioned zone --
+`max_temp_c`, `max_ramp_c_per_hr`, and `max_simultaneous_relays` (the last is
+board-wide, not per-zone) -- and until 2026-09-06 they disagreed on what 0
+meant. The reconciled rule: **`max_temp_c == 0` and `max_ramp_c_per_hr == 0`
+both mean "not commissioned, refuse to start a firing or autotune"** on any
+zone that can actually heat (`control_mode != OFF`) --
+`profile_executor_run()`'s guard-5/ramp-ceiling refusals already enforce this
+at firing-start time, and `autotune_engine.c`'s prestart checks enforce the
+equivalent for autotune. Everywhere else that reads these two fields
+mid-run (`thermal_guard.c` guard 5, `autotune_engine*.c`'s step-test and
+relay-identify methods) is deliberately left reading 0 as "no extra limit" --
+the start-time refusal has already made that state unreachable for a real
+firing, and autotune's own step-test method relies on running an unattended,
+brief, operator-watched probe on a zone with no ceiling yet. `GET
+/api/readiness`'s "Guard limits (max_temp_c)" item
+(`readiness_guard_max_temp_status()`, `readiness_http.h`) was the one
+consumer out of step with this rule -- it reported a heating zone's
+max_temp_c == 0 as `ok`/`deliberately_off`, which told the operator the board
+was ready to fire when starting one would be refused immediately; it now
+reports `not_done` for that case.
+
+`max_simultaneous_relays == 0` is NOT the same kind of field and keeps its
+existing "0 = unlimited" meaning unchanged: it is a board-wide breaker/supply
+cap applied after every zone has already decided what it wants (see "Load
+cap" below), not a per-zone commissioning gate, so there is no start-time
+refusal to reconcile it against.
+
 ### Load cap (TODO.md 6A.5, load staggering)
 
 `zones_config_get_max_simultaneous_relays()` (0 = unlimited, the default) is
