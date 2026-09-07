@@ -1194,6 +1194,16 @@ typedef enum {
      * inflating that zone's measured "normal" permanently. Refuse to start
      * instead of silently measuring a foreign load. */
     ZONE_SWEEP_REFUSE_RELAYS_ON,
+    /* opus review finding (MEDIUM): zone_cfg_committed_ct_topology() reads
+     * the safety param cache's 0x031F row and defaults to per_zone (0) when
+     * that row has never been set -- but "never set" is indistinguishable
+     * from "the cache has never even been fetched from the Pico yet"
+     * (safety_cfg_store_fetched_ms_ago() == UINT32_MAX), which is the
+     * state of every board's first boot after the v2->v3 store bump. A
+     * summed-topology board sweeping under an unfetched cache would
+     * silently measure and persist per-zone-shaped normals that are wrong
+     * for its actual wiring. Refuse instead of guessing. */
+    ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN,
 } zone_sweep_refusal_t;
 
 /* Human-readable reason for a zone_sweep_refusal_t -- used by the HTTP
@@ -1284,6 +1294,15 @@ typedef struct {
      * the safety processor. */
     uint8_t k_ct_derived_mask;
     char    k_ct_reason[96];
+    /* opus review finding (MEDIUM), CT_COMMISSIONING_PLAN.md step 3 summed
+     * topology: zone_sweep_summed_normal_a() refuses (rather than clamping
+     * to a persisted zero) when a zone's shared-channel reading came back
+     * lower with the zone on than idle -- a wiring/noise artifact, not a
+     * real measurement. Bit zi set here means that zone's normal was NOT
+     * written this run and the operator needs to know which zone(s) to
+     * re-sweep; zero for every zone in per_zone topology, where this
+     * refusal path is never reached. */
+    uint8_t summed_unmeasured_mask;
 } zone_sweep_status_t;
 
 void zones_current_sweep_get_status(zone_sweep_status_t *out);

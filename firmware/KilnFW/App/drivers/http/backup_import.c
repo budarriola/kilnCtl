@@ -892,6 +892,23 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
             return false;
         }
     }
+    /* opus review finding (LOW-MEDIUM): the settings_source commit loop below
+     * uses the _no_save() variant so a mid-batch failure (an out-of-range
+     * override_source pass 1 somehow missed, or a future refusal added to
+     * the setter) leaves whatever pairs already committed THIS pass sitting
+     * mutated in RAM with settings_source_dirty never getting persisted --
+     * the live config and flash silently disagree until something else
+     * happens to save. Snapshot every zone's settings_source[group] before
+     * this loop starts so the failure arm can restore the exact pre-import
+     * values rather than leaving a half-applied set live. */
+    uint8_t settings_source_before[MAX31856_CHANNEL_COUNT][SRC_GROUP_COUNT];
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
+            if (!zones_config_get_settings_source(zi, group, &settings_source_before[zi][group])) {
+                settings_source_before[zi][group] = ZONE_SETTINGS_SOURCE_CUSTOM;
+            }
+        }
+    }
     bool settings_source_dirty = false; /* set true once any _no_save() commit below succeeds; see item 3 comment */
     for (size_t i = 0; i < zone_candidate_count; i++) {
         zone_candidate_t *zc = &zone_candidates[i];
@@ -1093,6 +1110,22 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
          * finishes, persists the lot in one write. */
         for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
             if (!zones_config_set_settings_source_unchecked_no_save(zc->index, group, zc->settings_source[group])) {
+                /* opus review finding (LOW-MEDIUM): restore every zone's
+                 * settings_source[] to its pre-import snapshot before
+                 * returning -- otherwise whatever (zone, group) pairs this
+                 * loop already committed this pass stay mutated in RAM,
+                 * unpersisted (settings_source_dirty never reaches the save
+                 * below), silently disagreeing with flash. Best-effort: the
+                 * restore uses the same unchecked/no-save setter, so a
+                 * restore failure here would itself need a restore -- but
+                 * these are the exact values that were live and valid a
+                 * moment ago, so failure is not expected. */
+                for (uint8_t rzi = 0; rzi < MAX31856_CHANNEL_COUNT; rzi++) {
+                    for (uint8_t rgroup = 0; rgroup < SRC_GROUP_COUNT; rgroup++) {
+                        zones_config_set_settings_source_unchecked_no_save(rzi, rgroup,
+                                                                            settings_source_before[rzi][rgroup]);
+                    }
+                }
                 snprintf(err_msg, err_cap,
                         "zone tuning entry %u (channel %u) rejected at commit setting settings_source",
                         (unsigned)i, zc->index);

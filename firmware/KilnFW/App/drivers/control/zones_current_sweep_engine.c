@@ -220,7 +220,17 @@ bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, floa
     }
     float normal_a = sum_with_zone_on_a - sum_idle_a;
     if (normal_a < 0.0f) {
-        normal_a = 0.0f; /* see this function's own header comment */
+        /* opus review finding (MEDIUM): this used to clamp to 0.0f and
+         * still return true, which PERSISTS a normal_a of exactly zero --
+         * indistinguishable from "measured and it's genuinely zero" -- and
+         * silently makes S14/S15 inert for that zone forever (a zero normal
+         * can never register as an overcurrent). A channel that reads lower
+         * with the zone on than idle is a wiring/noise artifact, not a
+         * measurement: report it as unmeasured (false, *out_normal_a left
+         * untouched) so the caller can leave the zone's bit clear in
+         * measured_mask and the sweep result can say which zones were not
+         * measured, instead of persisting a wrong-shaped zero. */
+        return false;
     }
     if (out_normal_a) {
         *out_normal_a = normal_a;
@@ -255,6 +265,8 @@ const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
     case ZONE_SWEEP_REFUSE_LINK_DOWN: return "the safety link is down";
     case ZONE_SWEEP_REFUSE_TRIP_LATCHED: return "a safety trip is latched";
     case ZONE_SWEEP_REFUSE_RELAYS_ON: return "a relay is already on -- turn it off before sweeping";
+    case ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN:
+        return "CT topology has not been fetched from the safety processor yet -- retry once the link has synced";
     default: return "unknown refusal";
     }
 }
@@ -267,7 +279,7 @@ const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
 zone_sweep_refusal_t zone_sweep_check_refusal(bool already_running, bool have_hw, bool config_valid,
                                                       uint8_t thermo_count, bool profile_running_or_paused,
                                                       bool autotune_active, bool link_up, bool trip_latched,
-                                                      bool relays_on)
+                                                      bool relays_on, bool ct_topology_unknown)
 {
     if (already_running) {
         return ZONE_SWEEP_REFUSE_ALREADY_RUNNING;
@@ -295,6 +307,9 @@ zone_sweep_refusal_t zone_sweep_check_refusal(bool already_running, bool have_hw
     }
     if (relays_on) {
         return ZONE_SWEEP_REFUSE_RELAYS_ON;
+    }
+    if (ct_topology_unknown) {
+        return ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN;
     }
     return ZONE_SWEEP_REFUSE_OK;
 }

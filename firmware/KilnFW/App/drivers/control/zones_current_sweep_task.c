@@ -117,6 +117,17 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
             float normal_a = 0.0f;
             if (zone_sweep_summed_normal_a(with_on, s_ct_summed_idle_a, &normal_a)) {
                 zone_normals_set(zi, normal_a);
+            } else if (zi < 8) {
+                /* opus review finding (MEDIUM): the shared channel read
+                 * LOWER with this zone on than idle -- a wiring/noise
+                 * artifact, not a real measurement. Do NOT persist a zero
+                 * (that would silently make S14/S15 inert for this zone
+                 * forever); record it as unmeasured instead so the operator
+                 * sees which zone needs a re-sweep. */
+                ESP_LOGW(ZONES_HTTP_TAG, "zone %u: summed-CT reading with relay on (%.3fA) was below the idle "
+                              "baseline (%.3fA) -- treating as unmeasured, not persisting a normal",
+                         zi, (double)with_on, (double)s_ct_summed_idle_a);
+                s_sweep.summed_unmeasured_mask |= (uint8_t)(1u << zi);
             }
         }
         return;
@@ -321,7 +332,18 @@ static void zone_sweep_push_ct_channel_map(void)
     uint8_t staged_mask = 0;
 
     if (s_ct_derive.derived_mask == 0) {
-        snprintf(note, sizeof(note), "no CT channel could be identified -- map not changed");
+        /* LOW (opus review): in summed topology this branch fires on EVERY
+         * run, by design -- zone_sweep_task_record_ct_channels() never even
+         * attempts the one-relay-one-channel derivation there (a single
+         * shared CT has no per-relay mapping to find). The per_zone wording
+         * ("no CT channel could be identified") reads as a failed attempt,
+         * which misleads an operator on a summed board where nothing was
+         * ever attempted. */
+        if (s_ct_topology_summed) {
+            snprintf(note, sizeof(note), "summed CT topology has no per-zone channel map to derive -- not applicable");
+        } else {
+            snprintf(note, sizeof(note), "no CT channel could be identified -- map not changed");
+        }
     } else if (!s_hw_safety) {
         snprintf(note, sizeof(note), "safety link not available -- CT map not written");
         s_ct_derive.derived_mask = 0;
@@ -842,9 +864,18 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
      * the foreign-load condition to the operator explicitly instead of
      * silently overriding whatever they had on. */
     bool relays_on = s_hw_io && (kiln_io_get_relay_shadow(s_hw_io) != 0);
+    /* opus review finding (MEDIUM): zone_cfg_committed_ct_topology() below
+     * silently defaults an UNFETCHED safety param cache to per_zone, the
+     * same value a genuinely-committed per_zone board reads -- the two are
+     * indistinguishable to that accessor. Every first boot after the v2->v3
+     * store bump starts with safety_cfg_store_fetched_ms_ago() ==
+     * UINT32_MAX (never fetched), so refuse here rather than let a
+     * summed-topology board sweep and persist per-zone-shaped normals. */
+    bool ct_topology_unknown = (safety_cfg_store_fetched_ms_ago() == UINT32_MAX);
     zone_sweep_refusal_t refusal = zone_sweep_check_refusal(
         s_sweep.active, have_hw, s_zones_config_valid, s_zones.cfg.thermo_count,
-        profile_running_or_paused, autotune_engine_is_active(), link_up, trip_latched, relays_on);
+        profile_running_or_paused, autotune_engine_is_active(), link_up, trip_latched, relays_on,
+        ct_topology_unknown);
     if (refusal != ZONE_SWEEP_REFUSE_OK) {
         return refusal;
     }
@@ -880,6 +911,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
     s_sweep.ct_map_reason[0] = '\0';
     s_sweep.k_ct_derived_mask = 0;
     s_sweep.k_ct_reason[0] = '\0';
+    s_sweep.summed_unmeasured_mask = 0;
 
     BaseType_t created = xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task);
     if (created != pdPASS) {
@@ -922,6 +954,7 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out)
     out->k_ct_derived_mask = s_sweep.k_ct_derived_mask;
     strncpy(out->k_ct_reason, (const char *)s_sweep.k_ct_reason, sizeof(out->k_ct_reason) - 1);
     out->k_ct_reason[sizeof(out->k_ct_reason) - 1] = '\0';
+    out->summed_unmeasured_mask = s_sweep.summed_unmeasured_mask;
 }
 
 /* ---- Task 2: runtime CT-to-zone mapping check ----------------------------- */

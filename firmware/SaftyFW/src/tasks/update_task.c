@@ -636,9 +636,11 @@ static void update_task_gather_preconditions(update_preconditions_t *out)
     out->relay_open = !relay_energized;
 
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
-    bool warn_active = false;
     uint8_t diag_state = 0;
-    safety_core_get_diag_status(&trip_reason, &warn_active, &diag_state, NULL);
+    /* opus review finding (LOW): warn_active used to be gathered into a
+     * local that nothing downstream ever read -- this function only needs
+     * trip_reason, so pass NULL rather than carry a dead variable. */
+    safety_core_get_diag_status(&trip_reason, NULL, &diag_state, NULL);
     out->no_trip_pending = (trip_reason == SAFETY_TRIP_NONE);
 
     thermo_snapshot_t th;

@@ -659,6 +659,41 @@ bool relay_cycles_reset(unsigned relay)
     return true;
 }
 
+/* opus review finding (MEDIUM): both of these used to hold s_rc.lock across
+ * the full persist_locked() NVS commit -- relay_cycles_add()/
+ * relay_cycles_note_safety_edge() take the same lock with portMAX_DELAY from
+ * the executor's tick path (and now also from the drained-UART-frame path,
+ * see safety_link_frames.c), so a commit taking place under the lock stalls
+ * every contact-cycle add for its duration. Fixed with the same
+ * snapshot-then-write pattern relay_cycles_reset() already uses above:
+ * snapshot + clear `dirty` under the lock, write the snapshot with the lock
+ * released, and on failure re-arm `dirty` with a plain assignment (never
+ * clobbering a `dirty=true` a concurrent add() may have set in the
+ * meantime). */
+static hal_status_t persist_snapshot_now(void)
+{
+    reset_persist_job_arg_t snap;
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
+    memcpy(snap.types, s_rc.types, sizeof(snap.types));
+    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
+    s_rc.dirty = false;
+    xSemaphoreGive(s_rc.lock);
+
+    hal_status_t err = persist_snapshot(&snap);
+
+    if (err == HAL_OK) {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.last_persist_us = (int64_t)hal_time_now_us();
+        xSemaphoreGive(s_rc.lock);
+    } else {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.dirty = true;
+        xSemaphoreGive(s_rc.lock);
+    }
+    return err;
+}
+
 void relay_cycles_maybe_persist(void)
 {
     if (!ensure_lock()) {
@@ -667,8 +702,9 @@ void relay_cycles_maybe_persist(void)
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     bool due = s_rc.dirty &&
                ((int64_t)hal_time_now_us() - s_rc.last_persist_us) >= (int64_t)RELAY_CYCLES_PERSIST_INTERVAL_S * 1000000;
-    hal_status_t err = due ? persist_locked() : HAL_OK;
     xSemaphoreGive(s_rc.lock);
+
+    hal_status_t err = due ? persist_snapshot_now() : HAL_OK;
 
     if (err != HAL_OK) {
         ESP_LOGW(TAG, "periodic persist failed: %s (counts kept in RAM, will retry)", hal_status_to_name(err));
@@ -681,8 +717,10 @@ esp_err_t relay_cycles_flush(void)
         return ESP_ERR_NO_MEM;
     }
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    hal_status_t err = s_rc.dirty ? persist_locked() : HAL_OK;
+    bool dirty = s_rc.dirty;
     xSemaphoreGive(s_rc.lock);
+
+    hal_status_t err = dirty ? persist_snapshot_now() : HAL_OK;
     if (err != HAL_OK) {
         ESP_LOGW(TAG, "flush failed: %s", hal_status_to_name(err));
         return hal_status_to_esp_err(err);

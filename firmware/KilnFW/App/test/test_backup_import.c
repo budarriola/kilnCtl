@@ -865,11 +865,25 @@ bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t grou
  * save; test_backup_import_settings_source_single_save_per_import() below
  * checks the pairing (a nvs-save stand-in counter, g_settings_source_save_calls)
  * increments exactly once per import regardless of zone/group count. */
+/* opus review finding (LOW-MEDIUM), restore-on-failure test: lets a test
+ * force this call to fail for one specific (zone, group) pair without
+ * needing an input pass 1's own checks would already reject -- backup_import.c
+ * must restore every zone's pre-import settings_source[] when THIS call
+ * fails mid-batch, and the only way to prove that is to make a call fail
+ * that pass 1 could not have caught (all real rejection paths below are
+ * exactly the ones pass 1 already re-validates). Off (0xFF, no zone matches)
+ * by default. */
+static uint8_t s_force_fail_settings_source_zone = 0xFFu;
+static uint8_t s_force_fail_settings_source_group = 0xFFu;
+
 bool zones_config_set_settings_source_unchecked_no_save(uint8_t zone_index, uint8_t group, uint8_t settings_source)
 {
     if (zone_index >= STUB_ZONE_COUNT || group >= SRC_GROUP_COUNT) return false;
     if (settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && settings_source >= MAX31856_CHANNEL_COUNT) return false;
     if (settings_source == zone_index) return false;
+    if (zone_index == s_force_fail_settings_source_zone && group == s_force_fail_settings_source_group) {
+        return false;
+    }
     s_writes[zone_index].set_settings_source_called[group] = true;
     s_writes[zone_index].settings_source[group] = settings_source;
     return true;
@@ -1572,6 +1586,48 @@ static void test_settings_source_restore_onto_differently_configured_board_succe
               "both entries' settings_source were actually committed, not just accepted on paper");
 }
 
+// opus review finding (LOW-MEDIUM): a _no_save() settings_source commit
+// failing mid-batch used to leave every (zone, group) pair already
+// committed THIS pass sitting mutated in RAM, unpersisted (settings_source_
+// dirty never reaches zones_config_save_now() because the loop returns
+// early). Fixed by snapshotting every zone's settings_source[] before the
+// commit loop and restoring it on the failure arm. Proven here with a
+// failure the stub injects (zone 1, group SRC_GROUP_LIMITS) that pass 1's
+// own re-validation could never catch on its own -- exactly the kind of
+// failure the restore exists for.
+static void test_settings_source_commit_failure_restores_pre_import_values(void)
+{
+    TEST_SECTION("backup_import_apply -- opus review finding (LOW-MEDIUM): a settings_source "
+                 "commit failure partway through the batch restores every zone's pre-import "
+                 "settings_source[], not just refuses -- zone 0's commit (which succeeded before "
+                 "zone 1's forced failure) must not survive the refusal");
+    reset_stub_state();
+    // Live seed: both zones start at Custom (reset_stub_state()'s own default).
+    uint8_t seeded0 = 0xAA;
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &seeded0) && seeded0 == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "live seed: zone 0 starts at Custom");
+
+    s_force_fail_settings_source_zone = 1;
+    s_force_fail_settings_source_group = SRC_GROUP_LIMITS;
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
+        "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    s_force_fail_settings_source_zone = 0xFFu;
+    s_force_fail_settings_source_group = 0xFFu;
+
+    TEST_CHECK(!ok, "the injected commit failure on zone 1 is refused, not silently swallowed");
+    uint8_t s0 = 0xAA;
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &s0) && s0 == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zone 0's settings_source is restored to its pre-import value (Custom), not left at "
+              "the imported value (1) the commit wrote before zone 1's failure");
+}
+
 // ---------------------------------------------------------------------------
 // Export coverage (PID_EXPANSION_PLAN.md line ~715): backup_export_get_
 // handler() was completely untested before this -- a silent no-op or a
@@ -1910,6 +1966,7 @@ void run_test_backup_import(void)
     test_settings_source_cross_entry_cycle_rejected_before_any_commit();
     test_settings_source_cross_entry_legal_chain_still_imports();
     test_settings_source_restore_onto_differently_configured_board_succeeds();
+    test_settings_source_commit_failure_restores_pre_import_values();
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
     test_export_round_trips_through_import_to_identical_config();

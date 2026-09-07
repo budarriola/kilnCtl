@@ -238,6 +238,9 @@ typedef struct {
     volatile char                ct_map_reason[96];
     volatile uint8_t             k_ct_derived_mask;
     volatile char                k_ct_reason[96];
+    /* opus review finding (MEDIUM): see zone_sweep_status_t's identically-
+     * named field in zones_config_accessors.h. */
+    volatile uint8_t             summed_unmeasured_mask;
     TaskHandle_t                 task;
 } zone_sweep_ctx_t;
 extern zone_sweep_ctx_t s_sweep;
@@ -293,15 +296,18 @@ const char *zone_kct_derive_str(zone_kct_derive_t r);
  * read with every zone off (`normal_a[zone] = sum(with zone on) - sum(idle)`,
  * the plan's own formula). Pure and host-testable, no I/O: `sum_idle_a` is
  * whatever the caller sampled once, before the per-zone loop, with every
- * relay off. Returns false (out untouched) if either input is non-finite;
- * clamps the result at 0 rather than reporting a negative normal (a channel
- * that reads LOWER with the zone on than idle is a wiring/noise artifact,
- * not evidence of negative current). */
+ * relay off. Returns false (out untouched) if either input is non-finite,
+ * OR if sum_with_zone_on_a < sum_idle_a (a channel that reads LOWER with
+ * the zone on than idle is a wiring/noise artifact, not evidence of
+ * negative current, and clamping it to a persisted zero would silently make
+ * S14/S15 inert for that zone forever -- opus review finding, MEDIUM). The
+ * caller must treat false as "not measured": leave the zone's bit clear in
+ * measured_mask rather than persisting anything for it. */
 bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, float *out_normal_a);
 zone_sweep_refusal_t zone_sweep_check_refusal(bool already_running, bool have_hw, bool config_valid,
                                               uint8_t thermo_count, bool profile_running_or_paused,
                                               bool autotune_active, bool link_up, bool trip_latched,
-                                              bool relays_on);
+                                              bool relays_on, bool ct_topology_unknown);
 void zone_sweep_force_relays_off(void);
 void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_deps_t *deps,
                               const zone_sweep_all_hooks_t *hooks, zone_sweep_all_result_t *out);

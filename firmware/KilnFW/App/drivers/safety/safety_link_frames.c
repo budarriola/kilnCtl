@@ -677,14 +677,14 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * false (this driver's own boot, or a just-applied Pico boot_id change --
      * see safety_apply_fw_version() above) so the FIRST frame after either
      * event only resyncs the tracked state and counts zero edges, never a
-     * fabricated one. relay_cycles_note_safety_edge() only marks the RAM
-     * counter dirty (relay_cycles.c) -- it does not touch flash itself, so
-     * calling it here, on whichever task drains this frame, is safe even
-     * though safety_poll_task's own stack is PSRAM. */
+     * fabricated one. The edge is computed here, under link->state_lock, but
+     * relay_cycles_note_safety_edge() itself is called after safety_unlock()
+     * below -- calling it while still holding state_lock would establish a
+     * new lock order (link->state_lock -> s_rc.lock) alongside whatever
+     * order relay_cycles.c's own callers already use elsewhere, and nothing
+     * needs the edge count to be applied inside this critical section. */
     bool relay_now = (link->cached.flags & SAFETY_FLAG_RELAY) != 0;
-    if (link->safety_relay_state_known && relay_now != link->safety_relay_state) {
-        relay_cycles_note_safety_edge();
-    }
+    bool relay_edge = link->safety_relay_state_known && relay_now != link->safety_relay_state;
     link->safety_relay_state = relay_now;
     link->safety_relay_state_known = true;
 
@@ -692,6 +692,9 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->ever_received = true;
     link->stats.frames_received++;
     safety_unlock(link);
+    if (relay_edge) {
+        relay_cycles_note_safety_edge();
+    }
     return true;
 }
 
