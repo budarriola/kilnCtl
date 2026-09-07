@@ -312,4 +312,11 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 **Integrity**
 - [x] Python codec checked against `firmware/CommonFW/test/vectors/` --
       `tools/PcTools/tests/test_kilnlink_commonfw_vectors.py`
-- [ ] No relay path here bypasses `relay_authority_on_blocked()`
+- [x] No relay path here bypasses `relay_authority_on_blocked()` -- audited
+      2026-09-06 (`49de63a2`): every relay-write call site under
+      `tools/PcTools/src`/`scripts` went through `IoClient`'s refusal-aware
+      `set_relay`/`set_relay_mask`/`all_relays_off`, except
+      `current_sense_commissioning.py`, which bypassed it via a bare
+      `io.send(devices.io_set_relay(...))` and so never saw a firmware
+      refusal. Fixed, and `tools/check_relay_authority_paths.py` (+ `.ps1`
+      wrapper, in `run_all_checks.ps1`) now catches a regression.
