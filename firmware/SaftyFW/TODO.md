@@ -898,3 +898,31 @@ confirmed up on both sides; it did not return afterward, and frame discards
 did not climb. Settled Pico diag: `warn_mask 0x0010` (S5, no bench safety TC --
 expected), `trip_mask 0x0000`.
 
+## 2026-09-07 -- ESP+Pico flashed to 6427502a (stack-safety fixes)
+
+Both processors flashed and verified at commit `6427502a`, built from
+`C:/wt/espflash` (ESP) and `C:/wt/picoflash4` (Pico), both detached at
+`origin/main`. Picks up `d77c9976` (factory-reset NVS erase moved off the
+3072 B uart bridge stack) and `e0f33bd8` (telemetry_log stack 4096->6144,
+PSRAM-backed). ESP: `flash_firmware`'s automatic verify passed, gains and
+coupling read back identical to pre-flash (Zone0 Kp=0.0318 Ki=0.0001
+Kd=0.8401, Zone1 Kp=0.0485 Ki=0.0002 Kd=1.0548, Zone2 Kp=0.0631 Ki=0.0002
+Kd=1.0690, coupling z0(27.32,21.72) z1(14.30,22.15) z2(8.33,12.42)),
+`uart_protocol_version` 11 compatible with Pico protocol 12. Pico: new
+`boot_id=72`, build timestamp matches the sha, link up both directions.
+
+Expected post-reset S6a `MAIN_FAULT` trip occurred (`trip_reason 6`),
+cleared with `safety_clear_trip()` once link was confirmed up, and did not
+return (trip_mask stayed 0x0000 15 s later). Settled Pico diag: `state warn`,
+`warn_mask 0x0010` (S5 sensor-invalid, no bench safety TC -- expected,
+matches pre-flash `safety TC invalid` state, unchanged and not chased per
+separate investigation).
+
+Post-flash `get_stack_margin()`: `telemetry_log` now 50.3% headroom (was the
+target of `e0f33bd8`), no longer LOW. `system_uart_bridge` still reports
+[LOW] at 29.8% (916 B free of 3072 B) -- this is an idle low-water mark since
+boot; the factory-reset NVS-erase deep path `d77c9976` moved off this stack
+has not run since this boot, so this reading does not yet exercise it either
+way (see "Idle stack baseline is a floor"). Worst three by free bytes:
+`system_uart_bridge` 916 B, `backlight_pwm` 1028 B, `info_uart_bridge` 1112 B.
+
