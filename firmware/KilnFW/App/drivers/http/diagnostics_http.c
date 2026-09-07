@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h" /* heap_caps_malloc() -- cfgfs_file_get_handler()/cfgfs_file_post_handler() below */
 #include "esp_littlefs.h"
 #include "esp_log.h"
 
@@ -941,6 +942,24 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
     return err == HAL_OK ? rev : 0;
 }
 
+/* This handler's locals used to live on the httpd task stack: a 2048-byte
+ * JSON buffer plus a whole zones_cfg_t (~1.6-1.7 KB, dominated by
+ * zones[MAX31856_CHANNEL_COUNT] and timing_profiles[MAX31856_CHANNEL_COUNT])
+ * -- roughly 3.7 KB in this frame alone, on a task whose MEASURED
+ * worst-case margin is 64 B (see CLAUDE.md's "httpd stack" note and
+ * docs/audits/filesystem_migration_review_2026-09-07.md finding #1). That
+ * is on top of cfg_fs_status_build_json()'s own frame just below it, which
+ * separately stack-allocated two 32-entry cfg_fs_entry_t arrays (see that
+ * function). Both are moved to the heap: a single request-scoped buffer
+ * pool allocated up front and freed on every return path, so nothing this
+ * handler needs ever lands on the task's own stack. malloc() failure (heap
+ * pressure, not stack) is reported as 500 rather than silently truncating,
+ * same convention as the JSON-build failure path below. */
+typedef struct {
+    zones_cfg_t raw;
+    char json[2048];
+} cfgfs_status_scratch_t;
+
 static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
 {
     bool mounted = cfg_fs_is_available();
@@ -955,23 +974,196 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         }
     }
 
+    cfgfs_status_scratch_t *s = malloc(sizeof(*s));
+    if (!s) {
+        ESP_LOGE(TAG, "cfgfs_status_get_handler: malloc(%u) failed", (unsigned)sizeof(*s));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+
     cfg_fs_zones_dualwrite_info_t dual;
-    zones_cfg_t raw;
-    zones_config_cfg_fs_load_raw(&raw, &dual.file_rev, &dual.file_valid);
+    zones_config_cfg_fs_load_raw(&s->raw, &dual.file_rev, &dual.file_valid);
     dual.nvs_rev = cfgfs_read_zones_nvs_rev();
 
-    char json[2048];
     size_t len = 0;
-    esp_err_t err = cfg_fs_status_build_json(mounted ? "/cfg" : NULL, &cap, &dual, json, sizeof(json), &len);
+    esp_err_t err = cfg_fs_status_build_json(mounted ? "/cfg" : NULL, &cap, &dual, s->json, sizeof(s->json), &len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cfg_fs_status_build_json() failed: %s (buffer too small?)", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status build failed");
+        free(s);
         return ESP_OK;
     }
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, len);
+    esp_err_t send_err = httpd_resp_send(req, s->json, len);
+    free(s);
+    return send_err;
 }
+
+/* GET /api/cfgfs/file?name=<name> and POST /api/cfgfs/file?name=<name> --
+ * full_board_backup.py's filesystem-coverage addition (docs/FILESYSTEM_PLAN.md
+ * "Add filesystem coverage to the backup"). /api/cfgfs above already lists
+ * every file cfg_fs holds, with sizes -- this pair is deliberately NOT a
+ * second listing surface, just the one primitive that was missing: fetch (or
+ * restore) one named file's exact bytes, opaque to this handler. Every file
+ * `cfg_fs` holds is already whatever byte layout its own writer chose
+ * (pref_cfg_fs.c's 4-byte-rev-prefixed blobs, zones_config_cfg_fs.c's raw
+ * JSON, ...) -- this endpoint never parses any of that, it only round-trips
+ * raw bytes through cfg_fs_read()/cfg_fs_write_atomic(), so a backup/restore
+ * of the filesystem does not need to know (or keep in sync with) any single
+ * file's internal format. */
+#define CFGFS_FILE_NAME_MAX CFG_FS_MAX_NAME
+#define CFGFS_FILE_BODY_MAX 8192 /* generous headroom over any one cfg file this codebase writes today */
+
+static bool cfgfs_file_name_get(httpd_req_t *req, char *name, size_t name_cap)
+{
+    char query[96];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return false;
+    }
+    if (httpd_query_key_value(query, "name", name, name_cap) != ESP_OK) {
+        return false;
+    }
+    /* Same "no directory component, no traversal" contract cfg_fs_entry_t's
+     * own name field carries (CFG_FS_MAX_NAME, bare filename) -- refuse
+     * anything that could walk outside the `cfg` mount root before it ever
+     * reaches cfg_fs_read()/cfg_fs_write_atomic(). */
+    if (name[0] == '\0' || strchr(name, '/') || strchr(name, '\\') || strstr(name, "..")) {
+        return false;
+    }
+    return true;
+}
+
+static esp_err_t cfgfs_file_get_handler(httpd_req_t *req)
+{
+    char name[CFGFS_FILE_NAME_MAX];
+    if (!cfgfs_file_name_get(req, name, sizeof(name))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing/invalid \"name\"");
+        return ESP_OK;
+    }
+    if (!cfg_fs_is_available()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "cfg filesystem not mounted");
+        return ESP_OK;
+    }
+    /* HEAP in PSRAM, not internal DRAM nor this handler task's own stack --
+     * same reasoning as backup_export.c's BACKUP_STREAM_BUF allocation and
+     * this file's own httpd DRAM-pressure discipline elsewhere; 8KB is far
+     * too large to put on a task stack in a codebase with a documented
+     * stack-overflow bricking history (see CLAUDE.md's boot_guard section). */
+    uint8_t *buf = heap_caps_malloc(CFGFS_FILE_BODY_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+    size_t len = 0;
+    esp_err_t err = cfg_fs_read(name, buf, CFGFS_FILE_BODY_MAX, &len);
+    if (err != ESP_OK) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "file not found or unreadable");
+        return ESP_OK;
+    }
+    /* Raw bytes, not JSON -- full_board_backup.py base64-encodes this body
+     * itself for the archive. Keeping this endpoint's own wire format
+     * exactly the file's bytes (no base64, no envelope) means a restore
+     * writes back with zero decode/re-encode risk of its own; only the PC
+     * script's archive format needs base64, because JSON cannot hold
+     * arbitrary binary. */
+    httpd_resp_set_type(req, "application/octet-stream");
+    esp_err_t send_err = httpd_resp_send(req, (const char *)buf, len);
+    free(buf);
+    return send_err;
+}
+
+typedef struct {
+    const char *name;
+    const uint8_t *bytes;
+    size_t len;
+    esp_err_t result;
+} cfgfs_file_write_job_t;
+
+static void cfgfs_file_write_job(void *arg)
+{
+    cfgfs_file_write_job_t *job = (cfgfs_file_write_job_t *)arg;
+    job->result = cfg_fs_write_atomic(job->name, job->bytes, job->len);
+}
+
+extern esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+extern bool uart_bridge_ext_is_on_flash_worker(void);
+
+static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
+{
+    char name[CFGFS_FILE_NAME_MAX];
+    if (!cfgfs_file_name_get(req, name, sizeof(name))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing/invalid \"name\"");
+        return ESP_OK;
+    }
+    if (req->content_len <= 0 || req->content_len > CFGFS_FILE_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    if (!cfg_fs_is_available()) {
+        /* No HTTPD_409_CONFLICT in this esp_http_server's httpd_err_code_t --
+         * same manual-status pattern danger_start_post_handler() above
+         * already uses for its own 409. */
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "cfg filesystem not mounted");
+        return ESP_OK;
+    }
+    /* INTERNAL DRAM, deliberately NOT PSRAM (unlike the GET handler's read
+     * buffer above): this buffer is the write SOURCE for cfg_fs_write_atomic()
+     * dispatched onto the flash worker below, and a flash operation disables
+     * the cache, making PSRAM unreachable for the duration -- see
+     * flash_worker.h's own HAZARD comment and relay_cycles_reset()'s
+     * reset_persist_job_arg_t snapshot (a stack-local struct, never PSRAM)
+     * for the precedent this follows. Freed well before the response is
+     * sent, so this is a transient 8KB internal allocation, not a standing
+     * one. */
+    uint8_t *body = heap_caps_malloc(CFGFS_FILE_BODY_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, (char *)body + received, req->content_len - received);
+        if (ret <= 0) {
+            free(body);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+
+    /* Same flash-worker dispatch shape relay_cycles_reset()/factory_reset.c
+     * use -- this httpd handler task's own stack is not the internal-SRAM
+     * worker stack a flash write requires (see flash_worker.h's HAZARD
+     * comment), so the write always runs on the worker; the
+     * is_on_flash_worker() check exists only so this same function would
+     * still be safe to call FROM the worker itself, which never happens on
+     * this particular route today. */
+    cfgfs_file_write_job_t job = { .name = name, .bytes = body, .len = received, .result = ESP_FAIL };
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        cfgfs_file_write_job(&job);
+    } else {
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(cfgfs_file_write_job, &job);
+        if (submit_err != ESP_OK) {
+            job.result = submit_err;
+        }
+    }
+    free(body);
+
+    char json[128];
+    int n;
+    if (job.result == ESP_OK) {
+        n = snprintf(json, sizeof(json), "{\"ok\":true,\"name\":\"%s\",\"size_bytes\":%u}", name, (unsigned)received);
+    } else {
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(job.result));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+#undef CFGFS_FILE_BODY_MAX
 
 esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
 {
@@ -996,6 +1188,12 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     };
     static const httpd_uri_t cfgfs_status_api_uri = {
         .uri = "/api/cfgfs", .method = HTTP_GET, .handler = cfgfs_status_get_handler,
+    };
+    static const httpd_uri_t cfgfs_file_get_uri = {
+        .uri = "/api/cfgfs/file", .method = HTTP_GET, .handler = cfgfs_file_get_handler,
+    };
+    static const httpd_uri_t cfgfs_file_post_uri = {
+        .uri = "/api/cfgfs/file", .method = HTTP_POST, .handler = cfgfs_file_post_handler,
     };
     static const httpd_uri_t crash_report_ack_uri = {
         .uri = "/api/crash_report/ack", .method = HTTP_POST, .handler = crash_report_ack_post_handler,
@@ -1066,6 +1264,16 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     err = httpd_register_uri_handler(server, &cfgfs_status_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/cfgfs) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &cfgfs_file_get_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/cfgfs/file) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &cfgfs_file_post_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/cfgfs/file) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &lwip_stats_get_uri);

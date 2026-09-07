@@ -80,6 +80,12 @@ void zones_config_cfg_fs_set_write_fn(zones_cfg_fs_write_fn_t fn);
  * and never needs to un-set it. */
 void zones_config_cfg_fs_reset_write_fn_for_test(void);
 
+/* Read the currently-installed write function -- used by
+ * cfg_fs_mount.c's real-build assert that the device (flash-worker-
+ * dispatching) writer is installed whenever the filesystem is mounted
+ * (docs/audits/filesystem_migration_review_2026-09-07.md section 1). */
+zones_cfg_fs_write_fn_t zones_config_cfg_fs_get_write_fn(void);
+
 /* Core of the read-through policy described above.
  *
  *   nvs_cfg/nvs_valid/nvs_rev  -- what zones_config_store.c's nvs_load_from()

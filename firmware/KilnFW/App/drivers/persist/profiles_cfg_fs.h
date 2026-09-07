@@ -79,6 +79,12 @@ typedef esp_err_t (*profiles_cfg_fs_write_fn_t)(const char *rel_path, const void
 void profiles_cfg_fs_set_write_fn(profiles_cfg_fs_write_fn_t fn);
 void profiles_cfg_fs_reset_write_fn_for_test(void);
 
+/* Read the currently-installed write function -- used by cfg_fs_mount.c's
+ * real-build assert that the device writer is installed whenever the
+ * filesystem is mounted (docs/audits/filesystem_migration_review_2026-09-07.md
+ * section 1). */
+profiles_cfg_fs_write_fn_t profiles_cfg_fs_get_write_fn(void);
+
 /* Matches cfg_fs_delete()'s signature. Defaults to cfg_fs_delete. */
 typedef esp_err_t (*profiles_cfg_fs_delete_fn_t)(const char *rel_path);
 void profiles_cfg_fs_set_delete_fn(profiles_cfg_fs_delete_fn_t fn);

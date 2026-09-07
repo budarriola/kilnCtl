@@ -21,6 +21,7 @@
 #ifndef CFG_FS_MOUNT_H
 #define CFG_FS_MOUNT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "esp_err.h"
@@ -53,6 +54,49 @@ esp_err_t cfg_fs_mount_device(void);
  * pass is the foundation only -- see docs/FILESYSTEM_USER_DATA_PLAN.md
  * section 5, steps 3+ move real data through this entry point). */
 esp_err_t cfg_fs_write_atomic_device(const char *rel_path, const void *data, size_t len);
+
+/* AUTO-FORMAT / ASK-FIRST (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step
+ * 1, owner decision 2026-09-07): cfg_fs_mount_device() no longer just reports
+ * a mount failure and stops. When esp_vfs_littlefs_register() fails, it reads
+ * the raw partition back (cfg_fs_format_gate.h, host-tested) and:
+ *   - if the region shows no evidence of real content (reads as erased, give
+ *     or take a handful of stray bits), formats it automatically and retries
+ *     the mount -- this is today's REAL state on every board (the `cfg`
+ *     partition is flashed but has never been written), so this path is what
+ *     actually makes the config filesystem live for the first time;
+ *   - if the region shows a LittleFS superblock signature or a meaningful
+ *     fraction of non-erased bytes, it does NOT format -- it sets the
+ *     "awaiting confirmation" flag below and leaves cfg_fs UNAVAILABLE,
+ *     exactly like any other mount failure, so nothing is silently
+ *     destroyed.
+ * Either way this never blocks boot and never touches any partition other
+ * than `cfg`. */
+bool cfg_fs_mount_format_confirmation_pending(void);
+
+/* Human-readable reason the last mount attempt refused to auto-format (e.g.
+ * "LittleFS superblock signature found"), or "" if nothing is pending.
+ * Surfaced by cfg_fs_format_http.c's GET /api/cfgfs/format_pending for the
+ * web UI banner. */
+const char *cfg_fs_mount_format_pending_reason(void);
+
+/* Explicit operator confirmation: unconditionally erases and reformats the
+ * `cfg` partition (regardless of what a prior scan found -- calling this IS
+ * the confirmation) and mounts it fresh. Clears the awaiting-confirmation
+ * flag on success. Used by two callers: cfg_fs_format_http.c's
+ * POST /api/cfgfs/format_confirm (an operator explicitly acknowledging the
+ * "appears to contain data" banner) and factory_reset.c's "all" scope (the
+ * factory-reset button already IS the explicit operator action the plan
+ * doc's mount-failure contract calls for -- see cfg_fs.h's file banner).
+ *
+ * Runs the actual erase/format on the flash worker task
+ * (uart_bridge_ext_run_on_flash_worker()), same reasoning as
+ * cfg_fs_write_atomic_device() above and factory_reset.c's execute_scope():
+ * a PSRAM-stacked or small-stacked caller (httpd_worker) must never touch
+ * flash directly. HAZARD: never call this from a handler already running ON
+ * the flash worker task -- see cfg_fs_write_atomic_device()'s doc comment
+ * for the deadlock this avoids (project_flash_worker_reentrancy). Never
+ * blocks boot: this has no boot-time caller, only HTTP-triggered ones. */
+esp_err_t cfg_fs_confirm_format_device(void);
 
 #ifdef __cplusplus
 }

@@ -329,8 +329,12 @@ behavior for free).
 - **Not done in this pass**: zone normals (2) and relay names (3) — their
   own separate NVS blobs, untouched; kiln config slots (8); adaptive tune
   (9); the pre-fire interlock; the JSON-text file format upgrade noted
-  above; no board has this flashed (no `cfg` partition on any board today,
-  by design of step 1's own gate).
+  above; no board has this flashed. Correction: the bench board's `cfg`
+  partition was actually flashed at `c4b4e65d` (2026-09-07) — it exists in
+  the partition table, it is merely unformatted (reads as all-0xFF), which
+  behaves the same as "absent" through every mount-failure path until it is
+  auto-formatted or explicitly confirmed. "No `cfg` partition on any board
+  today" was true only before that commit; do not read it as still true.
 
 **Step 3 (items 11, 10, 12 — unit pref, ramp assist, display power),
 2026-09-07 — done, host-proven, board-absent by construction.** Relay names
@@ -408,10 +412,12 @@ below for both.
   present, plus the new `hal_kv_set_u32` rev-write line), confirmed clean of
   the break. Full suite green again afterward.
 - **Not done in this pass**: the `/api/cfgfs` `dual_write` surface for these
-  items (flagged, not implemented); no board has this flashed (`cfg`
-  partition mount is still not wired into the boot sequence on any board —
-  `cfg_fs_mount_device()` has no call site yet, confirmed by grep, same gap
-  step 1's own note already describes for zones).
+  items (flagged, not implemented); no board has this flashed. Correction:
+  `cfg_fs_mount_device()` IS now wired into the boot sequence (`117fc6f9`),
+  and the bench board's `cfg` partition IS flashed (`c4b4e65d`) — it is
+  merely unformatted (all-0xFF), same as step 1's "no `cfg` partition on any
+  board today" note, which is stale for the same reason (see that note's own
+  correction above).
 
 **Step 3/5 close-out: relay names (item 3) + TZ (item 14), 2026-09-07 —
 done, host-proven, board-absent by construction.** Both items' original
@@ -492,7 +498,9 @@ here rather than left pending.
   changes remained). Full suite green again.
 - **Not done in this pass**: the `/api/cfgfs` `dual_write` surface for
   relay names/TZ (same flag as the step-3 note above); no board has this
-  flashed (same `cfg` partition mount gap).
+  flashed. Correction: same as the step-3 note above -- the mount IS wired
+  (`117fc6f9`) and the bench board's `cfg` partition IS flashed
+  (`c4b4e65d`), merely unformatted.
 
 **Step 4 (item 5 — user profile slots 0..7 only), 2026-09-07 — done
 (`530dc2f7`), host-proven, board-absent by construction.** Item 6 (hidden-builtin mask)

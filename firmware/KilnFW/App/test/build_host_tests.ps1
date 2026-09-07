@@ -1091,9 +1091,6 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_format_gate.c')`" " +
             "`"$(Join-Path $driversDir 'persist/boot_guard.c')`" " +
-            "`"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
-            "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
-            "`"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 

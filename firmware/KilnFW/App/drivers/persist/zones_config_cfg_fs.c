@@ -21,6 +21,11 @@ void zones_config_cfg_fs_reset_write_fn_for_test(void)
     s_write_fn = cfg_fs_write_atomic;
 }
 
+zones_cfg_fs_write_fn_t zones_config_cfg_fs_get_write_fn(void)
+{
+    return s_write_fn;
+}
+
 /* rev(4 bytes LE) + the on-flash blob. Sized generously above
  * sizeof(zones_cfg_t) (itself capped at ZONES_CONFIG_BLOB_MAX_SIZE by
  * zones_config_accessors.h's own _Static_assert) so a future field growth

@@ -46,4 +46,11 @@ const esp_partition_t *esp_partition_get(esp_partition_iterator_t iterator);
 esp_partition_iterator_t esp_partition_next(esp_partition_iterator_t iterator);
 esp_err_t esp_partition_iterator_release(esp_partition_iterator_t iterator);
 
+/* Added for cfg_fs_mount.c's host tests (test_cfg_fs_mount_reentrancy.c) --
+ * same "declared here, defined per test executable" convention as the
+ * others above. */
+const esp_partition_t *esp_partition_find_first(esp_partition_type_t type, esp_partition_subtype_t subtype,
+                                                 const char *label);
+esp_err_t esp_partition_read(const esp_partition_t *partition, size_t src_offset, void *dst, size_t size);
+
 #endif // TEST_STUB_ESP_PARTITION_H

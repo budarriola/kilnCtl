@@ -2,6 +2,7 @@
 #include "cfg_fs_status.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -82,7 +83,23 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
     cfg_fs_status_t st = cfg_fs_get_status();
     bool mounted = cfg_fs_is_available();
 
-    cfg_fs_entry_t files[CFG_FS_STATUS_MAX_FILES];
+    /* Two 32-entry cfg_fs_entry_t arrays (48 bytes each => 1536 B apiece,
+     * ~3 KB together) used to be stack locals in this function -- on top of
+     * the caller's own ~3.7 KB frame (diagnostics_http.c's
+     * cfgfs_status_get_handler()), on the httpd task whose MEASURED
+     * worst-case margin is 64 B (CLAUDE.md's "httpd stack" note;
+     * docs/audits/filesystem_migration_review_2026-09-07.md finding #1).
+     * Heap-allocated instead so this function's frame stays small
+     * regardless of CFG_FS_STATUS_MAX_FILES; every path below frees both
+     * before returning (see the `cleanup` label). */
+    cfg_fs_entry_t *files = malloc(sizeof(cfg_fs_entry_t) * CFG_FS_STATUS_MAX_FILES);
+    cfg_fs_entry_t *tmp_files = malloc(sizeof(cfg_fs_entry_t) * CFG_FS_STATUS_MAX_FILES);
+    if (!files || !tmp_files) {
+        free(files);
+        free(tmp_files);
+        return ESP_ERR_NO_MEM;
+    }
+
     size_t file_count = 0;
     if (mounted) {
         cfg_fs_list("", files, CFG_FS_STATUS_MAX_FILES, &file_count);
@@ -98,21 +115,22 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
      * what it literally measures rather than claimed to be the historical
      * mount-time reap count (cfg_fs.c does not persist that number anywhere
      * -- see this module's header comment). */
-    cfg_fs_entry_t tmp_files[CFG_FS_STATUS_MAX_FILES];
     size_t tmp_count = 0;
     if (mounted) {
         cfg_fs_list(".tmp", tmp_files, CFG_FS_STATUS_MAX_FILES, &tmp_count);
     }
 
+    esp_err_t ret = ESP_OK;
     size_t o = 0;
     int n;
 #define APPEND(...)                                                                                                  \
     do {                                                                                                             \
         n = snprintf(buf + o, buf_cap - o, __VA_ARGS__);                                                             \
         if (n < 0 || (size_t)n >= buf_cap - o) {                                                                     \
-            return ESP_ERR_INVALID_SIZE;                                                                             \
+            ret = ESP_ERR_INVALID_SIZE;                                                                              \
+            goto cleanup;                                                                                            \
         }                                                                                                            \
-        o += (size_t)n;                                                                                              \
+        o += (size_t)n;                                                                                             \
     } while (0)
 
     APPEND("{\"mounted\":%s,\"status\":\"%s\"", mounted ? "true" : "false", status_str(st));
@@ -166,5 +184,9 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
 #undef APPEND
 
     *out_len = o;
-    return ESP_OK;
+
+cleanup:
+    free(files);
+    free(tmp_files);
+    return ret;
 }
