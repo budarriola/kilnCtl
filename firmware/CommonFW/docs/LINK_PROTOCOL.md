@@ -1496,6 +1496,23 @@ Two more, driven by the borrowed-thermocouple option:
       || version_mismatch)` every poll, where `up` is
       `safety_link_up_locked()` — gated on `SAFETY_LINK_UP_PERIODS` (3) missed
       500 ms polls, i.e. 1.5 s, matching the doc exactly.
+- [x] **1.5 s staleness ceiling — bench-verified with a stopwatch, 2026-09-06.**
+      Board idle, no firing, relays off (`safety_get_status`/`get_board_state`
+      confirmed before and after). `debug_reset(peer="pico")` was used to
+      silence the Pico's telemetry (the only available way to hold the link
+      down without a physical disconnect); the ESP's own device log recorded
+      the exact transition: `safety_link: safety processor link is down
+      (last status 2250 ms ago)` followed immediately by `isolated fault line
+      ASSERTED`. The coded ceiling (`SAFETY_LINK_STALE_MS = 1500`,
+      `safety_link.h:396`) fired correctly; the observed 2250 ms reflects the
+      500 ms poll granularity's worst-case slack on top of the 1500 ms
+      threshold, not a wrong constant. The fault line self-cleared
+      automatically on the next good frame once the Pico rebooted and
+      resumed sending (no `safety_clear_trip()` needed) — matches
+      `LINK_PROTOCOL.md` §8's "clears automatically on the next good frame".
+      ESP running `fw_build` 2026-09-06 19:13:16Z (commit 05087f0, protocol
+      v11); Pico `fw_build` 2026-09-07 03:08:42Z (commit 1a7403f4, protocol
+      v12) both before and after the induced reset (boot_id 159→155).
 - [x] 30 s firing-abort wired into `profile_executor`
       (`firmware/KilnFW/App/drivers/control/profile_executor.c:1201-1236`'s
       `safety_link_silent_30s`/`SAFETY_LINK_FIRING_ABORT_SILENCE_MS`, pinned
@@ -1503,10 +1520,12 @@ Two more, driven by the borrowed-thermocouple option:
       M15 C5 verification). **Evidence level: host-tested and CI-pinned
       only, NOT hardware-verified** (`docs/SAFETY_CASE.md` section 4
       classification) — the tick means the code exists and a host test
-      proves it fires at the coded threshold, not that anyone has held the
-      real link down on a running board with a stopwatch. `ROADMAP.md` M6
-      and its "Blocked on hardware that does not exist yet" table (row `S`)
-      track that bench step as still open.
+      proves it fires at the coded threshold. Unlike the 1.5 s ceiling above,
+      this one needs a *running firing* to abort (relays live, a profile
+      executing) — out of scope for a read-only/no-heat bench pass
+      (2026-09-06) and still genuinely open. `ROADMAP.md` M6 and its "Blocked
+      on hardware that does not exist yet" table (row `S`) now track only
+      this half of the bench step.
 - [x] Before the first frame ever arrives, the link counts as down.
       **2026-09-04**: every caller that reads link state before the first
       exchange defaults `link_up = false` (`dashboard_http.c`,
