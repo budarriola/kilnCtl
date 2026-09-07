@@ -184,6 +184,44 @@ static void test_safe_execute_timeout_is_reported_and_leaves_cache_unchanged(voi
                "a timed-out write leaves the cache at its pre-write (uncommissioned) state");
 }
 
+// persist/save logging audit (2026-09-06): config_store_write_cb() used to
+// discard hal_flash_program()'s own return value with a bare (void) cast,
+// on the argument that it could only ever fail with a caller-bug status.
+// The host fake's hal_flash_safe_execute() (fake_flash.c) documents exactly
+// why that argument does not cover this case: "any erase/program failure the
+// callback triggers is surfaced through ITS own return path ... not through
+// this function's return value" -- so a HAL_OK from hal_flash_safe_execute()
+// says only that the callback RAN, never that the program landed. This
+// pins that config_store_write() now catches a scripted PROGRAM failure
+// even though SAFE_EXECUTE itself reports HAL_OK.
+static void test_program_failure_is_not_masked_by_safe_execute_ok(void)
+{
+    TEST_SECTION("config_store_flash: a failed hal_flash_program() is not "
+                 "masked by hal_flash_safe_execute()'s own HAL_OK");
+    reset_all();
+    config_store_boot_load();
+
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_PROGRAM, HAL_IO);
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x03u;
+
+    const char *reason = NULL;
+    bool ok = config_store_write(&rec, &reason);
+    TEST_CHECK(ok == false,
+               "write fails when the underlying hal_flash_program() fails, "
+               "even though hal_flash_safe_execute() itself returns HAL_OK");
+    TEST_CHECK(reason != NULL && strcmp(reason, "ok") != 0,
+               "the reason string is not the success sentinel on a masked failure");
+
+    // Same "must not silently advance the cache" property the TIMEOUT test
+    // above pins, for the other failure path.
+    TEST_CHECK(config_store_get_config_crc() == 0,
+               "a program failure the safe_execute wrapper did not itself "
+               "report still leaves the cache at its pre-write state");
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -191,6 +229,7 @@ int main(void)
     test_write_refused_while_armed();
     test_seq_increments_and_survives_wraparound();
     test_safe_execute_timeout_is_reported_and_leaves_cache_unchanged();
+    test_program_failure_is_not_masked_by_safe_execute_ok();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

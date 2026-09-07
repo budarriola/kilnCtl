@@ -87,6 +87,12 @@
 #include "current_task.h"
 #include "link_frame.h"
 #include "link_task.h"
+#include "log_task.h" // persist/logging audit (2026-09-06): update_task_persist_metadata()
+                       // failures previously reached only the wire status frame
+                       // (UPDATE_TASK_STATE_FAILED) with no on-device log line naming
+                       // the module -- see this file's own comment (formerly here,
+                       // now resolved) on update_task_process_begin()'s
+                       // decision.requested_slot_mismatch line.
 #include "safety_core.h"
 #include "snapshots.h"
 #include "thermo_task.h"
@@ -622,7 +628,13 @@ static void update_task_revert_target_slot(void)
     size_t latest = update_task_read_latest_metadata_or_default(&meta);
     memset(&meta.slots[s_target_slot], 0, sizeof(meta.slots[s_target_slot]));
     meta.slots[s_target_slot].state = BOOTLOADER_SLOT_EMPTY;
-    (void)update_task_persist_metadata(&meta, latest); // best-effort -- transfer is being torn down regardless
+    // Best-effort -- transfer is being torn down regardless -- but a failure
+    // here previously vanished with no trace anywhere; log it so a stuck
+    // STAGED/PENDING_VERIFY slot metadata record left behind by a failed
+    // revert is not a silent mystery later.
+    if (!update_task_persist_metadata(&meta, latest)) {
+        log_task_log(LOG_LEVEL_WARN, "update", "revert_target_slot: metadata persist failed");
+    }
 
     s_transfer_active = false;
 }
@@ -715,6 +727,7 @@ static void update_task_process_begin(const uint8_t *payload, uint8_t length)
     update_task_send_status_now(UPDATE_TASK_STATE_ERASING, 0);
 
     if (!update_task_erase_slot(s_slot_flash_offset)) {
+        log_task_log(LOG_LEVEL_ERROR, "update", "begin: erase_slot failed");
         update_task_send_status_now(UPDATE_TASK_STATE_FAILED, UPDATE_STATUS_ERR_INTERNAL);
         return;
     }
@@ -728,6 +741,7 @@ static void update_task_process_begin(const uint8_t *payload, uint8_t length)
     memset(&meta.slots[s_target_slot], 0, sizeof(meta.slots[s_target_slot]));
     meta.slots[s_target_slot].state = BOOTLOADER_SLOT_STAGED;
     if (!update_task_persist_metadata(&meta, latest)) {
+        log_task_log(LOG_LEVEL_ERROR, "update", "begin: STAGED metadata persist failed");
         update_task_send_status_now(UPDATE_TASK_STATE_FAILED, UPDATE_STATUS_ERR_INTERNAL);
         return;
     }
@@ -865,6 +879,7 @@ static void update_task_process_end(const uint8_t *payload, uint8_t length)
     meta.boot_attempts = 0;
 
     if (!update_task_persist_metadata(&meta, latest)) {
+        log_task_log(LOG_LEVEL_ERROR, "update", "end: PENDING_VERIFY metadata persist failed");
         update_task_send_status_now(UPDATE_TASK_STATE_FAILED, UPDATE_STATUS_ERR_INTERNAL);
         return;
     }
@@ -1025,9 +1040,12 @@ static void update_task_confirm_tick(void)
     meta.slots[s_own_slot].state = BOOTLOADER_SLOT_VALID;
     if (update_task_persist_metadata(&meta, latest)) {
         s_confirm_pending = false; // confirmed -- nothing further to do, ever, this boot
+    } else {
+        // s_confirm_pending stays true and this retries on the next
+        // UPDATE_CONFIRM_TICK_PERIOD_MS tick -- but a persistently failing
+        // flash write here would otherwise retry forever with zero trace.
+        log_task_log(LOG_LEVEL_WARN, "update", "confirm_tick: VALID metadata persist failed, will retry");
     }
-    // On persist failure, s_confirm_pending stays true and this retries on
-    // the next UPDATE_CONFIRM_TICK_PERIOD_MS tick.
 }
 
 // --- Explicit rollback (SAFETY_CMD_ROLLBACK, 0x17) --------------------------

@@ -318,28 +318,33 @@ typedef struct {
     size_t  next_write_slot;
     bool    needs_erase;
     uint8_t record[CONFIG_STORE_RECORD_LEN];
+    hal_status_t result; // persist/save logging audit (2026-09-06): this file's
+                          // own header comment used to argue the erase/program
+                          // status could never be anything but HAL_OK here, and
+                          // discarded it -- but update_task.c's near-identical
+                          // update_metadata_write_cb() was fixed the same day
+                          // ("discarding it would let a failed erase/program
+                          // still report success up the call chain") for the
+                          // exact same shape of call. hal_flash_safe_execute()'s
+                          // own HAL_OK only means the callback RAN, not that the
+                          // op it ran succeeded, so this must be captured and
+                          // checked by config_store_write() too -- see that
+                          // function below.
 } config_store_write_args_t;
 
-// Offsets below are region-relative (0-based within the config store's own
-// sector, per ensure_region()'s binding) -- NOT SAFTYFW_CONFIG_STORE_FLASH_
-// OFFSET-relative any more. hal_flash_erase()/hal_flash_program() return
-// values are not checked here: both can only fail with HAL_NOT_READY (an
-// uninitialized `r`, which config_store_write() already ruled out via
-// ensure_region() before scheduling this callback) or HAL_INVALID_SIZE/ARG
-// (a misaligned or out-of-range offset/len, which the compile-time-fixed
-// SAFTYFW_CONFIG_STORE_FLASH_SIZE/CONFIG_STORE_RECORD_LEN geometry this file
-// uses can never produce) -- the same "caller-bug, not a runtime condition
-// this call site needs to react to" shape flash_range_erase()/flash_range_
-// program() had before the rebase (they returned void).
 static void config_store_write_cb(void *param)
 {
     config_store_write_args_t *a = (config_store_write_args_t *)param;
+    a->result = HAL_OK;
     if (a->needs_erase) {
-        (void)hal_flash_erase(&s_region, 0, SAFTYFW_CONFIG_STORE_FLASH_SIZE);
+        a->result = hal_flash_erase(&s_region, 0, SAFTYFW_CONFIG_STORE_FLASH_SIZE);
+        if (a->result != HAL_OK) {
+            return; // do not attempt the program half over a failed erase
+        }
     }
-    (void)hal_flash_program(&s_region,
-                             (uint32_t)a->next_write_slot * CONFIG_STORE_RECORD_LEN,
-                             a->record, CONFIG_STORE_RECORD_LEN);
+    a->result = hal_flash_program(&s_region,
+                                   (uint32_t)a->next_write_slot * CONFIG_STORE_RECORD_LEN,
+                                   a->record, CONFIG_STORE_RECORD_LEN);
 }
 
 // Writes `rec` as the new current config record, refusing while ARMED
@@ -385,10 +390,16 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
     config_store_write_args_t args;
     args.next_write_slot = config_store_next_write_slot(s_cached_slot);
     args.needs_erase = config_store_next_write_needs_erase(s_cached_slot);
+    args.result = HAL_NOT_READY; // overwritten by the callback if it ever runs
     config_store_pack(&to_write, args.record);
 
     hal_status_t status = hal_flash_safe_execute(config_store_write_cb, &args, 1000u);
-    if (status != HAL_OK) {
+    // Both must succeed: `status` reports whether the callback ran at all
+    // (lockout handshake), args.result reports whether the erase/program it
+    // ran actually landed -- see config_store_write_args_t's own result field
+    // comment for why neither check alone is sufficient (a HAL_OK `status`
+    // with a failed args.result used to be silently reported as success).
+    if (status != HAL_OK || args.result != HAL_OK) {
         // Surface WHICH failure mode this was, not a single opaque string --
         // see config_store_flash_rc_reason()'s header comment (config_store.h)
         // for why "the other core never answered the lockout" (TIMEOUT) and
@@ -398,8 +409,9 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
         // already made this same distinction (hal_status_t); translated back
         // to the legacy CONFIG_STORE_FLASH_RC_* value so config_store_flash_
         // rc_reason()'s existing strings need no change.
+        hal_status_t failing_status = (status != HAL_OK) ? status : args.result;
         int rc;
-        (void)hal_status_to_config_store_flash_rc(status, &rc);
+        (void)hal_status_to_config_store_flash_rc(failing_status, &rc);
         if (out_reason != NULL) {
             *out_reason = config_store_flash_rc_reason(rc);
         }
