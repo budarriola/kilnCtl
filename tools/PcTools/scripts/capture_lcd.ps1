@@ -14,7 +14,7 @@
   1280x720 frame costs several times the tokens of the default 640x360 crop
   for no diagnostic gain.
 
-  The crop rectangle was measured from a full-frame capture on 2026-09-04.
+  The crop rectangle was measured from a full-frame capture on 2026-09-06.
   If the camera or board is ever moved, re-run with -Full to get an
   uncropped frame, read off the new rectangle, and update the defaults here.
 
@@ -41,11 +41,15 @@ param(
     [int]$Width = 640,
     [string]$Device = "HD Pro Webcam C920",
     # Active-area rectangle of the LCD within a 1280x720 frame, measured
-    # 2026-09-04. x,y is the top-left corner of the lit pixels, not the bezel.
-    [int]$CropX = 288,
-    [int]$CropY = 70,
-    [int]$CropW = 722,
-    [int]$CropH = 502
+    # 2026-09-06 (the panel had shifted lower/right of the prior 2026-09-04
+    # rectangle, which was ~90% bezel). x,y is the top-left corner of the
+    # lit pixels, not the bezel. The panel is viewed at a tilt and its
+    # bottom-right corner runs off the bottom of the 1280x720 frame, so this
+    # rectangle is the largest inscribed all-panel box, not the full panel.
+    [int]$CropX = 339,
+    [int]$CropY = 487,
+    [int]$CropW = 594,
+    [int]$CropH = 231
 )
 
 $ErrorActionPreference = "Stop"
