@@ -97,7 +97,9 @@
 <p>Each button below erases ONLY what it says and reboots the board
 immediately -- there is no undo. "Wi-Fi" never touches zones/rules/profiles;
 "kiln config" never touches Wi-Fi or profiles; "profiles" never touches
-anything else. "Factory default" erases all three.</p>
+anything else. "Factory default" erases all three, and also reformats the
+config filesystem (the `cfg` partition zones/profiles/preferences are
+migrating onto).</p>
 <p>
 <button type="button" class="danger-btn" data-scope="wifi">Reset Wi-Fi only</button>
 <button type="button" class="danger-btn" data-scope="kiln">Reset kiln config only (zones, rules, relay cycles, run state)</button>
@@ -105,6 +107,22 @@ anything else. "Factory default" erases all three.</p>
 <button type="button" class="danger-btn" data-scope="all">Factory default (erase everything)</button>
 </p>
 <p id="resetStatus"></p>
+
+<!-- cfg_fs auto-format ask-first banner (docs/FILESYSTEM_USER_DATA_PLAN.md
+     section 5 step 1, owner decision 2026-09-07): cfg_fs_mount_device()
+     refuses to auto-format the `cfg` partition when its content scan finds
+     evidence of real data, and surfaces that refusal via
+     GET /api/cfgfs/format_pending. Hidden unless that endpoint reports
+     pending -- most boards most of the time see nothing here at all. -->
+<div id="cfgFsFormatBanner" hidden style="border:1px solid var(--bad); padding:0.75em; margin:1em 0;">
+  <p><strong>Config filesystem did not mount.</strong>
+  <span id="cfgFsFormatReason"></span>
+  Formatting will erase it. Only confirm this if you do not recognize this
+  board's config history (e.g. it was flashed from someone else's image) --
+  otherwise investigate before erasing.</p>
+  <button type="button" id="cfgFsFormatConfirmBtn">Format cfg partition</button>
+  <p id="cfgFsFormatStatus"></p>
+</div>
 
 <script>
 (function () {
@@ -139,6 +157,39 @@ var SCOPE_LABELS = {
   profiles: 'saved fire profiles only',
   all: 'EVERYTHING (factory default)',
 };
+// cfg_fs auto-format ask-first banner -- see the #cfgFsFormatBanner markup
+// above. Checked once on page load; nothing polls it, so a board that
+// starts refusing mid-session (it can't -- the decision is made once, at
+// boot, by cfg_fs_mount_device()) would need a page reload to notice, which
+// matches every other one-shot status read on this page.
+fetch('/api/cfgfs/format_pending').then(function (r) { return r.json(); }).then(function (data) {
+  if (!data.pending) {
+    return;
+  }
+  document.getElementById('cfgFsFormatReason').textContent = data.reason ? (' (' + data.reason + ')') : '';
+  document.getElementById('cfgFsFormatBanner').hidden = false;
+}).catch(function () {
+  // No board reachable / endpoint missing this build -- same as every other
+  // best-effort status fetch on this page, stay silent rather than alarm.
+});
+document.getElementById('cfgFsFormatConfirmBtn').addEventListener('click', function () {
+  if (!kcConfirm('This permanently erases the config filesystem and cannot be undone. Continue?')) {
+    return;
+  }
+  var status = document.getElementById('cfgFsFormatStatus');
+  status.textContent = 'Formatting...';
+  fetch('/api/cfgfs/format_confirm', { method: 'POST' }).then(function (r) {
+    return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+  }).then(function (res) {
+    status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
+    if (res.ok) {
+      document.getElementById('cfgFsFormatBanner').hidden = true;
+    }
+  }).catch(function () {
+    status.textContent = 'Request failed -- check the board is reachable and try again.';
+  });
+});
+
 document.querySelectorAll('.danger-btn').forEach(function (b) {
   b.addEventListener('click', function () {
     var scope = b.getAttribute('data-scope');

@@ -439,6 +439,22 @@ void main_boot_early(main_boot_ctx_t *ctx)
                  (unsigned)stack_words_before, (unsigned)stack_words_after,
                  (unsigned)(stack_words_before * sizeof(StackType_t)),
                  (unsigned)(stack_words_after * sizeof(StackType_t)));
+
+        /* Loud, easy-to-grep boot-log banner for the "found evidence of
+         * content, refused to auto-format" outcome -- same "make the
+         * refusal visible, not silent" reasoning as get_heap_status()'s
+         * UNACKNOWLEDGED CRASH REPORT banner. The web UI's own banner
+         * (settings_page.html, GET /api/cfgfs/format_pending) is the
+         * operator-facing half; this is the one a bench session tailing the
+         * serial log sees immediately, before any browser is even open. */
+        if (cfg_fs_mount_format_confirmation_pending()) {
+            ESP_LOGE(MAIN_TAG,
+                     "**** CFG PARTITION AWAITING FORMAT CONFIRMATION **** reason: %s -- the config "
+                     "filesystem is UNAVAILABLE this boot; every cfg_fs-backed setting falls back to "
+                     "firmware defaults until an operator confirms via POST /api/cfgfs/format_confirm "
+                     "or the Settings page's danger-zone banner",
+                     cfg_fs_mount_format_pending_reason());
+        }
     }
 
     // watchdog_cfg_init(): the task watchdog itself already exists by this

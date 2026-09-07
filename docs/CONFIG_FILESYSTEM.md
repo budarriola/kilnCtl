@@ -45,14 +45,38 @@ opposite policy from the `logs` partition, deliberately: silently erasing
 tuning data is the worst failure mode here). It is skipped entirely in
 recovery mode.
 
-**As of 2026-09-07 the `cfg` partition exists on the bench board's
-partition table but has never been formatted, and nothing in the boot
-sequence mounts it yet.** Until both a first-time-format step and the
-mount call are wired in, every file operation is a fast no-op and every
-item quietly runs NVS-only — same behavior as before this migration
-started, not a fallback that needs diagnosing. Don't read "config
-filesystem unavailable" on this board as a fault; it is the expected
-state right now.
+**As of 2026-09-07 `cfg_fs_mount_device()` (`main_boot_early.c`) now runs at
+boot and auto-formats a genuinely blank partition** — see "Auto-format and
+the ask-first path" below. The bench board's `cfg` partition has been
+flashed but never written, so its NEXT boot after this lands will
+auto-format and mount cleanly, making the dual-write bridges live for the
+first time. A board whose `cfg` partition instead contains real (if
+mount-failed) data is NOT touched automatically — see below.
+
+## Auto-format and the ask-first path
+
+Owner decision, 2026-09-07: "Auto format, don't require all-FF, search for
+valid files/partitions, ask the user if it is ok to overwrite if
+partitions/files found." When `esp_vfs_littlefs_register()` fails,
+`cfg_fs_mount_device()` reads the raw partition back
+(`cfg_fs_format_gate.c`, pure and host-tested) and:
+
+- **No evidence of real content** (the region reads as erased, give or take
+  a handful of stray bit-error bytes — deliberately NOT gated on a strict
+  all-0xFF requirement) → formats automatically and remounts. Logged at
+  WARN. This is the path every board takes today.
+- **A LittleFS superblock signature, or a meaningful fraction of
+  non-erased bytes** → refuses to format. Logged at ERROR with a loud
+  boot-log banner, and surfaced two other ways: `GET /api/cfgfs/format_pending`
+  (`{"pending":true,"reason":"..."}`) and a banner on the Settings page
+  with an explicit confirm button, which POSTs to
+  `/api/cfgfs/format_confirm` (authenticated the same way `/api/factory_reset`
+  is — the same danger tier, deliberately reusing that lockout budget
+  rather than adding a fifth one). Nothing is ever erased without one of
+  these two triggers.
+
+Either outcome never blocks boot, never touches any partition other than
+`cfg`, and is skipped entirely in recovery mode (same gate as before).
 
 ## Reading `/api/cfgfs`
 
@@ -100,14 +124,13 @@ still resolve from NVS whenever the file side is unavailable.
 
 ## What factory reset does to it
 
-Not yet specified or implemented as a distinct step — factory reset today
-acts on NVS only. Formatting or reformatting `cfg` is meant to be an
-explicit, operator-initiated action on the factory-reset page (not an
-automatic fallback on mount failure), because the whole point of
-`format_if_mount_failed=false` is that a filesystem problem should be
-reported and looked at, not erased out from under the operator. Until that
-action exists, there is no way to format `cfg` on this board short of a
-full-chip erase, which also takes NVS.
+The Settings page's "Factory default (erase everything)" button (scope
+`all`) now also erases and reformats `cfg`, unconditionally — its own
+confirm dialog IS the explicit operator action the mount-failure contract
+calls for, so this path never goes through the ask-first flow above.
+"Wi-Fi only"/"kiln config only"/"profiles only" do **not** touch `cfg` — it
+holds a mix of kiln-config-shaped and profile-shaped data today, and those
+narrower buttons promise to erase only what they say.
 
 ## State of the migration, 2026-09-07
 
@@ -150,6 +173,7 @@ Supporting infrastructure, not tied to one inventory item:
 | `/api/cfgfs` status endpoint | `b79b5ef5` |
 | LittleFS component pinned (host-build only, prerequisite) | `ca5d90c5` |
 | Equal-rev tie-break defect found and fixed (zones + profiles) | `2c7bd240` |
+| Boot-time mount call, auto-format-or-ask gate, `/api/cfgfs/format_pending`+`format_confirm`, factory-reset "all" scope format | *(this pass, 2026-09-07)* |
 
 11 items moved to dual-write, 11 stay in NVS deliberately, 2 (relay names,
 TZ) are still NVS-only pending a follow-up pass, matching the plan's own
@@ -165,13 +189,12 @@ count.
   byte-identical to the NVS copy, and one proven backup/restore round trip
   against the file path. None of the three has started; the clock has not
   begun because nothing is mounted on any board yet.
-- **`cfg` is unformatted on the bench board.** The partition exists in the
-  table and was flashed, but nothing has ever formatted it, and no
-  first-time-format code path exists. The feature is inert — every write
-  falls through to NVS-only — until both the mount call and a format
-  action land. This is not a bug in what shipped; it is a known missing
-  prerequisite (`docs/audits/filesystem_migration_review_2026-09-07.md`
-  §6).
+- **`cfg` was unformatted on the bench board — now resolved.** The mount
+  call and the auto-format-or-ask gate both landed this pass (see
+  "Auto-format and the ask-first path" above); the bench board's next boot
+  auto-formats and mounts. The LCD/`/api/status` banner for the ask-first
+  refusal path is still not wired in — only the boot log and the Settings
+  page know about it today.
 - **RP2040 `config_store` has no A/B sectors — a real, unfixed defect.**
   Found by the endurance review, not by this migration, but it belongs
   here because it is genuine outstanding work, not a footnote: when the

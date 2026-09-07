@@ -998,8 +998,18 @@ esp_err_t wifi_provision_http_start(void)
      * config.max_uri_handlers here IS the only real cap, and
      * check_uri_handler_cap.ps1 parses this exact line rather than carrying
      * a second hardcoded number of its own -- so there is only ever one
-     * value to keep in lockstep, this one. */
-    config.max_uri_handlers = 118;
+     * value to keep in lockstep, this one.
+     *
+     * Bumped 118 -> 130, 2026-09-07: cfg_fs_format_http.c's two new routes
+     * (GET /api/cfgfs/format_pending, POST /api/cfgfs/format_confirm --
+     * the ask-first confirmation surface for cfg_fs_mount.c's auto-format
+     * gate) plus dualwrite_window_http.c's two (concurrent, unrelated pass)
+     * took the real count from 118 to 121 -- three over this cap.
+     * check_uri_handler_cap.ps1 caught it exactly as designed. Set to 130:
+     * 121 plus 9 spare slots, same headroom as every bump above. RAM cost:
+     * 12 extra pointer slots * 4 bytes = 48 bytes, noise against the
+     * documented ~11.9 kB DRAM failure floor. */
+    config.max_uri_handlers = 130;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

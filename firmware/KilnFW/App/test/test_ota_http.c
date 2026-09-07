@@ -191,6 +191,17 @@ void hal_wdt_reboot(void) {}
 esp_err_t profiles_builtin_restore_all(void) { return ESP_OK; }
 
 // ---------------------------------------------------------------------------
+// cfg_fs_mount.h (2026-09-07) -- factory_reset.c's "all" scope now also
+// formats the `cfg` LittleFS partition (docs/FILESYSTEM_USER_DATA_PLAN.md
+// section 5 step 1, owner decision). Never actually exercised by any test in
+// this file (same "the interlock check always refuses first" note above --
+// no test here reaches a scope's actual execute_scope_job()), but the symbol
+// must still resolve since factory_reset.c is compiled directly into this
+// file. cfg_fs_mount.c itself is not part of this (or any) host test build
+// (it needs esp_littlefs.h/esp_partition.h, ESP-IDF only).
+esp_err_t cfg_fs_confirm_format_device(void) { return ESP_OK; }
+
+// ---------------------------------------------------------------------------
 // uart_bridge.h/flash_worker.h (2026-09-07) -- execute_scope() now dispatches
 // its NVS erase through uart_bridge_ext_run_on_flash_worker() (see
 // flash_worker_lint.py's factory_reset.c entry) instead of calling

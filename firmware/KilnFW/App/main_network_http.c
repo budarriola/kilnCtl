@@ -29,8 +29,10 @@
 #include "board_temps_http.h"
 #include "diagnostics_http.h"
 #include "partition_info_http.h"
+#include "dualwrite_window_http.h"
 #include "backup_http.h"
 #include "settings_http.h"
+#include "cfg_fs_format_http.h"
 #include "factory_reset.h"
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
@@ -342,6 +344,17 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                  esp_err_to_name(factory_reset_err));
     }
 
+    // cfg_fs_mount_device() (main_boot_early.c) may have refused to
+    // auto-format the `cfg` partition because its content scan found
+    // evidence of real data -- this is the operator-facing surface for that
+    // refusal (GET status + explicit-confirm POST), see
+    // cfg_fs_format_http.h's own comment.
+    esp_err_t cfg_fs_format_http_err = cfg_fs_format_http_start();
+    if (cfg_fs_format_http_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "cfg_fs_format_http_start failed: %s -- no format-confirmation endpoint this boot",
+                 esp_err_to_name(cfg_fs_format_http_err));
+    }
+
     // TODO.md 8.2's boot-time report: capture AFTER every module above that
     // owns an NVS partition (wifi_prov_start() in main_boot_early.c,
     // relay_cycles_init(), zones/profiles_http_start() just above) has
@@ -420,6 +433,21 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (partition_info_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "partition_info_http_start failed: %s -- no /api/partitions this boot",
                  esp_err_to_name(partition_info_err));
+    }
+
+    // FILESYSTEM_PLAN.md "Dual-write window" section: GET /api/dualwrite_window
+    // reports progress toward the owner-approved dual-write closure criterion
+    // (20 consecutive clean boots + one file-backed firing + one verified
+    // restore round trip), and POST .../restore_verified lets PC-side backup
+    // tooling attest the restore leg. Also runs the once-per-boot clean/
+    // unclean check (dualwrite_window_boot_check()) -- see that function's own
+    // doc comment for why here rather than main_boot_early.c. Same "pure
+    // page/small endpoint, no ordering dependency" placement as everything
+    // else in this block.
+    esp_err_t dualwrite_window_err = dualwrite_window_http_start();
+    if (dualwrite_window_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "dualwrite_window_http_start failed: %s -- no /api/dualwrite_window this boot",
+                 esp_err_to_name(dualwrite_window_err));
     }
 
     // UI_PLAN.md "web page structure" section, items 2-4: the settings hub

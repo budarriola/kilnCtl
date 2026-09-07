@@ -8,6 +8,8 @@
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
+#include "cfg_fs_mount.h" /* cfg_fs_confirm_format_device() -- "all" scope formats the `cfg`
+                            * LittleFS partition too, see reset_scope_t's format_cfg_fs field */
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "hal_wdt.h"
@@ -75,6 +77,19 @@ typedef struct {
      * explicitly makes the intent part of the scope definition rather than
      * an accident of storage layout, and re-syncs the RAM copy. */
     bool restore_builtin_profiles;
+
+    /* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+     * step 1, "The reset section of the webpage should format when
+     * reseting"): "all" is the one scope that also erases and reformats the
+     * `cfg` LittleFS partition -- the same partition zones_config_cfg_fs.c/
+     * profiles_cfg_fs.c/pref_cfg_fs.c dual-write onto. A NARROWER scope
+     * (wifi/kiln/profiles) must NOT touch it: those buttons promise "erases
+     * ONLY what it says" (settings_page.html's own copy), and cfg holds a
+     * MIX of kiln-config-shaped and profile-shaped data today -- formatting
+     * it under "kiln" or "profiles" alone would silently destroy the other
+     * category too, breaking that promise. Only "all" (erase everything) is
+     * honest about reaching it. */
+    bool format_cfg_fs;
 } reset_scope_t;
 
 static const char *const kWifiOnly[] = { WIFI_NVS_PARTITION, NULL };
@@ -83,10 +98,10 @@ static const char *const kProfilesOnly[] = { PROFILES_NVS_PARTITION, NULL };
 static const char *const kAll[] = { WIFI_NVS_PARTITION, KILN_NVS_PARTITION, PROFILES_NVS_PARTITION, NULL };
 
 static const reset_scope_t kScopes[] = {
-    { "wifi", kWifiOnly, false },
-    { "kiln", kKilnOnly, false },
-    { "profiles", kProfilesOnly, true },
-    { "all", kAll, true },
+    { "wifi", kWifiOnly, false, false },
+    { "kiln", kKilnOnly, false, false },
+    { "profiles", kProfilesOnly, true, false },
+    { "all", kAll, true, true },
 };
 #define NUM_SCOPES (sizeof(kScopes) / sizeof(kScopes[0]))
 
@@ -172,6 +187,34 @@ static void execute_scope_job(void *arg)
             }
         } else {
             ESP_LOGW(TAG, "erased NVS partition '%s'", part);
+        }
+    }
+
+    /* Formats the `cfg` LittleFS partition too, for "all" only -- see
+     * reset_scope_t's format_cfg_fs doc comment. Runs AFTER the NVS erases
+     * above for the same "before vs. after" reasoning as the builtin-
+     * profile restore: this whole job already runs on the flash worker (see
+     * execute_scope() below), and cfg_fs_confirm_format_device() detects
+     * that (uart_bridge_ext_is_on_flash_worker()) and runs its own format
+     * inline instead of dispatching again -- calling it from here, rather
+     * than from execute_scope() before dispatch, is what makes that
+     * same-worker fast path apply. This IS the explicit operator action the
+     * mount-failure contract requires (docs/FILESYSTEM_USER_DATA_PLAN.md
+     * section 3 point 4) -- clicking "Factory default" already carries the
+     * same confirm-dialog the danger-zone buttons all require
+     * (settings_page.html's kcConfirm()), so this never goes through the
+     * ask-first / awaiting-confirmation path cfg_fs_mount.c's boot-time
+     * auto-format gate uses. */
+    if (scope->format_cfg_fs) {
+        esp_err_t cfg_fmt_err = cfg_fs_confirm_format_device();
+        if (cfg_fmt_err != ESP_OK) {
+            ESP_LOGE(TAG, "cfg_fs_confirm_format_device() failed during factory reset: %s",
+                     esp_err_to_name(cfg_fmt_err));
+            if (first_err == ESP_OK) {
+                first_err = cfg_fmt_err;
+            }
+        } else {
+            ESP_LOGW(TAG, "cfg LittleFS partition formatted as part of factory reset");
         }
     }
 
