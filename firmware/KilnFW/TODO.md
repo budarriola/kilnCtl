@@ -104,10 +104,15 @@ text, and the safety-link config-page hardening. Still open:
       fixed 2026-08-30 (`UI_PLAN.md` 5.2 audit): `ui_page_temperature.c`'s
       relay tiles, relay error toasts and zone rows are now all 0-based,
       matching the web side's R0-R3.
-- [ ] **The Safety Processor LCD page never shows the current state.** It
-      reports the last trip, temperatures and link version, but not whether
-      the processor is ARMED or TRIPPED right now, nor whether it has been
-      commissioned. That is the page an operator opens to answer exactly that.
+- [x] **The Safety Processor LCD page never shows the current state.** FIXED
+      2026-09-07 -- Diagnostics' Safety & Board Health page (`ui_page_diagnostics.c`)
+      now shows live link UP/DOWN (`ds.safety_ready`, the staleness-gated bit,
+      not the sticky `link_version_known`), the live ARMED/TRIPPED word (with
+      trip reason inline when tripped, already present), and a Commissioned
+      Yes/No/unknown row (`ds.safety_build_known` + `ds.safety_config_crc`).
+      No new link frames or protocol fields; the Enclosure temp row was
+      dropped to hold the page at 5 text rows + 3 cold-junction rows, same as
+      before, so the existing no-scroll budget proof still holds.
 - [x] **Unknown `/api/*` paths serve the 90 kB dashboard HTML with 200** rather
       than 404 (the catch-all handler). A client gets a page where it expects
       JSON and has to guess. DONE -- `captive_portal_404_handler()`

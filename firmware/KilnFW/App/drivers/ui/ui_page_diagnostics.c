@@ -387,7 +387,14 @@ static lv_obj_t *s_esp32_temp_label;
  * carried over -- it duplicated s_esp32_temp_label above (PSRAM & storage
  * page); see the header comment for why dropping it now is the honest call. */
 static lv_obj_t *s_safety_temp_label;
-static lv_obj_t *s_enclosure_temp_label;
+/* TODO.md:107 fix (2026-09-06): this row used to show enclosure temperature
+ * -- dropped here (condensed out, per that item's "remove/condense less
+ * useful rows if needed") in favor of a live commissioned yes/no row. The
+ * Board Health cold-junction rows below already cover per-channel thermal
+ * detail; enclosure temp had no safety-decision consumer, unlike arm/trip/
+ * commission state, which is exactly what an operator opens this page to
+ * check and previously had no live answer here (only last-trip history). */
+static lv_obj_t *s_commissioned_label;
 static lv_obj_t *s_safety_power_label;
 static lv_obj_t *s_link_version_label;
 static lv_obj_t *s_trip_label;
@@ -751,13 +758,19 @@ static void refresh_cb(lv_timer_t *timer)
     } else {
         lv_label_set_text(s_safety_temp_label, "Safety temp: ---");
     }
-    if (ds.enclosure_temp_valid) {
-        snprintf(buf, sizeof(buf), "Enclosure temp: %.1f %s",
-                 (double)unit_pref_convert(ds.enclosure_temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE),
-                 unit_pref_suffix(ds.temp_unit));
-        lv_label_set_text(s_enclosure_temp_label, buf);
+    /* TODO.md:107 -- "commissioned yes/no", read the same way
+     * safety_link.h's own peer_build_known/config_crc comment documents:
+     * config_crc == 0 alongside safety_build_known == true means the Pico is
+     * still running compiled-in defaults, i.e. never commissioned. Unknown
+     * (not "No") until safety_build_known is true, same "don't report a
+     * stale/zero value as real" rule every other safety_build_* consumer on
+     * this page already follows. */
+    if (!ds.safety_build_known) {
+        lv_label_set_text(s_commissioned_label, "Commissioned: unknown (no build reply yet)");
+    } else if (ds.safety_config_crc != 0u) {
+        lv_label_set_text(s_commissioned_label, "Commissioned: Yes");
     } else {
-        lv_label_set_text(s_enclosure_temp_label, "Enclosure temp: ---");
+        lv_label_set_text(s_commissioned_label, "Commissioned: No (running defaults)");
     }
     /* CT_COMMISSIONING_PLAN.md step 4 -- real-amps display. Appended to the
      * existing Power row (no new row -- ui_page_diagnostics.c's own budget
@@ -810,15 +823,23 @@ static void refresh_cb(lv_timer_t *timer)
      * older side added length without adding an actionable fact) so this
      * sentence stays a single wrapped line even at two-digit protocol
      * versions -- see this file's header comment for the character count. */
-    if (!ds.link_version_known) {
-        lv_label_set_text(s_link_version_label, "Link: ---");
+    /* TODO.md:107 -- "link state (up/down)". ds.safety_ready IS
+     * dashboard_safety_ready()'s own staleness-gated answer (this file's
+     * header include comment on dashboard_http.h: "must equal link_up,
+     * never merely non-NULL") -- the same bit dashboard_http_get_hw_ready()
+     * reports, not a re-derivation of it from link_version_known, which only
+     * ever latches true/sticky and would show UP forever after one frame. */
+    if (!ds.safety_ready) {
+        lv_label_set_text(s_link_version_label, "Link: DOWN");
+    } else if (!ds.link_version_known) {
+        lv_label_set_text(s_link_version_label, "Link: UP (version unknown)");
     } else if (ds.link_version_compatible) {
-        snprintf(buf, sizeof(buf), "Link: ESP %u / Pico %u (OK)",
+        snprintf(buf, sizeof(buf), "Link: UP -- ESP%u/Pico%u (OK)",
                  (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version);
         lv_label_set_text(s_link_version_label, buf);
     } else {
         char vbuf[80];
-        snprintf(vbuf, sizeof(vbuf), "Link: ESP%u/Pico%u INCOMPATIBLE, update ESP",
+        snprintf(vbuf, sizeof(vbuf), "Link: UP -- ESP%u/Pico%u INCOMPATIBLE, update ESP",
                  (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version);
         lv_label_set_text(s_link_version_label, vbuf);
     }
@@ -1448,7 +1469,7 @@ lv_obj_t *ui_page_diagnostics_build(void)
      * this consolidation's report for the full character-count arithmetic. */
     lv_obj_t *safety_bh_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_SAFETY_BOARD_HEALTH];
     s_safety_temp_label = build_full_text_row_accent(safety_bh_page, "Safety temp: ---", UI_THEME_ACCENT_1);
-    s_enclosure_temp_label = build_full_text_row_accent(safety_bh_page, "Enclosure temp: ---", UI_THEME_ACCENT_2);
+    s_commissioned_label = build_full_text_row_accent(safety_bh_page, "Commissioned: ---", UI_THEME_ACCENT_2);
     s_safety_power_label = build_full_text_row_accent(safety_bh_page, "Power: ---", UI_THEME_ACCENT_3);
     s_link_version_label = build_full_text_row_accent(safety_bh_page, "Link: ---", UI_THEME_ACCENT_4);
     s_trip_label = build_full_text_row_accent(safety_bh_page, "State: ---", UI_THEME_ACCENT_5);
