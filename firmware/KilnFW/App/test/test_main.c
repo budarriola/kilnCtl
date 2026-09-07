@@ -40,6 +40,7 @@ void run_test_backlight_pwm(void);
 void run_test_display_power_policy(void);
 void run_test_display_power_cfg(void);
 void run_test_display_power_wiring(void);
+void run_test_dashboard_protocol_version(void);
 void run_test_crash_report(void);
 void run_test_watchdog_cfg(void);
 void run_test_ramp_assist_cfg(void);
@@ -108,6 +109,7 @@ int main(void)
     run_test_display_power_policy();
     run_test_display_power_cfg();
     run_test_display_power_wiring();
+    run_test_dashboard_protocol_version();
     run_test_crash_report();
     run_test_watchdog_cfg();
     run_test_ramp_assist_cfg();

@@ -34,6 +34,7 @@
 #include "safety_trip_words.h" /* shared cause/remedy/fault-source decode -- see that header's own comment */
 #include "sim_backend.h"
 #include "uart_task_ids.h"
+#include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- self_protocol_version below is this firmware's ESP<->Pico link version, not the PC<->ESP UART_PROTOCOL_VERSION */
 #include "ramp_assist_cfg.h"
 #include "unit_pref.h"
 #include "watchdog_cfg.h"
@@ -335,7 +336,7 @@ void dashboard_get_status(dashboard_status_t *out)
          * firmware's own protocol number is always known regardless of link
          * state, the peer's is whatever the last FW_VERSION frame said (or
          * unknown, on this no-Pico bench build). */
-        out->self_protocol_version = (uint16_t)UART_PROTOCOL_VERSION;
+        out->self_protocol_version = (uint16_t)KILNLINK_PROTOCOL_VERSION;
         (void)safety_link_get_peer_version_status(s_dash.safety, &out->link_version_known,
                                                     &out->link_version_compatible,
                                                     &out->peer_protocol_version,
@@ -368,7 +369,7 @@ void dashboard_get_status(dashboard_status_t *out)
         memcpy(out->safety_build_datetime, datetime_buf, datetime_len);
         out->safety_build_datetime[datetime_len] = '\0';
     } else {
-        out->self_protocol_version = (uint16_t)UART_PROTOCOL_VERSION;
+        out->self_protocol_version = (uint16_t)KILNLINK_PROTOCOL_VERSION;
     }
     if (!s_dash.safety || safety_status_err != ESP_OK) {
         /* memset(out, 0, ...) above would otherwise leave these reading as a
