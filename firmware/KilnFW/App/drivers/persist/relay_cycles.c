@@ -682,6 +682,65 @@ bool relay_cycles_reset(unsigned relay)
     return true;
 }
 
+/* Backup/restore support (2026-09-07 backup-gate pass): full_board_backup.py
+ * captures relay cycle counters via GET /api/status but no restore path
+ * existed -- losing them on a partition-table reflash silently zeroes
+ * relay-life accounting the operator relies on to know when a contact is
+ * near end-of-life. Reuses the exact snapshot-then-flash-worker-dispatch
+ * shape relay_cycles_reset() already established just above, so this is not
+ * a parallel persistence mechanism. Idempotent: setting the same counts
+ * twice in a row writes the same blob both times. Validates before writing
+ * anything -- `counts` values above RELAY_CYCLES_RESTORE_MAX_COUNT are
+ * refused wholesale (all-or-nothing) rather than clamped, since a
+ * wildly-out-of-range value is much more likely a corrupt/truncated backup
+ * field than a real relay with that many operations. */
+#define RELAY_CYCLES_RESTORE_MAX_COUNT 100000000u /* 100M -- far past any rated life in this file's own table */
+
+bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT])
+{
+    if (!counts || !ensure_lock()) {
+        return false;
+    }
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        if (counts[r] > RELAY_CYCLES_RESTORE_MAX_COUNT) {
+            ESP_LOGE(TAG, "relay_cycles_restore_all: refusing -- counts[%u]=%lu exceeds sanity ceiling %u; "
+                          "no counts changed", r, (unsigned long)counts[r], RELAY_CYCLES_RESTORE_MAX_COUNT);
+            return false;
+        }
+    }
+
+    reset_persist_job_arg_t snap;
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    memcpy(s_rc.counts, counts, sizeof(s_rc.counts));
+    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
+    memcpy(snap.types, s_rc.types, sizeof(snap.types));
+    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
+    s_rc.dirty = false;
+    xSemaphoreGive(s_rc.lock);
+
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
+    esp_err_t err;
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        reset_persist_job(&ctx);
+        err = ctx.err;
+    } else {
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
+        err = (submit_err != ESP_OK) ? submit_err : ctx.err;
+    }
+
+    if (err != ESP_OK) {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.dirty = true;
+        xSemaphoreGive(s_rc.lock);
+        ESP_LOGW(TAG, "relay_cycles_restore_all: persist failed (%s) -- counts restored in RAM only",
+                 esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "relay_cycles_restore_all: counts restored from backup and persisted");
+    return true;
+}
+
 /* opus review finding (MEDIUM): both of these used to hold s_rc.lock across
  * the full persist_locked() NVS commit -- relay_cycles_add()/
  * relay_cycles_note_safety_edge() take the same lock with portMAX_DELAY from

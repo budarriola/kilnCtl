@@ -499,6 +499,76 @@ static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
 }
 #undef RELAY_CYCLES_RESET_BODY_MAX
 
+/* POST /api/relay_cycles/restore c0=N&c1=N&c2=N&c3=N&c4=N -- backup-gate pass
+ * 2026-09-07 (docs/FILESYSTEM_PLAN.md runbook). full_board_backup.py already
+ * captures these five counts as /api/status's relay_counts array; this is
+ * the matching restore path, added because none existed. Same form-body
+ * convention as relay_cycles_reset_post_handler() just above, one field per
+ * RELAY_CYCLES_COUNT slot rather than a single index. All-or-nothing: a
+ * missing/malformed field refuses the WHOLE request before relay_cycles_
+ * restore_all() is even called, and relay_cycles_restore_all() itself
+ * repeats the sanity-ceiling check on every value (see that function's own
+ * comment) -- defence in depth, not redundant trust, since this handler
+ * cannot see that ceiling constant without including relay_cycles.c. */
+#define RELAY_CYCLES_RESTORE_BODY_MAX 128
+static esp_err_t relay_cycles_restore_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > RELAY_CYCLES_RESTORE_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[RELAY_CYCLES_RESTORE_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    uint32_t counts[RELAY_CYCLES_COUNT];
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        char field[8];
+        snprintf(field, sizeof(field), "c%u", r);
+        char val[16];
+        int val_len = http_form_find_field(body, field, val, sizeof(val));
+        if (val_len <= 0) {
+            char err[32];
+            snprintf(err, sizeof(err), "missing field \"%s\"", field);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+            return ESP_OK;
+        }
+        char *endp = NULL;
+        unsigned long v = strtoul(val, &endp, 10);
+        if (endp == val || *endp != '\0') {
+            char err[48];
+            snprintf(err, sizeof(err), "field \"%s\" is not a valid number", field);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+            return ESP_OK;
+        }
+        counts[r] = (uint32_t)v;
+    }
+
+    bool ok = relay_cycles_restore_all(counts);
+
+    char json[192];
+    int n;
+    if (ok) {
+        n = snprintf(json, sizeof(json), "{\"ok\":true}");
+        httpd_resp_set_status(req, "200 OK");
+    } else {
+        n = snprintf(json, sizeof(json),
+            "{\"ok\":false,\"error\":\"restore refused or persist failed -- see board log for which\"}");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+#undef RELAY_CYCLES_RESTORE_BODY_MAX
+
 /* GET /api/ramp_assist -- current state of the kiln-wide ramp-assist toggle
  * (ramp_assist_cfg.h). Also carried in GET /api/status (dashboard_http.c)
  * for the persistent indicator; this endpoint exists so the diagnostics
@@ -885,6 +955,9 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     static const httpd_uri_t relay_cycles_reset_uri = {
         .uri = "/api/relay_cycles/reset", .method = HTTP_POST, .handler = relay_cycles_reset_post_handler,
     };
+    static const httpd_uri_t relay_cycles_restore_uri = {
+        .uri = "/api/relay_cycles/restore", .method = HTTP_POST, .handler = relay_cycles_restore_post_handler,
+    };
     static const httpd_uri_t danger_get_uri = {
         .uri = "/api/diagnostics/danger", .method = HTTP_GET, .handler = danger_get_handler,
     };
@@ -964,6 +1037,11 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     err = httpd_register_uri_handler(server, &relay_cycles_reset_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/relay_cycles/reset) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &relay_cycles_restore_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/relay_cycles/restore) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &danger_get_uri);

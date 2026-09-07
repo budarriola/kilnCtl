@@ -154,6 +154,22 @@ relay_budget_tier_t relay_cycles_max_budget_tier(void);
  * does. */
 bool relay_cycles_reset(unsigned relay);
 
+/* Restores all RELAY_CYCLES_COUNT counts from a backup (e.g.
+ * /api/status.relay_counts previously captured by full_board_backup.py),
+ * validates every value against a sanity ceiling BEFORE writing anything
+ * (all-or-nothing -- a single out-of-range value refuses the whole call so a
+ * truncated/corrupt backup field cannot land a partial restore), and
+ * persists immediately through the same flash-worker path
+ * relay_cycles_reset() uses. Idempotent: calling this twice with the same
+ * `counts` produces the same on-disk blob both times. types/rated_overrides
+ * are left untouched, same as relay_cycles_reset()'s convention. Returns
+ * false for a NULL pointer, an out-of-range count, or a persist failure (in
+ * which case the in-RAM counts ARE updated but not yet durable -- same
+ * "keep going, retry later" contract relay_cycles_reset() documents). MUST
+ * be called from a task with an internal-SRAM stack, same constraint as
+ * every other write path in this module. */
+bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT]);
+
 /* Writes to NVS if anything changed and the interval has elapsed. Cheap to
  * call every control tick. */
 void relay_cycles_maybe_persist(void);

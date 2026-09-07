@@ -181,6 +181,99 @@ Before any partition-table flash, run in order:
    `pid_kp/pid_ki/pid_kd` and `coupling_c1/coupling_c2` against the bench
    values above via `GET /api/zones` before starting any firing.
 
+## Backup-gate closure, 2026-09-07 -- the 6 uncovered items
+
+Commit `031ededb` proved the backup gate above was NOT met: zones config and
+profiles round-trip (host-test-proven, unchanged), but 6 items captured by
+`full_board_backup.py` had no proven import path. Resolved item by item:
+
+1. **Kiln config slots** (`/api/kiln_configs`) -- NEEDS a restore path, and
+   already HAS one: `POST /api/kiln_configs/save` (plus `/clone`, `/rename`)
+   already accept the same fields the GET returns. Restoring a slot is
+   replaying its captured `name`/zone data through `save`. No new firmware
+   code needed -- this was a documentation gap (the runbook never said the
+   existing endpoints ARE the restore path), not a missing-capability gap.
+2. **Adaptive-tune state** (`/api/adaptive_tune`) -- does NOT need a byte-
+   exact restore. The Ki baseline is re-derived from live firing behavior
+   (`adaptive_tune_zone_tick()`/`adaptive_tune_run_end()`); a fresh board
+   re-learns it over the next firing or two, same as a factory-new board
+   would. The only durable *preference* here is the opt-in enable flag,
+   which already has its own restorable POST (`/api/adaptive_tune/enable`).
+   Losing the baseline costs one extra firing of slightly-off Ki before it
+   re-converges -- not an irreplaceable loss.
+3. **Relay cycle counters / relay_life** -- NEEDS a restore path and had
+   none: `relay_cycles.c` had a setter for relay *type* and a *reset-to-
+   zero*, but nothing to set an arbitrary count back from a backup. Losing
+   these on a reflash silently resets every relay's wear accounting to 0,
+   which reads as "brand new contact" to the 80%/90% budget-tier warning --
+   the real cost is a false sense of remaining contact life, not just lost
+   history. **Implemented**: `relay_cycles_restore_all()`
+   (`firmware/KilnFW/App/drivers/persist/relay_cycles.c`/`.h`) plus
+   `POST /api/relay_cycles/restore` (`firmware/KilnFW/App/drivers/http/diagnostics_http.c`,
+   form body `c0=N&c1=N&c2=N&c3=N&c4=N`). Reuses the exact snapshot-then-
+   flash-worker-dispatch shape `relay_cycles_reset()` already used (no
+   parallel persistence mechanism). Validates every count against a sanity
+   ceiling (100,000,000) BEFORE writing anything -- all-or-nothing, so a
+   truncated/corrupted archive field cannot land a partial restore.
+   Idempotent: restoring the same array twice writes byte-identical blobs.
+   Proven by `firmware/KilnFW/App/test/test_relay_cycles.c`'s new
+   `test_restore_all_sets_every_count_and_persists`,
+   `test_restore_all_is_idempotent`,
+   `test_restore_all_refuses_out_of_range_count_and_writes_nothing`
+   (NEGATIVE TEST: one field past the ceiling refuses the whole restore, RAM
+   counts fully unchanged, no NVS namespace ever created -- proven, not
+   asserted) and `test_restore_all_rejects_null_pointer`. All pass:
+   `run_state_relay_cycles` executable green, `212/212` host test binaries
+   overall unaffected. NOT yet wired into the native `/api/backup/export`
+   format -- it is a standalone POST an operator (or a future backup-import
+   script) calls with the values `full_board_backup.py` already captured
+   under `/api/status`'s `relay_counts`.
+4. **Ramp-assist** (`/api/ramp_assist`) -- a preference (single enable flag).
+   Regenerable in the sense that losing it just means re-flipping a switch,
+   but it already HAS a restore path: `POST /api/ramp_assist` (GET/POST pair
+   already existed, `diagnostics_http.c`). No new code needed.
+5. **Display power policy** (`/api/settings/display_power`) -- a preference
+   (brightness/timeout/keep-on-while-firing/display-on-error). Same
+   situation as ramp-assist: `POST /api/settings/display_power` already
+   exists and accepts every field the GET returns. No new code needed.
+6. **RP2040 safety commissioning mirror** (`/api/safety/commissioning`) --
+   **removed from the gate.** This is a *mirror* on the ESP side of data
+   whose master copy lives on the RP2040's own 4K CRC'd config store, on a
+   physically separate chip with its own flash. An ESP partition-table
+   change does not touch the RP2040 at all -- the RP2040 is simply
+   unaffected. If the RP2040 itself needed reflashing/re-commissioning that
+   would be a SaftyFW concern with its own backup story (out of scope here),
+   not a reason to hold the ESP partition flash. Restoring the ESP's read-
+   only mirror of RP2040 state would not even be meaningful: the ESP has no
+   write path that pushes values INTO the RP2040 config store from this
+   mirror (`/api/safety/commissioning`'s POST writes live RP2040 params over
+   the safety link during commissioning, which is a different, intentional,
+   operator-driven action -- not a backup-restore replay).
+
+### Net result
+
+Of the 6, only #3 (relay counters) needed and received new firmware code.
+#1/#4/#5 already had working restore paths that the original runbook simply
+never named as such. #2 is honestly re-derivable, not restorable-or-bust.
+#6 does not belong in an ESP-partition backup gate at all.
+
+**Wi-Fi credential gap (unchanged, restated for this pass):** there is no
+GET endpoint for Wi-Fi credentials (by design -- see `backup_http.c`'s
+header comment), so `full_board_backup.py` cannot and does not capture them.
+If a partition change moves or erases `wifi_nvs` (this revision's `cfg`
+addition does not -- see "Data loss" above), Wi-Fi must be re-provisioned
+manually via `/wifi` afterward. This is a known, permanent, by-design gap,
+not something this pass could close.
+
+**THE PARTITION FLASH GATE IS NOW MET** for the 6 items this pass covered,
+given the above verdicts (2 already restorable via existing endpoints, 1
+newly implemented and host-test-proven including a negative test, 1
+honestly re-derivable, 1 removed as inapplicable) plus the Wi-Fi caveat
+above, which was already a documented, accepted gap before this pass and
+remains one now. This does not re-run the live-board round trip in step 5
+of the original runbook below -- that still needs to happen against the
+actual board before flashing, per that runbook's own step 5.
+
 Headlines: 11 items MOVE, 11 KEEP, 2 undecided. Wi-Fi credentials, boot-guard
 state, touch calibration, watchdog/OTA/crash records and the RP2040 config
 store all stay in NVS — every one of them is read before any mount, or lives on

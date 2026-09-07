@@ -505,6 +505,115 @@ static void test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy(
     g_test_stub_semaphore_take_default = 1; // restore pdTRUE for every test after this one
 }
 
+// --- backup-gate pass (docs/FILESYSTEM_PLAN.md, 2026-09-07):
+// relay_cycles_restore_all() -- the counterpart to relay_cycles_reset()
+// above, restoring all RELAY_CYCLES_COUNT counts from a backup archive
+// (full_board_backup.py's /api/status.relay_counts) rather than zeroing one.
+
+static void test_restore_all_sets_every_count_and_persists(void)
+{
+    TEST_SECTION("relay_cycles_restore_all -- sets every count from a backup array, leaves "
+                 "type/override alone, and persists through the flash-worker stub");
+    reset_all();
+    relay_cycles_set_type(0, RELAY_TYPE_CONTACTOR, 55);
+
+    uint32_t backup[RELAY_CYCLES_COUNT];
+    for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        backup[i] = 1000u + i;
+    }
+    TEST_CHECK(relay_cycles_restore_all(backup) == true, "restore succeeds on the normal path");
+    for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        TEST_CHECK(s_rc.counts[i] == backup[i], "every restored count lands in RAM");
+    }
+
+    relay_type_t type;
+    uint32_t override_val;
+    relay_cycles_get_type(0, &type, &override_val);
+    TEST_CHECK(type == RELAY_TYPE_CONTACTOR && override_val == 55,
+               "type/override are untouched by a restore, same convention as relay_cycles_reset()");
+
+    TEST_CHECK(s_rc.dirty == false, "the dispatched persist actually landed (dirty cleared)");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "reopen for readback");
+    relay_cycles_blob_t blob;
+    size_t len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
+               "blob round-trips");
+    hal_kv_close(&h);
+    for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        TEST_CHECK(blob.counts[i] == backup[i], "the restored counts are what actually landed in the "
+                                                 "store, not just in RAM (byte-equal to the archive)");
+    }
+}
+
+static void test_restore_all_is_idempotent(void)
+{
+    TEST_SECTION("relay_cycles_restore_all -- calling it twice with the same archive produces the "
+                 "identical on-disk blob both times (idempotent restore)");
+    reset_all();
+
+    uint32_t backup[RELAY_CYCLES_COUNT];
+    for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        backup[i] = 500u + i * 3u;
+    }
+    TEST_CHECK(relay_cycles_restore_all(backup) == true, "first restore succeeds");
+    relay_cycles_blob_t blob_first;
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    size_t len = sizeof(blob_first);
+    hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob_first, &len);
+    hal_kv_close(&h);
+
+    TEST_CHECK(relay_cycles_restore_all(backup) == true, "second restore of the same archive succeeds");
+    relay_cycles_blob_t blob_second;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    len = sizeof(blob_second);
+    hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob_second, &len);
+    hal_kv_close(&h);
+
+    TEST_CHECK(memcmp(&blob_first, &blob_second, sizeof(blob_first)) == 0,
+               "restoring the same archive twice writes byte-identical blobs -- idempotent");
+}
+
+// NEGATIVE TEST: a corrupted/out-of-range archive field must refuse the
+// WHOLE restore, not silently clamp or partially write. Proves the
+// all-or-nothing contract relay_cycles_restore_all()'s own comment claims.
+static void test_restore_all_refuses_out_of_range_count_and_writes_nothing(void)
+{
+    TEST_SECTION("relay_cycles_restore_all -- NEGATIVE TEST: one field far past the sanity ceiling "
+                 "(simulating a corrupted/truncated backup) refuses the ENTIRE restore -- no partial "
+                 "write, RAM counts unchanged, no NVS write attempted");
+    reset_all();
+    s_rc.counts[0] = 11;
+    s_rc.counts[1] = 22;
+    s_rc.counts[2] = 33;
+
+    uint32_t backup[RELAY_CYCLES_COUNT];
+    for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        backup[i] = 100u + i; // otherwise-plausible values
+    }
+    backup[2] = RELAY_CYCLES_RESTORE_MAX_COUNT + 1u; // the one corrupted field
+
+    TEST_CHECK(relay_cycles_restore_all(backup) == false,
+               "restore is refused because of the single out-of-range field");
+    TEST_CHECK(s_rc.counts[0] == 11 && s_rc.counts[1] == 22 && s_rc.counts[2] == 33,
+               "RAM counts are completely unchanged -- not even the valid fields were applied "
+               "(all-or-nothing, checked before any write)");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "no NVS write was ever attempted -- the namespace was never created");
+}
+
+static void test_restore_all_rejects_null_pointer(void)
+{
+    TEST_SECTION("relay_cycles_restore_all -- a NULL counts pointer is refused, not undefined behavior");
+    reset_all();
+    TEST_CHECK(relay_cycles_restore_all(NULL) == false, "NULL is refused");
+}
+
 void run_test_relay_cycles(void)
 {
     g_test_stub_semaphore_take_default = 1; // pdTRUE -- see comment above test_maybe_persist_skips_...
@@ -520,6 +629,10 @@ void run_test_relay_cycles(void)
     test_reset_rejects_out_of_range_relay();
     test_reset_runs_inline_when_already_on_flash_worker();
     test_reset_does_not_lose_a_concurrent_add();
+    test_restore_all_sets_every_count_and_persists();
+    test_restore_all_is_idempotent();
+    test_restore_all_refuses_out_of_range_count_and_writes_nothing();
+    test_restore_all_rejects_null_pointer();
     test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
