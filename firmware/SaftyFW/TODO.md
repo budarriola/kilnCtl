@@ -862,3 +862,23 @@ sensor-invalid WARN, expected, no safety TC attached on this bench unit)
 and `trip_mask 0x0000` -- the boot-time trip did not survive the reflash;
 no `debug_reset` was needed. `safety_get_link_stats` showed 1 crc/framing
 error immediately after the reset transient, not climbing afterward.
+
+Flashed both processors to `fc6d30f8` 2026-09-07, carrying forward
+`b12faf41`/`cb6f3cd5` (uart_log_bridge eviction-severity ordering) and
+`52f4c944` (safety trip wording) since the previous flash. ESP built and
+flashed first from `C:/wt/espflash` (origin/main moved from `db2d7eb5` to
+`fc6d30f8` mid-task; rebuilt at the newer sha before flashing) via
+`flash_firmware()`, verified: PID gains and coupling matrix byte-identical
+to pre-flash (Zone0/1/2 Kp/Ki/Kd and all nine coupling coefficients
+unchanged), heap clean, no crash report. Pico built from a clean detached
+worktree, `C:/wt/picoflash2`, off the same sha, relays confirmed off / no
+firing pre-flash, flashed via `debug_program(peer="pico")`. Post-flash:
+boot_id 88, `safety_get_fw_version`/ESP both report protocol v12
+compatible. Immediately after reset the board briefly latched
+`trip_reason 6` (S6a `MAIN_FAULT`, the GPIO10 main-fault discrete input) --
+a one-shot reset-transient glitch on that pin, not a real fault condition;
+`safety_clear_trip()` cleared it and it did not return. The board then
+settled to steady state `state warn`, `warn_mask 0x0010`, `trip_mask
+0x0000` (S5 sensor-invalid WARN, expected -- no safety TC attached on this
+bench unit). `safety_get_link_stats` showed 1 crc error and 3 timeouts
+during the reset transient, not climbing afterward.
