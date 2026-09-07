@@ -75,6 +75,11 @@ set(SAFTYFW_APP_SOURCES
     # thermo_task.c to feed S5's sensor-invalid path -- see
     # max31856_tc_range_policy.h.
     src/max31856_tc_range_policy.c
+    # Pure retry-cadence policy for re-attempting max31856_configure() while
+    # tc_type has never verified (bring-up race: IC not yet powered when
+    # main.c's one-shot configure() runs) -- consumed by thermo_task.c, see
+    # max31856_reconfig_retry.h.
+    src/max31856_reconfig_retry.c
     src/current_sense.c
     # NOTE: src/spi_owner.c, src/tasks/uart_owner.c and
     # src/tasks/uart_owner_tx_policy.c moved to the hwabstraction_pico

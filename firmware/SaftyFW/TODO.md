@@ -814,12 +814,22 @@ field still holding 0, or the API should not report a 0-valued
 no-default field as set. As it stands, a reader trusting `set` concludes the
 ceiling is commissioned when it is not.
 
-### Bring-up note worth keeping
+### Bring-up note -- FIXED 2026-09-06
 
-The safety MAX31856 must be present **before** the Pico boots: its SPI init
-runs once at startup, so an IC fitted under power reads as `safety TC invalid`
-until the Pico is reset, with no fault indication pointing at the real cause.
-A `debug_reset` over SWD is enough. Also note `watchdog_enable(..., true)` sets
+The safety MAX31856's one-shot `main.c` configure() used to be the only
+attempt ever made: an IC fitted under power or not yet settled latched
+`safety TC invalid` for the rest of the boot, clearable only by a Pico
+reset. `thermo_task.c` now re-attempts `max31856_configure()` every 500 ms
+(cadence policy in `max31856_reconfig_retry.c/.h`) while
+`max31856_tc_type_verified()` is false, up to 20 attempts, then gives up
+(SWD-readable via `s_reconfig_gave_up`/`s_reconfig_retries`). S5 trip
+behaviour during the invalid window is unchanged -- this only lets the
+*sensor* recover once the part answers; a latched trip still requires its
+normal clear path. Host-tested in
+`test/test_max31856_reconfig_retry.c` (recovers after N failures, gives up
+at the bound, respects the retry interval, negative-tested).
+
+Also note `watchdog_enable(..., true)` sets
 `pause_on_debug`, so an attached probe suspends the 1000 ms watchdog — a core
 in a fault state will sit there indefinitely under the debugger instead of
 being reset, which makes a debugger session look worse than the real

@@ -28,6 +28,7 @@
 #include "board_pins.h"
 #include "config_store.h" // safety_tc_installed (0x0211) -- the structural injection gate, see thermo_task.h
 #include "max31856.h"
+#include "max31856_reconfig_retry.h" // periodic re-probe while tc_type is unverified, see its own header
 #include "max31856_tc_range_policy.h" // per-tc_type plausibility band, see its own header for the full argument
 #include "task_priorities.h"
 #include "watchdog_task.h"
@@ -110,6 +111,18 @@
  * a normal build (the branch is compiled out), so this doubles as the
  * SWD-readable proof of which mode a running board is actually in. */
 static volatile uint32_t s_drdy_assumed_reads = 0;
+
+// Bring-up bug (TODO.md): the safety MAX31856's ONE configure() attempt
+// (main.c, pre-scheduler) fails if the IC is not powered/settled yet,
+// latching "safety TC invalid" for the rest of the boot. This state drives
+// max31856_reconfig_retry.h's periodic re-probe from this task's own loop
+// below -- see that header for the full cadence/bound rationale.
+// s_reconfig_retries (SWD-readable, same discipline as s_drdy_assumed_
+// reads above) mirrors the state struct's retry_count so a bench session
+// can see how many re-probes a given boot actually needed.
+static max31856_reconfig_retry_state_t s_reconfig_retry;
+static volatile uint32_t s_reconfig_retries = 0;
+static volatile bool s_reconfig_gave_up = false;
 
 // Before the MAX31856 is configured (or if it never comes up --
 // docs/ARCHITECTURE.md section 5 step 6: "failure is logged, not fatal"),
@@ -316,7 +329,30 @@ static void thermo_task_fn(void *arg)
     gpio_set_irq_enabled_with_callback(SAFTYFW_PIN_THERMO_DRDY, GPIO_IRQ_EDGE_FALL, true,
                                         &thermo_drdy_isr);
 
+    max31856_reconfig_retry_init(&s_reconfig_retry);
+
     for (;;) {
+        // Re-probe the part while its tc_type has never verified -- see
+        // max31856_reconfig_retry.h for the cadence/bound. Attempted before
+        // this cycle's conv_ms/timeout are computed so that a retry which
+        // succeeds THIS iteration already gets the real DRDY-based timeout
+        // below, instead of waiting one more full cycle on the
+        // unconfigured fallback. Does not touch S5/trip-latch semantics:
+        // it only ever changes whether max31856_tc_type_verified() -- and
+        // therefore snap.valid below -- can become true again; a trip that
+        // already latched stays latched regardless.
+        uint32_t retry_now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        bool verified_before_retry = max31856_tc_type_verified();
+        if (max31856_reconfig_retry_should_attempt(&s_reconfig_retry, verified_before_retry,
+                                                    retry_now_ms)) {
+            (void)max31856_configure(config_store_get_tc_type());
+            bool verified_after_retry = max31856_tc_type_verified();
+            max31856_reconfig_retry_note_result(&s_reconfig_retry, verified_after_retry,
+                                                 retry_now_ms);
+            s_reconfig_retries = s_reconfig_retry.retry_count;
+            s_reconfig_gave_up = s_reconfig_retry.gave_up;
+        }
+
         uint32_t conv_ms = max31856_conversion_time_ms();
         uint32_t timeout_ms = (conv_ms > 0)
                                    ? conv_ms * THERMO_TASK_DRDY_SILENCE_MULTIPLIER
