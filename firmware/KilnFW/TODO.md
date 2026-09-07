@@ -115,12 +115,12 @@ text, and the safety-link config-page hardening. Still open:
       captive-portal redirect and answers it with a real 404 + JSON error
       body instead; only non-`/api/` paths still get the 302-to-dashboard
       redirect.
-- [ ] **`Accept-Encoding: identity` gets a 406 for every page.** Correct per
-      the RFC and deliberate (only a gzip representation is stored), but it
-      makes the board unreachable to any plain client that asks for identity
-      -- Python's `urllib` does by default. Worth either storing an identity
-      fallback or documenting it where someone scripting against the board
-      will find it.
+- [x] **`Accept-Encoding: identity` gets a 406 for every page.** DONE
+      2026-09-06 -- documented rather than reworked (storing an uncompressed
+      fallback was rejected on the flash budget): `docs/ARCHITECTURE_DECISIONS.md`
+      "Web server / transport" now names the behavior and the fix for a
+      plain client (`urllib`, some `curl` invocations) -- send
+      `Accept-Encoding: gzip` explicitly, or `curl --compressed`.
 - [x] **Internal-DRAM regression: superseded.** Re-baselined (`af17e3d`,
       `f426ec6`); `dram_margin.h`'s known-good figures are now largest=18432,
       free=46083 at `app_main_done`, with no regression logged on boot.

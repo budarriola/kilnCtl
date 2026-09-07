@@ -15,6 +15,19 @@ the plan.
   `docs/PROJECT_STATUS.md` and TODO.md 8).
 - Push (WebSocket/SSE) vs. 2s polling: **polling stays**. Revisit only if a
   real firing shows 2s is too coarse.
+- Embedded pages are stored **gzip-only** in flash (budget: flash is at ~5%
+  free, see `docs/FLASH_BUDGET_PLAN.md`) — there is no uncompressed fallback
+  representation. A request whose `Accept-Encoding` excludes `gzip` (an
+  explicit `gzip;q=0`, or `identity`/no header value that names `gzip`) gets
+  a real `406 Not Acceptable` (`web_encoding.c`'s `web_send_gzip_not_acceptable()`)
+  naming the cause, per RFC 9110 s12.5.3, rather than a silently mangled
+  body. This is deliberate, not a bug: **anyone scripting against this
+  board's HTTP API must ensure their client sends `Accept-Encoding: gzip`**
+  (most libraries — `requests`, `httpx`, browsers — do this by default and
+  transparently decompress; plain `urllib.request` and some `curl`
+  invocations do not and need `Accept-Encoding: gzip` set explicitly, or
+  `curl --compressed`). Storing an uncompressed fallback was considered and
+  rejected on the same flash budget.
 
 ## Relay ownership / gating
 
