@@ -232,6 +232,69 @@ document, do not solve.
 6. **Bench** (owner present): steps 0 and 2 on the test kiln, then one
    heating run to record the three zone normals and check the 70 mA figure.
 
+   **6a. Set commissioning to match the fitted hardware (do this before the
+   heating run above).** The commissioning config as of 2026-09-06 still
+   reads `ct_installed=0`/`ct_topology=per_zone`, but a summed-heater
+   split-core CT has been physically fitted since 2026-09-05 (RP2040
+   GPIO28, 1A:1V, ~+59mV idle offset -- `CURRENT_SENSE.md` §4,
+   `project_ct_sensor_on_gpio28`). Left at the stale values, the sweep runs
+   the per-zone `ct_channel_map` derivation against a topology that does
+   not exist, and S14/S15 judge the board against per-channel CTs that are
+   not there. Correct values for this bench: `ct_installed=1`,
+   `ct_topology=1` (`summed` -- `CONFIG_STORE_CT_TOPOLOGY_SUMMED`, the only
+   other enum value is `0`/`per_zone`; there is no third topology).
+
+   Both params (`ct_installed` 0x0109, `ct_topology` 0x031F) go through the
+   existing generic `SET_PARAM`/`COMMIT_CONFIG` path documented in step 1
+   above (`safety_cfg_http_client.apply_safety_fields()` --
+   GET-then-POST-then-read-back-verify, never trusts the POST's own
+   `{"ok":true}` alone). `4f1b9a4f` (now flashed, running at `fc6d30f8`)
+   fixed a masked `hal_flash_program()` failure in exactly this write path
+   (`config_store_write()`), so a write attempted before that fix could
+   have reported success while nothing actually persisted -- this bench is
+   past that point. The write is also refused outright while the Pico is
+   ARMED (relay_owner: config writes rejected while ARMED); it only lands
+   during the 60s post-reset GRACE window, same rule `safety_set_rate_guard`
+   documents.
+
+   Exact command (run from a Python shell with `tools/PcTools/src` on
+   `sys.path`, or wire the two lines into a one-off MCP tool the way
+   `safety_set_rate_guard` wraps `apply_safety_fields`):
+
+   ```python
+   from kilnctrl import safety_cfg_http_client as cfg
+
+   host = "<board host/IP>"          # e.g. from mcp_server_ota._ota_resolve_host(None)
+   fields = {"ct_installed": 1, "ct_topology": 1}
+   result = cfg.apply_safety_fields(host, fields, verify=True)
+   print(result.ok, result.confirmed, result.mismatches,
+         result.commissioned_after, result.still_unset)
+   ```
+
+   If it refuses with "ARMED" in `result.post_reason`: `debug_reset(peer="pico")`,
+   then re-run the same call within 60 seconds.
+
+   Readback verification (independent of the above -- confirm the board's
+   own view, not just the client's): `GET /api/safety/commissioning` (or
+   `kiln_call(name="safety_get_commissioning")`) and check `ct_installed`
+   reads `set=true, value=1` and `ct_topology` reads `set=true, value=1`.
+
+   After this lands, before any current flows: `S14` (over-current, WARN)
+   reports "inactive" on channel 2 until a zone is commanded on AND that
+   zone's `i_normal_a` has been measured (it has not yet -- that is this
+   step's own heating run); channels 0/1 report not-fitted/inert
+   permanently in summed mode. `S15` (new, under-current/open-heater WARN,
+   per zone) stays fully inert for the same reason -- no zone normal
+   measured yet. Both guards report DORMANT-not-armed via
+   `safety_get_commissioning`'s description helper
+   (`mcp_server_safety._describe_commissioning()`) until the heating run
+   populates `i_normal_a[]`; that is expected, not a fault. Code review of
+   `safety_guards.c`'s summed branch (as of this pass) found no defect --
+   S14/S15 sum `i_normal_a[]` only over zones currently commanded on and
+   skip entirely (never a false pass) when any commanded zone's normal is
+   unmeasured; nothing divides by a fixed channel count that would be wrong
+   for one shared CT.
+
 ## Order and ownership
 
 Step 0 first (it may make step 3's under-current warn moot on this bench).
