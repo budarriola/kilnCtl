@@ -259,6 +259,45 @@ static void test_full_queue_non_error_not_privileged(void)
     TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue still full after the info line too");
 }
 
+// TODO.md's "UART_TASK_ID_WIFI (11) sometimes doesn't register at boot" item:
+// uart_protocol.c's registration-failure log ("task %u: xQueueCreate still
+// failing after 5 attempts...") used to be ESP_LOGW. This test reproduces
+// that exact line, at both the old (W) and fixed (E) level, against a full
+// boot-burst queue -- the state a wifi/thermo/etc. registration failure
+// actually races against per this file's own comment a few lines above
+// (uart_log_bridge_start's HAZARD note names UART_TASK_ID_WIFI directly).
+// It proves the bug mechanically: at W, the board's own account of *why*
+// task 11 didn't register is silently discarded, indistinguishable from the
+// line never having been logged at all -- exactly the "no corresponding
+// failure logged" symptom TODO.md describes, even though the producer code
+// did call ESP_LOG. Promoting it to E (the fix applied alongside this test)
+// makes it eviction-protected like every other boot-critical failure.
+static void test_registration_failure_log_only_survives_as_error(void)
+{
+    const char *wifi_failure_line = "task 11: xQueueCreate still failing after 5 attempts -- "
+                                     "internal SRAM genuinely exhausted";
+
+    ring_test_setup();
+    fill_queue_with_info();
+    char before_at_w[192];
+    ring_entry_text(0, before_at_w, sizeof(before_at_w));
+    call_uart_log_vprintf("W (1234) uart_protocol: %s", wifi_failure_line);
+    char after_at_w[192];
+    ring_entry_text(0, after_at_w, sizeof(after_at_w));
+    TEST_CHECK(strcmp(before_at_w, after_at_w) == 0,
+               "pre-fix (W): the registration-failure line is dropped with no eviction -- silently lost");
+
+    ring_test_setup();
+    fill_queue_with_info();
+    call_uart_log_vprintf("E (1234) uart_protocol: %s", wifi_failure_line);
+    char newest_at_e[192];
+    ring_entry_text(UART_LOG_BRIDGE_QUEUE_LEN - 1, newest_at_e, sizeof(newest_at_e));
+    char expected[192];
+    snprintf(expected, sizeof(expected), "E (1234) uart_protocol: %s", wifi_failure_line);
+    TEST_CHECK(strcmp(newest_at_e, expected) == 0,
+               "post-fix (E): the same line survives a full boot-burst queue by evicting the oldest INFO");
+}
+
 static void test_room_available_no_eviction(void)
 {
     ring_test_setup();
@@ -316,6 +355,7 @@ void run_test_uart_log_bridge(void)
     test_one_enqueue_per_call();
     test_full_queue_error_evicts_oldest();
     test_full_queue_non_error_not_privileged();
+    test_registration_failure_log_only_survives_as_error();
     test_room_available_no_eviction();
     test_eviction_bounded_per_call();
 

@@ -1531,13 +1531,28 @@ invisible on the page the operator watches.
       after its content exists. If still seen on hardware, suspect touch
       calibration/hit-test drift rather than page-registry wiring.
 
-- [ ] **`UART_TASK_ID_WIFI` (11) sometimes doesn''t register at boot** — PC-tool
-      `wifi_get_status`/`wifi_scan` NACK "destination task not registered"
-      with no corresponding failure logged. Does not affect the AP itself
-      (comes up and accepts phone joins regardless), only PC/MCP tooling''s
-      ability to query Wi-Fi state over UART. Not chased down; worth a
-      dedicated pass with more boot instrumentation around
-      `uart_bridge_start_wifi_task()`''s call site.
+- [x] **`UART_TASK_ID_WIFI` (11) sometimes doesn''t register at boot** — DONE
+      2026-09-07. Root-caused, not a race and not Wi-Fi-provisioning
+      ordering: `uart_protocol_register_task()`
+      (`firmware/hwAbstraction/esp/uart/uart_protocol.c`) already retries the
+      PSRAM-backed inbox `xQueueCreate` 5x and, on final failure, already
+      logged the task id and reason -- but at `ESP_LOGW`, not `ESP_LOGE`.
+      `uart_log_bridge.c`''s boot-burst queue only protects `ESP_LOGE` lines
+      from eviction when full (see its own HAZARD comment, which already
+      named this exact call site); a WARN during the boot burst this failure
+      mode occurs in is silently dropped with no eviction, indistinguishable
+      from never having logged at all -- exactly the "no corresponding
+      failure logged" symptom, even though the producer code did call
+      `ESP_LOG*`. Live board check (`e584067f`): `wifi_get_status()` answers
+      normally, so task 11 is registered on this boot -- confirms
+      "intermittent", not "always broken". Fix: promoted that one log call
+      to `ESP_LOGE`, so a real registration failure for any task id now
+      survives the same boot burst that used to eat it. Host test:
+      `test_registration_failure_log_only_survives_as_error()` in
+      `App/test/test_uart_log_bridge.c` reproduces the exact
+      pre-fix/post-fix line against a full boot-burst queue via the real
+      `uart_log_bridge.c` eviction logic and proves W is silently dropped
+      while E survives.
 - [x] **`ui_page_temperature.c`''s no-scroll fit depends on relay count per
       zone at runtime** — DONE 2026-08-24. The real budget is
       `ui_theme.h`''s new `UI_THEME_PAGE_CONTENT_BUDGET_PX` (268px, computed

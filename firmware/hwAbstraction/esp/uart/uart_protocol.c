@@ -658,7 +658,17 @@ esp_err_t uart_protocol_register_task(uart_protocol_t *proto,
         }
     }
     if (!inbox) {
-        ESP_LOGW(TAG, "task %u: xQueueCreate still failing after 5 attempts (~200ms) -- "
+        /* ESP_LOGE, not ESP_LOGW: uart_log_bridge.c's boot-burst queue only
+         * protects ERROR lines from eviction when it fills (see its comment
+         * naming UART_TASK_ID_WIFI by number -- this is that call site). A
+         * WARN here can be silently dropped on a full queue during exactly
+         * the boot burst this failure mode occurs in, which is how a task
+         * that "checks the return value and logs the failure" still produced
+         * an intermittent-looking, apparently-unlogged registration miss
+         * (KilnFW TODO.md). Registration failure for ANY task id is a real
+         * loss (that task NACKs every request for the rest of the boot), so
+         * it earns the eviction-protected level. */
+        ESP_LOGE(TAG, "task %u: xQueueCreate still failing after 5 attempts (~200ms) -- "
                        "internal SRAM genuinely exhausted, not just a boot-time WiFi transient",
                  task_id);
         xSemaphoreGive(proto->tasks_lock);
