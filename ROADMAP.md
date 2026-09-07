@@ -119,7 +119,7 @@ open is short:
 | [`firmware/KilnFW/docs/UI_PLAN.md`](firmware/KilnFW/docs/UI_PLAN.md) | LCD + web UI usability/cleanup plan — no-scroll LCD audit, phone/tablet web audit, prioritized fix queue |
 | [`firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`](firmware/KilnFW/docs/PID_EXPANSION_PLAN.md) | Per-zone control-algorithm choice (Cohen-Coon rule, fuzzy-PID layer), cross-zone coupling measurement (RGA) and feedforward |
 | [`firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`](firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md) | Second LCD panel (ST7796/MSP4031) support, runtime panel auto-detection, display SPI async/DMA |
-| [`firmware/KilnFW/docs/FLASH_BUDGET_PLAN.md`](firmware/KilnFW/docs/FLASH_BUDGET_PLAN.md) | The 16 MB flash: partition table, image size, what has been reclaimed |
+| [`firmware/KilnFW/docs/FLASH_BUDGET.md`](firmware/KilnFW/docs/FLASH_BUDGET.md) | The 16 MB flash: partition table, image size, what has been reclaimed |
 | [`firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md`](firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md) | Internal SRAM reclamation — allocator threshold, stack sizing, PSRAM relocation |
 | [`firmware/KilnFW/docs/WEB_UI_RESPONSIVE.md`](firmware/KilnFW/docs/WEB_UI_RESPONSIVE.md) | Browser UI across display sizes: token consolidation, shell layout, the responsive sweep |
 | [`firmware/KilnFW/docs/ARCHITECTURE.md`](firmware/KilnFW/docs/ARCHITECTURE.md) | Tasks, priorities, owner-task queues, single-writer ownership doctrine |
