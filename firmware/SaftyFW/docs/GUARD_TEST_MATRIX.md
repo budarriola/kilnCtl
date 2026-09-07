@@ -1,6 +1,6 @@
 # Guard Test Matrix
 
-> **Status:** planning · **Last reviewed:** 2026-09-04
+> **Status:** planning · **Last reviewed:** 2026-09-06
 > **Keep this file current.** Add a row whenever a guard is added or a threshold
 > moves, and record results as they are obtained — this file is the evidence
 > that the safety case is real. Checklist at the bottom.
@@ -62,8 +62,12 @@ exhaustively host-tested in `test/test_max31856_tc_range_policy.c`, against
 ranges taken from `firmware/KilnFW/Datasheets/MAX31856.pdf` page 12, Table 1
 "Supported Thermocouples and Temperature Ranges" (TEMP RANGE column) — see
 that policy file's own header comment for the full citation and argument.
-Not yet hardware-verified — no MAX31856/RP2040 on any bench this was built
-on.
+Not yet hardware-verified for the fault-injection cases specifically (a
+reading actually outside the commissioned type's band, a deliberate
+`tc_type` mismatch) — the safety MAX31856/thermocouple was populated on
+`hardware/SaftyThermocoupleBoard/` 2026-08-24 and is on the bench today
+(§6a), but only a healthy in-band reading has been observed live; the
+plausibility-band rejection path itself has not been provoked there.
 
 **S5's CR1 readback verification (2026-08-24, same pass)** is also tested
 one layer upstream: `max31856_configure()` (`max31856.c`) reads CR1 back
@@ -76,7 +80,10 @@ real type at the exact byte this driver writes, MISMATCH for a different
 real type, and DEAD_BUS for a readback of `0x00`/`0xFF` (checked to take
 priority over MISMATCH even when the intended type's own low nibble
 happens to be `0x0`) — is exhaustively host-tested alongside the band
-above, in the same file. Also not yet hardware-verified.
+above, in the same file. Also not yet hardware-verified for the mismatch/
+dead-bus cases specifically, same caveat and same hardware as the
+plausibility band above — only a matching CR1 readback has been observed
+live.
 
 ---
 
