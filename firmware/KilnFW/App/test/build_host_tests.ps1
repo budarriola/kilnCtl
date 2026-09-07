@@ -973,6 +973,25 @@ try {
 
     Invoke-HostTestExe -Name "profile_export_import" -ExePath $exe29 -BuildCmd $cmd29
 
+    # ---- test_link_watchdog.c: its own THIRTIETH, separate executable --------
+    # TODO.md: "The PC-link watchdog drops all relays every 5 s of host
+    # silence" -- link_watchdog_decide.c/.h (bridge/) is the watchdog's owner-
+    # distinction logic (uart_bridge.c's link_watchdog_task) pulled out so it
+    # can be tested without FreeRTOS/kiln_io/lvgl/panel_spi. Links the REAL
+    # relay_authority.c (its own executable so this test's relay-ownership
+    # claims cannot collide with any other test's fakes of the same symbols,
+    # same reasoning test_kiln_io_owner.c's header comment gives).
+    $exe30 = Join-Path $outDir "kilnctl_host_tests_link_watchdog.exe"
+    $lwObjDir = Join-Path $outDir "lw"
+    New-Item -ItemType Directory -Force -Path $lwObjDir | Out-Null
+    $cmd30 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$lwObjDir\\`" /Fe:`"$exe30`" " +
+            "`"$(Join-Path $testDir 'test_link_watchdog.c')`" " +
+            "`"$(Join-Path $driversDir 'bridge/link_watchdog_decide.c')`" " +
+            "`"$(Join-Path $driversDir 'owners/relay_authority.c')`""
+
+    Invoke-HostTestExe -Name "link_watchdog" -ExePath $exe30 -BuildCmd $cmd30
+
     # ---- summary ----------------------------------------------------------
     #
     # 28 executables are attempted above (main + zones_http + safety_cfg_http +
@@ -982,7 +1001,8 @@ try {
     # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
     # zone_coupling_solve + partition_info_http + adaptive_tune_http +
     # profiles_builtin + ft6336u + max31856_hal_spi + hal_i2c_adopt +
-    # hal_spi_adopt + hal_spi_async + profile_export_import) -- opus review
+    # hal_spi_adopt + hal_spi_async + profile_export_import + link_watchdog) --
+    # opus review
     # finding (LOW): this used to say 28 (both in this comment and in
     # $totalExpected below) while only 27 Invoke-HostTestExe calls actually
     # existed above (the $exeN numbering itself skips from $exe5 to $exe7, a
@@ -998,7 +1018,7 @@ try {
     # from this list (added to the comment/count but never wired to an
     # Invoke-HostTestExe call, or vice versa) fails loud instead of depending on
     # this comment staying accurate by hand.
-    $totalExpected = 28
+    $totalExpected = 29
     Write-Host ""
     Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
     if ($script:buildFailures.Count -gt 0) {

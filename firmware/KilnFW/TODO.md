@@ -87,12 +87,20 @@ text, and the safety-link config-page hardening. Still open:
       steady state (`safety_cfg_store_maybe_refetch()`: "no UART traffic at
       all, by design"). No analyser capture was ever needed; the Pico was
       innocent, as suspected.
-- [ ] **The PC-link watchdog drops all relays every 5 s of host silence**, and
-      an idle-but-connected MCP session is enough to trigger it repeatedly
-      (observed continuously through this whole sweep). It overrode LCD manual
-      relay control within seconds every time. Check what this does to a
-      running firing before a real one is attempted -- "relays stay off until
-      the host commands them" during a profile would be a silent halt.
+- [x] **The PC-link watchdog drops all relays every 5 s of host silence** --
+      confirmed 2026-09-07 that this does NOT abort a running firing: the
+      2026-08-27 owner-qualification fix (uart_bridge.c's link_watchdog_task)
+      already excludes any relay claimed PROFILE/RULE/AUTOTUNE via
+      relay_authority_manual_blocked_by_owner() -- an idle host only expires
+      relays it (or a manual UI command) left NONE/MANUAL-owned. Pulled the
+      decision logic out into `bridge/link_watchdog_decide.{c,h}` (mirrors
+      `profile_executor_wd_decide()`'s split) so it is host-tested against the
+      REAL relay_authority.c: `test_link_watchdog.c` proves a PROFILE- or
+      AUTOTUNE-owned relay stays out of the watchdog's mask, a MANUAL/NONE-
+      owned one stays in it, danger mode zeroes the mask, and traffic resets
+      the liveness timer. No behavior change; this closes the "check what
+      this does to a running firing" ask with an automated proof instead of a
+      one-off bench observation.
 - [x] **`max_temp_c == 0` and `max_ramp_c_per_hr == 0` mean opposite things**
       on the same uncommissioned zone -- reconciled 2026-09-06 (see
       `docs/PROFILES.md` "Zero-commissioning semantics"). Rule: both mean

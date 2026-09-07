@@ -22,6 +22,7 @@
 #include "kiln_io_owner.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
 #include "kiln_ui.h"
+#include "link_watchdog_decide.h"
 #include "lvgl_port.h"
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- same ERR_UPDATING case */
 #include "relay_authority.h"
@@ -328,10 +329,14 @@ static void link_watchdog_task(void *arg)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(UART_BRIDGE_LINK_CHECK_MS));
 
-        /* Unsigned tick subtraction, so this stays correct across the tick
-         * counter's wrap (~49 days at 1 kHz) without a special case. */
-        const bool up = s_link_ever_seen &&
-                        ((TickType_t)(xTaskGetTickCount() - s_link_last_activity) < timeout_ticks);
+        /* link_watchdog_decide.h's link_watchdog_decide_link_up() -- unsigned
+         * tick subtraction, so this stays correct across the tick counter's
+         * wrap (~49 days at 1 kHz) without a special case. Extracted so a
+         * host test can exercise the exact same comparison (TODO.md's
+         * "traffic resets the timer" case) without pulling in FreeRTOS. */
+        const bool up = link_watchdog_decide_link_up((uint32_t)xTaskGetTickCount(),
+                                                       (uint32_t)s_link_last_activity, s_link_ever_seen,
+                                                       (uint32_t)timeout_ticks);
 
         if (up) {
             if (!was_up) {
@@ -403,15 +408,13 @@ static void link_watchdog_task(void *arg)
          * the drop wholesale for its window, since an operator is deliberately
          * holding relays closed from the browser with no serial traffic at
          * all. */
-        uint8_t unowned_mask = 0;
-        for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
-            if (!relay_authority_manual_blocked_by_owner(relay)) {
-                unowned_mask |= (uint8_t)(1u << (relay - 1u));
-            }
-        }
-        if (danger_mode_active()) {
-            unowned_mask = 0;
-        }
+        /* link_watchdog_decide.h's link_watchdog_decide_unowned_mask() --
+         * extracted so a host test can prove, against the REAL
+         * relay_authority.c ownership lookup, that a PROFILE/AUTOTUNE-owned
+         * relay is excluded (an idle host must not touch a running firing)
+         * while a NONE/MANUAL-owned relay is not (a silent PC's manual grant
+         * must expire). See that header's doc comment and TODO.md. */
+        uint8_t unowned_mask = link_watchdog_decide_unowned_mask(danger_mode_active());
         /* The confirmation is per-mask, not once per outage. A firing that
          * ends (or a danger-mode window that closes) hands relays back while
          * the link is still down, and those newly unowned relays must then be
