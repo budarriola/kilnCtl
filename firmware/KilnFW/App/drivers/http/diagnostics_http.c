@@ -23,7 +23,10 @@
 #include "lvgl_port.h"
 #include "ramp_assist_cfg.h"
 #include "relay_cycles.h" /* relay_cycles_reset_post_handler() below needs RELAY_CYCLES_COUNT */
+#include "safety_link.h" /* SafetyLinkClass/safety_link_get_status() -- thermo_faults_get_handler()'s
+                           * "safety" block below */
 #include "thermo_owner.h"
+#include "uart_task_ids.h" /* SAFETY_FLAG_TC_NOT_INSTALLED/SAFETY_FLAG_TC_INJECTED */
 #include "watchdog_cfg.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
@@ -182,7 +185,96 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
               reading.fault_pin_asserted ? "true" : "false", cj_buf, age_buf,
               reading.stale ? "true" : "false");
     }
-    APPEND("]}");
+    APPEND("]");
+
+    /* Safety processor's own MAX31856 (RP2040-side), folded in next to the
+     * main-board channels above rather than shown only on the dashboard's
+     * cached safety_temp_c tile (dashboard_http.c) -- 2026-09-08 owner
+     * request, prompted directly by a night where that cached tile read a
+     * plausible-looking temperature while the real safety TC was both
+     * open-loop (chip not converting, THERMO_FAULT_* bits all clear) AND
+     * unreachable for a raw register read because the link itself was down.
+     * A cached "looks fine" number and a dead sensor are indistinguishable
+     * from that tile alone; this block exists to make the distinction the
+     * owner actually needed that night.
+     *
+     * "state" priority, most-diagnostic first:
+     *   no_link         -- s_diag_safety NULL, or safety_link_get_status()
+     *                       failed, or its own link_up is false: nothing
+     *                       below this point is fresh data, only whatever
+     *                       was last cached (age_ms says how stale).
+     *   faulted         -- TEMP_VALID and a real THERMO_FAULT_* bit is set:
+     *                       the MAX31856 IS converting and DID complete a
+     *                       transfer, and is reporting a genuine hardware
+     *                       condition (open circuit, TC/CJ out of range,
+     *                       over/under voltage). cj_c is still meaningful
+     *                       here -- a sane cold junction alongside a faulted
+     *                       TC reading says the chip is alive and the
+     *                       PROBE is the problem, not the chip.
+     *   not_converting  -- NOT TEMP_VALID (tc_c/cj_c both NaN) with fault==0.
+     *                       THIS is the state seen the night this was
+     *                       written: both readings NaN, zero fault bits,
+     *                       which is exactly what "the part has stopped
+     *                       converting" (thermo_task.c's DRDY-silence path,
+     *                       SaftyFW) and "CR1 type-verify failed after
+     *                       reconfigure" (max31856_reconfig_retry.c,
+     *                       SaftyFW) BOTH look like on this wire today --
+     *                       the Pico's own max31856_tc_type_verified()
+     *                       result and its reconfig-retry gave_up flag are
+     *                       not transmitted in the status frame (Frame A,
+     *                       CommonFW/docs/LINK_PROTOCOL.md sec 4) at all,
+     *                       so this server cannot tell those two apart yet
+     *                       -- labelled honestly as "cannot be distinguished
+     *                       with current link data" rather than guessing.
+     *                       A genuine wire fix would need a new bit; Frame
+     *                       A's flags byte (byte1) already has both spare
+     *                       bits spent (LINK_FLAG_TC_NOT_INSTALLED/
+     *                       _TC_INJECTED, link_frame.h), so it would need a
+     *                       V4 tail byte behind a new peer_supports_status_v4
+     *                       gate -- the same skew-safety machinery V1->V2->V3
+     *                       already established -- which is a coordinated
+     *                       ESP+Pico protocol change, not a diagnostics-page
+     *                       edit, and is out of scope here; not attempted.
+     *   ok              -- TEMP_VALID and fault==0.
+     *
+     * not_installed/injected are reported as independent booleans (not
+     * folded into "state") because they are orthogonal facts already carried
+     * in-band today, at zero extra wire cost -- LINK_FLAG_TC_NOT_INSTALLED/
+     * _TC_INJECTED (link_frame.h), decoded into safety_link_status_t::flags
+     * bits 6/7 by safety_link_frames.c's safety_apply_status() and already
+     * surfaced to safety_cfg_http.c/safety_page.html; this is simply the
+     * first place they are shown NEXT TO the other thermocouple/fault
+     * entries rather than on their own commissioning page. */
+    safety_link_status_t sl;
+    esp_err_t safety_err = s_diag_safety ? safety_link_get_status(s_diag_safety, &sl) : ESP_FAIL;
+    if (safety_err != ESP_OK || !sl.link_up) {
+        APPEND(",\"safety\":{\"state\":\"no_link\",\"link_up\":false}");
+    } else {
+        bool temp_valid = !isnan(sl.tc_temp_c);
+        bool faulted = temp_valid && sl.tc_fault != 0u;
+        const char *state = faulted ? "faulted" : (temp_valid ? "ok" : "not_converting");
+        bool not_installed = (sl.flags & SAFETY_FLAG_TC_NOT_INSTALLED) != 0u;
+        bool injected = (sl.flags & SAFETY_FLAG_TC_INJECTED) != 0u;
+
+        char tc_buf[16], cj_buf2[16];
+        if (isnan(sl.tc_temp_c)) {
+            snprintf(tc_buf, sizeof(tc_buf), "null");
+        } else {
+            snprintf(tc_buf, sizeof(tc_buf), "%.2f", (double)sl.tc_temp_c);
+        }
+        if (isnan(sl.cj_temp_c)) {
+            snprintf(cj_buf2, sizeof(cj_buf2), "null");
+        } else {
+            snprintf(cj_buf2, sizeof(cj_buf2), "%.2f", (double)sl.cj_temp_c);
+        }
+
+        APPEND(",\"safety\":{\"state\":\"%s\",\"link_up\":true,\"link_age_ms\":%u,"
+              "\"tc_c\":%s,\"cj_c\":%s,\"fault_status\":%u,"
+              "\"not_installed\":%s,\"injected\":%s}",
+              state, (unsigned)sl.age_ms, tc_buf, cj_buf2, (unsigned)sl.tc_fault,
+              not_installed ? "true" : "false", injected ? "true" : "false");
+    }
+    APPEND("}");
 
 send:
     httpd_resp_set_type(req, "application/json");
@@ -248,11 +340,15 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     } while (0)
 
     APPEND("{\"present\":true,\"acknowledged\":%s,\"exc_cause\":%lu,\"exc_cause_str\":\"%s\","
-          "\"exc_pc\":\"0x%08lx\",\"exc_addr\":\"0x%08lx\",\"exc_task\":\"%s\","
+          "\"exc_pc\":\"0x%08lx\",\"exc_addr\":\"0x%08lx\",\"exc_a0\":\"0x%08lx\","
+          "\"exc_a1_sp\":\"0x%08lx\",\"exc_task\":\"%s\","
           "\"found_on_boot_reset_reason\":\"%s\","
+          "\"frame_trustworthy\":%s,"
           "\"backtrace\":[",
           rec.acknowledged ? "true" : "false", (unsigned long)rec.exc_cause, cause_str_esc,
-          (unsigned long)rec.exc_pc, (unsigned long)rec.exc_addr, task_esc, reset_reason_esc);
+          (unsigned long)rec.exc_pc, (unsigned long)rec.exc_addr, (unsigned long)rec.exc_a0,
+          (unsigned long)rec.exc_a1, task_esc, reset_reason_esc,
+          crash_report_frame_trustworthy(&rec) ? "true" : "false");
     for (uint8_t i = 0; i < rec.bt_count && i < CRASH_REPORT_BT_MAX; i++) {
         /* Hex strings, not JSON numbers: these are code addresses, and the
          * only thing anyone does with them is paste them into addr2line.

@@ -851,6 +851,20 @@ here:</p>
     // decimals ("299" for 0x0000012b).
     html += crashRow('Program counter', cr.exc_pc || 'unknown');
     html += crashRow('Fault address', cr.exc_addr || 'unknown');
+    // a0 (return address) and a1 (STACK POINTER) of the crashing frame. a1 is
+    // the one that matters most: a small fault address like 0x18 means a NULL
+    // struct pointer dereferenced at field offset 0x18 ONLY IF a1 was a sane
+    // stack address. If a1 is itself 0 or garbage, the same 0x18 is just a
+    // local variable's frame offset and the null-struct reading is wrong.
+    html += crashRow('Frame a0 (return addr)', cr.exc_a0 || 'unknown');
+    html += crashRow('Frame a1 (stack ptr)', cr.exc_a1_sp || 'unknown');
+    if (cr.frame_trustworthy === false) {
+      html += crashRow('Warning',
+                       'The saved exception frame is NOT self-consistent -- its program counter is ' +
+                       'not a code address (0xfffffffd means the saved PC was 0). Do NOT read the ' +
+                       'fault address above as a struct field offset, and do not symbolize the PC. ' +
+                       'Decode the coredump partition with espcoredump.py instead.');
+    }
     // NOT the reset reason of the crash -- it is the reason for the boot on
     // which this dump was first noticed. For a dump found after a reflash or
     // a power cycle that says nothing about the crash, so it is labelled for
@@ -1190,7 +1204,71 @@ here:</p>
                      '</div>' : '') +
               '</div>';
     }
+    html += renderSafetyTcCard(faultsResp && faultsResp.safety);
     el.innerHTML = html;
+  }
+
+  // Safety processor's own MAX31856 (RP2040-side), shown as one more card in
+  // the SAME #thermoChannels grid as the main-board channels above -- 2026-
+  // 09-08 owner request: "safety thermocouple faults should show next to the
+  // others in diagnostics", prompted by a night where the dashboard's cached
+  // safety_temp_c tile (renderStatus() below) read a plausible-looking
+  // temperature while the real safety TC was both open-loop and unreachable
+  // for a raw register read (link down). Reuses faultSummary()/FAULT_BITS
+  // above unchanged -- the safety MAX31856's SR register is bit-for-bit the
+  // same part with the same layout (firmware/SaftyFW/src/max31856.h's
+  // MAX31856_FAULT_* mirrors firmware/KilnFW/App/drivers/hw/MAX31856.h's
+  // MAX31856_MASK_*/MAX31856_FAULT_* exactly), so no second fault-name table
+  // to keep in sync.
+  //
+  // "not_converting" is deliberately NOT split into "chip stopped
+  // converting" vs. "commissioned tc_type failed CR1 readback": SaftyFW's
+  // max31856_tc_type_verified() result and its reconfig-retry gave_up flag
+  // (max31856_reconfig_retry.c) are never transmitted over the link, so both
+  // causes reach this page as the identical wire signature (TEMP_VALID
+  // clear, THERMO_FAULT_* bits all clear) and this label says so honestly
+  // rather than guessing which one it is.
+  function renderSafetyTcCard(s) {
+    if (!s) return '';
+    var cardClass = 'chan kc-live-value';
+    var faultsClass = 'faults';
+    var summary;
+    if (s.state === 'no_link') {
+      cardClass += ' timeout';
+      faultsClass += ' timeout';
+      summary = 'LINK DOWN -- no data from the safety processor';
+    } else if (s.state === 'faulted') {
+      cardClass += ' faulted';
+      faultsClass += ' faulted';
+      summary = faultSummary(s.fault_status);
+    } else if (s.state === 'not_converting') {
+      cardClass += ' faulted';
+      faultsClass += ' faulted';
+      summary = 'NOT CONVERTING -- both TC and cold junction unavailable, ' +
+                'zero fault bits (chip not converting, or its commissioned ' +
+                'type failed to verify -- cannot be distinguished with ' +
+                'current link data)';
+    } else {
+      faultsClass += ' ok';
+      summary = faultSummary(s.fault_status);
+    }
+    var html = '<div class="' + cardClass + '">' +
+                '<div class="title">Safety processor TC</div>' +
+                '<div class="' + faultsClass + '">' + window.kcEscapeHtml(summary) + '</div>';
+    if (s.state !== 'no_link') {
+      html += '<div class="subrow">TC: ' + window.kcUnit.fmt(s.tc_c) +
+              '  &middot;  CJ: ' + window.kcUnit.fmt(s.cj_c) +
+              '  &middot;  Link age: ' + s.link_age_ms + ' ms</div>';
+      if (s.not_installed || s.injected) {
+        html += '<div class="subrow">' +
+                (s.not_installed ? '<span class="bad">Declared not installed</span>' : '') +
+                (s.not_installed && s.injected ? '  &middot;  ' : '') +
+                (s.injected ? '<span class="bad">Reading is synthetic (bench injection)</span>' : '') +
+                '</div>';
+      }
+    }
+    html += '</div>';
+    return html;
   }
 
   var thermoLastGoodAt = null;
