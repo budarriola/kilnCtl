@@ -400,6 +400,21 @@ const RECOVERY_BANNER_VARIANTS = {
     window.setRecoveryBanner(true);
     true;
   `,
+  // Owner task 2026-09-08: recovery banner, setup-offer banner, and (on
+  // pages that have one) the connection-lost banner can now all target the
+  // top of the page (buildRecoveryBanner()/buildSetupBanner() insertion
+  // precedence comments in app.js). That combination -- both shown at
+  // once -- had never been swept; this variant forces both real
+  // show-functions on directly, same as recovery_shown does, rather than a
+  // hand-built substitute, so the sweep exercises the actual stacked
+  // in-flow layout at every width.
+  recovery_and_setup_shown: `
+    if (typeof window.setRecoveryBanner !== 'function') return 'setRecoveryBanner not found';
+    if (typeof window.setSetupBanner !== 'function') return 'setSetupBanner not found';
+    window.setRecoveryBanner(true);
+    window.setSetupBanner(true);
+    true;
+  `,
 };
 
 const PAGE_FIXTURES = {

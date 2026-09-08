@@ -93,6 +93,13 @@ function makeContext(opts) {
       body: body,
       createElement: function () { return makeEl(); },
       querySelector: function (sel) { return sel === '.kc-topbar' ? topbar : null; },
+      // setRecoveryBanner() (d89256fe, 2026-09-08 UI aggregate review) now
+      // looks up #runBtn to keep the Start control disabled in lockstep
+      // with the banner. This page-level fixture has no #runBtn (same as
+      // most *_page.html app.js loads on, per that commit's own comment),
+      // so mimic that real "not on this page" case rather than adding an
+      // element none of these tests exercise.
+      getElementById: function () { return null; },
     },
     window: {},
     bannerEl: opts.bannerEl || null, // simulates the conn-banner built just above this block in real app.js
