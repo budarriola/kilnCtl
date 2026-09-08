@@ -49,7 +49,137 @@
 #include "profiles_http.h"
 #include "zones_config_accessors.h"
 
-static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
+/* ---- backup_import_apply()'s two big candidate arrays: heap, not stack ----
+ *
+ * 2026-09-08 check_httpd_task_stack_budget.py measured this function's own
+ * frame ($constprop$0) at 4656 B -- the single largest frame in the deepest
+ * httpd_worker path (backup_import_post_handler, 7952 B of an 8192 B stack,
+ * 240 B free). The two locals below, `candidates[PROFILES_MAX_COUNT]`
+ * (profile_candidate_t, ~428 B each = ~3.4 KB) and
+ * `zone_candidates[MAX31856_CHANNEL_COUNT]` (zone_candidate_t, smaller but
+ * still non-trivial), together account for essentially all of that frame.
+ * Moved to heap (PSRAM preferred, same MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT
+ * convention backup_import_post_handler already uses for its own `body`
+ * buffer just below) via the backup_import_apply() wrapper: it allocates
+ * both, calls the actual two-pass validate-then-commit logic (renamed
+ * backup_import_apply_locked(), otherwise byte-for-byte identical, EVERY
+ * `return false`/`return true` untouched), then frees both on every path.
+ * An allocation failure here happens strictly BEFORE either array is
+ * touched or any profile/zone config is read -- it returns false with an
+ * "out of memory" err_msg (caller sends a clean 400, not a 500 or a panic;
+ * see backup_import_post_handler's `if (!ok)` branch), so it is
+ * indistinguishable from any other pass-1 validation refusal: nothing is
+ * ever half-applied. The two-pass validate-then-commit split itself, and
+ * every check inside it, is unchanged. */
+typedef struct {
+    bool has_id;
+    uint8_t id;
+    profile_t p;
+} profile_candidate_t;
+
+typedef struct {
+    uint8_t index;
+    float kp, ki, kd;
+    bool has_model;
+    float k_dc, tau_s, dead_time_s;
+    bool has_tc;
+    uint8_t tc_type;
+    /* Version 2 (2026-08-21): everything else zones_http.h gained a
+     * setter for this pass. Each has its own has_* flag, same
+     * optional-per-field convention as has_model/has_tc above -- see
+     * backup_json_field_opt_num()'s comment for why "absent" must not be an
+     * error. */
+    bool has_name;
+    /* +2, not +1: backup_json_field_str() silently truncates to cap-1 bytes with
+     * no way to tell the caller it did so, so a buffer sized exactly
+     * ZONE_NAME_MAX_LEN+1 could never actually observe an overlong name
+     * -- it would just come back pre-truncated to a fit, and the "name
+     * too long" check below would be permanently unreachable (dead)
+     * code. Sizing one byte larger than the real limit means ANY name
+     * whose true length exceeds ZONE_NAME_MAX_LEN still results in
+     * strlen(name) == ZONE_NAME_MAX_LEN+1 after the copy (truncated to
+     * fit this buffer, but still detectably over the limit), so the
+     * length check that follows can actually fire. See this pass's
+     * report for the negative test that proves it does. */
+    char name[ZONE_NAME_MAX_LEN + 2];
+    bool has_relay_mask;
+    uint8_t relay_mask;
+    bool has_thermo_mask;
+    uint8_t thermo_mask;
+    bool has_ct_mask;
+    uint8_t ct_mask;
+    bool has_cal;
+    float cal_offset_c;
+    bool has_ramp;
+    float max_ramp_c_per_hr;
+    bool has_sanity;
+    float sanity_rate_c_per_min;
+    bool has_mode;
+    uint8_t control_mode;
+    /* max_temp_c/min_temp_c are a bundled pair (zones_config_set_temp_limits()
+     * takes both together) -- either both are present in the import or
+     * neither is, same "all-or-nothing" rule TODO already applies to
+     * model_k_dc/tau_s/dead_time_s just above. */
+    bool has_temp_limits;
+    float max_temp_c, min_temp_c;
+    /* heater_window_ms/min_on_ms/min_off_ms -- same bundled-pair rule. */
+    bool has_heater_cfg;
+    float heater_window_ms, heater_min_on_ms, heater_min_off_ms;
+    /* The 8 guard-threshold overrides -- same bundled-pair rule, all 8
+     * or none (zones_config_set_guard_thresholds() takes all 8
+     * together). */
+    bool has_guard;
+    float guard_wrong_dir_window_s, guard_wrong_dir_rate_c_per_min, guard_off_settle_s,
+        guard_runaway_rate_c_per_min, guard_runaway_margin_c, guard_drift_period_s,
+        guard_sensor_fault_debounce_ticks, guard_frozen_window_s;
+    bool has_cross_zone;
+    float cross_zone_max_delta_c;
+    /* Version 3 (2026-08-30): PID_EXPANSION_PLAN.md Phase 2/4's four new
+     * fields. The three floats follow the ordinary optional-field
+     * convention (absent -> not written, so an older board's stored value
+     * survives an older-format import untouched). settings_source is
+     * different -- see this struct's field and backup_import_apply()'s
+     * own comment: an ABSENT settings_source must still be written as
+     * ZONE_SETTINGS_SOURCE_CUSTOM on a fresh zone, so it carries no
+     * has_settings_source flag at all; instead settings_source itself is
+     * pre-seeded to ZONE_SETTINGS_SOURCE_CUSTOM by memset+explicit
+     * default below, and is simply overwritten when the key is present. */
+    bool has_fuzzy_strength;
+    float fuzzy_strength_pct;
+    /* Version 4 (2026-08-30, same-day follow-up): per-cell presence and
+     * value, not a bundled pair -- see BACKUP_FORMAT_VERSION's 3->4
+     * comment. has_coupling_cell[j]/coupling_row[j] track neighbor j
+     * independently, so an import can update just the cells a backup
+     * actually has values for (a version-3 body has at most one). */
+    bool has_coupling_cell[MAX31856_CHANNEL_COUNT];
+    float coupling_row[MAX31856_CHANNEL_COUNT];
+    /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the tau/dead-time
+     * siblings of coupling_row above, same per-cell presence tracking.
+     * NOT gated on has_coupling_cell[j] -- an export may in principle
+     * carry a coeff without a matching tau/L key (or vice versa) from a
+     * hand-edited body, and each is independently optional/preserved. */
+    bool has_coupling_tau_cell[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_row[MAX31856_CHANNEL_COUNT];
+    bool has_coupling_dead_cell[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_row[MAX31856_CHANNEL_COUNT];
+    /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
+     * coupling identification's own diagonal cell -- ordinary optional-
+     * field convention, same as has_fuzzy_strength above (absent -> not
+     * written, an older board's stored value survives untouched). */
+    bool has_coupling_diag_k_dc;
+    float coupling_diag_k_dc;
+    /* Opus review of 5672719 (item 4): one value per SRC_GROUP_COUNT
+     * group, not a single scalar fanned out to all five -- see
+     * backup_export.c's matching comment on the "settings_source_g%u"
+     * keys. Each defaults to ZONE_SETTINGS_SOURCE_CUSTOM (see comment
+     * above); an older (version <=4) backup that only has the legacy
+     * "settings_source" scalar has every group set to that one value
+     * instead, preserving the old fan-out behavior for old backups. */
+    uint8_t settings_source[SRC_GROUP_COUNT];
+} zone_candidate_t;
+
+static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
+                                        profile_candidate_t *candidates, zone_candidate_t *zone_candidates)
 {
     double dver;
     char kind[24];
@@ -72,12 +202,6 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
     uint8_t valid_zone_bits = thermo_count >= 8 ? 0xFFu : (uint8_t)((1u << thermo_count) - 1u);
 
     /* ---- Pass 1a: profiles ---- */
-    typedef struct {
-        bool has_id;
-        uint8_t id;
-        profile_t p;
-    } profile_candidate_t;
-    profile_candidate_t candidates[PROFILES_MAX_COUNT];
     size_t candidate_count = 0;
 
     const char *profiles_arr = backup_json_obj_find(body, "profiles");
@@ -200,107 +324,6 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
     }
 
     /* ---- Pass 1b: zone tuning ---- */
-    typedef struct {
-        uint8_t index;
-        float kp, ki, kd;
-        bool has_model;
-        float k_dc, tau_s, dead_time_s;
-        bool has_tc;
-        uint8_t tc_type;
-        /* Version 2 (2026-08-21): everything else zones_http.h gained a
-         * setter for this pass. Each has its own has_* flag, same
-         * optional-per-field convention as has_model/has_tc above -- see
-         * backup_json_field_opt_num()'s comment for why "absent" must not be an
-         * error. */
-        bool has_name;
-        /* +2, not +1: backup_json_field_str() silently truncates to cap-1 bytes with
-         * no way to tell the caller it did so, so a buffer sized exactly
-         * ZONE_NAME_MAX_LEN+1 could never actually observe an overlong name
-         * -- it would just come back pre-truncated to a fit, and the "name
-         * too long" check below would be permanently unreachable (dead)
-         * code. Sizing one byte larger than the real limit means ANY name
-         * whose true length exceeds ZONE_NAME_MAX_LEN still results in
-         * strlen(name) == ZONE_NAME_MAX_LEN+1 after the copy (truncated to
-         * fit this buffer, but still detectably over the limit), so the
-         * length check that follows can actually fire. See this pass's
-         * report for the negative test that proves it does. */
-        char name[ZONE_NAME_MAX_LEN + 2];
-        bool has_relay_mask;
-        uint8_t relay_mask;
-        bool has_thermo_mask;
-        uint8_t thermo_mask;
-        bool has_ct_mask;
-        uint8_t ct_mask;
-        bool has_cal;
-        float cal_offset_c;
-        bool has_ramp;
-        float max_ramp_c_per_hr;
-        bool has_sanity;
-        float sanity_rate_c_per_min;
-        bool has_mode;
-        uint8_t control_mode;
-        /* max_temp_c/min_temp_c are a bundled pair (zones_config_set_temp_limits()
-         * takes both together) -- either both are present in the import or
-         * neither is, same "all-or-nothing" rule TODO already applies to
-         * model_k_dc/tau_s/dead_time_s just above. */
-        bool has_temp_limits;
-        float max_temp_c, min_temp_c;
-        /* heater_window_ms/min_on_ms/min_off_ms -- same bundled-pair rule. */
-        bool has_heater_cfg;
-        float heater_window_ms, heater_min_on_ms, heater_min_off_ms;
-        /* The 8 guard-threshold overrides -- same bundled-pair rule, all 8
-         * or none (zones_config_set_guard_thresholds() takes all 8
-         * together). */
-        bool has_guard;
-        float guard_wrong_dir_window_s, guard_wrong_dir_rate_c_per_min, guard_off_settle_s,
-            guard_runaway_rate_c_per_min, guard_runaway_margin_c, guard_drift_period_s,
-            guard_sensor_fault_debounce_ticks, guard_frozen_window_s;
-        bool has_cross_zone;
-        float cross_zone_max_delta_c;
-        /* Version 3 (2026-08-30): PID_EXPANSION_PLAN.md Phase 2/4's four new
-         * fields. The three floats follow the ordinary optional-field
-         * convention (absent -> not written, so an older board's stored value
-         * survives an older-format import untouched). settings_source is
-         * different -- see this struct's field and backup_import_apply()'s
-         * own comment: an ABSENT settings_source must still be written as
-         * ZONE_SETTINGS_SOURCE_CUSTOM on a fresh zone, so it carries no
-         * has_settings_source flag at all; instead settings_source itself is
-         * pre-seeded to ZONE_SETTINGS_SOURCE_CUSTOM by memset+explicit
-         * default below, and is simply overwritten when the key is present. */
-        bool has_fuzzy_strength;
-        float fuzzy_strength_pct;
-        /* Version 4 (2026-08-30, same-day follow-up): per-cell presence and
-         * value, not a bundled pair -- see BACKUP_FORMAT_VERSION's 3->4
-         * comment. has_coupling_cell[j]/coupling_row[j] track neighbor j
-         * independently, so an import can update just the cells a backup
-         * actually has values for (a version-3 body has at most one). */
-        bool has_coupling_cell[MAX31856_CHANNEL_COUNT];
-        float coupling_row[MAX31856_CHANNEL_COUNT];
-        /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the tau/dead-time
-         * siblings of coupling_row above, same per-cell presence tracking.
-         * NOT gated on has_coupling_cell[j] -- an export may in principle
-         * carry a coeff without a matching tau/L key (or vice versa) from a
-         * hand-edited body, and each is independently optional/preserved. */
-        bool has_coupling_tau_cell[MAX31856_CHANNEL_COUNT];
-        float coupling_tau_row[MAX31856_CHANNEL_COUNT];
-        bool has_coupling_dead_cell[MAX31856_CHANNEL_COUNT];
-        float coupling_dead_row[MAX31856_CHANNEL_COUNT];
-        /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
-         * coupling identification's own diagonal cell -- ordinary optional-
-         * field convention, same as has_fuzzy_strength above (absent -> not
-         * written, an older board's stored value survives untouched). */
-        bool has_coupling_diag_k_dc;
-        float coupling_diag_k_dc;
-        /* Opus review of 5672719 (item 4): one value per SRC_GROUP_COUNT
-         * group, not a single scalar fanned out to all five -- see
-         * backup_export.c's matching comment on the "settings_source_g%u"
-         * keys. Each defaults to ZONE_SETTINGS_SOURCE_CUSTOM (see comment
-         * above); an older (version <=4) backup that only has the legacy
-         * "settings_source" scalar has every group set to that one value
-         * instead, preserving the old fan-out behavior for old backups. */
-        uint8_t settings_source[SRC_GROUP_COUNT];
-    } zone_candidate_t;
-    zone_candidate_t zone_candidates[MAX31856_CHANNEL_COUNT];
     size_t zone_candidate_count = 0;
 
     const char *zones_arr = backup_json_obj_find(body, "zones");
@@ -1143,6 +1166,42 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
     }
 
     return true;
+}
+
+/* Wrapper: heap-allocates the two big candidate arrays (PSRAM preferred, see
+ * this file's header comment above profile_candidate_t) and hands them to
+ * backup_import_apply_locked(), which is otherwise byte-for-byte the
+ * previous backup_import_apply() body. An allocation failure here is
+ * reported exactly like any other pass-1 validation failure -- false plus an
+ * err_msg, nothing touched -- so backup_import_post_handler's existing
+ * "!ok -> 400, err_msg body" path handles it without change. */
+static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
+{
+    profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!candidates) {
+        candidates = malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT);
+    }
+    if (!candidates) {
+        snprintf(err_msg, err_cap, "out of memory (profile candidates)");
+        return false;
+    }
+    zone_candidate_t *zone_candidates = heap_caps_malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT,
+                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!zone_candidates) {
+        zone_candidates = malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
+    }
+    if (!zone_candidates) {
+        free(candidates);
+        snprintf(err_msg, err_cap, "out of memory (zone candidates)");
+        return false;
+    }
+
+    bool ok = backup_import_apply_locked(body, err_msg, err_cap, candidates, zone_candidates);
+
+    free(zone_candidates);
+    free(candidates);
+    return ok;
 }
 
 esp_err_t backup_import_post_handler(httpd_req_t *req)

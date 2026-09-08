@@ -28,23 +28,31 @@ CEILING, not a headroom-fraction budget
 ----------------------------------------
 `check_main_task_stack_budget.py` budgets against a fraction of the
 configured stack size because that check was written to fix a genuine
-overflow and is normally comfortably under budget. httpd_worker is not: the
-deepest handler measured on this tree, `backup_import_post_handler` (its
-`backup_import_apply()` -> `zones_config_cfg_fs_save()` ->
-`zones_config_json_compute_crc()` chain), sits at ~7952 B of the 8192 B
-stack -- a PRE-EXISTING condition, unrelated to today's regression, tracked
-here as a known finding rather than fixed in this pass (it needs its own
-review of `backup_import.c`'s two-pass validate-then-commit design, not a
-quick stack-local move). Budgeting off a fraction of 8192 would make this
-check fail on every run regardless of what changes, which is useless as a
-gate.
+overflow and is normally comfortably under budget. httpd_worker is not
+comfortably under budget in general, so this check enforces a CEILING
+(see CEILING_BYTES below) rather than a percentage of 8192 -- it exists to
+catch the deepest reachable path getting WORSE, not to relitigate whatever
+the worst case happened to measure at last time it was set.
 
-Instead this check enforces a CEILING equal to that already-known worst case
-(see CEILING_BYTES below): it exists to catch the deepest path getting WORSE
-than what has already been measured and accepted as critical-but-not-yet-
-overflowing, exactly the class of regression `api_setup_progress_get_handler`
-was. Fixing the pre-existing `backup_import_post_handler` depth (and then
-lowering CEILING_BYTES to match) is tracked as separate follow-up work.
+2026-09-08, FIXED: `backup_import_post_handler` (via
+`backup_import_apply()` -> `zones_config_cfg_fs_save()` ->
+`zones_config_json_compute_crc()`) was the deepest path at 7952 B of the
+8192 B stack, 240 B free -- almost entirely one 4656 B frame in
+`backup_import_apply()` itself, dominated by two stack-local arrays:
+`profile_candidate_t candidates[PROFILES_MAX_COUNT]` (~428 B each, ~3.4 KB)
+and `zone_candidate_t zone_candidates[MAX31856_CHANNEL_COUNT]`. Fixed by
+splitting the function: the two-pass validate-then-commit logic moved
+unchanged (every `return false`/`return true` untouched, same all-or-
+nothing ordering) into a new `backup_import_apply_locked()` that takes the
+two arrays as pointers, and the renamed `backup_import_apply()` is now a
+thin wrapper that heap-allocates both (PSRAM preferred via
+`MALLOC_CAP_SPIRAM`, same convention already used for this handler's own
+request-body buffer) before calling it, freeing on every path. An
+allocation failure is reported exactly like any other pass-1 validation
+refusal (false + err_msg, nothing touched yet) -- see backup_import.c's
+own comment above `profile_candidate_t`. This dropped the path to 3808 B;
+CEILING_BYTES below has been retightened to the new overall worst case
+(see its own comment).
 
 LIMITS, stated honestly (same as check_main_task_stack_budget.py):
   * Indirect calls (`callx8`) are not followed.
@@ -74,11 +82,12 @@ REPO_ROOT = base.REPO_ROOT
 DEFAULT_ELF = base.DEFAULT_ELF
 HTTP_DIR = os.path.join(REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "http")
 
-# Known worst case as of 2026-09-08 (backup_import_post_handler, pre-existing,
-# see module docstring). This is a CEILING, not a percentage-of-stack budget:
-# it exists to catch the deepest reachable handler path getting WORSE, not to
-# relitigate the already-measured-and-tracked pre-existing depth.
-CEILING_BYTES = 7952
+# Known worst case as of 2026-09-08, after backup_import_post_handler's fix
+# (see module docstring): backup_export_get_handler (via
+# profile_detail_get_handler -> send_builtin_full -> ...) at 7472 B. This is
+# a CEILING, not a percentage-of-stack budget: it exists to catch the deepest
+# reachable handler path getting WORSE, not to relitigate this depth.
+CEILING_BYTES = 7472
 
 HANDLER_RE = re.compile(r"\.handler\s*=\s*([A-Za-z_][A-Za-z0-9_]*)")
 
