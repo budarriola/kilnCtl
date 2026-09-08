@@ -260,11 +260,13 @@ static void cfg_fs_auto_format_task(void *arg)
                   "/api/cfgfs for progress)");
 
     cfg_fs_auto_format_job_t job = { .result = ESP_ERR_INVALID_STATE };
-    /* Never on the flash worker already -- this is a brand-new task created
-     * solely to run this once, so the reentrancy guard other dispatchers in
-     * this file use is unnecessary here, but dispatching unconditionally
-     * (never inline) keeps this task's own tiny stack out of the flash-write
-     * path regardless. */
+    /* Not reachable on-worker: this is a brand-new task
+     * (cfg_fs_auto_format_task, created once by start_deferred_auto_format())
+     * whose entire body is this function -- it has no other caller and never
+     * runs on the flash worker itself, so the reentrancy guard other
+     * dispatchers in this file use is unnecessary here, but dispatching
+     * unconditionally (never inline) keeps this task's own tiny stack out of
+     * the flash-write path regardless. */
     esp_err_t dispatch_err = uart_bridge_ext_run_on_flash_worker(cfg_fs_auto_format_job_run, &job);
     esp_err_t final_result = (dispatch_err != ESP_OK) ? dispatch_err : job.result;
 
@@ -352,20 +354,43 @@ static esp_err_t maybe_auto_format_and_remount(esp_err_t original_mount_err)
         return original_mount_err;
     }
 
-    cfg_fs_format_gate_t gate;
+    /* HEAP, never the stack: cfg_fs_format_gate_t carries an 8192 B verbatim
+     * copy of the partition's two metadata blocks (see cfg_fs_format_gate.h's
+     * `header[CFG_FS_FORMAT_GATE_HEADER_BYTES]`). A stack-local `gate` here
+     * used to combine with scan_partition() (inlined into this function by
+     * the compiler) to put ~8.4 KiB in this function's own frame -- measured
+     * by check_main_task_stack_budget.py as the deepest app_main path,
+     * 8704 B against the 6144 B budget on an 8192 B main-task stack. Same
+     * "malloc failure degrades, never panics" convention as scan_partition()'s
+     * own chunk buffer just above: if the allocation fails, this treats the
+     * scan as unreadable and asks for operator confirmation instead of
+     * auto-formatting -- never a crash. */
+    cfg_fs_format_gate_t *gate = malloc(sizeof(*gate));
+    if (!gate) {
+        ESP_LOGE(TAG, "could not allocate cfg_fs_format_gate_t (%u B) to judge auto-format safety -- refusing "
+                      "to format, treating as awaiting confirmation", (unsigned)sizeof(*gate));
+        s_format_confirmation_pending = true;
+        snprintf(s_format_pending_reason, sizeof(s_format_pending_reason),
+                 "partition could not be scanned: out of memory");
+        return original_mount_err;
+    }
+
     cfg_fs_format_gate_verdict_t verdict;
-    esp_err_t scan_err = scan_partition(part, &gate, &verdict);
+    esp_err_t scan_err = scan_partition(part, gate, &verdict);
     if (scan_err != ESP_OK) {
         ESP_LOGE(TAG, "could not read back cfg partition to judge auto-format safety: %s -- refusing to "
                       "format, treating as awaiting confirmation", esp_err_to_name(scan_err));
         s_format_confirmation_pending = true;
         snprintf(s_format_pending_reason, sizeof(s_format_pending_reason),
                  "partition could not be read back: %s", esp_err_to_name(scan_err));
+        free(gate);
         return original_mount_err;
     }
 
     char reason[sizeof(s_format_pending_reason)];
-    cfg_fs_format_gate_describe(&gate, verdict, reason, sizeof(reason));
+    cfg_fs_format_gate_describe(gate, verdict, reason, sizeof(reason));
+    free(gate);
+    gate = NULL;
 
     if (verdict != CFG_FS_FORMAT_GATE_SAFE_TO_FORMAT) {
         s_format_confirmation_pending = true;
