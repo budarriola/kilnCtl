@@ -147,3 +147,29 @@ None of these is an unvalidated-id bug; all are large stack locals, the same
 class as this one. `firing_history`'s own id handling (400 on unparseable or
 out-of-0..255, 200-with-empty-array on an id that never fired) was reviewed
 and is correct as written.
+
+## Hardware confirmation
+
+Built from a clean detached worktree at `d3a7ff6b` (`C:\wt\fh`, with the
+gitignored `sdkconfig`, `managed_components/` and the `lvgl` submodule copied
+in from the working tree — none of which this change touches) and flashed with
+`flash_firmware(kiln_fw_root=...)`; the tool's own post-flash verification
+confirmed the board is running `factory` with the matching build.
+
+* `GET /api/firing_history?profile_id=0` → **HTTP 200**, two real run records
+  for `cplval70`. `profile_id=7` → 200, five records. Omitting `profile_id`
+  → 400. No panic, board uptime uninterrupted.
+* **The lazy migration completed**: `/api/cfgfs`'s dual-write row for
+  `firing_stats` now reads `file_backed: true, nvs_backed: true,
+  diverged: false`. A history read is what triggers it, which is exactly why
+  it could never complete while that read panicked the board. This was the
+  last open item of the filesystem migration for this feature.
+* The pre-fix crash record was acknowledged (`POST /api/crash_report/ack`)
+  after being captured in full above.
+
+One more sibling worth recording, found while confirming the above:
+`firing_stats_get_dualwrite_status()` — the function behind that very
+`/api/cfgfs` row — keeps TWO 1364 B blobs (`f_blob`, `n_blob`) on the stack
+inside a loop over every profile id. `cfgfs_status_get_handler` measures
+4304 B post-fix (its `_load_raw()` frame is heap-allocated by this pass), so
+it is not urgent, but it is the same shape.
