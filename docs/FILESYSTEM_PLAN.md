@@ -635,3 +635,51 @@ comment for the exact line broken, the failure produced, and the by-hand
 restore + confirmed-empty `git diff` that followed), the derived-status
 computation, the sticky/idempotent notes, and the "report only, never an
 automation" contract.
+
+## `cfg` partition re-flashed after stack-overflow fix, 2026-09-07
+
+Built and flashed `3c36b7e1` (the `nvs_load_store_with_cfg_fs`/
+`kiln_cfg_store_cfg_fs_load_raw` heap-move fix for the 218f65f7 boot panic,
+see `docs/audits/boot_hang_2026-09-08.md`) from a clean detached worktree
+(`C:/wt/espflash`). Host tests 31/31 passed; `check_main_task_stack_budget`
+measured 4864 B against a 6144 B budget (75% of the 8192 B `main` task
+stack) -- OK. Pre-flash backup: `full_board_backup.py`, 12/12 endpoints
+(cfgfs section empty, expected -- partition unmounted pre-flash), archived
+under `tools/PcTools/board-backups/` (gitignored).
+
+`flash_firmware(kiln_fw_root="C:/wt/espflash/firmware/KilnFW", verify=True)`
+passed and verified on the first attempt after two untracked host-test
+fixture directories and a line-ending-only diff in `dashboard_http.c` were
+cleared from the worktree (the sensitive-dirty gate had flagged one of the
+fixture dirs, `cfg_fs_test_kiln_cfg_store/`, as `cfg_fs`-adjacent; it was a
+scratch directory from `build_host_tests.ps1`, not source).
+
+Post-flash: no new crash report (`get_heap_status`'s unacknowledged-crash
+banner is still the stale `218f65f7` record: `exc_pc=0xfffffffd`, corrupted
+backtrace, unchanged from before this flash -- this boot's own
+`reset_reason` is a clean `software (esp_restart)`, `uptime_s=14` at first
+check). `debug_check_partition_table` reports the on-chip table now MATCHES
+`partitions.csv` exactly, `cfg` present at `0xDB0000/0x80000`. PID gains and
+coupling matrix read back identical to pre-flash (Zone0 Kp=0.0318
+Ki=0.0001 Kd=0.8401, Zone1 Kp=0.0485 Ki=0.0002 Kd=1.0548, Zone2 Kp=0.0631
+Ki=0.0002 Kd=1.0690, coupling z0(27.32,21.72) z1(14.30,22.15)
+z2(8.33,12.42)). Stack margins for every task read OK except two
+already-known LOW entries unrelated to this change (`backlight_pwm` 896 B/
+29.2%, `system_uart_bridge` 920 B/29.9%) -- neither regressed by this flash.
+Safety link came up (S6b tripped briefly on the ESP-side reset, self-cleared,
+`safety_get_status` shows link up shortly after).
+
+**Auto-format did NOT run.** The boot log shows LittleFS mount failing with
+`Corrupted dir pair at {0x0, 0x1}` and `cfg_fs` then refusing to auto-format
+because *86.6% of the partition is non-erased data* -- this region still
+holds residual bytes from before the prior recovery reverted the partition
+table, not blank flash, so the auto-format safety gate correctly declined
+rather than silently overwriting whatever is there. `GET /api/cfgfs` reports
+`mounted=false status='unmounted'`, all items still NVS-only,
+`GET /api/dualwrite_window` reports `consecutive_clean_boots=0`. This is a
+stop point, not a failure of the stack-overflow fix: deciding whether to
+force-format that residual data (irreversibly discarding whatever is in it)
+is an operator call this flash pass does not make unilaterally. Zones/PID
+values were left untouched and no functional round-trip test (unit
+preference etc.) was attempted since it would have exercised only the
+NVS-only fallback path, not the new cfg_fs code this flash was validating.

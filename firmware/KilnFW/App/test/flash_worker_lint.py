@@ -115,6 +115,21 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): crash_report_save() runs from the panic/
     # boot path, before normal task concurrency exists.
     "crash_report.c",
+    # Pattern 2 (local caller_stack_is_external() guard), same shape and
+    # same reasoning as run_state.c's/kiln_cfg_store.c's own entries:
+    # persist_locked() checks it before every hal_kv_set_blob()/
+    # hal_kv_commit(). Write call sites are dualwrite_window_boot_check()
+    # (from dualwrite_window_http_start(), itself called from
+    # main_network_http.c's httpd bring-up -- internal-SRAM-stack task, not
+    # PSRAM), dualwrite_window_note_mount_failure() (not yet wired to any
+    # call site -- see this file's own header comment), and
+    # dualwrite_window_note_firing_complete()/_note_restore_verified()
+    # (profile_executor.c's tick task and the dualwrite_window_http.c POST
+    # handler, respectively -- same internal-SRAM-stack story). None of
+    # these call sites dispatch through uart_bridge_ext_run_on_flash_worker(),
+    # so the re-entrancy half of this lint does not apply here -- only the
+    # direct-hal_kv-write half, which the guard covers.
+    "dualwrite_window.c",
     # Pattern 3 (init-time only): display_power_cfg_set() runs from
     # settings_http.c's POST /api/settings/display_power handler, on that
     # handler's own internal-SRAM-stack httpd task -- same story as
