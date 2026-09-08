@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
@@ -1214,19 +1215,48 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"safety link not available this boot\"}");
     }
-    safety_link_status_t st;
-    memset(&st, 0, sizeof(st));
-    bool link_up = (safety_link_get_status(s_link, &st) == ESP_OK) && st.link_up;
-    bool trip_latched = st.fault_asserted ||
-                         (st.diag_ever_received && st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED);
-    bool k4_closed = (st.flags & SAFETY_FLAG_RELAY) != 0u;
+    /* st and pstat (below) are heap-allocated, internal DRAM, in narrow
+     * scopes that end well before the httpd_worker stack-budget pass's
+     * target frame is left (2026-09-08) -- both are read once into plain
+     * bools/floats right after the call that fills them and freed
+     * immediately, so neither has to be tracked across this handler's many
+     * later return paths. Internal DRAM, not PSRAM: this handler's confirm
+     * path (below) reaches flash via safety_cfg_store_set_ct_cal_input(),
+     * and a PSRAM-backed allocation touched around a flash write is the
+     * known panic class documented elsewhere in this codebase -- these two
+     * buffers are unrelated to that write, but internal DRAM for every
+     * heap buffer in a handler that has ANY flash-writing path removes the
+     * question rather than depending on "this particular buffer's lifetime
+     * doesn't overlap the write" staying true after a future edit. */
+    bool link_up, trip_latched, k4_closed;
+    {
+        safety_link_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_8BIT);
+        if (!st) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+            return ESP_OK;
+        }
+        memset(st, 0, sizeof(*st));
+        link_up = (safety_link_get_status(s_link, st) == ESP_OK) && st->link_up;
+        trip_latched = st->fault_asserted ||
+                       (st->diag_ever_received && st->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED);
+        k4_closed = (st->flags & SAFETY_FLAG_RELAY) != 0u;
+        free(st);
+    }
     bool have_io = s_hw_io != NULL;
     bool relays_on = have_io && kiln_io_get_relay_shadow(s_hw_io) != 0u;
     uint32_t off_ms = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
-    profile_exec_status_t pstat;
-    memset(&pstat, 0, sizeof(pstat));
-    profile_executor_get_status(&pstat);
-    bool profile_running_or_paused = (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED);
+    bool profile_running_or_paused;
+    {
+        profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_8BIT);
+        if (!pstat) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+            return ESP_OK;
+        }
+        memset(pstat, 0, sizeof(*pstat));
+        profile_executor_get_status(pstat);
+        profile_running_or_paused = (pstat->state == PROFILE_EXEC_RUNNING || pstat->state == PROFILE_EXEC_PAUSED);
+        free(pstat);
+    }
     bool autotune_active = autotune_engine_is_active();
 
     safety_ct_cal_source_t existing_source = SAFETY_CT_CAL_SOURCE_MANUAL;
@@ -1305,13 +1335,22 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     // ct_auto_zero_check_postconditions()'s own comment. ---
     bool relays_on_after = have_io && kiln_io_get_relay_shadow(s_hw_io) != 0u;
     uint32_t off_ms_after = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
-    // Reuse `pstat` (no longer needed after the precondition check above) rather
-    // than declaring a second ~550 B profile_exec_status_t in this httpd frame --
-    // the httpd task stack is 8192 B with a known 64 B worst-case margin.
-    memset(&pstat, 0, sizeof(pstat));
-    profile_executor_get_status(&pstat);
-    bool profile_running_or_paused_after =
-        (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED);
+    // Second narrow heap-scoped profile_exec_status_t read, same reasoning
+    // and same internal-DRAM choice as the first one above -- not a stack
+    // local, so there is no frame cost to "declaring a second one" any more.
+    bool profile_running_or_paused_after;
+    {
+        profile_exec_status_t *pstat2 = heap_caps_malloc(sizeof(*pstat2), MALLOC_CAP_8BIT);
+        if (!pstat2) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+            return ESP_OK;
+        }
+        memset(pstat2, 0, sizeof(*pstat2));
+        profile_executor_get_status(pstat2);
+        profile_running_or_paused_after =
+            (pstat2->state == PROFILE_EXEC_RUNNING || pstat2->state == PROFILE_EXEC_PAUSED);
+        free(pstat2);
+    }
     bool autotune_active_after = autotune_engine_is_active();
     const char *post_refusal = ct_auto_zero_check_postconditions(
         relays_on_after, off_ms_after, waited_ms, profile_running_or_paused_after, autotune_active_after);

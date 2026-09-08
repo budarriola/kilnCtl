@@ -82,12 +82,29 @@ REPO_ROOT = base.REPO_ROOT
 DEFAULT_ELF = base.DEFAULT_ELF
 HTTP_DIR = os.path.join(REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "http")
 
-# Known worst case as of 2026-09-08, after backup_import_post_handler's fix
-# (see module docstring): backup_export_get_handler (via
-# profile_detail_get_handler -> send_builtin_full -> ...) at 7472 B. This is
-# a CEILING, not a percentage-of-stack budget: it exists to catch the deepest
+# Known worst case as of 2026-09-08, after the four-handler stack-budget pass
+# (profile_detail_get_handler's 5184 B json[] buffer, ct_auto_zero_post_
+# handler's st/pstat locals, backup_export_get_handler -- which shares this
+# ceiling's path only through this static analysis's per-name call-graph
+# match, see below -- and firing_stats_get_dualwrite_status's two 1364 B
+# blobs, all moved to heap.malloc): the new worst reachable path is
+# backup_export_get_handler (752 B own frame) -> ct_auto_zero_post_handler's
+# NAME reused as a call-graph match for the safety_cfg_store_refetch_locked
+# -> safety_link_get_config_page -> ... -> uart_enable_tx_write_fifo chain,
+# at 5776 B total. NOTE: backup_export.c never actually calls
+# ct_auto_zero_post_handler (nor, before this pass, profile_detail_get_
+# handler) -- this script's static analysis measures the deepest path
+# reachable from a name it can find a call edge FOR, and something in this
+# codepath's call-graph extraction is mis-attributing an edge across files
+# that do not call each other. That mis-attribution predates this pass (the
+# same shape was already visible in the prior 7472 B ceiling's reported
+# path) and is out of scope here -- the real, load-bearing worst case this
+# pass leaves behind is ct_cal_post_handler at 5056 B (see the "deepest 5"
+# printout), which is what CEILING_BYTES is retightened against, with
+# headroom to the reported (if mis-attributed) 5776 B above it. This is a
+# CEILING, not a percentage-of-stack budget: it exists to catch the deepest
 # reachable handler path getting WORSE, not to relitigate this depth.
-CEILING_BYTES = 7472
+CEILING_BYTES = 5776
 
 HANDLER_RE = re.compile(r"\.handler\s*=\s*([A-Za-z_][A-Za-z0-9_]*)")
 

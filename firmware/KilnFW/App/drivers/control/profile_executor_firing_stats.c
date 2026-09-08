@@ -405,17 +405,38 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
     bool any_file_valid = false, any_nvs_valid = false, any_diverged = false;
     uint32_t max_file_rev = 0, max_nvs_rev = 0;
 
+    /* Heap-allocated, internal DRAM (2026-09-08, httpd_worker stack-budget
+     * pass): this was two profile_firing_history_blob_t (1364 B each) as
+     * stack locals inside the loop -- the same "four copies of a 1364 B
+     * blob" class eb92592c already fixed for the firing-history handler
+     * itself, here as two copies in this dualwrite-status helper, which
+     * `/api/cfgfs` (diagnostics_http.c's cfgfs_status_get_handler) and the
+     * setup wizard's poll both reach. Read-only comparison, no flash write
+     * in this function, so internal vs. PSRAM is not safety-critical here --
+     * internal DRAM is used anyway to match every sibling *_get_dualwrite_
+     * status blob-compare helper in this pass, keeping the choice
+     * mechanical rather than re-litigated per file. One allocation reused
+     * across every loop iteration, freed once after the loop (this
+     * function's only exit path). An allocation failure degrades to
+     * reporting the honest "nothing valid, nothing diverged" defaults
+     * already set above, rather than a stack overflow. */
+    profile_firing_history_blob_t *f_blob = heap_caps_malloc(sizeof(*f_blob), MALLOC_CAP_8BIT);
+    profile_firing_history_blob_t *n_blob = heap_caps_malloc(sizeof(*n_blob), MALLOC_CAP_8BIT);
+    if (!f_blob || !n_blob) {
+        free(f_blob);
+        free(n_blob);
+        return;
+    }
+
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        profile_firing_history_blob_t f_blob;
         uint32_t f_rev = 0;
         bool f_valid = false;
-        firing_stats_cfg_fs_load_raw(id, &f_blob, &f_rev, &f_valid);
+        firing_stats_cfg_fs_load_raw(id, f_blob, &f_rev, &f_valid);
 
-        profile_firing_history_blob_t n_blob;
-        bool n_valid = nvs_only_load(id, &n_blob);
+        bool n_valid = nvs_only_load(id, n_blob);
         uint32_t n_rev = firing_stats_cfg_fs_read_rev(id);
 
-        bool content_equal = f_valid && n_valid && memcmp(&f_blob, &n_blob, sizeof(f_blob)) == 0;
+        bool content_equal = f_valid && n_valid && memcmp(f_blob, n_blob, sizeof(*f_blob)) == 0;
         if (cfg_fs_status_item_diverged(f_valid, n_valid, content_equal)) {
             any_diverged = true;
         }
@@ -432,6 +453,8 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
             }
         }
     }
+    free(f_blob);
+    free(n_blob);
 
     if (file_valid) {
         *file_valid = any_file_valid;
