@@ -1038,6 +1038,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<div><label>Min temp &deg;C -- below this reads as a broken/disconnected sensor</label>' +
       '<input type="number" step="1" class="mintemp" value="' + z.min_temp_c + '"></div>' +
     '</div>' +
+    '<div class="heaterOnly">' +
     '<label>Relay timing (ms, 0 = use firmware default: 60000/10000/2000) ' +
     infoDetailsHtml('relayTiming', 'relay timing') +
     '</label>' +
@@ -1045,6 +1046,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<div><label>Window (&ge; 3x min on)</label><input type="number" step="1000" min="30000" class="window" value="' + (z.heater_window_ms || 0) + '"></div>' +
       '<div><label>Min on (&ge; 10000)</label><input type="number" step="1000" min="10000" class="minon" value="' + (z.heater_min_on_ms || 0) + '"></div>' +
       '<div><label>Min off</label><input type="number" step="100" class="minoff" value="' + (z.heater_min_off_ms || 0) + '"></div>' +
+    '</div>' +
     '</div>' +
     '<div class="heaterOnly">' +
     '<label>Cross-zone plausibility (&deg;C, 0 = disabled) ' +
