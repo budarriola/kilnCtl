@@ -211,7 +211,13 @@ static void test_mounted_with_files(void)
                "capacity section echoes the caller-supplied values and computes free correctly");
     TEST_CHECK(json_has(json, "\"zones\":{\"file_backed\":true,\"file_rev\":5,\"nvs_rev\":5,\"diverged\":false}"),
                "dual-write: equal revs is not diverged");
-    TEST_CHECK(json_has(json, "\"nvs_only\":["), "still lists the not-yet-migrated items");
+    TEST_CHECK(json_has(json, "\"nvs_only\":[\"firing_stats\",\"adaptive_tune\",\"relay_cycles\"]"),
+               "nvs_only lists only items with NO cfg_fs bridge yet -- prefs/profiles/zones/kiln-config-slots "
+               "are file-backed today (34927a77/530dc2f7/19f74959/9bd29cff) and must NOT appear here");
+    TEST_CHECK(json_has(json, "\"nvs_permanent\":["), "nvs_permanent section present");
+    TEST_CHECK(json_has(json, "\"wifi_creds\""),
+               "an intentionally-NVS-forever item (wifi creds) is reported in nvs_permanent, "
+               "never in nvs_only -- an operator must not read it as a pending migration");
 
     /* Now the divergence case: NVS strictly ahead of the file means a prior
      * file write failed -- must be flagged, not silently reported healthy. */

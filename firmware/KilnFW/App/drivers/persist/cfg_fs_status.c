@@ -178,12 +178,39 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
     } else {
         APPEND("\"zones\":{\"file_backed\":false}");
     }
-    /* Every other MOVE item from docs/FILESYSTEM_USER_DATA_PLAN.md section 5
-     * (prefs/profiles/kiln-config-slots/adaptive-tune/relay-cycles) has not
-     * had its migration step land yet (steps 3/4/6) -- reported plainly as
-     * NVS-only rather than omitted, so "what's file-backed vs NVS-only" is
-     * a complete answer, not just the one item that happens to be done. */
-    APPEND(",\"nvs_only\":[\"prefs\",\"profiles\",\"kilncfg_slots\",\"adaptive_tune\",\"relay_cycles\"]");
+    /* 2026-09-08 audit (deaccc4f): this list used to also carry "prefs" and
+     * "profiles", which went stale the moment 34927a77/530dc2f7 gave both
+     * real persist/*_cfg_fs.c bridges (pref_cfg_fs.c, profiles_cfg_fs.c) --
+     * an operator or the setup wizard reading /api/cfgfs would have been
+     * told a migrated item was still pending. Verified against the actual
+     * bridge modules under persist/ (kiln_cfg_store_cfg_fs.c,
+     * pref_cfg_fs.c, profiles_cfg_fs.c, zones_config_cfg_fs.c), not against
+     * this doc-derived array, which is why it's now just these three: MOVE
+     * items from docs/FILESYSTEM_USER_DATA_PLAN.md section 5 with NO bridge
+     * module yet (steps not landed) -- firing stats/history (item 7),
+     * adaptive-tune state (item 9), relay cycle counters (item 4, plan
+     * recommends moving it last). cfgfs_nvs_only_drift_check.py fails the
+     * moment a new persist/*_cfg_fs.c bridge appears without this array (and
+     * that check) being updated to match, so this list cannot go stale the
+     * same way again. */
+    APPEND(",\"nvs_only\":[\"firing_stats\",\"adaptive_tune\",\"relay_cycles\"]");
+    /* Distinct from the above: items docs/FILESYSTEM_USER_DATA_PLAN.md's
+     * "KEEP in NVS" section says stay in NVS FOREVER, by design, for boot-
+     * ordering or safety-isolation reasons -- not "not migrated yet". Listed
+     * separately so an operator reading /api/cfgfs cannot mistake "working
+     * as designed" for "unfinished migration" (the exact confusion this
+     * audit was raised to prevent). See that doc section for the reason
+     * behind each: wifi_creds/boot_guard_counter/watchdog_panic_disable
+     * (must work before or independent of any mount), ota_record/
+     * crash_report (must be writable from panic/OTA paths), touch_cal
+     * (needed for the recovery UI before mount), run_state_breadcrumb
+     * (read at early boot, UNDECIDED-leaning-KEEP), safety_mirror_esp (a
+     * cache the safety path must not depend on the filesystem for),
+     * rp2040_config_store (a different chip -- out of scope permanently),
+     * logs/coredump (already on their own dedicated partitions). */
+    APPEND(",\"nvs_permanent\":[\"wifi_creds\",\"boot_guard_counter\",\"watchdog_panic_disable\","
+          "\"ota_record\",\"crash_report\",\"touch_cal\",\"run_state_breadcrumb\",\"safety_mirror_esp\","
+          "\"rp2040_config_store\",\"logs\",\"coredump\"]");
     APPEND("}");
 
     /* "format" -- observability for the deferred background auto-format

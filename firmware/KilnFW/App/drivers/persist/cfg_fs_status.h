@@ -38,10 +38,16 @@ typedef struct {
     size_t used_bytes;
 } cfg_fs_capacity_info_t;
 
-/* Dual-write picture for one migrated item (today: zones config only, per
- * docs/FILESYSTEM_USER_DATA_PLAN.md section 5 -- steps 3/4/6 have not
- * landed, so every other MOVE item is still NVS-only and is reported as
- * such by cfg_fs_status_build_json() without needing an entry here). */
+/* Dual-write rev-compare picture for ONE item: zones config, the only item
+ * this struct carries today. As of 2026-09-08, four persist/*_cfg_fs.c
+ * bridges exist (kiln_cfg_store, pref, profiles, zones_config), covering
+ * most MOVE items from docs/FILESYSTEM_USER_DATA_PLAN.md section 5 -- but
+ * this struct/JSON's per-item file_rev/nvs_rev/diverged detail is wired up
+ * for zones only; the other bridges' items are reported via
+ * cfg_fs_status_build_json()'s plain nvs_only/nvs_permanent name lists
+ * without a rev-compare picture. Widening this to every bridge is a real
+ * gap (each additional item needs its own NVS-rev-key plumbing through the
+ * caller, diagnostics_http.c), tracked but not done here. */
 typedef struct {
     bool     file_valid;  /* zones_config_cfg_fs_load_raw()'s out_valid */
     uint32_t file_rev;    /* zones_config_cfg_fs_load_raw()'s out_rev */

@@ -1033,10 +1033,16 @@ here:</p>
 
     var dw = j.dual_write || {};
     var fileBacked = [];
+    // nvs_only: not yet migrated, still pending. nvs_permanent: KEEP in NVS
+    // forever by design (boot-order/safety reasons) -- rendered distinctly
+    // so "pending" and "working as intended" are never conflated (2026-09-08
+    // audit: this list used to also carry already-migrated items and misled
+    // readers into thinking finished migrations were still outstanding).
     var nvsOnly = Array.isArray(dw.nvs_only) ? dw.nvs_only.slice() : [];
+    var nvsPermanent = Array.isArray(dw.nvs_permanent) ? dw.nvs_permanent.slice() : [];
     var anyDiverged = false;
     for (var key in dw) {
-      if (key === 'nvs_only' || !Object.prototype.hasOwnProperty.call(dw, key)) continue;
+      if (key === 'nvs_only' || key === 'nvs_permanent' || !Object.prototype.hasOwnProperty.call(dw, key)) continue;
       var item = dw[key];
       if (item && item.file_backed) {
         fileBacked.push({ key: key, item: item });
@@ -1055,7 +1061,11 @@ here:</p>
     }
     for (var n = 0; n < nvsOnly.length; n++) {
       rows += '<div class="row"><span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(nvsOnly[n])) +
-              '</span><span class="value" style="color:var(--muted)">NVS-only</span></div>';
+              '</span><span class="value" style="color:var(--muted)">NVS-only (migration pending)</span></div>';
+    }
+    for (var p = 0; p < nvsPermanent.length; p++) {
+      rows += '<div class="row"><span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(nvsPermanent[p])) +
+              '</span><span class="value" style="color:var(--muted)">NVS by design (stays in NVS)</span></div>';
     }
     if (anyDiverged) {
       rows += '<div class="row"><span class="label" style="color:var(--ui-accent-5)">Warning</span>' +
