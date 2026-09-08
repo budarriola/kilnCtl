@@ -152,6 +152,8 @@ static void main_ota_rollback_confirm_task(void *arg)
 
     TickType_t start = xTaskGetTickCount();
     bool       warned = false;
+    bool       rollback_cancel_attempted = false; /* OTA-slot branch only -- see below */
+    bool       clear_warned = false;
 
     for (;;) {
         bool link_up = false;
@@ -166,43 +168,84 @@ static void main_ota_rollback_confirm_task(void *arg)
             boot_confirm_decide(is_factory, ctx.nvs_ok, ctx.web_ok, ctx.ota_ok);
 
         if (action == BOOT_CONFIRM_SKIP_FACTORY) {
-            ESP_LOGI(MAIN_TAG, "running from the factory partition -- OTA rollback confirmation does "
-                          "not apply here (there is no PENDING_VERIFY slot to cancel; "
-                          "esp_ota_mark_app_valid_cancel_rollback() only means something after a "
-                          "real OTA into ota_0/ota_1). NVS, web server and OTA routes are healthy, "
-                          "so boot_guard's counter is still cleared below.");
-            boot_guard_mark_healthy();
-            vTaskDelete(NULL);
-            return;
+            if (!clear_warned) {
+                ESP_LOGI(MAIN_TAG, "running from the factory partition -- OTA rollback confirmation does "
+                              "not apply here (there is no PENDING_VERIFY slot to cancel; "
+                              "esp_ota_mark_app_valid_cancel_rollback() only means something after a "
+                              "real OTA into ota_0/ota_1). NVS, web server and OTA routes are healthy, "
+                              "so boot_guard's counter is still cleared below.");
+            }
+            /* 2026-09-08 recovery-loop audit (docs/audits/
+             * boot_guard_recovery_loop_2026-09-08.md): boot_guard_mark_healthy()
+             * now returns false when its own read-back verification shows the
+             * clear did NOT persist, even though the underlying NVS write call
+             * reported success. The old code called this once and deleted
+             * itself unconditionally -- exactly the bug that left a healthy
+             * board (NVS/web/OTA all up, 11+ minutes of uptime) stuck in
+             * recovery mode forever: the very first (and only) attempt's
+             * write silently failed to stick, nothing ever tried again, and
+             * the task exited believing it had succeeded. Now: keep polling
+             * (existing 500 ms cadence) and retrying the clear until it is
+             * actually verified, rather than trusting one shot. */
+            if (boot_guard_mark_healthy()) {
+                vTaskDelete(NULL);
+                return;
+            }
+            if (!clear_warned && (xTaskGetTickCount() - start) > pdMS_TO_TICKS(MAIN_OTA_CONFIRM_WARN_MS)) {
+                ESP_LOGE(MAIN_TAG, "boot-guard clear still not verified %lu ms after boot -- will keep "
+                              "retrying every %d ms; this boot stays counted as unconfirmed until it "
+                              "succeeds",
+                         (unsigned long)MAIN_OTA_CONFIRM_WARN_MS, MAIN_OTA_CONFIRM_POLL_MS);
+                clear_warned = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(MAIN_OTA_CONFIRM_POLL_MS));
+            continue;
         }
 
         if (action == BOOT_CONFIRM_CONFIRM_OTA_SLOT) {
-            esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-            if (err == ESP_OK) {
-                ESP_LOGI(MAIN_TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "
-                              "-- this image is no longer PENDING_VERIFY");
-            } else {
-                ESP_LOGE(MAIN_TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %s "
-                              "(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE off, or not an OTA slot?)",
-                         esp_err_to_name(err));
-            }
-            if (!link_up) {
-                /* Degraded-but-recorded, per boot_guard.h's doc comment: this
-                 * confirmation did NOT wait for a live safety-link frame
-                 * exchange. Announced loudly rather than silently, so a board
-                 * that is SUPPOSED to have a safety processor answering does
-                 * not have that fact buried in an INFO line. */
-                ESP_LOGW(MAIN_TAG, "OTA rollback confirmed WITHOUT a live safety-link check "
-                              "(safety_link_up=0) -- if this board is expected to have a safety "
-                              "processor answering, that is a separate problem worth investigating");
+            if (!rollback_cancel_attempted) {
+                esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+                if (err == ESP_OK) {
+                    ESP_LOGI(MAIN_TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "
+                                  "-- this image is no longer PENDING_VERIFY");
+                } else {
+                    ESP_LOGE(MAIN_TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %s "
+                                  "(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE off, or not an OTA slot?)",
+                             esp_err_to_name(err));
+                }
+                if (!link_up) {
+                    /* Degraded-but-recorded, per boot_guard.h's doc comment: this
+                     * confirmation did NOT wait for a live safety-link frame
+                     * exchange. Announced loudly rather than silently, so a board
+                     * that is SUPPOSED to have a safety processor answering does
+                     * not have that fact buried in an INFO line. */
+                    ESP_LOGW(MAIN_TAG, "OTA rollback confirmed WITHOUT a live safety-link check "
+                                  "(safety_link_up=0) -- if this board is expected to have a safety "
+                                  "processor answering, that is a separate problem worth investigating");
+                }
+                rollback_cancel_attempted = true; /* esp_ota_mark_app_valid_cancel_rollback() is a
+                                                    * one-shot bootloader-state transition -- do not
+                                                    * repeat it every poll while only the boot_guard
+                                                    * clear below is still being retried. */
             }
             /* Same predicate as the rollback decision just above, by
              * construction (boot_confirm_is_healthy() was already
              * satisfied) -- see boot_guard.h's doc comment for why these two
-             * must never be allowed to disagree again. */
-            boot_guard_mark_healthy();
-            vTaskDelete(NULL);
-            return;
+             * must never be allowed to disagree again. Retried the same way
+             * as the factory-partition branch above -- see its comment. */
+            if (boot_guard_mark_healthy()) {
+                vTaskDelete(NULL);
+                return;
+            }
+            if (!clear_warned && (xTaskGetTickCount() - start) > pdMS_TO_TICKS(MAIN_OTA_CONFIRM_WARN_MS)) {
+                ESP_LOGE(MAIN_TAG, "boot-guard clear still not verified %lu ms after boot -- will keep "
+                              "retrying every %d ms; this boot stays counted as unconfirmed until it "
+                              "succeeds",
+                         (unsigned long)MAIN_OTA_CONFIRM_WARN_MS, MAIN_OTA_CONFIRM_POLL_MS);
+                clear_warned = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(MAIN_OTA_CONFIRM_POLL_MS));
+            continue;
         }
 
         if (!warned && (xTaskGetTickCount() - start) > pdMS_TO_TICKS(MAIN_OTA_CONFIRM_WARN_MS)) {

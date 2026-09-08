@@ -158,7 +158,16 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
     // (boot_guard_mark_healthy() no-ops once already cleared this boot), and
     // removes any dependency on that background task's timing for this
     // explicit, operator-requested exit.
-    boot_guard_mark_healthy();
+    if (!boot_guard_mark_healthy()) {
+        /* 2026-09-08 recovery-loop audit: this is no longer trusted to be a
+         * harmless no-op -- an operator explicitly asking to exit recovery
+         * mode deserves to know the clear did not verify, even though the
+         * reboot below proceeds regardless (the background confirm task,
+         * main_network_http.c, keeps retrying across this reboot's own
+         * lifetime too). */
+        ESP_LOGW(OTA_HTTP_TAG, "recovery_exit: boot-guard clear did not verify this call -- rebooting anyway; "
+                      "the background confirm task will keep retrying on the next boot");
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"rebooting\"}");
     /* Plain xTaskCreate -- an INTERNAL-RAM stack, deliberately, exactly like

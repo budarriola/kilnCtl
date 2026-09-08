@@ -143,11 +143,33 @@ bool boot_guard_is_recovery_mode(void);
 
 /* Clears the persisted counter to 0 -- the board is confirmed to have
  * booted successfully enough that continuing to reset-loop is no longer a
- * live risk. Idempotent and cheap to call repeatedly: only writes to NVS
- * the first time it actually has something to clear in a given boot. Does
- * NOT retroactively change boot_guard_is_recovery_mode()'s answer for the
- * boot that is currently running -- see that function's doc comment. */
-void boot_guard_mark_healthy(void);
+ * live risk. Does NOT retroactively change boot_guard_is_recovery_mode()'s
+ * answer for the boot that is currently running -- see that function's doc
+ * comment.
+ *
+ * Returns true only once the clear has been READ BACK and verified to be
+ * actually 0 in NVS -- not merely once the write call reported success.
+ * This distinction is the whole point (2026-09-08 recovery-loop audit,
+ * docs/audits/boot_guard_recovery_loop_2026-09-08.md): hal_kv_set_blob()/
+ * hal_kv_commit() reporting HAL_OK is necessary but was found NOT to be
+ * sufficient evidence the byte pattern a later boot reads back actually
+ * changed -- on real hardware the persisted "unconfirmed boot" count was
+ * observed to stay pinned at its pre-clear value across every boot even
+ * though this function's write calls returned HAL_OK every time and set
+ * healthy_marked=true in RAM (confirmed via a live JTAG read of s_bg mid-
+ * boot). Trusting the write's return code alone is exactly the "logging
+ * unchecked success" bug class this project has hit before elsewhere
+ * (CLAUDE.md's "Safety calls logging unchecked success" entry) -- here the
+ * return code itself was unreliable, not merely uninspected, so the fix is
+ * a read-back, not just a tighter `if`.
+ *
+ * NOT idempotent in the old "only tries once" sense: unlike before, a
+ * caller whose first attempt fails verification SHOULD call this again
+ * (main_network_http.c's main_ota_rollback_confirm_task() does, on its
+ * existing poll cadence, instead of giving up after one try) -- see that
+ * call site. Once verified, further calls are cheap no-ops (checks
+ * s_bg.healthy_marked before touching NVS again). */
+bool boot_guard_mark_healthy(void);
 
 /* For diagnostics/tests: the persisted "unconfirmed" count as loaded (or
  * incremented to) this boot. */

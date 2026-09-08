@@ -344,9 +344,33 @@ KilnFW's `boot_guard.h` RECOVERY MODE deliberately skips starting subsystems
 into one. Today's accessors are prestart-hardened (they check their lock for
 NULL), so the gate is defence in depth rather than the only thing standing
 between you and a hang — but the board has been bricked into a permanent
-recovery loop twice from this area (`e7b8efc`, and 2026-08-22).
+recovery loop THREE times from this area (`e7b8efc`, 2026-08-22, and
+2026-09-08 — see `docs/audits/boot_guard_recovery_loop_2026-09-08.md`).
 
-Both times the real fault was a task stack, not the missing gate: a 700-byte
+The 2026-09-08 instance was a different failure shape from the first two:
+`boot_guard_mark_healthy()`'s NVS write reported `HAL_OK` while the
+persisted count never actually reached 0 — confirmed via a live JTAG read
+of `s_bg` showing `healthy_marked=true` in RAM on a boot whose successor
+still loaded the pre-clear count, on a board that was healthy (NVS/web/OTA
+all up, no firing, relays off) for 11+ minutes and, separately, across 5
+password-authenticated `POST /api/ota/esp/recovery_exit` calls over 8
+minutes — the explicit operator escape hatch was just as affected as the
+automatic path, since both call the same function. **`boot_guard_mark_healthy()`
+now returns `bool` and only reports success once a read-back
+(`verify_persisted_count()`) confirms the clear, with one bounded
+erase-then-retry before giving up; `main_ota_rollback_confirm_task()`
+(`main_network_http.c`) no longer deletes itself after a single unverified
+attempt — it keeps polling (existing 500 ms cadence) until the clear
+verifies.** Do not trust a boot_guard NVS write's return code alone anywhere
+in this module again — this is the same "logging unchecked success" class
+flagged elsewhere in this file, just with an unreliable return code rather
+than merely an uninspected one. No HTTP endpoint currently exposes the raw
+boot_guard count (`GET /api/ota/esp/status`'s `recovery_mode` is a boolean,
+fixed for the boot) — verifying this class of fix without a reflash
+required a JTAG memory read of `s_bg`, resolved via `pyelftools` against the
+matching ELF; a `/api/boot_guard` diagnostics route is a reasonable follow-up.
+
+Both of the first two times the real fault was a task stack, not the missing gate: a 700-byte
 overflow corrupted the heap, and the pool walk then looped inside a critical
 section until the interrupt watchdog fired. **Register every new task for
 stack-margin reporting and measure it** — `check_stack_margin_registration.ps1`

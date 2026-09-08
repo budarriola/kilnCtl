@@ -165,6 +165,68 @@ static uint32_t load_count(void)
     return rec.boot_count;
 }
 
+/* Strict read-back for boot_guard_mark_healthy()'s verification: unlike
+ * load_count() (which deliberately collapses "missing/corrupt/unreadable"
+ * to a safe default of 0, appropriate for an ordinary boot-time load), a
+ * verify step must NOT treat "could not read it back at all" as "confirmed
+ * zero" -- those are opposite conclusions here. Returns true only if the
+ * record was read back successfully, is version/CRC-valid, AND its
+ * boot_count is exactly `expected`. Any read/validity failure returns
+ * false, distinctly from "read back some other value" -- both are logged
+ * differently by the caller, but both are "not verified". */
+static bool verify_persisted_count(uint32_t expected)
+{
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        ESP_LOGE(TAG, "verify_persisted_count: could not reopen '%s'/'%s' to read back: %s",
+                 KILN_NVS_PARTITION, NVS_NAMESPACE, hal_status_to_name(err));
+        return false;
+    }
+    boot_guard_record_t rec;
+    size_t len = sizeof(rec);
+    err = hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(rec)) {
+        ESP_LOGE(TAG, "verify_persisted_count: read-back failed: %s (len=%u, want %u)",
+                 hal_status_to_name(err), (unsigned)len, (unsigned)sizeof(rec));
+        return false;
+    }
+    if (!record_is_valid(&rec)) {
+        ESP_LOGE(TAG, "verify_persisted_count: record failed version/CRC check immediately after "
+                      "writing it -- the write plainly did not take");
+        return false;
+    }
+    return rec.boot_count == expected;
+}
+
+/* Best-effort mitigation, tried once by boot_guard_mark_healthy() before it
+ * gives up for this call: explicitly erase the key first, then write+commit
+ * a fresh record. An ordinary nvs_set_blob() overwrite-in-place is what
+ * persist_count() already does and is what was observed (2026-09-08 audit)
+ * to sometimes report HAL_OK without the read-back changing; erasing first
+ * removes any possibility of an in-place-update quirk being the cause,
+ * without requiring a diagnosis of exactly which NVS-internal condition
+ * produced the original symptom. Returns the write's own status (NOT
+ * whether it verified -- the caller still verifies separately). */
+static hal_status_t erase_then_persist_count(uint32_t count)
+{
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return err;
+    }
+    hal_status_t erase_err = hal_kv_erase_key(&h, NVS_KEY_REC);
+    if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
+        /* Not fatal by itself -- fall through and try the write anyway,
+         * same as persist_count()'s own tolerance -- but worth knowing. */
+        ESP_LOGW(TAG, "erase_then_persist_count: hal_kv_erase_key failed: %s -- writing anyway",
+                 hal_status_to_name(erase_err));
+    }
+    hal_kv_close(&h);
+    return persist_count(count);
+}
+
 static bool ensure_lock(void)
 {
     if (!s_bg.lock) {
@@ -273,25 +335,62 @@ boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok
     return is_factory_partition ? BOOT_CONFIRM_SKIP_FACTORY : BOOT_CONFIRM_CONFIRM_OTA_SLOT;
 }
 
-void boot_guard_mark_healthy(void)
+bool boot_guard_mark_healthy(void)
 {
-    if (!s_bg.initialized || s_bg.healthy_marked) {
-        return;
+    if (!s_bg.initialized) {
+        return false;
+    }
+    if (s_bg.healthy_marked) {
+        return true; /* already verified cleared earlier this boot */
     }
     if (!ensure_lock()) {
-        return;
+        return false;
     }
     xSemaphoreTake(s_bg.lock, portMAX_DELAY);
     hal_status_t err = persist_count(0);
-    if (err == HAL_OK) {
+    /* See boot_guard.h's doc comment on this function: a HAL_OK write result
+     * was observed on real hardware NOT to guarantee the persisted value
+     * actually changed (docs/audits/boot_guard_recovery_loop_2026-09-08.md).
+     * Read it back with verify_persisted_count() (NOT load_count() -- that
+     * function's own "unreadable collapses to 0" default is exactly wrong
+     * for a verification step, which must tell a genuine confirmed-zero
+     * apart from "could not read it back at all") before ever trusting the
+     * clear -- this is the fix, not the write's own return code. */
+    bool verified = (err == HAL_OK) && verify_persisted_count(0);
+    if (!verified) {
+        /* One bounded retry, erasing the key first -- see
+         * erase_then_persist_count()'s own comment. Cheap (this call only
+         * runs a handful of times total per boot, from a low-priority
+         * background task or an explicit operator action, never a hot
+         * path), and it measurably improves the odds of actually clearing
+         * on real hardware where a plain overwrite was observed not to
+         * stick. Logged distinctly so a retry that was needed is visible,
+         * not just a retry that succeeded. */
+        ESP_LOGW(TAG, "boot-guard clear did not verify on the first attempt -- retrying once with "
+                      "an explicit erase-then-write");
+        err = erase_then_persist_count(0);
+        verified = (err == HAL_OK) && verify_persisted_count(0);
+    }
+    if (verified) {
         s_bg.healthy_marked = true;
     }
     xSemaphoreGive(s_bg.lock);
 
-    if (err == HAL_OK) {
-        ESP_LOGI(TAG, "boot-guard counter cleared -- this boot is confirmed healthy");
-    } else {
+    if (verified) {
+        ESP_LOGI(TAG, "boot-guard counter cleared and VERIFIED (read back as 0) -- this boot is "
+                      "confirmed healthy");
+    } else if (err != HAL_OK) {
         ESP_LOGW(TAG, "could not clear boot-guard counter: %s -- will retry next call",
                  hal_status_to_name(err));
+    } else {
+        /* The write call itself reported success, but verify_persisted_count()
+         * did NOT confirm boot_count==0 immediately afterward -- exactly the
+         * failure mode that bricked this board into a permanent recovery
+         * loop (that function already logs the specific reason: unreadable,
+         * invalid, or a different nonzero value). */
+        ESP_LOGE(TAG, "boot-guard counter WRITE REPORTED SUCCESS BUT DID NOT VERIFY -- NOT marking "
+                      "this boot healthy; will retry next call rather than trusting the write's own "
+                      "return code");
     }
+    return verified;
 }

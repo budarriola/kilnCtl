@@ -151,13 +151,80 @@ static void test_mark_healthy_clears_counter(void)
     }
     TEST_CHECK(!boot_guard_is_recovery_mode(), "precondition: not yet in recovery mode");
 
-    boot_guard_mark_healthy();
+    TEST_CHECK(boot_guard_mark_healthy(), "boot_guard_mark_healthy() reports true when the clear "
+               "actually verifies (the honest-hardware case)");
 
     simulate_reboot();
     boot_guard_init();
     TEST_CHECK(boot_guard_get_boot_count() == 1u,
                "boot_guard_mark_healthy() reset the persisted count to 0, so the next boot sees count 1");
     TEST_CHECK(!boot_guard_is_recovery_mode(), "nowhere near the threshold after a healthy mark");
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-08 recovery-loop audit (docs/audits/boot_guard_recovery_loop_2026-09-08.md):
+// on real hardware, boot_guard_mark_healthy()'s write call (persist_count(0))
+// reported HAL_OK and set the old code's unconditional healthy_marked=true,
+// yet the board came back up in recovery mode on every subsequent boot --
+// the persisted "unconfirmed boot" count never actually reached 0 in flash,
+// confirmed by a live JTAG read of s_bg mid-boot showing healthy_marked=true
+// in RAM while the very next boot still loaded the pre-clear count. Trusting
+// the write call's own return code was the bug. This test proves the NEW
+// read-back verification (verify_persisted_count(), boot_guard.c) actually
+// catches exactly that shape of lie: a committed record that a
+// (real-hardware-observed) failure mode leaves NOT reading back as the value
+// just written, despite the write path having reported success.
+// ---------------------------------------------------------------------------
+static void test_verify_persisted_count_catches_a_write_that_does_not_stick(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+
+    // Get a real, valid, nonzero count on record (same as every other test
+    // here) -- this is the STALE pre-clear value the real board's boot log
+    // kept reporting boot after boot ("3 consecutive boots"), never
+    // reaching 0 despite boot_guard_mark_healthy() reporting HAL_OK from its
+    // write call every time.
+    for (uint32_t i = 0; i < 2; i++) {
+        simulate_reboot();
+        boot_guard_init();
+    }
+    TEST_CHECK(boot_guard_get_boot_count() == 2u, "precondition: a real, valid, nonzero count is on record");
+
+    // NEGATIVE TEST -- the exact real-hardware shape: the persisted record
+    // is genuinely well-formed (valid version, valid CRC -- reading it back
+    // does NOT fail or come back corrupt) but its boot_count is the STALE
+    // pre-clear value, not the 0 a just-succeeded clear should show. Without
+    // this function's boot_count==expected comparison (i.e. if it merely
+    // checked "did the record read back and pass its CRC check", the same
+    // mistake boot_guard_mark_healthy() used to make by trusting the
+    // write's return code alone), this would be wrongly accepted as
+    // verified. Deliberately does NOT call persist_count(0) first -- this
+    // models the write claiming success while the flash content never
+    // actually changed, which is exactly what could not be told apart from
+    // a genuine clear without a value comparison.
+    TEST_CHECK(!verify_persisted_count(0),
+               "verify_persisted_count() refuses to confirm a clear when the persisted record is "
+               "well-formed but its boot_count is still the stale nonzero value -- this is the "
+               "exact gap that let the real board believe it had cleared the counter when it had "
+               "not: a mere readability/CRC check would have wrongly passed this");
+
+    // Now perform a genuine clear and confirm the SAME function correctly
+    // accepts it -- proves the check is discriminating, not vacuously false.
+    TEST_CHECK(persist_count(0) == HAL_OK, "a genuine clear write succeeds");
+    TEST_CHECK(verify_persisted_count(0),
+               "verify_persisted_count() DOES confirm a clear that genuinely reads back as 0");
+
+    // Separately: a record that fails outright to read back (corrupted/
+    // unreadable) must ALSO not be confused with "confirmed zero" -- see
+    // boot_guard.c's own comment on why this function does not reuse
+    // load_count()'s "unreadable collapses to 0" default.
+    TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_REC),
+               "precondition: the just-written record can be corrupted for this test");
+    TEST_CHECK(!verify_persisted_count(0),
+               "verify_persisted_count() also refuses to confirm a clear whose read-back fails "
+               "outright, rather than defaulting that to 'confirmed zero' the way load_count() would");
 }
 
 static void test_corrupted_record_is_treated_as_count_zero(void)
@@ -281,6 +348,7 @@ void run_test_boot_guard(void)
     test_next_boot_count_threshold();
     test_counter_increments_and_enters_recovery();
     test_mark_healthy_clears_counter();
+    test_verify_persisted_count_catches_a_write_that_does_not_stick();
     test_corrupted_record_is_treated_as_count_zero();
     test_boot_confirm_is_healthy();
     test_boot_confirm_decide();
