@@ -3514,6 +3514,103 @@ static void test_post_relay_type_optional_range_and_preserve(void)
               "omitting z0_relaytype preserves the currently-stored value (Contactor), not a silent reset to SSR");
 }
 
+/* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/min_on_s/
+ * min_off_s -- same optional/range-checked/omit-preserves shape as
+ * z0_relaytype above, this is the first pass that lets a POST touch these
+ * five fields at all (step 1 only added storage). */
+static void test_post_on_off_fields_optional_range_and_preserve(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_zonetype/z0_failsafe/z0_hystc/z0_minons/z0_minoffs: "
+                 "accepted in range, out-of-range refused, omitted preserves the stored value "
+                 "(ON_OFF_ZONE_PLAN.md step 6)");
+
+    char body_ok[700];
+    snprintf(body_ok, sizeof(body_ok),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=1&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0&"
+             "z0_zonetype=1&z0_failsafe=1&z0_hystc=5.5&z0_minons=45&z0_minoffs=90");
+    zone_cfg_t current = make_stored_zone();
+    current.zone_type = 0;
+    current.failsafe_state = 0;
+    current.hyst_c = 0.0f;
+    current.min_on_s = 0;
+    current.min_off_s = 0;
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = zones_http_parse_zone_fields(body_ok, 0, 1, 4, 1, &current, &out, &err_reason);
+    TEST_CHECK(ok, "in-range zone_type/failsafe/hyst_c/min_on_s/min_off_s must be accepted");
+    TEST_CHECK(out.zone_type == 1, "zone_type=1 (ON_OFF) is parsed verbatim");
+    TEST_CHECK(out.failsafe_state == 1, "failsafe_state=1 (ON) is parsed verbatim");
+    TEST_CHECK(out.hyst_c > 5.49f && out.hyst_c < 5.51f, "hyst_c=5.5 is parsed verbatim");
+    TEST_CHECK(out.min_on_s == 45, "min_on_s=45 is parsed verbatim");
+    TEST_CHECK(out.min_off_s == 90, "min_off_s=90 is parsed verbatim");
+
+    // zone_type past ZONE_TYPE_ON_OFF (1) is refused, naming the field.
+    char body_bad_type[700];
+    snprintf(body_bad_type, sizeof(body_bad_type),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=1&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0&z0_zonetype=2");
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_bad_type, 0, 1, 4, 1, &current, &out, &err_reason);
+    TEST_CHECK(!ok, "z0_zonetype=2 is out of range (0-1) and must be refused");
+    TEST_CHECK(err_reason && strstr(err_reason, "zone_type") != NULL, "the refusal names the field");
+
+    // hyst_c below ZONE_HYST_C_MIN (but nonzero) is refused.
+    char body_bad_hyst[700];
+    snprintf(body_bad_hyst, sizeof(body_bad_hyst),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=1&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0&z0_hystc=0.1");
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_bad_hyst, 0, 1, 4, 1, &current, &out, &err_reason);
+    TEST_CHECK(!ok, "z0_hystc=0.1 is below ZONE_HYST_C_MIN (0.5) and must be refused");
+    TEST_CHECK(err_reason && strstr(err_reason, "hyst_c") != NULL, "the refusal names the field");
+
+    // min_on_s past ZONE_MIN_ON_OFF_S_MAX is refused.
+    char body_bad_minon[700];
+    snprintf(body_bad_minon, sizeof(body_bad_minon),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=1&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0&z0_minons=999999");
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_bad_minon, 0, 1, 4, 1, &current, &out, &err_reason);
+    TEST_CHECK(!ok, "z0_minons=999999 is past ZONE_MIN_ON_OFF_S_MAX (3600) and must be refused");
+    TEST_CHECK(err_reason && strstr(err_reason, "min_on_s") != NULL, "the refusal names the field");
+
+    // All five omitted entirely: preserves current_z's stored values, same
+    // "an older client must not silently reset this" reasoning as
+    // z0_relaytype's own omit case above.
+    char body_omit[700];
+    snprintf(body_omit, sizeof(body_omit),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=1&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0");
+    zone_cfg_t current_onoff = make_stored_zone();
+    current_onoff.zone_type = 1;
+    current_onoff.failsafe_state = 1;
+    current_onoff.hyst_c = 3.0f;
+    current_onoff.min_on_s = 60;
+    current_onoff.min_off_s = 120;
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_omit, 0, 1, 4, 1, &current_onoff, &out, &err_reason);
+    TEST_CHECK(ok, "a body omitting all five on/off fields must still be accepted");
+    TEST_CHECK(out.zone_type == 1 && out.failsafe_state == 1 && out.hyst_c == 3.0f &&
+              out.min_on_s == 60 && out.min_off_s == 120,
+              "omitting the on/off fields preserves every stored value, not a silent reset to HEATER/OFF/0");
+}
+
 /* One clean body with only the field-under-test varied, mirroring
  * post_body_with_minon()'s own pattern above. */
 static bool post_body_with_fuzzy_strength(const char *literal, const char **err_reason_out, float *out_value)
@@ -4011,6 +4108,16 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->tuning_rise_inf_c = ZONE_MAX_TEMP_C_MAX;
         z->tuning_seq = 0xFFFFFFFFu;
         z->adaptive_tune_enabled = 255;
+        /* docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23):
+         * zone_type/failsafe_state render as small integers/booleans
+         * ("false" is the wider literal, same reasoning as the tuning_*
+         * booleans above), hyst_c/min_on_s/min_off_s at their documented
+         * max widths. */
+        z->zone_type = (uint8_t)ZONE_TYPE_ON_OFF;
+        z->failsafe_state = 0;
+        z->hyst_c = ZONE_HYST_C_MAX;
+        z->min_on_s = ZONE_MIN_ON_OFF_S_MAX;
+        z->min_off_s = ZONE_MIN_ON_OFF_S_MAX;
     }
 
     httpd_req_t req;
@@ -9313,6 +9420,7 @@ void run_test_zones_http(void)
     test_push_all_relay_types_clears_orphaned_relay();
     test_post_mode_pid_fuzzy_accepted_by_parser();
     test_post_relay_type_optional_range_and_preserve();
+    test_post_on_off_fields_optional_range_and_preserve();
     test_post_fuzzy_strength_out_of_range_refused_not_clamped();
     test_post_omitting_new_fields_preserves_stored_values();
     test_post_new_fields_present_but_unparseable_are_refused();

@@ -335,6 +335,37 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone relay_type out of range";
             return false;
         }
+        /* docs/ON_OFF_ZONE_PLAN.md step 6: the UI is the first writer of
+         * these five fields, so this is their first validation too. Same
+         * "refused, never clamped" discipline as every other field here --
+         * zone_type/failsafe_state are boolean-ish (0/1), 0 is always legal
+         * for hyst_c/min_on_s/min_off_s (the getters substitute the plan
+         * default at read time, see zones_config_get_hyst_c()'s own
+         * comment), so the same [0, MAX] then (0, MIN)-sliver split as
+         * progress_band_c/error_band_c is used. */
+        if (z->zone_type > (uint8_t)ZONE_TYPE_ON_OFF) {
+            *err_reason = "zone zone_type out of range";
+            return false;
+        }
+        if (z->failsafe_state > 1) {
+            *err_reason = "zone failsafe_state out of range";
+            return false;
+        }
+        if (!isfinite(z->hyst_c) || z->hyst_c < 0.0f || z->hyst_c > ZONE_HYST_C_MAX ||
+            (z->hyst_c != 0.0f && z->hyst_c < ZONE_HYST_C_MIN)) {
+            *err_reason = "zone hyst_c out of range";
+            return false;
+        }
+        if (z->min_on_s > ZONE_MIN_ON_OFF_S_MAX ||
+            (z->min_on_s != 0 && z->min_on_s < ZONE_MIN_ON_OFF_S_MIN)) {
+            *err_reason = "zone min_on_s out of range";
+            return false;
+        }
+        if (z->min_off_s > ZONE_MIN_ON_OFF_S_MAX ||
+            (z->min_off_s != 0 && z->min_off_s < ZONE_MIN_ON_OFF_S_MIN)) {
+            *err_reason = "zone min_off_s out of range";
+            return false;
+        }
         if (!isfinite(z->max_temp_c) || z->max_temp_c < 0.0f || z->max_temp_c > ZONE_MAX_TEMP_C_MAX) {
             *err_reason = "zone max_temp_c out of range";
             return false;

@@ -225,6 +225,26 @@ extern "C" {
 #define ZONE_PROGRESS_BAND_C_MAX 20.0f
 #define ZONE_PROGRESS_BAND_C_DEFAULT 3.0f
 
+/* docs/ON_OFF_ZONE_PLAN.md sec 3: on/off zone hysteresis and minimum on/off
+ * dwell -- step 1 (ZONES_CFG_VERSION 22->23) added the storage
+ * (zone_cfg_t::hyst_c/min_on_s/min_off_s) but no reader/writer yet; step 6
+ * (this UI pass) is the first thing that actually lets an operator set
+ * these, so the bounds are pinned here rather than invented ad hoc on the
+ * POST-parse side. hyst_c 0.5-25 C / default 2.0 and min_on_s/min_off_s
+ * default 30 s are the plan's own numbers verbatim (sec 3's "Why 2.0"/"30 s
+ * bounds the worst case" paragraphs). min_on_s/min_off_s have no plan-stated
+ * ceiling; 3600 s (1 hour) is a generous headroom bound in the same spirit
+ * as ZONE_PID_GAIN_MAX's "no natural physical bound, so pick something far
+ * past anything real" reasoning -- a relay that never gets a chance to
+ * revisit its state for more than an hour is a misconfiguration, not a
+ * value this endpoint should silently accept as intentional. */
+#define ZONE_HYST_C_MIN 0.5f
+#define ZONE_HYST_C_MAX 25.0f
+#define ZONE_HYST_C_DEFAULT 2.0f
+#define ZONE_MIN_ON_OFF_S_MIN 1
+#define ZONE_MIN_ON_OFF_S_MAX 3600
+#define ZONE_MIN_ON_OFF_S_DEFAULT 30
+
 typedef struct {
     char name[ZONE_NAME_MAX_LEN + 1];
     float cal_offset_c; /* applied via zones_config_apply_cal() by dashboard_http.c and

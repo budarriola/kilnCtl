@@ -189,6 +189,92 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
         }
     }
 
+    /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/
+     * min_on_s/min_off_s (ZONES_CFG_VERSION 22->23 storage, unused by any
+     * consumer until this UI pass). OPTIONAL, same reasoning as z%u_relaytype
+     * above -- every pre-existing client (pc_tools/MCP, older test bodies)
+     * has never heard of these keys and must not get a 400 on an otherwise
+     * unrelated save, nor silently flip a zone back to HEATER or lose an
+     * operator's fail-safe/hysteresis choice the next time one of those
+     * clients replays a whole-page submit. Falls back to current_z (the live
+     * value), never to a fixed default, for every field including
+     * zone_type/failsafe_state -- the zones page itself always sends these
+     * (this pass adds the control), so "omit preserves" only matters for a
+     * client that predates the feature entirely. */
+    snprintf(key, sizeof(key), "z%u_zonetype", i);
+    {
+        char probe[8];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            uint8_t zone_type_raw;
+            if (!zones_config_json_parse_u8_field(body, key, 0, (long)ZONE_TYPE_ON_OFF, &zone_type_raw)) {
+                *err_reason = "zone zone_type out of range (0=heater, 1=on/off device)";
+                return false;
+            }
+            z->zone_type = zone_type_raw;
+        } else {
+            z->zone_type = current_z->zone_type;
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_failsafe", i);
+    {
+        char probe[8];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            uint8_t failsafe_raw;
+            if (!zones_config_json_parse_u8_field(body, key, 0, 1, &failsafe_raw)) {
+                *err_reason = "zone failsafe_state out of range (0=off, 1=on)";
+                return false;
+            }
+            z->failsafe_state = failsafe_raw;
+        } else {
+            z->failsafe_state = current_z->failsafe_state;
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_hystc", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_HYST_C_MAX, &z->hyst_c) ||
+                (z->hyst_c != 0.0f && z->hyst_c < ZONE_HYST_C_MIN)) {
+                *err_reason = "zone hyst_c out of range (0 = firmware default 2.0 C)";
+                return false;
+            }
+        } else {
+            z->hyst_c = current_z->hyst_c;
+        }
+    }
+    /* min_on_s/min_off_s: uint16_t seconds, up to ZONE_MIN_ON_OFF_S_MAX
+     * (3600) -- past zones_config_json_parse_u8_field()'s 0-255 range, so
+     * parsed as a float (same helper heater_window_ms/heater_min_on_ms use
+     * for their own millisecond counts, which run far higher than 3600) and
+     * range/finite-checked before the narrowing cast to uint16_t. */
+    snprintf(key, sizeof(key), "z%u_minons", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            float parsed;
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, (float)ZONE_MIN_ON_OFF_S_MAX, &parsed) ||
+                (parsed != 0.0f && parsed < (float)ZONE_MIN_ON_OFF_S_MIN)) {
+                *err_reason = "zone min_on_s out of range (0 = firmware default 30 s)";
+                return false;
+            }
+            z->min_on_s = (uint16_t)parsed;
+        } else {
+            z->min_on_s = current_z->min_on_s;
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_minoffs", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            float parsed;
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, (float)ZONE_MIN_ON_OFF_S_MAX, &parsed) ||
+                (parsed != 0.0f && parsed < (float)ZONE_MIN_ON_OFF_S_MIN)) {
+                *err_reason = "zone min_off_s out of range (0 = firmware default 30 s)";
+                return false;
+            }
+            z->min_off_s = (uint16_t)parsed;
+        } else {
+            z->min_off_s = current_z->min_off_s;
+        }
+    }
+
     /* 2026-08-27 (ZONES_CFG_VERSION 8->9, owner's request: "assign the zones
      * to them"): which timing_profiles[] slot this zone uses. REQUIRED, unlike
      * the nine fields it replaces (which were each individually OPTIONAL) --

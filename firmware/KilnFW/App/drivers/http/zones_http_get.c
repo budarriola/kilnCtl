@@ -213,6 +213,17 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
            "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,"
            "\"pc_link_abort_silence_ms\":%.0f,"
+           /* docs/ON_OFF_ZONE_PLAN.md step 6: the resolved-default numbers
+            * zones_config_get_hyst_c()/_min_on_s()/_min_off_s() substitute
+            * for a stored 0, derived from the SAME ZONE_HYST_C_DEFAULT/
+            * ZONE_MIN_ON_OFF_S_DEFAULT macros those getters use
+            * (zones_config_json.h) -- emitted once, top-level, rather than
+            * hand-typed as a literal in zones_page.html, so the page's
+            * placeholder text can never drift from the firmware default the
+            * requirement 6 sync rule warns about (see
+            * tools/check_safety_trip_words_sync.ps1 for the model this
+            * avoids needing a copy of). */
+           "\"on_off_hyst_c_default\":%.3f,\"on_off_min_on_off_s_default\":%u,"
            /* 2026-08-27+1 (owner request: name relays that are NOT in any
             * zone): relay_zone_owned_mask lets the page tell, without its
             * own recompute, which of relay_names[] below it should render
@@ -237,6 +248,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
            s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type,
            (double)s_zones.cfg.pc_link_abort_silence_ms,
+           (double)ZONE_HYST_C_DEFAULT, (unsigned)ZONE_MIN_ON_OFF_S_DEFAULT,
            zone_owned_relay_mask(&s_zones.cfg),
            safety_wiring.link_up ? "true" : "false", safety_wiring.tc_temp_valid ? "true" : "false",
            (double)safety_wiring.tc_temp_c, safety_wiring.tc_fault, safety_wiring.relay_energized ? "true" : "false",
@@ -341,6 +353,20 @@ esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type, z->ct_mask,
             z->timing_profile, normal_measured ? "true" : "false", (double)normal_a,
             z->relay_type, (double)z->fuzzy_strength_pct);
+        /* docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23's
+         * zone_type/failsafe_state/hyst_c/min_on_s/min_off_s, unused by any
+         * consumer until this pass): always emitted, same always-emit/
+         * read-back-and-repost reasoning as relay_type/fuzzy_strength_pct
+         * above. Emits the RAW stored value for hyst_c/min_on_s/min_off_s
+         * (including the legal 0 "not configured" sentinel), same
+         * convention progress_band_c/ease_off_window_mult use -- the page
+         * shows what is actually stored, and separately renders the
+         * resolved default (2.0 C / 30 s) for an operator who has not yet
+         * set one. */
+        APPEND("\"zone_type\":%u,\"failsafe_state\":%s,\"hyst_c\":%.3f,"
+               "\"min_on_s\":%u,\"min_off_s\":%u,",
+               z->zone_type, z->failsafe_state ? "true" : "false", (double)z->hyst_c,
+               (unsigned)z->min_on_s, (unsigned)z->min_off_s);
         /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
          * coupling identification's own diagonal cell -- see zone_cfg_t::
          * coupling_diag_k_dc's own doc comment. Always emitted, same always-

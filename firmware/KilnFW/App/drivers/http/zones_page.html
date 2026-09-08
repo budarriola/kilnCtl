@@ -826,7 +826,21 @@ var INFO_HTML = {
     'here, relay type) never mirror -- they always describe THIS zone\'s own hardware or its own ' +
     'measurements, never another zone\'s. The calibration offset is part of "thermocouple type" on ' +
     'this page\'s single dropdown but is excluded from that group\'s mirroring for the same reason: ' +
-    'it corrects THIS physical sensor, not a policy choice a zone can share.</p>'
+    'it corrects THIS physical sensor, not a policy choice a zone can share.</p>',
+  zoneType: '<p class="hint">docs/ON_OFF_ZONE_PLAN.md: a Heater zone is PID/bang-bang controlled and ' +
+    'is a heat source in the thermal model. An On/off device (vent, damper, fan, water feed) is ' +
+    'switched fully on or off -- it is never PID-modulated, is never treated as a heat source or a ' +
+    'heat victim, and guards 1/2/3/4/9 (which all assume a controlled heater) are disabled for it. ' +
+    'Its actual on/off triggering (by ramp phase, direction, temperature, time) is configured per ' +
+    'profile segment on the Profiles page, not here -- this page only sets what kind of device it ' +
+    'is and its fail-safe/hysteresis/timing properties.</p>',
+  failsafe: '<p class="hint">The state this relay is driven to whenever the run aborts, faults, is ' +
+    'halted, or the safety processor trips -- nothing below that precedence level can override it. ' +
+    'Defaults to OFF because a zero-initialized or partially-filled config must never leave a relay ' +
+    'energised with nothing owning it. Set to ON only for a device whose safe state genuinely is ' +
+    '"energised" (a vent that should open to dump heat) -- and note that a safety trip also opens ' +
+    'K4, so a fail-safe-ON device fed from that same interlocked supply cannot actually be commanded ' +
+    'on at the moment it matters most.</p>'
 };
 
 function infoOpenStorageKey(key) { return 'zoneInfoOpen:' + key; }
@@ -967,7 +981,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
   var fuzzyStrength = (z.fuzzy_strength_pct != null) ? z.fuzzy_strength_pct : 30;
   var pidGainsLabel = (mode === 3) ? 'Base gains (from Autotune)' : 'Kp / Ki / Kd';
   var pidPanelHtml =
-    '<div class="pidPanel">' +
+    '<div class="pidPanel heaterOnly">' +
       '<label class="pidgainslabel">' + pidGainsLabel + '</label>' +
       '<div class="row2">' +
         '<div><label>Kp</label><input type="number" step="0.01" class="kp" value="' + z.pid_kp + '"></div>' +
@@ -1004,12 +1018,16 @@ function zoneBlock(z, i, relayCount, thermoCount) {
        THIS zone's thermo_mask on save -- see saveBtn's channel-type pass. */
     '<label>Thermocouple type wired to channel ' + i + '</label>' +
     tcTypeSelectHtml('tctype', z.tc_type) +
+    '<div class="heaterOnly">' +
     '<label>Control mode</label>' + modeHtml +
     '<p class="modehint hint">' + (MODE_DESC[mode] || MODE_DESC[0]) + '</p>' +
+    '</div>' +
     '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
     pidPanelHtml +
+    '<div class="heaterOnly">' +
     '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
     '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
+    '</div>' +
     '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5)</label>' +
     infoDetailsHtml('sanity', 'minimum rise rate') +
     '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
@@ -1026,24 +1044,26 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<div><label>Min on (&ge; 10000)</label><input type="number" step="1000" min="10000" class="minon" value="' + (z.heater_min_on_ms || 0) + '"></div>' +
       '<div><label>Min off</label><input type="number" step="100" class="minoff" value="' + (z.heater_min_off_ms || 0) + '"></div>' +
     '</div>' +
+    '<div class="heaterOnly">' +
     '<label>Cross-zone plausibility (&deg;C, 0 = disabled)</label>' +
     infoDetailsHtml('crossZone', 'cross-zone plausibility') +
     '<input type="number" step="5" class="xzone" value="' + (z.cross_zone_max_delta_c || 0) + '">' +
+    '</div>' +
     '<details class="advguards"><summary>Advanced guard thresholds (0 = firmware default -- ' +
     'leave alone unless you know why)</summary>' +
-      '<div class="row2">' +
+      '<div class="row2 heaterOnly">' +
         '<div><label>Wrong-direction window (s)</label>' +
         '<input type="number" step="10" class="wdwindow" value="' + (z.guard_wrong_dir_window_s || 0) + '"></div>' +
         '<div><label>Wrong-direction rate (&deg;C/min)</label>' +
         '<input type="number" step="0.1" class="wdrate" value="' + (z.guard_wrong_dir_rate_c_per_min || 0) + '"></div>' +
       '</div>' +
-      '<div class="row2">' +
+      '<div class="row2 heaterOnly">' +
         '<div><label>Runaway off-settle (s)</label>' +
         '<input type="number" step="10" class="offsettle" value="' + (z.guard_off_settle_s || 0) + '"></div>' +
         '<div><label>Runaway rate (&deg;C/min)</label>' +
         '<input type="number" step="0.1" class="runrate" value="' + (z.guard_runaway_rate_c_per_min || 0) + '"></div>' +
       '</div>' +
-      '<div class="row2">' +
+      '<div class="row2 heaterOnly">' +
         '<div><label>Runaway margin (&deg;C)</label>' +
         '<input type="number" step="1" class="runmargin" value="' + (z.guard_runaway_margin_c || 0) + '"></div>' +
         '<div><label>Drift period (s)</label>' +
@@ -1057,9 +1077,64 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '</div>' +
     '</details>';
 
+  /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type (ZONES_CFG_VERSION 22->23,
+   * zone_cfg_t::zone_type/failsafe_state/hyst_c/min_on_s/min_off_s -- storage
+   * landed in step 1, unused by any consumer until this pass). Requirement 2
+   * ("make the consequences visible") is met by onoffWarnHtml below, which
+   * is NOT tucked behind a details/summary the way the PID/guard fields it
+   * describes are -- an operator choosing On/off device must see the
+   * guard-disable and coupling-zeroing consequence in the same view as the
+   * control that causes it, not one click away. .heaterOnly/.onoffPanel
+   * visibility is set both here (initial render) and by the delegated
+   * 'change' handler on '.zonetype' below (toggleZoneTypeUi()), so a fresh
+   * load and a live edit agree. */
+  var zoneType = z.zone_type || 0;
+  var failsafeOn = z.failsafe_state ? 1 : 0;
+  /* Defaults come from the server (current.on_off_hyst_c_default/
+   * on_off_min_on_off_s_default, GET /api/zones) rather than being
+   * hand-typed here -- see that field's own comment in zones_http_get.c for
+   * why (requirement 6's UI-string/firmware-constant sync rule). */
+  var onOffHystDefault = (current.on_off_hyst_c_default != null) ? current.on_off_hyst_c_default : 2.0;
+  var onOffMinOnOffDefault = (current.on_off_min_on_off_s_default != null) ? current.on_off_min_on_off_s_default : 30;
+  var hystC = (z.hyst_c != null && z.hyst_c !== 0) ? z.hyst_c : onOffHystDefault;
+  var minOnS = (z.min_on_s != null && z.min_on_s !== 0) ? z.min_on_s : onOffMinOnOffDefault;
+  var minOffS = (z.min_off_s != null && z.min_off_s !== 0) ? z.min_off_s : onOffMinOnOffDefault;
+  var zoneTypeHtml =
+    '<label>Zone type</label>' + infoDetailsHtml('zoneType', 'zone type') +
+    '<select class="zonetype">' +
+      '<option value="0"' + (zoneType === 0 ? ' selected' : '') + '>Heater (PID/bang-bang controlled)</option>' +
+      '<option value="1"' + (zoneType === 1 ? ' selected' : '') + '>On/off device (vent, damper, fan -- not PID controlled)</option>' +
+    '</select>' +
+    '<p class="onoffWarn hint" style="color:var(--bad);font-weight:bold;' + (zoneType === 1 ? '' : 'display:none') + '">' +
+      'On/off device: guards 1 (stall), 2 (wrong direction), 3 (runaway), 4 (drift) and 9 (cross-zone) ' +
+      'are DISABLED for this zone, and its coupling row/column are zeroed (treated as injecting no heat ' +
+      'and having no setpoint of its own). PID gains, ramp rate, control mode and those guard thresholds ' +
+      'are hidden below because none of them do anything for this zone any more.' +
+    '</p>' +
+    '<div class="onoffPanel" style="' + (zoneType === 1 ? '' : 'display:none') + '">' +
+      '<label>Fail-safe state</label>' + infoDetailsHtml('failsafe', 'fail-safe state') +
+      '<select class="failsafestate">' +
+        '<option value="0"' + (failsafeOn ? '' : ' selected') + '>OFF (default -- de-energised on any abort/fault/trip)</option>' +
+        '<option value="1"' + (failsafeOn ? ' selected' : '') + '>ON (energised on abort/fault/trip)</option>' +
+      '</select>' +
+      '<p class="hint">Fail-safe ON commands this relay ON whenever the run aborts, faults, or the safety ' +
+      'processor trips -- e.g. a vent meant to dump heat. If this device is fed from the same K4-interlocked ' +
+      'supply as the heaters, ON cannot actually be honoured on a safety trip -- the interlock still opens. ' +
+      'Choosing ON requires confirming this.</p>' +
+      '<label>Temperature hysteresis (&deg;C, 0.5-25, default ' + onOffHystDefault + ')</label>' +
+      '<input type="number" step="0.1" min="0.5" max="25" class="hystc" value="' + hystC + '">' +
+      '<div class="row2">' +
+        '<div><label>Minimum ON time (s, default ' + onOffMinOnOffDefault + ')</label>' +
+        '<input type="number" step="1" min="1" max="3600" class="minons" value="' + minOnS + '"></div>' +
+        '<div><label>Minimum OFF time (s, default ' + onOffMinOnOffDefault + ')</label>' +
+        '<input type="number" step="1" min="1" max="3600" class="minoffs" value="' + minOffS + '"></div>' +
+      '</div>' +
+      '<p class="hint onoffcycles"></p>' +
+    '</div>';
   var bodyHtml =
     '<h2>Zone ' + i + '</h2>' +
     '<label>Name</label><input type="text" class="name" maxlength="15" value="' + window.kcEscapeHtml(z.name || '') + '">' +
+    zoneTypeHtml +
     '<label>Relays in this zone</label><div class="relaybits">' + relayHtml + '</div>' +
     '<label>Relay type</label>' + infoDetailsHtml('relayType', 'relay type') + relayTypeHtml +
     '<label>Thermocouples feeding this zone</label><div class="thermobits">' + thermoHtml + '</div>' +
@@ -1452,10 +1527,59 @@ function initGroupSourceControls() {
 // silently falling back to Custom, not a hard-to-spot per-group mismatch.
 var SRC_GROUPS = ['limits', 'relaytiming', 'control', 'guards', 'tc'];
 
+/* docs/ON_OFF_ZONE_PLAN.md step 6: shows/hides the same .heaterOnly/
+ * .onoffPanel/.onoffWarn elements zoneBlock() sets an initial inline style
+ * for at render time -- kept as ONE function so "what a live edit does" and
+ * "what a fresh load shows" cannot drift apart (the exact class of bug
+ * TODO.md's fuzzy-mode-2 "showing an inert field" finding warns about, just
+ * inverted: here a HIDDEN field must actually be inert, not merely
+ * invisible -- see the negative test in test_zones_http.c/the responsive
+ * sweep for how that's checked). */
+function toggleZoneTypeUi(div) {
+  if (!div) return;
+  var isOnOff = div.querySelector('.zonetype').value === '1';
+  div.querySelectorAll('.heaterOnly').forEach(function (el) { el.style.display = isOnOff ? 'none' : ''; });
+  var panel = div.querySelector('.onoffPanel');
+  if (panel) panel.style.display = isOnOff ? '' : 'none';
+  var warn = div.querySelector('.onoffWarn');
+  if (warn) warn.style.display = isOnOff ? '' : 'none';
+  updateOnOffCycles(div);
+}
+
+/* Plan sec 3: "the UI must show projected cycles for an on/off zone" -- a
+ * simple worst-case bound (3600 / (min_on_s + min_off_s)), recomputed live
+ * as the operator edits either field, never persisted. */
+function updateOnOffCycles(div) {
+  var out = div.querySelector('.onoffcycles');
+  if (!out) return;
+  var onS = parseFloat(div.querySelector('.minons').value) || 0;
+  var offS = parseFloat(div.querySelector('.minoffs').value) || 0;
+  var total = onS + offS;
+  out.textContent = (total > 0)
+    ? ('Worst-case switching: ' + (3600 / total).toFixed(1) + ' cycles/hr at these minimum times -- see RELAY_LIFE_BUDGET.md for this relay type\'s rated life.')
+    : '';
+}
+
 document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('thermobit')) updateThermoWarnings();
   if (e.target.classList.contains('relaybit')) renderRelayNames();
   if (e.target.classList.contains('mode')) updateZonePanel(e.target.closest('.zone'));
+  if (e.target.classList.contains('zonetype')) toggleZoneTypeUi(e.target.closest('.zone'));
+  if (e.target.classList.contains('failsafestate')) {
+    /* Owner decision (ON_OFF_ZONE_PLAN.md sec 5/owner decisions): fail-safe
+     * ON is confirm-gated because it energises a coil when things go wrong.
+     * Revert to OFF if the operator declines -- this must be an actual
+     * block, not a cosmetic warning, so a negative test removing this
+     * confirm() call has something real to catch (see test file). */
+    if (e.target.value === '1') {
+      var ok = window.confirm(
+        'Fail-safe ON means this relay is ENERGISED whenever the run aborts, faults, or the ' +
+        'safety processor trips. Only choose this if that is genuinely the safe state for this ' +
+        'device (e.g. a vent that should open to dump heat) -- for most on/off devices OFF is ' +
+        'correct. Set fail-safe state to ON?');
+      if (!ok) { e.target.value = '0'; }
+    }
+  }
   if (e.target.classList.contains('settingssrc')) {
     /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: the whole-zone select is now a SHORTCUT --
      * it sets every one of the five independent .groupsrc selects to the
@@ -1500,6 +1624,12 @@ document.getElementById('zones').addEventListener('change', function (e) {
 // instead. Every zone's block for the same key opens/closes in lockstep on
 // the NEXT render (zoneBlock() reads isInfoSectionOpen() at creation time);
 // this only persists the choice.
+document.getElementById('zones').addEventListener('input', function (e) {
+  if (e.target.classList.contains('minons') || e.target.classList.contains('minoffs')) {
+    updateOnOffCycles(e.target.closest('.zone'));
+  }
+});
+
 document.getElementById('zones').addEventListener('toggle', function (e) {
   if (!e.target.classList || !e.target.classList.contains('info')) return;
   setInfoSectionOpen(e.target.dataset.infokey, e.target.open);
@@ -1641,7 +1771,9 @@ function renderZones() {
     var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, timing_profile: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */,
       fuzzy_strength_pct: 30, /* coupling_c0.. omitted: zoneBlock() defaults each missing cell to 0 */
       settings_source: (i === 0 ? 255 : 0) /* zones_http.c's ZONE_SETTINGS_SOURCE_CUSTOM; PID_EXPANSION_PLAN.md 3.5's "default same as zone 0" */ };
-    el.appendChild(zoneBlock(z, i, relayCount, thermoCount));
+    var zdiv = zoneBlock(z, i, relayCount, thermoCount);
+    el.appendChild(zdiv);
+    updateOnOffCycles(zdiv);
   }
   updateThermoWarnings();
   /* Relay-ownership can only be evaluated once the zone cards (and their
@@ -1909,6 +2041,16 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_thermo_mask=' + thermoMask);
     params.push('z' + i + '_ct_mask=' + ctMask);
 
+    /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/
+       min_on_s/min_off_s are TOPOLOGY/device properties, same as relay_type
+       just above -- never part of any inheritance group, always this zone's
+       own div. */
+    params.push('z' + i + '_zonetype=' + div.querySelector('.zonetype').value);
+    params.push('z' + i + '_failsafe=' + div.querySelector('.failsafestate').value);
+    params.push('z' + i + '_hystc=' + div.querySelector('.hystc').value);
+    params.push('z' + i + '_minons=' + div.querySelector('.minons').value);
+    params.push('z' + i + '_minoffs=' + div.querySelector('.minoffs').value);
+
     /* Calibration offset: per SENSOR, never mirrors regardless of the tc
        group's choice -- always this zone's own stack, per
        docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs
@@ -2084,6 +2226,12 @@ function populateAutotuneZones() {
   var prev = sel.value;
   sel.innerHTML = '';
   for (var i = 0; i < thermoCount; i++) {
+    /* docs/ON_OFF_ZONE_PLAN.md sec 1: "an on/off zone must never be excited
+     * as the perturbing zone nor fitted as the responding zone" -- excluded
+     * from the offer entirely rather than relying on the firmware's own
+     * prestart refusal to be the only thing stopping an operator from
+     * picking one. */
+    if (current.zones[i] && current.zones[i].zone_type === 1) continue;
     var opt = document.createElement('option');
     opt.value = i;
     opt.textContent = 'Zone ' + i + ((current.zones[i] && current.zones[i].name) ? ' (' + current.zones[i].name + ')' : '');
