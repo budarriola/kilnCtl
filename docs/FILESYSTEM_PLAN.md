@@ -768,3 +768,46 @@ of this task's original brief (format-gate log lines, `/api/cfgfs` summary,
 DRAM headroom, the unit-preference file-backed-survives-reboot proof, the
 reformat-vs-mount-existing check) are still the right next actions and remain
 completely unattempted.
+
+## Targeted boot_guard fix (`0b6e82b7`) flashed and tested, still trapped, 2026-09-08
+
+Built and flashed `0b6e82b7` (strict read-back + erase-then-write retry in
+`boot_guard_mark_healthy()`, both callers retrying until verified) from a
+clean detached worktree at `C:/wt/espflash`. Pre-flash: `check_main_task_stack_budget.py`
+against the fresh ELF measured 4864 B / 6144 B budget (75% of an 8192 B
+stack, OK) -- deepest path `app_main -> ... -> zones_config_json_compute_crc`.
+31/31 host test executables passed. No agent mid-edit in `App/drivers`.
+Pre-flash board snapshot taken (`full_board_backup.py`, gains/coupling/crash
+report all matched the known values above, `cfg` still unmounted).
+`flash_firmware(kiln_fw_root=..., verify=True)` reported flashed-and-verified
+OK, running `factory`, matching build.
+
+Post-flash boot (first boot on the new binary) came up **still in RECOVERY
+MODE** (`RECOVERY MODE: profile_executor_start() skipped`, `RECOVERY MODE:
+LVGL/LCD UI skipped`, `/api/dualwrite_window` `consecutive_clean_boots: 0`).
+No new crash: `GET /api/crash_report` still reports the identical stale
+`218f65f7` signature (`exc_cause_str IllegalInstruction`, `exc_pc=0xfffffffd`,
+`exc_addr=0x0`, `acknowledged:false`, unchanged). Confirmed all relays off and
+no firing, then did exactly one `debug_reset(peer="esp")` per this task's
+instruction to stop after a healthy boot plus one reset. The following boot
+**also** came up in recovery mode, with the same `RECOVERY MODE:` log lines
+repeating verbatim. `cfg` stayed unmounted both boots
+(`reason: "not mounted this boot -- either recovery mode skipped the mount,
+or boot has not reached it yet"`).
+
+**Conclusion: the fix is incomplete as flashed.** `0b6e82b7`'s stated
+mechanism (verify `boot_guard_mark_healthy()`'s NVS write with a strict
+read-back and retry with erase-then-write) does not by itself make the
+counter clear on this board across the two boots observed here, matching the
+prior pass's persist-failure hypothesis rather than resolving it. The
+filesystem work (`c1bbdc83`'s rewritten format gate, the dual-write round
+trip, the reboot-persistence proof) remains completely unproven on
+hardware -- still blocked by the same older recovery-mode trap, not a new
+regression from this flash. PID gains, coupling matrix, profile list, and
+Pico link protocol (v12, `6427502a`) were all reconfirmed unchanged after
+flashing. Board left safe: no firing, all relays off, idle in recovery mode
+(Wi-Fi + OTA only). Do not spend further reset cycles chasing this without a
+new fix to `boot_guard.c`'s persistence path itself -- the next pass should
+instrument or directly read `persist_count()`/`load_count()`'s actual NVS
+interaction on this board rather than re-attempting the same black-box
+reset-and-observe loop.
