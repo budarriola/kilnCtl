@@ -93,4 +93,17 @@ bool uart_bridge_ext_is_on_flash_worker(void)
     return s_stub_on_flash_worker;
 }
 
+// Stands in for "the flash-safe worker task has been created" -- see
+// uart_bridge_ext.c's real uart_bridge_ext_flash_worker_started(), added
+// alongside cfg_fs_mount.c's wait_for_flash_worker() (the fix for the
+// worker-not-started-yet race that made every cold-boot deferred cfg auto-
+// format fail in ~16 ms). Always true here: every test file that includes
+// this stub dispatches through uart_bridge_ext_run_on_flash_worker()
+// directly and never exercises the boot-ordering race itself, so there is
+// never a reason for a wait loop built on this stub to actually wait.
+bool uart_bridge_ext_flash_worker_started(void)
+{
+    return true;
+}
+
 #endif // KILNCTL_TEST_STUBS_BX_WORKER_STUB_H

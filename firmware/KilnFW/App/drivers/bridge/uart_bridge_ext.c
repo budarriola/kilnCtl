@@ -453,6 +453,22 @@ bool uart_bridge_ext_is_on_flash_worker(void)
     return bx_caller_is_worker_task(s_bx_worker_task_handle, xTaskGetCurrentTaskHandle());
 }
 
+/* True once the flash-safe worker task has actually been created --
+ * i.e. iff uart_bridge_ext_run_on_flash_worker() would dispatch onto a real
+ * task instead of hitting bx_run_on_internal_stack()'s "flash-safe worker
+ * not started -- job dropped" fast-fail path. Exists for callers that can
+ * run BEFORE main_control_bringup() calls uart_bridge_ext_start_flash_
+ * worker() -- cfg_fs_mount.c's deferred auto-format task is the first: it is
+ * created during main_boot_early(), at tskIDLE_PRIORITY+1, which the
+ * scheduler is free to run before the main task ever reaches
+ * main_control_bringup() (docs/audits: the dispatch used to fail in 16 ms,
+ * every single boot, for exactly this reason). A caller in that position
+ * should poll this rather than dispatch blind and fail fast. */
+bool uart_bridge_ext_flash_worker_started(void)
+{
+    return s_bx_started;
+}
+
 /* --------------------------------------------------------------------------
  * Shared little-endian helpers -- same layout uart_bridge.c uses, duplicated
  * here (rather than exported from there) because they're a handful of

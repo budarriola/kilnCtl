@@ -58,11 +58,16 @@ typedef struct {
  * false means no auto/deferred format has run at all this boot (the common
  * case -- the partition mounted cleanly). */
 typedef struct {
-    bool     known;
-    bool     in_progress;
-    bool     completed;
-    bool     succeeded;   /* meaningful only when completed */
-    uint32_t elapsed_ms;  /* time so far while in_progress, final duration once completed, 0 otherwise */
+    bool      known;
+    bool      in_progress;
+    bool      completed;
+    bool      succeeded;   /* meaningful only when completed */
+    uint32_t  elapsed_ms;  /* time so far while in_progress, final duration once completed, 0 otherwise */
+    esp_err_t result;      /* meaningful only when completed && !succeeded -- the actual esp_err_t (e.g.
+                             * from esp_littlefs_format(), the VFS re-register, or the dispatch onto the
+                             * flash worker) so a failure is one GET /api/cfgfs away from a name, not
+                             * another investigation. ESP_OK here with succeeded==false cannot happen by
+                             * construction (succeeded is derived from this same value at the call site). */
 } cfg_fs_format_progress_t;
 
 /* Ceiling used to flag a running format as STALLED rather than merely slow.

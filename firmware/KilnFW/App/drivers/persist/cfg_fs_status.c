@@ -199,6 +199,15 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
               fmt->in_progress ? "true" : "false", fmt->completed ? "true" : "false",
               fmt->succeeded ? "true" : "false", (unsigned long)fmt->elapsed_ms, stalled ? "true" : "false",
               (unsigned long)CFG_FS_FORMAT_CEILING_MS);
+        /* Failure detail: named esp_err_t, not just the boolean -- a format
+         * that fails silently with only "succeeded":false is exactly what
+         * turned the deferred-format worker-not-started race into a fresh
+         * investigation instead of a one-query answer (see cfg_fs_mount.c's
+         * wait_for_flash_worker()). Omitted (not "null") on success/still-
+         * running, same "unknown is not zero" discipline as capacity above. */
+        if (fmt->completed && !fmt->succeeded) {
+            APPEND(",\"error\":\"%s\"", esp_err_to_name(fmt->result));
+        }
     } else {
         APPEND("\"known\":false");
     }

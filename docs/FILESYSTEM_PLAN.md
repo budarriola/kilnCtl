@@ -890,3 +890,71 @@ Whoever picks this up next should read `cfg_fs_format_gate.c`'s and
 call actually returned in those 16 ms, since a fast unconditional failure
 this early is not one of this doc's previously-characterized failure
 modes.
+
+### RESOLVED 2026-09-08: the 16 ms failure was a boot-ordering race, not a partition/format defect
+
+`get_device_log` (fresh `debug_reset(peer="esp")`, board idle, relays off)
+named the exact call and error:
+
+```
+E E (2964) esp_littlefs: .../lfs.c:1383:error: Corrupted dir pair at {0x0, 0x1}
+E E (2974) esp_littlefs: mount failed,  (-84)
+W W (3084) cfg_fs: cfg partition failed to mount (ESP_FAIL) and the content scan found no valid LittleFS superblock found (region was 86.6% non-erased data, not ...)
+W W (3094) cfg_fs: cfg auto-format: background format starting (boot has already continued; poll GET /api/cfgfs for progress)
+E E (3104) uart_bridge_ext: flash-safe worker not started -- job dropped
+E E (3114) cfg_fs: cfg auto-format: FAILED after 16 ms: ESP_FAIL -- cfg filesystem remains unavailable this boot
+```
+
+The failing call is `uart_bridge_ext_run_on_flash_worker()`, invoked from
+`cfg_fs_mount.c`'s `cfg_fs_auto_format_task()`. **Root cause:** that task is
+created during `main_boot_early()` (`start_deferred_auto_format()`, priority
+`tskIDLE_PRIORITY+1`), but the flash-safe worker task it dispatches onto is
+not created until `main_control_bringup()` calls
+`uart_bridge_ext_start_flash_worker()` -- several boot stages later
+(`main.c`: `main_boot_early()` then `main_control_bringup()`). The scheduler
+is free to run the low-priority auto-format task before the main task ever
+reaches `main_control_bringup()`, and `uart_bridge_ext_run_on_flash_worker()`
+fails FAST (`bx_run_on_internal_stack()`'s "flash-safe worker not started --
+job dropped" branch, ~0 ms) rather than waiting when called before the
+worker exists. `esp_littlefs_format()` itself was never reached -- the
+dispatch failed before the format call, matching the 16 ms observation
+exactly (a real 512 KiB format is seconds, not milliseconds). Not a
+partition/label/subtype defect and not an `esp_littlefs_format()` bug; a
+pure boot-ordering race that fires on every single cold boot with a blank
+`cfg` partition.
+
+**Fix** (`firmware/KilnFW/App/drivers/bridge/uart_bridge_ext.c`/`.h`,
+`firmware/KilnFW/App/drivers/persist/cfg_fs_mount.c`): added
+`uart_bridge_ext_flash_worker_started()`, a plain accessor for the
+worker-task-created flag. `cfg_fs_auto_format_task()` now calls a new
+`wait_for_flash_worker()` (20 ms poll, 5 s ceiling) before dispatching --
+bounded so a genuinely broken worker still fails loudly (`ESP_ERR_TIMEOUT`)
+instead of hanging the background task forever. This task already runs off
+the boot path, so waiting up to 5 s here costs nothing boot-time-visible.
+
+**Error now surfaced, not just a boolean** (`cfg_fs_status.h`/`.c`,
+`diagnostics_http.c`): `cfg_fs_format_progress_t` gained a `result` field
+(the actual `esp_err_t`, wired from `cfg_fs_mount_format_result()`), and
+`GET /api/cfgfs`'s `format` object now includes `"error":"<esp_err_t name>"`
+whenever `completed:true, succeeded:false` -- the next failure is one query
+away instead of a fresh JTAG-log investigation. Host test added:
+`test_cfg_fs_status.c`'s "a failed format names its esp_err_t..." check
+(with a NEGATIVE-test companion asserting no `error` field on success).
+
+**Not yet re-flashed/validated on hardware** as of this writing -- host
+tests pass (32/32 executables, including the new negative-test case) and
+`tools/run_all_checks.ps1` is clean except two PRE-EXISTING, unrelated RED
+checks that predate this fix (confirmed via `git show HEAD:<path>`, not
+introduced by it): `check_flash_worker_lint.ps1` flags
+`cfg_fs_status.c`'s existing `cfg_fs_format_is_stalled()` call as matching
+the `cfg_fs_format\w*(` regex (a naming collision with the write/format
+surface the lint watches, not an actual write), and
+`check_hal_include_boundary.ps1` flags `cfg_fs_mount.c`'s pre-existing
+`#include "esp_timer.h"`. Next step: flash from a clean detached worktree
+at a committed sha (after `check_main_task_stack_budget` -- margin is thin,
+5792/6144 B), confirm the boot log now shows format start -> `esp_littlefs_
+format()` -> success -> mount, then `GET /api/cfgfs` `mounted:true` with a
+real capacity, then the round trip: change `unit_pref`, confirm
+`dual_write.zones.file_backed` (or the relevant item) is file-backed,
+`debug_reset`, confirm the value survived, and state plainly whether the
+second boot MOUNTED the existing filesystem or reformatted it.

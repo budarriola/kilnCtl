@@ -1089,7 +1089,8 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
     if (fmt.known) {
         fmt.in_progress = cfg_fs_mount_format_in_progress();
         fmt.completed = cfg_fs_mount_format_completed();
-        fmt.succeeded = fmt.completed && (cfg_fs_mount_format_result() == ESP_OK);
+        fmt.result = cfg_fs_mount_format_result();
+        fmt.succeeded = fmt.completed && (fmt.result == ESP_OK);
         fmt.elapsed_ms = cfg_fs_mount_format_elapsed_ms();
     }
 

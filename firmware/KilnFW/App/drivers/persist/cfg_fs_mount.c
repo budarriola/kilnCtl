@@ -67,6 +67,7 @@ static void cfg_fs_install_device_write_fns(void)
  * task declarations this file needs none of. Keep in sync with
  * uart_bridge.h by hand if the signature ever changes. */
 bool uart_bridge_ext_is_on_flash_worker(void);
+bool uart_bridge_ext_flash_worker_started(void);
 
 #define CFG_FS_PARTITION_LABEL "cfg"
 #define CFG_FS_SCAN_CHUNK_BYTES 4096
@@ -252,6 +253,35 @@ static void cfg_fs_auto_format_job_run(void *arg)
     job->result = finish_mount_after_register();
 }
 
+/* Deferred format is created during main_boot_early(), at
+ * tskIDLE_PRIORITY+1 -- the flash-safe worker task itself is not created
+ * until main_control_bringup() calls uart_bridge_ext_start_flash_worker(),
+ * several boot stages later. The scheduler is free to run this task before
+ * that point (equal/low priority, and the main task yields at various
+ * points along the way), and uart_bridge_ext_run_on_flash_worker() fails
+ * FAST (~0 ms -- "flash-safe worker not started -- job dropped") rather
+ * than waiting, when called before the worker exists. That made every
+ * cold-boot auto-format fail in ~16 ms, every single time, regardless of
+ * how healthy the partition scan and the eventual worker were: a pure
+ * boot-ordering race, not a format/partition defect. Poll for readiness
+ * first, bounded, so a slow scheduler is not mistaken for a permanent
+ * failure. */
+#define CFG_FS_AUTOFMT_WORKER_WAIT_POLL_MS 20
+#define CFG_FS_AUTOFMT_WORKER_WAIT_CEILING_MS 5000
+
+static bool wait_for_flash_worker(void)
+{
+    uint32_t waited_ms = 0;
+    while (!uart_bridge_ext_flash_worker_started()) {
+        if (waited_ms >= CFG_FS_AUTOFMT_WORKER_WAIT_CEILING_MS) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(CFG_FS_AUTOFMT_WORKER_WAIT_POLL_MS));
+        waited_ms += CFG_FS_AUTOFMT_WORKER_WAIT_POLL_MS;
+    }
+    return true;
+}
+
 static void cfg_fs_auto_format_task(void *arg)
 {
     (void)arg;
@@ -260,14 +290,21 @@ static void cfg_fs_auto_format_task(void *arg)
                   "/api/cfgfs for progress)");
 
     cfg_fs_auto_format_job_t job = { .result = ESP_ERR_INVALID_STATE };
-    /* Not reachable on-worker: this is a brand-new task
-     * (cfg_fs_auto_format_task, created once by start_deferred_auto_format())
-     * whose entire body is this function -- it has no other caller and never
-     * runs on the flash worker itself, so the reentrancy guard other
-     * dispatchers in this file use is unnecessary here, but dispatching
-     * unconditionally (never inline) keeps this task's own tiny stack out of
-     * the flash-write path regardless. */
-    esp_err_t dispatch_err = uart_bridge_ext_run_on_flash_worker(cfg_fs_auto_format_job_run, &job);
+    esp_err_t dispatch_err;
+    if (!wait_for_flash_worker()) {
+        ESP_LOGE(TAG, "cfg auto-format: flash-safe worker still not started after %u ms -- giving up",
+                 (unsigned)CFG_FS_AUTOFMT_WORKER_WAIT_CEILING_MS);
+        dispatch_err = ESP_ERR_TIMEOUT;
+    } else {
+        /* Not reachable on-worker: this is a brand-new task
+         * (cfg_fs_auto_format_task, created once by start_deferred_auto_format())
+         * whose entire body is this function -- it has no other caller and never
+         * runs on the flash worker itself, so the reentrancy guard other
+         * dispatchers in this file use is unnecessary here, but dispatching
+         * unconditionally (never inline) keeps this task's own tiny stack out of
+         * the flash-write path regardless. */
+        dispatch_err = uart_bridge_ext_run_on_flash_worker(cfg_fs_auto_format_job_run, &job);
+    }
     esp_err_t final_result = (dispatch_err != ESP_OK) ? dispatch_err : job.result;
 
     s_auto_format_end_us = esp_timer_get_time();

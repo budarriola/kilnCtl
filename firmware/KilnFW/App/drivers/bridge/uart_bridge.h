@@ -121,6 +121,17 @@ esp_err_t uart_bridge_ext_start_flash_worker(void);
  * internal_stack() comment for the deadlock this avoids. */
 bool uart_bridge_ext_is_on_flash_worker(void);
 
+/* True once the flash-safe worker task itself has been created (i.e.
+ * uart_bridge_ext_start_flash_worker() has run/succeeded, or one of the
+ * lazy fallbacks has). A caller that can run before main_control_bringup()
+ * -- cfg_fs_mount.c's deferred auto-format task is the first -- must poll
+ * this instead of dispatching blind: uart_bridge_ext_run_on_flash_worker()
+ * fails immediately ("flash-safe worker not started -- job dropped") if
+ * called before the worker exists, which used to make every cold-boot
+ * auto-format fail in ~16 ms. See uart_bridge_ext.c's doc comment on this
+ * function for the incident. */
+bool uart_bridge_ext_flash_worker_started(void);
+
 /* CONTROL (task 8): zone config reads + narrow PID/model writes -- see
  * uart_task_ids.h for the scope cap versus /api/zones. No hardware handle
  * needed; everything routes through zones_http.c's public getters/setters. */

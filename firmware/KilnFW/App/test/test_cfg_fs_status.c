@@ -96,13 +96,23 @@ static void test_format_progress(void)
                "build succeeds");
     TEST_CHECK(json_has(json, "\"completed\":true,\"succeeded\":true,\"elapsed_ms\":6200"),
                "a completed successful format reports its final duration");
+    TEST_CHECK(!json_has(json, "\"error\":"), "a successful format never carries an error field");
 
     cfg_fs_format_progress_t done_failed = { .known = true, .completed = true, .succeeded = false,
-                                              .elapsed_ms = 1200 };
+                                              .elapsed_ms = 1200, .result = ESP_ERR_TIMEOUT };
     TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &done_failed, json, sizeof(json), &len) == ESP_OK,
                "build succeeds");
     TEST_CHECK(json_has(json, "\"completed\":true,\"succeeded\":false"),
                "a completed but failed format is distinguished from a completed success");
+    /* NEGATIVE TARGET: before this fix, a failed format surfaced only the
+     * bare "succeeded":false boolean -- the actual esp_err_t (e.g. from
+     * esp_littlefs_format(), or ESP_ERR_TIMEOUT from cfg_fs_mount.c's
+     * wait_for_flash_worker() giving up) was logged, if anywhere, and never
+     * reached GET /api/cfgfs at all. This is the one-query-away contract the
+     * "16 ms failure, no visible cause" investigation asked for. */
+    TEST_CHECK(json_has(json, "\"error\":\"ESP_ERR_TIMEOUT\""),
+               "a failed format names its esp_err_t so the cause is one GET /api/cfgfs away, not a fresh "
+               "investigation");
 
     cfg_fs_deinit();
 }

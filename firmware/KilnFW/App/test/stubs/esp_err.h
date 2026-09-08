@@ -36,10 +36,22 @@ typedef int esp_err_t;
 /* Added for safety_link.c's host build. */
 #define ESP_ERR_INVALID_RESPONSE 0x108
 
+/* Named lookups only for the handful of codes host tests actually assert
+ * the NAME of (e.g. test_cfg_fs_status.c's GET /api/cfgfs "error" field) --
+ * everything else still falls back to the old generic "ERR" so no other
+ * test's expectations shift. Not a claim of parity with the real ESP-IDF
+ * esp_err_to_name() table, which is far larger. */
 static inline const char *esp_err_to_name(esp_err_t e)
 {
-    (void)e;
-    return "ERR";
+    switch (e) {
+    case ESP_OK: return "ESP_OK";
+    case ESP_FAIL: return "ESP_FAIL";
+    case ESP_ERR_TIMEOUT: return "ESP_ERR_TIMEOUT";
+    case ESP_ERR_NOT_FOUND: return "ESP_ERR_NOT_FOUND";
+    case ESP_ERR_INVALID_STATE: return "ESP_ERR_INVALID_STATE";
+    case ESP_ERR_NO_MEM: return "ESP_ERR_NO_MEM";
+    default: return "ERR";
+    }
 }
 
 #endif // TEST_STUB_ESP_ERR_H
