@@ -65,7 +65,24 @@ HEADROOM_FRACTION = 0.75
 
 FN_RE = re.compile(r"^[0-9a-f]{8} <(.+)>:")
 ENTRY_RE = re.compile(r"\bentry\ta1, (0x[0-9a-f]+|\d+)")
-CALL_RE = re.compile(r"\bcall(?:4|8|12)\t[0-9a-f]+ <([^>+]+)(?:\+0x[0-9a-f]+)?>")
+# Deliberately requires the target to land EXACTLY on a symbol (no
+# "+0xNNNN") -- 2026-09-08 fix, see SECTION_MARKER_NAMES' comment below for
+# the full story. Xtensa's windowed-register ABI means a `call4/8/12` can
+# only legally target a function's own `entry` prologue; it can never jump
+# into the middle of another function's body the way `j`/`callx` might. So
+# whenever objdump captions a call target as "<name+0xNNNN>", that is proof
+# the REAL callee has no symbol of its own and objdump fell back to the
+# nearest earlier one in the whole symbol table, however far away -- not
+# that this call actually reaches `name`. The previous version of this
+# regex matched that case anyway (silently discarding the offset), which is
+# what produced fabricated call-graph edges like `backup_export_get_handler`
+# -> `_stext` -> `profiles_handle_message` -> ... 6176 B, a path
+# backup_export.c never calls (grep confirms no reference). Dropping
+# offset-qualified matches entirely is a strict subset of before -- it can
+# only make this checker's reported paths MORE accurate (an under-estimate,
+# same direction as this file's other documented LIMITS), never hide a call
+# that previously wasn't there.
+CALL_RE = re.compile(r"\bcall(?:4|8|12)\t[0-9a-f]+ <([^>+]+)>")
 
 
 def find_objdump():
@@ -113,6 +130,29 @@ def parse(objdump, elf):
     return frames, calls
 
 
+# Linker section-boundary symbols (_stext and friends). objdump has no
+# closer symbol to caption a call target that lands in an unlabeled stretch
+# of the image -- a literal pool, a jump/veneer table, or genuinely
+# code whose own local symbol didn't make it into this ELF's symbol table
+# -- so it captions the target against whichever real symbol precedes it,
+# however far away that is. `_stext` sits at the very start of .text, so
+# EVERY such orphaned target in the low addresses gets captioned
+# "<_stext+0xNNNN>" regardless of which of the many unrelated functions
+# actually live there. Treating "_stext" as one callable node then unions
+# together the call sets of all of them, producing entirely fabricated
+# transitive reachability: confirmed 2026-09-08 on
+# `backup_export_get_handler` -> `_stext` -> `profiles_handle_message` ->
+# `profile_executor_halt` -> ... -> 6176 B, a path backup_export.c does not
+# call into (grep confirms no reference), inflating
+# check_httpd_task_stack_budget.py's reported worst case past its real one
+# (revert_post_handler, 4832 B). Skip these names as callees, exactly like
+# an unresolvable indirect call (see LIMITS above) -- the path stops here
+# rather than continuing through a fabricated edge.
+SECTION_MARKER_NAMES = frozenset({
+    "_stext", "_etext", "_sinittext", "_einittext", "_srodata", "_erodata",
+})
+
+
 def deepest(root, frames, calls):
     memo = {}
 
@@ -123,7 +163,7 @@ def deepest(root, frames, calls):
             return memo[fn]
         best = (0, [])
         for callee in sorted(calls.get(fn, ())):
-            if callee not in frames:
+            if callee not in frames or callee in SECTION_MARKER_NAMES:
                 continue
             d, p = walk(callee, on_stack | {fn})
             if d > best[0]:

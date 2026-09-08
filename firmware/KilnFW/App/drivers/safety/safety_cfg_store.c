@@ -2,6 +2,7 @@
 
 #include <math.h> /* isfinite() -- safety_ct_cal_convert() */
 #include <stdbool.h>
+#include <stdlib.h> /* malloc()/free() -- safety_cfg_store_refetch_locked()'s heap scratch, see its comment */
 #include <string.h>
 
 #include "esp_log.h"
@@ -972,6 +973,31 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
     return true;
 }
 
+/* Heap-allocated bundle for safety_cfg_store_refetch_locked()'s two large
+ * locals -- 2026-09-08 httpd-stack pass (CLAUDE.md "httpd stack" note).
+ * This function is reachable from BOTH safety_poll_task (PSRAM stack, see
+ * safety_link.c's "PSRAM stack" comment near xTaskCreatePinnedToCoreWithCaps)
+ * AND the shared httpd worker task (internal DRAM, tight -- 632-468 B free
+ * measured 2026-09-08) via safety_cfg_http.c's confirm_commit_landed() /
+ * ct_cal_post_handler / revert_post_handler's apply_pairs() chain. A struct
+ * this size (scratch alone is SAFETY_CFG_PARAM_COUNT entries; page is a full
+ * KILNLINK_CONFIG_PAGE_MAX_ENTRIES-entry frame) sitting on whichever task's
+ * stack happens to call in is exactly the shared-chain cost
+ * check_httpd_task_stack_budget.py's ct_cal_post_handler / revert_post_
+ * handler entries were flagging. Moved to a single ordinary malloc() (plain
+ * internal-DRAM heap, same convention as setup_progress_http.c's scratch --
+ * NOT MALLOC_CAP_SPIRAM: this function only marks s_dirty and defers the
+ * actual NVS write to the flash-safe worker below, so there is no flash
+ * write on this stack to keep off PSRAM, but there is also no reason to
+ * prefer PSRAM over the plain heap for a transient decode buffer), freed on
+ * every return path. Allocation failure degrades to a clean `return false`
+ * (cache left unchanged, same outcome as any other failed refetch below) --
+ * never a partial commit to the Pico or a half-built cache. */
+typedef struct {
+    safety_cfg_store_blob_t scratch;
+    kilnlink_config_page_t page;
+} safety_cfg_store_refetch_scratch_t;
+
 /* The actual refetch body -- unchanged in substance from before the H5 fix,
  * just renamed and made static so safety_cfg_store_refetch() below can wrap
  * it with s_store_lock. MUST NOT be called directly by anything except that
@@ -980,16 +1006,22 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
  * whatever this returns, success or failure. */
 static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t config_crc)
 {
+    safety_cfg_store_refetch_scratch_t *scr = malloc(sizeof(*scr));
+    if (!scr) {
+        ESP_LOGE(TAG, "safety_cfg_store_refetch: malloc(%u) failed -- cache left unchanged",
+                 (unsigned)sizeof(*scr));
+        return false;
+    }
 
     /* Staged into a scratch copy first -- an interrupted refetch (a page
      * request times out or fails to decode partway through) must leave the
      * PREVIOUS cache exactly as it was, never a mix of old and new pages with
      * no way to tell which is which. Nothing touches s_store until every
      * page has been read successfully. */
-    safety_cfg_store_blob_t scratch;
-    memset(&scratch, 0, sizeof(scratch));
-    scratch.version = SAFETY_CFG_STORE_VERSION;
-    scratch.config_crc = config_crc;
+    safety_cfg_store_blob_t *scratch = &scr->scratch;
+    memset(scratch, 0, sizeof(*scratch));
+    scratch->version = SAFETY_CFG_STORE_VERSION;
+    scratch->config_crc = config_crc;
 
     /* SAFETY_CFG_STORE_REFETCH_BUDGET_MS -- 2026-08-23 fix, see that
      * constant's own comment. This whole function runs synchronously inside
@@ -1019,6 +1051,7 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
             } else {
                 s_refetch_fail_suppressed++;
             }
+            free(scr);
             return false;
         }
 
@@ -1051,8 +1084,8 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
             vTaskDelay(pdMS_TO_TICKS(SAFETY_CFG_STORE_INTER_PAGE_GAP_MS));
         }
 
-        kilnlink_config_page_t page;
-        esp_err_t err = safety_link_get_config_page(link, page_index, &page);
+        kilnlink_config_page_t *page = &scr->page;
+        esp_err_t err = safety_link_get_config_page(link, page_index, page);
         if (err != ESP_OK) {
             int64_t now_us = (int64_t)hal_time_now_us();
             if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
@@ -1070,10 +1103,11 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
             } else {
                 s_refetch_fail_suppressed++;
             }
+            free(scr);
             return false;
         }
-        for (uint8_t i = 0; i < page.entry_count; i++) {
-            const kilnlink_config_page_entry_t *e = &page.entries[i];
+        for (uint8_t i = 0; i < page->entry_count; i++) {
+            const kilnlink_config_page_entry_t *e = &page->entries[i];
             int idx = index_for_id(e->param_id);
             if (idx < 0) {
                 /* COMMISSIONING.md sec 2: version-tolerant -- an id this
@@ -1093,10 +1127,10 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
              * format and protocol-version-bump reasoning). A pre-fix Pico
              * never sets that bit, so this degrades to the old (less honest,
              * but not WRONGLY MORE confident) behavior against one. */
-            scratch.entries[idx].set = e->set ? 1 : 0;
-            scratch.entries[idx].value = e->value;
+            scratch->entries[idx].set = e->set ? 1 : 0;
+            scratch->entries[idx].value = e->value;
         }
-        if (!page.more) {
+        if (!page->more) {
             break;
         }
         page_index++;
@@ -1106,11 +1140,13 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
              * ~14 pages worst case); a Pico claiming more forever is a
              * protocol fault, not something to loop on forever. */
             ESP_LOGE(TAG, "safety_cfg_store_refetch: page_index wrapped without more==0 -- aborting");
+            free(scr);
             return false;
         }
     }
 
-    s_store = scratch;
+    s_store = *scratch;
+    free(scr);
     s_fetched_at_us = (int64_t)hal_time_now_us();
     /* 2026-08-23 fix: no longer nvs_save_store() directly -- this function
      * runs on safety_poll_task, whose stack is PSRAM (safety_link.c:1636-

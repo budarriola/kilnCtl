@@ -82,29 +82,63 @@ REPO_ROOT = base.REPO_ROOT
 DEFAULT_ELF = base.DEFAULT_ELF
 HTTP_DIR = os.path.join(REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "http")
 
-# Known worst case as of 2026-09-08, after the four-handler stack-budget pass
-# (profile_detail_get_handler's 5184 B json[] buffer, ct_auto_zero_post_
-# handler's st/pstat locals, backup_export_get_handler -- which shares this
-# ceiling's path only through this static analysis's per-name call-graph
-# match, see below -- and firing_stats_get_dualwrite_status's two 1364 B
-# blobs, all moved to heap.malloc): the new worst reachable path is
-# backup_export_get_handler (752 B own frame) -> ct_auto_zero_post_handler's
-# NAME reused as a call-graph match for the safety_cfg_store_refetch_locked
-# -> safety_link_get_config_page -> ... -> uart_enable_tx_write_fifo chain,
-# at 5776 B total. NOTE: backup_export.c never actually calls
-# ct_auto_zero_post_handler (nor, before this pass, profile_detail_get_
-# handler) -- this script's static analysis measures the deepest path
-# reachable from a name it can find a call edge FOR, and something in this
-# codepath's call-graph extraction is mis-attributing an edge across files
-# that do not call each other. That mis-attribution predates this pass (the
-# same shape was already visible in the prior 7472 B ceiling's reported
-# path) and is out of scope here -- the real, load-bearing worst case this
-# pass leaves behind is ct_cal_post_handler at 5056 B (see the "deepest 5"
-# printout), which is what CEILING_BYTES is retightened against, with
-# headroom to the reported (if mis-attributed) 5776 B above it. This is a
-# CEILING, not a percentage-of-stack budget: it exists to catch the deepest
+# Known worst case as of 2026-09-08, after the shared-safety-link-chain pass:
+# ct_cal_post_handler (5056 B) and revert_post_handler (4832 B) shared
+# ~4 KB in apply_pairs() -> safety_cfg_store_refetch_locked() ->
+# safety_link_get_config_page() -> ... -> uart_enable_tx_write_fifo. Of that
+# 4 KB, 992 B was safety_cfg_store_refetch_locked()'s OWN frame: a
+# safety_cfg_store_blob_t (67-entry cache scratch copy) and a
+# kilnlink_config_page_t (32-entry wire-page decode buffer) both declared as
+# plain stack locals. Both are used only by that one function, on whichever
+# task happens to call in -- safety_poll_task (PSRAM stack, fine) or the
+# shared httpd worker (internal DRAM, the tight one) via
+# safety_cfg_http.c's confirm_commit_landed()/ct_cal_post_handler/
+# revert_post_handler's apply_pairs() chain. Fixed once, at the shared
+# root, rather than in each caller: both locals now live in one
+# malloc()-ed bundle (safety_cfg_store_refetch_scratch_t), freed on every
+# return path, same "malloc + free on every return, 500-equivalent
+# `return false` on OOM" convention as setup_progress_http.c's scratch --
+# plain internal-DRAM heap, not MALLOC_CAP_SPIRAM: this function never
+# writes flash directly (it marks s_dirty and defers to the flash-safe
+# worker), so there is no flash-write-from-PSRAM-stack hazard to avoid, and
+# no reason to prefer PSRAM for a transient decode buffer either. This
+# dropped safety_cfg_store_refetch_locked()'s own frame to 64 B and took
+# ct_cal_post_handler/ct_auto_zero_post_handler out of the "deepest 5"
+# entirely (4128 B / 4096 B now, well under the new ceiling).
+#
+# Measuring the new worst case exposed a SEPARATE, larger instance of the
+# call-graph mis-attribution artifact this file's own history already
+# flagged once (see git blame): the raw report showed
+# backup_export_get_handler reaching a fabricated 6176 B via
+# `_stext` -> `profiles_handle_message` -> `profile_executor_halt` -> ... --
+# backup_export.c calls neither (grep confirms). Root cause, this time
+# actually run down rather than merely worked around: objdump captions an
+# indirect-looking call target against the NEAREST PRECEDING symbol in the
+# whole symbol table when the real callee has no symbol of its own (a
+# literal pool / veneer table / a local whose symbol didn't make this ELF's
+# symtab) -- and for everything low in the image, that nearest symbol is
+# `_stext`, however far away. check_main_task_stack_budget.py's CALL_RE
+# used to match `<name+0xNNNN>` and silently discard the offset, treating
+# that guess as a real edge; folding dozens of unrelated functions'
+# unrelated call sets under one `_stext` node fabricates whatever
+# transitive reachability happens to exist anywhere in that region. FIXED
+# there (CALL_RE now requires the target to land exactly on a symbol, no
+# offset) rather than patched around here, since Xtensa's windowed-register
+# ABI means a real `call4/8/12` can never legally land mid-function anyway
+# -- this can only make every check built on that module's parse()/deepest()
+# more accurate, never hide a real edge. See that file's own comment on
+# CALL_RE and SECTION_MARKER_NAMES for the full story; the latter is kept
+# as cheap defence in depth even though CALL_RE now excludes the case that
+# motivated it.
+#
+# The real, verified (grep-confirmed) worst case after both fixes is
+# revert_post_handler at 4832 B, entirely unrelated to the safety-link
+# chain (adaptive_tune_revert -> zones_config_set_model -> nvs_save ->
+# zones_config_cfg_fs_save -> zones_config_json_compute_crc) and unchanged
+# by this pass -- CEILING_BYTES is retightened to it. This is a CEILING,
+# not a percentage-of-stack budget: it exists to catch the deepest
 # reachable handler path getting WORSE, not to relitigate this depth.
-CEILING_BYTES = 5776
+CEILING_BYTES = 4832
 
 HANDLER_RE = re.compile(r"\.handler\s*=\s*([A-Za-z_][A-Za-z0-9_]*)")
 
