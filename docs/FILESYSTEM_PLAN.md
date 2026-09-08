@@ -1099,3 +1099,61 @@ data for reading over HTTP/JTAG-free tooling; only the boot-time
 `cfg_fs_mount_device()` high-water log line was available
 (`5428/5428 words free` at that point in boot, i.e. before most subsystems
 start).
+
+**2026-09-08 hardware verification of the fix -- migration is NOT proven.**
+Built `bc0befd0` (the `flash_worker_wait.h` fix above) from a clean detached
+worktree, host tests 32/32 green, `check_main_task_stack_budget` 4864/6144 B
+(unchanged, within budget), flashed and verified. Relay cycle counters
+(2201/2994/3214/0) survived byte-for-byte across the flash and a subsequent
+clean `debug_reset`; gains/coupling matrix identical; `cfg` partition MOUNTED
+(not reformatted) both times; no OTA/otadata hijack (`running: "factory"`).
+
+But `GET /api/cfgfs` on this boot (and again after `debug_reset`) still shows
+`relay_cycles` and `adaptive_tune` as `"file_backed": false, "migration_deferred": true`
+-- the bounded wait added by this fix does not close the gap on real
+hardware. The boot log shows the wait giving up and the condition persisting
+well past its own ceiling:
+
+```
+uart_bridge_ext: flash-safe worker not started -- job dropped
+relay_cycles: flash-safe worker still not started -- relay-cycles migrate-on-load write may be dropped this boot; see GET /api/cfgfs   (at t=11189 ms)
+pref_cfg_fs: relay_cycles.dat write (rev 0) failed: ESP_FAIL
+pref_cfg_fs: could not migrate NVS relay_cycles.dat to file: ESP_FAIL
+adaptive_tune: flash-safe worker still not started -- kibase migrate-on-load write may be dropped this boot; see GET /api/cfgfs   (at t=16239 ms)
+```
+
+`relay_cycles_init()` runs at ~t=6.2s and the "still not started" warning
+fires again at t=11.2s and t=16.2s -- i.e. the flash-safe worker was not
+merely a little late (which a 5 s bounded wait would absorb), it had not
+started by 16+ seconds into boot on this run. This is not the boot-ordering
+race the fix targeted (that race is a few-hundred-ms window); something else
+is keeping `uart_bridge_ext_start_flash_worker()` from completing in a
+reasonable time on this board/build. `firing_stats` shows
+`"file_backed": false, "nvs_backed": true, "migration_deferred": false` --
+it never attempted the migrate-on-load write at all this boot (no follow-up
+investigation done here; flagged for the next pass).
+
+**Conclusion: the filesystem migration for `relay_cycles`/`adaptive_tune` is
+NOT fully proven on hardware.** `bc0befd0` successfully turned a silent drop
+into a visible, diagnosable one (`migration_deferred` in `/api/cfgfs`, plus
+the named log lines above) -- that part of the fix works exactly as
+designed. It did not fix the underlying failure to become file-backed. No
+data loss occurred (NVS remains authoritative and was read correctly both
+times), but the promised NVS-only -> file-backed migration for these two
+items still has not happened on real hardware. Next step: instrument or log
+`uart_bridge_ext_start_flash_worker()`'s own completion time this boot to
+find out why it takes longer than the 5 s ceiling (or never completes) --
+out of scope for this flash/verify pass, which only flashes and observes.
+
+Separately (not part of this migration, flagged for awareness): this boot
+also produced a second, distinct `crash_report` (`StoreProhibited`,
+`exc_task='ipc0'`, `exc_addr=0x820b784e`, `exc_a0=0xa5a5a5a5`) that the
+firmware's own `crash_report` module flags as self-inconsistent
+(`"crash record's exception frame is NOT self-consistent (pc=0x000001fd,
+backtrace corrupted=1) -- do NOT read exc_addr as a struct field"`) --
+consistent with a JTAG/OpenOCD reset-timing artifact from the flash
+tool's own noted "benign Verify-Failed quirk" retry, not a new firmware
+regression: the boot immediately following it, and the `debug_reset` boot
+after that, both ran clean (`reset_reason='software (esp_restart)'`,
+heartbeats every 18 s with no further panics). Unacknowledged; owner should
+review `GET /api/crash_report` before assuming it is inert.
