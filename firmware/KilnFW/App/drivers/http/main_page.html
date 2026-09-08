@@ -598,6 +598,59 @@ function zoneIndexForChannel(channel) {
   return null;
 }
 
+// Which zone indices claim CT (current-sense) channel `ci` (0-based, so
+// ct_current_a[ci]/ct_fitted[ci]) via their own ct_mask -- bit ci = channel
+// ci+1, same convention zones_config_json.h documents on zone_cfg_t::ct_mask
+// and the one zoneIndexForChannel() above already uses for thermo_mask.
+// ct_mask lives ON each zone_cfg_t row (not a separate lookup table), so
+// there is no way for an assignment to reference a zone index that doesn't
+// exist -- every entry in `zones` (the /api/zones response, zonesCache.zones)
+// IS a real zone. Zero, one, or (deliberately, per that same doc comment --
+// one physical CT clamped around a supply feeding more than one zone's
+// element) more than one zone may claim the same channel. Owner request
+// 2026-09-08's three-way dashboard split (own-zone row / shared section /
+// hidden) is exactly the 1 / >=2 / 0 cases of this list's length.
+function ctChannelZones(zones, ci) {
+  var bit = 1 << ci;
+  var out = [];
+  (zones || []).forEach(function (z, zi) {
+    if (z && (z.ct_mask & bit)) out.push(zi);
+  });
+  return out;
+}
+
+// Owner request 2026-09-08 ("if each zone is assigned its own current
+// sense, put it in the zone that it is assigned to"): the inline HTML tag
+// for `zoneIndex`'s own row (renderChannels above) listing every CT channel
+// whose ct_mask is claimed by EXACTLY this one zone -- ctChannelZones()
+// does the zero/one/many-zone counting. A channel claimed by two-or-more
+// zones (the shared/summed case, e.g. the bench's single GPIO28 CT wired to
+// more than one zone's element) is deliberately excluded here -- it stays
+// in renderCurrentCard()'s existing separate section, unchanged, per the
+// same owner request. A channel claimed by NO zone is not shown anywhere.
+// This is independent of (and additive to) renderChannels()'s own
+// summed-topology ampsTag, which is a live single-active-zone attribution
+// GUESS, not a static assignment -- the two can both fire for the same zone
+// if the operator has also mapped the shared channel into >1 zone's
+// ct_mask. Returns '' (never null/undefined) when there is nothing to show
+// -- zoneIndex null (channel has no zone at all), data.ct_current_a absent
+// (older firmware), or no channel singly claims this zone.
+function singleZoneCtTag(data, zones, zoneIndex) {
+  var tag = '';
+  if (!data.ct_current_a || zoneIndex === null || zoneIndex === undefined) return tag;
+  var fitted = data.ct_fitted || [true, true, true];
+  for (var ci = 0; ci < data.ct_current_a.length; ci++) {
+    if (!fitted[ci]) continue;
+    var claimants = ctChannelZones(zones, ci);
+    if (claimants.length !== 1 || claimants[0] !== zoneIndex) continue;
+    var val = data.ct_current_a[ci];
+    tag += (val === null || val === undefined)
+      ? ' <span class="stale">(CT' + ci + ': no reading yet)</span>'
+      : ' <span class="stale">(CT' + ci + ': ' + val.toFixed(2) + ' A)</span>';
+  }
+  return tag;
+}
+
 // relaysData is /api/status's "relays" array ({relay, on}), present only
 // when ds.io_ready (dashboard_http.c) -- absent entirely on a board with no
 // IO expander, same as today. Relay ON/OFF IS a live device reading (unlike
@@ -703,13 +756,31 @@ function renderSafetyCard(data) {
 // landed -- treated the same as "per_zone, everything fitted" so this card
 // degrades to the old three-real-numbers-or-null behavior rather than
 // hiding itself.
-function renderCurrentCard(data) {
+// Owner request 2026-09-08: this section is now shared-CT-only. A channel
+// claimed by exactly one zone (ctChannelZones() above returns length 1)
+// moves onto that zone's own row in renderChannels() instead; a channel
+// claimed by no zone is not shown anywhere. Only a channel claimed by TWO
+// OR MORE zones (the summed/shared-supply case -- the bench's single GPIO28
+// CT wired into more than one zone's ct_mask is the live example) still
+// lands here, presented exactly as before this change.
+//
+// `zones` is optional and gates whether that grouping filter applies at
+// all: the real dashboard call site always passes zonesCache.zones (an
+// array, [] before it has loaded), but omitting the argument entirely (as
+// the pre-existing fitted/not-fitted regression tests below do) keeps the
+// old show-every-fitted-channel behavior, unfiltered by assignment -- so
+// this function still has an assignment-agnostic mode to test the fitted
+// logic in isolation, without every one of those tests having to also
+// fabricate a zones array.
+function renderCurrentCard(data, zones) {
   if (!data.ct_current_a) return null;
   const fitted = data.ct_fitted || [true, true, true];
+  const grouped = zones !== undefined;
   const div = document.createElement('div');
   div.className = 'card';
   var parts = [];
-  for (var ci = 0; ci < 3; ci++) {
+  for (var ci = 0; ci < data.ct_current_a.length; ci++) {
+    if (grouped && ctChannelZones(zones, ci).length < 2) continue;
     var label = 'CT' + ci;
     var val;
     if (!fitted[ci]) {
@@ -721,6 +792,7 @@ function renderCurrentCard(data) {
     }
     parts.push('<span class="stale">' + label + ':</span> ' + val);
   }
+  if (parts.length === 0) return null;
   div.innerHTML = '<span>Current sense</span><span class="temp">' + parts.join(' &nbsp; ') + '</span>';
   return div;
 }
@@ -1105,8 +1177,10 @@ function renderChannels(data) {
           ampsTag = ' <span class="stale">(&mdash;)</span>';
         }
       }
+      // Owner request 2026-09-08 -- see singleZoneCtTag()'s own doc comment.
+      var ctOwnTag = singleZoneCtTag(data, zonesCache.zones, ziForDuty);
       detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' + staleTag + dutyTag +
-               ampsTag + relayStatusHtml(ch.channel, data.relays);
+               ampsTag + ctOwnTag + relayStatusHtml(ch.channel, data.relays);
     }
     // Label the row with its zone name (operator-set on Thermocouples &
     // Zones) when one claims this channel; otherwise fall back to
@@ -1138,7 +1212,7 @@ function renderChannels(data) {
   if (safetyDiv) {
     el.appendChild(safetyDiv);
   }
-  const currentDiv = renderCurrentCard(data);
+  const currentDiv = renderCurrentCard(data, zonesCache.zones);
   if (currentDiv) {
     el.appendChild(currentDiv);
   }
