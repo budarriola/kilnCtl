@@ -137,6 +137,29 @@
   .crash-actions button { font: inherit; padding: 0.5em 0.9em; min-height: 32px; box-sizing: border-box;
                 background: var(--button-bg); border: 1px solid var(--border);
                 border-radius: var(--ui-radius); color: var(--fg); cursor: pointer; }
+  /* Relay-cycle reset (table cell, per relay row): was a bare native
+     <button> -- no class, no rule anywhere in this file or theme.css --
+     so it rendered in browser-default chrome (UA padding/border/font, no
+     theme colors) sitting inside an otherwise fully themed table, exactly
+     the same bug the watchdog-panic toggle had before it was pointed at
+     theme.css's shared button.danger-btn (comment above, owner report
+     2026-08-27). Reusing that button's outlined-red/solid-on-hover
+     treatment and its --fault-color token here too (no new colors) so a
+     destructive relay-history-erasing action still reads as one -- but not
+     the class itself: button.danger-btn is `display:block; width:100%`,
+     meant for a standalone settings row, and forcing that width onto a
+     table cell would blow the table out sideways on a narrow viewport.
+     This keeps the same border/background/hover/color declarations at a
+     size that fits inline in a td, with box-sizing so the explicit
+     min-height reserves a real tap target without adding to the padding
+     the way an unconstrained UA button would. Confirm step (kcConfirm) was
+     already present in the click handler below and is unchanged. */
+  .relay-reset-btn { font: inherit; padding: 0.4em 0.8em; min-height: 32px; box-sizing: border-box;
+                border: 1px solid var(--fault-color); border-radius: var(--ui-radius);
+                background: var(--button-bg); color: var(--fault-color); cursor: pointer;
+                white-space: nowrap; }
+  .relay-reset-btn:hover { background: var(--fault-color); color: #fff; }
+  .relay-reset-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   /* Danger Zone -- deliberately the loudest thing on this page, same
      solid-fill treatment main_page.html's safety-trip banner uses (not the
      border-only .card everything else here gets), so it never reads as just
