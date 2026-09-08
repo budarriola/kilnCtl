@@ -513,6 +513,79 @@ static void test_legacy_record_is_read_once_then_retired(void)
     hal_kv_close(&h);
 }
 
+// ---------------------------------------------------------------------------
+// 2026-09-08 post-flash recovery foot-gun
+// (docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md):
+// boot_confirm_is_healthy() -> boot_guard_mark_healthy() is gated on a
+// snapshot (nvs_report_capture()) that main_network_http.c takes ONCE, early,
+// and never re-checks. A board that samples that snapshot during a
+// transient window -- plausibly right after flash_firmware() resets the
+// chip -- never gets a second chance to confirm healthy that boot, even
+// though boot_guard's own counter keeps incrementing and persisting fine
+// (it owns its NVS handle independently -- see boot_guard_init()). Three
+// ordinary development flashes in a row can walk a perfectly healthy board
+// into recovery mode this way. boot_guard_reset_counter() is the fix: a
+// tool that knows it just performed a deliberate flash can clear the
+// counter directly, without waiting on that flaky auto-health snapshot.
+// ---------------------------------------------------------------------------
+static void test_reset_counter_keeps_normal_flashing_under_threshold(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    // Model "three normal flashes in a row": each boot increments (the app
+    // is running, boot_guard_init() always counts first, unconditionally --
+    // see boot_guard.h), but never reaches boot_confirm_is_healthy() this
+    // boot (the auto-health snapshot happened to sample a transient NVS
+    // state), so the ONLY thing that clears the counter is the tool calling
+    // boot_guard_reset_counter() after confirming the new build is up.
+    for (uint32_t i = 0; i < 5; i++) {
+        simulate_reboot();
+        boot_guard_init();
+        TEST_CHECK(boot_guard_get_boot_count() == 1u,
+                   "each 'flash' boot increments from a cleared counter, never accumulating");
+        TEST_CHECK(!boot_guard_is_recovery_mode(),
+                   "a run of ordinary flashes never reaches the threshold when the tool resets "
+                   "the counter after each one");
+        TEST_CHECK(boot_guard_reset_counter(),
+                   "boot_guard_reset_counter() verifies its clear on ordinary (non-broken) hardware");
+    }
+}
+
+// THE negative test: prove test_reset_counter_keeps_normal_flashing_under_threshold()
+// actually exercises the fix rather than passing vacuously. Simulates a
+// genuinely broken boot -- nothing ever calls boot_guard_reset_counter() or
+// boot_guard_mark_healthy(), the same as a board that really cannot boot --
+// and confirms recovery mode is STILL reached after
+// RECOVERY_MODE_BOOT_THRESHOLD such boots. This is what pins that the fix
+// above is additive (an explicit, tool-driven reset), not a weakening of
+// the counter itself: a board nobody ever calls the reset for is exactly as
+// protected as before this change.
+static void test_a_genuinely_failing_boot_still_trips_recovery(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    for (uint32_t i = 1; i <= (uint32_t)RECOVERY_MODE_BOOT_THRESHOLD; i++) {
+        simulate_reboot();
+        boot_guard_init();
+        TEST_CHECK(boot_guard_get_boot_count() == i,
+                   "a boot nobody ever confirms/resets keeps accumulating, unaffected by the new "
+                   "reset path existing");
+    }
+    simulate_reboot();
+    boot_guard_init();
+#if RECOVERY_MODE_ENABLED
+    TEST_CHECK(boot_guard_is_recovery_mode(),
+               "NEGATIVE-TEST TARGET: a genuinely failing boot (nothing ever resets or confirms it) "
+               "still trips recovery mode after RECOVERY_MODE_BOOT_THRESHOLD boots -- proves "
+               "boot_guard_reset_counter() is an additive escape hatch for a deliberate flash, not "
+               "a general weakening of the counter");
+#endif
+}
+
 void run_test_boot_guard(void)
 {
     test_crc32_reference_vector();
@@ -526,4 +599,6 @@ void run_test_boot_guard(void)
     test_boot_confirm_decide();
     test_stuck_counter_escape();
     test_legacy_record_is_read_once_then_retired();
+    test_reset_counter_keeps_normal_flashing_under_threshold();
+    test_a_genuinely_failing_boot_still_trips_recovery();
 }

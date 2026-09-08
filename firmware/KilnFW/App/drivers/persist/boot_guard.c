@@ -491,18 +491,17 @@ boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok
     return is_factory_partition ? BOOT_CONFIRM_SKIP_FACTORY : BOOT_CONFIRM_CONFIRM_OTA_SLOT;
 }
 
-bool boot_guard_mark_healthy(void)
+/* Shared by boot_guard_mark_healthy() and boot_guard_reset_counter(): does
+ * the actual NVS work (write, verify, one bounded erase-then-retry) and
+ * returns whether the clear is CONFIRMED in flash. Caller holds s_bg.lock
+ * and is responsible for the s_bg/s_bg_rtc bookkeeping and logging that
+ * differs between the two call sites (see each function's own comment for
+ * why they differ). Pulled out 2026-09-08 (post-flash-recovery-foot-gun
+ * audit) rather than duplicated, so the verify-then-retry sequence -- the
+ * actual fix for the write-lies bug this file's big comment block
+ * documents -- has exactly one implementation to keep correct. */
+static bool clear_persisted_counter_verified_locked(void)
 {
-    if (!s_bg.initialized) {
-        return false;
-    }
-    if (s_bg.healthy_marked) {
-        return true; /* already verified cleared earlier this boot */
-    }
-    if (!ensure_lock()) {
-        return false;
-    }
-    xSemaphoreTake(s_bg.lock, portMAX_DELAY);
     hal_status_t err = persist_count(0);
     /* See boot_guard.h's doc comment on this function: a HAL_OK write result
      * was observed on real hardware NOT to guarantee the persisted value
@@ -527,6 +526,37 @@ bool boot_guard_mark_healthy(void)
         err = erase_then_persist_count(0);
         verified = (err == HAL_OK) && verify_persisted_count(0);
     }
+    if (!verified) {
+        if (err != HAL_OK) {
+            ESP_LOGW(TAG, "could not clear boot-guard counter: %s -- will retry next call",
+                     hal_status_to_name(err));
+        } else {
+            /* The write call itself reported success, but
+             * verify_persisted_count() did NOT confirm boot_count==0
+             * immediately afterward -- exactly the failure mode that
+             * bricked this board into a permanent recovery loop (that
+             * function already logs the specific reason: unreadable,
+             * invalid, or a different nonzero value). */
+            ESP_LOGE(TAG, "boot-guard counter WRITE REPORTED SUCCESS BUT DID NOT VERIFY -- will "
+                          "retry next call rather than trusting the write's own return code");
+        }
+    }
+    return verified;
+}
+
+bool boot_guard_mark_healthy(void)
+{
+    if (!s_bg.initialized) {
+        return false;
+    }
+    if (s_bg.healthy_marked) {
+        return true; /* already verified cleared earlier this boot */
+    }
+    if (!ensure_lock()) {
+        return false;
+    }
+    xSemaphoreTake(s_bg.lock, portMAX_DELAY);
+    bool verified = clear_persisted_counter_verified_locked();
     if (verified) {
         s_bg.healthy_marked = true;
         /* See the STUCK-COUNTER ESCAPE comment at the top of this file: this
@@ -540,18 +570,69 @@ bool boot_guard_mark_healthy(void)
     if (verified) {
         ESP_LOGI(TAG, "boot-guard counter cleared and VERIFIED (read back as 0) -- this boot is "
                       "confirmed healthy");
-    } else if (err != HAL_OK) {
-        ESP_LOGW(TAG, "could not clear boot-guard counter: %s -- will retry next call",
-                 hal_status_to_name(err));
-    } else {
-        /* The write call itself reported success, but verify_persisted_count()
-         * did NOT confirm boot_count==0 immediately afterward -- exactly the
-         * failure mode that bricked this board into a permanent recovery
-         * loop (that function already logs the specific reason: unreadable,
-         * invalid, or a different nonzero value). */
-        ESP_LOGE(TAG, "boot-guard counter WRITE REPORTED SUCCESS BUT DID NOT VERIFY -- NOT marking "
-                      "this boot healthy; will retry next call rather than trusting the write's own "
-                      "return code");
+    }
+    return verified;
+}
+
+bool boot_guard_reset_counter(void)
+{
+    /* See docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md:
+     * boot_confirm_is_healthy() requires nvs_report_capture()'s ONE-SHOT,
+     * never-retried snapshot of ALL THREE NVS partitions (wifi_nvs/kiln_nvs/
+     * profiles_nvs) to be mounted, sampled once early in
+     * main_network_http_bringup(). A board that is otherwise completely
+     * fine can sample that snapshot during a genuinely transient window --
+     * most plausibly right after flash_firmware() resets the chip, before
+     * every partition has finished mounting -- and if it does, that boot's
+     * nvs_ok is wrong for the rest of the boot (nothing re-samples it), so
+     * boot_guard_mark_healthy() is never even attempted and the counter
+     * that boot climbs by one for a reason that has nothing to do with
+     * whether the FIRMWARE can boot. A developer flashing several times in
+     * a row during ordinary iteration can walk an entirely healthy board
+     * into RECOVERY_MODE_BOOT_THRESHOLD this way.
+     *
+     * This function is the deliberate-flash escape hatch: unlike
+     * boot_guard_mark_healthy(), it does NOT require s_bg.initialized (a
+     * tool driving this from outside the board, e.g. over a future
+     * authenticated HTTP route called from flash_firmware()'s verify step,
+     * is asserting "I just flashed this board on purpose" independent of
+     * whatever boot_confirm_is_healthy() would eventually decide) and does
+     * NOT check s_bg.healthy_marked (a deliberate reset is idempotent to
+     * call again, same as mark_healthy, but is not "the same event" as an
+     * automatic health confirmation, so it does not short-circuit on that
+     * flag). It DOES arm the same RTC stuck-counter marker mark_healthy()
+     * does -- see boot_guard_counter_is_stuck()'s comment: that escape only
+     * exists to believe a verified clear over a counter that flash refuses
+     * to actually update, and a deliberate reset is exactly as much "a
+     * verified clear" as an automatic one is. Sharing that arming is what
+     * keeps this change from being able to combine with 0b5d9dad's marker
+     * to produce a board where NEITHER path clears the stuck counter: both
+     * paths funnel through the same clear_persisted_counter_verified_locked()
+     * and the same RTC-arm, so there is only ever one "did the last clear
+     * verify" fact for the next boot to trust, not two independently
+     * maintained ones.
+     *
+     * Does NOT touch s_bg.recovery_mode: same as boot_guard_mark_healthy(),
+     * this can only affect the NEXT boot's decision, never retroactively
+     * un-decide the one currently running (boot_guard_is_recovery_mode()'s
+     * own doc comment). A board already running in recovery mode this boot
+     * stays in recovery mode this boot even after a successful reset; it
+     * simply will not still be in recovery mode on the boot after. */
+    if (!ensure_lock()) {
+        return false;
+    }
+    xSemaphoreTake(s_bg.lock, portMAX_DELAY);
+    bool verified = clear_persisted_counter_verified_locked();
+    if (verified) {
+        s_bg.healthy_marked = true;
+        s_bg_rtc.magic = BOOT_GUARD_RTC_MAGIC;
+        s_bg_rtc.marked_healthy = 1u;
+    }
+    xSemaphoreGive(s_bg.lock);
+
+    if (verified) {
+        ESP_LOGI(TAG, "boot-guard counter explicitly reset and VERIFIED (read back as 0) -- "
+                      "recorded as a deliberate flash, not an automatic health confirmation");
     }
     return verified;
 }

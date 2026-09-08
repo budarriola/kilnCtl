@@ -370,6 +370,27 @@ fixed for the boot) — verifying this class of fix without a reflash
 required a JTAG memory read of `s_bg`, resolved via `pyelftools` against the
 matching ELF; a `/api/boot_guard` diagnostics route is a reasonable follow-up.
 
+A second, separate 2026-09-08 finding
+(`docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md`) is why boards get INTO
+recovery mode from ordinary development flashing in the first place: `boot_confirm_is_healthy()`
+(which gates the automatic counter clear) depends on `nvs_report_capture()`'s one-shot,
+never-retried snapshot of three NVS partitions taken once early in
+`main_network_http_bringup()`. A boot that samples that snapshot during a transient window —
+plausibly moments after `flash_firmware()` resets the chip — never gets a second chance to
+confirm healthy that boot, even though `boot_guard`'s own counter keeps incrementing and
+persisting correctly (it owns an independent NVS handle, opened earlier in
+`main_boot_early.c`). A few ordinary flashes in a row can walk a perfectly healthy board into
+recovery mode this way. Fix: `boot_guard_reset_counter()` (`boot_guard.c`/`.h`), a deliberate,
+externally-triggered clear that bypasses that flaky snapshot entirely, sharing its actual
+verified-clear-with-retry logic with `boot_guard_mark_healthy()` via one common helper so the
+`0b5d9dad` write-lies fix covers both paths. It is meant to be called by a TOOL that knows it
+just performed a deliberate flash (`flash_firmware()`'s verify step, once implemented — not yet
+wired up as of this note), never from inside an unconditional firmware boot path: a negative
+test proved that wiring it into every `boot_guard_init()` call instead defeats the counter
+entirely, masking a genuinely failing board. Firmware cannot itself distinguish "a developer
+just flashed this" from "this board is quietly reset-looping" — only the tool knows which one
+just happened.
+
 Both of the first two times the real fault was a task stack, not the missing gate: a 700-byte
 overflow corrupted the heap, and the pool walk then looped inside a critical
 section until the interrupt watchdog fired. **Register every new task for

@@ -171,6 +171,46 @@ bool boot_guard_is_recovery_mode(void);
  * s_bg.healthy_marked before touching NVS again). */
 bool boot_guard_mark_healthy(void);
 
+/* Explicit "this was a deliberate flash, not a boot that proved itself
+ * healthy" reset -- docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md.
+ *
+ * boot_confirm_is_healthy() (and therefore boot_guard_mark_healthy()) is
+ * gated on nvs_report_capture()'s ONE-SHOT snapshot of three NVS partitions
+ * taken once, early, and never re-sampled for the rest of the boot -- see
+ * that module's own header. A board that samples that snapshot during a
+ * genuinely transient window (most plausibly moments after flash_firmware()
+ * resets the chip, before every partition has finished mounting) never gets
+ * a second chance to confirm healthy that boot, even though nothing is
+ * actually wrong with it: this module's own counter still increments and
+ * persists normally (it has its own, independent NVS partition handle --
+ * see boot_guard_init()), so a run of ordinary development flashes can walk
+ * a perfectly good board into RECOVERY_MODE_BOOT_THRESHOLD for a reason that
+ * has nothing to do with whether the firmware can boot.
+ *
+ * This function exists for a TOOL that knows it just performed a deliberate
+ * flash (flash_firmware()'s verify step, once it confirms the new build is
+ * actually running) to say so directly, bypassing that flaky auto-health
+ * snapshot entirely. Same verified-clear-with-retry contract as
+ * boot_guard_mark_healthy() (returns true only once the clear is read back
+ * confirmed, not merely written), and arms the SAME RTC stuck-counter marker
+ * boot_guard_counter_is_stuck() reads -- both functions share one
+ * clear-and-arm implementation, so there is exactly one "did the last clear
+ * verify" fact carried into the next boot, never two independently-tracked
+ * ones that could disagree and leave a stuck counter with no path to clear
+ * it. Unlike boot_guard_mark_healthy(), does NOT require boot_guard_init()
+ * to have run this boot and does NOT short-circuit on healthy_marked --
+ * a deliberate reset is not "the same event" as an automatic confirmation,
+ * even though both end up doing the same NVS write.
+ *
+ * Does NOT change boot_guard_is_recovery_mode()'s answer for the boot this
+ * is called from (same as boot_guard_mark_healthy() -- that decision was
+ * already made, once, at boot_guard_init()); it only affects the NEXT boot.
+ * A genuinely failing board that is never deliberately flashed again is
+ * completely unaffected: nothing calls this function on its behalf, so its
+ * counter keeps climbing and it still trips recovery mode after
+ * RECOVERY_MODE_BOOT_THRESHOLD boots exactly as before. */
+bool boot_guard_reset_counter(void);
+
 /* For diagnostics/tests: the persisted "unconfirmed" count as loaded (or
  * incremented to) this boot. */
 uint32_t boot_guard_get_boot_count(void);
