@@ -137,9 +137,35 @@
 
   #setupOfflineMsg { color: var(--bad); font-weight: bold; }
 
+  /* ---- ADDED for the step-content screens (plan implementation steps 4-5:
+     steps 0-3). Same visual language as zones_page.html/safety_commissioning_page.html's
+     own field blocks -- label above control, .hint below -- no new colours. ---- */
+  .wfield { margin: 0.7em 0; }
+  .wfield label { display: block; font-weight: bold; margin-bottom: 0.2em; }
+  .wfield input[type=text], .wfield input[type=number], .wfield select {
+    font-size: 1em; padding: 0.4em 0.5em; border-radius: var(--ui-radius);
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--fg);
+    min-height: 32px; box-sizing: border-box; width: 100%; max-width: 22em;
+  }
+  .zonecard { border: 1px solid var(--border); border-radius: var(--ui-radius);
+    padding: 0.7em 0.9em; margin: 0.6em 0; background: var(--bg); }
+  .zonecard h4 { margin: 0 0 0.4em; }
+  .chanbits label { display: inline-flex; align-items: center; gap: 0.3em; margin-right: 1em;
+    min-height: 32px; }
+  .livereading { font-family: monospace; font-size: 0.85em; color: var(--muted); }
+  .badge { display: inline-block; border-radius: 999px; padding: 0.1em 0.6em; font-size: 0.78em;
+    font-weight: bold; border: 1px solid transparent; margin-left: 0.4em; }
+  .badge-ok { background: var(--ok); color: #fff; }
+  .badge-warn { background: var(--warn); color: #fff; }
+  .werr { color: var(--bad); font-weight: bold; margin: 0.4em 0; }
+  .wok { color: var(--ok); font-weight: bold; margin: 0.4em 0; }
+  .crashbanner { background: var(--bad); color: #fff; border-radius: var(--ui-radius);
+    padding: 0.7em 1em; margin: 0.6em 0; font-weight: bold; }
+
   @media (max-width: 420px) {
     .steprow { flex-direction: column; align-items: flex-start; }
     .steprow .stepgo { align-self: flex-start; }
+    .wfield input[type=text], .wfield input[type=number], .wfield select { max-width: 100%; }
   }
 </style>
 </head>
@@ -171,11 +197,24 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <p id="stepSafetyNote" class="hint" hidden></p>
   <p id="stepStatusLine" class="hint"></p>
   <div id="stepRegressedNote" class="review-row" hidden></div>
-  <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
-    -- docs/SETUP_WIZARD_PLAN.md's implementation steps 4-11 add that one step at a time. This shell
-    already tracks and renders this step's true state from the board, and lets you jump straight to
-    it (deep link <code>#step=N</code>), independent of every other step and resumable after a
-    reload or a reboot.</p>
+
+  <!-- Steps 0-3 (implementation steps 4-5 of SETUP_WIZARD_PLAN.md section 8):
+       real content, wired to the same endpoints/validation the existing
+       settings pages already use -- see the per-step render*/commit*
+       functions below. Steps 4-12 fall through to #stepGenericContent. -->
+  <div id="stepBody0" hidden></div>
+  <div id="stepBody1" hidden></div>
+  <div id="stepBody2" hidden></div>
+  <div id="stepBody3" hidden></div>
+
+  <div id="stepGenericContent" hidden>
+    <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
+      -- docs/SETUP_WIZARD_PLAN.md's implementation steps 6-11 add that one step at a time. This shell
+      already tracks and renders this step's true state from the board, and lets you jump straight to
+      it (deep link <code>#step=N</code>), independent of every other step and resumable after a
+      reload or a reboot.</p>
+  </div>
+
   <div class="gnav">
     <button type="button" onclick="gGoto('overview')">Back to overview</button>
   </div>
@@ -335,6 +374,118 @@ function pickResumeStep(mergedSteps) {
 }
 
 /* ==========================================================================
+ * Step 0-3 content: pure validators + formatters (kept DOM-free so
+ * test_setup_wizard.js can drive them directly, same discipline as the
+ * merge functions above). SETUP_WIZARD_PLAN.md implementation steps 4-5
+ * (section 8): preflight, network/time/units, zone count + thermocouple
+ * channels, thermocouple types + offsets. NOTHING here duplicates a
+ * firmware validation rule -- every one of these re-checks a value
+ * client-side ONLY so the "Next"/"Save" button can be disabled early; the
+ * server (zones_http.c / settings_http.c / dashboard_settings_http.c) is
+ * still the authority, and its rejection text is rendered verbatim on a
+ * 400, never paraphrased (task requirement 3 / plan section 1 "Validation").
+ * ========================================================================== */
+
+// Real, driver-sourced thermocouple types -- copied verbatim from
+// zones_page.html's own TC_TYPES (uart_task_ids.h's THERMO_TC_* codes 0-7,
+// ZONE_TC_TYPE_MAX_REAL). Two independent pages, same source of truth
+// (this file's comment and zones_page.html's both point at
+// uart_task_ids.h); if that driver enum ever grows, both copies need the
+// same edit -- flagged here rather than silently drifting apart.
+var TC_TYPES = [
+  { code: 0, name: 'Type B', range: '0 to 1820°C', note: 'highest range; no CJ compensation below ~50°C' },
+  { code: 1, name: 'Type E', range: '-200 to 900°C', note: 'highest output signal of any type' },
+  { code: 2, name: 'Type J', range: '-40 to 750°C', note: 'iron leg corrodes above ~500°C in open air' },
+  { code: 3, name: 'Type K', range: '-200 to 1350°C', note: 'general purpose -- what this kiln ships with' },
+  { code: 4, name: 'Type N', range: '-200 to 1300°C', note: 'more stable than K at high temp, less common' },
+  { code: 5, name: 'Type R', range: '-50 to 1760°C', note: 'platinum/rhodium, for high-fire kilns' },
+  { code: 6, name: 'Type S', range: '-50 to 1760°C', note: 'platinum/rhodium, for high-fire kilns' },
+  { code: 7, name: 'Type T', range: '-200 to 350°C', note: 'lowest range -- not for a kiln\'s hot side' },
+];
+var THERMO_COUNT_MAX = 3; // matches zones_page.html's #thermoCount max (THERMO_CHANNEL_COUNT)
+
+function tcTypeOptionsHtml(selected) {
+  var sel = (typeof selected === 'number') ? selected : 3;
+  return TC_TYPES.map(function (t) {
+    return '<option value="' + t.code + '"' + (t.code === sel ? ' selected' : '') + '>' +
+      t.name + ' (' + t.range + ') -- ' + t.note + '</option>';
+  }).join('');
+}
+
+// Task requirement 4 / plan section 2 ("max_temp_c 0 = not set",
+// "max_ramp_c_per_hr 0 = never configured -> refuse to start", settled in
+// 1fc9b1dd): 0 in either field is UNSET, never a valid limit. This is the
+// single place that rule is expressed for the wizard -- consumed today by
+// step 2's informational zone-commissioning badge (below) and meant to be
+// reused unchanged by step 6's own screen when that lands, so the rule
+// cannot silently diverge between the two.
+function isZoneCommissioned(zone) {
+  return !!zone && zone.max_temp_c !== 0 && zone.max_ramp_c_per_hr !== 0;
+}
+
+function formatZoneLimitC(v) {
+  return (v === 0) ? 'NOT SET' : (v + '°C');
+}
+
+// Step 1 (network/time/units) commit-time validator. Mirrors, at the
+// client, exactly what time_sync_tz_is_valid()/settings_tz_post_handler
+// will refuse anyway (a POSIX TZ rule, not an IANA name) -- refusal text
+// from the server is still shown verbatim if this client-side check is
+// somehow wrong, never overridden by it (plan section 1's "Validation" row:
+// re-checked again at commit).
+function validateStep1(fields) {
+  var errors = [];
+  var tz = (fields.tz || '').trim();
+  if (!tz) {
+    errors.push('Time zone is required (e.g. EST5EDT,M3.2.0,M11.1.0).');
+  } else if (/^[A-Za-z]+\/[A-Za-z_]+$/.test(tz)) {
+    errors.push('That looks like an IANA zone name (e.g. "America/Chicago") -- the board needs a ' +
+      'POSIX TZ rule instead (e.g. EST5EDT,M3.2.0,M11.1.0).');
+  }
+  if (fields.unit !== 'C' && fields.unit !== 'F') {
+    errors.push('Pick a temperature display unit.');
+  }
+  return { valid: errors.length === 0, errors: errors };
+}
+
+// Step 2 (zone count + thermocouple channel assignment) commit-time
+// validator. `zones` is an array of { thermo_mask } for indices
+// [0, thermoCount).
+function validateStep2(thermoCount, zones) {
+  var errors = [];
+  if (!(thermoCount >= 1 && thermoCount <= THERMO_COUNT_MAX)) {
+    errors.push('Thermocouples in use must be between 1 and ' + THERMO_COUNT_MAX + '.');
+    return { valid: false, errors: errors };
+  }
+  for (var i = 0; i < thermoCount; i++) {
+    var z = zones[i] || {};
+    if (!z.thermo_mask) {
+      errors.push('Zone ' + (i + 1) + ' has no thermocouple channel assigned yet.');
+    }
+  }
+  return { valid: errors.length === 0, errors: errors };
+}
+
+// Step 3 (thermocouple types + calibration offsets) commit-time validator.
+// `zones` is an array of { tc_type, cal_offset_c } for indices [0, thermoCount).
+function validateStep3(thermoCount, zones, calMinC, calMaxC) {
+  var errors = [];
+  for (var i = 0; i < thermoCount; i++) {
+    var z = zones[i] || {};
+    var validType = TC_TYPES.some(function (t) { return t.code === z.tc_type; });
+    if (!validType) {
+      errors.push('Zone ' + (i + 1) + ' has no valid thermocouple type selected.');
+    }
+    if (typeof z.cal_offset_c !== 'number' || isNaN(z.cal_offset_c) ||
+        z.cal_offset_c < calMinC || z.cal_offset_c > calMaxC) {
+      errors.push('Zone ' + (i + 1) + ' calibration offset must be a number between ' +
+        calMinC + ' and ' + calMaxC + ' °C.');
+    }
+  }
+  return { valid: errors.length === 0, errors: errors };
+}
+
+/* ==========================================================================
  * DOM wiring below. Kept separate from the pure functions above on purpose.
  * ========================================================================== */
 
@@ -414,6 +565,387 @@ function gGoto(target) {
   gRenderStepper();
 }
 
+// Marks a step's stored state via the already-landed POST /api/setup/progress
+// (implementation step 2) -- never a second store, per plan section 5.
+// Reloads readiness+progress afterward so the overview/stepper immediately
+// reflect the board's own merged verdict rather than an optimistic local guess.
+function postStepState(stepId, state, note) {
+  var body = 'step=' + stepId + '&state=' + encodeURIComponent(state) +
+    (note ? ('&note=' + encodeURIComponent(note)) : '');
+  return fetch('/api/setup/progress', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+  }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) {
+    return { ok: r.ok, body: j };
+  }); });
+}
+
+function renderErrList(el, errors) {
+  if (!errors.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="werr"><ul>' +
+    errors.map(function (e) { return '<li>' + window.kcEscapeHtml(e) + '</li>'; }).join('') + '</ul></div>';
+}
+
+/* ---- Step 0: Welcome / preflight. Reuses GET /api/status and
+ * GET /api/crash_report verbatim (plan section 7 row "0"); mirrors
+ * capability_preflight.py's refusal to proceed on an unacknowledged crash,
+ * in the browser, per plan section 6. Read-only -- nothing is written. ---- */
+function renderStep0() {
+  var el = document.getElementById('stepBody0');
+  el.innerHTML = '<p class="hint">Loading board status&hellip;</p>';
+  return Promise.all([
+    fetchJsonOr('/api/status', null),
+    fetchJsonOr('/api/crash_report', null),
+  ]).then(function (r) {
+    var status = r[0], crash = r[1];
+    var html = '';
+    if (!status) {
+      html += '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
+      el.innerHTML = html;
+      return;
+    }
+    html += '<div class="review-row"><span>Firmware build</span><span class="rv">' +
+      window.kcEscapeHtml(String(status.fw_build || 'unknown')) + '</span></div>';
+    html += '<div class="review-row"><span>Uptime</span><span class="rv">' +
+      window.kcEscapeHtml(String(status.uptime_s != null ? status.uptime_s + ' s' : 'unknown')) + '</span></div>';
+    html += '<div class="review-row"><span>Reset reason</span><span class="rv">' +
+      window.kcEscapeHtml(String(status.reset_reason || 'unknown')) + '</span></div>';
+
+    var crashUnacked = !!(crash && crash.present && !crash.acknowledged);
+    if (crashUnacked) {
+      html += '<div class="crashbanner">UNACKNOWLEDGED CRASH REPORT -- ' +
+        window.kcEscapeHtml(crash.exc_cause_str || 'reason not given') + '. Review it on the ' +
+        '<a href="/diagnostics">diagnostics page</a> before continuing setup ' +
+        '(capability_preflight refuses a run here too).</div>';
+    }
+    html += '<div id="step0Err"></div>';
+    html += '<div class="gnav"><button type="button" id="step0Continue" ' +
+      (crashUnacked ? 'disabled' : '') + '>Mark preflight reviewed</button></div>';
+    el.innerHTML = html;
+
+    document.getElementById('step0Continue').addEventListener('click', function () {
+      // Commit-time re-check (requirement 3): re-fetch crash_report right
+      // now rather than trusting the snapshot this screen loaded with --
+      // another tab/session could have caused a crash since.
+      fetchJsonOr('/api/crash_report', null).then(function (freshCrash) {
+        if (freshCrash && freshCrash.present && !freshCrash.acknowledged) {
+          renderErrList(document.getElementById('step0Err'),
+            ['A crash report appeared since this screen loaded -- review it before continuing.']);
+          return;
+        }
+        postStepState(0, 'done').then(function () { loadAll(); });
+      });
+    });
+  });
+}
+
+/* ---- Step 1: Network + time + units. Reuses GET/POST /api/status,
+ * POST /api/settings/tz, POST /api/unit_pref verbatim -- no new endpoint,
+ * no second copy of tz/unit validation (plan section 7 row "1"). Network
+ * itself links out to the existing /wifi provisioning page rather than
+ * re-embedding wifi_provision_http.c's scan/connect flow, same "link,
+ * don't duplicate" choice the plan makes for step 7's safety commissioning. ---- */
+function renderStep1() {
+  var el = document.getElementById('stepBody1');
+  el.innerHTML = '<p class="hint">Loading current settings&hellip;</p>';
+  return fetchJsonOr('/api/status', null).then(function (status) {
+    if (!status) {
+      el.innerHTML = '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
+      return;
+    }
+    var netItem = (latestReadiness.items || []).filter(function (it) { return it.key === 'network'; })[0];
+    var html = '<div class="wfield"><label>Network</label><p class="hint">' +
+      window.kcEscapeHtml(netItem ? netItem.detail : 'status unknown') +
+      ' -- <a href="/wifi">configure Wi-Fi &rarr;</a></p></div>';
+    html += '<div class="wfield"><label for="wTz">Time zone (POSIX TZ rule)</label>' +
+      '<input type="text" id="wTz" value="' + window.kcEscapeHtml(status.time_tz || '') + '">' +
+      '<p class="hint">Example: EST5EDT,M3.2.0,M11.1.0. Firing logs are timestamped with this, so ' +
+      'get it right before a long firing, not after.</p></div>';
+    html += '<div class="wfield"><label for="wUnit">Displayed temperature unit</label>' +
+      '<select id="wUnit"><option value="C"' + (status.temp_unit === 'C' ? ' selected' : '') + '>Celsius</option>' +
+      '<option value="F"' + (status.temp_unit === 'F' ? ' selected' : '') + '>Fahrenheit</option></select></div>';
+    html += '<div id="step1Err"></div><div id="step1Ok"></div>';
+    html += '<div class="gnav"><button type="button" id="step1Save">Save &amp; mark done</button></div>';
+    el.innerHTML = html;
+
+    document.getElementById('step1Save').addEventListener('click', function () {
+      // Commit-time re-validation (requirement 3): read the fields NOW,
+      // not whatever was true when the screen loaded.
+      var fields = { tz: document.getElementById('wTz').value, unit: document.getElementById('wUnit').value };
+      var v = validateStep1(fields);
+      var errEl = document.getElementById('step1Err');
+      var okEl = document.getElementById('step1Ok');
+      okEl.innerHTML = '';
+      if (!v.valid) { renderErrList(errEl, v.errors); return; }
+      renderErrList(errEl, []);
+      fetch('/api/settings/tz', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'tz=' + encodeURIComponent(fields.tz),
+      }).then(function (r) {
+        if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+        return fetch('/api/unit_pref', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'unit=' + encodeURIComponent(fields.unit),
+        });
+      }).then(function (r) {
+        if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+        return postStepState(1, 'done');
+      }).then(function () {
+        okEl.innerHTML = '<p class="wok">Saved.</p>';
+        loadAll();
+      }).catch(function (e) {
+        // Rejection text rendered verbatim, never paraphrased (plan section 1).
+        renderErrList(errEl, [String(e.message || e)]);
+      });
+    });
+  });
+}
+
+/* ---- Step 2: Zone count + thermocouple channel assignment. Reuses
+ * GET/POST /api/zones (zones_http.c) and /api/status's per-zone actual_c/
+ * actual_valid for live readings -- same "show the board's own number"
+ * pattern zones_page.html's pollCtCurrents() uses (plan section 7 row
+ * "2,3,4,5,6"). No client-side copy of thermo_mask/thermo_count bounds
+ * beyond what's needed to grey out the button early; the POST is the real
+ * gate. ---- */
+var step2Poll = null;
+
+function step2ZoneRowHtml(i, z) {
+  var bits = '';
+  for (var ch = 0; ch < THERMO_COUNT_MAX; ch++) {
+    var checked = (z.thermo_mask & (1 << ch)) ? ' checked' : '';
+    bits += '<label><input type="checkbox" class="s2chan" data-zone="' + i + '" data-ch="' + ch + '"' +
+      checked + '> Ch ' + ch + '</label>';
+  }
+  var commissioned = isZoneCommissioned(z);
+  var badge = commissioned ? '<span class="badge badge-ok">limits set</span>' :
+    '<span class="badge badge-warn">limits NOT SET (step 6)</span>';
+  return '<div class="zonecard" data-zone="' + i + '">' +
+    '<h4>Zone ' + (i + 1) + badge + '</h4>' +
+    '<div class="wfield"><label>Name</label><input type="text" class="s2name" data-zone="' + i +
+    '" value="' + window.kcEscapeHtml(z.name || '') + '"></div>' +
+    '<div class="wfield chanbits"><label>Thermocouple channel(s)</label>' + bits + '</div>' +
+    '<p class="hint">Live reading: <span class="livereading" data-zone="' + i + '">n/a</span> -- ' +
+    'wiggle the probe now and confirm the right number moves, before saving.</p>' +
+    '<p class="hint">Commissioning limits (max temp ' + formatZoneLimitC(z.max_temp_c) + ', max ramp ' +
+    formatZoneLimitC(z.max_ramp_c_per_hr) + (z.max_ramp_c_per_hr === 0 ? '' : '/hr') +
+    ') are set in step 6, not here.</p></div>';
+}
+
+function step2ReadCurrentZones(thermoCount, existingZones) {
+  var zones = [];
+  for (var i = 0; i < thermoCount; i++) {
+    var card = document.querySelector('.zonecard[data-zone="' + i + '"]');
+    if (!card) { zones.push(existingZones[i] || {}); continue; }
+    var mask = 0;
+    card.querySelectorAll('.s2chan:checked').forEach(function (cb) { mask |= (1 << parseInt(cb.dataset.ch, 10)); });
+    var name = card.querySelector('.s2name').value;
+    var prev = existingZones[i] || {};
+    zones.push({ name: name, thermo_mask: mask, max_temp_c: prev.max_temp_c, max_ramp_c_per_hr: prev.max_ramp_c_per_hr });
+  }
+  return zones;
+}
+
+function step2PollLive() {
+  fetchJsonOr('/api/status', null).then(function (st) {
+    if (!st || !st.zones) return;
+    document.querySelectorAll('.livereading').forEach(function (span) {
+      var i = parseInt(span.dataset.zone, 10);
+      var z = st.zones[i];
+      if (!z) { span.textContent = 'n/a'; return; }
+      span.textContent = z.actual_valid ? (z.actual_c.toFixed(1) + '°C') : 'no valid reading (fault or unassigned)';
+    });
+  }).catch(function () {});
+}
+
+function renderStep2() {
+  var el = document.getElementById('stepBody2');
+  el.innerHTML = '<p class="hint">Loading zones&hellip;</p>';
+  if (step2Poll) { clearInterval(step2Poll); step2Poll = null; }
+  return fetchJsonOr('/api/zones', null).then(function (data) {
+    if (!data) {
+      el.innerHTML = '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
+      return;
+    }
+    var thermoCount = data.thermo_count || 0;
+    var zones = data.zones || [];
+    var html = '<div class="wfield"><label for="s2count">Thermocouples in use (1-' + THERMO_COUNT_MAX + ')</label>' +
+      '<input type="number" id="s2count" min="1" max="' + THERMO_COUNT_MAX + '" value="' + (thermoCount || 1) + '"></div>';
+    html += '<div id="s2zones"></div>';
+    html += '<div id="step2Err"></div><div id="step2Ok"></div>';
+    html += '<div class="gnav"><button type="button" id="s2rebuild">Apply channel count</button>' +
+      '<button type="button" id="step2Save">Save &amp; mark done</button></div>';
+    el.innerHTML = html;
+
+    function rebuild(n) {
+      var zdiv = document.getElementById('s2zones');
+      var html2 = '';
+      for (var i = 0; i < n; i++) {
+        html2 += step2ZoneRowHtml(i, zones[i] || { name: '', thermo_mask: (1 << i), max_temp_c: 0, max_ramp_c_per_hr: 0 });
+      }
+      zdiv.innerHTML = html2;
+      step2PollLive();
+      if (!step2Poll) step2Poll = setInterval(step2PollLive, 3000);
+    }
+    rebuild(thermoCount || 1);
+
+    document.getElementById('s2rebuild').addEventListener('click', function () {
+      var n = parseInt(document.getElementById('s2count').value, 10);
+      if (!(n >= 1 && n <= THERMO_COUNT_MAX)) { n = 1; }
+      rebuild(n);
+    });
+
+    document.getElementById('step2Save').addEventListener('click', function () {
+      var thermoCountNow = parseInt(document.getElementById('s2count').value, 10);
+      var liveZones = step2ReadCurrentZones(thermoCountNow, zones);
+      // Commit-time re-validation (requirement 3): validated against the
+      // fields as they stand right now, not against what loaded initially.
+      var v = validateStep2(thermoCountNow, liveZones);
+      var errEl = document.getElementById('step2Err');
+      var okEl = document.getElementById('step2Ok');
+      okEl.innerHTML = '';
+      if (!v.valid) { renderErrList(errEl, v.errors); return; }
+      renderErrList(errEl, []);
+      var params = ['thermo_count=' + thermoCountNow];
+      liveZones.forEach(function (z, i) {
+        params.push('z' + i + '_name=' + encodeURIComponent(z.name || ''));
+        params.push('z' + i + '_thermo_mask=' + z.thermo_mask);
+      });
+      fetch('/api/zones', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+      }).then(function (r) {
+        if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+        return postStepState(2, 'done');
+      }).then(function () {
+        okEl.innerHTML = '<p class="wok">Saved.</p>';
+        loadAll();
+      }).catch(function (e) {
+        renderErrList(errEl, [String(e.message || e)]);
+      });
+    });
+  });
+}
+
+/* ---- Step 3: Thermocouple types + calibration offsets. Reuses GET/POST
+ * /api/zones for tc_type/cal_offset_c (same fields zones_page.html already
+ * edits, TC_TYPES enumerated verbatim from the driver's real codes) and
+ * GET /api/status's actual_valid as the best available verify-on-chip
+ * signal (plan section 7 row "2,3,4,5,6"). The main-board MAX31856 path has
+ * no transmitted tc_type_verified bit the way the Pico's safety TC does
+ * (diagnostics_http.c's own documented gap) -- this screen says so plainly
+ * rather than claiming a verification it cannot actually perform: "write
+ * accepted" and "chip converting a plausible reading afterward" are shown
+ * as two separate facts, never collapsed into one "success". ---- */
+var step3PollTimer = null;
+
+function step3ZoneRowHtml(i, z) {
+  return '<div class="zonecard" data-zone="' + i + '">' +
+    '<h4>Zone ' + (i + 1) + '</h4>' +
+    '<div class="wfield"><label>Thermocouple type</label><select class="s3type" data-zone="' + i + '">' +
+    tcTypeOptionsHtml(z.tc_type) + '</select></div>' +
+    '<div class="wfield"><label>Calibration offset (&deg;C)</label>' +
+    '<input type="number" step="0.1" class="s3cal" data-zone="' + i + '" value="' + z.cal_offset_c + '"></div>' +
+    '<p class="hint">Verify: <span class="s3verify" data-zone="' + i + '">not yet checked</span></p></div>';
+}
+
+function step3ReadCurrentZones(thermoCount, existingZones) {
+  var zones = [];
+  for (var i = 0; i < thermoCount; i++) {
+    var card = document.querySelector('#stepBody3 .zonecard[data-zone="' + i + '"]');
+    var prev = existingZones[i] || {};
+    if (!card) { zones.push(prev); continue; }
+    zones.push({
+      tc_type: parseInt(card.querySelector('.s3type').value, 10),
+      cal_offset_c: parseFloat(card.querySelector('.s3cal').value),
+    });
+  }
+  return zones;
+}
+
+function renderStep3() {
+  var el = document.getElementById('stepBody3');
+  el.innerHTML = '<p class="hint">Loading zones&hellip;</p>';
+  if (step3PollTimer) { clearTimeout(step3PollTimer); step3PollTimer = null; }
+  return fetchJsonOr('/api/zones', null).then(function (data) {
+    if (!data) {
+      el.innerHTML = '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
+      return;
+    }
+    var thermoCount = data.thermo_count || 0;
+    var zones = data.zones || [];
+    if (thermoCount === 0) {
+      el.innerHTML = '<p class="hint">No thermocouple channels assigned yet -- finish ' +
+        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < thermoCount; i++) {
+      html += step3ZoneRowHtml(i, zones[i] || { tc_type: 3, cal_offset_c: 0 });
+    }
+    html += '<div id="step3Err"></div><div id="step3Ok"></div>';
+    html += '<div class="gnav"><button type="button" id="step3Save">Save &amp; mark done</button></div>';
+    el.innerHTML = html;
+
+    document.getElementById('step3Save').addEventListener('click', function () {
+      var liveZones = step3ReadCurrentZones(thermoCount, zones);
+      // Commit-time re-validation (requirement 3).
+      var v = validateStep3(thermoCount, liveZones, -50.0, 50.0);
+      var errEl = document.getElementById('step3Err');
+      var okEl = document.getElementById('step3Ok');
+      okEl.innerHTML = '';
+      if (!v.valid) { renderErrList(errEl, v.errors); return; }
+      renderErrList(errEl, []);
+      var params = [];
+      liveZones.forEach(function (z, i) {
+        params.push('z' + i + '_tctype=' + z.tc_type);
+        params.push('z' + i + '_cal=' + z.cal_offset_c);
+      });
+      fetch('/api/zones', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+      }).then(function (r) {
+        if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+        okEl.innerHTML = '<p class="wok">Write accepted -- checking whether each channel is converting&hellip;</p>';
+        // Verify-on-chip (requirement 5): a write returning 200 is NOT the
+        // same claim as "this type actually verified on the chip" (the CR1
+        // class -- a type that fails to verify reads NaN and looks like a
+        // dead probe). Poll /api/status a few times and report per-zone
+        // whether a valid (non-NaN) reading actually appeared, rather than
+        // declaring success from the POST's 200 alone.
+        return pollVerifyAfterWrite(thermoCount, 5, 800);
+      }).then(function (allVerified) {
+        if (allVerified) {
+          okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
+          return postStepState(3, 'done').then(function () { loadAll(); });
+        } else {
+          okEl.innerHTML = '<p class="hint" style="color:var(--warn);">Write accepted, but at least one ' +
+            'channel is still not producing a valid reading -- see per-zone status above. This can be the ' +
+            'CR1 verify-on-chip failure mode (a type change that did not actually take), not a dead probe. ' +
+            'NOT marked done until every channel verifies.</p>';
+        }
+      }).catch(function (e) {
+        renderErrList(errEl, [String(e.message || e)]);
+      });
+    });
+  });
+}
+
+function pollVerifyAfterWrite(thermoCount, attemptsLeft, delayMs) {
+  return fetchJsonOr('/api/status', null).then(function (st) {
+    var allOk = true;
+    for (var i = 0; i < thermoCount; i++) {
+      var span = document.querySelector('.s3verify[data-zone="' + i + '"]');
+      var z = st && st.zones ? st.zones[i] : null;
+      var ok = !!(z && z.actual_valid);
+      if (span) span.textContent = ok ? 'converting (' + z.actual_c.toFixed(1) + '°C)' :
+        'no valid reading yet' + (attemptsLeft > 1 ? ' -- retrying' : ' -- NOT VERIFIED');
+      if (!ok) allOk = false;
+    }
+    if (allOk || attemptsLeft <= 1) return allOk;
+    return new Promise(function (resolve) {
+      step3PollTimer = setTimeout(function () { resolve(pollVerifyAfterWrite(thermoCount, attemptsLeft - 1, delayMs)); }, delayMs);
+    });
+  });
+}
+
 function gRenderStepDetail(stepId) {
   var s = latestMerged.filter(function (m) { return m.id === stepId; })[0];
   if (!s) return;
@@ -437,6 +969,20 @@ function gRenderStepDetail(stepId) {
   } else {
     regressedNote.hidden = true;
   }
+
+  // Dispatch to this step's real content (0-3) or the generic not-built-yet
+  // placeholder (4-12). Only one body div is ever visible at a time.
+  [0, 1, 2, 3].forEach(function (id) {
+    var body = document.getElementById('stepBody' + id);
+    if (body) body.hidden = (stepId !== id);
+  });
+  document.getElementById('stepGenericContent').hidden = (stepId >= 0 && stepId <= 3);
+  if (step2Poll) { clearInterval(step2Poll); step2Poll = null; }
+  if (step3PollTimer) { clearTimeout(step3PollTimer); step3PollTimer = null; }
+  if (stepId === 0) renderStep0();
+  else if (stepId === 1) renderStep1();
+  else if (stepId === 2) renderStep2();
+  else if (stepId === 3) renderStep3();
 }
 
 function gResume() {

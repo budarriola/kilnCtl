@@ -228,6 +228,70 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(gateNonSafetyOk.complete === true, 'skipping a non-safety step (11: coupling matrix) does not block completion');
 })();
 
+// ---- Steps 0-3 content: pure validators (implementation steps 4-5) ------
+(function testStep1Validation() {
+  const ctx = loadPageScript(noopFetch);
+  const ok = ctx.validateStep1({ tz: 'EST5EDT,M3.2.0,M11.1.0', unit: 'C' });
+  assert(ok.valid === true, 'step1: a real POSIX TZ rule + a unit validates');
+
+  const empty = ctx.validateStep1({ tz: '', unit: 'C' });
+  assert(empty.valid === false, 'step1: empty tz is refused');
+
+  const iana = ctx.validateStep1({ tz: 'America/Chicago', unit: 'C' });
+  assert(iana.valid === false, 'step1: an IANA zone name (not POSIX TZ) is refused');
+
+  const noUnit = ctx.validateStep1({ tz: 'EST5EDT,M3.2.0,M11.1.0', unit: '' });
+  assert(noUnit.valid === false, 'step1: missing unit choice is refused');
+})();
+
+(function testStep2Validation() {
+  const ctx = loadPageScript(noopFetch);
+  const ok = ctx.validateStep2(2, [{ thermo_mask: 1 }, { thermo_mask: 2 }]);
+  assert(ok.valid === true, 'step2: every zone within thermoCount has a channel assigned -> valid');
+
+  const unassigned = ctx.validateStep2(2, [{ thermo_mask: 1 }, { thermo_mask: 0 }]);
+  assert(unassigned.valid === false, 'step2: a zone with thermo_mask 0 is refused');
+  assert(/Zone 2/.test(unassigned.errors[0]), 'step2: error names the offending zone');
+
+  const badCount = ctx.validateStep2(0, []);
+  assert(badCount.valid === false, 'step2: thermoCount 0 is refused (must be >=1 to proceed)');
+
+  const tooMany = ctx.validateStep2(ctx.THERMO_COUNT_MAX + 1, []);
+  assert(tooMany.valid === false, 'step2: thermoCount above THERMO_COUNT_MAX is refused');
+})();
+
+(function testStep3Validation() {
+  const ctx = loadPageScript(noopFetch);
+  const ok = ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: 0 }], -50.0, 50.0);
+  assert(ok.valid === true, 'step3: a real tc_type code + an in-range offset validates');
+
+  const badType = ctx.validateStep3(1, [{ tc_type: 99, cal_offset_c: 0 }], -50.0, 50.0);
+  assert(badType.valid === false, 'step3: an out-of-range tc_type code is refused');
+
+  const badOffset = ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: 999 }], -50.0, 50.0);
+  assert(badOffset.valid === false, 'step3: an out-of-bound cal_offset_c is refused');
+
+  const nanOffset = ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: NaN }], -50.0, 50.0);
+  assert(nanOffset.valid === false, 'step3: NaN cal_offset_c is refused');
+})();
+
+// ---- Task requirement 4 / plan section 2: 0 means UNSET for max_temp_c and
+// max_ramp_c_per_hr (settled in 1fc9b1dd), never a valid commissioned limit.
+// isZoneCommissioned() is the single place this rule lives for the wizard;
+// step 2's zone cards render its badge off this exact function.
+(function testZoneLimitsZeroMeansUnset() {
+  const ctx = loadPageScript(noopFetch);
+  assert(ctx.formatZoneLimitC(0) === 'NOT SET', 'formatZoneLimitC(0) reads as NOT SET, never as "0°C"');
+  assert(ctx.formatZoneLimitC(1250) === '1250°C', 'formatZoneLimitC renders a real limit with its value');
+
+  assert(ctx.isZoneCommissioned({ max_temp_c: 1250, max_ramp_c_per_hr: 200 }) === true,
+    'a zone with both limits set is commissioned');
+  assert(ctx.isZoneCommissioned({ max_temp_c: 0, max_ramp_c_per_hr: 200 }) === false,
+    'a zone with max_temp_c still 0 is NOT commissioned, even with a ramp limit set');
+  assert(ctx.isZoneCommissioned({ max_temp_c: 1250, max_ramp_c_per_hr: 0 }) === false,
+    'a zone with max_ramp_c_per_hr still 0 is NOT commissioned, even with a temp limit set');
+})();
+
 Promise.resolve().then(() => {
   console.log('');
   console.log((passed + failed) + ' assertions, ' + passed + ' passed, ' + failed + ' failed');
