@@ -721,11 +721,16 @@ function renderSafetyCard(data) {
   // Same relay-tag markup/classes as relayStatusHtml() above, so K4 reads
   // as one of the relay row rather than a differently-styled one-off.
   //
-  // Named in full ("Safety relay K4"), not just "K4" (owner request
-  // 2026-08-29): this is the contact that decides whether ANY element
-  // current flows, and it is the one thing to watch while a firing is
-  // supposed to be heating -- a two-character label on the dashboard sent
-  // people to /diagnostics to find out what it meant.
+  // Shortened to "K4: <state>" on the dashboard (owner request 2026-09-08),
+  // superseding the 2026-08-29 "named in full" decision above: this pill
+  // was measured taking too much horizontal space on the dashboard card.
+  // The relay designator + state is kept -- only the "Safety relay " prefix
+  // is dropped. Full context (which contact, when it closes, what it gates)
+  // stays available via the pill's title attribute and on /diagnostics,
+  // whose own longer label ("Safety relay (K4, safety-processor owned)")
+  // and zones_page.html's ("Safety relay (K4): ...") are left untouched --
+  // there is more room there and the dashboard is the only page this
+  // request named.
   //
   // safety_relay_energized is null, not false, until a status frame has
   // actually been decoded (dashboard_http.c's safety_relay_known). The old
@@ -741,7 +746,7 @@ function renderSafetyCard(data) {
   const relayHtml = '<span class="relay-status"><span class="relay-tag kc-live-value ' +
     relayCls + '" title="K4 on the safety processor -- closed only while SaftyFW is armed AND ' +
     'the controller has asked it to permit heating. No element current can flow while this is off.">' +
-    'Safety relay K4: ' + relayTxt + '</span></span>';
+    'K4: ' + relayTxt + '</span></span>';
   div.innerHTML = '<span>Safety TC</span><span class="temp">' + tempHtml + relayHtml + '</span>';
   return div;
 }
