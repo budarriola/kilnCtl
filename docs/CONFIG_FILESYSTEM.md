@@ -122,14 +122,14 @@ Either outcome never blocks boot, never touches any partition other than
   check — the newer revision won and resynced the loser, so this should
   self-clear; a `diverged` flag that stays true across repeated reads
   means something is repeatedly re-diverging, not resolving.
-- `"nvs_only"` — items that have not moved to file backing yet. **This
-  list is not perfectly current as of 2026-09-07** — the prefs items
-  (unit pref, ramp assist, display power) and user profiles already moved
-  to dual-write in code that landed after this array was last updated, and
-  the array itself is out of scope for the pass that would fix it (see
-  `docs/audits/filesystem_migration_review_2026-09-07.md` open item 4).
-  Treat the state-of-migration table below, not this array, as the source
-  of truth for what has actually moved.
+- `"nvs_only"` — items that have not moved to file backing yet. **As of
+  `2e88e90a` (2026-09-08) this array is empty** — every item this doc's
+  migration table (below) tracks as MOVE (1-9) now has a real cfg-filesystem
+  bridge and its own `dual_write.items[]` row; nothing genuinely NVS-only
+  remains among the migrated set. `cfgfs_nvs_only_drift_check.py` fails the
+  build the moment a new `persist/*_cfg_fs.c` bridge lands without a matching
+  `dual_write.items[]` row, so this array should not go stale silently a
+  third time (see `2e88e90a`'s commit message for the second time it did).
 
 ## If the filesystem fails to mount
 
@@ -161,12 +161,12 @@ Of 24 inventoried runtime-changeable items:
 | 1 | Zones config (PID/FOPDT/coupling/guards/wiring/tc_type) | dual-write | `19f74959` |
 | 2 | Zone normals | still NVS-only | — |
 | 3 | Relay names | still NVS-only (grouped with zones, deliberately deferred) | — |
-| 4 | Relay cycle counters | still NVS-only (planned move-last) | — |
+| 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
 | 6 | Hidden-builtin profile mask | still NVS-only | — |
-| 7 | Firing stats / history | still NVS-only | — |
+| 7 | Firing stats / history | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 8 | Named kiln config slots | still NVS-only | — |
-| 9 | Adaptive-tune Ki baseline + opt-in mask | still NVS-only | — |
+| 9 | Adaptive-tune Ki baseline (opt-in mask lives in zone config, off this table) | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 10 | Ramp-assist enable | dual-write | `34927a77` |
 | 11 | Unit preference (C/F) | dual-write | `34927a77` |
 | 12 | Display power / backlight policy | dual-write | `34927a77` |

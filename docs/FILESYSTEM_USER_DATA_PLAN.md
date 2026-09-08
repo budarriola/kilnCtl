@@ -504,7 +504,9 @@ here rather than left pending.
 
 **Step 4 (item 5 — user profile slots 0..7 only), 2026-09-07 — done
 (`530dc2f7`), host-proven, board-absent by construction.** Item 6 (hidden-builtin mask)
-and item 7 (firing stats) are NOT done — still NVS-only.
+is still NOT done — still NVS-only. Item 7 (firing stats) was NOT done at
+this point in the plan's history but is DONE as of Step 6b below
+(`762bb29e` bridge, `2e88e90a` /api/cfgfs reporting).
 
 - **File layout**: one file per slot, `profiles/prof<id>.json` (matches this
   doc's section 3 path shape), still **slot-addressed by numeric id 0..7**,
@@ -622,9 +624,11 @@ and item 7 (firing stats) are NOT done — still NVS-only.
   character-for-character against what was there before the break.
 
 **Step 5 (item 8 — kiln config slots only), 2026-09-07 — done, host-proven,
-board-absent by construction.** Item 2 (zone normals) and item 9 (adaptive
-tune) are still **NOT done** — NVS-only. The pre-fire interlock (refuse a
-firing if `cfg` did not mount) is still **NOT done** either.
+board-absent by construction.** Item 2 (zone normals) is still **NOT done**
+— NVS-only. Item 9 (adaptive tune) was NOT done at this point in the plan's
+history but is DONE as of Step 6c below (`762bb29e` bridge, `2e88e90a`
+/api/cfgfs reporting). The pre-fire interlock (refuse a firing if `cfg`
+did not mount) is still **NOT done** either.
 
 - **Shape**: unlike `profiles_cfg_fs.c`'s per-slot files, the whole saved-
   configs store — every slot, `active_id`, `next_id` — was ALREADY one NVS
@@ -793,15 +797,15 @@ plan's own recommendation, after every other item.
   acceptance test (size + version) — no bound relaxed, and there is no "0
   means default" sentinel in this blob to protect (a count of 0 is a real,
   meaningful value: a fresh or just-reset relay).
-- **`/api/cfgfs` needs**: `cfg_fs_status.c` is off-limits/owned by a
-  concurrent pass in this task's brief, so its `nvs_only` array (which lists
-  `"relay_cycles"`) was left untouched — flagged here instead, same
-  convention every earlier step in this doc uses. Once edited, `"relay_
-  cycles"` should move to `dual_write`, backed by the same generic bridge
-  entry `"prefs"` already uses (no new bridge-module name — this item reuses
-  `pref_cfg_fs.c`, it does not add a new `*_cfg_fs.c` file, so
-  `check_cfgfs_nvs_only_drift.ps1`'s `EXPECTED_BRIDGE_MODULES` did not need a
-  new entry for it).
+- **`/api/cfgfs` needs**: DONE, `2e88e90a` (2026-09-08). `relay_cycles_get_
+  dualwrite_status()` (new, `relay_cycles.c`) reads the file side via
+  `pref_cfg_fs_load_raw()` and the NVS side via its own direct read (not
+  `s_rc`'s in-RAM copy), computes `diverged` via `cfg_fs_status_item_
+  diverged()`, and is wired into `diagnostics_http.c`'s item list under the
+  name `"relay_cycles"` — moved out of `cfg_fs_status.c`'s `nvs_only` array,
+  which is now empty. No new bridge-module name needed (reuses `pref_cfg_fs.c`,
+  no new `*_cfg_fs.c` file), so `cfgfs_nvs_only_drift_check.py`'s
+  `EXPECTED_BRIDGE_MODULES` needed no new entry for it.
 - **Tests**: added to `test_relay_cycles.c` (its own executable,
   `kilnctl_host_tests_run_state_relay_cycles.exe`, now also linking
   `cfg_fs.c`/`pref_cfg_fs.c`) — partition-absent, NVS-fallback-then-migrate,
@@ -871,13 +875,17 @@ board-absent by construction.**
   only under-trusts NVS on a future divergence check, it can never lose or
   corrupt the blob itself, which is already durably committed by that
   point).
-- **`/api/cfgfs` needs**: same situation as item 4 — `cfg_fs_status.c` is
-  off-limits, its `nvs_only` array (lists `"firing_stats"`) was left
-  untouched, flagged here instead. THIS item DOES add a new `*_cfg_fs.c`
-  bridge file, so `cfgfs_nvs_only_drift_check.py`'s `EXPECTED_BRIDGE_MODULES`
-  needed (and got) a new `"firing_stats"` entry, with a comment naming all
-  three of this task's items (4, 7, 9) as what `cfg_fs_status.c`'s arrays
-  still need moved out of `nvs_only` once that concurrent pass lands.
+- **`/api/cfgfs` needs**: DONE, `2e88e90a` (2026-09-08). `firing_stats_get_
+  dualwrite_status()` (new, `profile_executor_firing_stats.c`, declared in
+  `profile_executor.h`) aggregates over the user profile slots 0..
+  `PROFILES_MAX_COUNT`-1 (this bridge has no fixed, enumerable id space —
+  any profile can be a user slot OR a 3-digit builtin id, and only ids that
+  have actually fired get a key at all — a divergence confined to a builtin
+  profile's history is a documented gap this aggregation does not cover) and
+  is wired into `diagnostics_http.c`'s item list under `"firing_stats"` —
+  moved out of `cfg_fs_status.c`'s `nvs_only` array, which is now empty.
+  `cfgfs_nvs_only_drift_check.py`'s `EXPECTED_BRIDGE_MODULES` already carried
+  the `"firing_stats"` entry from this item's step 6b bridge landing.
 - **Tests**: added to `test_profile_executor_prestart.c` (already links
   `profile_executor_firing_stats.c` for real) — partition-absent,
   NVS-fallback-then-migrate, repeated-persist dual-write sync (ring growing
@@ -932,10 +940,16 @@ taken here.
   to every other `pref_cfg_fs` item (inherited, not reimplemented) — reads
   prefer the file, FILE FIRST then NVS on write, STRICT `file_rev >
   nvs_rev`. File: `ki_base.dat`; rev key: `kibase_rev`.
-- **`/api/cfgfs` needs**: same as item 4 — reuses the `"prefs"` bridge
-  entry, no new `EXPECTED_BRIDGE_MODULES` entry needed; `cfg_fs_status.c`'s
-  `nvs_only` array (lists `"adaptive_tune"`) needs the same move, flagged
-  for the concurrent pass rather than edited here.
+- **`/api/cfgfs` needs**: DONE, `2e88e90a` (2026-09-08). `adaptive_tune_get_
+  kibase_dualwrite_status()` (new, `adaptive_tune.c`, declared in
+  `adaptive_tune.h`) reads the file side via `pref_cfg_fs_load_raw()` and the
+  NVS side via its own direct read (never `s_kibase_rev`/the in-RAM zone
+  state, which may already have absorbed a resolve this boot), computes
+  `diverged` via `cfg_fs_status_item_diverged()` (a real `memcmp` of the
+  whole blob -- mask AND every zone's baseline float), and is wired into
+  `diagnostics_http.c`'s item list under `"adaptive_tune"` — moved out of
+  `cfg_fs_status.c`'s `nvs_only` array, which is now empty. Reuses the
+  `"prefs"` bridge entry, no new `EXPECTED_BRIDGE_MODULES` entry needed.
 - **Tests**: added to `test_adaptive_tune.c` (already links `adaptive_
   tune.c` for real) — partition-absent, NVS-fallback-then-migrate, and the
   negative test. 352/352 checks pass in that executable.
