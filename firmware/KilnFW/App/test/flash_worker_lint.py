@@ -304,8 +304,21 @@ ALLOWLIST = {
 # cfg_fs_delete() ARE defined in-tree (cfg_fs.c) -- folding the two together
 # would require every future WRITE_CALL_RE addition to also worry about
 # definition-line exclusion, which today it correctly does not have to.
+# Excludes cfg_fs_format_is_stalled() specifically -- found 2026-09-08 as a
+# genuine false positive, not a needs-allowlisting case. It is a pure
+# predicate (cfg_fs_status.c/.h -- this module's own header banner: "Pure
+# and host-testable... it never edits or reaches into cfg_fs.c's/
+# cfg_fs_mount.c's internals") that takes already-computed in_progress/
+# elapsed_ms values and returns a bool; it performs no cfg_fs I/O of any
+# kind, so it is not a member of the write/delete/format surface this regex
+# exists to catch at all. Allowlisting the whole file (cfg_fs_status.c) the
+# way a real dispatched-write call site would be would misrepresent a
+# non-hazard as a reviewed bypass, so this is a precise name exclusion
+# instead -- not a widened `\w*` -- so a real FUTURE cfg_fs_format*() call
+# added anywhere is still caught.
 CFG_FS_CALL_RE = re.compile(
-    r"\b(cfg_fs_write_atomic(?:_device)?|cfg_fs_delete|cfg_fs_format\w*)\s*\("
+    r"\b(cfg_fs_write_atomic(?:_device)?|cfg_fs_delete|"
+    r"cfg_fs_format(?!_is_stalled\b)\w*)\s*\("
 )
 
 # Excludes the two lines in cfg_fs.c that DEFINE cfg_fs_write_atomic()/
