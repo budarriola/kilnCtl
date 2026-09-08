@@ -364,6 +364,21 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
     return true;
 }
 
+// ---- zones_config_accessors.h -- validate_on_off_rules() (plan step 5)
+// reads a candidate rule's zone_index's type. Controllable per test, default
+// ZONE_TYPE_HEATER for every zone (same "generous stand-in until a test
+// says otherwise" convention as the stubs above) -- a test that needs an
+// on/off zone (or, for the negative test, a HEATER one on purpose) sets
+// g_stub_zone_type[N] first.
+static zone_type_t g_stub_zone_type[8];
+bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type)
+{
+    if (out_type) {
+        *out_type = (zone_index < 8) ? g_stub_zone_type[zone_index] : ZONE_TYPE_HEATER;
+    }
+    return zone_index < 8;
+}
+
 // Controllable by test_validate_io_segment_zone_ownership() -- bit N-1 of
 // this mask set means "zone 0 owns relay N", matching zone_cfg_t::relay_mask's
 // own bit convention. Every other zone (1-7) always reports "no mask", same
@@ -498,6 +513,22 @@ static profile_t_v2 to_v2(const profile_t *src)
     return v2;
 }
 
+// profile_persisted_v3_t holds the CURRENT (post-relay/IO) segment shape but
+// no on/off-rule tail -- this is the down-converter for building a real v3
+// blob to feed nvs_load_all_from()/profile_decode_blob() with.
+static profile_t_v3 to_v3(const profile_t *src)
+{
+    profile_t_v3 v3;
+    memset(&v3, 0, sizeof(v3));
+    strncpy(v3.name, src->name, sizeof(v3.name) - 1);
+    v3.zone_mask = src->zone_mask;
+    v3.segment_count = src->segment_count;
+    for (uint8_t i = 0; i < src->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
+        v3.segments[i] = src->segments[i];
+    }
+    return v3;
+}
+
 static void assert_profiles_equal(const profile_t *a, const profile_t *b, const char *ctx)
 {
     char msg[128];
@@ -514,6 +545,35 @@ static void assert_profiles_equal(const profile_t *a, const profile_t *b, const 
         TEST_CHECK_NEAR(a->segments[i].ramp_c_per_hr, b->segments[i].ramp_c_per_hr, 1e-6, msg);
         snprintf(msg, sizeof(msg), "%s: segment %u dwell_min preserved", ctx, i);
         TEST_CHECK(a->segments[i].dwell_min == b->segments[i].dwell_min, msg);
+    }
+    // docs/ON_OFF_ZONE_PLAN.md plan step 5 -- every existing caller of this
+    // helper now also proves the on/off rule tail round-trips (or, for a
+    // profile that never had any, stays at 0 -- this is what makes every
+    // v1/v2/v3 migration test in this file double as a "rules-free profile
+    // is unaffected" proof without needing a separate assertion helper).
+    snprintf(msg, sizeof(msg), "%s: on_off_rule_count preserved", ctx);
+    TEST_CHECK(a->on_off_rule_count == b->on_off_rule_count, msg);
+    for (uint8_t i = 0; i < a->on_off_rule_count && i < PROFILE_MAX_ON_OFF_RULES; i++) {
+        const profile_on_off_rule_t *ra = &a->on_off_rules[i];
+        const profile_on_off_rule_t *rb = &b->on_off_rules[i];
+        snprintf(msg, sizeof(msg), "%s: rule %u segment_index preserved", ctx, i);
+        TEST_CHECK(ra->segment_index == rb->segment_index, msg);
+        snprintf(msg, sizeof(msg), "%s: rule %u zone_index preserved", ctx, i);
+        TEST_CHECK(ra->zone_index == rb->zone_index, msg);
+        snprintf(msg, sizeof(msg), "%s: rule %u enable preserved", ctx, i);
+        TEST_CHECK(ra->enable == rb->enable, msg);
+        snprintf(msg, sizeof(msg), "%s: rule %u phase_mask preserved", ctx, i);
+        TEST_CHECK(ra->phase_mask == rb->phase_mask, msg);
+        snprintf(msg, sizeof(msg), "%s: rule %u direction_mask preserved", ctx, i);
+        TEST_CHECK(ra->direction_mask == rb->direction_mask, msg);
+        snprintf(msg, sizeof(msg), "%s: rule %u temp_cmp preserved", ctx, i);
+        TEST_CHECK(ra->temp_cmp == rb->temp_cmp, msg);
+        snprintf(msg, sizeof(msg), "%s: rule %u temp_threshold_c preserved", ctx, i);
+        TEST_CHECK_NEAR(ra->temp_threshold_c, rb->temp_threshold_c, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "%s: rule %u time window preserved", ctx, i);
+        TEST_CHECK(ra->time_start_s == rb->time_start_s && ra->time_stop_s == rb->time_stop_s, msg);
+        snprintf(msg, sizeof(msg), "%s: rule %u invert preserved", ctx, i);
+        TEST_CHECK(ra->invert == rb->invert, msg);
     }
 }
 
@@ -1173,6 +1233,131 @@ static void test_v2_blob_migrates_distinct_multi_segment_values(void)
 }
 
 // ---------------------------------------------------------------------------
+// Test 4c -- docs/ON_OFF_ZONE_PLAN.md plan step 5, PROFILE_VERSION 3->4: a
+// real v3 blob (current segment shape, crc32 tail, NO on/off rules -- what
+// every board saved between the relay/IO pass and this one) migrates and
+// gets the documented migration default: on_off_rule_count == 0, every rule
+// slot zeroed. This is the "rules-free profile is byte-identical" proof for
+// the migration path specifically (assert_profiles_equal's own rule-tail
+// assertions, extended by this pass, do the rest for every OTHER migration
+// test in this file for free).
+// ---------------------------------------------------------------------------
+static void test_v3_blob_migrates_with_no_rules(void)
+{
+    TEST_SECTION("nvs_load_all_from -- v3->v4: a real v3 blob (no rules yet) migrates with on_off_rule_count 0");
+
+    nvs_stub_reset();
+    profile_t src = make_stored_profile();
+
+    profile_persisted_v3_t v3;
+    memset(&v3, 0, sizeof(v3));
+    v3.version = 3;
+    v3.profile = to_v3(&src);
+    v3.crc32 = esp_crc32_le(0, (const uint8_t *)&v3, sizeof(v3)); /* crc32 field is still 0 here */
+    stage_profile_blob(0, &v3, sizeof(v3));
+    stage_bitmap(0x01);
+
+    profiles_state_t out;
+    bool any_found = false;
+    esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK((out.used_bitmap & 0x01) != 0, "a v3 blob must migrate to a used slot, not be dropped");
+    assert_profiles_equal(&out.profiles[0], &src, "v3->v4 migration");
+    TEST_CHECK(out.profiles[0].on_off_rule_count == 0,
+              "migration default: a v3 blob never had a rule, so on_off_rule_count must land at 0");
+}
+
+// ---------------------------------------------------------------------------
+// Test 4d -- on/off rule storage round-trips through the REAL production
+// save/load path (profiles_http_save() -> nvs_save_slot() ->
+// nvs_load_all_from(), the same NVS path plan step 5's task names). Zone 2
+// is set to ZONE_TYPE_ON_OFF via the zones_config_get_zone_type() stub so
+// validate_on_off_rules() (profiles_http.c) accepts the rule.
+// ---------------------------------------------------------------------------
+static void test_on_off_rule_round_trip_through_real_save_and_load(void)
+{
+    TEST_SECTION("profiles_http_save/nvs_load_all_from -- an on/off rule round-trips byte-for-byte through NVS");
+
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(g_stub_zone_type, 0, sizeof(g_stub_zone_type)); /* every zone HEATER by default */
+    g_stub_zone_type[2] = ZONE_TYPE_ON_OFF;
+
+    profile_t p = make_stored_profile();
+    p.on_off_rule_count = 1;
+    p.on_off_rules[0].segment_index = 1;
+    p.on_off_rules[0].zone_index = 2;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].phase_mask = ON_OFF_PHASE_DWELL;
+    p.on_off_rules[0].direction_mask = ON_OFF_DIR_COOLING;
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_ABOVE;
+    p.on_off_rules[0].temp_threshold_c = 650.0f;
+    p.on_off_rules[0].time_start_s = 5;
+    p.on_off_rules[0].time_stop_s = 0;
+    p.on_off_rules[0].invert = 0;
+
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+    TEST_CHECK(ok, err_msg[0] ? err_msg : "save with a valid on/off rule must succeed");
+
+    profiles_state_t out;
+    bool any_found = false;
+    esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(err == ESP_OK, "no NVS error reloading the saved slot");
+    assert_profiles_equal(&out.profiles[out_id], &p, "on/off rule NVS round-trip");
+}
+
+// ---------------------------------------------------------------------------
+// Test 4e -- validate_on_off_rules(): reject a rule pointing at a segment
+// index that does not exist in the profile.
+// ---------------------------------------------------------------------------
+static void test_validate_on_off_rules_rejects_bad_segment_index(void)
+{
+    TEST_SECTION("validate_on_off_rules -- a rule's segment_index must exist in the profile");
+    memset(g_stub_zone_type, 0, sizeof(g_stub_zone_type));
+    g_stub_zone_type[0] = ZONE_TYPE_ON_OFF;
+
+    profile_t p = make_stored_profile(); /* segment_count == 3, indices 0-2 legal */
+    p.on_off_rule_count = 1;
+    p.on_off_rules[0].segment_index = 3; /* one past the end */
+    p.on_off_rules[0].zone_index = 0;
+    p.on_off_rules[0].enable = 1;
+
+    char err_msg[160] = "";
+    bool ok = validate_on_off_rules(&p, err_msg, sizeof(err_msg));
+    TEST_CHECK(!ok, "a rule referencing a nonexistent segment must be refused");
+    TEST_CHECK(strstr(err_msg, "does not exist") != NULL, "the refusal names the reason");
+}
+
+// ---------------------------------------------------------------------------
+// Test 4f -- validate_on_off_rules(): THE DANGEROUS DIRECTION. A rule
+// pointing at a zone that is NOT typed ZONE_TYPE_ON_OFF (default:
+// ZONE_TYPE_HEATER, the fixture's default state) must be refused -- letting
+// this through would let on/off (bang-bang, no PID, no guards 1-4/9) logic
+// drive a real heating element. See this task's report for the negative
+// test performed by hand against this exact check.
+// ---------------------------------------------------------------------------
+static void test_validate_on_off_rules_rejects_heater_zone(void)
+{
+    TEST_SECTION("validate_on_off_rules -- THE DANGEROUS DIRECTION: a rule aimed at a HEATER zone is refused");
+    memset(g_stub_zone_type, 0, sizeof(g_stub_zone_type)); /* zone 0 stays ZONE_TYPE_HEATER (default) */
+
+    profile_t p = make_stored_profile();
+    p.on_off_rule_count = 1;
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].zone_index = 0; /* a HEATER zone */
+    p.on_off_rules[0].enable = 1;
+
+    char err_msg[160] = "";
+    bool ok = validate_on_off_rules(&p, err_msg, sizeof(err_msg));
+    TEST_CHECK(!ok, "a rule aimed at a HEATER zone must be refused -- on/off logic must never drive a heater");
+    TEST_CHECK(strstr(err_msg, "not configured as an on/off device") != NULL,
+              "the refusal names the reason");
+}
+
+// ---------------------------------------------------------------------------
 // Test 5 -- validate_io_segment(): a zone-assigned relay is REFUSED as a
 // segment target, and a genuinely unassigned one is ACCEPTED. Both
 // directions on purpose -- a gate that refuses everything is not a fix.
@@ -1486,6 +1671,10 @@ void run_test_profiles_http(void)
     test_length_mismatch_rejected();
     test_bad_crc_rejected();
     test_v2_blob_migrates_distinct_multi_segment_values();
+    test_v3_blob_migrates_with_no_rules();
+    test_on_off_rule_round_trip_through_real_save_and_load();
+    test_validate_on_off_rules_rejects_bad_segment_index();
+    test_validate_on_off_rules_rejects_heater_zone();
     test_newer_version_refused_not_wiped();
     test_one_bad_slot_does_not_affect_others();
     test_profiles_list_json_valid_with_escape_heavy_names();

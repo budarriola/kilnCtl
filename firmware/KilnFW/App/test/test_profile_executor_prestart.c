@@ -602,9 +602,12 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
     return false;
 }
 
+// Settable (plan step 8 cap tests) -- default 0 (unlimited), the fixed value
+// every pre-existing test in this file already assumed.
+static uint8_t g_stub_max_simultaneous_relays = 0;
 uint8_t zones_config_get_max_simultaneous_relays(void)
 {
-    return 0;
+    return g_stub_max_simultaneous_relays;
 }
 
 /* ZONES_CFG_VERSION 16->17: profile_executor_feedforward.c's zone_taper_
@@ -947,24 +950,40 @@ bool zone_is_on_off(uint8_t zone_index)
  * future test exercising the report path would need real per-zone stubs,
  * which this file does not need yet since it only tests the prestart-guard
  * seam, not a running tick. */
+// Settable per zone (plan step 8 actuation tests need a real fail-safe-ON
+// zone and non-default hold times) -- defaults are false/2.0/30/30, exactly
+// the fixed values every pre-existing test in this file already assumed, so
+// no test above this comment is affected by these arrays existing.
+static bool g_stub_failsafe_state[MAX31856_CHANNEL_COUNT];
+// Zero-initialised (false/0.0/0/0) by the C runtime; the getters below
+// substitute the fixed defaults every pre-existing test in this file already
+// assumed (false/2.0/30/30) whenever a slot has never been explicitly set --
+// avoids a compiler-extension array initializer just to fill every slot with
+// the same non-zero value, portable across the MSVC host-test toolchain.
+static float g_stub_hyst_c[MAX31856_CHANNEL_COUNT];
+static uint16_t g_stub_min_on_s[MAX31856_CHANNEL_COUNT];
+static uint16_t g_stub_min_off_s[MAX31856_CHANNEL_COUNT];
 bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on)
 {
-    if (out_on) *out_on = false;
+    if (out_on) *out_on = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_failsafe_state[zone_index] : false;
     return zone_index < MAX31856_CHANNEL_COUNT;
 }
 bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c)
 {
-    if (out_hyst_c) *out_hyst_c = 2.0f;
+    float v = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_hyst_c[zone_index] : 0.0f;
+    if (out_hyst_c) *out_hyst_c = (v > 0.0f) ? v : 2.0f;
     return zone_index < MAX31856_CHANNEL_COUNT;
 }
 bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s)
 {
-    if (out_s) *out_s = 30;
+    uint16_t v = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_min_on_s[zone_index] : 0;
+    if (out_s) *out_s = (v > 0) ? v : 30;
     return zone_index < MAX31856_CHANNEL_COUNT;
 }
 bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s)
 {
-    if (out_s) *out_s = 30;
+    uint16_t v = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_min_off_s[zone_index] : 0;
+    if (out_s) *out_s = (v > 0) ? v : 30;
     return zone_index < MAX31856_CHANNEL_COUNT;
 }
 
@@ -7072,6 +7091,459 @@ static void run_test_exec_mode_state_check(void)
     reset_mode_state_check_test_state();
 }
 
+// ---------------------------------------------------------------------------
+// docs/ON_OFF_ZONE_PLAN.md plan step 5 -- profile_resolve_on_off_rule(),
+// the pure lookup profile_executor.c's per-tick wiring calls to feed
+// on_off_trigger_decide()'s real .rule field. Called directly against a
+// hand-built profile_t; no s_exec/tick machinery needed (see this function's
+// own header comment in profile_executor_internal.h).
+// ---------------------------------------------------------------------------
+
+static profile_t make_on_off_rule_profile(void)
+{
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x07;
+    p.segment_count = 3;
+    p.on_off_rule_count = 1;
+    p.on_off_rules[0].segment_index = 1;
+    p.on_off_rules[0].zone_index = 2;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].phase_mask = ON_OFF_PHASE_DWELL;
+    p.on_off_rules[0].direction_mask = ON_OFF_DIR_HEATING;
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_ABOVE;
+    p.on_off_rules[0].temp_threshold_c = 600.0f;
+    p.on_off_rules[0].time_start_s = 10;
+    p.on_off_rules[0].time_stop_s = 300;
+    p.on_off_rules[0].invert = 1;
+    return p;
+}
+
+static void test_resolve_on_off_rule_matches_segment_and_zone(void)
+{
+    TEST_SECTION("profile_resolve_on_off_rule -- exact (zone, segment) match returns the stored axes");
+    profile_t p = make_on_off_rule_profile();
+    on_off_trigger_rule_t r = profile_resolve_on_off_rule(&p, 2, 1);
+    TEST_CHECK(r.enable, "matching (zone 2, segment 1) must resolve enable=true");
+    TEST_CHECK(r.phase_mask == ON_OFF_PHASE_DWELL, "phase_mask carried through unchanged");
+    TEST_CHECK(r.direction_mask == ON_OFF_DIR_HEATING, "direction_mask carried through unchanged");
+    TEST_CHECK(r.temp_cmp == ON_OFF_TEMP_CMP_ABOVE, "temp_source==1 -> temp_cmp passed through");
+    TEST_CHECK_NEAR(r.temp_threshold_c, 600.0f, 1e-6, "temp_threshold_c carried through unchanged");
+    TEST_CHECK(r.time_start_s == 10 && r.time_stop_s == 300, "time window carried through unchanged");
+    TEST_CHECK(r.invert, "invert carried through unchanged");
+}
+
+static void test_resolve_on_off_rule_no_match_returns_disabled(void)
+{
+    TEST_SECTION("profile_resolve_on_off_rule -- wrong zone or wrong segment -> enable=false (level 6, no rule)");
+    profile_t p = make_on_off_rule_profile();
+    on_off_trigger_rule_t wrong_zone = profile_resolve_on_off_rule(&p, 3, 1);
+    TEST_CHECK(!wrong_zone.enable, "a rule for a DIFFERENT zone must not match");
+    on_off_trigger_rule_t wrong_seg = profile_resolve_on_off_rule(&p, 2, 0);
+    TEST_CHECK(!wrong_seg.enable, "a rule for a DIFFERENT segment must not match");
+}
+
+static void test_resolve_on_off_rule_disabled_slot_returns_disabled(void)
+{
+    TEST_SECTION("profile_resolve_on_off_rule -- a stored-but-disabled rule (enable=0) behaves like no rule");
+    profile_t p = make_on_off_rule_profile();
+    p.on_off_rules[0].enable = 0;
+    on_off_trigger_rule_t r = profile_resolve_on_off_rule(&p, 2, 1);
+    TEST_CHECK(!r.enable, "enable=0 in storage must resolve to enable=false, not the stored axes");
+}
+
+static void test_resolve_on_off_rule_reserved_temp_source_drops_temp_axis(void)
+{
+    TEST_SECTION("profile_resolve_on_off_rule -- temp_source 2/3 (reserved) never leaks a temp_cmp");
+    profile_t p = make_on_off_rule_profile();
+    p.on_off_rules[0].temp_source = 2; /* named zone's TC -- not yet resolved by this function */
+    on_off_trigger_rule_t r = profile_resolve_on_off_rule(&p, 2, 1);
+    TEST_CHECK(r.enable, "the rest of the rule still resolves");
+    TEST_CHECK(r.temp_cmp == ON_OFF_TEMP_CMP_NONE,
+              "an unresolved temp_source must drop the temperature axis (tautology), never "
+              "evaluate against the wrong reading");
+}
+
+// docs/ON_OFF_ZONE_PLAN.md plan step 5: a rules-free profile (on_off_rule_count == 0,
+// the migration default for every pre-existing profile) must behave byte-identically to
+// before this field existed -- profile_resolve_on_off_rule() must never fabricate a match.
+static void test_resolve_on_off_rule_rules_free_profile_never_matches(void)
+{
+    TEST_SECTION("profile_resolve_on_off_rule -- a rules-free profile (count 0) always resolves enable=false");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.segment_count = 3;
+    p.on_off_rule_count = 0; /* migration default */
+    for (uint8_t zi = 0; zi < 3; zi++) {
+        for (uint8_t si = 0; si < 3; si++) {
+            on_off_trigger_rule_t r = profile_resolve_on_off_rule(&p, zi, si);
+            TEST_CHECK(!r.enable, "no rule anywhere in a rules-free profile can ever resolve enabled");
+        }
+    }
+}
+
+static void run_test_profile_resolve_on_off_rule(void)
+{
+    test_resolve_on_off_rule_matches_segment_and_zone();
+    test_resolve_on_off_rule_no_match_returns_disabled();
+    test_resolve_on_off_rule_disabled_slot_returns_disabled();
+    test_resolve_on_off_rule_reserved_temp_source_drops_temp_axis();
+    test_resolve_on_off_rule_rules_free_profile_never_matches();
+}
+
+// ---------------------------------------------------------------------------
+// docs/ON_OFF_ZONE_PLAN.md plan step 8 -- actual relay actuation.
+// UNEXERCISED ON HARDWARE: these tests drive the real production functions
+// (on_off_trigger_decide() -> profile_executor_on_off_actuation_gate() ->
+// profile_executor_on_off_cap_denies(), wrapped as one production function
+// profile_executor_on_off_zone_tick(), and separately the real apply_relay())
+// directly, with no s_exec tick loop involved (see profile_executor_on_off_
+// zone_tick()'s own header comment on why this is possible without a mirror
+// even though the FULL tick loop has no such seam). No zone on any real
+// board is typed ZONE_TYPE_ON_OFF yet (plan step 6's UI is elsewhere), so
+// none of this has ever actuated a physical relay -- plan step 9 (bench
+// firing, owner present, dry contacts only) is what exercises it for real.
+// ---------------------------------------------------------------------------
+
+static on_off_trigger_input_t make_healthy_running_unconditional_on_oin(void)
+{
+    on_off_trigger_input_t oin = {
+        .failsafe_override = false,
+        .failsafe_state_on = false,
+        .guard_5_6_tripped = false,
+        .run_running = true,
+        .run_paused = false,
+        .failsafe_on_pause = false,
+        .min_on_s = 0,
+        .min_off_s = 0,
+        .rule = {
+            .enable = true,
+            .phase_mask = 0,
+            .direction_mask = 0,
+            .temp_cmp = ON_OFF_TEMP_CMP_NONE,
+            .temp_threshold_c = 0.0f,
+            .time_start_s = 0,
+            .time_stop_s = 0,
+            .invert = false,
+        },
+        .current_phase_is_dwell = false,
+        .current_direction = ON_OFF_DIR_HEATING,
+        .temp_measurement_c = 500.0f,
+        .hyst_c = 2.0f,
+        .segment_elapsed_s = 5.0f,
+        .ramp_lock_held = false,
+        .stretched_this_tick = false,
+        .segment_index = 0,
+        .dt_s = 1.0f,
+    };
+    return oin;
+}
+
+static void test_on_off_zone_tick_rule_turns_relay_on_through_owner(void)
+{
+    TEST_SECTION("on/off zone: a satisfied rule actuates ON through profile_executor_on_off_zone_tick() "
+                 "-> apply_relay() -> kiln_io_owner, the SAME chokepoint a heater uses (plan sec 6 -- "
+                 "no separate relay-write path)");
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.zones[3].active = true;
+    g_stub_relay_mask[3] = 0x08;
+    s_exec.io = (kiln_io_t *)0x1;
+    g_relay_write_calls = 0;
+
+    on_off_trigger_state_t decide_state;
+    on_off_trigger_state_reset(&decide_state);
+    bool actuated_on = false;
+    float actuated_held_s = 0.0f;
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+
+    on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
+                                                                     &oin, /*bypass_hold=*/false,
+                                                                     /*relays_on_count=*/0, /*cap=*/0);
+    TEST_CHECK(r.actuated_on, "an unconditional rule (every axis a tautology) must decide ON");
+    TEST_CHECK(!r.cap_denied, "no cap configured -- must not be denied");
+
+    apply_relay(3, r.actuated_on);
+    TEST_CHECK(g_relay_write_calls == 1, "apply_relay() must have written the relay exactly once");
+    TEST_CHECK(g_last_relay_write_mask == 0x08, "must write THIS zone's own relay mask");
+    TEST_CHECK(g_last_relay_write_value == 0x08, "ON must set the mask bits, not clear them");
+    TEST_CHECK(s_exec.claimed_relay_mask == 0x08, "must claim through the SAME claimed_relay_mask a heater uses");
+    TEST_CHECK(s_exec.zones[3].relay_commanded_on, "relay_commanded_on must read true");
+
+    g_stub_relay_mask[3] = 0;
+    s_exec.io = NULL;
+}
+
+static void test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner(void)
+{
+    TEST_SECTION("on/off zone: invert negates the AND -- the same rule that turned the device ON above "
+                 "turns it OFF when inverted, still through apply_relay()/kiln_io_owner");
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.zones[3].active = true;
+    g_stub_relay_mask[3] = 0x08;
+    s_exec.io = (kiln_io_t *)0x1;
+    g_relay_write_calls = 0;
+
+    on_off_trigger_state_t decide_state;
+    on_off_trigger_state_reset(&decide_state);
+    bool actuated_on = false;
+    float actuated_held_s = 0.0f;
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+    oin.rule.invert = true;
+
+    on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
+                                                                     &oin, false, 0, 0);
+    TEST_CHECK(!r.actuated_on, "invert must flip an otherwise-true AND to false");
+
+    apply_relay(3, r.actuated_on);
+    TEST_CHECK(g_relay_write_calls == 1, "apply_relay() must still write (to prove OFF, not skip)");
+    TEST_CHECK(g_last_relay_write_value == 0, "OFF must clear the mask bits");
+
+    g_stub_relay_mask[3] = 0;
+    s_exec.io = NULL;
+}
+
+typedef struct {
+    const char *name;
+    bool failsafe_override;
+    bool guard_5_6_tripped;
+    bool run_running;
+    bool run_paused;
+    bool failsafe_on_pause;
+} run_ending_case_t;
+
+static void test_on_off_zone_tick_every_run_ending_path_applies_failsafe(void)
+{
+    TEST_SECTION("on/off zone: EVERY run-ending path -- fault/abort/safety-trip/authority-block "
+                 "(failsafe_override), guard 5/6 trip, halt/IDLE/DONE, and PAUSE with failsafe_on_pause -- "
+                 "drives the configured fail-safe state, bypassing the actuation-layer hold entirely "
+                 "(min_on_s/min_off_s=9999 must not matter)");
+    run_ending_case_t cases[] = {
+        { "global FAULTED (fault escalation / abort)", true,  false, true,  false, false },
+        { "authority-block (safety trip / relay_authority_zone_blocked)", true, false, true, false, false },
+        { "guard 5/6 trip (MAX_TEMP/MIN_TEMP)",         false, true,  true,  false, false },
+        { "run IDLE/DONE (halt)",                       false, false, false, false, false },
+        { "run PAUSED with failsafe_on_pause set",      false, false, false, true,  true  },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        on_off_trigger_state_t decide_state;
+        on_off_trigger_state_reset(&decide_state);
+        /* Start ON -- proves the path actively DRIVES the relay off, not
+         * merely that it never turned on. */
+        decide_state.commanded_on = true;
+        bool actuated_on = true;
+        float actuated_held_s = 0.0f; /* zero held: proves the hold cannot delay this */
+
+        on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+        oin.failsafe_override = cases[i].failsafe_override;
+        oin.failsafe_state_on = false; /* default OFF */
+        oin.guard_5_6_tripped = cases[i].guard_5_6_tripped;
+        oin.run_running = cases[i].run_running;
+        oin.run_paused = cases[i].run_paused;
+        oin.failsafe_on_pause = cases[i].failsafe_on_pause;
+        oin.min_on_s = 9999;
+        oin.min_off_s = 9999; /* huge hold -- must still be bypassed on every one of these paths */
+
+        bool bypass_hold = cases[i].failsafe_override || cases[i].guard_5_6_tripped || !cases[i].run_running;
+        on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on,
+                                                                         &actuated_held_s, &oin, bypass_hold, 0, 0);
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "%s must drive the relay to its fail-safe state (OFF, default) even with a 9999s hold",
+                 cases[i].name);
+        TEST_CHECK(!r.actuated_on, msg);
+    }
+}
+
+static void test_on_off_zone_tick_plain_pause_without_override_holds_last_state(void)
+{
+    TEST_SECTION("on/off zone: PAUSE WITHOUT failsafe_on_pause holds the last commanded state -- this is "
+                 "the one run-ending-shaped transition that is deliberately NOT a fail-safe path (plan sec 3 "
+                 "level 3), distinguishing it from every case in the enumeration above");
+    on_off_trigger_state_t decide_state;
+    on_off_trigger_state_reset(&decide_state);
+    decide_state.commanded_on = true;
+    bool actuated_on = true;
+    float actuated_held_s = 0.0f;
+
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+    oin.run_running = false;
+    oin.run_paused = true;
+    oin.failsafe_on_pause = false; /* the distinguishing bit */
+    bool bypass_hold = !oin.run_running; /* run not RUNNING -> still bypass the hold */
+    on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
+                                                                     &oin, bypass_hold, 0, 0);
+    TEST_CHECK(r.actuated_on, "plain PAUSE (no failsafe_on_pause) must HOLD the last commanded state (ON), "
+                             "not force fail-safe");
+}
+
+static void test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured(void)
+{
+    TEST_SECTION("on/off zone: fail-safe drives ON only when failsafe_state_on is explicitly true (the "
+                 "confirm-gated opt-in) -- a zero-initialised config (failsafe_state_on=false, the "
+                 "migration/fresh-save default) must NEVER energise the relay on a fail-safe path");
+    on_off_trigger_state_t decide_state;
+    on_off_trigger_state_reset(&decide_state);
+    bool actuated_on = false;
+    float actuated_held_s = 0.0f;
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+    oin.failsafe_override = true; /* e.g. FAULTED */
+    oin.failsafe_state_on = true; /* EXPLICITLY configured ON */
+
+    on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
+                                                                     &oin, /*bypass_hold=*/true, 0, 0);
+    TEST_CHECK(r.actuated_on, "failsafe_state_on=true must actually drive the relay ON on a fail-safe path");
+
+    on_off_trigger_state_reset(&decide_state);
+    actuated_on = false;
+    actuated_held_s = 0.0f;
+    oin.failsafe_state_on = false; /* the zero-init default */
+    r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s, &oin, true, 0, 0);
+    TEST_CHECK(!r.actuated_on, "a zero-initialised (default) fail-safe config must never energise the relay");
+}
+
+static void test_on_off_zone_apply_relay_authority_block_leaves_device_safe_even_if_failsafe_is_on(void)
+{
+    TEST_SECTION("on/off zone: apply_relay() forces OFF while authority-blocked EVEN IF the verdict says ON "
+                 "-- the documented limitation (plan sec 5: a blocked/interlocked supply cannot honor a "
+                 "fail-safe-ON request) proven against the real apply_relay(), not asserted");
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.zones[1].active = true;
+    g_stub_relay_mask[1] = 0x02;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_test_relay_authority_zone_blocked = true;
+    s_test_relay_authority_zone_blocked_sources = 0x04;
+    g_relay_write_calls = 0;
+
+    apply_relay(1, /*want_on=*/true); /* the on/off zone's own verdict says ON */
+
+    TEST_CHECK(g_relay_write_calls == 1, "apply_relay() must still write (to prove OFF, not merely skip)");
+    TEST_CHECK(g_last_relay_write_value == 0, "authority-blocked must force the write to OFF regardless of want_on");
+    TEST_CHECK(!s_exec.zones[1].relay_commanded_on, "relay_commanded_on must read false -- the device is left safe");
+    TEST_CHECK(s_exec.zones[1].heat_blocked, "heat_blocked must be reported true for diagnostics");
+
+    s_test_relay_authority_zone_blocked = false;
+    s_test_relay_authority_zone_blocked_sources = 0;
+    g_stub_relay_mask[1] = 0;
+    s_exec.io = NULL;
+}
+
+static void test_on_off_actuation_gate_min_on_blocks_a_too_early_off(void)
+{
+    TEST_SECTION("profile_executor_on_off_actuation_gate(): min_on_s blocks an OFF decision until the hold "
+                 "has elapsed -- requirement 4, independent of on_off_trigger_decide()'s own hold");
+    bool actuated_on = true;
+    float held_s = 2.0f; /* only 2s into a 30s min_on */
+    bool result = profile_executor_on_off_actuation_gate(&actuated_on, &held_s, /*decided_on=*/false,
+                                                          /*bypass_hold=*/false, /*min_on_s=*/30,
+                                                          /*min_off_s=*/30, /*dt_s=*/1.0f);
+    TEST_CHECK(result, "must stay ON -- min_on_s not yet satisfied");
+    TEST_CHECK(actuated_on, "state must reflect the held ON");
+
+    held_s = 30.0f; /* now satisfied */
+    result = profile_executor_on_off_actuation_gate(&actuated_on, &held_s, false, false, 30, 30, 1.0f);
+    TEST_CHECK(!result, "must now turn OFF -- hold satisfied");
+}
+
+static void test_on_off_actuation_gate_min_off_blocks_a_too_early_on(void)
+{
+    TEST_SECTION("profile_executor_on_off_actuation_gate(): min_off_s blocks an ON decision symmetrically");
+    bool actuated_on = false;
+    float held_s = 1.0f;
+    bool result = profile_executor_on_off_actuation_gate(&actuated_on, &held_s, /*decided_on=*/true, false, 30, 30,
+                                                          1.0f);
+    TEST_CHECK(!result, "must stay OFF -- min_off_s not yet satisfied");
+    held_s = 30.0f;
+    result = profile_executor_on_off_actuation_gate(&actuated_on, &held_s, true, false, 30, 30, 1.0f);
+    TEST_CHECK(result, "must now turn ON -- hold satisfied");
+}
+
+static void test_on_off_actuation_gate_bypass_hold_ignores_the_timer(void)
+{
+    TEST_SECTION("profile_executor_on_off_actuation_gate(): bypass_hold=true (a safety-relevant transition) "
+                 "is never delayed by min_on_s/min_off_s, however large");
+    bool actuated_on = true;
+    float held_s = 0.0f; /* just turned on this instant */
+    bool result = profile_executor_on_off_actuation_gate(&actuated_on, &held_s, /*decided_on=*/false,
+                                                          /*bypass_hold=*/true, 9999, 9999, 1.0f);
+    TEST_CHECK(!result, "a safety-relevant OFF must not be held even with a huge min_on_s");
+}
+
+static void test_on_off_actuation_gate_bounds_a_chattering_decision_core(void)
+{
+    TEST_SECTION("profile_executor_on_off_actuation_gate(): requirement 4's whole point -- a decision core "
+                 "that flips its verdict EVERY tick (simulating a hold-timer bug inside on_off_trigger_"
+                 "decide()) still cannot chatter the physical relay, because this second, independent hold "
+                 "bounds it regardless");
+    bool actuated_on = false;
+    float held_s = 0.0f;
+    int transitions = 0;
+    bool last = actuated_on;
+    for (int t = 0; t < 60; t++) {
+        bool decided_on = (t % 2) == 0; /* pathological: flips every single tick */
+        bool r = profile_executor_on_off_actuation_gate(&actuated_on, &held_s, decided_on, false, 30, 30, 1.0f);
+        if (r != last) {
+            transitions++;
+            last = r;
+        }
+    }
+    TEST_CHECK(transitions <= 2, "60 seconds of a flip-every-tick decision core must produce at most ~2 real "
+                                "relay transitions under a 30s hold, not 60");
+}
+
+static void test_on_off_cap_denies_pure_predicate(void)
+{
+    TEST_SECTION("profile_executor_on_off_cap_denies(): pure predicate, 0 = unlimited");
+    TEST_CHECK(!profile_executor_on_off_cap_denies(0, 0), "cap 0 never denies");
+    TEST_CHECK(!profile_executor_on_off_cap_denies(1, 2), "below cap -- not denied");
+    TEST_CHECK(profile_executor_on_off_cap_denies(2, 2), "at cap -- denied");
+    TEST_CHECK(profile_executor_on_off_cap_denies(3, 2), "over cap -- denied");
+}
+
+static void test_on_off_zone_tick_cap_denies_last_after_heaters(void)
+{
+    TEST_SECTION("on/off zone: max_simultaneous_relays denies an on/off zone's ON verdict once heaters have "
+                 "already claimed every slot (plan sec 6: on/off zones are suppressed LAST, and the denial "
+                 "is not deferred -- state is left truthfully OFF, not stuck believing it's ON)");
+    on_off_trigger_state_t decide_state;
+    on_off_trigger_state_reset(&decide_state);
+    bool actuated_on = false;
+    float actuated_held_s = 0.0f;
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+
+    /* relays_on_count=2, cap=2 -- heaters already used every slot. */
+    on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
+                                                                     &oin, false, /*relays_on_count=*/2,
+                                                                     /*cap=*/2);
+    TEST_CHECK(!r.actuated_on, "must be denied -- cap already reached by (simulated) heaters");
+    TEST_CHECK(r.cap_denied, "must report cap_denied so the caller logs it -- denial is not deferred");
+    TEST_CHECK(!actuated_on, "actuation-layer state must be left truthfully OFF, not stuck ON");
+    TEST_CHECK(actuated_held_s == 0.0f, "held_s reset -- a later grant is not itself blocked by a stale hold");
+
+    /* Same tick, but a slot is free -- must be granted. */
+    on_off_trigger_state_reset(&decide_state);
+    actuated_on = false;
+    actuated_held_s = 0.0f;
+    r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s, &oin, false, 1, 2);
+    TEST_CHECK(r.actuated_on, "must be granted -- a slot is free");
+}
+
+static void run_test_on_off_actuation(void)
+{
+    test_on_off_zone_tick_rule_turns_relay_on_through_owner();
+    test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner();
+    test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
+    test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
+    test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();
+    test_on_off_zone_apply_relay_authority_block_leaves_device_safe_even_if_failsafe_is_on();
+    test_on_off_actuation_gate_min_on_blocks_a_too_early_off();
+    test_on_off_actuation_gate_min_off_blocks_a_too_early_on();
+    test_on_off_actuation_gate_bypass_hold_ignores_the_timer();
+    test_on_off_actuation_gate_bounds_a_chattering_decision_core();
+    test_on_off_cap_denies_pure_predicate();
+    test_on_off_zone_tick_cap_denies_last_after_heaters();
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -7254,6 +7726,12 @@ void run_test_profile_executor_prestart(void)
 
     // ROADMAP.md M15 "Mode-state sprawl" -- exec_mode_state_check().
     run_test_exec_mode_state_check();
+
+    // docs/ON_OFF_ZONE_PLAN.md plan step 5 -- profile_resolve_on_off_rule().
+    run_test_profile_resolve_on_off_rule();
+
+    // docs/ON_OFF_ZONE_PLAN.md plan step 8 -- actual relay actuation.
+    run_test_on_off_actuation();
 }
 
 

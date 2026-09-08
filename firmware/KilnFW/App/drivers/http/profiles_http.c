@@ -20,6 +20,10 @@
 #include "profiles_builtin.h"
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
+#include "on_off_trigger_decide.h" /* on_off_phase_bit_t/on_off_direction_bit_t/on_off_temp_cmp_t --
+                                     * validate_on_off_rules() bounds-checks against these same bit
+                                     * layouts so a stored rule can never encode a bit the decision
+                                     * core does not know how to interpret. */
 
 #include "profiles_http_internal.h"
 
@@ -91,6 +95,17 @@ NVS_KEY_LEN_CHECK(PROFILES_NVS_PARTITION);
  * mistake zones_http.c's ZONES_CFG_VERSION 6->7 comment already documents by
  * name for zone_cfg_t.
  *
+ * 3 -> 4 (docs/ON_OFF_ZONE_PLAN.md plan step 5): profile_t itself grew a
+ * tail -- on_off_rule_count + on_off_rules[PROFILE_MAX_ON_OFF_RULES]
+ * (profiles_types.h). This is the SAFE case the comments above warn is
+ * rare: profile_segment_t's own shape is UNCHANGED, so the new fields land
+ * strictly after segments[PROFILE_MAX_SEGMENTS] with no element-shift
+ * hazard -- a plain trailing append, same shape as zones_http.c's v21->v22
+ * (progress_band_c). profile_t_v3/profile_persisted_v3_t below freeze
+ * exactly today's (pre-rules) shape -- segments unchanged from v2's -- so
+ * v3 gets its own migration case (convert_profile_v3()) rather than being
+ * folded into convert_profile_v2()'s path.
+ *
  * 2 -> 3 (this pass, TODO relay/IO segments -- see profiles_http.h's
  * profile_seg_kind_t doc comment for the owner's request that drove this):
  * profile_segment_t itself grew four uint8_t fields (seg_kind/io_target/
@@ -112,7 +127,7 @@ NVS_KEY_LEN_CHECK(PROFILES_NVS_PARTITION);
  * every segment field-by-field for exactly this reason -- a struct
  * assignment or memcpy across the shape change is never safe again from this
  * version forward. */
-#define PROFILE_VERSION 3
+#define PROFILE_VERSION 4
 
 /* PROFILES_MAX_COUNT / PROFILE_NAME_MAX_LEN / PROFILE_MAX_SEGMENTS and the
  * profile_t/profile_segment_t layout now live in profiles_http.h --
@@ -220,6 +235,37 @@ typedef struct {
                             * name now that a real current-format profile_t
                             * exists and is a different size. */
 
+/* EXACT snapshot of profile_t as it was BEFORE this pass (2026-09-08) added
+ * on_off_rule_count/on_off_rules -- the CURRENT (v3) segment shape
+ * (seg_kind/io_* fields present), just without the on/off-rule tail. Same
+ * discipline as profile_t_v2 above: never grown or reused for a later
+ * version, frozen the moment PROFILE_VERSION moves past it. A real board's
+ * v3 blobs are exactly this shape. */
+typedef struct {
+    char name[PROFILE_NAME_MAX_LEN + 1];
+    uint8_t zone_mask;
+    uint8_t segment_count;
+    profile_segment_t segments[PROFILE_MAX_SEGMENTS]; /* CURRENT segment shape, unchanged by this pass */
+} profile_t_v3;
+
+typedef struct {
+    uint8_t version;
+    profile_t_v3 profile;
+    uint32_t crc32;
+} profile_persisted_v3_t; /* v3: crc32 tail, current segment shape, NO on/off rules */
+
+/* Frozen-snapshot size/offset asserts -- 2026-09-08 docs/audits/ review of
+ * this feature found ZONES_CFG_VERSION's frozen-snapshot discipline had one
+ * missing `_Static_assert` elsewhere in the tree; do not repeat that here.
+ * Sizes/offsets computed off the actual struct layout (float/uint32-aligned
+ * profile_segment_t forces 4-byte struct alignment throughout), not by
+ * hand-counted bytes. */
+_Static_assert(sizeof(profile_t_v3) == 260, "profile_t_v3 must stay exactly the pre-rules profile_t shape");
+_Static_assert(sizeof(profile_persisted_v3_t) == 268,
+               "profile_persisted_v3_t must stay exactly the v3 on-flash wrapper shape");
+_Static_assert(offsetof(profile_persisted_v3_t, profile) == 4, "profile_t_v3 must start right after the padded version byte");
+_Static_assert(offsetof(profile_persisted_v3_t, crc32) == 264, "crc32 must sit at the true tail of profile_persisted_v3_t");
+
 /* Per-version expected blob length, checked in decode_profile_blob() BEFORE a
  * single byte is copied out of a stored blob or interpreted as any field --
  * same discipline as zones_http.c's expected_len_for_version(). A stored blob
@@ -243,6 +289,7 @@ static size_t expected_len_for_version(uint8_t version)
     switch (version) {
     case 1: return sizeof(profile_persisted_v1_t);
     case 2: return sizeof(profile_persisted_v2_t);
+    case 3: return sizeof(profile_persisted_v3_t);
     case PROFILE_VERSION: return sizeof(profile_persisted_t);
     default: return 0;
     }
@@ -272,6 +319,26 @@ static void convert_profile_v2_segments(const profile_segment_v2_t *src, uint8_t
         out->segments[i].io_blocking = 0;
         out->segments[i].io_leave_on_at_end = 0; /* fail-off default, never inherited as "on" */
     }
+}
+
+/* v3 -> current: segment shape is IDENTICAL (profile_segment_t did not
+ * change between v3 and v4), so segments copy element-for-element by value
+ * -- no field-by-field walk needed here, unlike the v1/v2 converters above,
+ * because there is no shape mismatch to guard against. The only new
+ * behavior is the tail: on_off_rule_count = 0 and every rule slot zeroed,
+ * which is the migration default profiles_types.h documents -- a v3
+ * profile never had a rule, so this reproduces its old behavior exactly
+ * (on_off_trigger_decide() sees rule.enable == false, precedence level 6). */
+static void convert_profile_v3(const profile_persisted_v3_t *src, profile_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    strncpy(out->name, src->profile.name, sizeof(out->name) - 1);
+    out->zone_mask = src->profile.zone_mask;
+    out->segment_count = src->profile.segment_count;
+    for (uint8_t i = 0; i < src->profile.segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
+        out->segments[i] = src->profile.segments[i];
+    }
+    out->on_off_rule_count = 0; /* migration default -- see profiles_types.h */
 }
 
 static void convert_profile_v1(const profile_persisted_v1_t *src, profile_t *out)
@@ -397,6 +464,23 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
             return PROFILE_DECODE_CORRUPT;
         }
         *out = loaded.profile;
+        return PROFILE_DECODE_OK;
+    }
+
+    if (version == 3) {
+        /* Current segment shape, crc32 tail, no on/off rules yet -- checked
+         * the same way v2/v4 are, never a weaker gate for an older version. */
+        profile_persisted_v3_t loaded_v3;
+        memcpy(&loaded_v3, blob, sizeof(loaded_v3));
+        uint32_t stored_crc = loaded_v3.crc32;
+        profile_persisted_v3_t tmp = loaded_v3;
+        tmp.crc32 = 0;
+        uint32_t computed_crc = esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+        if (computed_crc != stored_crc) {
+            *reason = "CRC mismatch -- treating as corrupt";
+            return PROFILE_DECODE_CORRUPT;
+        }
+        convert_profile_v3(&loaded_v3, out);
         return PROFILE_DECODE_OK;
     }
 
@@ -954,6 +1038,89 @@ bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *er
     return true;
 }
 
+/* docs/ON_OFF_ZONE_PLAN.md plan step 5 validation -- shared by
+ * profiles_http_save() (both the HTTP POST and UART-bridge entry points)
+ * so a rule referencing a nonexistent segment or a non-ON_OFF zone can
+ * never be persisted, regardless of entry point. THIS IS THE DANGEROUS
+ * DIRECTION this check exists to close: a rule pointing at a HEATER zone
+ * would let on/off (bang-bang, no PID, no guards 1-4/9) logic drive a real
+ * heating element -- see this function's own negative test. Bounds every
+ * numeric field so a corrupt/hand-crafted candidate cannot smuggle an
+ * out-of-range value past decode. */
+bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err_cap)
+{
+    for (uint8_t i = 0; i < candidate->on_off_rule_count; i++) {
+        const profile_on_off_rule_t *r = &candidate->on_off_rules[i];
+        if (i >= PROFILE_MAX_ON_OFF_RULES) {
+            snprintf(err_msg, err_cap, "rule %u: on_off_rule_count exceeds PROFILE_MAX_ON_OFF_RULES (%u)", i,
+                     (unsigned)PROFILE_MAX_ON_OFF_RULES);
+            return false;
+        }
+        if (r->segment_index >= candidate->segment_count) {
+            snprintf(err_msg, err_cap, "rule %u: segment_index %u does not exist in this profile (%u segments)",
+                     i, r->segment_index, candidate->segment_count);
+            return false;
+        }
+        if (r->zone_index >= MAX31856_CHANNEL_COUNT) {
+            snprintf(err_msg, err_cap, "rule %u: zone_index %u out of range", i, r->zone_index);
+            return false;
+        }
+        zone_type_t zt = ZONE_TYPE_HEATER;
+        if (!zones_config_get_zone_type(r->zone_index, &zt) || zt != ZONE_TYPE_ON_OFF) {
+            /* THE dangerous direction: refuse a rule aimed at anything that
+             * is not (already, currently) a typed on/off device -- most
+             * importantly a HEATER, which on/off logic must never drive. */
+            snprintf(err_msg, err_cap,
+                     "rule %u: zone %u is not configured as an on/off device -- refusing to let on/off logic "
+                     "drive it",
+                     i, r->zone_index);
+            return false;
+        }
+        if ((r->phase_mask & (uint8_t)~(ON_OFF_PHASE_RAMP | ON_OFF_PHASE_DWELL)) != 0) {
+            snprintf(err_msg, err_cap, "rule %u: phase_mask has unknown bits set", i);
+            return false;
+        }
+        if ((r->direction_mask & (uint8_t)~(ON_OFF_DIR_HEATING | ON_OFF_DIR_COOLING | ON_OFF_DIR_FLAT)) != 0) {
+            snprintf(err_msg, err_cap, "rule %u: direction_mask has unknown bits set", i);
+            return false;
+        }
+        if (r->temp_cmp > ON_OFF_TEMP_CMP_BELOW) {
+            snprintf(err_msg, err_cap, "rule %u: temp_cmp %u is not a known comparison", i, r->temp_cmp);
+            return false;
+        }
+        if (r->temp_source > 3) {
+            snprintf(err_msg, err_cap, "rule %u: temp_source %u is not a known source", i, r->temp_source);
+            return false;
+        }
+        if (r->temp_source == 2 && r->temp_ref_zone >= MAX31856_CHANNEL_COUNT) {
+            snprintf(err_msg, err_cap, "rule %u: temp_ref_zone %u out of range", i, r->temp_ref_zone);
+            return false;
+        }
+        if (r->temp_cmp != ON_OFF_TEMP_CMP_NONE &&
+            (isnan(r->temp_threshold_c) || r->temp_threshold_c < PROFILE_TARGET_C_MIN ||
+             r->temp_threshold_c > PROFILE_TARGET_C_MAX)) {
+            snprintf(err_msg, err_cap, "rule %u: temp_threshold_c out of range (%.0f-%.0f)", i,
+                     (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX);
+            return false;
+        }
+        /* time_stop_s == 0 means "to end of segment" (profiles_types.h) --
+         * only a NONZERO stop must be after start. Both fields are
+         * uint16_t, so an upper bound is enforced structurally already
+         * (max 65535 s ~ 18.2h, comfortably above PROFILE_DWELL_MIN_MAX's
+         * 1440 minutes/segment); no separate range check needed. */
+        if (r->time_stop_s != 0 && r->time_stop_s <= r->time_start_s) {
+            snprintf(err_msg, err_cap, "rule %u: time_stop_s must be after time_start_s (or 0 for end-of-segment)",
+                     i);
+            return false;
+        }
+        if (r->enable > 1 || r->invert > 1) {
+            snprintf(err_msg, err_cap, "rule %u: enable/invert must be 0 or 1", i);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* True iff some ZONE_RAMP segment's target_c exceeds the CURRENTLY configured
  * max_temp_c of one of its zone_mask zones, and fills `note` (if non-NULL)
  * describing the first offending segment/zone found -- same shape as the
@@ -1044,6 +1211,13 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
             snprintf(err_msg, err_cap, "segment %u: dwell_min out of range (0-1440)", i + 1);
             return false;
         }
+    }
+    if (candidate->on_off_rule_count > PROFILE_MAX_ON_OFF_RULES) {
+        snprintf(err_msg, err_cap, "on_off_rule_count out of range (0-%u)", (unsigned)PROFILE_MAX_ON_OFF_RULES);
+        return false;
+    }
+    if (!validate_on_off_rules(candidate, err_msg, err_cap)) {
+        return false;
     }
 
     /* SAVE-VS-COPY, for a save aimed at a builtin catalogue id: the catalogue

@@ -284,6 +284,43 @@ static void reload_config_if_changed(void)
              (unsigned long)prev, (unsigned long)gen, rechecked, changed_mask);
 }
 
+/* profile_resolve_on_off_rule() -- see profile_executor_internal.h for the
+ * full contract. Pure lookup: linear scan of at most PROFILE_MAX_ON_OFF_RULES
+ * entries, no side effects. */
+on_off_trigger_rule_t profile_resolve_on_off_rule(const profile_t *p, uint8_t zone_index, uint8_t segment_index)
+{
+    on_off_trigger_rule_t resolved = {
+        .enable = false,
+        .phase_mask = 0,
+        .direction_mask = 0,
+        .temp_cmp = ON_OFF_TEMP_CMP_NONE,
+        .temp_threshold_c = 0.0f,
+        .time_start_s = 0,
+        .time_stop_s = 0,
+        .invert = false,
+    };
+    if (!p) {
+        return resolved;
+    }
+    for (uint8_t ri = 0; ri < p->on_off_rule_count && ri < PROFILE_MAX_ON_OFF_RULES; ri++) {
+        const profile_on_off_rule_t *pr = &p->on_off_rules[ri];
+        if (!pr->enable || pr->zone_index != zone_index || pr->segment_index != segment_index) {
+            continue;
+        }
+        resolved.enable = true;
+        resolved.phase_mask = pr->phase_mask;
+        resolved.direction_mask = pr->direction_mask;
+        resolved.temp_cmp = (pr->temp_source == 1) ? (on_off_temp_cmp_t)pr->temp_cmp : ON_OFF_TEMP_CMP_NONE;
+        resolved.temp_threshold_c = pr->temp_threshold_c;
+        resolved.time_start_s = pr->time_start_s;
+        resolved.time_stop_s = pr->time_stop_s;
+        resolved.invert = pr->invert;
+        break; /* validate_on_off_rules() (profiles_http.c) enforces at most one stored rule
+                * per (segment, zone) pair -- first match is the only one */
+    }
+    return resolved;
+}
+
 /* ---- control task ----------------------------------------------------------- */
 
 void executor_task_entry(void *arg)
@@ -1014,11 +1051,41 @@ void executor_task_entry(void *arg)
 
         /* --- Apply relays + guards, per active zone -------------------------- */
         bool run_faulted_this_tick = false;
+        /* docs/ON_OFF_ZONE_PLAN.md sec 6: an on/off zone counts toward
+         * max_simultaneous_relays (a contactor coil draws the same current
+         * whatever it switches) but is suppressed LAST -- only after every
+         * heater has already been considered by the pass-1 load-cap loop
+         * above. want_relay_on[] at this point already reflects that cap-
+         * adjusted heater decision (an on/off zone's own want_relay_on[]
+         * entry is still the pass-1 default false -- it is decided below,
+         * per zone, AFTER this count is taken), so seeding the running
+         * count from it and growing it as on/off zones are granted a relay
+         * below gives on/off zones the cap's last, unclaimed slots without
+         * ever revisiting a heater's already-decided state. Denial is
+         * logged, never deferred (there is no window to repay a denied
+         * on/off cycle into -- see the pass-1 load-cap comment for the same
+         * point about bang-bang zones). cap == 0 is unlimited, unchanged. */
+        uint8_t on_off_cap = zones_config_get_max_simultaneous_relays();
+        uint8_t relays_on_count = 0;
+        if (on_off_cap > 0) {
+            for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+                if (s_exec.zones[zi].active && !s_exec.zones[zi].faulted && want_relay_on[zi]) {
+                    relays_on_count++;
+                }
+            }
+        }
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT && !run_faulted_this_tick; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
             zone_runtime_t *z = &s_exec.zones[zi];
 
-            apply_relay(zi, want_relay_on[zi]);
+            /* On/off zones are NOT applied here -- their relay command is
+             * decided below (after this tick's own guard 5/6 result is
+             * known) and applied there instead. Heater zones are
+             * unaffected: this call and its position are bit-identical to
+             * before this feature existed. */
+            if (!zone_on_off[zi]) {
+                apply_relay(zi, want_relay_on[zi]);
+            }
 
             /* Guards 1/2/3/7 all gate their multi-tick accumulation windows
              * on commanded_duty (thermal_guard.c), and this used to be fed
@@ -1199,22 +1266,22 @@ void executor_task_entry(void *arg)
                 }
             }
 
-            /* docs/ON_OFF_ZONE_PLAN.md sec 3/4/7 -- REPORT ONLY. Computes
-             * this tick's verdict for an on/off zone through the pure
-             * on_off_trigger_decide() core so its state (quasi_dwell,
-             * held_s, commanded_on) is real and host-test-verifiable
-             * against production inputs, exactly matching plan step 7's
-             * "Output computed and reported, relay still not written
-             * (dry-run flag)". NOTHING below writes a relay, changes duty,
-             * or is read by any other part of this tick -- apply_relay()
-             * wiring is plan step 8, deliberately not done here.
-             *
-             * rule.* is hardcoded to "no rule" (enable=false) because
-             * profile_on_off_rule_t storage (plan step 5) has not landed
-             * yet -- every on/off zone therefore reports precedence level
-             * 6 ("no rule -> OFF") whenever it isn't overridden by a
-             * higher level, which is the honest, current state of this
-             * feature rather than a placeholder pretending otherwise. */
+            /* docs/ON_OFF_ZONE_PLAN.md sec 3/4/6/8 -- WIRED. Computes this
+             * tick's verdict for an on/off zone through the pure on_off_
+             * trigger_decide() core, gates it through the actuation-layer
+             * min_on_s/min_off_s hold (profile_executor_on_off_actuation_
+             * gate(), independent state -- sec "requirement 4"), applies the
+             * cap suppression this loop's relays_on_count is tracking, and
+             * finally calls apply_relay() -- the SAME chokepoint a heater
+             * uses, same claimed_relay_mask/relay_authority_zone_blocked()/
+             * kiln_io_owner path, no new relay write path (plan sec 6's
+             * non-negotiable). UNEXERCISED ON HARDWARE per this task's
+             * instructions -- no on/off zone has been bench-tested with this
+             * path live; every zone remains ZONE_TYPE_HEATER (0) until a UI
+             * (plan step 6, elsewhere) can type one, so this is inert on
+             * every board today exactly like step 7's report-only version
+             * was, EXCEPT that from here on the code path is the real,
+             * production actuation path a host test can drive end to end. */
             if (zone_on_off[zi]) {
                 bool failsafe_on;
                 zones_config_get_failsafe_state(zi, &failsafe_on);
@@ -1229,27 +1296,57 @@ void executor_task_entry(void *arg)
                 } else if (s_exec.target_rate_c_per_s < 0.0f) {
                     direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
                 }
+                /* Refreshed HERE, directly, rather than by reading z->
+                 * heat_blocked: for a heater zone heat_blocked is already
+                 * fresh by this point in the tick because apply_relay() ran
+                 * for it earlier in this same loop iteration (line above).
+                 * An on/off zone's apply_relay() call happens LATER, below
+                 * -- deliberately, because it needs this tick's own verdict
+                 * as its want_on argument -- so z->heat_blocked here would
+                 * still be LAST tick's answer. relay_authority_zone_
+                 * blocked() is a pure query (owners/relay_authority.c) with
+                 * no side effect on the latch/mask state, so calling it a
+                 * second time this tick (apply_relay() below calls it again
+                 * to actually gate its write) is free and cannot desync
+                 * anything -- it is asking the same authority module the
+                 * same question twice in one tick, not maintaining two
+                 * copies of an answer. */
+                uint32_t authority_sources_now = 0;
+                bool authority_blocked_now = relay_authority_zone_blocked(s_exec.safety, zi, &authority_sources_now);
+                (void)authority_sources_now;
+                /* Look up this (zone, current segment)'s stored rule, if
+                 * any -- profile_t is sparse (PROFILE_MAX_ON_OFF_RULES
+                 * entries, each self-keyed by segment_index/zone_index), so
+                 * this is a linear scan of at most 8 entries, once per
+                 * on/off zone per tick. No match, OR a match with enable==0
+                 * (a profile author disabled the rule without deleting it),
+                 * both mean "no rule for this segment" -- precedence level
+                 * 6. temp_source == 2 (named zone's TC)/3 (executor
+                 * setpoint) are reserved encoding (profiles_types.h) not
+                 * yet resolved here; a rule using either axis is treated as
+                 * temp_cmp NONE (its temperature axis drops out of the AND
+                 * as a tautology) until a later step resolves them -- never
+                 * silently mis-evaluated against the wrong reading. */
+                on_off_trigger_rule_t resolved_rule =
+                    profile_resolve_on_off_rule(&s_exec.profile, zi, s_exec.segment_index);
+
+                bool run_ending_failsafe = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted ||
+                                           authority_blocked_now;
+                bool guard_5_6_tripped_now = z->guard_state.is_tripped &&
+                    (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
+                     z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);
+                bool run_running_now = (s_exec.state == PROFILE_EXEC_RUNNING);
+
                 on_off_trigger_input_t oin = {
-                    .failsafe_override = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted || z->heat_blocked,
+                    .failsafe_override = run_ending_failsafe,
                     .failsafe_state_on = failsafe_on,
-                    .guard_5_6_tripped = z->guard_state.is_tripped &&
-                        (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
-                         z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP),
-                    .run_running = (s_exec.state == PROFILE_EXEC_RUNNING),
+                    .guard_5_6_tripped = guard_5_6_tripped_now,
+                    .run_running = run_running_now,
                     .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
                     .failsafe_on_pause = false, /* no per-zone override field yet -- plan step 6's UI */
                     .min_on_s = min_on_s,
                     .min_off_s = min_off_s,
-                    .rule = {
-                        .enable = false,
-                        .phase_mask = 0,
-                        .direction_mask = 0,
-                        .temp_cmp = ON_OFF_TEMP_CMP_NONE,
-                        .temp_threshold_c = 0.0f,
-                        .time_start_s = 0,
-                        .time_stop_s = 0,
-                        .invert = false,
-                    },
+                    .rule = resolved_rule,
                     .current_phase_is_dwell = s_exec.dwelling || z->on_off_trigger_state.quasi_dwell,
                     .current_direction = direction_bit,
                     .temp_measurement_c = z->actual_c,
@@ -1260,7 +1357,52 @@ void executor_task_entry(void *arg)
                     .segment_index = s_exec.segment_index,
                     .dt_s = dt_s,
                 };
-                (void)on_off_trigger_decide(&z->on_off_trigger_state, &oin);
+                /* Requirement 4: the actuation layer enforces min_on_s/
+                 * min_off_s AGAIN, independent of on_off_trigger_decide()'s
+                 * own hold timer, so a decision-core bug cannot chatter the
+                 * physical relay. bypass_hold mirrors on_off_trigger_
+                 * decide()'s own precedence levels 1-3 exactly (run_ending_
+                 * failsafe, guard_5_6_tripped_now, !run_running_now) -- a
+                 * safety-relevant transition is never held at THIS layer
+                 * either, matching plan sec 3's "[the hold] sits... below
+                 * the safety levels so safety is never delayed by it." Cap
+                 * suppression (sec 6, on/off zones LAST) is applied inside
+                 * the same call -- see profile_executor_on_off_zone_tick()'s
+                 * header comment for why this whole chain is one production
+                 * function rather than inline code here. */
+                bool bypass_hold = run_ending_failsafe || guard_5_6_tripped_now || !run_running_now;
+                on_off_zone_tick_result_t tick_result = profile_executor_on_off_zone_tick(
+                    &z->on_off_trigger_state, &z->on_off_actuated_on, &z->on_off_actuated_held_s,
+                    &oin, bypass_hold, relays_on_count, on_off_cap);
+                bool actuated_on = tick_result.actuated_on;
+                if (tick_result.cap_denied) {
+                    ESP_LOGW(PE_TAG, "zone %u (on/off) denied its relay this tick: "
+                                  "max_simultaneous_relays (%u) already reached by other zones -- "
+                                  "on/off zones are always suppressed last, denial is not deferred",
+                             zi, (unsigned)on_off_cap);
+                }
+                if (actuated_on) {
+                    relays_on_count++;
+                }
+
+                /* Requirement 5: relay-cycles accounting. On/off zones never
+                 * run heater_output_bangbang()/heater_output_duty() (those
+                 * are HEATER-mode-only, see the control-mode switch above),
+                 * so z->heater_state.cycle_count is otherwise NEVER touched
+                 * for an on/off zone and relay_cycles_add() below (unchanged
+                 * code) would silently attribute it zero cycles for a whole
+                 * firing regardless of how often its relay actually
+                 * switched. Mirrored from heater_output.c's own note_
+                 * transition() (same struct, same counter, same "count any
+                 * transition" rule) so the existing unchanged accounting
+                 * code just below picks this up for free -- no separate
+                 * on/off relay-life code path to drift from the heater one. */
+                if (actuated_on != z->heater_state.relay_on) {
+                    z->heater_state.cycle_count++;
+                    z->heater_state.relay_on = actuated_on;
+                }
+
+                apply_relay(zi, actuated_on);
             }
 
             /* Contact-cycle accounting (TODO.md 6A.1): hand relay_cycles.c

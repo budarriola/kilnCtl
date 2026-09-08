@@ -369,8 +369,10 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
      * exceeds_ceiling/ceiling_note fields -- ceiling_note_escaped is up to
      * sizeof(ceiling_note)*2 = 512 bytes worst case (every byte escaped;
      * ceiling_note itself widened 160 -> 256 to satisfy -Werror=format-
-     * truncation's conservative worst-case-float-width analysis). */
-    char json[816 + PROFILE_MAX_SEGMENTS * 192];
+     * truncation's conservative worst-case-float-width analysis). +
+     * PROFILE_MAX_ON_OFF_RULES * 128 (2026-09-08, plan step 5) -- each rule
+     * object measured well under 110 bytes worst case, rounded up. */
+    char json[816 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * 128];
     size_t o = 0;
     int n;
 
@@ -437,6 +439,17 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
                i == 0 ? "" : ",", s->seg_kind, (double)s->target_c, (double)s->ramp_c_per_hr,
                (unsigned long)s->dwell_min, s->io_target, s->io_state, s->io_blocking,
                s->io_leave_on_at_end, profile_feasibility_verdict_str(per_seg[i]));
+    }
+    APPEND("],\"on_off_rules\":[");
+    /* docs/ON_OFF_ZONE_PLAN.md plan step 5 API surface -- echoes exactly the
+     * fields profiles_edit_http.c's rule%u_* parser accepts, same round-trip
+     * discipline the segment loop above already follows. */
+    for (uint8_t i = 0; i < p->on_off_rule_count; i++) {
+        const profile_on_off_rule_t *r = &p->on_off_rules[i];
+        APPEND("%s{\"zone\":%u,\"segment\":%u,\"enable\":%u,\"phase_mask\":%u,\"direction_mask\":%u,"
+               "\"temp_cmp\":%u,\"temp_c\":%.2f,\"time_start_s\":%u,\"time_stop_s\":%u,\"invert\":%u}",
+               i == 0 ? "" : ",", r->zone_index, r->segment_index, r->enable, r->phase_mask, r->direction_mask,
+               r->temp_cmp, (double)r->temp_threshold_c, r->time_start_s, r->time_stop_s, r->invert);
     }
     APPEND("]}");
 

@@ -515,6 +515,21 @@ typedef struct {
      * from anything derived from it. */
     on_off_trigger_state_t on_off_trigger_state;
 
+    /* Plan step 8 (docs/ON_OFF_ZONE_PLAN.md sec 3/6): ACTUATION-layer
+     * min_on_s/min_off_s enforcement, deliberately separate state from
+     * on_off_trigger_state.commanded_on/held_s above. Requirement: "a
+     * decision-core bug cannot chatter a physical relay" -- if
+     * on_off_trigger_decide() ever mis-evaluates the hold (a bug in that
+     * module), this second, independent timer at the point that actually
+     * calls apply_relay() still bounds the physical relay's switching rate.
+     * Bypassed only for a failsafe/guard-5-6/run-not-RUNNING transition
+     * (on_off_apply_gate()'s own doc comment) -- safety is never delayed by
+     * a hold timer, same rule the decision core itself follows. Reset at
+     * run start / resume alongside on_off_trigger_state (profile_executor_
+     * run.c) -- never merely on a segment change. */
+    bool  on_off_actuated_on;
+    float on_off_actuated_held_s;
+
     /* TODO.md 6A.7's max_ramp_c_per_hr re-check (see reload_zone_config()):
      * latches once this zone's current segment has newly become infeasible
      * against a lowered ceiling, so the WARN logs once per occurrence
@@ -974,6 +989,76 @@ float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float 
  * an uncapped zone (cap_c_per_hr == 0) is bit-identical to before. */
 float profile_executor_guard_zone_ramp_rate(float shared_rate_c_per_s, float cap_c_per_hr,
                                             bool still_approaching);
+/* Plan step 8 -- ACTUATION-layer min_on_s/min_off_s enforcement for an
+ * on/off zone, independent of on_off_trigger_decide()'s own hold timer (see
+ * on_off_actuated_on/on_off_actuated_held_s's doc comment, zone_runtime_t).
+ * Pure scalar function, same shape as this file's other small decision
+ * helpers, so a host test can drive it directly with no zone_runtime_t/
+ * s_exec in scope.
+ *
+ * *actuated_on / *held_s are the caller's persistent actuation-layer state,
+ * mutated in place. decided_on is on_off_trigger_decide()'s verdict for this
+ * tick. bypass_hold must be true exactly when the decision was driven by a
+ * safety-relevant precedence level (fail-safe override, guard 5/6 trip, or
+ * run not RUNNING) -- plan sec 3: the hold "sits... below the safety levels
+ * so safety is never delayed by it," and this second, independent gate must
+ * honor the same rule or it would reintroduce the very chatter/delay this
+ * layer exists to bound out of the level it is supposed to be defending.
+ * min_on_s/min_off_s of 0 hold nothing (matches on_off_trigger_decide()'s
+ * own 0-means-not-configured convention -- the caller substitutes the plan's
+ * 30s default before calling, same as it does for that module).
+ *
+ * Returns the actuated value (== *actuated_on after the call). */
+bool profile_executor_on_off_actuation_gate(bool *actuated_on, float *held_s, bool decided_on,
+                                            bool bypass_hold, uint16_t min_on_s, uint16_t min_off_s,
+                                            float dt_s);
+
+/* docs/ON_OFF_ZONE_PLAN.md sec 6: whether an on/off zone's already-gated ON
+ * verdict must be suppressed by max_simultaneous_relays THIS tick.
+ * relays_on_count is how many relays the tick has already committed to ON
+ * before this zone is considered -- the caller seeds it from the (already
+ * cap-adjusted) heater decisions and grows it as on/off zones are granted,
+ * which is what makes on/off zones the cap's last, unclaimed slots: a
+ * heater's own claim was already final by the time any on/off zone is
+ * looked at. cap == 0 is unlimited (never denies). Pure predicate, no
+ * side effect, no deferral bookkeeping -- plan sec 6: "their denial is
+ * logged rather than deferred." */
+bool profile_executor_on_off_cap_denies(uint8_t relays_on_count, uint8_t cap);
+
+/* docs/ON_OFF_ZONE_PLAN.md sec 3/4/6/8 -- the ENTIRE per-zone, per-tick
+ * on/off decision chain as one production function: on_off_trigger_decide()
+ * (precedence, hysteresis, quasi-dwell) -> profile_executor_on_off_
+ * actuation_gate() (independent actuation-layer min_on_s/min_off_s hold,
+ * requirement 4) -> profile_executor_on_off_cap_denies() (max_simultaneous_
+ * relays, on/off zones suppressed last). Factored out of profile_executor.c's
+ * tick loop for the same reason profile_executor_guard_commanded_duty() and
+ * this file's other small decision helpers were: direct host-test call-
+ * ability against the REAL production chain, not a hand-written mirror of
+ * it -- the tick loop's own "no seam to call just one tick" limitation
+ * (test_ramp_lock_onesided.c's header comment) applies to the FreeRTOS task
+ * loop's shape, not to what runs inside one zone's iteration of it, and
+ * everything genuinely decision-shaped for an on/off zone now lives here
+ * instead of inline in that loop.
+ *
+ * bypass_hold must be true exactly when *in describes a safety-relevant
+ * transition (fail-safe override / guard 5-6 trip / run not RUNNING) --
+ * same value on_off_trigger_decide() itself uses internally to decide
+ * whether ITS OWN hold applies; the caller computes it once and passes it
+ * to both, which is why it is a parameter here rather than re-derived.
+ * relays_on_count/cap are this tick's already-tallied "how many relays are
+ * ON before this zone is considered" and the configured cap (0=unlimited).
+ *
+ * Mutates *decide_state (on_off_trigger_decide()'s own state) and
+ * *actuated_on/*actuated_held_s (the actuation-layer hold state) in place,
+ * exactly as the two functions it calls would if invoked separately. */
+typedef struct {
+    bool actuated_on;  /* final verdict this tick -- what apply_relay() should be called with */
+    bool cap_denied;   /* true if the cap suppressed an otherwise-ON verdict (for the caller's log line) */
+} on_off_zone_tick_result_t;
+
+on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
+    on_off_trigger_state_t *decide_state, bool *actuated_on, float *actuated_held_s,
+    const on_off_trigger_input_t *in, bool bypass_hold, uint8_t relays_on_count, uint8_t cap);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 void release_profile_relay_claim(void);
@@ -1228,6 +1313,36 @@ void history_unpack(const history_slot_t *slot, profile_history_entry_t *out);
 
 /* ---- run() feasibility/warm-start helpers (profile_executor_start.c) ----- */
 bool profile_zones_have_ceiling(const profile_t *p, uint8_t *out_missing_zone);
+
+/* docs/ON_OFF_ZONE_PLAN.md plan step 5, sec 3 -- looks up the stored
+ * profile_on_off_rule_t (if any) for (zone_index, segment_index) in `p` and
+ * translates it into on_off_trigger_decide.h's on_off_trigger_rule_t, the
+ * exact shape that module's `.rule` input field expects. Pure function
+ * (profile_t in, verdict-shaped struct out; no s_exec, no I/O) so it is
+ * host-test-callable directly against a hand-built profile_t, same as
+ * profile_zones_have_ceiling()/profile_executor_plan_warm_start() above --
+ * profile_executor.c's per-tick wiring (control/profile_executor.c) is the
+ * only production caller.
+ *
+ * No match, or a match with enable == 0 (an author disabled a rule without
+ * deleting it), both return a rule with .enable == false -- indistinguishable
+ * from "no rule for this segment" (plan sec 3 precedence level 6), which is
+ * intentional: a disabled rule and an absent one command the identical
+ * verdict. At most one stored rule is expected to match a given
+ * (segment_index, zone_index) pair -- profiles_http.c's
+ * validate_on_off_rules() enforces this is the only way a profile can be
+ * saved -- so the first match found is returned without scanning for a
+ * (structurally impossible, if validation held) second one.
+ *
+ * temp_source == 2 ("named zone's TC") and == 3 ("executor setpoint") are
+ * reserved encoding (profiles_types.h) not yet resolved by any caller as of
+ * this step -- a rule using either is returned with temp_cmp forced to
+ * ON_OFF_TEMP_CMP_NONE (the axis drops out of on_off_trigger_decide()'s AND
+ * as a tautology) rather than evaluated against the wrong reading. Only
+ * temp_source == 1 (this zone's own thermocouple, the only reading a
+ * profile_t-only function can resolve without a live zone read) passes its
+ * temp_cmp through. */
+on_off_trigger_rule_t profile_resolve_on_off_rule(const profile_t *p, uint8_t zone_index, uint8_t segment_index);
 
 typedef struct {
     bool     warm_started;

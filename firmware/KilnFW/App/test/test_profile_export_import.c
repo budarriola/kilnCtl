@@ -295,6 +295,63 @@ static void test_negative_dwell_min_is_still_rejected(void)
     TEST_CHECK(s_response_status == 400, "dwell_min:-5 is answered with 400 Bad Request");
 }
 
+// ---------------------------------------------------------------------------
+// docs/ON_OFF_ZONE_PLAN.md plan step 5 -- export/import compatibility for
+// the new "on_off_rules" top-level key. See import_post_handler()'s own
+// comment (profiles_export_http.c) for the full both-directions writeup;
+// these two tests exercise it against the real production import path.
+// ---------------------------------------------------------------------------
+
+// An OLD (version:1, pre-rules) export body -- MAKE_BODY() above already IS
+// exactly this shape (no "on_off_rules" key at all). Imported into this
+// (current) firmware, it must land as a rules-free candidate: rule_count 0,
+// same as before the field existed -- the "old export into new firmware"
+// half of the compatibility claim.
+static void test_old_export_without_rules_key_imports_as_rules_free(void)
+{
+    reset_state();
+    esp_err_t err = run_import(MAKE_BODY("30"));
+    TEST_CHECK(err == ESP_OK, "an old (no on_off_rules key) export still imports");
+    TEST_CHECK(s_save_called, "profiles_http_save() is reached");
+    TEST_CHECK(s_last_saved.on_off_rule_count == 0,
+              "no \"on_off_rules\" key in the body -> on_off_rule_count must be 0, "
+              "identical to a profile that never had any rules");
+}
+
+// A NEW (version:2, has rules) export body, with one on/off rule -- imported
+// into this (current) firmware, every rule field must survive intact. This
+// is the "new export into new firmware" half; "new export into OLD
+// firmware" (the key is silently ignored, profile still imports without its
+// rules) cannot be exercised from THIS firmware's own test tree -- see the
+// handler's own comment for that direction's reasoning.
+#define MAKE_BODY_WITH_RULE                                                                       \
+    "{\"kind\":\"kilnctl_profile\",\"version\":2,\"name\":\"Cone6\",\"zone_mask\":1,"              \
+    "\"segments\":[{\"seg_kind\":0,\"target_c\":1200,\"ramp_c_per_hr\":100,"                       \
+    "\"dwell_min\":30,\"io_target\":0,\"io_state\":0,\"io_blocking\":0,"                           \
+    "\"io_leave_on_at_end\":0}],"                                                                   \
+    "\"on_off_rules\":[{\"zone\":2,\"segment\":0,\"enable\":1,\"phase_mask\":2,"                    \
+    "\"direction_mask\":1,\"temp_cmp\":1,\"temp_c\":650.5,\"time_start_s\":5,"                      \
+    "\"time_stop_s\":0,\"invert\":0}]}"
+
+static void test_new_export_with_rules_key_round_trips_every_field(void)
+{
+    reset_state();
+    esp_err_t err = run_import(MAKE_BODY_WITH_RULE);
+    TEST_CHECK(err == ESP_OK, "a new (has on_off_rules key) export imports");
+    TEST_CHECK(s_save_called, "profiles_http_save() is reached");
+    TEST_CHECK(s_last_saved.on_off_rule_count == 1, "exactly one rule imported");
+    const profile_on_off_rule_t *r = &s_last_saved.on_off_rules[0];
+    TEST_CHECK(r->zone_index == 2, "zone_index round-trips");
+    TEST_CHECK(r->segment_index == 0, "segment_index round-trips");
+    TEST_CHECK(r->enable == 1, "enable round-trips");
+    TEST_CHECK(r->phase_mask == 2, "phase_mask round-trips");
+    TEST_CHECK(r->direction_mask == 1, "direction_mask round-trips");
+    TEST_CHECK(r->temp_cmp == 1, "temp_cmp round-trips");
+    TEST_CHECK_NEAR(r->temp_threshold_c, 650.5f, 1e-4, "temp_threshold_c round-trips");
+    TEST_CHECK(r->time_start_s == 5 && r->time_stop_s == 0, "time window round-trips");
+    TEST_CHECK(r->invert == 0, "invert round-trips");
+}
+
 int main(void)
 {
     TEST_SECTION("profile_export_import");
@@ -304,6 +361,8 @@ int main(void)
     test_absurd_dwell_min_is_rejected();
     test_dwell_min_one_past_bound_is_rejected();
     test_negative_dwell_min_is_still_rejected();
+    test_old_export_without_rules_key_imports_as_rules_free();
+    test_new_export_with_rules_key_round_trips_every_field();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

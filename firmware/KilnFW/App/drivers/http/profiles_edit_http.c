@@ -184,6 +184,93 @@ static bool parse_profile_fields(const char *body, profile_t *p, char *err_msg, 
         }
         seg->dwell_min = (uint32_t)dwell;
     }
+
+    /* docs/ON_OFF_ZONE_PLAN.md plan step 5 API surface -- indexed field
+     * family "rule0_zone=3&rule0_segment=2&..." matching how segments are
+     * already encoded above. A rule slot is present iff "rule%u_zone" is
+     * present; presence stops at the first gap (no sparse holes over the
+     * wire -- the stored array itself may still end up sparse in the sense
+     * that not every segment/zone pair has one, but the wire encoding is a
+     * dense 0..N-1 list). Range/reference validation (segment exists, zone
+     * is ON_OFF, numeric bounds) is deliberately NOT duplicated here --
+     * validate_on_off_rules() (profiles_http.c) is the one place that runs,
+     * shared with the UART-bridge/import entry points, so a rule can never
+     * be accepted by one entry point and rejected by another. */
+    p->on_off_rule_count = 0;
+    for (uint8_t i = 0; i < PROFILE_MAX_ON_OFF_RULES; i++) {
+        char key[24];
+        char val[24];
+        snprintf(key, sizeof(key), "rule%u_zone", i);
+        int len = http_form_find_field(body, key, val, sizeof(val));
+        if (len <= 0) {
+            break; /* first gap ends the list */
+        }
+        profile_on_off_rule_t *r = &p->on_off_rules[i];
+        memset(r, 0, sizeof(*r));
+
+        char *fend = NULL;
+        long zone_index = strtol(val, &fend, 10);
+        if (fend == val || zone_index < 0 || zone_index > 255) {
+            snprintf(err_msg, err_cap, "rule %u: zone missing or out of range", i);
+            return false;
+        }
+        r->zone_index = (uint8_t)zone_index;
+
+        snprintf(key, sizeof(key), "rule%u_segment", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
+        long seg_idx = len > 0 ? strtol(val, &fend, 10) : -1;
+        if (len <= 0 || fend == val || seg_idx < 0 || seg_idx > 255) {
+            snprintf(err_msg, err_cap, "rule %u: segment missing or out of range", i);
+            return false;
+        }
+        r->segment_index = (uint8_t)seg_idx;
+
+        snprintf(key, sizeof(key), "rule%u_enable", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        r->enable = (len > 0 && val[0] != '0') ? 1 : 0;
+
+        snprintf(key, sizeof(key), "rule%u_phase", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
+        long phase = len > 0 ? strtol(val, &fend, 10) : 0;
+        r->phase_mask = (fend == val) ? 0 : (uint8_t)(phase & 0xFF);
+
+        snprintf(key, sizeof(key), "rule%u_direction", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
+        long direction = len > 0 ? strtol(val, &fend, 10) : 0;
+        r->direction_mask = (fend == val) ? 0 : (uint8_t)(direction & 0xFF);
+
+        snprintf(key, sizeof(key), "rule%u_temp_cmp", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
+        long temp_cmp = len > 0 ? strtol(val, &fend, 10) : 0;
+        r->temp_cmp = (fend == val) ? 0 : (uint8_t)(temp_cmp & 0xFF);
+
+        snprintf(key, sizeof(key), "rule%u_temp_c", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
+        r->temp_threshold_c = len > 0 ? strtof(val, &fend) : 0.0f;
+
+        snprintf(key, sizeof(key), "rule%u_time_start_s", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
+        long time_start = len > 0 ? strtol(val, &fend, 10) : 0;
+        r->time_start_s = (fend == val || time_start < 0 || time_start > 65535) ? 0 : (uint16_t)time_start;
+
+        snprintf(key, sizeof(key), "rule%u_time_stop_s", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
+        long time_stop = len > 0 ? strtol(val, &fend, 10) : 0;
+        r->time_stop_s = (fend == val || time_stop < 0 || time_stop > 65535) ? 0 : (uint16_t)time_stop;
+
+        snprintf(key, sizeof(key), "rule%u_invert", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        r->invert = (len > 0 && val[0] != '0') ? 1 : 0;
+
+        p->on_off_rule_count = (uint8_t)(i + 1);
+    }
     return true;
 }
 

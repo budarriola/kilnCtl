@@ -73,7 +73,7 @@ static esp_err_t export_get_handler(httpd_req_t *req)
      * comment on the 2026-08-31 stack-overflow audit). 256B fixed part +
      * 192B/segment matches profiles_catalog_http.c's own per-segment budget
      * for the richer (seg_kind/io_*) field set below. */
-    const size_t cap = 256 + (size_t)PROFILE_MAX_SEGMENTS * 192;
+    const size_t cap = 256 + (size_t)PROFILE_MAX_SEGMENTS * 192 + (size_t)PROFILE_MAX_ON_OFF_RULES * 128;
     char *json = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
         ESP_LOGE(TAG, "GET /api/profile/export: malloc(%u) failed", (unsigned)cap);
@@ -97,7 +97,13 @@ static esp_err_t export_get_handler(httpd_req_t *req)
         o += (size_t)n;                                                                            \
     } while (0)
 
-    APPEND("{\"kind\":\"kilnctl_profile\",\"version\":1,\"name\":\"%s\",\"zone_mask\":%u,\"segments\":[",
+    /* "version":2 (was 1) -- this export document's OWN version, unrelated
+     * to PROFILE_VERSION (the on-flash NVS/file wrapper). Bumped because a
+     * v1 export has no "on_off_rules" key at all, and a v1-generation
+     * importer (see import_post_handler() below) does not look for one --
+     * see this pass's compatibility note there for exactly what each
+     * direction does. */
+    APPEND("{\"kind\":\"kilnctl_profile\",\"version\":2,\"name\":\"%s\",\"zone_mask\":%u,\"segments\":[",
            name_escaped, p.zone_mask);
     for (uint8_t i = 0; i < p.segment_count; i++) {
         const profile_segment_t *s = &p.segments[i];
@@ -106,6 +112,14 @@ static esp_err_t export_get_handler(httpd_req_t *req)
                i == 0 ? "" : ",", s->seg_kind, (double)s->target_c, (double)s->ramp_c_per_hr,
                (unsigned long)s->dwell_min, s->io_target, s->io_state, s->io_blocking,
                s->io_leave_on_at_end);
+    }
+    APPEND("],\"on_off_rules\":[");
+    for (uint8_t i = 0; i < p.on_off_rule_count; i++) {
+        const profile_on_off_rule_t *r = &p.on_off_rules[i];
+        APPEND("%s{\"zone\":%u,\"segment\":%u,\"enable\":%u,\"phase_mask\":%u,\"direction_mask\":%u,"
+               "\"temp_cmp\":%u,\"temp_c\":%.2f,\"time_start_s\":%u,\"time_stop_s\":%u,\"invert\":%u}",
+               i == 0 ? "" : ",", r->zone_index, r->segment_index, r->enable, r->phase_mask, r->direction_mask,
+               r->temp_cmp, (double)r->temp_threshold_c, r->time_start_s, r->time_stop_s, r->invert);
     }
     APPEND("]}");
 #undef APPEND
@@ -286,6 +300,94 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         FAIL("no segments");
     }
     candidate.segment_count = seg_i;
+
+    /* "on_off_rules" (plan step 5, export/import compatibility):
+     *
+     * OLD export (no "on_off_rules" key) imported into NEW firmware:
+     * backup_json_obj_find() returns NULL for a missing key, the loop below
+     * runs zero iterations, and candidate.on_off_rule_count stays 0 (already
+     * zeroed by the memset above) -- imports exactly as a rules-free
+     * profile, byte-identical to today's behavior for that profile.
+     *
+     * NEW export (has "on_off_rules") imported into OLD firmware: an old
+     * import_post_handler() has no code that looks for this key at all --
+     * backup_json's hand-rolled reader only extracts fields this handler
+     * explicitly asks for, so the extra top-level key is silently ignored,
+     * never rejected. The profile imports successfully WITHOUT its on/off
+     * rules (old firmware's profile_t has no such field to hold them) --
+     * a graceful, documented degradation, not data corruption: nothing
+     * downstream in old firmware ever expected these rules to exist. */
+    const char *rules_arr = backup_json_obj_find(body, "on_off_rules");
+    uint8_t rule_i = 0;
+    for (const char *re = backup_json_arr_first(rules_arr); re; re = backup_json_arr_next(re)) {
+        if (rule_i >= PROFILE_MAX_ON_OFF_RULES) {
+            FAIL("too many on_off_rules");
+        }
+        profile_on_off_rule_t *r = &candidate.on_off_rules[rule_i];
+
+        double dz = 0.0;
+        if (!backup_json_field_num(re, "zone", &dz) || dz < 0 || dz > 255) {
+            FAIL("on_off_rule missing or invalid \\\"zone\\\"");
+        }
+        r->zone_index = (uint8_t)dz;
+
+        double dseg = 0.0;
+        if (!backup_json_field_num(re, "segment", &dseg) || dseg < 0 || dseg > 255) {
+            FAIL("on_off_rule missing or invalid \\\"segment\\\"");
+        }
+        r->segment_index = (uint8_t)dseg;
+
+        double dv = 0.0;
+        bool has_v = false;
+        r->enable = 0;
+        if (backup_json_field_opt_num(re, "enable", 0, 1, &dv, &has_v, "enable", NULL, 0, rule_i) && has_v) {
+            r->enable = (uint8_t)dv;
+        }
+        r->phase_mask = 0;
+        has_v = false;
+        if (backup_json_field_opt_num(re, "phase_mask", 0, 255, &dv, &has_v, "phase_mask", NULL, 0, rule_i) &&
+            has_v) {
+            r->phase_mask = (uint8_t)dv;
+        }
+        r->direction_mask = 0;
+        has_v = false;
+        if (backup_json_field_opt_num(re, "direction_mask", 0, 255, &dv, &has_v, "direction_mask", NULL, 0,
+                                       rule_i) &&
+            has_v) {
+            r->direction_mask = (uint8_t)dv;
+        }
+        r->temp_cmp = 0;
+        has_v = false;
+        if (backup_json_field_opt_num(re, "temp_cmp", 0, 255, &dv, &has_v, "temp_cmp", NULL, 0, rule_i) && has_v) {
+            r->temp_cmp = (uint8_t)dv;
+        }
+        r->temp_threshold_c = 0.0f;
+        double dtemp = 0.0;
+        if (backup_json_field_num(re, "temp_c", &dtemp)) {
+            r->temp_threshold_c = (float)dtemp;
+        }
+        r->time_start_s = 0;
+        has_v = false;
+        if (backup_json_field_opt_num(re, "time_start_s", 0, 65535, &dv, &has_v, "time_start_s", NULL, 0, rule_i) &&
+            has_v) {
+            r->time_start_s = (uint16_t)dv;
+        }
+        r->time_stop_s = 0;
+        has_v = false;
+        if (backup_json_field_opt_num(re, "time_stop_s", 0, 65535, &dv, &has_v, "time_stop_s", NULL, 0, rule_i) &&
+            has_v) {
+            r->time_stop_s = (uint16_t)dv;
+        }
+        r->invert = 0;
+        has_v = false;
+        if (backup_json_field_opt_num(re, "invert", 0, 1, &dv, &has_v, "invert", NULL, 0, rule_i) && has_v) {
+            r->invert = (uint8_t)dv;
+        }
+
+        rule_i++;
+    }
+    candidate.on_off_rule_count = rule_i;
+
     free(body);
     body = NULL;
 #undef FAIL

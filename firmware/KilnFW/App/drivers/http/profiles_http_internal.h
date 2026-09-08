@@ -150,6 +150,16 @@ esp_err_t nvs_erase_slot(uint8_t id);
  * rationale. */
 bool profile_exceeds_zone_ceiling(const profile_t *p, char *note, size_t note_cap);
 
+/* docs/ON_OFF_ZONE_PLAN.md plan step 5 -- rejects a candidate profile whose
+ * on/off rules reference a nonexistent segment or a zone not typed
+ * ZONE_TYPE_ON_OFF (the dangerous direction: a HEATER zone driven by on/off
+ * logic), or whose numeric fields are out of bounds. Called by
+ * profiles_http_save() for both the HTTP POST and UART-bridge entry points;
+ * exposed here so profiles_edit_http.c/profiles_export_http.c can also
+ * validate a freshly-parsed candidate before it ever reaches save (same
+ * "fail fast, at the edge" shape validate_io_segment() already follows). */
+bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err_cap);
+
 /* Validates one RELAY_IO segment's target/flags -- shared by
  * profiles_http.c's own profiles_http_save() (the UART-bridge entry point)
  * and profiles_edit_http.c's parse_profile_fields() (the HTTP POST entry

@@ -101,6 +101,50 @@ typedef struct {
                                   * Meaningful only for a RELAY_IO segment with io_blocking == 0. */
 } profile_segment_t;
 
+/* docs/ON_OFF_ZONE_PLAN.md sec 3/7 (plan step 5) -- one per (profile,
+ * segment, on/off zone) rule. Storage lives with the PROFILE, not the zone
+ * (zone_cfg_t only holds the device's physical properties -- type,
+ * fail-safe state, hysteresis, min on/off times): the same vent is used
+ * differently by a bisque and a glaze firing. Deliberately a SPARSE array
+ * (PROFILE_MAX_ON_OFF_RULES entries, each carrying its own segment_index/
+ * zone_index) rather than inline in profile_segment_t -- inlining up to
+ * MAX31856_CHANNEL_COUNT rules per segment would multiply profile_t's size
+ * by roughly that factor for a feature most profiles never use, and would
+ * touch profile_segment_t's layout, which every existing PROFILE_VERSION
+ * migration (see profiles_http.c) already depends on staying put except at
+ * its own documented growth points.
+ *
+ * Field-for-field identical to control/on_off_trigger_decide.h's
+ * on_off_trigger_rule_t (minus that struct's caller-resolved fields) PLUS
+ * the two keys (segment_index/zone_index) that let this array be sparse --
+ * this is deliberate, not a coincidence, so profile_executor.c's lookup can
+ * copy the trigger axes across without a field-by-field translation layer
+ * silently drifting from the decision core's own struct. */
+#define PROFILE_MAX_ON_OFF_RULES 8
+
+typedef struct {
+    uint8_t  segment_index;      /* 0-based; must be < the owning profile's segment_count */
+    uint8_t  zone_index;         /* must reference a zone typed ZONE_TYPE_ON_OFF */
+    uint8_t  enable;             /* 0 = this array slot carries no rule (unused/deleted);
+                                   * nonzero = the rule below is active for this
+                                   * (segment_index, zone_index). Distinct from "array slot
+                                   * unused" so a profile author can disable a rule without
+                                   * losing its configured axes. */
+    uint8_t  phase_mask;         /* bit0 RAMP, bit1 DWELL -- on_off_phase_bit_t */
+    uint8_t  direction_mask;     /* bit0 HEATING, bit1 COOLING, bit2 FLAT -- on_off_direction_bit_t */
+    uint8_t  temp_source;        /* 0 = none, 1 = measured (this zone's TC),
+                                   * 2 = measured (named zone's TC), 3 = executor setpoint.
+                                   * Only 0/1 are wired by the executor as of plan step 5 --
+                                   * 2/3 are reserved encoding space for a later step, matching
+                                   * PROFILE_IO_TARGET_*'s "reserved gap" precedent above. */
+    uint8_t  temp_ref_zone;      /* for temp_source == 2 */
+    uint8_t  temp_cmp;           /* on_off_temp_cmp_t: 0 = none, 1 = ABOVE, 2 = BELOW */
+    float    temp_threshold_c;
+    uint16_t time_start_s;       /* offset into the segment at which the rule becomes eligible */
+    uint16_t time_stop_s;        /* 0 = to end of segment; else eligible window ends here */
+    uint8_t  invert;             /* device ON when the configured axes AND to FALSE */
+} profile_on_off_rule_t;
+
 typedef struct {
     char name[PROFILE_NAME_MAX_LEN + 1];
     /* TODO.md 6A.5: a profile can now drive more than one zone at once,
@@ -113,6 +157,14 @@ typedef struct {
     uint8_t zone_mask;
     uint8_t segment_count;
     profile_segment_t segments[PROFILE_MAX_SEGMENTS];
+    /* Tail-append, PROFILE_VERSION 3 -> 4 (profiles_http.c). Migration
+     * default for every pre-existing profile: on_off_rule_count = 0, every
+     * profile_on_off_rule_t zeroed -- reproduces today's behavior exactly
+     * (no rule for any segment/zone -- on_off_trigger_decide() reports
+     * precedence level 6, "no rule -> OFF", same as before this field
+     * existed). */
+    uint8_t on_off_rule_count;
+    profile_on_off_rule_t on_off_rules[PROFILE_MAX_ON_OFF_RULES];
 } profile_t;
 
 #ifdef __cplusplus
