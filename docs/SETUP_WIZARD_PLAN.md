@@ -1,6 +1,8 @@
 # Whole-Kiln Setup Wizard — plan
 
-> **Status:** design only, nothing implemented. **Opened:** 2026-09-08.
+> **Status:** implementation steps 1-3 landed 2026-09-08 (progress store,
+> `/api/setup/progress`, the `/setup` page shell); steps 4-11 (individual step
+> content) not started. **Opened:** 2026-09-08.
 > Owner request, verbatim: *"like the safety commissioning wizard i want a
 > wizard that guides me through the entire setup process of the kiln. ie pid,
 > zones, current exc. including the safety processor."*
@@ -8,6 +10,19 @@
 > **One-line goal:** one page, `/setup`, that walks a new owner from a blank
 > board to a kiln that `/api/readiness` reports fully ready — reusing every
 > existing endpoint, adding no second copy of any validation rule.
+>
+> **Owner decisions (2026-09-08), settled, build to these:**
+> 1. **Embed** the safety-processor commissioning inline in the wizard
+>    (embed over link-out, section 10 Q2) — but reuse the existing write path
+>    and its `confirm_commit_landed()` read-back
+>    (`safety_set_commissioning_fields` / the commissioning commit endpoint)
+>    rather than a second implementation of confirm-and-verify. If a future
+>    pass finds itself copying that logic, extract and share it instead.
+> 2. **Offer, do not force** (section 10 Q6): an unconfigured board gets a
+>    prompt/banner pointing at `/setup`; no forced redirect.
+> 3. **Hand-entered PID gains complete step 10** — autotune is not mandatory
+>    (section 10 Q4). The step's own UI must say so explicitly, so the choice
+>    reads as deliberate rather than as a shortcut nobody noticed.
 
 ---
 
@@ -208,8 +223,8 @@ Each is independently mergeable. R = reversible without a flash. F = needs a fla
 
 | # | Step | Test strategy | Risk |
 |---|---|---|---|
-| 1 | **Progress store.** `setup_wizard_progress.{c,h}` in `persist/`: versioned NVS blob, `NVS_KEY_LEN_CHECK`, get/set/clear per step. No HTTP yet | New host test: round-trip, version migration, unknown-step rejection, key-length static assert. Negative-test it by breaking the production encoder by hand, then restoring by hand | F, low |
-| 2 | **`GET/POST /api/setup/progress`** + register the store. Report JSON size against `json_cap` headroom in the PR; **do not enlarge httpd stack buffers** — build the response in the existing pattern | Host test for the serializer; `curl` against a board | F, low |
+| 1 | **DONE (`90bd8b2c`).** **Progress store.** `setup_wizard_progress.{c,h}` in `persist/`: versioned NVS blob (namespace `setup_wiz`, key `progress_v1`, both `NVS_KEY_LEN_CHECK`'d), `{version, per-step {state, ts, note}}` only — no config value. v1 `{state, ts}` migrates to v2's tail-appended `note`, `_Static_assert`'d layout. `setup_wizard_progress_effective_state()` is the readiness-authoritative REGRESSED-vs-DONE precedence rule, pure and host-tested standalone. `flash_worker_lint.py`'s ALLOWLIST covers the one `hal_kv_set_blob()`/`hal_kv_commit()` call site (Pattern 3, internal-SRAM-stack httpd task — same shape as `display_power_cfg.c`/`unit_pref.c`) | `test_setup_wizard_progress.c`: round-trip, v1 migration, unknown-step rejection, state-value rejection, NVS-unavailable degrade, wire-name round trip. Negative-tested: disabled the REGRESSED precedence check, watched `test_setup_wizard_progress.c:232` fail, restored by hand, confirmed `git diff` clean | F, low |
+| 2 | **DONE (`90bd8b2c`).** **`GET/POST /api/setup/progress`** (`setup_progress_http.{c,h}`), registered in `main_network_http.c` right after `setup_wizard_http_start()` (step 3). Body: `{"version":1,"steps":{"<index>":{"state","ts","note"}}}` — object keyed by step index, matching the already-landed page shell's `defaultProgress()`/`mergeAllSteps()` contract. `SETUP_PROGRESS_JSON_CAP=2048` against a ~1300-byte worst case (13 steps). POST is one step per call (plan section 5 point 6 — no global commit-everything). Does NOT itself fetch/merge a live readiness snapshot — that merge is step 3's page-side JS (`computeStepState`), so this endpoint never duplicates any readiness check | Host tests cover the shared wire-format helpers (`setup_wizard_step_state_name/_from_name`) in `test_setup_wizard_progress.c`; `curl` against a board still to do | F, low |
 | 3 | **DONE (pending hash).** **`/setup` page shell**: overview screen, 13 rows, status merged from `/api/setup/progress` + `/api/readiness`, resume button, deep-link `#step=N`. No step content yet. `firmware/KilnFW/App/drivers/http/setup_wizard_page.html` + `setup_wizard_http.{c,h}`, reusing the safety-commissioning page's `.gstepper`/`.gscreen`/`.review-row` CSS verbatim; added regressed-state stepper/pill classes and the completeness gate. Offer banner in `app.js` (`pollSetupOffer`/`buildSetupBanner`), theme.css's `.kc-setup-banner` (accent-1, no new colour). JS host test `test_setup_wizard.js` (20 assertions incl. readiness-overrides-stored, resume-after-reload, negative-tested completeness gate). No new endpoint added at this step -- zero json_cap cost; the page consumes the already-landed `GET/POST /api/setup/progress` (step 2) and `GET /api/readiness` verbatim. | `check_ui_responsive_sweep.ps1` at every viewport; JS host tests (`check_js_host_tests.ps1`) for the merge function incl. the regressed case | F, R at runtime |
 | 4 | **Steps 0–1** (preflight, network/time/units) | Sweep + manual; preflight refusal exercised with a synthetic crash-report response | F |
 | 5 | **Steps 2–3** (zones, thermocouples, types, offsets) | Reuse `zones_page.html` parsers; host test the client-side validation mirror if one is added — better, add none and let the POST reject | F |
