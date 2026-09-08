@@ -297,6 +297,9 @@ replicates routing already drawn on one instance of a repeated block onto its si
 - Configure MCP in your editor using the server path: `python tools\mykicadMcp\kicad_mcp_server.py`
 - Example tools: "List the components on the PCB", "Show me component R1 and its connections", "Provide details for net /MainControler/CLK"
 
+### PcTools Dependencies
+`tools/PcTools/uv.lock` is tracked in git and should be committed alongside any edits to `pyproject.toml`. The lockfile is kept in sync with declared dependencies and committed deliberately so dependency snapshots are reproducible across sessions.
+
 ## Firmware gotchas
 
 Symbolize a crash against the ELF that matches the RUNNING image, not
