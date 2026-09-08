@@ -281,6 +281,68 @@ static void test_divergence_tie_break_higher_rev_wins(void)
     cfg_fs_deinit();
 }
 
+// docs/audits/filesystem_migration_review_2026-09-07.md section 2: the
+// EQUAL-rev, DIFFERING-bytes case -- the one `file_rev >= nvs_rev` got
+// wrong (adopted the stale file) and check_cfg_fs_tie_break.ps1 now guards
+// against reintroducing. This is NOT the same scenario as
+// test_divergence_tie_break_higher_rev_wins() above (that one has NVS
+// STRICTLY ahead, rev 5 vs rev 1) -- an equal rev with differing bytes can
+// only happen when something wrote the NVS blob directly without knowing
+// about the rev counter, exactly what firmware from before this dual-write
+// existed does on a rollback: it writes NVS_KEY_RAMP_ASSIST but never
+// touches NVS_KEY_RAMP_ASSIST_REV, so rolling forward again finds
+// file_rev == nvs_rev with the file now stale. The correct answer is
+// unconditional: NVS is the newer side in this case, never the file.
+static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
+{
+    ra_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(RA_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    ramp_assist_cfg_set_enabled(true); // file+NVS both rev 1, both true
+
+    // Simulate "an edit made on rolled-back (pre-dual-write) firmware":
+    // overwrite ONLY the NVS blob, leaving its rev untouched at 1 -- exactly
+    // what a build that has never heard of NVS_KEY_RAMP_ASSIST_REV would do.
+    // The file is left at rev 1/true, now stale relative to this edit.
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, 0);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    // Precondition: this really is the equal-rev, differing-bytes case, not
+    // some other scenario -- confirmed directly against NVS before trusting
+    // the outcome below.
+    uint32_t precondition_rev = 0;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "precondition: NVS namespace opens");
+    hal_kv_get_u32(&h, NVS_KEY_RAMP_ASSIST_REV, &precondition_rev);
+    hal_kv_close(&h);
+    TEST_CHECK(precondition_rev == 1, "precondition: NVS rev is still 1 (untouched by the rollback-style write)");
+
+    simulate_reboot();
+    esp_err_t err = ramp_assist_cfg_start();
+    TEST_CHECK(err == ESP_OK, "start() succeeds across the equal-rev divergence");
+    TEST_CHECK(!ramp_assist_cfg_enabled(),
+               "equal rev, differing bytes: NVS (false) wins over the now-stale file (true) -- "
+               "the edit made on rolled-back firmware is NOT discarded");
+
+    // The file must be resynced to the winning (NVS) value, same as the
+    // strictly-higher-rev case above -- the divergence must not survive to
+    // the next boot.
+    uint8_t file_raw = 1;
+    uint32_t file_rev = 0;
+    bool file_valid = false;
+    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_validate, &file_raw, &file_rev,
+                          &file_valid);
+    TEST_CHECK(file_valid && file_raw == 0 && file_rev == 1, "the file was resynced from the winning NVS side");
+
+    cfg_fs_deinit();
+}
+
 static void test_mount_failed_falls_through_to_nvs_only(void)
 {
     ra_cfg_fs_reset();
@@ -365,6 +427,7 @@ void run_test_ramp_assist_cfg(void)
     test_file_preferred_when_both_valid_and_equal();
     test_nvs_fallback_when_file_absent();
     test_divergence_tie_break_higher_rev_wins();
+    test_equal_rev_divergence_adopts_nvs_not_the_stale_file();
     test_mount_failed_falls_through_to_nvs_only();
     test_interrupted_write_leaves_old_file_intact();
 
