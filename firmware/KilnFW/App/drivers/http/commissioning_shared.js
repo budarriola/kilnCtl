@@ -31,15 +31,24 @@
  *     window.confirm; `opts.namePrefix` customises the confirm dialog text.
  *     Resolves to {ok, message} -- never throws for an ordinary rejection.
  *
- * KNOWN DEBT, stated plainly because the earlier wording here was wrong:
- * ONLY setup_wizard_page.html loads this file. safety_commissioning_page.html
- * was deliberately NOT retrofitted in b284bd11 and still carries its own
- * findCriticalChanges()/checkFiringOrAutotuneRunning()/commit-and-read-back
- * implementation (see that file, around lines 1417/1453/1615-1720). So two
- * implementations of one safety-critical contract exist today, and a fix
- * applied to one silently leaves the other stale -- exactly the drift the
- * extraction was meant to end. Retrofit that page before adding a third
- * caller; until then, any change made here must be mirrored there by hand.
+ * RETROFITTED 2026-09-08 (review 5d03f8c2): safety_commissioning_page.html
+ * now consumes these three exports too (loads this file via
+ * <script src="/commissioning_shared.js">, same as setup_wizard_page.html;
+ * both are served from the one shared httpd handle -- see
+ * wifi_provision_http.c's commissioning_shared_js_uri, registered once for
+ * the whole server). Its local findCriticalChanges()/
+ * checkFiringOrAutotuneRunning()/commit-and-read-back copy is gone. Where
+ * the two implementations had drifted (the empty-criticalChanges success
+ * message wrongly claimed "confirmed by read-back" here when the safety
+ * page correctly said plain "Committed."; the confirm-dialog wording and the
+ * MAX31856-caveat wording differed cosmetically), the ORIGINAL,
+ * longer-standing safety-page behaviour won: the "Committed." bug is fixed
+ * here (so setup_wizard_page.html's step 7 gets the same fix), and the
+ * safety-specific wording is now this function's default with the wizard's
+ * differently-scoped writes (abs_max_temp_c/ct_installed/ct_topology, not
+ * only tc_type/tc_offset_c) overriding via opts.confirmPrefix as before.
+ * check_no_duplicate_commissioning_impl.ps1 fails the build if a second
+ * confirm-and-read-back implementation reappears in any served page.
  *
  * Domain-specific checks that are
  * NOT generic (checkTcMaxContradiction's tc_type/abs_max_temp_c
@@ -112,6 +121,25 @@
     opts = opts || {};
     var confirmFn = opts.confirmFn || global.confirm;
     var setMsg = opts.setMsg || function () {};
+    // 2026-09-08 retrofit (5d03f8c2): safety_commissioning_page.html's
+    // longer-standing wording differs from this module's own defaults in a
+    // few places (the confirm dialog's closing sentence, the busy-refusal's
+    // description of what is unsafe, the verified-success caveat about the
+    // MAX31856 chip). Preferring the original everywhere would mean this
+    // module speaking as if every caller only ever writes tc_type/tc_offset_c,
+    // which is not true for setup_wizard_page.html's step 7 (writes
+    // abs_max_temp_c/ct_installed/ct_topology too) -- so the ORIGINAL text
+    // stays the default (this function's oldest, proven-on-hardware caller),
+    // and callers with a narrower or differently-worded claim override via
+    // opts instead of this module silently drifting from either.
+    var confirmSuffix = opts.confirmSuffix ||
+      '\n\nA wrong value here silently misreads temperature. Continue?';
+    var busyAction = opts.busyAction ||
+      'changing the safety thermocouple configuration mid-run is not safe';
+    var verifyCaveat = opts.verifyCaveat ||
+      ' (this could not independently confirm the MAX31856 chip itself accepted the type -- ' +
+      'only that the safety processor\'s config record now holds it; see THERMOCOUPLE.md\'s ' +
+      'CR1-verify note).';
 
     function doPost() {
       var body = bodyPairs.map(function (p) {
@@ -132,10 +160,17 @@
         if (!res.httpOk || !res.j || res.j.ok !== true) {
           var reason = (res.j && res.j.field ? res.j.field + ' -- ' : '') +
             ((res.j && (res.j.reason || res.j.error)) || 'commit failed');
-          return { ok: false, message: 'Rejected: ' + reason, armed: /ARMED/i.test(reason) };
+          return { ok: false, posted: false, message: 'Rejected: ' + reason, armed: /ARMED/i.test(reason) };
         }
         if (!criticalChanges || !criticalChanges.length) {
-          return { ok: true, message: 'Committed and confirmed by read-back.' };
+          // No critical field was actually changed by this save, so no
+          // independent read-back was needed or performed -- do not claim
+          // one happened. (2026-09-08: this branch used to say "Committed
+          // and confirmed by read-back." unconditionally, which was simply
+          // false whenever criticalChanges was empty -- caught comparing
+          // against safety_commissioning_page.html's longer-standing
+          // behaviour, which only ever said "Committed." here.)
+          return { ok: true, posted: true, message: 'Committed.' };
         }
         // The server's own confirm_commit_landed() already forced a live
         // read-back before reporting {"ok":true}. This is this page's OWN,
@@ -154,19 +189,19 @@
           if (bad.length) {
             return {
               ok: false,
+              posted: true,
               message: 'FAILED: the safety processor reported success, but a fresh read of ' +
                 bad.map(function (b) { return b.name; }).join(', ') +
                 ' does NOT match what was just written -- treat the write as NOT confirmed. Reload ' +
-                'and re-check before firing.',
+                'this page and re-check before firing.',
             };
           }
           return {
             ok: true,
+            posted: true,
             message: 'Committed and confirmed by read-back: ' +
               criticalChanges.map(function (c) { return c.name + '=' + c.newDisplay; }).join(', ') +
-              ' (this cannot independently confirm the MAX31856 chip itself accepted a changed ' +
-              'thermocouple type -- only that the safety processor\'s config record now holds it; ' +
-              'max31856_tc_type_verified() is not on the wire).',
+              verifyCaveat,
           };
         }).catch(function () {
           return { ok: false, message: 'Committed, but this page\'s own re-verification fetch failed -- ' +
@@ -181,20 +216,20 @@
     setMsg('Checking it is safe to write the safety processor\'s flash…');
     return checkBusy().then(function (busyReason) {
       if (busyReason) {
-        return { ok: false, message: 'Refused: ' + busyReason + ' -- changing safety-processor ' +
-          'commissioning mid-run is not safe. Stop it first, then retry.' };
+        return { ok: false, posted: false, message: 'Refused: ' + busyReason + ' -- ' + busyAction +
+          '. Stop it first, then retry.' };
       }
       var lines = criticalChanges.map(function (c) {
         return c.name + ': ' + c.oldDisplay + ' -> ' + c.newDisplay;
       });
       var confirmed = confirmFn(
-        (opts.confirmPrefix || 'This WRITES THE SAFETY PROCESSOR\'S (RP2040) FLASH:') +
-        '\n\n' + lines.join('\n') +
-        '\n\nA wrong value here silently changes what the independent over-temperature protection ' +
-        'relies on. Continue?'
+        (opts.confirmPrefix ||
+          'This WRITES THE SAFETY PROCESSOR\'S (RP2040) FLASH and changes how its independent ' +
+          'over-temperature protection interprets its own thermocouple:') +
+        '\n\n' + lines.join('\n') + confirmSuffix
       );
       if (!confirmed) {
-        return { ok: false, message: 'Cancelled -- nothing was written.' };
+        return { ok: false, posted: false, message: 'Cancelled -- nothing was written.' };
       }
       return doPost();
     });

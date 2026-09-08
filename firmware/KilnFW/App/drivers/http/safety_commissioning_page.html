@@ -29,6 +29,14 @@
      precise list of what the coordinator still has to connect. -->
 <script defer src="/nav.js"></script>
 <script defer src="/app.js"></script>
+<!-- 2026-09-08 retrofit (review 5d03f8c2): the confirm+read-back contract for
+     the Advanced-view save (findCriticalChanges/checkFiringOrAutotuneRunning/
+     commit-and-verify) now lives once, in commissioning_shared.js, shared with
+     setup_wizard_page.html's step 7 -- see that file's own header comment.
+     Served from the same httpd handle as this page (wifi_provision_http.c's
+     commissioning_shared_js_uri, registered once for the whole server), so no
+     route/embedding change was needed beyond this <script> tag. -->
+<script defer src="/commissioning_shared.js"></script>
 <style>
   /* Shared KlipperScreen-derived palette, duplicated verbatim per page --
      see zones_page.html's identical comment for why (EMBED_TXTFILES'd
@@ -1414,63 +1422,29 @@ var CRITICAL_CONFIRM_FIELD_IDS = GROUPS.reduce(function (acc, g) {
 // would actually change, not merely re-submit unchanged. Each entry carries
 // old/new as DISPLAY strings (never touching what actually gets posted) so
 // the confirm dialog can name both without re-deriving formatting rules.
+// Retrofitted 2026-09-08 (review 5d03f8c2) onto commissioning_shared.js's
+// kcCommissioningFindCriticalChanges() -- this used to be a second,
+// independently-maintained copy of the same logic setup_wizard_page.html's
+// step 7 needs. `enumLabelFor` reproduces this page's own enum-lookup rule
+// ("only replace the display string if a matching enumOpts entry exists",
+// same as the old inline version) so the two callers cannot silently diverge
+// on how an enum id renders in the confirm dialog.
+function enumLabelForField(id, display) {
+  var f = FIELD_BY_ID[id];
+  if (!f || !f.enumOpts) return null;
+  var opt = f.enumOpts.filter(function (o) { return String(o[0]) === display; })[0];
+  return opt ? opt[1] : null;
+}
 function findCriticalChanges(body) {
-  var out = [];
-  var paramsById = {};
-  (latest && latest.params || []).forEach(function (p) { paramsById[p.id] = p; });
-  CRITICAL_CONFIRM_FIELD_IDS.forEach(function (id) {
-    var pair = body.filter(function (b) { return b.id === id; })[0];
-    if (!pair) return; // not part of this submission at all
-    var f = FIELD_BY_ID[id];
-    var oldP = paramsById[id];
-    var oldDisplay = (oldP && oldP.set) ? String(oldP.value) : '(unset)';
-    var newDisplay = pair.value;
-    // enum fields: show the human label, not the bare numeric code, so the
-    // confirm dialog reads "Type K -> Type T" rather than "3 -> 7".
-    if (f && f.enumOpts) {
-      var oldOpt = f.enumOpts.filter(function (o) { return String(o[0]) === oldDisplay; })[0];
-      var newOpt = f.enumOpts.filter(function (o) { return String(o[0]) === newDisplay; })[0];
-      if (oldOpt) oldDisplay = oldOpt[1];
-      if (newOpt) newDisplay = newOpt[1];
-    }
-    if (oldDisplay === newDisplay) return; // genuinely unchanged, nothing to confirm
-    out.push({ id: id, name: (f && f.name) || ('id ' + id), oldDisplay: oldDisplay, newDisplay: newDisplay });
-  });
-  return out;
+  return window.kcCommissioningFindCriticalChanges(
+    latest && latest.params, CRITICAL_CONFIRM_FIELD_IDS, body, enumLabelForField);
 }
 
-// Mirrors mcp_server_safety.py's _profile_or_autotune_running() refusal --
-// same two endpoints (/api/profile_exec, /api/autotune), same reasoning:
-// the Pico's own relay_owner refuses config writes while ARMED anyway, but a
-// live run is also not a safe time to change safety-guard commissioning out
-// from under it, and telling the operator BEFORE they type a confirmation
-// they will only see rejected is kinder than a round trip to find out.
-// Resolves to a reason string if busy, or null if clear to proceed; NEVER
-// rejects on a failed fetch (a firmware too old for one of these endpoints,
-// or a transient network hiccup, must not silently block every commissioning
-// write forever -- the Pico's own ARMED refusal remains the real backstop
-// either way).
+// Retrofitted onto commissioning_shared.js's kcCommissioningCheckBusy() --
+// same mcp_server_safety.py-mirroring reasoning as before (see that
+// function's own header comment), no longer duplicated here.
 function checkFiringOrAutotuneRunning() {
-  return Promise.all([
-    fetch('/api/profile_exec').then(function (r) { return r.json(); }).catch(function () { return null; }),
-    fetch('/api/autotune').then(function (r) { return r.json(); }).catch(function () { return null; }),
-  ]).then(function (results) {
-    var exec = results[0], at = results[1];
-    if (exec && exec.state === 'running') {
-      return 'a profile is currently firing (state: running)';
-    }
-    if (exec && exec.state === 'paused') {
-      return 'a profile is currently paused mid-firing (state: paused)';
-    }
-    // autotune_state_name() (dashboard_json.c) never returns "running" --
-    // its states are idle/settling/stepping/relay_approach/relay_cycling/
-    // done/aborted -- so "busy" is everything except the three states that
-    // are NOT an active run, not a single string match.
-    if (at && at.state && ['idle', 'done', 'aborted'].indexOf(at.state) === -1) {
-      return 'an autotune run is currently in progress (state: ' + at.state + ')';
-    }
-    return null;
-  });
+  return window.kcCommissioningCheckBusy();
 }
 
 function loadCurrent() {
@@ -1614,9 +1588,16 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   });
   // id-shaped pairs (not just the joined string) so findCriticalChanges()
   // can inspect them before the body is flattened for the wire.
+  // `name` is carried alongside id/value so commissioning_shared.js's
+  // findCriticalChanges() (which names a change from bodyPairs, not from a
+  // page-specific field table it has no knowledge of) can report "tc_type"
+  // rather than falling back to "id 261".
   var bodyPairs = body.map(function (s) {
     var m = /^id=(\d+)&value=(.*)$/.exec(s);
-    return m ? { id: Number(m[1]), value: decodeURIComponent(m[2]) } : null;
+    if (!m) return null;
+    var id = Number(m[1]);
+    var f = FIELD_BY_ID[id];
+    return { id: id, value: decodeURIComponent(m[2]), name: f && f.name };
   }).filter(Boolean);
 
   // Owner request 2026-09-08: tc_type/tc_offset_c change what the safety
@@ -1626,101 +1607,22 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   // the safety-critical write it is: refuse mid-run, then require an
   // explicit, NAMED confirmation before this ever reaches the wire.
   var criticalChanges = findCriticalChanges(bodyPairs);
-  function doSubmit() {
-    body.push('commit=1');
-    msg.textContent = 'Staging and committing…';
-    fetch('/api/safety/commissioning', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.join('&'),
-    }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
-    }).then(function (res) {
-      // F1 fix (opus review, same defect as gCommit()): a REJECTED commit is
-      // HTTP 200 with body {"ok":false,"reason":"..."} -- see safety_cfg_http.c
-      // :703-723. res.ok alone is never enough; the parsed body's own ok field
-      // is the only place a real success is distinguishable from an ARMED
-      // refusal, a RANGE/CONTRADICTION rejection, or a read-back failure.
-      if (!res.ok || !res.j || res.j.ok !== true) {
-        // "Names the offending field and the rule it broke" -- COMMISSIONING.md
-        // section 2.1/3.1. Rendered verbatim, not paraphrased, so this page
-        // never becomes a second place that rule-text can drift from the Pico's.
-        msg.textContent = 'Rejected: ' + (res.j && res.j.field ? res.j.field + ' -- ' : '') +
-          ((res.j && (res.j.reason || res.j.error)) || 'commit failed');
-      } else if (criticalChanges.length) {
-        // The server's own confirm_commit_landed() already forced a live
-        // read-back before reporting {"ok":true} -- a mismatch there is
-        // ALREADY reported as ok:false/FAILED above, never reaches here. This
-        // branch is this page's OWN, second, named confirmation of that same
-        // guarantee: re-fetch fresh (not the response body, which never
-        // carried params[]) and check the exact fields this save changed
-        // read back as what was sent, failing loudly -- naming the field --
-        // if this page's own check ever disagrees with the server's.
-        // CR1-verify gap (THERMOCOUPLE.md, max31856_tc_type_verified()): this
-        // confirms the safety processor's CONFIG RECORD now holds the value,
-        // not that the MAX31856 chip's own CR1 register accepted it -- that
-        // signal is not currently on the wire (uart_task_ids.h's status flags
-        // byte has no free bit), so it cannot be shown here. Said explicitly
-        // rather than silently implied.
-        msg.textContent = 'Committed. Verifying read-back…';
-        fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (fresh) {
-          var freshById = {};
-          (fresh.params || []).forEach(function (p) { freshById[p.id] = p; });
-          var bad = criticalChanges.filter(function (c) {
-            var p = freshById[c.id];
-            var pair = bodyPairs.filter(function (b) { return b.id === c.id; })[0];
-            return !p || !p.set || String(p.value) !== pair.value;
-          });
-          if (bad.length) {
-            msg.textContent = 'FAILED: the safety processor reported success, but a fresh read of ' +
-              bad.map(function (b) { return b.name; }).join(', ') +
-              ' does NOT match what was just written -- treat the write as NOT confirmed. Reload ' +
-              'this page and re-check before firing.';
-          } else {
-            msg.textContent = 'Committed and confirmed by read-back: ' +
-              criticalChanges.map(function (c) { return c.name + '=' + c.newDisplay; }).join(', ') +
-              ' (this could not independently confirm the MAX31856 chip itself accepted the type -- ' +
-              'only that the safety processor\'s config record now holds it; see THERMOCOUPLE.md\'s ' +
-              'CR1-verify note).';
-          }
-          loadCurrent();
-        }).catch(function () {
-          msg.textContent = 'Committed, but this page\'s own re-verification fetch failed -- ' +
-            'reload to confirm before firing.';
-          loadCurrent();
-        });
-      } else {
-        msg.textContent = 'Committed.';
-        loadCurrent();
-      }
-    }).catch(function (e) {
-      msg.textContent = 'Save failed: ' + e.message;
-    });
-  }
-
-  if (!criticalChanges.length) {
-    doSubmit();
-    return;
-  }
-  msg.textContent = 'Checking it is safe to write the safety processor\'s flash…';
-  checkFiringOrAutotuneRunning().then(function (busyReason) {
-    if (busyReason) {
-      msg.textContent = 'Refused: ' + busyReason + ' -- changing the safety thermocouple ' +
-        'configuration mid-run is not safe. Stop it first, then retry.';
-      return;
-    }
-    var lines = criticalChanges.map(function (c) {
-      return c.name + ': ' + c.oldDisplay + ' -> ' + c.newDisplay;
-    });
-    var confirmed = window.confirm(
-      'This WRITES THE SAFETY PROCESSOR\'S (RP2040) FLASH and changes how its independent ' +
-      'over-temperature protection interprets its own thermocouple:\n\n' + lines.join('\n') +
-      '\n\nA wrong value here silently misreads temperature. Continue?'
-    );
-    if (!confirmed) {
-      msg.textContent = 'Cancelled -- nothing was written.';
-      return;
-    }
-    doSubmit();
+  // Retrofitted 2026-09-08 (review 5d03f8c2) onto commissioning_shared.js's
+  // kcCommissioningCommitAndVerify() -- was this page's own second copy of
+  // the busy-check/confirm/POST/rejection-vs-success/independent-read-back
+  // contract setup_wizard_page.html's step 7 also needs. No opts overrides:
+  // this page's wording is the shared module's default (it is the older,
+  // proven-on-hardware behaviour the defaults were set to match), so nothing
+  // here should ever read differently than it did before this retrofit.
+  window.kcCommissioningCommitAndVerify(bodyPairs, criticalChanges, {
+    setMsg: function (t) { msg.textContent = t; },
+  }).then(function (res) {
+    msg.textContent = res.message;
+    // Matches the original's own rule: reload after any outcome where the
+    // write itself was accepted by the safety processor, regardless of
+    // whether this page's own independent read-back then agreed with it --
+    // never after a rejection, a busy refusal, or an operator cancel.
+    if (res.posted) { loadCurrent(); }
   });
 });
 
