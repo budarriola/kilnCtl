@@ -1,5 +1,18 @@
 # Filesystem plan
 
+> **WARNING (2026-09-08): do not flash commit `218f65f7`.** It panics
+> (`IllegalInstruction` on the `main` task) during early boot — before
+> Wi-Fi/HTTP/UART bring-up — after `117fc6f9`/`9d5da657` wired the `cfg`
+> LittleFS mount+auto-format-confirmation path into `main_boot_early.c`. The
+> board is left in a JTAG-only-recoverable state (no HTTP, no UART CONTROL
+> link). Recovery and root-cause notes: `docs/audits/boot_hang_2026-09-08.md`.
+> The originally-suspected mechanism (mount racing ahead of
+> `rtc_watchdog_start()`) was checked by reading `main_boot_early.c` and is
+> **not** what happens — the watchdog is armed first — so the real fault is
+> still open: something in or just after `cfg_fs_mount_device()` on a
+> freshly-flashed/blank `cfg` partition takes an illegal-instruction fault.
+> Do not reflash this commit until that is root-caused and fixed.
+
 Status check before planning new work: ROADMAP.md's only filesystem-shaped
 item is `docs/LITTLEFS_ASSESSMENT.md` (2026-09-06), and its answer was **not
 adopted** — NVS already wear-levels every KV write, SaftyFW has one 4 K
