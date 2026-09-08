@@ -1130,7 +1130,13 @@ try {
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $driversDir 'persist/boot_guard.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            # check_hal_include_boundary.ps1: cfg_fs_mount.c's format-timeout
+            # elapsed-time measurement moved off esp_timer_get_time() onto
+            # hal_time_now_us() (interface/hal_time.h) -- fake_time.c supplies
+            # it here, same convention as every other hal_time_now_us() caller
+            # in this file (see the other "fake_time.c supplies it" comments).
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
 
     Invoke-HostTestExe -Name "cfg_fs_mount_reentrancy" -ExePath $exe32 -BuildCmd $cmd32
 

@@ -10,7 +10,8 @@
 #include "esp_log.h"
 #include "esp_littlefs.h"
 #include "esp_partition.h"
-#include "esp_timer.h"
+
+#include "hal_time.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -126,7 +127,7 @@ uint32_t cfg_fs_mount_format_elapsed_ms(void)
     if (!s_auto_format_ever_started) {
         return 0;
     }
-    int64_t end_us = s_auto_format_completed ? s_auto_format_end_us : esp_timer_get_time();
+    int64_t end_us = s_auto_format_completed ? s_auto_format_end_us : hal_time_now_us();
     int64_t elapsed_us = end_us - s_auto_format_start_us;
     if (elapsed_us < 0) {
         return 0;
@@ -283,7 +284,7 @@ static bool wait_for_flash_worker(void)
 static void cfg_fs_auto_format_task(void *arg)
 {
     (void)arg;
-    s_auto_format_start_us = esp_timer_get_time();
+    s_auto_format_start_us = hal_time_now_us();
     ESP_LOGW(TAG, "cfg auto-format: background format starting (boot has already continued; poll GET "
                   "/api/cfgfs for progress)");
 
@@ -305,7 +306,7 @@ static void cfg_fs_auto_format_task(void *arg)
     }
     esp_err_t final_result = (dispatch_err != ESP_OK) ? dispatch_err : job.result;
 
-    s_auto_format_end_us = esp_timer_get_time();
+    s_auto_format_end_us = hal_time_now_us();
     s_auto_format_result = final_result;
     s_auto_format_completed = true;
     s_auto_format_in_progress = false;
