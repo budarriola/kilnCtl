@@ -383,6 +383,26 @@ void run_state_note_progress(const run_state_snapshot_t *snap)
     (void)snap;
 }
 
+/* Fakes for FILESYSTEM_PLAN.md's dual-write window (drivers/persist/
+ * dualwrite_window.h/cfg_fs.h): profile_executor.c's PROFILE_EXEC_DONE
+ * transitions call cfg_fs_is_available() to gate a
+ * dualwrite_window_note_firing_complete() call, same "define our own fake
+ * body rather than link the real module" convention as run_state_note()
+ * above and every zones_config_*()/profiles_http_get() fake in this file --
+ * this test never reaches PROFILE_EXEC_DONE (it only exercises the
+ * before-profile_executor_start() prestart guard), so a no-op body that
+ * satisfies the linker is enough; reporting "not available" from the fake
+ * keeps the (unreached) gate closed rather than silently claiming the
+ * filesystem is live in a test that never mounted one. */
+bool cfg_fs_is_available(void)
+{
+    return false;
+}
+
+void dualwrite_window_note_firing_complete(void)
+{
+}
+
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
@@ -908,6 +928,16 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
 {
     if (out_mask) *out_mask = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_thermo_mask[zone_index] : 0;
     return zone_index < MAX31856_CHANNEL_COUNT && g_stub_thermo_mask[zone_index] != 0;
+}
+
+/* docs/ON_OFF_ZONE_PLAN.md step 1: same shape as g_stub_thermo_mask above --
+ * every zone defaults to HEATER (false) so every pre-existing test in this
+ * file is bit-identical to before this field existed; step-2-shaped bit-
+ * identical proof this file doesn't otherwise carry. */
+static bool g_stub_zone_is_on_off[MAX31856_CHANNEL_COUNT];
+bool zone_is_on_off(uint8_t zone_index)
+{
+    return zone_index < MAX31856_CHANNEL_COUNT && g_stub_zone_is_on_off[zone_index];
 }
 
 // Settable for B2's negative test below -- see s_test_profiles_http_get_ok's

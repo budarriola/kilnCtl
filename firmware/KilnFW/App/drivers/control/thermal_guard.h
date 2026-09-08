@@ -193,6 +193,28 @@ typedef struct {
     const bool  *peer_ok;
     uint8_t      peer_count;
     uint8_t      peer_index_self;
+    /* peer_is_on_off[i] true means that channel belongs to a ZONE_TYPE_
+     * ON_OFF zone (docs/ON_OFF_ZONE_PLAN.md sec 1, guard 9/cross-zone row):
+     * an on/off device's channel is not comparable to a heater's, so it must
+     * be excluded from the OTHER side of every cross-zone comparison too, not
+     * just skipped when it is the zone being ticked (see on_off_zone below).
+     * NULL means "no on/off zones in this snapshot" -- every peer is treated
+     * as comparable, bit-identical to before this field existed. */
+    const bool  *peer_is_on_off;
+    /* True when THIS zone (the one thermal_guard_tick() is being called for)
+     * is ZONE_TYPE_ON_OFF (docs/ON_OFF_ZONE_PLAN.md sec 1's guard table).
+     * Guards 1 (heating-failed), 2 (wrong-direction), 3 (runaway) and 4
+     * (drift) all read a signature that a correctly-operating on/off device
+     * (a vent commanding duty 1.0 for hours with a flat or FALLING reading)
+     * produces as its completely normal, healthy behaviour -- guard 1's trip
+     * condition is identical to a working vent's signature, so there is no
+     * way to relax any of the four rather than not run them at all. Guards 5
+     * (max/min temp), 6 (sensor validity) and 7 (frozen sensor) are NOT
+     * gated by this flag -- they protect the kiln/sensor regardless of what
+     * the relay drives, and stay live whenever the zone has a thermocouple.
+     * Defaults false (a plain struct literal or memset(0)) so every existing
+     * caller/zone is bit-identical to before this field existed. */
+    bool on_off_zone;
 
     /* Relaxes ONLY guard 1's "still rising" requirement for this tick.
      * Exists for autotune_engine.c's step test: a step response that has

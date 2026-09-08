@@ -4221,6 +4221,55 @@ static void test_coupling_row_whole_setter_round_trip_and_bounds(void)
     nvs_test_clear();
 }
 
+// docs/ON_OFF_ZONE_PLAN.md sec 1 "belt and braces": an on/off zone's
+// coupling row AND column must both read zero, at every read, regardless of
+// what is actually stored -- and a caller may not write a nonzero cell
+// against an on/off zone's row or column either.
+static void test_coupling_zeroed_for_on_off_zone_row_and_column(void)
+{
+    TEST_SECTION("zones_config_get/set_coupling -- an on/off zone's row AND column are forced to "
+                 "zero, defense at both read and write time");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    // Zone 1 has real, previously-measured coupling to zones 0 and 2.
+    float row1[MAX31856_CHANNEL_COUNT] = {10.887f, 0.0f, 3.332f};
+    TEST_CHECK(zones_config_set_coupling(1, row1), "zone 1's row is accepted while still a HEATER");
+    // Zone 0 also names zone 1 as a neighbor (the OTHER side of zone 1's row).
+    float row0[MAX31856_CHANNEL_COUNT] = {0.0f, 4.2f, 0.0f};
+    TEST_CHECK(zones_config_set_coupling(0, row0), "zone 0's row (naming zone 1 as a neighbor) is accepted");
+
+    // Now make zone 1 an on/off device.
+    TEST_CHECK(zones_config_set_zone_type(1, ZONE_TYPE_ON_OFF), "zone 1 becomes ON_OFF");
+
+    // ROW: zone 1's own row must now read all-zero, even though the raw
+    // stored bytes still hold 10.887/3.332 -- "no neighbour's heat is
+    // corrected for on this zone".
+    float out_row[MAX31856_CHANNEL_COUNT] = {-1.0f, -1.0f, -1.0f};
+    TEST_CHECK(zones_config_get_coupling(1, out_row), "getter still succeeds");
+    TEST_CHECK_NEAR(out_row[0], 0.0f, 1e-9, "zone 1's row, cell 0, reads zero now that zone 1 is on/off");
+    TEST_CHECK_NEAR(out_row[2], 0.0f, 1e-9, "zone 1's row, cell 2, reads zero now that zone 1 is on/off");
+
+    // COLUMN: zone 0 (still a HEATER) must now see its OWN cell pointed at
+    // zone 1 read as zero too -- "this zone injects no heat into anyone".
+    float out_row0[MAX31856_CHANNEL_COUNT] = {-1.0f, -1.0f, -1.0f};
+    TEST_CHECK(zones_config_get_coupling(0, out_row0), "getter for zone 0 still succeeds");
+    TEST_CHECK_NEAR(out_row0[1], 0.0f, 1e-9,
+                    "zone 0's cell pointed at on/off zone 1 reads zero -- a fan injects no heat");
+
+    // WRITE side: a caller may not write a nonzero cell against zone 1's
+    // row, nor a nonzero cell pointed at zone 1 from another zone's row.
+    float bad_row1[MAX31856_CHANNEL_COUNT] = {1.0f, 0.0f, 0.0f};
+    TEST_CHECK(!zones_config_set_coupling(1, bad_row1), "a nonzero row for the on/off zone itself is refused");
+    float bad_row0[MAX31856_CHANNEL_COUNT] = {0.0f, 9.9f, 0.0f};
+    TEST_CHECK(!zones_config_set_coupling(0, bad_row0), "a nonzero cell pointed at the on/off zone is refused");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // The single-cell setter autotune_engine.c's finalize_fit() uses to persist
 // one neighbor's measured coefficient without disturbing the others.
 //
@@ -6058,6 +6107,201 @@ static void test_nvs_load_from_v21_blob_defaults_progress_band_c_to_default(void
               "resolves the migrated 0 sentinel to the 3.0 firmware default, not the raw 0.0 -- a "
               "board upgrading from v21 gets today's guard-1 arrival-band behaviour, not a near-zero "
               "band that demands a rise the moment it settles");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------------
+// docs/ON_OFF_ZONE_PLAN.md step 1 (ZONES_CFG_VERSION 22->23): zone_type/
+// failsafe_state/hyst_c/min_on_s/min_off_s, tail-appended after
+// progress_band_c. Same shape as the progress_band_c tests just above.
+
+// Accessor pair for zone_cfg_t::zone_type.
+static void test_zone_type_accessor_get_set_and_range(void)
+{
+    TEST_SECTION("zones_config_get/set_zone_type() -- round trip, per-zone isolation, "
+                 "refuse-don't-clamp bounds, and ZONE_TYPE_HEATER==0 as the fail-safe default");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.relay_count = 2;
+    s_zones.cfg.zones[0].relay_mask = 0x01;
+    s_zones.cfg.zones[0].thermo_mask = 0x01;
+    s_zones.cfg.zones[0].max_temp_c = 1300.0f;
+    s_zones.cfg.zones[1].relay_mask = 0x02;
+    s_zones.cfg.zones[1].thermo_mask = 0x02;
+    s_zones.cfg.zones[1].max_temp_c = 1300.0f;
+    s_zones.cfg.timing_profile_count = 1;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(nvs_save() == ESP_OK, "initial save must succeed");
+
+    zone_type_t got = ZONE_TYPE_ON_OFF;
+    TEST_CHECK(zones_config_get_zone_type(0, &got) && got == ZONE_TYPE_HEATER,
+              "a freshly-saved zone defaults to ZONE_TYPE_HEATER -- fail-safe default, not on/off");
+
+    zone_type_t ignored;
+    TEST_CHECK(!zones_config_get_zone_type(MAX31856_CHANNEL_COUNT, &ignored),
+              "get(zone_type) with an out-of-range zone index is refused");
+    TEST_CHECK(!zones_config_set_zone_type(MAX31856_CHANNEL_COUNT, ZONE_TYPE_ON_OFF),
+              "set(zone_type) with an out-of-range zone index is refused");
+    TEST_CHECK(!zones_config_set_zone_type(0, (zone_type_t)2),
+              "set(zone_type) with a value past ZONE_TYPE_ON_OFF is refused, not clamped");
+
+    TEST_CHECK(zones_config_set_zone_type(0, ZONE_TYPE_ON_OFF), "set(zone 0, ZONE_TYPE_ON_OFF) succeeds");
+    got = ZONE_TYPE_HEATER;
+    TEST_CHECK(zones_config_get_zone_type(0, &got) && got == ZONE_TYPE_ON_OFF,
+              "get(zone 0) reads back ON_OFF, from LIVE state");
+
+    zone_type_t got1 = ZONE_TYPE_ON_OFF;
+    TEST_CHECK(zones_config_get_zone_type(1, &got1) && got1 == ZONE_TYPE_HEATER,
+              "zone 1 is UNTOUCHED by zone 0's set() -- still HEATER");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg)); // wipe the live struct, force a real reload
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "reload after set() must succeed");
+    got = ZONE_TYPE_HEATER;
+    TEST_CHECK(zones_config_get_zone_type(0, &got) && got == ZONE_TYPE_ON_OFF,
+              "ZONE_TYPE_ON_OFF survives a genuine NVS round trip, not just an in-RAM poke");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Fail-safe default OFF: a zero-initialized zone_cfg_t (fresh save, partial
+// form, a migrated blob) must never report zone_type == ON_OFF or
+// failsafe_state == ON. This is the non-negotiable from docs/
+// ON_OFF_ZONE_PLAN.md sec 5 -- checked directly against the real struct
+// layout, not a mirror.
+static void test_zero_initialized_zone_cfg_is_heater_and_failsafe_off(void)
+{
+    TEST_SECTION("a zero-initialized zone_cfg_t must default to ZONE_TYPE_HEATER and "
+                 "failsafe_state==OFF -- zero must never energise a relay with nothing owning it");
+    zone_cfg_t z;
+    memset(&z, 0, sizeof(z));
+    TEST_CHECK(z.zone_type == ZONE_TYPE_HEATER, "zero-initialized zone_type is ZONE_TYPE_HEATER (0)");
+    TEST_CHECK(z.failsafe_state == 0, "zero-initialized failsafe_state is OFF (0)");
+}
+
+// Migration test (both directions per the task's own requirement): forward,
+// a v22 blob upconverts to v23 with the new fields on their safe-default
+// sentinels while every sibling field survives unchanged; and the round trip
+// (a v23 struct with the new fields set for real survives a genuine NVS
+// save/reload, same discipline test_zone_type_accessor_get_set_and_range()
+// above already exercises for zone_type alone) -- there is no v23->v22
+// downgrade path anywhere in this codebase (no migration ever goes
+// backwards; see docs/UPDATE_PROTOCOL.md's rollback-hazard note instead),
+// so "both directions" here means forward-migrate and round-trip, not an
+// actual downgrade converter.
+static void test_nvs_load_from_v22_blob_defaults_zone_type_and_failsafe_to_zero(void)
+{
+    TEST_SECTION("nvs_load_from -- a v22 blob upconverts to v23: every zone's new zone_type/"
+                 "failsafe_state/hyst_c/min_on_s/min_off_s land on their 0 sentinels, while "
+                 "progress_band_c/error_band_c/relay_type/settings_source survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v22_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 22;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].error_band_c = 15.0f; /* a REAL, non-default sibling field -- must survive untouched */
+    src.zones[0].relay_type = 1;       /* RELAY_TYPE_CONTACTOR -- must also survive untouched */
+    src.zones[0].progress_band_c = 5.0f; /* likewise -- v22's own newest field must survive too */
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src.zones[0].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src.zones[1].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+
+    src.crc32 = 0; // v22's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v22 blob must migrate to a valid current (v23) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    for (uint8_t j = 0; j < 2; j++) {
+        TEST_CHECK(out_cfg.zones[j].zone_type == ZONE_TYPE_HEATER,
+                  "v22 has no zone_type -- the raw migrated field lands on the ZONE_TYPE_HEATER (0) sentinel");
+        TEST_CHECK(out_cfg.zones[j].failsafe_state == 0,
+                  "v22 has no failsafe_state -- lands on the OFF (0) sentinel, never ON");
+        TEST_CHECK_NEAR(out_cfg.zones[j].hyst_c, 0.0f, 1e-9, "v22 has no hyst_c -- lands on the 0 sentinel");
+        TEST_CHECK(out_cfg.zones[j].min_on_s == 0, "v22 has no min_on_s -- lands on the 0 sentinel");
+        TEST_CHECK(out_cfg.zones[j].min_off_s == 0, "v22 has no min_off_s -- lands on the 0 sentinel");
+    }
+    TEST_CHECK_NEAR(out_cfg.zones[0].error_band_c, 15.0f, 1e-6, "sibling error_band_c survives the hop unchanged");
+    TEST_CHECK(out_cfg.zones[0].relay_type == 1, "sibling relay_type survives the hop unchanged");
+    TEST_CHECK_NEAR(out_cfg.zones[0].progress_band_c, 5.0f, 1e-6, "sibling progress_band_c survives the hop unchanged");
+
+    /* Round-trip leg: save the migrated config back out (with a real,
+     * nonzero opt-in on zone 0) and reload it via the CURRENT (v23) path --
+     * not another historical blob -- to prove the new fields persist for
+     * real, not only across a migration. */
+    s_zones.cfg = out_cfg;
+    TEST_CHECK(zones_config_set_zone_type(0, ZONE_TYPE_ON_OFF), "set(zone 0, ON_OFF) on the migrated config succeeds");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "reload of the v23-native save must succeed");
+    zone_type_t rt = ZONE_TYPE_HEATER;
+    TEST_CHECK(zones_config_get_zone_type(0, &rt) && rt == ZONE_TYPE_ON_OFF,
+              "ZONE_TYPE_ON_OFF survives a genuine v23-native NVS round trip");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// docs/ON_OFF_ZONE_PLAN.md sec 1/sec 2 predicates.
+static void test_zone_is_on_off_and_zone_needs_ceiling(void)
+{
+    TEST_SECTION("zone_is_on_off()/zone_needs_ceiling() -- the predicates every guard/ramp-lock/"
+                 "coupling/autotune exclusion in this pass is built on");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+    s_zones.cfg.relay_count = 3;
+    s_zones.cfg.zones[0].relay_mask = 0x01; s_zones.cfg.zones[0].thermo_mask = 0x01; s_zones.cfg.zones[0].max_temp_c = 1300.0f;
+    s_zones.cfg.zones[1].relay_mask = 0x02; s_zones.cfg.zones[1].thermo_mask = 0x02; s_zones.cfg.zones[1].max_temp_c = 1300.0f;
+    s_zones.cfg.zones[2].relay_mask = 0x04; /* zone 2: on/off, NO thermocouple assigned */
+    s_zones.cfg.timing_profile_count = 1;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(nvs_save() == ESP_OK, "initial save must succeed");
+
+    TEST_CHECK(!zone_is_on_off(0), "zone 0 (HEATER, default) is not on/off");
+    TEST_CHECK(zone_needs_ceiling(0), "a HEATER zone always needs a ceiling");
+
+    TEST_CHECK(zones_config_set_zone_type(1, ZONE_TYPE_ON_OFF), "set zone 1 to ON_OFF");
+    TEST_CHECK(zone_is_on_off(1), "zone 1 now reports on/off");
+    TEST_CHECK(zone_needs_ceiling(1), "an on/off zone WITH a thermocouple still needs a ceiling");
+
+    TEST_CHECK(zones_config_set_zone_type(2, ZONE_TYPE_ON_OFF), "set zone 2 to ON_OFF");
+    TEST_CHECK(zone_is_on_off(2), "zone 2 reports on/off");
+    TEST_CHECK(!zone_needs_ceiling(2), "an on/off zone with NO thermocouple does not need a ceiling");
+
+    TEST_CHECK(!zone_is_on_off(MAX31856_CHANNEL_COUNT), "an out-of-range index is fail-closed to \"not on/off\"");
+    TEST_CHECK(zone_needs_ceiling(MAX31856_CHANNEL_COUNT), "an out-of-range index is fail-closed to \"needs a ceiling\"");
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -9084,6 +9328,7 @@ void run_test_zones_http(void)
     test_zones_get_handler_succeeds_when_malloc_does_not_fail();
     test_fuzzy_strength_pct_setter_round_trip_and_bounds();
     test_coupling_row_whole_setter_round_trip_and_bounds();
+    test_coupling_zeroed_for_on_off_zone_row_and_column();
     test_coupling_single_cell_setter_preserves_other_cells();
     test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed();
     test_settings_source_setter_round_trip_and_bounds();
@@ -9106,6 +9351,10 @@ void run_test_zones_http(void)
     test_progress_band_c_accessor_get_set_and_range();
     test_NEGATIVE_wrong_zone_progress_band_read_is_caught();
     test_nvs_load_from_v21_blob_defaults_progress_band_c_to_default();
+    test_zone_type_accessor_get_set_and_range();
+    test_zero_initialized_zone_cfg_is_heater_and_failsafe_off();
+    test_nvs_load_from_v22_blob_defaults_zone_type_and_failsafe_to_zero();
+    test_zone_is_on_off_and_zone_needs_ceiling();
     test_NEGATIVE_wrong_zone_band_read_is_caught();
     test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught();
     test_settings_source_save_reload_inheritance_round_trip();
@@ -9202,10 +9451,15 @@ void run_test_zones_http(void)
  * rather than in a shared header since nothing else needs it. */
 extern void run_test_zones_config_cfg_fs(void);
 
+/* test_relay_names_cfg_fs.c -- same convention, item 3's cfg_fs dual-write
+ * bridge tests. */
+extern void run_test_relay_names_cfg_fs(void);
+
 int main(void)
 {
     run_test_zones_http();
     run_test_zones_config_cfg_fs();
+    run_test_relay_names_cfg_fs();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);

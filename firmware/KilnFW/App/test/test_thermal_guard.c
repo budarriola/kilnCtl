@@ -1036,6 +1036,130 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped, "progress_band_c=10 puts an 8 C error inside the band, so no rise is demanded");
     }
 
+    /* docs/ON_OFF_ZONE_PLAN.md sec 1: guard 1's key finding. Duty commanded
+     * at 1.0 for 10x the progress window while the reading stays perfectly
+     * FLAT is exactly a healthy vent's signature -- and today's guard 1
+     * (in.on_off_zone left false, the pre-this-pass behaviour) trips it as
+     * HEATING_FAILED. With on_off_zone set, it must not trip at all. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.on_off_zone = true;
+        in.setpoint_c = 600.0f;
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 3000 && !tripped; i++) { /* 3000*10s = 300 min, 10x PROGRESS_WINDOW_S (300s=5min) */
+            /* Dithered, same guard-7 (frozen sensor) reason every other
+             * dithered case in this file uses: a bit-exact-flat reading
+             * would trip guard 7 (unaffected by on_off_zone -- see the
+             * guard 5/6/7 case below), which would prove nothing about
+             * guard 1 specifically. Net rise across the whole run is 0. */
+            in.measurement_c = (i % 2) ? 400.1f : 400.0f;
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "on_off_zone: duty 1.0 for 10x the progress window with a flat reading "
+                             "must NOT trip guard 1 -- this is a healthy vent's normal signature");
+    }
+
+    /* Same shape, falling instead of flat -- guard 2's case, and a vent's
+     * actual purpose (dump heat while commanded on). */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f,
+                                   .wrong_dir_rate_c_per_min = 0.1f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.on_off_zone = true;
+        in.setpoint_c = 600.0f;
+        in.measurement_c = 610.0f; /* at/above setpoint -- guard 2's falling-while-heating branch */
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 100 && !tripped; i++) {
+            in.measurement_c -= 5.0f; /* falling fast -- would easily trip guard 2 on a heater */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "on_off_zone: falling fast while commanded on must NOT trip guard 2 -- "
+                             "this IS the intended use (a vent dumping heat)");
+    }
+
+    /* Guard 3 (runaway, heat off) and guard 4 (drift) must also stay quiet. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f,
+                                   .off_settle_s = 30.0f, .runaway_margin_c = 5.0f, .drift_period_s = 60.0f,
+                                   .drift_hysteresis_c = 3.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.on_off_zone = true;
+        in.setpoint_c = 600.0f;
+        in.measurement_c = 400.0f; /* far outside any drift band, commanded off */
+        in.commanded_duty = 0.0f;
+        bool tripped = false;
+        for (int i = 0; i < 60 && !tripped; i++) {
+            in.measurement_c += 2.0f; /* rising 12 C/min with heat commanded OFF -- would trip guard 3 on a heater */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "on_off_zone: rising with heat commanded off must NOT trip guard 3, and "
+                             "sitting far from setpoint must NOT trip guard 4 (no setpoint to drift from)");
+    }
+
+    /* Guards 5/6/7 (max/min temp, sensor validity, frozen) are UNCHANGED for
+     * an on/off zone -- they protect the sensor/kiln regardless of what the
+     * relay drives. Guard 5 here, as the simplest to isolate. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 500.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.on_off_zone = true;
+        in.measurement_c = 600.0f; /* over the ceiling */
+        bool tripped = thermal_guard_tick(&s, &cfg, &in);
+        TEST_CHECK(tripped && s.reason == THERMAL_GUARD_TRIP_MAX_TEMP,
+                  "on_off_zone: guard 5 (max_temp_c) still trips -- protects the kiln regardless of "
+                  "what the relay drives");
+    }
+
+    /* Guard 9/cross-zone: an on/off zone excluded from BOTH sides -- as the
+     * zone being ticked (peer readings ignored), and as a PEER of another
+     * (heater) zone's own tick. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f,
+                                   .cross_zone_max_delta_c = 10.0f, .cross_zone_period_s = 30.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.on_off_zone = true; /* zone being ticked IS the on/off zone */
+        in.measurement_c = 20.0f;
+        float peers[2] = {20.0f, 500.0f}; /* wildly different from a "neighbour" -- would trip if evaluated */
+        bool peer_ok[2] = {true, true};
+        in.peer_c = peers;
+        in.peer_ok = peer_ok;
+        in.peer_count = 2;
+        in.peer_index_self = 0;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) tripped = thermal_guard_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "on_off_zone as the zone being ticked: guard 9 does not evaluate at all");
+
+        /* Now the OTHER side: a HEATER zone's own tick must not see this
+         * on/off zone as a comparable peer either. */
+        thermal_guard_reset(&s);
+        in = base_input();
+        in.on_off_zone = false; /* zone being ticked is a HEATER */
+        in.measurement_c = 20.0f;
+        bool peer_is_on_off[2] = {false, true}; /* peer 1 (500.0C, wildly different) IS on/off */
+        in.peer_c = peers;
+        in.peer_ok = peer_ok;
+        in.peer_is_on_off = peer_is_on_off;
+        in.peer_count = 2;
+        in.peer_index_self = 0;
+        tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) tripped = thermal_guard_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "a HEATER zone's own tick excludes an on/off PEER from guard 9's comparison -- "
+                             "a vent reading 480C different is the design working, not a fault");
+    }
+
     /* thermal_guard_clear() fully un-latches and resets windows. */
     {
         thermal_guard_state_t s;

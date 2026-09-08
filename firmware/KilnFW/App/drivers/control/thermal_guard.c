@@ -155,8 +155,19 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
     /* --- Guards 1 & 2: heating-failed / wrong-direction --------------------
      * Both share one rolling window over "duty is at/above the progress
      * threshold" periods; which guard applies depends on which way the
-     * error points. */
-    if (in->commanded_duty >= effective_f(cfg->progress_duty_min, PROGRESS_DUTY_MIN)) {
+     * error points.
+     *
+     * ON_OFF_ZONE_PLAN.md sec 1: disabled entirely for an on/off zone. A
+     * correctly working vent commands duty 1.0 for hours and produces no
+     * rise at all (often a fall) -- guard 1's whole trip condition ("duty
+     * high, temperature flat") is also a healthy vent's normal operating
+     * signature, and guard 2 would trip immediately on the falling-while-
+     * commanded-on case that IS the intended use. Nothing about either
+     * guard's own logic can tell the two apart; not running them is the
+     * only correct fix. */
+    if (in->on_off_zone) {
+        state->progress_window_active = false;
+    } else if (in->commanded_duty >= effective_f(cfg->progress_duty_min, PROGRESS_DUTY_MIN)) {
         float error = in->setpoint_c - in->measurement_c;
         if (!state->progress_window_active) {
             state->progress_window_active = true;
@@ -293,8 +304,17 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
         state->progress_window_active = false;
     }
 
-    /* --- Guard 3: runaway with heat off (welded contact) ------------------- */
-    if (in->commanded_duty <= 0.0f) {
+    /* --- Guard 3: runaway with heat off (welded contact) -------------------
+     * ON_OFF_ZONE_PLAN.md sec 1: disabled for an on/off zone -- this guard
+     * infers a welded output from "temperature rising while commanded off",
+     * which an on/off channel's relay cannot express (its whole job may BE
+     * cooling while on). Welded-contactor detection for this output is a
+     * CT/contactor-feedback problem, out of scope here -- see the plan's
+     * accepted-coverage-gap note. */
+    if (in->on_off_zone) {
+        state->off_window_active = false;
+        state->runaway_rate_baseline_valid = false;
+    } else if (in->commanded_duty <= 0.0f) {
         /* Computed once per tick so the settle threshold and the "sample too
          * short to rate" cutoff below always agree on the same window,
          * whatever this zone's override is -- the false positive this guard
@@ -409,7 +429,10 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * the idle-arming backstop above ever mattering: idle_elapsed_s still
      * accumulates (harmless, unread by anything else), but nothing below
      * reads settled_or_timed_out when no_setpoint is set. */
-    if (!in->no_setpoint) {
+    /* ON_OFF_ZONE_PLAN.md sec 1: disabled for an on/off zone, same reasoning
+     * as in->no_setpoint just above -- "drifted from setpoint" has no
+     * meaning for a device with no setpoint to drift from. */
+    if (!in->no_setpoint && !in->on_off_zone) {
         float abs_error = fabsf(in->setpoint_c - in->measurement_c);
         float drift_band_c = effective_f(cfg->drift_hysteresis_c, DRIFT_HYSTERESIS_C);
         float drift_period_cfg = effective_f(cfg->drift_period_s, DRIFT_PERIOD_S);
@@ -440,12 +463,16 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * has no default. Compared against the *worst* disagreeing peer rather
      * than an average: with three zones, an average would let one badly wrong
      * channel hide behind a healthy one. */
-    if (cfg->cross_zone_max_delta_c > 0.0f && in->peer_c && in->peer_count > 0) {
+    if (!in->on_off_zone && cfg->cross_zone_max_delta_c > 0.0f && in->peer_c && in->peer_count > 0) {
         float worst_delta = 0.0f;
         int worst_peer = -1;
         for (uint8_t i = 0; i < in->peer_count; i++) {
             if (i == in->peer_index_self) continue;
             if (in->peer_ok && !in->peer_ok[i]) continue; /* untrustworthy reading -- guard 6's problem, not this one */
+            /* ON_OFF_ZONE_PLAN.md sec 1: exclude an on/off zone from the
+             * OTHER side of this comparison too -- a vent reading 200C below
+             * its heater neighbours is the design working, not a fault. */
+            if (in->peer_is_on_off && in->peer_is_on_off[i]) continue;
             float delta = fabsf(in->measurement_c - in->peer_c[i]);
             if (delta > worst_delta) {
                 worst_delta = delta;

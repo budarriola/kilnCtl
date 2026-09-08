@@ -60,7 +60,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 22
+#define ZONES_CFG_VERSION 23
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -748,7 +748,148 @@ typedef struct {
      * convert_versioned_blob_to_current()'s entry memset, which is already
      * today's real, correct behaviour for every existing board. */
     float progress_band_c;
+    /* ---- ZONES_CFG_VERSION 22->23 (2026-09-07, docs/ON_OFF_ZONE_PLAN.md
+     * step 1, two owner decisions: "extend the existing mechanism" -- this
+     * is a NEW tail-append, not a reuse of PROFILE_SEG_KIND_RELAY_IO, which
+     * is a one-shot per-segment timeline event on a non-zone output and
+     * cannot express a state-driven, re-evaluated-every-tick zone type --
+     * and "fail-safe default OFF, with a per-zone confirm-gated opt-in to
+     * ON" -- see failsafe_state below.
+     *
+     * zone_type: ZONE_TYPE_HEATER = 0 (zones_config_accessors.h) is the
+     * migration default for every existing zone and the zero-initialized
+     * default for a fresh/partial config, identical in shape to relay_type's
+     * own v19->v20 migration -- every migrated/fresh zone keeps behaving
+     * exactly as it does today. Deliberately not zone_control_mode_t (see
+     * that enum's own comment): mode answers "how is duty computed", type
+     * answers "is this a heat source at all", and overloading one field for
+     * both would make every `mode >= PID` test in the tree silently
+     * correct-looking while making the coupling matrix's meaning depend on a
+     * field it never reads today. */
+    uint8_t zone_type;
+    /* failsafe_state: 0 = OFF (default), 1 = ON. ON/OFF_ZONE_PLAN.md sec 5:
+     * the default MUST stay OFF -- a zero-initialized struct (a fresh save,
+     * a partial form, a migrated v22 blob) must never leave a relay
+     * energised with nothing owning it, same reasoning as
+     * io_leave_on_at_end's own 0 default. An owner who wants a fail-safe-ON
+     * device (e.g. a vent that should dump heat on a trip) sets this
+     * explicitly through a UI that requires a confirmation for that specific
+     * choice -- not implemented this pass (step 1 is schema + safety
+     * exclusions only), but the field's storage and default are pinned now
+     * so no later pass has to touch the schema again for it. */
+    uint8_t failsafe_state;
+    /* hyst_c: temperature hysteresis for a future trigger evaluator (plan
+     * sec 3), 0 -> 2.0f default at read, same "0 is always a safe, must-
+     * substitute" convention as progress_band_c just above. Unused by any
+     * consumer this pass -- see zones_config_json.c's own comment on why a
+     * pure schema step ships with no reader yet. */
+    float hyst_c;
+    /* min_on_s/min_off_s: minimum on/off dwell for the same future trigger
+     * evaluator, 0 -> 30 default at read. Unused by any consumer this pass,
+     * same reasoning as hyst_c above. */
+    uint16_t min_on_s;
+    uint16_t min_off_s;
 } zone_cfg_t;
+
+/* Frozen v22 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 22->23): predates zone_type/failsafe_state/
+ * hyst_c/min_on_s/min_off_s. Field order hand-copied from v22's actual
+ * shape, never derived from the live struct -- same discipline as every
+ * other frozen zone_cfg_vN_t in this file, and closes the one review found
+ * missing (docs/audits/): every prior frozen snapshot has a `_Static_assert`
+ * pinning its size; this is v22's. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source[SRC_GROUP_COUNT];
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+    float error_band_c;
+    float rate_band_c_per_s;
+    uint8_t relay_type;
+    float progress_band_c;
+} zone_cfg_v22_t;
+
+/* 220 = 216 (zone_cfg_v21_t's own byte-for-byte size) + 4 (progress_band_c),
+ * a pure tail append with no new padding since a float lands on its own
+ * natural 4-byte alignment straight after relay_type. Confirmed against a
+ * standalone layout replica of this exact struct, never sizeof(zone_cfg_t) --
+ * see zone_cfg_v21_t's own assert comment for why that name is never safe to
+ * use for this purpose. */
+_Static_assert(sizeof(zone_cfg_v22_t) == 220,
+               "zone_cfg_v22_t must match the on-flash v22 layout byte-for-byte (220 bytes)"); /* v22 -- predates zone_type */
+
+/* Per-field offsetof assertions for zone_cfg_v22_t -- same rationale as
+ * zone_cfg_v21_t's own block below it. */
+_Static_assert(offsetof(zone_cfg_v22_t, name) == 0,
+               "zone_cfg_v22_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v22_t, cal_offset_c) == 16,
+               "zone_cfg_v22_t::cal_offset_c must stay at byte offset 16");
+_Static_assert(offsetof(zone_cfg_v22_t, relay_mask) == 148,
+               "zone_cfg_v22_t::relay_mask must stay at byte offset 148");
+_Static_assert(offsetof(zone_cfg_v22_t, control_mode) == 149,
+               "zone_cfg_v22_t::control_mode must stay at byte offset 149");
+_Static_assert(offsetof(zone_cfg_v22_t, settings_source) == 154,
+               "zone_cfg_v22_t::settings_source must stay at byte offset 154");
+_Static_assert(offsetof(zone_cfg_v22_t, coupling_diag_k_dc) == 192,
+               "zone_cfg_v22_t::coupling_diag_k_dc must stay at byte offset 192");
+_Static_assert(offsetof(zone_cfg_v22_t, ease_off_window_mult) == 196,
+               "zone_cfg_v22_t::ease_off_window_mult must stay at byte offset 196");
+_Static_assert(offsetof(zone_cfg_v22_t, approach_rate_cap_c_per_hr) == 200,
+               "zone_cfg_v22_t::approach_rate_cap_c_per_hr must stay at byte offset 200");
+_Static_assert(offsetof(zone_cfg_v22_t, error_band_c) == 204,
+               "zone_cfg_v22_t::error_band_c must stay at byte offset 204");
+_Static_assert(offsetof(zone_cfg_v22_t, rate_band_c_per_s) == 208,
+               "zone_cfg_v22_t::rate_band_c_per_s must stay at byte offset 208");
+_Static_assert(offsetof(zone_cfg_v22_t, relay_type) == 212,
+               "zone_cfg_v22_t::relay_type must stay at byte offset 212");
+_Static_assert(offsetof(zone_cfg_v22_t, progress_band_c) == 216,
+               "zone_cfg_v22_t::progress_band_c must stay at byte offset 216");
 
 /* Frozen v21 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 21->22): predates progress_band_c. Field
@@ -2583,6 +2724,27 @@ typedef struct {
     uint32_t crc32;
 } zones_cfg_v20_t; /* v20 -- what zones_cfg_t looked like immediately before THIS
                      * pass; predates the settings_source per-group split. */
+
+/* Frozen v22 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 22->23): zones[] is the per-zone shape that
+ * predates zone_type/failsafe_state/hyst_c/min_on_s/min_off_s
+ * (zone_cfg_v22_t, frozen above). This is what a LIVE, already-commissioned
+ * v22 board looks like on flash right now -- the exact blob a v22->v23
+ * upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v22_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v22_t; /* v22 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates zone_type. */
 
 /* Frozen v21 layout -- what zones_cfg_t looked like immediately before THIS
  * pass (ZONES_CFG_VERSION 21->22): zones[] is the per-zone shape that

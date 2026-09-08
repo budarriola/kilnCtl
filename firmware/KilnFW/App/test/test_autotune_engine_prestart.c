@@ -605,6 +605,18 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
     return true;
 }
 
+// docs/ON_OFF_ZONE_PLAN.md step 1: same shape as s_stub_thermo_mask above --
+// false (HEATER) by default so every existing test in this file is
+// unaffected; test_run_refuses_on_off_zone() below sets this true to
+// exercise autotune_begin_run_locked()'s new prestart refusal.
+static bool s_stub_zone_is_on_off = false;
+
+bool zone_is_on_off(uint8_t zone_index)
+{
+    (void)zone_index;
+    return s_stub_zone_is_on_off;
+}
+
 bool zones_config_is_valid(void)
 {
     // True so autotune_begin_run_locked() (real code, called for real by the
@@ -2663,6 +2675,50 @@ static void test_run_refuses_zone_with_no_thermo_mask(void)
     errbuf[0] = '\0';
     ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
     TEST_CHECK(ok, "control: with a thermo_mask assigned, the identical setup must succeed");
+}
+
+// docs/ON_OFF_ZONE_PLAN.md step 1: an on/off zone must refuse autotune at
+// prestart, the same shape/place as the thermo_mask==0 refusal just above --
+// and BEFORE it, so a TC-equipped on/off zone gets this message rather than
+// passing the thermo_mask check only to fail later on a flat trace.
+static void test_run_refuses_on_off_zone(void)
+{
+    TEST_SECTION("autotune_engine_run() refuses a ZONE_TYPE_ON_OFF zone before any heating starts");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_stub_thermo_mask = 0x01; /* a TC IS assigned -- must still refuse on zone_type alone */
+    s_stub_zone_is_on_off = true;
+
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+
+    TEST_CHECK(!ok, "an on/off zone must refuse the autotune run before any heating starts");
+    TEST_CHECK(strstr(errbuf, "on/off") != NULL, "the refusal must name the zone as an on/off device");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE,
+               "a refused run must never leave the engine in a running state");
+
+    // Control case: with zone_type restored to HEATER, the identical setup
+    // (still with a real thermo_mask) succeeds -- proves the refusal above is
+    // really about zone_type, not some other side effect of this test's setup.
+    s_stub_zone_is_on_off = false;
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    errbuf[0] = '\0';
+    ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "control: with zone_type back to HEATER, the identical setup must succeed");
 }
 
 // The shared heat claim's atomic gate (relay_authority.h) -- proves the LATE
@@ -5902,6 +5958,7 @@ void run_test_autotune_engine_prestart(void)
 
     test_run_refuses_while_zone_sweep_is_active();
     test_run_refuses_zone_with_no_thermo_mask();
+    test_run_refuses_on_off_zone();
     test_run_refuses_at_atomic_heat_claim_gate();
 
     // Heat-enable (K4) wiring -- each starts from its own

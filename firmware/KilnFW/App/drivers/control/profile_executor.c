@@ -26,6 +26,11 @@
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
+#include "dualwrite_window.h" /* FILESYSTEM_PLAN.md dual-write window: note a completed firing
+                                * that ran with cfg_fs live, toward the "one complete firing run
+                                * file-backed" exit criterion -- see the two call sites below */
+#include "cfg_fs.h" /* cfg_fs_is_available() -- gates the note above on the filesystem
+                      * actually having been the live path for this run */
 #include "safety_trip_words.h" /* safety_fault_source_words() -- ROADMAP.md M13, decode the
                                  * fault-source mask for the operator instead of a bare hex value */
 #include "sim_backend.h"
@@ -404,6 +409,13 @@ void executor_task_entry(void *arg)
             }
         }
         float raw_c[MAX31856_CHANNEL_COUNT];    /* per ZONE: this zone's combined raw reading */
+        bool zone_on_off[MAX31856_CHANNEL_COUNT]; /* per ZONE: docs/ON_OFF_ZONE_PLAN.md sec 1 --
+                                                    * snapshotted once per tick, same "one consistent
+                                                    * picture" reasoning as raw_c/sensor_ok, and handed to
+                                                    * thermal_guard_tick() both as this zone's own
+                                                    * on_off_zone flag and as every OTHER zone's
+                                                    * peer_is_on_off[] so guard 9/cross-zone excludes an
+                                                    * on/off zone from both sides of the comparison. */
         bool sensor_ok[MAX31856_CHANNEL_COUNT]; /* per ZONE: true iff >=1 assigned channel is valid --
                                                   * this IS guard 6's extended "invalid" definition
                                                   * (TODO.md 10.8: "all assigned thermocouples for
@@ -415,6 +427,7 @@ void executor_task_entry(void *arg)
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             raw_c[zi] = NAN;
             sensor_ok[zi] = false;
+            zone_on_off[zi] = zone_is_on_off(zi);
             if (!s_exec.zones[zi].active) continue;
             /* Live read every tick, not cached in zone_runtime_t -- same
              * "no hardware-safety handover needed" reasoning
@@ -457,6 +470,12 @@ void executor_task_entry(void *arg)
         uint8_t lagging = 0;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
+            /* docs/ON_OFF_ZONE_PLAN.md sec 1: an on/off zone has no actual_c
+             * obligation to a shared setpoint -- leaving it in this loop
+             * would let a zone sitting at ambient (or with no thermocouple
+             * at all) freeze the whole firing's ramp forever. Hard
+             * requirement, not an optimisation. */
+            if (zone_is_on_off(zi)) continue;
             /* ONE-SIDED (2026-09-03, hot-start defect): only a zone that is
              * COLDER than the shared target by more than the band can hold
              * the lock. A zone that is HOTTER than target by the same
@@ -599,6 +618,12 @@ void executor_task_entry(void *arg)
                     capture_run_snapshot(&done_snap);
                     xSemaphoreGive(s_exec.lock);
                     run_state_note(RUN_STATE_PHASE_DONE, &done_snap.snap);
+                    if (cfg_fs_is_available()) {
+                        /* FILESYSTEM_PLAN.md dual-write window: this run reached a genuine
+                         * completion with cfg_fs live -- counts toward the exit criterion's
+                         * "one complete firing run file-backed" leg. Sticky/idempotent. */
+                        dualwrite_window_note_firing_complete();
+                    }
                     continue;
                 }
                 seg = &s_exec.profile.segments[s_exec.segment_index];
@@ -722,6 +747,12 @@ void executor_task_entry(void *arg)
                         capture_run_snapshot(&done_snap);
                         xSemaphoreGive(s_exec.lock);
                         run_state_note(RUN_STATE_PHASE_DONE, &done_snap.snap);
+                        if (cfg_fs_is_available()) {
+                            /* FILESYSTEM_PLAN.md dual-write window: this run reached a genuine
+                             * completion with cfg_fs live -- counts toward the exit criterion's
+                             * "one complete firing run file-backed" leg. Sticky/idempotent. */
+                            dualwrite_window_note_firing_complete();
+                        }
                         continue;
                     }
                     s_exec.dwelling = false;
@@ -1154,6 +1185,13 @@ void executor_task_entry(void *arg)
                 .peer_ok = sensor_ok,
                 .peer_count = MAX31856_CHANNEL_COUNT,
                 .peer_index_self = zi,
+                /* docs/ON_OFF_ZONE_PLAN.md sec 1: guards 1/2/3/4/9 disabled
+                 * for an on/off zone (thermal_guard.c gates each block on
+                 * this), guards 5/6/7/8 unaffected. peer_is_on_off excludes
+                 * every on/off zone from the OTHER side of guard 9 too, for
+                 * every zone's tick, not only an on/off zone's own. */
+                .peer_is_on_off = zone_on_off,
+                .on_off_zone = zone_on_off[zi],
             };
             if (thermal_guard_tick(&z->guard_state, &guard_cfg_this_tick, &gin)) {
                 if (escalate_guard_trip(zi, z->guard_state.reason, z->guard_state.detail)) {

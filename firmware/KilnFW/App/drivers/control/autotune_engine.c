@@ -974,6 +974,23 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * exists to prevent cheaply, up front, instead of hours in. Checked here,
      * not only in the tick, for the same "refuse before any heating starts"
      * convention as every other check in this function. */
+    /* docs/ON_OFF_ZONE_PLAN.md sec 1/step 1: refuse an on/off zone BEFORE
+     * the thermo_mask check just below, same "refuse before any heating"
+     * convention as every other check in this function -- a TC-equipped
+     * on/off zone (legal per plan sec 2) must get THIS message, not sail
+     * past the thermo_mask check only to fail later on a flat trace that
+     * looks identical to a genuinely dead element. An on/off zone is never a
+     * heat source (plan sec 1's "one rule governs everything"): autotune has
+     * no step response to identify on it at all. */
+    if (zone_is_on_off(zone_index)) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "zone %u is an on/off device, not a heater -- autotune has nothing to identify",
+                     zone_index);
+        }
+        return false;
+    }
+
     uint8_t tmask = 0;
     if (!zones_config_get_thermo_mask(zone_index, &tmask) || tmask == 0) {
         if (err_msg) {

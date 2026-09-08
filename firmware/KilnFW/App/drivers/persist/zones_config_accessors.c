@@ -480,6 +480,25 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     }
     const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     memcpy(out_row, z->coupling_coeff, sizeof(z->coupling_coeff));
+    /* docs/ON_OFF_ZONE_PLAN.md sec 1, belt and braces: zero this zone's
+     * WHOLE row if it is itself ZONE_TYPE_ON_OFF ("no neighbour's heat is
+     * corrected for on this zone" -- it has no setpoint to correct), and
+     * zero any COLUMN whose neighbor is on/off even when zone_index itself
+     * is a heater ("this zone injects no heat into anyone" -- it's a fan,
+     * not a source zone_coupling_solve.c's Jacobi system may allocate real
+     * commandable duty to). Enforced here, at every read, not only at
+     * zones_config_set_coupling() time below -- the matrix is also editable
+     * via autotune's coupling pass, so a getter-side guard is the only place
+     * that can never be bypassed by a future write path. */
+    if (zone_is_on_off(zone_index)) {
+        memset(out_row, 0, MAX31856_CHANNEL_COUNT * sizeof(out_row[0]));
+        return true;
+    }
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        if (zone_is_on_off(j)) {
+            out_row[j] = 0.0f;
+        }
+    }
     return true;
 }
 
@@ -519,11 +538,34 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
     if (!row || zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
+    /* docs/ON_OFF_ZONE_PLAN.md sec 1: refuse a nonzero row for an on/off
+     * zone outright -- it has no setpoint to correct, so a caller asking to
+     * store real coupling data for one is asking to store something that
+     * cannot mean anything, not something this store should silently zero
+     * and accept. The getter above is the belt-and-braces backstop for
+     * whatever is ALREADY on flash; this is the suspenders for what a
+     * caller tries to write next. */
+    if (zone_is_on_off(zone_index)) {
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            if (row[j] != 0.0f) {
+                return false;
+            }
+        }
+    }
     for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
         if (!isfinite(row[j])) {
             return false;
         }
         if (j == zone_index) {
+            if (row[j] != 0.0f) {
+                return false;
+            }
+            continue;
+        }
+        /* A column pointed at an on/off neighbor must also stay 0 -- see the
+         * getter's own comment on why a fan must never inject heat into the
+         * Jacobi system. */
+        if (zone_is_on_off(j)) {
             if (row[j] != 0.0f) {
                 return false;
             }
@@ -782,6 +824,62 @@ bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
     s_zones.cfg.zones[zone_index].control_mode = (uint8_t)mode;
     s_config_generation++;
     return nvs_save() == ESP_OK;
+}
+
+bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type)
+{
+    if (!out_type || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_type = (zone_type_t)s_zones.cfg.zones[zone_index].zone_type;
+    return true;
+}
+
+/* Same bound zones_config_set_control_mode() enforces, against ZONE_TYPE's
+ * own max instead of zone_control_mode_t's. */
+bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if ((unsigned)type > (unsigned)ZONE_TYPE_ON_OFF) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].zone_type = (uint8_t)type;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
+/* docs/ON_OFF_ZONE_PLAN.md sec 1's predicate -- see zones_config_accessors.h
+ * for the fail-closed convention on an out-of-range zone_index (false here,
+ * i.e. "not on/off", matching zones_config_get_zone_type()'s own false
+ * return for the same case). */
+bool zone_is_on_off(uint8_t zone_index)
+{
+    zone_type_t t;
+    if (!zones_config_get_zone_type(zone_index, &t)) {
+        return false;
+    }
+    return t == ZONE_TYPE_ON_OFF;
+}
+
+/* docs/ON_OFF_ZONE_PLAN.md sec 2's zone_needs_ceiling(zi) predicate -- see
+ * zones_config_accessors.h for the fail-closed convention on an out-of-range
+ * zone_index (true here, i.e. "needs a ceiling", the safer default). */
+bool zone_needs_ceiling(uint8_t zone_index)
+{
+    zone_type_t t;
+    if (!zones_config_get_zone_type(zone_index, &t)) {
+        return true;
+    }
+    if (t != ZONE_TYPE_ON_OFF) {
+        return true; /* HEATER always needs a ceiling -- unchanged rule */
+    }
+    uint8_t tmask = 0;
+    if (!zones_config_get_thermo_mask(zone_index, &tmask)) {
+        return true;
+    }
+    return tmask != 0; /* on/off zone: only if it actually has a TC assigned */
 }
 
 bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, float *out_min_temp_c)

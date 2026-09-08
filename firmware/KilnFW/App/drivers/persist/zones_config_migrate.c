@@ -763,6 +763,41 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * struct. */
         return true;
     }
+    case 22: {
+        /* v22 -> v23 (THIS pass, docs/ON_OFF_ZONE_PLAN.md step 1):
+         * zone_type/failsafe_state/hyst_c/min_on_s/min_off_s are brand new,
+         * appended at the true tail after progress_band_c -- zone_cfg_v22_t
+         * is therefore a byte-for-byte prefix of the current (v23)
+         * zone_cfg_t, same "plain memcpy of the smaller historical shape"
+         * technique case 21 uses just above. Every zone's zone_type lands on
+         * the 0 (ZONE_TYPE_HEATER) sentinel and failsafe_state on 0 (OFF) via
+         * this function's entry memset -- brand-new mechanism, no prior
+         * global opinion to carry forward, same shape as progress_band_c's
+         * own v21->v22 migration. ZONE_TYPE_HEATER == 0 and failsafe_state ==
+         * OFF == 0 are BOTH load-bearing here: a v22 board upgrading must
+         * never silently gain an on/off zone or a fail-safe-ON device it
+         * never configured. */
+        zones_cfg_v22_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v22 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].zone_type/failsafe_state/hyst_c/min_on_s/
+             * min_off_s already 0 from this function's entry memset -- see
+             * this case's own top comment. */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v22
+         * shape; nvs_save() stamps a fresh one over the current (v23)
+         * struct. */
+        return true;
+    }
     default:
         /* No known historical (or current) layout for this version --
          * zones_cfg_expected_len_for_version() already returned 0 for it and

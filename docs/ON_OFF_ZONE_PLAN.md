@@ -1,12 +1,42 @@
 # On/Off Device Zones — plan
 
-> **Status:** design only, nothing implemented. **Opened:** 2026-09-07.
+> **Status:** step 1 (zone typing + safety exclusions) DONE, 2026-09-07,
+> `<COMMIT_HASH>`. Steps 2-9 still design-only. **Opened:** 2026-09-07.
 > Owner request, verbatim: *"add a feature that a zone may instead of being a
 > heater it can be a on off device. this should be an option to set in a profile
 > at a specific part of a ramp or dwell. for this if the dwell time if
 > significantly accumulateing then the dwel should be considered on. give options
 > for turning it on/off baised on ramp, direction, temp, time think about how our
 > dynamic changes in profile effect this."*
+
+> **OWNER DECISIONS (2026-09-07), settling two questions this plan left
+> open:**
+> 1. **"Extend the existing mechanism"** — build on `PROFILE_SEG_KIND_RELAY_IO`
+>    rather than a parallel path, for whatever part of the feature that
+>    mechanism can genuinely cover. Investigated for step 1: RELAY_IO is a
+>    one-shot, non-zone timeline event (`profile_executor.c`'s segment-
+>    stepping fires it once per segment entry/exit; it never appears in
+>    `zone_mask`, is never walked by a guard, and holds no per-tick state) --
+>    see this doc's own "Already exists, and is not this feature" section
+>    above, confirmed unchanged by inspecting `profile_executor.c:553`,
+>    `profile_executor_run.c:281,710` and `profile_executor_start.c:337,360`.
+>    Step 1 (zone typing) has no RELAY_IO analogue to extend at all -- a
+>    `zone_type` field and the guard/ramp-lock/coupling/autotune exclusions it
+>    drives are necessarily a new, separate mechanism (RELAY_IO does not
+>    represent zones or run per-tick). The owner's instruction is honored by
+>    NOT adding any parallel path either: the schema is a tail-append onto
+>    the existing `zone_cfg_t` (the same struct every other per-zone knob
+>    lives on), and the guard exclusions extend `thermal_guard_input_t` (the
+>    existing per-tick guard contract) with two new fields rather than a
+>    second guard-evaluation function. Later steps (5, 7: profile-level
+>    trigger rules) are where RELAY_IO's actual one-shot machinery may have
+>    real reuse potential (e.g. a rule's "no rule for this segment -> OFF"
+>    fallback looks structurally similar to RELAY_IO's own segment-boundary
+>    firing) and should be evaluated again when that step is implemented.
+> 2. **Fail-safe default OFF, per-zone confirm-gated opt-in to ON.** Encoded
+>    directly in the schema (`zone_cfg_t::failsafe_state`, 0 = OFF, migration
+>    and zero-init default) -- see §5 and §7 below, now implemented for step
+>    1. The confirm-gate itself is UI (step 6), not yet built.
 
 **Interpretation (confirm or correct before step 1).** A zone's relay drives
 something that is not a heating element — vent, damper, fan, blower, water feed
@@ -353,7 +383,19 @@ does not exist.
    `profile_segment_t`'s layout — and the RELAY_IO fields — untouched.
    Version the profile blob with the same tail-append discipline.
 
-3. **`cfg` filesystem migration is in flight and must not be collided with.**
+3. **Step 1 status for the filesystem workstream:** landed 2026-09-07 through
+   the existing NVS/serialiser path only, per the sequencing rule below --
+   `zones_config_cfg_fs.c`/`dualwrite_window.c`/`cfg_fs_mount.c`/
+   `pref_cfg_fs.c` were NOT touched. What that workstream's own cutover will
+   need to carry once it reaches `zone_cfg_t`: five new fields at the struct's
+   true tail (`zone_type`, `failsafe_state` — both `uint8_t`, `hyst_c` —
+   `float`, `min_on_s`/`min_off_s` — both `uint16_t`), ZONES_CFG_VERSION now
+   23, and a `zone_cfg_v22_t` frozen snapshot (220 bytes) already in
+   `zones_config_json.h` if a file-format migration ever needs to read an
+   old v22 blob directly instead of going through the NVS path's own
+   `convert_versioned_blob_to_current()`.
+
+   **`cfg` filesystem migration is in flight and must not be collided with.**
    `zones_config_cfg_fs.c`, `profiles_cfg_fs.c`, `dualwrite_window.c`,
    `cfg_fs_mount.c`, `pref_cfg_fs.c` and the format policy are all owned by
    another workstream right now (`docs/CONFIG_FILESYSTEM.md`). **Do not touch
@@ -403,7 +445,7 @@ green.
 
 | # | Step | Flash? | Reversible? | Test |
 |---|---|---|---|---|
-| 1 | `zone_type`/`failsafe_state`/`hyst_c`/`min_on_s`/`min_off_s` in `zone_cfg_t`, v22→v23, `zone_cfg_v22_t` frozen, converters. **No consumer reads them yet.** | No (host only until flashed with step 3) | Yes — pure tail-append | `test_zones_http.c`: round-trip, v22-blob upgrade, `_Static_assert` offsets, defaults-on-zero |
+| 1 | **DONE 2026-09-07 (`<COMMIT_HASH>`).** `zone_type`/`failsafe_state`/`hyst_c`/`min_on_s`/`min_off_s` in `zone_cfg_t`, v22→v23, `zone_cfg_v22_t` frozen (closing the one missing `_Static_assert` review found), converters. Widened beyond a pure schema-only step per the task's own non-negotiables: guards 1/2/3/4/9 excluded for an on/off zone (`thermal_guard_input_t.on_off_zone`/`peer_is_on_off`), ramp-lock excludes on/off zones, coupling row/column zeroed at both read and write time (`zones_config_get/set_coupling`), autotune refuses an on/off zone at prestart (same shape as the `thermo_mask==0` refusal, checked first). Guards 5/6/7/8 and heater-zone behavior are unchanged (`on_off_zone` defaults false; full pre-existing host-test suite passes unmodified). | No — every existing zone stays `ZONE_TYPE_HEATER` (0); nothing on a live board changes until a zone is explicitly typed on/off, which no UI yet allows (step 6). Safe to flash whenever convenient. | Yes — pure tail-append | `test_zones_http.c` (schema round-trip both directions, v22-blob upgrade, `_Static_assert` offsets, defaults-on-zero, fail-safe-OFF-on-zero-init, coupling row/column zeroing), `test_thermal_guard.c` (guards 1/2/3/4/9 excluded, 5/6/7 kept, negative-tested), `test_autotune_engine_prestart.c` (refusal before thermo_mask check), `test_ramp_lock_onesided.c` (on/off zone never holds the lock) |
 | 2 | Read-only predicates + exclusions: `zone_is_on_off()`, `zone_needs_ceiling()`, exclude on/off zones from ramp-lock, lag, feasibility, firing stats, cross-zone guard 9, coupling row/column zeroing. **Still no zone is typed on/off, so behaviour is bit-identical.** | No | Yes | Host tests asserting bit-identical executor output with all zones HEATER; negative test forcing a zone on/off and asserting the lock loop skips it (break the real predicate, restore by hand) |
 | 3 | Guard gating: `on_off_guard_tick()` (5/6/7/8 only), autotune/iter_tune/adaptive_tune refusals, `PROFILE_EXEC_FAULTED` counts heaters only. | Yes | Yes | `test_thermal_guard*`: assert guard 1 **cannot** trip an on/off zone under duty 1.0 + flat temperature for 10× `progress_window_s` — this is the false-trip regression test and it must fail before the fix |
 | 4 | `effective_dwell`/`quasi_dwell` classifier + status/API reporting. **Reporting only — nothing acts on it.** | Yes | Yes | Host test driving `ramp_lock_held` patterns across the 120 s/30 s boundaries, stretched-ramp gating, segment-change reset, and an anti-flap sweep |

@@ -66,6 +66,18 @@ typedef struct {
     float actual_c;
 } mirror_zone_t;
 
+/* docs/ON_OFF_ZONE_PLAN.md sec 1: stand-in for the real zones_config_
+ * accessors.c predicate of the same name (this file cannot link that module
+ * without pulling in all of NVS -- same reasoning sensor_ok/actual_c are
+ * caller-supplied fields on mirror_zone_t rather than real accessor calls).
+ * Defaults false (every existing test in this file leaves it untouched) so
+ * this is bit-identical to before this predicate existed. */
+static bool s_mirror_on_off[TEST_ZONE_COUNT];
+static bool zone_is_on_off(uint8_t zone_index)
+{
+    return s_mirror_on_off[zone_index];
+}
+
 /* Mirrors profile_executor.c's per-tick lock_ok/lagging loop (anchored on
  * the one-sided condition itself, not a line number -- see
  * ramp_lock_decision_mirror_drift_check.py). old_fabsf selects the PRE-FIX formula
@@ -76,6 +88,7 @@ static uint8_t lock_lagging_mask(const mirror_zone_t zones[TEST_ZONE_COUNT], flo
     uint8_t lagging = 0;
     for (uint8_t zi = 0; zi < TEST_ZONE_COUNT; zi++) {
         if (!zones[zi].active || zones[zi].faulted) continue;
+        if (zone_is_on_off(zi)) continue;
         bool held;
         if (old_fabsf) {
             held = !zones[zi].sensor_ok || fabsf(zones[zi].actual_c - target_c) > TEST_RAMP_LOCK_BAND_C;
@@ -245,5 +258,30 @@ void run_test_ramp_lock_onesided(void)
         }
         TEST_CHECK(segment_elapsed_s == 0, "an invalid sensor holds the lock under the fix, same as before -- "
                                             "the !sensor_ok clause was left exactly as-is");
+    }
+
+    /* docs/ON_OFF_ZONE_PLAN.md sec 1: an on/off zone sitting at ambient (or
+     * with no thermocouple at all -- sensor_ok=false here models that) with
+     * an active, real ramp lagging must NOT freeze the schedule. z1 is on/
+     * off and would hold the lock forever under the old rule (invalid
+     * sensor); z0 is a real, healthy heater tracking target exactly. */
+    {
+        mirror_zone_t zones[TEST_ZONE_COUNT] = {
+            {.active = true, .faulted = false, .sensor_ok = true, .actual_c = 45.0f}, /* z0: healthy heater, on target */
+            {.active = true, .faulted = false, .sensor_ok = false, .actual_c = 20.0f}, /* z1: on/off, no TC, ambient */
+        };
+        s_mirror_on_off[0] = false;
+        s_mirror_on_off[1] = true;
+        float target_c = 45.0f;
+        uint32_t segment_elapsed_s = 0;
+        for (int i = 0; i < 10; i++) {
+            uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
+            bool lock_ok = (lagging == 0);
+            step_schedule(&target_c, &segment_elapsed_s, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+        }
+        TEST_CHECK(segment_elapsed_s > 0, "an on/off zone (even with sensor_ok=false / no TC) never holds the "
+                                          "ramp lock -- only the real heater zone's own state matters");
+        s_mirror_on_off[0] = false;
+        s_mirror_on_off[1] = false; /* reset for any test added after this one */
     }
 }

@@ -901,6 +901,47 @@ bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_
  * value is rejected, matching the POST handler's "out of range (0-3)" error. */
 bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode);
 
+/* docs/ON_OFF_ZONE_PLAN.md sec 1: "is this zone a heat source at all" --
+ * deliberately NOT a zone_control_mode_t value (see that plan section for
+ * why overloading mode would be wrong). ZONE_TYPE_HEATER == 0 is the
+ * migration default for every existing zone (ZONES_CFG_VERSION 22->23) and
+ * the zero-initialized default for a fresh/partial config -- the ordinary,
+ * unchanged behaviour every zone on this board has always had. Appended,
+ * never inserted -- persisted in NVS, same "enums touched by a stored blob
+ * only ever grow at the tail" rule zone_control_mode_t's own comment states. */
+typedef enum {
+    ZONE_TYPE_HEATER = 0,
+    ZONE_TYPE_ON_OFF = 1,
+} zone_type_t;
+
+bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type);
+
+/* Setter for the getter above. Bound to <= ZONE_TYPE_ON_OFF, same discipline
+ * as zones_config_set_control_mode() -- an out-of-range value is refused,
+ * never clamped. */
+bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type);
+
+/* docs/ON_OFF_ZONE_PLAN.md sec 1's "one rule governs everything" predicate:
+ * true iff `zone_index` is a valid, configured ZONE_TYPE_ON_OFF zone. False
+ * (never true) for an out-of-range index -- callers that already validate
+ * zone_index elsewhere get the same "no such zone, so no such on/off zone"
+ * answer as every other zones_config_get_*() failure mode, rather than a
+ * separate error path to check. */
+bool zone_is_on_off(uint8_t zone_index);
+
+/* docs/ON_OFF_ZONE_PLAN.md sec 2's zone_needs_ceiling(zi) predicate: a HEATER
+ * zone always needs a max_temp_c ceiling (the existing, unchanged "0 means
+ * uncommissioned, refuse to start" rule); a ZONE_TYPE_ON_OFF zone needs one
+ * only if it actually has a thermocouple assigned (thermo_mask != 0) -- an
+ * unmeasured channel has no ceiling to apply to. One predicate, one place, so
+ * the two call sites (profile_executor_run.c's start refusal and
+ * profile_executor_start.c's) cannot drift apart. Returns true (the safer,
+ * "needs a ceiling" default) for an out-of-range zone_index, same fail-closed
+ * convention as zone_is_on_off() returning false for one -- either predicate
+ * mis-evaluating an invalid index must never accidentally relax a safety
+ * check. */
+bool zone_needs_ceiling(uint8_t zone_index);
+
 /* Guard 5's absolute limits (TODO.md 6A.3). max_temp_c == 0 still means
  * "not set" here, at the storage/getter layer this function lives at --
  * thermal_guard.c's guard 5 continues to read 0 as "no ceiling" and stays a
