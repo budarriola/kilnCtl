@@ -683,3 +683,88 @@ is an operator call this flash pass does not make unilaterally. Zones/PID
 values were left untouched and no functional round-trip test (unit
 preference etc.) was attempted since it would have exercised only the
 NVS-only fallback path, not the new cfg_fs code this flash was validating.
+
+## Recovery-mode trap blocks verification of the rewritten format gate, 2026-09-07/08
+
+Board (commit `c1bbdc83`, dirty, built 2026-09-08 03:33:44Z, `factory`
+partition, per `get_board_state`/`GET /api/partitions`) was found already in
+`boot_guard.h` RECOVERY MODE ("3 consecutive boots were never confirmed
+healthy") at the start of this pass -- pre-existing, not caused by this pass.
+Pre-work state confirmed safe first: `profiles_get_exec_status` state=0 (no
+firing), `get_board_state.io.relays=0` (all relays off), stale unacknowledged
+crash report matched the known `218f65f7` panic exactly (`exc_cause_str
+IllegalInstruction`, `exc_pc=0xfffffffd`, `exc_addr=0x0`, corrupted backtrace
+-- confirmed via `GET /api/crash_report`), gains/coupling matched the known
+bench values.
+
+`ota_recovery_exit_esp()` was called and accepted -- but the AP password the
+board is currently actually configured with (visible in
+`get_board_state().wifi_status.ap_password`) differs from the password value
+supplied for this task; the tool refuses (403 wrong password) against the
+supplied value and only succeeds against the board's live configured value.
+Noted here as a fact about board state (not a secret), not written anywhere
+else, and not needed again once whoever owns AP-password provisioning
+reconciles the two.
+
+**The board did not durably leave recovery mode.** Five separate exit
+attempts were made across roughly 8 minutes on the bench
+(`ota_recovery_exit_esp()` x2, `debug_reset(peer="esp")` x3, each followed by
+a wait of 30-130+ seconds before the next check) -- every single resulting
+boot re-entered recovery mode and logged the IDENTICAL line
+`RECOVERY MODE: 3 consecutive boots were never confirmed healthy`, never
+increasing (which a genuinely-incrementing, never-clearing counter would
+show) and never clearing (which a working self-clear would show as recovery
+absent on the very next boot). A `loaded` value pinned at exactly 3 forever,
+boot after boot, is consistent with `boot_guard.c`'s `persist_count()` NVS
+writes silently failing on this board (so both the increment on entry and
+`boot_guard_mark_healthy()`'s clear-to-0 on exit never actually commit, and
+every boot re-reads the same stale on-flash value) -- this is a diagnostic
+read of the symptom, not a confirmed root cause, and **no change was made to
+`boot_guard.c`, `main_ota_rollback_confirm_task`, or any other file in this
+area**, per this task's explicit scope boundary (that root-cause fix is
+another pass's work). `GET /api/partitions` confirms `running: factory`
+throughout (not an OTA-slot confirmation-path issue). No
+`OTA rollback not yet confirmed`/`boot-guard counter cleared`/`could not
+clear boot-guard counter` log lines were ever observed across ~10 boots'
+worth of log capture, consistent with the confirm task's own log lines being
+silently dropped by `uart_log_bridge`'s queue-full behavior during the
+matching boot windows -- so this pass cannot even confirm whether the confirm
+task ran at all versus ran and failed to persist.
+
+**Consequence: step 3 (verify the rewritten LittleFS format gate on a normal
+boot) could not be attempted.** Every boot this pass produced was a recovery
+boot, and `cfg_fs` unconditionally logs `recovery mode: skipping cfg
+filesystem mount entirely` and skips the mount in that mode by design
+(`cfg_fs_mount.c`) -- confirmed via `GET /api/cfgfs` returning
+`mounted:false` after every attempt, `reason: not mounted this boot -- either
+recovery mode skipped the mount, or boot has not reached it yet`. **The
+config-filesystem feature (auto-format gate, mount, dual-write functional
+round trip, reboot-persistence proof) remains UNPROVEN on hardware as of this
+pass** -- exactly the state it was already in before this pass started. This
+is not a regression; it is the same pre-existing gap this pass was asked to
+close and could not, because the recovery-mode trap (a different, older,
+already-flagged defect) sits in front of it.
+
+**Board left in a safe state.** No firing, all relays off (confirmed again
+after the final attempt), PID gains and coupling matrix unchanged
+(Zone0 Kp=0.0318 Ki=0.0001 Kd=0.8401, Zone1 Kp=0.0485 Ki=0.0002 Kd=1.0548,
+Zone2 Kp=0.0631 Ki=0.0002 Kd=1.0690, coupling z0(27.32,21.72) z1(14.30,22.15)
+z2(8.33,12.42)), profiles list intact (8 user + 28 built-in), Pico link
+protocol 12 (`safety_get_fw_version`: commit `6427502a`, boot_id=208,
+commissioned), crash report unchanged (still the stale `218f65f7`
+`exc_pc=0xfffffffd`, no new panic introduced by any of the resets in this
+pass). The board is currently sitting in recovery mode (Wi-Fi + OTA routes
+only, LCD blank, no profile executor/autotune this boot) -- functionally
+idle and safe, but not in its normal operating mode, pending whoever
+root-causes the counter-persistence defect above.
+
+**Next step for whoever picks this up:** the recovery-mode self-clear defect
+needs its own root-cause pass (`boot_guard.c`'s `persist_count()`/`load_count()`
+against the `kiln_nvs` partition's actual free-space/wear state is the first
+place to look, given this partition has separately logged
+`kiln_cfg_store blob is the wrong size` corruption on every boot observed in
+this pass). Once a board can reach a genuinely non-recovery boot, steps 3-6
+of this task's original brief (format-gate log lines, `/api/cfgfs` summary,
+DRAM headroom, the unit-preference file-backed-survives-reboot proof, the
+reformat-vs-mount-existing check) are still the right next actions and remain
+completely unattempted.
