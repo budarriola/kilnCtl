@@ -216,6 +216,64 @@ static void test_divergence_tie_break_higher_rev_wins(void)
     cfg_fs_deinit();
 }
 
+static void test_dualwrite_status_reports_divergence(void)
+{
+    TEST_SECTION("unit_pref_get_dualwrite_status: GET /api/cfgfs's per-item row -- healthy (equal content) "
+                 "reports diverged:false, and a real content disagreement between file and NVS reports "
+                 "diverged:true, without performing any resync write as a side effect (a status read must "
+                 "be safe to call repeatedly)");
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(UP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    /* Healthy: both sides agree (same value, same rev). */
+    uint8_t celsius = (uint8_t)UNIT_PREF_CELSIUS;
+    TEST_CHECK(pref_cfg_fs_save(UNIT_PREF_FILE_PATH, &celsius, sizeof(celsius), 3) == ESP_OK, "file write");
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_u8(&h, NVS_KEY_UNIT_PREF, celsius);
+    hal_kv_set_u32(&h, NVS_KEY_UNIT_PREF_REV, 3);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    bool file_valid = false, nvs_valid = false, diverged = true /* poison */;
+    uint32_t file_rev = 0, nvs_rev = 0;
+    unit_pref_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+    TEST_CHECK(file_valid && nvs_valid && file_rev == 3 && nvs_rev == 3, "both sides reported, revs match");
+    TEST_CHECK(!diverged, "equal content -- NOT diverged");
+
+    /* Now make them genuinely disagree: NVS moves to Fahrenheit at rev 4,
+     * the file is left at Celsius/rev 3 -- exactly the "prior file write
+     * failed" shape every bridge's own resolve() would flag. */
+    uint8_t fahrenheit = (uint8_t)UNIT_PREF_FAHRENHEIT;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_u8(&h, NVS_KEY_UNIT_PREF, fahrenheit);
+    hal_kv_set_u32(&h, NVS_KEY_UNIT_PREF_REV, 4);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    unit_pref_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+    TEST_CHECK(file_valid && nvs_valid && file_rev == 3 && nvs_rev == 4, "both sides still reported, revs now differ");
+    /* NEGATIVE TARGET (see this task's report for the deliberate-break/
+     * restore proof): if unit_pref_get_dualwrite_status() ever stopped
+     * comparing real content and instead only compared revs, or always
+     * returned diverged=false, this is the check that would catch it. */
+    TEST_CHECK(diverged, "file (Celsius) and NVS (Fahrenheit) genuinely disagree -- DIVERGED");
+
+    /* The status read must not have resynced anything -- re-reading the
+     * file directly must still show the ORIGINAL Celsius/rev 3 content. */
+    uint8_t file_raw_check = 0xFF;
+    uint32_t rev_check = 0;
+    bool valid_check = false;
+    pref_cfg_fs_load_raw(UNIT_PREF_FILE_PATH, sizeof(file_raw_check), unit_pref_validate, &file_raw_check,
+                          &rev_check, &valid_check);
+    TEST_CHECK(valid_check && file_raw_check == celsius && rev_check == 3,
+               "a status read performs NO resync write -- the file is untouched by the divergence check");
+
+    cfg_fs_deinit();
+}
+
 static void test_mount_failed_falls_through_to_nvs_only(void)
 {
     up_cfg_fs_reset();
@@ -247,6 +305,7 @@ void run_test_unit_pref(void)
     test_dual_write_lands_on_both_file_and_nvs();
     test_nvs_fallback_when_file_absent_then_migrates();
     test_divergence_tie_break_higher_rev_wins();
+    test_dualwrite_status_reports_divergence();
     test_mount_failed_falls_through_to_nvs_only();
 
     cfg_fs_deinit();

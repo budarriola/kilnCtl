@@ -50,6 +50,15 @@ void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
                               float *out_ramp_c_per_hr_min, float *out_ramp_c_per_hr_max,
                               uint32_t *out_dwell_min_max);
 
+/* Read-only dual-write status for slot `id` (0..PROFILES_MAX_COUNT-1), for
+ * GET /api/cfgfs -- see unit_pref.h's unit_pref_get_dualwrite_status() for
+ * the full contract (fresh re-read of both sides every call, no resync
+ * side effects). `id` outside range reports everything false/0. A slot
+ * that is genuinely unused on both sides (the common case for most slots)
+ * reports file_valid=false, nvs_valid=false -- not an error. */
+void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
+                                         uint32_t *nvs_rev, bool *diverged);
+
 #ifdef __cplusplus
 }
 #endif

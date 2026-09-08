@@ -102,3 +102,8 @@ void time_sync_get_status(time_sync_status_t *out);
  * write error) still applies the TZ live for this boot and is logged, not
  * fatal -- same "in-RAM truth first" convention unit_pref_set() documents. */
 esp_err_t time_sync_set_tz(const char *tz);
+
+// Read-only dual-write status for GET /api/cfgfs -- see unit_pref.h's
+// unit_pref_get_dualwrite_status() for the full contract.
+void time_sync_get_tz_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                        bool *diverged);

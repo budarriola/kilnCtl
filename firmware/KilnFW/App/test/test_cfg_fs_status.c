@@ -57,15 +57,15 @@ static void test_unmounted(void)
 
     char json[2048];
     size_t len = 0;
-    esp_err_t err = cfg_fs_status_build_json(NULL, NULL, NULL, NULL, json, sizeof(json), &len);
+    esp_err_t err = cfg_fs_status_build_json(NULL, NULL, NULL, 0, NULL, json, sizeof(json), &len);
     TEST_CHECK(err == ESP_OK, "build succeeds even when nothing is mounted");
     TEST_CHECK(json_has(json, "\"mounted\":false"), "reports mounted:false");
     TEST_CHECK(json_has(json, "\"status\":\"unmounted\""), "reports status:unmounted");
     TEST_CHECK(json_has(json, "\"reason\":"), "carries a reason string when not mounted");
     TEST_CHECK(json_has(json, "\"capacity\":{\"known\":false}"), "capacity reported unknown, not zeroed");
     TEST_CHECK(json_has(json, "\"file_count\":0"), "no files when unmounted");
-    TEST_CHECK(json_has(json, "\"dual_write\":{\"zones\":{\"file_backed\":false}"),
-               "dual-write section present but zones not file-backed when dual info is NULL");
+    TEST_CHECK(json_has(json, "\"dual_write\":{\"items\":[]"),
+               "dual-write section present but empty when no items are supplied");
     TEST_CHECK(json_has(json, "\"format\":{\"known\":false}"),
                "format section present but reports known:false when no progress info is supplied "
                "(NULL fmt) -- the common case, no auto/deferred format has run this boot");
@@ -85,14 +85,14 @@ static void test_format_progress(void)
     size_t len = 0;
 
     cfg_fs_format_progress_t in_progress = { .known = true, .in_progress = true, .elapsed_ms = 5000 };
-    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &in_progress, json, sizeof(json), &len) == ESP_OK,
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, &in_progress, json, sizeof(json), &len) == ESP_OK,
                "build succeeds");
     TEST_CHECK(json_has(json, "\"format\":{\"known\":true,\"in_progress\":true,\"completed\":false,"
                               "\"succeeded\":false,\"elapsed_ms\":5000,\"stalled\":false"),
                "5 s into a format is reported in-progress, not stalled -- well under the ceiling");
 
     cfg_fs_format_progress_t done_ok = { .known = true, .completed = true, .succeeded = true, .elapsed_ms = 6200 };
-    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &done_ok, json, sizeof(json), &len) == ESP_OK,
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, &done_ok, json, sizeof(json), &len) == ESP_OK,
                "build succeeds");
     TEST_CHECK(json_has(json, "\"completed\":true,\"succeeded\":true,\"elapsed_ms\":6200"),
                "a completed successful format reports its final duration");
@@ -100,7 +100,7 @@ static void test_format_progress(void)
 
     cfg_fs_format_progress_t done_failed = { .known = true, .completed = true, .succeeded = false,
                                               .elapsed_ms = 1200, .result = ESP_ERR_TIMEOUT };
-    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &done_failed, json, sizeof(json), &len) == ESP_OK,
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, &done_failed, json, sizeof(json), &len) == ESP_OK,
                "build succeeds");
     TEST_CHECK(json_has(json, "\"completed\":true,\"succeeded\":false"),
                "a completed but failed format is distinguished from a completed success");
@@ -139,7 +139,7 @@ static void test_format_stalled_ceiling(void)
                                         .elapsed_ms = CFG_FS_FORMAT_CEILING_MS + 5000 };
     char json[2048];
     size_t len = 0;
-    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &stuck, json, sizeof(json), &len) == ESP_OK,
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, &stuck, json, sizeof(json), &len) == ESP_OK,
                "build succeeds");
     TEST_CHECK(json_has(json, "\"stalled\":true"), "GET /api/cfgfs surfaces the stalled flag once the ceiling "
                                                     "is exceeded, distinguishing a stuck format from a slow one");
@@ -157,7 +157,7 @@ static void test_unavailable(void)
 
     char json[2048];
     size_t len = 0;
-    TEST_CHECK(cfg_fs_status_build_json(NULL, NULL, NULL, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
+    TEST_CHECK(cfg_fs_status_build_json(NULL, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
     TEST_CHECK(json_has(json, "\"status\":\"unavailable\""), "reports status:unavailable");
     TEST_CHECK(json_has(json, "mount was attempted and failed"), "reason names mount failure, distinct from "
                                                                   "the never-mounted reason");
@@ -174,7 +174,7 @@ static void test_mounted_empty(void)
 
     char json[2048];
     size_t len = 0;
-    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
     TEST_CHECK(json_has(json, "\"mounted\":true"), "reports mounted:true");
     TEST_CHECK(!json_has(json, "\"reason\":"), "no reason field once mounted");
     TEST_CHECK(json_has(json, "\"file_count\":0"), "no files yet");
@@ -198,19 +198,28 @@ static void test_mounted_with_files(void)
     TEST_CHECK(cfg_fs_write_atomic("prefs.json", prefs_payload, 12) == ESP_OK, "write prefs.json (12 bytes)");
 
     cfg_fs_capacity_info_t cap = { .known = true, .total_bytes = 524288, .used_bytes = 4096 };
-    cfg_fs_zones_dualwrite_info_t dual = { .file_valid = true, .file_rev = 5, .nvs_rev = 5 };
+    cfg_fs_dualwrite_item_t items[2] = {
+        { .name = "zones", .file_valid = true, .file_rev = 5, .nvs_valid = true, .nvs_rev = 5, .diverged = false },
+        { .name = "unit_pref", .file_valid = true, .file_rev = 2, .nvs_valid = true, .nvs_rev = 2, .diverged = false },
+    };
 
     char json[2048];
     size_t len = 0;
-    TEST_CHECK(cfg_fs_status_build_json(base, &cap, &dual, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
+    TEST_CHECK(cfg_fs_status_build_json(base, &cap, items, 2, NULL, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds");
     TEST_CHECK(json_has(json, "\"file_count\":2"), "both files counted");
     TEST_CHECK(json_has(json, "\"name\":\"zones.json\",\"size_bytes\":6"), "zones.json size matches what was written");
     TEST_CHECK(json_has(json, "\"name\":\"prefs.json\",\"size_bytes\":12"), "prefs.json size matches what was written");
     TEST_CHECK(json_has(json, "\"capacity\":{\"known\":true,\"total_bytes\":524288,\"used_bytes\":4096,"
                               "\"free_bytes\":520192}"),
                "capacity section echoes the caller-supplied values and computes free correctly");
-    TEST_CHECK(json_has(json, "\"zones\":{\"file_backed\":true,\"file_rev\":5,\"nvs_rev\":5,\"diverged\":false}"),
-               "dual-write: equal revs is not diverged");
+    TEST_CHECK(json_has(json, "\"dual_write\":{\"items\":["
+                              "{\"name\":\"zones\",\"file_backed\":true,\"file_rev\":5,\"nvs_backed\":true,"
+                              "\"nvs_rev\":5,\"diverged\":false},"
+                              "{\"name\":\"unit_pref\",\"file_backed\":true,\"file_rev\":2,\"nvs_backed\":true,"
+                              "\"nvs_rev\":2,\"diverged\":false}]"),
+               "dual-write: every item passed in gets its own row, not just zones -- 70ed6514 fixed the stale "
+               "lists but left per-item detail zones-only; this is the widened per-bridge picture");
     TEST_CHECK(json_has(json, "\"nvs_only\":[\"firing_stats\",\"adaptive_tune\",\"relay_cycles\"]"),
                "nvs_only lists only items with NO cfg_fs bridge yet -- prefs/profiles/zones/kiln-config-slots "
                "are file-backed today (34927a77/530dc2f7/19f74959/9bd29cff) and must NOT appear here");
@@ -219,13 +228,41 @@ static void test_mounted_with_files(void)
                "an intentionally-NVS-forever item (wifi creds) is reported in nvs_permanent, "
                "never in nvs_only -- an operator must not read it as a pending migration");
 
-    /* Now the divergence case: NVS strictly ahead of the file means a prior
-     * file write failed -- must be flagged, not silently reported healthy. */
-    dual.nvs_rev = 6;
-    TEST_CHECK(cfg_fs_status_build_json(base, &cap, &dual, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
-    TEST_CHECK(json_has(json, "\"diverged\":true"), "nvs_rev > file_rev is flagged diverged");
+    /* Now the divergence case: caller (a real bridge's own accessor, on
+     * device) reports diverged when both sides are valid and disagree --
+     * this test only checks that whatever the caller passes for `diverged`
+     * on any one item is rendered faithfully and independently per item,
+     * not derived or re-computed here (cfg_fs_status.c is a dumb renderer;
+     * see cfg_fs_status_item_diverged()'s own tests below for the shared
+     * divergence RULE itself). */
+    items[1].diverged = true;
+    TEST_CHECK(cfg_fs_status_build_json(base, &cap, items, 2, NULL, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds");
+    TEST_CHECK(json_has(json, "\"name\":\"zones\",\"file_backed\":true,\"file_rev\":5,\"nvs_backed\":true,"
+                              "\"nvs_rev\":5,\"diverged\":false"),
+               "zones (untouched) still reports diverged:false");
+    TEST_CHECK(json_has(json, "\"name\":\"unit_pref\",\"file_backed\":true,\"file_rev\":2,\"nvs_backed\":true,"
+                              "\"nvs_rev\":2,\"diverged\":true"),
+               "unit_pref's diverged:true is surfaced independently of zones' row -- one item diverging "
+               "must not be lost among, or confused with, another item's healthy row");
 
     cfg_fs_deinit();
+}
+
+static void test_item_diverged_rule(void)
+{
+    TEST_SECTION("cfg_fs_status_item_diverged: THE shared divergence rule every bridge's status accessor "
+                 "calls -- both sides must be valid AND their content must differ; a rev mismatch alone is "
+                 "NOT sufficient (dual-write's file-then-NVS ordering makes that the ordinary in-flight "
+                 "case), and equal-rev-differing-content (check_cfg_fs_tie_break.ps1's dangerous case) IS "
+                 "flagged since this rule is driven by content_equal, never by comparing revs itself");
+    TEST_CHECK(!cfg_fs_status_item_diverged(false, false, false), "neither side valid -- not diverged");
+    TEST_CHECK(!cfg_fs_status_item_diverged(true, false, false), "only file valid -- not diverged (nothing to "
+                                                                  "disagree with)");
+    TEST_CHECK(!cfg_fs_status_item_diverged(false, true, false), "only NVS valid -- not diverged");
+    TEST_CHECK(!cfg_fs_status_item_diverged(true, true, true), "both valid, content equal -- not diverged");
+    TEST_CHECK(cfg_fs_status_item_diverged(true, true, false), "both valid, content differs -- DIVERGED, "
+                                                                "regardless of which side's rev is higher");
 }
 
 static void test_buffer_too_small(void)
@@ -240,7 +277,7 @@ static void test_buffer_too_small(void)
 
     char tiny[8];
     size_t len = 999;
-    esp_err_t err = cfg_fs_status_build_json(base, NULL, NULL, NULL, tiny, sizeof(tiny), &len);
+    esp_err_t err = cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, tiny, sizeof(tiny), &len);
     TEST_CHECK(err == ESP_ERR_INVALID_SIZE, "reports truncation as an error rather than shipping a partial JSON");
 
     cfg_fs_deinit();
@@ -255,5 +292,6 @@ void run_test_cfg_fs_status(void)
     test_format_progress();
     test_format_stalled_ceiling();
     test_buffer_too_small();
+    test_item_diverged_rule();
     cfg_fs_deinit();
 }

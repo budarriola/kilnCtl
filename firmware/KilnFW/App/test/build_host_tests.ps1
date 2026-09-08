@@ -365,6 +365,8 @@ try {
             "`"$(Join-Path $driversDir 'control/adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/adaptive_tune_model.c')`" " +
             "`"$(Join-Path $driversDir 'control/adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/cone_table.c')`" `"$(Join-Path $driversDir 'control/on_off_trigger_decide.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/firing_stats_cfg_fs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
@@ -445,6 +447,7 @@ try {
     $cmd7 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
@@ -730,6 +733,7 @@ try {
             "/Fo:`"$atObjDir\\`" /Fe:`"$exe17`" " +
             "`"$(Join-Path $testDir 'test_adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
@@ -773,9 +777,18 @@ try {
     $cmd19 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$rsObjDir\\`" /Fe:`"$exe19`" `"$(Join-Path $testDir 'test_run_state.c')`" " +
             "`"$(Join-Path $testDir 'test_relay_cycles.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    # relay_cycles cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA_PLAN.md
+    # section 5 step 6): relay_cycles.c (#included directly by test_relay_cycles.c
+    # above) now also calls into pref_cfg_fs.c, which needs cfg_fs.c's real
+    # mount/write-atomic/read/delete against a temp directory -- same convention
+    # as exe2/exe4's cfg_fs.c+pref_cfg_fs.c link. The new dual-write tests live
+    # directly in test_relay_cycles.c (it already #includes relay_cycles.c, so
+    # it has file-scope access to s_rc/persist_snapshot/etc that a separate TU
+    # would not).
     # hal_time migration (HW_ABSTRACTION.md item 5): both run_state.c and
     # relay_cycles.c now call hal_time_now_us() instead of esp_timer_get_time();
     # fake_time.c supplies it.
@@ -1058,6 +1071,7 @@ try {
             "`"$(Join-Path $testDir 'test_time_sync.c')`" " +
             "`"$(Join-Path $driversDir 'net/time_sync_tz.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 

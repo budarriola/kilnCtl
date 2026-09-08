@@ -88,6 +88,11 @@ bool display_power_cfg_display_on_error(void);
 // matching unit_pref_set()'s "in-RAM truth first" ordering; a save failure
 // after that means the choice will not survive a reboot, not that it failed
 // to take effect now.
+// Read-only dual-write status for GET /api/cfgfs -- see unit_pref.h's
+// unit_pref_get_dualwrite_status() for the full contract.
+void display_power_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
+                                             uint32_t *nvs_rev, bool *diverged);
+
 esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_setting_t timeout_setting,
                                 bool keep_on_while_firing, bool display_on_error);
 

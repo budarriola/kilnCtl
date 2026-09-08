@@ -72,6 +72,18 @@ unit_pref_t unit_pref_get(void);
 // choice will not survive a reboot, not that it failed to take effect now.
 esp_err_t unit_pref_set(unit_pref_t pref);
 
+// Read-only dual-write status for GET /api/cfgfs (cfg_fs_status.h's
+// cfg_fs_dualwrite_item_t) -- re-reads the file (pref_cfg_fs_load_raw(),
+// no side effects) and the NVS candidate fresh on every call, and compares
+// their decoded content itself so `diverged` is computed via
+// cfg_fs_status_item_diverged() the same way pref_cfg_fs_resolve()'s own
+// tie-break would, not approximated from a rev comparison alone. Any
+// output pointer may be NULL. Never performs a resync write -- unlike
+// unit_pref_start()'s boot-time resolve, a status read must be safe to call
+// repeatedly without side effects.
+void unit_pref_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                     bool *diverged);
+
 // "C" or "F" -- the suffix every LCD temperature label appends after
 // unit_pref_c_to_display() converts the number itself.
 const char *unit_pref_suffix(unit_pref_t pref);

@@ -28,6 +28,7 @@
 #include "profiles_http_internal.h"
 
 #include "cfg_fs.h"
+#include "cfg_fs_status.h"
 #include "profiles_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4:
                                 * read-through/dual-write bridge to the `cfg`
                                 * LittleFS partition, one file per slot. See
@@ -1445,4 +1446,79 @@ esp_err_t profiles_http_start(void)
 
     ESP_LOGI(PROFILES_TAG, "profiles API up (storage/validation; execution runs in profile_executor.c)");
     return ESP_OK;
+}
+
+void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
+                                         uint32_t *nvs_rev, bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+    if (id >= PROFILES_MAX_COUNT) {
+        return;
+    }
+
+    profile_t f_profile;
+    memset(&f_profile, 0, sizeof(f_profile));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    profiles_cfg_fs_load_raw(id, &f_profile, &f_rev, &f_valid);
+
+    bool n_valid = false;
+    profile_t n_profile;
+    memset(&n_profile, 0, sizeof(n_profile));
+    uint32_t n_rev = 0;
+    if (nvs_partition_init(PROFILES_NVS_PARTITION) == HAL_OK) {
+        hal_kv_handle_t h;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION) == HAL_OK) {
+            char key[8];
+            profile_nvs_key(id, key, sizeof(key));
+            profile_persisted_t loaded;
+            size_t len = sizeof(loaded);
+            if (hal_kv_get_blob(&h, key, &loaded, &len) == HAL_OK) {
+                profile_t decoded;
+                const char *reason = "";
+                if (profile_decode_blob(&loaded, len, &decoded, &reason) == PROFILE_DECODE_OK) {
+                    n_valid = true;
+                    n_profile = decoded;
+                }
+            }
+            uint32_t revs[PROFILES_MAX_COUNT];
+            memset(revs, 0, sizeof(revs));
+            size_t rev_len = sizeof(revs);
+            if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, revs, &rev_len) == HAL_OK) {
+                n_rev = revs[id];
+            }
+            hal_kv_close(&h);
+        }
+    }
+
+    bool content_equal = f_valid && n_valid && (memcmp(&f_profile, &n_profile, sizeof(f_profile)) == 0);
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }

@@ -89,6 +89,13 @@ bool ramp_assist_cfg_enabled(void);
 // of this boot regardless of whether persistence itself succeeded.
 esp_err_t ramp_assist_cfg_set_enabled(bool enabled);
 
+// Read-only dual-write status for GET /api/cfgfs -- see unit_pref.h's
+// identical unit_pref_get_dualwrite_status() for the full contract (fresh
+// re-read of both sides every call, no side effects, `diverged` computed
+// via cfg_fs_status_item_diverged() from a real content compare).
+void ramp_assist_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                           bool *diverged);
+
 #ifdef __cplusplus
 }
 #endif

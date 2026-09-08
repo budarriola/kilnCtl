@@ -38,21 +38,49 @@ typedef struct {
     size_t used_bytes;
 } cfg_fs_capacity_info_t;
 
-/* Dual-write rev-compare picture for ONE item: zones config, the only item
- * this struct carries today. As of 2026-09-08, four persist/*_cfg_fs.c
- * bridges exist (kiln_cfg_store, pref, profiles, zones_config), covering
- * most MOVE items from docs/FILESYSTEM_USER_DATA_PLAN.md section 5 -- but
- * this struct/JSON's per-item file_rev/nvs_rev/diverged detail is wired up
- * for zones only; the other bridges' items are reported via
- * cfg_fs_status_build_json()'s plain nvs_only/nvs_permanent name lists
- * without a rev-compare picture. Widening this to every bridge is a real
- * gap (each additional item needs its own NVS-rev-key plumbing through the
- * caller, diagnostics_http.c), tracked but not done here. */
+/* Dual-write rev-compare picture for ONE migrated item. 2026-09-08: widened
+ * from zones-only to every persist/'*'_cfg_fs.c bridge (zones_config,
+ * kiln_cfg_store, the pref_cfg_fs.c-backed items -- unit pref, ramp assist,
+ * display power, TZ -- and profiles, one row per slot) -- each caller-side
+ * accessor (unit_pref_get_dualwrite_status() and siblings) reads its OWN
+ * bridge's actual NVS rev key (no naming convention assumed here) and
+ * computes `diverged` itself via cfg_fs_status_item_diverged() below, so
+ * this module stays a dumb renderer of whatever the callers hand it -- one
+ * shared divergence RULE, many independent per-item DATA sources. `name` is
+ * never copied -- callers must pass a string literal or other static
+ * storage. */
 typedef struct {
-    bool     file_valid;  /* zones_config_cfg_fs_load_raw()'s out_valid */
-    uint32_t file_rev;    /* zones_config_cfg_fs_load_raw()'s out_rev */
-    uint32_t nvs_rev;     /* the "zones_rev" NVS key, read by the caller */
-} cfg_fs_zones_dualwrite_info_t;
+    const char *name;
+    bool        file_valid;
+    uint32_t    file_rev;
+    bool        nvs_valid;
+    uint32_t    nvs_rev;
+    bool        diverged;
+} cfg_fs_dualwrite_item_t;
+
+/* Upper bound on how many dual-write item rows one /api/cfgfs response
+ * carries -- 1 (zones) + 1 (kiln_cfg_store) + 4 (pref-backed: unit pref,
+ * ramp assist, display power, TZ) + PROFILES_MAX_COUNT (8) = 14 today, with
+ * headroom for one more bridge before this needs to grow. Extra items past
+ * this cap are silently dropped by the JSON builder rather than overflowing
+ * -- see cfg_fs_status_build_json()'s own comment on why that is the right
+ * failure mode here (unlike CFG_FS_STATUS_MAX_FILES, this list is built by
+ * firmware code, not by whatever a user has dropped on the filesystem). */
+#define CFG_FS_STATUS_MAX_ITEMS 16
+
+/* THE single definition of "this item's file and NVS copies disagree",
+ * shared by every caller so a future bridge cannot invent a second one.
+ * Matches exactly what every *_cfg_fs.c bridge's resolve() function already
+ * branches on (see e.g. zones_config_cfg_fs.c's `differs` local): both
+ * sides must be valid, AND their decoded content must differ. A rev
+ * mismatch alone is NOT sufficient -- dual-write always bumps both sides
+ * together then writes the file first, so file_rev transiently ahead of
+ * nvs_rev is the ordinary in-flight case, not a divergence -- and an EQUAL
+ * rev with differing content is exactly the dangerous case
+ * check_cfg_fs_tie_break.ps1 pins, which a rev-only check would miss
+ * entirely. Callers must therefore pass the real result of comparing
+ * decoded file vs. NVS bytes, never infer it from revs. */
+bool cfg_fs_status_item_diverged(bool file_valid, bool nvs_valid, bool content_equal);
 
 /* Boot-hang-2026-09-08 follow-up (docs/audits/boot_hang_2026-09-08.md, "A
  * bounded-time format... would be the more robust fix"): the auto-format
@@ -95,8 +123,12 @@ bool cfg_fs_format_is_stalled(bool in_progress, uint32_t elapsed_ms);
 
 /* Builds the full /api/cfgfs JSON body into `buf` (capacity `buf_cap`).
  * `base_dir_for_sizes` may be NULL to omit per-file sizes (e.g. cfg_fs is
- * not mounted, so there is nothing to stat). `cap`/`dual` may be NULL to
- * omit their sections (reported as unknown/absent, not defaulted).
+ * not mounted, so there is nothing to stat). `cap`/`fmt` may be NULL to omit
+ * their sections (reported as unknown/absent, not defaulted). `items`/
+ * `item_count` may be NULL/0 to omit the dual-write item list entirely
+ * (rendered as an empty array, not omitted -- same "absent is not the same
+ * as zero" discipline as everything else in this module); item_count above
+ * CFG_FS_STATUS_MAX_ITEMS is clamped, not rejected.
  *
  * Returns ESP_OK and sets *out_len to the JSON length on success.
  * ESP_ERR_INVALID_ARG for NULL buf/out_len or buf_cap == 0.
@@ -105,7 +137,7 @@ bool cfg_fs_format_is_stalled(bool in_progress, uint32_t elapsed_ms);
  * convention, so a caller can grow its buffer and retry rather than ship a
  * silently-truncated response. */
 esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_capacity_info_t *cap,
-                                    const cfg_fs_zones_dualwrite_info_t *dual,
+                                    const cfg_fs_dualwrite_item_t *items, size_t item_count,
                                     const cfg_fs_format_progress_t *fmt, char *buf, size_t buf_cap,
                                     size_t *out_len);
 

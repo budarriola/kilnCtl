@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "cfg_fs_status.h"
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
@@ -248,4 +249,70 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
                  keep_on_while_firing ? "true" : "false", display_on_error ? "true" : "false");
     }
     return hal_status_to_esp_err(err);
+}
+
+void display_power_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
+                                             uint32_t *nvs_rev, bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+
+    display_power_cfg_blob_t f_blob;
+    memset(&f_blob, 0, sizeof(f_blob));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(f_blob), display_power_validate, &f_blob, &f_rev, &f_valid);
+
+    bool n_valid = false;
+    display_power_cfg_blob_t n_blob;
+    memset(&n_blob, 0, sizeof(n_blob));
+    uint32_t n_rev = 0;
+    if (nvs_partition_init(KILN_NVS_PARTITION) == HAL_OK) {
+        hal_kv_handle_t h;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            display_power_cfg_blob_t blob;
+            memset(&blob, 0, sizeof(blob));
+            size_t len = sizeof(blob);
+            if (hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, &len) == HAL_OK &&
+                display_power_validate(&blob, len)) {
+                n_valid = true;
+                n_blob = blob;
+                uint32_t rev = 0;
+                if (hal_kv_get_u32(&h, NVS_KEY_DISPLAY_POWER_REV, &rev) == HAL_OK) {
+                    n_rev = rev;
+                }
+            }
+            hal_kv_close(&h);
+        }
+    }
+
+    bool content_equal = f_valid && n_valid && (memcmp(&f_blob, &n_blob, sizeof(f_blob)) == 0);
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }

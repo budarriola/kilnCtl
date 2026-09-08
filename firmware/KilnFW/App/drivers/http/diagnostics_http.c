@@ -17,16 +17,22 @@
 #include "crash_report.h"
 #include "danger_mode.h"
 #include "dashboard_http.h"
+#include "display_power_cfg.h"
 #include "hal_kv.h"
 #include "http_form.h"
+#include "kiln_cfg_store.h"
 #include "kiln_io.h"
 #include "lvgl_port.h"
+#include "profiles_http.h" /* profiles_http_get_dualwrite_status() -- /api/cfgfs per-slot rows */
+#include "profiles_types.h" /* PROFILES_MAX_COUNT */
 #include "ramp_assist_cfg.h"
 #include "relay_cycles.h" /* relay_cycles_reset_post_handler() below needs RELAY_CYCLES_COUNT */
 #include "safety_link.h" /* SafetyLinkClass/safety_link_get_status() -- thermo_faults_get_handler()'s
                            * "safety" block below */
 #include "thermo_owner.h"
+#include "time_sync.h" /* time_sync_get_tz_dualwrite_status() -- /api/cfgfs TZ row */
 #include "uart_task_ids.h" /* SAFETY_FLAG_TC_NOT_INSTALLED/SAFETY_FLAG_TC_INJECTED */
+#include "unit_pref.h"
 #include "watchdog_cfg.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
@@ -1049,11 +1055,43 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * pool allocated up front and freed on every return path, so nothing this
  * handler needs ever lands on the task's own stack. malloc() failure (heap
  * pressure, not stack) is reported as 500 rather than silently truncating,
- * same convention as the JSON-build failure path below. */
+ * same convention as the JSON-build failure path below.
+ *
+ * BUFFER SIZE (2026-09-08 widening: per-item dual-write rows for every
+ * bridge, not zones only): worst case is 14 item rows (zones,
+ * kiln_cfg_store, 4 pref-backed items, PROFILES_MAX_COUNT=8 profile slots)
+ * at up to ~120 bytes each (longest name "display_power", both revs at
+ * UINT32_MAX) = ~1700 bytes for the items array alone, plus the
+ * pre-existing sections (header/capacity/format ~300 B typical,
+ * nvs_only/nvs_permanent name lists ~330 B fixed, files[] typically a
+ * handful of entries in real use though pathologically up to
+ * CFG_FS_STATUS_MAX_FILES=32 max-length names could itself exceed any
+ * reasonable buffer -- that pre-existing limit is unchanged by this pass).
+ * 3072 covers the realistic worst case (all 14 items diverged/max-rev, a
+ * handful of real files) with headroom; cfg_fs_status_build_json() still
+ * fails loudly with ESP_ERR_INVALID_SIZE rather than truncating if a
+ * pathological files[] list ever pushes past it. */
 typedef struct {
     zones_cfg_t raw;
-    char json[2048];
+    char json[3072];
 } cfgfs_status_scratch_t;
+
+/* Fills one row of the /api/cfgfs dual-write item list and advances *n. A
+ * full array (n == CFG_FS_STATUS_MAX_ITEMS) silently drops further rows --
+ * see cfg_fs_status.h's CFG_FS_STATUS_MAX_ITEMS comment; today's fixed set
+ * of 14 items sits well under that cap. */
+static void cfgfs_add_item(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
+                            uint32_t file_rev, bool nvs_valid, uint32_t nvs_rev, bool diverged)
+{
+    if (*n >= CFG_FS_STATUS_MAX_ITEMS) {
+        return;
+    }
+    items[*n] = (cfg_fs_dualwrite_item_t){
+        .name = name, .file_valid = file_valid, .file_rev = file_rev, .nvs_valid = nvs_valid, .nvs_rev = nvs_rev,
+        .diverged = diverged,
+    };
+    (*n)++;
+}
 
 static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
 {
@@ -1076,9 +1114,75 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    cfg_fs_zones_dualwrite_info_t dual;
-    zones_config_cfg_fs_load_raw(&s->raw, &dual.file_rev, &dual.file_valid);
-    dual.nvs_rev = cfgfs_read_zones_nvs_rev();
+    /* One dual-write row per migrated item across all four persist/'*'_cfg_fs.c
+     * bridges (70ed6514 fixed /api/cfgfs's stale lists but left this detail
+     * wired up for zones only -- widened here). Each bridge's own module
+     * reads its OWN NVS rev key and computes `diverged` itself via
+     * cfg_fs_status_item_diverged() (a real decoded-content compare, not a
+     * rev-only guess) -- this handler just collects what they report. */
+    cfg_fs_dualwrite_item_t items[CFG_FS_STATUS_MAX_ITEMS];
+    size_t n_items = 0;
+
+    /* zones -- kept as the PRE-EXISTING approximation (rev comparison, not a
+     * decoded-content compare): zones_config_cfg_fs.c's resolve() already
+     * exists and does the real compare, but it also performs resync WRITES
+     * as a side effect (see its own doc comment), which a status GET must
+     * never trigger -- repeated polling would wear the flash and could mask
+     * a real divergence by silently healing it before an operator sees it.
+     * Doing a true read-only content compare here would mean decoding the
+     * NVS zones blob a second time in this handler; left as a known,
+     * documented gap rather than duplicating zones_config_json_decode_blob's
+     * call site under time pressure -- the other bridges below DO get the
+     * real compare, since their status accessors are read-only by
+     * construction. */
+    {
+        bool file_valid = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        zones_config_cfg_fs_load_raw(&s->raw, &file_rev, &file_valid);
+        nvs_rev = cfgfs_read_zones_nvs_rev();
+        bool diverged = file_valid && (nvs_rev > file_rev);
+        cfgfs_add_item(items, &n_items, "zones", file_valid, file_rev, true, nvs_rev, diverged);
+    }
+
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        kiln_cfg_store_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "kiln_cfg_store", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        unit_pref_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "unit_pref", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        ramp_assist_cfg_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "ramp_assist", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        display_power_cfg_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "display_power", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        time_sync_get_tz_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "tz", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    static const char *const profile_names[PROFILES_MAX_COUNT] = {
+        "profile0", "profile1", "profile2", "profile3", "profile4", "profile5", "profile6", "profile7",
+    };
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        profiles_http_get_dualwrite_status(id, &file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, profile_names[id], file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
 
     /* Deferred auto-format progress (cfg_fs_mount.c) -- ESP-IDF-only getters,
      * so the picture is assembled here rather than inside the pure
@@ -1095,8 +1199,8 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
     }
 
     size_t len = 0;
-    esp_err_t err =
-        cfg_fs_status_build_json(mounted ? "/cfg" : NULL, &cap, &dual, &fmt, s->json, sizeof(s->json), &len);
+    esp_err_t err = cfg_fs_status_build_json(mounted ? "/cfg" : NULL, &cap, items, n_items, &fmt, s->json,
+                                              sizeof(s->json), &len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cfg_fs_status_build_json() failed: %s (buffer too small?)", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status build failed");

@@ -9,6 +9,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 
+#include "cfg_fs_status.h"
 #include "ota_state.h"
 #include "zones_config_accessors.h"
 
@@ -854,4 +855,74 @@ bool kiln_cfg_store_name_would_collide(const char *name, int32_t exclude_id)
         return false; /* an invalid name is reported separately -- not this predicate's job */
     }
     return name_collides(normalized, exclude_id);
+}
+
+void kiln_cfg_store_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                          bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+
+    /* HEAP, never the stack -- kiln_cfg_store_blob_t is ~7.5 KiB, same
+     * reasoning as nvs_load_store()'s own malloc() for its v1 scratch
+     * buffer. Two of them here (file + NVS candidates) briefly, freed
+     * before returning on every path. */
+    kiln_cfg_store_blob_t *f_blob = malloc(sizeof(*f_blob));
+    kiln_cfg_store_blob_t *n_blob = malloc(sizeof(*n_blob));
+    if (!f_blob || !n_blob) {
+        ESP_LOGW(TAG, "kiln_cfg_store_get_dualwrite_status: malloc failed -- reporting unknown");
+        free(f_blob);
+        free(n_blob);
+        return;
+    }
+
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    kiln_cfg_store_cfg_fs_load_raw(f_blob, &f_rev, &f_valid);
+
+    bool n_valid = false;
+    uint32_t n_rev = kiln_cfg_rev_load();
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_OK) {
+        size_t len = sizeof(*n_blob);
+        if (hal_kv_get_blob(&h, NVS_KEY_STORE, n_blob, &len) == HAL_OK && len == sizeof(*n_blob) &&
+            n_blob->version == KILN_CFG_STORE_VERSION) {
+            n_valid = true;
+        }
+        hal_kv_close(&h);
+    }
+
+    bool content_equal = f_valid && n_valid && (memcmp(f_blob, n_blob, sizeof(*f_blob)) == 0);
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
+
+    free(f_blob);
+    free(n_blob);
 }

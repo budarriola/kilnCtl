@@ -1,5 +1,6 @@
 #include "unit_pref.h"
 
+#include "cfg_fs_status.h"
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
@@ -212,4 +213,65 @@ float unit_pref_convert(float value_c, unit_pref_t pref, unit_pref_kind_t kind)
         return value_c * 9.0f / 5.0f;
     }
     return value_c * 9.0f / 5.0f + 32.0f;
+}
+
+void unit_pref_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                     bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+
+    uint8_t f_raw = 0;
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(UNIT_PREF_FILE_PATH, sizeof(f_raw), unit_pref_validate, &f_raw, &f_rev, &f_valid);
+
+    bool n_valid = false;
+    uint8_t n_raw = (uint8_t)UNIT_PREF_CELSIUS;
+    uint32_t n_rev = 0;
+    if (nvs_partition_init(KILN_NVS_PARTITION) == HAL_OK) {
+        hal_kv_handle_t h;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            uint8_t raw = (uint8_t)UNIT_PREF_CELSIUS;
+            if (hal_kv_get_u8(&h, NVS_KEY_UNIT_PREF, &raw) == HAL_OK && unit_pref_validate(&raw, 1)) {
+                n_valid = true;
+                n_raw = raw;
+                uint32_t rev = 0;
+                if (hal_kv_get_u32(&h, NVS_KEY_UNIT_PREF_REV, &rev) == HAL_OK) {
+                    n_rev = rev;
+                }
+            }
+            hal_kv_close(&h);
+        }
+    }
+
+    bool content_equal = f_valid && n_valid && (f_raw == n_raw);
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }

@@ -17,6 +17,7 @@
 #endif
 
 #include "cfg_fs.h"
+#include "esp_log.h"
 
 #define CFG_FS_STATUS_MAX_FILES 32
 #define CFG_FS_STATUS_PATH_MAX 600
@@ -77,8 +78,13 @@ bool cfg_fs_format_is_stalled(bool in_progress, uint32_t elapsed_ms)
     return in_progress && elapsed_ms > CFG_FS_FORMAT_CEILING_MS;
 }
 
+bool cfg_fs_status_item_diverged(bool file_valid, bool nvs_valid, bool content_equal)
+{
+    return file_valid && nvs_valid && !content_equal;
+}
+
 esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_capacity_info_t *cap,
-                                    const cfg_fs_zones_dualwrite_info_t *dual,
+                                    const cfg_fs_dualwrite_item_t *items, size_t item_count,
                                     const cfg_fs_format_progress_t *fmt, char *buf, size_t buf_cap,
                                     size_t *out_len)
 {
@@ -165,22 +171,29 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
 
     APPEND(",\"tmp_entries_now\":%lu", (unsigned long)tmp_count);
 
-    APPEND(",\"dual_write\":{");
-    if (dual) {
-        /* file_rev >= nvs_rev is the healthy state (dual-write always writes
-         * the file first, per zones_config_cfg_fs.h's tie-break doc) --
-         * nvs_rev strictly higher means a prior file write failed and only
-         * NVS advanced, worth flagging rather than leaving implicit. */
-        bool diverged = dual->file_valid && (dual->nvs_rev > dual->file_rev);
-        APPEND("\"zones\":{\"file_backed\":%s,\"file_rev\":%lu,\"nvs_rev\":%lu,\"diverged\":%s}",
-              dual->file_valid ? "true" : "false", (unsigned long)dual->file_rev, (unsigned long)dual->nvs_rev,
-              diverged ? "true" : "false");
-    } else {
-        APPEND("\"zones\":{\"file_backed\":false}");
+    APPEND(",\"dual_write\":{\"items\":[");
+    size_t n_items = items ? item_count : 0;
+    if (n_items > CFG_FS_STATUS_MAX_ITEMS) {
+        /* Clamped, not rejected -- see cfg_fs_status.h's CFG_FS_STATUS_MAX_ITEMS
+         * comment. Every item this codebase actually has fits comfortably
+         * under the cap, so hitting this in practice would itself be a bug
+         * worth a log line. */
+        ESP_LOGW("cfg_fs_status", "dual-write item_count %u exceeds CFG_FS_STATUS_MAX_ITEMS %u -- truncating",
+                 (unsigned)n_items, (unsigned)CFG_FS_STATUS_MAX_ITEMS);
+        n_items = CFG_FS_STATUS_MAX_ITEMS;
     }
+    for (size_t i = 0; i < n_items; i++) {
+        const cfg_fs_dualwrite_item_t *it = &items[i];
+        APPEND("%s{\"name\":\"%s\",\"file_backed\":%s,\"file_rev\":%lu,\"nvs_backed\":%s,\"nvs_rev\":%lu,"
+              "\"diverged\":%s}",
+              i == 0 ? "" : ",", it->name ? it->name : "?", it->file_valid ? "true" : "false",
+              (unsigned long)it->file_rev, it->nvs_valid ? "true" : "false", (unsigned long)it->nvs_rev,
+              it->diverged ? "true" : "false");
+    }
+    APPEND("]");
     /* 2026-09-08 audit (deaccc4f): this list used to also carry "prefs" and
      * "profiles", which went stale the moment 34927a77/530dc2f7 gave both
-     * real persist/*_cfg_fs.c bridges (pref_cfg_fs.c, profiles_cfg_fs.c) --
+     * real persist/'*'_cfg_fs.c bridges (pref_cfg_fs.c, profiles_cfg_fs.c) --
      * an operator or the setup wizard reading /api/cfgfs would have been
      * told a migrated item was still pending. Verified against the actual
      * bridge modules under persist/ (kiln_cfg_store_cfg_fs.c,
@@ -190,7 +203,7 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
      * module yet (steps not landed) -- firing stats/history (item 7),
      * adaptive-tune state (item 9), relay cycle counters (item 4, plan
      * recommends moving it last). cfgfs_nvs_only_drift_check.py fails the
-     * moment a new persist/*_cfg_fs.c bridge appears without this array (and
+     * moment a new persist/'*'_cfg_fs.c bridge appears without this array (and
      * that check) being updated to match, so this list cannot go stale the
      * same way again. */
     APPEND(",\"nvs_only\":[\"firing_stats\",\"adaptive_tune\",\"relay_cycles\"]");

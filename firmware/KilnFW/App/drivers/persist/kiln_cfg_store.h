@@ -133,6 +133,17 @@ typedef struct {
  * best-effort, and does not change this function's return value. */
 esp_err_t kiln_cfg_store_init(void);
 
+// Read-only dual-write status for GET /api/cfgfs -- see unit_pref.h's
+// unit_pref_get_dualwrite_status() for the full contract (fresh re-read of
+// both sides every call, no resync side effects). The NVS side is only
+// considered valid at the CURRENT KILN_CFG_STORE_VERSION and exact current
+// size -- same "wrong version is simply invalid, not migrated in place"
+// rule kiln_cfg_store_cfg_fs.h documents for the file side, so a v1-sized
+// blob here reports nvs_valid=false rather than silently comparing against
+// a migrated copy this function does not perform.
+void kiln_cfg_store_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                          bool *diverged);
+
 /* How many configs this board can have saved at once (KILN_CFG_MAX_COUNT) --
  * GET /api/kiln_configs' "max_count" field and the LCD's picker both need
  * this to know when "save as new" must instead offer "overwrite an existing

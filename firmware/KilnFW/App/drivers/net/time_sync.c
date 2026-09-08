@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "cfg_fs_status.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
@@ -296,4 +297,68 @@ esp_err_t time_sync_set_tz(const char *tz)
         s_tz_rev = new_rev;
     }
     return ESP_OK;
+}
+
+void time_sync_get_tz_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                        bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+
+    uint8_t f_item[TZ_ITEM_SIZE];
+    memset(f_item, 0, sizeof(f_item));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, tz_file_validate, f_item, &f_rev, &f_valid);
+
+    bool n_valid = false;
+    uint8_t n_item[TZ_ITEM_SIZE];
+    memset(n_item, 0, sizeof(n_item));
+    uint32_t n_rev = 0;
+    if (nvs_partition_init(KILN_NVS_PARTITION) == HAL_OK) {
+        hal_kv_handle_t h;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            char stored[TIME_SYNC_TZ_MAX_LEN + 1] = { 0 };
+            size_t len = sizeof(stored);
+            if (hal_kv_get_str(&h, NVS_KEY_TZ, stored, &len) == HAL_OK && time_sync_tz_is_valid(stored)) {
+                n_valid = true;
+                strncpy((char *)n_item, stored, TZ_ITEM_SIZE - 1);
+                uint32_t rev = 0;
+                if (hal_kv_get_u32(&h, NVS_KEY_TZ_REV, &rev) == HAL_OK) {
+                    n_rev = rev;
+                }
+            }
+            hal_kv_close(&h);
+        }
+    }
+
+    bool content_equal = f_valid && n_valid && (memcmp(f_item, n_item, sizeof(f_item)) == 0);
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }

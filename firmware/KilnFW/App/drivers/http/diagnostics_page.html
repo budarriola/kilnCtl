@@ -996,7 +996,18 @@ here:</p>
   // via the generic fallback path in renderCfgFs() below, so a newly
   // migrated item shows up (as "file-backed") the moment the endpoint
   // reports it, with no page-side allowlist edit required.
-  var CFG_FS_ITEM_LABELS = { zones: 'Zone configuration' };
+  var CFG_FS_ITEM_LABELS = {
+    zones: 'Zone configuration',
+    kiln_cfg_store: 'Saved kiln configs',
+    unit_pref: 'Display units (C/F)',
+    ramp_assist: 'Ramp assist',
+    display_power: 'Display power settings',
+    tz: 'Timezone',
+    profile0: 'Fire profile slot 0', profile1: 'Fire profile slot 1',
+    profile2: 'Fire profile slot 2', profile3: 'Fire profile slot 3',
+    profile4: 'Fire profile slot 4', profile5: 'Fire profile slot 5',
+    profile6: 'Fire profile slot 6', profile7: 'Fire profile slot 7',
+  };
   function cfgFsItemLabel(key) {
     return CFG_FS_ITEM_LABELS[key] || key;
   }
@@ -1032,6 +1043,12 @@ here:</p>
             tmpColor + '">' + (tmp != null ? tmp : 'n/a') + '</span></div>';
 
     var dw = j.dual_write || {};
+    // 2026-09-08 widening: dual_write.items is now a flat array, one row per
+    // migrated item across EVERY persist/'*'_cfg_fs.c bridge (zones,
+    // kiln_cfg_store, the pref-backed items, one row per profile slot) --
+    // 70ed6514 fixed /api/cfgfs's stale lists but left this per-item detail
+    // zones-only; a divergence in profiles or prefs used to be invisible on
+    // this page even though the endpoint's OTHER lists were already correct.
     var fileBacked = [];
     // nvs_only: not yet migrated, still pending. nvs_permanent: KEEP in NVS
     // forever by design (boot-order/safety reasons) -- rendered distinctly
@@ -1041,22 +1058,33 @@ here:</p>
     var nvsOnly = Array.isArray(dw.nvs_only) ? dw.nvs_only.slice() : [];
     var nvsPermanent = Array.isArray(dw.nvs_permanent) ? dw.nvs_permanent.slice() : [];
     var anyDiverged = false;
-    for (var key in dw) {
-      if (key === 'nvs_only' || key === 'nvs_permanent' || !Object.prototype.hasOwnProperty.call(dw, key)) continue;
-      var item = dw[key];
-      if (item && item.file_backed) {
-        fileBacked.push({ key: key, item: item });
-        if (item.diverged) anyDiverged = true;
-      } else {
-        nvsOnly.push(key);
+    var items = Array.isArray(dw.items) ? dw.items : [];
+    for (var ix = 0; ix < items.length; ix++) {
+      var it = items[ix];
+      if (it && it.file_backed) {
+        fileBacked.push(it);
+        if (it.diverged) anyDiverged = true;
+      } else if (it && it.nvs_backed) {
+        // Has an NVS copy but no file yet -- genuinely pending migration.
+        // An item with NEITHER side populated (e.g. an unused profile slot)
+        // is not rendered at all -- there is nothing to report.
+        nvsOnly.push(it.name);
       }
     }
     for (var i = 0; i < fileBacked.length; i++) {
       var fb = fileBacked[i];
-      var divergedNote = fb.item.diverged ?
-        ' <span style="color:var(--ui-accent-5); font-weight:bold;">DIVERGED</span>' : '';
-      rows += '<div class="row"><span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(fb.key)) +
-              '</span><span class="value">file-backed (rev ' + fb.item.file_rev + ')' + divergedNote +
+      // A DIVERGED item is a data-integrity warning, not a routine status
+      // line -- bold, the existing accent-5 warning color (no new colours),
+      // AND its own bordered/background treatment so it cannot be skimmed
+      // past the way a same-colored plain word could be.
+      var divergedNote = fb.diverged ?
+        ' <span style="color:var(--ui-accent-5); font-weight:bold; border:1px solid var(--ui-accent-5); ' +
+        'border-radius:3px; padding:0 4px;">DIVERGED</span>' : '';
+      var nvsNote = fb.nvs_backed ? '' :
+        ' <span style="color:var(--muted)">(no NVS copy)</span>';
+      rows += '<div class="row"' + (fb.diverged ? ' style="background:rgba(255,0,0,0.08)"' : '') + '>' +
+              '<span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(fb.name)) +
+              '</span><span class="value">file-backed (rev ' + fb.file_rev + ')' + nvsNote + divergedNote +
               '</span></div>';
     }
     for (var n = 0; n < nvsOnly.length; n++) {
