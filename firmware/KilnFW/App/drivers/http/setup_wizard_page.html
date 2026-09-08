@@ -1041,15 +1041,25 @@ function renderStep2() {
       okEl.innerHTML = '';
       if (!v.valid) { renderErrList(errEl, v.errors); return; }
       renderErrList(errEl, []);
-      var params = ['thermo_count=' + thermoCountNow];
-      liveZones.forEach(function (z, i) {
-        params.push('z' + i + '_name=' + encodeURIComponent(z.name || ''));
-        params.push('z' + i + '_thermo_mask=' + z.thermo_mask);
-      });
-      fetch('/api/zones', {
-        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
-      }).then(function (r) {
-        if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+      // Whole-page submit (this file's own zoneToPostParams()/
+      // submitZonesConfig() comment): zones_http_post_parse.c requires most
+      // per-zone fields on every POST and treats several as omit-DELETES
+      // (the measured plant model, z%u_k/z%u_tau/z%u_deadtime) -- this step
+      // only edits name/thermo_mask, so every OTHER field must be echoed
+      // back from the live GET, not left out. dataCopy carries the updated
+      // thermo_count; liveZones merges this step's edits onto the zones GET
+      // already returned, same Object.assign-over-a-copy pattern step 4/5/6
+      // use.
+      var dataCopy = Object.assign({}, data);
+      dataCopy.thermo_count = thermoCountNow;
+      var mergedZones = [];
+      for (var mi = 0; mi < thermoCountNow; mi++) {
+        var copy = Object.assign({}, zones[mi] || {});
+        copy.name = liveZones[mi].name;
+        copy.thermo_mask = liveZones[mi].thermo_mask;
+        mergedZones.push(copy);
+      }
+      submitZonesConfig(dataCopy, mergedZones).then(function () {
         return postStepState(2, 'done');
       }).then(function () {
         okEl.innerHTML = '<p class="wok">Saved.</p>';
@@ -1130,15 +1140,19 @@ function renderStep3() {
       okEl.innerHTML = '';
       if (!v.valid) { renderErrList(errEl, v.errors); return; }
       renderErrList(errEl, []);
-      var params = [];
-      liveZones.forEach(function (z, i) {
-        params.push('z' + i + '_tctype=' + z.tc_type);
-        params.push('z' + i + '_cal=' + z.cal_offset_c);
-      });
-      fetch('/api/zones', {
-        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
-      }).then(function (r) {
-        if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+      // Whole-page submit, same reasoning as step 2's commit handler above:
+      // this step only edits tc_type/cal_offset_c, so every other required/
+      // omit-deletes field (relay_mask, kp/ki/kd, model k/tau/deadtime, ...)
+      // must be echoed back from the live GET via zoneToPostParams()/
+      // submitZonesConfig() rather than left out of a hand-built params list.
+      var mergedZones = [];
+      for (var mi = 0; mi < thermoCount; mi++) {
+        var copy = Object.assign({}, zones[mi] || {});
+        copy.tc_type = liveZones[mi].tc_type;
+        copy.cal_offset_c = liveZones[mi].cal_offset_c;
+        mergedZones.push(copy);
+      }
+      submitZonesConfig(data, mergedZones).then(function () {
         okEl.innerHTML = '<p class="wok">Write accepted -- checking whether each channel is converting&hellip;</p>';
         // Verify-on-chip (requirement 5): a write returning 200 is NOT the
         // same claim as "this type actually verified on the chip" (the CR1

@@ -383,6 +383,81 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(noCommissioning === null, 'getAbsMaxTempC returns null when GET /api/safety/commissioning itself failed');
 })();
 
+// ---- Identification-round-trip regression (2026-09-08 hazard report):
+// zones_http_post_parse.c treats z%u_k/z%u_tau/z%u_deadtime as
+// OMIT-DELETES -- a submission that doesn't name them zeroes the measured
+// plant model. Steps 2 and 3 originally hand-built a short params list
+// containing only the field(s) each screen edits and POSTed that alone,
+// which would have wiped model identification (and tripped required-field
+// 400s on relay_mask/kp/ki/kd/etc) on a real board. The fix routes both
+// steps through the same submitZonesConfig()/zoneToPostParams() helper
+// steps 4-6 already used; these tests assert the POST body actually carries
+// the identification fields through when only an UNRELATED field changes,
+// by driving submitZonesConfig() directly (the same call step 2/3's commit
+// handlers now make) and by simulating each handler's own merge logic. ----
+(function testSubmitZonesConfigEchoesIdentification() {
+  let capturedBody = null;
+  const ctx = loadPageScript(makeFetch((url, opts) => {
+    if (opts && opts.body) capturedBody = opts.body;
+    return { ok: true, status: 200, body: {} };
+  }));
+  const data = {
+    thermo_count: 1, relay_count: 1, max_simultaneous_relays: 0, continue_on_zone_trip: false,
+    timing_profiles: [{ name: 'Profile 0' }],
+    zones: [{
+      name: 'Zone 1', relay_mask: 1, thermo_mask: 1, tc_type: 3, cal_offset_c: 0,
+      pid_kp: 10, pid_ki: 1, pid_kd: 0, control_mode: 0, max_ramp_c_per_hr: 100,
+      sanity_rate_c_per_min: 5, max_temp_c: 1200, min_temp_c: -20,
+      heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, timing_profile: 0,
+      model_k_dc: 42.5, model_tau_s: 600, model_dead_time_s: 30,
+    }],
+  };
+  ctx.submitZonesConfig(data, data.zones);
+  assert(capturedBody !== null, 'submitZonesConfig posts a body');
+  assert(/z0_k=42\.5/.test(capturedBody), 'submitZonesConfig echoes the measured model K');
+  assert(/z0_tau=600/.test(capturedBody), 'submitZonesConfig echoes the measured model tau');
+  assert(/z0_deadtime=30/.test(capturedBody), 'submitZonesConfig echoes the measured model dead time');
+})();
+
+// Step 2's own merge logic (name/thermo_mask edited, everything else --
+// including the model fields -- must survive from the GET-returned zone).
+(function testStep2MergePreservesIdentification() {
+  let capturedBody = null;
+  const ctx = loadPageScript(makeFetch((url, opts) => {
+    if (opts && opts.body) capturedBody = opts.body;
+    return { ok: true, status: 200, body: {} };
+  }));
+  const data = {
+    thermo_count: 1, relay_count: 1, timing_profiles: [{ name: 'Profile 0' }],
+    zones: [{
+      name: 'Old Name', relay_mask: 1, thermo_mask: 1, tc_type: 3, cal_offset_c: 0,
+      pid_kp: 10, pid_ki: 1, pid_kd: 0, control_mode: 0, max_ramp_c_per_hr: 100,
+      sanity_rate_c_per_min: 5, max_temp_c: 1200, min_temp_c: -20,
+      heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, timing_profile: 0,
+      model_k_dc: 42.5, model_tau_s: 600, model_dead_time_s: 30,
+    }],
+  };
+  const zones = data.zones;
+  const liveZones = [{ name: 'New Name', thermo_mask: 2 }]; // step2ReadCurrentZones()'s own shape
+  const thermoCountNow = 1;
+  const dataCopy = Object.assign({}, data);
+  dataCopy.thermo_count = thermoCountNow;
+  const mergedZones = [];
+  for (let mi = 0; mi < thermoCountNow; mi++) {
+    const copy = Object.assign({}, zones[mi] || {});
+    copy.name = liveZones[mi].name;
+    copy.thermo_mask = liveZones[mi].thermo_mask;
+    mergedZones.push(copy);
+  }
+  ctx.submitZonesConfig(dataCopy, mergedZones);
+  assert(/z0_name=New\+Name/.test(capturedBody) || /z0_name=New%20Name/.test(capturedBody),
+    'step2 merge: the edited field (name) is applied');
+  assert(/z0_thermo_mask=2/.test(capturedBody), 'step2 merge: the edited field (thermo_mask) is applied');
+  assert(/z0_k=42\.5/.test(capturedBody), 'step2 merge: model K survives an unrelated (name/thermo_mask) step commit');
+  assert(/z0_tau=600/.test(capturedBody), 'step2 merge: model tau survives an unrelated step commit');
+  assert(/z0_deadtime=30/.test(capturedBody), 'step2 merge: model dead time survives an unrelated step commit');
+})();
+
 Promise.resolve().then(() => {
   console.log('');
   console.log((passed + failed) + ' assertions, ' + passed + ' passed, ' + failed + ' failed');
