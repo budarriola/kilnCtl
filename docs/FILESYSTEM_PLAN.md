@@ -811,3 +811,82 @@ new fix to `boot_guard.c`'s persistence path itself -- the next pass should
 instrument or directly read `persist_count()`/`load_count()`'s actual NVS
 interaction on this board rather than re-attempting the same black-box
 reset-and-observe loop.
+
+## Recovery mode cleared and CONTROL UART recovered, but `cfg` still fails to mount, 2026-09-08
+
+Built and flashed `08230ff0` from a clean detached worktree
+(`C:/wt/espflash_final`, updated to current `origin/main`, `sdkconfig`
+re-copied from the main tree, `IDF_TARGET=esp32s3`). Host tests: 32/32
+executables passed. `check_main_task_stack_budget`: **5792 B against the
+6144 B budget** (75% of the 8192 B `main` task stack) -- OK, re-measured
+fresh against this ELF, not assumed. ELF archived automatically at
+`C:/wt/espflash_final/firmware/KilnFW/build/elf_archive/
+KilnCtrl-5c64e745cf3f.elf` (`KilnCtrl-latest.elf` points at it). Pre-flash
+`full_board_backup.py`: 13/13 endpoints ok; `cfg` confirmed NOT mounted
+pre-flash. `flash_firmware(kiln_fw_root=..., verify=True)` reported flashed
+and verified OK via OpenOCD/JTAG (HTTP post-flash verification was itself
+skipped -- board wasn't answering HTTP pre-flash either, expected during
+Wi-Fi bring-up, not a failure).
+
+**Recovery mode cleared.** `GET /api/ota/esp/status` reports
+`"recovery_mode":false` on the post-flash boot (commit `08230ff0`, clean,
+build matches). This is the first boot since the recovery-mode trap
+sections above where recovery mode did not reassert itself.
+
+**CONTROL UART came back.** Immediately after flashing, `kiln_call`s over
+the existing serial connection (COM14) failed with "no reply after all
+retries", but a plain `disconnect()`/`connect(port="COM14")` cycle
+re-synced cleanly (`protocol v11 matches - FW 08230ff0 (clean) built
+2026-09-08 17:27:03Z`), and `control_get_zones` then read back correctly.
+This looks like a PC-side/session-side desync (the MCP server's own link
+state going stale across the board's JTAG-triggered reset) rather than a
+firmware-side wedge, given a bare reconnect fixed it with no board-side
+action. PID gains and coupling matrix confirmed **identical** to the known
+values: Zone0 Kp=0.0318 Ki=0.0001 Kd=0.8401, Zone1 Kp=0.0485 Ki=0.0002
+Kd=1.0548, Zone2 Kp=0.0631 Ki=0.0002 Kd=1.0690, coupling z0(27.32,21.72)
+z1(14.30,22.15) z2(8.33,12.42).
+
+**`cfg` still does not mount -- new failure mode, not the recovery-mode
+skip.** `GET /api/cfgfs` reports `mounted:false`,
+`"format":{"known":true,"in_progress":false,"completed":true,
+"succeeded":false,"elapsed_ms":16,...}` -- the format gate ran (this is not
+`RECOVERY MODE: skipping cfg filesystem mount entirely` any more, and not
+the "86.6% non-erased, refusing to auto-format" case from the
+2026-09-07 pass either) and completed in 16 ms, but reported failure. 16 ms
+is implausibly fast for a real LittleFS format of a 512 KiB partition,
+suggesting an early bail (e.g. a precondition check failing immediately)
+rather than a format that actually ran and failed partway. All items
+(`prefs`, `profiles`, `kilncfg_slots`, `adaptive_tune`, `relay_cycles`)
+remain NVS-only. Confirmed the round trip cannot proceed past this point:
+set `unit_pref` to `F` via `POST /api/unit_pref` (form-urlencoded,
+`unit=F`) -- took effect (`GET /api/status` reflects `temp_unit:"F"`) but
+`GET /api/cfgfs`'s `dual_write.zones.file_backed` stayed `false`, i.e. the
+write landed in NVS only, exactly as expected when the filesystem isn't
+mounted. Set back to `C` afterward, confirmed. No `debug_reset` round trip
+was attempted since there is no mounted filesystem yet to prove survives
+one.
+
+No new crash: `GET /api/crash_report` is byte-for-byte the same stale
+record as every prior pass (`exc_cause_str: "LoadProhibited"`,
+`exc_pc:"0xfffffffd"`, `exc_addr:"0x00000018"`, `acknowledged:false`,
+`backtrace_corrupted:true`) -- only `found_on_boot_reset_reason` differs
+per boot (`"SW"` this time, matching the JTAG-triggered `esp_restart`),
+which is expected and does not indicate a new panic. All task stack
+margins read OK except the two already-known LOW entries, unchanged by
+this flash: `backlight_pwm` (920 B/29.9%), `system_uart_bridge` (920 B/
+29.9%). `get_heap_status`: `heap_internal free=74391 B min_free=48007 B`.
+
+**Net conclusion: the config-filesystem feature is still UNPROVEN on
+hardware.** Progress this pass: the recovery-mode trap that blocked every
+prior attempt at reaching this point is gone (recovery_mode=false,
+confirmed a genuinely non-recovery boot), and the CONTROL UART concern
+turned out to be session-side, not firmware-side. But the mount itself now
+fails for a third, different reason (fast/early format failure, `succeeded:
+false`) than either of the two previously-documented blockers (auto-format
+declining on non-erased data; recovery mode skipping the mount outright).
+Whoever picks this up next should read `cfg_fs_format_gate.c`'s and
+`cfg_fs_mount.c`'s boot-log lines directly (via a JTAG console capture or
+`get_device_log`, not just `/api/cfgfs`'s summary) to see what the format
+call actually returned in those 16 ms, since a fast unconditional failure
+this early is not one of this doc's previously-characterized failure
+modes.
