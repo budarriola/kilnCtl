@@ -53,6 +53,7 @@
 #include "run_state.h"
 #include "zone_coupling_solve.h"
 #include "autotune_engine.h"
+#include "on_off_trigger_decide.h"
 
 /* ---- shared log tag ------------------------------------------------------ */
 extern const char *PE_TAG;
@@ -502,6 +503,17 @@ typedef struct {
     uint32_t heat_blocked_sources;
     char     fault_reason[96];
     thermal_guard_trip_t fault_guard;
+
+    /* docs/ON_OFF_ZONE_PLAN.md sec 3/4 -- on_off_trigger_decide.h's
+     * feature-local per-zone state (quasi_dwell timers, commanded_on, hold
+     * timer). Deliberately NOT read by, or derived from, any other field in
+     * this struct (see that header's top comment on why quasi_dwell must
+     * stay isolated). Meaningful only for a ZONE_TYPE_ON_OFF zone; a HEATER
+     * zone's copy is reset at run start and never ticked. Report-only for
+     * now (plan step 7): profile_executor.c computes a verdict here every
+     * tick but does not act on it -- no relay is written from this field or
+     * from anything derived from it. */
+    on_off_trigger_state_t on_off_trigger_state;
 
     /* TODO.md 6A.7's max_ramp_c_per_hr re-check (see reload_zone_config()):
      * latches once this zone's current segment has newly become infeasible

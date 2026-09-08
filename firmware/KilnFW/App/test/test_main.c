@@ -9,6 +9,7 @@ int g_test_count = 0;
 
 void run_test_pid(void);
 void run_test_thermal_guard(void);
+void run_test_on_off_trigger_decide(void);
 void run_test_heater_output(void);
 void run_test_closed_loop(void);
 void run_test_pid_autotune(void);
@@ -83,6 +84,7 @@ int main(void)
 {
     run_test_pid();
     run_test_thermal_guard();
+    run_test_on_off_trigger_decide();
     run_test_heater_output();
     run_test_closed_loop();
     run_test_pid_autotune();

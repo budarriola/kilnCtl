@@ -882,6 +882,61 @@ bool zone_needs_ceiling(uint8_t zone_index)
     return tmask != 0; /* on/off zone: only if it actually has a TC assigned */
 }
 
+bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on)
+{
+    if (!out_on) {
+        return false;
+    }
+    *out_on = false; /* fail-closed default, set before the range check so every early return is safe */
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_on = s_zones.cfg.zones[zone_index].failsafe_state != 0;
+    return true;
+}
+
+bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c)
+{
+    if (!out_hyst_c) {
+        return false;
+    }
+    *out_hyst_c = 2.0f; /* plan default, set before the range check -- see header comment */
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    float stored = s_zones.cfg.zones[zone_index].hyst_c;
+    *out_hyst_c = (stored > 0.0f) ? stored : 2.0f;
+    return true;
+}
+
+bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s)
+{
+    if (!out_s) {
+        return false;
+    }
+    *out_s = 30u;
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    uint16_t stored = s_zones.cfg.zones[zone_index].min_on_s;
+    *out_s = (stored > 0u) ? stored : 30u;
+    return true;
+}
+
+bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s)
+{
+    if (!out_s) {
+        return false;
+    }
+    *out_s = 30u;
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    uint16_t stored = s_zones.cfg.zones[zone_index].min_off_s;
+    *out_s = (stored > 0u) ? stored : 30u;
+    return true;
+}
+
 bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, float *out_min_temp_c)
 {
     if (!out_max_temp_c || !out_min_temp_c || zone_index >= s_zones.cfg.thermo_count) {

@@ -1199,6 +1199,70 @@ void executor_task_entry(void *arg)
                 }
             }
 
+            /* docs/ON_OFF_ZONE_PLAN.md sec 3/4/7 -- REPORT ONLY. Computes
+             * this tick's verdict for an on/off zone through the pure
+             * on_off_trigger_decide() core so its state (quasi_dwell,
+             * held_s, commanded_on) is real and host-test-verifiable
+             * against production inputs, exactly matching plan step 7's
+             * "Output computed and reported, relay still not written
+             * (dry-run flag)". NOTHING below writes a relay, changes duty,
+             * or is read by any other part of this tick -- apply_relay()
+             * wiring is plan step 8, deliberately not done here.
+             *
+             * rule.* is hardcoded to "no rule" (enable=false) because
+             * profile_on_off_rule_t storage (plan step 5) has not landed
+             * yet -- every on/off zone therefore reports precedence level
+             * 6 ("no rule -> OFF") whenever it isn't overridden by a
+             * higher level, which is the honest, current state of this
+             * feature rather than a placeholder pretending otherwise. */
+            if (zone_on_off[zi]) {
+                bool failsafe_on;
+                zones_config_get_failsafe_state(zi, &failsafe_on);
+                uint16_t min_on_s = 30, min_off_s = 30;
+                zones_config_get_min_on_s(zi, &min_on_s);
+                zones_config_get_min_off_s(zi, &min_off_s);
+                float hyst_c = 2.0f;
+                zones_config_get_hyst_c(zi, &hyst_c);
+                uint8_t direction_bit = (uint8_t)ON_OFF_DIR_FLAT;
+                if (s_exec.target_rate_c_per_s > 0.0f) {
+                    direction_bit = (uint8_t)ON_OFF_DIR_HEATING;
+                } else if (s_exec.target_rate_c_per_s < 0.0f) {
+                    direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
+                }
+                on_off_trigger_input_t oin = {
+                    .failsafe_override = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted || z->heat_blocked,
+                    .failsafe_state_on = failsafe_on,
+                    .guard_5_6_tripped = z->guard_state.is_tripped &&
+                        (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
+                         z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP),
+                    .run_running = (s_exec.state == PROFILE_EXEC_RUNNING),
+                    .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
+                    .failsafe_on_pause = false, /* no per-zone override field yet -- plan step 6's UI */
+                    .min_on_s = min_on_s,
+                    .min_off_s = min_off_s,
+                    .rule = {
+                        .enable = false,
+                        .phase_mask = 0,
+                        .direction_mask = 0,
+                        .temp_cmp = ON_OFF_TEMP_CMP_NONE,
+                        .temp_threshold_c = 0.0f,
+                        .time_start_s = 0,
+                        .time_stop_s = 0,
+                        .invert = false,
+                    },
+                    .current_phase_is_dwell = s_exec.dwelling || z->on_off_trigger_state.quasi_dwell,
+                    .current_direction = direction_bit,
+                    .temp_measurement_c = z->actual_c,
+                    .hyst_c = hyst_c,
+                    .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
+                    .ramp_lock_held = s_exec.ramp_lock_held,
+                    .stretched_this_tick = stretched_this_tick,
+                    .segment_index = s_exec.segment_index,
+                    .dt_s = dt_s,
+                };
+                (void)on_off_trigger_decide(&z->on_off_trigger_state, &oin);
+            }
+
             /* Contact-cycle accounting (TODO.md 6A.1): hand relay_cycles.c
              * only what this zone has switched since the last tick. Its
              * relays switch as a group, so every relay in the mask takes the

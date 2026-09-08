@@ -942,6 +942,36 @@ bool zone_is_on_off(uint8_t zone_index);
  * check. */
 bool zone_needs_ceiling(uint8_t zone_index);
 
+/* docs/ON_OFF_ZONE_PLAN.md sec 5's per-zone fail-safe state: 0 = OFF
+ * (migration/zero-init default), nonzero = ON. First real reader is
+ * on_off_trigger_decide.h's precedence levels 1-3 (control/
+ * on_off_trigger_report.c). Fail-closed convention: an out-of-range
+ * zone_index returns false and *out_on is left false (OFF), same
+ * "never accidentally imply the safer-looking answer is ON" reasoning as
+ * every getter above -- a caller that doesn't check the bool return must
+ * still land on the safe default. */
+bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on);
+
+/* docs/ON_OFF_ZONE_PLAN.md sec 3's temperature hysteresis: stored value 0
+ * means "not configured" and the caller substitutes the plan's 2.0 C
+ * default -- same "0 substituted with a firmware default" convention
+ * thermal_guard_cfg_t's fields already use, so a fresh/migrated zone reads
+ * as the documented default rather than a disabled (0-width) band, which
+ * would let a boundary-sitting reading chatter the relay from the moment
+ * the schema migrates in, before any operator has touched the field.
+ * Out-of-range zone_index: returns false, *out_hyst_c left at the 2.0
+ * default (not 0) -- same fail-closed reasoning, the safe answer here is
+ * the one that CANNOT chatter, not the one that reads as "unset". */
+bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c);
+
+/* docs/ON_OFF_ZONE_PLAN.md sec 3's minimum on/off dwell: stored 0 means
+ * "not configured", substituted with the plan's 30 s default. Out-of-range
+ * zone_index: returns false, *out_s left at the 30 s default -- same
+ * reasoning as zones_config_get_hyst_c() above (the safe default is the
+ * one that bounds relay chatter, not zero). */
+bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s);
+bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s);
+
 /* Guard 5's absolute limits (TODO.md 6A.3). max_temp_c == 0 still means
  * "not set" here, at the storage/getter layer this function lives at --
  * thermal_guard.c's guard 5 continues to read 0 as "no ceiling" and stays a

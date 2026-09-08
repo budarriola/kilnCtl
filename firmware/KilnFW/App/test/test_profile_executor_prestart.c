@@ -940,6 +940,34 @@ bool zone_is_on_off(uint8_t zone_index)
     return zone_index < MAX31856_CHANNEL_COUNT && g_stub_zone_is_on_off[zone_index];
 }
 
+/* docs/ON_OFF_ZONE_PLAN.md sec 3/7 -- on_off_trigger_decide's report-only
+ * wiring in profile_executor.c reads these every tick for an on/off zone.
+ * Fixed, defaults-shaped fakes (never true/nonzero) so every pre-existing
+ * test in this file, which never types a zone on/off, is unaffected; a
+ * future test exercising the report path would need real per-zone stubs,
+ * which this file does not need yet since it only tests the prestart-guard
+ * seam, not a running tick. */
+bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on)
+{
+    if (out_on) *out_on = false;
+    return zone_index < MAX31856_CHANNEL_COUNT;
+}
+bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c)
+{
+    if (out_hyst_c) *out_hyst_c = 2.0f;
+    return zone_index < MAX31856_CHANNEL_COUNT;
+}
+bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s)
+{
+    if (out_s) *out_s = 30;
+    return zone_index < MAX31856_CHANNEL_COUNT;
+}
+bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s)
+{
+    if (out_s) *out_s = 30;
+    return zone_index < MAX31856_CHANNEL_COUNT;
+}
+
 // Settable for B2's negative test below -- see s_test_profiles_http_get_ok's
 // comment. Default false (matching the old hardcoded behavior) for every
 // other test in this file.

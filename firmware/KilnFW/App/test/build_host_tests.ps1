@@ -40,6 +40,7 @@ try {
         (Join-Path $testDir "test_main.c"),
         (Join-Path $testDir "test_pid.c"),
         (Join-Path $testDir "test_thermal_guard.c"),
+        (Join-Path $testDir "test_on_off_trigger_decide.c"),
         (Join-Path $testDir "test_heater_output.c"),
         (Join-Path $testDir "test_closed_loop.c"),
         (Join-Path $testDir "test_pid_autotune.c"),
@@ -101,6 +102,7 @@ try {
         (Join-Path $driversDir "control/pid.c"),
         (Join-Path $driversDir "control/cone_table.c"),
         (Join-Path $driversDir "control/thermal_guard.c"),
+        (Join-Path $driversDir "control/on_off_trigger_decide.c"),
         (Join-Path $driversDir "control/heater_output.c"),
         (Join-Path $driversDir "control/pid_autotune.c"),
         (Join-Path $driversDir "control/pid_fuzzy.c"),
@@ -360,7 +362,7 @@ try {
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
             "`"$(Join-Path $driversDir 'control/adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/adaptive_tune_model.c')`" " +
             "`"$(Join-Path $driversDir 'control/adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
-            "`"$(Join-Path $driversDir 'control/cone_table.c')`" " +
+            "`"$(Join-Path $driversDir 'control/cone_table.c')`" `"$(Join-Path $driversDir 'control/on_off_trigger_decide.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch

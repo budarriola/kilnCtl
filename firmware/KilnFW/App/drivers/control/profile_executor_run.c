@@ -585,6 +585,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             .progress_band_c = progress_band_c,
         };
         thermal_guard_reset(&z->guard_state);
+        /* docs/ON_OFF_ZONE_PLAN.md sec 5: "Resume starts every on/off device
+         * in its fail-safe state and quasi_dwell = false" -- profile_
+         * executor_run() is the single entry point for both a fresh run and
+         * the warm-start/resume path, so resetting here covers both without
+         * a second call site to keep in sync. */
+        on_off_trigger_state_reset(&z->on_off_trigger_state);
 
         /* Ramp baseline: the first active zone's actual (calibrated)
          * reading if we have one, else the segment's own target (makes
