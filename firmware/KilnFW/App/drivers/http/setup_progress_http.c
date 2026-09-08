@@ -1,6 +1,7 @@
 #include "setup_progress_http.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_http_server.h"
@@ -49,15 +50,36 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * item 2's own "{version, per-step {state, ts, note}}" wording). */
 #define SETUP_PROGRESS_JSON_CAP 2048
 
+/* 2026-09-08 hardware verification (httpd_worker measured 632 B free of
+ * 8192 B, down from a 1728 B pre-flash baseline): this handler's locals used
+ * to live directly on the httpd task stack -- a SETUP_WIZARD_STEP_COUNT-entry
+ * setup_wizard_step_t array plus the full 2048-byte json[] buffer, ~2.7 KB in
+ * this frame alone, on the same shared task every other handler in this
+ * codebase runs on (see CLAUDE.md's "httpd stack" note). Moved to the heap,
+ * same request-scoped-malloc-then-free-on-every-return-path convention as
+ * diagnostics_http.c's cfgfs_status_get_handler. malloc() failure is reported
+ * as 500, never a truncated/garbage response. */
+typedef struct {
+    setup_wizard_step_t steps[SETUP_WIZARD_STEP_COUNT];
+    char json[SETUP_PROGRESS_JSON_CAP];
+} setup_progress_get_scratch_t;
+
 static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
 {
-    setup_wizard_step_t steps[SETUP_WIZARD_STEP_COUNT];
-    setup_wizard_progress_get_all(steps);
+    setup_progress_get_scratch_t *s = malloc(sizeof(*s));
+    if (!s) {
+        ESP_LOGE(TAG, "api_setup_progress_get_handler: malloc(%u) failed", (unsigned)sizeof(*s));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
 
-    char json[SETUP_PROGRESS_JSON_CAP];
+    setup_wizard_progress_get_all(s->steps);
+
     size_t o = 0;
-    int n = snprintf(json, sizeof(json), "{\"version\":%u,\"steps\":{", (unsigned)SETUP_WIZARD_PROGRESS_API_VERSION);
-    if (n < 0 || (size_t)n >= sizeof(json)) {
+    int n = snprintf(s->json, sizeof(s->json), "{\"version\":%u,\"steps\":{",
+                      (unsigned)SETUP_WIZARD_PROGRESS_API_VERSION);
+    if (n < 0 || (size_t)n >= sizeof(s->json)) {
+        free(s);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
         return ESP_FAIL;
     }
@@ -65,30 +87,34 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
 
     for (uint8_t i = 0; i < SETUP_WIZARD_STEP_COUNT; i++) {
         char note_esc[2 * SETUP_WIZARD_NOTE_MAX];
-        json_escape(steps[i].note, note_esc, sizeof(note_esc));
-        n = snprintf(json + o, sizeof(json) - o,
+        json_escape(s->steps[i].note, note_esc, sizeof(note_esc));
+        n = snprintf(s->json + o, sizeof(s->json) - o,
                      "%s\"%u\":{\"state\":\"%s\",\"ts\":%u,\"note\":\"%s\"}", i == 0 ? "" : ",", (unsigned)i,
-                     setup_wizard_step_state_name(steps[i].state), (unsigned)steps[i].ts, note_esc);
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {
+                     setup_wizard_step_state_name(s->steps[i].state), (unsigned)s->steps[i].ts, note_esc);
+        if (n < 0 || (size_t)n >= sizeof(s->json) - o) {
             /* Unreachable at SETUP_WIZARD_STEP_COUNT=13 against a 2048-byte
              * buffer, but never ship a truncated JSON document silently --
              * same discipline as readiness_http.c's own overflow guard. */
             ESP_LOGE(TAG, "setup progress JSON did not fit SETUP_PROGRESS_JSON_CAP=%d", SETUP_PROGRESS_JSON_CAP);
+            free(s);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
             return ESP_FAIL;
         }
         o += (size_t)n;
     }
 
-    n = snprintf(json + o, sizeof(json) - o, "}}");
-    if (n < 0 || (size_t)n >= sizeof(json) - o) {
+    n = snprintf(s->json + o, sizeof(s->json) - o, "}}");
+    if (n < 0 || (size_t)n >= sizeof(s->json) - o) {
+        free(s);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
         return ESP_FAIL;
     }
     o += (size_t)n;
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t send_err = httpd_resp_send(req, s->json, o);
+    free(s);
+    return send_err;
 }
 
 /* POST /api/setup/progress -- form body "step=<0-12>&state=pending|done|skipped[&note=...]",
