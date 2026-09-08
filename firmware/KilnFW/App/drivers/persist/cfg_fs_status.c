@@ -72,8 +72,14 @@ static const char *status_reason(cfg_fs_status_t s)
     }
 }
 
+bool cfg_fs_format_is_stalled(bool in_progress, uint32_t elapsed_ms)
+{
+    return in_progress && elapsed_ms > CFG_FS_FORMAT_CEILING_MS;
+}
+
 esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_capacity_info_t *cap,
-                                    const cfg_fs_zones_dualwrite_info_t *dual, char *buf, size_t buf_cap,
+                                    const cfg_fs_zones_dualwrite_info_t *dual,
+                                    const cfg_fs_format_progress_t *fmt, char *buf, size_t buf_cap,
                                     size_t *out_len)
 {
     if (!buf || !out_len || buf_cap == 0) {
@@ -178,6 +184,24 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
      * NVS-only rather than omitted, so "what's file-backed vs NVS-only" is
      * a complete answer, not just the one item that happens to be done. */
     APPEND(",\"nvs_only\":[\"prefs\",\"profiles\",\"kilncfg_slots\",\"adaptive_tune\",\"relay_cycles\"]");
+    APPEND("}");
+
+    /* "format" -- observability for the deferred background auto-format
+     * (docs/audits/boot_hang_2026-09-08.md follow-up): distinguishes a slow
+     * format still running from a hang, and never claims knowledge this
+     * process doesn't have (`known:false` when no format has run this boot,
+     * same "unknown, not silently zeroed" discipline as capacity above). */
+    APPEND(",\"format\":{");
+    if (fmt && fmt->known) {
+        bool stalled = cfg_fs_format_is_stalled(fmt->in_progress, fmt->elapsed_ms);
+        APPEND("\"known\":true,\"in_progress\":%s,\"completed\":%s,\"succeeded\":%s,\"elapsed_ms\":%lu,"
+              "\"stalled\":%s,\"ceiling_ms\":%lu",
+              fmt->in_progress ? "true" : "false", fmt->completed ? "true" : "false",
+              fmt->succeeded ? "true" : "false", (unsigned long)fmt->elapsed_ms, stalled ? "true" : "false",
+              (unsigned long)CFG_FS_FORMAT_CEILING_MS);
+    } else {
+        APPEND("\"known\":false");
+    }
     APPEND("}");
 
     APPEND("}");

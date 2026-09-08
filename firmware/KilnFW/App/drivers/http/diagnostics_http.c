@@ -12,6 +12,7 @@
 
 #include "MAX31856.h"
 #include "cfg_fs.h"
+#include "cfg_fs_mount.h"
 #include "cfg_fs_status.h"
 #include "crash_report.h"
 #include "danger_mode.h"
@@ -985,8 +986,22 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
     zones_config_cfg_fs_load_raw(&s->raw, &dual.file_rev, &dual.file_valid);
     dual.nvs_rev = cfgfs_read_zones_nvs_rev();
 
+    /* Deferred auto-format progress (cfg_fs_mount.c) -- ESP-IDF-only getters,
+     * so the picture is assembled here rather than inside the pure
+     * cfg_fs_status.c module (see cfg_fs_status.h's cfg_fs_format_progress_t
+     * comment). known=false is correct and common: most boots either mount
+     * cleanly or never trigger the deferred task at all. */
+    cfg_fs_format_progress_t fmt = { .known = cfg_fs_mount_format_ever_started() };
+    if (fmt.known) {
+        fmt.in_progress = cfg_fs_mount_format_in_progress();
+        fmt.completed = cfg_fs_mount_format_completed();
+        fmt.succeeded = fmt.completed && (cfg_fs_mount_format_result() == ESP_OK);
+        fmt.elapsed_ms = cfg_fs_mount_format_elapsed_ms();
+    }
+
     size_t len = 0;
-    esp_err_t err = cfg_fs_status_build_json(mounted ? "/cfg" : NULL, &cap, &dual, s->json, sizeof(s->json), &len);
+    esp_err_t err =
+        cfg_fs_status_build_json(mounted ? "/cfg" : NULL, &cap, &dual, &fmt, s->json, sizeof(s->json), &len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cfg_fs_status_build_json() failed: %s (buffer too small?)", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status build failed");

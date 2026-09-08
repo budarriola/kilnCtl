@@ -455,6 +455,19 @@ void main_boot_early(main_boot_ctx_t *ctx)
                      "or the Settings page's danger-zone banner",
                      cfg_fs_mount_format_pending_reason());
         }
+
+        /* A blank partition auto-formats in the background now, not here --
+         * see cfg_fs_mount.h's doc comment on the deferred-format getters
+         * (docs/audits/boot_hang_2026-09-08.md). This boot proceeds with
+         * cfg_fs unavailable regardless of which branch above ran; this
+         * banner is just the boot-log-visible half of that ("in progress",
+         * not "hung") -- GET /api/cfgfs is the live/ongoing half. */
+        if (cfg_fs_mount_format_ever_started()) {
+            ESP_LOGW(MAIN_TAG,
+                     "cfg partition auto-format started in the BACKGROUND (deferred off the boot path) -- "
+                     "cfg filesystem unavailable until it completes; poll GET /api/cfgfs (\"format\" section) "
+                     "for progress/duration, never assume a hang");
+        }
     }
 
     // watchdog_cfg_init(): the task watchdog itself already exists by this

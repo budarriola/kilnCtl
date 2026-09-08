@@ -23,6 +23,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -97,6 +98,41 @@ const char *cfg_fs_mount_format_pending_reason(void);
  * for the deadlock this avoids (project_flash_worker_reentrancy). Never
  * blocks boot: this has no boot-time caller, only HTTP-triggered ones. */
 esp_err_t cfg_fs_confirm_format_device(void);
+
+/* DEFERRED AUTO-FORMAT (docs/audits/boot_hang_2026-09-08.md follow-up,
+ * 2026-09-08): a blank `cfg` partition used to be formatted INLINE, on the
+ * main boot task, inside cfg_fs_mount_device() -- a real esp_littlefs_format()
+ * of the whole 512 KiB partition, with no bound and nothing feeding
+ * rtc_watchdog.h's RTC watchdog until monitor_task.c starts several boot
+ * phases later. A format anywhere near its ~51 s worst-case (128 4-KiB
+ * sectors x ~400 ms datasheet-max erase each) blows past
+ * RTC_WATCHDOG_TIMEOUT_MS (20 s) with nothing to feed it, so the board
+ * resets mid-format and repeats -- a reset loop indistinguishable from a
+ * true hang to anyone polling the board from outside.
+ *
+ * Fix: cfg_fs_mount_device() still runs the (fast, bounded -- a few ms) scan
+ * inline, but when the scan concludes SAFE_TO_FORMAT it no longer formats
+ * itself. It starts a dedicated low-priority background task (internal RAM
+ * stack, never PSRAM -- see project_psram_stack_nvs_panic) and returns
+ * immediately with cfg_fs still UNAVAILABLE; boot proceeds exactly like any
+ * other mount failure. That task dispatches the actual format+register+
+ * mount-finish onto the flash worker (uart_bridge_ext_run_on_flash_worker())
+ * -- same call cfg_fs_confirm_format_device() uses -- blocking ITSELF, never
+ * the boot task, for however long the erase actually takes. When it
+ * completes (success or failure) it installs the device write functions on
+ * success exactly like any other mount path, records start/end timestamps
+ * and the result, and deletes itself.
+ *
+ * These getters back GET /api/cfgfs's "format" section (cfg_fs_status.h's
+ * cfg_fs_format_progress_t) so a slow-but-progressing format is visible and
+ * distinguishable from a stall, instead of nobody being able to tell the
+ * difference (exactly what happened the night this was written). None of
+ * these functions block or touch flash. */
+bool cfg_fs_mount_format_ever_started(void);
+bool cfg_fs_mount_format_in_progress(void);
+bool cfg_fs_mount_format_completed(void);
+esp_err_t cfg_fs_mount_format_result(void); /* meaningful only once cfg_fs_mount_format_completed() is true */
+uint32_t cfg_fs_mount_format_elapsed_ms(void); /* time so far if in progress, final duration once completed */
 
 #ifdef __cplusplus
 }

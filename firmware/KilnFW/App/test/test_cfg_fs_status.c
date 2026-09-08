@@ -57,7 +57,7 @@ static void test_unmounted(void)
 
     char json[2048];
     size_t len = 0;
-    esp_err_t err = cfg_fs_status_build_json(NULL, NULL, NULL, json, sizeof(json), &len);
+    esp_err_t err = cfg_fs_status_build_json(NULL, NULL, NULL, NULL, json, sizeof(json), &len);
     TEST_CHECK(err == ESP_OK, "build succeeds even when nothing is mounted");
     TEST_CHECK(json_has(json, "\"mounted\":false"), "reports mounted:false");
     TEST_CHECK(json_has(json, "\"status\":\"unmounted\""), "reports status:unmounted");
@@ -66,6 +66,74 @@ static void test_unmounted(void)
     TEST_CHECK(json_has(json, "\"file_count\":0"), "no files when unmounted");
     TEST_CHECK(json_has(json, "\"dual_write\":{\"zones\":{\"file_backed\":false}"),
                "dual-write section present but zones not file-backed when dual info is NULL");
+    TEST_CHECK(json_has(json, "\"format\":{\"known\":false}"),
+               "format section present but reports known:false when no progress info is supplied "
+               "(NULL fmt) -- the common case, no auto/deferred format has run this boot");
+}
+
+static void test_format_progress(void)
+{
+    TEST_SECTION("cfg_fs_status: deferred auto-format progress section (docs/audits/boot_hang_2026-09-08.md "
+                 "follow-up) -- in-progress, completed/succeeded, and completed/failed are all reported "
+                 "distinctly, and a not-yet-over-ceiling in-progress format is NOT flagged stalled");
+    cfg_fs_deinit();
+    const char *base = "cfg_fs_status_test_format";
+    reset_scratch(base);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char json[2048];
+    size_t len = 0;
+
+    cfg_fs_format_progress_t in_progress = { .known = true, .in_progress = true, .elapsed_ms = 5000 };
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &in_progress, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds");
+    TEST_CHECK(json_has(json, "\"format\":{\"known\":true,\"in_progress\":true,\"completed\":false,"
+                              "\"succeeded\":false,\"elapsed_ms\":5000,\"stalled\":false"),
+               "5 s into a format is reported in-progress, not stalled -- well under the ceiling");
+
+    cfg_fs_format_progress_t done_ok = { .known = true, .completed = true, .succeeded = true, .elapsed_ms = 6200 };
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &done_ok, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds");
+    TEST_CHECK(json_has(json, "\"completed\":true,\"succeeded\":true,\"elapsed_ms\":6200"),
+               "a completed successful format reports its final duration");
+
+    cfg_fs_format_progress_t done_failed = { .known = true, .completed = true, .succeeded = false,
+                                              .elapsed_ms = 1200 };
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &done_failed, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds");
+    TEST_CHECK(json_has(json, "\"completed\":true,\"succeeded\":false"),
+               "a completed but failed format is distinguished from a completed success");
+
+    cfg_fs_deinit();
+}
+
+static void test_format_stalled_ceiling(void)
+{
+    TEST_SECTION("cfg_fs_status: NEGATIVE TARGET -- cfg_fs_format_is_stalled() flags an in-progress format "
+                 "past CFG_FS_FORMAT_CEILING_MS as stalled, and never flags a completed one regardless of "
+                 "duration");
+    TEST_CHECK(!cfg_fs_format_is_stalled(true, CFG_FS_FORMAT_CEILING_MS),
+               "exactly at the ceiling is not yet stalled (strictly greater-than)");
+    TEST_CHECK(cfg_fs_format_is_stalled(true, CFG_FS_FORMAT_CEILING_MS + 1),
+               "one ms past the ceiling IS stalled");
+    TEST_CHECK(!cfg_fs_format_is_stalled(false, CFG_FS_FORMAT_CEILING_MS + 60000),
+               "a format that already finished is never reported stalled no matter how long it took");
+
+    /* Wired end-to-end through the JSON builder too, not just the pure
+     * predicate -- GET /api/cfgfs is what an operator actually reads. */
+    cfg_fs_deinit();
+    const char *base = "cfg_fs_status_test_stalled";
+    reset_scratch(base);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
+    cfg_fs_format_progress_t stuck = { .known = true, .in_progress = true,
+                                        .elapsed_ms = CFG_FS_FORMAT_CEILING_MS + 5000 };
+    char json[2048];
+    size_t len = 0;
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, &stuck, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds");
+    TEST_CHECK(json_has(json, "\"stalled\":true"), "GET /api/cfgfs surfaces the stalled flag once the ceiling "
+                                                    "is exceeded, distinguishing a stuck format from a slow one");
+    cfg_fs_deinit();
 }
 
 static void test_unavailable(void)
@@ -79,7 +147,7 @@ static void test_unavailable(void)
 
     char json[2048];
     size_t len = 0;
-    TEST_CHECK(cfg_fs_status_build_json(NULL, NULL, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
+    TEST_CHECK(cfg_fs_status_build_json(NULL, NULL, NULL, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
     TEST_CHECK(json_has(json, "\"status\":\"unavailable\""), "reports status:unavailable");
     TEST_CHECK(json_has(json, "mount was attempted and failed"), "reason names mount failure, distinct from "
                                                                   "the never-mounted reason");
@@ -96,7 +164,7 @@ static void test_mounted_empty(void)
 
     char json[2048];
     size_t len = 0;
-    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
     TEST_CHECK(json_has(json, "\"mounted\":true"), "reports mounted:true");
     TEST_CHECK(!json_has(json, "\"reason\":"), "no reason field once mounted");
     TEST_CHECK(json_has(json, "\"file_count\":0"), "no files yet");
@@ -124,7 +192,7 @@ static void test_mounted_with_files(void)
 
     char json[2048];
     size_t len = 0;
-    TEST_CHECK(cfg_fs_status_build_json(base, &cap, &dual, json, sizeof(json), &len) == ESP_OK, "build succeeds");
+    TEST_CHECK(cfg_fs_status_build_json(base, &cap, &dual, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
     TEST_CHECK(json_has(json, "\"file_count\":2"), "both files counted");
     TEST_CHECK(json_has(json, "\"name\":\"zones.json\",\"size_bytes\":6"), "zones.json size matches what was written");
     TEST_CHECK(json_has(json, "\"name\":\"prefs.json\",\"size_bytes\":12"), "prefs.json size matches what was written");
@@ -138,7 +206,7 @@ static void test_mounted_with_files(void)
     /* Now the divergence case: NVS strictly ahead of the file means a prior
      * file write failed -- must be flagged, not silently reported healthy. */
     dual.nvs_rev = 6;
-    TEST_CHECK(cfg_fs_status_build_json(base, &cap, &dual, json, sizeof(json), &len) == ESP_OK, "build succeeds");
+    TEST_CHECK(cfg_fs_status_build_json(base, &cap, &dual, NULL, json, sizeof(json), &len) == ESP_OK, "build succeeds");
     TEST_CHECK(json_has(json, "\"diverged\":true"), "nvs_rev > file_rev is flagged diverged");
 
     cfg_fs_deinit();
@@ -156,7 +224,7 @@ static void test_buffer_too_small(void)
 
     char tiny[8];
     size_t len = 999;
-    esp_err_t err = cfg_fs_status_build_json(base, NULL, NULL, tiny, sizeof(tiny), &len);
+    esp_err_t err = cfg_fs_status_build_json(base, NULL, NULL, NULL, tiny, sizeof(tiny), &len);
     TEST_CHECK(err == ESP_ERR_INVALID_SIZE, "reports truncation as an error rather than shipping a partial JSON");
 
     cfg_fs_deinit();
@@ -168,6 +236,8 @@ void run_test_cfg_fs_status(void)
     test_unavailable();
     test_mounted_empty();
     test_mounted_with_files();
+    test_format_progress();
+    test_format_stalled_ceiling();
     test_buffer_too_small();
     cfg_fs_deinit();
 }

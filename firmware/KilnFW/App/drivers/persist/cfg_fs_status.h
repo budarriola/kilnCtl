@@ -48,6 +48,40 @@ typedef struct {
     uint32_t nvs_rev;     /* the "zones_rev" NVS key, read by the caller */
 } cfg_fs_zones_dualwrite_info_t;
 
+/* Boot-hang-2026-09-08 follow-up (docs/audits/boot_hang_2026-09-08.md, "A
+ * bounded-time format... would be the more robust fix"): the auto-format
+ * that used to run inline on the boot task now runs on a deferred background
+ * task (cfg_fs_mount.c), so a slow format is never confused with a hang --
+ * this struct is how the caller (diagnostics_http.c, reading cfg_fs_mount.c's
+ * getters, which need ESP-IDF and so cannot live in this pure module) hands
+ * that picture to cfg_fs_status_build_json() for GET /api/cfgfs. `known`
+ * false means no auto/deferred format has run at all this boot (the common
+ * case -- the partition mounted cleanly). */
+typedef struct {
+    bool     known;
+    bool     in_progress;
+    bool     completed;
+    bool     succeeded;   /* meaningful only when completed */
+    uint32_t elapsed_ms;  /* time so far while in_progress, final duration once completed, 0 otherwise */
+} cfg_fs_format_progress_t;
+
+/* Ceiling used to flag a running format as STALLED rather than merely slow.
+ * Arithmetic (see cfg_fs_status.c's file banner for the full derivation):
+ * the `cfg` partition is 512 KiB = 128 4-KiB sectors; typical SPI-NOR sector
+ * erase is ~45 ms, worst-case (datasheet max) ~400 ms, so a full-partition
+ * format costs ~5.8 s typical / ~51.2 s worst-case, plus small LittleFS
+ * superblock overhead. This ceiling (120 s) sits comfortably above 2x the
+ * worst-case estimate so a legitimately slow format on tired flash is never
+ * misreported as stuck, while a format that is still running after this long
+ * is worth a loud flag. It does NOT abort anything -- LittleFS/esp_partition
+ * offer no cooperative abort point mid-erase -- it only changes what
+ * GET /api/cfgfs reports. */
+#define CFG_FS_FORMAT_CEILING_MS 120000u
+
+/* Pure predicate, unit-testable without any real elapsed time: true iff a
+ * format that has been running for `elapsed_ms` should be reported STALLED. */
+bool cfg_fs_format_is_stalled(bool in_progress, uint32_t elapsed_ms);
+
 /* Builds the full /api/cfgfs JSON body into `buf` (capacity `buf_cap`).
  * `base_dir_for_sizes` may be NULL to omit per-file sizes (e.g. cfg_fs is
  * not mounted, so there is nothing to stat). `cap`/`dual` may be NULL to
@@ -60,7 +94,8 @@ typedef struct {
  * convention, so a caller can grow its buffer and retry rather than ship a
  * silently-truncated response. */
 esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_capacity_info_t *cap,
-                                    const cfg_fs_zones_dualwrite_info_t *dual, char *buf, size_t buf_cap,
+                                    const cfg_fs_zones_dualwrite_info_t *dual,
+                                    const cfg_fs_format_progress_t *fmt, char *buf, size_t buf_cap,
                                     size_t *out_len);
 
 #ifdef __cplusplus

@@ -10,6 +10,10 @@
 #include "esp_log.h"
 #include "esp_littlefs.h"
 #include "esp_partition.h"
+#include "esp_timer.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "cfg_fs.h"
 #include "cfg_fs_format_gate.h"
@@ -78,6 +82,54 @@ bool cfg_fs_mount_format_confirmation_pending(void)
 const char *cfg_fs_mount_format_pending_reason(void)
 {
     return s_format_pending_reason;
+}
+
+/* Deferred auto-format state -- see cfg_fs_mount.h's doc comment on the
+ * getters below for why this exists and the incident it fixes. Written only
+ * by the single background task this module ever creates for this purpose
+ * (start_deferred_auto_format() below); read by any task via the getters. Plain (not
+ * atomic) reads/writes are acceptable here the same way s_format_confirmation_
+ * pending above already is: every field is written by exactly one task, read
+ * for observability only (GET /api/cfgfs), and a torn read at worst shows a
+ * stale snapshot for one HTTP poll, never a crash or a wrong boot decision. */
+static volatile bool     s_auto_format_ever_started = false;
+static volatile bool     s_auto_format_in_progress = false;
+static volatile bool     s_auto_format_completed = false;
+static volatile esp_err_t s_auto_format_result = ESP_ERR_INVALID_STATE;
+static volatile int64_t  s_auto_format_start_us = 0;
+static volatile int64_t  s_auto_format_end_us = 0;
+
+bool cfg_fs_mount_format_ever_started(void)
+{
+    return s_auto_format_ever_started;
+}
+
+bool cfg_fs_mount_format_in_progress(void)
+{
+    return s_auto_format_in_progress;
+}
+
+bool cfg_fs_mount_format_completed(void)
+{
+    return s_auto_format_completed;
+}
+
+esp_err_t cfg_fs_mount_format_result(void)
+{
+    return s_auto_format_result;
+}
+
+uint32_t cfg_fs_mount_format_elapsed_ms(void)
+{
+    if (!s_auto_format_ever_started) {
+        return 0;
+    }
+    int64_t end_us = s_auto_format_completed ? s_auto_format_end_us : esp_timer_get_time();
+    int64_t elapsed_us = end_us - s_auto_format_start_us;
+    if (elapsed_us < 0) {
+        return 0;
+    }
+    return (uint32_t)(elapsed_us / 1000);
 }
 
 /* Reads the WHOLE `cfg` partition back in fixed-size chunks and feeds every
@@ -170,6 +222,97 @@ static esp_err_t finish_mount_after_register(void)
     return ESP_OK;
 }
 
+/* Runs the actual format on the flash worker (uart_bridge_ext_run_on_flash_
+ * worker()) -- same call cfg_fs_confirm_format_job_run() uses -- from a
+ * dedicated background task, never from the boot task. Blocks THIS task for
+ * the real duration of the erase (a few seconds typical, tens of seconds
+ * worst case per cfg_fs_status.h's CFG_FS_FORMAT_CEILING_MS comment); boot
+ * has already moved on by the time this even starts running. */
+typedef struct {
+    esp_err_t result;
+} cfg_fs_auto_format_job_t;
+
+static void cfg_fs_auto_format_job_run(void *arg)
+{
+    cfg_fs_auto_format_job_t *job = (cfg_fs_auto_format_job_t *)arg;
+
+    esp_err_t fmt_err = esp_littlefs_format(CFG_FS_PARTITION_LABEL);
+    if (fmt_err != ESP_OK) {
+        ESP_LOGE(TAG, "deferred auto-format: esp_littlefs_format(cfg) failed: %s -- config filesystem "
+                      "UNAVAILABLE this boot", esp_err_to_name(fmt_err));
+        job->result = fmt_err;
+        return;
+    }
+    esp_err_t reg_err = register_cfg_vfs();
+    if (reg_err != ESP_OK) {
+        ESP_LOGE(TAG, "deferred auto-format: register after format failed: %s", esp_err_to_name(reg_err));
+        job->result = reg_err;
+        return;
+    }
+    job->result = finish_mount_after_register();
+}
+
+static void cfg_fs_auto_format_task(void *arg)
+{
+    (void)arg;
+    s_auto_format_start_us = esp_timer_get_time();
+    ESP_LOGW(TAG, "cfg auto-format: background format starting (boot has already continued; poll GET "
+                  "/api/cfgfs for progress)");
+
+    cfg_fs_auto_format_job_t job = { .result = ESP_ERR_INVALID_STATE };
+    /* Never on the flash worker already -- this is a brand-new task created
+     * solely to run this once, so the reentrancy guard other dispatchers in
+     * this file use is unnecessary here, but dispatching unconditionally
+     * (never inline) keeps this task's own tiny stack out of the flash-write
+     * path regardless. */
+    esp_err_t dispatch_err = uart_bridge_ext_run_on_flash_worker(cfg_fs_auto_format_job_run, &job);
+    esp_err_t final_result = (dispatch_err != ESP_OK) ? dispatch_err : job.result;
+
+    s_auto_format_end_us = esp_timer_get_time();
+    s_auto_format_result = final_result;
+    s_auto_format_completed = true;
+    s_auto_format_in_progress = false;
+
+    uint32_t dur_ms = (uint32_t)((s_auto_format_end_us - s_auto_format_start_us) / 1000);
+    if (final_result == ESP_OK) {
+        ESP_LOGW(TAG, "cfg auto-format: completed OK in %u ms -- cfg filesystem now available", (unsigned)dur_ms);
+    } else {
+        ESP_LOGE(TAG, "cfg auto-format: FAILED after %u ms: %s -- cfg filesystem remains unavailable this boot",
+                 (unsigned)dur_ms, esp_err_to_name(final_result));
+    }
+    vTaskDelete(NULL);
+}
+
+/* Starts the deferred background format. Returns false (logs its own error)
+ * if the task could not even be created -- caller must treat that exactly
+ * like any other "could not format" outcome. */
+static bool start_deferred_auto_format(void)
+{
+    s_auto_format_ever_started = true;
+    s_auto_format_in_progress = true;
+    s_auto_format_completed = false;
+    s_auto_format_result = ESP_ERR_INVALID_STATE;
+    s_auto_format_start_us = 0;
+    s_auto_format_end_us = 0;
+
+    /* Plain internal-RAM stack (xTaskCreate(), never the PSRAM-capable
+     * xTaskCreateWithCaps/EXT variant) -- this task itself never touches
+     * flash directly (it dispatches to the flash worker, which owns its own
+     * safe stack), but keeping it internal-RAM is the same standing rule as
+     * every other flash-adjacent task in this codebase
+     * (project_psram_stack_nvs_panic). 3072 words is generous for a function
+     * whose own frames are a handful of locals plus one dispatch call. */
+    BaseType_t created = xTaskCreate(cfg_fs_auto_format_task, "cfg_autofmt", 3072, NULL, tskIDLE_PRIORITY + 1, NULL);
+    if (created != pdPASS) {
+        ESP_LOGE(TAG, "cfg auto-format: xTaskCreate() failed -- cfg filesystem UNAVAILABLE this boot");
+        s_auto_format_in_progress = false;
+        s_auto_format_completed = true;
+        s_auto_format_result = ESP_ERR_NO_MEM;
+        return false;
+    }
+    return true;
+}
+
 /* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
  * step 1): "Auto format, dont require all ff, search for valid files/
  * partitions ask the user if it is ok to overwright if partitions/files
@@ -181,9 +324,21 @@ static esp_err_t finish_mount_after_register(void)
  * no evidence of real content. Any other outcome -- content found, or the
  * scan itself failing -- leaves the partition untouched and sets the
  * awaiting-confirmation flag so the web UI and boot log can ask instead of
- * guessing. Returns ESP_OK only if it auto-formatted AND the retried mount
- * succeeded; any other return means the caller's original mount-failure
- * error still stands. */
+ * guessing.
+ *
+ * The scan above is fast and bounded (a few ms: 512 KiB read back in 4 KiB
+ * chunks) and stays inline. The format itself is NOT run here any more --
+ * see cfg_fs_mount.h's doc comment on the deferred-format getters for why
+ * (docs/audits/boot_hang_2026-09-08.md: an inline format could run long
+ * enough to starve the RTC watchdog before monitor_task.c ever starts
+ * feeding it, turning a slow-but-honest format into a boot-time reset loop).
+ * When the scan says SAFE_TO_FORMAT, this function only STARTS the deferred
+ * background task and returns immediately -- it always returns the caller's
+ * original mount-failure error in that case, same as the "awaiting
+ * confirmation" outcome, because cfg_fs is genuinely still unavailable at
+ * the moment this function returns; the deferred task is what eventually
+ * makes it available, asynchronously, and GET /api/cfgfs's "format" section
+ * is how that gets observed instead of guessed at. */
 static esp_err_t maybe_auto_format_and_remount(esp_err_t original_mount_err)
 {
     const esp_partition_t *part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY,
@@ -222,21 +377,15 @@ static esp_err_t maybe_auto_format_and_remount(esp_err_t original_mount_err)
         return original_mount_err;
     }
 
-    ESP_LOGW(TAG, "cfg partition failed to mount (%s) and the content scan found %s -- auto-formatting",
-             esp_err_to_name(original_mount_err), reason);
-    esp_err_t fmt_err = esp_littlefs_format(CFG_FS_PARTITION_LABEL);
-    if (fmt_err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_littlefs_format(cfg) failed: %s -- config filesystem UNAVAILABLE this boot",
-                 esp_err_to_name(fmt_err));
-        return fmt_err;
+    ESP_LOGW(TAG, "cfg partition failed to mount (%s) and the content scan found %s -- deferring format to a "
+                  "background task so boot never blocks on it", esp_err_to_name(original_mount_err), reason);
+    if (!start_deferred_auto_format()) {
+        return ESP_ERR_NO_MEM;
     }
-    esp_err_t reg_err = register_cfg_vfs();
-    if (reg_err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_vfs_littlefs_register(cfg) failed even after formatting: %s", esp_err_to_name(reg_err));
-        return reg_err;
-    }
-    ESP_LOGW(TAG, "cfg partition auto-formatted (blank, no evidence of existing data) and mounted");
-    return ESP_OK;
+    /* cfg_fs stays UNAVAILABLE for THIS boot's return from cfg_fs_mount_device()
+     * -- the deferred task installs the mount and write functions later, off
+     * this call stack entirely. */
+    return original_mount_err;
 }
 
 esp_err_t cfg_fs_mount_device(void)
