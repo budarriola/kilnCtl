@@ -1017,6 +1017,82 @@ out of scope for this flash/verify pass) -- worth a follow-up patch mirroring
 only `relay_cycles` logged an attempt this boot since it's the only one of
 the three with pre-existing NVS data on this board).
 
+**2026-09-08 fix.** Full call-site audit of every `persist/'*'_cfg_fs.c`
+bridge plus `relay_cycles.c`/`adaptive_tune.c`/`profile_executor_firing_
+stats.c`'s migrate-on-load paths:
+
+| item | write path | racy at boot? | why |
+|---|---|---|---|
+| `zones` (`zones_config_cfg_fs.c`) | `cfg_fs_write_atomic_device` (flash-worker dispatch, installed by `cfg_fs_mount.c`'s `cfg_fs_install_device_write_fns()`) | no | loaded from `zones_http_start()`, `main_network_http.c`, which runs after `main_control_bringup()` already started the flash worker |
+| `prefs`/`unit_pref`/`ramp_assist`/`display_power`/`tz` (`pref_cfg_fs.c`) | same device write fn (shared, module-wide `s_write_fn`) | no | all loaded from `main_network_http.c`, same as `zones` |
+| `profiles` (`profiles_cfg_fs.c`) | same device write fn | no | loaded alongside `zones`/`prefs`, same file, after the worker starts |
+| `kiln_cfg_store` (`kiln_cfg_store_cfg_fs.c`) | plain `cfg_fs_write_atomic` (direct stdio, **never wired to the device fn** -- `cfg_fs_install_device_write_fns()` only ever touched the three bridges above) | no (but bypasses the PSRAM-stack guard entirely -- a real gap, just not this one) | `kiln_cfg_store_init()` also runs from `main_network_http.c`, on an internal-stack task, so the missing dispatch never manifests as a dropped job -- it's a different, latent hazard (filesystem_migration_review_2026-09-07.md section 1's caveat), not this boot-ordering race |
+| `firing_stats` (`firing_stats_cfg_fs.c`) | plain `cfg_fs_write_atomic` (same gap as `kiln_cfg_store`) | no (same reason) | `firing_stats_load()`'s callers run on the executor task (`executor_task_entry()`, internal-stacked by design, see that file's own comment) |
+| `relay_cycles` (via `pref_cfg_fs.c`, shares its write fn) | device write fn once installed | **yes** | `relay_cycles_init()` runs from `main_control_bringup.c` line ~136, **before** that same function starts the flash worker at line ~207 |
+| `adaptive_tune` kibase (via `pref_cfg_fs.c`) | device write fn once installed | **yes** | `adaptive_tune_init()` runs from `profile_executor_start()`, called by `main_control_bringup.c` line ~161 -- also before the worker starts at line ~207 |
+
+The three pre-existing bridges (`zones`/`prefs`/`profiles`) survive not by
+luck but by ordering: every one of them is loaded from `main_network_http.c`,
+which runs strictly after `main_control_bringup()` has already called
+`uart_bridge_ext_start_flash_worker()`. `relay_cycles`/`adaptive_tune` are
+the only two items whose migrate-on-load call sites sit *inside*
+`main_control_bringup()` itself, ahead of that same function's own
+flash-worker start line -- the exact race `cfg_fs_auto_format_task()` hit
+and `1136c0a9` fixed for the format path.
+
+**Shared helper**: extracted the wait into
+`firmware/KilnFW/App/drivers/persist/flash_worker_wait.h`/`.c`
+(`flash_worker_wait_until_started(started_fn, poll_ms, ceiling_ms)`, plus a
+`flash_worker_wait_default()` convenience wrapper). `cfg_fs_mount.c`'s
+`wait_for_flash_worker()` now calls it instead of keeping its own copy;
+`relay_cycles_init()` and `adaptive_tune_init()` call
+`flash_worker_wait_default()` immediately before their `pref_cfg_fs_resolve()`
+migrate-on-load write. One implementation, three call sites, not three
+copies of the 20 ms/5 s constants.
+
+**Deferred-migration visibility**: `cfg_fs_dualwrite_item_t` gained a
+`migration_deferred` field, rendered in `GET /api/cfgfs`'s
+`dual_write.items[]` alongside the existing `diverged` field
+(`cfg_fs_status.c`). `relay_cycles_migration_worker_wait_deferred()` and
+`adaptive_tune_kibase_migration_worker_wait_deferred()` report true iff
+their boot-time bounded wait gave up (worker still not started after 5 s) --
+`diagnostics_http.c`'s `/api/cfgfs` handler wires both into their rows via a
+new `cfgfs_add_item_ex()`. A dropped migration is now one `GET /api/cfgfs`
+away instead of requiring a hardware flash and a boot-log grep to discover.
+
+**Migrate-on-load stayed on the boot path** (not deferred off it, unlike the
+format path in `5658b949`): unlike a fresh-format erase (seconds, worth
+moving to a background task), a single small blob's `pref_cfg_fs_resolve()`
+write is one `fopen`/`fwrite`/`fsync`/`rename` -- the bounded wait (5 s
+ceiling, cheap when the worker is already up, which it is on every boot
+that isn't itself racing) is a better fit than adding a second deferred-task
+mechanism alongside the format path's, and boot never blocks past the
+ceiling either way.
+
+`kiln_cfg_store`/`firing_stats` still default to the bare
+`cfg_fs_write_atomic` (never installed with the device write fn) -- this is
+the separate, pre-existing PSRAM-stack-guard gap `filesystem_migration_
+review_2026-09-07.md` section 1 named, not the boot-ordering race this pass
+fixed. Both currently avoid the hazard in practice because every call site
+that reaches them runs on an internal-stack task, but that is not enforced
+the way the guard is for the other three bridges -- worth a follow-up to
+wire `cfg_fs_install_device_write_fns()` to cover all five bridges
+consistently, out of scope for this pass (which only had a *demonstrated*
+boot-ordering drop to fix, not the latent guard gap).
+
+Tests: `firmware/KilnFW/App/test/test_relay_cycles.c` adds direct coverage
+of `flash_worker_wait_until_started()` (gives-up-at-ceiling, succeeds-once-
+predicate-flips, NULL-predicate) plus a boot-time check that
+`relay_cycles_migration_worker_wait_deferred()` reads false when the worker
+is already up (this suite's normal state). `test_cfg_fs_status.c`'s exact-
+JSON dual-write assertion was updated for the new `migration_deferred` key.
+Negative-tested by temporarily making `flash_worker_wait_until_started()`
+return `true` unconditionally (never checking `started_fn()` at all,
+reproducing the exact "job dropped" hazard) -- `run_state_relay_cycles`
+failed 3 checks, shortest: `test_relay_cycles.c:929: gives up -- worker
+never reported started`. Reverted by hand; `git diff` on
+`flash_worker_wait.c` empty afterward.
+
 Per-task stack margins beyond `main` were not obtainable this pass -- no
 `GET /api/*` endpoint or LCD page currently surfaces `stack_margin_register()`
 data for reading over HTTP/JTAG-free tooling; only the boot-time

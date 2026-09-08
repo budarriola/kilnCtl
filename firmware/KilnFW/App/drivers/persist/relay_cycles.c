@@ -11,8 +11,22 @@
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- relay_cycles_get_dualwrite_status() below */
+#include "flash_worker_wait.h" /* bounded wait for the flash-safe worker -- see relay_cycles_init()'s
+                                 * call site below and flash_worker_wait.h's header comment */
 
 static const char *TAG = "relay_cycles";
+
+/* Set true if relay_cycles_init()'s boot-time migrate-on-load write was
+ * attempted before the flash-safe worker existed and the bounded wait gave
+ * up (worker still not started after FLASH_WORKER_WAIT_CEILING_MS_DEFAULT).
+ * This is the exact "flash-safe worker not started -- job dropped" hazard
+ * (hardware verification 3e226f28): before this fix the migration attempt
+ * failed silently and the item stayed NVS-only with nothing surfaced.
+ * Surfaced read-only via relay_cycles_get_dualwrite_status() below into
+ * GET /api/cfgfs's dual_write.items[] (cfg_fs_status.c), never cleared
+ * mid-boot -- a dropped migration needs a reboot (or an explicit re-save)
+ * to resolve, so "still true" after boot correctly means "still NVS-only". */
+static bool s_migration_worker_wait_deferred = false;
 
 /* Hand-declared rather than #include "uart_bridge.h" -- same reasoning as
  * safety_cfg_store.c's identical block: that header pulls in
@@ -402,6 +416,24 @@ esp_err_t relay_cycles_init(void)
     memcpy(nvs_candidate.counts, s_rc.counts, sizeof(nvs_candidate.counts));
     memcpy(nvs_candidate.types, s_rc.types, sizeof(nvs_candidate.types));
     memcpy(nvs_candidate.rated_overrides, s_rc.rated_overrides, sizeof(nvs_candidate.rated_overrides));
+
+    /* relay_cycles_init() runs from main_control_bringup.c, BEFORE
+     * uart_bridge_ext_start_flash_worker() is called later in that same
+     * function -- the identical boot-ordering race cfg_fs_mount.c's auto-
+     * format path hit and 1136c0a9 fixed there. pref_cfg_fs_resolve()
+     * below writes through pref_cfg_fs's installed write function, which by
+     * this point in boot is already cfg_fs_write_atomic_device() (installed
+     * during cfg_fs_mount_device() in main_boot_early.c, well before this
+     * call) -- i.e. it dispatches to the flash worker, which does not exist
+     * yet here. Bounded wait first so a slow scheduler is not mistaken for
+     * "no migration needed"; if the worker still hasn't started after the
+     * ceiling, let the write attempt (and fail fast) but record it so it is
+     * not silently dropped. */
+    s_migration_worker_wait_deferred = !flash_worker_wait_default();
+    if (s_migration_worker_wait_deferred) {
+        ESP_LOGW(TAG, "flash-safe worker still not started -- relay-cycles migrate-on-load write may be "
+                      "dropped this boot; see GET /api/cfgfs");
+    }
 
     relay_cycles_blob_t resolved;
     uint32_t resolved_rev = nvs_rev;
@@ -1033,6 +1065,11 @@ esp_err_t relay_cycles_flush(void)
  * both places, independent of what booted into RAM), then compares the
  * decoded bytes for a real content-equal check rather than a rev-only
  * guess. */
+bool relay_cycles_migration_worker_wait_deferred(void)
+{
+    return s_migration_worker_wait_deferred;
+}
+
 void relay_cycles_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
                                         bool *diverged)
 {

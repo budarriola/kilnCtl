@@ -1089,17 +1089,24 @@ typedef struct {
  * full array (n == CFG_FS_STATUS_MAX_ITEMS) silently drops further rows --
  * see cfg_fs_status.h's CFG_FS_STATUS_MAX_ITEMS comment; today's fixed set
  * of 14 items sits well under that cap. */
-static void cfgfs_add_item(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
-                            uint32_t file_rev, bool nvs_valid, uint32_t nvs_rev, bool diverged)
+static void cfgfs_add_item_ex(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
+                               uint32_t file_rev, bool nvs_valid, uint32_t nvs_rev, bool diverged,
+                               bool migration_deferred)
 {
     if (*n >= CFG_FS_STATUS_MAX_ITEMS) {
         return;
     }
     items[*n] = (cfg_fs_dualwrite_item_t){
         .name = name, .file_valid = file_valid, .file_rev = file_rev, .nvs_valid = nvs_valid, .nvs_rev = nvs_rev,
-        .diverged = diverged,
+        .diverged = diverged, .migration_deferred = migration_deferred,
     };
     (*n)++;
+}
+
+static void cfgfs_add_item(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
+                            uint32_t file_rev, bool nvs_valid, uint32_t nvs_rev, bool diverged)
+{
+    cfgfs_add_item_ex(items, n, name, file_valid, file_rev, nvs_valid, nvs_rev, diverged, false);
 }
 
 static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
@@ -1203,13 +1210,15 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         bool file_valid = false, nvs_valid = false, diverged = false;
         uint32_t file_rev = 0, nvs_rev = 0;
         relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
-        cfgfs_add_item(items, &n_items, "relay_cycles", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+        cfgfs_add_item_ex(items, &n_items, "relay_cycles", file_valid, file_rev, nvs_valid, nvs_rev, diverged,
+                          relay_cycles_migration_worker_wait_deferred());
     }
     {
         bool file_valid = false, nvs_valid = false, diverged = false;
         uint32_t file_rev = 0, nvs_rev = 0;
         adaptive_tune_get_kibase_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
-        cfgfs_add_item(items, &n_items, "adaptive_tune", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+        cfgfs_add_item_ex(items, &n_items, "adaptive_tune", file_valid, file_rev, nvs_valid, nvs_rev, diverged,
+                          adaptive_tune_kibase_migration_worker_wait_deferred());
     }
     {
         bool file_valid = false, nvs_valid = false, diverged = false;

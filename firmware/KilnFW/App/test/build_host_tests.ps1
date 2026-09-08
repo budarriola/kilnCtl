@@ -368,8 +368,12 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/firing_stats_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    # 2026-09-08: flash_worker_wait.c linked in -- adaptive_tune.c (linked
+    # for real here too) now calls flash_worker_wait_default() before its
+    # kibase migrate-on-load write; same fix as exe17/exe19 above.
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
     # 4: control/, safety/, profiles_http.c, ui_page_diagnostics.c): this
     # executable links adaptive_tune.c/adaptive_tune_model.c/adaptive_tune_ki.c
@@ -736,8 +740,15 @@ try {
             "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    # 2026-09-08: flash_worker_wait.c linked in -- adaptive_tune.c's
+    # adaptive_tune_init() now calls flash_worker_wait_default() before its
+    # kibase pref_cfg_fs_resolve() write (boot-ordering fix for the
+    # relay_cycles/adaptive_tune/firing_stats migrate-on-load race, hardware
+    # verification 3e226f28). Uses the shared bx_worker_stub.h's always-true
+    # uart_bridge_ext_flash_worker_started() -- see that stub's own comment.
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
     # 4): adaptive_tune.c (#included directly by test_adaptive_tune.c) now calls
     # hal_kv_*() and hal_status_to_esp_err() instead of nvs_*() directly, so this
@@ -781,9 +792,14 @@ try {
             "`"$(Join-Path $testDir 'test_relay_cycles.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    # 2026-09-08: flash_worker_wait.c linked in -- relay_cycles_init() now
+    # calls flash_worker_wait_default() before its migrate-on-load
+    # pref_cfg_fs_resolve() write (same boot-ordering fix as adaptive_tune.c's
+    # exe17, hardware verification 3e226f28).
     # relay_cycles cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA_PLAN.md
     # section 5 step 6): relay_cycles.c (#included directly by test_relay_cycles.c
     # above) now also calls into pref_cfg_fs.c, which needs cfg_fs.c's real
@@ -1111,6 +1127,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs_mount.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_format_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $driversDir 'persist/boot_guard.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""

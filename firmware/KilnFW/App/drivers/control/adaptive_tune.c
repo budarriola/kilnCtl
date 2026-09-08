@@ -52,6 +52,8 @@
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t
                               * save_kibase_job()'s caller (the flash worker) already branches on */
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- adaptive_tune_get_kibase_dualwrite_status() below */
+#include "flash_worker_wait.h" /* bounded wait for the flash-safe worker -- see adaptive_tune_init()'s
+                                 * kibase resolve call site below and flash_worker_wait.h's header comment */
 #include "pref_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
                              section 5 item 9 -- see adaptive_tune_internal.h's
                              ADAPTIVE_TUNE_KIBASE_FILE_PATH comment for the simplified
@@ -64,6 +66,13 @@
 const char *ADAPTIVE_TUNE_TAG = "adaptive_tune";
 
 adaptive_tune_zone_t adaptive_tune_zones[MAX31856_CHANNEL_COUNT];
+
+/* Set true if adaptive_tune_init()'s boot-time kibase migrate-on-load write
+ * (pref_cfg_fs_resolve() below) was attempted before the flash-safe worker
+ * existed and the bounded wait gave up. Same hazard and same fix pattern as
+ * relay_cycles.c's identical flag -- see flash_worker_wait.h. Surfaced via
+ * adaptive_tune_get_kibase_dualwrite_status() into GET /api/cfgfs. */
+static bool s_kibase_migration_worker_wait_deferred = false;
 
 // ---------------------------------------------------------------------
 // Joint (all-zone) dwell observations for the coupled solve -- module-wide,
@@ -1157,6 +1166,19 @@ void adaptive_tune_init(void)
     // 5 item 9) -- see adaptive_tune_internal.h's ADAPTIVE_TUNE_KIBASE_FILE_PATH
     // comment for why this item gets the simplified generic-bridge treatment
     // rather than zones config's bespoke divergence forensics.
+    /* adaptive_tune_init() runs from profile_executor_start(), called by
+     * main_control_bringup.c BEFORE uart_bridge_ext_start_flash_worker() is
+     * called later in that same function -- the identical boot-ordering
+     * race relay_cycles_init() has (see that function's matching comment)
+     * and cfg_fs_mount.c's auto-format path had before 1136c0a9. Bounded
+     * wait first, then let the write attempt proceed either way, recording
+     * whether the worker was actually up so a dropped write is not silent. */
+    s_kibase_migration_worker_wait_deferred = !flash_worker_wait_default();
+    if (s_kibase_migration_worker_wait_deferred) {
+        ESP_LOGW(ADAPTIVE_TUNE_TAG, "flash-safe worker still not started -- kibase migrate-on-load write may "
+                                     "be dropped this boot; see GET /api/cfgfs");
+    }
+
     adaptive_tune_kibase_blob_t resolved;
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
@@ -1180,6 +1202,11 @@ void adaptive_tune_init(void)
     //
     // No httpd registration here any more -- call adaptive_tune_http_start()
     // separately once the shared httpd server is up (see adaptive_tune_http.c).
+}
+
+bool adaptive_tune_kibase_migration_worker_wait_deferred(void)
+{
+    return s_kibase_migration_worker_wait_deferred;
 }
 
 // GET /api/cfgfs dual-write picture for the Ki-baseline blob -- 2026-09-08,

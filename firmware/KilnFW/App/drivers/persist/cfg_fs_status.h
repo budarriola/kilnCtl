@@ -56,6 +56,14 @@ typedef struct {
     bool        nvs_valid;
     uint32_t    nvs_rev;
     bool        diverged;
+    /* 2026-09-08 (hardware verification 3e226f28): true iff this item's
+     * boot-time migrate-on-load write was attempted before the flash-safe
+     * worker existed and the bounded wait (flash_worker_wait.h) gave up --
+     * i.e. the write was very likely dropped ("flash-safe worker not
+     * started -- job dropped") and the item may still be NVS-only despite
+     * having a bridge. Defaults false for every item that does not track
+     * this (only relay_cycles/adaptive_tune report it as of this pass). */
+    bool        migration_deferred;
 } cfg_fs_dualwrite_item_t;
 
 /* Upper bound on how many dual-write item rows one /api/cfgfs response

@@ -215,9 +215,9 @@ static void test_mounted_with_files(void)
                "capacity section echoes the caller-supplied values and computes free correctly");
     TEST_CHECK(json_has(json, "\"dual_write\":{\"items\":["
                               "{\"name\":\"zones\",\"file_backed\":true,\"file_rev\":5,\"nvs_backed\":true,"
-                              "\"nvs_rev\":5,\"diverged\":false},"
+                              "\"nvs_rev\":5,\"diverged\":false,\"migration_deferred\":false},"
                               "{\"name\":\"unit_pref\",\"file_backed\":true,\"file_rev\":2,\"nvs_backed\":true,"
-                              "\"nvs_rev\":2,\"diverged\":false}]"),
+                              "\"nvs_rev\":2,\"diverged\":false,\"migration_deferred\":false}]"),
                "dual-write: every item passed in gets its own row, not just zones -- 70ed6514 fixed the stale "
                "lists but left per-item detail zones-only; this is the widened per-bridge picture");
     TEST_CHECK(json_has(json, "\"nvs_only\":[]"),

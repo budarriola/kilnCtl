@@ -185,10 +185,10 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
     for (size_t i = 0; i < n_items; i++) {
         const cfg_fs_dualwrite_item_t *it = &items[i];
         APPEND("%s{\"name\":\"%s\",\"file_backed\":%s,\"file_rev\":%lu,\"nvs_backed\":%s,\"nvs_rev\":%lu,"
-              "\"diverged\":%s}",
+              "\"diverged\":%s,\"migration_deferred\":%s}",
               i == 0 ? "" : ",", it->name ? it->name : "?", it->file_valid ? "true" : "false",
               (unsigned long)it->file_rev, it->nvs_valid ? "true" : "false", (unsigned long)it->nvs_rev,
-              it->diverged ? "true" : "false");
+              it->diverged ? "true" : "false", it->migration_deferred ? "true" : "false");
     }
     APPEND("]");
     /* 2026-09-08 audit (deaccc4f): this list used to also carry "prefs" and

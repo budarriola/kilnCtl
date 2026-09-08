@@ -343,6 +343,13 @@ bool adaptive_tune_fit_gain(const float *duty, const float *rise_c, uint32_t n, 
 void adaptive_tune_get_kibase_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
                                                 uint32_t *nvs_rev, bool *diverged);
 
+// True iff adaptive_tune_init()'s boot-time kibase migrate-on-load write was
+// attempted before the flash-safe worker existed and the bounded wait
+// (flash_worker_wait.h) gave up -- see that call site's comment in
+// adaptive_tune.c. Surfaced into GET /api/cfgfs's dual_write.items[]
+// ("migration_deferred"), 2026-09-08 (hardware verification 3e226f28).
+bool adaptive_tune_kibase_migration_worker_wait_deferred(void);
+
 #ifdef __cplusplus
 }
 #endif

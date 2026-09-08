@@ -19,6 +19,7 @@
 #include "cfg_fs_format_gate.h"
 #include "boot_guard.h"
 #include "flash_worker.h"
+#include "flash_worker_wait.h"
 #include "zones_config_cfg_fs.h"
 #include "pref_cfg_fs.h"
 #include "profiles_cfg_fs.h"
@@ -266,20 +267,17 @@ static void cfg_fs_auto_format_job_run(void *arg)
  * boot-ordering race, not a format/partition defect. Poll for readiness
  * first, bounded, so a slow scheduler is not mistaken for a permanent
  * failure. */
-#define CFG_FS_AUTOFMT_WORKER_WAIT_POLL_MS 20
-#define CFG_FS_AUTOFMT_WORKER_WAIT_CEILING_MS 5000
+/* Shared with every other boot-time migrate-on-load call site
+ * (relay_cycles.c, adaptive_tune.c) via flash_worker_wait.h/.c -- see that
+ * header's comment for why this moved out of being a private copy here. */
+#define CFG_FS_AUTOFMT_WORKER_WAIT_POLL_MS FLASH_WORKER_WAIT_POLL_MS_DEFAULT
+#define CFG_FS_AUTOFMT_WORKER_WAIT_CEILING_MS FLASH_WORKER_WAIT_CEILING_MS_DEFAULT
 
 static bool wait_for_flash_worker(void)
 {
-    uint32_t waited_ms = 0;
-    while (!uart_bridge_ext_flash_worker_started()) {
-        if (waited_ms >= CFG_FS_AUTOFMT_WORKER_WAIT_CEILING_MS) {
-            return false;
-        }
-        vTaskDelay(pdMS_TO_TICKS(CFG_FS_AUTOFMT_WORKER_WAIT_POLL_MS));
-        waited_ms += CFG_FS_AUTOFMT_WORKER_WAIT_POLL_MS;
-    }
-    return true;
+    return flash_worker_wait_until_started(uart_bridge_ext_flash_worker_started,
+                                            CFG_FS_AUTOFMT_WORKER_WAIT_POLL_MS,
+                                            CFG_FS_AUTOFMT_WORKER_WAIT_CEILING_MS);
 }
 
 static void cfg_fs_auto_format_task(void *arg)

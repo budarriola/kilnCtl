@@ -190,6 +190,14 @@ esp_err_t relay_cycles_flush(void);
 void relay_cycles_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
                                         bool *diverged);
 
+/* True iff relay_cycles_init()'s boot-time migrate-on-load write was
+ * attempted before the flash-safe worker existed and the bounded wait
+ * (flash_worker_wait.h) gave up -- see that write call site's comment in
+ * relay_cycles.c. Surfaced into GET /api/cfgfs's dual_write.items[]
+ * ("migration_deferred") so a dropped migration is one query away instead
+ * of requiring a hardware flash to notice (2026-09-08, 3e226f28). */
+bool relay_cycles_migration_worker_wait_deferred(void);
+
 #ifdef __cplusplus
 }
 #endif

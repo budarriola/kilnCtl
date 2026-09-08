@@ -895,6 +895,71 @@ static void test_get_dualwrite_status_reports_real_divergence(void)
     TEST_CHECK(diverged, "a real content disagreement at equal rev is reported as diverged:true");
 }
 
+// flash_worker_wait_until_started() (persist/flash_worker_wait.c) -- the
+// shared bounded-poll helper this pass extracted out of cfg_fs_mount.c so
+// relay_cycles_init()'s kibase/cycles migrate-on-load writes (and adaptive_
+// tune.c's) share ONE implementation instead of each copying cfg_fs_mount.c's
+// original 20ms/5s constants. Tested here directly through its real
+// production function, not a mirror -- see the injected predicate below,
+// which lets the test drive "worker never starts" and "worker starts after
+// N polls" without needing to fight bx_worker_stub.h's always-true
+// uart_bridge_ext_flash_worker_started() (shared across every other test in
+// this binary; overriding it here would break those).
+static int s_never_started_calls = 0;
+static bool never_started(void)
+{
+    s_never_started_calls++;
+    return false;
+}
+
+static int s_starts_after_n_calls = 0;
+static int s_starts_after_n_target = 0;
+static bool starts_after_n(void)
+{
+    s_starts_after_n_calls++;
+    return s_starts_after_n_calls >= s_starts_after_n_target;
+}
+
+static void test_flash_worker_wait_gives_up_after_ceiling(void)
+{
+    TEST_SECTION("flash_worker_wait_until_started() -- a predicate that never returns true is polled "
+                 "until the ceiling, then the call gives up and returns false (does not hang forever)");
+    s_never_started_calls = 0;
+    bool started = flash_worker_wait_until_started(never_started, 1, 5);
+    TEST_CHECK(!started, "gives up -- worker never reported started");
+    TEST_CHECK(s_never_started_calls >= 5, "polled at least ceiling/poll_ms times before giving up");
+}
+
+static void test_flash_worker_wait_succeeds_once_predicate_flips(void)
+{
+    TEST_SECTION("flash_worker_wait_until_started() -- a predicate that flips true after a few polls is "
+                 "detected, well inside the ceiling (a slow scheduler is not mistaken for permanent failure)");
+    s_starts_after_n_calls = 0;
+    s_starts_after_n_target = 3;
+    bool started = flash_worker_wait_until_started(starts_after_n, 1, 5000);
+    TEST_CHECK(started, "detected as started once the predicate flips");
+    TEST_CHECK(s_starts_after_n_calls == 3, "stopped polling the instant it flipped, not before or after");
+}
+
+static void test_flash_worker_wait_null_predicate_returns_false(void)
+{
+    TEST_SECTION("flash_worker_wait_until_started() -- a NULL predicate returns false immediately "
+                 "(the safe assumption: treat it as never started, never crash)");
+    TEST_CHECK(!flash_worker_wait_until_started(NULL, 1, 5), "NULL predicate -> false, not a crash");
+}
+
+static void test_relay_cycles_init_deferred_flag_clear_when_worker_already_up(void)
+{
+    TEST_SECTION("relay_cycles_init() -- with the flash worker already started (this suite's normal "
+                 "stub state), relay_cycles_migration_worker_wait_deferred() reports false: the "
+                 "migrate-on-load write was NOT dropped");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+    TEST_CHECK(!relay_cycles_migration_worker_wait_deferred(),
+               "worker was up throughout -- nothing was deferred/dropped this boot");
+}
+
 void run_test_relay_cycles(void)
 {
     g_test_stub_semaphore_take_default = 1; // pdTRUE -- see comment above test_maybe_persist_skips_...
@@ -923,6 +988,10 @@ void run_test_relay_cycles(void)
     test_cfg_fs_reset_all_composes_with_migration_never_loses_counts();
     test_cfg_fs_negative_no_file_write_means_file_never_catches_up();
     test_get_dualwrite_status_reports_real_divergence();
+    test_flash_worker_wait_gives_up_after_ceiling();
+    test_flash_worker_wait_succeeds_once_predicate_flips();
+    test_flash_worker_wait_null_predicate_returns_false();
+    test_relay_cycles_init_deferred_flag_clear_when_worker_already_up();
     reset_all_cfg_fs();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
