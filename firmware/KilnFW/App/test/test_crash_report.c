@@ -49,6 +49,8 @@ static crash_report_record_t make_sample_record(void)
     rec.exc_cause = 9u;
     rec.exc_pc = 0x420001234u & 0xFFFFFFFFu;
     rec.exc_addr = 0xDEADBEEFu;
+    rec.exc_a0 = 0x8000BEEFu;
+    rec.exc_a1 = 0x3FCE0000u;
     rec.bt_count = 3;
     rec.bt_corrupted = 0;
     rec.backtrace_pc[0] = 0x40001111u;
@@ -383,6 +385,85 @@ static void test_clear_erases_coredump_via_hal_sysinfo(void)
     fake_sysinfo_reset_all();
 }
 
+
+// ---------------------------------------------------------------------------
+// 2026-09-08: exception-frame trustworthiness + the a0/a1 capture that makes
+// a LoadProhibited record actionable. See
+// docs/audits/crash_loadprohibited_0x18_2026-09-08.md -- the live board's
+// record (cause 28 / addr 0x18 / pc 0xfffffffd / backtrace corrupted) could
+// not be told apart from a genuine null-struct-pointer dereference, because
+// the stack pointer was never recorded and nothing flagged the frame as
+// self-inconsistent.
+// ---------------------------------------------------------------------------
+
+static void test_exception_registers_round_trip(void)
+{
+    TEST_SECTION("exc_a0/exc_a1 -- the crashing frame's return address and STACK POINTER survive "
+                 "persist/load (without a1 a LoadProhibited record is undiagnosable)");
+    reset_all();
+
+    crash_report_record_t rec = make_sample_record();
+    rec.exc_a0 = 0x8200ABCDu;
+    rec.exc_a1 = 0x3FCEF010u;
+    seal_crc(&rec);
+    TEST_CHECK(persist(&rec) == ESP_OK, "record with a0/a1 persists");
+
+    crash_report_record_t loaded;
+    TEST_CHECK(load(&loaded), "record with a0/a1 loads back as valid");
+    TEST_CHECK(loaded.exc_a0 == 0x8200ABCDu, "exc_a0 round-trips through NVS unchanged");
+    TEST_CHECK(loaded.exc_a1 == 0x3FCEF010u, "exc_a1 (stack pointer) round-trips through NVS unchanged");
+
+    // NEGATIVE-TEST PROOF: a1 is genuinely covered by the record's CRC, so a
+    // silently-flipped stack pointer cannot be read back as trustworthy.
+    crash_report_record_t tampered = loaded;
+    tampered.exc_a1 = 0x00000000u;
+    TEST_CHECK(record_valid(&tampered) == false,
+               "flipping exc_a1 alone breaks the record CRC -- the stack pointer is inside the "
+               "integrity check, not appended outside it");
+}
+
+static void test_frame_trustworthy_rejects_pc_of_zero(void)
+{
+    TEST_SECTION("crash_report_frame_trustworthy -- a record whose exc_pc is 0xfffffffd "
+                 "(esp_cpu_process_stack_pc(0), i.e. the saved PC was 0) is NOT trustworthy");
+    reset_all();
+
+    crash_report_record_t good = make_sample_record();
+    good.exc_pc = 0x42001234u;
+    good.bt_corrupted = 0;
+    TEST_CHECK(crash_report_frame_trustworthy(&good) == true,
+               "a record with a real code-address PC and an uncorrupted backtrace IS trustworthy "
+               "-- the predicate is not vacuously false");
+
+    // The EXACT record the live board produced on 2026-09-08.
+    crash_report_record_t live = make_sample_record();
+    live.exc_cause = 28u;             // LoadProhibited
+    live.exc_addr = 0x00000018u;      // looks exactly like a struct field offset -- it is not safe
+    live.exc_pc = 0xfffffffdu;        // == 0 - 3
+    live.bt_count = 1;
+    live.backtrace_pc[0] = 0xfffffffdu;
+    live.bt_corrupted = 1;
+    TEST_CHECK(crash_report_frame_trustworthy(&live) == false,
+               "the live 2026-09-08 record is refused: nobody may read its exc_addr 0x18 as a "
+               "struct field offset");
+
+    // Each condition alone is sufficient -- neither is carrying the other.
+    crash_report_record_t pc_only = make_sample_record();
+    pc_only.exc_pc = 0xfffffffdu;
+    pc_only.bt_corrupted = 0;
+    TEST_CHECK(crash_report_frame_trustworthy(&pc_only) == false,
+               "pc == esp_cpu_process_stack_pc(0) alone is enough to refuse the frame, even with "
+               "an uncorrupted backtrace");
+
+    crash_report_record_t bt_only = make_sample_record();
+    bt_only.exc_pc = 0x42001234u;
+    bt_only.bt_corrupted = 1;
+    TEST_CHECK(crash_report_frame_trustworthy(&bt_only) == false,
+               "a corrupted backtrace alone is enough to refuse the frame, even with a plausible PC");
+
+    TEST_CHECK(crash_report_frame_trustworthy(NULL) == false, "NULL record is not trustworthy");
+}
+
 void run_test_crash_report(void)
 {
     test_crc_round_trip();
@@ -395,6 +476,8 @@ void run_test_crash_report(void)
     test_dump_id_ignores_padding_bytes();
     test_init_reaches_summary_fetch_when_coredump_present();
     test_clear_erases_coredump_via_hal_sysinfo();
+    test_exception_registers_round_trip();
+    test_frame_trustworthy_rejects_pc_of_zero();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

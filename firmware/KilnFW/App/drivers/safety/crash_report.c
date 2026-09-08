@@ -38,7 +38,7 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
  * C11 alike and checks exactly the same thing. Update this literal whenever
  * crash_report_record_t's layout changes, alongside bumping
  * CRASH_REPORT_RECORD_VERSION. */
-typedef char crash_report_record_t_size_check[(sizeof(crash_report_record_t) == 152) ? 1 : -1];
+typedef char crash_report_record_t_size_check[(sizeof(crash_report_record_t) == 160) ? 1 : -1];
 
 /* Brings up KILN_NVS_PARTITION, erasing ONLY that partition if its contents
  * are unusable -- identical to run_state.c's/ota_record.c's own
@@ -86,6 +86,27 @@ static bool record_valid(const crash_report_record_t *rec)
 static void seal_crc(crash_report_record_t *rec)
 {
     rec->crc32 = compute_crc(rec);
+}
+
+/* espcoredump stores exc_pc as esp_cpu_process_stack_pc(raw_pc), which is
+ * `raw_pc - 3` (components/xtensa/include/esp_cpu_utils.h). A raw PC of 0
+ * therefore lands in the record as 0 - 3 == 0xfffffffd. That is not a code
+ * address on any ESP32-S3 image, so a record carrying it describes a frame
+ * whose PC field was never a PC -- see this file's public doc comment. */
+#define CRASH_REPORT_PC_OF_ZERO 0xfffffffdu
+
+bool crash_report_frame_trustworthy(const crash_report_record_t *rec)
+{
+    if (!rec) {
+        return false;
+    }
+    if (rec->bt_corrupted) {
+        return false;
+    }
+    if (rec->exc_pc == CRASH_REPORT_PC_OF_ZERO) {
+        return false;
+    }
+    return true;
 }
 
 static void copy_str(char *dst, size_t cap, const char *src)
@@ -147,6 +168,11 @@ static void fill_from_summary(crash_report_record_t *out, const esp_core_dump_su
     out->exc_cause = summary->ex_info.exc_cause;
     out->exc_pc = summary->exc_pc;
     out->exc_addr = summary->ex_info.exc_vaddr;
+    /* a0/a1 of the crashing frame -- see crash_report.h's field comments for
+     * why a1 (the stack pointer) is the field that disambiguates a NULL
+     * struct-pointer dereference from a NULL/garbage stack pointer. */
+    out->exc_a0 = summary->ex_info.exc_a[0];
+    out->exc_a1 = summary->ex_info.exc_a[1];
 
     uint32_t depth = summary->exc_bt_info.depth;
     if (depth > CRASH_REPORT_BT_MAX) {
@@ -334,9 +360,19 @@ void crash_report_init(void)
         ESP_LOGE(TAG, "could not persist new crash record: %s", esp_err_to_name(err));
         return;
     }
-    ESP_LOGW(TAG, "crash record captured: task='%s' cause=%lu (%s) pc=0x%08lx addr=0x%08lx frames=%u",
+    ESP_LOGW(TAG, "crash record captured: task='%s' cause=%lu (%s) pc=0x%08lx addr=0x%08lx a0=0x%08lx "
+                  "a1(sp)=0x%08lx frames=%u",
              rec.exc_task, (unsigned long)rec.exc_cause, rec.exc_cause_str,
-             (unsigned long)rec.exc_pc, (unsigned long)rec.exc_addr, (unsigned)rec.bt_count);
+             (unsigned long)rec.exc_pc, (unsigned long)rec.exc_addr, (unsigned long)rec.exc_a0,
+             (unsigned long)rec.exc_a1, (unsigned)rec.bt_count);
+    if (!crash_report_frame_trustworthy(&rec)) {
+        ESP_LOGE(TAG, "crash record's exception frame is NOT self-consistent (pc=0x%08lx%s, backtrace "
+                      "corrupted=%u) -- do NOT read exc_addr as a struct field offset or exc_pc as a "
+                      "code address from this record; symbolize the coredump instead",
+                 (unsigned long)rec.exc_pc,
+                 (rec.exc_pc == CRASH_REPORT_PC_OF_ZERO) ? " == esp_cpu_process_stack_pc(0), i.e. the saved PC was 0" : "",
+                 (unsigned)rec.bt_corrupted);
+    }
 }
 
 bool crash_report_get(crash_report_record_t *out)

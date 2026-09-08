@@ -49,7 +49,7 @@ extern "C" {
 // discarded rather than migrated -- same "one lost breadcrumb costs nothing,
 // mis-parsing an old layout would print a confidently wrong answer" argument
 // as run_state.h's own RUN_STATE_RECORD_VERSION.
-#define CRASH_REPORT_RECORD_VERSION 1u
+#define CRASH_REPORT_RECORD_VERSION 2u
 
 // esp_core_dump_bt_info_t.bt[] (port/xtensa/esp_core_dump_summary_port.h) is
 // itself capped at 16 entries -- this just mirrors that cap, not an
@@ -77,6 +77,17 @@ typedef struct {
     uint32_t exc_cause;        // esp_core_dump_summary_extra_info_t.exc_cause (xtensa EXCCAUSE)
     uint32_t exc_pc;           // esp_core_dump_summary_t.exc_pc
     uint32_t exc_addr;         // esp_core_dump_summary_extra_info_t.exc_vaddr (faulting address)
+    uint32_t exc_a0;           // esp_core_dump_summary_extra_info_t.exc_a[0] -- the crashing frame's
+                               // return address. See crash_report_frame_trustworthy() below.
+    uint32_t exc_a1;           // esp_core_dump_summary_extra_info_t.exc_a[1] -- the crashing frame's
+                               // STACK POINTER. Added 2026-09-08 (docs/audits/
+                               // crash_loadprohibited_0x18_2026-09-08.md): without it, a record
+                               // showing exc_cause=LoadProhibited/exc_addr=0x18 is ambiguous between
+                               // "a NULL struct pointer was dereferenced at field offset 0x18" and
+                               // "the STACK POINTER itself was NULL/garbage and a perfectly ordinary
+                               // local at frame offset 0x18 was loaded". Those two have completely
+                               // different fixes, and the summary as captured could not tell them
+                               // apart -- a1 decides it in one glance.
     uint32_t backtrace_pc[CRASH_REPORT_BT_MAX]; // esp_core_dump_bt_info_t.bt[], first bt_count valid
     char     exc_task[CRASH_REPORT_TASK_NAME_MAX];      // faulting task's name
     char     exc_cause_str[CRASH_REPORT_CAUSE_STR_MAX]; // decoded EXCCAUSE mnemonic, "" if unknown
@@ -101,6 +112,19 @@ void crash_report_init(void);
 // never written, corrupted (CRC mismatch), or a size/version this build
 // doesn't recognize.
 bool crash_report_get(crash_report_record_t *out);
+
+// True only if the exception frame this record was built from looks
+// self-consistent enough that exc_pc/exc_addr may be reasoned about.
+//
+// WHY THIS EXISTS (2026-09-08): esp_core_dump_summary_t.exc_pc is not the raw
+// saved PC -- espcoredump runs it through esp_cpu_process_stack_pc(), which
+// returns `pc - 3`. A stored exc_pc of 0xfffffffd therefore means the saved
+// PC was EXACTLY 0x00000000, i.e. the frame's PC field is not a code address
+// at all. A record in that state was read, on this board, as though its
+// exc_addr were a meaningful struct field offset; it is not safe to do that,
+// because a frame whose PC is zero has no established relationship to its own
+// exccause/vaddr fields. Pure predicate over the record, no I/O -- host-tested.
+bool crash_report_frame_trustworthy(const crash_report_record_t *rec);
 
 // Sets the acknowledged flag on the stored record and persists it. Returns
 // false if there is no valid record to acknowledge.

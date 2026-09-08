@@ -27,6 +27,13 @@ typedef struct {
 typedef struct {
     uint32_t exc_cause;
     uint32_t exc_vaddr;
+    /* Mirrors the real esp_core_dump_summary_extra_info_t (espcoredump/include/
+     * port/xtensa/esp_core_dump_summary_port.h): the a-register set saved at the
+     * exception. Only a0/a1 are consumed by crash_report.c -- a1 is the crashing
+     * frame's STACK POINTER, the field that tells a null-struct-pointer
+     * dereference apart from a null/garbage stack pointer. The full 16 are
+     * declared so the stub keeps matching the real header's shape. */
+    uint32_t exc_a[16];
 } esp_core_dump_summary_extra_info_t;
 
 typedef struct {
