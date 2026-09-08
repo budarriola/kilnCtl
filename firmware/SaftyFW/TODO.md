@@ -926,3 +926,48 @@ has not run since this boot, so this reading does not yet exercise it either
 way (see "Idle stack baseline is a floor"). Worst three by free bytes:
 `system_uart_bridge` 916 B, `backlight_pwm` 1028 B, `info_uart_bridge` 1112 B.
 
+## 2026-09-08 -- Pico flashed to 24090c9a (config_store A/B sectors)
+
+Pico only, flashed at commit `24090c9a` (flash_endurance_review_2026-09-07.md
+R2 fix: config_store gets a second sector B inside the already-reserved 64K
+region so the 8th write no longer erases the sole sector holding the safety
+config -- a power cut in that window used to leave zero valid copies of
+`tc_type`/`abs_max_temp_c`/CT cal). 169/169 host tests pass (up from 60),
+including the new power-cut-mid-erase/mid-program/between cases and the
+old-single-sector-image migration test. Built from a clean detached worktree,
+`C:/wt/picoflash_ab` (build dir `C:/wt/picoflash_ab_build`), flashed
+`SaftyFW.elf` via `debug_program(peer="pico", confirm=true)`.
+
+Pre-flash checks: no firing in progress, `safety_get_status` link up,
+`SaftyFW armed (relay_owner not tripped)`, safety TC valid 37.15 C, all
+relay currents 0.00 A. ESP `get_heap_status`: no unacknowledged crash report.
+Pre-flash commissioning capture (`safety_get_commissioning`/`safety_get_ct_cal`,
+this migration's whole point being to preserve exactly these fields across the
+sector-layout change): `commissioned=True`, config CRC 25042, S1
+`abs_max_temp_c=80C` ARMED, S8 `max_rate_c_per_min=33.3C/min` ARMED,
+`tc_source=0`, `ct_installed=0` (S14 DORMANT), `ct_topology=per_zone` (S15
+DORMANT), CT channels 0/1/2 all uncalibrated. Old boot_id 132, Pico build
+`6427502a`.
+
+Post-flash, config CRC read back **unchanged at 25042** / `config_version=121`
+-- every field above (`abs_max_temp_c`, `max_rate_c_per_min`, `tc_source`,
+`ct_installed`, `ct_topology`, CT cal) matched the pre-flash capture exactly,
+confirming the A/B migration preserved the legacy single-sector record with
+no reset to defaults. New `boot_id=85`, Pico build `24090c9a` built
+2026-09-08 23:12:11Z, protocol v12 (min compatible v7); ESP `get_fw_version`
+reports `uart_protocol_version 11`, compatible yes. `safety_get_link_stats`
+showed 1 crc/framing error and 3 timeouts during the reset transient only,
+not climbing afterward.
+
+The expected post-reset S6a `MAIN_FAULT` trip occurred (`trip_reason 6`,
+`trip_mask 0x0020`) once link-up and protocol compatibility were confirmed
+both directions; `safety_clear_trip()` cleared it and it did not return
+(`trip_mask 0x0000`, `state armed` afterward). One deviation from the usual
+post-flash pattern: `safety_get_diag` settled at `warn_mask 0x0000`, not the
+`0x0010` (S5 sensor-invalid WARN) seen on prior flashes of this same bench
+unit with no safety TC attached -- `safety_get_status` still reports "safety
+TC invalid" (no plausible temperature), so the sensor is not newly reading
+correctly; only the WARN bit's presence differs from the last few flash
+records. Not chased further here -- flagging it since it doesn't match this
+board's established baseline.
+
