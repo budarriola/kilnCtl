@@ -43,12 +43,43 @@
 #ifndef DIAGNOSTICS_HTTP_H
 #define DIAGNOSTICS_HTTP_H
 
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "esp_err.h"
 #include "safety_link.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Pure state-selection logic pulled out of thermo_faults_get_handler()'s
+ * safety-processor block (diagnostics_http.c) after 3ba65080's negative-test
+ * verification audit found the "not_converting" state's own negative test
+ * (test_safety_tc_diagnostics.js) was vacuous -- it fed a hand-built
+ * `state` string straight into the page renderer and never touched the
+ * logic below that actually derives "ok"/"faulted"/"not_converting" from
+ * the wire data. Pulled out `static inline`, same pattern as this header's
+ * own dashboard_safety_ready() in dashboard_http.h, specifically so it is
+ * host-testable (test_diagnostics_safety_tc_state.c) without standing up
+ * httpd/safety_link/thermo_owner. Same three-way priority as the doc
+ * comment above thermo_faults_get_handler()'s safety block:
+ *   faulted         -- tc_temp_c is a real (non-NaN) reading AND a
+ *                       THERMO_FAULT_* bit is set: the MAX31856 completed a
+ *                       conversion and is reporting a genuine fault -- chip
+ *                       alive, probe is the problem.
+ *   not_converting  -- tc_temp_c is NaN with fault==0: the state that cost
+ *                       hours the night this was written (both TC and CJ
+ *                       NaN, zero fault bits -- indistinguishable on this
+ *                       wire from a CR1 type-verify failure).
+ *   ok              -- tc_temp_c is a real reading and fault==0. */
+static inline const char *diag_safety_tc_state(double tc_temp_c, uint32_t tc_fault)
+{
+    bool temp_valid = !isnan(tc_temp_c);
+    bool faulted = temp_valid && tc_fault != 0u;
+    return faulted ? "faulted" : (temp_valid ? "ok" : "not_converting");
+}
 
 /* Registers the three page routes above on the httpd instance
  * wifi_provision_http.c already started. Takes no hardware pointers of its

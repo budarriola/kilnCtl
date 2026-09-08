@@ -144,16 +144,18 @@ def main():
     args = ap.parse_args()
 
     if not os.path.isfile(args.elf):
-        print(f"check_main_task_stack_budget: SKIPPED -- no ELF at {args.elf}.")
+        print(f"check_main_task_stack_budget: SKIP: no ELF at {args.elf}.")
         print("  Build KilnFW (build_kilnfw / idf.py build) and re-run; this check cannot "
-              "measure anything without one.")
-        return 0
+              "measure anything without one. This is a SKIP, not a pass -- it means the "
+              "8704 B/6144 B-class overflow this check exists to catch (see the module "
+              "docstring) goes UNMEASURED on this run, not that it was checked and found fine.")
+        return 3
 
     objdump = find_objdump()
     if not objdump:
-        print("check_main_task_stack_budget: SKIPPED -- xtensa-esp32s3-elf-objdump not found "
-              "(set XTENSA_OBJDUMP).")
-        return 0
+        print("check_main_task_stack_budget: SKIP: xtensa-esp32s3-elf-objdump not found "
+              "(set XTENSA_OBJDUMP). Unmeasured, not passing.")
+        return 3
 
     stack = args.stack_bytes or stack_size_from_sdkconfig(DEFAULT_SDKCONFIG)
     if not stack:

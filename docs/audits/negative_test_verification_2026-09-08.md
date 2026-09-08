@@ -68,3 +68,66 @@ banner, TC fault rendering, and recovery-mode escape-hatch scoping).
   aspirational.
 - Fix `check_main_task_stack_budget.py`/`.ps1` to exit 3 (real SKIP) instead
   of 0 when the ELF or objdump is missing (finding 2).
+
+## Fixes applied (this pass)
+
+1. **Finding 1 (`d5d23b98`, vacuous TC-state negative test) — FIXED.** Pulled
+   the state-selection logic out of `thermo_faults_get_handler()`
+   (`firmware/KilnFW/App/drivers/http/diagnostics_http.c`) into a `static
+   inline` pure function, `diag_safety_tc_state(double tc_temp_c, uint32_t
+   tc_fault)`, in `diagnostics_http.h` — same pattern as this header's
+   existing `dashboard_safety_ready()` in `dashboard_http.h`, chosen so it is
+   host-testable without standing up httpd/safety_link/thermo_owner. New host
+   test `firmware/KilnFW/App/test/test_diagnostics_safety_tc_state.c` drives
+   this REAL production function directly (registered in `test_main.c` and
+   `build_host_tests.ps1`), covering ok / faulted / the not_converting case
+   (NaN + fault==0) / NaN-with-fault-bit priority. Negative-tested: collapsed
+   the function to `faulted ? "faulted" : "ok"` (dropping the
+   `not_converting` branch) — the new host suite failed at
+   `test_diagnostics_safety_tc_state.c:62`: "NaN temperature with
+   fault_status==0 must read not_converting, not ok and not faulted -- a
+   dead chip must never render as healthy". Reverted by hand; `git diff` on
+   `diagnostics_http.h` is empty relative to the fix. The pre-existing
+   `test_safety_tc_diagnostics.js` is left in place (it still legitimately
+   covers the page-rendering half); the new C test is what closes the gap
+   the commit message overclaimed.
+2. **Finding 2 (`check_main_task_stack_budget`, silent exit-0 skip) —
+   FIXED.** `check_main_task_stack_budget.py`'s two prerequisite branches
+   (missing ELF, missing `xtensa-esp32s3-elf-objdump`) now `return 3` with a
+   message containing `SKIP:`, matching `run_all_checks.ps1`'s reserved
+   SKIP exit code; the `.ps1` wrapper's header comment updated to match
+   (it already passed `$LASTEXITCODE` through unchanged, so no wrapper
+   logic change was needed). Chose SKIP over FAIL for the missing-ELF case:
+   an unbuilt checkout has nothing to measure and this is not a defect in
+   the checkout itself, matching `check_stub_signature_drift.ps1`'s
+   documented reasoning for the same shape ("a missing ESP-IDF/build
+   artifact is a legitimate, expected state on plenty of machines"); a
+   missing `sdkconfig` value or missing `app_main` symbol in a real ELF
+   still `return 1` (FAIL) unchanged, since those indicate something wrong
+   in a build that DID happen. Negative-tested both paths: `--elf
+   nonexistent.elf` now prints `SKIP: no ELF at ...` and exits 3 (was exit
+   0); with a real ELF present, `-StackBytes 6000` (budget 4500 B against
+   the measured 5792 B path) still correctly FAILs with exit 1, naming the
+   same call path. No file changes needed reverting (the fix is the
+   intended final state, not a broken-then-restored probe).
+3. **Sweep of other `check_*.ps1`/`.py` scripts**: grepped every
+   `check_*.ps1` for a missing-prerequisite branch and its exit code.
+   `check_stub_signature_drift.ps1` already uses exit 3 correctly (fixed in
+   an earlier pass per its own header, `docs/audits/
+   check_independence_2026-09-07.md`). Every other check with a
+   prerequisite guard (`check_flash_worker_lint.ps1` and the mirror-drift
+   family: `check_approach_rate_cap_mirror_drift.ps1`,
+   `check_fuzzy_gain_mirror_drift.ps1`, `check_heater_output_pwm_drift.ps1`,
+   `check_pid_fuzzy_drift.ps1`, `check_power_diag_flag_mirror_drift.ps1`,
+   `check_ramp_lock_decision_mirror_drift.ps1`,
+   `check_ramp_stepping_gate_mirror_drift.ps1`,
+   `check_source_path_drift.ps1`, `check_wire_protocol_fingerprint.ps1`,
+   `check_frame_a_offset_drift.ps1`, `check_cfg_fs_tie_break.ps1`,
+   `check_ui_shell_layout.ps1`) already treats its missing prerequisite as
+   exit 1 (FAIL), not exit 0 — `check_main_task_stack_budget` was the only
+   script still shipping the old vacuous shape. No second instance of the
+   "asserts against a mirror instead of the real production function" shape
+   was found among today's other JS/C test additions in the time available
+   for this pass; a full re-audit of every test added 2026-09-08 was out of
+   scope here (see "What would make this stronger" above, which still
+   applies for claims 3/6/8).

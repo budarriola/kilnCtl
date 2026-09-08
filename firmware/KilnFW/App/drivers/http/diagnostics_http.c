@@ -250,9 +250,7 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
     if (safety_err != ESP_OK || !sl.link_up) {
         APPEND(",\"safety\":{\"state\":\"no_link\",\"link_up\":false}");
     } else {
-        bool temp_valid = !isnan(sl.tc_temp_c);
-        bool faulted = temp_valid && sl.tc_fault != 0u;
-        const char *state = faulted ? "faulted" : (temp_valid ? "ok" : "not_converting");
+        const char *state = diag_safety_tc_state(sl.tc_temp_c, sl.tc_fault);
         bool not_installed = (sl.flags & SAFETY_FLAG_TC_NOT_INSTALLED) != 0u;
         bool injected = (sl.flags & SAFETY_FLAG_TC_INJECTED) != 0u;
 

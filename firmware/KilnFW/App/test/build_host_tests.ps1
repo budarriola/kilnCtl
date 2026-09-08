@@ -68,7 +68,9 @@ try {
         (Join-Path $testDir "test_backlight_pwm.c"),
         (Join-Path $testDir "test_display_power_policy.c"),
         (Join-Path $testDir "test_display_power_cfg.c"),
+        (Join-Path $testDir "test_setup_wizard_progress.c"),
         (Join-Path $testDir "test_display_power_wiring.c"),
+        (Join-Path $testDir "test_diagnostics_safety_tc_state.c"),
         (Join-Path $testDir "test_dashboard_protocol_version.c"),
         (Join-Path $testDir "test_crash_report.c"),
         (Join-Path $testDir "test_dualwrite_window.c"),
@@ -1098,6 +1100,24 @@ try {
 
     Invoke-HostTestExe -Name "cfg_fs_mount_reentrancy" -ExePath $exe32 -BuildCmd $cmd32
 
+    # ---- test_recovery_start_refusal.c: its own THIRTY-THIRD, separate
+    # executable ----------------------------------------------------------
+    # ui_aggregate_review_2026-09-08.md (d89256fe): tests
+    # App/drivers/http/recovery_start_refusal.h's explicit, named
+    # recovery-mode refusal -- the enforcement the review found missing
+    # (the banner claimed "Firing is NOT available" but no HTTP route
+    # checked boot_guard_is_recovery_mode()). Header-only (static inline),
+    # so this needs no sibling .c files -- just a fake body for
+    # boot_guard_is_recovery_mode() (same convention test_ota_http.c already
+    # uses for that exact symbol). Own executable because that fake would
+    # collide at link time with test_boot_guard.c's real one (test_main.c's
+    # combined binary #includes boot_guard.c directly).
+    $exe33 = Join-Path $outDir "kilnctl_host_tests_recovery_start_refusal.exe"
+    $cmd33 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exe33`" `"$(Join-Path $testDir 'test_recovery_start_refusal.c')`""
+
+    Invoke-HostTestExe -Name "recovery_start_refusal" -ExePath $exe33 -BuildCmd $cmd33
+
     # ---- summary ----------------------------------------------------------
     #
     # 28 executables are attempted above (main + zones_http + safety_cfg_http +
@@ -1130,7 +1150,10 @@ try {
     # confirms 31 real calls exist) without bumping this constant, which is
     # exactly the silent-mismatch failure mode this comment's own history
     # describes -- caught by this same gate, not introduced by it.
-    $totalExpected = 31
+    # 31 -> 32: this pass added test_recovery_start_refusal.c as its own
+    # 32nd Invoke-HostTestExe call (recovery_start_refusal.h's explicit,
+    # named recovery-mode API-layer refusal, ui_aggregate_review_2026-09-08).
+    $totalExpected = 32
     Write-Host ""
     Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
     if ($script:buildFailures.Count -gt 0) {

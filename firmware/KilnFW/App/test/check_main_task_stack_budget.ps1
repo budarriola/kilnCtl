@@ -9,10 +9,12 @@
 # panicked the board at boot with an IllegalInstruction and no usable
 # backtrace -- docs/audits/boot_hang_2026-09-08.md.
 #
-# SKIPS (exit 0, loudly) when there is no build/KilnCtrl.elf or no Xtensa
-# objdump: this check measures a build artifact, and a checkout that has
-# never been built has nothing to measure. Run `build_kilnfw` first for it
-# to mean anything.
+# SKIPS (exit 3, run_all_checks.ps1's reserved SKIP status -- never exit 0)
+# when there is no build/KilnCtrl.elf or no Xtensa objdump: this check
+# measures a build artifact, and a checkout that has never been built has
+# nothing to measure. Run `build_kilnfw` first for it to mean anything. A
+# skip must never read as a pass -- see run_all_checks.ps1's header for the
+# exit-3 contract this follows.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File firmware\KilnFW\App\test\check_main_task_stack_budget.ps1
