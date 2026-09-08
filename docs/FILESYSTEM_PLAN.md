@@ -1255,3 +1255,33 @@ this has not been flashed or hardware-verified. Read back `GET /api/cfgfs`
 after flashing and confirm `relay_cycles`/`adaptive_tune` show
 `file_backed:true, migration_deferred:false` on a cold boot before trusting
 the fix on hardware.
+
+**Hardware-verified 2026-09-08 (`1f741635`)**: flashed from a clean detached
+worktree (`C:/wt/espflash_final`) at `1f741635` (confirmed a fast-forward
+ancestor of the concurrently-advancing main HEAD `56afdb26`, which only
+added an unrelated `setup_wizard_page.html` fix). Host tests 32/32,
+`check_main_task_stack_budget` 4864/6144 B (unchanged). Cold boot:
+`GET /api/cfgfs` shows `relay_cycles: file_backed:true,
+migration_deferred:false` -- **the fix is confirmed working on hardware**,
+the deferred-migration bug this doc tracked is resolved. `adaptive_tune`
+reads `file_backed:false, migration_deferred:false` -- not evidence against
+the fix; the zone has zero adaptive-tune observations, so there is nothing
+to migrate (correctly not-deferred, just empty). Relay cycle counts
+unchanged across the flash: `[2201, 2994, 3214, 0]`. `httpd_worker` stack
+margin, separately tracked as CRITICAL (632-468 B free), now reads 4520 B
+free / 55.2% headroom -- that fix has also landed and holds on this boot.
+
+**New finding, not yet fixed**: `GET /api/firing_history?profile_id=0`
+panicked the board (`uptime_s=35` at next `get_heap_status`, reset_reason
+`PANIC`, `exc_cause=65535`, `exc_task` garbled, `exc_addr=0x0`, `a0` not the
+known-stale `0xa5a5a5a5` pattern -- genuinely new, distinguishable from the
+two pre-existing stale crash records). This was hit while trying to trigger
+`firing_stats`'s lazy on-first-read migration per this doc's own plan; the
+crash happened before the migration outcome could be observed, so
+`firing_stats: file_backed:false` is **unconfirmed either way**, not a
+negative result. Board self-recovered (auto-reboot, relays stayed off, no
+firing in progress) and was otherwise healthy afterward -- not a brick, no
+recovery-flash was needed. This crash report is still unacknowledged on the
+board as of this writing and needs its own investigation (likely an
+out-of-bounds or null-history-array access in the firing_history GET
+handler when `profile_id=0` has no recorded firing history yet).
