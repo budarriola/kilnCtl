@@ -230,7 +230,23 @@ $allowlistPaths = @(
     # project deliberately chose not to build going forward -- see
     # tools/check_no_duplicate_crc.ps1's matching allowlist entry for the
     # same file and its Python mirror.
-    (Join-Path $firmwareRoot "UnitTestFw\UnitTest\App\drivers\espInterfaces\uart_protocol.c")
+    (Join-Path $firmwareRoot "UnitTestFw\UnitTest\App\drivers\espInterfaces\uart_protocol.c"),
+
+    # 2026-09-07: cfg_fs_format_gate.c's lfs_style_crc() (and
+    # test_cfg_fs_format_gate.c's identical test-side ref_crc(), used to
+    # independently construct fixture bytes rather than share the
+    # production function with what it's testing) reproduce the pinned
+    # joltwallet/littlefs component's own on-disk CRC-32 (0xEDB88320,
+    # lfs_util.c's lfs_crc()) bit-for-bit, so the auto-format gate can tell
+    # a genuine LittleFS superblock commit from coincidental bytes without
+    # linking the full ESP-IDF LittleFS driver into a pure/host-tested
+    # module. Same class as every other entry above: a different
+    # algorithm/purpose (LittleFS's own on-disk integrity check, not the
+    # kilnlink UART link's CRC16-CCITT-FALSE) that happens to also be
+    # called "crc", not a from-scratch reimplementation of the link
+    # protocol.
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\cfg_fs_format_gate.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_cfg_fs_format_gate.c")
 )
 
 # Concurrent sessions are the norm in this repo: another agent's in-flight

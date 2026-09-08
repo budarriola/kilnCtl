@@ -46,28 +46,48 @@ tuning data is the worst failure mode here). It is skipped entirely in
 recovery mode.
 
 **As of 2026-09-07 `cfg_fs_mount_device()` (`main_boot_early.c`) now runs at
-boot and auto-formats a genuinely blank partition** — see "Auto-format and
-the ask-first path" below. The bench board's `cfg` partition has been
-flashed but never written, so its NEXT boot after this lands will
-auto-format and mount cleanly, making the dual-write bridges live for the
-first time. A board whose `cfg` partition instead contains real (if
+boot and auto-formats any partition with no valid LittleFS filesystem in
+it** — see "Auto-format and the ask-first path" below. The bench board's
+`cfg` partition reads 86.6% non-erased (residual bytes left over from
+before the `cfg` partition existed in `partitions.csv`, not a filesystem —
+the density-based gate this section originally shipped with wrongly
+treated that as evidence of content and refused to format it), so its NEXT
+boot after this fix lands will auto-format and mount cleanly, making the
+dual-write bridges live for the first time. A board whose `cfg` partition
+instead contains real (if
 mount-failed) data is NOT touched automatically — see below.
 
 ## Auto-format and the ask-first path
 
-Owner decision, 2026-09-07: "Auto format, don't require all-FF, search for
-valid files/partitions, ask the user if it is ok to overwrite if
-partitions/files found." When `esp_vfs_littlefs_register()` fails,
-`cfg_fs_mount_device()` reads the raw partition back
-(`cfg_fs_format_gate.c`, pure and host-tested) and:
+Owner decision, 2026-09-07, refined the same day: "The auto check should be
+looking to see if it is a valid file system, not just data. If it is just
+data and not file system then just format it." When
+`esp_vfs_littlefs_register()` fails, `cfg_fs_mount_device()` reads the raw
+partition back (`cfg_fs_format_gate.c`, pure and host-tested) and asks one
+question: **is there a valid LittleFS filesystem in the first two blocks
+(the redundant superblock metadata-block pair) of this partition?** It
+walks each block's real on-disk tag chain (revision count, tagged
+CRC-protected commits) looking for a SUPERBLOCK+INLINESTRUCT commit whose
+CRC-32 actually checks out and whose version field is sane — exactly what
+`lfs_dir_fetchmatch()`/`lfs_format_()` in the pinned `joltwallet/littlefs`
+component write and validate, reproduced directly rather than approximated
+with byte statistics. Byte density (how much of the partition reads as
+non-erased) is **no longer a gating signal** — it is still logged/reported
+for operator context, but a partition full of leftover, pre-existing
+non-erased data that never formed a real filesystem is auto-formatted
+regardless of how much of it there is:
 
-- **No evidence of real content** (the region reads as erased, give or take
-  a handful of stray bit-error bytes — deliberately NOT gated on a strict
-  all-0xFF requirement) → formats automatically and remounts. Logged at
-  WARN. This is the path every board takes today.
-- **A LittleFS superblock signature, or a meaningful fraction of
-  non-erased bytes** → refuses to format. Logged at ERROR with a loud
-  boot-log banner, and surfaced two other ways: `GET /api/cfgfs/format_pending`
+- **No valid LittleFS superblock found** (whether the region reads as
+  erased, or is mostly/entirely non-erased residual data with no real
+  filesystem structure in it) → formats automatically and remounts. Logged
+  at WARN. This is the path every board takes today, including the bench
+  board's actual partition (86.6% non-erased leftover data, no filesystem).
+- **A LittleFS superblock structure is found** — whether fully valid (a
+  real, otherwise-mountable filesystem that failed to mount for some other
+  reason) or one that decoded far enough to be recognizably real but failed
+  its CRC/version check (a genuine filesystem that is itself corrupt) —
+  → refuses to format either way. Logged at ERROR with a loud boot-log
+  banner, and surfaced two other ways: `GET /api/cfgfs/format_pending`
   (`{"pending":true,"reason":"..."}`) and a banner on the Settings page
   with an explicit confirm button, which POSTs to
   `/api/cfgfs/format_confirm` (authenticated the same way `/api/factory_reset`
