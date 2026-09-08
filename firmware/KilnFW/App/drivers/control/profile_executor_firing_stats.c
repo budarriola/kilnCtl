@@ -10,8 +10,10 @@
 #include "profile_executor_internal.h"
 
 #include <math.h>
+#include <stdlib.h> /* free() -- blobs below are heap-allocated, see firing_stats_load() */
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "hal_kv.h"
@@ -314,14 +316,26 @@ static bool nvs_only_load(uint8_t profile_id, profile_firing_history_blob_t *out
  * which this pass does not widen). */
 bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
 {
-    profile_firing_history_blob_t nvs_blob;
-    bool nvs_valid = nvs_only_load(profile_id, &nvs_blob);
+    /* HEAP, not the stack (2026-09-08 panic, docs/audits/firing_history_
+     * stack_overflow_2026-09-08.md): this 1364 B blob was one of four
+     * nested copies on the httpd_worker stack reached from
+     * GET /api/firing_history. Internal DRAM -- this path touches NVS. */
+    profile_firing_history_blob_t *nvs_blob =
+        heap_caps_malloc(sizeof(*nvs_blob), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (nvs_blob == NULL) {
+        ESP_LOGE(PE_TAG, "firing_stats_load(%u): malloc(%u) failed", (unsigned)profile_id,
+                 (unsigned)sizeof(*nvs_blob));
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    bool nvs_valid = nvs_only_load(profile_id, nvs_blob);
 
     uint32_t nvs_rev = firing_stats_cfg_fs_read_rev(profile_id);
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value =
-        firing_stats_cfg_fs_resolve(profile_id, &nvs_blob, nvs_valid, nvs_rev, out, &resolved_rev, &used_file);
+        firing_stats_cfg_fs_resolve(profile_id, nvs_blob, nvs_valid, nvs_rev, out, &resolved_rev, &used_file);
+    free(nvs_blob);
     if (!have_value) {
         memset(out, 0, sizeof(*out));
         // nvs_valid is only false here for genuinely corrupt/unrecognized

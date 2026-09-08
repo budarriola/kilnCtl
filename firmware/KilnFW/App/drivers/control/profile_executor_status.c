@@ -8,7 +8,9 @@
 #include "profile_executor_internal.h"
 
 #include <math.h>
+#include <stdlib.h> /* free() -- firing-history blob is heap-allocated, see get_firing_history() */
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "adaptive_tune.h"
@@ -399,14 +401,31 @@ size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_ru
     }
     /* NVS-only, no s_exec/lock -- see firing_stats_load()'s own doc comment.
      * Safe from any task/state, including before profile_executor_start(). */
-    profile_firing_history_blob_t blob;
-    if (!firing_stats_load(profile_id, &blob)) {
+    /* HEAP, not the stack (2026-09-08 panic, docs/audits/firing_history_
+     * stack_overflow_2026-09-08.md): profile_firing_history_blob_t is 1364 B
+     * and this function is called from firing_history_get_handler() on the
+     * 8192 B httpd_worker stack, which was measured with 632-468 B free.
+     * This frame plus firing_stats_load()'s / firing_stats_cfg_fs_resolve()'s
+     * / _load_raw()'s own copies of the same blob summed to 6544 B of
+     * statically-measured depth and overflowed the stack, smashing the TCB
+     * (garbled exc_task, nonsense PC) on every GET /api/firing_history.
+     * Internal DRAM, not PSRAM: firing_stats_load() reaches NVS/flash. */
+    profile_firing_history_blob_t *blob =
+        heap_caps_malloc(sizeof(*blob), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (blob == NULL) {
+        ESP_LOGE(PE_TAG, "profile_executor_get_firing_history(%u): malloc(%u) failed -- reporting no history",
+                 (unsigned)profile_id, (unsigned)sizeof(*blob));
         return 0;
     }
-    size_t n = blob.count;
+    if (!firing_stats_load(profile_id, blob)) {
+        free(blob);
+        return 0;
+    }
+    size_t n = blob->count;
     if (n > PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) n = PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH; /* corrupt-blob guard */
     if (n > max_entries) n = max_entries;
-    memcpy(out, blob.runs, n * sizeof(blob.runs[0])); /* runs[0] = newest, matches this function's contract */
+    memcpy(out, blob->runs, n * sizeof(blob->runs[0])); /* runs[0] = newest, matches this function's contract */
+    free(blob);
     return n;
 }
 

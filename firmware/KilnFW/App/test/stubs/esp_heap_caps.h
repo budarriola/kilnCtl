@@ -14,6 +14,10 @@
 
 #define MALLOC_CAP_SPIRAM (1 << 0)
 #define MALLOC_CAP_8BIT   (1 << 1)
+// 2026-09-08 firing-history stack-overflow fix: the firing_stats read path
+// allocates its 1364 B blobs from INTERNAL DRAM (it reaches NVS/flash, so
+// a PSRAM buffer would be the wrong pool). Caps are ignored on the host.
+#define MALLOC_CAP_INTERNAL (1 << 2)
 #define MALLOC_CAP_DEFAULT (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 
 // 2026-08-31 httpd_worker stack-overflow fix: zones_get_handler() (and
@@ -38,11 +42,36 @@ static inline void heap_caps_malloc_test_set_fail(bool fail)
     s_stub_heap_caps_malloc_fail = fail;
 }
 
+// 2026-09-08 firing-history stack-overflow fix: a test needs to assert that a
+// code path allocates its large buffers rather than stacking them, and the
+// fail-flag above cannot distinguish "one of four frames still allocates" from
+// "all four do" (any single failure short-circuits the whole read). This
+// counter, sampled around a call, gives that resolution -- a frame moved back
+// onto the stack shows up as one fewer allocation. Counts only allocations
+// >= min_bytes so incidental small allocations elsewhere cannot mask a
+// regression. `static` per translation unit, same as every other stub state.
+static unsigned s_stub_heap_caps_malloc_count = 0;
+static size_t s_stub_heap_caps_malloc_count_min_bytes = 0;
+
+static inline void heap_caps_malloc_test_reset_count(size_t min_bytes)
+{
+    s_stub_heap_caps_malloc_count = 0;
+    s_stub_heap_caps_malloc_count_min_bytes = min_bytes;
+}
+
+static inline unsigned heap_caps_malloc_test_count(void)
+{
+    return s_stub_heap_caps_malloc_count;
+}
+
 static inline void *heap_caps_malloc(size_t size, uint32_t caps)
 {
     (void)caps;
     if (s_stub_heap_caps_malloc_fail) {
         return NULL;
+    }
+    if (size >= s_stub_heap_caps_malloc_count_min_bytes) {
+        s_stub_heap_caps_malloc_count++;
     }
     return malloc(size);
 }

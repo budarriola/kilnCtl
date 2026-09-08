@@ -2,8 +2,10 @@
 #include "firing_stats_cfg_fs.h"
 
 #include <stdio.h>
+#include <stdlib.h> /* free() -- the 1364 B blob/file buffers below are heap-allocated */
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "cfg_fs.h"
@@ -101,10 +103,21 @@ void firing_stats_cfg_fs_load_raw(uint8_t id, profile_firing_history_blob_t *out
     char path[40];
     firing_stats_cfg_fs_path(id, path, sizeof(path));
 
-    uint8_t raw[FSCF_FILE_BUF_MAX];
+    /* HEAP, not the stack (2026-09-08 panic, docs/audits/firing_history_
+     * stack_overflow_2026-09-08.md): this 1368 B buffer sat on the
+     * httpd_worker stack, four frames below GET /api/firing_history, behind
+     * three more copies of the same 1364 B blob. Out of memory is reported
+     * the same way an absent file is -- the NVS candidate then decides. */
+    uint8_t *raw = heap_caps_malloc(FSCF_FILE_BUF_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (raw == NULL) {
+        ESP_LOGE(FSCF_TAG, "fs%u file read: malloc(%u) failed -- ignoring file, NVS candidate decides", id,
+                 (unsigned)FSCF_FILE_BUF_MAX);
+        return;
+    }
     size_t len = 0;
-    esp_err_t err = cfg_fs_read(path, raw, sizeof(raw), &len);
+    esp_err_t err = cfg_fs_read(path, raw, FSCF_FILE_BUF_MAX, &len);
     if (err != ESP_OK) {
+        free(raw);
         return; /* absent/unreadable -- not "found but bad" on its own */
     }
     // VERSIONLESS blob: exact size or nothing. No tail-append tolerance
@@ -114,12 +127,14 @@ void firing_stats_cfg_fs_load_raw(uint8_t id, profile_firing_history_blob_t *out
     if (len != FSCF_FILE_BUF_MAX) {
         ESP_LOGW(FSCF_TAG, "fs%u file is %u bytes, expected exactly %u -- ignoring, NVS candidate decides", id,
                  (unsigned)len, (unsigned)FSCF_FILE_BUF_MAX);
+        free(raw);
         return;
     }
 
     *out_rev = get_u32_le(raw);
     memcpy(out_blob, raw + 4, sizeof(*out_blob));
     *out_valid = true;
+    free(raw);
 }
 
 esp_err_t firing_stats_cfg_fs_save(uint8_t id, const profile_firing_history_blob_t *blob, uint32_t rev)
@@ -130,13 +145,21 @@ esp_err_t firing_stats_cfg_fs_save(uint8_t id, const profile_firing_history_blob
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;
     }
-    uint8_t raw[FSCF_FILE_BUF_MAX];
+    /* HEAP, not the stack -- same 2026-09-08 reasoning as load_raw() above;
+     * firing_stats_cfg_fs_resolve() calls this on the lazy-migration path,
+     * so it is reachable from the same httpd_worker chain. */
+    uint8_t *raw = heap_caps_malloc(FSCF_FILE_BUF_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (raw == NULL) {
+        ESP_LOGE(FSCF_TAG, "fs%u file write: malloc(%u) failed", id, (unsigned)FSCF_FILE_BUF_MAX);
+        return ESP_ERR_NO_MEM;
+    }
     put_u32_le(raw, rev);
     memcpy(raw + 4, blob, sizeof(*blob));
 
     char path[40];
     firing_stats_cfg_fs_path(id, path, sizeof(path));
-    esp_err_t err = s_write_fn(path, raw, sizeof(raw));
+    esp_err_t err = s_write_fn(path, raw, FSCF_FILE_BUF_MAX);
+    free(raw);
     if (err != ESP_OK) {
         ESP_LOGW(FSCF_TAG, "fs%u file write (rev %lu) failed: %s", id, (unsigned long)rev, esp_err_to_name(err));
     }
@@ -185,13 +208,29 @@ bool firing_stats_cfg_fs_resolve(uint8_t id, const profile_firing_history_blob_t
         return false;
     }
 
-    profile_firing_history_blob_t file_blob;
+    /* HEAP, not the stack -- same 2026-09-08 reasoning as load_raw() above.
+     * On OOM, behave exactly as a missing/corrupt file does: the NVS
+     * candidate decides, no history is discarded. */
+    profile_firing_history_blob_t *file_blob =
+        heap_caps_malloc(sizeof(*file_blob), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (file_blob == NULL) {
+        ESP_LOGE(FSCF_TAG, "fs%u resolve: malloc(%u) failed -- NVS candidate decides", id,
+                 (unsigned)sizeof(*file_blob));
+        if (!nvs_valid) {
+            return false;
+        }
+        *out_blob = *nvs_blob;
+        *out_rev = nvs_rev;
+        *out_used_file = false;
+        return true;
+    }
     uint32_t file_rev = 0;
     bool file_valid = false;
-    firing_stats_cfg_fs_load_raw(id, &file_blob, &file_rev, &file_valid);
+    firing_stats_cfg_fs_load_raw(id, file_blob, &file_rev, &file_valid);
 
     if (!file_valid) {
         if (!nvs_valid) {
+            free(file_blob);
             return false; /* this profile has never fired, on either side */
         }
         // File missing/corrupt, NVS has real history -- adopt NVS (never
@@ -204,6 +243,7 @@ bool firing_stats_cfg_fs_resolve(uint8_t id, const profile_firing_history_blob_t
         if (werr != ESP_OK && werr != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(FSCF_TAG, "could not migrate fs%u history to file: %s", id, esp_err_to_name(werr));
         }
+        free(file_blob);
         return true;
     }
 
@@ -217,19 +257,21 @@ bool firing_stats_cfg_fs_resolve(uint8_t id, const profile_firing_history_blob_t
         ESP_LOGW(FSCF_TAG, "fs%u file/NVS DIVERGED (file rev %lu valid, NVS unused) -- adopting FILE (no delete "
                            "path exists for this item, so this must be a prior failed NVS write)",
                  id, (unsigned long)file_rev);
-        *out_blob = file_blob;
+        *out_blob = *file_blob;
         *out_rev = file_rev;
         *out_used_file = true;
+        free(file_blob);
         return true;
     }
 
     // Both valid -- compare content, not just rev, so two independently
     // identical histories never log a spurious divergence.
-    bool differs = memcmp(&file_blob, nvs_blob, sizeof(file_blob)) != 0;
+    bool differs = memcmp(file_blob, nvs_blob, sizeof(*file_blob)) != 0;
     if (!differs) {
-        *out_blob = file_blob;
+        *out_blob = *file_blob;
         *out_rev = file_rev > nvs_rev ? file_rev : nvs_rev;
         *out_used_file = true;
+        free(file_blob);
         return true;
     }
 
@@ -238,7 +280,7 @@ bool firing_stats_cfg_fs_resolve(uint8_t id, const profile_firing_history_blob_t
         // enforces on every other *_cfg_fs module in this codebase.
         ESP_LOGW(FSCF_TAG, "fs%u file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting FILE (strictly higher rev)",
                  id, (unsigned long)file_rev, (unsigned long)nvs_rev);
-        *out_blob = file_blob;
+        *out_blob = *file_blob;
         *out_rev = file_rev;
         *out_used_file = true;
     } else {
@@ -254,5 +296,6 @@ bool firing_stats_cfg_fs_resolve(uint8_t id, const profile_firing_history_blob_t
             ESP_LOGW(FSCF_TAG, "could not resync fs%u file from NVS: %s", id, esp_err_to_name(werr));
         }
     }
+    free(file_blob);
     return true;
 }

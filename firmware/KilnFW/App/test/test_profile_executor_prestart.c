@@ -7912,6 +7912,74 @@ static void test_fscf_negative_no_file_write_means_file_never_catches_up(void)
                "the run is NOT lost -- NVS alone is carrying it, and firing_stats_load() still returns it");
 }
 
+/* 2026-09-08 REGRESSION (docs/audits/firing_history_stack_overflow_2026-09-08.md):
+ * GET /api/firing_history?profile_id=0 panicked the board every time. The read
+ * path stacked FOUR copies of the 1364 B profile_firing_history_blob_t --
+ * profile_executor_get_firing_history()'s, firing_stats_load()'s nvs_blob,
+ * firing_stats_cfg_fs_resolve()'s file_blob and _load_raw()'s file buffer --
+ * 6544 B of statically-measured depth on the 8192 B httpd_worker stack that
+ * had been measured with 632-468 B free. It overflowed and smashed the TCB.
+ *
+ * This test pins the fix by its observable consequence: with the heap refusing
+ * every allocation, the read path must report NO history rather than returning
+ * data. Stack-resident buffers cannot fail to allocate, so the pre-fix code
+ * returns the run it just persisted and this test FAILS -- which is exactly
+ * the property being guarded. It does not measure stack depth (a host test
+ * cannot); check_httpd_task_stack_budget.py is the depth gate. */
+static void test_fscf_history_read_uses_the_heap_not_the_httpd_stack(void)
+{
+    TEST_SECTION("firing stats: the read path's 1364 B blobs are HEAP-allocated, not stacked on "
+                 "httpd_worker (2026-09-08 panic) -- an OOM degrades to 'no history', it does not "
+                 "quietly succeed off the stack");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts (so the file side is exercised too)");
+
+    profile_firing_run_record_t rec = make_fscf_record(5, 3000, 2500);
+    firing_stats_persist(&rec);
+
+    profile_firing_run_record_t out[PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH];
+    memset(out, 0, sizeof(out));
+    // Count the blob-sized allocations one read makes. Four frames on this
+    // path each need one -- profile_executor_get_firing_history(),
+    // firing_stats_load(), firing_stats_cfg_fs_resolve() and
+    // firing_stats_cfg_fs_load_raw() -- so a frame moved back onto the stack
+    // shows up here as a smaller count. Only TWO are counted: the stub's
+    // counter is file-scope `static`, so it is per translation unit, and the
+    // two _cfg_fs_ frames live in persist/firing_stats_cfg_fs.c, compiled as
+    // its own object (see build_host_tests.ps1's $cmd4) with its own copy of
+    // the counter. The two counted here are the ones this test TU #includes.
+    // The OOM checks below cannot substitute for this: with the heap refusing
+    // everything, one surviving heap frame short-circuits the whole read
+    // regardless of what the others do.
+    heap_caps_malloc_test_reset_count(sizeof(profile_firing_history_blob_t));
+    TEST_CHECK(profile_executor_get_firing_history(5, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) == 1,
+               "baseline: the persisted run reads back normally while the heap is healthy");
+    TEST_CHECK(heap_caps_malloc_test_count() >= 2,
+               "both 1364 B blob frames visible from this translation unit allocate -- "
+               "profile_executor_get_firing_history()'s and firing_stats_load()'s. A lower count means "
+               "one of them is back on the 8192 B httpd_worker stack");
+    heap_caps_malloc_test_reset_count(0);
+
+    heap_caps_malloc_test_set_fail(true);
+    memset(out, 0, sizeof(out));
+    size_t n = profile_executor_get_firing_history(5, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
+    heap_caps_malloc_test_set_fail(false);
+    TEST_CHECK(n == 0,
+               "with every heap allocation refused, the read reports 0 entries -- proving the blob is "
+               "on the heap. If this returns 1, the 1364 B blob is back on the httpd_worker stack");
+
+    profile_firing_history_blob_t blob;
+    heap_caps_malloc_test_set_fail(true);
+    bool ok = firing_stats_load(5, &blob);
+    heap_caps_malloc_test_set_fail(false);
+    TEST_CHECK(!ok, "firing_stats_load() reports failure on OOM rather than reading through a stack blob");
+
+    memset(out, 0, sizeof(out));
+    TEST_CHECK(profile_executor_get_firing_history(5, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) == 1,
+               "the OOM path discarded nothing -- the run is still there once the heap recovers");
+    reset_all_fscf();
+}
+
 int main(void)
 {
     run_test_profile_executor_prestart();
@@ -7919,6 +7987,7 @@ int main(void)
     test_fscf_migrates_then_prefers_file();
     test_fscf_dual_write_stays_in_sync_across_repeated_persists();
     test_fscf_negative_no_file_write_means_file_never_catches_up();
+    test_fscf_history_read_uses_the_heap_not_the_httpd_stack();
     reset_all_fscf();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
