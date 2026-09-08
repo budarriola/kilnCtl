@@ -906,8 +906,16 @@ function step9CheckBusy() {
     fetchJsonOr('/api/autotune', null),
   ]).then(function (r) {
     var exec = r[0], at = r[1];
-    var execRunning = !!(exec && (exec.state === 'RUNNING' || exec.state === 'PAUSED'));
-    var atRunning = !!(at && at.state && at.state !== 'IDLE' && at.state !== 'idle');
+    // State strings are LOWERCASE on the wire: exec_state_name()
+    // (dashboard_exec_http.c) emits idle/running/paused/done/faulted, and
+    // autotune_state_name() (dashboard_json.c) emits idle/settling/stepping/
+    // relay_approach/relay_cycling/done/aborted. This function previously
+    // compared against 'RUNNING'/'PAUSED'/'IDLE', which matched nothing the
+    // firmware ever sends -- a live firing did NOT refuse the sweep, while a
+    // finished autotune ('done') falsely reported busy forever. Same
+    // idle/done/aborted allowlist commissioning_shared.js's checkBusy() uses.
+    var execRunning = !!(exec && (exec.state === 'running' || exec.state === 'paused'));
+    var atRunning = !!(at && at.state && ['idle', 'done', 'aborted'].indexOf(at.state) === -1);
     if (execRunning) return 'a firing is currently running -- cannot apply heat for CT verification at the same time';
     if (atRunning) return 'autotune is currently running -- cannot apply heat for CT verification at the same time';
     return null; // includes both fetches failing: never block on a failed fetch

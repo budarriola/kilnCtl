@@ -487,15 +487,57 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(/does NOT stop it/.test(html), 'step9: closing the tab not stopping a running sweep is stated, not implied');
 })();
 
+// The state strings below are the ones the firmware actually emits --
+// exec_state_name() (dashboard_exec_http.c) and autotune_state_name()
+// (dashboard_json.c) are both lowercase. The original version of this test
+// fed 'RUNNING'/'IDLE', which the firmware never sends, so it passed against
+// a step9CheckBusy() that could not refuse a real firing (idealized-test-
+// input class). Do not "fix" a failure here by re-uppercasing the fixture.
 (function testStep9CheckBusy() {
   const ctx = loadPageScript(makeFetch((url) => {
-    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'RUNNING' } };
-    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'IDLE' } };
+    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'running' } };
+    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'idle' } };
     return { ok: true, status: 200, body: {} };
   }));
   return ctx.step9CheckBusy().then((reason) => {
     assert(typeof reason === 'string' && /firing is currently running/.test(reason),
       'step9CheckBusy: a running firing refuses the CT verification sweep');
+  });
+})();
+
+(function testStep9CheckBusyPausedFiring() {
+  const ctx = loadPageScript(makeFetch((url) => {
+    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'paused' } };
+    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'idle' } };
+    return { ok: true, status: 200, body: {} };
+  }));
+  return ctx.step9CheckBusy().then((reason) => {
+    assert(typeof reason === 'string' && /firing is currently running/.test(reason),
+      'step9CheckBusy: a PAUSED firing still refuses the sweep (relays are still owned)');
+  });
+})();
+
+(function testStep9CheckBusyRunningAutotune() {
+  const ctx = loadPageScript(makeFetch((url) => {
+    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'idle' } };
+    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'stepping' } };
+    return { ok: true, status: 200, body: {} };
+  }));
+  return ctx.step9CheckBusy().then((reason) => {
+    assert(typeof reason === 'string' && /autotune is currently running/.test(reason),
+      'step9CheckBusy: a running autotune refuses the sweep');
+  });
+})();
+
+(function testStep9CheckBusyFinishedRunsDoNotBlock() {
+  const ctx = loadPageScript(makeFetch((url) => {
+    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'done' } };
+    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'done' } };
+    return { ok: true, status: 200, body: {} };
+  }));
+  return ctx.step9CheckBusy().then((reason) => {
+    assert(reason === null,
+      'step9CheckBusy: a FINISHED firing/autotune (state "done") does not block the sweep forever');
   });
 })();
 

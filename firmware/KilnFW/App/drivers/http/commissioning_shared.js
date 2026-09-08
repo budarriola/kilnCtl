@@ -31,8 +31,17 @@
  *     window.confirm; `opts.namePrefix` customises the confirm dialog text.
  *     Resolves to {ok, message} -- never throws for an ordinary rejection.
  *
- * Neither page owns a second copy of this logic any more -- both `<script
- * defer src="/commissioning_shared.js">`. Domain-specific checks that are
+ * KNOWN DEBT, stated plainly because the earlier wording here was wrong:
+ * ONLY setup_wizard_page.html loads this file. safety_commissioning_page.html
+ * was deliberately NOT retrofitted in b284bd11 and still carries its own
+ * findCriticalChanges()/checkFiringOrAutotuneRunning()/commit-and-read-back
+ * implementation (see that file, around lines 1417/1453/1615-1720). So two
+ * implementations of one safety-critical contract exist today, and a fix
+ * applied to one silently leaves the other stale -- exactly the drift the
+ * extraction was meant to end. Retrofit that page before adding a third
+ * caller; until then, any change made here must be mirrored there by hand.
+ *
+ * Domain-specific checks that are
  * NOT generic (checkTcMaxContradiction's tc_type/abs_max_temp_c
  * relationship, the guided flow's own field set) stay local to each page,
  * since sharing those would mean generating one from the other across two
