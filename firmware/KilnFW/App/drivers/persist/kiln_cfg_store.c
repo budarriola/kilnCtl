@@ -348,15 +348,30 @@ static void nvs_load_store_with_cfg_fs(void)
     bool nvs_valid = nvs_load_store();
     uint32_t nvs_rev = kiln_cfg_rev_load();
 
-    kiln_cfg_store_blob_t resolved;
+    /* HEAP, never the stack: kiln_cfg_store_blob_t is ~7.5 KiB and this
+     * runs on the `main` task (8192 B stack) during boot. A stack copy here
+     * -- together with the identical one kiln_cfg_store_cfg_fs_load_raw()
+     * used to keep -- overflowed the main task and panicked the board at
+     * boot with IllegalInstruction: docs/audits/boot_hang_2026-09-08.md.
+     * An allocation failure degrades exactly like "no cfg partition":
+     * whatever nvs_load_store() already put in s_store stands. */
+    kiln_cfg_store_blob_t *resolved = malloc(sizeof(*resolved));
+    if (!resolved) {
+        ESP_LOGW(TAG, "kiln cfg resolve scratch alloc failed (%u bytes) -- keeping the NVS candidate",
+                 (unsigned)sizeof(*resolved));
+        s_kiln_cfg_rev = nvs_rev;
+        (void)nvs_valid;
+        return;
+    }
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool trustworthy =
-        kiln_cfg_store_cfg_fs_resolve(&s_store, nvs_valid, nvs_rev, &resolved, &resolved_rev, &used_file);
+        kiln_cfg_store_cfg_fs_resolve(&s_store, nvs_valid, nvs_rev, resolved, &resolved_rev, &used_file);
     s_kiln_cfg_rev = resolved_rev;
     if (used_file) {
-        s_store = resolved;
+        s_store = *resolved;
     }
+    free(resolved);
     /* !trustworthy means neither side had anything valid -- s_store is
      * already the defaults nvs_load_store()'s own invalid-branch left in
      * place; nothing further to do. */

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -90,20 +91,34 @@ static esp_err_t scan_partition(const esp_partition_t *part, cfg_fs_format_gate_
                                  cfg_fs_format_gate_verdict_t *out_verdict)
 {
     cfg_fs_format_gate_reset(gate);
-    uint8_t buf[CFG_FS_SCAN_CHUNK_BYTES];
+    /* HEAP, never the stack: this runs inline on the `main` task during
+     * main_boot_early(), whose stack is CONFIG_ESP_MAIN_TASK_STACK_SIZE
+     * (8192 B today). A CFG_FS_SCAN_CHUNK_BYTES array here was half of that
+     * in one frame -- see docs/audits/boot_hang_2026-09-08.md, where this
+     * plus two 7.5 KiB kiln_cfg_store_blob_t stack copies overflowed the
+     * main task and panicked the board at boot with IllegalInstruction.
+     * check_main_task_stack_budget.py now measures the whole app_main call
+     * tree out of the built ELF and fails the build if it can exceed the
+     * configured stack. */
+    uint8_t *buf = malloc(CFG_FS_SCAN_CHUNK_BYTES);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
     size_t offset = 0;
     while (offset < part->size) {
         size_t len = part->size - offset;
-        if (len > sizeof(buf)) {
-            len = sizeof(buf);
+        if (len > CFG_FS_SCAN_CHUNK_BYTES) {
+            len = CFG_FS_SCAN_CHUNK_BYTES;
         }
         esp_err_t err = esp_partition_read(part, offset, buf, len);
         if (err != ESP_OK) {
+            free(buf);
             return err;
         }
         cfg_fs_format_gate_feed(gate, buf, len);
         offset += len;
     }
+    free(buf);
     *out_verdict = cfg_fs_format_gate_conclude(gate);
     return ESP_OK;
 }

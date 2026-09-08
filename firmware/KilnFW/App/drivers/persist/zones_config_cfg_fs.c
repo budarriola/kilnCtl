@@ -1,6 +1,7 @@
 // See zones_config_cfg_fs.h for the full design/rationale.
 #include "zones_config_cfg_fs.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -63,10 +64,19 @@ void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool 
         return;
     }
 
-    uint8_t raw[ZCFG_FILE_BUF_MAX];
+    /* HEAP, never the stack: this whole chain runs on the `main` task
+     * (8192 B) at boot, and a stack buffer here plus a zones_cfg_t local
+     * below made this one frame 1904 B -- part of the main-task overflow in
+     * docs/audits/boot_hang_2026-09-08.md. */
+    uint8_t *raw = malloc(ZCFG_FILE_BUF_MAX);
+    if (!raw) {
+        ESP_LOGW(ZCFG_FS_TAG, "zones config file read buffer alloc failed -- treating as file absent");
+        return;
+    }
     size_t len = 0;
-    esp_err_t err = cfg_fs_read(ZONES_CFG_FILE_PATH, raw, sizeof(raw), &len);
+    esp_err_t err = cfg_fs_read(ZONES_CFG_FILE_PATH, raw, ZCFG_FILE_BUF_MAX, &len);
     if (err != ESP_OK) {
+        free(raw);
         /* ESP_ERR_NOT_FOUND (never migrated yet), ESP_ERR_INVALID_SIZE (file
          * larger than this buffer -- cannot happen for a well-formed file,
          * but a corrupted length must not be trusted either), or any other
@@ -79,20 +89,25 @@ void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool 
     if (len < 5) { /* need at least the rev prefix + a 1-byte version */
         ESP_LOGW(ZCFG_FS_TAG, "zones config file is %u bytes, too short to hold a rev + blob -- ignoring",
                  (unsigned)len);
+        free(raw);
         return;
     }
 
     uint32_t rev = get_u32_le(raw);
     const char *reason = "";
-    zones_cfg_t cand;
-    zones_decode_result_t result = zones_config_json_decode_blob(raw + 4, len - 4, &cand, &reason);
+    /* Decoded straight into the caller's buffer -- see the malloc comment
+     * above; a zones_cfg_t local here was another 812 B of main-task stack.
+     * out_cfg is re-zeroed on rejection so a caller that ignores *out_valid
+     * still sees the same all-zero struct it did before. */
+    zones_decode_result_t result = zones_config_json_decode_blob(raw + 4, len - 4, out_cfg, &reason);
+    free(raw);
     if (result != ZONES_DECODE_OK) {
         ESP_LOGW(ZCFG_FS_TAG, "zones config file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides",
                  (unsigned long)rev, reason);
+        memset(out_cfg, 0, sizeof(*out_cfg));
         return;
     }
 
-    *out_cfg = cand;
     *out_rev = rev;
     *out_valid = true;
 }

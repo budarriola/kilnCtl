@@ -94,19 +94,24 @@ void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *o
     }
 
     uint32_t rev = get_u32_le(raw);
-    kiln_cfg_store_blob_t cand;
-    memcpy(&cand, raw + 4, sizeof(cand));
+    /* Decoded straight into the caller's buffer rather than through a
+     * kiln_cfg_store_blob_t local: that local was ~7.5 KiB on the `main`
+     * task's 8192 B stack during boot -- half of the overflow that panicked
+     * the board in docs/audits/boot_hang_2026-09-08.md. On a rejected file
+     * out_blob is re-zeroed below, so a caller that ignores *out_valid
+     * still sees the same all-zero blob it did before. */
+    memcpy(out_blob, raw + 4, sizeof(*out_blob));
     free(raw);
 
-    if (cand.version != KILN_CFG_STORE_VERSION) {
+    if (out_blob->version != KILN_CFG_STORE_VERSION) {
         ESP_LOGW(KCFG_FS_TAG,
                  "kiln config store file (rev %lu) claims version %u, this firmware wants %u -- ignoring "
                  "file, NVS candidate decides",
-                 (unsigned long)rev, (unsigned)cand.version, (unsigned)KILN_CFG_STORE_VERSION);
+                 (unsigned long)rev, (unsigned)out_blob->version, (unsigned)KILN_CFG_STORE_VERSION);
+        memset(out_blob, 0, sizeof(*out_blob));
         return;
     }
 
-    *out_blob = cand;
     *out_rev = rev;
     *out_valid = true;
 }
