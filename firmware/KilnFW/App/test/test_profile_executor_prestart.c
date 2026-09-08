@@ -7246,8 +7246,8 @@ static void test_on_off_zone_tick_rule_turns_relay_on_through_owner(void)
                  "-> apply_relay() -> kiln_io_owner, the SAME chokepoint a heater uses (plan sec 6 -- "
                  "no separate relay-write path)");
     memset(&s_exec, 0, sizeof(s_exec));
-    s_exec.zones[3].active = true;
-    g_stub_relay_mask[3] = 0x08;
+    s_exec.zones[2].active = true;
+    g_stub_relay_mask[2] = 0x04;
     s_exec.io = (kiln_io_t *)0x1;
     g_relay_write_calls = 0;
 
@@ -7263,14 +7263,14 @@ static void test_on_off_zone_tick_rule_turns_relay_on_through_owner(void)
     TEST_CHECK(r.actuated_on, "an unconditional rule (every axis a tautology) must decide ON");
     TEST_CHECK(!r.cap_denied, "no cap configured -- must not be denied");
 
-    apply_relay(3, r.actuated_on);
+    apply_relay(2, r.actuated_on);
     TEST_CHECK(g_relay_write_calls == 1, "apply_relay() must have written the relay exactly once");
-    TEST_CHECK(g_last_relay_write_mask == 0x08, "must write THIS zone's own relay mask");
-    TEST_CHECK(g_last_relay_write_value == 0x08, "ON must set the mask bits, not clear them");
-    TEST_CHECK(s_exec.claimed_relay_mask == 0x08, "must claim through the SAME claimed_relay_mask a heater uses");
-    TEST_CHECK(s_exec.zones[3].relay_commanded_on, "relay_commanded_on must read true");
+    TEST_CHECK(g_last_relay_write_mask == 0x04, "must write THIS zone's own relay mask");
+    TEST_CHECK(g_last_relay_write_value == 0x04, "ON must set the mask bits, not clear them");
+    TEST_CHECK(s_exec.claimed_relay_mask == 0x04, "must claim through the SAME claimed_relay_mask a heater uses");
+    TEST_CHECK(s_exec.zones[2].relay_commanded_on, "relay_commanded_on must read true");
 
-    g_stub_relay_mask[3] = 0;
+    g_stub_relay_mask[2] = 0;
     s_exec.io = NULL;
 }
 
@@ -7279,8 +7279,8 @@ static void test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner(vo
     TEST_SECTION("on/off zone: invert negates the AND -- the same rule that turned the device ON above "
                  "turns it OFF when inverted, still through apply_relay()/kiln_io_owner");
     memset(&s_exec, 0, sizeof(s_exec));
-    s_exec.zones[3].active = true;
-    g_stub_relay_mask[3] = 0x08;
+    s_exec.zones[2].active = true;
+    g_stub_relay_mask[2] = 0x04;
     s_exec.io = (kiln_io_t *)0x1;
     g_relay_write_calls = 0;
 
@@ -7295,11 +7295,11 @@ static void test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner(vo
                                                                      &oin, false, 0, 0);
     TEST_CHECK(!r.actuated_on, "invert must flip an otherwise-true AND to false");
 
-    apply_relay(3, r.actuated_on);
+    apply_relay(2, r.actuated_on);
     TEST_CHECK(g_relay_write_calls == 1, "apply_relay() must still write (to prove OFF, not skip)");
     TEST_CHECK(g_last_relay_write_value == 0, "OFF must clear the mask bits");
 
-    g_stub_relay_mask[3] = 0;
+    g_stub_relay_mask[2] = 0;
     s_exec.io = NULL;
 }
 

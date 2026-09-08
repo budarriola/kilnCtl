@@ -222,6 +222,60 @@ float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float 
     return configured;
 }
 
+bool profile_executor_on_off_actuation_gate(bool *actuated_on, float *held_s, bool decided_on,
+                                            bool bypass_hold, uint16_t min_on_s, uint16_t min_off_s,
+                                            float dt_s)
+{
+    bool desired;
+    if (bypass_hold) {
+        /* Safety-relevant transition (fail-safe/guard-5-6/run-not-RUNNING):
+         * never held, same rule the decision core itself follows. */
+        desired = decided_on;
+    } else if (decided_on != *actuated_on) {
+        uint16_t required_hold = *actuated_on ? min_on_s : min_off_s;
+        desired = (*held_s < (float)required_hold) ? *actuated_on : decided_on;
+    } else {
+        desired = decided_on; /* == *actuated_on already, no hold question */
+    }
+
+    if (desired != *actuated_on) {
+        *actuated_on = desired;
+        *held_s = dt_s;
+    } else {
+        *held_s += dt_s;
+    }
+    return *actuated_on;
+}
+
+bool profile_executor_on_off_cap_denies(uint8_t relays_on_count, uint8_t cap)
+{
+    return cap > 0 && relays_on_count >= cap;
+}
+
+on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
+    on_off_trigger_state_t *decide_state, bool *actuated_on, float *actuated_held_s,
+    const on_off_trigger_input_t *in, bool bypass_hold, uint8_t relays_on_count, uint8_t cap)
+{
+    on_off_zone_tick_result_t result = {0};
+    bool decided_on = on_off_trigger_decide(decide_state, in);
+    bool gated_on = profile_executor_on_off_actuation_gate(actuated_on, actuated_held_s, decided_on,
+                                                            bypass_hold, in->min_on_s, in->min_off_s, in->dt_s);
+    if (gated_on && profile_executor_on_off_cap_denies(relays_on_count, cap)) {
+        /* Keep the actuation-layer state truthful: see profile_executor_
+         * on_off_actuation_gate()'s own header for why a cap-denied ON must
+         * be written back as OFF here, not just returned as OFF, or the
+         * NEXT tick's hold-timer math would believe a relay is on that the
+         * cap just forced off. */
+        *actuated_on = false;
+        *actuated_held_s = 0.0f;
+        result.cap_denied = true;
+        result.actuated_on = false;
+        return result;
+    }
+    result.actuated_on = gated_on;
+    return result;
+}
+
 /* Must be called with s_exec.lock held. */
 void force_zone_relay_off(uint8_t zi)
 {

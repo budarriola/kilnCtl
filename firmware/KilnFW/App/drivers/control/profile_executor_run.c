@@ -456,6 +456,39 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* docs/ON_OFF_ZONE_PLAN.md sec 6: "If the cap is reached by on/off zones
+     * alone, that is a configuration error; refuse at run start rather than
+     * discovering it mid-firing." An on/off zone counts toward
+     * max_simultaneous_relays exactly like a heater (a contactor coil draws
+     * the same current whatever it switches) but on/off zones are always the
+     * LAST ones suppressed when the cap binds during a run (see the tick
+     * loop's cap-adjustment for on/off zones) -- so a profile whose on/off
+     * zone COUNT ALONE already meets or exceeds the cap would silently deny
+     * every one of them, every tick, for the whole firing, with no heater
+     * ever contending for those slots to make the denial look transient.
+     * Caught here, once, instead of as a mystery "why won't my vent ever
+     * turn on" during a live firing. cap == 0 is "unlimited", unchanged. */
+    uint8_t cap_for_on_off_check = zones_config_get_max_simultaneous_relays();
+    if (cap_for_on_off_check > 0) {
+        uint8_t n_on_off_zones = 0;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!(p.zone_mask & (1u << zi))) continue;
+            if (zone_is_on_off(zi)) n_on_off_zones++;
+        }
+        if (n_on_off_zones >= cap_for_on_off_check) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "this profile has %u on/off zone(s) but max_simultaneous_relays is %u -- "
+                         "on/off zones are always suppressed last when the cap binds, so at least one "
+                         "on/off device would never be able to turn on for the whole firing. Raise the "
+                         "cap in Settings, or reduce the on/off zones in this profile.",
+                         (unsigned)n_on_off_zones, (unsigned)cap_for_on_off_check);
+            }
+            return false;
+        }
+    }
+
     int8_t first_active = -1;
     uint8_t active_rank = 0;
     float baseline_target_c = p.segments[0].target_c;
@@ -591,6 +624,10 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * the warm-start/resume path, so resetting here covers both without
          * a second call site to keep in sync. */
         on_off_trigger_state_reset(&z->on_off_trigger_state);
+        /* Actuation-layer hold state (plan step 8) mirrors the same
+         * fail-safe-shaped reset: never actuated, no held time. */
+        z->on_off_actuated_on = false;
+        z->on_off_actuated_held_s = 0.0f;
 
         /* Ramp baseline: the first active zone's actual (calibrated)
          * reading if we have one, else the segment's own target (makes
