@@ -47,6 +47,24 @@
  * since sharing those would mean generating one from the other across two
  * different UI shapes -- out of proportion to the risk, same call this
  * codebase already made for TC_MAX_C_BY_TYPE's two sources of truth.
+ *
+ * EXTENDED 2026-09-08 (setup wizard confirmation drift, docs/audits/
+ * setup_wizard_review_2026-09-08.md) with kcConfirmConsequentialChange(),
+ * a fourth export alongside the three above -- NOT a fourth bespoke
+ * implementation. Steps 4 and 6 of the wizard write ZONE config
+ * (/api/zones, the ESP's own store) rather than the Pico's
+ * /api/safety/commissioning, so kcCommissioningCommitAndVerify() itself
+ * doesn't fit them directly: there is no analogous "independent read-back
+ * of the Pico" step for an ESP-only write, because unlike a Pico commit,
+ * submitZonesConfig() has never had its own read-back verification at
+ * ANY of the four steps that already call it (2, 4, 5, 6) -- adding one
+ * only for 4/6 now would be a new, narrower inconsistency, not a fix of
+ * this one, and touching submitZonesConfig()'s contract is out of scope
+ * for a confirmation-drift fix. What DOES generalise is the confirm
+ * dialog + busy-refusal shape itself (checkBusy(), named old->new lines,
+ * a confirm prompt, cancel means nothing is sent) -- that part is shared
+ * here so steps 4 and 6 use the same wording/structure/busy-check as step
+ * 7 rather than growing their own.
  */
 (function (global) {
   'use strict';
@@ -182,7 +200,41 @@
     });
   }
 
+  // Generic confirm-before-write, shared by any step that changes a
+  // consequence-bearing setting but does NOT go through the Pico commit
+  // path above (see the file-header note for why this is a sibling, not
+  // a copy). Resolves to true only if the operator confirmed (or there
+  // was nothing to confirm); false for "busy, refused" or "cancelled" --
+  // callers must treat false as "do not write, and put the UI back the
+  // way it was," never merely "don't advance."
+  function confirmConsequentialChange(lines, opts) {
+    opts = opts || {};
+    var confirmFn = opts.confirmFn || global.confirm;
+    if (!lines || !lines.length) return Promise.resolve(true);
+
+    function ask() {
+      return confirmFn(
+        (opts.confirmPrefix || 'Confirm this change:') + '\n\n' + lines.join('\n') +
+        (opts.confirmSuffix || '')
+      );
+    }
+
+    if (opts.skipBusyCheck) return Promise.resolve(ask());
+
+    return checkBusy().then(function (busyReason) {
+      if (busyReason) {
+        if (typeof opts.onBusy === 'function') {
+          opts.onBusy('Refused: ' + busyReason + ' -- changing this setting mid-run is not safe. ' +
+            'Stop it first, then retry.');
+        }
+        return false;
+      }
+      return ask();
+    });
+  }
+
   global.kcCommissioningCheckBusy = checkBusy;
   global.kcCommissioningFindCriticalChanges = findCriticalChanges;
   global.kcCommissioningCommitAndVerify = commitAndVerify;
+  global.kcConfirmConsequentialChange = confirmConsequentialChange;
 })(typeof window !== 'undefined' ? window : this);
