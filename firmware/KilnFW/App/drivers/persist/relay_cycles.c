@@ -10,6 +10,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- relay_cycles_get_dualwrite_status() below */
 
 static const char *TAG = "relay_cycles";
 
@@ -1021,4 +1022,77 @@ esp_err_t relay_cycles_flush(void)
         return hal_status_to_esp_err(err);
     }
     return ESP_OK;
+}
+
+/* GET /api/cfgfs dual-write picture -- see relay_cycles.h's doc comment.
+ * Same shape as unit_pref_get_dualwrite_status()/display_power_cfg_get_
+ * dualwrite_status(): reads the file side via pref_cfg_fs_load_raw() (no
+ * resolve, no resync write) and the NVS side via its own direct read (not
+ * s_rc's in-RAM copy, which may already have absorbed an in-flight
+ * migration/resolve this boot -- this reports what is actually ON DISK in
+ * both places, independent of what booted into RAM), then compares the
+ * decoded bytes for a real content-equal check rather than a rev-only
+ * guess. */
+void relay_cycles_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                        bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+
+    relay_cycles_blob_t f_blob;
+    memset(&f_blob, 0, sizeof(f_blob));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(RELAY_CYCLES_FILE_PATH, sizeof(f_blob), relay_cycles_file_validate, &f_blob, &f_rev,
+                          &f_valid);
+
+    relay_cycles_blob_t n_blob;
+    memset(&n_blob, 0, sizeof(n_blob));
+    bool n_valid = false;
+    uint32_t n_rev = 0;
+    if (nvs_partition_init(KILN_NVS_PARTITION) == HAL_OK) {
+        hal_kv_handle_t h;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            size_t len = sizeof(n_blob);
+            if (hal_kv_get_blob(&h, NVS_KEY_CYCLES, &n_blob, &len) == HAL_OK && len == sizeof(n_blob)
+                && n_blob.version == RELAY_CYCLES_VERSION) {
+                n_valid = true;
+                uint32_t rev = 0;
+                if (hal_kv_get_u32(&h, NVS_KEY_CYCLES_REV, &rev) == HAL_OK) {
+                    n_rev = rev;
+                }
+            }
+            hal_kv_close(&h);
+        }
+    }
+
+    bool content_equal = f_valid && n_valid && memcmp(&f_blob, &n_blob, sizeof(f_blob)) == 0;
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }

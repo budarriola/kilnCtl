@@ -197,16 +197,26 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
      * an operator or the setup wizard reading /api/cfgfs would have been
      * told a migrated item was still pending. Verified against the actual
      * bridge modules under persist/ (kiln_cfg_store_cfg_fs.c,
-     * pref_cfg_fs.c, profiles_cfg_fs.c, zones_config_cfg_fs.c), not against
-     * this doc-derived array, which is why it's now just these three: MOVE
-     * items from docs/FILESYSTEM_USER_DATA_PLAN.md section 5 with NO bridge
-     * module yet (steps not landed) -- firing stats/history (item 7),
-     * adaptive-tune state (item 9), relay cycle counters (item 4, plan
-     * recommends moving it last). cfgfs_nvs_only_drift_check.py fails the
-     * moment a new persist/'*'_cfg_fs.c bridge appears without this array (and
-     * that check) being updated to match, so this list cannot go stale the
-     * same way again. */
-    APPEND(",\"nvs_only\":[\"firing_stats\",\"adaptive_tune\",\"relay_cycles\"]");
+     * pref_cfg_fs.c, profiles_cfg_fs.c, zones_config_cfg_fs.c,
+     * firing_stats_cfg_fs.c), not against this doc-derived array.
+     *
+     * 2026-09-08 follow-up (this pass): the same staleness recurred for the
+     * remaining three -- 762bb29e landed firing_stats_cfg_fs.c and gave
+     * relay_cycles/adaptive_tune real pref_cfg_fs.c-backed dual-write paths,
+     * but this array (and cfgfs_status_get_handler()'s item list) were left
+     * pointing at the old "not migrated yet" state. All three now report
+     * through dual_write.items[] instead (see diagnostics_http.c's
+     * cfgfs_add_item() call sites) -- verified against relay_cycles.c's
+     * RELAY_CYCLES_FILE_PATH/pref_cfg_fs_load_raw() call, adaptive_tune.c's
+     * ADAPTIVE_TUNE_KIBASE_FILE_PATH/pref_cfg_fs_resolve() call, and
+     * firing_stats_cfg_fs.c/.h existing as a real bridge module, not against
+     * the prior report alone. This list is empty by construction now: every
+     * item docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracks as "MOVE" has
+     * a bridge module AND a dual_write.items[] row. cfgfs_nvs_only_drift_
+     * check.py fails the moment a new persist/'*'_cfg_fs.c bridge appears
+     * without a matching row, so this list cannot go stale the same way a
+     * third time without the check catching it. */
+    APPEND(",\"nvs_only\":[]");
     /* Distinct from the above: items docs/FILESYSTEM_USER_DATA_PLAN.md's
      * "KEEP in NVS" section says stay in NVS FOREVER, by design, for boot-
      * ordering or safety-isolation reasons -- not "not migrated yet". Listed

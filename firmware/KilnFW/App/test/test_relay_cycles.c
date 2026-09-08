@@ -846,6 +846,55 @@ static void test_cfg_fs_negative_no_file_write_means_file_never_catches_up(void)
                         "this migration must not reintroduce (NVS alone is carrying the counts)");
 }
 
+/* 2026-09-08: relay_cycles_get_dualwrite_status() -- GET /api/cfgfs's row
+ * for this item, moved off the stale nvs_only list this pass. Same shape
+ * as test_unit_pref.c's unit_pref_get_dualwrite_status() test: healthy
+ * (equal content) reports diverged:false, a real content disagreement
+ * between file and NVS (equal rev, so the tie-break itself does not
+ * intervene) reports diverged:true -- exercising the REAL production
+ * function, not a test-local mirror of its logic (project_negative_test_
+ * on_a_mirror_is_vacuous). */
+static void test_get_dualwrite_status_reports_real_divergence(void)
+{
+    TEST_SECTION("relay_cycles_get_dualwrite_status(): healthy reports diverged:false; a genuine file/NVS "
+                 "content disagreement reports diverged:true -- calls the real production function");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+
+    s_rc.counts[0] = 10;
+    s_rc.counts[1] = 20;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush -- file and NVS agree at rev 1");
+
+    bool file_valid = false, nvs_valid = false, diverged = true;
+    uint32_t file_rev = 0, nvs_rev = 0;
+    relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+    TEST_CHECK(file_valid && nvs_valid, "both sides valid after a normal flush");
+    TEST_CHECK(file_rev == 1 && nvs_rev == 1, "both revs agree at 1");
+    TEST_CHECK(!diverged, "healthy dual-write state reports diverged:false");
+
+    /* Force the file to disagree with NVS AT THE SAME REV (so the
+     * divergence is genuinely a content mismatch, not just an in-flight
+     * rev skew) -- same setup test_cfg_fs_divergence_tie_break_strict_
+     * greater_than() above already uses for the load-side tie-break. */
+    relay_cycles_blob_t stale_equal_rev;
+    memset(&stale_equal_rev, 0, sizeof(stale_equal_rev));
+    stale_equal_rev.version = RELAY_CYCLES_VERSION;
+    stale_equal_rev.counts[0] = 999; // disagrees with NVS's counts[0] == 10
+    TEST_CHECK(pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &stale_equal_rev, sizeof(stale_equal_rev), 1) == ESP_OK,
+               "test setup: file rewritten at the SAME rev (1) with different content");
+
+    file_valid = false;
+    nvs_valid = false;
+    diverged = false;
+    file_rev = 0;
+    nvs_rev = 0;
+    relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+    TEST_CHECK(file_valid && nvs_valid, "both sides still individually valid");
+    TEST_CHECK(diverged, "a real content disagreement at equal rev is reported as diverged:true");
+}
+
 void run_test_relay_cycles(void)
 {
     g_test_stub_semaphore_take_default = 1; // pdTRUE -- see comment above test_maybe_persist_skips_...
@@ -873,6 +922,7 @@ void run_test_relay_cycles(void)
     test_cfg_fs_divergence_tie_break_strict_greater_than();
     test_cfg_fs_reset_all_composes_with_migration_never_loses_counts();
     test_cfg_fs_negative_no_file_write_means_file_never_catches_up();
+    test_get_dualwrite_status_reports_real_divergence();
     reset_all_cfg_fs();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects

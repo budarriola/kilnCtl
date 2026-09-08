@@ -509,6 +509,13 @@ size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_ru
  * that distinction meaningful in a way it wasn't before this pass). */
 bool profile_executor_zone_is_active(uint8_t zone_index);
 
+/* GET /api/cfgfs dual-write picture for the firing_stats_cfg_fs.c bridge --
+ * see profile_executor_firing_stats.c's definition (firing_stats_get_
+ * dualwrite_status()) for the aggregation shape and its documented
+ * builtin-id scope gap. */
+void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                        bool *diverged);
+
 #ifdef __cplusplus
 }
 #endif

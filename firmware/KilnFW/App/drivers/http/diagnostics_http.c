@@ -23,10 +23,13 @@
 #include "kiln_cfg_store.h"
 #include "kiln_io.h"
 #include "lvgl_port.h"
+#include "adaptive_tune.h" /* adaptive_tune_get_kibase_dualwrite_status() -- /api/cfgfs row */
+#include "profile_executor.h" /* firing_stats_get_dualwrite_status() -- /api/cfgfs row */
 #include "profiles_http.h" /* profiles_http_get_dualwrite_status() -- /api/cfgfs per-slot rows */
 #include "profiles_types.h" /* PROFILES_MAX_COUNT */
 #include "ramp_assist_cfg.h"
-#include "relay_cycles.h" /* relay_cycles_reset_post_handler() below needs RELAY_CYCLES_COUNT */
+#include "relay_cycles.h" /* relay_cycles_reset_post_handler() below needs RELAY_CYCLES_COUNT;
+                              relay_cycles_get_dualwrite_status() -- /api/cfgfs row */
 #include "safety_link.h" /* SafetyLinkClass/safety_link_get_status() -- thermo_faults_get_handler()'s
                            * "safety" block below */
 #include "thermo_owner.h"
@@ -1058,19 +1061,25 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * same convention as the JSON-build failure path below.
  *
  * BUFFER SIZE (2026-09-08 widening: per-item dual-write rows for every
- * bridge, not zones only): worst case is 14 item rows (zones,
- * kiln_cfg_store, 4 pref-backed items, PROFILES_MAX_COUNT=8 profile slots)
- * at up to ~120 bytes each (longest name "display_power", both revs at
- * UINT32_MAX) = ~1700 bytes for the items array alone, plus the
- * pre-existing sections (header/capacity/format ~300 B typical,
- * nvs_only/nvs_permanent name lists ~330 B fixed, files[] typically a
+ * bridge, not zones only; WIDENED AGAIN same day when relay_cycles/
+ * adaptive_tune/firing_stats moved off the stale nvs_only list): worst case
+ * is now 17 item rows (zones, kiln_cfg_store, 4 pref-backed items,
+ * PROFILES_MAX_COUNT=8 profile slots, relay_cycles, adaptive_tune,
+ * firing_stats) at up to ~120 bytes each (longest name "display_power" and
+ * "firing_stats" -- both under the same 120 B/row estimate, both revs at
+ * UINT32_MAX) = 17 * 120 = 2040 bytes for the items array alone (was ~1700 B
+ * for 14 items), plus the pre-existing sections (header/capacity/format
+ * ~300 B typical, nvs_only/nvs_permanent name lists ~300 B fixed now that
+ * nvs_only is an empty array instead of three names, files[] typically a
  * handful of entries in real use though pathologically up to
  * CFG_FS_STATUS_MAX_FILES=32 max-length names could itself exceed any
  * reasonable buffer -- that pre-existing limit is unchanged by this pass).
- * 3072 covers the realistic worst case (all 14 items diverged/max-rev, a
- * handful of real files) with headroom; cfg_fs_status_build_json() still
- * fails loudly with ESP_ERR_INVALID_SIZE rather than truncating if a
- * pathological files[] list ever pushes past it. */
+ * 2040 + 300 + 300 = ~2640 B worst case; 3072 already covered the old 14-item
+ * worst case (~2330 B) with ~740 B headroom, so the new ~2640 B worst case
+ * still fits under 3072 with ~430 B headroom to spare -- NOT raised this
+ * pass. cfg_fs_status_build_json() still fails loudly with
+ * ESP_ERR_INVALID_SIZE rather than truncating if a pathological files[]
+ * list (or a future item count) ever pushes past it. */
 typedef struct {
     zones_cfg_t raw;
     char json[3072];
@@ -1114,12 +1123,14 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* One dual-write row per migrated item across all four persist/'*'_cfg_fs.c
-     * bridges (70ed6514 fixed /api/cfgfs's stale lists but left this detail
-     * wired up for zones only -- widened here). Each bridge's own module
-     * reads its OWN NVS rev key and computes `diverged` itself via
-     * cfg_fs_status_item_diverged() (a real decoded-content compare, not a
-     * rev-only guess) -- this handler just collects what they report. */
+    /* One dual-write row per migrated item across every persist/'*'_cfg_fs.c
+     * bridge (70ed6514 fixed /api/cfgfs's stale lists but left this detail
+     * wired up for zones only -- widened here; 2026-09-08 widened again to
+     * cover relay_cycles/adaptive_tune/firing_stats, the last three items
+     * docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracked). Each bridge's
+     * own module reads its OWN NVS rev key and computes `diverged` itself
+     * via cfg_fs_status_item_diverged() (a real decoded-content compare, not
+     * a rev-only guess) -- this handler just collects what they report. */
     cfg_fs_dualwrite_item_t items[CFG_FS_STATUS_MAX_ITEMS];
     size_t n_items = 0;
 
@@ -1182,6 +1193,29 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         uint32_t file_rev = 0, nvs_rev = 0;
         profiles_http_get_dualwrite_status(id, &file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
         cfgfs_add_item(items, &n_items, profile_names[id], file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+
+    /* 2026-09-08: the three items that used to be reported via the stale
+     * "nvs_only" hardcoded list (cfg_fs_status.c) now have real
+     * pref_cfg_fs.c/firing_stats_cfg_fs.c-backed bridges (762bb29e) -- moved
+     * here so /api/cfgfs stops claiming they are unmigrated. */
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "relay_cycles", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        adaptive_tune_get_kibase_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "adaptive_tune", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        firing_stats_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "firing_stats", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
     }
 
     /* Deferred auto-format progress (cfg_fs_mount.c) -- ESP-IDF-only getters,

@@ -220,9 +220,11 @@ static void test_mounted_with_files(void)
                               "\"nvs_rev\":2,\"diverged\":false}]"),
                "dual-write: every item passed in gets its own row, not just zones -- 70ed6514 fixed the stale "
                "lists but left per-item detail zones-only; this is the widened per-bridge picture");
-    TEST_CHECK(json_has(json, "\"nvs_only\":[\"firing_stats\",\"adaptive_tune\",\"relay_cycles\"]"),
-               "nvs_only lists only items with NO cfg_fs bridge yet -- prefs/profiles/zones/kiln-config-slots "
-               "are file-backed today (34927a77/530dc2f7/19f74959/9bd29cff) and must NOT appear here");
+    TEST_CHECK(json_has(json, "\"nvs_only\":[]"),
+               "nvs_only is EMPTY -- 762bb29e gave relay_cycles/adaptive_tune/firing_stats real cfg_fs "
+               "bridges too (the last three items docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracked), "
+               "so nothing remains genuinely NVS-only; see test_all_17_items_report_dualwrite_state() below "
+               "for the full per-item picture");
     TEST_CHECK(json_has(json, "\"nvs_permanent\":["), "nvs_permanent section present");
     TEST_CHECK(json_has(json, "\"wifi_creds\""),
                "an intentionally-NVS-forever item (wifi creds) is reported in nvs_permanent, "
@@ -265,6 +267,103 @@ static void test_item_diverged_rule(void)
                                                                 "regardless of which side's rev is higher");
 }
 
+/* 2026-09-08: verifies all 17 dual-write items (the 14 already reporting
+ * plus relay_cycles/adaptive_tune/firing_stats, moved off the stale
+ * nvs_only list in this pass) render their own row, AND that a simulated
+ * divergence on any ONE of the three new items surfaces independently --
+ * same "one item diverging must not be lost among another item's healthy
+ * row" property test_mounted_with_files() above already established for
+ * zones/unit_pref, now covering the three items this pass adds. Exercises
+ * only cfg_fs_status_build_json() (the pure renderer) with a synthetic
+ * items array -- the real per-bridge accessors (relay_cycles_get_
+ * dualwrite_status() etc.) are ESP-IDF/NVS-backed and covered separately
+ * on-device; this test's job is the JSON shape, not those accessors'
+ * internals. */
+static void test_all_17_items_report_dualwrite_state(void)
+{
+    TEST_SECTION("cfg_fs_status: all 17 dual-write items (2026-09-08 -- relay_cycles/adaptive_tune/"
+                 "firing_stats moved off the stale nvs_only list) each report their own row, and a "
+                 "divergence on any one of the three new items is surfaced independently");
+    cfg_fs_deinit();
+    const char *base = "cfg_fs_status_test_17items";
+    reset_scratch(base);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
+
+    cfg_fs_dualwrite_item_t items[17] = {
+        { .name = "zones", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "kiln_cfg_store", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "unit_pref", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "ramp_assist", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "display_power", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "tz", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "profile0", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "profile1", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "profile2", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "profile3", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "profile4", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "profile5", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "profile6", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "profile7", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1 },
+        { .name = "relay_cycles", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1,
+          .diverged = false },
+        { .name = "adaptive_tune", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1,
+          .diverged = false },
+        { .name = "firing_stats", .file_valid = true, .file_rev = 1, .nvs_valid = true, .nvs_rev = 1,
+          .diverged = false },
+    };
+
+    char json[4096];
+    size_t len = 0;
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, items, 17, NULL, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds with all 17 items");
+    for (size_t i = 0; i < 17; i++) {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "\"name\":\"%s\"", items[i].name);
+        TEST_CHECK(json_has(json, needle), items[i].name);
+    }
+    TEST_CHECK(json_has(json, "\"nvs_only\":[]"), "nvs_only empty with the full 17-item set too");
+
+    /* Simulated divergence, one at a time, on each of the three NEW items
+     * (relay_cycles/adaptive_tune/firing_stats) -- proving the JSON
+     * builder surfaces a divergence on any one of them independently of
+     * the other 16 healthy rows, the same property already proven for
+     * zones/unit_pref in test_mounted_with_files(). */
+    const char *new_item_names[3] = { "relay_cycles", "adaptive_tune", "firing_stats" };
+    for (size_t which = 0; which < 3; which++) {
+        cfg_fs_dualwrite_item_t items2[17];
+        memcpy(items2, items, sizeof(items));
+        for (size_t i = 0; i < 17; i++) {
+            if (strcmp(items2[i].name, new_item_names[which]) == 0) {
+                items2[i].diverged = true;
+            }
+        }
+        char json2[4096];
+        size_t len2 = 0;
+        TEST_CHECK(cfg_fs_status_build_json(base, NULL, items2, 17, NULL, json2, sizeof(json2), &len2) == ESP_OK,
+                   "build succeeds with one item diverged");
+        char needle[96];
+        snprintf(needle, sizeof(needle), "\"name\":\"%s\",\"file_backed\":true,\"file_rev\":1,"
+                                          "\"nvs_backed\":true,\"nvs_rev\":1,\"diverged\":true",
+                 new_item_names[which]);
+        TEST_CHECK(json_has(json2, needle), new_item_names[which]);
+        /* The OTHER two new items, and every pre-existing item, must still
+         * read diverged:false in this same response -- a divergence on one
+         * item must never bleed into another's row. */
+        for (size_t other = 0; other < 3; other++) {
+            if (other == which) {
+                continue;
+            }
+            char needle2[96];
+            snprintf(needle2, sizeof(needle2), "\"name\":\"%s\",\"file_backed\":true,\"file_rev\":1,"
+                                                "\"nvs_backed\":true,\"nvs_rev\":1,\"diverged\":false",
+                     new_item_names[other]);
+            TEST_CHECK(json_has(json2, needle2), new_item_names[other]);
+        }
+    }
+
+    cfg_fs_deinit();
+}
+
 static void test_buffer_too_small(void)
 {
     TEST_SECTION("cfg_fs_status: NEGATIVE TARGET -- a buffer too small to hold the JSON fails loudly "
@@ -289,6 +388,7 @@ void run_test_cfg_fs_status(void)
     test_unavailable();
     test_mounted_empty();
     test_mounted_with_files();
+    test_all_17_items_report_dualwrite_state();
     test_format_progress();
     test_format_stalled_ceiling();
     test_buffer_too_small();

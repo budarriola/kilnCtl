@@ -19,6 +19,7 @@
 #include "nvs_key_check.h"
 #include "firing_stats_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
                                      section 5 item 7 */
+#include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- firing_stats_get_dualwrite_status() below */
 
 /* ---- firing quality stats (PID_EXPANSION_PLAN.md Phase 7a/7a-2/7a-3) ------
  *
@@ -336,6 +337,103 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
                  (unsigned long)resolved_rev);
     }
     return true;
+}
+
+/* GET /api/cfgfs dual-write picture for the firing_stats_cfg_fs.c bridge --
+ * 2026-09-08, moving this item's reporting out of cfg_fs_status.c's stale
+ * "nvs_only" hardcoded list (docs/FILESYSTEM_USER_DATA_PLAN.md item 7,
+ * landed in 762bb29e). This bridge is keyed per PROFILE ID, unlike every
+ * other item this endpoint already reports one row for -- there is no
+ * fixed, enumerable set of ids (a profile can be any user slot 0..
+ * PROFILES_MAX_COUNT-1 OR a 3-digit builtin id, and only ids that have
+ * actually fired ever get a key at all), so a byte-for-byte content compare
+ * across "every id that could possibly exist" is not a well-defined
+ * operation the way it is for the other bridges' single fixed-size blobs.
+ *
+ * SCOPE (documented gap, not silently assumed complete): this checks only
+ * the user profile slots 0..PROFILES_MAX_COUNT-1 -- the same id range
+ * cfgfs_status_get_handler() already itemizes separately for the profiles'
+ * own config rows ("profile0".."profile7") -- not any builtin 3-digit id.
+ * A divergence confined to a builtin profile's firing history would not be
+ * caught here. Widening this to enumerate every id actually on disk would
+ * need a directory walk over "stats/" (cfg_fs_list()) cross-referenced
+ * against every "fsr_<id>" NVS key with no equivalent listing API on the
+ * NVS side -- out of scope for restoring accurate /api/cfgfs reporting,
+ * which is this pass's job.
+ *
+ * One row, aggregated: `file_valid`/`nvs_valid` are true if ANY covered id
+ * has a valid side; `file_rev`/`nvs_rev` report the MAX rev seen (purely
+ * informational -- unlike the per-item revs elsewhere, this is not one
+ * blob's single counter); `diverged` is true if ANY covered id's file and
+ * NVS copies disagree in content. Read-only throughout: nvs_only_load() (in
+ * this same file, static) and firing_stats_cfg_fs_load_raw() are both pure
+ * reads, no resolve/resync call anywhere in this function, matching every
+ * sibling *_get_dualwrite_status(). */
+void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                        bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+
+    bool any_file_valid = false, any_nvs_valid = false, any_diverged = false;
+    uint32_t max_file_rev = 0, max_nvs_rev = 0;
+
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profile_firing_history_blob_t f_blob;
+        uint32_t f_rev = 0;
+        bool f_valid = false;
+        firing_stats_cfg_fs_load_raw(id, &f_blob, &f_rev, &f_valid);
+
+        profile_firing_history_blob_t n_blob;
+        bool n_valid = nvs_only_load(id, &n_blob);
+        uint32_t n_rev = firing_stats_cfg_fs_read_rev(id);
+
+        bool content_equal = f_valid && n_valid && memcmp(&f_blob, &n_blob, sizeof(f_blob)) == 0;
+        if (cfg_fs_status_item_diverged(f_valid, n_valid, content_equal)) {
+            any_diverged = true;
+        }
+        if (f_valid) {
+            any_file_valid = true;
+            if (f_rev > max_file_rev) {
+                max_file_rev = f_rev;
+            }
+        }
+        if (n_valid) {
+            any_nvs_valid = true;
+            if (n_rev > max_nvs_rev) {
+                max_nvs_rev = n_rev;
+            }
+        }
+    }
+
+    if (file_valid) {
+        *file_valid = any_file_valid;
+    }
+    if (file_rev) {
+        *file_rev = max_file_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = any_nvs_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = max_nvs_rev;
+    }
+    if (diverged) {
+        *diverged = any_diverged;
+    }
 }
 
 /* Persists rec as the newest entry for its own profile_id -- read-modify-

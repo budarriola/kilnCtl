@@ -177,6 +177,19 @@ void relay_cycles_maybe_persist(void);
 /* Writes now if anything changed, ignoring the interval. */
 esp_err_t relay_cycles_flush(void);
 
+/* GET /api/cfgfs dual-write picture for this bridge -- 2026-09-08, moving
+ * this item's reporting out of cfg_fs_status.c's stale "nvs_only" hardcoded
+ * list (docs/FILESYSTEM_USER_DATA_PLAN.md's relay-cycles bridge, step 6,
+ * landed in 762bb29e). Read-only: does NOT call pref_cfg_fs_resolve() or any
+ * other function capable of a resync write, matching every sibling
+ * *_get_dualwrite_status() (unit_pref.c etc.) -- a status GET must never
+ * itself heal or mask a divergence. `diverged` uses
+ * cfg_fs_status_item_diverged() (real content compare via memcmp of the
+ * whole relay_cycles_blob_t, not a rev-only guess), same discipline every
+ * other accessor here follows. All five output pointers accept NULL. */
+void relay_cycles_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                        bool *diverged);
+
 #ifdef __cplusplus
 }
 #endif

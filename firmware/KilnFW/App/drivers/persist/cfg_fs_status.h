@@ -60,13 +60,16 @@ typedef struct {
 
 /* Upper bound on how many dual-write item rows one /api/cfgfs response
  * carries -- 1 (zones) + 1 (kiln_cfg_store) + 4 (pref-backed: unit pref,
- * ramp assist, display power, TZ) + PROFILES_MAX_COUNT (8) = 14 today, with
- * headroom for one more bridge before this needs to grow. Extra items past
- * this cap are silently dropped by the JSON builder rather than overflowing
- * -- see cfg_fs_status_build_json()'s own comment on why that is the right
- * failure mode here (unlike CFG_FS_STATUS_MAX_FILES, this list is built by
- * firmware code, not by whatever a user has dropped on the filesystem). */
-#define CFG_FS_STATUS_MAX_ITEMS 16
+ * ramp assist, display power, TZ) + PROFILES_MAX_COUNT (8) + 3 (2026-09-08:
+ * relay_cycles, adaptive_tune ki-baseline, firing_stats -- the last three
+ * items docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracked, all landed in
+ * 762bb29e) = 17 today, with headroom for one more bridge before this needs
+ * to grow again. Extra items past this cap are silently dropped by the
+ * JSON builder rather than overflowing -- see cfg_fs_status_build_json()'s
+ * own comment on why that is the right failure mode here (unlike
+ * CFG_FS_STATUS_MAX_FILES, this list is built by firmware code, not by
+ * whatever a user has dropped on the filesystem). */
+#define CFG_FS_STATUS_MAX_ITEMS 18
 
 /* THE single definition of "this item's file and NVS copies disagree",
  * shared by every caller so a future bridge cannot invent a second one.

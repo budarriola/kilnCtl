@@ -51,6 +51,7 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t
                               * save_kibase_job()'s caller (the flash worker) already branches on */
+#include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- adaptive_tune_get_kibase_dualwrite_status() below */
 #include "pref_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
                              section 5 item 9 -- see adaptive_tune_internal.h's
                              ADAPTIVE_TUNE_KIBASE_FILE_PATH comment for the simplified
@@ -1179,4 +1180,76 @@ void adaptive_tune_init(void)
     //
     // No httpd registration here any more -- call adaptive_tune_http_start()
     // separately once the shared httpd server is up (see adaptive_tune_http.c).
+}
+
+// GET /api/cfgfs dual-write picture for the Ki-baseline blob -- 2026-09-08,
+// moving this item's reporting out of cfg_fs_status.c's stale "nvs_only"
+// hardcoded list (docs/FILESYSTEM_USER_DATA_PLAN.md's Ki-baseline bridge,
+// step 9, landed in 762bb29e). Read-only: unlike adaptive_tune_init()'s
+// boot-time load, this does NOT call pref_cfg_fs_resolve() (no resync
+// write) -- same "a status GET must never heal or mask a divergence"
+// discipline every sibling *_get_dualwrite_status() follows. `diverged`
+// uses cfg_fs_status_item_diverged() (a real memcmp of the whole
+// adaptive_tune_kibase_blob_t -- mask AND every zone's baseline value, not
+// just the mask), not a rev-only guess. All five output pointers accept
+// NULL.
+void adaptive_tune_get_kibase_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
+                                                uint32_t *nvs_rev, bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+
+    adaptive_tune_kibase_blob_t f_blob;
+    memset(&f_blob, 0, sizeof(f_blob));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(f_blob), kibase_file_validate, &f_blob, &f_rev,
+                          &f_valid);
+
+    adaptive_tune_kibase_blob_t n_blob;
+    memset(&n_blob, 0, sizeof(n_blob));
+    bool n_valid = false;
+    uint32_t n_rev = 0;
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ADAPTIVE_TUNE_NVS_PARTITION) == HAL_OK) {
+        size_t len = sizeof(n_blob);
+        if (hal_kv_get_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &n_blob, &len) == HAL_OK && len == sizeof(n_blob)) {
+            n_valid = true;
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV, &rev) == HAL_OK) {
+                n_rev = rev;
+            }
+        }
+        hal_kv_close(&h);
+    }
+
+    bool content_equal = f_valid && n_valid && memcmp(&f_blob, &n_blob, sizeof(f_blob)) == 0;
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }

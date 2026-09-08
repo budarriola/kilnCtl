@@ -338,6 +338,11 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
 // bound's numeric value and reasoning.
 bool adaptive_tune_fit_gain(const float *duty, const float *rise_c, uint32_t n, float *out_k);
 
+// GET /api/cfgfs dual-write picture for the persisted Ki-baseline blob --
+// see adaptive_tune.c's definition for the read-only/no-resync contract.
+void adaptive_tune_get_kibase_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
+                                                uint32_t *nvs_rev, bool *diverged);
+
 #ifdef __cplusplus
 }
 #endif
