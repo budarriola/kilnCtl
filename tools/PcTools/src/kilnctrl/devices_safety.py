@@ -354,11 +354,24 @@ class SafetyStatus:
         else:
             age = f"{self.age_ms} ms old"
         set_flags = self.flag_labels or ["no flags set"]
-        temp = (
-            f"{self.temperature_c:.2f} C (CJ {self.cold_junction_c:.2f} C)"
-            if self.temp_valid
-            else "safety TC invalid"
-        )
+        if self.temp_valid:
+            temp = f"{self.temperature_c:.2f} C (CJ {self.cold_junction_c:.2f} C)"
+        else:
+            # fault_status is transmitted independently of temp_valid
+            # (SaftyFW link_task.c's link_task_send_status(): fault_bits is
+            # read unconditionally, only tc_c/cj_c are NaN'd when invalid),
+            # so it is available here even on a fully invalid reading -- but
+            # it does NOT distinguish a real SPI/part fault from a CR1-verify
+            # (tc_type mismatch) or DRDY-silence downgrade, both of which
+            # zero fault_bits on the wire (thermo_task.c: those paths set
+            # valid=false without ever touching fault_bits, or set it to 0
+            # outright). "no MAX31856 fault bits set" here means "not a
+            # datasheet-visible fault", not "the sensor is fine" -- see
+            # thermo_task.c's max31856_tc_type_verified()/plausibility-band
+            # downgrades for the other ways this can read invalid.
+            labels = self.fault_labels
+            reason = "; ".join(labels) if labels else "no MAX31856 fault bits set"
+            temp = f"safety TC invalid ({reason})"
         if ct_fitted is None:
             currents = ", ".join(f"{a:.2f} A" for a in self.current_a)
         else:
