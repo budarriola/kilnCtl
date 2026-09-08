@@ -1103,7 +1103,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
   var minOnS = (z.min_on_s != null && z.min_on_s !== 0) ? z.min_on_s : onOffMinOnOffDefault;
   var minOffS = (z.min_off_s != null && z.min_off_s !== 0) ? z.min_off_s : onOffMinOnOffDefault;
   var zoneTypeHtml =
-    '<label>Zone type</label>' + infoDetailsHtml('zoneType', 'zone type') +
+    '<label>Zone type ' + infoDetailsHtml('zoneType', 'zone type') + '</label>' +
     '<select class="zonetype">' +
       '<option value="0"' + (zoneType === 0 ? ' selected' : '') + '>Heater (PID/bang-bang controlled)</option>' +
       '<option value="1"' + (zoneType === 1 ? ' selected' : '') + '>On/off device (vent, damper, fan -- not PID controlled)</option>' +
@@ -1115,7 +1115,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       'are hidden below because none of them do anything for this zone any more.' +
     '</p>' +
     '<div class="onoffPanel" style="' + (zoneType === 1 ? '' : 'display:none') + '">' +
-      '<label>Fail-safe state</label>' + infoDetailsHtml('failsafe', 'fail-safe state') +
+      '<label>Fail-safe state ' + infoDetailsHtml('failsafe', 'fail-safe state') + '</label>' +
       '<select class="failsafestate">' +
         '<option value="0"' + (failsafeOn ? '' : ' selected') + '>OFF (default -- de-energised on any abort/fault/trip)</option>' +
         '<option value="1"' + (failsafeOn ? ' selected' : '') + '>ON (energised on abort/fault/trip)</option>' +
