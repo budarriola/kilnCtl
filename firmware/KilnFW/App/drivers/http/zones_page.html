@@ -958,7 +958,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
    * client that predates a given neighbour must not silently erase a
    * measurement -- see saveAll()'s per-cell push below, which always sends
    * every rendered cell explicitly instead of relying on that fallback. */
-  var couplingHtml = '<label>Cross-zone coupling to feedforward</label>' + infoDetailsHtml('coupling', 'cross-zone coupling');
+  var couplingHtml = '<label>Cross-zone coupling to feedforward ' + infoDetailsHtml('coupling', 'cross-zone coupling') + '</label>';
   if (thermoCount <= 1) {
     couplingHtml += '<p class="hint">Only one zone configured -- nothing to couple against.</p>';
   } else {
@@ -991,7 +991,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       modelHtml +
       couplingHtml +
       '<div class="fuzzyPanel">' +
-        '<label>Adjustment strength (0-100%)</label>' + infoDetailsHtml('fuzzy', 'the fuzzy adjustment layer') +
+        '<label>Adjustment strength (0-100%) ' + infoDetailsHtml('fuzzy', 'the fuzzy adjustment layer') + '</label>' +
         '<input type="number" class="fuzzystrength" min="0" max="100" step="1" value="' + fuzzyStrength + '">' +
       '</div>' +
     '</div>';
@@ -1028,8 +1028,9 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
     '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
     '</div>' +
-    '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5)</label>' +
+    '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5) ' +
     infoDetailsHtml('sanity', 'minimum rise rate') +
+    '</label>' +
     '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
     '<div class="row2">' +
       '<div><label>Max temp &deg;C (0 = no ceiling) -- hard safety trip, no debounce</label>' +
@@ -1037,16 +1038,18 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<div><label>Min temp &deg;C -- below this reads as a broken/disconnected sensor</label>' +
       '<input type="number" step="1" class="mintemp" value="' + z.min_temp_c + '"></div>' +
     '</div>' +
-    '<label>Relay timing (ms, 0 = use firmware default: 60000/10000/2000)</label>' +
+    '<label>Relay timing (ms, 0 = use firmware default: 60000/10000/2000) ' +
     infoDetailsHtml('relayTiming', 'relay timing') +
+    '</label>' +
     '<div class="row2">' +
       '<div><label>Window (&ge; 3x min on)</label><input type="number" step="1000" min="30000" class="window" value="' + (z.heater_window_ms || 0) + '"></div>' +
       '<div><label>Min on (&ge; 10000)</label><input type="number" step="1000" min="10000" class="minon" value="' + (z.heater_min_on_ms || 0) + '"></div>' +
       '<div><label>Min off</label><input type="number" step="100" class="minoff" value="' + (z.heater_min_off_ms || 0) + '"></div>' +
     '</div>' +
     '<div class="heaterOnly">' +
-    '<label>Cross-zone plausibility (&deg;C, 0 = disabled)</label>' +
+    '<label>Cross-zone plausibility (&deg;C, 0 = disabled) ' +
     infoDetailsHtml('crossZone', 'cross-zone plausibility') +
+    '</label>' +
     '<input type="number" step="5" class="xzone" value="' + (z.cross_zone_max_delta_c || 0) + '">' +
     '</div>' +
     '<details class="advguards"><summary>Advanced guard thresholds (0 = firmware default -- ' +
@@ -1136,7 +1139,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<label>Name</label><input type="text" class="name" maxlength="15" value="' + window.kcEscapeHtml(z.name || '') + '">' +
     zoneTypeHtml +
     '<label>Relays in this zone</label><div class="relaybits">' + relayHtml + '</div>' +
-    '<label>Relay type</label>' + infoDetailsHtml('relayType', 'relay type') + relayTypeHtml +
+    '<label>Relay type ' + infoDetailsHtml('relayType', 'relay type') + '</label>' + relayTypeHtml +
     '<label>Thermocouples feeding this zone</label><div class="thermobits">' + thermoHtml + '</div>' +
     '<p class="hint">Checking more than one channel averages their valid readings into this ' +
     'zone\'s control temperature. Leaving all unchecked disables control for this zone, the ' +
@@ -1172,8 +1175,9 @@ function zoneBlock(z, i, relayCount, thermoCount) {
      * it needs every zone's div in the DOM first, which zoneBlock() alone
      * cannot guarantee while still building this one. */
     bodyHtml +=
-      '<label>Thermocouple type + settings (quick -- sets every group below the same way)</label>' +
+      '<label>Thermocouple type + settings (quick -- sets every group below the same way) ' +
       infoDetailsHtml('settingsSrcGroups', 'per-item "same as zone N"') +
+      '</label>' +
       '<select class="settingssrc"></select>' +
       '<div class="inheritedSummary hint"></div>' +
       /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: the whole-zone select above stays as a
