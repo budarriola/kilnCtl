@@ -210,6 +210,19 @@ ALLOWLIST = {
     # through uart_bridge_ext_run_on_flash_worker() otherwise -- see this
     # file's own comment.
     "safety_cfg_store.c",
+    # Pattern 3 (internal-SRAM-stack httpd task, not init-time): the only
+    # write call site is setup_wizard_progress_set_step()'s persist_all(),
+    # reached exclusively from setup_progress_http.c's POST
+    # /api/setup/progress handler -- registered on the same httpd instance
+    # (wifi_provision_http_get_server()) settings_http.c's POST handlers
+    # run on, same internal-SRAM-stack story as display_power_cfg.c's/
+    # unit_pref.c's/time_sync.c's own entries in this list. Never called
+    # from app_main/boot, never dispatched through
+    # uart_bridge_ext_run_on_flash_worker(), so neither the PSRAM-stack nor
+    # the re-entrancy half of this lint applies -- only the direct-hal_kv-
+    # write half, which this entry covers the same way those three files'
+    # entries do.
+    "setup_wizard_progress.c",
     # Pattern 3 (init-time only): time zone save runs from the settings
     # HTTP handler's own internal-SRAM-stack httpd task, no PSRAM stack
     # involved in this handler's call chain.
