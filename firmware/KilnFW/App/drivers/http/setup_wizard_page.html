@@ -37,6 +37,11 @@
 <link rel="stylesheet" href="/theme.css">
 <script defer src="/nav.js"></script>
 <script defer src="/app.js"></script>
+<!-- SETUP_WIZARD_PLAN.md step 8 (safety processor commissioning): shared
+     confirm-and-read-back logic with safety_commissioning_page.html -- see
+     commissioning_shared.js's own header comment for why this is one
+     implementation, not two. -->
+<script defer src="/commissioning_shared.js"></script>
 <style>
   /* ---- Palette: IDENTICAL token set to safety_commissioning_page.html's
      own local block (that page's comment explains why each page still
@@ -161,6 +166,11 @@
   .wok { color: var(--ok); font-weight: bold; margin: 0.4em 0; }
   .crashbanner { background: var(--bad); color: #fff; border-radius: var(--ui-radius);
     padding: 0.7em 1em; margin: 0.6em 0; font-weight: bold; }
+  /* ---- Step 9's heat-required warning reuses .crashbanner's exact visual
+     weight (same --bad token) -- no new colour, just a semantic alias for
+     the one other class of banner this wizard needs: "this is about to
+     apply heat", not "something already went wrong". ---- */
+  .heatwarn { margin-bottom: 0.8em; }
 
   @media (max-width: 420px) {
     .steprow { flex-direction: column; align-items: flex-start; }
@@ -211,6 +221,19 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <div id="stepBody4" hidden></div>
   <div id="stepBody5" hidden></div>
   <div id="stepBody6" hidden></div>
+  <!-- Step 7 (implementation step 8 of SETUP_WIZARD_PLAN.md section 8):
+       safety processor commissioning, embedded inline per owner decision --
+       reuses the /api/safety/commissioning write path and its
+       confirm_commit_landed() read-back via commissioning_shared.js, rather
+       than a second implementation of confirm-and-verify. -->
+  <div id="stepBody7" hidden></div>
+  <!-- Steps 8-12 (this pass): CT setup, CT mapping verification (heat),
+       PID gains (autotune or hand-entered), coupling matrix, final gate. -->
+  <div id="stepBody8" hidden></div>
+  <div id="stepBody9" hidden></div>
+  <div id="stepBody10" hidden></div>
+  <div id="stepBody11" hidden></div>
+  <div id="stepBody12" hidden></div>
 
   <div id="stepGenericContent" hidden>
     <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
@@ -718,6 +741,498 @@ function validateStep6(zones, absMaxTempC) {
         'raise abs_max_temp_c in step 7 first. Refused, not clamped.');
     }
   });
+  return { valid: errors.length === 0, errors: errors };
+}
+
+/* ==========================================================================
+ * Steps 8-11 (this pass): CT setup, CT mapping verification (HEAT), PID
+ * gains (autotune or hand-entered), coupling matrix. Step 7 (safety
+ * processor commissioning) is a different pass's territory and is left
+ * exactly as the shell generates it today (generic placeholder) -- not
+ * touched here.
+ * ========================================================================== */
+
+// Reads one named field out of GET /api/safety/commissioning's params[]
+// array (same shape safety_commissioning_page.html itself renders and
+// getAbsMaxTempC() above already reads one field of). Returns null when the
+// board hasn't answered, the field is unknown, or it has never been
+// commissioned -- never coerced to 0/false, so "not yet known" cannot be
+// misread as a real value (same discipline getAbsMaxTempC() already uses).
+function getCommissioningParam(commissioning, name) {
+  if (!commissioning || !commissioning.params) return null;
+  for (var i = 0; i < commissioning.params.length; i++) {
+    var p = commissioning.params[i];
+    if (p.name === name && p.set) return p.value;
+  }
+  return null;
+}
+
+/* ---- Step 8 (CT install + topology + per-zone mapping). Requirement 2:
+ * ct_installed/ct_topology/per-zone ct_mask live on the Pico via the SAME
+ * guided commit path step 7 owns (POST /api/safety/commissioning) -- this
+ * screen reads and explains, it does not add a second write path for those
+ * fields (plan section 6, "never add a second Pico write path"). What IS
+ * new here is spelling out the consequence the dashboard's CT grouping
+ * (9d515708) has for whatever mapping is chosen: a CT assigned to exactly
+ * one zone renders inside that zone's card, a CT feeding several zones
+ * (summed topology) renders in a shared section, and a CT with NO
+ * assignment is hidden entirely -- so a forgotten mapping does not show up
+ * even as an error, it just never appears. validateStep8() below is the
+ * one new rule this step actually owns: under per-zone topology, two CT
+ * channels mapped to the same zone is a real misconfiguration (the
+ * dashboard can show only one CT per single-zone card), so it is flagged
+ * here client-side even though nothing on the wire refuses it today. */
+function validateStep8(ctInstalled, ctTopology, mapMask, zoneForCh) {
+  if (ctInstalled !== 1) return { valid: true, errors: [] };
+  var errors = [];
+  if (ctTopology !== 0 && ctTopology !== 1) {
+    errors.push('CT topology (per-zone or summed) must be set once a CT is installed (step 7\'s ' +
+      'safety commissioning screen).');
+    return { valid: false, errors: errors };
+  }
+  if (ctTopology === 0) {
+    var seen = {};
+    for (var ch = 0; ch < (zoneForCh || []).length; ch++) {
+      if (!(mapMask & (1 << ch))) continue; // not derived yet -- nothing to validate for this channel
+      var z = zoneForCh[ch];
+      if (seen.hasOwnProperty(z)) {
+        errors.push('CT channels ' + seen[z] + ' and ' + ch + ' both map to zone ' + (z + 1) +
+          ' under per-zone topology -- the dashboard can only show one CT per single-zone card, so one ' +
+          'of these two channels needs a different zone (or the topology should be "summed").');
+      } else {
+        seen[z] = ch;
+      }
+    }
+  }
+  return { valid: errors.length === 0, errors: errors };
+}
+
+function ctZoneAssignmentHtml(mapMask, zoneForCh, ctTopology) {
+  var rows = '';
+  for (var ch = 0; ch < ZONE_CT_CHANNEL_COUNT_JS; ch++) {
+    var derived = !!(mapMask & (1 << ch));
+    var text;
+    if (!derived) {
+      text = 'not mapped yet -- <b>hidden on the dashboard</b> until a zone claims relay(s) this CT reads';
+    } else if (ctTopology === 1) {
+      text = 'feeds the shared (summed) section on the dashboard';
+    } else {
+      text = 'zone ' + (zoneForCh[ch] + 1) + ' -- renders inside that zone\'s card';
+    }
+    rows += '<div class="review-row"><span>CT' + ch + '</span><span class="rv">' + text + '</span></div>';
+  }
+  return rows;
+}
+var ZONE_CT_CHANNEL_COUNT_JS = 3; // mirrors ZONE_CT_CHANNEL_COUNT (zones_config_accessors.h)
+
+function renderStep8() {
+  var el = document.getElementById('stepBody8');
+  el.innerHTML = '<p class="hint">Loading current sensing setup&hellip;</p>';
+  return Promise.all([
+    fetchJsonOr('/api/safety/commissioning', null),
+    fetchJsonOr('/api/zones/ct_channel_map', null),
+  ]).then(function (r) {
+    var commissioning = r[0], ctMap = r[1];
+    if (!commissioning) {
+      el.innerHTML = '<p class="werr">Could not reach the safety processor -- reload once it answers again.</p>';
+      return;
+    }
+    var ctInstalled = getCommissioningParam(commissioning, 'ct_installed');
+    var ctTopology = getCommissioningParam(commissioning, 'ct_topology');
+    var html = '<p class="hint">Current sensing (installed, topology, per-channel mapping and gain/offset ' +
+      'calibration) is written through the safety processor\'s guided commissioning flow -- ' +
+      '<a href="/safety/commissioning">open it &rarr;</a> -- the same named-confirmation, read-back-verified ' +
+      'write path step 7 uses, not a second one.</p>';
+    if (ctInstalled === null) {
+      html += '<p class="hint">Not yet commissioned -- <code>ct_installed</code> is unknown until step 7 ' +
+        'is completed.</p>';
+    } else if (ctInstalled === 0) {
+      html += '<div class="review-row"><span>CT installed?</span><span class="rv">No</span></div>' +
+        '<p class="hint">A legitimate finish: guards S3 (welded contactor), S4, S9 and S14, which need a ' +
+        'current reading, report <b>deliberately_off</b> rather than blocking anything ' +
+        '(project_no_cts_fitted_guard_coverage).</p>';
+    } else {
+      var topoName = (ctTopology === 1) ? 'summed (one CT reads several zones together)' :
+        (ctTopology === 0) ? 'per-zone (one CT per zone)' : 'not set yet';
+      html += '<div class="review-row"><span>CT installed?</span><span class="rv">Yes</span></div>' +
+        '<div class="review-row"><span>Topology</span><span class="rv">' + window.kcEscapeHtml(topoName) +
+        '</span></div>';
+      html += '<h4>Dashboard consequence of the current mapping</h4>' +
+        (ctMap ? ctZoneAssignmentHtml(ctMap.mask, ctMap.zone, ctTopology) :
+          '<p class="hint">Could not read the current mapping.</p>');
+      window.kcStep8Ct = { mask: ctMap ? ctMap.mask : 0, zone: ctMap ? ctMap.zone : [] };
+    }
+    html += '<div id="step8Err"></div><div id="step8Ok"></div>';
+    html += '<div class="gnav"><button type="button" id="step8Done">I have reviewed CT setup above &amp; mark done</button></div>';
+    el.innerHTML = html;
+
+    document.getElementById('step8Done').addEventListener('click', function () {
+      // Commit-time re-check (same discipline as every other step): re-read
+      // ct_installed/ct_topology/mapping right now, not the snapshot this
+      // screen loaded with -- another tab could be mid-edit on /safety/commissioning.
+      Promise.all([
+        fetchJsonOr('/api/safety/commissioning', null),
+        fetchJsonOr('/api/zones/ct_channel_map', null),
+      ]).then(function (fresh) {
+        var freshInstalled = getCommissioningParam(fresh[0], 'ct_installed');
+        var freshTopo = getCommissioningParam(fresh[0], 'ct_topology');
+        var freshMap = fresh[1];
+        var v = validateStep8(freshInstalled, freshTopo, freshMap ? freshMap.mask : 0, freshMap ? freshMap.zone : []);
+        var errEl = document.getElementById('step8Err');
+        if (!v.valid) { renderErrList(errEl, v.errors); return; }
+        renderErrList(errEl, []);
+        postStepState(8, 'done').then(function () { loadAll(); });
+      });
+    });
+  });
+}
+
+/* ---- Step 9 (CT mapping verification, applies HEAT). Requirement 3: this
+ * is one of only two steps in the whole wizard that heats the kiln (the
+ * other is step 10's autotune) -- the screen must not be walkable into
+ * unaware, must clearly say heat + owner presence are required, and must
+ * remain skippable/resumable. Reuses /api/zones/current_sweep/{start,
+ * status,abort} verbatim (zones_current_sweep_task.c) -- no second sweep
+ * implementation. Busy refusal mirrors safety_commissioning_page.html's
+ * checkFiringOrAutotuneRunning(): poll /api/profile_exec + /api/autotune,
+ * refuse when either is actually running, never block on a failed fetch. */
+var step9Poll = null;
+
+function step9StopPoll() { if (step9Poll) { clearInterval(step9Poll); step9Poll = null; } }
+
+function step9CheckBusy() {
+  return Promise.all([
+    fetchJsonOr('/api/profile_exec', null),
+    fetchJsonOr('/api/autotune', null),
+  ]).then(function (r) {
+    var exec = r[0], at = r[1];
+    var execRunning = !!(exec && (exec.state === 'RUNNING' || exec.state === 'PAUSED'));
+    var atRunning = !!(at && at.state && at.state !== 'IDLE' && at.state !== 'idle');
+    if (execRunning) return 'a firing is currently running -- cannot apply heat for CT verification at the same time';
+    if (atRunning) return 'autotune is currently running -- cannot apply heat for CT verification at the same time';
+    return null; // includes both fetches failing: never block on a failed fetch
+  });
+}
+
+function renderStep9() {
+  var el = document.getElementById('stepBody9');
+  step9StopPoll();
+  el.innerHTML = '<p class="hint">Loading&hellip;</p>';
+  return fetchJsonOr('/api/safety/commissioning', null).then(function (commissioning) {
+    var ctInstalled = getCommissioningParam(commissioning, 'ct_installed');
+    if (ctInstalled === 0) {
+      el.innerHTML = '<p class="hint">No CT installed (step 8) -- there is nothing to verify. Skipping this ' +
+        'step is a legitimate finish.</p><div class="gnav"><button type="button" id="step9Skip">Skip (not ' +
+        'installed) &amp; mark done</button></div>';
+      document.getElementById('step9Skip').addEventListener('click', function () {
+        postStepState(9, 'skipped', 'ct_installed=0, nothing to verify').then(function () { loadAll(); });
+      });
+      return;
+    }
+    var html = '<div class="crashbanner heatwarn">THIS STEP APPLIES HEAT and energizes relays one group at a ' +
+      'time to verify the CT reads the right zone. The owner must be physically present for the whole run. ' +
+      '<b>Closing this browser tab does NOT stop it</b> -- use the Abort button below, or ' +
+      '<a href="/settings/zones">/settings/zones</a>, to actually stop heating.</div>';
+    html += '<label style="display:flex;align-items:center;gap:0.5em;min-height:32px;"><input type="checkbox" ' +
+      'id="step9Ack"> I am present and the kiln is safe to heat right now.</label>';
+    html += '<div id="step9Busy" class="hint"></div>';
+    html += '<div id="step9Status" class="hint">Not running.</div>';
+    html += '<div id="step9Err"></div><div id="step9Ok"></div>';
+    html += '<div class="gnav"><button type="button" id="step9Start" disabled>Start CT verification sweep</button>' +
+      '<button type="button" id="step9Abort">Abort</button>' +
+      '<button type="button" id="step9SkipLater">Skip for now</button></div>';
+    el.innerHTML = html;
+
+    var ackBox = document.getElementById('step9Ack');
+    var startBtn = document.getElementById('step9Start');
+    ackBox.addEventListener('change', function () { startBtn.disabled = !ackBox.checked; });
+
+    function renderSweepStatus(st) {
+      var statusEl = document.getElementById('step9Status');
+      if (!st) { statusEl.textContent = 'Could not read sweep status.'; return; }
+      statusEl.textContent = 'State: ' + st.state + ' -- zone ' + (st.zone_index + 1) + ', ' + st.zones_done +
+        ' of ' + st.zones_total + ' zones done.' + (st.reason ? ' (' + st.reason + ')' : '') +
+        (st.ct_map_reason ? ' CT mapping: ' + st.ct_map_reason : '');
+      if (st.state === 'done') {
+        step9StopPoll();
+        document.getElementById('step9Ok').innerHTML = '<p class="wok">Verification complete.</p>';
+        postStepState(9, 'done').then(function () { loadAll(); });
+      } else if (st.state === 'failed' || st.state === 'aborted') {
+        step9StopPoll();
+      }
+    }
+
+    document.getElementById('step9Start').addEventListener('click', function () {
+      var errEl = document.getElementById('step9Err');
+      renderErrList(errEl, []);
+      if (!ackBox.checked) { renderErrList(errEl, ['Confirm you are present and it is safe to heat first.']); return; }
+      step9CheckBusy().then(function (busyReason) {
+        if (busyReason) { renderErrList(errEl, [busyReason]); return; }
+        fetch('/api/zones/current_sweep/start', { method: 'POST' }).then(function (r) {
+          return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, body: j }; });
+        }).then(function (res) {
+          if (!res.body || res.body.ok !== true) {
+            // Rejection text rendered verbatim, exactly as the firmware
+            // phrases it (zone_sweep_refusal_str()) -- never paraphrased.
+            renderErrList(errEl, [res.body && res.body.reason ? res.body.reason : 'sweep refused to start']);
+            return;
+          }
+          step9StopPoll();
+          step9Poll = setInterval(function () {
+            fetchJsonOr('/api/zones/current_sweep/status', null).then(renderSweepStatus);
+          }, 2000);
+        });
+      });
+    });
+
+    document.getElementById('step9Abort').addEventListener('click', function () {
+      fetch('/api/zones/current_sweep/abort', { method: 'POST' }).then(function () {
+        return fetchJsonOr('/api/zones/current_sweep/status', null).then(renderSweepStatus);
+      });
+    });
+
+    document.getElementById('step9SkipLater').addEventListener('click', function () {
+      step9StopPoll();
+      postStepState(9, 'skipped', 'deferred -- resume later, requires heat + owner present').then(function () { loadAll(); });
+    });
+  });
+}
+
+/* ---- Step 10 (PID gains: autotune or hand-entered). Requirement 1: hand-
+ * entered gains COUNT as complete -- autotune is not mandatory, and this
+ * screen says so explicitly (not a silently-tolerated loophole). Both
+ * paths are offered side by side; autotune links out to the existing
+ * /settings/zones flow (multi-hour warning, real engine, already built)
+ * rather than a second implementation, with the prestart refusals this
+ * screen CAN determine client-side (no thermocouple, on/off zone) surfaced
+ * verbatim, copied from autotune_engine.c's own message text, before the
+ * link is even followed. Hand-entered gains post straight to the existing
+ * narrow POST /api/zones/pid endpoint and re-read the result back, same
+ * "confirm, don't assume" pattern main_page.html's PID popup already uses. */
+function autotunePrecheck(zone) {
+  if (!zone.thermo_mask) {
+    return 'zone has no thermocouple channel assigned -- autotune cannot measure a response with no sensor to read';
+  }
+  if (zone.zone_type === 1) {
+    return 'zone is an on/off device, not a heater -- autotune has nothing to identify';
+  }
+  if (!zone.relay_mask) {
+    return 'zone has no relay mask configured';
+  }
+  return null;
+}
+
+function renderStep10() {
+  var el = document.getElementById('stepBody10');
+  el.innerHTML = '<p class="hint">Loading zones&hellip;</p>';
+  return fetchJsonOr('/api/zones', null).then(function (data) {
+    if (!data) {
+      el.innerHTML = '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
+      return;
+    }
+    var thermoCount = data.thermo_count || 0;
+    var zones = data.zones || [];
+    if (thermoCount === 0) {
+      el.innerHTML = '<p class="hint">No zones configured yet -- finish ' +
+        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+      return;
+    }
+    var html = '<p class="hint"><b>Hand-entered gains complete this step just as fully as autotune does</b> ' +
+      '-- this is a deliberate owner decision (SETUP_WIZARD_PLAN.md section 10 Q4), not a shortcut nobody ' +
+      'noticed. <code>/api/readiness</code>\'s <code>autotune</code> item accepts either a full identified ' +
+      'model or <code>kp &gt; 0</code> typed in by hand, for every zone, and this screen checks the exact ' +
+      'same thing.</p>';
+    for (var i = 0; i < thermoCount; i++) {
+      var z = zones[i] || {};
+      var pre = autotunePrecheck(z);
+      html += '<div class="zonecard" data-zone="' + i + '"><h4>Zone ' + (i + 1) +
+        (z.name ? ' -- ' + window.kcEscapeHtml(z.name) : '') + '</h4>';
+      html += '<div class="review-row"><span>Stored gains</span><span class="rv">Kp=' + (z.pid_kp || 0) +
+        ' Ki=' + (z.pid_ki || 0) + ' Kd=' + (z.pid_kd || 0) + '</span></div>';
+      if (pre) {
+        html += '<p class="werr">Autotune refuses this zone: "' + window.kcEscapeHtml(pre) + '" ' +
+          '(autotune_engine.c, quoted verbatim). Hand-enter gains instead, or fix the cause above first.</p>';
+      } else {
+        html += '<p class="hint"><a href="/settings/zones">Run autotune on this zone &rarr;</a> (multi-hour, ' +
+          'one zone at a time, needs a rested kiln at ambient -- the linked page shows the full warning and ' +
+          'every other real-time refusal from the engine).</p>';
+      }
+      html += '<div class="wfield"><label>Kp</label><input type="number" step="0.0001" class="s10kp" data-zone="' +
+        i + '" value="' + (z.pid_kp || 0) + '"></div>';
+      html += '<div class="wfield"><label>Ki</label><input type="number" step="0.0001" class="s10ki" data-zone="' +
+        i + '" value="' + (z.pid_ki || 0) + '"></div>';
+      html += '<div class="wfield"><label>Kd</label><input type="number" step="0.0001" class="s10kd" data-zone="' +
+        i + '" value="' + (z.pid_kd || 0) + '"></div>';
+      html += '<button type="button" class="s10save" data-zone="' + i + '">Save gains for zone ' + (i + 1) + '</button>';
+      html += '<span class="s10result" data-zone="' + i + '"></span></div>';
+    }
+    html += '<p class="hint">Status: ' + window.kcEscapeHtml(
+      (latestMerged.filter(function (m) { return m.id === 10; })[0] || {}).detail || '') + '</p>';
+    el.innerHTML = html;
+
+    el.querySelectorAll('.s10save').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var zi = parseInt(this.dataset.zone, 10);
+        var card = el.querySelector('.zonecard[data-zone="' + zi + '"]');
+        var kp = parseFloat(card.querySelector('.s10kp').value);
+        var ki = parseFloat(card.querySelector('.s10ki').value);
+        var kd = parseFloat(card.querySelector('.s10kd').value);
+        var resultEl = card.querySelector('.s10result');
+        if (!(kp >= 0 && kp <= 1000) || !(ki >= 0 && ki <= 1000) || !(kd >= 0 && kd <= 1000)) {
+          resultEl.textContent = 'Kp/Ki/Kd must each be between 0 and 1000.';
+          resultEl.className = 's10result werr';
+          return;
+        }
+        resultEl.textContent = 'Applying…';
+        fetch('/api/zones/pid', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'zone=' + zi + '&kp=' + kp + '&ki=' + ki + '&kd=' + kd,
+        }).then(function (r) {
+          if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); });
+          return r.json();
+        }).then(function (result) {
+          if (result && result.ok === false) throw new Error(result.error || 'apply failed');
+          // Confirm, don't assume: re-read /api/zones and compare, same
+          // discipline main_page.html's PID popup already uses.
+          return fetchJsonOr('/api/zones', null).then(function (cfg2) {
+            var stored = cfg2 && cfg2.zones ? cfg2.zones[zi] : null;
+            var matched = stored && Math.abs(stored.pid_kp - kp) < 1e-6 && Math.abs(stored.pid_ki - ki) < 1e-9 &&
+              Math.abs(stored.pid_kd - kd) < 1e-6;
+            resultEl.textContent = matched ? 'Stored.' : 'WARNING: board reports different gains than sent.';
+            resultEl.className = matched ? 's10result wok' : 's10result werr';
+            if (matched && kp > 0) {
+              postStepState(10, 'done').then(function () { loadAll(); });
+            }
+          });
+        }).catch(function (e) {
+          resultEl.textContent = 'Not applied: ' + e.message;
+          resultEl.className = 's10result werr';
+        });
+      });
+    });
+  });
+}
+
+/* ---- Step 11 (coupling matrix, optional). Reuses GET /api/autotune/matrix
+ * verbatim -- no second matrix. ON_OFF zones are excluded from the review
+ * (their coupling row/column is zeroed by construction -- ON_OFF_ZONE_PLAN.md). */
+function renderStep11() {
+  var el = document.getElementById('stepBody11');
+  el.innerHTML = '<p class="hint">Loading&hellip;</p>';
+  return Promise.all([
+    fetchJsonOr('/api/autotune/matrix', null),
+    fetchJsonOr('/api/zones', null),
+  ]).then(function (r) {
+    var matrix = r[0], data = r[1];
+    var html = '<p class="hint">Optional: the cross-zone coupling matrix, built up as each zone is autotuned. ' +
+      'Can be deferred -- a kiln with only one zone, or zones tuned by hand, may never populate this.</p>';
+    if (!matrix || !matrix.cells) {
+      html += '<p class="hint">No coupling data yet.</p>';
+    } else {
+      var zones = (data && data.zones) || [];
+      matrix.cells.forEach(function (c) {
+        if (zones[c.i] && zones[c.i].zone_type === 1) return; // on/off zones excluded
+        if (zones[c.j] && zones[c.j].zone_type === 1) return;
+        var val = c.valid ? ('k=' + c.k + ' tau=' + c.tau_s + 's dead_time=' + c.dead_time_s + 's') : 'not measured yet';
+        html += '<div class="review-row"><span>zone ' + (c.i + 1) + ' &rarr; zone ' + (c.j + 1) + '</span>' +
+          '<span class="rv">' + val + '</span></div>';
+      });
+    }
+    html += '<div class="gnav"><button type="button" id="step11Skip">Skip (optional) &amp; mark done</button>' +
+      '<button type="button" id="step11Done">Mark reviewed</button></div>';
+    el.innerHTML = html;
+    document.getElementById('step11Skip').addEventListener('click', function () {
+      postStepState(11, 'skipped', 'optional, deferred').then(function () { loadAll(); });
+    });
+    document.getElementById('step11Done').addEventListener('click', function () {
+      postStepState(11, 'done').then(function () { loadAll(); });
+    });
+  });
+}
+
+/* ---- Step 12 (first profile + final readiness gate). Requirement 4: the
+ * completion gate itself is NOT reimplemented here -- computeCompleteness()
+ * (already landed, already tested) is the single source of truth and is
+ * rendered on the OVERVIEW screen's gate banner; this step screen just
+ * shows the same verdict inline plus a link to save a profile, since
+ * readinessKeys ['profile_saved','storage'] already drives this step's own
+ * done/pending state through the normal computeStepState() path -- no
+ * separate "mark setup complete" write exists anywhere, by design (plan
+ * section 5: the wizard stores no config value and no completion flag; the
+ * only authority is /api/readiness, read fresh every time). */
+function renderStep12() {
+  var el = document.getElementById('stepBody12');
+  el.innerHTML = '<p class="hint">Loading&hellip;</p>';
+  return fetchJsonOr('/api/profiles', null).then(function (profiles) {
+    var gate = computeCompleteness(latestMerged, latestReadiness);
+    var html = gate.complete
+      ? '<div class="gate gate-complete">Setup complete -- every readiness item is ok or deliberately off, ' +
+        'and no safety-relevant step was skipped.</div>'
+      : ('<div class="gate gate-incomplete">Not complete yet:<ul>' +
+        gate.reasons.map(function (r) { return '<li>' + window.kcEscapeHtml(r) + '</li>'; }).join('') + '</ul></div>');
+    html += '<p class="hint">' + ((profiles && profiles.length) ? profiles.length + ' profile(s) saved.' :
+      'No profile saved yet.') + ' <a href="/profiles">Manage profiles &rarr;</a></p>';
+    el.innerHTML = html;
+  });
+}
+
+/* ---- Step 7 (safety processor commissioning, embedded per owner decision).
+ * Fields covered, verified against safety_commissioning_page.html's own
+ * GROUPS table rather than assumed: tc_type (id 261), tc_offset_c (id 266,
+ * fd02df05 -- applied in thermo_task.c before any guard sees the reading),
+ * abs_max_temp_c (id 260), ct_installed (id 265), ct_topology (id 799). Same
+ * ids, same enum codes as that page -- this is not a second, possibly-
+ * disagreeing definition of what those numbers mean. ---- */
+var STEP7_TC_TYPES = [
+  [0, 'Type B'], [1, 'Type E'], [2, 'Type J'], [3, 'Type K'],
+  [4, 'Type N'], [5, 'Type R'], [6, 'Type S'], [7, 'Type T'],
+];
+var STEP7_ENUM_LABELS = {
+  261: STEP7_TC_TYPES,
+  265: [[1, 'Yes -- CTs fitted'], [0, 'No -- no CTs']],
+  799: [[0, 'Per-zone'], [1, 'Summed']],
+};
+function step7EnumLabelFor(id, rawValue) {
+  var opts = STEP7_ENUM_LABELS[id];
+  if (!opts) return null;
+  var hit = opts.filter(function (o) { return String(o[0]) === String(rawValue); })[0];
+  return hit ? hit[1] : null;
+}
+
+// Requirement 2 (abs-max relationship): fields.absMaxTempC must never be
+// BELOW any zone's own max_temp_c -- refused, not clamped, mirroring step 6's
+// own check in the other direction (zone max_temp_c above the Pico ceiling).
+// zoneMaxTemps is the dense [0, thermoCount) list of each zone's max_temp_c
+// (0 = not yet commissioned there, excluded from the comparison the same way
+// step 6 skips a null/unknown ceiling rather than treating it as zero).
+function validateStep7(fields, zoneMaxTemps) {
+  var errors = [];
+  if (!(fields.tcType >= 0 && fields.tcType <= 7)) {
+    errors.push('Choose the safety processor\'s own thermocouple type (tc_type) -- it must match the ' +
+      'sensor physically fitted to J7 on the safety board.');
+  }
+  if (fields.tcOffsetC !== '' && !isFinite(fields.tcOffsetC)) {
+    errors.push('Calibration offset (tc_offset_c) must be a finite number.');
+  }
+  if (!(fields.absMaxTempC > 0)) {
+    errors.push('Enter the safety processor\'s absolute-maximum ceiling (abs_max_temp_c) -- a real ' +
+      'positive number, no "unlimited" value.');
+  } else {
+    var maxZone = (zoneMaxTemps || []).filter(function (v) { return v > 0; })
+      .reduce(function (a, b) { return Math.max(a, b); }, 0);
+    if (maxZone > 0 && fields.absMaxTempC < maxZone) {
+      errors.push('abs_max_temp_c (' + fields.absMaxTempC + ' °C) is BELOW the highest configured ' +
+        'zone max_temp_c (' + maxZone + ' °C). The Pico\'s ceiling is a second set of eyes and must ' +
+        'never be tighter than the ESP\'s -- refused, not clamped. Raise abs_max_temp_c or lower that ' +
+        'zone\'s max temp in step 6 first.');
+    }
+  }
+  if (fields.ctInstalled !== 0 && fields.ctInstalled !== 1) {
+    errors.push('Answer whether current transformers (CTs) are physically fitted (ct_installed) -- no ' +
+      'default is safe here, the firmware cannot see whether one is clamped on.');
+  } else if (fields.ctInstalled === 1 && fields.ctTopology !== 0 && fields.ctTopology !== 1) {
+    errors.push('Choose the CT topology (ct_topology: per-zone or summed) -- required whenever CTs are fitted.');
+  }
   return { valid: errors.length === 0, errors: errors };
 }
 
@@ -1548,6 +2063,159 @@ function renderStep6() {
   });
 }
 
+/* ---- Step 7: safety processor commissioning, EMBEDDED per owner decision
+ * (SETUP_WIZARD_PLAN.md, "owner decisions" block, item 1). Reuses the
+ * existing /api/safety/commissioning write path verbatim, and
+ * commissioning_shared.js for the confirm-and-read-back logic that page
+ * already implements -- not a second implementation. Every field written
+ * here is treated as critical (named confirm + independent read-back),
+ * since this whole step exists to change what the safety processor's own
+ * over-temperature protection believes. ---- */
+function renderStep7() {
+  var el = document.getElementById('stepBody7');
+  el.innerHTML = '<p class="hint">Loading safety processor status&hellip;</p>';
+  return Promise.all([
+    fetchJsonOr('/api/safety/commissioning', null),
+    fetchJsonOr('/api/zones', null),
+  ]).then(function (r) {
+    var commissioning = r[0], zonesData = r[1];
+    if (!commissioning) {
+      el.innerHTML = '<p class="werr">Could not reach the safety processor -- reload once it answers again.</p>';
+      return;
+    }
+    var byId = {};
+    (commissioning.params || []).forEach(function (p) { byId[p.id] = p; });
+    var zoneMaxTemps = ((zonesData && zonesData.zones) || []).map(function (z) { return z.max_temp_c || 0; });
+    var highestZoneMax = zoneMaxTemps.filter(function (v) { return v > 0; })
+      .reduce(function (a, b) { return Math.max(a, b); }, 0);
+
+    var html = '<p class="hint">Commissions the RP2040 safety processor\'s own thermocouple type, ' +
+      'calibration offset, absolute-maximum ceiling, and current-transformer (CT) setup -- stored on the ' +
+      'Pico, outside both OTA slots, enforced there independent of everything else on this board. Embedded ' +
+      'here (not linked out) per owner decision, reusing <a href="/safety/commissioning">/safety/commissioning</a>\'s ' +
+      'own write path and its confirm_commit_landed() read-back verbatim.</p>';
+    html += '<p class="hint">' + (commissioning.link_up ? 'Safety processor: LINK UP.' :
+      'Safety processor: LINK DOWN -- values below are the ESP\'s last cached copy and may be stale.') +
+      (commissioning.commissioned ? ' Commissioned: YES.' : ' Commissioned: NO.') + '</p>';
+
+    var tcOffsetP = byId[266];
+    if (commissioning.unset_reporting_reliable && tcOffsetP && tcOffsetP.set && Number(tcOffsetP.value) !== 0) {
+      html += '<p class="werr">Non-zero calibration offset currently set: ' + window.kcEscapeHtml(tcOffsetP.value) +
+        ' °C -- every reading from the safety processor\'s own sensor is shifted by this amount before any ' +
+        'guard sees it. This is shown as a persistent banner on ' +
+        '<a href="/safety/commissioning">/safety/commissioning</a> too, so it stays visible after this ' +
+        'wizard finishes, not just at the moment it is set.</p>';
+    }
+
+    html += '<div class="wfield"><label for="s7TcType">Safety processor thermocouple type (J7)</label>' +
+      '<select id="s7TcType"><option value="">-- choose --</option>' +
+      STEP7_TC_TYPES.map(function (o) { return '<option value="' + o[0] + '">' + window.kcEscapeHtml(o[1]) + '</option>'; }).join('') +
+      '</select><p class="hint">Must match the thermocouple physically fitted to J7 on the safety board -- a ' +
+      'different, physically separate sensor from any zone thermocouple on the main board. A successful write ' +
+      'confirms the safety processor\'s CONFIG RECORD now holds this type, NOT that the MAX31856 chip\'s own ' +
+      'CR1 register accepted it -- that signal has no free bit on the wire today ' +
+      '(max31856_tc_type_verified() is not transmitted), so a successful commit is the best available proxy, ' +
+      'not proof the physical chip is running that type.</p></div>';
+
+    html += '<div class="wfield"><label for="s7TcOffset">Calibration offset (tc_offset_c, &deg;C)</label>' +
+      '<input type="number" step="any" id="s7TcOffset" placeholder="0 = no correction">' +
+      '<p class="hint">Added to the safety board\'s own MAX31856 reading, before any guard sees it ' +
+      '(applied in thermo_task.c). 0 means no correction.</p></div>';
+
+    html += '<div class="wfield"><label for="s7AbsMax">Absolute-maximum ceiling (abs_max_temp_c, &deg;C)</label>' +
+      '<input type="number" step="any" min="0.0001" id="s7AbsMax" placeholder="e.g. 1300">' +
+      '<p class="hint">The highest temperature this kiln\'s furniture/elements/brick can survive -- not the ' +
+      'hottest firing you plan. Required, no "unlimited" value. Currently the highest configured zone ceiling ' +
+      'is ' + (highestZoneMax > 0 ? (highestZoneMax + ' °C') : 'not set yet (step 6)') + ' -- this value must ' +
+      'never be BELOW that: the Pico\'s ceiling is a second set of eyes and must never be tighter than the ' +
+      'ESP\'s. Refused, not clamped, if it would be.</p></div>';
+
+    html += '<div class="wfield"><label for="s7CtInstalled">Current transformers (CTs) physically fitted?</label>' +
+      '<select id="s7CtInstalled"><option value="">-- choose --</option>' +
+      '<option value="1">Yes</option><option value="0">No</option></select>' +
+      '<p class="hint">No default -- the firmware cannot see whether a CT is fitted. "No" switches S3/S4/S9/S14 ' +
+      'off and reports them off; that is a legitimate, complete commissioning state, not a workaround.</p></div>';
+
+    html += '<div class="wfield" id="s7CtTopologyWrap"><label for="s7CtTopology">CT topology</label>' +
+      '<select id="s7CtTopology"><option value="">-- choose --</option>' +
+      '<option value="1">Summed (one shared CT, channel 3, reads every zone)</option>' +
+      '<option value="0">Per-zone (one CT per zone)</option></select>' +
+      '<p class="hint">Required whenever CTs are fitted. This bench: one summed CT on RP2040 GPIO28 ' +
+      '(ct_installed=1, ct_topology=1).</p></div>';
+
+    html += '<div id="step7Err"></div><div id="step7Ok"></div><p id="step7Msg" class="hint"></p>';
+    html += '<div class="gnav"><button type="button" id="step7Save">Stage &amp; commit</button></div>';
+    el.innerHTML = html;
+
+    function setVal(id, v) { var e2 = document.getElementById(id); if (e2 && v !== undefined && v !== null) e2.value = String(v); }
+    if (byId[261] && byId[261].set) setVal('s7TcType', byId[261].value);
+    if (byId[266] && byId[266].set) setVal('s7TcOffset', byId[266].value);
+    if (byId[260] && byId[260].set) setVal('s7AbsMax', byId[260].value);
+    if (byId[265] && byId[265].set) setVal('s7CtInstalled', byId[265].value);
+    if (byId[799] && byId[799].set) setVal('s7CtTopology', byId[799].value);
+
+    document.getElementById('step7Save').addEventListener('click', function () {
+      var errEl = document.getElementById('step7Err');
+      var okEl = document.getElementById('step7Ok');
+      var msgEl = document.getElementById('step7Msg');
+      okEl.innerHTML = '';
+      msgEl.textContent = '';
+
+      var tcTypeRaw = document.getElementById('s7TcType').value;
+      var tcOffsetRaw = document.getElementById('s7TcOffset').value;
+      var absMaxRaw = document.getElementById('s7AbsMax').value;
+      var ctInstalledRaw = document.getElementById('s7CtInstalled').value;
+      var ctTopologyRaw = document.getElementById('s7CtTopology').value;
+
+      var fields = {
+        tcType: tcTypeRaw === '' ? -1 : parseInt(tcTypeRaw, 10),
+        tcOffsetC: tcOffsetRaw === '' ? 0 : parseFloat(tcOffsetRaw),
+        absMaxTempC: parseFloat(absMaxRaw),
+        ctInstalled: ctInstalledRaw === '' ? -1 : parseInt(ctInstalledRaw, 10),
+        ctTopology: ctTopologyRaw === '' ? -1 : parseInt(ctTopologyRaw, 10),
+      };
+
+      // Commit-time re-check (requirement 2 / same discipline as step 6's
+      // mirror-image check): re-fetch zones fresh right now -- a zone's
+      // max_temp_c could have changed in another tab since this screen loaded.
+      fetchJsonOr('/api/zones', null).then(function (freshZones) {
+        var freshMaxTemps = ((freshZones && freshZones.zones) || []).map(function (z) { return z.max_temp_c || 0; });
+        var v = validateStep7(fields, freshMaxTemps);
+        if (!v.valid) { renderErrList(errEl, v.errors); return; }
+        renderErrList(errEl, []);
+
+        var bodyPairs = [
+          { id: 261, name: 'tc_type', value: fields.tcType },
+          { id: 266, name: 'tc_offset_c', value: fields.tcOffsetC },
+          { id: 260, name: 'abs_max_temp_c', value: fields.absMaxTempC },
+          { id: 265, name: 'ct_installed', value: fields.ctInstalled },
+        ];
+        if (fields.ctInstalled === 1) {
+          bodyPairs.push({ id: 799, name: 'ct_topology', value: fields.ctTopology });
+        }
+
+        fetchJsonOr('/api/safety/commissioning', null).then(function (freshCommissioning) {
+          var freshParams = (freshCommissioning && freshCommissioning.params) || [];
+          var criticalIds = bodyPairs.map(function (p) { return p.id; });
+          var critical = window.kcCommissioningFindCriticalChanges(freshParams, criticalIds, bodyPairs, step7EnumLabelFor);
+          window.kcCommissioningCommitAndVerify(bodyPairs, critical, {
+            setMsg: function (t) { msgEl.textContent = t; },
+            confirmPrefix: 'This WRITES THE SAFETY PROCESSOR\'S (RP2040) FLASH -- safety-processor commissioning:',
+          }).then(function (res) {
+            msgEl.textContent = res.message;
+            if (res.ok) {
+              postStepState(7, 'done').then(function () {
+                okEl.innerHTML = '<p class="wok">Saved.</p>';
+                loadAll();
+              });
+            }
+          });
+        });
+      });
+    });
+  });
+}
+
 function gRenderStepDetail(stepId) {
   var s = latestMerged.filter(function (m) { return m.id === stepId; })[0];
   if (!s) return;
@@ -1572,15 +2240,19 @@ function gRenderStepDetail(stepId) {
     regressedNote.hidden = true;
   }
 
-  // Dispatch to this step's real content (0-6) or the generic not-built-yet
-  // placeholder (7-12). Only one body div is ever visible at a time.
-  [0, 1, 2, 3, 4, 5, 6].forEach(function (id) {
+  // Dispatch to this step's real content (0-6, 8-12) or the generic
+  // not-built-yet placeholder (7 only, as of this pass -- a different pass
+  // owns that step). Only one body div is ever visible at a time.
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].forEach(function (id) {
     var body = document.getElementById('stepBody' + id);
     if (body) body.hidden = (stepId !== id);
   });
-  document.getElementById('stepGenericContent').hidden = (stepId >= 0 && stepId <= 6);
+  // Every step 0-12 has real content as of this pass (step 7 landed here;
+  // 8-12 landed in a concurrent pass) -- the generic placeholder never shows.
+  document.getElementById('stepGenericContent').hidden = true;
   if (step2Poll) { clearInterval(step2Poll); step2Poll = null; }
   if (step3PollTimer) { clearTimeout(step3PollTimer); step3PollTimer = null; }
+  if (step9Poll) { step9StopPoll(); }
   if (stepId === 0) renderStep0();
   else if (stepId === 1) renderStep1();
   else if (stepId === 2) renderStep2();
@@ -1588,6 +2260,12 @@ function gRenderStepDetail(stepId) {
   else if (stepId === 4) renderStep4();
   else if (stepId === 5) renderStep5();
   else if (stepId === 6) renderStep6();
+  else if (stepId === 7) renderStep7();
+  else if (stepId === 8) renderStep8();
+  else if (stepId === 9) renderStep9();
+  else if (stepId === 10) renderStep10();
+  else if (stepId === 11) renderStep11();
+  else if (stepId === 12) renderStep12();
 }
 
 function gResume() {

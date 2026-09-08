@@ -102,7 +102,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "http/safety_commissioning_page.html"
         "http/safety_config_page.html"
         "http/zones_page.html"
-        "http/setup_wizard_page.html")
+        "http/setup_wizard_page.html"
+        "http/commissioning_shared.js")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         get_filename_component(kilnctl_gz_basename "${asset}" NAME)

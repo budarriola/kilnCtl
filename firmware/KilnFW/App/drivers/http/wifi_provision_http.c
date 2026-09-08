@@ -74,6 +74,13 @@ extern const uint8_t nav_js_gz_start[] asm("_binary_nav_js_gz_start");
 extern const uint8_t nav_js_gz_end[] asm("_binary_nav_js_gz_end");
 extern const uint8_t app_js_gz_start[] asm("_binary_app_js_gz_start");
 extern const uint8_t app_js_gz_end[] asm("_binary_app_js_gz_end");
+/* SETUP_WIZARD_PLAN.md step 8 (safety processor commissioning): the
+ * client-side confirm-and-read-back logic shared between
+ * safety_commissioning_page.html and setup_wizard_page.html's step 7, so
+ * that step could embed inline (owner decision) without duplicating that
+ * logic a second time -- see commissioning_shared.js's own header comment. */
+extern const uint8_t commissioning_shared_js_gz_start[] asm("_binary_commissioning_shared_js_gz_start");
+extern const uint8_t commissioning_shared_js_gz_end[] asm("_binary_commissioning_shared_js_gz_end");
 
 static httpd_handle_t s_server;
 
@@ -132,6 +139,18 @@ static esp_err_t app_js_get_handler(httpd_req_t *req)
     web_set_asset_cache_headers(req);
     return httpd_resp_send(req, (const char *)app_js_gz_start,
                            (size_t)(app_js_gz_end - app_js_gz_start));
+}
+
+static esp_err_t commissioning_shared_js_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "commissioning_shared.js");
+    }
+    httpd_resp_set_type(req, "text/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
+    return httpd_resp_send(req, (const char *)commissioning_shared_js_gz_start,
+                           (size_t)(commissioning_shared_js_gz_end - commissioning_shared_js_gz_start));
 }
 
 static esp_err_t wifi_page_get_handler(httpd_req_t *req)
@@ -1101,6 +1120,11 @@ esp_err_t wifi_provision_http_start(void)
     static const httpd_uri_t app_js_uri = {
         .uri = "/app.js", .method = HTTP_GET, .handler = app_js_get_handler,
     };
+    /* SETUP_WIZARD_PLAN.md step 8 -- see commissioning_shared.js's own
+     * header comment. Same module/reasoning as nav_js_uri/app_js_uri above. */
+    static const httpd_uri_t commissioning_shared_js_uri = {
+        .uri = "/commissioning_shared.js", .method = HTTP_GET, .handler = commissioning_shared_js_get_handler,
+    };
     /* Unlike every other *_http.c module's registration block, these 8 were
      * firing-and-forgetting httpd_register_uri_handler()'s return value --
      * the one gap in the codebase's own convention (see e.g. ota_http.c's
@@ -1135,6 +1159,7 @@ esp_err_t wifi_provision_http_start(void)
     REGISTER_OR_LOG(&theme_css_uri);
     REGISTER_OR_LOG(&nav_js_uri);
     REGISTER_OR_LOG(&app_js_uri);
+    REGISTER_OR_LOG(&commissioning_shared_js_uri);
 
 #undef REGISTER_OR_LOG
 

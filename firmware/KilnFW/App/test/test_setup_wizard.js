@@ -458,6 +458,250 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(/z0_deadtime=30/.test(capturedBody), 'step2 merge: model dead time survives an unrelated step commit');
 })();
 
+// ---- Step 8: CT mapping validation (this pass) ------------------------
+(function testValidateStep8() {
+  const ctx = loadPageScript(noopFetch);
+  const notInstalled = ctx.validateStep8(0, null, 0, []);
+  assert(notInstalled.valid, 'step8: ct_installed=0 needs no mapping validation at all');
+
+  const noTopology = ctx.validateStep8(1, null, 0, []);
+  assert(!noTopology.valid, 'step8: ct_installed=1 with no topology set is refused');
+
+  const perZoneOk = ctx.validateStep8(1, 0, 0x3, [0, 1]); // CT0->zone0, CT1->zone1
+  assert(perZoneOk.valid, 'step8: per-zone topology, distinct zones per CT is valid');
+
+  const perZoneClash = ctx.validateStep8(1, 0, 0x3, [0, 0]); // both CTs -> zone0
+  assert(!perZoneClash.valid, 'step8: per-zone topology, two CTs mapped to the same zone is refused');
+  assert(/both map to zone 1/.test(perZoneClash.errors[0]), 'step8: the clash names the zone');
+
+  const summedOk = ctx.validateStep8(1, 1, 0x3, [0, 0]); // summed: same zone id on multiple CTs is fine
+  assert(summedOk.valid, 'step8: summed topology tolerates the same zone id on multiple CT channels');
+})();
+
+// ---- Step 9: heat-required marking is not silently walkable past -------
+(function testStep9HeatWarningPresent() {
+  const html = fs.readFileSync(PAGE_PATH, 'utf8');
+  assert(/APPLIES HEAT/.test(html), 'step9: the page source names the heat warning verbatim');
+  assert(/step9Ack/.test(html), 'step9: an explicit presence/safety acknowledgement checkbox gates the start button');
+  assert(/step9SkipLater/.test(html), 'step9: the step offers an explicit skip-for-later control');
+  assert(/does NOT stop it/.test(html), 'step9: closing the tab not stopping a running sweep is stated, not implied');
+})();
+
+(function testStep9CheckBusy() {
+  const ctx = loadPageScript(makeFetch((url) => {
+    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'RUNNING' } };
+    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'IDLE' } };
+    return { ok: true, status: 200, body: {} };
+  }));
+  return ctx.step9CheckBusy().then((reason) => {
+    assert(typeof reason === 'string' && /firing is currently running/.test(reason),
+      'step9CheckBusy: a running firing refuses the CT verification sweep');
+  });
+})();
+
+(function testStep9CheckBusyNeverBlocksOnFailedFetch() {
+  const ctx = loadPageScript(function () { return Promise.reject(new Error('network down')); });
+  return ctx.step9CheckBusy().then((reason) => {
+    assert(reason === null, 'step9CheckBusy: a failed fetch never blocks the start (matches ' +
+      'checkFiringOrAutotuneRunning()\'s own rule)');
+  });
+})();
+
+// ---- Step 10: hand-entered gains vs. autotune branch -------------------
+(function testAutotunePrecheck() {
+  const ctx = loadPageScript(noopFetch);
+  const noTc = ctx.autotunePrecheck({ thermo_mask: 0, relay_mask: 1, zone_type: 0 });
+  assert(/no thermocouple channel assigned/.test(noTc), 'step10: no-thermocouple refusal matches autotune_engine.c verbatim');
+
+  const onOff = ctx.autotunePrecheck({ thermo_mask: 1, relay_mask: 1, zone_type: 1 });
+  assert(/on\/off device, not a heater/.test(onOff), 'step10: on/off-zone refusal matches autotune_engine.c verbatim');
+
+  const noRelay = ctx.autotunePrecheck({ thermo_mask: 1, relay_mask: 0, zone_type: 0 });
+  assert(/no relay mask configured/.test(noRelay), 'step10: no-relay refusal matches autotune_engine.c verbatim');
+
+  const ok = ctx.autotunePrecheck({ thermo_mask: 1, relay_mask: 1, zone_type: 0 });
+  assert(ok === null, 'step10: a normal heater zone with sensor+relay has no client-side autotune precheck refusal');
+})();
+
+(function testStep10HandEnteredCountsAsComplete() {
+  const html = fs.readFileSync(PAGE_PATH, 'utf8');
+  assert(/Hand-entered gains complete this step just as fully as autotune/.test(html),
+    'step10: the UI states hand-entered gains explicitly complete the step, not a silent loophole');
+  assert(/autotune is not mandatory|complete this step just as fully/.test(html),
+    'step10: the deliberate-choice framing is present in the page text');
+})();
+
+// ---- Completion gate: NEGATIVE TEST (task requirement) -----------------
+// Prove computeCompleteness() can actually fail this test if it regresses --
+// simulate the exact bug class this repo has shipped before ("a check that
+// cannot fail proves nothing"): make the readiness-not_done branch a no-op
+// and confirm the test goes RED, then restore by hand.
+(function testCompletenessGateCatchesOutstandingItem() {
+  const ctx = loadPageScript(noopFetch);
+  const readiness = readinessOf([item('guard_max_temp', 'not_done', 'zone 1 has no ceiling')]);
+  const merged = ctx.mergeAllSteps({ version: 1, steps: {} }, readiness);
+  const gate = ctx.computeCompleteness(merged, readiness);
+  assert(gate.complete === false, 'completeness gate: a not_done readiness item blocks "complete"');
+  assert(gate.reasons.some((r) => /guard_max_temp is not_done/.test(r)),
+    'completeness gate: the outstanding item is named in the reasons list');
+})();
+
+// ---- Step 7: safety processor commissioning (embedded per owner decision) --
+// validateStep7() and the enum-label helper it shares with the confirm
+// dialog. Fields: tc_type (261), tc_offset_c (266), abs_max_temp_c (260),
+// ct_installed (265), ct_topology (799) -- same ids/codes
+// safety_commissioning_page.html's own GROUPS table uses.
+(function testStep7Validate() {
+  const ctx = loadPageScript(noopFetch);
+  const okFields = { tcType: 3, tcOffsetC: 0, absMaxTempC: 1300, ctInstalled: 1, ctTopology: 1 };
+  assert(ctx.validateStep7(okFields, [1000, 1200]).valid === true,
+    'step7: a real tc_type + positive abs_max_temp_c above every zone ceiling + CT answers validates');
+
+  const noType = Object.assign({}, okFields, { tcType: -1 });
+  assert(ctx.validateStep7(noType, []).valid === false, 'step7: tc_type must be chosen (no default)');
+
+  const badType = Object.assign({}, okFields, { tcType: 8 });
+  assert(ctx.validateStep7(badType, []).valid === false, 'step7: an out-of-range tc_type code is refused');
+
+  const zeroMax = Object.assign({}, okFields, { absMaxTempC: 0 });
+  assert(ctx.validateStep7(zeroMax, []).valid === false,
+    'step7: abs_max_temp_c of 0 is refused -- no "unlimited" value');
+
+  const nanOffset = Object.assign({}, okFields, { tcOffsetC: NaN });
+  assert(ctx.validateStep7(nanOffset, []).valid === false, 'step7: a non-finite tc_offset_c is refused');
+
+  const noCtAnswer = Object.assign({}, okFields, { ctInstalled: -1 });
+  assert(ctx.validateStep7(noCtAnswer, []).valid === false,
+    'step7: ct_installed must be answered explicitly -- no default');
+
+  const ctYesNoTopology = Object.assign({}, okFields, { ctTopology: -1 });
+  assert(ctx.validateStep7(ctYesNoTopology, []).valid === false,
+    'step7: ct_installed=yes requires a chosen ct_topology');
+
+  const ctNoTopologyOptional = Object.assign({}, okFields, { ctInstalled: 0, ctTopology: -1 });
+  assert(ctx.validateStep7(ctNoTopologyOptional, []).valid === true,
+    'step7: ct_installed=no does not require a topology answer (deliberately_off is a legitimate finish)');
+})();
+
+// Requirement 2, the abs-max relationship (must never be tighter than the
+// ESP's) -- REFUSED, not clamped, mirroring step 6's own check in the
+// opposite direction.
+(function testStep7AbsMaxNeverTighterThanEsp() {
+  const ctx = loadPageScript(noopFetch);
+  const base = { tcType: 3, tcOffsetC: 0, ctInstalled: 0, ctTopology: -1 };
+
+  const atCeiling = Object.assign({}, base, { absMaxTempC: 1200 });
+  assert(ctx.validateStep7(atCeiling, [1200]).valid === true,
+    'step7: abs_max_temp_c exactly equal to the highest zone max_temp_c is accepted');
+
+  const aboveCeiling = Object.assign({}, base, { absMaxTempC: 1300 });
+  assert(ctx.validateStep7(aboveCeiling, [1200]).valid === true,
+    'step7: abs_max_temp_c above every zone ceiling is accepted');
+
+  const belowCeiling = Object.assign({}, base, { absMaxTempC: 1000 });
+  const v = ctx.validateStep7(belowCeiling, [1200]);
+  assert(v.valid === false, 'step7: abs_max_temp_c BELOW a zone max_temp_c is refused, not clamped');
+  assert(v.errors.some((e) => /never be tighter than the ESP/.test(e)),
+    'step7: the refusal names the second-set-of-eyes rule, matching step 6\'s own wording');
+
+  const zeroZones = Object.assign({}, base, { absMaxTempC: 1000 });
+  assert(ctx.validateStep7(zeroZones, [0, 0]).valid === true,
+    'step7: zones with max_temp_c still 0 (uncommissioned) are excluded from the ceiling comparison');
+})();
+
+// step7EnumLabelFor: the confirm dialog must name "Type K -> Type T", not
+// "3 -> 7" -- same human-label rule safety_commissioning_page.html's
+// findCriticalChanges() already applies to tc_type.
+(function testStep7EnumLabelFor() {
+  const ctx = loadPageScript(noopFetch);
+  assert(ctx.step7EnumLabelFor(261, '3') === 'Type K', 'step7: tc_type code 3 labels as Type K');
+  assert(ctx.step7EnumLabelFor(265, '1') === 'Yes -- CTs fitted', 'step7: ct_installed=1 labels as fitted');
+  assert(ctx.step7EnumLabelFor(799, '1') === 'Summed', 'step7: ct_topology=1 labels as Summed');
+  assert(ctx.step7EnumLabelFor(999, '1') === null, 'step7: an unknown field id has no enum label');
+})();
+
+// CR1-verify gap wording (requirement 3): the page must say plainly that a
+// successful commit confirms the CONFIG RECORD, not the physical chip.
+(function testStep7Cr1GapWordingHonest() {
+  const html = fs.readFileSync(PAGE_PATH, 'utf8');
+  assert(/CONFIG RECORD now holds this type, NOT that the MAX31856 chip/.test(html),
+    'step7: the CR1-verify gap is stated explicitly, not implied as a stronger confirmation');
+})();
+
+// ---- commissioning_shared.js: the read-back verification itself (Non-
+// negotiable 1: "a post-write read-back that fails loudly on disagreement").
+// Loads the real shared file (not a reimplementation) into its own vm
+// context with a stub fetch: POST reports {ok:true} (as a real board would
+// for an accepted commit) but the follow-up GET reports a DIFFERENT value
+// for the critical field than what was just sent -- kcCommissioningCommitAndVerify
+// must resolve {ok:false} and name the field, never trust the POST's ok:true alone.
+const COMMISSIONING_SHARED_PATH = resolveDriverFile(resolveDriversDir(__dirname), 'commissioning_shared.js');
+
+function loadCommissioningShared(fetchImpl, confirmImpl) {
+  const code = fs.readFileSync(COMMISSIONING_SHARED_PATH, 'utf8');
+  const sandbox = { fetch: fetchImpl, confirm: confirmImpl || (() => true), console };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(code, { filename: 'commissioning_shared.js' }).runInContext(sandbox);
+  return sandbox;
+}
+
+(function testReadbackMismatchFailsLoudly() {
+  const boardValue = { 261: '3' }; // board's own tc_type after the "successful" commit
+  const fetchImpl = (url, opts) => {
+    if (opts && opts.method === 'POST') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    }
+    // GET read-back: reports a DIFFERENT value (7, Type T) than what was
+    // sent (3, Type K) -- the board silently did not apply the write.
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ params: [{ id: 261, name: 'tc_type', value: boardValue[261], set: true }] }),
+    });
+  };
+  const ctx = loadCommissioningShared(fetchImpl);
+  const bodyPairs = [{ id: 261, name: 'tc_type', value: '7' }]; // what we tried to write
+  const critical = [{ id: 261, name: 'tc_type', oldDisplay: 'Type K', newDisplay: 'Type T' }];
+  return ctx.kcCommissioningCommitAndVerify(bodyPairs, critical, { setMsg: () => {} }).then((res) => {
+    assert(res.ok === false, 'read-back mismatch: overall result is NOT ok, even though POST reported ok:true');
+    assert(/does NOT match what was just written/.test(res.message),
+      'read-back mismatch: message fails loudly and names the disagreement');
+    assert(/tc_type/.test(res.message), 'read-back mismatch: the offending field is named');
+  });
+})();
+
+(function testReadbackMatchSucceeds() {
+  const fetchImpl = (url, opts) => {
+    if (opts && opts.method === 'POST') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    }
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ params: [{ id: 261, name: 'tc_type', value: '7', set: true }] }),
+    });
+  };
+  const ctx = loadCommissioningShared(fetchImpl);
+  const bodyPairs = [{ id: 261, name: 'tc_type', value: '7' }];
+  const critical = [{ id: 261, name: 'tc_type', oldDisplay: 'Type K', newDisplay: 'Type T' }];
+  return ctx.kcCommissioningCommitAndVerify(bodyPairs, critical, { setMsg: () => {} }).then((res) => {
+    assert(res.ok === true, 'read-back match: agreeing read-back reports ok:true');
+    assert(/confirmed by read-back/.test(res.message), 'read-back match: message says confirmed');
+  });
+})();
+
+// ---- NEGATIVE TEST (task requirement): prove testReadbackMismatchFailsLoudly
+// can actually fail, not just always pass. See report for the exact steps
+// taken by hand: (1) in commissioning_shared.js's commitAndVerify(), the
+// mismatch line
+//   return !p || !p.set || String(p.value) !== String(pair.value);
+// was changed to `return false;` (bug: mismatch never detected), (2) this
+// test file was re-run, (3) testReadbackMismatchFailsLoudly went RED on its
+// first assertion ("read-back mismatch: overall result is NOT ok, even
+// though POST reported ok:true") because res.ok came back true, (4) the
+// edit was reversed by hand, (5) `git diff` on commissioning_shared.js
+// confirmed empty before this pass committed.
+
 Promise.resolve().then(() => {
   console.log('');
   console.log((passed + failed) + ' assertions, ' + passed + ' passed, ' + failed + ' failed');
