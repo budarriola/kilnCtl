@@ -1157,3 +1157,101 @@ regression: the boot immediately following it, and the `debug_reset` boot
 after that, both ran clean (`reset_reason='software (esp_restart)'`,
 heartbeats every 18 s with no further panics). Unacknowledged; owner should
 review `GET /api/crash_report` before assuming it is inert.
+
+**2026-09-08 follow-up: root cause found, `bc0befd0`'s premise was wrong, not
+the worker.** The prior entry above assumed the flash-safe worker "should
+have started" by the time `relay_cycles_init()`/`adaptive_tune_init()` ran
+and speculated something was blocking `uart_bridge_ext_start_flash_worker()`
+itself for 16+ seconds. That is not what the code does. Re-reading
+`main_control_bringup.c` line by line: `relay_cycles_init()` (was line ~136)
+and `profile_executor_start()` -> `adaptive_tune_init()` (was line ~161) both
+run **before** `uart_bridge_ext_start_flash_worker()` (was line ~207) --
+*textually later in the exact same function, on the exact same task*. All
+of `main_control_bringup()` runs single-threaded on the boot task, so a
+bounded wait placed before the worker's own creation call can never observe
+it start: nothing else runs on that task to create the worker while the
+wait is polling. The two "still not started" timestamps aren't evidence of
+a slow or stuck worker -- they are two independent 5 s bounded waits run
+back-to-back on the same task, 11189 -> 16239 ms is exactly one 5050 ms
+wait-then-continue later. The flash worker had not been asked to start at
+either timestamp; it is created only when execution reaches the old line
+~207, which is after both waits already gave up.
+
+**`firing_stats` explained the same pass**: unlike `relay_cycles`/
+`adaptive_tune`, `firing_stats_cfg_fs`'s migrate-on-load is lazy --
+triggered from `firing_stats_load()`, called from `profile_executor_status.c`
+only when firing history is actually read (e.g. a status/history HTTP
+request), never unconditionally at boot. `migration_deferred:false` with
+`file_backed:false` on that hardware run is simply "never asked to migrate
+this boot" (no history read happened), a different and, by design, correct
+state -- not a bug, and not the same failure mode as the other two.
+
+**Fix chosen: start the worker earlier, before either caller.**
+`uart_bridge_ext_start_flash_worker()` moved in `main_control_bringup.c` to
+run immediately after `kiln_io_owner_start()`/the sim-plant block, before
+both `relay_cycles_init()` and `profile_executor_start()`. This removes the
+ordering hazard outright: both bounded waits now find `started_fn()` already
+true on their very first poll (0 ms cost, not 5000 ms), so cold-boot
+migration completes on every boot rather than deferring on every boot.
+Weighed against the other two options named in the review request:
+- *Defer migration until the worker signals ready via callback/event*
+  (mirroring `5658b949`'s move of the format path off the boot path): more
+  moving parts (a new callback/event mechanism, plus two callback-shaped
+  rewrites of two boot-time reads that currently return their resolved
+  value synchronously to their callers) to solve a problem a plain reorder
+  already solves for free. Right fit for the format path (seconds-long,
+  worth backgrounding); overkill for a single small blob write that the
+  reorder makes instant.
+- *Migrate-on-load lazily at first access* (the `firing_stats` shape):
+  correct in general, but `relay_cycles`/`adaptive_tune` are read
+  synchronously at `main_control_bringup()` time specifically because their
+  resolved values feed control-loop state before the executor starts --
+  turning that into a lazy first-access path would change more than the
+  boot-ordering bug requires and risks the exact "who else holds a copy or
+  a derived expectation of this" hazard CLAUDE.md's reset-one-side class
+  warns about (a value read early for the control loop that is later
+  silently replaced with a "real" migrated value nobody re-propagates).
+The reorder is a same-function line move with no new state, no new
+mechanism, and directly matches the confirmed cause -- the other two are
+solving problems this boot ordering does not actually have.
+
+**Permanent-vs-transient deferral**: `relay_cycles_migration_worker_wait_
+deferred()`/`adaptive_tune_kibase_migration_worker_wait_deferred()` are each
+read exactly once, at boot, with no retry path anywhere in either module
+(confirmed by grep -- both flags are set once from `relay_cycles_init()`/
+`adaptive_tune_init()` and never touched again). `migration_deferred:true`
+in `GET /api/cfgfs` was therefore already permanent-for-this-boot before
+this fix, not transient -- the ambiguity the hardware run exposed was that
+nothing said so explicitly, so it read identically to "still catching up."
+With the worker now started before either caller, `migration_deferred:true`
+should no longer occur in practice except a genuine internal-SRAM
+allocation failure (the pre-existing `uart_bridge_ext_start_flash_worker()
+!= ESP_OK` branch) -- a case that already logs loudly and is now the ONLY
+remaining path to `migration_deferred:true`, making the flag effectively
+unambiguous going forward without needing a separate transient/permanent
+field.
+
+**Older bridges unaffected**: `zones`/`prefs`/`profiles`/`kiln_cfg_store`
+load from `main_network_http.c` or the executor task, both of which run
+strictly after `main_control_bringup()` returns -- i.e. after the worker
+start call regardless of where inside `main_control_bringup()` that call
+sits. Moving it earlier only makes their margin larger, not smaller; this
+still holds.
+
+**Negative test**: `firmware/KilnFW/App/test/test_flash_worker_boot_order.c`
+(new, host-buildable, links the real `flash_worker_wait.c`) drives the real
+`flash_worker_wait_until_started()` with a fake "is the worker created yet"
+predicate under both orderings. Old order (predicate never flips true during
+the wait, modeling the worker being started later in the same function)
+times out as expected. Injecting the bug into the "new order" case (setting
+the fake predicate to stay false, modeling the fix being reverted) was
+caught immediately: `FAIL: new order (worker started first) succeeds
+immediately -- migration proceeds instead of deferring`. Reverted by hand;
+`git diff` on the test file's assertion line empty afterward (confirmed via
+re-run: both cases `PASS`, `ALL PASS`, exit 0).
+
+**Reflash needed**: yes -- `main_control_bringup.c`'s boot order changed;
+this has not been flashed or hardware-verified. Read back `GET /api/cfgfs`
+after flashing and confirm `relay_cycles`/`adaptive_tune` show
+`file_backed:true, migration_deferred:false` on a cold boot before trusting
+the fix on hardware.

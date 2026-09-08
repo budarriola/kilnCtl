@@ -129,10 +129,50 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     }
 #endif
 
+    // --- Flash-safe executor for the CONTROL/PROFILES/AUTOTUNE bridges -------
+    // MOVED HERE 2026-09-08 (docs/audits/flash_worker_boot_race_2026-09-08.md):
+    // this used to be started AFTER profile_executor_start()/autotune_engine_
+    // start() below, but relay_cycles_init() (right after this block) and
+    // adaptive_tune_init() (called synchronously from inside
+    // profile_executor_start()) each do a bounded wait-then-migrate against
+    // this worker at boot -- and since all of this runs on ONE task, a wait
+    // placed before the worker's own creation call can NEVER see it start:
+    // the creation is later in this same call chain, so every cold boot
+    // spun the full ceiling on BOTH waits (confirmed on hardware: "still not
+    // started" logged twice, ~5 s apart, matching two sequential bounded
+    // waits) and both items landed NVS-only with migration_deferred=true
+    // every single time, not just occasionally. Starting the worker before
+    // either caller runs removes the ordering hazard outright, so this is
+    // simply relocated rather than replaced.
+    //
+    // Its 8192-byte stack must still come from internal SRAM (see the
+    // HAZARD block in uart_bridge_ext.c); internal DRAM is at its tightest
+    // right after lvgl_port_start() (main_boot_early.c), which already ran
+    // before main_control_bringup() -- measured 7680 B largest free block on
+    // 2026-08-20 with the three MAX31856s fitted, which is under 8192 and
+    // cost all three of the CONTROL/PROFILES/AUTOTUNE bridge surfaces for a
+    // whole boot at THAT point. This spot is strictly earlier (and so
+    // strictly roomier) than the old one -- nothing between here and the old
+    // call site allocates memory this task doesn't also allocate before
+    // reaching here today -- so the old measurement is a safe upper bound,
+    // not a reason to move this back later.
+    if (uart_bridge_ext_start_flash_worker() != ESP_OK) {
+        ESP_LOGE(MAIN_TAG, "flash-safe executor failed to start (internal SRAM, largest block %u B) -- "
+                      "the CONTROL, PROFILES and AUTOTUNE uart bridges (tasks 8/9/10) will NOT "
+                      "start this boot: no zone PID/model reads or writes, no fire-profile list/"
+                      "save/delete or profile execution over the PC link, no autotune status or "
+                      "control. Kiln control from the PC GUI is unavailable; the HTTP dashboard "
+                      "and the thermo/io/safety bridges are unaffected. relay_cycles/adaptive_tune "
+                      "migrate-on-load will also see the worker absent and defer (see GET /api/cfgfs).",
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+
     // Lifetime relay contact-cycle counts (TODO.md 6A.1), loaded before the
     // executor starts adding to them. A failure here costs the wear history,
     // not correctness, so it is logged and ignored like every other
-    // non-essential subsystem in this file.
+    // non-essential subsystem in this file. Runs AFTER the flash-safe worker
+    // above so its migrate-on-load bounded wait (relay_cycles.c) actually has
+    // a running worker to find.
     esp_err_t cycles_err = relay_cycles_init();
     if (cycles_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "relay_cycles_init failed: %s -- contact-cycle history not kept this boot",
@@ -193,25 +233,6 @@ void main_control_bringup(main_boot_ctx_t *ctx)
         }
     } else {
         ESP_LOGW(MAIN_TAG, "RECOVERY MODE: autotune_engine_start() skipped -- no autotune this boot");
-    }
-
-    // --- Flash-safe executor for the CONTROL/PROFILES/AUTOTUNE bridges -------
-    // Started HERE, and deliberately not down with the bridge tasks that use
-    // it: its 8192-byte stack must come from internal SRAM (see the HAZARD
-    // block in uart_bridge_ext.c) and internal DRAM is at its tightest right
-    // after lvgl_port_start() (main_bridges_bringup.c) -- measured 7680
-    // largest free block on 2026-08-20 with the three MAX31856s fitted,
-    // which is under 8192 and cost all three of those bridge surfaces for a
-    // whole boot. At this stage the largest free block is ~31744. Do not
-    // move this later.
-    if (uart_bridge_ext_start_flash_worker() != ESP_OK) {
-        ESP_LOGE(MAIN_TAG, "flash-safe executor failed to start (internal SRAM, largest block %u B) -- "
-                      "the CONTROL, PROFILES and AUTOTUNE uart bridges (tasks 8/9/10) will NOT "
-                      "start this boot: no zone PID/model reads or writes, no fire-profile list/"
-                      "save/delete or profile execution over the PC link, no autotune status or "
-                      "control. Kiln control from the PC GUI is unavailable; the HTTP dashboard "
-                      "and the thermo/io/safety bridges are unaffected.",
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
 
     main_heap_stage("executor+autotune");
