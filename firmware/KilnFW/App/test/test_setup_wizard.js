@@ -67,9 +67,14 @@ function makeFetch(responder) {
   };
 }
 
-function buildContext(fetchImpl, hash) {
-  const document = makeDocument();
+function buildContext(fetchImpl, hash, documentOverride) {
+  const document = documentOverride || makeDocument();
   const localStorageData = {};
+  // hashListeners is captured on the sandbox so a test can simulate the
+  // browser actually dispatching 'hashchange' (real gGoto() no longer
+  // renders synchronously when the hash changes -- see gRenderNavCount
+  // below -- it relies on this event to trigger the one real render).
+  const hashListeners = [];
   const sandbox = {
     document,
     window: { kcEscapeHtml: (s) => String(s), location: { hash: hash || '', pathname: '/' } },
@@ -86,18 +91,70 @@ function buildContext(fetchImpl, hash) {
     clearTimeout,
   };
   sandbox.window.document = document;
-  sandbox.window.addEventListener = () => {};
+  sandbox.window.addEventListener = (type, fn) => { if (type === 'hashchange') hashListeners.push(fn); };
   sandbox.globalThis = sandbox;
+  sandbox.__hashListeners = hashListeners;
   vm.createContext(sandbox);
   return sandbox;
 }
 
-function loadPageScript(fetchImpl, hash) {
+function loadPageScript(fetchImpl, hash, documentOverride) {
   const html = fs.readFileSync(PAGE_PATH, 'utf8');
   const code = extractInlineScript(html);
-  const ctx = buildContext(fetchImpl, hash);
+  const ctx = buildContext(fetchImpl, hash, documentOverride);
   new vm.Script(code, { filename: 'setup_wizard_page.html (inline script)' }).runInContext(ctx);
   return ctx;
+}
+
+// Simulates the browser actually firing 'hashchange' after window.location.hash
+// was assigned a NEW value -- gGoto() (setup_wizard_page.html) intentionally
+// does not render synchronously in that case any more (§1 fix), it defers to
+// this event, so a test driving real navigation must fire it by hand exactly
+// once per hash assignment, same as a real browser would.
+function fireHashChange(ctx) {
+  ctx.__hashListeners.forEach((fn) => fn());
+}
+
+// Minimal scoped-selector fake DOM for testStep2SelectorScoped* below: models
+// just enough of document.querySelector('#containerId .zonecard[data-zone="N"]')
+// vs the unscoped '.zonecard[data-zone="N"]' to prove a scoped selector picks
+// the right container's card even when another container has a same-indexed
+// decoy earlier in document order (the exact §3 defect: an unscoped selector
+// only worked by DOM ordering).
+function makeScopedZoneDocument(cards) {
+  function matches(card, sel) {
+    const scoped = /^#(\S+)\s+(.*)$/.exec(sel);
+    let containerReq = null, rest = sel;
+    if (scoped) { containerReq = scoped[1]; rest = scoped[2]; }
+    const zm = /\.zonecard\[data-zone="(\d+)"\]/.exec(rest);
+    if (!zm) return false;
+    if (containerReq && card.container !== containerReq) return false;
+    return card.zone === parseInt(zm[1], 10);
+  }
+  function makeCardEl(card) {
+    return {
+      dataset: { zone: String(card.zone) },
+      querySelectorAll(sel) {
+        if (sel === '.s2chan:checked') {
+          return (card.checkedChannels || []).map((ch) => ({ dataset: { ch: String(ch) } }));
+        }
+        return [];
+      },
+      querySelector(sel) {
+        if (sel === '.s2name') return { value: card.name || '' };
+        return null;
+      },
+    };
+  }
+  return {
+    getElementById: () => makeElement(),
+    querySelector(sel) {
+      const found = cards.filter((c) => matches(c, sel));
+      return found.length ? makeCardEl(found[0]) : null;
+    },
+    querySelectorAll: () => [],
+    body: makeElement('body'), documentElement: makeElement('documentElement'),
+  };
 }
 
 function runMicrotasks() {
@@ -946,6 +1003,92 @@ function loadCommissioningShared(fetchImpl, confirmImpl) {
     assert(res.ok === true, 'read-back match: agreeing read-back reports ok:true');
     assert(/confirmed by read-back/.test(res.message), 'read-back match: message says confirmed');
   });
+})();
+
+// ---- JS hygiene pass (docs/audits/setup_wizard_review_2026-09-08.md) -----
+
+// §1: gGoto() + the 'hashchange' listener used to BOTH render on a real
+// navigation (gGoto() rendered directly, unconditionally, on top of setting
+// window.location.hash -- which then also fired 'hashchange', which rendered
+// again), so one click rendered twice and re-fetched that step's data twice.
+// gRenderNavCount (exposed for exactly this purpose) counts every actual
+// render; a real navigation must produce exactly one.
+(function testOneRenderPerNavigation() {
+  const ctx = loadPageScript(noopFetch, '');
+  return runMicrotasks().then(() => {
+    const before = ctx.gRenderNavCount;
+    ctx.gGoto(2); // hash '' -> '#step=2': a real change, so gGoto() must NOT render synchronously.
+    assert(ctx.gRenderNavCount === before,
+      'gGoto() to a new hash defers rendering to the hashchange event instead of rendering directly');
+    fireHashChange(ctx); // simulates the browser's one resulting event
+    assert(ctx.gRenderNavCount === before + 1,
+      'exactly one render happens per navigation once hashchange fires');
+    // A second, distinct navigation must also be exactly one render, not an
+    // accumulating double per click.
+    ctx.gGoto(3);
+    fireHashChange(ctx);
+    assert(ctx.gRenderNavCount === before + 2,
+      'a second navigation adds exactly one more render, not two');
+  });
+})();
+
+// gGoto() to a step that is ALREADY open (hash unchanged, e.g. re-clicking
+// the same "Open" button) must still render once directly -- no hashchange
+// event fires in that case, so skipping the direct render would render
+// nothing at all.
+(function testGGotoRendersDirectlyWhenHashAlreadyCorrect() {
+  const ctx = loadPageScript(noopFetch, '#step=5');
+  return runMicrotasks().then(() => {
+    const before = ctx.gRenderNavCount;
+    ctx.gGoto(5); // hash is already '#step=5' -- no hashchange will fire
+    assert(ctx.gRenderNavCount === before + 1,
+      'gGoto() to the step already open renders directly exactly once (no hashchange would fire otherwise)');
+  });
+})();
+
+// NEGATIVE TEST for §1 (task requirement): proof the counter can actually
+// catch a regression. Performed by hand against the real file, not simulated
+// here -- see the report for the exact steps (reintroduce the old
+// unconditional render + hash-set in gGoto(), re-run this file, quote the
+// failing line, revert, confirm `git diff` empty). Left as a comment (like
+// the commissioning_shared.js negative test below) so the procedure is
+// preserved without permanently shipping a broken gGoto().
+
+// §2: a save confirmation used to be written directly into the DOM and then
+// immediately raced by loadAll()'s re-render of that same step, which wiped
+// it. armStepMessage()/consumeArmedStepMessage() are the fix -- a message
+// armed for step N is applied once, after step N's own next render actually
+// finishes, so it survives the refresh instead of losing the race.
+(function testArmedStepMessageSurvivesRerender() {
+  const ctx = loadPageScript(noopFetch);
+  let applied = 0;
+  ctx.armStepMessage(1, () => { applied++; });
+  // A render of a DIFFERENT step must not consume or apply step 1's armed message.
+  ctx.consumeArmedStepMessage(2);
+  assert(applied === 0, 'an armed message for step 1 is not applied when a different step (2) renders');
+  // The matching step's render applies it exactly once.
+  ctx.consumeArmedStepMessage(1);
+  assert(applied === 1, 'an armed message for step 1 is applied when step 1 itself renders (survives the refresh)');
+  // It must not fire a second time on a later, unrelated render of the same step.
+  ctx.consumeArmedStepMessage(1);
+  assert(applied === 1, 'a consumed armed message is not re-applied on a later render of the same step');
+})();
+
+// §3: document.querySelector('.zonecard[data-zone="N"]') in
+// step2ReadCurrentZones() used to be unscoped, so it worked only because step
+// 2 happened to be the only visible screen with a .zonecard at the time --
+// step 3 uses the identical class/attribute shape. Prove the fixed, scoped
+// selector (#stepBody2 .zonecard[...]) resolves the step-2 card even with a
+// same-indexed decoy elsewhere in the DOM ahead of it in document order.
+(function testStep2SelectorScopedNotFooledByDuplicateElsewhere() {
+  const cards = [
+    { container: 'stepBody3', zone: 0, name: 'DECOY (step 3 zone card)', checkedChannels: [] },
+    { container: 'stepBody2', zone: 0, name: 'Zone One', checkedChannels: [0] },
+  ];
+  const ctx = loadPageScript(noopFetch, '', makeScopedZoneDocument(cards));
+  const zones = ctx.step2ReadCurrentZones(1, [{}]);
+  assert(zones[0].name === 'Zone One',
+    'step2ReadCurrentZones() resolves the #stepBody2-scoped card, not a same-zone-index decoy elsewhere in the DOM');
 })();
 
 // ---- NEGATIVE TEST (task requirement): prove testReadbackMismatchFailsLoudly

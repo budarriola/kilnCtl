@@ -946,7 +946,6 @@ function renderStep8() {
       html += '<h4>Dashboard consequence of the current mapping</h4>' +
         (ctMap ? ctZoneAssignmentHtml(ctMap.mask, ctMap.zone, ctTopology) :
           '<p class="hint">Could not read the current mapping.</p>');
-      window.kcStep8Ct = { mask: ctMap ? ctMap.mask : 0, zone: ctMap ? ctMap.zone : [] };
     }
     html += '<div id="step8Err"></div><div id="step8Ok"></div>';
     html += '<div class="gnav"><button type="button" id="step8Done">I have reviewed CT setup above &amp; mark done</button></div>';
@@ -1062,7 +1061,13 @@ function renderStep9() {
       if (st.state === 'done') {
         step9StopPoll();
         document.getElementById('step9Ok').innerHTML = '<p class="wok">Verification complete.</p>';
-        postStepState(9, 'done').then(function () { loadAll(); });
+        postStepState(9, 'done').then(function () {
+          armStepMessage(9, function () {
+            var ok2 = document.getElementById('step9Ok');
+            if (ok2) ok2.innerHTML = '<p class="wok">Verification complete.</p>';
+          });
+          loadAll();
+        });
       } else if (st.state === 'failed' || st.state === 'aborted') {
         step9StopPoll();
       }
@@ -1406,21 +1411,47 @@ function currentStepId() {
   return m ? parseInt(m[1], 10) : null;
 }
 
-function gGoto(target) {
+// setup_wizard_review_2026-09-08 §1: gGoto() used to unconditionally render
+// AND set window.location.hash, while a separate 'hashchange' listener
+// (bottom of this file) ALSO rendered whenever that hash assignment actually
+// changed the hash -- so every real navigation (overview -> step, or step N
+// -> step M) rendered twice and re-fetched that step's data twice. Fix:
+// gGoto() only ever sets the hash and lets the resulting 'hashchange' event
+// do the one-and-only render (gRenderTarget() below, shared with the
+// listener); it renders directly, itself, ONLY when the hash is already
+// correct (a deep-linked initial load whose URL already carries this hash,
+// or a redundant call to the step already open) -- the case where no
+// 'hashchange' event will fire at all, so skipping the direct render would
+// silently render nothing. Either path renders exactly once.
+// gRenderNavCount (test-observable) counts actual renders so
+// test_setup_wizard.js can assert "one render per navigation" directly,
+// the same way pure functions above are asserted directly rather than by
+// eye.
+var gRenderNavCount = 0;
+
+function gRenderTarget(target) {
+  gRenderNavCount++;
   var overview = document.getElementById('gscreenOverview');
   var stepScreen = document.getElementById('gscreenStep');
   if (target === 'overview' || target === null || target === undefined) {
-    window.location.hash = '';
     overview.hidden = false;
     stepScreen.hidden = true;
     gRenderStepper();
     return;
   }
-  window.location.hash = '#step=' + target;
   overview.hidden = true;
   stepScreen.hidden = false;
   gRenderStepDetail(target);
   gRenderStepper();
+}
+
+function gGoto(target) {
+  var newHash = (target === 'overview' || target === null || target === undefined) ? '' : ('#step=' + target);
+  if (window.location.hash !== newHash) {
+    window.location.hash = newHash; // triggers exactly one 'hashchange' -> gRenderTarget()
+    return;
+  }
+  gRenderTarget(target);
 }
 
 // Marks a step's stored state via the already-landed POST /api/setup/progress
@@ -1548,7 +1579,10 @@ function renderStep1() {
         if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
         return postStepState(1, 'done');
       }).then(function () {
-        okEl.innerHTML = '<p class="wok">Saved.</p>';
+        armStepMessage(1, function () {
+          var ok2 = document.getElementById('step1Ok');
+          if (ok2) ok2.innerHTML = '<p class="wok">Saved.</p>';
+        });
         loadAll();
       }).catch(function (e) {
         // Rejection text rendered verbatim, never paraphrased (plan section 1).
@@ -1592,7 +1626,12 @@ function step2ZoneRowHtml(i, z) {
 function step2ReadCurrentZones(thermoCount, existingZones) {
   var zones = [];
   for (var i = 0; i < thermoCount; i++) {
-    var card = document.querySelector('.zonecard[data-zone="' + i + '"]');
+    // setup_wizard_review_2026-09-08 §3: scoped to #stepBody2 -- an
+    // unscoped selector worked only by DOM ordering (this was the only
+    // screen with a .zonecard visible at the time) and would silently
+    // resolve to the wrong card if another visible screen ever added a
+    // matching element (step 3's own zone cards use the same class).
+    var card = document.querySelector('#stepBody2 .zonecard[data-zone="' + i + '"]');
     if (!card) { zones.push(existingZones[i] || {}); continue; }
     var mask = 0;
     card.querySelectorAll('.s2chan:checked').forEach(function (cb) { mask |= (1 << parseInt(cb.dataset.ch, 10)); });
@@ -1684,7 +1723,10 @@ function renderStep2() {
       submitZonesConfig(dataCopy, mergedZones).then(function () {
         return postStepState(2, 'done');
       }).then(function () {
-        okEl.innerHTML = '<p class="wok">Saved.</p>';
+        armStepMessage(2, function () {
+          var ok2 = document.getElementById('step2Ok');
+          if (ok2) ok2.innerHTML = '<p class="wok">Saved.</p>';
+        });
         loadAll();
       }).catch(function (e) {
         renderErrList(errEl, [String(e.message || e)]);
@@ -1786,7 +1828,13 @@ function renderStep3() {
       }).then(function (allVerified) {
         if (allVerified) {
           okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
-          return postStepState(3, 'done').then(function () { loadAll(); });
+          return postStepState(3, 'done').then(function () {
+            armStepMessage(3, function () {
+              var ok2 = document.getElementById('step3Ok');
+              if (ok2) ok2.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
+            });
+            loadAll();
+          });
         } else {
           okEl.innerHTML = '<p class="hint" style="color:var(--warn);">Write accepted, but at least one ' +
             'channel is still not producing a valid reading -- see per-zone status above. This can be the ' +
@@ -1924,7 +1972,10 @@ function renderStep4() {
         submitZonesConfig(data, liveZones).then(function () {
           return postStepState(4, 'done');
         }).then(function () {
-          okEl.innerHTML = '<p class="wok">Saved.</p>';
+          armStepMessage(4, function () {
+            var ok2 = document.getElementById('step4Ok');
+            if (ok2) ok2.innerHTML = '<p class="wok">Saved.</p>';
+          });
           loadAll();
         }).catch(function (e) {
           renderErrList(errEl, [String(e.message || e)]);
@@ -2117,7 +2168,10 @@ function renderStep5() {
       submitZonesConfig(dataCopy, liveZones, relayNameParams).then(function () {
         return postStepState(5, 'done');
       }).then(function () {
-        okEl.innerHTML = '<p class="wok">Saved.</p>';
+        armStepMessage(5, function () {
+          var ok2 = document.getElementById('step5Ok');
+          if (ok2) ok2.innerHTML = '<p class="wok">Saved.</p>';
+        });
         loadAll();
       }).catch(function (e) {
         renderErrList(errEl, [String(e.message || e)]);
@@ -2232,7 +2286,10 @@ function renderStep6() {
           submitZonesConfig(data, liveZones).then(function () {
             return postStepState(6, 'done');
           }).then(function () {
-            okEl.innerHTML = '<p class="wok">Saved.</p>';
+            armStepMessage(6, function () {
+              var ok2 = document.getElementById('step6Ok');
+              if (ok2) ok2.innerHTML = '<p class="wok">Saved.</p>';
+            });
             loadAll();
           }).catch(function (e) {
             renderErrList(errEl, [String(e.message || e)]);
@@ -2414,7 +2471,13 @@ function renderStep7() {
             msgEl.textContent = res.message;
             if (res.ok) {
               postStepState(7, 'done').then(function () {
-                okEl.innerHTML = '<p class="wok">Saved.</p>';
+                var savedMsg = res.message;
+                armStepMessage(7, function () {
+                  var ok2 = document.getElementById('step7Ok');
+                  var msg2 = document.getElementById('step7Msg');
+                  if (ok2) ok2.innerHTML = '<p class="wok">Saved.</p>';
+                  if (msg2) msg2.textContent = savedMsg;
+                });
                 loadAll();
               });
             }
@@ -2423,6 +2486,30 @@ function renderStep7() {
       });
     });
   });
+}
+
+// setup_wizard_review_2026-09-08 §2: every step's "Save & mark done" handler
+// used to write its confirmation straight into the DOM and then immediately
+// call loadAll(), which re-fetches readiness/progress and re-renders this
+// very step from scratch (rebuilding stepBodyN's innerHTML, including a
+// fresh, empty #stepNOk) -- so the confirmation was wiped within one refresh
+// cycle and a successful save read exactly like a failed one. Fix: a save
+// handler arms a pending message for its step instead of writing it
+// directly, and consumeArmedStepMessage() (called once, after that step's
+// own render actually finishes -- see the dispatch loop below) applies it to
+// the freshly-rebuilt DOM, so it survives the refresh instead of racing it.
+var gArmedStepMessage = null; // { stepId, apply: function() {...} } | null
+
+function armStepMessage(stepId, applyFn) {
+  gArmedStepMessage = { stepId: stepId, apply: applyFn };
+}
+
+function consumeArmedStepMessage(stepId) {
+  if (gArmedStepMessage && gArmedStepMessage.stepId === stepId) {
+    var fn = gArmedStepMessage.apply;
+    gArmedStepMessage = null;
+    fn();
+  }
 }
 
 function gRenderStepDetail(stepId) {
@@ -2462,19 +2549,27 @@ function gRenderStepDetail(stepId) {
   if (step2Poll) { clearInterval(step2Poll); step2Poll = null; }
   if (step3PollTimer) { clearTimeout(step3PollTimer); step3PollTimer = null; }
   if (step9Poll) { step9StopPoll(); }
-  if (stepId === 0) renderStep0();
-  else if (stepId === 1) renderStep1();
-  else if (stepId === 2) renderStep2();
-  else if (stepId === 3) renderStep3();
-  else if (stepId === 4) renderStep4();
-  else if (stepId === 5) renderStep5();
-  else if (stepId === 6) renderStep6();
-  else if (stepId === 7) renderStep7();
-  else if (stepId === 8) renderStep8();
-  else if (stepId === 9) renderStep9();
-  else if (stepId === 10) renderStep10();
-  else if (stepId === 11) renderStep11();
-  else if (stepId === 12) renderStep12();
+  var renderPromise;
+  if (stepId === 0) renderPromise = renderStep0();
+  else if (stepId === 1) renderPromise = renderStep1();
+  else if (stepId === 2) renderPromise = renderStep2();
+  else if (stepId === 3) renderPromise = renderStep3();
+  else if (stepId === 4) renderPromise = renderStep4();
+  else if (stepId === 5) renderPromise = renderStep5();
+  else if (stepId === 6) renderPromise = renderStep6();
+  else if (stepId === 7) renderPromise = renderStep7();
+  else if (stepId === 8) renderPromise = renderStep8();
+  else if (stepId === 9) renderPromise = renderStep9();
+  else if (stepId === 10) renderPromise = renderStep10();
+  else if (stepId === 11) renderPromise = renderStep11();
+  else if (stepId === 12) renderPromise = renderStep12();
+  // Apply a save confirmation armed for THIS step (see armStepMessage()
+  // above) only after this step's own render has actually finished
+  // rebuilding the DOM -- applying it any earlier would just get overwritten
+  // by the render itself.
+  if (renderPromise && typeof renderPromise.then === 'function') {
+    renderPromise.then(function () { consumeArmedStepMessage(stepId); });
+  }
 }
 
 function gResume() {
@@ -2507,7 +2602,7 @@ function loadAll() {
 
 window.addEventListener('hashchange', function () {
   var target = currentStepId();
-  gGoto(target === null ? 'overview' : target);
+  gRenderTarget(target === null ? 'overview' : target);
 });
 
 loadAll();
