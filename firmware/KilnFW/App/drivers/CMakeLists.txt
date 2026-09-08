@@ -101,7 +101,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "http/settings_display_page.html"
         "http/safety_commissioning_page.html"
         "http/safety_config_page.html"
-        "http/zones_page.html")
+        "http/zones_page.html"
+        "http/setup_wizard_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         get_filename_component(kilnctl_gz_basename "${asset}" NAME)
@@ -170,6 +171,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "ui/ui_confirm.c"
                        "ui/ui_num_pad.c"
                        "persist/touch_cal_store.c"
+                       "persist/setup_wizard_progress.c"
                        "persist/unit_pref.c"
                        "control/ramp_assist_cfg.c"
                        "ui/ui_theme.c"
@@ -348,6 +350,10 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/profiles_builtin.c"
                        "control/profile_feasibility.c"
                        "http/readiness_http.c"
+                       # SETUP_WIZARD_PLAN.md step 3: the /setup page shell.
+                       "http/setup_wizard_http.c"
+                       # SETUP_WIZARD_PLAN.md step 2: GET/POST /api/setup/progress.
+                       "http/setup_progress_http.c"
                        "hw/board_temps.c"
                        # board_temps_http.c split out of board_temps.c 2026-09-05
                        # (HW_ABSTRACTION.md "drivers/ layering" item 3): the

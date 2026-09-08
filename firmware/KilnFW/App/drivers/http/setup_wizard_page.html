@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Setup Wizard</title>
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- docs/SETUP_WIZARD_PLAN.md, implementation step 3: "/setup page shell:
+     overview screen, 13 rows, status merged from /api/setup/progress +
+     /api/readiness, resume button, deep-link #step=N. No step content yet."
+     This file is that shell -- the stepper, the overview, the merge/
+     completeness logic. Individual step SCREENS (network provisioning
+     fields, zone editors, the embedded safety-commissioning flow, ...) are
+     later plan steps (4-11) and are NOT built here; gGoto() for a step id
+     renders a placeholder that already carries the step's live readiness
+     detail, so the shell is real and testable today without pretending any
+     step's content exists yet.
+
+     Reused verbatim from safety_commissioning_page.html (the owner's named
+     model, plan section 1): the .gstepper/.gscreen/.radio-card/.review-row/
+     .writewindow CSS, the gGoto()-hides-siblings navigation shape, "no new
+     colours" (same --ui-* / --ok / --warn / --bad tokens, no local additions
+     beyond what that page already defines), and the 32px touch-target rule
+     on every <summary>/checkbox label.
+     NOT reused, because step 3 has no writes at all yet: gCommit()'s stage-
+     then-commit-then-read-back sequence, the write-window banner, the
+     radio-card consequence-text pattern (no step screens exist to attach it
+     to), and the destructive-confirm/busy-refusal checks (those belong to
+     the individual heat-applying steps, 9/10, not the shell).
+     ADDED, because a 13-step multi-day flow needs it and 4-question
+     safety-commissioning did not: the readiness-overrides-stored-state
+     merge (mergeStepState()), the regressed-state render class, the
+     resume-where-you-left-off button, and the completion gate
+     (computeCompleteness()) that refuses "done" while any readiness item is
+     not_done/cannot_yet or a safety-relevant step is skipped
+     (SETUP_WIZARD_PLAN.md section 6). -->
+<link rel="stylesheet" href="/theme.css">
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* ---- Palette: IDENTICAL token set to safety_commissioning_page.html's
+     own local block (that page's comment explains why each page still
+     duplicates this rather than sharing a second stylesheet route). No new
+     colour is introduced anywhere in this file -- every rule below reuses
+     --ui-* / --ok / --warn / --bad / --fault-color or theme.css's shell tokens. ---- */
+  :root {
+    --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+    --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+    --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+    --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  }
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --ok: #1a7f37; --warn: #9a6700; --bad: #c0392b; --fault-color: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+      --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+      --fault-color: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+    --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+    --fault-color: var(--ui-accent-5);
+  }
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1.05em; margin-top: 1.6em; }
+  h3 { margin-top: 0; }
+  p { color: var(--muted); }
+  .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }
+  button { margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
+           border-radius: var(--ui-radius); cursor: pointer; min-height: 32px; }
+
+  /* ---- Reused verbatim from safety_commissioning_page.html's guided flow. ---- */
+  .gstepper { display: flex; gap: 0.4em; margin: 0.8em 0; flex-wrap: wrap; }
+  .gstepper span { font-size: 0.75em; padding: 0.2em 0.6em; border-radius: 999px;
+    background: var(--card-bg); border: 1px solid var(--border); color: var(--muted); }
+  .gstepper span.current { border-color: var(--link); color: var(--fg); font-weight: bold; }
+  .gstepper span.done { color: var(--ok); border-color: var(--ok); }
+  /* ADDED: the safety wizard's stepper never needed a "regressed" or
+     "skipped" state -- four questions, no persistence across sessions. This
+     one does (SETUP_WIZARD_PLAN.md section 5 item 3). Distinct border/text
+     colours from .done/.current, still only --warn/--bad tokens. */
+  .gstepper span.skipped { color: var(--muted); border-color: var(--border); text-decoration: line-through; }
+  .gstepper span.regressed { color: #fff; background: var(--bad); border-color: var(--bad); font-weight: bold; }
+  .gscreen { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+    padding: 1em 1.2em; margin-bottom: 1em; }
+  .gnav { display: flex; gap: 0.6em; margin-top: 1em; flex-wrap: wrap; }
+  .gnav button { margin-top: 0; }
+  .review-row { display: flex; justify-content: space-between; gap: 1em; padding: 0.35em 0;
+    border-bottom: 1px dotted var(--border); font-size: 0.92em; align-items: center; flex-wrap: wrap; }
+  .review-row:last-child { border-bottom: none; }
+  .review-row .rv { font-family: monospace; text-align: right; }
+
+  /* ---- ADDED for the 13-row overview: one row per step, a status pill, and
+     (for a regressed step only) the readiness detail that caused it. Kept
+     inside the same .field-card visual language the rest of this codebase's
+     config pages use, rather than a bare table -- CONFIG_REFERENCE.md's
+     "not forty-five identical-looking boxes" rule generalises to "not
+     thirteen identical-looking rows" here. ---- */
+  .steprow { display: flex; align-items: center; gap: 0.7em; padding: 0.6em 0.2em;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap; min-height: 32px; }
+  .steprow:last-child { border-bottom: none; }
+  .steprow .stepnum { font-weight: bold; width: 1.6em; flex: 0 0 auto; color: var(--muted); }
+  .steprow .steptitle { flex: 1 1 260px; min-width: 0; }
+  .steprow .steptitle .safety-flag { font-size: 0.72em; color: var(--warn); font-weight: bold; margin-left: 0.4em; }
+  .steprow .stepdetail { flex-basis: 100%; font-size: 0.8em; color: var(--muted); margin-top: 0.2em; }
+  .pill { display: inline-block; border-radius: 999px; padding: 0.15em 0.7em; font-size: 0.78em;
+    font-weight: bold; white-space: nowrap; border: 1px solid transparent; }
+  .pill-pending { background: var(--card-bg); border-color: var(--border); color: var(--muted); }
+  .pill-done { background: var(--ok); color: #fff; }
+  .pill-skipped { background: var(--card-bg); border-color: var(--border); color: var(--muted);
+    text-decoration: line-through; }
+  .pill-regressed { background: var(--bad); color: #fff; }
+  .pill-cannot_yet { background: var(--card-bg); border-color: var(--warn); color: var(--warn); }
+  .steprow .stepgo { margin: 0; padding: 0.4em 0.9em; font-size: 0.85em; min-height: 32px; }
+
+  /* ---- Completion gate banner: refuses to render "complete" the moment any
+     readiness item is not_done/cannot_yet or a safety-relevant step is
+     skipped (SETUP_WIZARD_PLAN.md section 6). Same visual weight as the
+     safety-commissioning page's writewindow banners. ---- */
+  .gate { border-radius: var(--ui-radius); padding: 0.8em 1em; margin: 0.8em 0; font-weight: bold; }
+  .gate.gate-incomplete { background: var(--warn); color: #fff; font-weight: normal; }
+  .gate.gate-complete { background: var(--ok); color: #fff; }
+  .gate ul { margin: 0.4em 0 0; padding-left: 1.3em; font-weight: normal; }
+
+  #setupOfflineMsg { color: var(--bad); font-weight: bold; }
+
+  @media (max-width: 420px) {
+    .steprow { flex-direction: column; align-items: flex-start; }
+    .steprow .stepgo { align-self: flex-start; }
+  }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+
+<h1>Whole-kiln setup wizard</h1>
+<p>Walks a new board from blank to a kiln <a href="/readiness">/readiness</a> reports fully ready --
+one guided front end onto the same checklist and the same write paths every settings page already
+uses. Nothing here is a second copy of any config value: every step's DONE state is read back live
+from the board (<code>GET /api/readiness</code>), never trusted from memory alone.</p>
+
+<div class="gstepper" id="gstepper"></div>
+
+<div class="gscreen" id="gscreenOverview">
+  <h3>Overview</h3>
+  <p id="setupOfflineMsg" hidden>Could not reach this board's readiness checklist -- showing the
+    last-known step states only. Reload once the board answers again before trusting anything below.</p>
+  <div id="gateBanner"></div>
+  <div id="stepRows"><p class="hint">Loading&hellip;</p></div>
+  <div class="gnav">
+    <button type="button" id="resumeBtn" onclick="gResume()">Resume where you left off</button>
+    <button type="button" onclick="loadAll()">Refresh</button>
+  </div>
+</div>
+
+<div class="gscreen" id="gscreenStep" hidden>
+  <h3 id="stepHeading">&nbsp;</h3>
+  <p id="stepSafetyNote" class="hint" hidden></p>
+  <p id="stepStatusLine" class="hint"></p>
+  <div id="stepRegressedNote" class="review-row" hidden></div>
+  <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
+    -- docs/SETUP_WIZARD_PLAN.md's implementation steps 4-11 add that one step at a time. This shell
+    already tracks and renders this step's true state from the board, and lets you jump straight to
+    it (deep link <code>#step=N</code>), independent of every other step and resumable after a
+    reload or a reboot.</p>
+  <div class="gnav">
+    <button type="button" onclick="gGoto('overview')">Back to overview</button>
+  </div>
+</div>
+
+<script>
+/* ==========================================================================
+ * Step 3 shell logic. Every function below is a plain, pure(-ish) function
+ * deliberately kept free of DOM access where possible (computeStepState,
+ * mergeAllSteps, computeCompleteness, pickResumeStep) so test_setup_wizard.js
+ * can drive them directly -- same "extract the real inline <script> and run
+ * it in a vm" harness test_guided_flow.js already uses for the safety
+ * commissioning page.
+ * ========================================================================== */
+
+// SETUP_WIZARD_PLAN.md section 3's ordered 13 steps. `readinessKeys` names
+// the /api/readiness item(s) (readiness_http.c's own `key` field -- see that
+// file's append_item() call sites) this step's DONE claim is checked
+// against; readiness is authoritative over anything the progress store says
+// (section 5 item 3; section 1 table). Steps 8/9/11 have NO 1:1 readiness
+// item today (the plan's own reuse map, section 7, lists no dedicated
+// checklist entry for CT mapping verification or the coupling matrix) --
+// left as an empty array rather than guessing a wrong key, and flagged here
+// so a later step wiring real content does not have to rediscover this.
+// `safety` marks the plan's section 6 "safety-relevant = 6, 7, 8 (if
+// ct_installed), 9 (if ct_installed)" list; 8/9 are marked safety:true
+// unconditionally here since this shell cannot yet read ct_installed
+// (that lives on the Pico, reachable only via the safety-commissioning
+// endpoints a later step wires up) -- ratchet-safe direction: treating them
+// as safety-relevant when they might not be blocks completion a little too
+// eagerly, never too little.
+var WIZARD_STEPS = [
+  { id: 0, title: 'Welcome / preflight', readinessKeys: [], safety: false },
+  { id: 1, title: 'Network, time & units', readinessKeys: ['network'], safety: false },
+  { id: 2, title: 'Zone count & thermocouple channels', readinessKeys: ['thermo_count'], safety: false },
+  { id: 3, title: 'Thermocouple types & calibration offsets', readinessKeys: ['calibration'], safety: false },
+  { id: 4, title: 'Zone type: heater vs on/off device', readinessKeys: ['control_mode'], safety: false },
+  { id: 5, title: 'Relays: count, assignment, names', readinessKeys: ['relays_assigned'], safety: false },
+  { id: 6, title: 'Zone commissioning limits', readinessKeys: ['guard_max_temp', 'guard_cross_zone'], safety: true },
+  { id: 7, title: 'Safety processor commissioning', readinessKeys: ['safety_commissioned'], safety: true },
+  { id: 8, title: 'Current sensing: install & calibrate', readinessKeys: [], safety: true },
+  { id: 9, title: 'CT mapping verification', readinessKeys: [], safety: true },
+  { id: 10, title: 'PID gains (autotune or by hand)', readinessKeys: ['autotune'], safety: false },
+  { id: 11, title: 'Coupling matrix (optional)', readinessKeys: [], safety: false },
+  { id: 12, title: 'First profile & final readiness gate', readinessKeys: ['profile_saved', 'storage'], safety: false },
+];
+
+function defaultProgress() {
+  // Documented shape of GET /api/setup/progress per SETUP_WIZARD_PLAN.md
+  // section 5 item 2 ("thin blob: {version, per-step {state, ts, note}}"),
+  // reproduced here as the fallback used whenever that endpoint (plan step
+  // 2, not landed as of this file) 404s, errors, or has not been built yet
+  // on this board -- every step renders as though never visited, which is
+  // the correct, safe reading of "no record exists".
+  return { version: 1, steps: {} };
+}
+
+// Precedence rule that is the whole point of this file (task requirement 2 /
+// plan section 5 item 3): the progress blob's claim is checked, per step,
+// against the SAME step's readiness item(s); a stored "done" that a mapped
+// readiness item now contradicts (not_done) renders REGRESSED, never done.
+// Conversely a step nobody ever visited in the wizard, but whose readiness
+// items already read ok (e.g. configured by hand on /settings/zones), is
+// allowed to show DONE -- readiness is the single source of truth in both
+// directions, the stored blob is read but never lets a stale "done" survive
+// a real regression, and never blocks a true completion it simply never
+// saw happen through this UI.
+function computeStepState(step, storedStep, readinessByKey) {
+  var storedState = storedStep && storedStep.state ? storedStep.state : 'pending';
+  var items = step.readinessKeys.map(function (k) { return readinessByKey[k]; }).filter(Boolean);
+  var anyNotDone = items.some(function (it) { return it.status === 'not_done'; });
+  var anyCannotYet = items.some(function (it) { return it.status === 'cannot_yet'; });
+  var allOkOrOff = items.length > 0 && items.every(function (it) {
+    return it.status === 'ok' || it.status === 'deliberately_off';
+  });
+
+  if (storedState === 'done' && anyNotDone) {
+    return {
+      state: 'regressed',
+      detail: 'Marked done, but the board now reports this outstanding: ' +
+        items.filter(function (it) { return it.status === 'not_done'; })
+             .map(function (it) { return it.label + ' -- ' + it.detail; }).join('; '),
+    };
+  }
+  if (storedState === 'skipped') {
+    return { state: 'skipped', detail: storedStep && storedStep.note ? storedStep.note : '' };
+  }
+  if (storedState === 'done' || allOkOrOff) {
+    return { state: 'done', detail: '' };
+  }
+  if (anyCannotYet) {
+    return {
+      state: 'pending',
+      detail: 'Not reachable yet: ' +
+        items.filter(function (it) { return it.status === 'cannot_yet'; })
+             .map(function (it) { return it.label + ' -- ' + it.detail; }).join('; '),
+    };
+  }
+  if (anyNotDone) {
+    return {
+      state: 'pending',
+      detail: items.filter(function (it) { return it.status === 'not_done'; })
+                   .map(function (it) { return it.label + ' -- ' + it.detail; }).join('; '),
+    };
+  }
+  return { state: 'pending', detail: '' };
+}
+
+function indexReadinessByKey(readiness) {
+  var byKey = {};
+  (readiness && readiness.items ? readiness.items : []).forEach(function (it) { byKey[it.key] = it; });
+  return byKey;
+}
+
+function mergeAllSteps(progress, readiness) {
+  var readinessByKey = indexReadinessByKey(readiness);
+  var steps = progress && progress.steps ? progress.steps : {};
+  return WIZARD_STEPS.map(function (step) {
+    var computed = computeStepState(step, steps[String(step.id)], readinessByKey);
+    return {
+      id: step.id, title: step.title, safety: step.safety,
+      state: computed.state, detail: computed.detail,
+    };
+  });
+}
+
+// Task requirement 4 / plan section 6: "setup complete" is granted only when
+// no readiness item is not_done/cannot_yet AND no safety-relevant step is
+// skipped. deliberately_off is a legitimate complete state (e.g.
+// ct_installed = no) and must never block completion by itself.
+function computeCompleteness(mergedSteps, readiness) {
+  var reasons = [];
+  (readiness && readiness.items ? readiness.items : []).forEach(function (it) {
+    if (it.status === 'not_done' || it.status === 'cannot_yet') {
+      reasons.push(it.label + ' is ' + it.status + ' -- ' + it.detail);
+    }
+  });
+  mergedSteps.forEach(function (s) {
+    if (s.safety && s.state === 'skipped') {
+      reasons.push('Step ' + s.id + ' (' + s.title + ') is safety-relevant and was skipped.');
+    }
+  });
+  return { complete: reasons.length === 0, reasons: reasons };
+}
+
+// Task requirement 3: "resumable across browser sessions and reboots" --
+// this derives PURELY from the merged (board-authoritative) state, never
+// from any in-page memory of what screen was last open, so a fresh tab
+// lands on the same answer a stale one would.
+function pickResumeStep(mergedSteps) {
+  for (var i = 0; i < mergedSteps.length; i++) {
+    if (mergedSteps[i].state === 'pending' || mergedSteps[i].state === 'regressed') {
+      return mergedSteps[i].id;
+    }
+  }
+  return null; // nothing pending/regressed -- every step is done/skipped
+}
+
+/* ==========================================================================
+ * DOM wiring below. Kept separate from the pure functions above on purpose.
+ * ========================================================================== */
+
+var latestMerged = [];
+var latestReadiness = { items: [] };
+var latestProgress = defaultProgress();
+
+function fetchJsonOr(url, fallback) {
+  return fetch(url).then(function (r) {
+    if (!r.ok) throw new Error('http ' + r.status);
+    return r.json();
+  }).catch(function () { return fallback; });
+}
+
+function gRenderStepper() {
+  var el = document.getElementById('gstepper');
+  if (!el) return;
+  var current = currentStepId();
+  el.innerHTML = latestMerged.map(function (s) {
+    var cls = s.state; // pending|done|skipped|regressed
+    if (s.id === current) cls += ' current';
+    return '<span class="' + cls + '">' + (s.id + 1) + '. ' + window.kcEscapeHtml(s.title) + '</span>';
+  }).join('');
+}
+
+function pillHtml(state) {
+  var label = { pending: 'PENDING', done: 'DONE', skipped: 'SKIPPED', regressed: 'REGRESSED' }[state] || state;
+  return '<span class="pill pill-' + state + '">' + label + '</span>';
+}
+
+function gRenderOverview() {
+  var rows = document.getElementById('stepRows');
+  if (!rows) return;
+  rows.innerHTML = latestMerged.map(function (s) {
+    var safetyFlag = s.safety ? '<span class="safety-flag">SAFETY-RELEVANT</span>' : '';
+    var detail = s.detail ? '<div class="stepdetail">' + window.kcEscapeHtml(s.detail) + '</div>' : '';
+    return '<div class="steprow">' +
+      '<div class="stepnum">' + (s.id + 1) + '</div>' +
+      '<div class="steptitle">' + window.kcEscapeHtml(s.title) + safetyFlag + detail + '</div>' +
+      pillHtml(s.state) +
+      '<button type="button" class="stepgo" onclick="gGoto(' + s.id + ')">Open</button>' +
+      '</div>';
+  }).join('');
+
+  var gate = computeCompleteness(latestMerged, latestReadiness);
+  var gateEl = document.getElementById('gateBanner');
+  if (gate.complete) {
+    gateEl.innerHTML = '<div class="gate gate-complete">Setup complete -- every readiness item is ' +
+      'ok or deliberately off, and no safety-relevant step was skipped.</div>';
+  } else {
+    gateEl.innerHTML = '<div class="gate gate-incomplete">Setup NOT complete. Outstanding before this ' +
+      'kiln can be marked ready:<ul>' +
+      gate.reasons.map(function (r) { return '<li>' + window.kcEscapeHtml(r) + '</li>'; }).join('') +
+      '</ul></div>';
+  }
+}
+
+function currentStepId() {
+  var m = /^#step=(\d+)$/.exec(window.location.hash || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function gGoto(target) {
+  var overview = document.getElementById('gscreenOverview');
+  var stepScreen = document.getElementById('gscreenStep');
+  if (target === 'overview' || target === null || target === undefined) {
+    window.location.hash = '';
+    overview.hidden = false;
+    stepScreen.hidden = true;
+    gRenderStepper();
+    return;
+  }
+  window.location.hash = '#step=' + target;
+  overview.hidden = true;
+  stepScreen.hidden = false;
+  gRenderStepDetail(target);
+  gRenderStepper();
+}
+
+function gRenderStepDetail(stepId) {
+  var s = latestMerged.filter(function (m) { return m.id === stepId; })[0];
+  if (!s) return;
+  document.getElementById('stepHeading').textContent = (stepId + 1) + '. ' + s.title;
+  var safetyNote = document.getElementById('stepSafetyNote');
+  if (s.safety) {
+    safetyNote.hidden = false;
+    safetyNote.textContent = 'Safety-relevant: skipping this step blocks "setup complete" ' +
+      '(SETUP_WIZARD_PLAN.md section 6).';
+  } else {
+    safetyNote.hidden = true;
+  }
+  document.getElementById('stepStatusLine').textContent = 'Current state (from the board, not this ' +
+    'browser tab): ' + s.state.toUpperCase() + (s.detail ? ' -- ' + s.detail : '');
+  var regressedNote = document.getElementById('stepRegressedNote');
+  if (s.state === 'regressed') {
+    regressedNote.hidden = false;
+    regressedNote.innerHTML = '<b>REGRESSED:</b> this step was previously marked done, but the ' +
+      'board\'s own readiness checklist now disagrees -- shown as regressed, never as done, until ' +
+      'it is fixed and readiness reports it again.';
+  } else {
+    regressedNote.hidden = true;
+  }
+}
+
+function gResume() {
+  var target = pickResumeStep(latestMerged);
+  if (target === null) {
+    gGoto('overview');
+    return;
+  }
+  gGoto(target);
+}
+
+function loadAll() {
+  return Promise.all([
+    fetchJsonOr('/api/readiness', { items: [] }),
+    fetchJsonOr('/api/setup/progress', defaultProgress()),
+  ]).then(function (results) {
+    latestReadiness = results[0];
+    latestProgress = results[1];
+    latestMerged = mergeAllSteps(latestProgress, latestReadiness);
+    var offlineMsg = document.getElementById('setupOfflineMsg');
+    offlineMsg.hidden = !!(latestReadiness && latestReadiness.items && latestReadiness.items.length);
+    gRenderOverview();
+    gRenderStepper();
+    var target = currentStepId();
+    if (target !== null) {
+      gGoto(target);
+    }
+  });
+}
+
+window.addEventListener('hashchange', function () {
+  var target = currentStepId();
+  gGoto(target === null ? 'overview' : target);
+});
+
+loadAll();
+</script>
+</body>
+</html>

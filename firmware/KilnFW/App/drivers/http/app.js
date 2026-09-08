@@ -501,6 +501,101 @@
   // the real show/hide logic.
   window.setRecoveryBanner = setRecoveryBanner;
 
+  // ---- Setup-wizard OFFER banner -----------------------------------------
+  //
+  // SETUP_WIZARD_PLAN.md: "OFFER the wizard rather than forcing a redirect"
+  // -- an owner decision in force for the whole plan. This polls the same
+  // GET /api/readiness the /readiness and /setup pages already poll (no new
+  // endpoint, no new JSON field -- same "reuse, spend no json_cap headroom"
+  // shape as pollRecoveryMode() above) and shows a low-key banner linking to
+  // /setup whenever any item reads not_done. cannot_yet is deliberately NOT
+  // included here: several items are cannot_yet purely because an earlier
+  // item hasn't been answered yet (readiness_http.c's own gating), so
+  // counting those too would just restate the same not_done item twice.
+  // deliberately_off is excluded on purpose too -- that is a legitimate,
+  // already-made choice (e.g. ct_installed = no), not something to nag about.
+  //
+  // Never on /setup itself -- an operator already on the wizard does not
+  // need the wizard advertised to them.
+  var SETUP_OFFER_POLL_MS = 20000;
+  var setupOfferPollTimer = null;
+  var setupBannerEl = null;
+  var setupBannerDismissed = false; // session-local only; see theme.css's comment on why
+
+  function buildSetupBanner() {
+    var el = document.createElement('div');
+    el.className = 'kc-setup-banner';
+    el.setAttribute('hidden', '');
+    el.setAttribute('role', 'status');
+    var text = document.createElement('span');
+    text.textContent = 'Setup is not finished yet. ';
+    var link = document.createElement('a');
+    link.href = '/setup';
+    link.textContent = 'Open the setup wizard';
+    var dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.textContent = 'Dismiss';
+    dismiss.setAttribute('aria-label', 'Dismiss setup reminder for this page load');
+    dismiss.addEventListener('click', function () {
+      setupBannerDismissed = true;
+      setSetupBanner(false);
+    });
+    el.appendChild(text);
+    el.appendChild(link);
+    el.appendChild(dismiss);
+    // Same insertion precedence rule as buildRecoveryBanner(): more
+    // consequential state (recovery mode, then connection-lost) renders
+    // above this -- an incomplete setup is real but never urgent enough to
+    // outrank either of those, so this always inserts BELOW them (directly
+    // above the rest of the page's content) rather than at the very top.
+    if (recoveryBannerEl && recoveryBannerEl.parentNode) {
+      recoveryBannerEl.parentNode.insertBefore(el, recoveryBannerEl.nextSibling);
+    } else if (bannerEl && bannerEl.parentNode) {
+      bannerEl.parentNode.insertBefore(el, bannerEl.nextSibling);
+    } else {
+      var topbar = document.querySelector('.kc-topbar');
+      if (topbar && topbar.parentNode) {
+        topbar.parentNode.insertBefore(el, topbar.nextSibling);
+      } else {
+        document.body.insertBefore(el, document.body.firstChild);
+      }
+    }
+    return el;
+  }
+
+  function setSetupBanner(active) {
+    if (!setupBannerEl) return;
+    if (active && !setupBannerDismissed) {
+      setupBannerEl.removeAttribute('hidden');
+    } else {
+      setupBannerEl.setAttribute('hidden', '');
+    }
+  }
+
+  function pollSetupOffer() {
+    if (document.visibilityState === 'hidden') return;
+    if (window.location.pathname === '/setup') return; // never advertise the wizard to itself
+    fetch('/api/readiness')
+      .then(function (r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(function (body) {
+        var items = (body && body.items) || [];
+        var incomplete = items.some(function (it) { return it && it.status === 'not_done'; });
+        setSetupBanner(incomplete);
+      })
+      .catch(function () {
+        // Best-effort, same convention as pollRecoveryMode(): a transient
+        // fetch failure never hides a banner that was already correctly
+        // shown, and never fabricates one either -- it just leaves the last
+        // known state alone.
+      });
+  }
+  // Exported for the same reason window.setRecoveryBanner is: a test can
+  // drive the actual show/hide function rather than a hand-built stand-in.
+  window.setSetupBanner = setSetupBanner;
+
   // ---- Sticky Stop -----------------------------------------------------
   //
   // UI_PLAN.md item 2: a fixed Stop control on every page, not just the
@@ -797,12 +892,15 @@
   function init() {
     bannerEl = buildBanner();
     recoveryBannerEl = buildRecoveryBanner();
+    setupBannerEl = buildSetupBanner();
     stopBarEl = buildStopBar();
     observeStopBarHeight(stopBarEl);
     buildUnitBtn();
     pollHeartbeat();
     pollRecoveryMode();
+    pollSetupOffer();
     recoveryPollTimer = setInterval(pollRecoveryMode, RECOVERY_POLL_MS);
+    setupOfferPollTimer = setInterval(pollSetupOffer, SETUP_OFFER_POLL_MS);
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible') {
         // Coming back into view: re-poll immediately instead of waiting out
@@ -810,6 +908,7 @@
         // banner/stop-bar state can't lag a real reconnect by up to 30s.
         scheduleNext(0);
         pollRecoveryMode();
+        pollSetupOffer();
       }
     });
   }

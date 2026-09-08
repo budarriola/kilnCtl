@@ -49,6 +49,8 @@
 #include "adaptive_tune.h"
 #include "adaptive_tune_http.h"
 #include "readiness_http.h"
+#include "setup_progress_http.h"
+#include "setup_wizard_http.h"
 #include "safety_link.h"
 #include "sim_backend.h"
 #include "stack_margin.h"
@@ -419,6 +421,29 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (readiness_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "readiness_http_start failed: %s -- no readiness page this boot",
                  esp_err_to_name(readiness_err));
+    }
+
+    // SETUP_WIZARD_PLAN.md step 3: the /setup page shell. Registered right
+    // after readiness for the same reason -- no ordering dependency, the
+    // page is static markup/JS that reads GET /api/readiness (just started
+    // above) and GET /api/setup/progress (a later step's endpoint) entirely
+    // client-side.
+    esp_err_t setup_wizard_err = setup_wizard_http_start();
+    if (setup_wizard_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "setup_wizard_http_start failed: %s -- no /setup page this boot",
+                 esp_err_to_name(setup_wizard_err));
+    }
+
+    // SETUP_WIZARD_PLAN.md implementation step 2: GET/POST
+    // /api/setup/progress, the endpoint the /setup page shell just started
+    // above already fetches. Registered right after it for the same
+    // "no ordering dependency, just keep the two together" reason --
+    // setup_progress_http_start() also loads/migrates the persisted
+    // wizard-progress NVS record (setup_wizard_progress_start()).
+    esp_err_t setup_progress_err = setup_progress_http_start();
+    if (setup_progress_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "setup_progress_http_start failed: %s -- no /api/setup/progress endpoint this boot",
+                 esp_err_to_name(setup_progress_err));
     }
 
     // log_http.c: read-back for the firing/autotune logs log_store_mount.c

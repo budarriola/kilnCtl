@@ -71,6 +71,7 @@
   // its children in place.
   var NAV_LINKS = [
     { href: '/profiles', label: 'Firing profiles' },
+    { href: '/setup', label: 'Setup wizard' },
     { href: '/readiness', label: 'Ready to fire? (checklist)' },
     { href: '/settings/zones', label: 'Thermocouples & zones' },
     // 'Relays & rules' (/settings/relays) removed 2026-08-27: the rule

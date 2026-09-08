@@ -350,6 +350,31 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
                        margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center;
                        font-weight: bold; }
 .kc-recovery-banner[hidden] { display: none; }
+
+/* Setup-wizard OFFER banner (SETUP_WIZARD_PLAN.md, "OFFER the wizard rather
+   than forcing a redirect" -- owner decision in force). Same in-flow
+   placement/no-leftover-gap shape as the two banners above, but
+   deliberately the mildest of the three: --ui-accent-1 (this file's
+   existing "warn", NOT "something is wrong") because an incomplete setup on
+   a board that is otherwise working fine is a nudge, not an alarm -- no new
+   colour, and never accent-5 (reserved for connection/recovery failures).
+   Dismissible for the CURRENT page load only (a plain in-memory hide, no
+   localStorage) -- app.js's setSetupOfferBanner() re-derives visibility from
+   a fresh readiness fetch every poll, so dismissing it does not fabricate a
+   "setup is done" memory that could go stale the way a persisted dismissal
+   flag would (the same reasoning the recovery banner's own comment gives
+   for having no persisted dismissal at all; this one is allowed a
+   *session*-local dismiss because unlike recovery mode, being reminded here
+   is a convenience, not a safety-relevant fact the operator must not lose
+   track of). */
+.kc-setup-banner { background: var(--ui-accent-1); color: #fff; padding: 0.6em 1em;
+                    margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center; }
+.kc-setup-banner[hidden] { display: none; }
+.kc-setup-banner a { color: #fff; text-decoration: underline; font-weight: bold; }
+.kc-setup-banner button { margin: 0 0 0 0.8em; padding: 0.2em 0.6em; font-size: 0.85em;
+                           min-height: 32px; min-width: 32px; background: transparent;
+                           color: #fff; border: 1px solid #fff; border-radius: var(--ui-radius);
+                           cursor: pointer; }
 /* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
    item 4's "dim its values" wording. Every *_page.html now annotates its
    live device-reading elements with .kc-live-value (temperatures, relay/
