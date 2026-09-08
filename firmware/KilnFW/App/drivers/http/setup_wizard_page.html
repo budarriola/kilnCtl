@@ -206,10 +206,15 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <div id="stepBody1" hidden></div>
   <div id="stepBody2" hidden></div>
   <div id="stepBody3" hidden></div>
+  <!-- Steps 4-6 (implementation step 6 of SETUP_WIZARD_PLAN.md section 8):
+       zone type, relay assignment, zone commissioning limits. -->
+  <div id="stepBody4" hidden></div>
+  <div id="stepBody5" hidden></div>
+  <div id="stepBody6" hidden></div>
 
   <div id="stepGenericContent" hidden>
     <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
-      -- docs/SETUP_WIZARD_PLAN.md's implementation steps 6-11 add that one step at a time. This shell
+      -- docs/SETUP_WIZARD_PLAN.md's implementation steps 8-11 add that one step at a time. This shell
       already tracks and renders this step's true state from the board, and lets you jump straight to
       it (deep link <code>#step=N</code>), independent of every other step and resumable after a
       reload or a reboot.</p>
@@ -403,6 +408,7 @@ var TC_TYPES = [
   { code: 7, name: 'Type T', range: '-200 to 350°C', note: 'lowest range -- not for a kiln\'s hot side' },
 ];
 var THERMO_COUNT_MAX = 3; // matches zones_page.html's #thermoCount max (THERMO_CHANNEL_COUNT)
+var RELAY_COUNT_MAX = 4; // matches zones_page.html's #relayCount max (KILN_IO_RELAY_COUNT)
 
 function tcTypeOptionsHtml(selected) {
   var sel = (typeof selected === 'number') ? selected : 3;
@@ -482,6 +488,236 @@ function validateStep3(thermoCount, zones, calMinC, calMaxC) {
         calMinC + ' and ' + calMaxC + ' °C.');
     }
   }
+  return { valid: errors.length === 0, errors: errors };
+}
+
+/* ==========================================================================
+ * Shared POST /api/zones builder for steps 4-6 (implementation step 6,
+ * SETUP_WIZARD_PLAN.md section 8). zones_http_post_parse.c REQUIRES most
+ * per-zone fields on every whole-page submission (relay_mask, cal, kp/ki/kd,
+ * ramp, sanity, mode, maxtemp, mintemp, window, minon, minoff,
+ * timingprofile -- see that file's own "missing or ..." refusals) and treats
+ * several more as "omit DELETES the stored value" (z%u_k/z%u_tau/
+ * z%u_deadtime -- the measured plant model -- see its own comment: "these
+ * numbers are NOT typed by an operator; they are measured... omitting them
+ * silently deletes that measurement"). Steps 2/3's own save handlers above
+ * post only the handful of fields each of those screens edits, which is
+ * fine only because zones_http_post_parse.c happens to preserve exactly
+ * those particular omitted fields (thermo_mask/tc_type/cal are each
+ * documented omit-preserves); steps 4-6 touch zone_type/relay_mask/
+ * max_temp_c/max_ramp_c_per_hr, which sit right next to several
+ * omit-REQUIRED and omit-DELETES fields in that same parser, so guessing
+ * which fields are safe to leave out per step is exactly the kind of
+ * "reset one side of a pair" trap this codebase's standing practice warns
+ * about. zoneToPostParams() instead echoes EVERY GET /api/zones field this
+ * endpoint's parser either requires or would otherwise reset/delete, one
+ * key per line, sourced from the live zone object read back on this same
+ * screen load -- the same "read back, change one thing, post the whole
+ * zone" discipline zones_page.html's own save button already uses (see its
+ * saveBtn listener), just expressed against the JSON GET returns instead of
+ * a DOM tree. Fields the parser documents as OPTIONAL-with-preserve
+ * (fuzzy_strength_pct, coupling_c%u, settings_source and its per-group
+ * keys) are safe to omit and are omitted here for the same reason
+ * zones_page.html's inheriting zones omit them for non-CUSTOM groups; this
+ * file has no notion of settings-source inheritance groups so every zone is
+ * posted as its own fully-resolved values, which is what GET already
+ * reports regardless of how that zone got there. coupling_tau_s[]/
+ * coupling_dead_time_s[] have NO POST wire fields at all (see
+ * zones_http_post_parse.c's own comment -- "always preserved from
+ * current_z regardless") and so need no entry here either.
+ * At least one timing profile (tp0_name) is REQUIRED by zones_post_handler()
+ * on every submission regardless of which step is saving -- see its own
+ * "at least one timing profile... is required" refusal -- so
+ * submitZonesConfig() below always echoes data.timing_profiles too. */
+function zoneToPostParams(z, i) {
+  var params = [];
+  function add(key, val) { params.push('z' + i + '_' + key + '=' + encodeURIComponent(val)); }
+  add('name', z.name || '');
+  add('relay_mask', z.relay_mask || 0);
+  add('relaytype', z.relay_type || 0);
+  add('thermo_mask', z.thermo_mask || 0);
+  add('ct_mask', z.ct_mask || 0);
+  add('tctype', (z.tc_type != null) ? z.tc_type : 3);
+  add('cal', z.cal_offset_c || 0);
+  add('kp', z.pid_kp || 0);
+  add('ki', z.pid_ki || 0);
+  add('kd', z.pid_kd || 0);
+  add('mode', z.control_mode || 0);
+  add('ramp', z.max_ramp_c_per_hr || 0);
+  add('sanity', z.sanity_rate_c_per_min || 0);
+  add('maxtemp', z.max_temp_c || 0);
+  add('mintemp', (z.min_temp_c != null) ? z.min_temp_c : -20);
+  add('window', z.heater_window_ms || 0);
+  add('minon', z.heater_min_on_ms || 0);
+  add('minoff', z.heater_min_off_ms || 0);
+  add('wrongdirwindow', z.guard_wrong_dir_window_s || 0);
+  add('wrongdirrate', z.guard_wrong_dir_rate_c_per_min || 0);
+  add('offsettle', z.guard_off_settle_s || 0);
+  add('runawayrate', z.guard_runaway_rate_c_per_min || 0);
+  add('runawaymargin', z.guard_runaway_margin_c || 0);
+  add('driftperiod', z.guard_drift_period_s || 0);
+  add('debounce', z.guard_sensor_fault_debounce_ticks || 0);
+  add('frozenwindow', z.guard_frozen_window_s || 0);
+  add('xzone', z.cross_zone_max_delta_c || 0);
+  add('k', z.model_k_dc || 0);
+  add('tau', z.model_tau_s || 0);
+  add('deadtime', z.model_dead_time_s || 0);
+  add('timingprofile', z.timing_profile || 0);
+  add('easeoffmult', z.ease_off_window_mult || 0);
+  add('approachratecap', z.approach_rate_cap_c_per_hr || 0);
+  add('errorband', z.error_band_c || 0);
+  add('rateband', z.rate_band_c_per_s || 0);
+  add('progressband', z.progress_band_c || 0);
+  add('zonetype', z.zone_type || 0);
+  add('failsafe', z.failsafe_state ? 1 : 0);
+  add('hystc', z.hyst_c || 0);
+  add('minons', z.min_on_s || 0);
+  add('minoffs', z.min_off_s || 0);
+  return params;
+}
+
+function timingProfileToPostParams(tp, p) {
+  var params = [];
+  function add(key, val) { params.push('tp' + p + '_' + key + '=' + encodeURIComponent(val)); }
+  add('name', tp.name || ('Profile ' + p));
+  add('progressduty', tp.guard_progress_duty_min || 0);
+  add('progresswindow', tp.guard_progress_window_s || 0);
+  add('drifthyst', tp.guard_drift_hysteresis_c || 0);
+  add('frozeneps', tp.guard_frozen_eps_c || 0);
+  add('xzoneperiod', tp.guard_cross_zone_period_s || 0);
+  add('bbhyst', tp.bangbang_hysteresis_c || 0);
+  add('coolmargin', tp.cooling_limited_margin_c || 0);
+  add('coolhold', tp.cooling_limited_hold_s || 0);
+  add('ramplock', tp.ramp_lock_band_c || 0);
+  return params;
+}
+
+// Whole-page POST, replaying every zone 0..thermo_count-1 through
+// zoneToPostParams() plus every timing profile GET returned, then any
+// extra params the caller supplies (e.g. relay<N>_name). `liveZones` is a
+// dense array indexed the same as data.zones, carrying this screen's edits;
+// a slot this step never touched is passed through unchanged (the caller
+// builds liveZones as a copy of data.zones with only its own fields
+// overridden -- see step 4/5/6's own commit handlers).
+function submitZonesConfig(data, liveZones, extraParams) {
+  var params = [
+    'thermo_count=' + (data.thermo_count || 0),
+    'relay_count=' + (data.relay_count || 0),
+    'max_simultaneous_relays=' + (data.max_simultaneous_relays || 0),
+    'continue_on_zone_trip=' + (data.continue_on_zone_trip ? 1 : 0),
+  ];
+  (data.timing_profiles || []).forEach(function (tp, p) {
+    params = params.concat(timingProfileToPostParams(tp, p));
+  });
+  var thermoCount = data.thermo_count || 0;
+  for (var i = 0; i < thermoCount; i++) {
+    var z = (liveZones && liveZones[i]) || (data.zones && data.zones[i]) || {};
+    params = params.concat(zoneToPostParams(z, i));
+  }
+  if (extraParams) params = params.concat(extraParams);
+  return fetch('/api/zones', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+  }).then(function (r) {
+    if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+    return r;
+  });
+}
+
+/* ---- Step 4 (zone type). Requirement 1: the consequence text below is
+ * copied VERBATIM (byte-for-byte) from zones_page.html's zoneBlock()
+ * ".onoffWarn" paragraph (docs/ON_OFF_ZONE_PLAN.md step 6, commit
+ * 172e3081) -- reused, not reworded, so an operator who later opens
+ * /settings/zones sees the exact same sentence rather than a second,
+ * differently-phrased account of the same consequence. Only the
+ * surrounding wizard chrome (heading, save button, badges) is new. ---- */
+var ZONE_TYPE_CONSEQUENCE_TEXT =
+  'On/off device: guards 1 (stall), 2 (wrong direction), 3 (runaway), 4 (drift) and 9 (cross-zone) ' +
+  'are DISABLED for this zone, and its coupling row/column are zeroed (treated as injecting no heat ' +
+  'and having no setpoint of its own). PID gains, ramp rate, control mode and those guard thresholds ' +
+  'do nothing for this zone any more.';
+
+function validateStep4(zones) {
+  var errors = [];
+  zones.forEach(function (z, i) {
+    if (z.zone_type !== 1) return;
+    if (!(z.hyst_c >= 0.5 && z.hyst_c <= 25)) {
+      errors.push('Zone ' + (i + 1) + ' hysteresis must be between 0.5 and 25 °C.');
+    }
+    if (!(z.min_on_s >= 1 && z.min_on_s <= 3600)) {
+      errors.push('Zone ' + (i + 1) + ' minimum ON time must be between 1 and 3600 s.');
+    }
+    if (!(z.min_off_s >= 1 && z.min_off_s <= 3600)) {
+      errors.push('Zone ' + (i + 1) + ' minimum OFF time must be between 1 and 3600 s.');
+    }
+  });
+  return { valid: errors.length === 0, errors: errors };
+}
+
+/* ---- Step 5 (relay assignment). Requirement 2: max_simultaneous_relays'
+ * on/off interaction (bf1db47f -- on/off zones now COUNT toward the cap and
+ * are suppressed LAST, after every heater; profile_executor_run() refuses
+ * to start when the on/off zone count alone exceeds the cap) is surfaced as
+ * a live count against the configured cap, not left implicit. `zones` here
+ * is the same dense [0, thermoCount) slice validateStep4/6 use. ---- */
+function validateStep5(relayCount, zones, maxSimultaneous) {
+  var errors = [];
+  if (!(relayCount >= 0 && relayCount <= RELAY_COUNT_MAX)) {
+    errors.push('Relays in use must be between 0 and ' + RELAY_COUNT_MAX + '.');
+  }
+  var onOffCount = zones.filter(function (z) { return z.zone_type === 1; }).length;
+  if (maxSimultaneous > 0 && onOffCount > maxSimultaneous) {
+    errors.push('This board has ' + onOffCount + ' on/off zone(s) configured, which alone would exceed ' +
+      'the cap of ' + maxSimultaneous + ' relay(s) energized at once. On/off zones count toward this cap ' +
+      'and are suppressed LAST, after every heater (bf1db47f) -- a firing refuses to start in this state. ' +
+      'Raise the cap or reduce the number of on/off zones before this step can complete.');
+  }
+  return { valid: errors.length === 0, errors: errors };
+}
+
+/* ---- Step 6 (zone commissioning limits). Requirement 3: 0 means
+ * "uncommissioned, refuse to start" (1fc9b1dd) for BOTH max_temp_c (every
+ * zone that can command a relay) and max_ramp_c_per_hr (heater zones only
+ * -- an on/off zone is not ramped, zones_page.html hides this field for
+ * zone_type 1 the same way, see its ".heaterOnly" wrapper around the ramp
+ * input). isZoneCommissioned()/formatZoneLimitC() (defined above, already
+ * used read-only by step 2's badge) are reused unchanged here rather than
+ * reimplemented -- this is the screen that OWNS writing what that badge
+ * only displays. getAbsMaxTempC() reads the Pico's abs_max_temp_c straight
+ * off GET /api/safety/commissioning's params[] (id 260, the same field
+ * safety_commissioning_page.html itself renders) -- never a second, wizard-
+ * owned copy of that number. */
+function getAbsMaxTempC(commissioning) {
+  if (!commissioning || !commissioning.params) return null;
+  for (var i = 0; i < commissioning.params.length; i++) {
+    var p = commissioning.params[i];
+    if (p.name === 'abs_max_temp_c' && p.set && typeof p.value === 'number') return p.value;
+  }
+  return null; // not yet commissioned (step 7) or unreliable on this peer -- cannot enforce the relationship yet
+}
+
+// absMaxTempC may be null (Pico not yet commissioned / value not known
+// reliably) -- in that case the ceiling half of the check is skipped, never
+// treated as "no ceiling" or as 0. Requirement 3: refuse, never clamp.
+function validateStep6(zones, absMaxTempC) {
+  var errors = [];
+  zones.forEach(function (z, i) {
+    if (!isZoneCommissioned({ max_temp_c: z.max_temp_c, max_ramp_c_per_hr: (z.zone_type === 1) ? -1 : z.max_ramp_c_per_hr })) {
+      if (!(z.max_temp_c > 0)) {
+        errors.push('Zone ' + (i + 1) + ' max temp is ' + formatZoneLimitC(0) +
+          ' -- a firing refuses to start until every zone has a real ceiling.');
+      }
+      if (z.zone_type !== 1 && !(z.max_ramp_c_per_hr > 0)) {
+        errors.push('Zone ' + (i + 1) + ' max ramp rate is ' + formatZoneLimitC(0) +
+          ' -- a firing refuses to start until every heater zone has one.');
+      }
+    }
+    if (typeof absMaxTempC === 'number' && z.max_temp_c > 0 && z.max_temp_c > absMaxTempC) {
+      errors.push('Zone ' + (i + 1) + ' max temp (' + z.max_temp_c + ' °C) exceeds the safety ' +
+        'processor\'s abs_max_temp_c ceiling (' + absMaxTempC + ' °C). The Pico\'s ceiling is a ' +
+        'second set of eyes and must never be tighter than the ESP\'s -- lower this zone\'s max temp, or ' +
+        'raise abs_max_temp_c in step 7 first. Refused, not clamped.');
+    }
+  });
   return { valid: errors.length === 0, errors: errors };
 }
 
@@ -946,6 +1182,358 @@ function pollVerifyAfterWrite(thermoCount, attemptsLeft, delayMs) {
   });
 }
 
+/* ---- Step 4 DOM: zone type. ---- */
+function step4ZoneRowHtml(i, z, hystDefault, minOnOffDefault) {
+  var zoneType = z.zone_type || 0;
+  var failsafeOn = z.failsafe_state ? 1 : 0;
+  var hystC = (z.hyst_c != null && z.hyst_c !== 0) ? z.hyst_c : hystDefault;
+  var minOnS = (z.min_on_s != null && z.min_on_s !== 0) ? z.min_on_s : minOnOffDefault;
+  var minOffS = (z.min_off_s != null && z.min_off_s !== 0) ? z.min_off_s : minOnOffDefault;
+  return '<div class="zonecard" data-zone="' + i + '">' +
+    '<h4>Zone ' + (i + 1) + (z.name ? ' -- ' + window.kcEscapeHtml(z.name) : '') + '</h4>' +
+    '<div class="wfield"><label>Zone type</label><select class="s4type" data-zone="' + i + '">' +
+      '<option value="0"' + (zoneType === 0 ? ' selected' : '') + '>Heater (PID/bang-bang controlled)</option>' +
+      '<option value="1"' + (zoneType === 1 ? ' selected' : '') +
+        '>On/off device (vent, damper, fan -- not PID controlled)</option>' +
+    '</select></div>' +
+    '<p class="werr s4warn" data-zone="' + i + '" style="' + (zoneType === 1 ? '' : 'display:none') + '">' +
+      window.kcEscapeHtml(ZONE_TYPE_CONSEQUENCE_TEXT) + '</p>' +
+    '<div class="s4onoff" data-zone="' + i + '" style="' + (zoneType === 1 ? '' : 'display:none') + '">' +
+      '<div class="wfield"><label>Fail-safe state</label><select class="s4failsafe" data-zone="' + i + '">' +
+        '<option value="0"' + (failsafeOn ? '' : ' selected') + '>OFF (default -- de-energised on any abort/fault/trip)</option>' +
+        '<option value="1"' + (failsafeOn ? ' selected' : '') + '>ON (energised on abort/fault/trip)</option>' +
+      '</select><p class="hint">ON cannot be honoured if this device shares a K4-interlocked supply with ' +
+      'the heaters -- the interlock still opens on a trip.</p></div>' +
+      '<div class="wfield"><label>Temperature hysteresis (&deg;C, 0.5-25, default ' + hystDefault + ')</label>' +
+      '<input type="number" step="0.1" min="0.5" max="25" class="s4hystc" data-zone="' + i + '" value="' + hystC + '"></div>' +
+      '<div class="wfield"><label>Minimum ON time (s, default ' + minOnOffDefault + ')</label>' +
+      '<input type="number" step="1" min="1" max="3600" class="s4minons" data-zone="' + i + '" value="' + minOnS + '"></div>' +
+      '<div class="wfield"><label>Minimum OFF time (s, default ' + minOnOffDefault + ')</label>' +
+      '<input type="number" step="1" min="1" max="3600" class="s4minoffs" data-zone="' + i + '" value="' + minOffS + '"></div>' +
+    '</div></div>';
+}
+
+function renderStep4() {
+  var el = document.getElementById('stepBody4');
+  el.innerHTML = '<p class="hint">Loading zones&hellip;</p>';
+  return fetchJsonOr('/api/zones', null).then(function (data) {
+    if (!data) {
+      el.innerHTML = '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
+      return;
+    }
+    var thermoCount = data.thermo_count || 0;
+    var zones = data.zones || [];
+    if (thermoCount === 0) {
+      el.innerHTML = '<p class="hint">No zones configured yet -- finish ' +
+        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+      return;
+    }
+    var hystDefault = (data.on_off_hyst_c_default != null) ? data.on_off_hyst_c_default : 2.0;
+    var minOnOffDefault = (data.on_off_min_on_off_s_default != null) ? data.on_off_min_on_off_s_default : 30;
+    var html = '';
+    for (var i = 0; i < thermoCount; i++) {
+      html += step4ZoneRowHtml(i, zones[i] || {}, hystDefault, minOnOffDefault);
+    }
+    html += '<div id="step4Err"></div><div id="step4Ok"></div>';
+    html += '<div class="gnav"><button type="button" id="step4Save">Save &amp; mark done</button></div>';
+    el.innerHTML = html;
+
+    el.querySelectorAll('.s4type').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        var zi = this.dataset.zone;
+        var isOnOff = this.value === '1';
+        var warn = el.querySelector('.s4warn[data-zone="' + zi + '"]');
+        var panel = el.querySelector('.s4onoff[data-zone="' + zi + '"]');
+        if (warn) warn.style.display = isOnOff ? '' : 'none';
+        if (panel) panel.style.display = isOnOff ? '' : 'none';
+      });
+    });
+
+    document.getElementById('step4Save').addEventListener('click', function () {
+      // Commit-time re-validation (requirement 4): read every field fresh
+      // from the DOM right now, not whatever was true when the screen loaded.
+      var liveZones = zones.slice();
+      for (var i = 0; i < thermoCount; i++) {
+        var card = el.querySelector('.zonecard[data-zone="' + i + '"]');
+        var copy = Object.assign({}, zones[i] || {});
+        copy.zone_type = parseInt(card.querySelector('.s4type').value, 10);
+        if (copy.zone_type === 1) {
+          copy.failsafe_state = card.querySelector('.s4failsafe').value === '1';
+          copy.hyst_c = parseFloat(card.querySelector('.s4hystc').value);
+          copy.min_on_s = parseInt(card.querySelector('.s4minons').value, 10);
+          copy.min_off_s = parseInt(card.querySelector('.s4minoffs').value, 10);
+        }
+        liveZones[i] = copy;
+      }
+      var v = validateStep4(liveZones.slice(0, thermoCount));
+      var errEl = document.getElementById('step4Err');
+      var okEl = document.getElementById('step4Ok');
+      okEl.innerHTML = '';
+      if (!v.valid) { renderErrList(errEl, v.errors); return; }
+      renderErrList(errEl, []);
+      submitZonesConfig(data, liveZones).then(function () {
+        return postStepState(4, 'done');
+      }).then(function () {
+        okEl.innerHTML = '<p class="wok">Saved.</p>';
+        loadAll();
+      }).catch(function (e) {
+        renderErrList(errEl, [String(e.message || e)]);
+      });
+    });
+  });
+}
+
+/* ---- Step 5 DOM: relay assignment, names, max_simultaneous_relays. ---- */
+function step5RelayZoneRowHtml(i, z, relayCount) {
+  var bits = '';
+  for (var r = 0; r < relayCount; r++) {
+    var checked = (z.relay_mask & (1 << r)) ? ' checked' : '';
+    bits += '<label><input type="checkbox" class="s5relaybit" data-zone="' + i + '" data-bit="' + r + '"' +
+      checked + '> Relay ' + r + '</label>';
+  }
+  var relayType = z.relay_type || 0;
+  var onOffBadge = (z.zone_type === 1) ? '<span class="badge badge-warn">on/off</span>' : '';
+  return '<div class="zonecard" data-zone="' + i + '">' +
+    '<h4>Zone ' + (i + 1) + (z.name ? ' -- ' + window.kcEscapeHtml(z.name) : '') + onOffBadge + '</h4>' +
+    '<div class="wfield chanbits"><label>Relay(s) driving this zone</label>' + (bits || '<p class="hint">' +
+    'No relays configured -- set the count above.</p>') + '</div>' +
+    '<div class="wfield"><label>Relay type</label><select class="s5relaytype" data-zone="' + i + '">' +
+      '<option value="0"' + (relayType === 0 ? ' selected' : '') + '>SSR</option>' +
+      '<option value="1"' + (relayType === 1 ? ' selected' : '') + '>Contactor</option>' +
+      '<option value="2"' + (relayType === 2 ? ' selected' : '') + '>Mercury</option>' +
+    '</select></div></div>';
+}
+
+function step5RenderRelayNames(relayCount, ownedMask, names) {
+  if (relayCount === 0) return '<p class="hint">No relays configured -- set the count above.</p>';
+  var html = '';
+  for (var r = 0; r < relayCount; r++) {
+    var owned = (ownedMask & (1 << r)) !== 0;
+    var stored = names[r] || '';
+    if (owned) {
+      html += '<div class="wfield"><label>Relay ' + r + ' name</label>' +
+        '<p class="hint">Assigned to a zone above -- named by that zone instead (its own stored name' +
+        (stored ? ', "' + window.kcEscapeHtml(stored) + '",' : '') + ' is kept and returns here if unassigned).</p>' +
+        '<input type="hidden" class="s5relayname" data-relay="' + r + '" value="' + window.kcEscapeHtml(stored) + '"></div>';
+    } else {
+      html += '<div class="wfield"><label>Relay ' + r + ' name</label>' +
+        '<input type="text" maxlength="15" class="s5relayname" data-relay="' + r + '" value="' +
+        window.kcEscapeHtml(stored) + '"></div>';
+    }
+  }
+  return html;
+}
+
+function step5ComputeOwnedMask(liveZones, thermoCount) {
+  var mask = 0;
+  for (var i = 0; i < thermoCount; i++) mask |= (liveZones[i].relay_mask || 0);
+  return mask;
+}
+
+function renderStep5() {
+  var el = document.getElementById('stepBody5');
+  el.innerHTML = '<p class="hint">Loading zones&hellip;</p>';
+  return fetchJsonOr('/api/zones', null).then(function (data) {
+    if (!data) {
+      el.innerHTML = '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
+      return;
+    }
+    var thermoCount = data.thermo_count || 0;
+    var zones = data.zones || [];
+    if (thermoCount === 0) {
+      el.innerHTML = '<p class="hint">No zones configured yet -- finish ' +
+        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+      return;
+    }
+    var namesArr = (data.relay_names || []).slice();
+    var html = '<div class="wfield"><label for="s5relaycount">Relays in use (0-' + RELAY_COUNT_MAX + ')</label>' +
+      '<input type="number" id="s5relaycount" min="0" max="' + RELAY_COUNT_MAX + '" value="' + (data.relay_count || 0) + '"></div>';
+    html += '<div id="s5zones"></div>';
+    html += '<div class="wfield"><label for="s5maxsim">Max relays energized at once (0 = unlimited)</label>' +
+      '<input type="number" id="s5maxsim" min="0" max="' + RELAY_COUNT_MAX + '" value="' + (data.max_simultaneous_relays || 0) + '">' +
+      '<p class="hint">On/off zones now COUNT toward this cap and are suppressed LAST, after every heater ' +
+      '(bf1db47f) -- a firing REFUSES TO START if the on/off zones alone would exceed this cap, before any ' +
+      'heater is even considered. Leave at 0 (unlimited) unless your supply/breaker cannot take every ' +
+      'zone\'s relay energized together.</p></div>';
+    html += '<p class="hint" id="s5onoffcapnote"></p>';
+    html += '<h4>Names for relays not assigned to any zone</h4><div id="s5names"></div>';
+    html += '<div id="step5Err"></div><div id="step5Ok"></div>';
+    html += '<div class="gnav"><button type="button" id="s5rebuild">Apply relay count</button>' +
+      '<button type="button" id="step5Save">Save &amp; mark done</button></div>';
+    el.innerHTML = html;
+
+    function currentZonesLive() {
+      var out = zones.slice();
+      for (var i = 0; i < thermoCount; i++) {
+        var card = document.querySelector('#s5zones .zonecard[data-zone="' + i + '"]');
+        var copy = Object.assign({}, zones[i] || {});
+        if (card) {
+          var mask = 0;
+          card.querySelectorAll('.s5relaybit:checked').forEach(function (cb) {
+            mask |= (1 << parseInt(cb.dataset.bit, 10));
+          });
+          copy.relay_mask = mask;
+          copy.relay_type = parseInt(card.querySelector('.s5relaytype').value, 10);
+        }
+        out[i] = copy;
+      }
+      return out;
+    }
+
+    function updateCapNote() {
+      var relayCount = parseInt(document.getElementById('s5relaycount').value, 10) || 0;
+      var maxSim = parseInt(document.getElementById('s5maxsim').value, 10) || 0;
+      var liveZones = currentZonesLive();
+      var v = validateStep5(relayCount, liveZones.slice(0, thermoCount), maxSim);
+      var onOffCount = liveZones.slice(0, thermoCount).filter(function (z) { return z.zone_type === 1; }).length;
+      var noteEl = document.getElementById('s5onoffcapnote');
+      noteEl.textContent = 'On/off zones configured: ' + onOffCount + '; cap: ' + (maxSim > 0 ? maxSim : 'unlimited') +
+        (v.valid ? '.' : ' -- EXCEEDED, see below.');
+      noteEl.style.color = v.valid ? '' : 'var(--bad)';
+      noteEl.style.fontWeight = v.valid ? 'normal' : 'bold';
+    }
+
+    function rebuild() {
+      var relayCount = parseInt(document.getElementById('s5relaycount').value, 10) || 0;
+      if (!(relayCount >= 0 && relayCount <= RELAY_COUNT_MAX)) relayCount = 0;
+      var zonesDiv = document.getElementById('s5zones');
+      var h = '';
+      for (var i = 0; i < thermoCount; i++) h += step5RelayZoneRowHtml(i, zones[i] || {}, relayCount);
+      zonesDiv.innerHTML = h;
+      var liveZones = currentZonesLive();
+      var ownedMask = step5ComputeOwnedMask(liveZones, thermoCount);
+      document.getElementById('s5names').innerHTML = step5RenderRelayNames(relayCount, ownedMask, namesArr);
+      updateCapNote();
+    }
+    rebuild();
+
+    document.getElementById('s5rebuild').addEventListener('click', rebuild);
+    document.getElementById('s5maxsim').addEventListener('input', updateCapNote);
+
+    document.getElementById('step5Save').addEventListener('click', function () {
+      // Commit-time re-validation (requirement 4): read the fields as they
+      // stand right now.
+      var relayCount = parseInt(document.getElementById('s5relaycount').value, 10) || 0;
+      var maxSim = parseInt(document.getElementById('s5maxsim').value, 10) || 0;
+      var liveZones = currentZonesLive();
+      var v = validateStep5(relayCount, liveZones.slice(0, thermoCount), maxSim);
+      var errEl = document.getElementById('step5Err');
+      var okEl = document.getElementById('step5Ok');
+      okEl.innerHTML = '';
+      if (!v.valid) { renderErrList(errEl, v.errors); return; }
+      renderErrList(errEl, []);
+      var dataCopy = Object.assign({}, data);
+      dataCopy.relay_count = relayCount;
+      dataCopy.max_simultaneous_relays = maxSim;
+      var relayNameParams = [];
+      document.querySelectorAll('#s5names .s5relayname').forEach(function (inp) {
+        relayNameParams.push('relay' + (parseInt(inp.dataset.relay, 10) + 1) + '_name=' + encodeURIComponent(inp.value));
+      });
+      submitZonesConfig(dataCopy, liveZones, relayNameParams).then(function () {
+        return postStepState(5, 'done');
+      }).then(function () {
+        okEl.innerHTML = '<p class="wok">Saved.</p>';
+        loadAll();
+      }).catch(function (e) {
+        renderErrList(errEl, [String(e.message || e)]);
+      });
+    });
+  });
+}
+
+/* ---- Step 6 DOM: zone commissioning limits (max_temp_c, max_ramp_c_per_hr,
+ * min_temp_c) and the abs-max-vs-Pico-ceiling refusal. ---- */
+function step6ZoneRowHtml(i, z) {
+  var rampField = (z.zone_type === 1) ? '' :
+    '<div class="wfield"><label>Max ramp rate (&deg;C/hr) -- required for a heater zone, 0 = NOT SET</label>' +
+    '<input type="number" step="1" class="s6ramp" data-zone="' + i + '" value="' + (z.max_ramp_c_per_hr || 0) + '"></div>';
+  return '<div class="zonecard" data-zone="' + i + '">' +
+    '<h4>Zone ' + (i + 1) + (z.name ? ' -- ' + window.kcEscapeHtml(z.name) : '') + '</h4>' +
+    '<div class="wfield"><label>Max temp (&deg;C) -- required, hard safety trip, no debounce, 0 = NOT SET</label>' +
+    '<input type="number" step="1" class="s6maxtemp" data-zone="' + i + '" value="' + (z.max_temp_c || 0) + '"></div>' +
+    rampField +
+    '<div class="wfield"><label>Min temp (&deg;C) -- below this reads as a broken/disconnected sensor</label>' +
+    '<input type="number" step="1" class="s6mintemp" data-zone="' + i + '" value="' + z.min_temp_c + '"></div>' +
+    '<p class="hint">Currently stored: max temp ' + formatZoneLimitC(z.max_temp_c) + ', max ramp ' +
+    formatZoneLimitC(z.max_ramp_c_per_hr) + (z.max_ramp_c_per_hr ? '/hr' : '') + '.</p></div>';
+}
+
+function renderStep6() {
+  var el = document.getElementById('stepBody6');
+  el.innerHTML = '<p class="hint">Loading zones&hellip;</p>';
+  return Promise.all([
+    fetchJsonOr('/api/zones', null),
+    fetchJsonOr('/api/safety/commissioning', null),
+  ]).then(function (r) {
+    var data = r[0], commissioning = r[1];
+    if (!data) {
+      el.innerHTML = '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
+      return;
+    }
+    var thermoCount = data.thermo_count || 0;
+    var zones = data.zones || [];
+    if (thermoCount === 0) {
+      el.innerHTML = '<p class="hint">No zones configured yet -- finish ' +
+        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+      return;
+    }
+    var absMaxTempC = getAbsMaxTempC(commissioning);
+    var html = '<p class="hint">' + (typeof absMaxTempC === 'number' ?
+      'Safety processor ceiling (abs_max_temp_c): ' + absMaxTempC + ' °C. The Pico\'s ceiling is a second ' +
+      'set of eyes and must never be tighter than the ESP\'s -- a zone max temp entered here ABOVE this ' +
+      'ceiling is REFUSED, not clamped.' :
+      'Safety processor ceiling (abs_max_temp_c) is not known yet -- step 7 commissions it. Once set there ' +
+      'it must never be tighter than the highest zone max temp set here; that relationship is re-checked ' +
+      'again at step 7\'s own commit, and this screen re-checks it live at commit whenever the value ' +
+      'becomes known.') + '</p>';
+    for (var i = 0; i < thermoCount; i++) html += step6ZoneRowHtml(i, zones[i] || {});
+    html += '<div id="step6Err"></div><div id="step6Ok"></div>';
+    html += '<div class="gnav"><button type="button" id="step6Save">Save &amp; mark done</button></div>';
+    el.innerHTML = html;
+
+    function readLiveZones() {
+      var out = zones.slice();
+      for (var i = 0; i < thermoCount; i++) {
+        var card = el.querySelector('.zonecard[data-zone="' + i + '"]');
+        var copy = Object.assign({}, zones[i] || {});
+        copy.max_temp_c = parseFloat(card.querySelector('.s6maxtemp').value) || 0;
+        var rampInput = card.querySelector('.s6ramp');
+        if (rampInput) copy.max_ramp_c_per_hr = parseFloat(rampInput.value) || 0;
+        copy.min_temp_c = parseFloat(card.querySelector('.s6mintemp').value);
+        out[i] = copy;
+      }
+      return out;
+    }
+
+    document.getElementById('step6Save').addEventListener('click', function () {
+      var liveZones = readLiveZones();
+      var v = validateStep6(liveZones.slice(0, thermoCount), absMaxTempC);
+      var errEl = document.getElementById('step6Err');
+      var okEl = document.getElementById('step6Ok');
+      okEl.innerHTML = '';
+      if (!v.valid) { renderErrList(errEl, v.errors); return; }
+      renderErrList(errEl, []);
+      // Commit-time re-check (requirement 4 / plan section 1 "Validation"):
+      // re-fetch the Pico's ceiling right now -- step 7 could commission it
+      // in another tab while this one sits open, and this is exactly the
+      // abs-max relationship requirement 3 says must be re-checked at commit.
+      fetchJsonOr('/api/safety/commissioning', null).then(function (freshCommissioning) {
+        var freshAbsMax = getAbsMaxTempC(freshCommissioning);
+        var v2 = validateStep6(liveZones.slice(0, thermoCount), freshAbsMax);
+        if (!v2.valid) { renderErrList(errEl, v2.errors); return; }
+        submitZonesConfig(data, liveZones).then(function () {
+          return postStepState(6, 'done');
+        }).then(function () {
+          okEl.innerHTML = '<p class="wok">Saved.</p>';
+          loadAll();
+        }).catch(function (e) {
+          renderErrList(errEl, [String(e.message || e)]);
+        });
+      });
+    });
+  });
+}
+
 function gRenderStepDetail(stepId) {
   var s = latestMerged.filter(function (m) { return m.id === stepId; })[0];
   if (!s) return;
@@ -970,19 +1558,22 @@ function gRenderStepDetail(stepId) {
     regressedNote.hidden = true;
   }
 
-  // Dispatch to this step's real content (0-3) or the generic not-built-yet
-  // placeholder (4-12). Only one body div is ever visible at a time.
-  [0, 1, 2, 3].forEach(function (id) {
+  // Dispatch to this step's real content (0-6) or the generic not-built-yet
+  // placeholder (7-12). Only one body div is ever visible at a time.
+  [0, 1, 2, 3, 4, 5, 6].forEach(function (id) {
     var body = document.getElementById('stepBody' + id);
     if (body) body.hidden = (stepId !== id);
   });
-  document.getElementById('stepGenericContent').hidden = (stepId >= 0 && stepId <= 3);
+  document.getElementById('stepGenericContent').hidden = (stepId >= 0 && stepId <= 6);
   if (step2Poll) { clearInterval(step2Poll); step2Poll = null; }
   if (step3PollTimer) { clearTimeout(step3PollTimer); step3PollTimer = null; }
   if (stepId === 0) renderStep0();
   else if (stepId === 1) renderStep1();
   else if (stepId === 2) renderStep2();
   else if (stepId === 3) renderStep3();
+  else if (stepId === 4) renderStep4();
+  else if (stepId === 5) renderStep5();
+  else if (stepId === 6) renderStep6();
 }
 
 function gResume() {

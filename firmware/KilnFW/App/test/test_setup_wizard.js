@@ -292,6 +292,97 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
     'a zone with max_ramp_c_per_hr still 0 is NOT commissioned, even with a temp limit set');
 })();
 
+// ---- Step 4 (zone type) validation -------------------------------------
+(function testStep4Validation() {
+  const ctx = loadPageScript(noopFetch);
+  const heaterOnly = ctx.validateStep4([{ zone_type: 0 }]);
+  assert(heaterOnly.valid === true, 'step4: a heater zone needs no on/off fields at all');
+
+  const validOnOff = ctx.validateStep4([{ zone_type: 1, hyst_c: 2.0, min_on_s: 30, min_off_s: 30 }]);
+  assert(validOnOff.valid === true, 'step4: an on/off zone with in-range hyst/min-on/min-off validates');
+
+  const badHyst = ctx.validateStep4([{ zone_type: 1, hyst_c: 0, min_on_s: 30, min_off_s: 30 }]);
+  assert(badHyst.valid === false, 'step4: on/off hysteresis below 0.5 is refused');
+
+  const badMinOn = ctx.validateStep4([{ zone_type: 1, hyst_c: 2.0, min_on_s: 0, min_off_s: 30 }]);
+  assert(badMinOn.valid === false, 'step4: on/off min_on_s of 0 is refused (1-3600)');
+
+  assert(ctx.ZONE_TYPE_CONSEQUENCE_TEXT.indexOf('guards 1 (stall)') !== -1 &&
+    ctx.ZONE_TYPE_CONSEQUENCE_TEXT.indexOf('coupling row/column are zeroed') !== -1,
+    'step4: the reused consequence text names the disabled guards and the zeroed coupling row/column');
+})();
+
+// ---- Step 5 (relay assignment) validation, including the on/off-vs-cap
+// interaction (bf1db47f: on/off zones count toward max_simultaneous_relays
+// and are suppressed last) -------------------------------------------------
+(function testStep5Validation() {
+  const ctx = loadPageScript(noopFetch);
+  const ok = ctx.validateStep5(2, [{ zone_type: 0 }, { zone_type: 1 }], 2);
+  assert(ok.valid === true, 'step5: one on/off zone within a cap of 2 validates');
+
+  const capExceeded = ctx.validateStep5(2, [{ zone_type: 1 }, { zone_type: 1 }, { zone_type: 1 }], 2);
+  assert(capExceeded.valid === false, 'step5: 3 on/off zones alone exceeding a cap of 2 is refused');
+  assert(/bf1db47f/.test(capExceeded.errors[0]), 'step5: the refusal cites the commit that made on/off count toward the cap');
+
+  const unlimitedOk = ctx.validateStep5(2, [{ zone_type: 1 }, { zone_type: 1 }, { zone_type: 1 }], 0);
+  assert(unlimitedOk.valid === true, 'step5: cap 0 (unlimited) never refuses on the on/off count');
+
+  const badRelayCount = ctx.validateStep5(ctx.RELAY_COUNT_MAX + 1, [], 0);
+  assert(badRelayCount.valid === false, 'step5: relay count above RELAY_COUNT_MAX is refused');
+})();
+
+// ---- Step 6 (zone commissioning limits): 0-means-unset refusal AND the
+// abs-max-vs-Pico-ceiling relationship (requirement 3) -------------------
+(function testStep6Validation() {
+  const ctx = loadPageScript(noopFetch);
+  const ok = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1200, max_ramp_c_per_hr: 200 }], null);
+  assert(ok.valid === true, 'step6: a fully-commissioned heater zone with no known Pico ceiling validates');
+
+  const unsetTemp = ctx.validateStep6([{ zone_type: 0, max_temp_c: 0, max_ramp_c_per_hr: 200 }], null);
+  assert(unsetTemp.valid === false, 'step6: max_temp_c left at 0 is refused (1fc9b1dd)');
+
+  const unsetRamp = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1200, max_ramp_c_per_hr: 0 }], null);
+  assert(unsetRamp.valid === false, 'step6: max_ramp_c_per_hr left at 0 on a heater zone is refused');
+
+  const onOffNoRampNeeded = ctx.validateStep6([{ zone_type: 1, max_temp_c: 800, max_ramp_c_per_hr: 0 }], null);
+  assert(onOffNoRampNeeded.valid === true, 'step6: an on/off zone needs no ramp rate (not PID/ramped)');
+
+  const onOffStillNeedsMaxTemp = ctx.validateStep6([{ zone_type: 1, max_temp_c: 0, max_ramp_c_per_hr: 0 }], null);
+  assert(onOffStillNeedsMaxTemp.valid === false, 'step6: an on/off zone still needs a real max_temp_c');
+
+  // The abs-max relationship itself: a zone max_temp_c above the Pico's
+  // known abs_max_temp_c must be REFUSED (not clamped -- no code path here
+  // rewrites the value, only rejects it).
+  const aboveCeiling = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1300, max_ramp_c_per_hr: 200 }], 1200);
+  assert(aboveCeiling.valid === false, 'step6: a zone max_temp_c above the Pico abs_max_temp_c ceiling is refused');
+  assert(/never be tighter/.test(aboveCeiling.errors.join(' ')), 'step6: the refusal states the abs-max relationship');
+
+  const atCeiling = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1200, max_ramp_c_per_hr: 200 }], 1200);
+  assert(atCeiling.valid === true, 'step6: a zone max_temp_c exactly at the Pico ceiling is allowed');
+
+  const belowCeiling = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1100, max_ramp_c_per_hr: 200 }], 1200);
+  assert(belowCeiling.valid === true, 'step6: a zone max_temp_c below the Pico ceiling is allowed');
+})();
+
+// ---- getAbsMaxTempC(): reads the Pico's abs_max_temp_c off GET
+// /api/safety/commissioning's params[] (id 260) verbatim -- never a second,
+// wizard-owned copy of the number, and never confuses "unset"/"unknown"
+// with a real 0. -----------------------------------------------------------
+(function testGetAbsMaxTempC() {
+  const ctx = loadPageScript(noopFetch);
+  const set = ctx.getAbsMaxTempC({ params: [{ id: 260, name: 'abs_max_temp_c', set: true, value: 1250 }] });
+  assert(set === 1250, 'getAbsMaxTempC reads a set value straight off params[]');
+
+  const unset = ctx.getAbsMaxTempC({ params: [{ id: 260, name: 'abs_max_temp_c', set: false }] });
+  assert(unset === null, 'getAbsMaxTempC returns null (not 0) when the Pico field is unset');
+
+  const missing = ctx.getAbsMaxTempC({ params: [] });
+  assert(missing === null, 'getAbsMaxTempC returns null when the field is absent entirely');
+
+  const noCommissioning = ctx.getAbsMaxTempC(null);
+  assert(noCommissioning === null, 'getAbsMaxTempC returns null when GET /api/safety/commissioning itself failed');
+})();
+
 Promise.resolve().then(() => {
   console.log('');
   console.log((passed + failed) + ' assertions, ' + passed + ' passed, ' + failed + ' failed');
