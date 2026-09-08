@@ -1270,14 +1270,22 @@ function loadProfileList() {
     sel.innerHTML = '';
     profileTitleById = {};
     list.forEach(function (p) { profileTitleById[p.id] = profileDisplayName(p); });
+    // "no profiles" and "recovery mode" (app.js's setRecoveryBanner()) are
+    // two independent reasons #runBtn can be disabled -- tracked as separate
+    // dataset flags so setting one here never re-enables the button while
+    // the other reason still holds. See app.js's setRecoveryBanner() doc
+    // comment (2026-09-08 UI aggregate review, d89256fe).
+    const runBtn = document.getElementById('runBtn');
     if (list.length === 0) {
       const opt = document.createElement('option');
       opt.textContent = 'No saved profiles -- create one first';
       sel.appendChild(opt);
-      document.getElementById('runBtn').disabled = true;
+      runBtn.dataset.noProfiles = 'true';
+      runBtn.disabled = true;
       return;
     }
-    document.getElementById('runBtn').disabled = false;
+    runBtn.dataset.noProfiles = 'false';
+    runBtn.disabled = runBtn.dataset.recoveryDisabled === 'true';
     list.forEach(function (p) {
       const opt = document.createElement('option');
       opt.value = p.id;

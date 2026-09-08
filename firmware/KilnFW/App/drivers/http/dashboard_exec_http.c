@@ -24,6 +24,7 @@
 #include "profile_executor.h"
 #include "profile_feasibility.h"
 #include "profiles_http.h"
+#include "recovery_start_refusal.h"
 #include "relay_authority.h"
 #include "run_state.h"
 #include "safety_trip_words.h"
@@ -635,6 +636,20 @@ esp_err_t history_csv_get_handler(httpd_req_t *req)
 
 esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
 {
+    /* recovery_start_refusal.h: checked first, before even reading the
+     * body -- ui_aggregate_review_2026-09-08's finding that the recovery
+     * banner's "Firing is NOT available" claim was never enforced by any
+     * route. See that header's doc comment for what happens without this
+     * check (a clean but generic "profile executor not started" refusal
+     * from profile_executor_run() itself, not a hang) and why this is named
+     * explicitly instead. */
+    char recovery_err[192];
+    if (recovery_mode_refuses_start(recovery_err, sizeof(recovery_err))) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, recovery_err);
+        return ESP_OK;
+    }
+
     if (req->content_len <= 0 || req->content_len > 32) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;

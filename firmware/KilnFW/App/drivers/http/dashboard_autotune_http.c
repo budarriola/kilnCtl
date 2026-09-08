@@ -16,6 +16,7 @@
 #include "dashboard_json.h"
 #include "http_form.h"
 #include "profile_executor.h"
+#include "recovery_start_refusal.h"
 #include "zones_config_accessors.h"
 
 /* autotune_state_name()/autotune_rule_name()/autotune_refusal_name() and the
@@ -167,6 +168,17 @@ esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
 
 esp_err_t autotune_start_post_handler(httpd_req_t *req)
 {
+    /* recovery_start_refusal.h: same explicit, named recovery-mode
+     * enforcement as profile_exec_start_post_handler() (dashboard_exec_http.c)
+     * -- see that header's doc comment. Checked first, before the body is
+     * even read. */
+    char recovery_err[192];
+    if (recovery_mode_refuses_start(recovery_err, sizeof(recovery_err))) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, recovery_err);
+        return ESP_OK;
+    }
+
     /* Raised from 64 when the relay method arrived: its form carries
      * method/setpoint_c/relay_d/relay_h/rule on top of zone. */
     if (req->content_len <= 0 || req->content_len > 192) {

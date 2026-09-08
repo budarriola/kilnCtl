@@ -474,6 +474,22 @@
     } else {
       recoveryBannerEl.setAttribute('hidden', '');
     }
+    // 2026-09-08 UI aggregate review (d89256fe): the banner said "Firing is
+    // NOT available" while main_page.html's #runBtn (the Start control)
+    // stayed clickable -- a banner asserting a property the page does not
+    // enforce is worse than no banner. Disable the control here, in
+    // lockstep with the banner, rather than only warning about it; the
+    // server-side enforcement is recovery_start_refusal.h. Tracked via a
+    // dataset flag rather than driving runBtn.disabled directly so this
+    // never fights with loadProfileList()'s own "no saved profiles" disable
+    // reason (main_page.html) -- either reason alone must keep it disabled,
+    // and #runBtn does not exist on every *_page.html app.js loads on, so
+    // this is a no-op there.
+    var runBtn = document.getElementById('runBtn');
+    if (runBtn) {
+      runBtn.dataset.recoveryDisabled = active ? 'true' : 'false';
+      runBtn.disabled = active || runBtn.dataset.noProfiles === 'true';
+    }
   }
 
   function pollRecoveryMode() {
