@@ -381,6 +381,27 @@ const ZONES_BASE_FIXTURE = `
 // TUNING_REC_VARIANTS above) so every state is actually rendered and swept,
 // not just the pre-Recommend empty one the static server would otherwise
 // leave in place.
+// main_page.html's recovery-mode banner (app.js's buildRecoveryBanner()/
+// setRecoveryBanner()) defaults to [hidden] under this static server --
+// pollRecoveryMode()'s fetch('/api/ota/esp/status') 404s here (this server
+// implements no /api/* routes, see file header) and its .catch()
+// deliberately leaves the banner in its last-known state rather than
+// hiding it, so the untouched page already covers the hidden case. The
+// 'recovery_shown' variant below covers the other owner-required case
+// (item 6: "test with the banner both shown and hidden") by calling the
+// page's own exported setRecoveryBanner(true) directly -- same real
+// function the poll success path calls, not a hand-built substitute -- so
+// this sweep exercises the actual full-width in-flow layout at every width
+// rather than assuming it matches .kc-conn-banner's already-covered shape.
+const RECOVERY_BANNER_VARIANTS = {
+  recovery_hidden: `true;`,
+  recovery_shown: `
+    if (typeof window.setRecoveryBanner !== 'function') return 'setRecoveryBanner not found';
+    window.setRecoveryBanner(true);
+    true;
+  `,
+};
+
 const PAGE_FIXTURES = {
   'zones_page.html': Object.keys(TUNING_REC_VARIANTS).map((suffix) => ({
     suffix,
@@ -388,6 +409,15 @@ const PAGE_FIXTURES = {
 (function () {
 ${ZONES_BASE_FIXTURE}
   ${TUNING_REC_VARIANTS[suffix]}
+  return 'ok';
+})()
+`,
+  })),
+  'main_page.html': Object.keys(RECOVERY_BANNER_VARIANTS).map((suffix) => ({
+    suffix,
+    script: `
+(function () {
+  ${RECOVERY_BANNER_VARIANTS[suffix]}
   return 'ok';
 })()
 `,

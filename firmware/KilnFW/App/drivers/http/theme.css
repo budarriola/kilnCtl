@@ -334,6 +334,22 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
 .kc-conn-banner { background: var(--ui-accent-5); color: #fff; padding: 0.6em 1em;
                   margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center; }
 .kc-conn-banner[hidden] { display: none; }
+
+/* Recovery-mode banner (owner report 2026-09-08). Same in-flow placement as
+   .kc-conn-banner above -- pushes content down, no overlap, disappears with
+   no leftover gap -- but built and inserted ABOVE it (app.js's
+   buildRecoveryBanner()) since a boot-time board state that explains WHY
+   firing/settings are degraded is more consequential than a transient
+   connection blip. accent-5 only, same token this file already uses for
+   "something is seriously wrong" (.kc-stop-btn, .kc-conn-banner above) --
+   no new colour introduced. Bold weight is the only extra emphasis, to
+   read as more urgent than the connection banner without a second colour.
+   Never dismissible -- see app.js's own comment on buildRecoveryBanner()
+   for why this element has no close control at all. */
+.kc-recovery-banner { background: var(--ui-accent-5); color: #fff; padding: 0.6em 1em;
+                       margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center;
+                       font-weight: bold; }
+.kc-recovery-banner[hidden] { display: none; }
 /* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
    item 4's "dim its values" wording. Every *_page.html now annotates its
    live device-reading elements with .kc-live-value (temperatures, relay/

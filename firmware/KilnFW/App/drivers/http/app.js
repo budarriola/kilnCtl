@@ -396,6 +396,111 @@
     }
   }
 
+  // ---- Recovery-mode banner ----------------------------------------------
+  //
+  // Owner report, 2026-09-08 recovery-loop incident: recovery mode was
+  // effectively invisible -- the LCD showed a frozen boot banner (the LVGL
+  // UI task is one of the things recovery mode skips, see
+  // main_bridges_bringup.c), the CONTROL UART was dead, and the config
+  // filesystem silently never mounted, with nothing on the dashboard saying
+  // so. Hours went into diagnosing symptoms of a state the board already
+  // knew it was in. This banner sources `recovery_mode` from the ALREADY
+  // EXISTING GET /api/ota/esp/status route (ota_http_esp.c's
+  // ota_esp_status_get_handler(), boot_guard_is_recovery_mode()) -- no new
+  // endpoint, no new JSON field, so no json_cap headroom is spent.
+  //
+  // recovery_mode is decided once at boot and never changes within a boot
+  // (see that handler's own doc comment), so this does not need the
+  // heartbeat's 3s cadence -- polled independently, much slower, on its own
+  // timer, and re-checked on visibilitychange like the heartbeat is.
+  var RECOVERY_POLL_MS = 20000;
+  var recoveryPollTimer = null;
+  var recoveryBannerEl = null;
+
+  // Named after what boot_guard.h / main_boot_early.c / main_bridges_bringup.c /
+  // main_control_bringup.c actually do in recovery mode, read directly from
+  // those files rather than assumed:
+  //   - main_boot_early.c: the config filesystem (pref_cfg_fs.c bridge) is
+  //     not mounted; settings come from firmware-default fallback storage.
+  //   - main_bridges_bringup.c (~line 102): the LVGL/LCD UI task is not
+  //     started at all -- this is also why an LCD-side version of this
+  //     banner would be unreachable; see this file's own header note.
+  //   - main_control_bringup.c (~line 152/160/187): profile_executor and
+  //     autotune_engine are not started -- firing and autotune are both
+  //     unavailable.
+  var RECOVERY_BANNER_TEXT =
+    'RECOVERY MODE — this board booted degraded after repeated unhealthy boots. ' +
+    'The LCD display, profile executor, and autotune engine are OFF, and the config ' +
+    'filesystem did not mount (settings may be running from fallback defaults). ' +
+    'Firing is NOT available. A healthy boot clears this automatically on its own, ' +
+    'or use "Exit recovery mode & reboot now" on the Firmware update page.';
+
+  function buildRecoveryBanner() {
+    var el = document.createElement('div');
+    el.className = 'kc-recovery-banner';
+    el.setAttribute('hidden', '');
+    el.setAttribute('role', 'alert');
+    el.textContent = RECOVERY_BANNER_TEXT;
+    // No dismiss control anywhere on this element, ever -- owner constraint
+    // (item 4): "must not be dismissible in a way that hides a still-active
+    // recovery state on reload." A localStorage-backed "dismissed" flag
+    // would do exactly that (persist across the very reload that should
+    // re-show it), so this banner has no close affordance at all; it only
+    // ever tracks live `recovery_mode` state from the board.
+    //
+    // Inserted directly ABOVE the connection-lost banner (bannerEl, built
+    // just above this function) rather than independently off the topbar --
+    // a board that is BOTH in recovery mode and currently unreachable
+    // should show the more consequential, explanatory state first: recovery
+    // mode says WHY firing/settings are degraded, the connection banner
+    // only says a poll briefly failed.
+    if (bannerEl && bannerEl.parentNode) {
+      bannerEl.parentNode.insertBefore(el, bannerEl);
+    } else {
+      var topbar = document.querySelector('.kc-topbar');
+      if (topbar && topbar.parentNode) {
+        topbar.parentNode.insertBefore(el, topbar.nextSibling);
+      } else {
+        document.body.insertBefore(el, document.body.firstChild);
+      }
+    }
+    return el;
+  }
+
+  function setRecoveryBanner(active) {
+    if (!recoveryBannerEl) return;
+    if (active) {
+      recoveryBannerEl.removeAttribute('hidden');
+    } else {
+      recoveryBannerEl.setAttribute('hidden', '');
+    }
+  }
+
+  function pollRecoveryMode() {
+    if (document.visibilityState === 'hidden') return;
+    fetch('/api/ota/esp/status')
+      .then(function (r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(function (st) {
+        setRecoveryBanner(!!(st && st.recovery_mode));
+      })
+      .catch(function () {
+        // Best-effort only: a transient fetch failure here is not evidence
+        // the board left recovery mode, so this deliberately leaves the
+        // banner in whatever state it last confirmed rather than hiding it
+        // -- the one banner on this page that must never silently drop
+        // because of an unrelated network blip.
+      });
+  }
+  // Exported (same convention as window.kcConfirm/window.kcEscapeHtml above)
+  // so ui_responsive_sweep.mjs's 'recovery_shown' fixture and
+  // test_recovery_banner.js can drive the SAME function the poll success
+  // path calls, rather than a hand-built substitute that could drift from
+  // the real show/hide logic.
+  window.setRecoveryBanner = setRecoveryBanner;
+
   // ---- Sticky Stop -----------------------------------------------------
   //
   // UI_PLAN.md item 2: a fixed Stop control on every page, not just the
@@ -691,16 +796,20 @@
 
   function init() {
     bannerEl = buildBanner();
+    recoveryBannerEl = buildRecoveryBanner();
     stopBarEl = buildStopBar();
     observeStopBarHeight(stopBarEl);
     buildUnitBtn();
     pollHeartbeat();
+    pollRecoveryMode();
+    recoveryPollTimer = setInterval(pollRecoveryMode, RECOVERY_POLL_MS);
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible') {
         // Coming back into view: re-poll immediately instead of waiting out
         // whatever backoff delay was in flight when it was hidden, so the
         // banner/stop-bar state can't lag a real reconnect by up to 30s.
         scheduleNext(0);
+        pollRecoveryMode();
       }
     });
   }
