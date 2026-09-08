@@ -191,3 +191,76 @@ what would have answered this in one step. It was not done here because
 OpenOCD's ESP flash read runs a stub on the halted target and effectively
 forces a reset, and `debug_reset` clears the RTC slow memory another agent's
 recovery work depends on.
+
+## 8. 2026-09-08 follow-up: reached the board without reset, and a flash was attempted but blocked
+
+**Board reached, no reset.** `kilnctrl` MCP server was restarted (stale, 1 file
+changed; no OpenOCD process running and no flash in progress, confirmed first)
+and came up fresh at commit `fd02df05`. `kiln_help()` shows no raw
+flash/partition-read tool in the 152-tool surface -- only memory-mapped
+`debug_read_memory`/`debug_read_symbol`, neither of which reaches the
+`coredump` partition's raw flash bytes. `kilnctl.local` (mDNS) and the
+previously-observed `192.168.1.156` both answered -- same board, same boot:
+`uptime_s=3925` (~65 min), `reset_reason: panic/exception` still naming this
+boot, `fw_build "Sep  7 2026 22:00:46"` (the `-1569-` build from section 1) --
+confirming this is still the one un-rebooted boot from section 2, now nearly
+1h5m stable in recovery mode.
+
+`/api/crash_report`, `/api/partitions`, `/api/status`, `/api/ota/esp/status`,
+`/api/cfgfs`, `/api/dualwrite_window`, and `get_device_log` (via
+`kiln_batch`) were captured and saved to
+`%USERPROFILE%\kilnctl_capture_20260908\` (gitignored, outside the repo, not
+committed). `crash_report.json` is byte-identical to section 1's record.
+`get_device_log(n=200)` returned "no device _srv.log lines received yet" --
+**not** the ~9h cached backlog this pass was briefed to expect; that
+expectation did not hold at capture time and is recorded as observed, not
+assumed. `link_status` additionally showed `connected: COM14` against
+`recommended_port: COM10` -- noted, not investigated, out of scope here.
+
+**Coredump extraction: still not obtainable without a reset**, and that
+conclusion is reaffirmed rather than newly discovered -- section 7 already
+named the OpenOCD-stub-forces-a-reset problem, and no raw-read MCP tool
+appeared after the restart to change that. The marginal value of the raw dump
+is bounded regardless: its only unique datum would have been `a1` (the
+stack pointer), and `7f7e3d0e` (section 5) now captures `exc_a0`/`exc_a1` for
+every *future* crash, so this specific v1 record's missing `a1` is a permanent,
+accepted gap, not a blocker for anything going forward.
+
+**Flash attempt was blocked by the stack-budget gate, not carried out.** A
+clean detached worktree was built at `origin/main` `a24fa033`
+(`C:/wt/espflash_0908` -- `C:/wt/espflash` was left alone, it belongs to
+another live agent and was mid-work/dirty at an older commit `0b6e82b7`).
+`origin/main` HEAD did not build as checked in: `-Werror=comment` failed on
+`profile_executor_internal.h:1052`, whose block comment reads
+`*actuated_on/*actuated_held_s` -- two variable names joined by `/` that GCC
+reads as an accidental nested-comment opener. Fixed by adding a space
+(`*actuated_on / *actuated_held_s`), comment-only, in both the worktree and
+the (clean-for-this-file) main tree, after which the build succeeded. Host
+tests: 31/31 executables built and passed. `check_main_task_stack_budget.ps1`
+against the resulting ELF:
+
+```
+deepest static stack path from app_main: 8704 B (budget 6144 B = 75% of a 8192 B stack)
+  app_main -> main_boot_early -> cfg_fs_mount_device -> maybe_auto_format_and_remount (8368 B)
+  -> cfg_fs_format_gate_conclude -> scan_metadata_block$constprop$0 -> lfs_style_crc
+check_main_task_stack_budget: FAIL -- 8704 B exceeds the 6144 B budget.
+```
+
+Per this pass's explicit stop condition, **`flash_firmware()` was NOT called**.
+This is the same overflow class as `boot_hang_2026-09-08.md`
+(`e7b8efc`/2026-08-22 bricking history), now routed through
+`cfg_fs_mount_device -> maybe_auto_format_and_remount`, which is inside the
+`cfg_fs*` area another agent is actively working (off-limits for this pass).
+The board was left exactly as found: still up, still in recovery mode, still
+un-acknowledged. `tools/run_all_checks.ps1`: 65/67 passed; the two failures
+(`check_flash_worker_lint.ps1`, `check_hal_include_boundary.ps1`) are both
+against `cfg_fs_status.c`/`cfg_fs_mount.c` -- the same off-limits area, named
+here rather than fixed.
+
+**Net effect of this pass:** the board's live state and every reachable
+diagnostic are now saved off-repo; the raw-coredump question is confirmed
+closed (not extractable without a reset, bounded value even if it were); and
+a real, separate build-breaking regression at `origin/main` HEAD was found and
+fixed (the `/*`-in-comment typo) plus a stack-budget regression was caught
+*before* it reached hardware. No reset, reflash, or OTA action was taken on
+the board.

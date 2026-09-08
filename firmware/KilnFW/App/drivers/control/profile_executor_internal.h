@@ -1049,7 +1049,7 @@ bool profile_executor_on_off_cap_denies(uint8_t relays_on_count, uint8_t cap);
  * ON before this zone is considered" and the configured cap (0=unlimited).
  *
  * Mutates *decide_state (on_off_trigger_decide()'s own state) and
- * *actuated_on/*actuated_held_s (the actuation-layer hold state) in place,
+ * *actuated_on / *actuated_held_s (the actuation-layer hold state) in place,
  * exactly as the two functions it calls would if invoked separately. */
 typedef struct {
     bool actuated_on;  /* final verdict this tick -- what apply_relay() should be called with */
