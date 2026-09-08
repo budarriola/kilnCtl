@@ -845,6 +845,68 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
                                     config_store_record_t *out_rec,
                                     config_store_reject_info_t *out_reject);
 
+// --- A/B sector arbitration (flash_endurance_review_2026-09-07.md R2) ------
+//
+// Sector A (the legacy single sector) and sector B (flash_layout.h's new
+// SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B) are each an independent 8-slot
+// append-only log, exactly as config_store_find_latest_ex() already
+// understands. The reader is the arbiter: at boot (or after any write), it
+// scans BOTH sectors' slots and keeps the single highest-`seq`, CRC-valid
+// record across all CONFIG_STORE_NUM_SECTORS * CONFIG_STORE_SLOTS_PER_SECTOR
+// slots -- there is no separate "which sector is active" flag stored
+// anywhere, so there is nothing shaped like a pointer that a torn write
+// could corrupt. This is what makes the sector switch atomic: config_store_
+// flash.c's write path always finishes writing (and CRC-verifying) the new
+// record in whichever sector it targets BEFORE it can matter, because until
+// that write's CRC validates, THIS function still returns the old sector's
+// last-good record -- there is no window where neither sector's answer is
+// trustworthy, and no window where both are, only the ordinary single-writer
+// question "did the newest write's CRC validate yet".
+//
+// `sectors[0]`/`sectors[1]` are exactly SAFTYFW_CONFIG_STORE_FLASH_SIZE bytes
+// each, same "caller already did the flash I/O" contract as
+// config_store_find_latest_ex(). Returns the winning slot index within
+// `sectors[*out_sector_index]`, or CONFIG_STORE_NO_SLOT (leaving `*out_rec`
+// and `*out_sector_index` untouched) if neither sector holds a single valid
+// record. `out_reject`, when non-NULL, reports the highest-seq structurally-
+// valid-but-range-refused record across BOTH sectors -- same "only meaningful
+// when this returns CONFIG_STORE_NO_SLOT" contract as config_store_find_
+// latest_ex(), extended across the pair the same way the good-record search
+// is.
+size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_STORE_NUM_SECTORS],
+                                          size_t *out_sector_index,
+                                          config_store_record_t *out_rec,
+                                          config_store_reject_info_t *out_reject);
+
+// Pure decision for where the NEXT write should land, given the CURRENT
+// winning (sector, slot) config_store_find_latest_multi_ex() returned (or
+// (0, CONFIG_STORE_NO_SLOT) for a never-written pair of sectors -- sector 0
+// is an arbitrary but fixed starting point, matching config_store_next_
+// write_slot()'s existing "slot 0 may already be erased, don't assume
+// otherwise" stance for the needs_erase field below).
+//
+//   - If the current sector still has room for another slot (config_store_
+//     next_write_needs_erase() on the current slot says false): stay in the
+//     same sector, next slot, no erase. Identical behaviour to the old
+//     single-sector design for 7 out of every 8 writes.
+//   - If the current sector is full (next_write_needs_erase() says true):
+//     SWITCH to the other sector, slot 0, needs_erase = true. The other
+//     sector holds either nothing (fresh board) or a full 8 slots of now-
+//     doubly-stale records from the last time it was active -- either way it
+//     must be erased before slot 0 can be programmed. Crucially, this erase
+//     targets the OTHER (already-superseded) sector, never the one holding
+//     the current live record, which is exactly what keeps a valid copy
+//     available through the whole erase+program pair.
+typedef struct {
+    size_t sector_index; // which of sectors[0]/[1] the caller should target
+    size_t slot_index;   // slot within that sector
+    bool   needs_erase;  // whether that sector must be erased before this
+                          // program -- true only on a sector switch
+} config_store_write_plan_t;
+
+config_store_write_plan_t config_store_plan_write(size_t current_sector_index,
+                                                    size_t current_slot_index);
+
 // Given the slot index config_store_find_latest() returned (or
 // CONFIG_STORE_NO_SLOT), returns the index the NEXT write should target.
 // Same wrap/never-written semantics as bootloader_metadata_next_write_slot().

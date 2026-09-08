@@ -90,10 +90,35 @@ extern "C" {
 #define SAFTYFW_CONFIG_STORE_FLASH_OFFSET BOOTLOADER_CONFIG_FLASH_OFFSET
 #define SAFTYFW_CONFIG_STORE_FLASH_SIZE   0x00001000u // 4K, one erase sector
 
-// Reserved headroom: 0x1B1000+0x1000 (SAFTYFW_CONFIG_STORE_FLASH_SIZE)
-// ..0x1C1000, 60K, plus 0x1C1000..0x200000, 252K. Not represented by a macro
-// here -- nothing addresses it yet, and giving unclaimed space a name invites
-// something to start using it without a doc update.
+// Flash endurance review 2026-09-07 (docs/audits/flash_endurance_review_
+// 2026-09-07.md, R2): sector A above is an 8-slot append-only log, but it is
+// the ONLY copy -- when its 8th write wraps, config_store_flash.c must erase
+// the whole sector before it can program slot 0 again, and between that
+// erase and the next successful program there are ZERO valid copies of the
+// safety configuration on this board. A power cut in that window loses TC
+// type, abs_max_temp_c, CT cal outright.
+//
+// Sector B is the fix: a second, identical 4K sector immediately following
+// sector A, carved from the SAME 64K BOOTLOADER_CONFIG_FLASH_SIZE region that
+// was already reserved for this and had 60K unused (15 spare sectors) --
+// no flash-layout move, no bootloader change. config_store_flash.c now
+// round-robins its 8-slot log inside whichever of A/B is "active", and only
+// SWITCHES to the other sector (erase-then-program, verified, before the
+// old sector is ever touched) when the active one fills up -- see that
+// file's header comment for the full write/switch/arbitration design. This
+// halves the per-sector erase rate as a free side effect (the endurance
+// review's R2 wear-levelling bonus), but the reason this exists is
+// atomicity, not wear: at least one of A/B always holds a complete,
+// CRC-valid record, at every instant, including mid-erase and mid-program of
+// the other one.
+#define SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B \
+    (SAFTYFW_CONFIG_STORE_FLASH_OFFSET + SAFTYFW_CONFIG_STORE_FLASH_SIZE)
+#define SAFTYFW_CONFIG_STORE_NUM_SECTORS 2u
+
+// Reserved headroom: 0x1B2000+0x1000 (sector B) ..0x1C2000, 56K, plus
+// 0x1C2000..0x200000, 252K. Not represented by a macro here -- nothing
+// addresses it yet, and giving unclaimed space a name invites something to
+// start using it without a doc update.
 
 #ifdef __cplusplus
 }

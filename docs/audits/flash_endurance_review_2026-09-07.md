@@ -1,5 +1,30 @@
 # Flash endurance review — 2026-09-07
 
+**Status update, 2026-09-08: R2 implemented, NOT YET FLASHED.** Sector B
+(`SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B`, immediately after sector A inside the
+already-reserved 64K `BOOTLOADER_CONFIG_FLASH_SIZE` region) is now live in
+source: `config_store_flash.c` writes always target the sector that is NOT
+current, erasing-then-programming it and only then updating the in-RAM
+(sector, slot) cache; `config_store_find_latest_multi_ex()` (config_store.c)
+is the sole arbiter, scanning both sectors' 16 slots every boot and keeping
+the single highest-seq, CRC-valid record -- there is no separate "which
+sector is active" pointer anywhere to tear. Sector A keeps its original
+offset and 8-slot format unchanged, so a board already running the old
+single-sector firmware needs no migration step: this firmware's first boot
+against that board's existing image finds sector A's real, already-
+committed record (TC type, `abs_max_temp_c`, CT cal all intact) exactly as
+before, with sector B simply still blank. 169/169 config_store host tests
+pass (up from 60), including power-cut injection at mid-erase, mid-program,
+and between-erase-and-program of the switch target (each leaves the OTHER,
+untouched sector's record valid), a fixture built from the CURRENT on-flash
+single-sector format proving migration is seamless, a corrupt-sector
+fallback, and a negative test that reintroduces the old erase-in-place
+behaviour and shows `test_power_loss_between_erase_and_program_of_target_
+leaves_old_sector_valid` fail with zero valid copies at that instant (then
+reverted by hand, `git diff` empty). Wear is now spread across both
+sectors as the free side effect this review named. **A Pico reflash is
+required to put this on the board and has not been done.**
+
 Owner directive: *"we must have wear leveling and this is a standard way to
 get it."* The 2026-09-06 `LITTLEFS_ASSESSMENT.md` declined a filesystem, but
 it argued from **log retention size**. That is a different question from

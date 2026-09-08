@@ -938,6 +938,101 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
     return best_slot;
 }
 
+size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_STORE_NUM_SECTORS],
+                                          size_t *out_sector_index,
+                                          config_store_record_t *out_rec,
+                                          config_store_reject_info_t *out_reject)
+{
+    if (out_reject != NULL) {
+        memset(out_reject, 0, sizeof(*out_reject));
+    }
+
+    if (sectors == NULL || out_sector_index == NULL || out_rec == NULL) {
+        return CONFIG_STORE_NO_SLOT;
+    }
+
+    size_t best_sector = 0;
+    size_t best_slot = CONFIG_STORE_NO_SLOT;
+    config_store_record_t best_rec;
+    memset(&best_rec, 0, sizeof(best_rec));
+    bool have_best = false;
+
+    // Same "highest-seq rejection, only reported if no sector has a good
+    // record" bookkeeping as config_store_find_latest_ex(), just carried
+    // across both sectors -- a rejection in sector A must not be reported if
+    // sector B has a perfectly good, newer record, and vice versa.
+    config_store_reject_info_t best_reject;
+    memset(&best_reject, 0, sizeof(best_reject));
+    bool have_rejected = false;
+
+    for (size_t s = 0; s < SAFTYFW_CONFIG_STORE_NUM_SECTORS; s++) {
+        if (sectors[s] == NULL) {
+            continue;
+        }
+        config_store_record_t sector_rec;
+        config_store_reject_info_t sector_reject;
+        size_t sector_slot = config_store_find_latest_ex(sectors[s], &sector_rec, &sector_reject);
+        if (sector_slot == CONFIG_STORE_NO_SLOT) {
+            if (sector_reject.rejected && (!have_rejected || sector_reject.seq > best_reject.seq)) {
+                best_reject = sector_reject;
+                have_rejected = true;
+            }
+            continue;
+        }
+        if (!have_best || sector_rec.seq > best_rec.seq) {
+            best_rec = sector_rec;
+            best_slot = sector_slot;
+            best_sector = s;
+            have_best = true;
+        }
+    }
+
+    if (!have_best) {
+        if (out_reject != NULL && have_rejected) {
+            *out_reject = best_reject;
+        }
+        return CONFIG_STORE_NO_SLOT;
+    }
+
+    *out_sector_index = best_sector;
+    *out_rec = best_rec;
+    return best_slot;
+}
+
+config_store_write_plan_t config_store_plan_write(size_t current_sector_index,
+                                                    size_t current_slot_index)
+{
+    config_store_write_plan_t plan;
+    if (current_slot_index == CONFIG_STORE_NO_SLOT) {
+        // Never written to either sector yet -- sector 0, slot 0, and (same
+        // reasoning as config_store_next_write_needs_erase()'s own
+        // CONFIG_STORE_NO_SLOT case) do not assume an erase is needed; a
+        // fresh/blank sector may already be erased.
+        plan.sector_index = 0;
+        plan.slot_index = 0;
+        plan.needs_erase = false;
+        return plan;
+    }
+
+    if (!config_store_next_write_needs_erase(current_slot_index)) {
+        // Room left in the current sector -- reuse the existing per-sector
+        // round-robin logic unchanged.
+        plan.sector_index = current_sector_index;
+        plan.slot_index = config_store_next_write_slot(current_slot_index);
+        plan.needs_erase = false;
+        return plan;
+    }
+
+    // Current sector is full: switch to the other one. It must be erased
+    // (it holds either nothing or a full sector of now-superseded records)
+    // before slot 0 can be programmed -- but the sector holding the CURRENT
+    // live record is never touched by this, which is the whole point.
+    plan.sector_index = (current_sector_index == 0) ? 1u : 0u;
+    plan.slot_index = 0;
+    plan.needs_erase = true;
+    return plan;
+}
+
 size_t config_store_next_write_slot(size_t latest_slot_index)
 {
     if (latest_slot_index == CONFIG_STORE_NO_SLOT) {

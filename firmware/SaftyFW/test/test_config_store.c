@@ -449,6 +449,105 @@ static void test_next_write_slot(void)
                "wrap requires an erase before the slot-0 write");
 }
 
+static void test_plan_write(void)
+{
+    TEST_SECTION("config_store_plan_write -- A/B sector switch decision");
+
+    config_store_write_plan_t plan = config_store_plan_write(0, CONFIG_STORE_NO_SLOT);
+    TEST_CHECK(plan.sector_index == 0 && plan.slot_index == 0 && plan.needs_erase == false,
+               "never written: sector 0, slot 0, no assumed erase");
+
+    plan = config_store_plan_write(1, CONFIG_STORE_NO_SLOT);
+    TEST_CHECK(plan.sector_index == 0, "the CURRENT sector index is ignored on NO_SLOT -- always starts at 0");
+
+    // Mid-sector: stays in the SAME sector, no erase, exactly the old
+    // single-sector behaviour for 7 of every 8 writes.
+    plan = config_store_plan_write(0, 3);
+    TEST_CHECK(plan.sector_index == 0 && plan.slot_index == 4 && plan.needs_erase == false,
+               "room left in sector A: next slot, same sector, no erase");
+
+    plan = config_store_plan_write(1, 3);
+    TEST_CHECK(plan.sector_index == 1 && plan.slot_index == 4 && plan.needs_erase == false,
+               "room left in sector B: next slot, same sector, no erase");
+
+    // Sector full (last slot just written): SWITCH to the other sector,
+    // slot 0, and it DOES need an erase -- this is the only case where the
+    // plan crosses sectors.
+    size_t last = CONFIG_STORE_SLOTS_PER_SECTOR - 1;
+    plan = config_store_plan_write(0, last);
+    TEST_CHECK(plan.sector_index == 1 && plan.slot_index == 0 && plan.needs_erase == true,
+               "sector A full: switches to sector B, slot 0, erase required");
+
+    plan = config_store_plan_write(1, last);
+    TEST_CHECK(plan.sector_index == 0 && plan.slot_index == 0 && plan.needs_erase == true,
+               "sector B full: switches back to sector A, slot 0, erase required");
+}
+
+static void test_find_latest_multi(void)
+{
+    TEST_SECTION("config_store_find_latest_multi_ex -- A/B arbitration");
+
+    uint8_t sector_a[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    uint8_t sector_b[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    memset(sector_a, 0xFF, sizeof(sector_a));
+    memset(sector_b, 0xFF, sizeof(sector_b));
+    const uint8_t *sectors[SAFTYFW_CONFIG_STORE_NUM_SECTORS] = {sector_a, sector_b};
+
+    config_store_record_t out;
+    size_t sector_index = 99; // poisoned, must stay untouched on NO_SLOT
+    size_t slot =
+        config_store_find_latest_multi_ex(sectors, &sector_index, &out, NULL);
+    TEST_CHECK(slot == CONFIG_STORE_NO_SLOT, "both sectors blank: no valid record anywhere");
+    TEST_CHECK(sector_index == 99, "*out_sector_index left untouched on NO_SLOT");
+
+    // Sector A alone holds a record -- exactly what a board running the OLD
+    // single-sector firmware looks like the first time this firmware reads
+    // it (sector B has never been written). This is the migration proof at
+    // the pure-logic layer; test_config_store_flash.c pins the same thing
+    // through the real flash-I/O path.
+    config_store_record_t rec_a;
+    memset(&rec_a, 0, sizeof(rec_a));
+    rec_a.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec_a.seq = 4;
+    rec_a.tc_type = 0x02u;
+    config_store_pack(&rec_a, &sector_a[2 * CONFIG_STORE_RECORD_LEN]);
+
+    slot = config_store_find_latest_multi_ex(sectors, &sector_index, &out, NULL);
+    TEST_CHECK(slot == 2 && sector_index == 0 && out.seq == 4,
+               "legacy single-sector board: sector A's record found, sector B ignored (blank)");
+
+    // Sector B holds a HIGHER seq (a completed switch) -- must win regardless
+    // of sector A still holding its own, now-stale, valid record.
+    config_store_record_t rec_b;
+    rec_b = rec_a;
+    rec_b.seq = 9;
+    rec_b.tc_type = 0x07u;
+    config_store_pack(&rec_b, &sector_b[0 * CONFIG_STORE_RECORD_LEN]);
+
+    slot = config_store_find_latest_multi_ex(sectors, &sector_index, &out, NULL);
+    TEST_CHECK(slot == 0 && sector_index == 1 && out.seq == 9,
+               "sector B's higher seq wins even though sector A still has a valid (stale) record");
+
+    // Corrupt sector B's only record -- must fall back to sector A's still-
+    // valid, lower-seq record, not to CONFIG_STORE_NO_SLOT. This is the
+    // "corrupt sector falls back to the good one" property at the pure-logic
+    // layer.
+    sector_b[20] ^= 0x01u;
+    slot = config_store_find_latest_multi_ex(sectors, &sector_index, &out, NULL);
+    TEST_CHECK(slot == 2 && sector_index == 0 && out.seq == 4,
+               "sector B corrupted: falls back silently to sector A's older valid record");
+
+    TEST_CHECK(config_store_find_latest_multi_ex(NULL, &sector_index, &out, NULL) ==
+                   CONFIG_STORE_NO_SLOT,
+               "NULL sectors array rejected");
+    TEST_CHECK(config_store_find_latest_multi_ex(sectors, NULL, &out, NULL) ==
+                   CONFIG_STORE_NO_SLOT,
+               "NULL out_sector_index rejected");
+    TEST_CHECK(config_store_find_latest_multi_ex(sectors, &sector_index, NULL, NULL) ==
+                   CONFIG_STORE_NO_SLOT,
+               "NULL out_rec rejected");
+}
+
 static void test_decide_write(void)
 {
     TEST_SECTION("config_store_decide_write -- ARMED refusal");
@@ -2463,6 +2562,8 @@ void run_test_config_store(void)
     test_default();
     test_find_latest();
     test_next_write_slot();
+    test_plan_write();
+    test_find_latest_multi();
     test_decide_write();
     test_record_crc();
     test_ct_cal_defaults_on_blank();

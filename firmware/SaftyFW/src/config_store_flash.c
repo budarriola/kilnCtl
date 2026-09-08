@@ -14,16 +14,67 @@
 // still expressed at this layer, untouched by the rebase -- only the flash
 // primitive calls underneath moved.
 //
-// Region binding: this file's hal_flash_region_t is bound once, lazily, to
-// exactly the config store's own sector -- base == flash_layout.h's real
-// SAFTYFW_CONFIG_STORE_FLASH_OFFSET, size == SAFTYFW_CONFIG_STORE_FLASH_SIZE
-// (see ensure_region() below) -- so every offset used elsewhere in this file
-// is 0-based within that one sector, not a whole-device offset. Binding at
-// the REAL flash_layout.h offset (rather than 0 on host, matching pico) is
-// deliberate: it lets this file be identical on both backends, at the cost
-// of the host fake needing to be sized to accept that real offset (see
-// firmware/hwAbstraction/host/fake_flash.h's FAKE_FLASH_MAX_SIZE_BYTES
-// comment, bumped the same day for exactly this).
+// Region binding: this file's two hal_flash_region_t's are bound once,
+// lazily, to the config store's A and B sectors -- base ==
+// flash_layout.h's real SAFTYFW_CONFIG_STORE_FLASH_OFFSET /
+// SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B, size == SAFTYFW_CONFIG_STORE_FLASH_
+// SIZE for each (see ensure_region() below) -- so every offset used
+// elsewhere in this file against one of them is 0-based within THAT sector,
+// not a whole-device offset. Binding at the REAL flash_layout.h offsets
+// (rather than 0 on host, matching pico) is deliberate: it lets this file be
+// identical on both backends, at the cost of the host fake needing to be
+// sized to accept those real offsets (see firmware/hwAbstraction/host/
+// fake_flash.h's FAKE_FLASH_MAX_SIZE_BYTES comment, bumped for exactly this).
+//
+// --- A/B sectors (flash_endurance_review_2026-09-07.md R2) -----------------
+//
+// The ORIGINAL single-sector design's failure mode: config_store_write()'s
+// 8th write into a sector must erase that whole sector before it can program
+// slot 0 again (config_store_next_write_needs_erase()) -- and between that
+// erase and the next successful program, the sector held ZERO valid copies
+// of the safety config. A power cut there lost TC type, abs_max_temp_c, CT
+// cal outright. Nothing about the CRC/seq scan itself was ever unsafe; the
+// gap was structural -- there was only ever one place to look.
+//
+// The fix adds a second sector (B) and never lets there be a moment with no
+// valid copy anywhere:
+//
+//   - WRITE: config_store_plan_write() (config_store.c, pure) decides, from
+//     the currently-cached (sector, slot), whether the next write fits in
+//     the SAME sector (7 out of 8 writes -- no erase, byte-identical to the
+//     old behaviour) or must SWITCH to the other sector (the 8th write --
+//     erase that other sector, then program its slot 0).
+//   - ATOMICITY: a switch never touches the sector holding the current
+//     record. config_store_write_cb() below is handed only ONE
+//     hal_flash_region_t (`args.region`, the target sector) -- it has no
+//     way to erase or reprogram the other one even if it wanted to. So at
+//     every instant during the erase-then-program pair -- including a crash
+//     mid-erase, mid-program, or anywhere between the two -- the sector that
+//     was NOT targeted still holds its full, untouched, CRC-valid record.
+//     There is no separate "which sector is active" pointer stored anywhere
+//     to tear: see the next bullet.
+//   - ARBITRATION: read_latest_or_default() reads BOTH sectors, every time,
+//     and config_store_find_latest_multi_ex() (config_store.c, pure) keeps
+//     the single highest-`seq`, CRC-valid record across all 16 slots. A
+//     torn/interrupted write in the target sector simply fails its own CRC
+//     check and is skipped, exactly like any other corrupt slot always was
+//     -- the reader then finds the OTHER sector's still-valid, lower-seq
+//     record instead, with no special-casing needed for "was this a
+//     switch-in-progress". The corrupt/superseded sector is not logged as a
+//     distinct case (it looks, and is treated, exactly like any other
+//     partially-written slot config_store_unpack_ex() already understands).
+//   - MIGRATION: sector A keeps its original offset (SAFTYFW_CONFIG_STORE_
+//     FLASH_OFFSET, unmoved) and its original 8-slot append-only format
+//     (unchanged) -- a board already running the old single-sector firmware
+//     IS running "A/B with B still erased/empty" already, with no data to
+//     move and no migration step to run. The first boot of this firmware on
+//     such a board reads sector A's existing highest-seq record exactly as
+//     before (config_store_find_latest_multi_ex() finds nothing valid in the
+//     still-blank sector B, same as an ordinary fresh sector) and proceeds
+//     unaffected; TC type and abs_max_temp_c are not defaulted or lost.
+//   - WEAR: each sector now absorbs erases only half as often (an erase
+//     happens once every 8 writes, alternating sectors), which is the free
+//     side effect the endurance review named -- not the reason this exists.
 //
 // Caches the current record in a static, so config_store_get_tc_type()/
 // config_store_is_calibration_missing() are cheap, lock-free reads for
@@ -92,7 +143,18 @@ static hal_status_t hal_status_to_config_store_flash_rc(hal_status_t status, int
 // Lazily bound the first time either read_latest_or_default() or
 // config_store_write() needs it -- see the file header comment above for
 // what this region covers and why the offset is the same on both backends.
+//
+// A/B sectors (flash_endurance_review_2026-09-07.md R2): s_region is sector
+// A (the legacy single sector, unmoved -- SAFTYFW_CONFIG_STORE_FLASH_OFFSET),
+// s_region_b is sector B (flash_layout.h's new
+// SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B, immediately following it in the same
+// 64K reserved region). Indexed as s_regions[0]/[1] wherever code needs to
+// pick "the sector config_store_plan_write()/find_latest_multi_ex() named",
+// so the sector-index values those pure functions return map directly to an
+// array index here with no translation.
 static hal_flash_region_t s_region;
+static hal_flash_region_t s_region_b;
+static hal_flash_region_t *s_regions[SAFTYFW_CONFIG_STORE_NUM_SECTORS];
 static bool s_region_ready = false;
 
 static bool ensure_region(void)
@@ -104,12 +166,24 @@ static bool ensure_region(void)
                                SAFTYFW_CONFIG_STORE_FLASH_SIZE) != HAL_OK) {
         return false;
     }
+    if (hal_flash_region_init(&s_region_b, SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B,
+                               SAFTYFW_CONFIG_STORE_FLASH_SIZE) != HAL_OK) {
+        return false;
+    }
+    s_regions[0] = &s_region;
+    s_regions[1] = &s_region_b;
     s_region_ready = true;
     return true;
 }
 
 static config_store_record_t s_cached_record;
 static size_t s_cached_slot = CONFIG_STORE_NO_SLOT;
+// Which of s_regions[0]/[1] (sector A/B) s_cached_slot indexes into. Only
+// meaningful once s_cached_slot != CONFIG_STORE_NO_SLOT; config_store_plan_
+// write() ignores it entirely in the NO_SLOT case (starts fresh at sector 0),
+// same "don't trust a stale index against a sentinel" discipline as
+// s_cached_slot's own callers already follow.
+static size_t s_cached_sector = 0;
 static bool s_loaded = false;
 // True iff the sector held a structurally-intact (magic/CRC/format_version
 // all valid) record that config_params_validate_ranges() refused, and no
@@ -130,24 +204,39 @@ static bool s_load_rejected = false;
 // is documented (config_store_flash.c's own header comment, "must run once,
 // pre-scheduler") to run exactly once before any task exists, so there is no
 // concurrent caller to serialize against; a single static buffer is safe.
-static uint8_t s_read_sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+static uint8_t s_read_sector[SAFTYFW_CONFIG_STORE_NUM_SECTORS][SAFTYFW_CONFIG_STORE_FLASH_SIZE];
 
+// Reads BOTH sectors and hands them to config_store_find_latest_multi_ex(),
+// which is the actual arbiter (config_store.h's "A/B sector arbitration"
+// comment) -- this function is now just the flash-I/O half of that: no
+// erase/switch state lives here, only whatever the two sectors' own bytes
+// say right now. `*out_sector` is filled with which sector the winning
+// record came from (0 or 1), untouched on a CONFIG_STORE_NO_SLOT return.
 static size_t read_latest_or_default(config_store_record_t *out_rec,
+                                      size_t *out_sector,
                                       config_store_reject_info_t *out_reject)
 {
     // ensure_region()/hal_flash_read() failing here is treated the same as
     // an unreadable/blank sector always was: "a missing part must not abort
     // boot" (max31856_configure()'s own doc comment) applies to
     // configuration exactly as much as to a missing sensor -- fall back to
-    // config_store_default() rather than propagate the failure.
+    // config_store_default() rather than propagate the failure. A read
+    // failure on EITHER sector is treated the same way -- there is no
+    // partial-arbitration path that trusts one sector's bytes while
+    // distrusting the other's read status.
     if (!ensure_region() ||
-        hal_flash_read(&s_region, 0, s_read_sector, sizeof(s_read_sector)) != HAL_OK) {
+        hal_flash_read(&s_region, 0, s_read_sector[0], sizeof(s_read_sector[0])) != HAL_OK ||
+        hal_flash_read(&s_region_b, 0, s_read_sector[1], sizeof(s_read_sector[1])) != HAL_OK) {
         config_store_default(out_rec);
         return CONFIG_STORE_NO_SLOT;
     }
-    size_t latest = config_store_find_latest_ex(s_read_sector, out_rec, out_reject);
+    const uint8_t *sectors[SAFTYFW_CONFIG_STORE_NUM_SECTORS] = {s_read_sector[0], s_read_sector[1]};
+    size_t sector_index = 0;
+    size_t latest = config_store_find_latest_multi_ex(sectors, &sector_index, out_rec, out_reject);
     if (latest == CONFIG_STORE_NO_SLOT) {
         config_store_default(out_rec);
+    } else {
+        *out_sector = sector_index;
     }
     return latest;
 }
@@ -177,7 +266,7 @@ void config_store_boot_load(void)
     config_store_reject_info_t reject_info;
     memset(&reject_info, 0, sizeof(reject_info));
 
-    s_cached_slot = read_latest_or_default(&s_cached_record, &reject_info);
+    s_cached_slot = read_latest_or_default(&s_cached_record, &s_cached_sector, &reject_info);
     s_load_rejected = (s_cached_slot == CONFIG_STORE_NO_SLOT) && reject_info.rejected;
 
     if (s_load_rejected) {
@@ -315,6 +404,14 @@ uint16_t config_store_get_config_crc(void)
 }
 
 typedef struct {
+    hal_flash_region_t *region; // s_regions[plan.sector_index] -- the ONLY
+                                 // sector this callback touches; the other
+                                 // one (holding the still-current record
+                                 // whenever needs_erase is true) is never
+                                 // passed here at all, so there is no way for
+                                 // this callback to erase or program the
+                                 // sector a crash must still be able to fall
+                                 // back on.
     size_t  next_write_slot;
     bool    needs_erase;
     uint8_t record[CONFIG_STORE_RECORD_LEN];
@@ -337,12 +434,12 @@ static void config_store_write_cb(void *param)
     config_store_write_args_t *a = (config_store_write_args_t *)param;
     a->result = HAL_OK;
     if (a->needs_erase) {
-        a->result = hal_flash_erase(&s_region, 0, SAFTYFW_CONFIG_STORE_FLASH_SIZE);
+        a->result = hal_flash_erase(a->region, 0, SAFTYFW_CONFIG_STORE_FLASH_SIZE);
         if (a->result != HAL_OK) {
             return; // do not attempt the program half over a failed erase
         }
     }
-    a->result = hal_flash_program(&s_region,
+    a->result = hal_flash_program(a->region,
                                    (uint32_t)a->next_write_slot * CONFIG_STORE_RECORD_LEN,
                                    a->record, CONFIG_STORE_RECORD_LEN);
 }
@@ -387,9 +484,20 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
     to_write.seq = s_cached_record.seq + 1u;
 
+    // config_store.h's "A/B sector arbitration" -- this plan names which
+    // sector this write actually targets, and whether that sector needs an
+    // erase first. When it is a sector SWITCH (needs_erase == true), the
+    // target is always the OTHER sector from s_cached_sector -- the one
+    // holding the still-valid current record is passed to config_store_
+    // write_cb() only as a value already captured in s_cached_record, never
+    // as `args.region`, so this callback cannot erase or reprogram it no
+    // matter when a crash interrupts it.
+    config_store_write_plan_t plan = config_store_plan_write(s_cached_sector, s_cached_slot);
+
     config_store_write_args_t args;
-    args.next_write_slot = config_store_next_write_slot(s_cached_slot);
-    args.needs_erase = config_store_next_write_needs_erase(s_cached_slot);
+    args.region = s_regions[plan.sector_index];
+    args.next_write_slot = plan.slot_index;
+    args.needs_erase = plan.needs_erase;
     args.result = HAL_NOT_READY; // overwritten by the callback if it ever runs
     config_store_pack(&to_write, args.record);
 
@@ -419,7 +527,8 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
     }
 
     s_cached_record = to_write;
-    s_cached_slot = args.next_write_slot;
+    s_cached_slot = plan.slot_index;
+    s_cached_sector = plan.sector_index;
     if (out_reason != NULL) {
         *out_reason = "ok";
     }
