@@ -99,6 +99,13 @@
      colours from .done/.current, still only --warn/--bad tokens. */
   .gstepper span.skipped { color: var(--muted); border-color: var(--border); text-decoration: line-through; }
   .gstepper span.regressed { color: #fff; background: var(--bad); border-color: var(--bad); font-weight: bold; }
+  /* ADDED (review §2a/§2c): "unknown" -- readiness data for this step could
+     not be read at all (unreachable board, or a truncated checklist).
+     Deliberately distinct from .regressed (which means the board actively
+     disagrees with a stored claim) -- this means no claim could be checked
+     either way. No new colour: same --warn token the safety-flag and
+     cannot_yet pill already use. */
+  .gstepper span.unknown { color: var(--warn); border-color: var(--warn); font-weight: bold; }
   .gscreen { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
     padding: 1em 1.2em; margin-bottom: 1em; }
   .gnav { display: flex; gap: 0.6em; margin-top: 1em; flex-wrap: wrap; }
@@ -129,6 +136,7 @@
     text-decoration: line-through; }
   .pill-regressed { background: var(--bad); color: #fff; }
   .pill-cannot_yet { background: var(--card-bg); border-color: var(--warn); color: var(--warn); }
+  .pill-unknown { background: var(--card-bg); border-color: var(--warn); color: var(--warn); font-weight: bold; }
   .steprow .stepgo { margin: 0; padding: 0.4em 0.9em; font-size: 0.85em; min-height: 32px; }
 
   /* ---- Completion gate banner: refuses to render "complete" the moment any
@@ -318,17 +326,37 @@ function computeStepState(step, storedStep, readinessByKey) {
   var allOkOrOff = items.length > 0 && items.every(function (it) {
     return it.status === 'ok' || it.status === 'deliberately_off';
   });
+  // Review §2c: a step that declares readiness keys but for which NONE
+  // resolved (either /api/readiness failed entirely and loadAll() fell
+  // back to an empty item list, or readiness_http.c's own checklist got
+  // truncated and dropped exactly this step's key(s)) must never fall
+  // through to trusting the stored blob -- absence of data is not absence
+  // of problems. Steps that legitimately declare no readinessKeys (8, 9,
+  // 11 -- see the comment above WIZARD_STEPS) are unaffected: this can only
+  // be true for a step that named keys and got none of them back.
+  var readinessUnresolved = step.readinessKeys.length > 0 && items.length === 0;
 
-  if (storedState === 'done' && anyNotDone) {
+  if (storedState === 'skipped') {
+    return { state: 'skipped', detail: storedStep && storedStep.note ? storedStep.note : '' };
+  }
+  if (readinessUnresolved) {
+    return {
+      state: 'unknown',
+      detail: 'The readiness checklist did not return data for this step (unreachable or truncated) -- ' +
+        'done/pending cannot be determined from here.',
+    };
+  }
+  // Review §2b: a step stored "done" whose readiness has since gone
+  // cannot_yet (a prerequisite it depended on was lost, e.g. thermo_count
+  // changed after this step ran) is regressed exactly like not_done -- an
+  // item that has become un-doable is a regression, not a still-good done.
+  if (storedState === 'done' && (anyNotDone || anyCannotYet)) {
+    var badItems = items.filter(function (it) { return it.status === 'not_done' || it.status === 'cannot_yet'; });
     return {
       state: 'regressed',
       detail: 'Marked done, but the board now reports this outstanding: ' +
-        items.filter(function (it) { return it.status === 'not_done'; })
-             .map(function (it) { return it.label + ' -- ' + it.detail; }).join('; '),
+        badItems.map(function (it) { return it.label + ' -- ' + it.detail; }).join('; '),
     };
-  }
-  if (storedState === 'skipped') {
-    return { state: 'skipped', detail: storedStep && storedStep.note ? storedStep.note : '' };
   }
   if (storedState === 'done' || allOkOrOff) {
     return { state: 'done', detail: '' };
@@ -375,7 +403,17 @@ function mergeAllSteps(progress, readiness) {
 // ct_installed = no) and must never block completion by itself.
 function computeCompleteness(mergedSteps, readiness) {
   var reasons = [];
-  (readiness && readiness.items ? readiness.items : []).forEach(function (it) {
+  var items = readiness && readiness.items ? readiness.items : [];
+  // Review §2a: an unreachable or malformed /api/readiness used to fall
+  // back to { items: [] } in loadAll(), which iterates to ZERO reasons here
+  // and paints a green "Setup complete" on a kiln that could not even be
+  // asked. Absence of an answer must never read as "no problems" -- fail
+  // closed and say so explicitly, the same way readiness_http.c's own
+  // `checklist_truncated` item fails closed on its side.
+  if (items.length === 0) {
+    reasons.push('The readiness checklist could not be read from the board -- completeness is unknown, not confirmed.');
+  }
+  items.forEach(function (it) {
     if (it.status === 'not_done' || it.status === 'cannot_yet') {
       reasons.push(it.label + ' is ' + it.status + ' -- ' + it.detail);
     }
@@ -383,6 +421,13 @@ function computeCompleteness(mergedSteps, readiness) {
   mergedSteps.forEach(function (s) {
     if (s.safety && s.state === 'skipped') {
       reasons.push('Step ' + s.id + ' (' + s.title + ') is safety-relevant and was skipped.');
+    }
+    // §2c continued: a step whose readiness data could not be resolved at
+    // all is exactly as "not confirmed" as the top-level empty-list case
+    // above, even when other steps' items came back fine (a partially
+    // truncated checklist, not a fully failed fetch).
+    if (s.state === 'unknown') {
+      reasons.push('Step ' + s.id + ' (' + s.title + ') readiness could not be read -- state unknown.');
     }
   });
   return { complete: reasons.length === 0, reasons: reasons };
@@ -394,7 +439,8 @@ function computeCompleteness(mergedSteps, readiness) {
 // lands on the same answer a stale one would.
 function pickResumeStep(mergedSteps) {
   for (var i = 0; i < mergedSteps.length; i++) {
-    if (mergedSteps[i].state === 'pending' || mergedSteps[i].state === 'regressed') {
+    if (mergedSteps[i].state === 'pending' || mergedSteps[i].state === 'regressed' ||
+        mergedSteps[i].state === 'unknown') {
       return mergedSteps[i].id;
     }
   }
@@ -676,6 +722,25 @@ function validateStep4(zones) {
   return { valid: errors.length === 0, errors: errors };
 }
 
+// Pure helper (setup_wizard_review_2026-09-08): the confirm-dialog lines for
+// every zone newly switching to ON_OFF_DEVICE (priorZones[i].zone_type !== 1
+// -> liveZones[i].zone_type === 1). Extracted to a top-level function, same
+// as validateStep4/6, so it is directly testable without driving the DOM
+// click handler. Switching a zone BACK to Heater produces no line -- that
+// direction re-enables guards and is not confirmed (see the call site).
+function step4ZoneTypeConfirmLines(priorZones, liveZones, thermoCount) {
+  var out = [];
+  for (var i = 0; i < thermoCount; i++) {
+    var was = (priorZones[i] || {}).zone_type || 0;
+    var now = (liveZones[i] || {}).zone_type;
+    if (was !== 1 && now === 1) {
+      out.push('Zone ' + (i + 1) + (priorZones[i] && priorZones[i].name ? ' (' + priorZones[i].name + ')' : '') +
+        ': Heater -> On/off device. ' + ZONE_TYPE_CONSEQUENCE_TEXT);
+    }
+  }
+  return out;
+}
+
 /* ---- Step 5 (relay assignment). Requirement 2: max_simultaneous_relays'
  * on/off interaction (bf1db47f -- on/off zones now COUNT toward the cap and
  * are suppressed LAST, after every heater; profile_executor_run() refuses
@@ -742,6 +807,27 @@ function validateStep6(zones, absMaxTempC) {
     }
   });
   return { valid: errors.length === 0, errors: errors };
+}
+
+// Pure helper (setup_wizard_review_2026-09-08), same technique as
+// step4ZoneTypeConfirmLines: the confirm-dialog lines naming, per changed
+// zone, old->new for max_temp_c/max_ramp_c_per_hr -- the values that bound
+// every firing. min_temp_c is deliberately excluded (see the call site: it
+// only narrows what reads as a broken sensor, it does not raise a ceiling).
+function step6LimitConfirmLines(priorZones, liveZones, thermoCount) {
+  var out = [];
+  for (var i = 0; i < thermoCount; i++) {
+    var was = priorZones[i] || {};
+    var now = liveZones[i] || {};
+    var label = 'Zone ' + (i + 1) + (was.name ? ' (' + was.name + ')' : '');
+    if ((was.max_temp_c || 0) !== (now.max_temp_c || 0)) {
+      out.push(label + ' max temp: ' + formatZoneLimitC(was.max_temp_c) + ' -> ' + formatZoneLimitC(now.max_temp_c));
+    }
+    if (now.max_ramp_c_per_hr !== undefined && (was.max_ramp_c_per_hr || 0) !== (now.max_ramp_c_per_hr || 0)) {
+      out.push(label + ' max ramp: ' + formatZoneLimitC(was.max_ramp_c_per_hr) + '/hr -> ' + formatZoneLimitC(now.max_ramp_c_per_hr) + '/hr');
+    }
+  }
+  return out;
 }
 
 /* ==========================================================================
@@ -929,11 +1015,23 @@ function renderStep9() {
   return fetchJsonOr('/api/safety/commissioning', null).then(function (commissioning) {
     var ctInstalled = getCommissioningParam(commissioning, 'ct_installed');
     if (ctInstalled === 0) {
-      el.innerHTML = '<p class="hint">No CT installed (step 8) -- there is nothing to verify. Skipping this ' +
-        'step is a legitimate finish.</p><div class="gnav"><button type="button" id="step9Skip">Skip (not ' +
-        'installed) &amp; mark done</button></div>';
+      // ct_installed=0 is a COMPLETE answer, not a deferral -- same
+      // precedent as step 8's own ct_installed=0 handling (:869) and as
+      // `deliberately_off` in computeCompleteness(). Posting 'skipped' here
+      // used to permanently block completion (WIZARD_STEPS marks step 9
+      // safety:true unconditionally, and computeCompleteness() treats any
+      // skipped safety step as an outstanding reason forever) even though
+      // this screen tells the operator skipping is the legitimate finish --
+      // a CT-less kiln (the normal state of this bench, see
+      // project_no_cts_fitted_guard_coverage) could never reach "complete".
+      // Posting 'done' instead makes the two screens agree, and matches the
+      // one-word fix the review recommended over making `safety` a
+      // predicate over live ct_installed.
+      el.innerHTML = '<p class="hint">No CT installed (step 8) -- there is nothing to verify. This is a ' +
+        'legitimate finish, not a deferral.</p><div class="gnav"><button type="button" id="step9Skip">No CT ' +
+        'installed &amp; mark done</button></div>';
       document.getElementById('step9Skip').addEventListener('click', function () {
-        postStepState(9, 'skipped', 'ct_installed=0, nothing to verify').then(function () { loadAll(); });
+        postStepState(9, 'done', 'ct_installed=0, nothing to verify').then(function () { loadAll(); });
       });
       return;
     }
@@ -1271,7 +1369,8 @@ function gRenderStepper() {
 }
 
 function pillHtml(state) {
-  var label = { pending: 'PENDING', done: 'DONE', skipped: 'SKIPPED', regressed: 'REGRESSED' }[state] || state;
+  var label = { pending: 'PENDING', done: 'DONE', skipped: 'SKIPPED', regressed: 'REGRESSED',
+    unknown: 'UNKNOWN' }[state] || state;
   return '<span class="pill pill-' + state + '">' + label + '</span>';
 }
 
@@ -1808,13 +1907,62 @@ function renderStep4() {
       okEl.innerHTML = '';
       if (!v.valid) { renderErrList(errEl, v.errors); return; }
       renderErrList(errEl, []);
-      submitZonesConfig(data, liveZones).then(function () {
-        return postStepState(4, 'done');
-      }).then(function () {
-        okEl.innerHTML = '<p class="wok">Saved.</p>';
-        loadAll();
-      }).catch(function (e) {
-        renderErrList(errEl, [String(e.message || e)]);
+
+      // Consequence-bearing confirm (setup_wizard_review_2026-09-08): a
+      // zone newly switched to ON_OFF_DEVICE here disables guards
+      // 1/2/3/4/9 for it and zeroes its coupling row/column -- the same
+      // consequence step 7 treats as critical, so it gets the same named
+      // confirm-before-write via kcConfirmConsequentialChange()
+      // (commissioning_shared.js), not a fourth bespoke implementation.
+      // Switching a zone BACK to Heater re-enables guards -- that is a
+      // safety-INCREASING direction, not a boundary a routine click could
+      // cross by accident, so it is not confirmed here (over-confirming a
+      // direction that only restores protection just trains click-through).
+      var newlyOnOff = step4ZoneTypeConfirmLines(zones, liveZones, thermoCount);
+
+      function doSubmit() {
+        submitZonesConfig(data, liveZones).then(function () {
+          return postStepState(4, 'done');
+        }).then(function () {
+          okEl.innerHTML = '<p class="wok">Saved.</p>';
+          loadAll();
+        }).catch(function (e) {
+          renderErrList(errEl, [String(e.message || e)]);
+        });
+      }
+
+      function revertNewlyOnOff() {
+        for (var zi2 = 0; zi2 < thermoCount; zi2++) {
+          var was2 = (zones[zi2] || {}).zone_type || 0;
+          var now2 = liveZones[zi2].zone_type;
+          if (was2 !== 1 && now2 === 1) {
+            var card2 = el.querySelector('.zonecard[data-zone="' + zi2 + '"]');
+            var sel2 = card2 && card2.querySelector('.s4type');
+            if (sel2) {
+              sel2.value = String(was2);
+              var warn2 = el.querySelector('.s4warn[data-zone="' + zi2 + '"]');
+              var panel2 = el.querySelector('.s4onoff[data-zone="' + zi2 + '"]');
+              if (warn2) warn2.style.display = 'none';
+              if (panel2) panel2.style.display = 'none';
+            }
+          }
+        }
+      }
+
+      if (!newlyOnOff.length) {
+        doSubmit();
+        return;
+      }
+      window.kcConfirmConsequentialChange(newlyOnOff, {
+        confirmPrefix: 'This disables safety guards for the zone(s) below and zeroes their coupling row/column:',
+        onBusy: function (msg) { renderErrList(errEl, [msg]); },
+      }).then(function (confirmed) {
+        if (!confirmed) {
+          revertNewlyOnOff();
+          okEl.innerHTML = '<p class="hint">Cancelled -- nothing was written, and the zone type selection was reverted.</p>';
+          return;
+        }
+        doSubmit();
       });
     });
   });
@@ -2042,6 +2190,25 @@ function renderStep6() {
       return out;
     }
 
+    // Consequence-bearing confirm (setup_wizard_review_2026-09-08): these
+    // two fields bound every firing (a hard, no-debounce trip and the
+    // ramp guard's own ceiling), so a changed value gets the same named
+    // old->new confirm step 7 already uses for the Pico's fields, via
+    // the shared kcConfirmConsequentialChange() -- not a fourth bespoke
+    // confirm. min_temp_c (broken-sensor floor) is excluded: it narrows,
+    // not widens, what the guards will accept, so it is not a safety
+    // boundary a routine click could cross by accident.
+    function step6RevertInputs() {
+      for (var i = 0; i < thermoCount; i++) {
+        var card = el.querySelector('.zonecard[data-zone="' + i + '"]');
+        var z = zones[i] || {};
+        var maxTempInput = card.querySelector('.s6maxtemp');
+        if (maxTempInput) maxTempInput.value = z.max_temp_c || 0;
+        var rampInput = card.querySelector('.s6ramp');
+        if (rampInput) rampInput.value = z.max_ramp_c_per_hr || 0;
+      }
+    }
+
     document.getElementById('step6Save').addEventListener('click', function () {
       var liveZones = readLiveZones();
       var v = validateStep6(liveZones.slice(0, thermoCount), absMaxTempC);
@@ -2050,22 +2217,43 @@ function renderStep6() {
       okEl.innerHTML = '';
       if (!v.valid) { renderErrList(errEl, v.errors); return; }
       renderErrList(errEl, []);
-      // Commit-time re-check (requirement 4 / plan section 1 "Validation"):
-      // re-fetch the Pico's ceiling right now -- step 7 could commission it
-      // in another tab while this one sits open, and this is exactly the
-      // abs-max relationship requirement 3 says must be re-checked at commit.
-      fetchJsonOr('/api/safety/commissioning', null).then(function (freshCommissioning) {
-        var freshAbsMax = getAbsMaxTempC(freshCommissioning);
-        var v2 = validateStep6(liveZones.slice(0, thermoCount), freshAbsMax);
-        if (!v2.valid) { renderErrList(errEl, v2.errors); return; }
-        submitZonesConfig(data, liveZones).then(function () {
-          return postStepState(6, 'done');
-        }).then(function () {
-          okEl.innerHTML = '<p class="wok">Saved.</p>';
-          loadAll();
-        }).catch(function (e) {
-          renderErrList(errEl, [String(e.message || e)]);
+
+      var changedLines = step6LimitConfirmLines(zones, liveZones, thermoCount);
+
+      function doCommitCheckAndSubmit() {
+        // Commit-time re-check (requirement 4 / plan section 1 "Validation"):
+        // re-fetch the Pico's ceiling right now -- step 7 could commission it
+        // in another tab while this one sits open, and this is exactly the
+        // abs-max relationship requirement 3 says must be re-checked at commit.
+        fetchJsonOr('/api/safety/commissioning', null).then(function (freshCommissioning) {
+          var freshAbsMax = getAbsMaxTempC(freshCommissioning);
+          var v2 = validateStep6(liveZones.slice(0, thermoCount), freshAbsMax);
+          if (!v2.valid) { renderErrList(errEl, v2.errors); return; }
+          submitZonesConfig(data, liveZones).then(function () {
+            return postStepState(6, 'done');
+          }).then(function () {
+            okEl.innerHTML = '<p class="wok">Saved.</p>';
+            loadAll();
+          }).catch(function (e) {
+            renderErrList(errEl, [String(e.message || e)]);
+          });
         });
+      }
+
+      if (!changedLines.length) {
+        doCommitCheckAndSubmit();
+        return;
+      }
+      window.kcConfirmConsequentialChange(changedLines, {
+        confirmPrefix: 'This changes the temperature/ramp ceilings that bound every firing:',
+        onBusy: function (msg) { renderErrList(errEl, [msg]); },
+      }).then(function (confirmed) {
+        if (!confirmed) {
+          step6RevertInputs();
+          okEl.innerHTML = '<p class="hint">Cancelled -- nothing was written, and the values were reverted.</p>';
+          return;
+        }
+        doCommitCheckAndSubmit();
       });
     });
   });
@@ -2093,7 +2281,16 @@ function renderStep7() {
     }
     var byId = {};
     (commissioning.params || []).forEach(function (p) { byId[p.id] = p; });
-    var zoneMaxTemps = ((zonesData && zonesData.zones) || []).map(function (z) { return z.max_temp_c || 0; });
+    // Slice to thermo_count, matching step 6 (:2043) -- zones_http_get.c
+    // always emits all MAX31856_CHANNEL_COUNT (5) slots, and
+    // zones_http_post_parse.c deliberately preserves stale values at
+    // slots >= thermo_count when the zone count is lowered. Comparing the
+    // whole array let a stale, off-screen slot (e.g. 1300 C left over from
+    // a since-reduced 5-zone config) block abs_max_temp_c with a number
+    // that appears on no screen in the wizard and cannot be cleared here.
+    var thermoCountS7 = (zonesData && zonesData.thermo_count) || 0;
+    var zoneMaxTemps = ((zonesData && zonesData.zones) || []).slice(0, thermoCountS7)
+      .map(function (z) { return z.max_temp_c || 0; });
     var highestZoneMax = zoneMaxTemps.filter(function (v) { return v > 0; })
       .reduce(function (a, b) { return Math.max(a, b); }, 0);
 
@@ -2187,7 +2384,11 @@ function renderStep7() {
       // mirror-image check): re-fetch zones fresh right now -- a zone's
       // max_temp_c could have changed in another tab since this screen loaded.
       fetchJsonOr('/api/zones', null).then(function (freshZones) {
-        var freshMaxTemps = ((freshZones && freshZones.zones) || []).map(function (z) { return z.max_temp_c || 0; });
+        // Same thermo_count slice as the initial render above -- re-fetched
+        // fresh, so a thermo_count change in another tab is honoured too.
+        var freshThermoCount = (freshZones && freshZones.thermo_count) || 0;
+        var freshMaxTemps = ((freshZones && freshZones.zones) || []).slice(0, freshThermoCount)
+          .map(function (z) { return z.max_temp_c || 0; });
         var v = validateStep7(fields, freshMaxTemps);
         if (!v.valid) { renderErrList(errEl, v.errors); return; }
         renderErrList(errEl, []);

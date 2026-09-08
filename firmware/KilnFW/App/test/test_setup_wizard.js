@@ -228,6 +228,62 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(gateNonSafetyOk.complete === true, 'skipping a non-safety step (11: coupling matrix) does not block completion');
 })();
 
+// ---- Review 2026-09-08 (docs/audits/setup_wizard_review_2026-09-08.md) §2a/
+// §2c: an unreachable or truncated /api/readiness must render UNKNOWN and
+// must never be able to read as "Setup complete". Before this fix,
+// loadAll()'s { items: [] } fallback iterated to zero reasons in
+// computeCompleteness() and the gate painted green on a kiln that could not
+// even be asked. See the standalone negative-test proof further down for
+// the "make it fail on purpose" half of this requirement.
+(function testUnreachableReadinessNeverReadsComplete() {
+  const ctx = loadPageScript(noopFetch);
+  const allDoneProgress = {
+    version: 1,
+    steps: Object.fromEntries(ctx.WIZARD_STEPS.map((s) => [String(s.id), { state: 'done' }])),
+  };
+  const unreachable = readinessOf([]); // exactly loadAll()'s fetchJsonOr fallback shape
+  const merged = ctx.mergeAllSteps(allDoneProgress, unreachable);
+  const gate = ctx.computeCompleteness(merged, unreachable);
+  assert(gate.complete === false, 'unreachable readiness (empty item list) never reads as complete, ' +
+    'even with every step stored done');
+  assert(gate.reasons.some((r) => /could not be read/.test(r)),
+    'unreachable readiness: the gate names the checklist as unreadable, not as "nothing outstanding"');
+})();
+
+(function testTruncatedChecklistRendersUnknownNotStoredState() {
+  const ctx = loadPageScript(noopFetch);
+  // A step that declares a readiness key, but that key never made it into
+  // this readiness response (readiness_http.c's append_item() dropped it) --
+  // simulates a truncated checklist rather than a total fetch failure.
+  const step = { id: 6, title: 'Zone limits', readinessKeys: ['guard_max_temp'], safety: true };
+  const truncated = ctx.computeStepState(step, { state: 'done' }, {}); // key absent from byKey entirely
+  assert(truncated.state === 'unknown',
+    'a step whose readiness key never resolved renders unknown, not the stored "done"');
+
+  // Same fixture through the full merge/gate path: an unknown step must
+  // also block "setup complete", not just render an odd pill.
+  const merged = ctx.mergeAllSteps(
+    { version: 1, steps: { '6': { state: 'done' } } },
+    readinessOf([]) // guard_max_temp and guard_cross_zone both missing
+  );
+  const gate = ctx.computeCompleteness(merged, readinessOf([]));
+  assert(gate.complete === false, 'a merged step in the unknown state blocks completion');
+})();
+
+// §2b: an item that has gone cannot_yet (a prerequisite this step depended
+// on was lost) is a regression exactly like not_done -- computeStepState()
+// previously tested only anyNotDone, so a stored "done" survived a
+// cannot_yet readiness answer and rendered DONE.
+(function testCannotYetRegressesStoredDone() {
+  const ctx = loadPageScript(noopFetch);
+  const step = { id: 6, title: 'Zone limits', readinessKeys: ['guard_max_temp'], safety: true };
+  const cannotYetByKey = { guard_max_temp: item('guard_max_temp', 'cannot_yet', 'thermo_count now 0') };
+  const result = ctx.computeStepState(step, { state: 'done' }, cannotYetByKey);
+  assert(result.state === 'regressed',
+    'stored done + readiness now cannot_yet -> REGRESSED, matching the not_done case');
+  assert(/guard_max_temp/.test(result.detail), 'cannot_yet regression detail names the offending item');
+})();
+
 // ---- Steps 0-3 content: pure validators (implementation steps 4-5) ------
 (function testStep1Validation() {
   const ctx = loadPageScript(noopFetch);
@@ -549,6 +605,52 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   });
 })();
 
+// §4: a CT-less kiln (this bench's normal state -- project_no_cts_fitted_
+// guard_coverage) must be able to reach "setup complete". Step 9's own copy
+// posted 'skipped' for ct_installed=0 while WIZARD_STEPS marks step 9
+// safety:true unconditionally, so computeCompleteness() blocked forever.
+// The fix posts 'done' instead -- same precedent step 8 already sets for
+// ct_installed=0 (:869) and the same treatment `deliberately_off` gets.
+(function testCtSkipPostsDoneNotSkipped() {
+  const html = fs.readFileSync(PAGE_PATH, 'utf8');
+  assert(/postStepState\(9, 'done', 'ct_installed=0, nothing to verify'\)/.test(html),
+    'step9: the no-CT exit posts done (a complete answer), not skipped (which blocks forever)');
+  assert(!/postStepState\(9, 'skipped', 'ct_installed=0, nothing to verify'\)/.test(html),
+    'step9: the old skipped-forever call is gone');
+})();
+
+(function testCtSkipDoneAllowsCompletion() {
+  const ctx = loadPageScript(noopFetch);
+  const allOkReadiness = readinessOf(
+    ctx.WIZARD_STEPS.reduce((acc, s) => acc.concat(s.readinessKeys.map((k) => item(k, 'ok'))), [])
+  );
+  const allDoneProgress = {
+    version: 1,
+    steps: Object.fromEntries(ctx.WIZARD_STEPS.map((s) => [String(s.id), { state: 'done' }])),
+  };
+  // Step 9 stored 'done' via the CT-less exit, exactly like the fixed code
+  // now posts -- must NOT read as a blocking skip.
+  allDoneProgress.steps['9'] = { state: 'done', note: 'ct_installed=0, nothing to verify' };
+  const merged = ctx.mergeAllSteps(allDoneProgress, allOkReadiness);
+  const gate = ctx.computeCompleteness(merged, allOkReadiness);
+  assert(gate.complete === true,
+    'a CT-less kiln that finished step 9 via the no-CT exit (state done) can reach setup complete');
+})();
+
+// §5: step 7's abs-max comparison must slice to thermo_count, matching step
+// 6 (:2043) -- zones_http_get.c always emits all 5 MAX31856_CHANNEL_COUNT
+// slots and zones_http_post_parse.c deliberately preserves stale values at
+// slots >= thermo_count when the zone count is lowered, so comparing the
+// whole array lets an off-screen stale slot block abs_max_temp_c with a
+// number that appears on no screen in the wizard.
+(function testStep7SourceSlicesToThermoCount() {
+  const html = fs.readFileSync(PAGE_PATH, 'utf8');
+  assert(/thermoCountS7[\s\S]{0,400}slice\(0, thermoCountS7\)/.test(html),
+    'step7: the initial render slices zones to thermo_count before computing the ceiling comparison');
+  assert(/freshThermoCount[\s\S]{0,400}slice\(0, freshThermoCount\)/.test(html),
+    'step7: the commit-time re-check slices the freshly-fetched zones to thermo_count too');
+})();
+
 // ---- Step 10: hand-entered gains vs. autotune branch -------------------
 (function testAutotunePrecheck() {
   const ctx = loadPageScript(noopFetch);
@@ -670,6 +772,71 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
     'step7: the CR1-verify gap is stated explicitly, not implied as a stronger confirmation');
 })();
 
+// ---- Step 4/6 confirmation drift fix (docs/audits/setup_wizard_review_
+// 2026-09-08.md): step4ZoneTypeConfirmLines()/step6LimitConfirmLines() are
+// the pure line-builders the click handlers feed into the shared
+// kcConfirmConsequentialChange(). Testing these top-level functions
+// directly (same technique as validateStep4/validateStep6) is what proves
+// "requires confirmation" / "routine steps do not prompt" without needing
+// to drive the stub DOM's querySelector (which this harness's makeDocument
+// does not implement -- it always returns null/[]).
+(function testStep4ZoneTypeConfirmLinesFiresOnNewOnOff() {
+  const ctx = loadPageScript(noopFetch);
+  const prior = [{ zone_type: 0, name: 'Bisque' }];
+  const live = [{ zone_type: 1 }];
+  const lines = ctx.step4ZoneTypeConfirmLines(prior, live, 1);
+  assert(lines.length === 1, 'step4: switching a zone to ON_OFF_DEVICE produces exactly one confirm line');
+  assert(/Zone 1 \(Bisque\)/.test(lines[0]), 'step4: the confirm line names the zone (number + stored name)');
+  assert(/Heater -> On\/off device/.test(lines[0]), 'step4: the confirm line states the direction of the change');
+  assert(lines[0].indexOf(ctx.ZONE_TYPE_CONSEQUENCE_TEXT) !== -1,
+    'step4: the confirm line reuses ZONE_TYPE_CONSEQUENCE_TEXT verbatim, not a third wording');
+})();
+
+(function testStep4ZoneTypeConfirmLinesRoutineCasesDoNotPrompt() {
+  const ctx = loadPageScript(noopFetch);
+  // No change at all.
+  assert(ctx.step4ZoneTypeConfirmLines([{ zone_type: 0 }], [{ zone_type: 0 }], 1).length === 0,
+    'step4: an unchanged heater zone produces no confirm line');
+  // Already on/off, staying on/off (only its hyst/min-on/min-off fields
+  // changed) -- not a NEW disablement, so no line.
+  assert(ctx.step4ZoneTypeConfirmLines([{ zone_type: 1 }], [{ zone_type: 1 }], 1).length === 0,
+    'step4: a zone already on/off staying on/off produces no confirm line');
+  // Switching BACK to Heater re-enables guards -- safety-increasing, not
+  // confirmed (over-confirming a safe direction trains click-through).
+  assert(ctx.step4ZoneTypeConfirmLines([{ zone_type: 1 }], [{ zone_type: 0 }], 1).length === 0,
+    'step4: switching a zone back to Heater produces no confirm line');
+})();
+
+(function testStep6LimitConfirmLinesFiresOnChangedCeiling() {
+  const ctx = loadPageScript(noopFetch);
+  const prior = [{ name: 'Bisque', max_temp_c: 1200, max_ramp_c_per_hr: 200, min_temp_c: -20 }];
+  const liveTempChanged = [{ max_temp_c: 1300, max_ramp_c_per_hr: 200 }];
+  const lines = ctx.step6LimitConfirmLines(prior, liveTempChanged, 1);
+  assert(lines.length === 1, 'step6: a changed max_temp_c produces exactly one confirm line');
+  assert(/Zone 1 \(Bisque\) max temp: 1200°C -> 1300°C/.test(lines[0]),
+    'step6: the confirm line names the zone and old->new max temp');
+
+  const liveRampChanged = [{ max_temp_c: 1200, max_ramp_c_per_hr: 250 }];
+  const rampLines = ctx.step6LimitConfirmLines(prior, liveRampChanged, 1);
+  assert(rampLines.length === 1 && /max ramp: 200°C\/hr -> 250°C\/hr/.test(rampLines[0]),
+    'step6: a changed max_ramp_c_per_hr produces a confirm line naming old->new');
+})();
+
+(function testStep6LimitConfirmLinesRoutineCasesDoNotPrompt() {
+  const ctx = loadPageScript(noopFetch);
+  const prior = [{ max_temp_c: 1200, max_ramp_c_per_hr: 200, min_temp_c: -20 }];
+  // Nothing changed at all.
+  assert(ctx.step6LimitConfirmLines(prior, [{ max_temp_c: 1200, max_ramp_c_per_hr: 200 }], 1).length === 0,
+    'step6: unchanged max_temp_c/max_ramp_c_per_hr produce no confirm line');
+  // min_temp_c is NOT one of the two consequence-bearing fields (it narrows
+  // the broken-sensor floor, it does not raise a ceiling) -- confirming it
+  // here would be over-confirming a field this step's own UI does not even
+  // treat as consequence-bearing.
+  const liveMinTempOnly = [{ max_temp_c: 1200, max_ramp_c_per_hr: 200, min_temp_c: 5 }];
+  assert(ctx.step6LimitConfirmLines(prior, liveMinTempOnly, 1).length === 0,
+    'step6: a changed min_temp_c alone produces no confirm line');
+})();
+
 // ---- commissioning_shared.js: the read-back verification itself (Non-
 // negotiable 1: "a post-write read-back that fails loudly on disagreement").
 // Loads the real shared file (not a reimplementation) into its own vm
@@ -688,6 +855,55 @@ function loadCommissioningShared(fetchImpl, confirmImpl) {
   new vm.Script(code, { filename: 'commissioning_shared.js' }).runInContext(sandbox);
   return sandbox;
 }
+
+// ---- kcConfirmConsequentialChange() (commissioning_shared.js): the generic
+// sibling steps 4/6 use in place of a bespoke confirm implementation.
+(function testConfirmConsequentialChangeNoLinesNeverPrompts() {
+  let confirmCalled = false;
+  const ctx = loadCommissioningShared(() => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
+    () => { confirmCalled = true; return true; });
+  return ctx.kcConfirmConsequentialChange([], {}).then((result) => {
+    assert(result === true, 'kcConfirmConsequentialChange: an empty change list resolves true');
+    assert(confirmCalled === false, 'kcConfirmConsequentialChange: a routine (no-op) call never shows a dialog');
+  });
+})();
+
+(function testConfirmConsequentialChangeConfirmedProceeds() {
+  const ctx = loadCommissioningShared(
+    () => Promise.resolve({ ok: true, json: () => Promise.resolve({ state: 'idle' }) }),
+    () => true
+  );
+  return ctx.kcConfirmConsequentialChange(['Zone 1: Heater -> On/off device.'], {}).then((result) => {
+    assert(result === true, 'kcConfirmConsequentialChange: confirming a real change resolves true');
+  });
+})();
+
+(function testConfirmConsequentialChangeDeclinedRefuses() {
+  const ctx = loadCommissioningShared(
+    () => Promise.resolve({ ok: true, json: () => Promise.resolve({ state: 'idle' }) }),
+    () => false
+  );
+  return ctx.kcConfirmConsequentialChange(['Zone 1: Heater -> On/off device.'], {}).then((result) => {
+    assert(result === false, 'kcConfirmConsequentialChange: declining resolves false (caller must revert, not just skip the save)');
+  });
+})();
+
+(function testConfirmConsequentialChangeRefusedWhenBusy() {
+  let confirmCalled = false;
+  let busyMsg = null;
+  const ctx = loadCommissioningShared(
+    (url) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.indexOf('profile_exec') !== -1 ? { state: 'running' } : { state: 'idle' }) }),
+    () => { confirmCalled = true; return true; }
+  );
+  return ctx.kcConfirmConsequentialChange(['Zone 1: Heater -> On/off device.'], {
+    onBusy: (msg) => { busyMsg = msg; },
+  }).then((result) => {
+    assert(result === false, 'kcConfirmConsequentialChange: a running firing refuses without ever asking to confirm');
+    assert(confirmCalled === false, 'kcConfirmConsequentialChange: busy refusal short-circuits before the confirm dialog');
+    assert(typeof busyMsg === 'string' && /profile is currently firing/.test(busyMsg),
+      'kcConfirmConsequentialChange: the busy refusal is reported via onBusy, naming the reason');
+  });
+})();
 
 (function testReadbackMismatchFailsLoudly() {
   const boardValue = { 261: '3' }; // board's own tc_type after the "successful" commit
