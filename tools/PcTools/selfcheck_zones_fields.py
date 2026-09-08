@@ -47,6 +47,8 @@ import re
 from kilnctrl.zones_http_client import (
     _TOP_FIELD_FORM_KEY,
     _TOP_READONLY_OR_STRUCTURAL_KEYS,
+    _ZONE_FIELD_FORM_KEY,
+    _ZONE_READONLY_KEYS,
 )
 
 from selfcheck_common import check
@@ -57,6 +59,7 @@ _DRIVERS_DIR = (
 )
 _ZONES_GET_C_PATH = _DRIVERS_DIR / "http" / "zones_http_get.c"
 _ZONES_POST_C_PATH = _DRIVERS_DIR / "http" / "zones_http_post.c"
+_ZONES_POST_PARSE_C_PATH = _DRIVERS_DIR / "http" / "zones_http_post_parse.c"
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: Between two adjacent (C-concatenated) string-literal fragments of one
@@ -171,6 +174,168 @@ def zones_field_table_checks() -> None:
     extra_in_client_post = client_post_keys - fw_post_keys
     check(
         "zones POST top-level fields: _TOP_FIELD_FORM_KEY matches firmware "
+        f"(missing from client: {sorted(missing_from_client_post)}, "
+        f"extra in client: {sorted(extra_in_client_post)})",
+        (missing_from_client_post, extra_in_client_post),
+        (set(), set()),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PER-ZONE field-table drift check (added 2026-09-08, same day as the on/off
+# zone fields -- zone_type/failsafe_state/hyst_c/min_on_s/min_off_s -- shipped
+# in the firmware's per-zone JSON but were never added to
+# zones_http_client._ZONE_FIELD_FORM_KEY, breaking every whole-page zones
+# save with ZonesHttpUnknownFieldError. This is the SECOND time in one day a
+# firmware zones field landed with no matching PC client entry (the first was
+# progress_band_c, e5375594) -- the check above only ever covered the
+# TOP-LEVEL field tables (_TOP_FIELD_FORM_KEY/_TOP_READONLY_OR_STRUCTURAL_KEYS),
+# never the PER-ZONE one (_ZONE_FIELD_FORM_KEY/_ZONE_READONLY_KEYS), so it
+# could not have caught either incident. This check closes that gap.
+#
+# WHAT WOULD INVALIDATE THIS CHECK: a rename of zones_get_handler's per-zone
+# loop guard (MAX31856_CHANNEL_COUNT) or of the "zones":[ / "z%u_" literal
+# markers this extraction keys on; a restructure that stops emitting each
+# zone's fields via a single `for (...MAX31856_CHANNEL_COUNT...)` loop in
+# zones_http_get.c; or a POST-side helper other than snprintf(key, ...,
+# "z%u_<suffix>", i) being used to build per-zone form-field names in
+# zones_http_post_parse.c. None of those are expected to change without a
+# deliberate zones-wire-format rewrite, in which case this check's extractors
+# need updating alongside it -- same standing as the top-level check above.
+#
+# EXTRACTION STRATEGY: symbol/marker-keyed, not line-number-keyed.
+# GET side -- slice zones_get_handler's body down to just the per-zone loop
+# by finding the literal `for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT;
+# i++) {` marker and brace-matching to its close, then reuse
+# _scan_template_keys() (the same depth tracker the top-level check uses) on
+# that slice: a `"key":` token at depth 1 (immediately inside the zone
+# object's own `{`) is a real per-zone JSON field. Dynamic keys built with a
+# second `%u`/`%s` placeholder (coupling_c%u, coupling_tau_c%u,
+# coupling_dead_time_c%u, and settings_source_groups' "%s":%u loop) never
+# match _IDENT_RE (which requires a clean identifier, no `%`), so they drop
+# out of the extraction automatically -- exactly like the top-level check
+# already relies on for array/relay fields, no special-casing needed here
+# either. settings_source_groups itself (the outer key) DOES match, and is
+# listed in _ZONE_READONLY_KEYS'-adjacent client set below alongside the
+# other real per-zone keys.
+# POST side -- zones_http_parse_zone_fields() builds every per-zone POST
+# field the same way: `snprintf(key, sizeof(key), "z%u_<suffix>", i)` with a
+# literal suffix. A single regex over that function's body recovers every
+# suffix. Two suffixes are themselves dynamic (a further %u/%s follows the
+# literal part): "z%u_coupling_c%u" truncates to "coupling_c", and
+# "z%u_settings_source_%s" truncates to "settings_source_" -- both handled on
+# the client side by _ZONE_COUPLING_CELL_RE / the _SRC_GROUP_NAMES loop
+# rather than a flat _ZONE_FIELD_FORM_KEY entry, so both are excluded from
+# the comparison set below by name, same as the GET side's %-placeholder
+# keys drop out on their own.
+_ZONE_LOOP_START_RE = re.compile(
+    # The C source has this as a string literal, so the JSON quotes around
+    # "zones" are themselves backslash-escaped in the raw file text (this
+    # regex runs on the RAW source, before _STRING_LITERAL_RE/dequoting) --
+    # match \"zones\": literally, not "zones":.
+    r'\\"zones\\":\[.*?for\s*\(uint8_t\s+i\s*=\s*0;\s*i\s*<\s*MAX31856_CHANNEL_COUNT;\s*i\+\+\)\s*\{',
+    re.DOTALL,
+)
+_ZONE_POST_FIELD_LITERAL_RE = re.compile(
+    r'snprintf\(\s*(?:key|gkey)\s*,\s*sizeof\((?:key|gkey)\)\s*,\s*"z%u_([A-Za-z_][A-Za-z0-9_]*)"'
+)
+#: Dynamic POST suffixes truncated by the regex above at the point a second
+#: format placeholder appears -- see this section's own header comment.
+#: Excluded from the firmware set rather than the client set, since the
+#: client's coverage for these is a regex/loop, not a flat dict entry.
+_ZONE_POST_DYNAMIC_SUFFIXES = {"coupling_c", "settings_source_"}
+
+
+def _slice_matching_braces(text: str, open_brace_pos: int) -> str:
+    """Return text[open_brace_pos : close+1] for the ``{`` at
+    ``open_brace_pos``, found by depth counting (handles nested braces)."""
+    depth = 0
+    for idx in range(open_brace_pos, len(text)):
+        if text[idx] == "{":
+            depth += 1
+        elif text[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace_pos : idx + 1]
+    raise AssertionError("unbalanced braces slicing the zones GET per-zone loop")
+
+
+def _extract_get_per_zone_keys(text: str, source_path: pathlib.Path) -> set:
+    body = _function_body(text, "zones_get_handler", source_path)
+    m = _ZONE_LOOP_START_RE.search(body)
+    if m is None:
+        raise AssertionError(
+            f"per-zone loop marker not found in zones_get_handler() ({source_path}) -- "
+            "has the loop guard or the \"zones\":[ marker been renamed?"
+        )
+    loop_open_brace = m.end() - 1
+    loop_body = _slice_matching_braces(body, loop_open_brace)
+    keys: set = set()
+    depth = 0
+    for am in _APPEND_CALL_RE.finditer(loop_body):
+        dequoted = "".join(
+            part.replace('\\"', '"') for part in _STRING_LITERAL_RE.findall(am.group(1))
+        )
+        depth = _scan_template_keys(dequoted, depth, keys)
+    return keys
+
+
+def _extract_post_per_zone_suffixes(text: str, source_path: pathlib.Path) -> set:
+    body = _function_body_c(text, "zones_http_parse_zone_fields", source_path)
+    suffixes = set(_ZONE_POST_FIELD_LITERAL_RE.findall(body))
+    return suffixes - _ZONE_POST_DYNAMIC_SUFFIXES
+
+
+def _function_body_c(text: str, name: str, source_path: pathlib.Path) -> str:
+    """Same as _function_body(), but for a ``bool``-returning function
+    (zones_http_parse_zone_fields is declared ``bool``, not ``esp_err_t``)."""
+    m = re.search(rf"\bbool\s+{re.escape(name)}\s*\(", text)
+    if m is None:
+        raise AssertionError(f"{name}() not found in {source_path}")
+    start = m.start()
+    # Bound on the next top-level function start (bool/esp_err_t/static/void
+    # return type at column 0) or end of file -- this file only defines the
+    # one function plus SRC_GROUP_NAMES, so end-of-file is the common case.
+    nxt = re.compile(r"\n(?:bool|esp_err_t|void|static)\s+\w+\s*\(").search(text, start + 1)
+    end = nxt.start() if nxt else len(text)
+    return text[start:end]
+
+
+def zones_per_zone_field_table_checks() -> None:
+    get_text = _ZONES_GET_C_PATH.read_text(encoding="utf-8")
+    post_text = _ZONES_POST_PARSE_C_PATH.read_text(encoding="utf-8")
+
+    fw_get_keys = _extract_get_per_zone_keys(get_text, _ZONES_GET_C_PATH)
+    fw_post_suffixes = _extract_post_per_zone_suffixes(post_text, _ZONES_POST_PARSE_C_PATH)
+
+    check("firmware per-zone GET extractor found keys", len(fw_get_keys) > 10, True)
+    check("firmware per-zone POST extractor found suffixes", len(fw_post_suffixes) > 10, True)
+
+    # GET side: every real per-zone JSON key must be either a field this
+    # client can round-trip (_ZONE_FIELD_FORM_KEY), a known read-only key
+    # (_ZONE_READONLY_KEYS), or the settings_source_groups nested object
+    # (handled by its own dedicated logic in _encode_zone(), not a flat
+    # dict entry).
+    client_get_keys = set(_ZONE_FIELD_FORM_KEY) | set(_ZONE_READONLY_KEYS) | {"settings_source_groups"}
+    missing_from_client_get = fw_get_keys - client_get_keys
+    extra_in_client_get = client_get_keys - fw_get_keys
+    check(
+        "zones per-zone GET keys: client dicts match firmware "
+        f"(missing from client -- would raise ZonesHttpUnknownFieldError on every "
+        f"zones save: {sorted(missing_from_client_get)}, "
+        f"extra in client: {sorted(extra_in_client_get)})",
+        (missing_from_client_get, extra_in_client_get),
+        (set(), set()),
+    )
+
+    # POST side: every per-zone form-field suffix the firmware parses must be
+    # produced by _ZONE_FIELD_FORM_KEY's values (what _encode_zone() actually
+    # emits onto the wire).
+    client_post_suffixes = set(_ZONE_FIELD_FORM_KEY.values())
+    missing_from_client_post = fw_post_suffixes - client_post_suffixes
+    extra_in_client_post = client_post_suffixes - fw_post_suffixes
+    check(
+        "zones per-zone POST suffixes: _ZONE_FIELD_FORM_KEY matches firmware "
         f"(missing from client: {sorted(missing_from_client_post)}, "
         f"extra in client: {sorted(extra_in_client_post)})",
         (missing_from_client_post, extra_in_client_post),

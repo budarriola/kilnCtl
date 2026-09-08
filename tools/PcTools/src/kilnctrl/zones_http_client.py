@@ -311,6 +311,32 @@ _ZONE_FIELD_FORM_KEY = {
     # own comment). Omitted-on-POST preserves the current per-zone value,
     # same convention as every other field in this dict.
     "progress_band_c": "progressband",
+    # RELAY_LIFE_BUDGET.md (ZONES_CFG_VERSION 19->20): which contact-life
+    # budget this zone's relay_mask relays are rated for (0=SSR/1=Contactor/
+    # 2=Mercury). Found missing from this table by
+    # zones_per_zone_field_table_checks() below -- the same silent-drop
+    # shape as every other entry added 2026-09-08, just never hit on
+    # hardware yet since no test or preset had exercised a whole-page
+    # round-trip against a board with a non-default relay_type set.
+    # zones_http_post_parse.c: snprintf(key, ..., "z%u_relaytype", i).
+    "relay_type": "relaytype",
+    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE_PLAN.md step 6, 2026-09-08):
+    # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s, added alongside the
+    # on/off zone UI pass. zones_http_post_parse.c: snprintf(key, ...,
+    # "z%u_zonetype"/"z%u_failsafe"/"z%u_hystc"/"z%u_minons"/"z%u_minoffs",
+    # i) -- read from that file directly, not guessed (the earlier
+    # progress_band_c fix found the real key was "progressband", not the
+    # obvious guess -- same caution applied here). Omitted-on-POST preserves
+    # the current value for every one of these five, same convention as
+    # every other field in this dict. failsafe_state is emitted by
+    # zones_http_get.c as a JSON bool ("true"/"false", not 0/1) -- see its
+    # own bool handling in _format_scalar() below, same treatment as
+    # continue_on_zone_trip.
+    "zone_type": "zonetype",
+    "failsafe_state": "failsafe",
+    "hyst_c": "hystc",
+    "min_on_s": "minons",
+    "min_off_s": "minoffs",
 }
 #: docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21, Opus review of
 #: 5672719 item 4): the five independent settings_source groups, in the
@@ -326,6 +352,18 @@ _SRC_GROUP_NAMES = ("limits", "relaytiming", "control", "guards", "tc")
 _ZONE_INT_FIELDS = {
     "relay_mask", "thermo_mask", "control_mode", "tc_type", "ct_mask", "timing_profile",
     "settings_source",
+    # zone_type: enum (0=heater, 1=on/off device), posted with parse_u8_field()
+    # on the firmware side, same as tc_type/ct_mask above.
+    "zone_type",
+    # relay_type: enum (0=SSR/1=Contactor/2=Mercury), same treatment.
+    "relay_type",
+    # min_on_s/min_off_s: uint16_t seconds. zones_http_get.c emits them as
+    # plain integers ("%u", not "%.3f"), and zones_http_post_parse.c parses
+    # them via the float helper only because it exceeds
+    # parse_u8_field()'s 0-255 range (see that file's own comment) -- the
+    # value itself is still a whole-second count on both sides, so encode
+    # as int here too rather than "30.0".
+    "min_on_s", "min_off_s",
 }
 #: zones_http.c emits the coupling row as MAX31856_CHANNEL_COUNT separate
 #: JSON keys per zone -- "coupling_c0".."coupling_c{N-1}" -- rather than an
@@ -419,6 +457,15 @@ _TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays", "sa
 _TOP_READONLY_OR_STRUCTURAL_KEYS = {
     "relay_zone_owned_mask", "safety_wiring", "ct_warn_mask",
     "relay_names", "timing_profiles", "zones",
+    # docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23, 2026-09-08):
+    # the resolved on/off hysteresis/min-on-off-seconds DEFAULTS, emitted
+    # top-level purely so zones_page.html's placeholder text can't drift
+    # from the firmware default (see zones_http_get.c's own comment on the
+    # APPEND() call that emits these two). Read-only telemetry -- there is
+    # no top-level POST field for either; the per-zone hyst_c/min_on_s/
+    # min_off_s fields (see _ZONE_FIELD_FORM_KEY) are what actually get
+    # posted.
+    "on_off_hyst_c_default", "on_off_min_on_off_s_default",
 }
 
 
@@ -430,7 +477,12 @@ def _format_scalar(key: str, value: Any, int_fields: "set[str]") -> str:
         # refuse it the same loud, catchable way as every other malformed
         # value instead.
         raise ZonesHttpError(f"field {key!r} is null -- refusing to encode a missing value")
-    if key == "continue_on_zone_trip":
+    if key in ("continue_on_zone_trip", "failsafe_state"):
+        # zones_http_get.c emits failsafe_state as a JSON bool ("true"/
+        # "false"), same as continue_on_zone_trip's top-level field; the
+        # firmware's POST parser (zones_http_post_parse.c) expects
+        # z%u_failsafe as "0"/"1" via zones_config_json_parse_u8_field(),
+        # not "true"/"false".
         return "1" if value else "0"
     if key in int_fields:
         return str(int(value))

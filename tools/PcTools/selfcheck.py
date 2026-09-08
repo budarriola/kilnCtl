@@ -65,7 +65,10 @@ from selfcheck_link_hub import link_hub_checks  # noqa: F401
 from selfcheck_actions import actions_checks  # noqa: F401
 from selfcheck_commonfw import commonfw_vector_checks, commonfw_payload_vector_checks  # noqa: F401
 from selfcheck_hardening import hardening_checks  # noqa: F401
-from selfcheck_zones_fields import zones_field_table_checks  # noqa: F401
+from selfcheck_zones_fields import (  # noqa: F401
+    zones_field_table_checks,
+    zones_per_zone_field_table_checks,
+)
 
 # Same cross-language-pin idiom as tests/test_ramp_assist.py's
 # RampAssistLagBandCrossLanguageTest: parse the firmware header's #define
@@ -275,6 +278,9 @@ def main() -> int:
 
     print("\n== zones top-level field table vs firmware (zones_http_get.c / zones_http_post.c) ==")
     zones_field_table_checks()
+
+    print("\n== zones per-zone field table vs firmware (zones_http_get.c / zones_http_post_parse.c) ==")
+    zones_per_zone_field_table_checks()
 
     print("\n== port discovery (no device required) ==")
     ports = list_ports()
