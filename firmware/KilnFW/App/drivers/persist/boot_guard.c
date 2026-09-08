@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -15,11 +16,44 @@ static const char *TAG = "boot_guard";
  * split), own namespace+key so a corrupt/rejected boot-guard record can
  * never take any of those down with it and vice versa. */
 #define KILN_NVS_PARTITION "kiln_nvs"
-#define NVS_NAMESPACE "boot_guard"
-#define NVS_KEY_REC "count"
+/* CURRENT namespace. Was its own "boot_guard" namespace until 2026-09-08 --
+ * see NVS_KEY_REC below for why the record moved into the namespace every
+ * other small kiln_nvs value already lives in. */
+#define NVS_NAMESPACE "kiln_cfg"
+#define NVS_NAMESPACE_LEGACY "boot_guard"
+
+/* CURRENT record key. Was "count" until 2026-09-08; see NVS_KEY_REC_LEGACY.
+ *
+ * WHY THE KEY MOVED (docs/audits/boot_guard_recovery_loop_2026-09-08.md):
+ * on this bench board the item stored under "count" stopped changing in
+ * flash. Every in-boot call reported success -- hal_kv_open(), set_blob()
+ * and commit() all returned HAL_OK, and a reopened READ_ONLY handle read
+ * the new value straight back with a valid CRC -- yet every subsequent boot
+ * loaded the same stale 3, for days, through two separate attempted fixes.
+ * Freshly created probe keys written to the SAME partition on the SAME
+ * boots incremented correctly across every one of those reboots WHEN THEY
+ * WERE IN THE "kiln_cfg" NAMESPACE, so NVS itself, the partition (used 314
+ * of 2016 entries), the key lengths and the write path were all healthy.
+ * A first attempt at a cure moved only the KEY ("count" -> "bootcnt2")
+ * inside the same "boot_guard" namespace: it was flashed and made no
+ * difference at all -- the next boot still found no record under the new
+ * key and fell back to the stale legacy 3. So the stuck unit is the
+ * NAMESPACE, not the key: nothing written under "boot_guard" survives a
+ * reboot, while "kiln_cfg" writes on the very same boots do. The record
+ * therefore lives in "kiln_cfg" now, alongside unit_pref/ramp_assist/
+ * relay_cycles/kiln_cfg_store, under its own key. */
+#define NVS_KEY_REC "bootguard"
+
+/* The pre-2026-09-08 location, "boot_guard"/"count". Still READ (as a
+ * fallback) so a board upgrading from an older firmware does not silently
+ * forget how many unconfirmed boots it has had, and erased on a best-effort
+ * basis whenever the new record is written. */
+#define NVS_KEY_REC_LEGACY "count"
 NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_REC);
+NVS_KEY_LEN_CHECK(NVS_KEY_REC_LEGACY);
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE_LEGACY);
 
 /* Bumped whenever boot_guard_record_t's layout changes. Same "discard rather
  * than migrate" convention as run_state.h -- a lost boot-guard record across
@@ -56,6 +90,64 @@ typedef struct {
 } boot_guard_ctx_t;
 
 static boot_guard_ctx_t s_bg;
+
+/* ---------------------------------------------------------------------
+ * STUCK-COUNTER ESCAPE (docs/audits/boot_guard_recovery_loop_2026-09-08.md)
+ *
+ * Observed on this board, 2026-09-08, with per-step instrumentation over
+ * JTAG/serial: boot_guard_mark_healthy() wrote 0, and hal_kv_open()/
+ * set_blob()/commit() ALL returned HAL_OK, and a reopened READ_ONLY handle
+ * read the record straight back as boot_count=0 with a valid CRC -- and the
+ * very next boot's load_count() read boot_count=3 again. Freshly created
+ * probe keys written in the same partition on the same boots (both a u32
+ * and a blob, in both the "boot_guard" and "kiln_cfg" namespaces)
+ * incremented correctly across every one of those reboots, so NVS itself,
+ * the partition, the key lengths and the write path are all fine: it is
+ * this ONE pre-existing item, kiln_nvs/boot_guard/count, that never changes
+ * in flash.
+ *
+ * Why the read-back "verification" added in 0b6e82b7 cannot see that:
+ * nvs_open() does NOT re-read flash. NVS builds one in-RAM index per
+ * partition at nvs_flash_init_partition() time and every handle on that
+ * partition -- new handle, READ_ONLY handle, different namespace -- is
+ * served from it. So a read-back after a write reports the value that was
+ * just written whether or not it ever reached flash. Any verification that
+ * lives inside the same boot as the write is structurally incapable of
+ * detecting this failure; only the NEXT boot can.
+ *
+ * So carry exactly that across the reboot, in storage that is not NVS:
+ * RTC slow memory, which survives a software reset/panic/watchdog reset and
+ * is only lost on a power cycle. If a boot marked itself healthy (which
+ * means NVS, the web server and the OTA routes were all up) and the next
+ * boot still loads a non-zero count, the persisted counter is stuck and
+ * must not be allowed to hold the board in recovery mode.
+ *
+ * This cannot let a genuinely reset-looping board out of recovery: the flag
+ * is only ever set by a boot that actually reached boot_confirm_is_healthy()
+ * and cleared its counter -- exactly the boots whose counter today's code
+ * already resets to 0. The change is only in whether that reset is
+ * BELIEVED when flash quietly refuses it.
+ * --------------------------------------------------------------------- */
+#define BOOT_GUARD_RTC_MAGIC 0x42474432u /* "BGD2" */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t marked_healthy; /* 1 if the PREVIOUS boot's mark_healthy() verified its clear */
+} boot_guard_rtc_t;
+
+/* RTC_NOINIT_ATTR: deliberately NOT zeroed by the startup code, so it
+ * carries across a software reset. Garbage after a power-on is rejected by
+ * the magic check below. */
+RTC_NOINIT_ATTR static boot_guard_rtc_t s_bg_rtc;
+
+/* True if the previous boot verified a clear (and therefore the counter
+ * this boot just loaded should have been 0). Pure predicate over the two
+ * inputs so test_boot_guard.c can exercise every combination directly. */
+bool boot_guard_counter_is_stuck(uint32_t rtc_magic, uint32_t rtc_marked_healthy,
+                                 uint32_t loaded_count)
+{
+    return rtc_magic == BOOT_GUARD_RTC_MAGIC && rtc_marked_healthy != 0u && loaded_count != 0u;
+}
 
 /* Table-less CRC32 (IEEE 802.3/zlib polynomial, same algorithm
  * esp_rom_crc32_le() implements) reimplemented locally rather than pulling
@@ -133,6 +225,30 @@ static hal_status_t persist_count(uint32_t count)
     }
     err = hal_kv_set_blob(&h, NVS_KEY_REC, &rec, sizeof(rec));
     if (err == HAL_OK) {
+        /* Best effort: retire the stuck legacy item so it can never be read
+         * again and stops occupying entries. HAL_NOT_FOUND is the ordinary
+         * steady state (it is gone after the first successful write) and is
+         * silent; a real failure is logged but never allowed to fail the
+         * write -- on the board this was found on the legacy item resisted
+         * erasure too, and that must not stop the new key from being
+         * written. Not gated behind a once-per-boot flag on purpose: this
+         * function runs a handful of times per boot at most, and a flag
+         * would make the retirement depend on which call happened to run
+         * first. */
+        hal_kv_handle_t lh;
+        if (hal_kv_open(&lh, NVS_NAMESPACE_LEGACY, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION)
+            == HAL_OK) {
+            hal_status_t lerr = hal_kv_erase_key(&lh, NVS_KEY_REC_LEGACY);
+            if (lerr == HAL_OK) {
+                (void)hal_kv_commit(&lh);
+            } else if (lerr != HAL_NOT_FOUND) {
+                ESP_LOGW(TAG, "could not erase the legacy boot-guard record '%s'/'%s': %s -- "
+                              "harmless, nothing reads it once '%s'/'%s' exists",
+                         NVS_NAMESPACE_LEGACY, NVS_KEY_REC_LEGACY, hal_status_to_name(lerr),
+                         NVS_NAMESPACE, NVS_KEY_REC);
+            }
+            hal_kv_close(&lh);
+        }
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
@@ -153,6 +269,26 @@ static uint32_t load_count(void)
     size_t len = sizeof(rec);
     err = hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len);
     hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(rec)) {
+        /* Nothing at the current location yet -- either a board that has
+         * never run this firmware, or the first boot after the 2026-09-08
+         * move. Fall back to the old namespace once so an upgrade does not
+         * reset the counter's history. See NVS_KEY_REC. */
+        hal_kv_handle_t lh;
+        hal_status_t lopen = hal_kv_open(&lh, NVS_NAMESPACE_LEGACY, HAL_KV_MODE_READ_ONLY,
+                                          KILN_NVS_PARTITION);
+        if (lopen != HAL_OK) {
+            return 0;
+        }
+        len = sizeof(rec);
+        err = hal_kv_get_blob(&lh, NVS_KEY_REC_LEGACY, &rec, &len);
+        hal_kv_close(&lh);
+        if (err == HAL_OK && len == sizeof(rec)) {
+            ESP_LOGW(TAG, "boot-guard record read from the LEGACY location '%s'/'%s' -- it will be "
+                          "rewritten under '%s'/'%s' (see boot_guard.c's comment on NVS_KEY_REC)",
+                     NVS_NAMESPACE_LEGACY, NVS_KEY_REC_LEGACY, NVS_NAMESPACE, NVS_KEY_REC);
+        }
+    }
     if (err != HAL_OK || len != sizeof(rec)) {
         return 0;
     }
@@ -267,6 +403,26 @@ esp_err_t boot_guard_init(void)
     xSemaphoreTake(s_bg.lock, portMAX_DELAY);
 
     uint32_t loaded = (part_err == HAL_OK) ? load_count() : 0;
+
+    /* See the STUCK-COUNTER ESCAPE comment above. Read the RTC marker
+     * BEFORE it is overwritten for this boot, and drop the loaded count to
+     * 0 if the previous boot already proved the counter cannot be cleared
+     * in flash -- that keeps the whole downstream decision (recovery_mode,
+     * the new count, the banner) working off an honest number rather than
+     * needing a second, parallel path. */
+    bool stuck = boot_guard_counter_is_stuck(s_bg_rtc.magic, s_bg_rtc.marked_healthy, loaded);
+    if (stuck) {
+        ESP_LOGE(TAG, "boot-guard counter is STUCK: the previous boot verified a clear to 0 and "
+                      "this boot still loaded %lu -- the persisted record is not actually being "
+                      "updated in flash (see docs/audits/boot_guard_recovery_loop_2026-09-08.md). "
+                      "Treating this boot as confirmed healthy rather than letting a counter that "
+                      "cannot be cleared hold the board in recovery mode forever.",
+                 (unsigned long)loaded);
+        loaded = 0;
+    }
+    s_bg_rtc.magic = BOOT_GUARD_RTC_MAGIC;
+    s_bg_rtc.marked_healthy = 0u; /* this boot has not marked itself healthy yet */
+
     bool recovery_mode;
     uint32_t new_count = next_boot_count(loaded, &recovery_mode);
 
@@ -373,6 +529,11 @@ bool boot_guard_mark_healthy(void)
     }
     if (verified) {
         s_bg.healthy_marked = true;
+        /* See the STUCK-COUNTER ESCAPE comment at the top of this file: this
+         * is the half of the pair that the NEXT boot reads. Set only on a
+         * verified clear, so a boot that never got healthy never arms it. */
+        s_bg_rtc.magic = BOOT_GUARD_RTC_MAGIC;
+        s_bg_rtc.marked_healthy = 1u;
     }
     xSemaphoreGive(s_bg.lock);
 

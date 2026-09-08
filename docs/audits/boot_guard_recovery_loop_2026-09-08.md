@@ -172,3 +172,180 @@ The break was reversed by hand (restoring `return rec.boot_count ==
 expected;`) and `git diff` against the committed fix is empty for
 `boot_guard.c` at that point -- confirmed via the file's diff stat showing
 only the intended additions, no residual break markers.
+
+---
+
+## Pass 3 (2026-09-08): the mechanism, observed rather than reasoned
+
+Two earlier passes both failed to free the board. This pass instrumented the
+firmware and read the answer off the hardware. Every claim below is marked
+OBSERVED (seen in a device log or an HTTP response) or INFERRED.
+
+### The four hypotheses that were on the table
+
+1. **Boot-time read and the write target different storage.** REFUTED
+   (OBSERVED). Instrumented `load_count()` and `persist_count()` log their
+   partition/namespace/key and every step's `hal_status_t`. Both use
+   `kiln_nvs` / `boot_guard` / `count`, and both reported `HAL_OK`.
+2. **The counter is re-incremented after being cleared, on the same boot.**
+   REFUTED (OBSERVED). Exact order in one boot's log: `persist_count(4)` at
+   3016 ms (from `boot_guard_init()`), then `mark_healthy` entered at
+   4036 ms and `persist_count(0)` at 4076 ms. Nothing writes the record
+   after that; the confirm task then deletes itself.
+3. **The NVS write fails at a layer that still reports success.** PARTLY, and
+   for none of the usual reasons (OBSERVED): key and namespace lengths are
+   legal (`check_nvs_key_length.ps1` passes; both are well under 15 chars);
+   the partition mounts (`hal_kv_init_partition('kiln_nvs')` -> `HAL_OK`);
+   it is nowhere near full (`nvs_get_stats`: **used 306, free 1710, total
+   2016 entries**); `nvs_commit` is reached and returns `HAL_OK`.
+   Freshly-created probe keys written on the *same boots* to the *same
+   partition* -- a `u32` and a 4-byte blob in the `kiln_cfg` namespace --
+   incremented correctly across every reboot (`probe READ kiln_cfg/p_blob
+   ... val=7`, then written as 8). A user-visible scalar behaved the same:
+   `POST /api/ramp_assist enabled=1` came back after a reboot as
+   `ramp assist: ENABLED (source=NVS, rev=1)`. **So NVS, the partition, the
+   key lengths and the write path are all healthy; it is this one record
+   that is frozen.**
+4. **The read-back verified a cached value, not flash.** **CONFIRMED
+   (OBSERVED) -- this is the mechanism.** In one boot:
+
+   ```
+   E (4076) boot_guard: BGDIAG persist_count(0): set_blob=HAL_OK
+   E (4076) boot_guard: BGDIAG persist_count(0): commit=HAL_OK
+   E (4106) boot_guard: BGDIAG readback: open=HAL_OK get=HAL_OK len=12 ver=1 count=0 crc_ok=1
+   ```
+
+   and then, on the very next boot:
+
+   ```
+   E (2996) boot_guard: BGDIAG load_count: get=HAL_OK len=12 ver=1 count=3
+   ```
+
+   The read-back is not a flash read. `nvs_open()` does **not** re-read
+   flash: NVS builds one in-RAM index per partition at
+   `nvs_flash_init_partition()` time, and every handle on that partition --
+   a new handle, a READ_ONLY handle, a different namespace -- is served from
+   it. A read-back performed in the same boot as the write therefore returns
+   what was just written whether or not it ever reached flash.
+
+### Why this is the third instance, and the rule to take away
+
+`0b6e82b7` added `verify_persisted_count()` specifically to stop trusting the
+write's return code. It reopens a handle and compares the value -- and it is
+*structurally incapable* of detecting this failure, for the reason above. It
+verified `0`, and the next boot read `3`, on hardware, repeatedly.
+
+> **An in-boot read-back of an NVS write proves nothing about flash.** The
+> only honest verification of "did this survive" is a read on a *later boot*.
+> Anything that must be checked across a reboot needs state that is not the
+> thing being checked -- RTC slow memory, or a second, independent record.
+
+Same shape as CLAUDE.md's "reset one side of a pair" class: two pieces of
+state (the flash record, and the module's belief about it) joined by a
+contract nothing enforces, both sides internally consistent, only the
+*relationship* broken -- and therefore silent.
+
+### Also learned along the way (all OBSERVED, all worth knowing)
+
+* **The first boot after `flash_firmware()` has no partition table.** That
+  boot logs `nvs_report: partition 'kiln_nvs' not present in flashed
+  partition table`, `hal_kv_init_partition('kiln_nvs') failed:
+  ESP_ERR_NOT_FOUND`, `SPIFFS: spiffs partition could not be found`, and a
+  nonsense `largest=838860800` heap figure. `boot_confirm_is_healthy()` is
+  false for the whole of it, so `boot_guard_mark_healthy()` is never called
+  and nothing is persisted. **Never judge persistence behaviour from the
+  boot immediately after a flash -- reboot once more first.**
+* **`debug_reset` (JTAG) clears RTC slow memory.** `RTC_NOINIT_ATTR` state
+  survives a panic, a watchdog reset and `esp_restart()`, but not an
+  OpenOCD-driven reset. Every reboot in this investigation was a JTAG reset
+  or a panic (`reset_reason` was `panic/exception` on every single boot),
+  which is why the RTC-backed escape below could not be demonstrated from
+  the bench.
+* **`ESP_LOGI` from the `ota_confirm` task does not reach the captured log**
+  (uart_log_bridge drops lines). Its `running partition:` and `boot-guard
+  counter cleared and VERIFIED` INFO lines are absent from every clean-build
+  boot log, which made the task look dead; raising the same lines to
+  `ESP_LOGE` in the diagnostic build showed it running normally every boot.
+  **Do not conclude a task never ran from missing INFO lines.**
+* **OpenOCD cannot read this board's flash**: `flash probe 0` fails with
+  `Failed to get flash maps` / `Failed to probe flash, size 0 KB`, so the
+  NVS pages cannot be dumped and parsed offline. That is the one measurement
+  that would have named the flash-level defect exactly.
+
+### What was changed
+
+1. **The stuck-counter escape** (`boot_guard.c`,
+   `boot_guard_counter_is_stuck()`). A one-bit marker in RTC slow memory
+   records "the previous boot verified a clear". If the next boot still
+   loads a non-zero count, the persisted counter is provably not being
+   updated, so the loaded count is treated as 0 (with a loud `ESP_LOGE`).
+   This cannot release a genuinely reset-looping board: the marker is only
+   ever set by a boot that reached `boot_confirm_is_healthy()` *and*
+   verified its own clear -- exactly the boots whose counter the existing
+   code already zeroes. A power cycle clears RTC memory, so the escape
+   re-arms from scratch (one recovery boot at worst) rather than permanently
+   disabling the guard.
+2. **The record moved out of the frozen location**: `boot_guard`/`count` ->
+   `kiln_cfg`/`bootguard`, with a one-time read of the old location so an
+   upgrading board keeps its counter history, and a best-effort erase of the
+   old record. A first attempt that moved only the *key* (`count` ->
+   `bootcnt2`) inside the `boot_guard` namespace was built and flashed and
+   made no difference at all, which is why the namespace moved too.
+
+Host tests: `test_stuck_counter_escape()` and
+`test_legacy_record_is_read_once_then_retired()` in `test_boot_guard.c`, both
+driving the real `boot_guard_init()` / `boot_guard_mark_healthy()`.
+Negative test (escape logic deleted from the production function, not from a
+test-local copy):
+
+```
+FAIL test_boot_guard.c:434: the boot after a verified-but-lost clear does NOT
+enter recovery mode -- without the RTC-backed stuck-counter escape the board
+is trapped forever, which is exactly what happened on hardware
+```
+
+Restored by hand afterwards (no `git checkout --`): the file's md5 checksum
+returned to the exact value recorded before the break, and no `NEGATIVE TEST`
+marker remains anywhere in the file.
+All 31 host-test executables pass; `tools/run_all_checks.ps1` reports
+66 passed, 0 failed.
+
+### STILL OPEN -- needs the owner
+
+**The board has NOT left recovery mode.** After both changes were flashed and
+the board rebooted several times, the banner is still, verbatim:
+
+```
+E (2936) boot_guard: RECOVERY MODE: 3 consecutive boots were never confirmed healthy (threshold 3).
+```
+
+The count is pinned at exactly 3 -- a value no boot has written since this
+started -- through a key change and a namespace change, while other modules'
+writes to the same partition on the same boots persist normally. INFERRED:
+something at the flash level under `kiln_nvs` is serving a stale snapshot for
+this record specifically, which no change inside `boot_guard.c` can reach.
+
+Two owner decisions, least destructive first:
+
+1. **Power-cycle the board.** Every boot in this whole investigation was a
+   JTAG reset or a panic (`reset_reason: panic/exception`, every time);
+   there has been no true power-on reset. It costs nothing, is the one
+   untried action, and also re-arms the RTC escape cleanly. Do this first
+   and check the banner.
+2. **If that does not clear it: a one-time erase.** The narrow target is the
+   NVS namespace `boot_guard` in the `kiln_nvs` partition (key `count`); the
+   only tool available is a whole-partition erase,
+   `nvs_flash_erase_partition("kiln_nvs")` (reachable today only through
+   `factory_reset.c`'s scoped erase path). **That is destructive**: it also
+   discards `zones_cfg` (the tuned PID gains, currently on-disk v19),
+   `relay_cyc` (contact cycle counts 2201/2994/3214), `kiln_cfg_store`,
+   `unit_pref`, `ramp_assist`, `touch_cal` and `dwwin`. Take a
+   `GET /api/backup/export` first. **Nothing was erased by this pass; this
+   is a proposal awaiting approval.**
+
+Note for whoever picks this up: `kiln_cfg_store blob is the wrong size --
+treating as corrupt`, `zones_cfg from 'kiln_nvs' loaded (on-disk version 19)
+as v23` and `relay_cycles: migrated relay cycle blob v1 -> v2` appear on
+*every* boot. All three are in-RAM migrations only written back on an
+explicit save, so they are not (yet) evidence of further frozen records --
+but if the erase happens, they are the first things to re-check afterwards.

@@ -175,6 +175,28 @@ bool boot_guard_mark_healthy(void);
  * incremented to) this boot. */
 uint32_t boot_guard_get_boot_count(void);
 
+/* STUCK-COUNTER ESCAPE -- see the long comment of the same name in
+ * boot_guard.c for the hardware evidence behind this.
+ *
+ * Pure predicate, no I/O, exposed for test_boot_guard.c. Answers: "did the
+ * PREVIOUS boot verify a clear to 0, and did this boot nevertheless load a
+ * non-zero count?" -- i.e. is the persisted record refusing to change in
+ * flash while every in-boot API call and read-back reports success?
+ *
+ * `rtc_magic`/`rtc_marked_healthy` come from RTC slow memory, which is NOT
+ * NVS and NOT zeroed on a software reset (it IS lost on a power cycle,
+ * which just means the escape re-arms from scratch after a power cycle --
+ * one extra recovery-mode boot at worst, never a permanent trap).
+ *
+ * A true answer means the boot-guard counter cannot do its job and must not
+ * be allowed to hold the board in recovery mode; boot_guard_init() then
+ * treats the loaded count as 0. This can never release a genuinely
+ * reset-looping board: rtc_marked_healthy is only ever set by a boot that
+ * reached boot_confirm_is_healthy() AND verified its own clear, which is
+ * exactly the set of boots whose counter the existing code already zeroes. */
+bool boot_guard_counter_is_stuck(uint32_t rtc_magic, uint32_t rtc_marked_healthy,
+                                 uint32_t loaded_count);
+
 /* THE single definition of "this boot is healthy enough to (a) cancel OTA
  * rollback (esp_ota_mark_app_valid_cancel_rollback()) and (b) clear this
  * module's boot-guard counter (boot_guard_mark_healthy())". main.c's

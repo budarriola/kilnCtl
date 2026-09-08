@@ -33,6 +33,19 @@ static void simulate_reboot(void)
     s_bg.count = 0;
     s_bg.recovery_mode = false;
     s_bg.healthy_marked = false;
+    /* s_bg_rtc is deliberately NOT touched here: on target it lives in RTC
+     * slow memory (RTC_NOINIT_ATTR), which survives exactly this kind of
+     * software reset. simulate_power_cycle() below is the one that clears
+     * it, matching the only event that clears it on hardware. */
+}
+
+/* A power cycle: everything a software reset clears, PLUS RTC slow memory.
+ * Used to start each test from a clean board, so the stuck-counter escape's
+ * RTC flag never leaks from one test case into the next. */
+static void simulate_power_cycle(void)
+{
+    simulate_reboot();
+    memset(&s_bg_rtc, 0, sizeof(s_bg_rtc));
 }
 
 static void test_crc32_reference_vector(void)
@@ -109,7 +122,7 @@ static void test_counter_increments_and_enters_recovery(void)
 {
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
-    simulate_reboot();
+    simulate_power_cycle();
 
     // Boots 1..RECOVERY_MODE_BOOT_THRESHOLD: never marked healthy. Boot N's
     // recovery decision is based on what boot N-1 LEFT BEHIND, so the first
@@ -141,7 +154,7 @@ static void test_mark_healthy_clears_counter(void)
 {
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
-    simulate_reboot();
+    simulate_power_cycle();
 
     // Run it up close to the threshold, then confirm healthy, then prove the
     // NEXT boot starts fresh instead of continuing to climb.
@@ -179,7 +192,7 @@ static void test_verify_persisted_count_catches_a_write_that_does_not_stick(void
 {
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
-    simulate_reboot();
+    simulate_power_cycle();
 
     // Get a real, valid, nonzero count on record (same as every other test
     // here) -- this is the STALE pre-clear value the real board's boot log
@@ -231,7 +244,7 @@ static void test_corrupted_record_is_treated_as_count_zero(void)
 {
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
-    simulate_reboot();
+    simulate_power_cycle();
 
     // Run up several real boots so the persisted count is unambiguously
     // nonzero and would (if read back correctly) already be in or near
@@ -341,6 +354,165 @@ static void test_boot_confirm_decide(void)
                "factory partition, healthy -- skip the rollback-cancel call, not an error");
 }
 
+// ---------------------------------------------------------------------------
+// STUCK-COUNTER ESCAPE -- docs/audits/boot_guard_recovery_loop_2026-09-08.md.
+//
+// The real-hardware failure this exists for, reproduced end to end through
+// the production functions: the persisted record refuses to change in
+// flash, while every in-boot call (open/set_blob/commit) returns HAL_OK AND
+// a reopened READ_ONLY handle reads the new value straight back (NVS serves
+// every handle on a partition from one in-RAM index built at mount time, so
+// no same-boot read-back can see this). Modelled here by writing the stale
+// value back into the fake store immediately after every clear -- i.e. the
+// clear verifies inside the boot and is gone by the next one, exactly as
+// observed.
+//
+// Before the fix the board is trapped forever. After it, the boot that
+// follows a verified-but-lost clear refuses to enter recovery mode.
+// ---------------------------------------------------------------------------
+static void freeze_persisted_count_at(uint32_t stale)
+{
+    /* Re-write the stale record behind the caller's back, standing in for
+     * "the flash content never actually changed". Uses the production
+     * persist_count() so the record is byte-for-byte a real one. */
+    boot_guard_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.version = BOOT_GUARD_RECORD_VERSION;
+    rec.boot_count = stale;
+    rec.crc32 = record_crc(&rec);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "freeze helper can open the store");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_REC, &rec, sizeof(rec)) == HAL_OK,
+               "freeze helper can write the stale record back");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "freeze helper commits");
+    hal_kv_close(&h);
+}
+
+static void test_stuck_counter_escape(void)
+{
+    /* --- the pure predicate, every combination ------------------------- */
+    TEST_CHECK(boot_guard_counter_is_stuck(BOOT_GUARD_RTC_MAGIC, 1u, 3u),
+               "previous boot verified a clear and this boot still loaded 3 -> stuck");
+    TEST_CHECK(!boot_guard_counter_is_stuck(BOOT_GUARD_RTC_MAGIC, 1u, 0u),
+               "previous boot cleared and this boot loaded 0 -> the normal, working case");
+    TEST_CHECK(!boot_guard_counter_is_stuck(BOOT_GUARD_RTC_MAGIC, 0u, 3u),
+               "a nonzero count with NO verified clear behind it is an ordinary unconfirmed boot, "
+               "not a stuck counter -- this is what keeps a genuinely reset-looping board in "
+               "recovery mode");
+    TEST_CHECK(!boot_guard_counter_is_stuck(0u, 1u, 3u),
+               "garbage RTC memory (bad magic, i.e. after a power cycle) is never trusted");
+
+    /* --- end to end, through boot_guard_init()/boot_guard_mark_healthy() */
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    /* Walk the counter up to the threshold so the next boot is a recovery
+     * boot -- the state the real board was found in. */
+    for (uint32_t i = 0; i < (uint32_t)RECOVERY_MODE_BOOT_THRESHOLD; i++) {
+        simulate_reboot();
+        boot_guard_init();
+        freeze_persisted_count_at(i + 1u); /* init's own write sticks while the count climbs */
+    }
+
+    simulate_reboot();
+    boot_guard_init();
+#if RECOVERY_MODE_ENABLED
+    TEST_CHECK(boot_guard_is_recovery_mode(), "precondition: the board is in recovery mode");
+#endif
+    /* A healthy boot: the clear verifies inside this boot... */
+    TEST_CHECK(boot_guard_mark_healthy(), "the clear verifies within the boot (as it did on hardware)");
+    /* ...and is then silently lost, which is the whole failure. */
+    freeze_persisted_count_at((uint32_t)RECOVERY_MODE_BOOT_THRESHOLD);
+
+    simulate_reboot();
+    boot_guard_init();
+    TEST_CHECK(!boot_guard_is_recovery_mode(),
+               "the boot after a verified-but-lost clear does NOT enter recovery mode -- without "
+               "the RTC-backed stuck-counter escape the board is trapped forever, which is exactly "
+               "what happened on hardware");
+    TEST_CHECK(boot_guard_get_boot_count() == 1u,
+               "the stuck counter is treated as 0, so this boot counts as the first unconfirmed one");
+
+    /* And a power cycle re-arms the guard from scratch rather than leaving
+     * the escape latched: RTC memory is gone, so the stale count is
+     * believed again until a fresh healthy boot re-proves it is stuck.
+     * (The flash is still stuck at the same stale value -- freeze it again,
+     * because the escape boot above wrote its own new count of 1, which on
+     * this broken board would never have landed either.) */
+    freeze_persisted_count_at((uint32_t)RECOVERY_MODE_BOOT_THRESHOLD);
+    simulate_power_cycle();
+    boot_guard_init();
+#if RECOVERY_MODE_ENABLED
+    TEST_CHECK(boot_guard_is_recovery_mode(),
+               "after a power cycle the escape re-arms from scratch (one recovery boot at worst), "
+               "rather than permanently disabling the boot guard");
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-08 key move: NVS_KEY_REC went from "count" to "bootcnt2" because
+// the item under the old key stopped changing in flash on this bench board
+// (see boot_guard.c's comment on NVS_KEY_REC). An upgrading board must keep
+// its counter history rather than silently restarting at 0 -- otherwise a
+// genuinely reset-looping board would get RECOVERY_MODE_BOOT_THRESHOLD
+// fresh chances every time the key name changed.
+// ---------------------------------------------------------------------------
+static void test_legacy_record_is_read_once_then_retired(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    /* An older firmware's record, under the OLD key only. */
+    boot_guard_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.version = BOOT_GUARD_RECORD_VERSION;
+    rec.boot_count = (uint32_t)RECOVERY_MODE_BOOT_THRESHOLD;
+    rec.crc32 = record_crc(&rec);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "legacy-record helper can open the store");
+    hal_kv_close(&h);
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE_LEGACY, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "legacy-record helper can open the OLD namespace");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_REC_LEGACY, &rec, sizeof(rec)) == HAL_OK,
+               "legacy-record helper writes under the OLD namespace+key");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "legacy-record helper commits");
+    hal_kv_close(&h);
+
+    TEST_CHECK(load_count() == (uint32_t)RECOVERY_MODE_BOOT_THRESHOLD,
+               "load_count() falls back to the legacy key, so an upgrade does not forget the "
+               "counter history");
+
+    simulate_reboot();
+    boot_guard_init();
+#if RECOVERY_MODE_ENABLED
+    TEST_CHECK(boot_guard_is_recovery_mode(),
+               "a board already at the threshold under the OLD key still enters recovery mode "
+               "after the key move -- the move must not hand a looping board a fresh start");
+#endif
+
+    /* boot_guard_init()'s own write went to the NEW key and retired the old
+     * one, so the next load reads the new key with no legacy fallback. */
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "store still opens after the migration write");
+    size_t len = sizeof(rec);
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len) == HAL_OK && len == sizeof(rec),
+               "the record now exists under the NEW key");
+    TEST_CHECK(rec.boot_count == (uint32_t)RECOVERY_MODE_BOOT_THRESHOLD + 1u,
+               "the migrated record carries the incremented count, not a reset one");
+    hal_kv_close(&h);
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE_LEGACY, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "the legacy namespace still opens");
+    len = sizeof(rec);
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_REC_LEGACY, &rec, &len) == HAL_NOT_FOUND,
+               "the legacy record is erased once the new one is written, so the stuck item can "
+               "never be read again");
+    hal_kv_close(&h);
+}
+
 void run_test_boot_guard(void)
 {
     test_crc32_reference_vector();
@@ -352,4 +524,6 @@ void run_test_boot_guard(void)
     test_corrupted_record_is_treated_as_count_zero();
     test_boot_confirm_is_healthy();
     test_boot_confirm_decide();
+    test_stuck_counter_escape();
+    test_legacy_record_is_read_once_then_retired();
 }
