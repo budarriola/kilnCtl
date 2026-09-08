@@ -243,15 +243,16 @@ static void test_index_for_id_finds_known_and_rejects_unknown(void)
 {
     TEST_SECTION("index_for_id -- every table row is reachable by its own id, an unknown id is not");
 
-    // 0x0101 is the table's first row (tc_source); 0x031F (ct_topology,
-    // CT_COMMISSIONING_PLAN.md step 3) is now its last, appended at the very
-    // end per this table's own "only ever appended to" rule. Both ends, not
+    // 0x0101 is the table's first row (tc_source); 0x010A (tc_offset_c,
+    // owner request 2026-09-08) is now its last, appended at the very end
+    // per this table's own "only ever appended to" rule -- ct_topology
+    // (0x031F, the previous last row) is now second-to-last. Both ends, not
     // just one, so a future off-by-one in the table's bounds shows up here.
     TEST_CHECK(index_for_id(0x0101) == 0, "first table row (tc_source) is index 0");
-    TEST_CHECK(index_for_id(0x031F) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
-               "last table row (ct_topology) is the last index");
-    TEST_CHECK(index_for_id(0x0504) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
-               "config_check_period_s, the last row before ct_topology was appended, is second-to-last");
+    TEST_CHECK(index_for_id(0x010A) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
+               "last table row (tc_offset_c) is the last index");
+    TEST_CHECK(index_for_id(0x031F) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
+               "ct_topology, the last row before tc_offset_c was appended, is second-to-last");
     TEST_CHECK(index_for_id(0xBEEF) == -1, "an id no CONFIG_REFERENCE.md section uses is not found");
     TEST_CHECK(safety_cfg_store_param_count() == SAFETY_CFG_PARAM_COUNT,
                "safety_cfg_store_param_count() matches the table size exactly");

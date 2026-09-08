@@ -73,7 +73,7 @@ extern "C" {
  * itself grows a field -- ids are permanent (COMMISSIONING.md sec 2.1: "a
  * field that is removed leaves its id burned, never reused"), so this count
  * only ever goes up. */
-#define SAFETY_CFG_PARAM_COUNT 66u
+#define SAFETY_CFG_PARAM_COUNT 67u
 
 /* One row of safety_cfg_store_get_by_index()'s output -- everything
  * safety_cfg_http.c's GET handler needs to emit one `params[]` entry.

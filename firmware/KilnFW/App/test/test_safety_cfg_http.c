@@ -702,6 +702,40 @@ static void test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rej
     TEST_CHECK(s_stub_refetch_calls == 1, "a live read-back was attempted");
 }
 
+// Owner request 2026-09-08 ("I should be able to set the safety thermocouple
+// type", scope-expanded to tc_offset_c, 0x010A): same class of test as
+// test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected()
+// above, but naming tc_offset_c specifically -- confirm_commit_landed()/
+// apply_pairs() are generic over param_id, so this does not exercise new
+// code, but the task brief asks for the read-back-verification negative test
+// to explicitly cover the new field, not just its siblings. F32 (not the
+// U16 the other tests default to), and a negative, non-integer value so a
+// sign or truncation bug could not accidentally pass.
+static void test_apply_pairs_tc_offset_c_readback_mismatch_fails(void)
+{
+    TEST_SECTION("apply_pairs -- tc_offset_c (0x010A) ACKed, not rejected, but the read-back "
+                 "does NOT match -- must FAIL, not report success");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "tc_offset_c";
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x010Au, .value_text = "-4.25" } };
+    // Deliberately leave s_stub_params empty -- the board never actually
+    // reports tc_offset_c back as -4.25 after the "commit", the exact shape
+    // of a write that ACKed on the wire but did not really land.
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == false,
+               "a tc_offset_c commit that ACKed but did not actually land is reported as FAILED, "
+               "never as success -- a wrong safety-TC calibration offset silently believed to be "
+               "written is exactly the failure this endpoint exists to prevent");
+    TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
+    TEST_CHECK(strstr(reason, "tc_offset_c") != NULL,
+               "the reason names the field, not just a generic failure");
+    TEST_CHECK(s_stub_refetch_calls == 1, "a live read-back was attempted");
+}
+
 static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(void)
 {
     TEST_SECTION("apply_pairs -- the live read-back itself fails (link trouble) -- reported UNCONFIRMED");
@@ -1229,6 +1263,7 @@ int main(void)
     test_apply_pairs_refused_commit_surfaces_reason();
     test_apply_pairs_rejected_commit_names_field_and_reason();
     test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected();
+    test_apply_pairs_tc_offset_c_readback_mismatch_fails();
     test_apply_pairs_refetch_failure_reports_unconfirmed_not_success();
     test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure();
     test_confirm_commit_landed_lookup_failure_on_its_own_pass_fails_closed();

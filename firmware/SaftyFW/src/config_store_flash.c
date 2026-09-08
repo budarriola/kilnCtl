@@ -322,6 +322,14 @@ uint8_t config_store_get_tc_type(void)
     return s_cached_record.tc_type;
 }
 
+float config_store_get_tc_offset_c(void)
+{
+    if (!s_loaded) {
+        return 0.0f; // safe default: no correction until proven otherwise
+    }
+    return s_cached_record.tc_offset_c;
+}
+
 bool config_store_is_calibration_missing(void)
 {
     if (!s_loaded) {

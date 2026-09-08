@@ -122,8 +122,11 @@ static safety_ct_cal_blob_t s_ct_cal;
  * appended at the END of the table (not mid-array, so no remap hazard this
  * time) -- bumped anyway, principled rather than relying again on the size
  * check alone to save an unbumped version, per this comment's own "the
- * version gets bumped" rule for every table growth. */
-#define SAFETY_CFG_STORE_VERSION 3u
+ * version gets bumped" rule for every table growth.
+ *
+ * 3 -> 4 (2026-09-08, owner request): tc_offset_c (0x010A) appended at the
+ * END of the table, same no-remap-hazard shape as the 2 -> 3 bump. */
+#define SAFETY_CFG_STORE_VERSION 4u
 
 /* CONFIG_REFERENCE.md secs 1-5 / COMMISSIONING.md sec 2.1's param_id table,
  * in that document's own order -- table POSITION is what
@@ -232,6 +235,11 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUN
      * requires. 0 = per_zone (safe default, matches every board before this
      * field existed). */
     { 0x031F, KILNLINK_PARAM_TYPE_U8, "ct_topology" },
+    /* 0x010A tc_offset_c -- owner request 2026-09-08. Appended at the END of
+     * the table, not re-grouped next to tc_type (0x0105) in sec 1, per this
+     * table's own "append to the end of the array" rule above -- 3 -> 4
+     * bump. */
+    { 0x010A, KILNLINK_PARAM_TYPE_F32, "tc_offset_c" },
 };
 
 typedef struct {

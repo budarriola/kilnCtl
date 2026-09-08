@@ -61,6 +61,11 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
                                            // in this section-1 group, deliberately
                                            // adjacent to the three ct_channel_map
                                            // ids it gates
+    { 0x010Au, KILNLINK_PARAM_TYPE_F32 }, // tc_offset_c -- owner request
+                                           // 2026-09-08; next unallocated id
+                                           // after 0x0109, deliberately
+                                           // adjacent to tc_type (0x0105) in
+                                           // this same section-1 group
     { 0x0201u, KILNLINK_PARAM_TYPE_F32 }, // firing_margin_c
     { 0x0202u, KILNLINK_PARAM_TYPE_F32 }, // overshoot_margin_c
     { 0x0203u, KILNLINK_PARAM_TYPE_U16 }, // overshoot_time_s
@@ -180,6 +185,7 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x0104u: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->abs_max_temp_c; return true;
     case 0x0105u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->tc_type; return true;
     case 0x0109u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_installed; return true;
+    case 0x010Au: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->tc_offset_c; return true;
     case 0x0106u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[0]; return true;
     case 0x0107u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[1]; return true;
     case 0x0108u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[2]; return true;
@@ -383,6 +389,12 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     // "not installed" changes the VALUE (and so re-arms the guards and
     // re-requires ct_channel_map) but never un-answers the question.
     case 0x0109u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(1u); rec->ct_installed = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_CT_INSTALLED; return true;
+    // tc_offset_c: same "unbounded beyond finiteness" treatment as its
+    // sibling tc_expected_offset_c (0x020A) -- see this file's own header
+    // comment on that field and config_store.h's struct comment on this one
+    // for why no magnitude/sign bound is invented here. Not fields_set-gated
+    // (0.0f is a safe "no correction" default).
+    case 0x010Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->tc_offset_c = value.f32_val; return true;
 
     case 0x0201u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->firing_margin_c = value.f32_val; return true;
     case 0x0202u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->overshoot_margin_c = value.f32_val; return true;
@@ -608,6 +620,7 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
     RANGE_F32_FINITE(rec->max_rate_c_per_min, "max_rate_c_per_min");
     RANGE_F32_FINITE(rec->tc_disagreement_c, "tc_disagreement_c");
     RANGE_F32_FINITE(rec->tc_expected_offset_c, "tc_expected_offset_c");
+    RANGE_F32_FINITE(rec->tc_offset_c, "tc_offset_c");
     RANGE_F32_FINITE(rec->cj_warn_c, "cj_warn_c");
     RANGE_F32_FINITE(rec->cj_max_c, "cj_max_c");
     RANGE_F32_FINITE(rec->k_ct_v_per_a[0], "k_ct_v_per_a[0]");
@@ -756,6 +769,7 @@ static const config_param_name_id_t CONFIG_PARAM_NAME_TABLE[] = {
     { "tc_placement_mode", 0x0103u },
     { "abs_max_temp_c", 0x0104u },
     { "tc_type", 0x0105u },
+    { "tc_offset_c", 0x010Au },
     { "borrowed_type_expected", 0x0210u },
     { "i_present_a", 0x0301u },
     { "max_expected_power_w", 0x0319u },

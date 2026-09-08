@@ -99,7 +99,10 @@
 //    229     1  i_present_a_manual (u8, 0/1) -- true iff i_present_a (offset
 //               87) was set directly via SET_PARAM rather than auto-derived
 //               from i_normal_a. Same "only 1 means true" decode as above.
-//    230   274  reserved, 0xFF-filled (headroom for a future field)
+//    230     4  tc_offset_c (f32 LE) -- safety board's own TC calibration
+//               correction, owner request 2026-09-08; see config_store.h's
+//               struct comment
+//    234   270  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -172,8 +175,26 @@
 // / auto-derive) without needing a distinct improbable sentinel.
 #define REC_OFF_CT_TOPOLOGY            (REC_OFF_CT_INSTALLED + 1u)        /* 228 */
 #define REC_OFF_I_PRESENT_A_MANUAL     (REC_OFF_CT_TOPOLOGY + 1u)         /* 229 */
-#define REC_OFF_RESERVED               (REC_OFF_I_PRESENT_A_MANUAL + 1u)  /* 230 */
-#define REC_RESERVED_LEN               274u
+// tc_offset_c (owner request "I should be able to set the safety
+// thermocouple type" pass, 2026-09-08): a calibration correction ADDED to
+// the safety board's own MAX31856 hot-junction reading before any guard
+// (or the wire telemetry) ever sees it -- distinct from tc_expected_offset_c
+// (0x020A) above, which is S10's captured steady-state DISAGREEMENT offset
+// between the safety TC and a zone TC, never applied to the reading itself.
+// Carved out of the front of the reserved tail, same convention as every
+// field above since REC_OFF_SAFETY_TC_INSTALLED: a record committed before
+// this field existed holds whatever incidental byte pattern used to live
+// here (0xFF erased-flash fill, most likely) at this offset, which is why
+// this field is NOT fields_set-gated -- 0.0f (no correction) is a safe
+// default for an unset offset, unlike abs_max_temp_c/tc_type, so
+// config_store_default()/config_store_unpack() (below) explicitly zero
+// this offset on migration/erased-flash decode rather than trusting
+// whatever stale bytes are already there, the same "explicit zero, not
+// trust-the-bytes" discipline overcurrent_pct/_time_s use for their own
+// carved-from-reserved fields.
+#define REC_OFF_TC_OFFSET_C            (REC_OFF_I_PRESENT_A_MANUAL + 1u)  /* 230 */
+#define REC_OFF_RESERVED               (REC_OFF_TC_OFFSET_C + 4u)         /* 234 */
+#define REC_RESERVED_LEN               270u
 
 // The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
 // file's own layout-table comment above for the hardware-confirmed reason:
@@ -387,6 +408,7 @@ void config_store_pack(const config_store_record_t *rec,
     // for why no 0xA5-style marker is needed here.
     out[REC_OFF_CT_TOPOLOGY] = (rec->ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED) ? 1u : 0u;
     out[REC_OFF_I_PRESENT_A_MANUAL] = rec->i_present_a_manual ? 1u : 0u;
+    put_f32_le(&out[REC_OFF_TC_OFFSET_C], rec->tc_offset_c);
 
     put_f32_le(&out[REC_OFF_MAX_EXPECTED_POWER_W], rec->max_expected_power_w);
 
@@ -523,6 +545,11 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
                             ? CONFIG_STORE_CT_TOPOLOGY_SUMMED
                             : CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
     out->i_present_a_manual = (in[REC_OFF_I_PRESENT_A_MANUAL] == 1u);
+    // tc_offset_c: raw decode, no fields_set gate needed -- see config_store.h's
+    // struct comment on why every pre-existing record's byte pattern here
+    // (0x00, confirmed, not erased-flash 0xFF) already decodes as the safe
+    // 0.0f default.
+    out->tc_offset_c = get_f32_le(&in[REC_OFF_TC_OFFSET_C]);
 
     // Raw decode only -- CONFIG_STORE_SET_MAX_EXPECTED_POWER_W (already read
     // into out->fields_set above) is what gates whether any caller may trust
@@ -774,6 +801,11 @@ void config_store_default(config_store_record_t *out)
                                       // pass clears it -- see config_store.h
     out->safety_tc_installed = 1u;   // default: installed -- see config_store.h's
                                       // header comment on this field
+    out->tc_offset_c = 0.0f;         // no correction -- explicit here even
+                                      // though memset(0) above already gives
+                                      // this, same "document the zero, don't
+                                      // just rely on it" style as the section
+                                      // 1 fields above
     out->ct_installed = 1u;          // default: installed = STRICT. The value
                                       // is only reachable once
                                       // CONFIG_STORE_SET_CT_INSTALLED is set

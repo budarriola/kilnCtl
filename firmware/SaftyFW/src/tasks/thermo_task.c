@@ -422,7 +422,20 @@ static void thermo_task_fn(void *arg)
 
             snap.spi_failed = !ok || reading.spi_failed;
             snap.fault_bits = ok ? reading.fault_status : 0;
-            snap.tc_c = ok ? reading.tc_temperature_c : NAN;
+            // tc_offset_c (owner request 2026-09-08): a calibration
+            // correction ADDED here, at the earliest point this task ever
+            // has a real hot-junction reading, so every downstream consumer
+            // -- fault-bit NaN-ing already applied inside max31856_read(),
+            // the per-type plausibility check just below, S1/S2/S10/S13's
+            // guard inputs, and the telemetry frame this snapshot feeds --
+            // sees the CORRECTED value uniformly. Applied only when the raw
+            // reading is itself finite (an already-NaN'd half-reading plus a
+            // finite offset must stay NaN, not become a plausible-looking
+            // number); config_store_get_tc_offset_c() returns 0.0f (a no-op
+            // add) both before commissioning and before config_store_boot_
+            // load() has even run, so this is unconditionally safe to call.
+            float raw_tc_c = ok ? reading.tc_temperature_c : NAN;
+            snap.tc_c = isnan(raw_tc_c) ? raw_tc_c : (raw_tc_c + config_store_get_tc_offset_c());
             snap.cj_c = ok ? reading.cj_temperature_c : NAN;
             // "valid" is the snapshot-level fact safety_guards.h's tc_valid
             // maps onto directly: a successful transfer. Per-half NaN-ing

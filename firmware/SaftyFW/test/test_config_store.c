@@ -214,6 +214,7 @@ static void test_default(void)
                "default format_version is current");
     TEST_CHECK(rec.seq == 0, "default seq is 0");
     TEST_CHECK(rec.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE, "default tc_type is K");
+    TEST_CHECK(rec.tc_offset_c == 0.0f, "default tc_offset_c is 0.0 (no correction)");
     // S8 sanity-rate guard (2026-09-05, review fix): the compiled record
     // default must be exactly 2x the fastest RISING ramp_c_per_hr among
     // KilnFW's built-in profiles -- S8 (safety_guards.c) only ever trips on
@@ -712,6 +713,10 @@ static void test_v2_full_roundtrip(void)
     rec.borrowed_stale_s = 11u;
     rec.borrowed_stale_trip_s = 61u;
     rec.borrowed_type_expected = 0x05u; // MAX31856_TC_TYPE_R
+    rec.tc_offset_c = -4.25f; // owner request 2026-09-08 -- deliberately
+                              // negative and non-integer, same "not a value
+                              // that would roundtrip by accident" discipline
+                              // as tc_expected_offset_c's 3.5f above
 
     rec.i_present_a = 2.5f;
     rec.zero_counts[0] = 1000;
@@ -803,6 +808,7 @@ static void test_v2_full_roundtrip(void)
                "borrowed_stale_trip_s roundtrips");
     TEST_CHECK(back.borrowed_type_expected == rec.borrowed_type_expected,
                "borrowed_type_expected roundtrips");
+    TEST_CHECK(back.tc_offset_c == rec.tc_offset_c, "tc_offset_c roundtrips");
 
     TEST_CHECK(back.i_present_a == rec.i_present_a, "i_present_a roundtrips");
     TEST_CHECK(memcmp(back.zero_counts, rec.zero_counts, sizeof(rec.zero_counts)) == 0,
@@ -944,6 +950,11 @@ static void test_v1_migration(void)
                "migrated record's firing_margin_c takes the v2 compiled default");
     TEST_CHECK(out.watchdog_timeout_ms == def.watchdog_timeout_ms,
                "migrated record's watchdog_timeout_ms takes the v2 compiled default");
+    TEST_CHECK(out.tc_offset_c == 0.0f,
+               "migrated record's tc_offset_c is 0.0 (no correction) -- v1 predates this "
+               "field entirely, and pack_legacy_v1_record() never wrote anything at this "
+               "now-carved-out reserved offset, so migration goes through config_store_"
+               "default()'s compiled 0.0f the same way every other v1-absent field does");
     TEST_CHECK(out.fields_set == 0,
                "migrated record has fields_set == 0 -- none of the no-safe-default fields "
                "were ever commissioned, v1 could not have set them");

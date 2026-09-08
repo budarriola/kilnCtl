@@ -664,20 +664,49 @@ typedef struct {
     // "unless set by hand".
     bool    i_present_a_manual;
 
+    // tc_offset_c: a calibration correction ADDED to the safety processor's
+    // OWN MAX31856 hot-junction reading (thermo_task.c) before any guard, or
+    // the wire telemetry, ever sees it -- owner request 2026-09-08 ("I should
+    // be able to set the safety thermocouple type", scope-expanded to include
+    // this offset in the same pass). NOT fields_set-gated: 0.0f (no
+    // correction) is a genuinely safe default for an unset offset, unlike
+    // abs_max_temp_c/tc_type, which have no safe compiled default at all --
+    // and every pre-existing record's bytes at this now-carved-out offset are
+    // 0x00 (this file's own hardware-confirmed note on REC_OFF_SAFETY_TC_
+    // INSTALLED: config_store_default() memsets `reserved` to 0 and
+    // config_store_pack() memcpy's it verbatim), which decodes as exactly
+    // 0.0f -- no NaN/garbage hazard the way max_expected_power_w/i_normal_a
+    // had to guard against. Deliberately distinct from tc_expected_offset_c
+    // above: that field is S10's captured steady-state DISAGREEMENT between
+    // the safety TC and a zone TC, compared but never applied to a reading;
+    // this field changes what the safety processor believes its own sensor
+    // says, which is why it carries the same "dangerous" risk rating as
+    // tc_type in CONFIG_REFERENCE.md / the commissioning page. Range: like
+    // tc_expected_offset_c, deliberately left UNBOUNDED beyond finiteness
+    // (config_params.c's CHECK_F32_FINITE) -- no MAX31856 hardware offset
+    // register backs this (it is a software correction, not a trim register
+    // field), and CONFIG_REFERENCE.md/COMMISSIONING.md document no sign or
+    // magnitude constraint for a calibration correction, so inventing one
+    // would be exactly the "tight sensible bound this discipline forbids"
+    // config_params.c's own header comment already argues against for this
+    // field's sibling.
+    float   tc_offset_c;
+
     // Reserved, unused, packed as 0xFF (matches the erased-flash background,
-    // same convention as metadata.h's per-slot reserved bytes). ~274 B of
+    // same convention as metadata.h's per-slot reserved bytes). ~270 B of
     // headroom (config_store.c's REC_OFF_RESERVED..REC_OFF_CRC; one byte of
     // the original 300 was carved off the FRONT of this block for
     // safety_tc_installed, 4 more for max_expected_power_w, 16 more (3xF32
     // i_normal_a + U16 overcurrent_pct + U32-on-wire-but-U16-tagged
-    // overcurrent_time_s) for S14, 1 more for ct_installed, and 2 more
+    // overcurrent_time_s) for S14, 1 more for ct_installed, 2 more
     // (ct_topology + i_present_a_manual, both 1-byte markers) for CT_
-    // COMMISSIONING_PLAN.md step 3 -- see REC_OFF_SAFETY_TC_INSTALLED /
-    // REC_OFF_MAX_EXPECTED_POWER_W / REC_OFF_I_NORMAL_A / REC_OFF_CT_TOPOLOGY
-    // in config_store.c) -- adding a field later is a struct/pack/unpack/
+    // COMMISSIONING_PLAN.md step 3, and 4 more (F32) for tc_offset_c above --
+    // see REC_OFF_SAFETY_TC_INSTALLED / REC_OFF_MAX_EXPECTED_POWER_W /
+    // REC_OFF_I_NORMAL_A / REC_OFF_CT_TOPOLOGY / REC_OFF_TC_OFFSET_C in
+    // config_store.c) -- adding a field later is a struct/pack/unpack/
     // host-test change, not a layout change, same as metadata.h's own
     // signature/sig_required reservation.
-    uint8_t  reserved[274];
+    uint8_t  reserved[270];
 } config_store_record_t;
 
 // Compile-time budget check, mirroring bootloader/metadata.c's
@@ -953,6 +982,15 @@ void config_store_boot_load(void);
 // readers in this build's current call pattern). Returns
 // CONFIG_STORE_DEFAULT_TC_TYPE if called before config_store_boot_load().
 uint8_t config_store_get_tc_type(void);
+
+// The cached tc_offset_c -- a calibration correction to be ADDED to the
+// safety board's own MAX31856 hot-junction reading (thermo_task.c is the one
+// caller, applied to reading.tc_temperature_c before anything else -- fault
+// bits, plausibility, guards -- ever sees the value). Returns 0.0f (no
+// correction, the safe default) if called before config_store_boot_load().
+// Same "safe to call from any task" contract as config_store_get_tc_type()
+// above.
+float config_store_get_tc_offset_c(void);
 
 // The cached calibration_missing flag. Returns true (the safe default) if
 // called before config_store_boot_load().
