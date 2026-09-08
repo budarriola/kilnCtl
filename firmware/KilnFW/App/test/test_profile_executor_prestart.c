@@ -386,18 +386,17 @@ void run_state_note_progress(const run_state_snapshot_t *snap)
 /* Fakes for FILESYSTEM_PLAN.md's dual-write window (drivers/persist/
  * dualwrite_window.h/cfg_fs.h): profile_executor.c's PROFILE_EXEC_DONE
  * transitions call cfg_fs_is_available() to gate a
- * dualwrite_window_note_firing_complete() call, same "define our own fake
- * body rather than link the real module" convention as run_state_note()
- * above and every zones_config_*()/profiles_http_get() fake in this file --
- * this test never reaches PROFILE_EXEC_DONE (it only exercises the
- * before-profile_executor_start() prestart guard), so a no-op body that
- * satisfies the linker is enough; reporting "not available" from the fake
- * keeps the (unreached) gate closed rather than silently claiming the
- * filesystem is live in a test that never mounted one. */
-bool cfg_fs_is_available(void)
-{
-    return false;
-}
+ * dualwrite_window_note_firing_complete() call. cfg_fs_is_available() USED
+ * to be a fake here (always false) -- now the REAL cfg_fs.c is linked in
+ * instead (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 item 9: adaptive_
+ * tune.c, also linked into this executable, now calls into pref_cfg_fs.c,
+ * which needs cfg_fs_write_atomic()/cfg_fs_read()/cfg_fs_is_available() for
+ * real -- a second fake definition of just cfg_fs_is_available() here would
+ * multiply-define against cfg_fs.c's real one). Behaviorally identical for
+ * this test file's purposes: cfg_fs_init() is never called here, so the real
+ * cfg_fs_is_available() also returns false -- this test still never reaches
+ * PROFILE_EXEC_DONE (it only exercises the before-profile_executor_start()
+ * prestart guard) either way. */
 
 void dualwrite_window_note_firing_complete(void)
 {
@@ -864,6 +863,21 @@ bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
  * stubs/bx_worker_stub.h's own header comment -- since it is still correct
  * to model the worker faithfully even though this path cannot trip it. */
 #include "bx_worker_stub.h"
+
+#ifdef _WIN32
+#include <direct.h>
+#define FSCF_TEST_MKDIR(p) _mkdir(p)
+#define FSCF_TEST_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define FSCF_TEST_MKDIR(p) mkdir((p), 0755)
+#define FSCF_TEST_RMDIR(p) rmdir(p)
+#endif
+#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA_PLAN.md
+                       * section 5 item 7's firing-stats cfg-filesystem bridge tests, appended near the
+                       * bottom of this file. */
+
 httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
 {
@@ -7735,9 +7749,177 @@ void run_test_profile_executor_prestart(void)
 }
 
 
+// ---------------------------------------------------------------------
+// cfg-filesystem dual-write bridge for firing stats/history
+// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 7). Uses the real
+// firing_stats_load()/firing_stats_persist() public entry points plus a
+// real cfg_fs.c against a temp directory -- same convention as
+// test_relay_names_cfg_fs.c/test_relay_cycles.c's own cfg_fs sections.
+// ---------------------------------------------------------------------
+static const char *FS_SCRATCH_BASE = "cfg_fs_test_firing_stats";
+
+static void reset_all_fscf(void)
+{
+    // Same "delete known filenames before rmdir" fix test_relay_names_cfg_fs.c's/
+    // test_zones_config_cfg_fs.c's own reset_all() apply -- _rmdir()/rmdir() fail
+    // silently on a non-empty directory, so a leftover per-id file from a PRIOR
+    // run of this executable (or an earlier test in this same run) would
+    // otherwise survive across "resets" and leak stale history into whichever
+    // profile_id a later test happens to reuse (this bit: out.count==5, the
+    // ring's max depth, from a leftover fs7.dat before this fix). Every
+    // profile_id these tests use (5, 7, 9, 11) is deleted explicitly, both the
+    // committed and any orphaned .tmp copy.
+    static const uint8_t known_ids[] = {5, 7, 9, 11};
+    char path[600];
+    for (size_t i = 0; i < sizeof(known_ids) / sizeof(known_ids[0]); i++) {
+        char rel[40];
+        firing_stats_cfg_fs_path(known_ids[i], rel, sizeof(rel));
+        // cfg_fs_write_atomic()'s temp file lives flat under .tmp/ with '/'
+        // flattened to '_' (flatten_for_tmp()), NOT under a "stats" subdir --
+        // "stats/fs7.dat" -> ".tmp/stats_fs7.dat".
+        char flat[48];
+        snprintf(flat, sizeof(flat), "%s", rel);
+        for (char *p = flat; *p; p++) { if (*p == '/') *p = '_'; }
+        snprintf(path, sizeof(path), "%s/.tmp/%s", FS_SCRATCH_BASE, flat);
+        remove(path);
+        snprintf(path, sizeof(path), "%s/%s", FS_SCRATCH_BASE, rel);
+        remove(path);
+    }
+    snprintf(path, sizeof(path), "%s/.tmp/stats", FS_SCRATCH_BASE);
+    FSCF_TEST_RMDIR(path);
+    snprintf(path, sizeof(path), "%s/stats", FS_SCRATCH_BASE);
+    FSCF_TEST_RMDIR(path);
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", FS_SCRATCH_BASE);
+    FSCF_TEST_RMDIR(tmp);
+    FSCF_TEST_RMDIR(FS_SCRATCH_BASE);
+    FSCF_TEST_MKDIR(FS_SCRATCH_BASE);
+
+    cfg_fs_deinit();
+    firing_stats_cfg_fs_reset_write_fn_for_test();
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+}
+
+static profile_firing_run_record_t make_fscf_record(uint8_t profile_id, uint32_t started, uint32_t duration)
+{
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = profile_id;
+    snprintf(rec.profile_name, sizeof(rec.profile_name), "P%u", (unsigned)profile_id);
+    rec.run_started_unix_s = started;
+    rec.duration_s = duration;
+    return rec;
+}
+
+static void test_fscf_partition_absent_behaves_like_before(void)
+{
+    TEST_SECTION("firing stats cfg_fs: partition absent -- load/persist behave exactly like NVS-only");
+    reset_all_fscf();
+    TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
+
+    profile_firing_run_record_t rec = make_fscf_record(5, 1000, 900);
+    firing_stats_persist(&rec);
+
+    profile_firing_history_blob_t out;
+    TEST_CHECK(firing_stats_load(5, &out), "load succeeds with no `cfg` partition mounted");
+    TEST_CHECK(out.count == 1 && out.runs[0].profile_id == 5, "run reloads from NVS alone");
+}
+
+static void test_fscf_migrates_then_prefers_file(void)
+{
+    TEST_SECTION("firing stats cfg_fs: NVS fallback migrates to file; a later load prefers the file");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    profile_firing_run_record_t rec = make_fscf_record(7, 2000, 1800);
+    firing_stats_persist(&rec); // dual-write: file first, then NVS
+
+    char path[64];
+    firing_stats_cfg_fs_path(7, path, sizeof(path));
+    bool exists = false;
+    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && exists, "the persist's dual-write actually created the file");
+
+    profile_firing_history_blob_t out;
+    TEST_CHECK(firing_stats_load(7, &out), "reload succeeds");
+    TEST_CHECK(out.count == 1 && out.runs[0].run_started_unix_s == 2000, "reloaded run matches what was persisted");
+
+    profile_firing_history_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    firing_stats_cfg_fs_load_raw(7, &raw, &rev, &valid);
+    TEST_CHECK(valid && rev == 1, "the file holds a rev-1 copy after one persist");
+}
+
+static void test_fscf_dual_write_stays_in_sync_across_repeated_persists(void)
+{
+    TEST_SECTION("firing stats cfg_fs: repeated persists keep file and NVS in sync (incrementing rev, "
+                 "growing the ring)");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    for (uint32_t i = 1; i <= 3; i++) {
+        profile_firing_run_record_t rec = make_fscf_record(9, 1000 * i, 100 * i);
+        firing_stats_persist(&rec);
+    }
+
+    profile_firing_history_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    firing_stats_cfg_fs_load_raw(9, &raw, &rev, &valid);
+    TEST_CHECK(valid && rev == 3, "file rev tracks three persists");
+    TEST_CHECK(raw.count == 3 && raw.runs[0].run_started_unix_s == 3000, "file holds the full ring, newest first");
+
+    profile_firing_history_blob_t out;
+    TEST_CHECK(firing_stats_load(9, &out), "reload");
+    TEST_CHECK(out.count == 3 && out.runs[0].run_started_unix_s == 3000,
+               "NVS agrees with the file after three dual-writes");
+}
+
+// NEGATIVE TEST (per this task's brief -- exercised here via write-fn
+// injection for firing stats specifically; the relay-cycle migration got
+// the required production-code break/revert, documented in this task's
+// report).
+static esp_err_t fscf_failing_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path; (void)data; (void)len;
+    return ESP_FAIL;
+}
+
+static void test_fscf_negative_no_file_write_means_file_never_catches_up(void)
+{
+    TEST_SECTION("firing stats cfg_fs NEGATIVE TEST: skipped file write leaves the file permanently "
+                 "behind -- firing history is never silently discarded either way (NVS keeps carrying it)");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    firing_stats_cfg_fs_set_write_fn(fscf_failing_write_fn); // stands in for "the file-write call was deleted"
+    profile_firing_run_record_t rec = make_fscf_record(11, 4000, 500);
+    firing_stats_persist(&rec);
+    firing_stats_cfg_fs_reset_write_fn_for_test();
+
+    profile_firing_history_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    firing_stats_cfg_fs_load_raw(11, &raw, &rev, &valid);
+    TEST_CHECK(!valid, "with the file write skipped, the file never catches up");
+
+    // Crucially, the history is NOT lost -- NVS still carries it, and
+    // firing_stats_load() must still return it (never discard it).
+    profile_firing_history_blob_t out;
+    TEST_CHECK(firing_stats_load(11, &out), "load still succeeds");
+    TEST_CHECK(out.count == 1 && out.runs[0].profile_id == 11,
+               "the run is NOT lost -- NVS alone is carrying it, and firing_stats_load() still returns it");
+}
+
 int main(void)
 {
     run_test_profile_executor_prestart();
+    test_fscf_partition_absent_behaves_like_before();
+    test_fscf_migrates_then_prefers_file();
+    test_fscf_dual_write_stays_in_sync_across_repeated_persists();
+    test_fscf_negative_no_file_write_means_file_never_catches_up();
+    reset_all_fscf();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);

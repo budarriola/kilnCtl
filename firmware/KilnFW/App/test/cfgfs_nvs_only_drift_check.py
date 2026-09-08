@@ -49,6 +49,15 @@ EXPECTED_BRIDGE_MODULES = {
     "pref",            # generic bridge backing items 10/11/12/14 (ramp assist, unit pref, display power, TZ)
     "profiles",        # items 5/6: user profiles + hidden-builtin mask
     "zones_config",    # items 1/2/3: zones config, zone normals, relay names
+    "firing_stats",    # item 7: firing stats/history -- 2026-09-08. cfg_fs_status.c's
+                       # nvs_only/nvs_permanent arrays still need a matching edit (owned
+                       # by a concurrent pass on that file as of this commit -- see this
+                       # task's report for what /api/cfgfs needs: move "firing_stats"
+                       # out of nvs_only, plus items 4 (relay_cycles, backed by the
+                       # generic pref_cfg_fs bridge inside relay_cycles.c -- no new
+                       # *_cfg_fs.c file, so it does not trip THIS check) and 9
+                       # (adaptive_tune, same generic-bridge situation) out of nvs_only
+                       # too, since all three are now dual-write.
 }
 
 

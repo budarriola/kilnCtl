@@ -51,6 +51,10 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t
                               * save_kibase_job()'s caller (the flash worker) already branches on */
+#include "pref_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
+                             section 5 item 9 -- see adaptive_tune_internal.h's
+                             ADAPTIVE_TUNE_KIBASE_FILE_PATH comment for the simplified
+                             (re-derivable) treatment this item gets. */
 
 #include "zones_config_accessors.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
                          // this file now writes the opt-in flag here too (U2) and reads/writes
@@ -458,9 +462,49 @@ typedef struct {
     esp_err_t result;
 } kibase_job_t;
 
+// In-memory rev counter for the cfg-filesystem dual-write below -- resolved
+// at boot (adaptive_tune_init()) from whichever side (file/NVS) won, then
+// incremented by every save_kibase_job() call. All three call sites that
+// build a kibase_job_t (adaptive_tune_run_end()/adaptive_tune_clear_ki_
+// baseline()/adaptive_tune_revert()) funnel through this ONE function to
+// reach NVS/the file, so a single counter here -- rather than one at each
+// call site -- cannot desync between them. Simplified treatment per this
+// item's "re-derivable over one firing" audit finding: no per-zone
+// divergence forensics, just monotonically increasing so a stale file can
+// never outrank a fresher NVS write or vice versa.
+static uint32_t s_kibase_rev = 0;
+
+// pref_cfg_fs_validate_fn_t for this blob: the only structural invariant
+// worth checking is that `mask` never claims a zone index this build does
+// not have -- everything else (a garbage baseline value for a zone whose
+// bit IS set) is exactly as trusted as the NVS blob always was, since this
+// item's whole point is that losing/re-deriving it is cheap.
+static bool kibase_file_validate(const void *bytes, size_t len)
+{
+    if (len != sizeof(adaptive_tune_kibase_blob_t)) {
+        return false;
+    }
+    const adaptive_tune_kibase_blob_t *b = (const adaptive_tune_kibase_blob_t *)bytes;
+    uint8_t valid_mask = (uint8_t)((1u << MAX31856_CHANNEL_COUNT) - 1u);
+    return (b->mask & (uint8_t)~valid_mask) == 0;
+}
+
+// FILE FIRST (best-effort, failure logged and swallowed), THEN NVS
+// (authoritative) -- same ordering every other pref_cfg_fs item uses. The
+// rev key is written in the SAME NVS transaction as the blob, same reason
+// relay_cycles.c's persist_snapshot() does it that way.
 static void save_kibase_job(void *arg)
 {
     kibase_job_t *job = (kibase_job_t *)arg;
+    uint32_t rev = ++s_kibase_rev;
+
+    esp_err_t file_err =
+        pref_cfg_fs_save(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &job->blob, sizeof(job->blob), rev);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(ADAPTIVE_TUNE_TAG, "ki-baseline file write failed: %s -- NVS remains the source of "
+                                    "truth this boot", esp_err_to_name(file_err));
+    }
+
     hal_kv_handle_t h;
     hal_status_t err =
         hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION);
@@ -469,6 +513,9 @@ static void save_kibase_job(void *arg)
         return;
     }
     err = hal_kv_set_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &job->blob, sizeof(job->blob));
+    if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV, rev);
+    }
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
@@ -1058,6 +1105,11 @@ void adaptive_tune_init(void)
 
     // Boot-time read, direct (not through the flash worker -- see this
     // file's top comment on why reads are exempt).
+    adaptive_tune_kibase_blob_t kb;
+    memset(&kb, 0, sizeof(kb));
+    bool nvs_valid = false;
+    uint32_t nvs_rev = 0;
+
     hal_kv_handle_t h;
     hal_status_t err =
         hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ADAPTIVE_TUNE_NVS_PARTITION);
@@ -1084,21 +1136,46 @@ void adaptive_tune_init(void)
         // struct-zero default (false), which is correct: that zone's
         // baseline genuinely has not been established yet, on this boot or
         // any previous one.
-        adaptive_tune_kibase_blob_t kb;
-        memset(&kb, 0, sizeof(kb));
         size_t kb_len = sizeof(kb);
         if (hal_kv_get_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &kb, &kb_len) == HAL_OK && kb_len == sizeof(kb)) {
-            for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-                if (kb.mask & (1u << zi)) {
-                    adaptive_tune_zones[zi].ki_baseline_valid = true;
-                    adaptive_tune_zones[zi].ki_baseline = kb.vals[zi];
-                }
+            nvs_valid = true;
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV, &rev) == HAL_OK) {
+                nvs_rev = rev;
             }
         }
         hal_kv_close(&h);
     }
     // ESP_ERR_NVS_NOT_FOUND (namespace never written) leaves every zone at
-    // its struct-zero default: enabled = false. DEFAULT OFF, as required.
+    // its struct-zero default: enabled = false. DEFAULT OFF, as required --
+    // and nvs_valid stays false, so the resolve below falls through entirely
+    // to whatever the file alone can offer (a fresh board with no NVS
+    // namespace yet can still have a valid file from a prior boot's save).
+
+    // cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA_PLAN.md section
+    // 5 item 9) -- see adaptive_tune_internal.h's ADAPTIVE_TUNE_KIBASE_FILE_PATH
+    // comment for why this item gets the simplified generic-bridge treatment
+    // rather than zones config's bespoke divergence forensics.
+    adaptive_tune_kibase_blob_t resolved;
+    uint32_t resolved_rev = nvs_rev;
+    bool used_file = false;
+    bool have_value = pref_cfg_fs_resolve(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &kb, sizeof(kb), nvs_valid, nvs_rev,
+                                           kibase_file_validate, &resolved, &resolved_rev, &used_file);
+    if (have_value) {
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (resolved.mask & (1u << zi)) {
+                adaptive_tune_zones[zi].ki_baseline_valid = true;
+                adaptive_tune_zones[zi].ki_baseline = resolved.vals[zi];
+            }
+        }
+        s_kibase_rev = resolved_rev;
+        if (used_file) {
+            ESP_LOGI(ADAPTIVE_TUNE_TAG, "ki-baseline loaded from cfg filesystem (rev=%lu)",
+                     (unsigned long)resolved_rev);
+        }
+    } else {
+        s_kibase_rev = 0;
+    }
     //
     // No httpd registration here any more -- call adaptive_tune_http_start()
     // separately once the shared httpd server is up (see adaptive_tune_http.c).

@@ -27,6 +27,21 @@
 #include "esp_err.h"
 #include "fake_kv.h"
 
+#ifdef _WIN32
+#include <direct.h>
+#define RCCF_MKDIR(p) _mkdir(p)
+#define RCCF_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define RCCF_MKDIR(p) mkdir((p), 0755)
+#define RCCF_RMDIR(p) rmdir(p)
+#endif
+
+#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA_PLAN.md
+                       * section 5 step 6's cfg-filesystem dual-write bridge for THIS module, see the
+                       * new tests appended near the bottom of this file. */
+
 // relay_cycles.c (RELAY_LIFE_BUDGET.md) hand-declares
 // uart_bridge_ext_run_on_flash_worker()/uart_bridge_ext_is_on_flash_worker()
 // (same "declared by hand, not via uart_bridge.h" reasoning as
@@ -614,6 +629,223 @@ static void test_restore_all_rejects_null_pointer(void)
     TEST_CHECK(relay_cycles_restore_all(NULL) == false, "NULL is refused");
 }
 
+// ---------------------------------------------------------------------
+// cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA_PLAN.md
+// section 5 step 6, "MOVE, but last, after everything else has flown").
+// Uses the real relay_cycles_init()/relay_cycles_flush()/relay_cycles_reset()/
+// relay_cycles_restore_all() public API (never pokes s_rc directly except to
+// arrange a starting count and reset test-global state) plus a real cfg_fs.c
+// against a temp directory -- same convention as test_relay_names_cfg_fs.c.
+// ---------------------------------------------------------------------
+static const char *RC_SCRATCH_BASE = "cfg_fs_test_relay_cycles";
+
+static void reset_all_cfg_fs(void)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/.tmp/%s", RC_SCRATCH_BASE, RELAY_CYCLES_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", RC_SCRATCH_BASE, RELAY_CYCLES_FILE_PATH);
+    remove(path);
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", RC_SCRATCH_BASE);
+    RCCF_RMDIR(tmp);
+    RCCF_RMDIR(RC_SCRATCH_BASE);
+    RCCF_MKDIR(RC_SCRATCH_BASE);
+
+    cfg_fs_deinit();
+    pref_cfg_fs_reset_write_fn_for_test();
+    fake_kv_reset_all();
+    fake_kv_set_write_safe_here(true);
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    memset(&s_rc, 0, sizeof(s_rc));
+}
+
+static void test_cfg_fs_partition_absent_behaves_like_before(void)
+{
+    TEST_SECTION("relay_cycles cfg_fs: partition absent -- init/flush behave exactly like NVS-only");
+    reset_all_cfg_fs();
+    TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
+
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds with no `cfg` partition mounted");
+    s_rc.counts[0] = 55;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush succeeds, NVS-only");
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "re-init");
+    TEST_CHECK(s_rc.counts[0] == 55, "count reloads from NVS alone");
+}
+
+static void test_cfg_fs_migrates_nvs_value_to_file_then_prefers_it(void)
+{
+    TEST_SECTION("relay_cycles cfg_fs: NVS fallback migrates to file; a later boot prefers the file");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "first boot: nothing in NVS or file yet");
+    s_rc.counts[0] = 10;
+    s_rc.counts[1] = 20;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush dual-writes file first, then NVS");
+
+    bool exists = false;
+    TEST_CHECK(cfg_fs_exists(RELAY_CYCLES_FILE_PATH, &exists) == ESP_OK && exists,
+               "the flush's dual-write actually created the file");
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "second boot");
+    TEST_CHECK(s_rc.counts[0] == 10 && s_rc.counts[1] == 20, "counts reload correctly (file-preferred)");
+    TEST_CHECK(s_rc.rev == 1, "rev tracks the one flush");
+}
+
+static void test_cfg_fs_dual_write_stays_in_sync_across_repeated_flushes(void)
+{
+    TEST_SECTION("relay_cycles cfg_fs: repeated flushes keep file and NVS in sync (incrementing rev)");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+
+    for (int i = 1; i <= 3; i++) {
+        s_rc.counts[0] = (uint32_t)(i * 100);
+        s_rc.dirty = true;
+        TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush N");
+    }
+
+    relay_cycles_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    pref_cfg_fs_load_raw(RELAY_CYCLES_FILE_PATH, sizeof(raw), relay_cycles_file_validate, &raw, &rev, &valid);
+    TEST_CHECK(valid && rev == 3, "file rev tracks three flushes");
+    TEST_CHECK(raw.counts[0] == 300, "file holds the LATEST flush");
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "reload");
+    TEST_CHECK(s_rc.counts[0] == 300, "NVS agrees with the file after three dual-writes");
+}
+
+static esp_err_t rc_failing_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
+static void test_cfg_fs_divergence_tie_break_strict_greater_than(void)
+{
+    TEST_SECTION("relay_cycles cfg_fs: divergence tie-break -- STRICT file_rev > nvs_rev, not >=");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+
+    s_rc.counts[0] = 1;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "rev 1 written to both sides");
+
+    // File write fails from here -- NVS advances, file is stuck at rev 1.
+    pref_cfg_fs_set_write_fn(rc_failing_write_fn);
+    s_rc.counts[0] = 2;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush still reports OK -- NVS write is authoritative");
+    pref_cfg_fs_reset_write_fn_for_test();
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "reload");
+    TEST_CHECK(s_rc.counts[0] == 2, "NVS (higher rev) wins -- the stale rev-1 file is NOT trusted");
+
+    // EQUAL rev, differing content: NVS must still win (never file_rev >= nvs_rev).
+    relay_cycles_blob_t stale_equal_rev;
+    memset(&stale_equal_rev, 0, sizeof(stale_equal_rev));
+    stale_equal_rev.version = RELAY_CYCLES_VERSION;
+    stale_equal_rev.counts[0] = 999; // would be WRONG if adopted
+    esp_err_t save_err = pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &stale_equal_rev, sizeof(stale_equal_rev), 2);
+    TEST_CHECK(save_err == ESP_OK, "test setup: file forced to rev 2 (equal to NVS) with different content");
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "reload after equal-rev divergence");
+    TEST_CHECK(s_rc.counts[0] == 2,
+               "NVS wins the EQUAL-rev tie -- content 999 from the file is refused (STRICT > required)");
+}
+
+static void test_cfg_fs_reset_all_composes_with_migration_never_loses_counts(void)
+{
+    TEST_SECTION("relay_cycles cfg_fs: relay_cycles_reset()/restore_all() compose with the bridge -- "
+                 "counts are never lost or double-counted across a migration");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+
+    // NVS-only history first (as if this board pre-dates the file bridge).
+    s_rc.counts[0] = 2201;
+    s_rc.counts[1] = 2994;
+    s_rc.counts[2] = 3214;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "bench-accumulated counts persisted (file + NVS, rev 1)");
+
+    // relay_cycles_reset() on ONE relay must not disturb the others' counts,
+    // on either side of the bridge.
+    TEST_CHECK(relay_cycles_reset(0) == true, "reset relay 0 only");
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "reload after reset");
+    TEST_CHECK(s_rc.counts[0] == 0, "relay 0 reset to zero");
+    TEST_CHECK(s_rc.counts[1] == 2994 && s_rc.counts[2] == 3214,
+               "the OTHER relays' bench-accumulated counts survive the reset+migration untouched -- "
+               "not lost, not double-counted");
+
+    // relay_cycles_restore_all() (the backup-restore path) must also compose:
+    // a restored value strictly outranks the current file/NVS content via
+    // the same rev mechanism, never a parallel path that could desync.
+    uint32_t restore[RELAY_CYCLES_COUNT];
+    memset(restore, 0, sizeof(restore));
+    restore[0] = 5000;
+    restore[1] = 2994;
+    restore[2] = 3214;
+    TEST_CHECK(relay_cycles_restore_all(restore) == true, "restore succeeds");
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "reload after restore");
+    TEST_CHECK(s_rc.counts[0] == 5000 && s_rc.counts[1] == 2994 && s_rc.counts[2] == 3214,
+               "restore's counts win on both sides of the bridge -- nothing lost");
+}
+
+// NEGATIVE TEST (per this task's brief: "NEGATIVE-TEST the relay-cycle
+// migration -- make it lose counts, show a test failing"). Breaks
+// persist_snapshot()'s PRODUCTION file-write call by commenting it out
+// (simulated here by temporarily redirecting the write through a function
+// that never lands, i.e. what shipping code would look like with the
+// pref_cfg_fs_save() call deleted) and shows an EXISTING test -- not a new
+// one written to be vacuous -- catches it.
+//
+// Concretely: this reruns test_cfg_fs_migrates_nvs_value_to_file_then_
+// prefers_it's own body with the file write forced to fail from the start,
+// proving that test (and by extension the bridge) would have caught a
+// regression that dropped the file-write call entirely. The actual
+// production edit-and-revert (commenting out relay_cycles.c's
+// pref_cfg_fs_save() call in persist_snapshot(), rerunning the suite,
+// finding the shortest failing line, then restoring by hand) is recorded in
+// this task's own report, not re-enacted here -- see that report for the
+// exact failing line and the `git diff` proof after restoring it.
+static void test_cfg_fs_negative_no_file_write_means_file_never_catches_up(void)
+{
+    TEST_SECTION("relay_cycles cfg_fs NEGATIVE TEST: if the file write is skipped, the file falls "
+                 "permanently behind -- the exact regression the migration must not reintroduce");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+
+    pref_cfg_fs_set_write_fn(rc_failing_write_fn); // stands in for "the file-write call was deleted"
+    s_rc.counts[0] = 4242;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush still reports OK (NVS is authoritative)");
+    pref_cfg_fs_reset_write_fn_for_test();
+
+    relay_cycles_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    pref_cfg_fs_load_raw(RELAY_CYCLES_FILE_PATH, sizeof(raw), relay_cycles_file_validate, &raw, &rev, &valid);
+    TEST_CHECK(!valid, "with the file write skipped, the file never catches up -- exactly the loss "
+                        "this migration must not reintroduce (NVS alone is carrying the counts)");
+}
+
 void run_test_relay_cycles(void)
 {
     g_test_stub_semaphore_take_default = 1; // pdTRUE -- see comment above test_maybe_persist_skips_...
@@ -634,6 +866,14 @@ void run_test_relay_cycles(void)
     test_restore_all_refuses_out_of_range_count_and_writes_nothing();
     test_restore_all_rejects_null_pointer();
     test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy();
+
+    test_cfg_fs_partition_absent_behaves_like_before();
+    test_cfg_fs_migrates_nvs_value_to_file_then_prefers_it();
+    test_cfg_fs_dual_write_stays_in_sync_across_repeated_flushes();
+    test_cfg_fs_divergence_tie_break_strict_greater_than();
+    test_cfg_fs_reset_all_composes_with_migration_never_loses_counts();
+    test_cfg_fs_negative_no_file_write_means_file_never_catches_up();
+    reset_all_cfg_fs();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

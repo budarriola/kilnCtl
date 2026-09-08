@@ -17,6 +17,8 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- keeps esp_err_to_name() below meaningful */
 #include "nvs_key_check.h"
+#include "firing_stats_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
+                                     section 5 item 7 */
 
 /* ---- firing quality stats (PID_EXPANSION_PLAN.md Phase 7a/7a-2/7a-3) ------
  *
@@ -206,8 +208,13 @@ static void firing_stats_build_record(profile_firing_run_record_t *rec)
 /* NVS I/O only -- no s_exec, no lock. Safe to call from any task/state.
  * Loads FIRING_STATS_NVS_NAMESPACE/"fs_<id>" from profiles_nvs; a missing
  * key (never fired) is reported as an empty (count == 0) blob, not an
- * error -- that's the normal, common case for most profiles. */
-bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
+ * error -- that's the normal, common case for most profiles. Its own
+ * return value already means exactly "is *out trustworthy" (true for a
+ * genuine current/v1-migrated blob AND for the legitimate "never fired"
+ * empty case; false only for actually-corrupt/unreadable data) -- reused
+ * verbatim below as firing_stats_load()'s nvs_valid input to
+ * firing_stats_cfg_fs_resolve(). */
+static bool nvs_only_load(uint8_t profile_id, profile_firing_history_blob_t *out)
 {
     memset(out, 0, sizeof(*out));
     char key[16];
@@ -290,6 +297,47 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
     return false;
 }
 
+/* cfg-filesystem read-through wrapper (docs/FILESYSTEM_USER_DATA_PLAN.md
+ * section 5 item 7, "firing stats / history") -- public entry point,
+ * unchanged signature/contract (requirement 2: existing callers keep
+ * working unchanged). Loads the NVS side exactly as before via
+ * nvs_only_load() (including its tail-append v1 migration tolerance),
+ * then lets firing_stats_cfg_fs_resolve() decide whether the file or NVS
+ * side actually wins -- see that module's header comment for the full
+ * divergence table. This NEVER discards firing history: the resolve either
+ * adopts NVS outright (file missing/corrupt) or, when NVS itself is
+ * untrustworthy but the file decodes, adopts the file instead of falling
+ * back to empty -- there is no path here that zeroes real history the way
+ * a bare size-mismatch NVS read used to (see the VERSIONLESS HAZARD comment
+ * in profile_executor_internal.h for that pre-existing NVS-only hazard,
+ * which this pass does not widen). */
+bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
+{
+    profile_firing_history_blob_t nvs_blob;
+    bool nvs_valid = nvs_only_load(profile_id, &nvs_blob);
+
+    uint32_t nvs_rev = firing_stats_cfg_fs_read_rev(profile_id);
+    uint32_t resolved_rev = nvs_rev;
+    bool used_file = false;
+    bool have_value =
+        firing_stats_cfg_fs_resolve(profile_id, &nvs_blob, nvs_valid, nvs_rev, out, &resolved_rev, &used_file);
+    if (!have_value) {
+        memset(out, 0, sizeof(*out));
+        // nvs_valid is only false here for genuinely corrupt/unrecognized
+        // NVS data (nvs_only_load()'s own "never fired" case already sets
+        // nvs_valid true on an empty blob, so resolve() would have taken
+        // the "adopt NVS" branch above instead of reaching here) -- preserve
+        // firing_stats_load()'s pre-existing false-on-corruption contract
+        // for callers that check it (profile_executor_status.c).
+        return nvs_valid;
+    }
+    if (used_file) {
+        ESP_LOGD(PE_TAG, "firing_stats_load(%u): loaded from cfg filesystem (rev=%lu)", (unsigned)profile_id,
+                 (unsigned long)resolved_rev);
+    }
+    return true;
+}
+
 /* Persists rec as the newest entry for its own profile_id -- read-modify-
  * write against profiles_nvs, called from whichever task ended the run
  * (see this section's top comment for why that's always safe here). A
@@ -334,6 +382,23 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     blob.runs[0] = *rec;
     blob.count = keep + 1;
 
+    // cfg-filesystem dual-write (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+    // item 7): FILE FIRST (best-effort, failure logged and swallowed -- NVS
+    // below remains the persistence guarantee exactly as before this pass),
+    // THEN NVS (authoritative) -- same ordering every other *_cfg_fs bridge
+    // in this codebase uses. Rev is read-then-incremented here (not cached
+    // in RAM) since this function can run from either the executor's own
+    // task or an operator's halt() on a different task, with no shared
+    // in-memory state between them -- reading NVS's own rev key is the
+    // cheap, always-correct source of truth for "what rev came before this
+    // save."
+    uint32_t new_rev = firing_stats_cfg_fs_read_rev(rec->profile_id) + 1;
+    esp_err_t file_err = firing_stats_cfg_fs_save(rec->profile_id, &blob, new_rev);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(PE_TAG, "firing_stats_persist(%u): file write failed: %s -- NVS remains the source "
+                         "of truth this boot", (unsigned)rec->profile_id, esp_err_to_name(file_err));
+    }
+
     char key[16];
     snprintf(key, sizeof(key), "fs_%u", (unsigned)rec->profile_id);
     hal_kv_handle_t h;
@@ -345,18 +410,31 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
         return;
     }
     err = hal_kv_set_blob(&h, key, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
     if (err != HAL_OK) {
         ESP_LOGE(PE_TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
                  hal_status_to_name(err));
-    } else {
-        ESP_LOGI(PE_TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
-                 (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob.count,
-                 (unsigned)PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
+        hal_kv_close(&h);
+        return;
     }
+    err = hal_kv_commit(&h);
     hal_kv_close(&h);
+    if (err != HAL_OK) {
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
+                 hal_status_to_name(err));
+        return;
+    }
+    ESP_LOGI(PE_TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
+             (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob.count,
+             (unsigned)PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
+    // Rev key write happens AFTER the blob's own NVS commit succeeds -- if
+    // this fails, the next load's nvs_rev is stale-low, which just means a
+    // FUTURE divergence check might slightly under-trust NVS; the blob
+    // itself (already committed above) is never at risk.
+    esp_err_t rev_err = firing_stats_cfg_fs_write_rev(rec->profile_id, new_rev);
+    if (rev_err != ESP_OK) {
+        ESP_LOGW(PE_TAG, "firing_stats_persist(%u): rev key write failed: %s", (unsigned)rec->profile_id,
+                 esp_err_to_name(rev_err));
+    }
 }
 
 /* Called from the tick loop's non-RUNNING branch (DONE/FAULTED) and from

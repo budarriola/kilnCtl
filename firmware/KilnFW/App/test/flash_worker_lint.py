@@ -135,6 +135,17 @@ ALLOWLIST = {
     # handler's own internal-SRAM-stack httpd task -- same story as
     # unit_pref.c/zones_config_store.c's identical entries below.
     "display_power_cfg.c",
+    # docs/FILESYSTEM_USER_DATA_PLAN.md section 5 item 7 (firing stats/
+    # history cfg-filesystem bridge, 2026-09-08): firing_stats_cfg_fs_
+    # write_rev()'s hal_kv_set_u32()/hal_kv_commit() calls are this file's
+    # ONLY write call site, and its ONLY caller anywhere in the codebase is
+    # profile_executor_firing_stats.c's firing_stats_persist() -- which
+    # already runs caller_stack_is_external() (Pattern 2) as the very first
+    # thing it does, before this file's function is ever reached, and is
+    # itself on this same allowlist for that reason. No new PSRAM-stack
+    # exposure: this is the same guarded call path, one file further down
+    # the same call chain, not a second independent write path.
+    "firing_stats_cfg_fs.c",
     # UPDATED 2026-09-07 (stack-margin review after system_uart_bridge's
     # get_stack_margin() reading came back LOW, 28.8% headroom on a 3072 B
     # task at idle). The 2026-09-06 entry this replaces reasoned only about

@@ -9,6 +9,7 @@
 #include "freertos/semphr.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+#include "pref_cfg_fs.h"
 
 static const char *TAG = "relay_cycles";
 
@@ -40,6 +41,24 @@ NVS_KEY_LEN_CHECK(NVS_KEY_CYCLES);
  * cannot take relay history with it. */
 #define KILN_NVS_PARTITION "kiln_nvs"
 NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+
+/* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 6 (relay cycle counters,
+ * scheduled LAST -- "MOVE, but last, after everything else has flown"): the
+ * cfg-filesystem dual-write bridge for this module. Same generic bridge
+ * unit_pref.c/ramp_assist_cfg.c/display_power_cfg.c/relay_names use
+ * (pref_cfg_fs.h) rather than a bespoke module -- this blob (46-ish bytes,
+ * one _Static_assert-free struct, no wire-format migration OF THE FILE
+ * itself) is exactly the shape that bridge targets; the v1->v2 migration
+ * chain below is an NVS-only concern (a v1-era board never produced a
+ * cfg-file, since this bridge postdates v2) and stays entirely inside
+ * relay_cycles_init()'s existing NVS load. A separate rev key, same
+ * reasoning as every other pref_cfg_fs item (NVS_KEY_RAMP_ASSIST_REV etc). */
+#define RELAY_CYCLES_FILE_PATH "relay_cycles.dat" /* a cfg-filesystem relative path, NOT an NVS
+                                                       key -- no NVS_KEY_LEN_CHECK, same as every
+                                                       other *_FILE_PATH constant in this codebase
+                                                       (RELAY_NAMES_FILE_PATH etc). */
+#define NVS_KEY_CYCLES_REV "relay_cyc_r"
+NVS_KEY_LEN_CHECK(NVS_KEY_CYCLES_REV);
 
 /* The blob has no version field of its own on disk before this change (a
  * bare uint32_t[KILN_IO_RELAY_COUNT]); wrapping it in a versioned struct
@@ -87,9 +106,25 @@ typedef struct {
     bool              dirty;
     int64_t           last_persist_us;
     bool              initialized;
+    uint32_t          rev; /* cfg-filesystem dual-write rev counter, see NVS_KEY_CYCLES_REV above */
 } relay_cycles_t;
 
 static relay_cycles_t s_rc;
+
+/* pref_cfg_fs_validate_fn_t for this blob: re-runs the SAME acceptance test
+ * relay_cycles_init()'s "current version, right size" branch already applies
+ * to an NVS candidate -- an older/newer/wrong-sized file is simply "not
+ * valid" here, exactly like relay_cycles_init() treats such an NVS blob,
+ * falling back to whichever side (NVS in practice, since a cfg-file can only
+ * ever have been written by firmware at or after this pass) is trustworthy. */
+static bool relay_cycles_file_validate(const void *bytes, size_t len)
+{
+    if (len != sizeof(relay_cycles_blob_t)) {
+        return false;
+    }
+    const relay_cycles_blob_t *blob = (const relay_cycles_blob_t *)bytes;
+    return blob->version == RELAY_CYCLES_VERSION;
+}
 
 /* Brings up KILN_NVS_PARTITION, erasing ONLY that partition if its contents
  * are unusable. hal_kv_init_partition() already implements the
@@ -271,6 +306,13 @@ esp_err_t relay_cycles_init(void)
         migrate_from_default_partition();
     }
 
+    bool nvs_have_value = false; /* true only for the two branches below that leave s_rc holding a
+                                    * trustworthy current-format blob (direct current-version load,
+                                    * or a successful v1->v2 migration) -- every other branch
+                                    * (missing, corrupt, wrong size, newer-than-firmware, unmigratable
+                                    * old version) leaves s_rc at its zeroed default and must NOT be
+                                    * offered to pref_cfg_fs_resolve() as a valid NVS candidate. */
+    uint32_t nvs_rev = 0;
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
     if (err == HAL_OK) {
@@ -295,6 +337,7 @@ esp_err_t relay_cycles_init(void)
                 memcpy(s_rc.counts, blob.counts, sizeof(s_rc.counts));
                 memcpy(s_rc.types, blob.types, sizeof(s_rc.types));
                 memcpy(s_rc.rated_overrides, blob.rated_overrides, sizeof(s_rc.rated_overrides));
+                nvs_have_value = true;
             }
         } else if (err == HAL_OK && blob.version > RELAY_CYCLES_VERSION) {
             /* Newer than this firmware understands -- a firmware-rollback
@@ -321,6 +364,7 @@ esp_err_t relay_cycles_init(void)
              * memset to RELAY_TYPE_SSR/0 above. */
             ESP_LOGI(TAG, "migrated relay cycle blob v1 -> v%u (fifth slot + types added, "
                      "existing relays default to ssr)", RELAY_CYCLES_VERSION);
+            nvs_have_value = true;
         } else if (err == HAL_OK) {
             /* Anything else older than current with no migration defined. */
             ESP_LOGW(TAG, "relay cycle blob version %u predates this firmware's %u with no migration defined -- "
@@ -334,7 +378,47 @@ esp_err_t relay_cycles_init(void)
             ESP_LOGW(TAG, "relay cycle blob load failed (%s) -- starting at zero",
                      hal_status_to_name(err));
         }
+        if (nvs_have_value) {
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, NVS_KEY_CYCLES_REV, &rev) == HAL_OK) {
+                nvs_rev = rev;
+            }
+        }
         hal_kv_close(&h);
+    }
+
+    /* cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA_PLAN.md section
+     * 5 step 6): build the NVS candidate blob s_rc currently holds (zeroed
+     * if nvs_have_value is false) and let pref_cfg_fs_resolve() decide
+     * whether the file or the NVS side wins -- same policy every other
+     * pref_cfg_fs item uses (STRICT file_rev > nvs_rev tie-break, self-heal
+     * write on the losing side). Partition-absent/mount-failed makes this a
+     * no-op that returns nvs_have_value unchanged, so a board with no `cfg`
+     * partition (every board today) behaves byte-identically to before this
+     * change. */
+    relay_cycles_blob_t nvs_candidate;
+    nvs_candidate.version = RELAY_CYCLES_VERSION;
+    memcpy(nvs_candidate.counts, s_rc.counts, sizeof(nvs_candidate.counts));
+    memcpy(nvs_candidate.types, s_rc.types, sizeof(nvs_candidate.types));
+    memcpy(nvs_candidate.rated_overrides, s_rc.rated_overrides, sizeof(nvs_candidate.rated_overrides));
+
+    relay_cycles_blob_t resolved;
+    uint32_t resolved_rev = nvs_rev;
+    bool used_file = false;
+    bool have_value = pref_cfg_fs_resolve(RELAY_CYCLES_FILE_PATH, &nvs_candidate, sizeof(nvs_candidate),
+                                           nvs_have_value, nvs_rev, relay_cycles_file_validate, &resolved,
+                                           &resolved_rev, &used_file);
+    if (have_value) {
+        memcpy(s_rc.counts, resolved.counts, sizeof(s_rc.counts));
+        memcpy(s_rc.types, resolved.types, sizeof(s_rc.types));
+        memcpy(s_rc.rated_overrides, resolved.rated_overrides, sizeof(s_rc.rated_overrides));
+        s_rc.rev = resolved_rev;
+        if (used_file) {
+            ESP_LOGI(TAG, "relay cycle counts loaded from cfg filesystem (rev=%lu)",
+                     (unsigned long)resolved_rev);
+        }
+    } else {
+        s_rc.rev = 0;
     }
 
     s_rc.dirty = false;
@@ -547,13 +631,23 @@ typedef struct {
     uint32_t counts[RELAY_CYCLES_COUNT];
     uint8_t  types[RELAY_CYCLES_COUNT];
     uint32_t rated_overrides[RELAY_CYCLES_COUNT];
+    uint32_t rev; /* cfg-filesystem dual-write rev this snapshot writes at, s_rc.rev+1 -- taken
+                     under s_rc.lock alongside the rest of the snapshot, same reasoning. */
 } reset_persist_job_arg_t;
 
 /* Same body as persist_locked(), minus the "read live s_rc" part -- writes
  * exactly the snapshot it was handed. Runs ON the flash worker's own
  * internal-SRAM stack (or inline, if the caller is already there -- see
  * relay_cycles_reset() below), so caller_stack_is_external()'s guard still
- * applies and is still checked. */
+ * applies and is still checked.
+ *
+ * FILE FIRST (best-effort -- a failure is logged and swallowed, NVS below
+ * remains the persistence guarantee exactly as it always has been), THEN
+ * NVS (authoritative, a failure here is returned to the caller exactly as
+ * before this pass) -- same ordering and rationale every other pref_cfg_fs
+ * item uses (ramp_assist_cfg.c etc). The rev key is written in the SAME NVS
+ * transaction as the blob so a torn write can never leave rev ahead of a
+ * blob that was never actually committed. */
 static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
 {
     if (caller_stack_is_external()) {
@@ -561,17 +655,28 @@ static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
                       "(PSRAM). See persist_locked()'s identical guard comment in this file.");
         return HAL_NOT_READY;
     }
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return err;
-    }
+
     relay_cycles_blob_t blob;
     blob.version = RELAY_CYCLES_VERSION;
     memcpy(blob.counts, snap->counts, sizeof(blob.counts));
     memcpy(blob.types, snap->types, sizeof(blob.types));
     memcpy(blob.rated_overrides, snap->rated_overrides, sizeof(blob.rated_overrides));
+
+    esp_err_t file_err = pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &blob, sizeof(blob), snap->rev);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "relay cycle counts file write failed: %s -- NVS remains the source of truth "
+                      "this boot", esp_err_to_name(file_err));
+    }
+
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return err;
+    }
     err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_CYCLES_REV, snap->rev);
+    }
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
@@ -628,6 +733,7 @@ bool relay_cycles_reset(unsigned relay)
     memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
     memcpy(snap.types, s_rc.types, sizeof(snap.types));
     memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
+    snap.rev = s_rc.rev + 1;
     s_rc.dirty = false;
     xSemaphoreGive(s_rc.lock);
 
@@ -654,7 +760,11 @@ bool relay_cycles_reset(unsigned relay)
         err = (submit_err != ESP_OK) ? submit_err : ctx.err;
     }
 
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.rev = snap.rev;
+        xSemaphoreGive(s_rc.lock);
+    } else {
         /* The write failed: re-arm `dirty` so the next periodic persist
          * retries it. A concurrent add()/note_safety_edge() during the
          * dispatch already set dirty=true itself under the lock (see the
@@ -715,6 +825,13 @@ bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT])
     memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
     memcpy(snap.types, s_rc.types, sizeof(snap.types));
     memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
+    /* Restore composes with the cfg-filesystem bridge the same way it composes
+     * with NVS: a strictly-increasing rev (never re-used, never reset) means
+     * a restored value always outranks whatever stale file/NVS content came
+     * before it, exactly like an ordinary save -- restore is not a parallel
+     * persistence path, it drives the SAME rev-then-write mechanism this
+     * module's other writers use. */
+    snap.rev = s_rc.rev + 1;
     s_rc.dirty = false;
     xSemaphoreGive(s_rc.lock);
 
@@ -728,7 +845,11 @@ bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT])
         err = (submit_err != ESP_OK) ? submit_err : ctx.err;
     }
 
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.rev = snap.rev;
+        xSemaphoreGive(s_rc.lock);
+    } else {
         xSemaphoreTake(s_rc.lock, portMAX_DELAY);
         s_rc.dirty = true;
         xSemaphoreGive(s_rc.lock);
@@ -820,6 +941,7 @@ static hal_status_t persist_snapshot_now(TickType_t persist_lock_wait_ticks)
     memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
     memcpy(snap.types, s_rc.types, sizeof(snap.types));
     memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
+    snap.rev = s_rc.rev + 1;
     s_rc.dirty = false;
     xSemaphoreGive(s_rc.lock);
 
@@ -840,6 +962,7 @@ static hal_status_t persist_snapshot_now(TickType_t persist_lock_wait_ticks)
     if (err == HAL_OK) {
         xSemaphoreTake(s_rc.lock, portMAX_DELAY);
         s_rc.last_persist_us = (int64_t)hal_time_now_us();
+        s_rc.rev = snap.rev;
         xSemaphoreGive(s_rc.lock);
     } else {
         xSemaphoreTake(s_rc.lock, portMAX_DELAY);

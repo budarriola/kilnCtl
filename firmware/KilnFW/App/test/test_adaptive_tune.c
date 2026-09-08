@@ -213,6 +213,17 @@ void profile_executor_get_status(profile_exec_status_t *out)
 #include "../drivers/control/adaptive_tune_model.c"
 #include "../drivers/control/adaptive_tune_ki.c"
 
+#ifdef _WIN32
+#include <direct.h>
+#define ATCF_MKDIR(p) _mkdir(p)
+#define ATCF_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define ATCF_MKDIR(p) mkdir((p), 0755)
+#define ATCF_RMDIR(p) rmdir(p)
+#endif
+
 // ---------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------
@@ -462,9 +473,133 @@ void run_test_adaptive_tune(void)
     test_revert_refuses_while_firing_active();
 }
 
+// ---------------------------------------------------------------------
+// cfg-filesystem dual-write bridge for the Ki baseline blob
+// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 9 -- "adaptive-tune
+// state", the simplified/re-derivable treatment). Uses the real
+// adaptive_tune_init()/adaptive_tune_clear_ki_baseline() public entry
+// points plus a real cfg_fs.c against a temp directory.
+// ---------------------------------------------------------------------
+static const char *AT_SCRATCH_BASE = "cfg_fs_test_adaptive_tune";
+
+static void reset_all_cfg_fs_at(void)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/.tmp/%s", AT_SCRATCH_BASE, ADAPTIVE_TUNE_KIBASE_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", AT_SCRATCH_BASE, ADAPTIVE_TUNE_KIBASE_FILE_PATH);
+    remove(path);
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", AT_SCRATCH_BASE);
+    ATCF_RMDIR(tmp);
+    ATCF_RMDIR(AT_SCRATCH_BASE);
+    ATCF_MKDIR(AT_SCRATCH_BASE);
+
+    cfg_fs_deinit();
+    pref_cfg_fs_reset_write_fn_for_test();
+    reset_module_state();
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
+    s_kibase_rev = 0;
+}
+
+static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
+{
+    TEST_SECTION("adaptive_tune ki-baseline cfg_fs: partition absent -- behaves exactly like NVS-only");
+    reset_all_cfg_fs_at();
+    TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
+
+    adaptive_tune_zones[1].ki_baseline_valid = true;
+    adaptive_tune_zones[1].ki_baseline = 3.5f;
+    kibase_job_t job = {.result = ESP_FAIL};
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        job.blob.vals[zi] = adaptive_tune_zones[zi].ki_baseline;
+        if (adaptive_tune_zones[zi].ki_baseline_valid) job.blob.mask |= (uint8_t)(1u << zi);
+    }
+    save_kibase_job(&job);
+    TEST_CHECK(job.result == ESP_OK, "save succeeds with no `cfg` partition mounted");
+
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
+    adaptive_tune_init();
+    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid && adaptive_tune_zones[1].ki_baseline == 3.5f,
+               "reload matches what was saved, sourced purely from NVS");
+}
+
+static void test_kibase_cfg_fs_migrates_then_prefers_file(void)
+{
+    TEST_SECTION("adaptive_tune ki-baseline cfg_fs: NVS fallback migrates to file; a later boot prefers it");
+    reset_all_cfg_fs_at();
+    TEST_CHECK(cfg_fs_init(AT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    adaptive_tune_zones[2].ki_baseline_valid = true;
+    adaptive_tune_zones[2].ki_baseline = 7.25f;
+    kibase_job_t job = {.result = ESP_FAIL};
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        job.blob.vals[zi] = adaptive_tune_zones[zi].ki_baseline;
+        if (adaptive_tune_zones[zi].ki_baseline_valid) job.blob.mask |= (uint8_t)(1u << zi);
+    }
+    save_kibase_job(&job);
+    TEST_CHECK(job.result == ESP_OK, "dual-write save succeeds (file first, then NVS)");
+
+    bool exists = false;
+    TEST_CHECK(cfg_fs_exists(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &exists) == ESP_OK && exists,
+               "the save's dual-write actually created the file");
+
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
+    adaptive_tune_init();
+    TEST_CHECK(adaptive_tune_zones[2].ki_baseline_valid && adaptive_tune_zones[2].ki_baseline == 7.25f,
+               "reloaded baseline matches what was saved");
+
+    adaptive_tune_kibase_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), kibase_file_validate, &raw, &rev, &valid);
+    TEST_CHECK(valid && rev == 1, "the file holds a rev-1 copy after one save");
+}
+
+// NEGATIVE TEST: if save_kibase_job()'s file write is skipped (the
+// production call deleted), the file must never catch up -- proving the
+// dual-write is load-bearing, not decorative, even for this simplified,
+// "re-derivable" item.
+static esp_err_t at_failing_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path; (void)data; (void)len;
+    return ESP_FAIL;
+}
+
+static void test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_up(void)
+{
+    TEST_SECTION("adaptive_tune ki-baseline cfg_fs NEGATIVE TEST: skipped file write leaves the file "
+                 "permanently behind");
+    reset_all_cfg_fs_at();
+    TEST_CHECK(cfg_fs_init(AT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    pref_cfg_fs_set_write_fn(at_failing_write_fn); // stands in for "the file-write call was deleted"
+    adaptive_tune_zones[0].ki_baseline_valid = true;
+    adaptive_tune_zones[0].ki_baseline = 9.0f;
+    kibase_job_t job = {.result = ESP_FAIL};
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        job.blob.vals[zi] = adaptive_tune_zones[zi].ki_baseline;
+        if (adaptive_tune_zones[zi].ki_baseline_valid) job.blob.mask |= (uint8_t)(1u << zi);
+    }
+    save_kibase_job(&job);
+    TEST_CHECK(job.result == ESP_OK, "save still reports OK -- NVS is authoritative");
+    pref_cfg_fs_reset_write_fn_for_test();
+
+    adaptive_tune_kibase_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), kibase_file_validate, &raw, &rev, &valid);
+    TEST_CHECK(!valid, "with the file write skipped, the file never catches up -- NVS alone carries the value");
+}
+
 int main(void)
 {
     run_test_adaptive_tune();
+    test_kibase_cfg_fs_partition_absent_behaves_like_before();
+    test_kibase_cfg_fs_migrates_then_prefers_file();
+    test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_up();
+    reset_all_cfg_fs_at();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);

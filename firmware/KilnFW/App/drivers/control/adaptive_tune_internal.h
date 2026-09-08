@@ -150,6 +150,22 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED);
 #define ADAPTIVE_TUNE_NVS_KEY_KIBASE "ki_base"
 NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE);
 
+// docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 9 (adaptive-tune state):
+// this task's own audit (ada18d3262, "adaptive-tune state was judged
+// re-derivable over one firing") licenses a SIMPLER treatment than zones
+// config/relay cycles get -- no per-zone divergence forensics, just the same
+// generic pref_cfg_fs.h bridge every other small fixed-size struct in this
+// codebase uses (unit_pref/ramp_assist/display_power/relay_names), applied
+// to the WHOLE adaptive_tune_kibase_blob_t as one document. Losing this file
+// (partition wipe, corrupt file) costs at most one firing's worth of
+// baseline re-latching, not a safety-relevant fact -- see adaptive_tune.c's
+// kibase_file_validate() for the one structural check applied (the mask
+// cannot reference a zone index that does not exist), everything else is
+// trusted the same way the NVS blob always was.
+#define ADAPTIVE_TUNE_KIBASE_FILE_PATH "ki_base.dat"
+#define ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV "kibase_rev"
+NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV);
+
 #define ADAPTIVE_TUNE_FIT_MIN_DENOM 1e-4
 
 // ---------------------------------------------------------------------

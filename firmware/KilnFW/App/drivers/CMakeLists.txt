@@ -379,6 +379,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # the seam rationale.
                        "control/profile_executor_feedforward.c"
                        "control/profile_executor_firing_stats.c"
+                       "persist/firing_stats_cfg_fs.c"
                        "control/profile_executor_relay_io.c"
                        "control/profile_executor_config_reload.c"
                        "control/profile_executor_pid_tick.c"
