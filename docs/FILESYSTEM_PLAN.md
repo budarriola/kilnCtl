@@ -958,3 +958,68 @@ real capacity, then the round trip: change `unit_pref`, confirm
 `dual_write.zones.file_backed` (or the relevant item) is file-backed,
 `debug_reset`, confirm the value survived, and state plainly whether the
 second boot MOUNTED the existing filesystem or reformatted it.
+
+## 2026-09-08 hardware verification (flash of 762bb29e, allow_stale over local HEAD bc05af12)
+
+Built from a clean detached worktree (`C:/wt/espflash_final`, pinned sha
+`762bb29e`, sdkconfig copied from the main tree). `check_main_task_stack_budget`:
+4864/6144 B (79% of budget, 59% of the 8192 B stack) -- improved from the
+5792/6144 B baseline despite the new bridges. 32/32 host test executables
+passed. ELF archived at
+`firmware/KilnFW/build/elf_archive/KilnCtrl-b383ce3281b3.elf`.
+
+Flashed and verified OK (`flash_firmware(verify=True)`). `/api/crash_report`
+after the flash showed the SAME stale `LoadProhibited`/`exc_addr 0x18`
+record as pre-flash (identical `exc_pc`, `exc_addr`, backtrace) -- confirmed
+NOT a new panic.
+
+**Mount survived a fresh boot as designed**: `GET /api/cfgfs` mounted=true,
+5 files, 36864/524288 B used, both immediately post-flash and again after a
+clean `debug_reset(esp)` -- second boot MOUNTED rather than reformatted.
+PID gains and coupling matrix read back byte-for-byte identical to the
+pre-flash capture (Z0/Z1/Z2 Kp/Ki/Kd, full coupling matrix). Recovery mode
+clear (`boot_guard: 0 unconfirmed boot(s)`). DRAM: pre-flash
+`heap_internal.free`=72851 B, post-flash/post-reset ~62943-62959 B --
+roughly 10 KB more committed than the pre-migration image, still far above
+the ~11.9 KB danger line from the httpd-wedge incident.
+
+**Relay cycle counts (2201/2994/3214, safety-slot 0) SURVIVED the flash
+byte-for-byte** -- confirmed via `GET /api/status`'s `relay_cycles` array
+both pre- and post-flash, and again after `debug_reset`. No data loss.
+
+**However, the three newly-migrated items (`relay_cycles`, `firing_stats`,
+`adaptive_tune`) did NOT become file-backed on this boot** --
+`GET /api/cfgfs`'s `dual_write.nvs_only` still lists all three after the
+flash and after the reset. The boot log names the reason directly:
+
+```
+relay_cycles: migrated relay cycle blob v1 -> v2 (fifth slot + types added, existing relays default to ssr)
+uart_bridge_ext: flash-safe worker not started -- job dropped
+pref_cfg_fs: relay_cycles.dat write (rev 0) failed: ESP_FAIL
+pref_cfg_fs: could not migrate NVS relay_cycles.dat to file: ESP_FAIL
+relay_cycles: relay contact cycles loaded: 2201 2994 3214 0
+```
+
+This is the SAME "flash-safe worker not started" boot-ordering race
+documented above for `cfg_fs_auto_format_task()`, but at a different call
+site: `relay_cycles.c`'s own migrate-on-load path calls
+`uart_bridge_ext_run_on_flash_worker()` directly during early boot, before
+`main_control_bringup()` has started the flash worker, and (unlike
+`cfg_fs_auto_format_task()`, which now calls `wait_for_flash_worker()`)
+has no wait/retry around it -- it fails fast and gives up for the rest of
+that boot. Data is not lost (NVS remains the fallback and is read
+correctly), but the promised migration to file-backed storage silently
+does not happen until something else independently retries the write. Not
+investigated further here (would mean editing source in the main tree,
+out of scope for this flash/verify pass) -- worth a follow-up patch mirroring
+`wait_for_flash_worker()` for `relay_cycles.c` (and checking whether
+`firing_stats`/`adaptive_tune`'s migrate-on-load paths have the same gap;
+only `relay_cycles` logged an attempt this boot since it's the only one of
+the three with pre-existing NVS data on this board).
+
+Per-task stack margins beyond `main` were not obtainable this pass -- no
+`GET /api/*` endpoint or LCD page currently surfaces `stack_margin_register()`
+data for reading over HTTP/JTAG-free tooling; only the boot-time
+`cfg_fs_mount_device()` high-water log line was available
+(`5428/5428 words free` at that point in boot, i.e. before most subsystems
+start).
