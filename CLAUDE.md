@@ -211,15 +211,19 @@ already points only at `tools/pdfMcp/.venv/Scripts/pdf-mcp.exe`, no config
 change needed.
 
 All main-board KiCad project files live under **hardware/mainBoard/** (paths below are relative to that
-directory unless noted). A second, independent board — the 5-channel thermocouple daughterboard —
-lives under **hardware/ThermocoupleBoard/** with its own `.kicad_pro`/`.kicad_pcb`/`.kicad_sch`; several of
-its sub-sheets (e.g. `Thermocouple.kicad_sch`) are copies of the same circuit used in the main
-board, so a fix found in one project's copy often applies to the other's too.
+directory unless noted). A second, independent board — the 3-channel thermocouple daughterboard —
+lives under **hardware/ThermocoupleBoard/** with its own `.kicad_pro`/`.kicad_pcb`/`.kicad_sch`
+(MAX31856 instances U2–U4); its `Thermocouple.kicad_sch` sub-sheet is a copy of the same
+single-channel circuit used on the main board's own (currently unused/not-in-hierarchy) copy of
+that file, so a fix found in one project's copy often applies to the other's too. A third,
+separate MAX31856 lives on the safety processor's own daughterboard,
+**hardware/SaftyThermocoupleBoard/**, giving four MAX31856 devices in the system overall: three
+feeding the ESP-S3 (KilnFW) and one feeding the RP2040 safety processor (SaftyFW).
 
 ### Schematics (hardware/mainBoard/)
 - **hardware/mainBoard/kiln.kicad_sch** — Main schematic file; top-level hierarchy
 - **hardware/mainBoard/MainControler.kicad_sch** — ESP32-S3-DevKitC main processor
-- **hardware/mainBoard/Thermocouple.kicad_sch** — MAX31856 thermocouple interface (5 channels)
+- **hardware/mainBoard/Thermocouple.kicad_sch** — single-channel MAX31856 reference circuit (U6); present on disk but not instantiated by `kiln.kicad_sch` — the main board itself has no populated thermocouple channels, all of which live on the daughterboards above
 - **hardware/mainBoard/Regulators.kicad_sch** — Input power conditioning/protection and 5V/3.3V LDO regulators
 - **hardware/mainBoard/5V_Regulator.kicad_sch** — Dedicated 5V regulation block
 - **hardware/mainBoard/CurrentSense.kicad_sch** — Current monitoring circuitry
@@ -399,7 +403,7 @@ overflow corrupted the heap, and the pool walk then looped inside a critical
 section until the interrupt watchdog fired. **Register every new task for
 stack-margin reporting and measure it** — `check_stack_margin_registration.ps1`
 enforces this. Equally, never hold a module lock across the producer calls a
-policy tick makes (`dashboard_get_status()` alone does five MAX31856 SPI reads,
+policy tick makes (`dashboard_get_status()` alone does three MAX31856 SPI reads,
 a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
 
@@ -460,7 +464,11 @@ instances above are the checklist.
 The project uses a hierarchical schematic structure where sub-sheets (ADC, Thermocouple, etc.) are instantiated in the main schematic. This allows modular design and easier debugging of subsystems.
 
 ### Multi-Channel Thermocouple Interface
-Five MAX31856 converters (U10–U14) provide independent thermocouple monitoring with built-in cold-junction compensation. Each is on a separate schematic page for clarity.
+Three MAX31856 converters (U2–U4, on `hardware/ThermocoupleBoard/`) provide the ESP-S3's
+independent zone thermocouple monitoring with built-in cold-junction compensation, each on its
+own instance of the same schematic sheet. A fourth MAX31856 on `hardware/SaftyThermocoupleBoard/`
+feeds the RP2040 safety processor's own, separate sensor. The main board itself (`hardware/mainBoard/`)
+has no populated thermocouple channels — see the Schematics list above.
 
 ### Power Distribution
 Three voltage rails:

@@ -93,7 +93,6 @@ open is short:
 | Bench webcam re-aim + LCD colour verification (numeric pixel sampling, not eyeball) | Display power / colour items above | `CLAUDE.md` "Camera aim (2026-09-06)"; `DISPLAY_ST7796_PLAN.md` §4 |
 | `iter_tune.c` wire-vs-delete decision | `control/iter_tune.c` stays dead code either way until decided | `docs/audits/iter_tune_decision_2026-09-07.md`; `PID_EXPANSION_PLAN.md` |
 | CT commissioning step 6 (bench run with the owner) | CT_COMMISSIONING_PLAN close-out | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md` |
-| U10–U12 (3 of the 5 MAX31856 thermocouple channels) are not placed on the PCB | Only channels with placed parts can be bench-verified | `hardware/mainBoard/Thermocouple.kicad_sch` |
 
 ### Software, doable now — no hardware, no decisions
 

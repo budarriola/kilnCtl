@@ -21,7 +21,7 @@
 2. **Decide iter_tune: wire vs. delete** — brief at `docs/audits/iter_tune_decision_2026-09-07.md`; recommendation is **wire it in**. Blocked on owner call because it changes autotune's default tuning path. ~10 min to decide, larger to implement if wired.
 3. **Re-aim the bench camera, then verify LCD relay-life colours** — camera has drifted off the panel (see CLAUDE.md camera-aim note); needs physical re-aim before `capture_lcd.ps1`/numeric sampling can confirm colours. Blocked on physical access to the bench. ~15 min re-aim + 10 min verify.
 4. **Run the CT commissioning write (step 6a)** — `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md` step 6a, now has an MCP tool (`safety_set_commissioning_fields`) ready. Blocked on owner sign-off to commit `ct_installed`/`ct_topology` to the safety processor's config. ~5 min.
-5. **U10–U12 not placed on the PCB** — three thermocouple channel positions exist in the schematic but have no footprint placement on the board. Needs an owner decision on whether to place now or defer. No time estimate until the decision is made.
+5. ~~U10–U12 not placed on the PCB~~ — **correction, 2026-09-08: this item was wrong.** No U10–U12 designators exist anywhere in the current schematics; the three ESP thermocouple channels are U2–U4 on `hardware/ThermocoupleBoard/`, and all three have footprints placed on that board's PCB. This traces back to the "five MAX31856" miscount in `CLAUDE.md`, now fixed.
 
 ## 3. Ready and waiting for one firing
 

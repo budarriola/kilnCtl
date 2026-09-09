@@ -246,7 +246,7 @@ change that breaks one is a defect even if it "works" on the bench.
 | --- | --- | --- |
 | `ili9488_flush_cb()` | inside `lv_timer_handler()`'s **active refresh** | any `lv_*` **mutator** — `lv_obj_invalidate`, `lv_obj_del`, `lv_screen_load`, `lv_refr_now`. Reads only. (`51e1ef5`) |
 | `touch_read_cb()` | inside `lv_timer_handler()`'s indev read | block. Everything it calls (`screen_idle_touch_swallow`, `touch_dev_read`) must be bounded and short |
-| `lv_timer` page-refresh callbacks (`ui_page_*.c`) | inside `lv_timer_handler()` | block for long. **Violated today**: `ui_page_diagnostics.c` (2 s) and `ui_page_temperature.c` (1 s) call `dashboard_get_status()` — five MAX31856 SPI reads, a `kiln_io_owner` round trip that can block 200 ms, and interrupts-disabled heap walks — on the `lvgl` task, which `get_stack_margin()` reports at 24.7% headroom (LOW) |
+| `lv_timer` page-refresh callbacks (`ui_page_*.c`) | inside `lv_timer_handler()` | block for long. **Violated today**: `ui_page_diagnostics.c` (2 s) and `ui_page_temperature.c` (1 s) call `dashboard_get_status()` — three MAX31856 SPI reads, a `kiln_io_owner` round trip that can block 200 ms, and interrupts-disabled heap walks — on the `lvgl` task, which `get_stack_margin()` reports at 24.7% headroom (LOW) |
 | `lvgl_port_task` loop, **before** `lv_timer_handler()` | own task | nothing special — this is the ONLY safe place for wake/blank `lv_*` mutators (`lvgl_port_service_idle_blank/_wake`) |
 | `screen_idle_task` | own task | call the expensive producers **under `idle->lock`** — that lock is taken by the LVGL task every tick and every touch (`7a8594d`). Producer reads go in `screen_idle_refresh_inputs()`, off-lock |
 
