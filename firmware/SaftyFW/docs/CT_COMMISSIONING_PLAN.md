@@ -344,6 +344,56 @@ document, do not solve.
    known load), and `ct_channel_map[0..2]` still unset -- the reason
    `safety_get_commissioning` still reports `commissioned=False`.
 
+## Legacy `ct_cal[3]` write surface removed (2026-09-08)
+
+The incident above ("not the separate legacy `ct_cal[3]`/`safety_set_ct_cal`
+gain-offset record") was not a one-off near-miss -- the tool existed
+specifically to invite it, since its name and docstring both said
+"commission the CT" while it only ever wrote a display-only correction
+(§ CURRENT_SENSE.md 5.3 has the full map of readers/writers). Owner decision:
+remove the write surface entirely rather than leave it as a second attempt
+waiting to happen.
+
+- **Removed:** `devices.safety_set_ct_cal()`, `SafetyClient.set_ct_cal()`,
+  the `safety_set_ct_cal` MCP tool. `safety_get_ct_cal` stays, read-only.
+- **Record layout unchanged.** `config_store.h`'s `ct_cal[3]` bytes stay
+  exactly where they are in the persisted record (both A/B sectors, both
+  processors already flashed) -- removing them would be a migration, and
+  the abs-max ceilings and `tc_type` sharing this record are not worth that
+  risk for a field that can simply go unwritten from now on. Firmware's
+  `SAFETY_CMD_SET_CT_CAL` handler and `ct_amps_cal_apply()` are untouched
+  and still compiled in; with no PC-side caller left, the wire command is
+  unreachable, which is the point.
+- **Guard:** `tools/check_ct_cal_write_surface.ps1` (part of the standing
+  `tools/run_all_checks.ps1` suite) fails if `SAFETY_CMD_SET_CT_CAL` or a
+  `set_ct_cal(...)` call reappears in `kilnctrl/safety.py` or
+  `kilnctrl/mcp_server_safety.py`. Negative-tested by hand (a stub
+  `set_ct_cal` method was inserted, the check was confirmed to fail
+  naming that exact line, then the stub was removed again).
+- **`ct_auto_zero` was already correct, not a second trap.** Its refusal
+  without a committed `A_fs` (`ct_auto_zero_check_preconditions()`,
+  `safety_cfg_http.c`) is deliberate, not a bug: an earlier version *did*
+  fabricate `a_fs=1.0` for a zero-only measurement and silently committed a
+  wrong gain, which was worse than refusing. The correct, and only,
+  procedure for a channel with no committed `A_fs` (channel 2, today) is:
+  enter a real `A_fs` manually first (commissioning page, or `POST
+  /api/safety/commissioning/ct_cal`), *then* run auto-zero to refine the
+  offset. No code change made here; this is a documentation gap, now
+  closed.
+- **Surviving calibration path, end to end:** operator enters `A_fs`
+  (probe rating) and `zero_mv` (or runs auto-zero after `A_fs` exists) on
+  the commissioning page -> ESP's `ct_cal_post_handler()`
+  (`safety_cfg_http.c`) converts to `k_ct_v_per_a`/`zero_counts`
+  (`safety_ct_cal_convert()`) -> staged via the generic `SET_PARAM`/
+  `COMMIT_CONFIG` path -> Pico's `config_store.c` persists them ->
+  `current_sense.c` reads them directly for both the §5 amps conversion
+  and `current_presence_is_flowing()`. This is a single, live path with no
+  second calibration stage in front of the guards. **Works today for
+  channel 2 (the summed topology channel)** for the zero half
+  (`zero_counts[2]=63`, confirmed holding); the gain half
+  (`A_fs`/`k_ct_v_per_a[2]`) is not yet entered, so `amps[2]`/S14/S15 read
+  `0.00 A`/DORMANT until that bench step (known load, owner present) runs.
+
 ## Order and ownership
 
 Step 0 first (it may make step 3's under-current warn moot on this bench).

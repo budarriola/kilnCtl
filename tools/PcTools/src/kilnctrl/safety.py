@@ -60,7 +60,6 @@ from .protocol import (
     SAFETY_CMD_GET_TRIP_EVENT,
     SAFETY_CMD_REQUEST_ENABLE,
     SAFETY_CMD_SET_CONFIG,
-    SAFETY_CMD_SET_CT_CAL,
     SAFETY_CMD_SET_FAULT_OUT,
     SAFETY_CMD_SET_POLL_PERIOD,
     UART_TASK_ID_SAFETY,
@@ -194,7 +193,7 @@ class SafetyClient:
 
         Fire-and-forget: the returned :class:`SendResult` proves delivery to
         the task's inbox only. Prefer :meth:`request_enable`/
-        :meth:`set_poll_period`/:meth:`set_fault_out`/:meth:`set_ct_cal`/
+        :meth:`set_poll_period`/:meth:`set_fault_out`/
         :meth:`set_config` instead -- they wait out a short window for the
         optional refusal reply safety_bridge_task() now sends on a truncated
         frame or an out-of-range argument (ROADMAP.md "KilnFW PC-link command
@@ -250,28 +249,18 @@ class SafetyClient:
             SAFETY_CMD_SET_CONFIG, devices.safety_set_config(tc_type), timeout
         )
 
-    def set_ct_cal(
-        self,
-        channel: int,
-        calibrated: bool,
-        gain: float,
-        offset: float,
-        timeout: float = MUTATING_REJECT_WINDOW_S,
-    ) -> OkReason:
-        """0x19 SET_CT_CAL, and learn *why* if the ESP refuses outright.
-
-        Still fire-and-forget as far as the Pico's own say-so is concerned
-        (relay ARMED, or an out-of-range channel it independently rejects --
-        see :func:`devices.safety_set_ct_cal`'s docstring); this only
-        additionally catches a truncated frame or an out-of-range channel on
-        the ESP side. Read the outcome from the next :meth:`get_ct_cal` call
-        either way.
-        """
-        return self._send_reject_window(
-            SAFETY_CMD_SET_CT_CAL,
-            devices.safety_set_ct_cal(channel, calibrated, gain, offset),
-            timeout,
-        )
+    # set_ct_cal() (0x19 SET_CT_CAL) removed 2026-09-08 -- it wrote
+    # config_store.h's legacy `ct_cal[]` gain/offset correction, which feeds
+    # ONLY the S14/S15 WARN-only display thresholds, never S3/S4/S9's
+    # presence detection (zero_counts/k_ct_v_per_a, a completely separate
+    # field). An agent used it expecting it to clear a latched S3 trip; it
+    # did not, silently. The real calibration surface is the commissioning
+    # page's A_fs/zero_mv fields (`POST /api/safety/commissioning/ct_cal`,
+    # an ESP-local, differently-shaped endpoint despite the shared name) --
+    # see docs/CURRENT_SENSE.md section 5 and
+    # firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md. get_ct_cal() below is
+    # kept, read-only, for visibility into whatever the legacy record still
+    # holds from before this write path existed.
 
     def _send_reject_window(self, subcommand: int, payload: bytes, timeout: float) -> OkReason:
         """Send a mutating subcommand and wait out ``timeout`` for the

@@ -355,7 +355,6 @@ __all__ = [
     "safety_get_link_stats",
     "safety_set_poll_period",
     "safety_set_fault_out",
-    "safety_set_ct_cal",
     "safety_get_ct_cal",
     "SafetyCtCal",
     "SafetyCtCalChannel",

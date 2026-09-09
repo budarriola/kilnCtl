@@ -157,37 +157,16 @@ def safety_set_fault_out(assert_fault: bool) -> bytes:
     return struct.pack("<BB", SAFETY_CMD_SET_FAULT_OUT, _check_bool_byte(assert_fault))
 
 
-def safety_set_ct_cal(channel: int, calibrated: bool, gain: float, offset: float) -> bytes:
-    """0x19 SET_CT_CAL: commission one channel of SaftyFW's config_store.h
-    ct_cal record (CommonFW/docs/LINK_PROTOCOL.md sec 4,
-    kilnlink_set_ct_cal.h). One channel per frame -- setting channel 0 must
-    never disturb channel 1/2's stored constants.
-
-    `channel` is checked locally against
-    :data:`~kilnctrl.protocol.SAFETY_CT_CAL_NUM_CHANNELS` (0..2); `gain`/
-    `offset` are checked finite (no NaN/inf on the wire). Both checks mirror
-    ones the receiver (SaftyFW) makes independently -- this is belt and
-    suspenders against stale numbers, not a substitute for the Pico's own
-    validation. `gain`/`offset` are opaque floats here: this call has no
-    opinion on units or which direction the linear fit runs, and
-    `calibrated` is carried explicitly rather than inferred from the numbers
-    (an uncalibrated channel's gain/offset are meaningless downstream -- see
-    config_store.h).
-
-    Refused (reason logged on the Pico side, never returned here) if the
-    relay is currently ARMED, or if `channel` is out of range. Fire-and-forget,
-    like SET_CONFIG/CLEAR_TRIP: no reply on the wire. Read the outcome from
-    :func:`safety_get_ct_cal`'s next readback, not from this call's return
-    value.
-    """
-    return struct.pack(
-        "<BBBff",
-        SAFETY_CMD_SET_CT_CAL,
-        _check_range(channel, 0, SAFETY_CT_CAL_NUM_CHANNELS - 1, "channel"),
-        _check_bool_byte(calibrated),
-        _check_finite(gain, "gain"),
-        _check_finite(offset, "offset"),
-    )
+# safety_set_ct_cal() (0x19 SET_CT_CAL) removed 2026-09-08 -- see
+# kilnctrl/safety.py's SafetyClient.set_ct_cal removal comment and
+# mcp_server_safety.safety_get_ct_cal's docstring for why this write surface
+# was dead-in-practice (it wrote config_store.h's `ct_cal[]` gain/offset
+# correction, which never fed S3/S4/S9 presence detection -- only the
+# S14/S15 WARN display thresholds) and what the real calibration path is
+# (A_fs/zero_mv via the ESP commissioning page). SAFETY_CMD_SET_CT_CAL
+# itself, and the Pico-side handler for it, are left in place -- see
+# CT_COMMISSIONING_PLAN.md's "record layout" note; this file just no longer
+# offers any PC-side way to reach it.
 
 
 def safety_get_ct_cal() -> bytes:

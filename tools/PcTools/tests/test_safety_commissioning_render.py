@@ -2,8 +2,8 @@
 """Unit tests for kilnctrl.mcp_server_safety._describe_commissioning() --
 the READ-ONLY rendering behind the new safety_get_commissioning() MCP tool.
 
-This closes a tooling gap: kiln_find surfaced only safety_set_tc_type/
-safety_set_ct_cal (writes) for the safety processor's commissioned
+This closes a tooling gap: kiln_find surfaced only safety_set_tc_type
+(writes) for the safety processor's commissioned
 thresholds, no read tool, so answering "is S1 armed" meant reading
 firmware/KilnFW/App/drivers/http/safety_cfg_http.c and the client by hand. The
 armed/dormant semantics asserted below were verified against

@@ -339,33 +339,29 @@ def safety_set_tc_type(tc_type_name: str) -> str:
 
 
 @_srv._tool()
-def safety_set_ct_cal(channel: int, calibrated: bool, gain: float, offset: float) -> str:
-    """Commission one channel of the safety processor's CT current-sense
-    calibration (config_store.h's ct_cal record).
-
-    `channel` is 0-2 (one of the three current-sense channels), `gain`/
-    `offset` are the linear-fit constants a bench calibration run produces.
-    Only one channel is written per call -- writing channel 0 never touches
-    channel 1/2's stored constants.
-
-    Fire-and-forget, like safety_clear_trip/safety_set_tc_type: there is no
-    reply on the wire. Refused on the Pico side (relay currently ARMED, or an
-    out-of-range channel) shows up only in the Pico's own _srv.log, not here --
-    call safety_get_ct_cal() afterward to see whether it actually took.
-    """
-    try:
-        result = _srv._safety.set_ct_cal(channel, calibrated, gain, offset)
-    except SafetyQueryError as exc:
-        return f"error: {exc}"
-    if result.ok:
-        return f"ok - requested CT ch{channel} calibration"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - could not set CT ch{channel} calibration{detail}"
-
-
-@_srv._tool()
 def safety_get_ct_cal() -> str:
-    """Read the safety processor's three CT channels' stored calibration.
+    """Read the safety processor's three CT channels' stored end-to-end amps
+    CORRECTION (config_store.h's legacy `ct_cal` gain/offset record --
+    SAFETY_CMD_GET_CT_CAL / 0x22). Read-only survivor of a removed write
+    surface, kept for visibility into whatever a channel's `ct_cal` record
+    already holds from before the write path (formerly `safety_set_ct_cal`,
+    which wrote `ct_cal[]` via wire command 0x19) was removed 2026-09-08.
+
+    THIS IS NOT THE CT CALIBRATION PROCEDURE. It never was, despite the
+    name: `ct_cal[]` is applied to `amps[]` AFTER the ADC-counts-to-amps
+    conversion (current_sense.c) and only ever fed the S14/S15 WARN-only
+    over/under-current display thresholds -- never S3 (LOAD_STUCK_ON) or any
+    other guard that decides whether current is present at all. An agent
+    clearing a latched S3 trip called the old `safety_set_ct_cal` expecting
+    it to commission the CT and it silently did nothing relevant: the trip
+    stayed latched until `zero_counts[2]` (a completely different field,
+    `config_params.c` id 0x0304) was corrected instead. See
+    `docs/CURRENT_SENSE.md` section 5 and
+    `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md` for the real procedure:
+    commission `A_fs`/`zero_mv` per channel (the commissioning page's CT
+    rows, `POST /api/safety/commissioning/ct_cal` -- a DIFFERENT, ESP-local
+    endpoint that despite sharing the word "ct_cal" writes `k_ct_v_per_a`/
+    `zero_counts`, the fields the guards actually read), then auto-zero.
 
     UNLIKE safety_get_status/other SAFETY queries, this is a LIVE round trip:
     it is answered by the ESP asking the Pico right now, not from a cache, so

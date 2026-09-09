@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
-"""Unit tests for kilnctrl.devices.safety_set_ct_cal()/safety_get_ct_cal()/
-SafetyCtCal -- the PC-facing side of SAFETY_CMD_SET_CT_CAL (0x19) and
-SAFETY_CMD_GET_CT_CAL (request, 0x22) / SAFETY_CMD_CT_CAL (reply, 0x1A --
-CommonFW/docs/LINK_PROTOCOL.md sec 4/6), plus mcp_server.safety_set_ct_cal()/
-safety_get_ct_cal().
+"""Unit tests for kilnctrl.devices.safety_get_ct_cal()/SafetyCtCal -- the
+PC-facing side of SAFETY_CMD_GET_CT_CAL (request, 0x22) / SAFETY_CMD_CT_CAL
+(reply, 0x1A -- CommonFW/docs/LINK_PROTOCOL.md sec 4/6), plus
+mcp_server.safety_get_ct_cal().
+
+2026-09-08: the SET_CT_CAL (0x19) write surface -- devices.safety_set_ct_cal(),
+SafetyClient.set_ct_cal(), mcp_server.safety_set_ct_cal() -- was removed. It
+wrote config_store.h's legacy `ct_cal[]` end-to-end amps CORRECTION, which is
+applied to `amps[]` after the ADC-counts-to-amps conversion and only ever fed
+the S14/S15 WARN-only over/under-current display thresholds -- never S3/S4/S9
+presence detection (that reads `zero_counts`/`k_ct_v_per_a` directly, a
+completely different field). An agent used it trying to clear a latched S3
+trip; it silently did nothing relevant. See
+`docs/CURRENT_SENSE.md` section 5 / `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`
+for the real calibration surface (A_fs/zero_mv via the ESP commissioning
+page, a differently-shaped endpoint that happens to share the "ct_cal" name).
+`CtCalWriteSurfaceRemovedTests` below is the negative test proving the
+removal: it fails loudly if either function/tool ever comes back.
 
 Through firmware protocol version 6, GET_CT_CAL's request and reply shared
 one wire id (0x1A), distinguished only by direction and length. Version 7
@@ -13,16 +26,9 @@ success reply; see protocol.py's SAFETY_CMD_GET_CT_CAL doc comment and
 SafetyGetCtCalRefusalTests below for the case this split exists to enable.
 
 No real UART/serial connection is used -- this only checks the byte-exact
-wire encoding/decoding. The SET_CT_CAL vectors below are the same two
-byte-exact vectors firmware/CommonFW/test/test_set_ct_cal.c hand-computed
-(there is no vectors.json for this codec yet, on either side):
-
-    test_vector_zero:            {0x19,0,0,0,0,0,0,0,0,0,0}
-    test_vector_channel2_gain1:  {0x19,0x02,0x01,0x00,0x00,0x80,0x3f,
-                                   0x00,0x00,0x00,0x00}
-
-and the GET reply vector mirrors test_ct_cal.c's test_vector_all_zero (28
-zero bytes after the 0x1A command byte -- the REPLY's own id, unchanged).
+wire encoding/decoding. The GET reply vector mirrors
+firmware/CommonFW/test/test_ct_cal.c's test_vector_all_zero (28 zero bytes
+after the 0x1A command byte -- the REPLY's own id, unchanged).
 
 Run with: python -m unittest discover -s tools/PcTools/tests
 """
@@ -41,42 +47,33 @@ from kilnctrl import mcp_server  # noqa: E402
 from kilnctrl.protocol import (  # noqa: E402
     SAFETY_CMD_CT_CAL,
     SAFETY_CMD_GET_CT_CAL,
-    SAFETY_CMD_SET_CT_CAL,
 )
 
 
-class SafetySetCtCalEncodeTests(unittest.TestCase):
-    def test_vector_zero_matches_commonfw_test_set_ct_cal(self):
-        # firmware/CommonFW/test/test_set_ct_cal.c's test_vector_zero().
-        expected = bytes([0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-        self.assertEqual(devices.safety_set_ct_cal(0, False, 0.0, 0.0), expected)
+class CtCalWriteSurfaceRemovedTests(unittest.TestCase):
+    """Negative test for the removal itself: proves the dead write surface
+    cannot silently come back under any of its three names. See module
+    docstring."""
 
-    def test_vector_channel2_gain1_matches_commonfw_test_set_ct_cal(self):
-        # firmware/CommonFW/test/test_set_ct_cal.c's test_vector_channel2_gain1():
-        # channel=2, calibrated=1, gain=1.0f (0x3F800000 LE), offset=0.0f.
-        expected = bytes(
-            [0x19, 0x02, 0x01, 0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x00, 0x00]
+    def test_devices_has_no_safety_set_ct_cal(self):
+        self.assertFalse(
+            hasattr(devices, "safety_set_ct_cal"),
+            "devices.safety_set_ct_cal() was removed 2026-09-08 -- see module docstring",
         )
-        self.assertEqual(devices.safety_set_ct_cal(2, True, 1.0, 0.0), expected)
 
-    def test_length_is_eleven_bytes(self):
-        self.assertEqual(len(devices.safety_set_ct_cal(1, True, 1.0321, -0.045)), 11)
+    def test_safety_client_has_no_set_ct_cal_method(self):
+        from kilnctrl.safety import SafetyClient
 
-    def test_channel_out_of_range_rejected(self):
-        with self.assertRaises(ValueError):
-            devices.safety_set_ct_cal(3, True, 1.0, 0.0)
+        self.assertFalse(
+            hasattr(SafetyClient, "set_ct_cal"),
+            "SafetyClient.set_ct_cal() was removed 2026-09-08 -- see module docstring",
+        )
 
-    def test_channel_negative_rejected(self):
-        with self.assertRaises(ValueError):
-            devices.safety_set_ct_cal(-1, True, 1.0, 0.0)
-
-    def test_nan_gain_rejected(self):
-        with self.assertRaises(ValueError):
-            devices.safety_set_ct_cal(0, True, float("nan"), 0.0)
-
-    def test_inf_offset_rejected(self):
-        with self.assertRaises(ValueError):
-            devices.safety_set_ct_cal(0, True, 1.0, float("inf"))
+    def test_mcp_server_has_no_safety_set_ct_cal_tool(self):
+        self.assertFalse(
+            hasattr(mcp_server, "safety_set_ct_cal"),
+            "mcp_server.safety_set_ct_cal() was removed 2026-09-08 -- see module docstring",
+        )
 
 
 class SafetyGetCtCalEncodeTests(unittest.TestCase):
@@ -206,46 +203,6 @@ class SafetyGetCtCalIdSeparationTests(unittest.TestCase):
         ):
             with self.assertRaises(SafetyQueryError):
                 mcp_server._safety.get_ct_cal()
-
-
-class SafetySetCtCalToolTests(unittest.TestCase):
-    # 2026-08-24: safety_set_ct_cal() now goes through
-    # SafetyClient.set_ct_cal() (waits a short window for the optional
-    # ESP-side refusal reply -- ROADMAP.md "KilnFW PC-link command
-    # acknowledgement") instead of the raw fire-and-forget mcp_server._send.
-    # These patch SafetyClient.set_ct_cal directly rather than _send.
-    def test_sends_expected_bytes(self):
-        with unittest.mock.patch.object(
-            mcp_server._safety, "set_ct_cal", return_value=devices.OkReason(ok=True)
-        ) as mock_set_ct_cal:
-            result = mcp_server.safety_set_ct_cal(2, True, 1.0, 0.0)
-        self.assertTrue(result.startswith("ok"))
-        mock_set_ct_cal.assert_called_once_with(2, True, 1.0, 0.0)
-
-    def test_out_of_range_channel_never_reaches_the_link(self):
-        # devices.safety_set_ct_cal() validates the channel range while
-        # building the payload, inside SafetyClient.set_ct_cal() -- one layer
-        # deeper than before this pass, but still before anything touches the
-        # wire. Patch the link itself (not set_ct_cal, which would mock the
-        # validation away too) to prove that.
-        with unittest.mock.patch.object(mcp_server._link, "send") as mock_send:
-            result = mcp_server.safety_set_ct_cal(5, True, 1.0, 0.0)
-        mock_send.assert_not_called()
-        self.assertTrue(result.startswith("error:"))
-
-    def test_refusal_reason_reaches_the_caller(self):
-        # The regression this pass fixes: a truncated/out-of-range refusal
-        # used to be silently dropped in SafetyClient's own consumer thread
-        # (mcp_server called the fire-and-forget _send, which never waited
-        # for the reply). Now it must show up in the returned string.
-        with unittest.mock.patch.object(
-            mcp_server._safety,
-            "set_ct_cal",
-            return_value=devices.OkReason(ok=False, reason="out of range"),
-        ):
-            result = mcp_server.safety_set_ct_cal(2, True, 1.0, 0.0)
-        self.assertTrue(result.startswith("refused"))
-        self.assertIn("out of range", result)
 
 
 class SafetyGetCtCalToolTests(unittest.TestCase):

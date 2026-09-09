@@ -565,6 +565,55 @@ exception (`config_store_decide_write()`). Once committed,
 same two fields, so S9/S11 whole-board presence works immediately — no
 firmware change needed.
 
+### 5.3 Legacy `ct_cal[]` gain/offset correction — PC write surface removed 2026-09-08
+
+`config_store.h`'s `ct_cal[3]` (per-channel `calibrated`/`gain`/`offset`,
+`SAFETY_CMD_SET_CT_CAL` 0x19 / `SAFETY_CMD_GET_CT_CAL` 0x22) is a **separate,
+later** correction stage applied by `current_sense.c` to `amps[n]` *after*
+the §5 physics conversion above (`ct_amps_cal_apply()`, `ct_amps_cal.h`). It
+is genuinely read — it feeds the S14/S15 WARN-only over/under-current
+display thresholds — but it has **never** fed `zero_counts`/`k_ct_v_per_a`
+or `current_presence_is_flowing()`, so it cannot affect S3/S4/S9 (the
+guards that actually decide whether current is present) no matter what is
+written to it.
+
+An agent trying to clear a latched S3 (`LOAD_STUCK_ON`) trip called the PC
+tool this used to expose (`safety_set_ct_cal`) expecting it to commission
+the CT. It did not: the trip stayed latched until `zero_counts[2]` (§5.2's
+field, a completely different one) was corrected instead
+(`CT_COMMISSIONING_PLAN.md` step 6a). The name overlap with the *actually
+live* commissioning endpoint — the ESP's `POST
+/api/safety/commissioning/ct_cal`, which despite sharing the word "ct_cal"
+writes `k_ct_v_per_a`/`zero_counts` from operator-entered `A_fs`/`zero_mv`
+— made this easy to reach for by mistake.
+
+**Removed 2026-09-08:** `devices.safety_set_ct_cal()`,
+`SafetyClient.set_ct_cal()` and the `safety_set_ct_cal` MCP tool
+(`tools/PcTools/src/kilnctrl/{devices_safety,safety,mcp_server_safety}.py`).
+`safety_get_ct_cal` (read-only) is kept for visibility into whatever the
+record already holds. `tools/check_ct_cal_write_surface.ps1` /
+`tools/PcTools/scripts/ct_cal_write_surface_check.py` fail the standing
+check suite if `SAFETY_CMD_SET_CT_CAL` or a `set_ct_cal(...)` call ever
+comes back into `kilnctrl/safety.py` or `kilnctrl/mcp_server_safety.py`.
+
+**Firmware left unchanged, deliberately.** `SAFETY_CMD_SET_CT_CAL`'s Pico
+handler (`link_task_handle_set_ct_cal()`), `config_store.h`'s `ct_cal[3]`
+record bytes (persisted, A/B-sector flash, both processors already
+flashed), and `ct_amps_cal.h`/`ct_amps_cal_apply()` are all still compiled
+in. Removing them is a persisted-record-layout change (a migration, not a
+delete — see `CT_COMMISSIONING_PLAN.md`'s "record layout" note) and a
+protocol change on flashed safety-processor firmware; neither was done here.
+The PC-side removal above is sufficient on its own: with no caller left,
+`SAFETY_CMD_SET_CT_CAL` is unreachable from any tool or UI, and the
+commissioning page's `ct_cal[0..2].{gain,offset,calibrated}` rows
+(`safety_commissioning_page.html` ids 784-792) were already read-only.
+
+**Bench state (2026-09-08):** channel 2's `zero_counts[2] = 63`, confirmed
+and holding the S3 trip clear. Gain calibration (`A_fs`/`zero_mv` →
+`k_ct_v_per_a[2]`/committing a real `gain[2]`) is still outstanding — a
+bench step needing a known load with the owner present — so `amps[2]`
+reads `0.00 A` and S14/S15 stay DORMANT on that channel until it is done.
+
 ---
 
 ## 4. Measured noise floor — MEASURED 2026-09-06 (history below predates the measurement)
