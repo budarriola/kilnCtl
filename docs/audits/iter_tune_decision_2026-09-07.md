@@ -1,5 +1,18 @@
 # iter_tune.c: wire or delete — decision brief (2026-09-07)
 
+> **SUPERSEDED, 2026-09-08.** The owner decided neither option in this brief:
+> **keep `iter_tune`, but redesign it** — the metric must be tracking quality
+> against the target profile, it must not require the same starting point, and
+> it must be validated in simulation first. This brief's §4 recommendation
+> ("wire it as-is") is therefore withdrawn: the whole-firing `iae_normalized`
+> score and the 2.0 °C start-temperature comparability window are exactly what
+> the redesign removes. See **`docs/ITER_TUNE_REDESIGN_PLAN.md`**.
+>
+> Still accurate and still worth reading here: §1's map of the integration
+> point, §3's record that `fs_start_temp_c` capture already landed, and §2's
+> noise-floor arithmetic (kept as history — the redesign does not reuse
+> `noise_floor.json` as a threshold source, only as a simulator cross-check).
+
 1. **What it does.** Pure decision logic (no ESP-IDF/NVS/lock) for a per-zone
    hill-climb: after each firing, perturb kp/ki by ±5%, keep the change only
    if the next comparable firing's `iae_normalized` improves by more than a

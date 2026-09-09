@@ -855,6 +855,11 @@ HTTP endpoint and zones-page UI.
       all 27 segments, extends to the coupled case. The module stays in-tree,
       unwired, as a parked experiment with the artifact pinned by a test.
 - [x] **Iterative tuning** — built as `iter_tune.c/.h` (`fe14ddf`, `17f7ebd`).
+      **SUPERSEDED 2026-09-08 by `docs/ITER_TUNE_REDESIGN_PLAN.md`** (owner
+      decision: keep the feature, redesign it — score matched profile
+      *segments*, not whole firings, so a different starting temperature stops
+      mattering). Everything below this line describes the shipped-but-unwired
+      whole-firing design and is retained as history, not as a plan of record.
       Scores each firing by the `iae_normalized` the executor already records,
       perturbs gains, and keeps the change only if the next *comparable* firing
       beats the prior score. **The blocking unknown is the noise floor**: two
