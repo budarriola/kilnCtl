@@ -23,11 +23,13 @@
 // folded into build_host_tests.ps1's overall exit code same as the
 // hal_spi_pico executable is.
 #include <string.h>
+#include <windows.h>
 
 #include "test_common.h"
 
 #include "config_store.h"
 #include "config_store_flash_host_stubs.h"
+#include "discrete_pin_policy.h"
 #include "fake_flash.h"
 #include "tasks/relay_owner.h"
 
@@ -562,6 +564,107 @@ static void test_corrupt_active_sector_falls_back_to_other_sector(void)
                "falling back to the other sector is not reported as a rejection -- ordinary skip");
 }
 
+// --- Seqlock concurrency test (2026-09-09) ----------------------------------
+//
+// WHAT THIS DOES AND DOES NOT PROVE. This host test cannot model two
+// Cortex-M0+ cores, their memory-ordering rules, or the AHB-Lite fabric
+// between them -- there is no RP2040 in this build. What it CAN model
+// honestly: config_store_record_t is 512 bytes, far bigger than any atomic
+// access this compiler/CPU can do in one instruction, so a plain struct
+// assignment (the pre-seqlock code: `s_cached_record = to_write;`) is
+// necessarily a multi-store copy that a genuinely concurrent reader,
+// running on a real OS thread that this host DOES schedule onto a separate
+// physical core, can observe mid-copy. Two real Windows threads (one
+// hammering config_store_write(), one hammering config_store_get_full_
+// record()) is a real concurrent-memory-tearing hazard, just not the exact
+// RP2040 cross-core hazard the seqlock was written for -- it exercises "is
+// the read/write pair internally consistent under real concurrency", not
+// "does this specific barrier sequence hold on Cortex-M0+ silicon". Treat a
+// PASS here as evidence the seqlock protocol itself is sound under real
+// concurrent access, not as proof the HAL_DMB() choice is correct on
+// RP2040 hardware -- that requires the actual bench board.
+//
+// Detection method: each write sets TWO fields that live far apart inside
+// the 512-byte record (tc_type near the front, estop_active_level near the
+// end -- config_store.h's field layout) to values that encode the SAME
+// alternating generation bit. A reader that ever observes the two fields
+// disagreeing has necessarily read a struct that was partway through being
+// overwritten -- there is no valid committed record in which they differ,
+// since every write sets both from the same `g`.
+typedef struct {
+    volatile LONG stop;
+    volatile LONG torn_count;
+    volatile LONG consistent_count;
+    volatile LONG write_count;
+} seqlock_race_ctx_t;
+
+static DWORD WINAPI seqlock_race_writer_fn(LPVOID param)
+{
+    seqlock_race_ctx_t *ctx = (seqlock_race_ctx_t *)param;
+    uint8_t g = 0;
+    while (!ctx->stop) {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        rec.calibration_missing = false;
+        rec.tc_type = g ? 0x02u : 0x01u; // both <= 7 (config_params.c's RANGE_U8_MAX), no fields_set gating required
+        rec.estop_active_level = g ? DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW
+                                    : DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH;
+        const char *reason = NULL;
+        (void)config_store_write(&rec, &reason);
+        InterlockedIncrement(&ctx->write_count);
+        g = (uint8_t)(g ^ 1u);
+    }
+    return 0;
+}
+
+static DWORD WINAPI seqlock_race_reader_fn(LPVOID param)
+{
+    seqlock_race_ctx_t *ctx = (seqlock_race_ctx_t *)param;
+    while (!ctx->stop) {
+        config_store_record_t snap;
+        config_store_get_full_record(&snap);
+        uint8_t g_from_tc_type = (snap.tc_type == 0x02u) ? 1u : 0u;
+        uint8_t g_from_estop = (snap.estop_active_level == DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW) ? 1u : 0u;
+        if (g_from_tc_type != g_from_estop) {
+            InterlockedIncrement(&ctx->torn_count);
+        } else {
+            InterlockedIncrement(&ctx->consistent_count);
+        }
+    }
+    return 0;
+}
+
+static void test_seqlock_concurrent_read_never_tears(void)
+{
+    TEST_SECTION("config_store_flash: concurrent writer/reader never observes a torn record "
+                 "(see this test's own header comment for exactly what this does and does not prove)");
+    reset_all();
+    config_store_boot_load();
+
+    seqlock_race_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    HANDLE writer = CreateThread(NULL, 0, seqlock_race_writer_fn, &ctx, 0, NULL);
+    HANDLE reader = CreateThread(NULL, 0, seqlock_race_reader_fn, &ctx, 0, NULL);
+    TEST_CHECK(writer != NULL && reader != NULL, "fixture can start both race threads");
+
+    Sleep(500); // real wall-clock window for the OS scheduler to interleave both threads
+    InterlockedExchange(&ctx.stop, 1);
+    WaitForSingleObject(writer, INFINITE);
+    WaitForSingleObject(reader, INFINITE);
+    CloseHandle(writer);
+    CloseHandle(reader);
+
+    printf("    (writes=%ld, consistent reads=%ld, torn reads=%ld)\n",
+           ctx.write_count, ctx.consistent_count, ctx.torn_count);
+
+    TEST_CHECK(ctx.write_count > 0, "sanity: the writer thread actually ran");
+    TEST_CHECK(ctx.consistent_count > 0, "sanity: the reader thread actually ran");
+    TEST_CHECK(ctx.torn_count == 0,
+               "no reader ever observed tc_type/estop_active_level disagreeing -- "
+               "the seqlock rejected or masked every torn snapshot");
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -577,6 +680,7 @@ int main(void)
     test_power_loss_between_erase_and_program_of_target_leaves_old_sector_valid();
     test_migration_from_legacy_single_sector_layout();
     test_corrupt_active_sector_falls_back_to_other_sector();
+    test_seqlock_concurrent_read_never_tears();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

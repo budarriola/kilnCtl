@@ -87,6 +87,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "hal_barrier.h"
 #include "hal_flash.h"
 
 #include "flash_layout.h" // bootloader/ -- SAFTYFW_CONFIG_STORE_FLASH_OFFSET/_SIZE
@@ -178,6 +179,134 @@ static bool ensure_region(void)
 }
 
 static config_store_record_t s_cached_record;
+
+// --- Seqlock for s_cached_record (2026-09-09) -------------------------------
+//
+// Why: config_store_write() (called only from link_task, pinned to
+// SAFTYFW_CORE_LINK_PATH / core 0) updates s_cached_record with a plain
+// struct assignment; every getter below (config_store_get_full_record(),
+// config_store_get_tc_type(), etc.) reads it with no synchronisation at
+// all, and those getters are called from safety_core/thermo_task/
+// current_task, all pinned to SAFTYFW_CORE_TRIP_PATH / core 1 -- including
+// the guard/trip path. hal_flash_safe_execute() only fences both cores
+// during the actual erase/program; `s_cached_record = to_write;` itself
+// runs AFTER that fence is released, fully unguarded. Confirmed live, not
+// theoretical: `safety_config_version` was observed moving 131 -> 132
+// (config_crc changing under it) while a heating run was reading guard
+// thresholds from this same cache.
+//
+// The owner-chosen fix is a seqlock, specifically BECAUSE the trip path
+// must never block waiting on the writer: the writer bumps a counter to
+// odd before touching the struct and to the next even value after: readers
+// snapshot the counter, copy the struct, then re-check the counter --
+// retrying if it changed (writer overlapped the copy) or was odd (writer
+// mid-update). No reader ever waits on the writer, and the writer never
+// waits on a reader.
+//
+// s_seq_counter must be volatile (stop the compiler reordering/caching its
+// own accesses) AND paired with HAL_DMB() (stop the CPU/bus reordering
+// what either core's OTHER core observes) -- volatile alone is a compiler-
+// level guarantee only, and this is a cross-core, not just cross-task,
+// hazard on RP2040's two independent Cortex-M0+ cores. See hal_barrier.h
+// for why a barrier is needed here at all and which backend is used.
+static volatile uint32_t s_seq_counter = 0u; // even == stable, odd == write in progress
+
+// Bounded retry count for config_store_seqlock_read() below. The trip path
+// (S1/S6a/etc via safety_core.c) must never spin unboundedly on a writer
+// that is, by construction, a rare, deliberate, ARMED-refused-anyway
+// commissioning commit -- so this is small on purpose, not tuned against
+// any measured worst case.
+#define CONFIG_STORE_SEQLOCK_MAX_RETRIES 4u
+
+// Last snapshot this module itself has ever confirmed stable, used as the
+// fallback when config_store_seqlock_read() exhausts its retries (see that
+// function's own comment for why this fallback is safe for a guard
+// threshold specifically). Deliberately NOT itself read/written under the
+// seqlock: it is only ever touched from inside config_store_seqlock_read(),
+// which already holds a stable, freshly-copied struct at that point (either
+// the snapshot it just took, or -- on the exhausted-retries path -- the
+// value this static already held from a previous successful call), so no
+// second synchronisation layer is needed around it.
+static config_store_record_t s_last_good_record;
+static bool s_last_good_valid = false;
+
+// Snapshot s_cached_record into *out under the seqlock above, retrying up
+// to CONFIG_STORE_SEQLOCK_MAX_RETRIES times if the writer is (or was)
+// concurrently updating it. Returns true and fills *out on success --
+// either a freshly stable snapshot, or (retries exhausted) the last
+// snapshot this function ever confirmed stable. Returns false only when
+// NEITHER a fresh nor a fallback snapshot exists yet (nothing has been read
+// since boot) -- callers already handle that the same way they handle
+// !s_loaded.
+//
+// Safety of the exhausted-retries fallback for a guard threshold
+// specifically: a value one commissioning write "behind" is still a value
+// that was fully committed and passed config_params_validate_ranges() --
+// it is stale by at most one write, never torn/nonsensical, and the write
+// that could make it stale is itself rare (an ARMED-refused-anyway
+// commissioning commit, not a hot-path event). Blocking the trip path
+// until the writer finishes, or handing it a torn struct, are both worse
+// than reading a threshold that is briefly one write old.
+static bool config_store_seqlock_read(config_store_record_t *out)
+{
+    for (unsigned attempt = 0; attempt < CONFIG_STORE_SEQLOCK_MAX_RETRIES; attempt++) {
+        uint32_t seq1 = s_seq_counter;
+        // Barrier: this core must not read the struct below using a stale
+        // cached view taken BEFORE it observed seq1 -- forces "read seq1"
+        // to actually complete, as seen by this core, before the struct
+        // read that follows.
+        HAL_DMB();
+        if (seq1 & 1u) {
+            continue; // writer is mid-update -- retry rather than read torn data
+        }
+        config_store_record_t copy = s_cached_record;
+        // Barrier: the struct copy above must be complete, as observed by
+        // this core, before the re-read of the counter below -- otherwise
+        // the CPU could reorder the seq2 read ahead of (part of) the struct
+        // copy, defeating the whole "did the writer move during my copy"
+        // check.
+        HAL_DMB();
+        uint32_t seq2 = s_seq_counter;
+        if (seq1 == seq2) {
+            *out = copy;
+            s_last_good_record = copy;
+            s_last_good_valid = true;
+            return true;
+        }
+        // seq changed between the two reads (or is now odd): the copy may
+        // be torn. Retry.
+    }
+    if (s_last_good_valid) {
+        *out = s_last_good_record;
+        return true;
+    }
+    return false; // never had a stable snapshot -- caller's !s_loaded path applies
+}
+
+// Writer-side counterpart to config_store_seqlock_read() above: bump the
+// counter to odd, write the struct, bump to the next even value. Called
+// only from config_store_write(), which is itself only ever reached from
+// link_task (core 0) -- there is exactly one writer, so this needs no
+// writer-side mutual exclusion of its own, only the barriers that make the
+// update visible to READERS on the other core in the right order.
+static void config_store_seqlock_write(const config_store_record_t *rec)
+{
+    uint32_t seq = s_seq_counter;
+    s_seq_counter = seq + 1u; // odd: tell readers a write is in progress
+    // Barrier: the struct write below must not be reordered/hoisted ahead
+    // of the counter going odd, as observed by another core -- otherwise a
+    // reader could see the OLD (even) counter value while already reading
+    // partially-updated struct bytes.
+    HAL_DMB();
+    s_cached_record = *rec;
+    // Barrier: the struct write above must be complete, as observed by
+    // another core, before the counter is published as even again --
+    // otherwise a reader could see "even" and trust a struct that has not
+    // actually finished landing in SRAM from this core's perspective.
+    HAL_DMB();
+    s_seq_counter = seq + 2u; // even again: stable, safe for readers
+}
+
 static size_t s_cached_slot = CONFIG_STORE_NO_SLOT;
 // Which of s_regions[0]/[1] (sector A/B) s_cached_slot indexes into. Only
 // meaningful once s_cached_slot != CONFIG_STORE_NO_SLOT; config_store_plan_
@@ -320,7 +449,11 @@ uint8_t config_store_get_tc_type(void)
         // warns about.
         return CONFIG_STORE_DEFAULT_TC_TYPE;
     }
-    return s_cached_record.tc_type;
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return CONFIG_STORE_DEFAULT_TC_TYPE;
+    }
+    return snap.tc_type;
 }
 
 float config_store_get_tc_offset_c(void)
@@ -328,7 +461,11 @@ float config_store_get_tc_offset_c(void)
     if (!s_loaded) {
         return 0.0f; // safe default: no correction until proven otherwise
     }
-    return s_cached_record.tc_offset_c;
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return 0.0f;
+    }
+    return snap.tc_offset_c;
 }
 
 bool config_store_is_calibration_missing(void)
@@ -336,7 +473,11 @@ bool config_store_is_calibration_missing(void)
     if (!s_loaded) {
         return true; // safe default: missing until proven otherwise
     }
-    return s_cached_record.calibration_missing;
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return true;
+    }
+    return snap.calibration_missing;
 }
 
 bool config_store_is_tc_type_set(void)
@@ -344,7 +485,11 @@ bool config_store_is_tc_type_set(void)
     if (!s_loaded) {
         return false; // safe default: treat as uncommissioned until proven otherwise
     }
-    return (s_cached_record.fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return false;
+    }
+    return (snap.fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
 }
 
 uint8_t config_store_get_estop_active_level(void)
@@ -358,7 +503,11 @@ uint8_t config_store_get_estop_active_level(void)
         // detect a lost signal.
         return DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH;
     }
-    return s_cached_record.estop_active_level;
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH;
+    }
+    return snap.estop_active_level;
 }
 
 void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_CAL_NUM_CHANNELS])
@@ -374,7 +523,14 @@ void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_C
         memcpy(out, def.ct_cal, sizeof(def.ct_cal));
         return;
     }
-    memcpy(out, s_cached_record.ct_cal, sizeof(s_cached_record.ct_cal));
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        config_store_record_t def;
+        config_store_default(&def);
+        memcpy(out, def.ct_cal, sizeof(def.ct_cal));
+        return;
+    }
+    memcpy(out, snap.ct_cal, sizeof(snap.ct_cal));
 }
 
 // SAFETY_CMD_FW_VERSION's config_version/config_crc fields (LINK_PROTOCOL.md
@@ -390,7 +546,9 @@ void config_store_get_full_record(config_store_record_t *out)
         config_store_default(out);
         return;
     }
-    *out = s_cached_record;
+    if (!config_store_seqlock_read(out)) {
+        config_store_default(out);
+    }
 }
 
 uint8_t config_store_get_config_version(void)
@@ -398,16 +556,24 @@ uint8_t config_store_get_config_version(void)
     if (!s_loaded) {
         return 0;
     }
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return 0;
+    }
     // config_store_seq_to_version() (config_store.c, pure/host-tested) is
     // the actual mapping -- see its own header comment in config_store.h for
     // why this can no longer be a bare truncating `& 0xFFu`: that collided
     // with the "never loaded" sentinel (0) every 256th commit.
-    return config_store_seq_to_version(s_cached_record.seq);
+    return config_store_seq_to_version(snap.seq);
 }
 
 uint16_t config_store_get_config_crc(void)
 {
     if (!s_loaded) {
+        return 0;
+    }
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
         return 0;
     }
     // See config_store.h's own header comment on this function for the full
@@ -420,10 +586,10 @@ uint16_t config_store_get_config_crc(void)
     // Returning the default record's own real (non-zero) packed CRC here,
     // as this function did before this fix, made a never-committed OR
     // rejected-at-load board read back as commissioned on both pages.
-    if (s_cached_record.seq == 0u) {
+    if (snap.seq == 0u) {
         return 0u;
     }
-    return (uint16_t)(config_store_record_crc(&s_cached_record) & 0xFFFFu);
+    return (uint16_t)(config_store_record_crc(&snap) & 0xFFFFu);
 }
 
 typedef struct {
@@ -552,7 +718,15 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
         return false;
     }
 
-    s_cached_record = to_write;
+    // Seqlock write, not a plain struct assignment (2026-09-09): every
+    // reader above runs on the OTHER core (SAFTYFW_CORE_TRIP_PATH) with no
+    // other synchronisation against this update -- see the seqlock block
+    // near s_cached_record's declaration for the full reasoning.
+    // s_cached_slot/s_cached_sector are NOT part of this: they are read
+    // only by this same function (config_store_plan_write() above, next
+    // call), never by a reader on the other core, so they need no seqlock
+    // protection of their own.
+    config_store_seqlock_write(&to_write);
     s_cached_slot = plan.slot_index;
     s_cached_sector = plan.sector_index;
     if (out_reason != NULL) {
