@@ -414,7 +414,15 @@ _ZONE_TUNING_READONLY_KEYS = {
     "tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
     "tuning_rise_inf_c", "tuning_seq",
 }
-_ZONE_READONLY_KEYS = {"index", "normal_current_measured", "normal_current_a"} | _ZONE_TUNING_READONLY_KEYS
+#: ZONES_CFG_VERSION 23->24 (2026-09-09): the operating point a zone's plant
+#: model was fitted at. Same read-only class as the tuning_* record above --
+#: GET emits both unconditionally, parse_zone_fields() has no POST key for
+#: either and copies them through from current_z. -273.15 is the
+#: "no operating point recorded" sentinel (ZONE_MODEL_FIT_TEMP_UNKNOWN);
+#: read it as None-equivalent, never as a real 273-below fit.
+_ZONE_MODEL_FIT_READONLY_KEYS = {"model_fit_temp_c", "model_fit_ambient_c"}
+_ZONE_READONLY_KEYS = ({"index", "normal_current_measured", "normal_current_a"}
+                       | _ZONE_TUNING_READONLY_KEYS | _ZONE_MODEL_FIT_READONLY_KEYS)
 
 _TIMING_PROFILE_FIELD_FORM_KEY = {
     "name": "name",
@@ -762,6 +770,7 @@ _PRESET_ZONE_KNOWN_IGNORED_FIELDS = {
     "tuning_extrapolation_converged", "tuning_tau_consistent",
     "tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
     "tuning_rise_inf_c", "tuning_seq",
+    "model_fit_temp_c", "model_fit_ambient_c",
 }
 
 
