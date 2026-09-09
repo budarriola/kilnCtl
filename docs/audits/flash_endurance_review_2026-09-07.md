@@ -1,6 +1,11 @@
 # Flash endurance review — 2026-09-07
 
-**Status update, 2026-09-08: R2 implemented, NOT YET FLASHED.** Sector B
+**Status update, 2026-09-08: R2 implemented AND flashed to the Pico**
+(`b7af9ebe`, bench-verified: commissioning config — `abs_max_temp_c`, S8 rate,
+`tc_source`, CT install/topology, CT cal — read back byte-for-byte preserved
+across the sector-layout migration, CRC unchanged at 25042). **A separate,
+later fix on top of it — the config_store RAM cache seqlock, `b202fe56` +
+`5671ee03`, 2026-09-09 — has NOT yet been flashed.** Sector B
 (`SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B`, immediately after sector A inside the
 already-reserved 64K `BOOTLOADER_CONFIG_FLASH_SIZE` region) is now live in
 source: `config_store_flash.c` writes always target the sector that is NOT
@@ -22,8 +27,11 @@ fallback, and a negative test that reintroduces the old erase-in-place
 behaviour and shows `test_power_loss_between_erase_and_program_of_target_
 leaves_old_sector_valid` fail with zero valid copies at that instant (then
 reverted by hand, `git diff` empty). Wear is now spread across both
-sectors as the free side effect this review named. **A Pico reflash is
-required to put this on the board and has not been done.**
+sectors as the free side effect this review named. **This landed on the
+bench Pico via `b7af9ebe`** (built from a clean detached worktree, flashed
+via `debug_program(peer="pico")`). The RAM-cache seqlock fix layered on top
+of it the next day (`b202fe56`/`5671ee03`, see `docs/CONFIG_FILESYSTEM.md`)
+has not yet been flashed.
 
 Owner directive: *"we must have wear leveling and this is a standard way to
 get it."* The 2026-09-06 `LITTLEFS_ASSESSMENT.md` declined a filesystem, but

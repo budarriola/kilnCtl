@@ -215,19 +215,51 @@ count.
   auto-formats and mounts. The LCD/`/api/status` banner for the ask-first
   refusal path is still not wired in — only the boot log and the Settings
   page know about it today.
-- **RP2040 `config_store` has no A/B sectors — a real, unfixed defect.**
-  Found by the endurance review, not by this migration, but it belongs
-  here because it is genuine outstanding work, not a footnote: when the
-  8-slot round-robin reaches its 8th write, the store erases the *entire*
-  4 KiB sector and then programs slot 0. Between those two steps the board
-  holds **zero valid copies** of the safety configuration (TC type,
-  `abs_max_temp_c`, `max_rate_c_per_min`, CT cal). A power cut or watchdog
-  reset in that window boots the RP2040 uncommissioned. Fix is two
-  sectors, A/B, writing the new record to the unused one and erasing the
-  old one only after the new one's CRC verifies — 15 spare 4 KiB sectors
-  already exist for this (`BOOTLOADER_CONFIG_FLASH_SIZE` is 64 KiB against
-  a 4 KiB store), so no flash-layout change is needed. Not started.
-  Full detail: `docs/audits/flash_endurance_review_2026-09-07.md` §5, R2.
+- **RP2040 `config_store`'s zero-valid-copies erase window — fixed.** The
+  endurance review found that the old single-sector, 8-slot round-robin
+  erased the *entire* 4 KiB sector before reprogramming slot 0, leaving
+  **zero valid copies** of the safety configuration (TC type,
+  `abs_max_temp_c`, `max_rate_c_per_min`, CT cal) during that window — a
+  power cut or watchdog reset there booted the RP2040 uncommissioned.
+  `24090c9a` adds sector B (`SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B`, inside
+  the already-reserved 64 KiB region — no partition/layout change).
+  Writes now always target whichever sector is NOT current, so a crash
+  during erase/program leaves the other, untouched sector's committed
+  record intact; `config_store_find_latest_multi_ex()` is the sole
+  arbiter, scanning both sectors' 16 slots and keeping the highest-`seq`
+  CRC-valid record. There is no separate "which sector is active" pointer
+  to tear — sector choice is derived fresh from the seq/CRC scan every
+  boot, which is why the "reset one side of a pair" bug class does not
+  apply here. What CRC still cannot catch: a write that completes with a
+  valid CRC but wrong content — the ordinary limit of any CRC scheme.
+  169/169 config_store host tests pass, including power-cut injection at
+  each step of the erase/program sequence. Follow-ons `4f1b9a4f` (a
+  discarded flash-program failure inside `config_store_write_cb()`, now
+  checked and logged) and `fd02df05` (TC type + cal-offset commissioning
+  UI) build on top of it.
+
+  A separate defect in the same file, found and fixed 2026-09-09: the
+  in-RAM cache (`s_cached_record`) was written by link_task on core 0 with
+  a plain struct assignment and read with no synchronisation by
+  safety_core/thermo_task/current_task on core 1, including the trip
+  path — confirmed live, with `safety_config_version` changing under a
+  concurrent guard-threshold read during a heating run. `b202fe56` adds a
+  seqlock (`config_store_seqlock_read()`/`_write()`): the writer bumps a
+  volatile counter odd/even around the struct write, readers snapshot and
+  retry up to 4 times before falling back to the last stable snapshot
+  rather than block the trip path or return a torn struct. Reverting the
+  writer to a plain assignment reproduced 20,945 torn reads over ~190k
+  writes on the host harness; with the seqlock, zero. `5671ee03` fixed the
+  barrier primitive itself (`hal_barrier.h`'s pico backend must use
+  pico-sdk's `hardware/sync.h` `__dmb()`, not a bare CMSIS `__DMB()` that
+  depended on an unguaranteed include order).
+
+  The A/B sector fix (`24090c9a`) is flashed to the bench Pico (`b7af9ebe`,
+  2026-09-08: commissioning config read back byte-for-byte across the
+  migration, CRC unchanged). The seqlock fix (`b202fe56`/`5671ee03`,
+  2026-09-09) is NOT yet flashed — correct in source and host-tested, not
+  yet on the board. Full detail:
+  `docs/audits/flash_endurance_review_2026-09-07.md` §5, R2.
 
 ## Dual-write window: now measured (2026-09-07)
 
