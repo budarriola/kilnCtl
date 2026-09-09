@@ -20,6 +20,7 @@
 #include "kiln_io_owner.h"
 #include "ota_state.h"
 #include "profiles_store.h"
+#include "readiness_gate.h"
 #include "relay_authority.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"
@@ -55,6 +56,41 @@ static void history_buf_ensure_alloc(void)
 
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
+    /* THE READINESS INTERLOCK (owner decision 2026-09-09; readiness_gate.h
+     * has the full rationale and the standing "NO OVERRIDE" instruction).
+     *
+     * Placed HERE, in profile_executor_run(), rather than at the HTTP door,
+     * because this function is the single choke point every start path funnels
+     * through: POST /api/profile_exec/start (dashboard_exec_http.c), both LCD
+     * start buttons (ui_page_home_actions.c, ui_page_profile_detail.c) and the
+     * benchproto RUN command (uart_bridge_ext_control.c). A gate at any one
+     * door would have left the other three open, and the next door added would
+     * have started life ungated. dashboard_exec_http.c ALSO checks it before
+     * reading the request body, purely so the HTTP client gets a 409 with the
+     * item named rather than a generic 400 -- that is a legibility duplicate of
+     * this check, never a substitute for it.
+     *
+     * Checked FIRST -- before even the s_exec.lock == NULL guard below --
+     * for two reasons. (a) The answer must not depend on which profile was
+     * asked for or on how far bring-up got: these four conditions are facts
+     * about the BOARD, and "which item is red" must read the same whatever is
+     * being started. (b) In recovery mode the lock IS NULL, and the generic
+     * "profile executor not started" refusal below tells an operator nothing
+     * about why -- the exact complaint recovery_start_refusal.h was written
+     * to fix. Reaching the gate first means the recovery-mode refusal names
+     * recovery mode. Nothing here touches s_exec, so running before that
+     * guard is safe; readiness_gate.c documents the fail-safe direction of
+     * every fact it reads on a board that has not finished starting. */
+    {
+        readiness_gate_block_t which = READINESS_GATE_OK;
+        if (readiness_gate_refuses_start(err_msg, err_cap, &which)) {
+            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the readiness interlock (item %d): %s",
+                     (unsigned)profile_id, (int)which, err_msg ? err_msg : "(no message)");
+            return false;
+        }
+    }
+
+
     /* Recovery mode (boot_guard.h) deliberately skips profile_executor_start()
      * so it can bring the board up with just Wi-Fi and the OTA HTTP routes --
      * but other code that DOES still run in that mode (safety_link.c's poll

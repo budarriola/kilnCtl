@@ -1162,6 +1162,23 @@ try {
 
     Invoke-HostTestExe -Name "recovery_start_refusal" -ExePath $exe33 -BuildCmd $cmd33
 
+    # ---- test_readiness_gate.c: its own THIRTY-FOURTH, separate
+    # executable ----------------------------------------------------------
+    # The readiness FIRING INTERLOCK (owner decision 2026-09-09):
+    # App/drivers/safety/readiness_gate.h, which turns four /api/readiness
+    # checklist items into a real refusal on every start path. Header-only
+    # decision (static inline over readiness_http.h's shared predicates), so
+    # this needs no sibling .c files -- just a fake body for the one declared
+    # symbol, readiness_gate_collect(), same convention
+    # test_recovery_start_refusal.c uses for boot_guard_is_recovery_mode().
+    # Own executable because that fake would collide at link time with
+    # readiness_gate.c's real body wherever that gets linked.
+    $exe34 = Join-Path $outDir "kilnctl_host_tests_readiness_gate.exe"
+    $cmd34 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exe34`" `"$(Join-Path $testDir 'test_readiness_gate.c')`""
+
+    Invoke-HostTestExe -Name "readiness_gate" -ExePath $exe34 -BuildCmd $cmd34
+
     # ---- summary ----------------------------------------------------------
     #
     # 28 executables are attempted above (main + zones_http + safety_cfg_http +
@@ -1197,7 +1214,10 @@ try {
     # 31 -> 32: this pass added test_recovery_start_refusal.c as its own
     # 32nd Invoke-HostTestExe call (recovery_start_refusal.h's explicit,
     # named recovery-mode API-layer refusal, ui_aggregate_review_2026-09-08).
-    $totalExpected = 32
+    # 32 -> 33: this pass added test_readiness_gate.c as its own 33rd
+    # Invoke-HostTestExe call (readiness_gate.h's firing interlock, owner
+    # decision 2026-09-09 -- see docs/SAFETY_CASE.md sec 3 item 10).
+    $totalExpected = 33
     Write-Host ""
     Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
     if ($script:buildFailures.Count -gt 0) {

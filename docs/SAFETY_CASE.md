@@ -300,39 +300,82 @@ here; none is copied from an unverified summary.
    not treated as a defect elsewhere in this document; see
    `firmware/KilnFW/docs/SAFETY_MODEL.md` for the full correction.
 
-10. **`/api/readiness` is an advisory checklist, not a firing interlock**
-    (stated 2026-09-09, after an opus review found the header/test wording
-    "unconditionally blocking" being read as enforcement). Precisely what it
-    does and does not do today:
+10. **`/api/readiness` is a REAL firing interlock for four of its items,
+    advisory for the rest** (owner decision 2026-09-09, implemented the same
+    day; supersedes this item's previous text, which stated that readiness
+    gated nothing at all — that was accurate when written and is no longer).
 
-    - **What it is.** `readiness_http.c` is a read-only aggregator. Every
-      item calls a getter some other consumer already calls, renders a
-      status (`ok` / `not_done` / `cannot_yet` / `deliberately_off`), and
-      returns it as JSON. It owns no state and changes no behaviour.
-    - **What "blocking" means in that module.** An item described as
-      "unconditionally blocking" means only that it reports
-      `READY_NOT_DONE` whenever its condition holds — never a partial or
-      informational status. That makes the CHECKLIST incomplete. It does
-      not make anything refuse to run.
-    - **What actually consumes it.** Only two browser pages:
-      `readiness_page.html` (renders the list) and `main_page.html` (the
-      setup-wizard completeness banner). Nothing in firmware reads it — a
-      repo-wide grep finds no C caller, and neither the start path
-      (`profile_executor_run.c`) nor `capability_preflight` consults any
-      readiness item.
-    - **Consequence.** An operator can start a firing with `estop_verified`,
-      `safety_trip`, `crash_report` or `recovery_mode` showing red on the
-      readiness page. Those conditions may still be refused elsewhere by
-      their OWN independent enforcement (an active safety trip refuses heat
-      at the Pico; recovery mode never starts `profile_executor`;
-      `capability_preflight` refuses a run on an unacknowledged crash) —
-      but that enforcement is separate code, and an item with no such
-      independent enforcement is advisory only. `estop_verified` is the
-      clearest example: nothing anywhere enforces it.
-    - **Making it a real interlock** would be a behavioural change to a
-      safety-critical start path and is an owner decision, not something
-      this document assumes. See the recommendation recorded with the
-      2026-09-09 wording fix.
+    - **What changed.** `App/drivers/safety/readiness_gate.h` turns four
+      checklist items into a refusal on every firing-start path:
+      `recovery_mode`, `safety_trip`, `crash_report` and `estop_verified`.
+      The check lives in `profile_executor_run()`, which is the single choke
+      point all four start paths funnel through (POST
+      `/api/profile_exec/start`, both LCD start buttons, and the benchproto
+      RUN command), so no door is left ungated.
+      `profile_exec_start_post_handler()` additionally checks it before
+      reading the request body, purely so the HTTP client gets a `409` naming
+      the item rather than a generic `400` — a legibility duplicate of the
+      same call, not a second rule.
+    - **NO OVERRIDE.** There is deliberately no password bypass, no
+      confirm-dialog escape and no `force` parameter. If the E-stop interlock
+      is unverified, the board does not fire. This was the owner's explicit
+      instruction, not an implementation default.
+    - **One definition of each rule.** The gate does not decide, for itself,
+      what "tripped" or "unverified" means. Each item is decided by calling
+      the SAME `readiness_*_status()` pure predicate `readiness_http.c`'s JSON
+      handler calls to render that item, and blocks on exactly one condition:
+      *the gate blocks item X iff item X's displayed status is
+      `READY_NOT_DONE`*. That makes the page and the interlock structurally
+      incapable of disagreeing — the failure this repo has hit four times as
+      the "reset one side of a pair" class. Held in place by
+      `test_readiness_gate.c` (the biconditional, over all 64 fact
+      combinations) and `check_readiness_gate_display_agreement.ps1` (that
+      both files still route each item through the same predicate and the same
+      item key).
+    - **What is genuinely NEW enforcement.** Only `estop_verified`. The other
+      three were already refused on the start path or just before it, and
+      making them explicit here removes surprise rather than adding
+      protection — with one real gap closed: an unacknowledged
+      **`crash_report`** was previously enforced ONLY by the PC-side
+      `capability_preflight`, so a start from the LCD or the web UI on a
+      crashed board was accepted. It is now refused by firmware too.
+      Per item, as verified 2026-09-09:
+      - `recovery_mode` — already enforced: `main_control_bringup.c` never
+        calls `profile_executor_start()` in recovery mode, so `s_exec.lock` is
+        NULL and every entry point refuses; plus the explicit API-layer
+        refusal in `recovery_start_refusal.h`.
+      - `safety_trip` — already enforced: `profile_executor_run()`'s
+        `relay_authority_on_blocked()` check refuses a start while heat
+        authority is blocked, which a latched trip does; and the Pico refuses
+        to enable heat regardless.
+      - `crash_report` — was **not** enforced in firmware (only
+        `tools/PcTools/src/kilnctrl/capability_preflight.py`). Now enforced.
+      - `estop_verified` — was enforced **nowhere**. Now enforced. Pole 1 of
+        the E-stop (in series with the external contactor coil) is wiring
+        firmware structurally cannot observe, so the honest coverage is a
+        documented bench procedure plus a durable operator record
+        (`estop_verification.h`); this gate is what makes that record matter.
+    - **What stays advisory, deliberately.** `guard_max_temp`, `hardware`,
+      `safety_context`, `cfg_fs`, `network`, `commissioning` and the rest do
+      NOT block. `guard_max_temp` in particular already has a better refusal
+      deeper in `profile_executor_run()` (the guard-5 zone-ceiling check) that
+      knows which zones the profile actually uses; the checklist item is a
+      whole-board summary and would refuse firings guard 5 correctly allows.
+      Adding an item to `readiness_http.c` does not add it to the interlock.
+    - **Operator legibility.** A refused start names the single blocking item
+      and the action that clears it, front-loaded so a truncating LCD dialog
+      still shows which item refused. The HTTP `409` carries the item's
+      `/api/readiness` key as `readiness_item`, and the dashboard shows the
+      message and links straight to that row on the readiness page. The
+      readiness page itself now states which four items refuse a firing.
+    - **Interaction with the reboot/S6a sequence.** Rebooting reliably latches
+      an S6a main-fault trip (see `sw_reset_http.c` and the Reboot section of
+      `settings_page.html`). With `safety_trip` a hard gate, a reboot now
+      leaves the board unfirable until the operator clears the trip. That is
+      correct, and the sequence — reboot, clear trip, start — is stated in the
+      reboot copy and repeated in the refusal message itself.
+    - **Not hardware-verified.** Implemented and host-tested only; no board
+      was flashed for this change.
 
 11. **Refusal of a relay-on command is invisible on the wire** — a refused
     `SET_RELAY` produces no reply; a GUI infers it only from state not

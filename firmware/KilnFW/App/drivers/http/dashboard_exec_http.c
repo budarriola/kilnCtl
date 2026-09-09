@@ -24,6 +24,7 @@
 #include "profile_executor.h"
 #include "profile_feasibility.h"
 #include "profiles_http.h"
+#include "readiness_gate.h"
 #include "recovery_start_refusal.h"
 #include "relay_authority.h"
 #include "run_state.h"
@@ -648,6 +649,50 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_sendstr(req, recovery_err);
         return ESP_OK;
+    }
+
+    /* THE READINESS INTERLOCK (readiness_gate.h). profile_executor_run()
+     * enforces this for every start path -- this call is a LEGIBILITY
+     * duplicate for the HTTP one only: it answers 409 Conflict with the
+     * blocking item named in full, before the body is even read, instead of
+     * the generic 400 the run() refusal path below produces. Deliberately
+     * reuses recovery_err[] rather than adding a second ~200-byte local to a
+     * frame that runs on the shared 8 KB httpd task stack
+     * (check_httpd_task_stack_budget; see CLAUDE.md's httpd-stack-blob note):
+     * the recovery check above has already returned by the time this writes.
+     *
+     * If this call were ever deleted, the firing would still be refused --
+     * just with a less specific status and message. If profile_executor_run()'s
+     * check were deleted, this one would NOT cover the LCD or benchproto start
+     * paths. Do not "de-duplicate" by removing the one in run(). */
+    readiness_gate_block_t gate_which = READINESS_GATE_OK;
+    if (readiness_gate_refuses_start(recovery_err, sizeof(recovery_err), &gate_which)) {
+        const char *item_key = readiness_gate_item_key(gate_which);
+        ESP_LOGW(DASH_TAG, "profile_exec/start refused by the readiness interlock (item %s)",
+                 item_key ? item_key : "?");
+        /* JSON, not the plain string the recovery refusal above sends: this
+         * page's start handler (main_page.html's proceedToStart()) parses the
+         * response with r.json() and shows result.error, so a plain-text body
+         * would throw in the parse and land in its .catch() -- an operator
+         * pressing Start would see NOTHING happen. "readiness_item" carries
+         * the /api/readiness key so the page can name and link the one item
+         * that blocked, instead of dropping the operator on a checklist of
+         * eighteen to find it themselves.
+         *
+         * No json_escape() here, deliberately: readiness_gate_evaluate()'s
+         * messages are compile-time constants guaranteed free of '"' and '\\'
+         * (see its own comment, enforced by test_readiness_gate.c's
+         * test_messages_are_json_safe()), so escaping would only buy a
+         * doubled ~400-byte scratch buffer on this shared stack -- the exact
+         * httpd-stack-blob class CLAUDE.md warns about -- to protect against
+         * an input that cannot occur. */
+        char json[sizeof(recovery_err) + 96];
+        int n = snprintf(json, sizeof(json),
+                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
+                         item_key ? item_key : "", recovery_err);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
     if (req->content_len <= 0 || req->content_len > 32) {

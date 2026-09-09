@@ -160,7 +160,17 @@ board, and nothing on this path sends a clear.</p>
 <p><strong>Required follow-up before heating:</strong> clear the latched trip
 with <a href="/safety">Clear latched trip on the Safety page</a> (or the
 dashboard's Clear Trip button) -- both POST <code>/api/safety/clear_trip</code>.
-Heat stays blocked until you do. No JTAG is needed for that, and never was.</p>
+Heat stays blocked until you do. No JTAG is needed for that, and never was.
+<!-- 2026-09-09, the readiness firing interlock (App/drivers/safety/readiness_gate.h):
+     "Heat stays blocked" above was already true at the relay level; since the
+     interlock landed it is also true at the START button. A latched trip is one
+     of four items that now REFUSE a firing outright, so the sequence after this
+     reboot is reboot -> clear trip -> start, in that order, every time. Said
+     here as well as in the refusal message itself because an operator who has
+     just rebooted should not have to discover the requirement by being turned
+     away. -->
+Until the trip is cleared, starting a firing is <strong>refused</strong>, naming
+this trip as the reason -- see the <a href="/readiness">Readiness</a> page.</p>
 <p>
 <button type="button" id="swResetBtn">Reboot both processors (no config changes)</button>
 </p>

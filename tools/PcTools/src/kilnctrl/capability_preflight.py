@@ -206,6 +206,17 @@ class CapabilityCheck:
     message: str
 
 
+# The four /api/readiness item keys the board's own firing interlock refuses
+# on (firmware/KilnFW/App/drivers/safety/readiness_gate.h's
+# READINESS_GATE_KEY_*). Keys only -- the decision for each item is made
+# firmware-side by one shared predicate and read from the wire here, so this
+# is a pointer at the rule, not a copy of it. Everything NOT in this set on
+# /api/readiness is advisory and must not fail a preflight.
+READINESS_BLOCKING_KEYS = frozenset(
+    {"recovery_mode", "safety_trip", "crash_report", "estop_verified"}
+)
+
+
 @dataclass(frozen=True)
 class BoardInfo:
     reachable: bool
@@ -225,6 +236,24 @@ class BoardInfo:
     uptime_s: Optional[float] = None
     crash_unacknowledged: bool = False
     crash_summary: Optional[str] = None
+    # THE READINESS FIRING INTERLOCK (owner decision 2026-09-09,
+    # firmware/KilnFW/App/drivers/safety/readiness_gate.h). Firmware now
+    # REFUSES a start on four /api/readiness items: recovery_mode,
+    # safety_trip, crash_report and estop_verified. Reading the same
+    # endpoint here means this preflight refuses BEFORE the board does,
+    # with the same reason -- instead of a run script cheerfully POSTing a
+    # start and reporting an opaque 409 several steps later.
+    #
+    # Deliberately NOT a second copy of the rule: this reads each item's
+    # own rendered `status` from the board and refuses on not_done. The
+    # decision stays firmware-side, exactly once, in readiness_gate.h. If
+    # this file grew its own "is the board tripped?" logic it would be the
+    # third copy of a rule that already has a documented drift hazard.
+    #
+    # An older firmware with no /api/readiness route (or one whose items
+    # this build predates) leaves this empty and changes nothing -- same
+    # tolerance get_board_info() already applies to /api/crash_report.
+    readiness_blocked: "tuple[tuple[str, str, str], ...]" = ()
 
 
 @dataclass(frozen=True)
@@ -238,13 +267,19 @@ class PreflightReport:
     def ok(self) -> bool:
         """False if the board never answered at all, if any required
         capability is FATALLY missing, or if the board is carrying an
-        unacknowledged crash report. That last case is deliberately checked
-        regardless of what the preset needs -- a panic five hours ago is a
-        reason to not start ANY unattended run, not just ones that happen to
-        probe a capability."""
+        unacknowledged crash report, or if any of the four blocking
+        /api/readiness items is red. The last two are deliberately checked
+        regardless of what the preset needs -- a panic five hours ago, or an
+        unverified E-stop interlock, is a reason to not start ANY unattended
+        run, not just ones that happen to probe a capability. The readiness
+        items are also what the BOARD itself will refuse on
+        (readiness_gate.h), so a run that skipped this check would simply be
+        refused a few steps later with less context."""
         if not self.board.reachable:
             return False
         if self.board.crash_unacknowledged:
+            return False
+        if self.board.readiness_blocked:
             return False
         return not any(c.fatal for c in self.checks)
 
@@ -280,6 +315,14 @@ class PreflightReport:
                 "this run would repeat. REMEDY: investigate, then "
                 "POST /api/crash_report/ack once reviewed."
             )
+        for key, label, detail in self.board.readiness_blocked:
+            lines.append(
+                f"  [FATAL]  READINESS ITEM BLOCKS FIRING: {label} ({key}) -- {detail} "
+                "The board's own firing interlock refuses a start on this item "
+                "(firmware/KilnFW/App/drivers/safety/readiness_gate.h) and there is NO "
+                "override. REMEDY: clear this item (see /readiness on the board), then "
+                "start again."
+            )
         if not self.checks:
             lines.append("  no HTTP-gated capabilities required by this preset/apply plan.")
         for c in self.checks:
@@ -300,7 +343,13 @@ class PreflightReport:
                     f"preset pins {c.preset_value!r}, which is what firmware lacking "
                     f"{c.capability.description} already does. No action needed."
                 )
-        if self.board.crash_unacknowledged and self.fatal_checks:
+        if self.board.readiness_blocked:
+            names = ", ".join(k for k, _l, _d in self.board.readiness_blocked)
+            lines.append(
+                f"  RESULT: the board's firing interlock blocks on {names} -- "
+                "this run would be refused; do not start it."
+            )
+        elif self.board.crash_unacknowledged and self.fatal_checks:
             lines.append(
                 f"  RESULT: unacknowledged crash report AND {len(self.fatal_checks)} "
                 "FATAL capability gap(s) -- do not start this run."
@@ -357,8 +406,40 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
             f"reset_reason={crash.get('found_on_boot_reset_reason')!r}"
         )
 
+    # THE READINESS FIRING INTERLOCK (see BoardInfo.readiness_blocked).
+    # One more GET, tolerated absent exactly like /api/crash_report above.
+    # The blocking key set is mirrored from readiness_gate.h's
+    # READINESS_GATE_KEY_* -- the KEYS only, never the rules: each item's
+    # not_done/ok verdict is computed firmware-side by the one shared
+    # predicate and simply read here. A key renamed on the firmware side
+    # makes this list stop matching, which reads as "not blocked" -- so
+    # firmware/KilnFW/App/test/check_readiness_gate_display_agreement.ps1
+    # pins those key strings on the firmware side, and a rename has to go
+    # through it.
+    readiness_blocked = []
+    try:
+        readiness, _raw3 = _get_json(host, "/api/readiness", timeout)
+    except PreflightTransportError:
+        readiness = None
+    if isinstance(readiness, dict):
+        for item in readiness.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("key") not in READINESS_BLOCKING_KEYS:
+                continue
+            if item.get("status") != "not_done":
+                continue
+            readiness_blocked.append(
+                (
+                    str(item.get("key")),
+                    str(item.get("label") or item.get("key")),
+                    str(item.get("detail") or "(no detail reported)"),
+                )
+            )
+
     return BoardInfo(
         reachable=True,
+        readiness_blocked=tuple(readiness_blocked),
         fw_version=data.get("fw_version") or None,
         fw_build=data.get("fw_build") or None,
         self_protocol_version=data.get("self_protocol_version"),

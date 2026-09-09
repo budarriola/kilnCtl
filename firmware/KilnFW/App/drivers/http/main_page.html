@@ -2747,11 +2747,40 @@ function proceedToStart(id, startName) {
     body: 'id=' + id,
   }).then(function (r) { return r.json(); }).then(function (result) {
     if (result.ok === false) {
+      // THE READINESS FIRING INTERLOCK (2026-09-09,
+      // App/drivers/safety/readiness_gate.h). Four checklist items --
+      // safety_trip, recovery_mode, crash_report, estop_verified -- now
+      // REFUSE a start outright. When one of them is the reason, the
+      // response carries "readiness_item": the /api/readiness key of the
+      // single item that blocked.
+      //
+      // Handled ahead of redirectToReadinessIfBlocked() below, and NOT by
+      // folding it into that function, because the two cases genuinely
+      // differ: that path knows only that SOMETHING on the checklist is
+      // amber and sends the operator to go look, which is the right answer
+      // for a vague "board isn't ready". This path knows exactly which item
+      // refused and why, so it says so first -- a refusal that dumps the
+      // operator on an eighteen-item checklist with no indication of which
+      // line refused them reads as a broken board, which is precisely the
+      // failure this interlock must not introduce.
+      if (result.readiness_item) {
+        alert(result.error || 'refused by the readiness interlock');
+        window.location.href = '/readiness#' + encodeURIComponent(result.readiness_item);
+        return;
+      }
       redirectToReadinessIfBlocked(result.error);
       return;
     }
     pollExec();
-  }).catch(pollExec);
+  }).catch(function () {
+    // Was a bare `.catch(pollExec)`: a non-JSON error body (the plain-text
+    // 409 the recovery-mode refusal above this handler still sends) threw
+    // here and the operator saw the Start button do absolutely nothing. Poll
+    // as before, but say something first.
+    alert('Start failed and the board did not explain why -- check the '
+          + 'Readiness page and the log.');
+    pollExec();
+  });
 }
 
 document.getElementById('runBtn').addEventListener('click', function () {

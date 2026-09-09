@@ -458,7 +458,7 @@ static void edit_btn_cb(lv_event_t *e)
 static void confirm_start_cb(void *user_data)
 {
     (void)user_data;
-    char err_msg[64] = "";
+    char err_msg[160] = ""; /* 64 -> 160: see ui_page_home_actions.c's matching widening -- the readiness interlock's refusals name an item AND a remedy. */
     /* profile_executor_run() writes NVS on the calling task (run_state.h's
      * breadcrumb). That is safe from here: lvgl_port.c gives the LVGL task
      * (this callback runs on it) an internal-SRAM stack, same HAZARD comment

@@ -103,8 +103,23 @@
      brand's old spot, so the heading was pure duplication. -->
 <p>A status page, not a forced setup flow (TODO.md 8.3) -- it answers "what
 is missing" on a board someone else configured a while ago, in the order
-each item actually becomes checkable. Nothing here is required to run a
-firing; it is a checklist, not a gate.</p>
+each item actually becomes checkable.</p>
+<!-- 2026-09-09, owner decision. This paragraph used to end "Nothing here is
+     required to run a firing; it is a checklist, not a gate." That is no
+     longer true, and leaving it would have been the worst possible copy: an
+     operator refused a start would have been reading a page telling them
+     nothing on it can refuse a start. Four items are now a real interlock
+     (App/drivers/safety/readiness_gate.h, enforced in
+     profile_executor_run(), which every start path goes through -- web, both
+     LCD buttons and benchproto). The REST of the list is still advisory, and
+     saying which is which is the point of splitting this into two
+     sentences. There is deliberately no override for the four: if the E-stop
+     interlock is unverified, the kiln does not fire. -->
+<p><strong>Four of these items will refuse a firing:</strong> a latched
+safety-processor trip, a recovery-mode boot, an unacknowledged crash report,
+and an unverified E-stop interlock. There is no override -- clear the item and
+start again. Every other item on this page is advisory: it is worth reading,
+but it will not stop you.</p>
 <div class="legend">
   <span>&#10003; ok</span>
   <span style="color:var(--bad)">&#10007; not done</span>
@@ -129,6 +144,8 @@ firing; it is a checklist, not a gate.</p>
     apply(next);
   });
 
+  var scrolledToHash = false;
+
   var MARK = { ok: '✓', not_done: '✗', cannot_yet: '⋯', deliberately_off: '—' };
 
   function render(items) {
@@ -146,7 +163,14 @@ firing; it is a checklist, not a gate.</p>
       // per readiness_http.c) -- kc-live-value on both. it.label is the
       // item's fixed name ("Wi-Fi configured", etc.), never changes with the
       // board's state, so it stays unmarked.
-      html += '<div class="item status-' + it.status + '">' +
+      // id on the row so a refused start can link straight to the ONE item
+      // that blocked it (main_page.html sends the operator to
+      // /readiness#<key>, using the same key readiness_http.c renders and
+      // readiness_gate.h blocks on -- check_readiness_gate_display_agreement
+      // holds those to each other). Without this the link lands at the top of
+      // an eighteen-item list and the operator has to hunt for their own
+      // refusal.
+      html += '<div class="item status-' + it.status + '" id="' + window.kcEscapeHtml(it.key || ('item' + i)) + '">' +
               '<div class="mark kc-live-value">' + mark + '</div>' +
               '<div class="body">' +
               '<div class="label">' + window.kcEscapeHtml(it.label) + '</div>' +
@@ -155,6 +179,19 @@ firing; it is a checklist, not a gate.</p>
               '</div></div>';
     }
     el.innerHTML = html;
+    // The rows are re-rendered every 5 s poll, so the browser's own one-shot
+    // scroll-to-#hash has long since happened against a "Loading..."
+    // placeholder. Re-target it here, on the FIRST render only -- repeating
+    // it every poll would yank the page back under an operator who has
+    // scrolled away to read something else.
+    if (!scrolledToHash && window.location.hash.length > 1) {
+      var target = document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+      if (target) {
+        target.scrollIntoView();
+        target.style.outline = '2px solid var(--bad)';
+        scrolledToHash = true;
+      }
+    }
   }
 
   function poll() {

@@ -40,7 +40,7 @@ static void ui_home_do_start(void)
         return;
     }
 
-    char err_msg[64] = "";
+    char err_msg[160] = ""; /* 64 -> 160, 2026-09-09: the readiness interlock's refusals (readiness_gate.h) name an item AND a remedy; at 64 the remedy was cut off. */
     if (!profile_executor_run(id, err_msg, sizeof(err_msg))) {
         ESP_LOGW(UI_HOME_TAG, "profile_executor_run(%u) refused: %s", id, err_msg);
     }
