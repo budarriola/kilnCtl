@@ -162,6 +162,20 @@ _VID_HINTS: tuple[tuple[str, int], ...] = (
     # 2026-09-05 with both boards attached. See is_fixture_port() below for
     # the belt-and-suspenders exclusion applied on top of this score.
     ("1A86:7522", -80),
+    # Raspberry Pi Debug Probe / picoprobe CMSIS-DAP -- the SWD/JTAG path used
+    # by debug_program(peer="pico"); its CDC interface is the Pico's bench
+    # console (console_capture.py), never the kiln UART bridge. Its generic
+    # Windows description ("USB Serial Device") matches the +25 "usb-serial"
+    # hint, which on 2026-09-09 was enough to make it outscore the real
+    # CH340K bridge (25 vs 15) and be picked as "(recommended)"; every
+    # subsequent kilnctrl call then failed with "no serial port open".
+    # Scored deeply negative here AND hard-excluded in recommend_port() via
+    # is_debug_probe_port() -- see DEBUG_PROBE_VID_PIDS below, which is the
+    # same device debug_probe.py pins by serial (E66540F0A36C6E21); two
+    # identical probes are on this bench, so the exclusion is by VID:PID
+    # (device class), never by serial or COM number.
+    ("2E8A:000C", -1000),
+    ("2E8A:0004", -1000),  # legacy picoprobe firmware, same physical role
 )
 
 # ---------------------------------------------------------------------------
@@ -274,6 +288,28 @@ def _score_port(port) -> int:
 #: (see `add_safety_probe_uart`'s caller, which is told the port explicitly).
 DEBUG_PROBE_VID_PID = "2E8A:000C"
 
+#: Every VID:PID that identifies a debug probe of this class: the current
+#: Raspberry Pi Debug Probe firmware and the legacy picoprobe one. Two
+#: physically identical probes are attached to this bench (see
+#: `firmware/SaftyFW/docs/HARDWARE.md` and `debug_probe.py`'s
+#: `adapter_serial` / KILNCTL_PICO_PROBE_SERIAL pin, E66540F0A36C6E21 for the
+#: Pico's), so anything that must never be mistaken for the kiln UART bridge
+#: is excluded by these VID:PIDs -- the device class -- and not by serial
+#: number or COM number, neither of which is stable or unit-general.
+DEBUG_PROBE_VID_PIDS: tuple[str, ...] = ("2E8A:000C", "2E8A:0004")
+
+
+def is_debug_probe_port(info: "PortInfo") -> bool:
+    """True if `info` is any interface of a CMSIS-DAP debug probe.
+
+    Hard exclusion for UART-bridge autodiscovery: the probe's CDC interface
+    enumerates on Windows as a bland "USB Serial Device", which scores
+    positively on the generic text hints, and picking it as the kiln link
+    yields a silently dead link (writes go nowhere; every call then reports
+    "no serial port open - connect first").
+    """
+    return any(v in info.hwid.upper() for v in DEBUG_PROBE_VID_PIDS)
+
 
 def debug_probe_hwid_serial(hwid: str) -> Optional[str]:
     """Pull the ``SER=...`` USB serial number out of a pyserial ``hwid``
@@ -338,7 +374,7 @@ def recommend_port() -> Optional[str]:
     before this exclusion, recommend_port() picked the fixture's COM14 over
     the main board's COM6."""
     for info in list_ports():
-        if info.score > 0 and not is_fixture_port(info):
+        if info.score > 0 and not is_fixture_port(info) and not is_debug_probe_port(info):
             return info.device
     return None
 

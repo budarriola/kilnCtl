@@ -143,5 +143,57 @@ class BoardIdentityHelpersTest(unittest.TestCase):
                 self.assertFalse(serial_link.is_main_board_port(info), port.device)
 
 
+#: The probe's CDC interface as Windows actually enumerates it (bench,
+#: 2026-09-09): a bland "USB Serial Device", with nothing in the description
+#: naming a probe -- which is exactly why it scored +25 on the generic
+#: "usb-serial" text hint and beat the real bridge.
+_PROBE_A = _FakeComPort("COM10", "USB Serial Device (COM10)", "Microsoft",
+                        "USB VID:PID=2E8A:000C SER=E66540F0A36C6E21 LOCATION=1-2.4.2:x.1")
+_PROBE_B = _FakeComPort("COM11", "USB Serial Device (COM11)", "Microsoft",
+                        "USB VID:PID=2E8A:000C SER=DEADBEEF00000000 LOCATION=1-2.4.3:x.1")
+_MAIN_BRIDGE = _FakeComPort("COM6", "USB-SERIAL CH343", "wch.cn",
+                            "USB VID:PID=1A86:55D3 SER=552E006806")
+_INERT = _FakeComPort("COM1", "Communications Port (COM1)", "", r"ACPI\PNP0501\0")
+
+
+class DebugProbeExclusionTest(unittest.TestCase):
+    """Confirmed bug, 2026-09-09: autodiscovery picked COM10 -- the Pico
+    CMSIS-DAP debug probe's CDC interface (2E8A:000C, serial
+    E66540F0A36C6E21, the same unit debug_probe.py pins for
+    debug_program(peer="pico")) -- scoring it 25 and labelling it
+    "(recommended)". Every kilnctrl call afterwards failed with "no serial
+    port open - connect first". Excluded by VID:PID, so it covers BOTH
+    identical probes on this bench, not one serial number."""
+
+    def test_probe_only_selects_nothing(self) -> None:
+        with _patch_comports([_PROBE_A, _PROBE_B, _INERT]):
+            self.assertIsNone(serial_link.recommend_port())
+
+    def test_bridge_only_selects_the_bridge(self) -> None:
+        with _patch_comports([_MAIN_BRIDGE, _INERT]):
+            self.assertEqual(serial_link.recommend_port(), "COM6")
+
+    def test_both_present_selects_the_bridge(self) -> None:
+        with _patch_comports([_PROBE_A, _PROBE_B, _MAIN_BRIDGE, _INERT]):
+            self.assertEqual(serial_link.recommend_port(), "COM6")
+
+    def test_probe_never_recommended_in_listing(self) -> None:
+        with _patch_comports([_PROBE_A, _PROBE_B, _MAIN_BRIDGE]):
+            for info in serial_link.list_ports():
+                if serial_link.is_debug_probe_port(info):
+                    self.assertFalse(info.recommended, info.device)
+
+    def test_is_debug_probe_port_covers_both_units_and_legacy_pid(self) -> None:
+        for hwid in ("USB VID:PID=2E8A:000C SER=E66540F0A36C6E21",
+                     "USB VID:PID=2e8a:000c SER=DEADBEEF00000000",
+                     "USB VID:PID=2E8A:0004 SER=000000000000"):
+            info = PortInfo(device="COMx", description="USB Serial Device",
+                            manufacturer="", hwid=hwid, score=0)
+            self.assertTrue(serial_link.is_debug_probe_port(info), hwid)
+        self.assertFalse(serial_link.is_debug_probe_port(
+            PortInfo(device="COM6", description="USB-SERIAL CH343", manufacturer="wch.cn",
+                     hwid="USB VID:PID=1A86:55D3 SER=552E006806", score=0)))
+
+
 if __name__ == "__main__":
     unittest.main()
