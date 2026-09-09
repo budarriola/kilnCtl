@@ -317,6 +317,21 @@
                    line-height: 1; padding: 0 0.2em; vertical-align: middle; }
   #relayLifeIcon.feas-icon-warn { color: var(--bad); }
   #relayLifeIcon.relay-life-error { color: var(--bad); font-weight: bold; }
+  /* Configured-limit headroom icon (owner policy 2026-09-08, "profiles are
+     never clamped -- warn instead"): same button-icon shape and reuses the
+     SAME two tokens (--bad/--muted) as #profileFeasIcon/#relayLifeIcon above
+     -- "no new colours" -- with THREE visible tiers distinguished by colour
+     + weight the same way #relayLifeIcon already distinguishes its two:
+     'exceeds' (target above the zone's configured ceiling outright -- will
+     be refused at start) is bad+bold; 'at_limit' (no overshoot margin -- the
+     case the owner raised) is bad, normal weight; 'near_limit' (worth
+     flagging, not yet a likely trip) is muted. 'comfortable' shows nothing
+     at all -- see computeProfileLimitWarning()'s own comment for why. */
+  #profileLimitIcon { border: none; background: none; cursor: pointer; font-size: 1.3em;
+                       line-height: 1; padding: 0 0.2em; vertical-align: middle; }
+  #profileLimitIcon.limit-icon-danger { color: var(--bad); font-weight: bold; }
+  #profileLimitIcon.limit-icon-warn { color: var(--bad); }
+  #profileLimitIcon.limit-icon-info { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -418,6 +433,7 @@
   <label for="profileSelect">Firing profile</label>
   <select id="profileSelect"></select>
   <button id="profileFeasIcon" type="button" hidden aria-label="Feasibility notice for this profile"></button>
+  <button id="profileLimitIcon" type="button" hidden aria-label="Configured-limit headroom notice for this profile"></button>
   <button id="relayLifeIcon" type="button" hidden aria-label="Relay contact-life warning" title=""></button>
   <button id="runBtn" type="button" class="run-btn primary">Start</button>
 </div>
@@ -2433,6 +2449,186 @@ function feasBodyHtml(summary) {
   return html;
 }
 
+// ---------------------------------------------------------------------------
+// Configured-limit headroom warning (owner policy 2026-09-08): "it will be
+// the user's responsibility to create profiles that meet their set limits...
+// guided by the dashboard warnings" -- profiles are NEVER clamped, rewritten
+// or rejected to fit max_temp_c/max_ramp_c_per_hr. The one thing that stays
+// is the EXISTING start-time refusal for a profile that genuinely exceeds a
+// hard limit (profile_executor_run.c's re-check) -- this feature's job is
+// only to make that outcome, and the near-miss cases short of it, VISIBLE
+// before the operator ever presses Start, not discovered as a trip.
+//
+// This is a DIFFERENT question from feasSummarize()'s model-based
+// too_fast/unreachable verdict above: that asks "can the tuned plant
+// physically get there"; this asks "is the profile close enough to the
+// OPERATOR'S OWN configured ceiling to trip on ordinary overshoot". A
+// profile can be perfectly feasible (the kiln can reach and hold the
+// target) and still sit right at its own configured ceiling -- exactly the
+// concrete case that prompted this: max_temp_c and the Pico's independent
+// abs_max_temp_c are BOTH 80C on this bench, so an 80C profile has zero
+// margin and will trip on any overshoot.
+//
+// Purely a client-side computation over data this page already fetches --
+// zonesCache.zones' max_temp_c/max_ramp_c_per_hr (GET /api/zones, loaded by
+// loadZones() above) and target_c/ramp_c_per_hr/seg_kind/zone_mask (GET
+// /api/profile?id=, already fetched by fetchProfileFeas() above for the
+// feasibility icon). No new endpoint, no new JSON field on either response
+// -- zero added httpd JSON cost.
+//
+// abs_max_temp_c (the Pico's independent ceiling) is deliberately NOT
+// fetched or compared here even though it is a live figure: setup_wizard_
+// page.html step 7 already REFUSES to commission abs_max_temp_c below the
+// highest configured zone max_temp_c ("must never be tighter than the
+// ESP's"), so max_temp_c is structurally always the tighter-or-equal of the
+// two -- comparing against it again client-side would need a new fetch just
+// to reach the same verdict max_temp_c already gives. Likewise S8's
+// max_rate_c_per_min (33.3C/min = 1998C/hr live on this bench) is far
+// looser than any sane max_ramp_c_per_hr (900C/hr live on this bench) and
+// is not wired in for the same reason -- it is not the binding constraint.
+//
+// Four states, ranked worst-to-best (see classifyMargin()):
+//   'exceeds'     target/rate is ABOVE the zone's configured ceiling
+//                 outright -- refused at start, same as always; surfaced
+//                 here so that refusal is not a surprise.
+//   'at_limit'    within LIMIT_AT_LIMIT_EPS_C of the ceiling -- no margin
+//                 for overshoot. This project has MEASURED real dwell-entry
+//                 overshoot (PID_EXPANSION_PLAN.md), so a target this close
+//                 to the ceiling is a PREDICTABLE trip, not a hypothetical
+//                 one -- limitBodyHtml() below says so in those terms.
+//   'near_limit'  within LIMIT_HEADROOM_WARN_C (5C -- the owner's own stated
+//                 rule of thumb for practical headroom) of the ceiling.
+//   'comfortable' not reported at all: no icon, no popup. "A warning that
+//                 is always present is a warning nobody reads."
+var LIMIT_HEADROOM_WARN_C = 5;     // owner's stated practical-headroom rule of thumb
+var LIMIT_AT_LIMIT_EPS_C = 0.5;    // ignore-sub-half-degree-effects: below this, "at" the ceiling
+var LIMIT_RAMP_NEAR_FRAC = 0.9;    // rate has no natural "5C"-equivalent unit -- use a fraction instead
+
+var LIMIT_RANK = { exceeds: 3, at_limit: 2, near_limit: 1, comfortable: 0 };
+
+function classifyMargin(margin, nearBandC) {
+  if (margin < 0) return 'exceeds';
+  if (margin <= LIMIT_AT_LIMIT_EPS_C) return 'at_limit';
+  if (margin <= nearBandC) return 'near_limit';
+  return 'comfortable';
+}
+
+// Walks every ZONE_RAMP segment of a /api/profile?id= response against the
+// CURRENTLY configured ceilings of every zone in its zone_mask, and returns
+// the worst verdict found plus the offending items, or null if nothing is
+// worth reporting (no segments, no commissioned zone in the mask, or every
+// segment comfortably inside both ceilings).
+function computeProfileLimitWarning(zones, profileData) {
+  if (!profileData || !profileData.segments || !profileData.segments.length) return null;
+  var zoneMask = profileData.zone_mask || 0;
+  var worst = 'comfortable';
+  var items = [];
+  (profileData.segments || []).forEach(function (s, i) {
+    if (s.seg_kind !== 0) return; // PROFILE_SEG_KIND_ZONE_RAMP=0; others carry no target_c/ramp_c_per_hr
+    for (var zi = 0; zi < 8; zi++) {
+      if (!(zoneMask & (1 << zi))) continue;
+      var z = zones[zi];
+      if (!z || !(z.max_temp_c > 0)) continue; // uncommissioned zone -- nothing real to compare against
+
+      var tempLevel = classifyMargin(z.max_temp_c - s.target_c, LIMIT_HEADROOM_WARN_C);
+      if (tempLevel !== 'comfortable') {
+        items.push({ n: i + 1, zone: zi, kind: 'temp', target: s.target_c, limit: z.max_temp_c,
+                     margin: z.max_temp_c - s.target_c, level: tempLevel });
+      }
+      if (LIMIT_RANK[tempLevel] > LIMIT_RANK[worst]) worst = tempLevel;
+
+      if (z.max_ramp_c_per_hr > 0 && s.ramp_c_per_hr) {
+        var rate = Math.abs(s.ramp_c_per_hr);
+        var rampLevel = classifyMargin(z.max_ramp_c_per_hr - rate, z.max_ramp_c_per_hr * (1 - LIMIT_RAMP_NEAR_FRAC));
+        if (rampLevel !== 'comfortable') {
+          items.push({ n: i + 1, zone: zi, kind: 'ramp', target: rate, limit: z.max_ramp_c_per_hr,
+                       margin: z.max_ramp_c_per_hr - rate, level: rampLevel });
+        }
+        if (LIMIT_RANK[rampLevel] > LIMIT_RANK[worst]) worst = rampLevel;
+      }
+    }
+  });
+  if (worst === 'comfortable') return null;
+  return { level: worst, items: items };
+}
+
+var LIMIT_LEVEL_LABEL = { exceeds: 'exceeds the limit', at_limit: 'at the limit', near_limit: 'close to the limit' };
+
+function limitBodyHtml(summary) {
+  var html = '';
+  if (summary.level === 'exceeds') {
+    html += '<p class="warn">One or more segments exceed a configured ceiling outright. This profile will ' +
+            'be <b>refused at start</b> until either the profile or the zone\'s limit changes.</p>';
+  } else if (summary.level === 'at_limit') {
+    html += '<p class="warn">One or more segments sit AT a configured ceiling, with no margin for overshoot. ' +
+            'This kiln has measured real overshoot at dwell entry -- a target this close to the ceiling is a ' +
+            '<b>predictable trip</b>, not a hypothetical one.</p>';
+  } else {
+    html += '<p>One or more segments are within a small margin of a configured ceiling -- worth knowing before ' +
+            'you start, though not yet a likely trip.</p>';
+  }
+  html += '<ul>';
+  summary.items.forEach(function (it) {
+    var zoneLabel = zoneName(it.zone);
+    var unit = it.kind === 'temp' ? 'C' : 'C/hr';
+    var what = it.kind === 'temp' ? 'target' : 'ramp rate';
+    html += '<li>Segment ' + it.n + ' (' + zoneLabel + '): ' + what + ' ' + it.target.toFixed(1) + unit +
+            ' vs limit ' + it.limit.toFixed(1) + unit + ' -- <b>' + LIMIT_LEVEL_LABEL[it.level] + '</b>' +
+            (it.margin >= 0 ? ' (' + it.margin.toFixed(1) + unit + ' headroom)' : '') + '.</li>';
+  });
+  html += '</ul>';
+  html += '<p class="msg">The profile is not being changed -- these limits are the zone\'s own configuration ' +
+          '(Thermocouples &amp; Zones settings). Raise the limit or edit the profile if this is not what you want.</p>';
+  return html;
+}
+
+function openLimitInfoPopup() {
+  var id = document.getElementById('profileSelect').value;
+  var summary = computeProfileLimitWarning(zonesCache.zones || [], profileFeasCache[id]);
+  if (!summary) return;
+  var name = profileTitleById[id] || ('profile ' + id);
+  var box = document.getElementById('feasPopupBox');
+  box.innerHTML = '<h3>Configured-limit notice — ' + name + '</h3>' + limitBodyHtml(summary) +
+    '<div class="btnrow"><button type="button" id="feasPopupCloseBtn">Close</button></div>';
+  document.getElementById('feasPopupOverlay').removeAttribute('hidden');
+  document.getElementById('feasPopupCloseBtn').addEventListener('click', closeFeasPopup);
+}
+
+// Refreshes #profileLimitIcon for whatever's currently selected. Same
+// stale-response guard as updateProfileFeasIcon() (fetchProfileFeas shares
+// its cache with that function, so this never issues its own extra fetch).
+function updateProfileLimitIcon() {
+  var id = document.getElementById('profileSelect').value;
+  var icon = document.getElementById('profileLimitIcon');
+  if (id === undefined || id === '') {
+    icon.hidden = true;
+    return;
+  }
+  fetchProfileFeas(id).then(function (data) {
+    if (document.getElementById('profileSelect').value !== id) return;
+    var summary = computeProfileLimitWarning(zonesCache.zones || [], data);
+    icon.classList.remove('limit-icon-danger', 'limit-icon-warn', 'limit-icon-info');
+    if (!summary) {
+      icon.hidden = true;
+      return;
+    }
+    icon.hidden = false;
+    if (summary.level === 'exceeds') {
+      icon.classList.add('limit-icon-danger');
+      icon.textContent = '⛔';
+      icon.title = 'This profile exceeds a configured limit and will be refused at start — click for details';
+    } else if (summary.level === 'at_limit') {
+      icon.classList.add('limit-icon-warn');
+      icon.textContent = '⚠';
+      icon.title = 'This profile has no margin against a configured limit — click for details';
+    } else {
+      icon.classList.add('limit-icon-info');
+      icon.textContent = 'ⓘ';
+      icon.title = 'This profile is close to a configured limit — click for details';
+    }
+  });
+}
+
 function closeFeasPopup() {
   document.getElementById('feasPopupOverlay').setAttribute('hidden', '');
 }
@@ -2470,6 +2666,7 @@ function openFeasStartPopup(name, summary, onProceed) {
 }
 
 document.getElementById('profileFeasIcon').addEventListener('click', openFeasInfoPopup);
+document.getElementById('profileLimitIcon').addEventListener('click', openLimitInfoPopup);
 
 // Refreshes the icon for whatever's currently selected. Called on initial
 // list load and on every profileSelect change (see the change handler
@@ -3731,6 +3928,7 @@ function poll() {
 document.getElementById('profileSelect').addEventListener('change', function (e) {
   if (wasIdle) setActivePlanFor(e.target.value);
   updateProfileFeasIcon();
+  updateProfileLimitIcon();
 });
 
 loadZones().then(function () {
@@ -3738,6 +3936,7 @@ loadZones().then(function () {
     var sel = document.getElementById('profileSelect');
     if (wasIdle && sel) setActivePlanFor(sel.value);
     updateProfileFeasIcon();
+    updateProfileLimitIcon();
   });
   loadKilnConfigs();
   poll();
