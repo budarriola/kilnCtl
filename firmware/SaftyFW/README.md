@@ -95,6 +95,71 @@ or crashed safety processor means a kiln that will not fire
 | [`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md) | Updating **both** processors: the interlocks, the one-password authentication, ESP OTA partitioning, and the frames that carry an image over the isolated link |
 | [`TODO.md`](TODO.md) | Sequenced build plan, phases 0–10, including the `KilnFW`-side blockers |
 
+## Wiring the E-stop
+
+**What it is for.** The E-stop must remove power from the elements *by itself*,
+with no software in the loop. The safety processor's job is not to perform the
+stop — it is to **know that the stop happened**, report it, and take a second,
+independent swing at it in case the wiring is wrong.
+
+**Use a double-pole switch, normally closed on both poles.**
+
+| Pole | Wire it to | What it does |
+|---|---|---|
+| 1 | **In series with the large safety relay's coil circuit** — the external line contactor coil, the same circuit K4's contact (J10 pins 1 + 2) sits in | Opening the switch breaks the coil circuit and the contactor drops out by physics. **This is the interlock.** No logic, no firmware, no processor involved. |
+| 2 | **J1** (2-pin), as a normally-closed contact to `GND_Safty` | Tells the safety processor that power was cut. **This is telemetry, not the interlock.** |
+
+Both poles are normally closed: pressing the button opens both at once.
+
+```
+                         E-stop (double pole, NC)
+                        ┌──────────┬──────────┐
+  contactor coil ───────┤ pole 1   │  pole 2  ├─── J1 ── GPIO9 (1k pull-up)
+        │               └──────────┴──────────┘         │
+        └── K4 contact (J10 1+2) ──────────────┘        └── GND_Safty
+```
+
+Pole 2's polarity is not optional. GPIO9 has a 1 k pull-up, so a
+**normally-closed contact to ground** is the only fail-safe sense: a pressed
+button, a cut cable and a pulled connector all read HIGH, and all read as
+*stop*. Do not invert this in firmware — that turns the one honestly fail-safe
+signal on the board into a fail-danger one (`docs/HARDWARE.md` §5).
+
+**What the firmware does in response.** `discrete_task` debounces GPIO9 for
+50 ms, then guard **S7** trips immediately — no further conditions, the fastest
+guard in the set. On that trip `safety_core` commands `relay_owner` to
+de-energize K4 and latch `TRIPPED`, so **the firmware also drops the relay**
+rather than merely reporting. On correctly wired hardware pole 1 has already
+opened the coil circuit and this command changes nothing; it exists for the case
+where the hardware is wrong. The command is retried every 100 ms tick until it
+actually lands (a full command queue must never be a silent one-shot), the trip
+latch makes it idempotent under a button held for hours, and none of it needs
+the link to the main controller — an E-stop is exactly when that link may also
+be gone. `firmware/SaftyFW/test/test_estop_deenergizes_relay.c` pins all of it.
+
+**Polarity is configurable — but one setting is blind.** Param `0x0212`
+`estop_active_level` (safety commissioning config, set from the commissioning
+page like any other): **`0` = asserted when GPIO9 is HIGH — the default**, the
+bench's current wiring, and the only setting under which a **broken E-stop
+line is itself a stop** (the 1 k pull-up floats a cut line high, so a pressed
+button, a cut cable and a pulled connector all read identically). `1` =
+asserted when GPIO9 is LOW, for an installation wired the other way round —
+**this setting cannot detect a broken line**, because the pull-up's high is
+its "all clear". That is a wiring-time decision, not a firmware one: a
+pull-down at the pin would be needed to move which failure is visible. Any
+unrecognised stored value falls back to `0`, deliberately. Full table in
+[`docs/HARDWARE.md`](docs/HARDWARE.md) §5.2.
+
+**What is covered, and what is not.** Pole 1 alone covers a dead, crashed or
+unprogrammed safety processor. The firmware command alone covers a
+single-pole switch, a broken pole-1 contact, or coil power arriving from
+somewhere it should not. Neither covers a **welded line contactor** — nothing
+on this board can (§3 of `docs/HARDWARE.md`); guard S3 will report it and the
+current will keep flowing. Nor does anything cover pole 2 being wired but pole
+1 not: the firmware would trip and command K4 open, but a welded K4 contact
+would then be the only thing between you and a live element, which is why the
+series contact — not the firmware — is the interlock.
+
 ## Three things to know before touching this
 
 **The isolated UART pin map is now a measurement, not a trace.** Measured on

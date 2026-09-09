@@ -68,12 +68,14 @@ extern "C" {
  * ids (i_normal_a[0..2], overcurrent_pct, overcurrent_time_s -- 0x031A-
  * 0x031E, COMMISSIONING_UX.md sec 3.3) = 64, plus ct_installed (0x0109,
  * ROADMAP.md M12's "CTs are optional hardware" pass) = 65, plus ct_topology
- * (0x031F, CT_COMMISSIONING_PLAN.md step 3, per_zone/summed) = 66. Bump this
+ * (0x031F, CT_COMMISSIONING_PLAN.md step 3, per_zone/summed) = 66, plus
+ * estop_active_level (0x0212, owner decision 2026-09-08 -- E-stop input
+ * polarity, 0 = active-high/fail-safe/default, 1 = active-low) = 67. Bump this
  * (and safety_cfg_store.c's SAFETY_CFG_PARAM_TABLE) only when CONFIG_REFERENCE.md
  * itself grows a field -- ids are permanent (COMMISSIONING.md sec 2.1: "a
  * field that is removed leaves its id burned, never reused"), so this count
  * only ever goes up. */
-#define SAFETY_CFG_PARAM_COUNT 67u
+#define SAFETY_CFG_PARAM_COUNT 68u
 
 /* One row of safety_cfg_store_get_by_index()'s output -- everything
  * safety_cfg_http.c's GET handler needs to emit one `params[]` entry.

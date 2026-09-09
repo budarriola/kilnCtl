@@ -421,14 +421,32 @@ what `SaftyFW` assumes.
 
 **On an unwired board GPIO9 floats high and the E-stop reads permanently
 asserted**, which is why bring-up needs either the button fitted or a
-deliberate jumper to `GND_Safty`. Checked 2026-08-16: **no jumper is currently
-fitted anywhere on the `estop` net** in the schematic, so an as-built board
+deliberate jumper to `GND_Safty`.
 
-**Superseded for the bench board, 2026-08-24:** GPIO9 measured **low** over
-SWD (`pico_gpio_read(9)`), so a contact IS present on the physical bench
-board -- E-stop reads healthy and S7 does not trip there. The schematic note
-above still stands for a freshly built board; check the pin rather than
-assuming either way. This mattered because `discrete_task.c` had the polarity
+> **CORRECTED 2026-09-08 — a contact IS fitted on this bench board.** The
+> "Checked 2026-08-16: no jumper is currently fitted anywhere on the `estop`
+> net" claim that used to open this paragraph was a *schematic* observation,
+> and it went stale the moment someone fitted one physically. GPIO9 reads
+> **LOW** over SWD (`pico_gpio_read(9)`, re-confirmed 2026-09-08), so the
+> input is held closed/healthy.
+>
+> **That state is the DEFAULT and the preferred safe-to-fire state** (owner
+> decision 2026-09-08) — it is not a bypass to be worked around, and §5.1's
+> configurable polarity is defaulted so that this reading is *not* a fault
+> condition. What is still outstanding is the **switch itself**: with a plain
+> closed contact rather than a real E-stop, S7 cannot be exercised by pressing
+> anything. Fit the double-pole switch of §5.1 before relying on the E-stop.
+>
+> Do not read the table above and assume the pin's state — read the pin. The
+> 2026-08-16 line above sat here wrong for three weeks, which is the same
+> class of stale hardware claim that cost a day of thermocouple diagnosis.
+
+The schematic-only statement still holds for a *freshly built* board: an
+as-built board
+
+**History, 2026-08-24 (the measurement the correction above is built on):**
+GPIO9 measured **low** over SWD, so a contact IS present on the physical bench
+board -- E-stop reads healthy and S7 does not trip there. This mattered because `discrete_task.c` had the polarity
 inverted until 642dd54, which decoded this healthy low as *pressed* -- masked
 only because S5 (no safety TC fitted, at the time this bug was live) latched
 first and `safety_guards_tick()` early-returns while any trip is latched.
@@ -451,6 +469,106 @@ is not. If a build genuinely has no E-stop, fit the jumper — a physical,
 visible, removable object — rather than a `#define`.
 
 Debounce in software: 50 ms of settled state before acting on a change.
+
+### 5.1 Intended wiring — double pole, and the input is NOT the interlock
+
+**Owner's design, stated 2026-09-08.** The E-stop is a **double-pole,
+normally-closed** switch. As built today the board offers only J1, a 2-pin
+terminal block on the `estop` net — traced 2026-09-08, that net reaches
+**A1 (GPIO9), R10, C3 and J1 and nothing else**, and in particular it does not
+touch K4's coil, Q4, or J10. So **the board as drawn supports pole 2 only**;
+pole 1 is external wiring the owner must add, and no board change is needed to
+add it.
+
+| Pole | Where it goes | Role |
+|---|---|---|
+| 1 | **In series with the large safety relay's coil circuit** — the external line contactor coil, the same circuit K4's contact carries via J10 pins 1 (NO) + 2 (COM), §3 | **The interlock.** Opening it drops the contactor by physics. No firmware, no processor, no logic. |
+| 2 | **J1**, NC contact to `GND_Safty` | **Telemetry.** Tells the safety processor that power was cut, so it can trip, report and latch. |
+
+Note "the large safety relay" is the **external line contactor**, not K4. K4 is
+a pilot relay (§3, "not rated for use with heaters") and its coil is powered
+from `12v_Safty` and low-side switched by Q4 — that coil circuit is entirely
+on-board and has no terminal a switch could be inserted into. The relay whose
+coil the E-stop breaks is the contactor.
+
+**Firmware's response — a third, independent action.** On a debounced
+assertion, guard S7 trips immediately, and `safety_core_task()` commands
+`relay_owner_command_trip()`, which drives `SAFTYFW_PIN_RELAY` (GPIO6) low and
+latches `RELAY_OWNER_STATE_TRIPPED`. So the firmware **de-energizes K4 as well
+as reporting** — deliberately redundant with pole 1, on the principle that the
+wiring may be wrong. Properties, all host-tested in
+`firmware/SaftyFW/test/test_estop_deenergizes_relay.c`:
+
+- **Idempotent.** E-stop is a level, not an edge. `safety_guards_tick()`
+  early-returns while any trip is latched, so a button held for hours issues
+  exactly one relay command — no thrash, no queue spam, no relay wear.
+- **Independent of the ESP link.** The whole path is `discrete_task` →
+  `safety_guards` → `relay_owner`, all local. An E-stop is precisely when the
+  link may also be down.
+- **Fails safe if the command fails.** `relay_owner`'s queue is 4 deep and
+  never blocks, so a send can be dropped. `s_trip_command_owed` latches the
+  moment the trip is decided and is re-derived every tick from the send's
+  *actual* result (`relay_trip_command_still_owed()`), so a dropped command is
+  retried every 100 ms until it lands, and success is never assumed.
+
+**Coverage, honestly.** Pole 1 covers a dead, crashed, unpowered or
+unprogrammed safety processor — the firmware cannot help there. The firmware
+command covers a single-pole switch, a failed pole-1 contact, or coil power
+reaching the contactor from somewhere it should not. **Neither covers a welded
+line contactor** (§3) — S3 reports it and the current keeps flowing. And a
+board wired with pole 2 but *not* pole 1 leaves K4's own contact as the only
+barrier, which is exactly the single point of failure the series contact
+exists to remove.
+
+### 5.2 Configurable polarity — and which failures each setting can see
+
+**Owner decision 2026-09-08:** the E-stop polarity is configurable, *and the
+state this bench is in right now is the default and the preferred
+safe-to-fire state*. GPIO9 measured LOW 2026-09-08; at the default polarity
+that reads healthy, so no existing board changes behaviour.
+
+Param **`0x0212` `estop_active_level`** (u8), stored in the safety
+commissioning config as `config_store_record_t::estop_active_level`. It is a
+tail-append into the record's reserved block at offset 234 — no
+`format_version` bump, no `KILNLINK_PROTOCOL_VERSION` bump (still **12**),
+and every already-committed record keeps loading exactly as before. On the
+ESP side it is appended at the very END of `SAFETY_CFG_PARAM_TABLE`
+(`safety_cfg_store.c`, store version 4 → 5), never mid-array — a mid-array
+insertion silently remaps every later persisted value.
+
+| Value | Meaning | Broken E-stop line reads as | Detectable? |
+|---|---|---|---|
+| **0 `ACTIVE_HIGH`** (default) | asserted when GPIO9 is HIGH | **STOP** — R10's 1 k pull-up floats a cut line high | **Yes** |
+| 1 `ACTIVE_LOW` | asserted when GPIO9 is LOW | **healthy** — the pull-up's high is this setting's "all clear" | **No** |
+
+**A lost E-stop signal is a trip in its own right — at the default polarity
+only.** Because the pull-up is fitted, a pressed button, a cut cable, a
+pulled connector and an unfitted switch are all electrically identical at
+`ACTIVE_HIGH`, and all four stop. `ACTIVE_LOW` trades that detection away:
+under it a broken line is indistinguishable from a working, un-pressed
+E-stop. **No firmware change can recover it** — which failure is visible is
+decided by whether the pin is pulled up or down, and R10 pulls up. If an
+installation genuinely needs `ACTIVE_LOW`, it needs a pull-down at the pin,
+which is a board change, not a config change.
+
+The decode is asymmetric on purpose: **only the byte `1` selects
+`ACTIVE_LOW`.** A legacy record's `0x00`, erased flash's `0xFF`, and any
+value a future or older firmware might leave at that offset all fall through
+to `ACTIVE_HIGH`. An unreadable configuration must never be the thing that
+selects the polarity which cannot see a broken wire.
+
+`discrete_task` re-reads the setting on every 10 ms sample
+(`config_store_get_estop_active_level()`), so a `SET_PARAM` takes effect
+without a reboot, and a read before the store is loaded returns
+`ACTIVE_HIGH`. Host-tested in `test/test_estop_deenergizes_relay.c` and
+`test/test_discrete_pin_policy.c`.
+
+---
+
+The user-facing version of §5.1/§5.2, written for someone doing the wiring
+rather than reading an audit, is in [`../README.md`](../README.md) § "Wiring
+the E-stop". **Keep the two in agreement** — a wiring instruction that
+differs between two files is how someone wires it wrong.
 
 ---
 
@@ -787,7 +905,7 @@ only the bench measurement in §1 did.
 - [x] `KilnFW` safety-UART pins corrected (TX→4, RX→5) and its docs fixed (2026-08-16)
 - [x] K4 interlock topology identified from the schematic (J10: 1=NO, 2=COM, 3=NC; §3) — [ ] **still needs confirming on the physical part**, the symbol-drawing convention this reading rests on is not a silkscreened label
 - [ ] De-energized K4 proven to open the contactor on the real wiring
-- [x] E-stop circuit confirmed normally-closed by design (§5) — [ ] switch or deliberate jumper still needs physically fitting, neither is present today
+- [x] E-stop circuit confirmed normally-closed by design (§5); GPIO9 reads LOW on the bench board = healthy = the default, preferred safe-to-fire state (§5.2) — [ ] the intended double-pole switch (§5.1) still needs fitting, and pole 1 in series with the contactor coil is external wiring the owner must add
 - [ ] Pico power/flash path decided; **USB-vs-back-fed-3V3 contention checked**
 - [ ] Debug probe obtained (Raspberry Pi Debug Probe or a spare Pico running `debugprobe`)
 - [ ] **DEBUG pads accessible** — 3-pin header fitted before A1 is soldered down

@@ -20,6 +20,7 @@
 
 #include "board_pins.h"
 #include "debounce_policy.h"
+#include "config_store.h"
 #include "discrete_pin_policy.h"
 #include "task_priorities.h"
 #include "watchdog_task.h"
@@ -86,7 +87,17 @@ static void discrete_task_fn(void *arg)
         // S7 in both directions -- was invisible to the existing test
         // suite (virtual_dut synthesizes `estop_pressed` directly and never
         // exercises a GPIO read).
-        bool estop_raw = discrete_pin_policy_estop_asserted(hal_gpio_get(SAFTYFW_PIN_ESTOP));
+        //
+        // Polarity is configurable as of 2026-09-08 (param 0x0212), read
+        // fresh on every sample -- the same "re-read where it's used"
+        // pattern config_store_get_tc_type() uses, so a SET_PARAM takes
+        // effect without a reboot, and so a caller running before the store
+        // is loaded gets the fail-safe ACTIVE_HIGH rather than a zeroed
+        // cache. The DEFAULT is unchanged and is what this bench is wired
+        // for (GPIO9 measured LOW = healthy, safe to fire), so this
+        // addition changes no behaviour on any existing board.
+        bool estop_raw = discrete_pin_policy_estop_asserted_ex(
+            hal_gpio_get(SAFTYFW_PIN_ESTOP), config_store_get_estop_active_level());
         bool main_fault_raw =
             discrete_pin_policy_main_fault_asserted(hal_gpio_get(SAFTYFW_PIN_MAIN_FAULT));
 

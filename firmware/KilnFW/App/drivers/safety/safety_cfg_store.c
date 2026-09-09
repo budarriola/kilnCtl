@@ -119,6 +119,10 @@ static safety_ct_cal_blob_t s_ct_cal;
  * safety_cfg_store_refetch() refills the empty cache from the Pico, which is
  * the authority on every one of these values anyway.
  *
+ * 4 -> 5 (2026-09-08, E-stop pass): estop_active_level (0x0212) appended at
+ * the END of the table, same tail-append discipline as 3 -> 4 -- bumped for
+ * the same principled reason, not left to the size check.
+ *
  * 2 -> 3 (2026-09-06, CT_COMMISSIONING_PLAN.md step 3): ct_topology (0x031F)
  * appended at the END of the table (not mid-array, so no remap hazard this
  * time) -- bumped anyway, principled rather than relying again on the size
@@ -127,7 +131,7 @@ static safety_ct_cal_blob_t s_ct_cal;
  *
  * 3 -> 4 (2026-09-08, owner request): tc_offset_c (0x010A) appended at the
  * END of the table, same no-remap-hazard shape as the 2 -> 3 bump. */
-#define SAFETY_CFG_STORE_VERSION 4u
+#define SAFETY_CFG_STORE_VERSION 5u
 
 /* CONFIG_REFERENCE.md secs 1-5 / COMMISSIONING.md sec 2.1's param_id table,
  * in that document's own order -- table POSITION is what
@@ -241,6 +245,19 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUN
      * table's own "append to the end of the array" rule above -- 3 -> 4
      * bump. */
     { 0x010A, KILNLINK_PARAM_TYPE_F32, "tc_offset_c" },
+    /* 0x0212 estop_active_level -- E-stop input polarity, owner decision
+     * 2026-09-08. Appended at the very END of the table (NOT next to
+     * safety_tc_installed/0x0211 in sec 2, where it belongs by subject
+     * matter) for exactly the reason this table's header comment gives: any
+     * insertion but a tail-append shifts every later row and silently
+     * remaps each already-persisted value onto the wrong field. 4 -> 5 bump.
+     * 0 = ACTIVE_HIGH: asserted when the Pico's GPIO9 reads high -- the
+     * default, this bench's real wiring, and the only polarity under which
+     * a broken E-stop line is detectable (R10's pull-up floats a cut line
+     * high, which reads as STOP). 1 = ACTIVE_LOW, for a differently-wired
+     * installation, which cannot see a broken line. The Pico is the
+     * authority on the value; this table only names it. */
+    { 0x0212, KILNLINK_PARAM_TYPE_U8, "estop_active_level" },
 };
 
 typedef struct {

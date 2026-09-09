@@ -1,6 +1,11 @@
 // config_store.c -- see config_store.h.
 #include "config_store.h"
 
+#include "discrete_pin_policy.h" // DISCRETE_PIN_POLICY_ESTOP_ACTIVE_* -- the
+                                // encoding this record's estop_active_level
+                                // byte carries; one shared definition rather
+                                // than a duplicated 0/1 convention
+
 #include <string.h>
 
 #include "config_params.h" // config_params_validate_ranges() -- load-time re-check, see config_store_unpack()
@@ -102,7 +107,15 @@
 //    230     4  tc_offset_c (f32 LE) -- safety board's own TC calibration
 //               correction, owner request 2026-09-08; see config_store.h's
 //               struct comment
-//    234   270  reserved, 0xFF-filled (headroom for a future field)
+//    234     1  estop_active_level (u8, 0=active-high/1=active-low) -- param
+//               0x0212, owner decision 2026-09-08. Plain 0/1 byte, same
+//               convention as ct_topology at 228: only the value 1 selects
+//               ACTIVE_LOW, so a legacy record's 0x00 and erased flash's
+//               0xFF both decode to ACTIVE_HIGH -- which is both the bench's
+//               real wiring and the fail-safe polarity. An unreadable
+//               configuration must never select the polarity that cannot
+//               detect a broken E-stop line.
+//    235   269  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -193,8 +206,20 @@
 // trust-the-bytes" discipline overcurrent_pct/_time_s use for their own
 // carved-from-reserved fields.
 #define REC_OFF_TC_OFFSET_C            (REC_OFF_I_PRESENT_A_MANUAL + 1u)  /* 230 */
-#define REC_OFF_RESERVED               (REC_OFF_TC_OFFSET_C + 4u)         /* 234 */
-#define REC_RESERVED_LEN               270u
+// estop_active_level (owner decision 2026-09-08, "Estop polarity should be
+// configureable but the state it is in now on my test setup should be
+// considered the default and the prefered safe to fire state"). Carved out
+// of the front of the reserved tail, plain 0/1 byte, same convention and
+// same reasoning as REC_OFF_CT_TOPOLOGY above: the decoder special-cases
+// only the value 1, so every byte pattern a record written before this
+// field existed could hold at this offset -- 0xFF erased-flash fill most
+// likely -- decodes to ACTIVE_HIGH. That is deliberately the direction
+// where an unreadable/legacy configuration lands on the FAIL-SAFE polarity
+// (the one where a cut E-stop line reads as STOP), never on the one that
+// cannot see a broken wire at all.
+#define REC_OFF_ESTOP_ACTIVE_LEVEL     (REC_OFF_TC_OFFSET_C + 4u)         /* 234 */
+#define REC_OFF_RESERVED               (REC_OFF_ESTOP_ACTIVE_LEVEL + 1u)  /* 235 */
+#define REC_RESERVED_LEN               269u
 
 // The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
 // file's own layout-table comment above for the hardware-confirmed reason:
@@ -409,6 +434,9 @@ void config_store_pack(const config_store_record_t *rec,
     out[REC_OFF_CT_TOPOLOGY] = (rec->ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED) ? 1u : 0u;
     out[REC_OFF_I_PRESENT_A_MANUAL] = rec->i_present_a_manual ? 1u : 0u;
     put_f32_le(&out[REC_OFF_TC_OFFSET_C], rec->tc_offset_c);
+    // Plain 0/1 byte -- see REC_OFF_ESTOP_ACTIVE_LEVEL's layout comment.
+    out[REC_OFF_ESTOP_ACTIVE_LEVEL] =
+        (rec->estop_active_level == DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW) ? 1u : 0u;
 
     put_f32_le(&out[REC_OFF_MAX_EXPECTED_POWER_W], rec->max_expected_power_w);
 
@@ -550,6 +578,11 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     // (0x00, confirmed, not erased-flash 0xFF) already decodes as the safe
     // 0.0f default.
     out->tc_offset_c = get_f32_le(&in[REC_OFF_TC_OFFSET_C]);
+    // Only the value 1 selects ACTIVE_LOW; everything else (legacy 0x00,
+    // erased 0xFF, anything unrecognised) is the fail-safe ACTIVE_HIGH.
+    out->estop_active_level = (in[REC_OFF_ESTOP_ACTIVE_LEVEL] == 1u)
+                                  ? DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW
+                                  : DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH;
 
     // Raw decode only -- CONFIG_STORE_SET_MAX_EXPECTED_POWER_W (already read
     // into out->fields_set above) is what gates whether any caller may trust

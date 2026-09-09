@@ -94,6 +94,10 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     // "append after the last used id in the field's own doc section" rule
     // every other id in this table already follows.
     { 0x0211u, KILNLINK_PARAM_TYPE_U8 },  // safety_tc_installed
+    // estop_active_level, owner decision 2026-09-08. Minted 0x0212 by the
+    // same "append after the last used id in this section-1-style
+    // commissioning group" rule 0x0211 above followed.
+    { 0x0212u, KILNLINK_PARAM_TYPE_U8 },  // estop_active_level
     { 0x0301u, KILNLINK_PARAM_TYPE_F32 }, // i_present_a
     { 0x0302u, KILNLINK_PARAM_TYPE_U16 }, // zero_counts[0]
     { 0x0303u, KILNLINK_PARAM_TYPE_U16 }, // zero_counts[1]
@@ -207,6 +211,7 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x020Fu: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->borrowed_stale_trip_s); return true;
     case 0x0210u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->borrowed_type_expected; return true;
     case 0x0211u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->safety_tc_installed; return true;
+    case 0x0212u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->estop_active_level; return true;
 
     case 0x0301u: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->i_present_a; return true;
     case 0x0302u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = rec->zero_counts[0]; return true;
@@ -421,6 +426,20 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     // expected's convention (a real compiled default, not an unset-until-
     // commissioned flag) rather than the four/six no-safe-default fields'.
     case 0x0211u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(1u); rec->safety_tc_installed = value.u8_val; return true;
+    // estop_active_level: 0 = ACTIVE_HIGH (default, fail-safe, and this
+    // bench's real wiring), 1 = ACTIVE_LOW. CHECK_U8_MAX(1u) keeps the
+    // encoding closed, so no third value can ever reach flash and force the
+    // decoder's fall-through to do the work. NOT fields_set-gated -- 0 is a
+    // genuinely safe compiled default (see config_store.h's field comment),
+    // so "never answered" and "answered 0" are the same state, exactly the
+    // reasoning ct_topology uses.
+    //
+    // Deliberately NOT added to config_params_all_required_set(): making
+    // this an ASKED question would leave every existing board
+    // uncommissionable until someone answered a question whose safe answer
+    // is already the default -- and the unsafe answer is the one an
+    // operator might pick by accident.
+    case 0x0212u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(1u); rec->estop_active_level = value.u8_val; return true;
 
     // A direct write to i_present_a is exactly "set by hand" (CT_
     // COMMISSIONING_PLAN.md step 3) -- marking i_present_a_manual here means

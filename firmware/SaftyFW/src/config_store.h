@@ -692,6 +692,27 @@ typedef struct {
     // field's sibling.
     float   tc_offset_c;
 
+    // E-stop input polarity, param 0x0212 -- owner decision 2026-09-08.
+    // DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH (0) or _ACTIVE_LOW (1); see
+    // discrete_pin_policy.h for the full semantics and for why 0 is the
+    // default in every direction (compiled default, legacy record, erased
+    // flash) rather than something inferred from whatever byte happens to
+    // be at this offset.
+    //
+    // 0 is not merely "the old behaviour" -- it is the polarity this bench
+    // is physically wired for (GPIO9 measured LOW 2026-09-08 = healthy,
+    // safe to fire) AND the only polarity under which a lost E-stop signal
+    // is itself detectable: R10's pull-up floats a broken line HIGH, which
+    // at ACTIVE_HIGH reads as STOP. Selecting ACTIVE_LOW trades that away,
+    // permanently and unrecoverably in firmware.
+    //
+    // NOT fields_set-gated -- fields_set is completely full (see
+    // CONFIG_STORE_SET_CT_INSTALLED's "LAST FREE BIT" comment above), and
+    // this field does not need a bit: it has a genuinely safe compiled
+    // default, so "never answered" and "answered 0" are the same state, the
+    // same reasoning ct_topology/i_present_a_manual use.
+    uint8_t estop_active_level;
+
     // Reserved, unused, packed as 0xFF (matches the erased-flash background,
     // same convention as metadata.h's per-slot reserved bytes). ~270 B of
     // headroom (config_store.c's REC_OFF_RESERVED..REC_OFF_CRC; one byte of
@@ -706,7 +727,7 @@ typedef struct {
     // config_store.c) -- adding a field later is a struct/pack/unpack/
     // host-test change, not a layout change, same as metadata.h's own
     // signature/sig_required reservation.
-    uint8_t  reserved[270];
+    uint8_t  reserved[269];
 } config_store_record_t;
 
 // Compile-time budget check, mirroring bootloader/metadata.c's
@@ -1000,6 +1021,14 @@ uint8_t config_store_get_tc_type(void);
 // Same "safe to call from any task" contract as config_store_get_tc_type()
 // above.
 float config_store_get_tc_offset_c(void);
+
+// The commissioned E-stop input polarity (param 0x0212), one of
+// DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH/_LOW. Returns ACTIVE_HIGH -- the
+// fail-safe polarity, and this bench's real wiring -- if the store has not
+// been loaded yet. Read by discrete_task on every sample, the same
+// "re-read where it's used" pattern config_store_get_tc_type() uses, so a
+// SET_PARAM takes effect without a reboot.
+uint8_t config_store_get_estop_active_level(void);
 
 // The cached calibration_missing flag. Returns true (the safe default) if
 // called before config_store_boot_load().

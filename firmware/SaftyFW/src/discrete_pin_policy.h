@@ -35,10 +35,18 @@
 #define SAFTYFW_DISCRETE_PIN_POLICY_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// E-stop polarity selector -- config_store_record_t::estop_active_level,
+// SET_PARAM 0x0212. 0 is the default in every direction (compiled default,
+// erased flash, legacy record) and is the fail-safe polarity; see
+// discrete_pin_policy_estop_asserted_ex() below.
+#define DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH 0u
+#define DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW  1u
 
 // GPIO9, E-stop. `gpio9_high` is the raw `gpio_get(SAFTYFW_PIN_ESTOP)`
 // reading. Returns true (E-stop asserted / STOP) whenever the pin reads
@@ -49,6 +57,37 @@ extern "C" {
 // normally-closed contact is intact and closed. NO inversion -- do not add
 // a `!` here; see this header's own comment for exactly why that is wrong.
 bool discrete_pin_policy_estop_asserted(bool gpio9_high);
+
+// Configurable-polarity form of the above (owner decision 2026-09-08:
+// "Estop polarity should be configureable but the state it is in now on my
+// test setup should be considered the default and the prefered safe to fire
+// state"). `active_level` is one of DISCRETE_PIN_POLICY_ESTOP_ACTIVE_*.
+//
+//   ACTIVE_HIGH (0, THE DEFAULT, and what this bench is wired for -- GPIO9
+//     measured LOW 2026-09-08, i.e. healthy/safe-to-fire):
+//     asserted == pin HIGH. This is the FAIL-SAFE choice and the only one
+//     that satisfies "a lost E-stop signal is itself a trip": R10's 1k
+//     pull-up means a cut wire, a pulled connector and an unfitted switch
+//     all float the pin HIGH and are therefore indistinguishable from a
+//     pressed button -- all of them STOP.
+//
+//   ACTIVE_LOW (1): asserted == pin LOW. Provided for an installation wired
+//     the other way round. **This polarity CANNOT detect a lost signal.**
+//     With the pull-up still fitted, a broken line reads HIGH, which under
+//     this setting is the healthy state -- a cut cable is indistinguishable
+//     from a working, un-pressed E-stop. Choosing it trades the
+//     broken-wire detection away, and nothing in firmware can win it back;
+//     only a pull-DOWN on the board would move which failure is detectable.
+//     Documented in docs/HARDWARE.md section 5.1 so the asymmetry is visible
+//     at wiring time, which is the only moment it can be acted on.
+//
+// Any value other than DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW is treated as
+// ACTIVE_HIGH. That is deliberate and matches config_store's decode: a
+// legacy record's 0x00, erased flash's 0xFF, and any byte a future/older
+// firmware might leave here all land on the fail-safe polarity rather than
+// the one that cannot see a broken wire. An unreadable configuration must
+// never be the thing that selects the less safe option.
+bool discrete_pin_policy_estop_asserted_ex(bool gpio9_high, uint8_t active_level);
 
 // GPIO10, mainFault. `gpio10_high` is the raw `gpio_get(SAFTYFW_PIN_MAIN_
 // FAULT)` reading. Returns true (mainFault asserted) whenever the pin reads

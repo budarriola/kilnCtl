@@ -82,6 +82,7 @@
 // re-scanning flash every call. config_store_boot_load() must run once,
 // early in main()'s boot sequence, before anything reads the cache.
 #include "config_store.h"
+#include "discrete_pin_policy.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -344,6 +345,20 @@ bool config_store_is_tc_type_set(void)
         return false; // safe default: treat as uncommissioned until proven otherwise
     }
     return (s_cached_record.fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
+}
+
+uint8_t config_store_get_estop_active_level(void)
+{
+    if (!s_loaded) {
+        // Same "safe defaults over silence" discipline as
+        // config_store_get_tc_type() above, and here the safe default is
+        // not merely conventional: ACTIVE_HIGH is the only polarity under
+        // which a broken E-stop line reads as STOP. A caller running before
+        // the store is loaded must not be handed the polarity that cannot
+        // detect a lost signal.
+        return DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH;
+    }
+    return s_cached_record.estop_active_level;
 }
 
 void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_CAL_NUM_CHANNELS])
