@@ -111,8 +111,30 @@ if ($text -match 'ui_responsive_sweep: SKIPPED') {
     Write-Host "check_ui_responsive_sweep.ps1: SKIP -- sweep SKIPPED internally (see reason above)."
     exit 3
 }
+# A genuine layout FAIL must win even if the same run also hit a harness
+# error on some other row -- ui_responsive_sweep.mjs itself already enforces
+# this ordering (it never emits "checks FAILED" and "HARNESS_ERROR" in the
+# same run: a real failedRows entry exits 1 before the harness-error branch
+# is even reached), but the check here matches FAILED first regardless, so
+# this wrapper cannot be fooled by which marker happens to appear first in
+# the text even if that ordering ever changed.
 if ($text -match '\d+ of \d+ .* checks FAILED') {
     throw "check_ui_responsive_sweep.ps1: sweep FAILED -- see output above for the specific (page, width, assertion) failures."
+}
+# Harness/transport error (2026-09-09): reproduced by running two sweeps
+# concurrently -- Node's fetch()/the CDP transport can fail transiently
+# under real contention (`fetch failed`, a wedged CDP call) with no
+# connection to whether the page under test actually regressed.
+# ui_responsive_sweep.mjs now retries a bounded number of times and, if
+# every retry still hit a transient failure, reports it distinctly as
+# "HARNESS_ERROR" rather than folding it into the same FAIL bucket as a real
+# assertion violation (exit 3, matching its own process.exit(3) for this
+# case) -- SKIP, not FAIL, since no layout assertion for that row ever ran.
+# A genuine layout regression is unaffected: it is matched by the FAILED
+# check above, which always runs first.
+if ($text -match 'ui_responsive_sweep: HARNESS_ERROR') {
+    Write-Host "check_ui_responsive_sweep.ps1: SKIP -- one or more (page, width) checks hit a transient fetch/CDP harness error, not a layout regression (see output above). Re-run in isolation to confirm." -ForegroundColor Yellow
+    exit 3
 }
 if ($text -notmatch 'All \d+ .* checks passed') {
     throw "check_ui_responsive_sweep.ps1: sweep ended without a recognized PASS/FAIL/SKIP marker -- treating as a failure. Output above."

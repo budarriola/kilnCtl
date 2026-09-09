@@ -742,6 +742,45 @@ async function sweepOnePage(port, fileUrl, width, fixtureScript) {
   }
 }
 
+// Harness-error classification (2026-09-09) -- reproduced by running two
+// check_ui_responsive_sweep.ps1 instances concurrently: under real
+// contention for CDP/the static server/Chrome startup itself, sweepOnePage()
+// can throw a plain `TypeError: fetch failed` (Node's own fetch(), from
+// newTab()/closeTab(), or from waitForPort()'s probe) with NO connection to
+// anything the page under test rendered. Before this fix that landed in the
+// SAME catch block (main()'s per-(page,width) try/catch) as a genuine page-
+// script exception, and was reported as `[error] ... sweep threw: fetch
+// failed` -- a harness/CDP transport failure printed and counted exactly
+// like a real layout assertion FAIL, indistinguishable in the output an
+// agent has to triage. Confirmed: two concurrent sweep runs reliably produce
+// this on an otherwise-unchanged tree.
+//
+// isTransientHarnessError() narrowly matches known harness/transport failure
+// signatures -- Node's fetch() network errors, CDP's own "connection closed"
+// /"timed out" wrappers (CdpSession, above) -- and deliberately does NOT
+// match `fixture script threw:` / `setup script threw:` / `page script
+// threw:` (sweepOnePage's own wraps around a REAL exception the page's own
+// JS raised) or anything else: those stay hard FAILs. A regression that
+// actually breaks page JS must never be swallowed as "just the harness".
+function isTransientHarnessError(e) {
+  const msg = (e && e.message) || String(e);
+  if (/^fixture script threw:|^setup script threw:|^page script threw:/.test(msg)) {
+    return false;
+  }
+  return /fetch failed/i.test(msg)
+      || /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND/i.test(msg)
+      || /^CDP call .* timed out/i.test(msg)
+      || /^CDP connection closed:/i.test(msg)
+      || /WebSocket/i.test(msg);
+}
+
+// Bounded retry for a transient harness error -- 3 total attempts (2
+// retries). Chosen the same way config_store_flash's seqlock retry count
+// was: enough to ride out ordinary scheduling/contention noise, not
+// unbounded (this loop still runs inside check_ui_responsive_sweep.ps1's own
+// 420s wall-clock cap either way).
+const HARNESS_ERROR_MAX_ATTEMPTS = 3;
+
 function formatFailures(page, width, r) {
   const lines = [];
   if (r.overflowFail) lines.push(`  [overflow] ${page} @${width}px: ${r.overflowDetail}`);
@@ -832,6 +871,7 @@ async function main() {
 
   const rows = [];
   let anyFail = false;
+  let anyHarnessError = false; // transient fetch/CDP failure, never a layout FAIL on its own -- see isTransientHarnessError()
   let devtoolsSkip = null;
 
   try {
@@ -873,19 +913,46 @@ async function main() {
       for (const variant of variants) {
         const label = variant.suffix ? `${pf} [${variant.suffix}]` : pf;
         for (const width of args.widths) {
-          let result, failures;
-          try {
-            result = await sweepOnePage(args.port, pageUrl, width, variant.script);
-            failures = formatFailures(label, width, result);
-            if (variant.suffix && result && result.tuningBadge && !(variant.suffix in badgesBySuffix)) {
-              badgesBySuffix[variant.suffix] = result.tuningBadge;
+          let result, failures = [], harnessErrorMsg = null;
+          for (let attempt = 1; attempt <= HARNESS_ERROR_MAX_ATTEMPTS; attempt++) {
+            try {
+              result = await sweepOnePage(args.port, pageUrl, width, variant.script);
+              failures = formatFailures(label, width, result);
+              harnessErrorMsg = null;
+              if (variant.suffix && result && result.tuningBadge && !(variant.suffix in badgesBySuffix)) {
+                badgesBySuffix[variant.suffix] = result.tuningBadge;
+              }
+              break; // success -- stop retrying
+            } catch (e) {
+              if (isTransientHarnessError(e)) {
+                harnessErrorMsg = e.message;
+                if (attempt < HARNESS_ERROR_MAX_ATTEMPTS) {
+                  // Brief backoff before retrying -- the contention this is
+                  // working around (another sweep, a loaded machine) is
+                  // rarely gone a millisecond later.
+                  await new Promise((r) => setTimeout(r, 200 * attempt));
+                  continue;
+                }
+                // Retries exhausted: fall through and report as a harness
+                // error below, NOT as a layout failure.
+                failures = [];
+              } else {
+                // A real exception from the page/setup/fixture script itself
+                // -- never retried, never downgraded: this is exactly the
+                // class of regression this sweep exists to catch.
+                failures = [`  [error]    ${label} @${width}px: sweep threw: ${e.message}`];
+                harnessErrorMsg = null;
+              }
+              break;
             }
-          } catch (e) {
-            failures = [`  [error]    ${label} @${width}px: sweep threw: ${e.message}`];
           }
-          const pass = failures.length === 0;
-          if (!pass) anyFail = true;
-          rows.push({ page: label, width, pass, failures });
+          const pass = failures.length === 0 && !harnessErrorMsg;
+          if (harnessErrorMsg) {
+            anyHarnessError = true;
+          } else if (!pass) {
+            anyFail = true;
+          }
+          rows.push({ page: label, width, pass, failures, harnessError: harnessErrorMsg });
         }
       }
 
@@ -1027,11 +1094,16 @@ async function main() {
   console.log('UI RESPONSIVE SWEEP -- widths: ' + args.widths.join(', '));
   console.log('');
   for (const row of rows) {
-    console.log(`  ${row.pass ? 'PASS' : 'FAIL'}  ${row.page.padEnd(34)} @${String(row.width).padStart(4)}px`);
+    const status = row.harnessError ? 'HARN' : (row.pass ? 'PASS' : 'FAIL');
+    console.log(`  ${status}  ${row.page.padEnd(34)} @${String(row.width).padStart(4)}px`);
   }
   console.log('');
 
-  const failedRows = rows.filter(r => !r.pass);
+  // Real layout failures (row.pass === false AND not a harness error) are
+  // reported and fail the build FIRST and UNCONDITIONALLY -- a genuine
+  // regression must never be masked just because some other row also hit a
+  // transient harness error in the same run.
+  const failedRows = rows.filter((r) => !r.pass && !r.harnessError);
   if (failedRows.length > 0) {
     console.log(`${failedRows.length} of ${rows.length} (page, width) checks FAILED:`);
     for (const r of failedRows) {
@@ -1043,6 +1115,27 @@ async function main() {
     // process (and the .ps1 wrapper's WaitForExit) alive past its own 5s
     // cleanup deadline.
     process.exit(1);
+  }
+
+  const harnessRows = rows.filter((r) => r.harnessError);
+  if (harnessRows.length > 0) {
+    // Distinct from both PASS and FAIL: every retry (HARNESS_ERROR_MAX_
+    // ATTEMPTS) was exhausted on a transient fetch/CDP failure, with no
+    // layout assertion ever having run for these rows. Loud, but NOT a
+    // build failure -- check_ui_responsive_sweep.ps1 greps for this marker
+    // (distinct from "checks FAILED" above) and maps it to its own SKIP
+    // exit code (3), same treatment as the no-node/no-DevTools-port paths.
+    console.log('=================================================================');
+    console.log(`ui_responsive_sweep: HARNESS_ERROR -- ${harnessRows.length} of ${rows.length} `
+      + '(page, width) checks could not complete due to a transient fetch/CDP failure, not a layout regression:');
+    for (const r of harnessRows) {
+      console.log(`  [harness]  ${r.page} @${r.width}px: ${r.harnessError}`);
+    }
+    console.log('This is almost always concurrent load (another sweep, a busy machine) --');
+    console.log('re-run in isolation before treating this as a UI regression.');
+    console.log('=================================================================');
+    console.log('');
+    process.exit(3);
   }
 
   console.log(`All ${rows.length} (page, width) checks passed.`);
