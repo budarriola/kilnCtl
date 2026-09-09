@@ -5,12 +5,14 @@
 // test_discrete_pin_policy.c.
 //
 // Why this matters (see max31856_fault_pin_policy.h's own comment): this
-// predicate's output feeds max31856_reading_t.fault_pin_asserted, which
-// safety_guards.c's S5 (thermocouple fault) reads. A flipped polarity here
-// is the exact same bug class as the E-stop inversion that shipped invisible
-// to host tests for GPIO9/S7 -- it would make S5 either never trip on a
-// genuine MAX31856 fault (open TC, over/undervoltage, bad cold-junction
-// reading) or trip permanently on a healthy, idle part.
+// predicate's output feeds max31856_reading_t.fault_pin_asserted. NOTE,
+// corrected 2026-09-08: this comment previously said S5 (thermocouple fault)
+// reads that field. It does not -- S5 reads in->fault_bits, the Fault Status
+// register (0Fh) byte, and fault_pin_asserted currently reaches no guard
+// input at all. The polarity is still worth pinning here (the pin is the
+// hardware corroboration path, and may yet become a guard input -- see
+// docs/MAX31856_FAULT_PIN_PLAN.md), but these cases do not, today, protect
+// S5 the way the old comment implied.
 //
 // CRITICAL project rule (per this repo's "negative-test every check"
 // discipline): every accept-direction check below is paired with a refuse-
