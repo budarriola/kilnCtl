@@ -73,6 +73,16 @@ profile-7 data below 60 °C, and one snapshot at 70 °C). S8's 33.3 °C/min
 rate ceiling is not binding anywhere near the ramp rates used (60 °C/hr =
 1 °C/min in `cplval70`).
 
+**Owner revision (2026-09-08, post-review): the proposed capture below now
+tops out at 75 °C, not 80.** `max_temp_c` and `abs_max_temp_c` are the same
+number (80) on this bench, so a profile that *commands* 80 °C has zero
+margin left for the exact phenomenon it is trying to measure — a
+dwell-entry overshoot of even a fraction of a degree at the top segment
+would trip S1 on the run meant to characterise overshoot near infeasibility,
+which is self-defeating. §4 below reflects the revised `cplval75` design;
+the headroom figure changes to **~5 °C of margin held below the ceiling by
+design**, not held in reserve accidentally.
+
 ## 3. What a 62-80 °C capture would settle, and what it cannot
 
 **Settles:**
@@ -86,17 +96,38 @@ rate ceiling is not binding anywhere near the ramp rates used (60 °C/hr =
   attached (`run_queue.py`) would produce the ramp-lag/dwell-overshoot/
   steady-error triple the `ITER_TUNE_REDESIGN_PLAN.md` scoring scheme uses,
   bucketed at the 60-70-80 °C temperature buckets it already defines.
-- **Whether the coupling matrix still tracks at 70-80 °C.** The matrix's
+- **Whether the coupling matrix still tracks at 70-75 °C.** The matrix's
   own-diagonal terms were fit below ~60-65 °C
   (`firmware/KilnFW/docs/PID_EXPANSION_PLAN.md` lines 157-168, adopted in
   `78f21344` "Adopt the re-solved 3x3 coupling matrix into the
   tuned_baseline preset"). `cplval70` is one snapshot suggesting the
-  fallback holds up to 70 °C on this bench; 70-80 °C is untested.
-- **z2 (bottom zone) saturation margin.** `cplval70` measured z2 duty 0.849
-  at 60 °C/hr by 70 °C — a capture that continues to 80 °C would show
-  whether z2 saturates (`duty=1.0`, structurally unable to hold) before the
-  ceiling is reached, which bounds the fastest ramp rate usable in that band
-  going forward.
+  fallback holds up to 70 °C on this bench; 70-75 °C is untested (75-80 °C
+  stays untested after this revision too — see cost below).
+- **z2 (bottom zone) saturation margin, partially.** `cplval70` measured z2
+  duty 0.849 at 60 °C/hr by 70 °C — a capture that continues to 75 °C
+  narrows, but does not close, the question of whether z2 saturates
+  (`duty=1.0`) before the fixture ceiling; full closure would need the
+  75-80 °C segment this revision deliberately does not run.
+
+**What the revision to 75 °C costs, specifically:**
+- **`ff_hold` magnitude is still the main prize, and 75 °C is still enough
+  margin to get it, not just re-confirm the flag.** The infeasibility onset
+  is ~62 °C; 75 °C is **13 °C above onset** (vs. 18 °C for the original
+  80 °C top). `cplval70` already got a flag-confirmation at 70 °C (8 °C
+  above onset) with sub-0.5 °C final offsets — 75 °C extends 5 °C further
+  into the infeasible region than any existing data point, which is enough
+  room to see whether the degradation *grows* with distance past onset
+  (the actual open question — `cplval70` alone can't distinguish "mild and
+  flat" from "the start of a ramp that gets worse") even though it will not
+  find where degradation becomes severe if that point turns out to sit
+  above 75 °C.
+- **What is genuinely given up**: the top 5 °C of the fixture's own range
+  (75-80 °C) stays completely unmeasured, and z2's saturation point (if it
+  sits between 75 and 80 °C) will not be observed by this capture. If the
+  75 °C dwell shows z2 duty still comfortably under 1.0 and offsets still
+  small, that is itself useful evidence the fallback is not about to fail
+  catastrophically right at the ceiling — but it is evidence *about* the
+  75-80 °C band, not a measurement *in* it.
 
 **Cannot settle:**
 - **Radiative-dominance behavior at cone temperatures.** 80 °C is far below
@@ -112,9 +143,16 @@ rate ceiling is not binding anywhere near the ramp rates used (60 °C/hr =
 
 ## 4. Proposed capture (ready to run, not scheduled by this task)
 
+**Revised 2026-09-08 per owner feedback: top out at 75 °C, not 80.**
+`max_temp_c` and `abs_max_temp_c` are both 80 on this bench — a profile that
+*commands* 80 °C leaves zero margin for the exact phenomenon (dwell-entry
+overshoot) this capture exists to measure, so it could trip S1 on its own
+top segment. Building in ~5 °C of held-back margin below the ceiling avoids
+that.
+
 A **user profile**, not an edit to the builtin schedule table (per standing
 prohibition on altering builtin `target_c`/`ramp_c_per_hr`/`dwell_min`/
-`segment_count`). Working name `cplval80`:
+`segment_count`). Working name `cplval75`:
 
 | Segment | Kind | Target | Rate | Dwell |
 |---|---|---|---|---|
@@ -122,8 +160,8 @@ prohibition on altering builtin `target_c`/`ramp_c_per_hr`/`dwell_min`/
 | 2 | DWELL | 62 °C | — | 45 min (settle + scored dwell) |
 | 3 | RAMP_UP | 62 → 70 °C | 60 °C/hr | — |
 | 4 | DWELL | 70 °C | — | 45 min |
-| 5 | RAMP_UP | 70 → 80 °C | 60 °C/hr | — |
-| 6 | DWELL | 80 °C | — | 60 min (longest — this is the ceiling point, and the point most likely to expose z2 saturation) |
+| 5 | RAMP_UP | 70 → 75 °C | 60 °C/hr | — |
+| 6 | DWELL | 75 °C | — | 60 min (longest — this is the top segment, held 5 °C below the ceiling specifically so a dwell-entry overshoot here is data, not a trip) |
 
 Rationale for stepped dwells rather than one long ramp: each dwell gives a
 scoreable segment at a distinct 25 °C-bucket boundary consistent with
@@ -143,10 +181,12 @@ enough ticks to pass the floor).
   `run_queue.py` (or equivalent) must be running so a real tracking-error
   series is produced, not another end-of-run snapshot.
 
-**Estimated duration:** ramps ≈ (62-25)+(70-62)+(80-70) = 65 °C at 60 °C/hr
-≈ 65 min of ramp, plus 45+45+60 = 150 min of dwell ≈ **215 min (~3.6 hours)**
-total, plus rested-baseline cooldown time beforehand if the fixture is not
-already cold.
+**Estimated duration:** ramps ≈ (62-25)+(70-62)+(75-70) = 50 °C at 60 °C/hr
+≈ 50 min of ramp, plus 45+45+60 = 150 min of dwell ≈ **200 min (~3.3 hours)**
+total (down from ~3.6 hours in the 80 °C version — the shorter top ramp
+segment is the only change, dwell durations are unchanged since settle time
+does not depend on how close to the ceiling the target sits), plus
+rested-baseline cooldown time beforehand if the fixture is not already cold.
 
 **Data to collect:** per-zone `actual_c`/`target_c`/duty
 (`bd_final_commanded`), `ff_hold_used_matrix`, `ff_hold_infeasible`, and
@@ -176,9 +216,36 @@ inferred (the explicit open follow-up from `94b1a2a4`).
 - **`ct_channel_map[0..2]` unset** — the reason `commissioned=False` still
   reads live. Same scope as above: affects CT-derived WARN guards, not the
   temperature ceiling guards this capture depends on.
-- **Net**: nothing currently blocks running `cplval80` from a safety-config
+- **Net**: nothing currently blocks running `cplval75` from a safety-config
   standpoint. The only prerequisite worth insisting on is operational —
   rested baseline and PC capture attached — not a commissioning gap.
+
+## 6. Broader design intent: margin is the user's job, visibility is the system's job
+
+The 80 °C-vs-80 °C near-miss above is a specific instance of a general
+policy the owner set 2026-09-08 while reviewing this document: **it is the
+user's responsibility to create profiles that respect their configured
+limits, guided by dashboard warnings — the system's job is to make the
+limits and the margin visible when a profile is being chosen or edited, not
+to silently clamp or rewrite what the user asked for.**
+
+Concretely, this means:
+- `profile_executor_run.c`'s existing behavior of *refusing, not clamping* a
+  segment whose `target_c` exceeds `max_temp_c` (lines 252-271, cited in §1
+  above) is the right shape and should not change to a silent rewrite.
+- What is missing is the *visibility* half: nothing today surfaces, at
+  profile-authoring time, how close a chosen `target_c` sits to
+  `max_temp_c`/`abs_max_temp_c`, or flags that the two are equal (the exact
+  condition that made the original 80 °C proposal self-defeating). A profile
+  editor/dashboard should show the configured ceiling and the margin a given
+  segment leaves below it, so a user picking 80 °C when the ceiling is 80 °C
+  sees that they have chosen zero margin, rather than discovering it via a
+  trip.
+- This document does not implement that surface — flagged here as the
+  design intent for whoever owns the profile UI/dashboard warning work
+  (noted as being picked up separately). This capture's own `cplval75`
+  design (§4) manually applies the margin a dashboard warning would
+  otherwise have called out.
 
 ## Sources
 
