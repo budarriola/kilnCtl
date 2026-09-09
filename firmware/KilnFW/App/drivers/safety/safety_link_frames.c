@@ -635,10 +635,18 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * clear, but a peer that sends 0.0 instead -- or a firmware that forgets --
      * must not have it forwarded to the PC as a real reading of a stone-cold
      * kiln. The flag is the authority; enforce it here rather than trusting
-     * the far side to have been careful. */
+     * the far side to have been careful.
+     *
+     * 2026-09-08: ONLY tc_temp_c is gated on SAFETY_FLAG_TEMP_VALID here.
+     * cj_temp_c used to be NaN'd alongside it unconditionally, which is
+     * exactly the bug this fix addresses -- the on-chip cold junction is
+     * independent of the external thermocouple probe TEMP_VALID describes,
+     * so a probe fault must not blank a genuinely good cj_c. cj_temp_c's own
+     * gating happens below, once cj_valid[_known] is known from the V3
+     * flags2 byte (or falls back to this same flag on an older/unconfirmed
+     * peer that cannot report cj_valid separately at all). */
     if (!(link->cached.flags & SAFETY_FLAG_TEMP_VALID)) {
         link->cached.tc_temp_c = NAN;
-        link->cached.cj_temp_c = NAN;
     }
     link->cached.tc_fault = p[KILNLINK_FRAME_A_OFF_TC_FAULT];
     link->cached.current_a[0] = safety_read_f32_le(&p[KILNLINK_FRAME_A_OFF_AMPS1]);
@@ -667,10 +675,26 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
         link->cached.borrowed_known = true;
         link->cached.borrowed = (p[KILNLINK_FRAME_A_OFF_FLAGS2] & SAFETY_LINK_STATUS_FLAG2_BORROWED) != 0u;
         link->cached.borrowed_zone_index = p[KILNLINK_FRAME_A_OFF_BORROWED_ZONE_INDEX];
+        link->cached.cj_valid_known = true;
+        link->cached.cj_valid = (p[KILNLINK_FRAME_A_OFF_FLAGS2] & SAFETY_LINK_STATUS_FLAG2_CJ_VALID) != 0u;
     } else {
         link->cached.borrowed_known = false;
         link->cached.borrowed = false;
         link->cached.borrowed_zone_index = SAFETY_LINK_BORROWED_ZONE_UNKNOWN;
+        link->cached.cj_valid_known = false;
+        link->cached.cj_valid = false;
+    }
+    /* cj_temp_c's own NaN gate -- deliberately separate from tc_temp_c's
+     * TEMP_VALID gate above (2026-09-08 fix). A V3 peer told us cj_valid
+     * directly; an older/unconfirmed peer never reported it at all, so the
+     * only honest fallback is the OLD behaviour (tied to TEMP_VALID) rather
+     * than inventing a "known" answer this frame never carried. */
+    if (link->cached.cj_valid_known) {
+        if (!link->cached.cj_valid) {
+            link->cached.cj_temp_c = NAN;
+        }
+    } else if (!(link->cached.flags & SAFETY_FLAG_TEMP_VALID)) {
+        link->cached.cj_temp_c = NAN;
     }
     /* RELAY_LIFE_BUDGET.md: count an observed off->on or on->off
      * transition of K4 (SAFETY_FLAG_RELAY). safety_relay_state_known starts

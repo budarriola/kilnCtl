@@ -220,30 +220,33 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
      *                       here -- a sane cold junction alongside a faulted
      *                       TC reading says the chip is alive and the
      *                       PROBE is the problem, not the chip.
-     *   not_converting  -- NOT TEMP_VALID (tc_c/cj_c both NaN) with fault==0.
-     *                       THIS is the state seen the night this was
-     *                       written: both readings NaN, zero fault bits,
-     *                       which is exactly what "the part has stopped
-     *                       converting" (thermo_task.c's DRDY-silence path,
-     *                       SaftyFW) and "CR1 type-verify failed after
-     *                       reconfigure" (max31856_reconfig_retry.c,
-     *                       SaftyFW) BOTH look like on this wire today --
-     *                       the Pico's own max31856_tc_type_verified()
-     *                       result and its reconfig-retry gave_up flag are
-     *                       not transmitted in the status frame (Frame A,
-     *                       CommonFW/docs/LINK_PROTOCOL.md sec 4) at all,
-     *                       so this server cannot tell those two apart yet
-     *                       -- labelled honestly as "cannot be distinguished
-     *                       with current link data" rather than guessing.
-     *                       A genuine wire fix would need a new bit; Frame
-     *                       A's flags byte (byte1) already has both spare
-     *                       bits spent (LINK_FLAG_TC_NOT_INSTALLED/
-     *                       _TC_INJECTED, link_frame.h), so it would need a
-     *                       V4 tail byte behind a new peer_supports_status_v4
-     *                       gate -- the same skew-safety machinery V1->V2->V3
-     *                       already established -- which is a coordinated
-     *                       ESP+Pico protocol change, not a diagnostics-page
-     *                       edit, and is out of scope here; not attempted.
+     *   probe_fault     -- NOT TEMP_VALID, fault==0, BUT the Pico's V3 status
+     *                       frame reports cj_valid==true (safety_link.h's
+     *                       SAFETY_LINK_STATUS_FLAG2_CJ_VALID) with a real,
+     *                       finite cj_c from the SAME successful transfer:
+     *                       the MAX31856 chip is alive and converting, only
+     *                       the external thermocouple probe/wiring or the
+     *                       commissioned-type CR1 verify is the problem
+     *                       (thermo_task.c's CR1-verify-downgrade path,
+     *                       SaftyFW -- "safety TC invalid is one CR1 byte").
+     *                       2026-09-08: this used to be indistinguishable
+     *                       from not_converting below because link_task.c
+     *                       (SaftyFW) NaN'd cj_c alongside tc_c whenever
+     *                       temp_valid was false, discarding this exact
+     *                       distinction; fixed by carrying cj_valid
+     *                       independently in the V3 status frame's existing
+     *                       spare flags2 bit (no protocol bump needed).
+     *   not_converting  -- NOT TEMP_VALID, fault==0, and EITHER the peer
+     *                       hasn't confirmed V3 support yet / predates it
+     *                       (cj_valid_known false -- no cj-side evidence
+     *                       exists at all, same honest "cannot be
+     *                       distinguished with current link data" verdict
+     *                       this comment used to give for every such case)
+     *                       OR cj_valid_known is true and cj_valid is false
+     *                       (cj_c is ALSO NaN -- the chip itself never
+     *                       completed a conversion, e.g. thermo_task.c's
+     *                       DRDY-silence path, SaftyFW). THIS is the state
+     *                       seen the night this was written.
      *   ok              -- TEMP_VALID and fault==0.
      *
      * not_installed/injected are reported as independent booleans (not
@@ -259,7 +262,8 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
     if (safety_err != ESP_OK || !sl.link_up) {
         APPEND(",\"safety\":{\"state\":\"no_link\",\"link_up\":false}");
     } else {
-        const char *state = diag_safety_tc_state(sl.tc_temp_c, sl.tc_fault);
+        const char *state = diag_safety_tc_state(sl.tc_temp_c, sl.tc_fault, sl.cj_temp_c,
+                                                  sl.cj_valid_known, sl.cj_valid);
         bool not_installed = (sl.flags & SAFETY_FLAG_TC_NOT_INSTALLED) != 0u;
         bool injected = (sl.flags & SAFETY_FLAG_TC_INJECTED) != 0u;
 
@@ -277,9 +281,11 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
 
         APPEND(",\"safety\":{\"state\":\"%s\",\"link_up\":true,\"link_age_ms\":%u,"
               "\"tc_c\":%s,\"cj_c\":%s,\"fault_status\":%u,"
-              "\"not_installed\":%s,\"injected\":%s}",
+              "\"not_installed\":%s,\"injected\":%s,"
+              "\"cj_valid_known\":%s,\"cj_valid\":%s}",
               state, (unsigned)sl.age_ms, tc_buf, cj_buf2, (unsigned)sl.tc_fault,
-              not_installed ? "true" : "false", injected ? "true" : "false");
+              not_installed ? "true" : "false", injected ? "true" : "false",
+              sl.cj_valid_known ? "true" : "false", sl.cj_valid ? "true" : "false");
     }
     APPEND("}");
 

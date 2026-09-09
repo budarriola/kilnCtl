@@ -773,7 +773,14 @@ static void link_task_send_status(void)
     // documented as zeroed rather than NaN.
     bool temp_valid = th_present && th.valid;
     float tc_c = temp_valid ? th.tc_c : NAN;
-    float cj_c = temp_valid ? th.cj_c : NAN;
+    // cj_valid is tracked INDEPENDENTLY of temp_valid (2026-09-08,
+    // safety_tc_warn_mask_disagreement audit) -- the cold junction is a
+    // separate on-chip sensor from the external thermocouple probe
+    // temp_valid describes, so a probe/CR1-verify fault must not blank a
+    // genuinely good cj_c. See snapshots.h's thermo_snapshot_t.cj_valid doc
+    // comment and link_frame.h's LINK_FLAG2_CJ_VALID for the wire side.
+    bool cj_valid = th_present && th.cj_valid;
+    float cj_c = cj_valid ? th.cj_c : NAN;
     uint8_t fault_bits = th_present ? th.fault_bits : 0;
 
     current_snapshot_t cur;
@@ -834,7 +841,8 @@ static void link_task_send_status(void)
                                          fault_bits, cur.amps[0], cur.amps[1], cur.amps[2],
                                          tc_not_installed, tc_injected,
                                          peer_supports_status_v2, tx_dropped_sat,
-                                         peer_supports_status_v3, is_borrowed, borrowed_zone_index_wire);
+                                         peer_supports_status_v3, is_borrowed, borrowed_zone_index_wire,
+                                         cj_valid);
 
     if (link_task_send_broadcast(payload, (uint8_t)len)) {
         s_status_tx_ok_count++;

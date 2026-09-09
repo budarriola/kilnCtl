@@ -63,22 +63,51 @@ extern "C" {
  * the wire data. Pulled out `static inline`, same pattern as this header's
  * own dashboard_safety_ready() in dashboard_http.h, specifically so it is
  * host-testable (test_diagnostics_safety_tc_state.c) without standing up
- * httpd/safety_link/thermo_owner. Same three-way priority as the doc
- * comment above thermo_faults_get_handler()'s safety block:
+ * httpd/safety_link/thermo_owner.
+ *
+ * 2026-09-08 (safety_tc_warn_mask_disagreement audit): the old two-way
+ * "not_converting" bucket collapsed two genuinely different hardware states
+ * into one honest-but-vague label -- see this repo's docs/audits/
+ * safety_tc_warn_mask_disagreement_2026-09-08.md. Now that SaftyFW's V3
+ * status frame carries cj_valid independently of temp_valid (flags2 bit 1,
+ * SAFETY_LINK_STATUS_FLAG2_CJ_VALID, safety_link.h), this function can tell
+ * them apart when the peer has actually reported it:
  *   faulted         -- tc_temp_c is a real (non-NaN) reading AND a
  *                       THERMO_FAULT_* bit is set: the MAX31856 completed a
  *                       conversion and is reporting a genuine fault -- chip
  *                       alive, probe is the problem.
- *   not_converting  -- tc_temp_c is NaN with fault==0: the state that cost
- *                       hours the night this was written (both TC and CJ
- *                       NaN, zero fault bits -- indistinguishable on this
- *                       wire from a CR1 type-verify failure).
- *   ok              -- tc_temp_c is a real reading and fault==0. */
-static inline const char *diag_safety_tc_state(double tc_temp_c, uint32_t tc_fault)
+ *   probe_fault     -- tc_temp_c is NaN, fault==0, BUT cj_valid_known is
+ *                       true and cj_valid is true (a real, finite cj_temp_c
+ *                       from the SAME on-chip sensor, a successful transfer
+ *                       just completed): the chip is alive and converting,
+ *                       only the external thermocouple probe/wiring/
+ *                       commissioned-type verification is the problem
+ *                       (matches the project's documented "safety TC invalid
+ *                       is one CR1 byte" failure mode).
+ *   not_converting  -- tc_temp_c is NaN with fault==0, and EITHER cj_valid
+ *                       is not known (an older Pico, or an ESP that hasn't
+ *                       confirmed V3 support yet -- no cj-side information
+ *                       exists to rule out a dead chip) OR cj_valid is known
+ *                       and false (cj_temp_c is ALSO NaN -- the chip itself
+ *                       never completed a conversion, e.g. DRDY silence).
+ *                       This is the state that cost hours the night this was
+ *                       written.
+ *   ok              -- tc_temp_c is a real reading and fault==0.
+ * `cj_valid_known`/`cj_valid` default to false/false when the caller has no
+ * V3 frame (safety_link_status_t's own "false/meaningless until proven
+ * otherwise" convention) -- passing those defaults reproduces the exact old
+ * two-way behaviour, so this is a strict refinement, not a behaviour change
+ * for a peer that has never sent V3. */
+static inline const char *diag_safety_tc_state(double tc_temp_c, uint32_t tc_fault,
+                                                double cj_temp_c, bool cj_valid_known,
+                                                bool cj_valid)
 {
     bool temp_valid = !isnan(tc_temp_c);
-    bool faulted = temp_valid && tc_fault != 0u;
-    return faulted ? "faulted" : (temp_valid ? "ok" : "not_converting");
+    if (temp_valid) {
+        return (tc_fault != 0u) ? "faulted" : "ok";
+    }
+    bool chip_alive = cj_valid_known && cj_valid && !isnan(cj_temp_c);
+    return chip_alive ? "probe_fault" : "not_converting";
 }
 
 /* Registers the three page routes above on the httpd instance

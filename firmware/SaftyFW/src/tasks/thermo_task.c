@@ -410,6 +410,8 @@ static void thermo_task_fn(void *arg)
             snap.valid = false;
             snap.tc_c = NAN;
             snap.cj_c = NAN;
+            snap.cj_valid = false; /* no conversion happened at all -- genuinely indistinguishable
+                                     * from "chip not converting", see snapshots.h's doc comment */
             snap.fault_bits = 0;
             snap.spi_failed = false;
         } else {
@@ -437,6 +439,14 @@ static void thermo_task_fn(void *arg)
             float raw_tc_c = ok ? reading.tc_temperature_c : NAN;
             snap.tc_c = isnan(raw_tc_c) ? raw_tc_c : (raw_tc_c + config_store_get_tc_offset_c());
             snap.cj_c = ok ? reading.cj_temperature_c : NAN;
+            // cj_valid tracks ONLY whether this half of a completed transfer is
+            // trustworthy -- deliberately computed here, before the CR1-verify /
+            // per-type-plausibility block below downgrades `snap.valid` for
+            // reasons that are about the THERMOCOUPLE probe/commissioned type,
+            // not the on-chip cold junction (snapshots.h's doc comment on
+            // cj_valid). isnan(snap.cj_c) already reflects any CJ-specific SR
+            // fault bit max31856_read() itself NaN'd out.
+            snap.cj_valid = ok && !reading.spi_failed && !isnan(snap.cj_c);
             // "valid" is the snapshot-level fact safety_guards.h's tc_valid
             // maps onto directly: a successful transfer. Per-half NaN-ing
             // for individual SR fault bits already happened inside

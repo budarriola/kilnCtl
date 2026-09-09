@@ -153,13 +153,32 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 #define LINK_FLAG2_BORROWED 0x01u /* tc_source is BORROWED_ZONE or BOTH -- this reading is (partly) sourced
                                     * from another zone's probe, not this board's own J7 input
                                     * (SAFETY_MODEL.md sec 3, THERMOCOUPLE.md's tc_source table). */
+// 2026-09-08 (safety_tc_warn_mask_disagreement audit): cold-junction validity,
+// independent of LINK_FLAG_TEMP_VALID. The MAX31856's cold junction is an
+// on-chip sensor separate from the external thermocouple probe -- a probe
+// fault (open circuit, bad wiring) leaves the chip converting fine and cj_c
+// genuinely finite even while temp_valid is false, but link_task.c used to
+// NaN cj_c right alongside tc_c whenever temp_valid was false, destroying the
+// one distinction ("chip alive, probe dead" vs "chip itself not converting")
+// that actually matters when diagnosing a tripped S5. This bit reuses the V3
+// flags2 byte's spare bits 1-7 (LINK_FLAG2_BORROWED already spent bit 0) --
+// no protocol/length bump, same reasoning as that bit's own addition. Set
+// iff thermo_snapshot_t.cj_valid is true (see snapshots.h), which link_task.c
+// derives independently of th.valid/temp_valid.
+#define LINK_FLAG2_CJ_VALID 0x02u
 
 // Packs the status payload into `out` (must have room for
 // LINK_FRAME_STATUS_LEN_V2 bytes, whether or not this call ends up using all
-// of them). `safety_tc_c`/`cj_c` should already be NaN when `temp_valid` is
-// false -- this function passes them through unchanged rather than
-// substituting 0, matching LINK_PROTOCOL.md's "send NaN, never 0" rule; it
-// does not itself decide validity. `tc_not_installed`/`tc_injected` set
+// of them). `safety_tc_c`/`cj_c` should already be NaN when `temp_valid`/
+// `cj_valid` (respectively) are false -- this function passes them through
+// unchanged rather than substituting 0, matching LINK_PROTOCOL.md's "send
+// NaN, never 0" rule; it does not itself decide validity. `cj_valid` is
+// INDEPENDENT of `temp_valid` (2026-09-08, LINK_FLAG2_CJ_VALID above): the
+// cold junction is a separate on-chip sensor from the external thermocouple
+// probe `temp_valid` describes, so a probe fault must not silently blank a
+// genuinely good cj_c. `cj_valid` drives flags2 bit 1 exactly as `is_borrowed`
+// drives bit 0, only ever emitted once `peer_supports_status_v3` is true --
+// same gate, no new byte. `tc_not_installed`/`tc_injected` set
 // LINK_FLAG_TC_NOT_INSTALLED/LINK_FLAG_TC_INJECTED above, independent of
 // temp_valid -- a declared-absent sensor still reports temp_valid accurately
 // (false while blind, per S5's existing contract); these two bits are
@@ -227,7 +246,7 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
                                bool tc_not_installed, bool tc_injected,
                                bool peer_supports_status_v2, uint8_t tx_dropped_sat,
                                bool peer_supports_status_v3, bool is_borrowed,
-                               uint8_t borrowed_zone_index);
+                               uint8_t borrowed_zone_index, bool cj_valid);
 
 // --- Frame C: SAFETY_CMD_FW_VERSION (0x0B) -----------------------------------
 // Also the reply to, and identical command byte as, SAFETY_CMD_GET_FW_VERSION

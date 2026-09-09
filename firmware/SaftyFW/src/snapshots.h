@@ -36,6 +36,20 @@ typedef struct {
     float    tc_c, cj_c;      /* NaN when !valid */
     uint8_t  fault_bits;      /* THERMO_FAULT_* */
     bool     spi_failed;
+    // 2026-09-08 (safety_tc_warn_mask_disagreement audit): cold-junction
+    // validity, tracked INDEPENDENTLY of `valid` above. `valid` answers "is
+    // this a trustworthy THERMOCOUPLE (probe) reading" -- it is downgraded
+    // to false by, among other things, thermo_task.c's CR1-verify check,
+    // which is a fact about the commissioned TC TYPE / probe wiring, not
+    // about the MAX31856's own on-chip cold-junction sensor. A finite cj_c
+    // from a successful SPI transfer stays a finite, trustworthy reading
+    // even when `valid` is false for TC-only reasons -- `cj_valid` is what
+    // lets link_task.c send that reading on rather than NaN-ing it out
+    // alongside tc_c. `cj_valid` is false (and cj_c is NaN) whenever no real
+    // conversion happened at all (DRDY silence) or the CJ half of the SR
+    // register itself faulted -- those cases are genuinely indistinguishable
+    // from "chip not converting" and must stay NaN.
+    bool     cj_valid;
 } thermo_snapshot_t;
 
 // current_snapshot_t -- current_task / adc_owner (docs/ARCHITECTURE.md

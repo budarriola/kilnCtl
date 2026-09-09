@@ -230,6 +230,16 @@ extern "C" {
  * left" reasoning for why this is a whole new byte, not a reused bit). */
 #define SAFETY_LINK_STATUS_FLAG2_BORROWED 0x01u
 
+/* 2026-09-08 (safety_tc_warn_mask_disagreement audit): cold-junction validity,
+ * mirrors SaftyFW's link_frame.h LINK_FLAG2_CJ_VALID exactly (same numeric
+ * value, same reasoning). The MAX31856's cold junction is an on-chip sensor
+ * independent of the external thermocouple probe SAFETY_FLAG_TEMP_VALID
+ * describes -- this bit lets a probe-only fault (chip alive, cj_temp_c real)
+ * be told apart from the chip itself not converting (both NaN), which was
+ * previously indistinguishable on this wire (see diagnostics_http.h's
+ * diag_safety_tc_state() "probe_fault" state). */
+#define SAFETY_LINK_STATUS_FLAG2_CJ_VALID 0x02u
+
 /* borrowed_zone_index sentinel (byte 25) -- mirrors SaftyFW's link_frame.h
  * LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN exactly. A real value is always
  * 0..2 (config_store.h borrowed_zone_index's own range), so 0xFF can never
@@ -738,6 +748,25 @@ typedef struct {
     bool     borrowed_known;
     bool     borrowed;
     uint8_t  borrowed_zone_index; /* SAFETY_LINK_BORROWED_ZONE_UNKNOWN (0xFF) if not commissioned on the Pico */
+
+    /* 2026-09-08 (safety_tc_warn_mask_disagreement audit): cold-junction
+     * validity, carried in the SAME V3 status frame's flags2 byte (bit 1,
+     * SAFETY_LINK_STATUS_FLAG2_CJ_VALID) that borrowed_known/borrowed above
+     * already use -- no new frame, no protocol bump. cj_valid_known is false
+     * (and cj_valid/cj_temp_c's validity meaningless) under the exact same
+     * "false/meaningless until proven otherwise" convention as
+     * borrowed_known: a V1/V2 frame, or a V3 peer this ESP hasn't yet
+     * confirmed, carries no information here, which is UNKNOWN, not "cold
+     * junction is bad". When cj_valid_known is true, cj_valid says whether
+     * cj_temp_c is a trustworthy on-chip cold-junction reading INDEPENDENTLY
+     * of the thermocouple probe's own SAFETY_FLAG_TEMP_VALID -- this is the
+     * whole point: a probe fault (temp_valid false) with cj_valid true means
+     * the chip is alive and converting, only the external probe/wiring is
+     * bad, while cj_valid false alongside temp_valid false means the chip
+     * itself never completed a conversion. See
+     * diagnostics_http.h's diag_safety_tc_state(). */
+    bool     cj_valid_known;
+    bool     cj_valid;
 
     /* SAFETY_CMD_POWER (Frame E) telemetry -- ROADMAP.md M5/M6, TODO.md
      * 10.10. NaN/false fields below mean "never received" or "not a valid
