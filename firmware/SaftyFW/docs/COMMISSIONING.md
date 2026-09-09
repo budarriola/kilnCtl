@@ -195,8 +195,25 @@ value in the wrong field with the right type tag and no error anywhere.
 (`KilnFW/docs/COMMISSIONING_UX.md` §1.1 Q5): *"are current transformers fitted
 to this board?"*. It is required for commissioning **unconditionally**, and
 `0x0106`–`0x0108` (`ct_channel_map`) are required only while it is 1 or
-unanswered. Answering 0 switches S3/S4/S9/S14 off **and reports them off** —
-see `docs/GUARD_TEST_MATRIX.md` §9 and `docs/CURRENT_SENSE.md` §0.1.
+unanswered **and `ct_topology` (`0x031F`) is `per_zone`** (the default).
+Answering 0 switches S3/S4/S9/S14 off **and reports them off** — see
+`docs/GUARD_TEST_MATRIX.md` §9 and `docs/CURRENT_SENSE.md` §0.1.
+
+**2026-09-09 fix: `ct_topology == summed` also drops the `ct_channel_map`
+requirement**, without needing `ct_installed == 0`. A summed board has ONE
+CT (channel 2) shared across all zones, and `safety_core.c`'s S14/S15 input
+builder reads it by **zone id** (`relay_commanded_now_for_zone`), never
+through `ct_channel_map` — there is no per-relay mapping question for a
+summed board to answer (`docs/CURRENT_SENSE.md` §0.2). Before this fix,
+`config_params_all_required_set()` still demanded all three per-channel bits
+whenever `ct_installed == 1`, regardless of topology, which left a
+correctly-configured summed-CT board permanently uncommissionable — see
+`docs/audits/commissioning_gap_and_no_heat_2026-09-09.md`. A summed board
+therefore reaches `commissioned == True` with `ct_installed=1`,
+`ct_topology=summed`, and `ct_channel_map[0..2]` left completely unset; no
+current measurement is required to get there (arming S14/S15's actual
+thresholds via `i_normal_a[]` is a separate, non-blocking step — §2.1 below
+and `docs/CURRENT_SENSE.md` §0.2/§5).
 
 **`tc_type` (`0x0105`) gained a `fields_set` bit (`CONFIG_STORE_SET_TC_TYPE`)
 on 2026-08-24.** Unlike the other bits in this table, it is not a "no safe

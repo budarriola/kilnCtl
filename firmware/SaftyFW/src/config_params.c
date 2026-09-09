@@ -951,12 +951,29 @@ bool config_params_all_required_set(const config_store_record_t *rec)
     // anyway (`!= 0` on a record defaulting to 1) AND the missing bit fails
     // the check on its own. There is no bit pattern in which an unanswered
     // question relaxes a requirement.
+    // 2026-09-09: ct_channel_map is required only when a per-zone CT actually
+    // needs one relay per channel resolved. In ct_topology == SUMMED, the one
+    // shared CT (channel 2) is read straight into S14's sum-vs-commanded
+    // check and S15's per-zone deficit check by zone id, never through
+    // ct_channel_map -- see safety_core.c's safety_guard_input_t builder
+    // (the `relay_commanded_now_for_zone` block's own comment: "unlike
+    // relay_commanded_now_for_ct above this does NOT go through
+    // ct_channel_map ... summed mode's S14/S15 do not consult that map at
+    // all") and CURRENT_SENSE.md section 0.2 ("the mapping check ... is
+    // skipped entirely -- there is no per-relay mapping to resolve"). Before
+    // this fix the gate still demanded the three per-channel bits on a
+    // summed board, which the summed design has no meaningful answer for --
+    // making a fully-configured summed-CT board permanently uncommissionable
+    // (docs/audits/commissioning_gap_and_no_heat_2026-09-09.md). ct_topology
+    // itself is a plain marker byte with no fields_set bit and a safe
+    // PER_ZONE(0) default (config_store.h), so reading it here is always
+    // well-defined even on a record that has never touched it.
     uint16_t required = (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX |
                                     CONFIG_STORE_SET_TC_PLACEMENT_MODE | CONFIG_STORE_SET_ABS_MAX_TEMP_C |
                                     CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
                                     CONFIG_STORE_SET_MAINS_VOLTAGE_V | CONFIG_STORE_SET_TC_TYPE |
                                     CONFIG_STORE_SET_CT_INSTALLED);
-    if (rec->ct_installed != 0u) {
+    if (rec->ct_installed != 0u && rec->ct_topology != CONFIG_STORE_CT_TOPOLOGY_SUMMED) {
         required = (uint16_t)(required | CONFIG_STORE_SET_CT_CHANNEL_MAP);
     }
     return config_store_field_is_set(&rec->fields_set, required);

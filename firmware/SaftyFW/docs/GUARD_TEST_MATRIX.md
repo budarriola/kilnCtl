@@ -1142,9 +1142,13 @@ first-class state, distinct from "CTs fitted but not yet mapped".
 
 **What it changes at the gate.** `config_params_all_required_set()` requires
 `ct_installed` unconditionally and requires `ct_channel_map` only when the
-answer is *yes* or absent. A CT-less board can therefore complete
-commissioning and be granted heat. Unanswered behaves exactly as every build
-before this field did: strict.
+answer is *yes* or absent **and `ct_topology` is `per_zone`**. A CT-less
+board can therefore complete commissioning and be granted heat. Unanswered
+behaves exactly as every build before this field did: strict. (2026-09-09:
+a summed-CT board — `ct_installed=1`, `ct_topology=summed` — also skips the
+`ct_channel_map` requirement, for the same reason as the CT-less case one
+level down: the summed design has no per-relay mapping question to answer.
+See `docs/CURRENT_SENSE.md` §0.2 and `docs/COMMISSIONING.md`.)
 
 **What it changes at the guards.** `safety_core_build_input()` forces the
 sensor's outputs to their no-information state (`any_current_present` false,

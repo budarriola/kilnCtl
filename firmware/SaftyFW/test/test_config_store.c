@@ -2205,6 +2205,68 @@ static void test_ct_installed_gates_the_channel_map(void)
                "ct_installed=1 WITH a full CT map: commissioned");
 }
 
+// --- ct_topology == SUMMED: the map has nothing to resolve, so it is not
+// required ---------------------------------------------------------------
+// docs/audits/commissioning_gap_and_no_heat_2026-09-09.md: on a summed-CT
+// board, safety_core.c's S14/S15 input builder reads the shared CT by ZONE
+// id (relay_commanded_now_for_zone), never through ct_channel_map -- the
+// map only resolves "which relay does channel N watch," a question summed
+// mode has no per-channel answer to (only channel 2 has a CT at all).
+// CURRENT_SENSE.md section 0.2 documents this as deliberate ("the mapping
+// check ... is skipped entirely"). Before the 2026-09-09 fix, the gate
+// still demanded the three per-channel bits regardless of ct_topology,
+// making a fully-configured summed board permanently uncommissionable.
+static void test_ct_topology_summed_skips_the_channel_map(void)
+{
+    TEST_SECTION("ct_topology summed -- ct_channel_map is not required (CURRENT_SENSE.md 0.2)");
+
+    kilnlink_param_value_t v;
+
+    // Same base record as test_ct_installed_gates_the_channel_map: every
+    // required field except the CT map, ct_installed=1 (CTs ARE fitted --
+    // this is not the "no CTs" escape hatch, it is the summed-CT one).
+    config_store_record_t base;
+    config_store_default(&base);
+    v.u8_val = CONFIG_STORE_TC_SOURCE_OWN_J7;
+    config_params_set(&base, 0x0101u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 0u;
+    config_params_set(&base, 0x0102u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = CONFIG_STORE_TC_PLACEMENT_CHAMBER_AGREED;
+    config_params_set(&base, 0x0103u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 1300.0f;
+    config_params_set(&base, 0x0104u, KILNLINK_PARAM_TYPE_F32, v);
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE;
+    config_params_set(&base, 0x0105u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 5.0f;
+    config_params_set(&base, 0x0204u, KILNLINK_PARAM_TYPE_F32, v);
+    v.f32_val = 240.0f;
+    config_params_set(&base, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v);
+    v.u8_val = 1u;
+    config_params_set(&base, 0x0109u, KILNLINK_PARAM_TYPE_U8, v); // ct_installed=1
+    config_params_finalize_ct_channel_map(&base); // no-op: nothing staged
+
+    // NEGATIVE: still per_zone (the default topology) -- the map remains
+    // genuinely required, proving this fix did not weaken the per_zone path.
+    TEST_CHECK(!config_params_all_required_set(&base),
+               "ct_topology=per_zone (default), ct_installed=1, no map: still NOT commissioned");
+
+    // POSITIVE: answer ct_topology=summed. Commissioning now completes with
+    // no ct_channel_map at all, because summed mode's guards never index it.
+    config_store_record_t summed = base;
+    v.u8_val = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+    config_params_set(&summed, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(config_params_all_required_set(&summed),
+               "ct_topology=summed, ct_installed=1, no ct_channel_map: commissioned");
+
+    // NEGATIVE (not sticky the other way): switching back to per_zone puts
+    // the requirement back.
+    config_store_record_t back_to_per_zone = summed;
+    v.u8_val = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+    config_params_set(&back_to_per_zone, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(!config_params_all_required_set(&back_to_per_zone),
+               "switching ct_topology back to per_zone re-requires the map");
+}
+
 // The record must survive a flash round trip with the answer intact, and --
 // the safety-critical half -- a record that never carried this byte must
 // decode to the STRICT state, never to "CTs disabled".
@@ -2593,6 +2655,7 @@ void run_test_config_store(void)
     test_tc_type_voltage_mode_clamp_v1_migration();
 
     test_ct_installed_gates_the_channel_map();
+    test_ct_topology_summed_skips_the_channel_map();
     test_ct_installed_round_trip_and_legacy_decode();
 
     test_config_params_get_set_roundtrip();
