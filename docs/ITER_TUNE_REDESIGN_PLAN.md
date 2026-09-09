@@ -228,8 +228,8 @@ realism (§6.3), not as a threshold source.
 | **What moves** | `kp` and `ki` only. `kd` is never touched (noise-sensitive, no model backing a blind nudge). No other field of any kind is ever written — see §5. |
 | **How many at once** | **One parameter, one zone, per firing.** Never two. The measured coupling matrix is large and asymmetric (z0 rises 27.32 per z1 step, z1 only 14.30 per z0 step; adopted `78f2134`, series `813ad90`) — a simultaneous two-zone perturbation is unattributable by construction. Coordinate descent, cycling `kp` → `ki` → next zone. |
 | **Step size** | Per-zone, adaptive: starts at **±10 %** of the current baseline value; **halves** after two consecutive rejects; **doubles**, capped at 20 %, after two consecutive accepts. Sign alternates when the previous trial in the same direction was rejected. |
-| **The cage** | Every proposed gain is clamped to `[0.5×, 2.0×]` of the **commissioned** gains — the values written by autotune/hand-tuning at commissioning time, persisted once and never rewritten by this module — *and* to `[ITER_TUNE_GAIN_FLOOR_C, ITER_TUNE_GAIN_CEIL_C]`. Anchoring to a persisted commissioning value, not to the rolling baseline, is deliberate: a baseline-relative cage ratchets, which this repo has already been bitten by. |
-| **Stopping rule** | A zone stops (`CONVERGED`, tuning disabled, status sticky) on any of: step size below 3 %; three consecutive rejects at minimum step; 12 scored trials on that zone; any gain hitting a cage edge twice. |
+| **The cage** | Every proposed gain is clamped to `[0.5×, 2.0×]` of the **commissioned** gains — the values written by autotune/hand-tuning at commissioning time, persisted once and never rewritten by this module — *and* to `[ITER_TUNE_GAIN_FLOOR_C, ITER_TUNE_GAIN_CEIL_C]`. Anchoring to a persisted commissioning value, not to the rolling baseline, is deliberate: a baseline-relative cage ratchets, which this repo has already been bitten by. **Settled (§9.1):** the anchor is captured automatically — the *first* time `iter_tune` is enabled for a zone, the gains active at that moment are snapshotted as "commissioned" and persisted; there is no separate manual capture step. The anchor is exposed as an explicit, operator-triggered "re-anchor" action (distinct from the existing "restore commissioned gains" revert of §4's Revert path) for the owner to deliberately move the cage centre later, e.g. after a hand-tuning pass. |
+| **Stopping rule** | A zone stops (`CONVERGED`, tuning disabled, status sticky) on any of: step size below 3 %; three consecutive rejects at minimum step; **6** scored trials on that zone (§9.2 — reduced from an earlier 12); any gain hitting a cage edge twice. |
 | **Not spending kiln time** | The module **never requests a firing.** It arms a trial only for a firing the operator was going to run anyway. If a firing yields `n = 0` matched pairs for every sub-score, the trial stays armed and unscored — but at most **3** such carries, after which it disarms and reverts, so a stale trial cannot ride indefinitely against a moving plant. |
 | **Revert path** | Unchanged from the existing module, and this is the part worth keeping verbatim: trial gains live only in `pending_gains`; `active_gains()` returns `baseline.gains` the instant `has_pending` clears. Revert is a flag clear, never an arithmetic undo, so it is bit-exact. Baseline is persisted only on accept, so a power loss mid-trial reverts by itself. A single operator action ("restore commissioned gains") writes the persisted commissioning values back and disables the module for that zone. |
 
@@ -476,7 +476,7 @@ Riskiest last. No hardware exposure before step 8, no heat before step 9.
 | 6 | Monte-Carlo acceptance run → §7 A1–A8. | medium | **all eight criteria met.** Any miss ends the plan at this line with a report, not a workaround |
 | 7 | Persistence + surface: new NVS namespace (never `adap_tune`'s), schema bump, per-zone opt-in, status + "restore commissioned gains" control, `check_iter_tune_write_surface.ps1` with its negative test. Still proposes nothing on hardware. | medium | full check suite green; schema migration tested both directions |
 | 8 | **Shadow mode on hardware.** Scores every real firing, computes what it *would* have proposed, writes nothing. ≥ 5 firings. Compare observed spread to the simulated floor (§3.1). | medium | observed floor ≤ 2× simulated, else Bar 2 stays disabled and the mechanism runs on Bar 1 alone |
-| 9 | **Enable trials on one zone, owner present**, one parameter, cage active, with the operator able to stop and restore commissioned gains at any point. | highest | owner sign-off |
+| 9 | **Enable trials on one zone, owner present, bench fixture kiln only** (§9.3), one parameter, cage active, with the operator able to stop and restore commissioned gains at any point. | highest | owner sign-off |
 
 Steps 1–7 need no kiln time at all. Steps 8 and 9 are the only ones that do,
 and step 8 spends none of its own — it rides firings the operator was running
@@ -484,15 +484,105 @@ anyway.
 
 ---
 
-## 9. Open questions for the owner
+## 9. Owner decisions (settled 2026-09-08)
 
-1. **Where do "commissioned gains" come from on a board that has already been
-   hand-tuned?** The cage anchor needs a one-time capture. Proposal: snapshot
-   the current gains as commissioned the first time `iter_tune` is enabled for
-   a zone, and expose it as re-settable.
-2. **Is 12 scored trials per zone an acceptable budget?** At one trial per
-   firing and one zone at a time, three zones × two parameters is realistically
-   tens of firings. If that is too many, the honest alternative is to tune one
-   zone only and leave the others at their commissioned gains.
-3. **Should step 9 be limited to the bench fixture kiln indefinitely**, or is
-   enabling this on a production firing with ware in the kiln ever intended?
+These three questions were posed as open in the prior revision of this
+document. All three are now decided. Each subsection also states which other
+part of this plan the decision constrains — §4's cage and stopping rule are
+already updated to match; this section is the record of *why*.
+
+### 9.1 Gain anchor — settled: automatic snapshot, re-settable
+
+**Decision:** adopt the plan's own recommendation as written. The cage anchor
+("commissioned gains") is captured automatically, with no separate manual
+step: the *first* time `iter_tune` is enabled for a zone, the gains active at
+that instant are snapshotted and persisted as that zone's commissioned
+baseline. The owner's existing hand-tuned values therefore become the cage
+centre with no extra action required at rollout. A distinct, explicit
+operator action ("re-anchor") lets the owner deliberately move the cage
+centre later — e.g. after a fresh hand-tuning pass makes the old anchor
+stale — without that being confused with the existing "restore commissioned
+gains" revert action (§4, Revert path), which moves gains, not the anchor.
+Reflected in §4's "The cage" row.
+
+### 9.2 Trial budget — settled: 6 scored trials per zone
+
+**Decision:** neither the 12-trials-per-zone figure nor single-zone-only
+tuning. The owner chose a smaller per-zone budget, covering all three zones
+but stopping sooner on each and accepting partial improvement over
+convergence. The chosen figure is **6 scored trials per zone** (half of the
+originally drafted 12), reflected in §4's "Stopping rule" row in place of the
+old "12 scored trials on that zone".
+
+**Why 6, not some other number smaller than 12:** the plan's own statistical
+bar (§3, Bar 2) requires `n >= 5` matched paired-difference samples, with the
+sign-consistency check needing `ceil(0.75 * n)` of those `n` in agreement.
+Six is the smallest round number strictly *above* that floor — it leaves one
+trial of margin over the bar's own minimum, rather than landing exactly on
+it with zero slack for a trial that scores fewer than the maximum possible
+comparisons. Anything at or below 5 would make hitting Bar 2 at all a
+knife-edge case dependent on every single trial contributing a countable
+comparison; §4's own "not spending kiln time" rule already allows a trial to
+go unscored (`n = 0`) and carry over up to 3 times, which by itself can
+consume trials from the budget without ever producing a comparison. Note
+that this per-zone trial budget is a distinct control from Bar 2's `n`: `n`
+counts *matched segment-class pairs* found by comparing two firings, which
+can be several even within one trial's before/after pair, while the 6-trial
+budget bounds how many separate gain proposals a zone gets before the
+stopping rule fires regardless of outcome. The two are related but not the
+same count — the 6-trial cap does not by itself guarantee `n >= 5` on every
+trial, it only keeps the exercise from stalling out if the owner's floor
+(Bar 1) is what ends up doing the work, which is the expected common case
+per §3.1 ("refusing to act is a legitimate outcome and is the default one").
+
+**What this permits:** at one trial per firing, coordinate descent still gets
+enough trials to run at least one full step-size adaptation (halve after two
+rejects, double after two accepts) on both `kp` and `ki` if the schedule
+favors one parameter early; it keeps Bar 2 reachable in the common case where
+most trials produce a scorable comparison; and across three zones the total
+operational cost is roughly **18 firings** (3 zones × 6 trials, one parameter
+change per firing), versus roughly 36 under the original 12-trial figure —
+consistent with "accepting partial improvement rather than convergence."
+
+**What this forbids:** it does not give a zone enough trials to fully explore
+both `kp` and `ki` through multiple step-size halvings each, so a zone is
+expected to stop at `CONVERGED` (trial-budget exhausted) having tried only a
+handful of proposals per parameter, not to reach the same degree of
+refinement the 12-trial figure targeted. It does not change or relax Bar 2's
+`n >= 5` requirement itself — a zone whose firings keep landing on `n = 0` or
+`n < 5` matched pairs still cannot clear Bar 2 inside 6 trials any more than
+it could inside 12, and falls back to Bar 1 (the 0.5 °C floor) plus the
+no-degradation veto exactly as §3.1 describes. This budget is independent of
+the simulation-only acceptance criteria A3/A4 (§7), which test the
+*algorithm's* statistical capability at a fixed 8-trial figure in the
+Monte-Carlo harness before anything is deployed; A3/A4 are unchanged by this
+decision, since it governs deployed hardware behavior, not the simulator
+acceptance bar.
+
+### 9.3 Scope — settled: bench fixture only, revisitable
+
+**Decision, in the owner's words:** *"Bench fixture only for now. Prefer the
+situation until you see real success."* Step 9 (§8) is therefore limited to
+the bench fixture kiln, and this is a **current boundary, not a permanent
+one** — it is explicitly revisitable, not a closed avenue in the sense of
+§1.
+
+**What "real success" means, in terms of this plan's own criteria:** the
+bench-fixture phase is judged successful once step 9 has run enough on the
+bench fixture to show, on real hardware, the same shape of result the
+simulator's acceptance criteria (§7) describe in simulation — concretely,
+observed shadow-mode spread staying within the §3.1 bound (≤ 2× the
+simulated floor, keeping Bar 2 usable rather than falling back to Bar 1
+alone), and enabled trials on the bench fixture clearing Bar 1 or Bar 2 with
+no instance of A2's "never worse" failure mode (a trial ending worse by more
+than a Bar-1 floor) and no cage violation (A6). In short: the bench fixture
+needs to demonstrate, on hardware, that the mechanism behaves the way §7
+predicted it would — not merely that it runs without crashing.
+
+**Widening beyond the bench fixture is not an incremental step.** Moving
+step 9 to a production firing with ware in the kiln requires its own,
+separate safety sign-off from the owner — it is not something this plan's
+existing step 9 gate ("owner sign-off") already covers, and it is not
+triggered automatically by "real success" on the bench fixture. This
+document does not attempt to define that sign-off's criteria in advance;
+that is deliberately left to be decided when it is proposed.
