@@ -389,6 +389,112 @@ class PreFlashProbeWiringTest(FlashFirmwareVerifyWiringTest):
         self.preflash_mock.assert_not_called()
 
 
+class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
+    """flash_firmware(ap_password=...) -- the tool-driven trigger for
+    docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's fix
+    (ota_http_client.boot_guard_reset_esp(), calling
+    App/drivers/http/ota_http_recovery.c's
+    ota_boot_guard_reset_post_handler()).
+
+    THE gate this class exists to prove: the call must happen ONLY after
+    _verify_flash_landed() returns "" (full, unambiguous success) -- never
+    on a raise (verification failure), a WARNING (unconfirmed/bring-up),
+    or verify=False. A board just flashed with something broken, or whose
+    landing was never actually confirmed, must still be free to walk into
+    recovery mode on its own; see boot_guard_reset_counter()'s own header
+    comment (firmware side) for why this is the one hard rule the whole
+    fix depends on."""
+
+    def test_called_after_full_verified_success(self):
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "boot_guard_reset_esp",
+                 return_value={"ok": True, "boot_count": 0}) as reset_mock:
+            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+        reset_mock.assert_called_once_with("192.168.1.156", "hunter2")
+        self.assertNotIn("error:", result)
+        self.assertIn("boot_guard_reset", result)
+        self.assertIn("cleared and verified", result)
+
+    def test_not_called_without_ap_password(self):
+        """The default (ap_password=None) must reproduce pre-existing
+        behavior exactly -- this is an additive, opt-in parameter."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
+            result = mf.flash_firmware(verify=True)
+        reset_mock.assert_not_called()
+        self.assertNotIn("boot_guard_reset", result)
+
+    def test_not_called_on_warning(self):
+        """A WARNING from _verify_flash_landed (board unreachable/could-not-
+        confirm) is NOT full verified success -- must not trigger the
+        reset. A resolvable board address is deliberately provided (not
+        the setUp default of None) so this test cannot pass merely because
+        _maybe_reset_boot_guard() had no address to call -- it must be the
+        WARNING gate itself doing the work."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed",
+                                         return_value="WARNING: board unreachable"), \
+             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
+            mf.flash_firmware(verify=True, ap_password="hunter2")
+        reset_mock.assert_not_called()
+
+    def test_not_called_on_verification_failure(self):
+        """THE central negative case: a hard verification failure (wrong
+        partition/build) must never clear the recovery-mode counter -- a
+        board that just got a bad flash must still be free to enter
+        recovery mode."""
+        with unittest.mock.patch.object(
+                mf, "_verify_flash_landed",
+                side_effect=RuntimeError("board is running partition 'ota_0', not 'factory'")), \
+             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
+            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+        reset_mock.assert_not_called()
+        self.assertTrue(result.startswith("error:"))
+
+    def test_not_called_when_verify_is_false(self):
+        """verify=False means the flash's own landing was never even
+        checked -- calling boot_guard_reset_esp here would be strictly
+        worse than doing nothing, since it would clear the counter on the
+        strength of NO evidence the new build is running at all."""
+        with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock, \
+             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
+            mf.flash_firmware(verify=False, ap_password="hunter2")
+        verify_mock.assert_not_called()
+        reset_mock.assert_not_called()
+
+    def test_unverified_reset_reported_as_warning_not_error(self):
+        """The board's own read-back could not confirm the clear (the
+        lying-write class) -- flash_firmware() must say so plainly, but
+        must NOT report the whole call as an error: the flash itself
+        landed and verified fine, only the counter-clear is in doubt."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "boot_guard_reset_esp",
+                 return_value={"ok": False, "boot_count": 2}):
+            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+        self.assertFalse(result.startswith("error:"))
+        self.assertIn("WARNING", result)
+        self.assertIn("NOT confirmed cleared", result)
+
+    def test_unreachable_boot_guard_endpoint_reported_as_warning_not_error(self):
+        """An OtaHttpError calling the endpoint (e.g. the board dropped off
+        Wi-Fi in the instant between verification and this call) is also a
+        WARNING, not a tool failure -- the flash already landed."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "boot_guard_reset_esp",
+                 side_effect=mf.ota_http.OtaHttpError("unreachable")):
+            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+        self.assertFalse(result.startswith("error:"))
+        self.assertIn("WARNING", result)
+        self.assertIn("boot_guard_reset call failed", result)
+
+
 class KilnFwRootOverrideTest(unittest.TestCase):
     """flash_firmware(kiln_fw_root=...) -- the worktree-build override.
 

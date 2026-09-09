@@ -477,6 +477,121 @@ class RecoveryExitEspTest(unittest.TestCase):
                 ota.recovery_exit_esp("192.0.2.1", "hunter2")
 
 
+class BootGuardResetEspTest(unittest.TestCase):
+    """docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's
+    tool-driven trigger -- POST /api/ota/esp/boot_guard_reset."""
+
+    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
+        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            if post_side_effect is not None:
+                raise post_side_effect
+            return post_response
+
+        return fake_urlopen, calls
+
+    def test_sends_boot_guard_reset_context_mac_and_empty_body(self):
+        ok_body = json.dumps({"ok": True, "boot_count": 0}).encode()
+        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
+
+        calls = {"n": 0}
+        captured_req = {}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            captured_req["req"] = req
+            return _fake_response(ok_body)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            result = ota.boot_guard_reset_esp("kiln.local", "hunter2")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["boot_count"], 0)
+        req = captured_req["req"]
+        self.assertEqual(req.full_url, "http://kiln.local/api/ota/esp/boot_guard_reset")
+        self.assertEqual(req.data, b"")
+        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
+        self.assertIsNotNone(mac_header)
+        self.assertEqual(len(mac_header), 64)
+        # Signed over its own "boot-guard-reset" context -- NOT interchangeable
+        # with "recovery"/"esp-rollback"/"sw-reset"/any other route's MAC.
+        expected = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "boot-guard-reset").hex()
+        self.assertEqual(mac_header, expected)
+        not_recovery_context = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "recovery").hex()
+        self.assertNotEqual(mac_header, not_recovery_context)
+
+    def test_reports_ok_false_without_raising(self):
+        """A lying-write on the board (verified=false) is a normal 200
+        response, not an HTTP error -- the caller must check `ok` in the
+        body, and this client must not swallow or misreport it."""
+        unverified_body = json.dumps({"ok": False, "boot_count": 2}).encode()
+        fake_urlopen, _ = self._mock_challenge_then(_fake_response(unverified_body))
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = ota.boot_guard_reset_esp("kiln.local", "hunter2")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["boot_count"], 2)
+
+    def test_surfaces_403_wrong_password(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/ota/esp/boot_guard_reset", 403, "Forbidden", hdrs=None,
+            fp=io.BytesIO(b"wrong password"))
+        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.boot_guard_reset_esp("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_rejects_non_json_response(self):
+        fake_urlopen, _ = self._mock_challenge_then(_fake_response(b"not json"))
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.boot_guard_reset_esp("kiln.local", "hunter2")
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.boot_guard_reset_esp("192.0.2.1", "hunter2")
+
+
+class GetBootGuardStatusTest(unittest.TestCase):
+    """GET /api/boot_guard -- unauthenticated diagnostics follow-up."""
+
+    def test_parses_count_and_recovery_mode(self):
+        body = json.dumps({"boot_count": 3, "recovery_mode": True}).encode()
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", return_value=_fake_response(body)):
+            result = ota.get_boot_guard_status("kiln.local")
+        self.assertEqual(result["boot_count"], 3)
+        self.assertTrue(result["recovery_mode"])
+
+    def test_no_challenge_fetched_first(self):
+        """Unlike the mutating routes, this is a plain unauthenticated GET
+        -- no nonce/HMAC dance, so exactly one urlopen call."""
+        body = json.dumps({"boot_count": 0, "recovery_mode": False}).encode()
+        calls = {"n": 0}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            return _fake_response(body)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            ota.get_boot_guard_status("kiln.local")
+        self.assertEqual(calls["n"], 1)
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.get_boot_guard_status("192.0.2.1")
+
+
 class PushImageLoggingTest(unittest.TestCase):
     """TODO.md: 'Every call logged with the image's SHA-256, and refusals
     logged too' / 'The password is never written to the log'."""

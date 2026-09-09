@@ -336,6 +336,55 @@ def _verify_flash_landed(host: Optional[str], bin_path: str, pre_flash_host: Opt
     return ""
 
 
+def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
+                             ap_password: Optional[str]) -> str:
+    """Called from flash_firmware()'s _post_flash() ONLY after
+    _verify_flash_landed() returned "" -- i.e. full, unambiguous, verified
+    success (running partition is 'factory' AND its build timestamp matches
+    the .bin just flashed). Never called on a raise, a WARNING, or
+    verify=False -- see flash_firmware()'s own `ap_password` doc comment and
+    boot_guard_reset_counter()'s header comment (firmware/KilnFW/App/
+    drivers/persist/boot_guard.h) for why: a board just flashed with
+    something broken, or whose landing was never actually confirmed, must
+    still be free to walk into recovery mode on its own.
+
+    No-op (returns "") when `ap_password` is not given -- this is an
+    additive, opt-in behavior; a caller that omits it gets exactly the
+    pre-existing flash_firmware() behavior.
+
+    Resolves the board address the SAME way _verify_flash_landed() just
+    confirmed one was reachable at (via _preflash_board_address(), which
+    walks the same _resolve_verify_hosts() candidate list) rather than
+    trusting a stale `host`/`pre_flash_host` value -- the board that
+    verification just talked to is the one this call needs to reach too.
+    Never raises: a failure here is reported as a WARNING string appended
+    to flash_firmware()'s result, because the flash itself already
+    succeeded and landed by this point -- losing the recovery-counter clear
+    is a real but non-fatal degradation (docs/audits/
+    boot_guard_post_flash_recovery_footgun_2026-09-08.md's residual is that
+    ordinary reflashing WITHOUT this call can still, eventually, walk a
+    board into recovery mode; this is exactly the "eventually" case)."""
+    if not ap_password:
+        return ""
+    resolved = _preflash_board_address(host) or pre_flash_host
+    if not resolved:
+        return ("WARNING: boot_guard_reset skipped -- could not resolve a board address to call "
+                "POST /api/ota/esp/boot_guard_reset at, even though post-flash verification just "
+                "succeeded against one; the recovery-mode counter was NOT cleared by this flash.")
+    try:
+        body = ota_http.boot_guard_reset_esp(resolved, ap_password)
+    except ota_http.OtaHttpError as exc:
+        _srv._session_log.warning("flash_firmware: boot_guard_reset call failed: %s", exc)
+        return (f"WARNING: boot_guard_reset call failed ({exc}) -- the flash itself landed fine, "
+                "but the recovery-mode counter was NOT cleared by this flash.")
+    if body.get("ok"):
+        return (f"boot_guard_reset: recovery-mode counter cleared and verified "
+                f"(boot_count now {body.get('boot_count')})")
+    return (f"WARNING: boot_guard_reset did not verify (board reported {body!r}) -- the flash "
+            "itself landed fine, but the recovery-mode counter was NOT confirmed cleared; a run of "
+            "ordinary reflashes could still eventually walk this board into recovery mode.")
+
+
 @_srv._tool()
 def flash_firmware(
     board_cfg: str = "board/esp32s3-builtin.cfg",
@@ -345,6 +394,7 @@ def flash_firmware(
     host: Optional[str] = None,
     allow_sensitive_dirty: bool = False,
     kiln_fw_root: Optional[str] = None,
+    ap_password: Optional[str] = None,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
@@ -465,7 +515,32 @@ def flash_firmware(
     `build/`) records `kiln_fw_root_override` so a later reader knows this
     flash did not come from the ordinary path. Post-flash verification
     (`verify=True`) compares against THAT tree's `.bin`, unchanged
-    otherwise."""
+    otherwise.
+
+    `ap_password`: when given AND `verify=True`, and ONLY once post-flash
+    verification confirms full success (the board is running `factory` with
+    the exact build just flashed -- `_verify_flash_landed()` returned "",
+    not a WARNING and not a raise), this also calls
+    `POST /api/ota/esp/boot_guard_reset` (ota_http_client.boot_guard_reset_esp())
+    to clear `boot_guard`'s recovery-mode counter directly -- the tool-driven
+    fix for docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md:
+    boot_confirm_is_healthy()'s own auto-clear depends on a one-shot NVS
+    snapshot that can be wrong for a boot or two right after a flash-induced
+    reset, and a run of ordinary development reflashes can otherwise walk a
+    perfectly healthy board into recovery mode for a reason that has nothing
+    to do with whether the firmware can boot. Deliberately gated on FULL
+    verified success, never on a failed, unverified, or merely-warned-about
+    flash (`verify=False`, an unreachable board, a wrong-partition/
+    wrong-build mismatch, or a soft bring-up WARNING) -- a board that was
+    just flashed with something broken, or whose landing was never actually
+    confirmed, must still be free to walk into recovery mode on its own; see
+    boot_guard_reset_counter()'s own header comment on why this must never
+    run except from a tool that KNOWS a deliberate, confirmed-good flash just
+    happened. A failure to reach or verify this call is reported as a
+    WARNING appended to the result, never raised -- the flash itself already
+    succeeded and landed by this point, and a caller who omits `ap_password`
+    (the default) gets the same behavior as before this parameter existed:
+    no attempt, no warning."""
     openocd_exe = _find_openocd_exe()
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
@@ -583,7 +658,14 @@ def flash_firmware(
         if landed_note:
             _srv._session_log.warning("flash_firmware: %s", landed_note)
             return f"{base_msg}\n{landed_note}"
-        return f"{base_msg}, and post-flash verification confirmed the board is running factory with the matching build"
+        # Full verified success ONLY (landed_note == "") -- see
+        # _maybe_reset_boot_guard()'s own doc comment for why this must
+        # never run on a raise (handled above, already returned), a WARNING
+        # (handled just above), or verify=False (already returned earlier).
+        boot_guard_note = _maybe_reset_boot_guard(host, pre_flash_host, ap_password)
+        suffix = f"\n{boot_guard_note}" if boot_guard_note else ""
+        return (f"{base_msg}, and post-flash verification confirmed the board is running factory "
+                f"with the matching build{suffix}")
 
     ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_kiln_fw_root, timeout_s=90)
     if ok:

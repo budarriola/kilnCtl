@@ -147,6 +147,17 @@ void fake_kv_script_next_write_status(hal_status_t status);
  * by fake_kv_reset_all(). */
 void fake_kv_script_silent_erase_noops(unsigned count);
 
+/* Same lie as fake_kv_script_silent_erase_noops(), for the NEXT `count`
+ * hal_kv_set_blob()/hal_kv_set_str()/hal_kv_set_u32()/hal_kv_set_u8() calls
+ * instead of hal_kv_erase_key(): reports HAL_OK while staging nothing, so
+ * the key's persisted value does not change even after a commit. Needed
+ * separately from the erase-noop version because not every "clear to a
+ * known value" caller erases first -- boot_guard.c's persist_count()
+ * overwrites via hal_kv_set_blob() directly, so only this variant can model
+ * a lying write on that path (see boot_guard_reset_counter()'s host tests).
+ * Consumed one call at a time; cleared by fake_kv_reset_all(). */
+void fake_kv_script_silent_set_noops(unsigned count);
+
 /* hal_kv_get_u32/set_u32 (profiles_builtin.c's NVS_KEY_HIDDEN mask) are
  * modeled as a plain 4-byte blob under the same key-slot storage
  * hal_kv_get/set_blob use -- no separate scalar storage needed. */

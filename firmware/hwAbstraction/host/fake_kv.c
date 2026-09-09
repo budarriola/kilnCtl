@@ -56,6 +56,7 @@ static bool                   s_next_write_fail_armed = false;
 static hal_status_t           s_next_write_fail_status = HAL_OK;
 static bool                   s_lossy_uncommitted = false;
 static unsigned               s_silent_erase_noops = 0u;
+static unsigned               s_silent_set_noops = 0u;
 
 static const char *norm_partition(const char *partition)
 {
@@ -126,6 +127,7 @@ void fake_kv_reset_all(void)
     s_next_write_fail_status = HAL_OK;
     s_lossy_uncommitted = false;
     s_silent_erase_noops = 0u;
+    s_silent_set_noops = 0u;
 }
 
 bool fake_kv_handle_is_live(const hal_kv_handle_t *h)
@@ -218,6 +220,11 @@ void fake_kv_script_next_write_status(hal_status_t status)
 void fake_kv_script_silent_erase_noops(unsigned count)
 {
     s_silent_erase_noops = count;
+}
+
+void fake_kv_script_silent_set_noops(unsigned count)
+{
+    s_silent_set_noops = count;
 }
 
 void fake_kv_set_write_safe_here(bool safe)
@@ -402,6 +409,21 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, bool is_s
     if (s_next_write_fail_armed) {
         s_next_write_fail_armed = false;
         return s_next_write_fail_status;
+    }
+
+    if (s_silent_set_noops > 0u) {
+        /* The lie: report success, stage nothing -- the set_blob/set_str/
+         * set_u32 analogue of fake_kv_script_silent_erase_noops(). Added
+         * for boot_guard_reset_counter()'s host tests
+         * (docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md):
+         * boot_guard.c's persist_count() writes via hal_kv_set_blob(), not
+         * erase_key(), so the erase-only noop above cannot model a lying
+         * write on that path at all -- this is the only way to reach
+         * clear_persisted_counter_verified_locked()'s read-back check with
+         * a *_set_blob*-based writer instead of an honest failure, which
+         * would exit on the return code long before the read-back runs. */
+        s_silent_set_noops--;
+        return HAL_OK;
     }
 
     fake_kv_namespace_t *ns = &s_partitions[hs->partition_slot].namespaces[hs->ns_slot];

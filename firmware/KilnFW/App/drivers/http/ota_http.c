@@ -171,6 +171,9 @@ static ota_auth_lockout_state_t s_lockout_pico_rollback;
 // Same reasoning again for POST /api/sw_reset -- see ota_state.h's doc
 // comment on OTA_HTTP_CONTEXT_SW_RESET.
 static ota_auth_lockout_state_t s_lockout_sw_reset;
+// Same reasoning again for POST /api/ota/esp/boot_guard_reset -- see
+// ota_state.h's doc comment on OTA_HTTP_CONTEXT_BOOT_GUARD_RESET.
+static ota_auth_lockout_state_t s_lockout_boot_guard_reset;
 
 // opus-review finding 3: safety_link_send_rollback_ex() blocks its caller
 // for up to ~6.3s (4 sends * 250ms + one reply window + the 5s boot_id
@@ -349,6 +352,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
         case OTA_HTTP_CONTEXT_FACTORY_RESET:  ctx_str = "factory-reset"; lockout = &s_lockout_factory_reset; break;
         case OTA_HTTP_CONTEXT_PICO_ROLLBACK:  ctx_str = "pico-rollback"; lockout = &s_lockout_pico_rollback; break;
         case OTA_HTTP_CONTEXT_SW_RESET:       ctx_str = "sw-reset";     lockout = &s_lockout_sw_reset;      break;
+        case OTA_HTTP_CONTEXT_BOOT_GUARD_RESET: ctx_str = "boot-guard-reset"; lockout = &s_lockout_boot_guard_reset; break;
         case OTA_HTTP_CONTEXT_PICO:
         default:                              ctx_str = "pico";         lockout = &s_lockout_pico;         break;
     }
@@ -1073,6 +1077,33 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     err = httpd_register_uri_handler(server, &recovery_exit_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/recovery_exit) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's
+    // follow-up: the TOOL-driven boot_guard_reset_counter() trigger, see
+    // ota_boot_guard_reset_post_handler()'s own doc comment
+    // (ota_http_recovery.c) for the auth (OTA_HTTP_CONTEXT_BOOT_GUARD_RESET)
+    // and why -- unlike recovery_exit -- this one does NOT gate on
+    // boot_guard_is_recovery_mode().
+    static const httpd_uri_t boot_guard_reset_uri = {
+        .uri = "/api/ota/esp/boot_guard_reset", .method = HTTP_POST, .handler = ota_boot_guard_reset_post_handler
+    };
+    err = httpd_register_uri_handler(server, &boot_guard_reset_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/boot_guard_reset) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Diagnostics follow-up from the same audit -- see
+    // ota_boot_guard_status_get_handler()'s own doc comment (unauthenticated,
+    // same exposure level as GET /api/status).
+    static const httpd_uri_t boot_guard_status_uri = {
+        .uri = "/api/boot_guard", .method = HTTP_GET, .handler = ota_boot_guard_status_get_handler
+    };
+    err = httpd_register_uri_handler(server, &boot_guard_status_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/boot_guard) failed: %s", esp_err_to_name(err));
         return err;
     }
 

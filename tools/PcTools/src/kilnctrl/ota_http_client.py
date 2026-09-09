@@ -136,14 +136,17 @@ def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
     function: "key = HMAC-SHA256(ap_password, ...)" is the ap_password as
     the HMAC KEY and the context string as the message -- this derivation is
     what keeps the literal Wi-Fi/AP password out of the value that's ever
-    compared or sent). `context` must be exactly "esp", "pico", or
-    "esp-rollback" (the last is its own context, not a reuse of "esp" -- see
-    ota_http.h's doc comment on OTA_HTTP_CONTEXT_ESP_ROLLBACK for why a
-    plain-update MAC must not double as a rollback authorization).
+    compared or sent). `context` must be exactly "esp", "pico",
+    "esp-rollback", "recovery", or "boot-guard-reset" (each is its own
+    context, not a reuse of "esp" -- see ota_http.h's doc comment on
+    OTA_HTTP_CONTEXT_ESP_ROLLBACK for why a plain-update MAC must not double
+    as a rollback authorization, and ota_state.h's doc comment on
+    OTA_HTTP_CONTEXT_BOOT_GUARD_RESET for the same reasoning applied there).
     """
-    if context not in ("esp", "pico", "esp-rollback", "recovery"):
+    if context not in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset"):
         raise ValueError(
-            f"context must be 'esp', 'pico', 'esp-rollback', or 'recovery', got {context!r}")
+            f"context must be 'esp', 'pico', 'esp-rollback', 'recovery', or 'boot-guard-reset', "
+            f"got {context!r}")
     key = hmac.new(ap_password.encode("utf-8"), OTA_KDF_CONTEXT, hashlib.sha256).digest()
     msg = nonce + context.encode("ascii")
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -464,3 +467,106 @@ def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIM
     else:
         log.warning("OTA recovery-exit reported failure: host=%s body=%s", host, body)
     return body
+
+
+def boot_guard_reset_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """POST /api/ota/esp/boot_guard_reset -- the tool-driven half of
+    docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's fix
+    (App/drivers/http/ota_http_recovery.c's ota_boot_guard_reset_post_handler()).
+
+    Tells the board directly "a tool just performed a deliberate flash and
+    independently confirmed the new build is running" -- bypassing
+    boot_confirm_is_healthy()'s one-shot, never-retried NVS snapshot that a
+    board can sample during a transient window right after a flash-triggered
+    reset, walking an entirely healthy board toward recovery mode after a
+    few ordinary reflashes. ONLY call this after your own independent
+    verification that the flash landed and the new build is actually
+    running -- see mcp_server_flash.py's flash_firmware(), the sanctioned
+    caller, which calls this only once `_verify_flash_landed()` returns ""
+    (full, unambiguous success), never on a failed, unverified, or merely
+    warned-about flash. A board that was just flashed with something broken
+    must still be free to walk into recovery mode on its own.
+
+    Same challenge/MAC dance as recovery_exit_esp()/rollback_esp(), signed
+    over its own "boot-guard-reset" context (ota_state.h's
+    OTA_HTTP_CONTEXT_BOOT_GUARD_RESET) -- NOT interchangeable with any other
+    route's MAC. Unlike recovery_exit_esp(), the board does NOT need to be
+    in recovery mode for this to succeed (see that context's own doc
+    comment for why: the common case here is an ORDINARY, non-recovery-mode
+    board, specifically so it never has to reach recovery mode at all), and
+    the board does NOT reboot afterward -- its only effect is the NVS clear.
+
+    Returns the parsed JSON body, {"ok": bool, "boot_count": int}. `ok` is
+    true only once the board's own read-back confirmed the clear actually
+    landed (boot_guard_reset_counter()'s verified-with-retry contract, same
+    as boot_guard_mark_healthy()) -- `ok: false` means the write may have
+    reported success internally but did not verify, exactly the class of
+    lying write CLAUDE.md's boot_guard section warns never to trust the
+    return code of alone. A caller MUST check `ok`, not just that this call
+    did not raise: a 200 with ok:false is not success.
+    """
+    nonce = get_challenge(host, timeout)
+    mac_hex = derive_mac(ap_password, nonce, "boot-guard-reset").hex()
+
+    req = urllib.request.Request(
+        _url(host, "/api/ota/esp/boot_guard_reset"),
+        data=b"",
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+            "X-Ota-Mac": mac_hex,
+        },
+    )
+    log.info("OTA boot_guard_reset requested: host=%s", host)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        log.warning("OTA boot_guard_reset refused: host=%s status=%s detail=%s", host, status_code, detail)
+        raise OtaHttpError(f"/api/ota/esp/boot_guard_reset refused: HTTP {status_code}: {detail}",
+                            status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        log.warning("OTA boot_guard_reset failed (unreachable): host=%s detail=%s", host, detail)
+        raise OtaHttpError(f"/api/ota/esp/boot_guard_reset unreachable: {detail}") from exc
+
+    try:
+        body = json.loads(body_text)
+    except Exception as exc:
+        log.warning("OTA boot_guard_reset response unparseable: host=%s body=%r", host, body_text)
+        raise OtaHttpError(
+            f"/api/ota/esp/boot_guard_reset response was not valid JSON: {body_text!r}") from exc
+    if body.get("ok"):
+        log.info("OTA boot_guard_reset accepted and VERIFIED: host=%s body=%s", host, body)
+    else:
+        log.warning("OTA boot_guard_reset did NOT verify (lying-write class -- see CLAUDE.md's "
+                    "boot_guard section): host=%s body=%s", host, body)
+    return body
+
+
+def get_boot_guard_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/boot_guard -- unauthenticated diagnostics for boot_guard's
+    recovery-mode counter (App/drivers/http/ota_http_recovery.c's
+    ota_boot_guard_status_get_handler()), added alongside the reset route
+    above so this class of fix is verifiable without a JTAG memory read of
+    s_bg (docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md
+    named exactly that as the previous, painful verification path).
+
+    Returns the parsed JSON body, {"boot_count": int, "recovery_mode": bool}.
+    """
+    req = urllib.request.Request(_url(host, "/api/boot_guard"), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/boot_guard refused: HTTP {status_code}: {detail}", status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/boot_guard unreachable: {detail}") from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"/api/boot_guard response was not valid JSON: {body_text!r}") from exc

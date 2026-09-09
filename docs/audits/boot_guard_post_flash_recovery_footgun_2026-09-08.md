@@ -195,9 +195,43 @@ reset from the wrong place), not one that lies about a single function's own ret
 - `firmware/KilnFW/App/test/test_boot_guard.c` -- two new tests (above).
 - `CLAUDE.md` -- boot_guard paragraph extended with this finding.
 
-## Not done in this pass
+## 2026-09-09 follow-up: the tool-side wiring is now done
 
-- No HTTP route wired up, and `flash_firmware()` itself was not changed -- see section 4.
+Section 4's "natural extension, not yet implemented in this pass" is implemented:
+`POST /api/ota/esp/boot_guard_reset` (`ota_http_recovery.c`'s
+`ota_boot_guard_reset_post_handler()`, its own auth context
+`OTA_HTTP_CONTEXT_BOOT_GUARD_RESET`) calls `boot_guard_reset_counter()` directly, and
+`flash_firmware()` (`tools/PcTools/src/kilnctrl/mcp_server_flash.py`) calls it -- via the new
+`ota_http_client.boot_guard_reset_esp()` -- ONLY once its own post-flash verification
+(`_verify_flash_landed()`) returns `""` (full, unambiguous success: running partition is
+`factory` AND its build timestamp matches the `.bin` just flashed), gated by a new optional
+`ap_password` parameter (omitted by default -- an opt-in, not a behavior change for existing
+callers). Never called on a raise, a WARNING, or `verify=False`, proven by host tests on both
+sides (`test_ota_http.c`'s handler tests with a controllable `boot_guard_reset_counter()` stub;
+`test_flash_firmware_verify.py`'s `BootGuardResetWiringTest`, which patches
+`ota_http.boot_guard_reset_esp` and asserts it is NOT called on every non-full-success path).
+Also added, per this doc's own suggested follow-up: `GET /api/boot_guard`
+(`ota_boot_guard_status_get_handler()`, unauthenticated, same exposure level as
+`GET /api/status`) reporting `{"boot_count", "recovery_mode"}` -- so this class of fix no longer
+needs a JTAG memory read of `s_bg` to verify (`ota_http_client.get_boot_guard_status()`).
+
+`boot_guard_reset_counter()`'s own lying-write path (both the first write and the bounded
+erase-then-retry lying) is now exercised directly against real `boot_guard.c`, not just
+`boot_guard_mark_healthy()`'s: `fake_kv_script_silent_set_noops()` was added to
+`firmware/hwAbstraction/host/fake_kv.c`/`.h` alongside the existing erase-only noop, since
+`persist_count()` writes via `hal_kv_set_blob()`, which the erase-only fake could not lie about.
+One incidental finding surfaced while writing that test: when BOTH the first write and the
+retry's write lie, the retry's own real `hal_kv_erase_key()` (not noop'd) still removes the
+record, so the NEXT boot's `load_count()` reads a missing record as 0 rather than the stale
+pre-clear value -- `boot_guard_reset_counter()` still correctly reports `false` for the boot
+that made the call (the read-back could not confirm it that boot), but the persisted state
+does not stay "stuck," it becomes "accidentally reads as 0 later." Not a defect worth chasing
+further: it is strictly no worse than the stuck-at-stale-value case this whole audit is about.
+
+## Not done in this pass (original, 2026-09-08)
+
+- ~~No HTTP route wired up, and `flash_firmware()` itself was not changed -- see section 4.~~
+  Done 2026-09-09, see above.
 - The exact hardware cause of the transient `kiln_nvs not present` sample was not reproduced
   live (board access was off limits for this task). The fix does not depend on that
   diagnosis; it treats the whole class of "the one-shot post-flash health snapshot can be

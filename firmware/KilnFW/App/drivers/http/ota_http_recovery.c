@@ -198,6 +198,104 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
 }
 
 
+// --- POST /api/ota/esp/boot_guard_reset --
+// docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's "not
+// yet implemented" follow-up, now wired up: a TOOL that just performed a
+// deliberate flash and independently confirmed (its own verify step, e.g.
+// tools/PcTools' flash_firmware()) that the NEW build is actually running
+// calls this to bypass boot_confirm_is_healthy()'s flaky one-shot NVS
+// snapshot and clear boot_guard's recovery-mode counter directly.
+//
+// Deliberately does NOT gate on boot_guard_is_recovery_mode() the way
+// ota_recovery_exit_post_handler() does -- see this route's own context
+// doc comment (ota_state.h, OTA_HTTP_CONTEXT_BOOT_GUARD_RESET): the common
+// case this exists for is an ORDINARY, non-recovery-mode board being
+// reflashed during normal iteration, specifically so it never has to reach
+// recovery mode in the first place. Refusing outside recovery mode, the
+// way recovery_exit does, would defeat the entire point.
+//
+// Does NOT reboot the board -- unlike recovery_exit/sw_reset/rollback, this
+// route's only effect is the NVS clear; the board just flashed is already
+// mid-boot into the new image by the time the tool's verify step (and
+// therefore this call) runs.
+esp_err_t ota_boot_guard_reset_post_handler(httpd_req_t *req)
+{
+    char ip[46];
+    ota_http_get_client_ip(req, ip, sizeof(ip));
+
+    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
+    // every other mutating handler in this file.
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
+    if (mac_hex_len != 64) {
+        ESP_LOGW(OTA_HTTP_TAG, "OTA boot_guard_reset from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
+                 ip, (unsigned)mac_hex_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
+        return ESP_OK;
+    }
+    char mac_hex[65];
+    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
+        return ESP_OK;
+    }
+    uint8_t mac[32];
+    if (!hex_decode(mac_hex, 64, mac)) {
+        ESP_LOGW(OTA_HTTP_TAG, "OTA boot_guard_reset from %s: X-Ota-Mac is not valid hex", ip);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
+        return ESP_OK;
+    }
+
+    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_BOOT_GUARD_RESET), not
+    // interchangeable with any other route's MAC. No recovery-mode check
+    // after this, unlike recovery_exit -- see this handler's own doc
+    // comment above for why.
+    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_BOOT_GUARD_RESET, mac, ip);
+    if (vr != OTA_HTTP_VERIFY_OK) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+        return ESP_OK;
+    }
+
+    bool verified = boot_guard_reset_counter();
+    char json[96];
+    int n = snprintf(json, sizeof(json), "{\"ok\":%s,\"boot_count\":%lu}",
+                      verified ? "true" : "false", (unsigned long)boot_guard_get_boot_count());
+    if (!verified) {
+        // Same reasoning as ota_recovery_exit_post_handler()'s equivalent
+        // log line: the caller (a tool that just flashed the board and is
+        // relying on this call to keep the counter from climbing) deserves
+        // to know the clear did not verify, not a silent 200 that implies
+        // it worked.
+        ESP_LOGW(OTA_HTTP_TAG, "boot_guard_reset from %s: boot-guard clear did not verify -- the "
+                      "persisted counter may still be nonzero; caller should treat this flash as "
+                      "NOT having reset the recovery-mode counter", ip);
+    } else {
+        ESP_LOGI(OTA_HTTP_TAG, "boot_guard_reset from %s: boot-guard counter cleared and verified "
+                      "-- recorded as a deliberate flash", ip);
+    }
+    httpd_resp_set_type(req, "application/json");
+    ota_http_send_json_clamped(req, json, n, sizeof(json));
+    return ESP_OK;
+}
+
+// GET /api/boot_guard -- diagnostics follow-up flagged by the same audit
+// ("a /api/boot_guard diagnostics route is a reasonable follow-up"): before
+// this, confirming the fix above actually worked required a JTAG memory
+// read of s_bg. Unauthenticated, matching GET /api/status's existing
+// exposure level (a boot count and a recovery-mode boolean are no more
+// sensitive than the live zone temperatures that route already exposes
+// without auth) -- see ota_interlock_get_handler()'s own doc comment just
+// below for the same reasoning applied to that route.
+esp_err_t ota_boot_guard_status_get_handler(httpd_req_t *req)
+{
+    char json[96];
+    int n = snprintf(json, sizeof(json), "{\"boot_count\":%lu,\"recovery_mode\":%s}",
+                      (unsigned long)boot_guard_get_boot_count(),
+                      boot_guard_is_recovery_mode() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    ota_http_send_json_clamped(req, json, n, sizeof(json));
+    return ESP_OK;
+}
+
+
 // ota_pico_rollback_format_body()/ota_pico_rollback_reason_str() moved to
 // ota_http_util.c -- see the #define aliases above and ota_http_util.h's
 // header comment.

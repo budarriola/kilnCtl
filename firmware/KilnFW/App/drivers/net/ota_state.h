@@ -53,6 +53,23 @@ typedef enum {
     // budget. Same reasoning as every other *_ROLLBACK/_RECOVERY_EXIT split
     // above.
     OTA_HTTP_CONTEXT_SW_RESET,
+    // POST /api/ota/esp/boot_guard_reset (ota_http_recovery.c) --
+    // docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's
+    // "not yet implemented" follow-up: flash_firmware() (tools/PcTools)
+    // calls this, ONLY after its own post-flash verification confirms the
+    // new build is actually running, to call boot_guard_reset_counter()
+    // directly -- bypassing boot_confirm_is_healthy()'s flaky one-shot NVS
+    // snapshot. Its own context, not a reuse of OTA_HTTP_CONTEXT_RECOVERY_EXIT
+    // or _SW_RESET: unlike recovery_exit it must work whether or not the
+    // board is currently in recovery mode (an ordinary healthy board being
+    // flashed is the common case this exists for), and unlike sw_reset it is
+    // an explicit "I just replaced the firmware" declaration a mere reboot
+    // request must never be able to make (see sw_reset_http.c's own
+    // "What this route deliberately does NOT do" comment, item 2, for why
+    // conflating the two would defeat the counter). A MAC signed for one
+    // context must not authorize another, same reasoning as every other
+    // split above.
+    OTA_HTTP_CONTEXT_BOOT_GUARD_RESET,
 } ota_http_context_t;
 
 // --- Heat interlock, the OTHER direction (TODO.md 9.4/ROADMAP.md M8's

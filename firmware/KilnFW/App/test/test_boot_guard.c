@@ -586,6 +586,103 @@ static void test_a_genuinely_failing_boot_still_trips_recovery(void)
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// boot_guard_reset_counter() against a HAL that LIES about the write, not
+// just an honest failure -- fake_kv_script_next_write_status() above only
+// models an honest HAL_NO_MEM/HAL_IO (the caller's `err != HAL_OK` branch
+// catches that long before clear_persisted_counter_verified_locked()'s
+// read-back ever runs). persist_count() writes via hal_kv_set_blob(), not
+// hal_kv_erase_key(), so fake_kv_script_silent_erase_noops() (already used
+// elsewhere in this file's mark_healthy coverage) cannot model a lying
+// write on THIS function's first attempt at all -- it needs the set-blob
+// noop added to fake_kv.h/.c specifically for this
+// (fake_kv_script_silent_set_noops()). This is the only way to actually
+// reach the read-back check with a set_blob-shaped writer, per
+// docs/audits/boot_guard_recovery_loop_2026-09-08.md's original hardware
+// finding: hal_kv_set_blob()/hal_kv_commit() reported HAL_OK while the
+// persisted count never changed.
+// ---------------------------------------------------------------------------
+static void test_reset_counter_recovers_from_a_single_lying_write(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    for (uint32_t i = 0; i < 2; i++) {
+        simulate_reboot();
+        boot_guard_init();
+    }
+    TEST_CHECK(boot_guard_get_boot_count() == 2u, "precondition: a real, valid, nonzero count is on record");
+
+    // Only the FIRST attempt's hal_kv_set_blob() lies -- persist_count(0)
+    // inside clear_persisted_counter_verified_locked()'s first try reports
+    // HAL_OK but changes nothing, so verify_persisted_count(0) fails and the
+    // bounded erase-then-retry (erase_then_persist_count()) fires; its own
+    // hal_kv_set_blob() call is a genuine, un-noop'd write and lands for
+    // real.
+    fake_kv_script_silent_set_noops(1u);
+    TEST_CHECK(boot_guard_reset_counter(),
+               "the bounded retry recovers when only the first write lies -- the check is "
+               "discriminating, not vacuously failing");
+
+    // boot_guard_reset_counter() only ever affects the NEXT boot's loaded
+    // count (see its own doc comment) -- s_bg.count this boot is untouched
+    // by design, so the only honest way to confirm the clear actually
+    // landed in flash is to simulate the next boot and read what it loads.
+    simulate_reboot();
+    boot_guard_init();
+    TEST_CHECK(boot_guard_get_boot_count() == 1u,
+               "the NEXT boot loads a genuinely-cleared persisted count (0, then this boot's own "
+               "unconditional +1) -- not just a return value that claimed success");
+}
+
+static void test_reset_counter_refuses_success_when_every_write_lies(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    for (uint32_t i = 0; i < 2; i++) {
+        simulate_reboot();
+        boot_guard_init();
+    }
+    TEST_CHECK(boot_guard_get_boot_count() == 2u, "precondition: a real, valid, nonzero count is on record");
+
+    // BOTH the first attempt's hal_kv_set_blob() and the bounded retry's own
+    // hal_kv_set_blob() (inside erase_then_persist_count(), after a genuine
+    // erase) lie -- the exact stuck-on-real-hardware shape the 2026-09-08
+    // audit found, now reached through boot_guard_reset_counter() rather
+    // than boot_guard_mark_healthy(). A return-code-only version of
+    // clear_persisted_counter_verified_locked() would report success here;
+    // the read-back must catch it.
+    fake_kv_script_silent_set_noops(2u);
+    bool verified = boot_guard_reset_counter();
+    TEST_CHECK(!verified,
+               "boot_guard_reset_counter() reports FAILURE when the counter still reads nonzero "
+               "after both the write and its retry claimed HAL_OK -- a write-status-only version "
+               "would have wrongly reported success here");
+
+    // NOTE this is NOT "the old count survives": erase_then_persist_count()
+    // (the bounded retry) genuinely erases the record first -- that part is
+    // real, not noop'd -- and only the WRITE that would recreate it lies.
+    // So the record this leaves behind is MISSING, not stale-at-2, and
+    // load_count() collapses a missing record to 0 exactly the same as a
+    // genuinely-cleared one (see its own doc comment) -- the next boot
+    // loads 0, +1 for that boot's own unconditional increment. The
+    // assertion that matters here is boot_guard_reset_counter()'s own
+    // return value above: it must report failure (not verified) on THIS
+    // call even though the persisted state happens to land somewhere
+    // count-like afterward, because a caller trusting a `false` return as
+    // "keep treating this as recovery-relevant" must not be told `true`
+    // when the read-back could not confirm it in the boot that ran it.
+    simulate_reboot();
+    boot_guard_init();
+    TEST_CHECK(boot_guard_get_boot_count() == 1u,
+               "the doubly-lying retry leaves the record erased (not rewritten), which the next "
+               "boot's load_count() reads as 0, +1 for that boot -- NOT the same as the write "
+               "having verified in the call that made it");
+}
+
 void run_test_boot_guard(void)
 {
     test_crc32_reference_vector();
@@ -601,4 +698,6 @@ void run_test_boot_guard(void)
     test_legacy_record_is_read_once_then_retired();
     test_reset_counter_keeps_normal_flashing_under_threshold();
     test_a_genuinely_failing_boot_still_trips_recovery();
+    test_reset_counter_recovers_from_a_single_lying_write();
+    test_reset_counter_refuses_success_when_every_write_lies();
 }

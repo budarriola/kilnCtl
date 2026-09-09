@@ -398,6 +398,14 @@ httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 // boot_guard.h
 bool boot_guard_is_recovery_mode(void) { return false; }
 void boot_guard_mark_healthy(void) {}
+// Test-controllable so ota_boot_guard_reset_post_handler()'s success/failure
+// reporting can be exercised without pulling in the real boot_guard.c (its
+// own NVS-backed clear-and-verify sequence is covered directly by
+// test_boot_guard.c) -- see run_test_ota_http()'s reset before each test.
+static bool s_stub_boot_guard_reset_verified = true;
+static uint32_t s_stub_boot_guard_count = 0;
+bool boot_guard_reset_counter(void) { return s_stub_boot_guard_reset_verified; }
+uint32_t boot_guard_get_boot_count(void) { return s_stub_boot_guard_count; }
 
 // web_encoding.h -- only reached from page GET handlers, never called here.
 bool web_client_accepts_gzip(httpd_req_t *req) { (void)req; return true; }
@@ -559,6 +567,7 @@ static const char *ctx_str_for(ota_http_context_t ctx)
         case OTA_HTTP_CONTEXT_FACTORY_RESET: return "factory-reset";
         case OTA_HTTP_CONTEXT_PICO_ROLLBACK: return "pico-rollback";
         case OTA_HTTP_CONTEXT_SW_RESET: return "sw-reset";
+        case OTA_HTTP_CONTEXT_BOOT_GUARD_RESET: return "boot-guard-reset";
         default: return "?";
     }
 }
@@ -600,6 +609,7 @@ static void reset_all_lockouts(void)
     memset(&s_lockout_factory_reset, 0, sizeof(s_lockout_factory_reset));
     memset(&s_lockout_pico_rollback, 0, sizeof(s_lockout_pico_rollback));
     memset(&s_lockout_sw_reset, 0, sizeof(s_lockout_sw_reset));
+    memset(&s_lockout_boot_guard_reset, 0, sizeof(s_lockout_boot_guard_reset));
 }
 
 // ---------------------------------------------------------------------------
@@ -1489,6 +1499,152 @@ static void test_sw_reset_pico_sentences_are_honest(void)
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/ota/esp/boot_guard_reset -- docs/audits/
+// boot_guard_post_flash_recovery_footgun_2026-09-08.md's tool-driven trigger.
+// boot_guard_reset_counter() itself (NVS write/verify/retry) is covered by
+// test_boot_guard.c against the real boot_guard.c; this file's stub
+// (s_stub_boot_guard_reset_verified) exists purely to exercise the HTTP
+// layer's own decisions: auth ordering and honest ok:true/false reporting.
+// ---------------------------------------------------------------------------
+
+static void test_boot_guard_reset_missing_auth_refused(void)
+{
+    TEST_SECTION("ota_boot_guard_reset_post_handler -- a missing X-Ota-Mac header is refused (400) "
+                 "before boot_guard_reset_counter() is ever called");
+    reset_all_lockouts();
+    stub_headers_reset();
+    s_last_err_code = 0;
+    s_last_err_msg[0] = '\0';
+    s_stub_boot_guard_reset_verified = true; // if this got called anyway, it would look like success
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_boot_guard_reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK -- errors go through httpd_resp_send_err");
+    TEST_CHECK(s_last_err_code == 400, "a missing X-Ota-Mac header is refused with 400");
+    TEST_CHECK(strstr(s_last_err_msg, "X-Ota-Mac") != NULL, "the refusal names the missing header");
+}
+
+static void test_boot_guard_reset_wrong_context_mac_refused(void)
+{
+    TEST_SECTION("ota_boot_guard_reset_post_handler -- a MAC signed for a DIFFERENT context "
+                 "(recovery_exit's) is rejected -- its own context, not interchangeable");
+    reset_all_lockouts();
+    g_stub_boot_button_bypass = false;
+    g_stub_ap_password = "boot-guard-reset-test-password";
+
+    uint8_t nonce[OTA_AUTH_NONCE_LEN];
+    issue_nonce(nonce);
+    uint8_t mac[32];
+    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_RECOVERY_EXIT), mac);
+    char hex[65];
+    hex_encode(mac, sizeof(mac), hex);
+    stub_headers_reset();
+    stub_header_set("X-Ota-Mac", hex);
+    s_last_err_code = 0;
+    s_last_err_msg[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_boot_guard_reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(s_last_err_code == 403, "a recovery-exit-context MAC is refused (403) against "
+              "OTA_HTTP_CONTEXT_BOOT_GUARD_RESET");
+}
+
+static void test_boot_guard_reset_authenticated_reports_success(void)
+{
+    TEST_SECTION("ota_boot_guard_reset_post_handler -- a correctly authenticated request calls "
+                 "boot_guard_reset_counter() and reports ok:true when it verifies");
+    reset_all_lockouts();
+    g_stub_boot_button_bypass = false;
+    g_stub_ap_password = "boot-guard-reset-test-password";
+    s_stub_boot_guard_reset_verified = true;
+    s_stub_boot_guard_count = 0;
+
+    uint8_t nonce[OTA_AUTH_NONCE_LEN];
+    issue_nonce(nonce);
+    uint8_t mac[32];
+    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_BOOT_GUARD_RESET), mac);
+    char hex[65];
+    hex_encode(mac, sizeof(mac), hex);
+    stub_headers_reset();
+    stub_header_set("X-Ota-Mac", hex);
+    s_last_err_code = 0;
+    s_last_err_msg[0] = '\0';
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_boot_guard_reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "a correctly authenticated request is not refused");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") != NULL,
+              "reports ok:true when boot_guard_reset_counter() verifies its clear");
+}
+
+static void test_boot_guard_reset_authenticated_reports_failure_honestly(void)
+{
+    TEST_SECTION("ota_boot_guard_reset_post_handler -- reports ok:false, not a bare 200 that implies "
+                 "success, when boot_guard_reset_counter() could NOT verify the clear");
+    reset_all_lockouts();
+    g_stub_boot_button_bypass = false;
+    g_stub_ap_password = "boot-guard-reset-test-password";
+    s_stub_boot_guard_reset_verified = false; // the lying-write case, from the caller's side
+
+    uint8_t nonce[OTA_AUTH_NONCE_LEN];
+    issue_nonce(nonce);
+    uint8_t mac[32];
+    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_BOOT_GUARD_RESET), mac);
+    char hex[65];
+    hex_encode(mac, sizeof(mac), hex);
+    stub_headers_reset();
+    stub_header_set("X-Ota-Mac", hex);
+    s_last_err_code = 0;
+    s_last_err_msg[0] = '\0';
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_boot_guard_reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK -- it still responds 200 either way, "
+              "the honesty is in the body, not the HTTP status");
+    TEST_CHECK(s_last_err_code == 0, "auth succeeded, so this is not an httpd_resp_send_err() path");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":false") != NULL,
+              "reports ok:false -- a caller (flash_firmware()) trusting a bare 200 as success would "
+              "wrongly believe the recovery-mode counter was actually cleared");
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/boot_guard -- unauthenticated diagnostics, same exposure level as
+// GET /api/status. Reports whatever boot_guard reports, honestly, with no
+// auth gate to bypass first.
+// ---------------------------------------------------------------------------
+
+static void test_boot_guard_status_reports_count_and_recovery_mode(void)
+{
+    TEST_SECTION("ota_boot_guard_status_get_handler -- unauthenticated, reports the real count and "
+                 "recovery-mode flag with no auth gate");
+    s_stub_boot_guard_count = 7;
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_boot_guard_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"boot_count\":7") != NULL, "reports the real boot count");
+    TEST_CHECK(strstr(s_last_resp_body, "\"recovery_mode\":false") != NULL,
+              "reports the real recovery-mode flag (this file's boot_guard_is_recovery_mode() stub "
+              "always returns false)");
+    s_stub_boot_guard_count = 0;
+}
+
+// ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
 {
@@ -1513,6 +1669,12 @@ void run_test_ota_http(void)
 
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();
+
+    test_boot_guard_reset_missing_auth_refused();
+    test_boot_guard_reset_wrong_context_mac_refused();
+    test_boot_guard_reset_authenticated_reports_success();
+    test_boot_guard_reset_authenticated_reports_failure_honestly();
+    test_boot_guard_status_reports_count_and_recovery_mode();
 
     test_pico_rollback_post_returns_pending_without_blocking();
     test_pico_rollback_status_reports_idle_before_any_request();

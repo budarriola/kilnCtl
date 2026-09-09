@@ -161,5 +161,7 @@ esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req);    // ota_http_pico.
 esp_err_t ota_pico_rollback_status_get_handler(httpd_req_t *req); // ota_http_pico.c
 esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req);    // ota_http_recovery.c
 esp_err_t ota_interlock_get_handler(httpd_req_t *req);         // ota_http_recovery.c
+esp_err_t ota_boot_guard_reset_post_handler(httpd_req_t *req); // ota_http_recovery.c
+esp_err_t ota_boot_guard_status_get_handler(httpd_req_t *req); // ota_http_recovery.c
 
 #endif // OTA_HTTP_INTERNAL_H
