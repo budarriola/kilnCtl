@@ -13,6 +13,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "max31856_codec.h" /* MAX31856_CHANNEL_COUNT, MAX31856_TC_TEMP_C_PER_LSB */
+#include "zones_config_json.h" /* zone_cfg_t -- G1's real-config seam, see sim_plant_from_zone_cfg() */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -136,6 +139,101 @@ float sim_kiln_reading_c(const sim_kiln_state_t *state, const sim_kiln_cfg_t *cf
 /* True element temperature of a physical zone -- the ground truth a real
  * controller never gets to see. For assertions only. */
 float sim_kiln_element_c(const sim_kiln_state_t *state, int zone);
+
+/* ------------------------------------------------------------------------
+ * G1 (ITER_TUNE_REDESIGN_PLAN.md sec 6.1/6.2) -- build a sim_plant_cfg_t from
+ * the board's REAL measured FOPDT parameters (zone_cfg_t::model_k_dc/
+ * model_tau_s/model_dead_time_s -- the same fields zone_model_at()'s
+ * passthrough seam reads, zones_config_accessors.c/.h) instead of hand-set
+ * constants, so a harness built on this cannot silently drift from the
+ * on-flash config schema. Deliberately takes a `const zone_cfg_t *` rather
+ * than calling zone_model_at()/zones_config_get_model() directly: those
+ * read a file-scope global inside zones_config_accessors.c, which would
+ * force every caller of this function (including host tests that link
+ * sim_plant.c but never touch zones_config, e.g. test_sim_kiln.c) to also
+ * link the whole zones_config_accessors.c/zones_config_json.c/NVS stack.
+ * Passing the struct keeps the schema dependency (the actual point of G1)
+ * without the link-time one; a caller that already has zones_config loaded
+ * fetches with zone_model_at()/zones_config_get_model() and passes the
+ * result in.
+ *
+ * Mapping (sec 6.2, exact up to one free scale h = loss_coeff_w_per_c = 1.0):
+ *   heater_power_w        = model_k_dc         (steady-state gain K)
+ *   thermal_mass_j_per_c  = model_tau_s         (time constant tau = C/h)
+ *   sensor_delay_s        = model_dead_time_s   (identified dead time L)
+ *   sensor_lag_tau_s      = 0                   (L already lumps sensor lag;
+ *                                                 splitting it would double-count)
+ * Units become nominal, not physical -- fine, because nothing downstream of
+ * sim_plant_step()/sim_kiln_step() scores watts, only input/output dynamics,
+ * which this mapping reproduces exactly.
+ *
+ * Returns false (leaving *out unmodified) if any of model_k_dc/model_tau_s/
+ * model_dead_time_s is non-finite or non-positive (a zone whose model has
+ * never been fitted reads 0 for all three -- see zones_config_migrate.c --
+ * and 0 tau/heater_power would divide by zero in sim_plant_step()). */
+bool sim_plant_from_zone_cfg(const zone_cfg_t *zcfg, float ambient_c, sim_plant_cfg_t *out);
+
+/* G1's coupling counterpart: the algebraic first cut sec 6.2 describes for
+ * turning a fitted steady-state cross-gain matrix (coupling_coeff[i][j] =
+ * zone i's rise per unit when zone j is stepped, as zones_config_get_coupling()
+ * / coupling_at() report it) into sim_kiln's conductance matrix
+ * coupling_w_per_c[i][j] on (T_j - T_i). g_ij ~= h_i * coupling_coeff[i][j] /
+ * k_dc[j], with h_i = 1 per sim_plant_from_zone_cfg()'s own free-scale choice.
+ * This is documented in the plan as a STARTING POINT only -- the sim's
+ * conductance loads zone j too (energy flows both ways), so matching the
+ * simulated cross-gain to the measured one to within 10% requires an
+ * additional numerical fit this function does not attempt. */
+void sim_kiln_coupling_from_cross_gain(int zone_count,
+                                        const float coupling_coeff[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES],
+                                        const float k_dc[SIM_KILN_MAX_ZONES],
+                                        float out_coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES]);
+
+/* ------------------------------------------------------------------------
+ * G3 (plan sec 6.1) -- relay actuation lag: a fixed transport delay on the
+ * *commanded relay state* itself, distinct from sim_plant_cfg_t's
+ * sensor_delay_s (which sits on the reading, not the actuator). This is the
+ * exact mechanism that defeated relay-feedback autotune identification on
+ * the bench (project_relay_ident_actuation_lag.md): 1 Hz relay-law switching
+ * actuated through a 60 s heater_output.c PWM window, with actuation lag on
+ * top, jittering every edge past the fit tolerance. Ring-buffer delay line
+ * on a bool, same shape as sim_plant_state_t's own delay_ring.
+ * ------------------------------------------------------------------------ */
+#define SIM_RELAY_LAG_RING_MAX 8
+
+typedef struct {
+    bool ring[SIM_RELAY_LAG_RING_MAX];
+    int  head;
+    int  len;
+} sim_relay_lag_t;
+
+/* Feeds `commanded` in, returns the relay state lag_s in the past (clamped to
+ * the ring's capacity, same "acceptable approximation, not a general
+ * variable-timestep model" posture as sim_plant.c's own sensor delay). Call
+ * once per tick per zone with a fresh sim_relay_lag_t (zero-initialize, e.g.
+ * via memset, before the first call -- there is no separate reset function
+ * because there is no cfg to reset against, unlike sim_plant_reset()). */
+bool sim_relay_lag_step(sim_relay_lag_t *state, bool commanded, float lag_s, float dt_s);
+
+/* ------------------------------------------------------------------------
+ * G4 (plan sec 6.1) -- MAX31856 quantisation. Real hardware resolution is
+ * NOT 1/MAX31856_TC_TEMP_C_PER_LSB (0.000244 C): that constant is the LSB
+ * weight of the raw 24-bit LTCB register word, but max31856_decode_tc()
+ * (max31856_codec.c) masks the low 5 bits of that word to 0 before decoding
+ * (LTCBL[4:0] is documented don't-care) -- the header comment on
+ * MAX31856_TC_TEMP_C_PER_LSB itself says so: "equivalently 0.0078125 degC
+ * per 19-bit code". The achievable resolution is therefore
+ * 32 * MAX31856_TC_TEMP_C_PER_LSB = 0.0078125 C (2^-7 C, the datasheet's
+ * documented 19-bit linearized-TC resolution), not the raw-register LSB.
+ * Quantizing at the finer, wrong constant would let the harness exercise
+ * precision the real converter never delivers -- exactly the "unquantized
+ * synthetic data hides real branches" bug class this gap exists to close. */
+#define SIM_MAX31856_TC_RESOLUTION_C (32.0f * MAX31856_TC_TEMP_C_PER_LSB)
+
+/* Rounds to the nearest real MAX31856 code; passes NaN through unchanged
+ * (an open/fault reading has no code to round to). Apply AFTER sim_kiln's
+ * own sensor noise and BEFORE the value reaches any controller code, per
+ * plan sec 6.1's G4 row. */
+float sim_max31856_quantize_tc(float temperature_c);
 
 #ifdef __cplusplus
 }

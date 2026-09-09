@@ -18,9 +18,12 @@
 //
 // LINKED AS-IS, NOT REIMPLEMENTED (plan sec 6.3): pid.c, heater_output.c
 // (this is gap G2 -- the real 60 s PWM window, not a continuous duty),
-// zone_coupling_solve.c, sim_plant.c, and all three modules under test. The
-// only new code here is the G1 measured-parameter mapping, G3's relay
-// actuation lag, G4's MAX31856 quantisation, the profile, and the driver.
+// zone_coupling_solve.c, sim_plant.c, and all three modules under test.
+// G1 (sim_plant_from_zone_cfg()/sim_kiln_coupling_from_cross_gain()), G3
+// (sim_relay_lag_step()) and G4 (sim_max31856_quantize_tc()) now live in
+// sim_plant.c/.h itself (promoted 2026-09-09 so any other harness gets them
+// for free) rather than as file-local code here; this file's own new code is
+// the measured-data table below, the profile, and the driver loop.
 //
 // WHAT THIS CANNOT TELL US (plan sec 6.4, restated because a simulation
 // that flatters the algorithm is worse than none):
@@ -86,27 +89,17 @@ bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
     return false;
 }
 
-// ---- G3: relay actuation lag (unmeasured on this bench; 0.5 s assumed for
-// an SSR-class device, same placeholder and same caveat as
-// sim_wide_temp_sweep.c) ----
-#define RELAY_LAG_RING_MAX 8
-typedef struct { bool ring[RELAY_LAG_RING_MAX]; int head; int len; } relay_lag_t;
-static bool relay_lag_step(relay_lag_t *rl, bool commanded, float lag_s, float dt_s)
-{
-    int lag_steps = (dt_s > 0.0f) ? (int)(lag_s / dt_s + 0.5f) : 0;
-    if (lag_steps < 0) lag_steps = 0;
-    if (lag_steps >= RELAY_LAG_RING_MAX) lag_steps = RELAY_LAG_RING_MAX - 1;
-    rl->ring[rl->head] = commanded;
-    if (rl->len < RELAY_LAG_RING_MAX) rl->len++;
-    int read_idx = rl->head - lag_steps;
-    while (read_idx < 0) read_idx += RELAY_LAG_RING_MAX;
-    bool out = (lag_steps < rl->len) ? rl->ring[read_idx] : false;
-    rl->head = (rl->head + 1) % RELAY_LAG_RING_MAX;
-    return out;
-}
-
-// ---- G4: MAX31856 quantisation, after the sim's own noise, before use ----
-static float quantize_tc(float v) { return isfinite(v) ? roundf(v / MAX31856_TC_TEMP_C_PER_LSB) * MAX31856_TC_TEMP_C_PER_LSB : v; }
+// ---- G2/G3/G4 now live in sim_plant.c/.h (promoted out of this file so any
+// other harness gets the same real PWM linkage / relay lag / quantisation
+// for free -- see that header's own comments for each). relay actuation lag
+// is unmeasured on this bench; 0.5 s assumed for an SSR-class device, same
+// placeholder and same caveat as sim_wide_temp_sweep.c. G4's quantize_tc()
+// used to round at the raw-register LSB (1/4096 C) instead of the real
+// 19-bit-code resolution (0.0078125 C, 32x coarser) -- fixed when this was
+// promoted to sim_max31856_quantize_tc(); see that function's header comment. ----
+typedef sim_relay_lag_t relay_lag_t;
+#define relay_lag_step sim_relay_lag_step
+#define quantize_tc sim_max31856_quantize_tc
 
 // ------------------------------------------------------------------ profile
 //
@@ -139,24 +132,59 @@ typedef struct {
     uint32_t noise_seed;
 } plant_variant_t;
 
+// G1: run the measured FOPDT data through sim_plant_from_zone_cfg() by
+// staging it into a real zone_cfg_t exactly the way zones_config_migrate.c's
+// model-fit fields are populated on the board, rather than assigning
+// sim_plant_cfg_t fields by hand -- so this harness cannot silently drift
+// from what zone_model_at()'s passthrough seam actually reads. Only the
+// three model_* fields this function consumes are set; everything else in
+// zone_cfg_t is zero, which is fine since sim_plant_from_zone_cfg() only
+// looks at model_k_dc/model_tau_s/model_dead_time_s.
 static void build_cfg(sim_kiln_cfg_t *cfg, const plant_variant_t *v)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->zone_count = NZ;
+
     for (int i = 0; i < NZ; i++) {
-        sim_plant_cfg_t *p = &cfg->zone[i].plant;
-        p->ambient_c = AMBIENT_C;
-        p->heater_power_w = g_k_dc[i] * v->k_scale[i]; // K (h == 1 free scale, plan sec 6.2)
-        p->thermal_mass_j_per_c = g_tau_s[i] * v->tau_scale[i];
-        p->loss_coeff_w_per_c = 1.0f;
-        p->sensor_delay_s = g_dead_time_s[i] * v->dead_scale[i];
-        p->sensor_lag_tau_s = 0.0f;
+        zone_cfg_t zcfg;
+        memset(&zcfg, 0, sizeof(zcfg));
+        zcfg.model_k_dc = g_k_dc[i] * v->k_scale[i]; // K (h == 1 free scale, plan sec 6.2)
+        zcfg.model_tau_s = g_tau_s[i] * v->tau_scale[i];
+        zcfg.model_dead_time_s = g_dead_time_s[i] * v->dead_scale[i];
+
+        bool ok = sim_plant_from_zone_cfg(&zcfg, AMBIENT_C, &cfg->zone[i].plant);
+        if (!ok) {
+            // Every g_k_dc[i]/g_tau_s[i] is a positive measured constant and
+            // every *_scale[i] is a positive multiplier (nominal_variant()/
+            // mismatched_variant()), so this can only fire if that invariant
+            // is broken -- fail loudly rather than run on a zeroed plant.
+            fprintf(stderr, "sim_plant_from_zone_cfg() rejected zone %d's measured parameters "
+                            "(k_dc=%.4f tau_s=%.4f dead_time_s=%.4f) -- aborting.\n",
+                    i, (double)zcfg.model_k_dc, (double)zcfg.model_tau_s, (double)zcfg.model_dead_time_s);
+            exit(1);
+        }
         cfg->zone[i].radiative_coeff_w_per_k4 = 0.0f; // inside the fitted region; see file header
+    }
+
+    float scaled_coupling[NZ][NZ];
+    for (int i = 0; i < NZ; i++) {
         for (int j = 0; j < NZ; j++) {
-            if (i == j) continue;
-            cfg->coupling_w_per_c[i][j] = v->coupling_scale * g_coupling_coeff[i][j] / g_k_dc[j];
+            scaled_coupling[i][j] = v->coupling_scale * g_coupling_coeff[i][j];
         }
     }
+    // Denominator is the NOMINAL measured k_dc, not this trial's mismatched
+    // one -- coupling_diag_k_dc is a fixed property of the cross-gain
+    // identification itself (plan sec 6.2), not something a plant-mismatch
+    // trial should also perturb; only coupling_scale (g_coupling_coeff's own
+    // mismatch knob) varies here, matching the pre-promotion behaviour.
+    float coupling_out[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES];
+    sim_kiln_coupling_from_cross_gain(NZ, scaled_coupling, g_k_dc, coupling_out);
+    for (int i = 0; i < NZ; i++) {
+        for (int j = 0; j < NZ; j++) {
+            cfg->coupling_w_per_c[i][j] = coupling_out[i][j];
+        }
+    }
+
     cfg->sensor_noise_c = 0.05f;
 }
 

@@ -196,3 +196,74 @@ float sim_kiln_element_c(const sim_kiln_state_t *state, int zone)
     if (zone < 0 || zone >= SIM_KILN_MAX_ZONES) return NAN;
     return state->zone[zone].element_c;
 }
+
+/* --------------------------------- G1 ------------------------------------ */
+
+bool sim_plant_from_zone_cfg(const zone_cfg_t *zcfg, float ambient_c, sim_plant_cfg_t *out)
+{
+    if (!zcfg || !out) return false;
+    float k_dc = zcfg->model_k_dc;
+    float tau_s = zcfg->model_tau_s;
+    float dead_time_s = zcfg->model_dead_time_s;
+
+    if (!isfinite(k_dc) || !isfinite(tau_s) || !isfinite(dead_time_s) ||
+        k_dc <= 0.0f || tau_s <= 0.0f || dead_time_s < 0.0f) {
+        return false;
+    }
+
+    out->ambient_c = ambient_c;
+    out->heater_power_w = k_dc;
+    out->thermal_mass_j_per_c = tau_s;
+    out->loss_coeff_w_per_c = 1.0f; /* the free scale h -- see header comment */
+    out->sensor_delay_s = dead_time_s;
+    out->sensor_lag_tau_s = 0.0f; /* dead_time_s already lumps sensor lag */
+    return true;
+}
+
+void sim_kiln_coupling_from_cross_gain(int zone_count,
+                                        const float coupling_coeff[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES],
+                                        const float k_dc[SIM_KILN_MAX_ZONES],
+                                        float out_coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES])
+{
+    if (zone_count < 0) zone_count = 0;
+    if (zone_count > SIM_KILN_MAX_ZONES) zone_count = SIM_KILN_MAX_ZONES;
+
+    for (int i = 0; i < SIM_KILN_MAX_ZONES; i++) {
+        for (int j = 0; j < SIM_KILN_MAX_ZONES; j++) {
+            out_coupling_w_per_c[i][j] = 0.0f;
+        }
+    }
+    for (int i = 0; i < zone_count; i++) {
+        for (int j = 0; j < zone_count; j++) {
+            if (i == j) continue;
+            if (k_dc[j] == 0.0f) continue; /* undefined; leave at 0 rather than divide */
+            /* h_i == 1.0 (sim_plant_from_zone_cfg()'s own free-scale choice) */
+            out_coupling_w_per_c[i][j] = coupling_coeff[i][j] / k_dc[j];
+        }
+    }
+}
+
+/* --------------------------------- G3 ------------------------------------ */
+
+bool sim_relay_lag_step(sim_relay_lag_t *state, bool commanded, float lag_s, float dt_s)
+{
+    int lag_steps = (dt_s > 0.0f) ? (int)(lag_s / dt_s + 0.5f) : 0;
+    if (lag_steps < 0) lag_steps = 0;
+    if (lag_steps >= SIM_RELAY_LAG_RING_MAX) lag_steps = SIM_RELAY_LAG_RING_MAX - 1;
+
+    state->ring[state->head] = commanded;
+    if (state->len < SIM_RELAY_LAG_RING_MAX) state->len++;
+    int read_idx = state->head - lag_steps;
+    while (read_idx < 0) read_idx += SIM_RELAY_LAG_RING_MAX;
+    bool out = (lag_steps < state->len) ? state->ring[read_idx] : false;
+    state->head = (state->head + 1) % SIM_RELAY_LAG_RING_MAX;
+    return out;
+}
+
+/* --------------------------------- G4 ------------------------------------ */
+
+float sim_max31856_quantize_tc(float temperature_c)
+{
+    if (!isfinite(temperature_c)) return temperature_c;
+    return roundf(temperature_c / SIM_MAX31856_TC_RESOLUTION_C) * SIM_MAX31856_TC_RESOLUTION_C;
+}
