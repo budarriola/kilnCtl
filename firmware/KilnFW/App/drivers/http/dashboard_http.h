@@ -553,6 +553,22 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
  * dashboard_http_start() was never reached (all three read as false). */
 void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, bool *out_safety_ready);
 
+/* Read-only accessor for readiness_http.c's "Safety processor trip status"
+ * item (2026-09-08, docs/audits/setup_wizard_live_dryrun_2026-09-08.md): the
+ * hw_ready accessor above only reports whether the safety link is UP, never
+ * whether the processor on the other end has an ACTIVE trip latched, so a
+ * board with a live trip (S5, say) read safety_ready=true and the wizard
+ * reported complete=true on a kiln that would refuse to fire. Same "one
+ * owner, read through the existing SafetyLinkClass pointer, no second copy"
+ * discipline as dashboard_http_get_hw_ready() -- *out_link_up mirrors that
+ * function's safety_ready link_up bit exactly (same staleness gate,
+ * safety_link_get_status()), *out_diag_trip_mask is safety_link_status_t's
+ * diag_trip_mask verbatim (one bit per guard currently tripped) and is only
+ * meaningful when *out_link_up is true. Safe to call even if
+ * dashboard_http_start() was never reached (link_up reads false, trip_mask
+ * reads 0). */
+void dashboard_http_get_safety_trip(bool *out_link_up, uint16_t *out_diag_trip_mask);
+
 #ifdef __cplusplus
 }
 #endif

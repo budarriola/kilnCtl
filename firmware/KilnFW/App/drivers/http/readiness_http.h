@@ -155,6 +155,41 @@ static inline readiness_status_t readiness_guard_max_temp_status(uint8_t thermo_
     return (set_count == thermo_count) ? READY_OK : READY_DELIBERATELY_OFF;
 }
 
+/* Pure decision for the "Safety processor trip status" item (2026-09-08 live
+ * dry run, docs/audits/setup_wizard_live_dryrun_2026-09-08.md): the old
+ * "Hardware present and answering" item (dashboard_http_get_hw_ready()) only
+ * asks whether the safety link is UP, never whether the processor on the
+ * other end has an ACTIVE trip latched. A board with S5 tripped
+ * (diag_trip_mask nonzero) answered link_up=true and safety_ready=true, so
+ * every readiness item read ok/not_done for unrelated reasons and the
+ * wizard's completeness gate -- which only refuses on an outstanding
+ * not_done/cannot_yet item -- saw nothing to refuse on. complete=true,
+ * reasons=[] on a kiln that would immediately refuse to fire.
+ *
+ * A live trip is unconditionally blocking (READY_NOT_DONE) whenever it is
+ * known: this is not a "some zones, some not" partial-credit item like
+ * max_temp_c above, because ANY tripped guard means the safety processor is
+ * currently refusing to let the main board command heat at all -- there is
+ * no such thing as a kiln that is "partially ready to fire" while tripped.
+ *
+ * `link_up` gates the same way the commissioning item's cached_crc==0 case
+ * does: with the link down the ESP has no current diag_trip_mask to trust
+ * (safety_link_get_status()'s link_up field already carries the staleness
+ * gate, per dashboard_safety_ready()'s doc comment), so it cannot tell
+ * "not tripped" from "do not know" -- reporting not_done here would be a
+ * confident answer to a question the board cannot currently answer, exactly
+ * backwards from the bug being fixed. That combination is CANNOT_YET, not
+ * a green light -- the separate "hardware present and answering" item is
+ * what already reports "safety=down" as not_done, so a dead link is never a
+ * bare pass, it just isn't double-reported as this item's fault too. */
+static inline readiness_status_t readiness_safety_trip_status(bool link_up, uint16_t diag_trip_mask)
+{
+    if (!link_up) {
+        return READY_CANNOT_YET;
+    }
+    return (diag_trip_mask != 0u) ? READY_NOT_DONE : READY_OK;
+}
+
 /* Registers /readiness + GET /api/readiness on the server
  * wifi_provision_http.c already started. No hardware pointers needed --
  * every hardware-adjacent fact (io_ready/thermo_ready/safety_ready) is read

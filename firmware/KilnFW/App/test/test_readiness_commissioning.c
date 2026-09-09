@@ -190,3 +190,31 @@ void run_test_readiness_guard_max_temp(void)
     TEST_CHECK(readiness_guard_max_temp_status(2, 1, 0) == READY_DELIBERATELY_OFF,
                 "a mix of an explicit ceiling and an OFF zone with none must read deliberately_off");
 }
+
+/* readiness_safety_trip_status(): 2026-09-08 live dry run
+ * (docs/audits/setup_wizard_live_dryrun_2026-09-08.md) found the wizard
+ * reporting complete=true, reasons=[] on a board with an ACTIVE safety trip
+ * (S5 latched, diag_trip_mask nonzero) because no readiness item ever asked
+ * whether the safety processor was currently tripped -- only whether the
+ * link to it was up. These tests pin the fix. */
+void run_test_readiness_safety_trip(void)
+{
+    TEST_SECTION("readiness safety_trip item -- active trip must block completeness");
+
+    /* The exact live-board case this item exists to catch: link up, a guard
+     * latched (any nonzero mask). Must be blocking, not a bare pass. */
+    TEST_CHECK(readiness_safety_trip_status(true, 0x0010 /* S5 */) == READY_NOT_DONE,
+                "an active trip with the link up must read not_done, not ok");
+
+    /* Link up, nothing tripped: genuinely ready. */
+    TEST_CHECK(readiness_safety_trip_status(true, 0x0000) == READY_OK,
+                "no trip with the link up must read ok");
+
+    /* Link down: the ESP cannot trust a stale/absent diag_trip_mask, so this
+     * must read cannot_yet, not a confident ok -- and NOT not_done either,
+     * since that would be nagging about a state that might already be fine. */
+    TEST_CHECK(readiness_safety_trip_status(false, 0x0000) == READY_CANNOT_YET,
+                "link down must read cannot_yet regardless of the cached mask");
+    TEST_CHECK(readiness_safety_trip_status(false, 0x0010) == READY_CANNOT_YET,
+                "link down must read cannot_yet even if a stale mask looks tripped");
+}

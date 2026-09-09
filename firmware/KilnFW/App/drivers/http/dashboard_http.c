@@ -530,6 +530,29 @@ void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, boo
     }
 }
 
+/* See dashboard_http.h's doc comment. Mirrors dashboard_http_get_hw_ready()'s
+ * link_up read exactly (same safety_link_get_status() call, same staleness
+ * gate) and additionally surfaces diag_trip_mask, which that function never
+ * exposes. */
+void dashboard_http_get_safety_trip(bool *out_link_up, uint16_t *out_diag_trip_mask)
+{
+    bool link_up = false;
+    uint16_t trip_mask = 0;
+    if (s_dash.safety) {
+        safety_link_status_t sl;
+        if (safety_link_get_status(s_dash.safety, &sl) == ESP_OK) {
+            link_up = sl.link_up;
+            trip_mask = sl.diag_trip_mask;
+        }
+    }
+    if (out_link_up) {
+        *out_link_up = link_up;
+    }
+    if (out_diag_trip_mask) {
+        *out_diag_trip_mask = trip_mask;
+    }
+}
+
 /* See dashboard_http.h's doc comment -- the plain-C action function
  * extracted from relay_post_handler() so a non-HTTP caller (ui_page_temperature.c)
  * goes through the same ownership/safety gate and the same kiln_io write,

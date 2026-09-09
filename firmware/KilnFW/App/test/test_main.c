@@ -34,6 +34,7 @@ void run_test_readiness_commissioning(void);
 void run_test_readiness_ct_applicability(void);
 void run_test_readiness_ct_installed_zero_reads_ok(void);
 void run_test_readiness_guard_max_temp(void);
+void run_test_readiness_safety_trip(void);
 void run_test_kiln_cfg_store(void);
 void run_test_safety_cfg_store(void);
 void run_test_boot_guard(void);
@@ -111,6 +112,7 @@ int main(void)
     run_test_readiness_ct_applicability();
     run_test_readiness_ct_installed_zero_reads_ok();
     run_test_readiness_guard_max_temp();
+    run_test_readiness_safety_trip();
     run_test_kiln_cfg_store();
     run_test_safety_cfg_store();
     run_test_boot_guard();

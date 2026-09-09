@@ -588,6 +588,40 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
+    /* 10b. Safety processor trip status. 2026-09-08 live dry run
+     * (docs/audits/setup_wizard_live_dryrun_2026-09-08.md) found the wizard
+     * reporting complete=true, reasons=[] on a board with S5 actively
+     * latched (diag_trip_mask nonzero): item 10 above only asks whether the
+     * safety link is UP, never whether the processor on the other end is
+     * currently refusing to let the board heat. See
+     * readiness_safety_trip_status()'s doc comment in readiness_http.h for
+     * the full reasoning; this is deliberately its own item rather than
+     * folded into item 10, because "hardware answering" and "hardware
+     * currently vetoing a firing" are different facts an operator needs to
+     * tell apart from the detail string alone. */
+    {
+        bool link_up = false;
+        uint16_t trip_mask = 0;
+        dashboard_http_get_safety_trip(&link_up, &trip_mask);
+        readiness_status_t st = readiness_safety_trip_status(link_up, trip_mask);
+        char detail[96];
+        if (!link_up) {
+            snprintf(detail, sizeof(detail), "safety link is down -- cannot tell tripped from unknown");
+        } else if (trip_mask != 0u) {
+            snprintf(detail, sizeof(detail),
+                     "safety processor has an ACTIVE trip latched (diag_trip_mask 0x%04X) -- firing will be refused",
+                     (unsigned)trip_mask);
+        } else {
+            snprintf(detail, sizeof(detail), "no guard is currently tripped");
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "safety_trip", "Safety processor trip status", st, detail,
+                        "/safety", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
     /* 11. Storage sections compatible -- the zones_config_valid flag (TODO.md
      * 8.2) plus every NVS partition's present/mounted state (nvs_report.c). */
     {
