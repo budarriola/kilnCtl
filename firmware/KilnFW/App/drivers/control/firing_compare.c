@@ -86,6 +86,7 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
     bool any_bar1 = false;
     bool any_bar2 = false;
     bool any_degraded = false;
+    bool any_degraded_untrusted = false;
     bool have_any_sample = false;
     float composite_sum = 0.0f;
     int composite_n = 0;
@@ -104,7 +105,11 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
         composite_sum += ss->median_normalised;
         composite_n++;
 
-        ss->bar1_cleared = (ss->median_normalised <= -1.0f);
+        // Bar 1 needs at least as many matched pairs as the veto does: an
+        // accept is permanent, and accepting on evidence too thin for the
+        // veto to object to is how a single-segment firing pair ratchets
+        // the gains. See FIRING_COMPARE_BAR1_MIN_N.
+        ss->bar1_cleared = (cnt[s] >= FIRING_COMPARE_BAR1_MIN_N) && (ss->median_normalised <= -1.0f);
         if (ss->bar1_cleared) any_bar1 = true;
 
         if (r.bar2_applied) {
@@ -118,18 +123,35 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
 
         // No-degradation veto: this sub-score got materially WORSE, by more
         // than one Bar-1 floor, with enough matched pairs to believe it.
-        if (cnt[s] >= FIRING_COMPARE_VETO_MIN_N && ss->median_normalised >= 1.0f) {
-            ss->degraded = true;
-            any_degraded = true;
+        if (ss->median_normalised >= 1.0f) {
+            if (cnt[s] >= FIRING_COMPARE_VETO_MIN_N) {
+                ss->degraded = true;
+                any_degraded = true;
+            } else {
+                // Too thin to REJECT on -- one odd segment must not be able
+                // to veto an otherwise good trial. But it is emphatically
+                // enough to refuse to make a PERMANENT gain change: "I saw a
+                // full owner floor of degradation and cannot yet tell
+                // whether it is real" is a reason to do nothing, not a
+                // reason to act. Verdict becomes INSUFFICIENT, not
+                // REJECT_DEGRADED, so the step schedule treats it as
+                // "unmeasured" rather than reversing direction on n < 3.
+                ss->degraded_untrusted = true;
+                any_degraded_untrusted = true;
+            }
         }
     }
 
     r.in_band_n = (uint16_t)in_band_n;
     if (in_band_n > 0) {
         r.in_band_median_delta = median_of(in_band, in_band_n);
-        if (in_band_n >= FIRING_COMPARE_VETO_MIN_N &&
-            r.in_band_median_delta < -FIRING_COMPARE_IN_BAND_TOLERANCE) {
-            r.in_band_veto = true;
+        if (r.in_band_median_delta < -FIRING_COMPARE_IN_BAND_TOLERANCE) {
+            if (in_band_n >= FIRING_COMPARE_VETO_MIN_N) {
+                r.in_band_veto = true;
+            } else {
+                r.in_band_degraded_untrusted = true;
+                any_degraded_untrusted = true;
+            }
         }
     }
     r.composite_normalised = composite_n ? (composite_sum / (float)composite_n) : 0.0f;
@@ -139,9 +161,11 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
     } else if (any_degraded || r.in_band_veto) {
         // The veto outranks any improvement: non-dominance, not a trade.
         r.verdict = FIRING_COMPARE_REJECT_DEGRADED;
-    } else if (any_bar1 && (!r.bar2_applied || any_bar2)) {
+    } else if (any_bar1 && (!r.bar2_applied || any_bar2) && !any_degraded_untrusted) {
         r.verdict = FIRING_COMPARE_ACCEPT;
     } else {
+        r.accept_blocked_untrusted =
+            (any_bar1 && (!r.bar2_applied || any_bar2) && any_degraded_untrusted);
         r.verdict = FIRING_COMPARE_INSUFFICIENT;
     }
 

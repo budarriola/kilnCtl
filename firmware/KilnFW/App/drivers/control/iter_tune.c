@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <string.h>
 
+static void advance_param(iter_tune_zone_state_t *state);
+
 static float clampf(float v, float lo, float hi)
 {
     if (v < lo) return lo;
@@ -23,11 +25,62 @@ static float *param_ptr(iter_tune_gains_t *g, uint8_t param)
     return (param == ITER_TUNE_PARAM_KI) ? &g->ki : &g->kp;
 }
 
-static void stop(iter_tune_zone_state_t *state, iter_tune_status_t status)
+static void stop(iter_tune_zone_state_t *state, iter_tune_status_t status,
+                 iter_tune_stop_reason_t reason)
 {
     state->has_pending = false;
     state->enabled = false;
     state->status = (uint8_t)status;
+    state->stop_reason = (uint8_t)reason;
+}
+
+// Resets everything the search carries between trials. Shared by enable()
+// and reanchor() so the two can never drift into resetting different
+// subsets of the state (this repo's "reset one side of a pair" class).
+static void reset_search_state(iter_tune_zone_state_t *state)
+{
+    state->has_pending = false;
+    state->param = ITER_TUNE_PARAM_KP;
+    for (uint8_t p = 0; p < ITER_TUNE_PARAM_COUNT; p++) {
+        state->step_frac[p] = ITER_TUNE_STEP_START;
+        state->step_negative[p] = false;
+        state->consec_accepts[p] = 0;
+        state->consec_rejects[p] = 0;
+        state->param_done[p] = 0;
+    }
+    state->trials_scored = 0;
+    state->carries = 0;
+    state->cage_edge_hits = 0;
+    state->stop_reason = (uint8_t)ITER_TUNE_STOP_NONE;
+}
+
+// The cage bounds for one parameter, given the current anchor.
+static void cage_bounds(const iter_tune_zone_state_t *state, uint8_t p, float *lo, float *hi)
+{
+    iter_tune_gains_t anchor_copy = state->anchor;
+    float anchor_v = *param_ptr(&anchor_copy, p);
+    *lo = ITER_TUNE_GAIN_FLOOR_C;
+    *hi = ITER_TUNE_GAIN_CEIL_C;
+    if (state->has_anchor) {
+        float cage_lo = anchor_v * ITER_TUNE_CAGE_LOW_FACTOR;
+        float cage_hi = anchor_v * ITER_TUNE_CAGE_HIGH_FACTOR;
+        if (cage_lo > *lo) *lo = cage_lo;
+        if (cage_hi < *hi) *hi = cage_hi;
+    }
+}
+
+// See iter_tune.h above iter_tune_propose_perturbation(): a zero-valued
+// parameter has no multiplicative scale to step from, and a zero anchor
+// collapses the cage to the single point {0}, so there is nothing legal to
+// propose. Treat it as exhausted rather than letting the proposal collapse
+// silently onto the baseline forever.
+static bool param_is_perturbable(const iter_tune_zone_state_t *state, uint8_t p)
+{
+    iter_tune_gains_t base_copy = state->baseline;
+    if (!(*param_ptr(&base_copy, p) > 0.0f)) return false;
+    float lo, hi;
+    cage_bounds(state, p, &lo, &hi);
+    return hi > lo;
 }
 
 bool iter_tune_enable(iter_tune_zone_state_t *state, iter_tune_gains_t current_gains)
@@ -51,40 +104,35 @@ bool iter_tune_enable(iter_tune_zone_state_t *state, iter_tune_gains_t current_g
     }
     state->enabled = true;
     state->status = (uint8_t)ITER_TUNE_STATUS_TUNING;
-    state->param = ITER_TUNE_PARAM_KP;
-    for (uint8_t p = 0; p < ITER_TUNE_PARAM_COUNT; p++) {
-        state->step_frac[p] = ITER_TUNE_STEP_START;
-        state->step_negative[p] = false;
-        state->consec_accepts[p] = 0;
-        state->consec_rejects[p] = 0;
-        state->param_done[p] = 0;
-    }
-    state->trials_scored = 0;
-    state->carries = 0;
-    state->cage_edge_hits = 0;
-    state->has_pending = false;
+    reset_search_state(state);
     return true;
 }
 
-void iter_tune_reanchor(iter_tune_zone_state_t *state, iter_tune_gains_t new_anchor)
+bool iter_tune_reanchor(iter_tune_zone_state_t *state, iter_tune_gains_t new_anchor)
 {
+    // A guard trip does not get re-anchored away. See iter_tune.h.
+    if (state->status == ITER_TUNE_STATUS_FAULTED) return false;
+
     state->anchor = new_anchor;
     state->has_anchor = true;
-    state->baseline = new_anchor;
-    state->has_baseline = true;
-    state->has_pending = false;
-    state->param = ITER_TUNE_PARAM_KP;
-    for (uint8_t p = 0; p < ITER_TUNE_PARAM_COUNT; p++) {
-        state->step_frac[p] = ITER_TUNE_STEP_START;
-        state->step_negative[p] = false;
-        state->consec_accepts[p] = 0;
-        state->consec_rejects[p] = 0;
-        state->param_done[p] = 0;
+    if (!state->has_baseline) {
+        state->baseline = new_anchor;
+        state->has_baseline = true;
+    } else {
+        // Keep the accepted gains -- moving the ANCHOR is not a revert (the
+        // revert action is iter_tune_restore_commissioned()). They are only
+        // clamped into the NEW cage, so the invariant "the running gains are
+        // always inside the cage" holds from the first tick after a
+        // re-anchor rather than being discovered by the next proposal.
+        state->baseline = iter_tune_clamp_to_cage(state, state->baseline, NULL);
     }
-    state->trials_scored = 0;
-    state->carries = 0;
-    state->cage_edge_hits = 0;
-    if (state->enabled) state->status = (uint8_t)ITER_TUNE_STATUS_TUNING;
+    reset_search_state(state);
+    // Clear the sticky stop, so the documented "re-anchor then enable"
+    // escape from CONVERGED actually works. An already-enabled zone resumes
+    // tuning immediately; a stopped one goes back to OFF, which is the one
+    // status iter_tune_enable() accepts.
+    state->status = state->enabled ? (uint8_t)ITER_TUNE_STATUS_TUNING : (uint8_t)ITER_TUNE_STATUS_OFF;
+    return true;
 }
 
 iter_tune_gains_t iter_tune_restore_commissioned(iter_tune_zone_state_t *state)
@@ -94,12 +142,13 @@ iter_tune_gains_t iter_tune_restore_commissioned(iter_tune_zone_state_t *state)
     state->baseline = g;
     state->enabled = false;
     state->status = (uint8_t)ITER_TUNE_STATUS_OFF;
+    state->stop_reason = (uint8_t)ITER_TUNE_STOP_NONE;
     return g;
 }
 
 void iter_tune_fault(iter_tune_zone_state_t *state)
 {
-    stop(state, ITER_TUNE_STATUS_FAULTED);
+    stop(state, ITER_TUNE_STATUS_FAULTED, ITER_TUNE_STOP_FAULT);
 }
 
 iter_tune_gains_t iter_tune_active_gains(const iter_tune_zone_state_t *state)
@@ -113,19 +162,10 @@ iter_tune_gains_t iter_tune_clamp_to_cage(const iter_tune_zone_state_t *state, i
 {
     bool hit = false;
     iter_tune_gains_t in = g;
-    const iter_tune_gains_t *a = &state->anchor;
 
     for (uint8_t p = 0; p < ITER_TUNE_PARAM_COUNT; p++) {
-        iter_tune_gains_t anchor_copy = *a;
-        float anchor_v = *param_ptr(&anchor_copy, p);
-        float lo = ITER_TUNE_GAIN_FLOOR_C;
-        float hi = ITER_TUNE_GAIN_CEIL_C;
-        if (state->has_anchor) {
-            float cage_lo = anchor_v * ITER_TUNE_CAGE_LOW_FACTOR;
-            float cage_hi = anchor_v * ITER_TUNE_CAGE_HIGH_FACTOR;
-            if (cage_lo > lo) lo = cage_lo;
-            if (cage_hi < hi) hi = cage_hi;
-        }
+        float lo, hi;
+        cage_bounds(state, p, &lo, &hi);
         float *v = param_ptr(&g, p);
         float clamped = clampf(*v, lo, hi);
         if (clamped != *v) hit = true;
@@ -141,13 +181,28 @@ bool iter_tune_propose_perturbation(iter_tune_zone_state_t *state, iter_tune_gai
     if (!state->enabled || !state->has_baseline || !state->has_anchor || state->has_pending) return false;
     if (state->status != ITER_TUNE_STATUS_TUNING) return false;
 
+    // Retire any parameter that cannot be moved at all BEFORE choosing one,
+    // so a zero-valued kp cannot silently block ki from ever being probed.
+    bool any_unperturbable = false;
+    for (uint8_t p = 0; p < ITER_TUNE_PARAM_COUNT; p++) {
+        if (!state->param_done[p] && !param_is_perturbable(state, p)) {
+            state->param_done[p] = 1;
+            any_unperturbable = true;
+        }
+    }
+
     // Skip a parameter that is already exhausted, so the remaining budget
     // goes to the one that might still be worth something.
     for (uint8_t tries = 0; tries < ITER_TUNE_PARAM_COUNT && state->param_done[state->param]; tries++) {
         state->param = (uint8_t)((state->param + 1u) % ITER_TUNE_PARAM_COUNT);
     }
     if (state->param_done[state->param]) {
-        stop(state, ITER_TUNE_STATUS_CONVERGED);
+        // Every parameter is retired. If nothing was ever movable, say so
+        // specifically: a "converged" zone that never scored a trial is
+        // otherwise indistinguishable from a search that genuinely ran.
+        stop(state, ITER_TUNE_STATUS_CONVERGED,
+             (state->trials_scored == 0 && any_unperturbable) ? ITER_TUNE_STOP_UNPERTURBABLE
+                                                              : ITER_TUNE_STOP_PARAMS_EXHAUSTED);
         return false;
     }
 
@@ -162,15 +217,29 @@ bool iter_tune_propose_perturbation(iter_tune_zone_state_t *state, iter_tune_gai
     if (hit_edge) {
         state->cage_edge_hits++;
         if (state->cage_edge_hits >= ITER_TUNE_MAX_CAGE_EDGE_HITS) {
-            stop(state, ITER_TUNE_STATUS_CONVERGED);
+            stop(state, ITER_TUNE_STATUS_CONVERGED, ITER_TUNE_STOP_CAGE_EDGE);
             return false;
         }
     }
 
     // A clamp that produced no movement at all is not a trial: proposing it
     // would burn a firing measuring the baseline against itself.
+    // param_is_perturbable() above rules out the degenerate zero case, so
+    // reaching here means the clamp bound hard against a real cage edge.
     iter_tune_gains_t base = state->baseline;
-    if (*param_ptr(&g, state->param) == *param_ptr(&base, state->param)) return false;
+    if (*param_ptr(&g, state->param) == *param_ptr(&base, state->param)) {
+        // The whole step is outside the cage in this direction, so this
+        // parameter cannot move further this way. Retire it rather than
+        // returning false forever with the status still TUNING.
+        state->param_done[pi] = 1;
+        advance_param(state);
+        bool all_retired = true;
+        for (uint8_t p = 0; p < ITER_TUNE_PARAM_COUNT; p++) {
+            if (!state->param_done[p]) all_retired = false;
+        }
+        if (all_retired) stop(state, ITER_TUNE_STATUS_CONVERGED, ITER_TUNE_STOP_PARAMS_EXHAUSTED);
+        return false;
+    }
 
     state->pending_gains = g;
     state->has_pending = true;
@@ -306,9 +375,9 @@ iter_tune_result_t iter_tune_process_comparison(iter_tune_zone_state_t *state,
         // step, or probed to the cap in both directions without a measurable
         // result. Refusing to act is a legitimate outcome, and the plan
         // expects it to be the common one.
-        stop(state, ITER_TUNE_STATUS_CONVERGED);
+        stop(state, ITER_TUNE_STATUS_CONVERGED, ITER_TUNE_STOP_PARAMS_EXHAUSTED);
     } else if (state->trials_scored >= ITER_TUNE_MAX_TRIALS) {
-        stop(state, ITER_TUNE_STATUS_CONVERGED);
+        stop(state, ITER_TUNE_STATUS_CONVERGED, ITER_TUNE_STOP_TRIAL_BUDGET);
     }
     return result;
 }
@@ -320,6 +389,21 @@ const char *iter_tune_status_str(iter_tune_status_t status)
         case ITER_TUNE_STATUS_TUNING: return "tuning";
         case ITER_TUNE_STATUS_CONVERGED: return "converged";
         case ITER_TUNE_STATUS_FAULTED: return "faulted";
+    }
+    return "?";
+}
+
+const char *iter_tune_stop_reason_str(iter_tune_stop_reason_t reason)
+{
+    switch (reason) {
+        case ITER_TUNE_STOP_NONE: return "still running";
+        case ITER_TUNE_STOP_PARAMS_EXHAUSTED: return "every parameter probed out";
+        case ITER_TUNE_STOP_TRIAL_BUDGET: return "trial budget spent";
+        case ITER_TUNE_STOP_CAGE_EDGE: return "pushed at the cage edge too often";
+        case ITER_TUNE_STOP_UNPERTURBABLE:
+            return "no tunable parameter: a zero gain has no multiplicative step and a zero anchor "
+                   "collapses the cage to a point";
+        case ITER_TUNE_STOP_FAULT: return "guard trip / operator halt";
     }
     return "?";
 }

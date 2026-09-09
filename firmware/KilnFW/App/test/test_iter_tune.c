@@ -286,6 +286,87 @@ static void test_bar2_requires_sign_consistency(void)
     TEST_CHECK(!r.bar2_applied || r.sub[FIRING_SUBSCORE_STEADY_RMS_C].bar2_cleared, "Bar 2 cleared");
 }
 
+
+// The exact scenario an opus review constructed on 2026-09-09, and the
+// reason FIRING_COMPARE_BAR1_MIN_N exists. ONE matched segment class:
+// lag_s improves by 1.2 owner floors at n = 1, overshoot degrades by 5
+// owner floors at n = 1, no noise-floor artifact so Bar 2 is skipped.
+// Before the fix this returned ACCEPT -- the improvement cleared an
+// unguarded Bar 1 while the degradation sat below the veto's own n >= 3 and
+// so could not object -- and iter_tune then moved `baseline` permanently
+// onto those gains. A single-segment firing pair ratcheted the gains on
+// evidence the module's own veto explicitly refuses to trust.
+//
+// NEGATIVE TEST (production edit, confirmed RED): in firing_compare.c
+// change
+//     ss->bar1_cleared = (cnt[s] >= FIRING_COMPARE_BAR1_MIN_N) && (...)
+// back to
+//     ss->bar1_cleared = (ss->median_normalised <= -1.0f);
+// AND drop `&& !any_degraded_untrusted` from the ACCEPT arm -> red here.
+// Each half alone also goes red, which is the point: the two gates are
+// independent.
+static void test_no_accept_on_a_single_matched_segment(void)
+{
+    TEST_SECTION("firing_compare: n==1 lag win + n==1 overshoot loss is NOT an accept");
+    const float rate = 60.0f / 3600.0f; // 60 C/hr
+    const float lag_floor = FIRING_COMPARE_OWNER_FLOOR_C / rate; // 30 s
+    firing_score_set_t a, b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+
+    float va[FIRING_SUBSCORE_COUNT] = {120.0f, 1.0f, 1.0f};
+    float vb[FIRING_SUBSCORE_COUNT];
+    bool  h[FIRING_SUBSCORE_COUNT] = {true, true, true};
+    vb[FIRING_SUBSCORE_LAG_S] = 120.0f - 1.2f * lag_floor;  // 1.2 floors BETTER
+    vb[FIRING_SUBSCORE_ENTRY_PEAK_C] = 1.0f + 5.0f * FIRING_COMPARE_OWNER_FLOOR_C; // 5 floors WORSE
+    vb[FIRING_SUBSCORE_STEADY_RMS_C] = 1.0f;                 // unchanged
+    add_seg(&a, 0, FIRING_SEG_RAMP_UP, 2, 5, rate, va, h, 0.9f);
+    add_seg(&b, 0, FIRING_SEG_RAMP_UP, 2, 5, rate, vb, h, 0.9f);
+
+    firing_compare_result_t r;
+    firing_compare_verdict_t v = firing_compare(&a, &b, NULL, &r);
+    TEST_CHECK(r.matched_classes == 1, "exactly one matched segment class");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_LAG_S].n == 1, "lag has a single pair");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_ENTRY_PEAK_C].n == 1, "overshoot has a single pair");
+    TEST_CHECK(!r.bar2_applied, "no floor artifact, so Bar 2 is skipped");
+    TEST_CHECK(v != FIRING_COMPARE_ACCEPT, "a single-segment pair must not move the gains");
+    TEST_CHECK(v == FIRING_COMPARE_INSUFFICIENT, "and it is INSUFFICIENT, not a REJECT on n==1");
+    TEST_CHECK(!r.sub[FIRING_SUBSCORE_LAG_S].bar1_cleared, "Bar 1 needs VETO_MIN_N pairs too");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_ENTRY_PEAK_C].degraded_untrusted,
+               "the thin degradation is recorded, not discarded");
+    TEST_CHECK(!r.sub[FIRING_SUBSCORE_ENTRY_PEAK_C].degraded, "but it does not arm the veto");
+}
+
+// The second, independent half of the same fix: even with Bar 1's n
+// satisfied, a full-floor degradation seen on THINNER evidence blocks the
+// accept. It cannot REJECT (one odd segment must not veto a good trial) --
+// it downgrades to INSUFFICIENT, which the step schedule treats as
+// "unmeasured" rather than reversing direction on n < 3.
+static void test_low_n_degradation_blocks_but_does_not_reject(void)
+{
+    TEST_SECTION("firing_compare: a full-floor loss at n<3 blocks an accept without vetoing");
+    firing_score_set_t a, b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    // Three matched dwell classes: steady_rms improves by 2 C on all three
+    // (n == 3, Bar 1 satisfied), entry_peak present on only ONE of them and
+    // 2 C worse there (n == 1, below the veto's minimum).
+    for (int16_t k = 4; k <= 6; k++) {
+        float v[FIRING_SUBSCORE_COUNT] = {0.0f, 1.0f, 3.0f};
+        bool  h[FIRING_SUBSCORE_COUNT] = {false, (k == 4), true};
+        add_seg(&a, 0, FIRING_SEG_DWELL, 0, k, 0.0f, v, h, 0.9f);
+        float w[FIRING_SUBSCORE_COUNT] = {0.0f, 3.0f, 1.0f};
+        add_seg(&b, 0, FIRING_SEG_DWELL, 0, k, 0.0f, w, h, 0.9f);
+    }
+    firing_compare_result_t r;
+    firing_compare_verdict_t v = firing_compare(&a, &b, NULL, &r);
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_STEADY_RMS_C].n == 3, "the winning sub-score has n == 3");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_STEADY_RMS_C].bar1_cleared, "and it clears Bar 1");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_ENTRY_PEAK_C].n == 1, "the losing sub-score has n == 1");
+    TEST_CHECK(v == FIRING_COMPARE_INSUFFICIENT, "blocked, but not rejected");
+    TEST_CHECK(r.accept_blocked_untrusted, "and the reason is reported");
+}
+
 // --------------------------------------------------------------- iter_tune
 
 static iter_tune_gains_t g3(float kp, float ki, float kd)
@@ -563,6 +644,147 @@ static void test_reanchor_moves_the_cage(void)
     TEST_CHECK(iter_tune_clamp_to_cage(&st, g3(10.0f, 1.0f, 0.5f), &hit).kp == 4.0f, "new cage in force");
 }
 
+
+// A CONVERGED zone must have a real way back that does not throw the
+// accepted gains away. Before 2026-09-09 it did not: iter_tune_enable()
+// refuses while status is CONVERGED, and iter_tune_reanchor() only wrote
+// TUNING when the zone was still `enabled` -- which a CONVERGED zone never
+// is, because stop() clears the flag. The documented escape hatch ("moving
+// it takes a deliberate re-anchor") was a permanent no-op, leaving
+// iter_tune_restore_commissioned() -- which discards every accepted gain --
+// as the only exit.
+//
+// NEGATIVE TEST (production edit, confirmed RED): in iter_tune.c's
+// iter_tune_reanchor(), change the status line back to
+//     if (state->enabled) state->status = (uint8_t)ITER_TUNE_STATUS_TUNING;
+// -> "re-enable now succeeds" goes red. Separately, change the baseline
+// branch back to `state->baseline = new_anchor;` -> "accepted gains
+// survive" goes red.
+static void test_reanchor_reopens_a_converged_zone(void)
+{
+    TEST_SECTION("iter_tune: re-anchor is a REAL escape from CONVERGED and keeps accepted gains");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f)), "enabled");
+
+    // Spend the budget on accepts, so the zone converges holding gains that
+    // are NOT the anchor.
+    firing_compare_result_t acc = verdict(FIRING_COMPARE_ACCEPT);
+    for (int i = 0; i < ITER_TUNE_MAX_TRIALS; i++) {
+        if (!iter_tune_propose_perturbation(&st, NULL)) break;
+        iter_tune_process_comparison(&st, &acc, NULL, 0);
+    }
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_CONVERGED, "zone converged");
+    TEST_CHECK(!st.enabled, "and is disabled, which is what made re-enable impossible");
+    iter_tune_gains_t accepted = st.baseline;
+    TEST_CHECK(accepted.kp != 1.0f || accepted.ki != 0.01f, "gains actually moved");
+    TEST_CHECK(!iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f)), "a plain re-enable is still refused");
+
+    // The deliberate re-anchor, onto the gains the search actually reached.
+    TEST_CHECK(iter_tune_reanchor(&st, accepted), "re-anchor accepted");
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_OFF, "the sticky CONVERGED is cleared");
+    TEST_CHECK(st.stop_reason == ITER_TUNE_STOP_NONE, "and so is the stop reason");
+    TEST_CHECK(iter_tune_enable(&st, g3(9.0f, 9.0f, 9.0f)), "re-enable now succeeds");
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_TUNING, "and the zone is tuning again");
+    TEST_CHECK(st.trials_scored == 0, "with a fresh budget");
+    TEST_CHECK(memcmp(&st.baseline, &accepted, sizeof(accepted)) == 0,
+               "accepted gains survive -- re-anchor is not a revert");
+    TEST_CHECK(memcmp(&st.anchor, &accepted, sizeof(accepted)) == 0,
+               "and the enable did NOT re-snapshot the anchor from current_gains");
+}
+
+// A re-anchor that does not move the gains must not silently discard them
+// either, and one that shrinks the cage around them clamps rather than
+// resets.
+static void test_reanchor_keeps_gains_and_clamps_them(void)
+{
+    TEST_SECTION("iter_tune: re-anchor keeps the accepted baseline, clamped into the new cage");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    st.baseline = g3(1.2f, 0.012f, 0.5f);
+    // New anchor at 4.0 puts the cage at [2.0, 8.0]; the 1.2 baseline is
+    // below it and must be clamped up, not thrown away for the anchor value.
+    TEST_CHECK(iter_tune_reanchor(&st, g3(4.0f, 0.012f, 0.5f)), "re-anchor accepted");
+    TEST_CHECK(st.baseline.kp == 2.0f, "baseline clamped to the new cage floor, not reset to 4.0");
+    TEST_CHECK(st.baseline.ki == 0.012f, "an in-cage gain is untouched");
+    TEST_CHECK(st.baseline.kd == 0.5f, "kd is never touched");
+}
+
+// FAULTED stays sticky: plan sec 5.5's "it does not retry". Re-anchor is
+// the escape from CONVERGED, not from a guard trip.
+static void test_reanchor_refuses_a_faulted_zone(void)
+{
+    TEST_SECTION("iter_tune: re-anchor refuses a FAULTED zone and changes nothing");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    iter_tune_fault(&st);
+    iter_tune_zone_state_t before = st;
+    TEST_CHECK(!iter_tune_reanchor(&st, g3(2.0f, 0.02f, 0.5f)), "refused");
+    TEST_CHECK(memcmp(&before, &st, sizeof(st)) == 0, "state untouched");
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_FAULTED, "still faulted");
+    TEST_CHECK(st.stop_reason == ITER_TUNE_STOP_FAULT, "with the fault reason recorded");
+}
+
+// A zero-valued gain has no multiplicative step and its cage collapses to
+// {0}. Before 2026-09-09 this stalled the whole search silently and
+// permanently: the proposal collapsed onto the baseline, the "no movement"
+// guard returned false without advancing the parameter or setting
+// param_done, and status stayed TUNING forever. A zero kp additionally
+// blocked ki, since `param` starts at KP and only advances from
+// process_comparison().
+//
+// NEGATIVE TEST (production edit, confirmed RED): in iter_tune.c, delete
+// the `param_is_perturbable()` retirement loop at the top of
+// iter_tune_propose_perturbation() -> both checks below go red (status
+// stays TUNING, and the ki probe never happens).
+static void test_zero_gain_does_not_stall_the_search(void)
+{
+    TEST_SECTION("iter_tune: a zero gain is retired, never left spinning with status TUNING");
+
+    // (a) kp == 0 must not block ki, which is perfectly tunable.
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(0.0f, 0.01f, 0.5f));
+    iter_tune_gains_t out;
+    TEST_CHECK(iter_tune_propose_perturbation(&st, &out), "a proposal is still made");
+    TEST_CHECK(st.param_done[ITER_TUNE_PARAM_KP], "kp retired as un-perturbable");
+    TEST_CHECK(st.param == ITER_TUNE_PARAM_KI, "and ki is the parameter under test");
+    TEST_CHECK(out.ki != 0.01f && out.kp == 0.0f, "ki moved, kp did not");
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_TUNING, "zone still tuning");
+
+    // (b) both zero: terminate with a definite status AND a reason, rather
+    // than returning false forever.
+    iter_tune_zone_state_t z;
+    memset(&z, 0, sizeof(z));
+    iter_tune_enable(&z, g3(0.0f, 0.0f, 0.5f));
+    TEST_CHECK(!iter_tune_propose_perturbation(&z, NULL), "nothing can be proposed");
+    TEST_CHECK(z.status == ITER_TUNE_STATUS_CONVERGED, "and the zone STOPS -- not TUNING forever");
+    TEST_CHECK(z.stop_reason == ITER_TUNE_STOP_UNPERTURBABLE, "with the un-perturbable reason");
+    TEST_CHECK(iter_tune_stop_reason_str((iter_tune_stop_reason_t)z.stop_reason)[0] != '\0',
+               "and a non-empty reason string");
+    TEST_CHECK(!iter_tune_propose_perturbation(&z, NULL), "and it stays stopped");
+}
+
+// Every stopping path must name itself. A CONVERGED zone with
+// stop_reason == NONE would be exactly the silent termination this pass
+// exists to remove.
+static void test_every_stop_names_a_reason(void)
+{
+    TEST_SECTION("iter_tune: every stopping path records a stop reason");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    firing_compare_result_t acc = verdict(FIRING_COMPARE_ACCEPT);
+    for (int i = 0; i < ITER_TUNE_MAX_TRIALS; i++) {
+        if (!iter_tune_propose_perturbation(&st, NULL)) break;
+        iter_tune_process_comparison(&st, &acc, NULL, 0);
+    }
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_CONVERGED, "converged");
+    TEST_CHECK(st.stop_reason != ITER_TUNE_STOP_NONE, "a reason was recorded");
+}
+
 void run_test_iter_tune(void)
 {
     test_gain_ceil_mirrors_zone_pid_gain_max();
@@ -577,6 +799,8 @@ void run_test_iter_tune(void)
     test_veto_rejects_a_trade();
     test_in_band_veto();
     test_bar2_requires_sign_consistency();
+    test_no_accept_on_a_single_matched_segment();
+    test_low_n_degradation_blocks_but_does_not_reject();
     test_default_off_and_anchor_on_first_enable();
     test_cage_clamps_to_anchor();
     test_absolute_ceiling_still_binds();
@@ -591,4 +815,9 @@ void run_test_iter_tune(void)
     test_fault_disables_stickily();
     test_restore_commissioned();
     test_reanchor_moves_the_cage();
+    test_reanchor_reopens_a_converged_zone();
+    test_reanchor_keeps_gains_and_clamps_them();
+    test_reanchor_refuses_a_faulted_zone();
+    test_zero_gain_does_not_stall_the_search();
+    test_every_stop_names_a_reason();
 }

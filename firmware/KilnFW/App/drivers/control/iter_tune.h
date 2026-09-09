@@ -127,6 +127,19 @@ typedef enum {
     ITER_TUNE_STATUS_FAULTED = 3,   // a guard trip / fault / operator halt ended it; sticky
 } iter_tune_status_t;
 
+// Why a zone stopped. Persisted alongside `status` so a CONVERGED zone can
+// always say WHY it stopped -- the review of 2026-09-09 found a path
+// (an un-perturbable, i.e. zero-valued, parameter) that terminated the
+// search with no trial, no fault and no text at all.
+typedef enum {
+    ITER_TUNE_STOP_NONE = 0,              // still running, or never started
+    ITER_TUNE_STOP_PARAMS_EXHAUSTED = 1,  // every parameter probed out
+    ITER_TUNE_STOP_TRIAL_BUDGET = 2,      // ITER_TUNE_MAX_TRIALS scored trials used
+    ITER_TUNE_STOP_CAGE_EDGE = 3,         // pushed at the cage boundary too often
+    ITER_TUNE_STOP_UNPERTURBABLE = 4,     // no parameter can be moved at all (see below)
+    ITER_TUNE_STOP_FAULT = 5,             // iter_tune_fault(): guard trip / halt
+} iter_tune_stop_reason_t;
+
 typedef enum {
     ITER_TUNE_RESULT_DISABLED = 0,
     ITER_TUNE_RESULT_NO_TRIAL = 1,          // nothing was pending; nothing judged
@@ -174,6 +187,7 @@ typedef struct {
     uint8_t carries;
     uint8_t cage_edge_hits;
     uint8_t status;            // iter_tune_status_t
+    uint8_t stop_reason;       // iter_tune_stop_reason_t
 } iter_tune_zone_state_t;
 
 // Turns the mechanism on for a zone. The FIRST enable snapshots
@@ -183,9 +197,25 @@ bool iter_tune_enable(iter_tune_zone_state_t *state, iter_tune_gains_t current_g
 
 // Deliberately moves the cage centre (owner decision 9.1's "re-anchor"),
 // e.g. after a fresh hand-tuning pass. Distinct from the revert action
-// below: this moves the ANCHOR, not the gains. Clears any pending trial and
+// below: this moves the ANCHOR, not the gains -- the accepted baseline is
+// KEPT, merely clamped into the new cage. Clears any pending trial and
 // restarts the budget, because the search space has changed.
-void iter_tune_reanchor(iter_tune_zone_state_t *state, iter_tune_gains_t new_anchor);
+//
+// IT ALSO CLEARS A STICKY CONVERGED STATUS, which is the whole point of the
+// action. Before 2026-09-09 it did not: iter_tune_enable() refuses while
+// status is CONVERGED, re-anchor only rewrote the status when the zone was
+// still `enabled`, and a CONVERGED zone is by construction disabled -- so
+// the documented escape hatch ("moving it takes a deliberate re-anchor")
+// was a permanent no-op, and the only real exit from CONVERGED was
+// iter_tune_restore_commissioned(), which throws every accepted gain away.
+// The intended sequence is now: iter_tune_reanchor() then
+// iter_tune_enable(), which resumes with the accepted gains intact.
+//
+// FAULTED is deliberately NOT cleared -- plan sec 5.5's "it does not
+// retry". A zone stopped by a guard trip must be investigated and put back
+// through iter_tune_restore_commissioned(). Returns false in that case,
+// having changed nothing.
+bool iter_tune_reanchor(iter_tune_zone_state_t *state, iter_tune_gains_t new_anchor);
 
 // The single operator action of plan sec 4's Revert path: put the persisted
 // commissioned gains back and disable the module for this zone. Returns the
@@ -212,6 +242,25 @@ iter_tune_gains_t iter_tune_active_gains(const iter_tune_zone_state_t *state);
 iter_tune_gains_t iter_tune_clamp_to_cage(const iter_tune_zone_state_t *state, iter_tune_gains_t g,
                                           bool *out_hit_edge);
 
+// A parameter whose value is zero (a P-only zone with ki == 0 is entirely
+// plausible) is UN-PERTURBABLE and is skipped, not probed from an absolute
+// floor. Two independent reasons, and either alone settles it:
+//   - the search is multiplicative (v * (1 +/- step)); zero has no scale,
+//     so there is no honest step size to take from it;
+//   - the cage is multiplicative too, so a zero ANCHOR collapses
+//     [0.5x, 2x] to exactly {0}. Perturbing off zero would mean leaving the
+//     cage, and the cage is the safety bound -- widening it to accommodate
+//     an un-tunable parameter is exactly the ratchet this repo has already
+//     been bitten by ("Bound relative to persisted state").
+// Before 2026-09-09 this case stalled instead: the proposal collapsed back
+// onto the baseline, the "no movement" guard returned false without
+// advancing the parameter or setting param_done, and every later call
+// returned false with status still TUNING -- no trial, no CONVERGED, no
+// fault, no reason. Worse, `param` starts at KP, so a zero kp also blocked
+// ki from ever being probed. A zone whose parameters are all
+// un-perturbable now stops CONVERGED with stop_reason
+// ITER_TUNE_STOP_UNPERTURBABLE.
+//
 // Proposes the next single-parameter perturbation. ONE parameter, ONE zone,
 // per firing -- never two: the measured coupling matrix is large and
 // asymmetric, so a simultaneous two-zone perturbation is unattributable by
@@ -228,6 +277,7 @@ iter_tune_result_t iter_tune_process_comparison(iter_tune_zone_state_t *state,
                                                 size_t reason_len);
 
 const char *iter_tune_status_str(iter_tune_status_t status);
+const char *iter_tune_stop_reason_str(iter_tune_stop_reason_t reason);
 const char *iter_tune_result_str(iter_tune_result_t result);
 
 #ifdef __cplusplus

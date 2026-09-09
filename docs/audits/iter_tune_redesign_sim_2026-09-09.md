@@ -109,3 +109,58 @@ violations) **PASS**.
 - Persistence, the HTTP surface, the write-surface check and shadow mode
   (plan steps 7–9) are not implemented. Nothing is wired into
   `profile_executor.c`; the module still proposes nothing on hardware.
+
+## Re-run after the three review fixes (same day, 2026-09-09)
+
+An opus review of `8f80a4de` found three latent defects (the module is still
+inert — nothing in `profile_executor.c` reaches it). All three were verified
+against the code and fixed:
+
+- **A.** `iter_tune_reanchor()` could not re-anchor a CONVERGED zone. It only
+  wrote `TUNING` when the zone was still `enabled`, which a CONVERGED zone
+  never is, and `iter_tune_enable()` refuses while the status is CONVERGED.
+  The documented escape hatch was a permanent no-op; the only real exit was
+  `iter_tune_restore_commissioned()`, which discards every accepted gain.
+  Re-anchor now clears the sticky status (to `OFF`, the one status `enable()`
+  accepts), KEEPS the accepted baseline — clamped into the new cage rather
+  than reset to the anchor — and returns `bool`, refusing a FAULTED zone
+  (plan §5.5's "it does not retry").
+- **B.** A zero-valued gain stalled the search silently and permanently: the
+  proposal collapsed back onto the baseline, the "no movement" guard returned
+  false without advancing the parameter or setting `param_done`, and the
+  status stayed `TUNING` forever with no trial, no fault and no text. A zero
+  `kp` additionally blocked `ki`, since `param` starts at KP. Such a
+  parameter is now **skipped as un-perturbable** (a multiplicative search has
+  no scale at zero, and a zero *anchor* collapses the [0.5×, 2×] cage to the
+  single point {0}, so perturbing off it would mean leaving the safety
+  bound). A new persisted `stop_reason` field means every stopping path now
+  names itself.
+- **C.** `bar1_cleared` had no minimum sample count while the no-degradation
+  veto required `n >= 3`, so one matched segment class could ACCEPT: lag
+  improving at `n = 1` cleared Bar 1, overshoot degrading by five floors at
+  `n = 1` was below the veto's own minimum and could not object, Bar 2 was
+  skipped for want of a floor artifact. Two independent gates now close it —
+  `FIRING_COMPARE_BAR1_MIN_N` (== `VETO_MIN_N`), and a full-floor degradation
+  at *any* n blocks an ACCEPT (downgrading to INSUFFICIENT, never to a
+  REJECT on `n < 3`). Both are expressed in units of the owner's 0.5 °C
+  floor, so sub-floor noise still blocks nothing.
+
+### Simulation re-run: byte-identical
+
+`sim_iter_tune.exe 220`, same build inputs, produced output **byte-identical**
+to the pre-fix run: 24 zone-runs (8 starting gain sets) — improved 1,
+unchanged inside the 0.5 °C floor 23, regressed 0, converged 24/24; 660 null
+comparisons — **ACCEPT 0 (0.00 %)**, INSUFFICIENT 660; 660 zone-runs over 220
+mismatched plants — better 13, unchanged 647, **worse 0 (0.00 %)**, mean cost
+change −0.0310 °C, terminated 660/660, 0 cage violations. A1/A2/A5/A6 all
+still PASS.
+
+That is a **non-regression** result, not evidence for the fixes: this
+harness's profile yields six segment classes and therefore `n = 3` per
+sub-score everywhere, and no start set carries a zero gain, so none of the
+three fixed paths is reachable in it. The evidence for the fixes is the five
+new host tests in `test_iter_tune.c`, each negative-tested by breaking
+production code. Reverting *both* halves of fix C — i.e. the pre-fix
+comparator — makes the reviewer's exact scenario return ACCEPT again, which
+is what the new `test_no_accept_on_a_single_matched_segment()` asserts
+against.

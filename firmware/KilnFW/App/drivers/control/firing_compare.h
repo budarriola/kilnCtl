@@ -32,9 +32,13 @@
 //     the median must also clear that key's measured floor, AND the paired
 //     differences must be consistently signed -- ceil(0.75*n) of n >= 5
 //     differences must be improvements.
+//   Bar 1 also requires n >= FIRING_COMPARE_BAR1_MIN_N matched pairs. See
+//     that macro for why an accept may not run on thinner evidence than a
+//     veto.
 //   No-degradation veto: REJECT if any sub-score with n >= 3 degrades by
 //     more than its own Bar-1 floor, or if time-in-band degrades outside
-//     tolerance. This makes the rule a non-dominance test: a trial that buys
+//     tolerance. A full-floor degradation at n < 3 is too thin to REJECT on
+//     but is still enough to block an ACCEPT (verdict INSUFFICIENT). This makes the rule a non-dominance test: a trial that buys
 //     1 degC of lag by adding 1 degC of overshoot is rejected, never
 //     silently traded.
 //
@@ -61,6 +65,35 @@ extern "C" {
 // Veto arms only with this many matched pairs -- below it a single odd
 // segment could veto an otherwise good trial.
 #define FIRING_COMPARE_VETO_MIN_N 3
+
+// Bar 1 arms only with this many matched pairs. IT MUST NEVER BE SMALLER
+// THAN FIRING_COMPARE_VETO_MIN_N, and the same-n choice is deliberate.
+//
+// The asymmetry this fixes (found in review, 2026-09-09): bar1_cleared was
+// unguarded by n while the no-degradation veto required n >= 3. A single
+// matched segment class could therefore produce an ACCEPT -- lag improving
+// by one floor at n = 1 clears Bar 1, overshoot degrading by five floors at
+// n = 1 is BELOW the veto's own minimum and so cannot object, floors
+// unavailable so Bar 2 is skipped -- and iter_tune then moves `baseline`
+// permanently onto those gains. The module was accepting on exactly the
+// evidence its own veto refuses to trust.
+//
+// WHY 3 AND NOT MORE. An accept is permanent and a veto is not, so the
+// accept side should if anything carry the heavier burden. It does, but
+// through two additional terms rather than through a bigger n:
+//   - an accept must ALSO survive every other sub-score, at ANY n, being
+//     free of a full-floor degradation (the `untrusted degradation` gate
+//     below) -- a strictly stronger condition than the veto's own n >= 3;
+//   - an accept must clear a FULL owner floor of median improvement, while
+//     nothing is required to merely refuse.
+// Raising this to Bar 2's 5 instead would collide with reality: a firing
+// commonly yields only 3-6 matched classes and the whole per-zone budget is
+// six scored trials, so a 5-pair Bar 1 with no noise-floor artifact present
+// would make the mechanism structurally inert -- the "two mutually
+// exclusive conditions" failure this repo has already recorded twice
+// (dwell credit; the plan's own step schedule). 3 is the smallest value
+// that restores the accept-vs-veto ordering without reintroducing that.
+#define FIRING_COMPARE_BAR1_MIN_N FIRING_COMPARE_VETO_MIN_N
 
 // How much time-in-band may fall before the diagnostic veto fires. Fraction
 // of ticks, i.e. 0.05 == five percentage points.
@@ -92,6 +125,8 @@ typedef struct {
     bool  bar1_cleared;
     bool  bar2_cleared;
     bool  degraded;              // median_normalised >= +1.0 with n >= VETO_MIN_N
+    bool  degraded_untrusted;    // median_normalised >= +1.0 but n < VETO_MIN_N: too
+                                 // thin to VETO on, still enough to refuse an ACCEPT
 } firing_compare_subscore_t;
 
 typedef struct {
@@ -101,6 +136,9 @@ typedef struct {
     uint16_t in_band_n;
     float in_band_median_delta;  // trial - baseline, fraction of ticks; negative == worse
     bool  in_band_veto;
+    bool  in_band_degraded_untrusted; // in-band fell outside tolerance at n < VETO_MIN_N
+    bool  accept_blocked_untrusted;   // an ACCEPT was downgraded to INSUFFICIENT purely
+                                      // by a low-n degradation somewhere
     bool  bar2_applied;
     // Human-facing composite ONLY (plan sec 2.2: "a composite IS still
     // computed and displayed for humans; it never decides anything").
