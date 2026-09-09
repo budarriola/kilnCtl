@@ -627,7 +627,27 @@ esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io)
     /* kiln_io deliberately installs no ISR on ~INT -- it hands the GPIO out and
      * lets whoever owns the board decide. That is this bridge. ~INT is
      * open-drain and active low, and stays low until the interrupt source is
-     * cleared (which kiln_io_read does), so a falling edge is the event. */
+     * cleared (which kiln_io_read does), so a falling edge is the event.
+     *
+     * This arm site has the SAME shape as the safety MAX31856 ~DRDY stall
+     * (docs/audits/safety_tc_drdy_stall_2026-09-08.md): this task starts, and
+     * therefore arms the edge IRQ, AFTER kiln_io_init() has already enabled
+     * the expander's interrupt sources, so a source can assert before the
+     * handler is armed and the edge is missed.
+     *
+     * Audited 2026-09-08 (docs/audits/irq_arm_site_inventory_2026-09-08.md)
+     * and DELIBERATELY LEFT AS SELF-HEALING rather than given DRDY's
+     * arm-time level-check fix: unlike DRDY, kiln_io_read() is called
+     * continuously from independent paths (dashboard/status polling), and
+     * every call re-reads current input state AND clears the expander's
+     * interrupt latch as a side effect. So a missed edge here never leaves
+     * stale/incorrect state cached -- it can only delay or drop one
+     * ISR-driven *auto-report push* (a proactive notification), not corrupt
+     * a reading the way DRDY did, where the notification was the only
+     * reader. Do not "fix" this without hardware verification: doing so
+     * means restructuring uart_bridge_start_io_task()/kiln_io_init() boot
+     * ordering, which touches relay-safety-adjacent boot sequencing on the
+     * expander used for relay control feedback. */
     int irq_gpio = kiln_io_irq_gpio(io);
     if (irq_gpio >= 0) {
         esp_err_t isr_err = gpio_install_isr_service(0);
