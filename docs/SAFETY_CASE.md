@@ -300,22 +300,62 @@ here; none is copied from an unverified summary.
    not treated as a defect elsewhere in this document; see
    `firmware/KilnFW/docs/SAFETY_MODEL.md` for the full correction.
 
-10. **`/api/readiness` is a REAL firing interlock for four of its items,
-    advisory for the rest** (owner decision 2026-09-09, implemented the same
-    day; supersedes this item's previous text, which stated that readiness
-    gated nothing at all — that was accurate when written and is no longer).
+10. **`/api/readiness` is a REAL interlock, on both firing and autotune, for
+    four of its items; advisory for the rest** (owner decision 2026-09-09,
+    firing gate implemented first, autotune gate extended the same day;
+    supersedes this item's previous text, which stated that readiness gated
+    nothing at all — that was accurate when written and is no longer, and a
+    version of this item that named only the firing path would itself now be
+    stale).
 
     - **What changed.** `App/drivers/safety/readiness_gate.h` turns four
-      checklist items into a refusal on every firing-start path:
-      `recovery_mode`, `safety_trip`, `crash_report` and `estop_verified`.
-      The check lives in `profile_executor_run()`, which is the single choke
-      point all four start paths funnel through (POST
-      `/api/profile_exec/start`, both LCD start buttons, and the benchproto
-      RUN command), so no door is left ungated.
-      `profile_exec_start_post_handler()` additionally checks it before
-      reading the request body, purely so the HTTP client gets a `409` naming
-      the item rather than a generic `400` — a legibility duplicate of the
-      same call, not a second rule.
+      checklist items into a refusal on every firing-start path AND every
+      autotune-start path: `recovery_mode`, `safety_trip`, `crash_report` and
+      `estop_verified`. There is exactly one decision function
+      (`readiness_gate_refuses_start()`), called from two choke points:
+      - `profile_executor_run()` — the single choke point all firing-start
+        paths funnel through (POST `/api/profile_exec/start`, both LCD start
+        buttons, and the benchproto RUN command).
+      - `autotune_begin_run_locked()` — the single choke point all
+        autotune-start paths funnel through (the step-test, target-step and
+        relay-feedback entry points all call it before doing anything else,
+        which in turn are reached from POST `/api/autotune/start` and the
+        benchproto AUTOTUNE command; there is no LCD autotune-start button).
+      Autotune commands heat through the same relays a firing does, so a gate
+      on firing alone left a second, equally capable path to heat completely
+      unguarded — an unverified E-stop or an unacknowledged crash report
+      blocked a firing but not an autotune run until this extension.
+      `profile_exec_start_post_handler()` and `autotune_start_post_handler()`
+      each additionally check it before reading the request body, purely so
+      the HTTP client gets a `409` naming the item rather than a generic
+      `400` — a legibility duplicate of the same call, not a second rule.
+    - **The rest of the board's heat-causing surface — checked, NOT fully
+      covered.** Firing and autotune are not the only ways this board can
+      energize a heater relay. `kiln_io_owner.c`'s `relay_on_blocked()` names
+      itself "the ONE choke point every MANUAL relay-ON command reaches":
+      `kiln_io_owner_command_set_relay()`/`_set_relay_mask()`, reached from
+      POST `/api/relay`, the LCD's manual override (`ui_page_temperature.c`),
+      and the benchproto `SET_RELAY`/`SET_RELAY_MASK` commands
+      (`uart_bridge_io.c`). `zones_current_sweep_engine.c`'s CT-calibration
+      sweep (`zone_sweep_hw_energize()`) also drives relays directly, through
+      `kiln_io_owner_command_set_relay_mask()`, outside both
+      `profile_executor_run()` and `autotune_begin_run_locked()`.
+      **Neither path calls `readiness_gate_refuses_start()`.** Both are gated
+      only by `relay_authority_on_blocked()` (a latched safety trip — one of
+      the four items, enforced here independently of the readiness checklist)
+      and the OTA-update interlock — `recovery_mode`, `crash_report` and
+      `estop_verified` do not block either one. Manual relay control is
+      additionally the one place `danger_mode_active()` (the diagnostics
+      page's explicit-accept bench-test mode) deliberately bypasses even
+      that safety-trip/OTA gate, by design, so an operator can bench-test a
+      relay/contactor with nothing fighting the test — this is pre-existing,
+      documented behavior (`danger_mode.h`), not a gap introduced here.
+      This is a real, currently-open gap: an unverified E-stop or an
+      unacknowledged crash report will refuse a firing or an autotune run
+      but will NOT refuse a manual `/api/relay` command or a CT-sweep. Raised
+      here rather than silently left for a future reader to rediscover;
+      closing it (if the owner wants manual relay control gated the same
+      way) is follow-up work, not part of this pass.
     - **NO OVERRIDE.** There is deliberately no password bypass, no
       confirm-dialog escape and no `force` parameter. If the E-stop interlock
       is unverified, the board does not fire. This was the owner's explicit
@@ -366,15 +406,24 @@ here; none is copied from an unverified summary.
       and the action that clears it, front-loaded so a truncating LCD dialog
       still shows which item refused. The HTTP `409` carries the item's
       `/api/readiness` key as `readiness_item`, and the dashboard shows the
-      message and links straight to that row on the readiness page. The
-      readiness page itself now states which four items refuse a firing.
+      message and links straight to that row on the readiness page, for both
+      the firing and the autotune start endpoints. The readiness page itself
+      states which four items refuse a firing (not yet reworded to also
+      mention autotune explicitly — the wording predates this extension).
     - **Interaction with the reboot/S6a sequence.** Rebooting reliably latches
       an S6a main-fault trip (see `sw_reset_http.c` and the Reboot section of
       `settings_page.html`). With `safety_trip` a hard gate, a reboot now
-      leaves the board unfirable until the operator clears the trip. That is
-      correct, and the sequence — reboot, clear trip, start — is stated in the
-      reboot copy and repeated in the refusal message itself.
-    - **Not hardware-verified.** Implemented and host-tested only; no board
+      leaves the board unfirable AND unable to start autotune until the
+      operator clears the trip. That is correct, and the sequence — reboot,
+      clear trip, start — is stated in the reboot copy and repeated in the
+      refusal message itself.
+    - **Not hardware-verified.** Implemented and host-tested only (the
+      autotune extension's own coverage:
+      `test_autotune_engine_prestart.c`'s `test_begin_run_refused_by_
+      readiness_*` tests and `test_begin_run_passes_the_readiness_gate_
+      when_ready()`, driving the real `readiness_gate_refuses_start()` the
+      same way `test_profile_executor_prestart.c`'s equivalent tests do); no
+      board
       was flashed for this change.
 
 11. **Refusal of a relay-on command is invisible on the wire** — a refused

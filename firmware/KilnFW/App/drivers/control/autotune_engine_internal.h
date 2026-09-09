@@ -84,6 +84,7 @@
 #include "kiln_io_owner.h"
 #include "ota_state.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
 #include "profile_executor.h"
+#include "readiness_gate.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "safety_trip_words.h" /* safety_fault_source_words() -- ROADMAP.md M13, decode the

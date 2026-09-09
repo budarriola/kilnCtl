@@ -857,6 +857,43 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
  * the lock NOT held on failure. */
 bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
 {
+    /* THE READINESS INTERLOCK (owner decision 2026-09-09; readiness_gate.h has
+     * the full rationale and the standing "NO OVERRIDE" instruction). Extended
+     * to autotune the same day, same owner decision: autotune commands heat
+     * through the same relays a firing does, and until this point
+     * profile_executor_run() was the only gated entry point -- an unverified
+     * E-stop or an unacknowledged crash report blocked a firing but not an
+     * autotune run.
+     *
+     * Placed HERE, in autotune_begin_run_locked(), because this is the single
+     * choke point every autotune start path funnels through: the step-test
+     * entry (autotune_engine_run()), the target-temperature step entry
+     * (autotune_engine_run_to_target()) and the relay-feedback entry
+     * (autotune_engine_run_relay(), autotune_engine_relay.c) all call this
+     * function before doing anything else, exactly the way
+     * profile_executor_run() is the one choke point for a firing. The two
+     * live callers of those three functions are POST /api/autotune/start
+     * (dashboard_autotune_http.c) and the benchproto AUTOTUNE command
+     * (uart_bridge_ext_autotune.c) -- there is no LCD autotune-start button
+     * today, so those two are the whole set; the next one added inherits this
+     * gate for free by calling through the same three functions rather than
+     * autotune_begin_run_locked() directly.
+     *
+     * Checked FIRST -- before even the s_at.lock == NULL guard below -- for
+     * the same two reasons profile_executor_run() checks it first: the answer
+     * must not depend on which zone or method was asked for, and in recovery
+     * mode s_at.lock IS NULL, so reaching the gate first means a recovery-mode
+     * refusal names recovery mode instead of "autotune engine not started".
+     * Nothing here touches s_at, so running before that guard is safe. */
+    {
+        readiness_gate_block_t which = READINESS_GATE_OK;
+        if (readiness_gate_refuses_start(err_msg, err_cap, &which)) {
+            ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused by the readiness interlock (item %d): %s",
+                     (unsigned)zone_index, (int)which, err_msg ? err_msg : "(no message)");
+            return false;
+        }
+    }
+
     /* Recovery mode (boot_guard.h) deliberately skips autotune_engine_start()
      * -- but other code that DOES still run in that mode can still call into
      * this module's public API. s_at.lock is NULL until

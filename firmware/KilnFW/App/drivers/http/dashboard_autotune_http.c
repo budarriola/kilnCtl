@@ -16,6 +16,7 @@
 #include "dashboard_json.h"
 #include "http_form.h"
 #include "profile_executor.h"
+#include "readiness_gate.h"
 #include "recovery_start_refusal.h"
 #include "zones_config_accessors.h"
 
@@ -177,6 +178,43 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_sendstr(req, recovery_err);
         return ESP_OK;
+    }
+
+    /* THE READINESS INTERLOCK (readiness_gate.h), extended to autotune the
+     * same day as the firing gate (owner decision 2026-09-09): autotune_begin_
+     * run_locked() enforces this for every autotune start path -- this call is
+     * a LEGIBILITY duplicate for the HTTP one only, same convention and same
+     * reasoning as profile_exec_start_post_handler()'s identical block
+     * (dashboard_exec_http.c): it answers 409 Conflict with the blocking item
+     * named in full, before the body is even read, instead of the generic 400
+     * autotune_begin_run_locked()'s own refusal produces further down.
+     * Deliberately reuses recovery_err[] rather than adding a second ~200-byte
+     * local to a frame on the shared 8 KB httpd task stack
+     * (check_httpd_task_stack_budget; CLAUDE.md's httpd-stack-blob note).
+     *
+     * If this call were ever deleted, the autotune start would still be
+     * refused -- just with a less specific status/message. If autotune_begin_
+     * run_locked()'s check were deleted, this one would NOT cover the
+     * benchproto start path. Do not "de-duplicate" by removing the one in
+     * autotune_begin_run_locked(). */
+    readiness_gate_block_t gate_which = READINESS_GATE_OK;
+    if (readiness_gate_refuses_start(recovery_err, sizeof(recovery_err), &gate_which)) {
+        const char *item_key = readiness_gate_item_key(gate_which);
+        ESP_LOGW(DASH_TAG, "autotune/start refused by the readiness interlock (item %s)",
+                 item_key ? item_key : "?");
+        /* JSON, not the plain string the recovery refusal above sends -- same
+         * reasoning as profile_exec_start_post_handler()'s identical block:
+         * the page parses this response as JSON. No json_escape() needed for
+         * the same reason as there: readiness_gate_evaluate()'s messages are
+         * compile-time constants proven free of '"'/'\\'
+         * (test_readiness_gate.c's test_messages_are_json_safe()). */
+        char json[sizeof(recovery_err) + 96];
+        int n = snprintf(json, sizeof(json),
+                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
+                         item_key ? item_key : "", recovery_err);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
     /* Raised from 64 when the relay method arrived: its form carries

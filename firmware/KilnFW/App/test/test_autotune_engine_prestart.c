@@ -794,6 +794,129 @@ static void test_run_relay_refuses_before_start(void)
     TEST_CHECK(err[0] != '\0', "an error message is filled in for the caller");
 }
 
+// ---------------------------------------------------------------------------
+// THE READINESS FIRING INTERLOCK, extended to autotune (owner decision
+// 2026-09-09, same day as App/drivers/safety/readiness_gate.h's original
+// firing-only gate). autotune_begin_run_locked() -- the single choke point
+// every autotune start path funnels through (autotune_engine_run(),
+// autotune_engine_run_to_target(), autotune_engine_run_relay()) -- now calls
+// readiness_gate_refuses_start() before anything else it does, so this file
+// -- which #includes autotune_engine.c directly -- must supply a body for the
+// one symbol that gate declares rather than defines. Everything that DECIDES
+// anything is static inline in readiness_gate.h and runs FOR REAL here: these
+// tests drive the actual interlock, not a stand-in for it.
+// test_readiness_gate.c proves the DECISION over all 64 fact combinations;
+// these tests prove the WIRING at this second call site.
+//
+// DEFAULT IS FULLY READY (not zeroed), same reasoning as
+// test_profile_executor_prestart.c's identical fake: a zeroed
+// readiness_gate_facts_t is a board with an unverified E-stop and a down
+// safety link, which the real gate refuses -- every pre-existing test in this
+// file that expects autotune_begin_run_locked() to get past its early guards
+// (starting with test_run_refuses_before_start() just above) would have
+// started failing for a reason that has nothing to do with what it is
+// testing.
+static readiness_gate_facts_t s_test_readiness_facts = {
+    .recovery_mode = false,
+    .safety_link_up = true,
+    .safety_trip_mask = 0u,
+    .crash_have_record = false,
+    .crash_acknowledged = false,
+    .estop_verified = true,
+};
+void readiness_gate_collect(readiness_gate_facts_t *out)
+{
+    if (out != NULL) {
+        *out = s_test_readiness_facts;
+    }
+}
+static void reset_readiness_facts_to_ready(void)
+{
+    s_test_readiness_facts.recovery_mode = false;
+    s_test_readiness_facts.safety_link_up = true;
+    s_test_readiness_facts.safety_trip_mask = 0u;
+    s_test_readiness_facts.crash_have_record = false;
+    s_test_readiness_facts.crash_acknowledged = false;
+    s_test_readiness_facts.estop_verified = true;
+}
+
+// The distinguishing observation is the same one
+// test_profile_executor_prestart.c's equivalent tests use: the gate runs
+// BEFORE the s_at.lock == NULL guard, so a blocked board answers the gate's
+// message while a READY board falls through to "autotune engine not
+// started" -- test_run_refuses_before_start() above IS the "ready board gets
+// past the gate" case already, since it runs on the default fully-ready
+// facts and still sees the OLD message.
+//
+// NEGATIVE TEST (performed 2026-09-09, RED confirmed, restored by hand):
+// deleting the `if (readiness_gate_refuses_start(...)) { ... return false; }`
+// block from autotune_engine.c's autotune_begin_run_locked() fails all four
+// tests below with
+//   FAIL: ... refused by the readiness interlock, naming the item
+// (each instead sees "autotune engine not started"). Restored by retyping the
+// block; `git diff` on autotune_engine.c then comes back empty.
+static void begin_run_and_expect_gate_refusal(const char *what, const char *needle)
+{
+    char err[192] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(!ok, what);
+    TEST_CHECK(strstr(err, needle) != NULL,
+               "autotune_engine_run() reports the readiness interlock's message, naming the item");
+    TEST_CHECK(strcmp(err, "autotune engine not started") != 0,
+               "the gate ran BEFORE the generic prestart guard, so the operator sees the real reason");
+    reset_readiness_facts_to_ready();
+}
+
+static void test_begin_run_refused_by_readiness_recovery_mode(void)
+{
+    TEST_SECTION("autotune_begin_run_locked() is refused by the readiness interlock -- recovery mode");
+    reset_readiness_facts_to_ready();
+    s_test_readiness_facts.recovery_mode = true;
+    begin_run_and_expect_gate_refusal("a recovery-mode boot refuses an autotune start", "RECOVERY MODE");
+}
+
+static void test_begin_run_refused_by_readiness_safety_trip(void)
+{
+    TEST_SECTION("autotune_begin_run_locked() is refused by the readiness interlock -- latched safety trip");
+    reset_readiness_facts_to_ready();
+    s_test_readiness_facts.safety_trip_mask = 0x0040u; /* S6a mainFault -- what a reboot latches */
+    begin_run_and_expect_gate_refusal("a latched safety trip refuses an autotune start", "TRIP");
+}
+
+static void test_begin_run_refused_by_readiness_crash_report(void)
+{
+    TEST_SECTION("autotune_begin_run_locked() is refused by the readiness interlock -- unacknowledged crash");
+    reset_readiness_facts_to_ready();
+    s_test_readiness_facts.crash_have_record = true;
+    s_test_readiness_facts.crash_acknowledged = false;
+    begin_run_and_expect_gate_refusal("an unacknowledged crash report refuses an autotune start",
+                                       "UNACKNOWLEDGED CRASH REPORT");
+}
+
+static void test_begin_run_refused_by_readiness_estop_unverified(void)
+{
+    TEST_SECTION("autotune_begin_run_locked() is refused by the readiness interlock -- E-stop unverified");
+    reset_readiness_facts_to_ready();
+    s_test_readiness_facts.estop_verified = false;
+    begin_run_and_expect_gate_refusal("an unverified E-stop interlock refuses an autotune start",
+                                       "E-STOP INTERLOCK");
+}
+
+static void test_begin_run_passes_the_readiness_gate_when_ready(void)
+{
+    /* The half a refuse-everything gate fails. A ready board must get PAST
+     * the interlock -- observable here as reaching the next refusal down
+     * (the s_at.lock == NULL prestart guard) with its own, different
+     * message. */
+    TEST_SECTION("autotune_begin_run_locked() passes the readiness interlock on a fully-ready board");
+    reset_readiness_facts_to_ready();
+    char err[192] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(!ok, "still refused overall -- s_at.lock is NULL in this prestart section");
+    TEST_CHECK(strcmp(err, "autotune engine not started") == 0,
+               "a ready board reaches the ORIGINAL prestart refusal, not the readiness interlock's");
+}
+
 static void test_abort_is_a_silent_noop_before_start(void)
 {
     TEST_SECTION("autotune_engine_abort() before start() -- returns, no crash");
@@ -5884,6 +6007,11 @@ void run_test_autotune_engine_prestart(void)
 {
     test_run_refuses_before_start();
     test_run_relay_refuses_before_start();
+    test_begin_run_refused_by_readiness_recovery_mode();
+    test_begin_run_refused_by_readiness_safety_trip();
+    test_begin_run_refused_by_readiness_crash_report();
+    test_begin_run_refused_by_readiness_estop_unverified();
+    test_begin_run_passes_the_readiness_gate_when_ready();
     test_abort_is_a_silent_noop_before_start();
     test_accept_refuses_before_start();
     test_is_active_false_before_start();
