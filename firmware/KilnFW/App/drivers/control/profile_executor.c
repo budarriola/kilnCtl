@@ -1382,6 +1382,13 @@ void executor_task_entry(void *arg)
                  * uses. */
                 bool prev_decided_on = z->on_off_trigger_state.commanded_on;
                 bool prev_actuated_on = z->on_off_actuated_on;
+                /* The hold accumulator BEFORE the gate mutates it -- the
+                 * only place the previous state's real held duration is
+                 * still readable (2026-09-09, opus review defect C2: the
+                 * trace used to read this back after the tick, when the
+                 * gate has already reset it to dt_s on any transition, so
+                 * every RELAY line printed held_prior_s=1.0). */
+                float prev_actuated_held_s = z->on_off_actuated_held_s;
                 on_off_zone_tick_result_t tick_result = profile_executor_on_off_zone_tick(
                     &z->on_off_trigger_state, &z->on_off_actuated_on, &z->on_off_actuated_held_s,
                     &oin, bypass_hold, relays_on_count, on_off_cap);
@@ -1398,8 +1405,9 @@ void executor_task_entry(void *arg)
                  * for the volume budget and edge-trigger reasoning. */
                 profile_executor_on_off_log_transition(zi, &oin, prev_decided_on, decided_on,
                                                         prev_actuated_on, actuated_on,
-                                                        z->on_off_actuated_held_s, min_on_s, min_off_s,
-                                                        bypass_hold);
+                                                        prev_actuated_held_s, z->on_off_actuated_held_s,
+                                                        min_on_s, min_off_s, bypass_hold,
+                                                        tick_result.cap_denied);
                 if (tick_result.cap_denied) {
                     ESP_LOGW(PE_TAG, "zone %u (on/off) denied its relay this tick: "
                                   "max_simultaneous_relays (%u) already reached by other zones -- "

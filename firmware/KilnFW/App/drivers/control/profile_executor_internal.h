@@ -1065,8 +1065,10 @@ on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
  * 2026-09-08.md for the reading guide. */
 void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_input_t *in,
                                              bool prev_decided_on, bool decided_on,
-                                             bool prev_actuated_on, bool actuated_on, float held_s,
-                                             uint16_t min_on_s, uint16_t min_off_s, bool bypass_hold);
+                                             bool prev_actuated_on, bool actuated_on,
+                                             float held_prior_s, float held_s,
+                                             uint16_t min_on_s, uint16_t min_off_s, bool bypass_hold,
+                                             bool cap_denied);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 void release_profile_relay_claim(void);

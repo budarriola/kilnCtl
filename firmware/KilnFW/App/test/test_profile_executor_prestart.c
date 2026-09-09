@@ -7586,13 +7586,78 @@ static void test_on_off_log_transition_decide_line_names_the_blocking_axis(void)
     esp_log_test_capture_reset();
     profile_executor_on_off_log_transition(/*zi=*/2, &oin, /*prev_decided_on=*/true, /*decided_on=*/false,
                                             /*prev_actuated_on=*/true, /*actuated_on=*/false,
-                                            /*held_s=*/45.0f, /*min_on_s=*/30, /*min_off_s=*/30,
-                                            /*bypass_hold=*/false);
+                                            /*held_prior_s=*/45.0f, /*held_s=*/1.0f,
+                                            /*min_on_s=*/30, /*min_off_s=*/30,
+                                            /*bypass_hold=*/false, /*cap_denied=*/false);
     TEST_CHECK(esp_log_test_capture_contains("onoff z2 DECIDE ON->OFF reason=axis_temp_false"),
                "DECIDE line must name the zone, the transition direction, and the specific blocking axis");
     TEST_CHECK(esp_log_test_capture_contains("onoff z2 RELAY ON->OFF"),
                "actuated_on changed the same tick -- a RELAY line must fire too, so a reader can see the "
                "decision and the actuation together");
+    /* 2026-09-09 (opus review defect C2): the RELAY line reports the PRE-gate
+     * accumulator (how long the state that just ended was actually held),
+     * not the post-gate one the gate has already reset to dt_s. held_prior_s
+     * (45.0) and held_s (1.0) are deliberately different here so a
+     * regression that passes the wrong one is caught rather than matching
+     * by coincidence. */
+    TEST_CHECK(esp_log_test_capture_contains("held_prior_s=45.0"),
+               "RELAY must print the duration the PREVIOUS state was held (45.0s), never the post-gate "
+               "accumulator (1.0s) -- the latter is one tick on every transition, which is what defeated "
+               "the audit's 'prove the 30s hold from timestamps' claim");
+    TEST_CHECK(!esp_log_test_capture_contains("held_prior_s=1.0"),
+               "and specifically not the always-one-tick post-gate value");
+}
+
+// 2026-09-09 (opus review defect C1). The relay-count cap produces exactly
+// the state the HOLD branch tests for (decided != actuated, prev pair equal,
+// bypass_hold false) because profile_executor_on_off_zone_tick() forces
+// actuated_on=false and held=0 on cap_denied -- so a cap-denied zone used to
+// print "HOLD suppresses OFF->ON: held 0.0s of required 30s", naming the
+// wrong mechanism and predicting a transition time the cap will not honour.
+static void test_on_off_log_transition_cap_denial_is_not_blamed_on_the_hold(void)
+{
+    TEST_SECTION("profile_executor_on_off_log_transition(): a zone denied by max_simultaneous_relays "
+                 "must be named as a CAP denial, never as the min_on/min_off hold");
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+
+    esp_log_test_capture_reset();
+    /* Exactly what profile_executor_on_off_zone_tick() leaves behind on a
+     * cap denial: the gate said ON, the cap wrote actuated_on back to false
+     * and zeroed the hold accumulator. */
+    profile_executor_on_off_log_transition(/*zi=*/1, &oin, /*prev_decided_on=*/false, /*decided_on=*/true,
+                                            /*prev_actuated_on=*/false, /*actuated_on=*/false,
+                                            /*held_prior_s=*/12.0f, /*held_s=*/0.0f,
+                                            /*min_on_s=*/30, /*min_off_s=*/30,
+                                            /*bypass_hold=*/false, /*cap_denied=*/true);
+    TEST_CHECK(esp_log_test_capture_contains("onoff z1 CAP suppresses OFF->ON: max_simultaneous_relays"),
+               "the cap must be named as the cause");
+    TEST_CHECK(!esp_log_test_capture_contains("HOLD suppresses"),
+               "and the hold must NOT be blamed -- this is the exact wrong-mechanism line the fix removes");
+    TEST_CHECK(!esp_log_test_capture_contains("required 30s"),
+               "nor may the line quote a required-hold figure, which would predict a transition time the "
+               "cap has no intention of honouring");
+}
+
+// Same state shape, cap_denied false -- proves the CAP branch did not simply
+// swallow the HOLD line for every suppression (a check that never fires is
+// worth nothing).
+static void test_on_off_log_transition_hold_still_reported_when_the_cap_is_not_involved(void)
+{
+    TEST_SECTION("profile_executor_on_off_log_transition(): the same suppressed-transition shape with "
+                 "cap_denied=false still reports the HOLD, so the CAP branch is discriminating");
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+
+    esp_log_test_capture_reset();
+    profile_executor_on_off_log_transition(/*zi=*/1, &oin, /*prev_decided_on=*/false, /*decided_on=*/true,
+                                            /*prev_actuated_on=*/false, /*actuated_on=*/false,
+                                            /*held_prior_s=*/12.0f, /*held_s=*/13.0f,
+                                            /*min_on_s=*/30, /*min_off_s=*/30,
+                                            /*bypass_hold=*/false, /*cap_denied=*/false);
+    TEST_CHECK(esp_log_test_capture_contains("onoff z1 HOLD suppresses OFF->ON: held 13.0s of required 30s"),
+               "an ordinary hold suppression is still reported, with the post-gate accumulator (how long "
+               "the CURRENT state has been held so far)");
+    TEST_CHECK(!esp_log_test_capture_contains("CAP suppresses"),
+               "and is not misreported as a cap denial");
 }
 
 static void test_on_off_log_transition_hold_line_shows_required_vs_held_seconds(void)
@@ -7606,8 +7671,9 @@ static void test_on_off_log_transition_hold_line_shows_required_vs_held_seconds(
     esp_log_test_capture_reset();
     profile_executor_on_off_log_transition(/*zi=*/1, &oin, /*prev_decided_on=*/false, /*decided_on=*/true,
                                             /*prev_actuated_on=*/false, /*actuated_on=*/false,
-                                            /*held_s=*/5.0f, /*min_on_s=*/30, /*min_off_s=*/30,
-                                            /*bypass_hold=*/false);
+                                            /*held_prior_s=*/4.0f, /*held_s=*/5.0f,
+                                            /*min_on_s=*/30, /*min_off_s=*/30,
+                                            /*bypass_hold=*/false, /*cap_denied=*/false);
     TEST_CHECK(esp_log_test_capture_contains("onoff z1 DECIDE OFF->ON"),
                "the decision core's own verdict flip must still be logged even while the actuation gate "
                "holds the relay back");
@@ -7627,8 +7693,10 @@ static void test_on_off_log_transition_silent_when_nothing_changed(void)
 
     esp_log_test_capture_reset();
     profile_executor_on_off_log_transition(/*zi=*/0, &oin, /*prev_decided_on=*/true, /*decided_on=*/true,
-                                            /*prev_actuated_on=*/true, /*actuated_on=*/true, /*held_s=*/40.0f,
-                                            /*min_on_s=*/30, /*min_off_s=*/30, /*bypass_hold=*/false);
+                                            /*prev_actuated_on=*/true, /*actuated_on=*/true,
+                                            /*held_prior_s=*/39.0f, /*held_s=*/40.0f,
+                                            /*min_on_s=*/30, /*min_off_s=*/30, /*bypass_hold=*/false,
+                                            /*cap_denied=*/false);
     TEST_CHECK(g_esp_log_capture_count == 0, "a fully steady tick must not emit any onoff log line");
 }
 
@@ -7637,6 +7705,8 @@ static void run_test_on_off_log_transition(void)
     test_on_off_log_transition_decide_line_names_the_blocking_axis();
     test_on_off_log_transition_hold_line_shows_required_vs_held_seconds();
     test_on_off_log_transition_silent_when_nothing_changed();
+    test_on_off_log_transition_cap_denial_is_not_blamed_on_the_hold();
+    test_on_off_log_transition_hold_still_reported_when_the_cap_is_not_involved();
 }
 
 static void run_test_on_off_actuation(void)

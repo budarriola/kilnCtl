@@ -340,11 +340,29 @@ static const char *on_off_axis_reason(const on_off_trigger_input_t *in, bool on_
  * (PROFILE_EXECUTOR_TICK_MS), so up to 3 lines/tick x 60 ticks/min = 180
  * lines/min in that worst case, all at INFO -- WARN/ERROR eviction
  * protection (b12faf41/cb6f3cd5) is untouched either way since this never
- * logs above INFO. */
+ * logs above INFO.
+ *
+ * held_prior_s vs held_s (2026-09-09, opus review defect C2): the actuation
+ * gate MUTATES its hold accumulator on the way past -- it sets *held_s =
+ * dt_s on a transition and *held_s += dt_s otherwise -- so the value read
+ * back AFTER the tick is never the duration the previous state was actually
+ * held. Passing only that post-gate value made every RELAY line print
+ * held_prior_s=1.0 (one tick), defeating the "prove the 30 s hold from the
+ * timestamps" claim the bench-readiness audit rests on. Both are now passed
+ * explicitly: held_prior_s is the accumulator read BEFORE
+ * profile_executor_on_off_zone_tick() (the real held duration of the state
+ * that just ended, what the RELAY line reports), held_s is the post-gate
+ * value (how long the CURRENT state has been held so far, what the HOLD
+ * line reports).
+ *
+ * cap_denied is on_off_zone_tick_result_t::cap_denied -- see the CAP branch
+ * below for why the cap has to be distinguished from the hold. */
 void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_input_t *in,
                                              bool prev_decided_on, bool decided_on,
-                                             bool prev_actuated_on, bool actuated_on, float held_s,
-                                             uint16_t min_on_s, uint16_t min_off_s, bool bypass_hold)
+                                             bool prev_actuated_on, bool actuated_on,
+                                             float held_prior_s, float held_s,
+                                             uint16_t min_on_s, uint16_t min_off_s, bool bypass_hold,
+                                             bool cap_denied)
 {
     if (decided_on != prev_decided_on) {
         ESP_LOGI(PE_TAG, "onoff z%u DECIDE %s->%s reason=%s temp=%.1fC thr=%.1fC hyst=%.1fC "
@@ -358,8 +376,23 @@ void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_inp
         ESP_LOGI(PE_TAG, "onoff z%u RELAY %s->%s decided=%s held_prior_s=%.1f min_on_s=%u "
                       "min_off_s=%u bypass_hold=%d",
                  zi, prev_actuated_on ? "ON" : "OFF", actuated_on ? "ON" : "OFF",
-                 decided_on ? "ON" : "OFF", (double)held_s, (unsigned)min_on_s, (unsigned)min_off_s,
-                 (int)bypass_hold);
+                 decided_on ? "ON" : "OFF", (double)held_prior_s, (unsigned)min_on_s,
+                 (unsigned)min_off_s, (int)bypass_hold);
+    } else if (cap_denied) {
+        /* 2026-09-09 (opus review defect C1). The relay-count cap produces
+         * EXACTLY the state the HOLD branch below tests for -- profile_
+         * executor_on_off_zone_tick() forces *actuated_on = false and
+         * *actuated_held_s = 0.0f on cap_denied, so a zone denied by
+         * max_simultaneous_relays used to print "HOLD suppresses OFF->ON:
+         * held 0.0s of required 30s", naming a mechanism that had nothing
+         * to do with it (and a required-seconds figure that predicts a
+         * transition time the cap will not honour). The cap is checked
+         * FIRST here because it is the one that actually decided this tick;
+         * min_on_s/min_off_s are deliberately not quoted on this line,
+         * since the hold is not what is suppressing the relay. */
+        ESP_LOGI(PE_TAG, "onoff z%u CAP suppresses %s->%s: max_simultaneous_relays reached "
+                      "(not the min_on/min_off hold)",
+                 zi, actuated_on ? "ON" : "OFF", decided_on ? "ON" : "OFF");
     } else if (decided_on != actuated_on && !bypass_hold && prev_decided_on == prev_actuated_on) {
         /* The actuation-layer hold (requirement 4's independent second
          * timer, profile_executor_on_off_actuation_gate()) is suppressing a

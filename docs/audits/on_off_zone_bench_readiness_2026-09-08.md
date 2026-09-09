@@ -239,7 +239,30 @@ at INFO:
 - `onoff z<N> HOLD suppresses <A>-><B>: held <X>s of required <Y>s` — the
   decision core wants a transition but the independent actuation-layer
   min_on_s/min_off_s hold (requirement 4) is blocking it. Fires exactly once,
-  the tick DECIDE and RELAY first disagree.
+  the tick DECIDE and RELAY first disagree. `<X>` is how long the CURRENT
+  state has been held so far.
+- `onoff z<N> CAP suppresses <A>-><B>: max_simultaneous_relays reached (not
+  the min_on/min_off hold)` — added 2026-09-09. The relay-count cap, not the
+  hold, is what denied this zone. It produces the same "decided != actuated"
+  state the HOLD line tests for, and until this line existed a cap denial
+  printed as `HOLD suppresses OFF->ON: held 0.0s of required 30s` — the
+  wrong mechanism, with a required-seconds figure the cap will not honour.
+  A cap denial is also accompanied by the existing `denied its relay this
+  tick: max_simultaneous_relays ...` WARN from `profile_executor.c`.
+
+> **Correction, 2026-09-09 (opus review defect C2).** The
+> `held_prior_s=30.0` evidence described in §7.1 was **never actually
+> produced by the 2026-09-08 code**. The trace read the hold accumulator
+> back AFTER the actuation gate had already mutated it, and the gate sets
+> that accumulator to `dt_s` on every transition — so every RELAY line
+> printed `held_prior_s=1.0`, one tick, regardless of how long the state
+> had really been held. No bench log was captured against that build, so
+> nothing in this document was contradicted by evidence at the time; the
+> §7.1 sample below is what the code was INTENDED to emit, not a
+> transcript. `profile_executor.c` now captures the accumulator BEFORE the
+> tick and passes it separately (`held_prior_s` vs `held_s`), and
+> `test_profile_executor_prestart.c` pins the two apart, so from that
+> commit onward the sequence below is what the board really emits.
 
 ### 7.1 Annotated CORRECT sequence
 
@@ -255,10 +278,13 @@ Reading it: the rule became true at 12:00:00 (temp crossed the ON-side edge,
 201.3 >= 200+1); the hold immediately shows `held 0.0s of required 30s`
 (nothing has elapsed yet); the RELAY line lands exactly 30.0s later, with
 `held_prior_s=30.0` proving the full min_on_s was honoured before the relay
-actually moved. The OFF transition at 12:04:12 is symmetric (`axis_temp_false`
+actually moved (true only from the 2026-09-09 fix onward — see the correction
+note above). The OFF transition at 12:04:12 is symmetric (`axis_temp_false`
 — the reading fell below the OFF-side edge, 196.8 <= 200-1) and its own RELAY
 line lands 30s after that. **The min-on/min-off holds are verifiable purely
-from the HOLD/RELAY timestamp delta — no meter needed.**
+from the HOLD/RELAY timestamp delta — no meter needed.** (The timestamp
+delta was always sound; it is the `held_prior_s` FIELD that was wrong before
+2026-09-09.)
 
 ### 7.2 Failure signatures in the log
 
