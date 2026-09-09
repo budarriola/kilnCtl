@@ -884,13 +884,22 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
 // record across all CONFIG_STORE_NUM_SECTORS * CONFIG_STORE_SLOTS_PER_SECTOR
 // slots -- there is no separate "which sector is active" flag stored
 // anywhere, so there is nothing shaped like a pointer that a torn write
-// could corrupt. This is what makes the sector switch atomic: config_store_
-// flash.c's write path always finishes writing (and CRC-verifying) the new
-// record in whichever sector it targets BEFORE it can matter, because until
-// that write's CRC validates, THIS function still returns the old sector's
-// last-good record -- there is no window where neither sector's answer is
-// trustworthy, and no window where both are, only the ordinary single-writer
-// question "did the newest write's CRC validate yet".
+// could corrupt. This is what makes the sector switch atomic, but be
+// precise about which half is doing the verifying: config_store_flash.c's
+// write path does NOT read back or CRC-verify what it just programmed (see
+// config_store_write() in that file) -- it programs the bytes and returns.
+// The CRC check that actually decides whether a write "took" happens later,
+// lazily, the next time THIS reader function runs and re-scans every slot:
+// until a record's own CRC validates under that scan, this function keeps
+// returning the old sector's last-good record. So the atomicity claim above
+// still holds (there is no window where neither sector's answer is
+// trustworthy, and no window where both are), but a caller cannot conclude
+// from `config_store_write()` returning true that the new record is
+// actually retrievable -- a torn write silently reverts on the next boot
+// with no error anywhere (docs/audits/unreviewed_changes_review_2026-09-08.md
+// finding D2). Adding a real post-program readback is a separate, deliberately
+// deferred proposal -- this store just flashed to the Pico, and changing its
+// write path in the same pass that documents the gap is the wrong tradeoff.
 //
 // `sectors[0]`/`sectors[1]` are exactly SAFTYFW_CONFIG_STORE_FLASH_SIZE bytes
 // each, same "caller already did the flash I/O" contract as

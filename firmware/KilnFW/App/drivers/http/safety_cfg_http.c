@@ -1227,10 +1227,16 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
      * buffers are unrelated to that write, but internal DRAM for every
      * heap buffer in a handler that has ANY flash-writing path removes the
      * question rather than depending on "this particular buffer's lifetime
-     * doesn't overlap the write" staying true after a future edit. */
+     * doesn't overlap the write" staying true after a future edit.
+     * MALLOC_CAP_8BIT alone does NOT guarantee internal DRAM -- with PSRAM
+     * enabled it is satisfiable from PSRAM too, so every allocation in this
+     * handler spells out MALLOC_CAP_INTERNAL explicitly rather than relying
+     * on CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL's threshold to keep landing
+     * these small structs in internal RAM by coincidence
+     * (docs/audits/unreviewed_changes_review_2026-09-08.md finding D3). */
     bool link_up, trip_latched, k4_closed;
     {
-        safety_link_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_8BIT);
+        safety_link_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!st) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return ESP_OK;
@@ -1247,7 +1253,7 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     uint32_t off_ms = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
     bool profile_running_or_paused;
     {
-        profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_8BIT);
+        profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!pstat) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return ESP_OK;
@@ -1340,7 +1346,7 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     // local, so there is no frame cost to "declaring a second one" any more.
     bool profile_running_or_paused_after;
     {
-        profile_exec_status_t *pstat2 = heap_caps_malloc(sizeof(*pstat2), MALLOC_CAP_8BIT);
+        profile_exec_status_t *pstat2 = heap_caps_malloc(sizeof(*pstat2), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!pstat2) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return ESP_OK;

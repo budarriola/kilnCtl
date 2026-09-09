@@ -270,6 +270,15 @@ bool thermo_task_inject_reading(bool tc_valid, float tc_c, float cj_c, uint8_t f
     s_inject_snapshot.spi_failed = false; // injection models a successful synthetic transfer;
                                            // callers wanting to exercise S5's spi_failed path
                                            // pass tc_valid=false instead, same as a real bad read
+    // cj_valid mirrors the same "successful synthetic transfer" model as
+    // spi_failed above and follows the live-hardware formula in
+    // thermo_task_fn() (ok && !spi_failed && !isnan(cj_c)): injection is
+    // meant to stand in for a real MAX31856 conversion, not a chip with no
+    // cold junction at all, so a caller supplying a finite cj_c alongside
+    // tc_valid=true gets cj_valid=true on the wire, same as hardware would.
+    // Deliberate, not the static-zero default this field used to fall back
+    // to (d6b643a4 added it and missed this producer).
+    s_inject_snapshot.cj_valid = tc_valid && !isnan(cj_c);
     s_inject_active = true;
 
     xSemaphoreGive(s_snapshot_lock);

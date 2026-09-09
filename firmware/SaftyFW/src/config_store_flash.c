@@ -461,10 +461,13 @@ static void config_store_write_cb(void *param)
 // that string over HTTP/PC UART the same way other refusal reasons in this
 // codebase are (see config_store_write_decision_reason()).
 //
-// No caller exists yet: TODO.md Phase 9 deliberately scopes this pass to
-// "the store plus its first (read-only) consumer" -- there is no
-// SAFTY_CMD_SET_CONFIG wire command wired to call this. It is built and
-// ready for that follow-on work, not exercised by anything today.
+// This is live, not dormant: link_task.c calls it from three wire command
+// handlers -- SET_CONFIG (link_task.c:1473), SET_CT_CAL (link_task.c:1538)
+// and COMMIT_CONFIG (link_task.c:2017) -- so this path runs on every
+// commissioning commit, not just when TODO.md Phase 9's follow-on work
+// eventually lands (docs/audits/unreviewed_changes_review_2026-09-08.md
+// finding D4; this comment previously said "no caller exists yet," which
+// was true only when Phase 9's first pass landed and has been stale since).
 bool config_store_write(const config_store_record_t *rec, const char **out_reason)
 {
     config_store_write_decision_t decision =

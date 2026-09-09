@@ -379,8 +379,13 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
      * same convention as backup_export_get_handler's stream buffer just
      * above: pure JSON construction, no flash writes anywhere in this
      * function, so there is no PSRAM/flash-worker re-entrancy hazard to
-     * avoid (contrast backup_import.c's candidate arrays, which DO reach
-     * flash and are therefore internal DRAM). Freed on the one `send:` exit
+     * avoid (contrast backup_import.c's candidate arrays, which also DO
+     * reach flash but are PSRAM-preferred -- backup_import.c's `_locked()`
+     * split copies each field into the live NVS-backed store before the
+     * single flash write, so nothing PSRAM-backed is live across that write;
+     * see backup_import.c:1180-1193 and
+     * docs/audits/unreviewed_changes_review_2026-09-08.md finding D6, which
+     * this comment previously described backwards). Freed on the one `send:` exit
      * every path below funnels through; an allocation failure degrades to a
      * clean 500 rather than a stack overflow. */
 #define PROFILE_DETAIL_JSON_CAP (816 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * 128)

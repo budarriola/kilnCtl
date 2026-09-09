@@ -355,9 +355,15 @@ fail:
 }
 
 /* Public early-init entry point -- see the "MUST BE CREATED EARLY" note above.
- * Idempotent; app_main calls this once, well before LVGL takes its own internal
- * stack, so the 8192-byte internal allocation lands while there is still ~31 KB
- * of contiguous internal DRAM rather than the 7680 left after lvgl_start. */
+ * Idempotent; main_control_bringup() calls this once from its new, earlier
+ * call site (1f741635 moved it ahead of relay_cycles_init() and
+ * profile_executor_start()) -- LVGL already started in main_boot_early.c by
+ * this point, same as at the old call site, so the ordering claim is not
+ * "before LVGL" (docs/audits/unreviewed_changes_review_2026-09-08.md finding
+ * D5). What actually changed, and still holds: the new site runs strictly
+ * earlier in main_control_bringup() than the old one did, so MORE
+ * contiguous internal DRAM is available for the 8192-byte allocation here
+ * than at the old site, which itself succeeded. */
 esp_err_t uart_bridge_ext_start_flash_worker(void)
 {
     if (!uart_bridge_ext_worker_ensure_started()) {
