@@ -661,6 +661,16 @@ const IN_PAGE_SCRIPT = `
     clipped: clipped,
     interactiveCount: all.length,
     tuningBadge: tuningBadge,
+    // docHeightAtCheck: the document's real scrollHeight AT THE MOMENT this
+    // script ran, independent of whatever height the viewport was resized
+    // to before this script started. sweepOnePage's settle-then-verify loop
+    // (see its own comment) compares this against the height it just sized
+    // the viewport to -- a mismatch means the document grew (or shrank)
+    // again in the gap between that resize and this script actually
+    // running, so the occlusion/overlap results just computed above were
+    // measured against a viewport that no longer matches the document and
+    // must be discarded and retried, not trusted.
+    docHeightAtCheck: docEl.scrollHeight,
   });
 })()
 `;
@@ -719,23 +729,106 @@ async function sweepOnePage(port, fileUrl, width, fixtureScript) {
     // Second pass: grow the viewport to the full document height (at the
     // fixed WIDTH under test) so every element's centre point lands inside
     // the viewport for the occlusion check below -- no scrolling, so no
-    // clamping-to-the-fold bug. document.title read first just to force
-    // layout; scrollHeight already reflects layout by this point regardless.
-    const heightResult = await cdp.send('Runtime.evaluate', {
-      expression: '(document.scrollingElement || document.documentElement).scrollHeight',
-      returnByValue: true,
-    });
-    const fullHeight = Math.min(Math.max(heightResult.result.value || VIEWPORT_HEIGHT, VIEWPORT_HEIGHT), 30000);
-    await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width, height: fullHeight, deviceScaleFactor: 1, mobile: false,
-    });
-    await cdp.send('Runtime.evaluate', { expression: 'new Promise(r => setTimeout(r, 50))', awaitPromise: true });
+    // clamping-to-the-fold bug.
+    //
+    // This used to be a single measure-then-resize (one scrollHeight read,
+    // one Emulation.setDeviceMetricsOverride, a flat 50ms wait). Reproduced
+    // 2026-09-09 by running two check_ui_responsive_sweep.ps1 instances
+    // concurrently: settings_page.html's Danger-zone "Factory default"
+    // button was reported overlapping the sticky Stop bar at 320/360px, but
+    // ONLY under concurrent load, never solo. Root-caused with an
+    // instrumented copy of this file that dumped the Stop bar's own
+    // offsetHeight/body padding-bottom alongside the failure: those were
+    // IDENTICAL (86px/86px) between a passing run and a failing one -- the
+    // Stop-bar-padding math this file's own comments already worry about was
+    // never the problem. What differed was docScrollHeight: 1825 (== the
+    // viewport height already locked in) on a pass, 1887 on a fail. app.js's
+    // pollHeartbeat() fires its first `/api/profile_exec` request at page
+    // init and, against this static server (which implements no /api/*
+    // routes -- see this file's header), always fails; its .catch() only
+    // shows the connection-lost banner once FAILURES_BEFORE_BANNER (2)
+    // consecutive failures have piled up, spaced HEARTBEAT_MIN_MS (3000ms)
+    // apart. Under a fast, uncontended run this never fires before the
+    // single height measurement below ran, so the banner (which adds real
+    // height at the top of the page) simply wasn't there yet either time.
+    // Under real contention (two sweeps and their own Chrome processes
+    // fighting for CPU), the wall-clock gap between page load and this
+    // point can stretch past 3000ms even though every individual CDP call
+    // still (eventually) succeeds -- long enough for that second heartbeat
+    // failure, and the banner, to land in the WINDOW BETWEEN the one-shot
+    // height read and the final assertion pass. The viewport was then
+    // already frozen at the stale, too-short height, so the banner's added
+    // content pushed the real bottom of the page below the visible/measured
+    // viewport -- past where the fixed-position Stop bar sits -- and the
+    // occlusion check (correctly, given that frozen viewport) reported an
+    // overlap that a real, un-frozen viewport would never show: the Stop bar
+    // stays pinned to the bottom of whatever the CURRENT viewport is, same
+    // as it does on a real phone, it just never got the chance to grow here.
+    // This is a measurement-timing artifact, not a layout defect -- nothing
+    // about the page's CSS/DOM changed between the two runs.
+    //
+    // Fix: loop the measure-then-resize step until two consecutive samples
+    // agree (the document has actually stopped growing/shrinking), instead
+    // of trusting a single sample -- AND, since app.js's async heartbeat
+    // timer is on the page's own wall clock and can still fire in the gap
+    // between "resize settled" and "IN_PAGE_SCRIPT actually ran" (a gap this
+    // sweep does not fully control once CDP round trips themselves are slow
+    // under contention), re-verify AFTER running IN_PAGE_SCRIPT that the
+    // document's real height at the moment it ran (docHeightAtCheck, see
+    // that field's own comment) still matches the height the viewport was
+    // just sized to. A mismatch there means the document moved again after
+    // the last resize -- the occlusion/overlap result just computed is
+    // against a stale viewport and must be discarded, not reported, so the
+    // whole settle+check attempt reruns.
+    //
+    // Bounded, not "wait forever and pass": SETTLE_MAX_ITERATIONS caps each
+    // settle sub-loop, and VERIFY_MAX_ATTEMPTS caps the outer retry -- once
+    // exhausted, the LAST attempt's result is used regardless, so a page
+    // that pathologically never stops growing still gets checked against
+    // its best-known state rather than silently skipped, and a genuinely
+    // failing check still fails loudly rather than looping forever waiting
+    // for a "clean" run that a real defect will never produce. A real CSS
+    // overlap that exists once the document has actually settled is
+    // untouched by any of this: this machinery only chases scrollHeight
+    // stability, it never edits or overrides an occlusion result once
+    // IN_PAGE_SCRIPT has run against a viewport confirmed to match.
+    const SETTLE_MAX_ITERATIONS = 6;
+    const SETTLE_POLL_MS = 100;
+    const VERIFY_MAX_ATTEMPTS = 10;
+    let result = null;
+    for (let attempt = 1; attempt <= VERIFY_MAX_ATTEMPTS; attempt++) {
+      let fullHeight = VIEWPORT_HEIGHT;
+      let prevHeight = null;
+      for (let i = 0; i < SETTLE_MAX_ITERATIONS; i++) {
+        const heightResult = await cdp.send('Runtime.evaluate', {
+          expression: '(document.scrollingElement || document.documentElement).scrollHeight',
+          returnByValue: true,
+        });
+        const measured = Math.min(Math.max(heightResult.result.value || VIEWPORT_HEIGHT, VIEWPORT_HEIGHT), 30000);
+        await cdp.send('Emulation.setDeviceMetricsOverride', {
+          width, height: measured, deviceScaleFactor: 1, mobile: false,
+        });
+        await cdp.send('Runtime.evaluate', { expression: `new Promise(r => setTimeout(r, ${SETTLE_POLL_MS}))`, awaitPromise: true });
+        const settled = prevHeight === measured;
+        fullHeight = measured;
+        prevHeight = measured;
+        if (settled) break;
+      }
 
-    const result = await cdp.send('Runtime.evaluate', { expression: IN_PAGE_SCRIPT, returnByValue: true });
-    if (result.exceptionDetails) {
-      throw new Error('page script threw: ' + JSON.stringify(result.exceptionDetails));
+      const attemptResult = await cdp.send('Runtime.evaluate', { expression: IN_PAGE_SCRIPT, returnByValue: true });
+      if (attemptResult.exceptionDetails) {
+        throw new Error('page script threw: ' + JSON.stringify(attemptResult.exceptionDetails));
+      }
+      const parsed = JSON.parse(attemptResult.result.value);
+      result = parsed;
+      if (parsed.docHeightAtCheck === fullHeight) break; // viewport matched the document at check time -- trust it
+      // Mismatch: something (almost always the heartbeat's connection-lost
+      // banner) changed the document's height again after the resize this
+      // attempt just did. Loop back and re-settle/re-check rather than
+      // report an occlusion result measured against a viewport that no
+      // longer matches reality.
     }
-    return JSON.parse(result.result.value);
+    return result;
   } finally {
     ws.close();
     await closeTab(port, tab.id);
