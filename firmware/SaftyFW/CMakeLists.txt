@@ -123,6 +123,10 @@ set(SAFTYFW_APP_SOURCES
     # policy.c, test/test_debounce_nuisance.c) -- see debounce_policy.h.
     src/debounce_policy.c
     src/tasks/discrete_task.c
+    # Pure missed-~DRDY-edge recovery decision, split out of thermo_task.c's
+    # loop so it is host-testable (test/test_thermo_task_drdy_recovery.c) --
+    # see thermo_task_drdy_recovery.h.
+    src/tasks/thermo_task_drdy_recovery.c
     src/tasks/thermo_task.c
     src/tasks/current_task.c
     src/tasks/console_uart.c

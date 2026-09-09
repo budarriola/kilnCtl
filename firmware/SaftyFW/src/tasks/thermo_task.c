@@ -32,6 +32,7 @@
 #include "max31856_reconfig_retry.h" // periodic re-probe while tc_type is unverified, see its own header
 #include "max31856_tc_range_policy.h" // per-tc_type plausibility band, see its own header for the full argument
 #include "task_priorities.h"
+#include "thermo_task_drdy_recovery.h" // pure missed-edge decision, see its own header
 #include "watchdog_task.h"
 
 #define THERMO_TASK_STACK_WORDS configMINIMAL_STACK_SIZE
@@ -112,6 +113,37 @@
  * a normal build (the branch is compiled out), so this doubles as the
  * SWD-readable proof of which mode a running board is actually in. */
 static volatile uint32_t s_drdy_assumed_reads = 0;
+
+// Missed-edge recovery counter (docs/audits/safety_tc_drdy_stall_2026-09-08.md).
+// A falling edge on ~DRDY can occur before gpio_set_irq_enabled_with_callback()
+// arms the IRQ in thermo_task_fn() (the boot-time race: CMODE free-runs the
+// instant main.c's pre-scheduler max31856_configure() returns, well before
+// this task gets to arm the IRQ) -- an edge-triggered IRQ armed on an
+// already-low, active-low pin never fires again, because the pin only goes
+// high again once something reads the chip's registers, and nothing ever
+// will if the only reader is gated behind that same notification. This is
+// self-latching, so the fix cannot be one-shot: any edge missed for any
+// reason (not just at arm time) needs the same recovery, or the SAME stall
+// recurs later. The recovery is a plain level check -- DRDY is level-
+// observable (this task already polls on a timeout, unlike an edge-only
+// design) -- done every loop iteration right after a notification timeout:
+// if the pin reads asserted (active-low) despite no notification, a
+// completed conversion's edge was missed, so the pending result is read
+// anyway, which also releases DRDY for the next real edge. This does NOT
+// fabricate a reading for a genuinely dead/silent chip: a chip that never
+// asserts DRDY at all leaves the pin HIGH (the external pull-up, R2), which
+// fails this check and falls straight through to the existing "no fault,
+// no reading, no assertion" behaviour: it falls into the existing
+// DRDY-silence branch below and publishes sensor-invalid, same as always.
+// A chip that responds low but is actually faulty is still
+// caught by max31856_read()'s own ok/spi_failed/fault_status result and the
+// per-type plausibility check below, exactly as any normal DRDY-triggered
+// read would be -- this only changes how the read gets *triggered*, never
+// what is done with its result. Non-zero is a normal, expected occurrence
+// (unlike s_drdy_assumed_reads above, which only moves under the bench-only
+// macro) -- SWD-readable so a bench session can see whether a given boot's
+// TC recovered from the boot race.
+static volatile uint32_t s_drdy_missed_edge_recoveries = 0;
 
 // Bring-up bug (TODO.md): the safety MAX31856's ONE configure() attempt
 // (main.c, pre-scheduler) fails if the IC is not powered/settled yet,
@@ -407,6 +439,17 @@ static void thermo_task_fn(void *arg)
             s_drdy_assumed_reads++;
         }
 #endif
+
+        // Missed-edge recovery: see thermo_task_drdy_recovery.h for the
+        // decision this makes and why it cannot fabricate a reading for a
+        // genuinely silent part. Only consulted when the notify-wait itself
+        // timed out -- a real edge always takes the else branch below on its
+        // own via the notification path.
+        if (thermo_task_drdy_missed_edge(notifications, assume_ready,
+                                          gpio_get(SAFTYFW_PIN_THERMO_DRDY))) {
+            assume_ready = true;
+            s_drdy_missed_edge_recoveries++;
+        }
 
         if (notifications == 0 && !assume_ready) {
             // DRDY silence: no falling edge within ~2x the expected

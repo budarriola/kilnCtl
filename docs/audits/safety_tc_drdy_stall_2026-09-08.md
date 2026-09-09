@@ -164,9 +164,116 @@ timing that caused it was one specific boot) and separately queuing the
 ordering fix above. No guard behavior was changed and the S5 trip was not
 cleared in this session.
 
+## Fix implemented (this pass)
+
+The ordering fix recommended above is now implemented, host-tested, and
+built for target -- **not yet flashed** (see "Reflash needed?" below).
+
+**Approach: periodic level-based fallback, not a one-shot arm-time check.**
+`thermo_task_fn()`'s loop already polls on a notify-wait timeout (it has
+to, to detect a genuinely stalled part), and `~DRDY` is level-observable, so
+the recovery is applied every time that wait times out, not just once at
+task startup. A one-shot check immediately after
+`gpio_set_irq_enabled_with_callback()` would only close the specific
+boot-time window this audit caught; it would not protect against a second
+edge missed later for any other reason, and the failure mode (self-latch,
+since the MAX31856 only releases `~DRDY` on a host register read) is
+identical either way. The decision itself is pulled into a new, tiny, pure
+module -- `firmware/SaftyFW/src/tasks/thermo_task_drdy_recovery.{h,c}`,
+function `thermo_task_drdy_missed_edge(notifications, assume_ready,
+drdy_pin_level)` -- split out the same way `max31856_reconfig_retry.h` and
+`max31856_tc_range_policy.h` already are, so it is host-testable with no
+pico-sdk/FreeRTOS dependency. `thermo_task_fn()`'s loop calls this exact
+function (not a copy) right after a notify-wait timeout, passing the live
+`gpio_get(SAFTYFW_PIN_THERMO_DRDY)` level; a `true` result makes the loop
+take the normal DRDY-triggered read branch instead of the silence branch,
+which also performs the register read that was missing and releases `~DRDY`
+for the next real edge. A new SWD-readable counter,
+`s_drdy_missed_edge_recoveries` (`thermo_task.c`), lets a bench session see
+whether a given boot needed this recovery, mirroring the existing
+`s_drdy_assumed_reads`/`s_reconfig_retries` discipline in the same file.
+
+**Why a genuinely dead/silent chip still trips S5.** The recovery only
+fires when the pin reads asserted (active-low, `drdy_pin_level == 0`) at
+the moment of the timeout. A part that never completes a conversion at all
+leaves `~DRDY` HIGH on the board's external pull-up (R2) -- that reads
+`drdy_pin_level == 1`, `thermo_task_drdy_missed_edge()` returns `false`
+unconditionally, and the loop falls through completely unchanged into the
+pre-existing DRDY-silence branch (`valid=false`, `tc_c`/`cj_c=NaN`,
+`fault_bits=0`), exactly as it did before this fix. Nor does a LOW-but-
+faulty part get a fabricated good reading: the recovery only decides
+whether to *attempt* the read; `max31856_read()`'s own
+`ok`/`spi_failed`/`fault_status` result and the per-type plausibility check
+immediately below it are just as authoritative over a recovered read as
+they are over any normal DRDY-triggered one, so a part that responds badly
+still produces `snap.valid == false` and S5 still trips on it.
+
+**S5 unchanged.** No line in `safety_guards.c`/`safety_core.c` was touched;
+the fix lives entirely in `thermo_task.c` and the new pure module upstream
+of `thermo_snapshot_t` publication. `test_safety_guards.c`'s existing S5
+tests pass unmodified (see host-test run below).
+
+**Host tests added**, `firmware/SaftyFW/test/test_thermo_task_drdy_recovery.c`
+(wired into `CMakeLists.txt`, `test/build_host_tests.ps1`, `test_main.c`):
+recovers when `~DRDY` already reads asserted at timeout; does NOT recover
+(no fabricated reading) when the pin reads HIGH; inert on a real
+notification regardless of pin level; inert once the bench-only
+`assume_ready` path already fired. Full suite:
+`firmware/SaftyFW/test/build_host_tests.ps1` -- **2377/2377 checks passed**
+(previously 2373; +4 new). `tools/run_all_checks.ps1` -- **74/74 passed**.
+
+**Negative test** (production function, not a mirror): changed
+`thermo_task_drdy_recovery.c`'s `return drdy_pin_level == 0;` to
+`return false;` (reproducing the exact pre-fix stuck-latched behaviour),
+reran the suite, and got:
+```
+FAIL C:\...\test_thermo_task_drdy_recovery.c:20: DRDY asserted at timeout -> treat as a missed edge, read now
+```
+(2376/2377, 1 failure). Reversed the edit by hand back to
+`return drdy_pin_level == 0;`; `git status --porcelain` shows the file only
+as a new, untracked addition (no diff to have drifted), confirming the
+restore is exact.
+
+**Sibling IRQ-arm sites checked** (same class: an edge-triggered interrupt
+armed after the event it watches could already have occurred):
+- `firmware/SaftyFW/src/tasks/thermo_task.c` (this file) -- the only
+  `gpio_set_irq_enabled_with_callback()` call anywhere in SaftyFW (its own
+  comment: "The only GPIO-IRQ callback registered anywhere in this
+  firmware"). No sibling call sites exist on the Pico side to check.
+- KilnFW's three ESP thermocouple channels (MAX31856 x3,
+  `firmware/KilnFW/App/drivers/hw/MAX31856.c`) do **not** use an edge IRQ at
+  all -- `thermo_task.c`'s own header comment notes the main board's DRDY is
+  behind an SX1509 I/O expander and KilnFW polls it (falls back to an
+  elapsed-time guess) rather than taking a GPIO edge interrupt. There is no
+  arm-order race to have here structurally: nothing is "missed" because
+  nothing is edge-triggered. This means the ESP channels are not "surviving
+  on timing luck" the way the audit worried they might be -- they were never
+  exposed to this race in the first place, by construction.
+- `~FAULT` (GPIO11, SaftyFW): read via polling in `max31856_fault_pin_
+  policy.c`'s consumer, not registered as an interrupt anywhere -- same
+  "not exposed" conclusion.
+- Link/UART edges (`uart_owner_tx_policy.c`, `console_uart.c`) and touch: no
+  `hardware/gpio.h` edge-IRQ registration found anywhere else in SaftyFW or
+  KilnFW's driver tree (grepped for `gpio_set_irq_enabled` and pico-sdk
+  UART/PIO IRQ registration) -- UART and PIO paths in both firmwares use
+  their own peripheral-level ISR vectors (`uart_set_irq_enables`, PIO IRQ
+  registers), which fire on FIFO watermark/status conditions that are
+  continuously true while data is pending, not a single edge that can be
+  missed and then never recur -- a different hazard shape than this bug's
+  "edge occurs once, then self-latches if unheard."
+- **Conclusion: `thermo_task.c`'s ~DRDY IRQ was a singular instance in this
+  codebase, not a pattern repeated elsewhere.** The ESP's three channels
+  work today because they were never built on an edge-IRQ arm-ordering
+  assumption at all, not because they got lucky with timing.
+
 ## Reflash needed?
 
-No firmware change was made. No SaftyFW rebuild/reflash required for this
-audit; the `SaftyFW.elf` rebuilt here was only to get a matching ELF for SWD
-symbol resolution, done in a separate worktree (`git worktree add --detach`
-at commit `36394fbd`), never touching the main tree or the running board.
+**Yes, for this fix to take effect on the board.** `build_saftyfw()` was run
+this pass and links cleanly (`SaftyFW.elf`/`_slotA`/`_slotB`), but per this
+session's task scope the board was **not flashed**. `debug_program(peer=
+"pico")` should be run next, followed by a Pico reset/power cycle and a
+read-back of `safety_get_diag`/`s_drdy_missed_edge_recoveries` to confirm
+the boot-time race (if it recurs) is now recovered rather than latching.
+The prior audit's "no firmware change was made" note above is now
+superseded by this section for anyone reading top-to-bottom -- that note
+described the state as of the original diagnostic pass only.

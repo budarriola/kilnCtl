@@ -150,6 +150,8 @@ try {
         (Join-Path $testDir "test_max31856_fault_pin_policy.c"),
         (Join-Path $srcDir "max31856_reconfig_retry.c"),
         (Join-Path $testDir "test_max31856_reconfig_retry.c"),
+        (Join-Path $srcDir "tasks\thermo_task_drdy_recovery.c"),
+        (Join-Path $testDir "test_thermo_task_drdy_recovery.c"),
         (Join-Path $srcDir "link_diag_flags.c"),
         (Join-Path $testDir "test_link_diag_flags.c"),
         (Join-Path $srcDir "current_presence_policy.c"),
