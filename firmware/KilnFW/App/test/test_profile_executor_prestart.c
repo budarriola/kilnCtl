@@ -740,6 +740,24 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     return true;
 }
 
+/* zone_model_at()/coupling_at() -- the passthrough seam
+ * (docs/audits/high_temperature_transfer_analysis_2026-09-08.md item 2)
+ * profile_executor_feedforward.c now calls instead of zones_config_get_
+ * model()/zones_config_get_coupling() directly. T_c is unused by the real
+ * implementation too (bit-identical passthrough), so the stub just forwards
+ * to the same fakes just above. */
+bool zone_model_at(uint8_t zone_index, float T_c, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
+{
+    (void)T_c;
+    return zones_config_get_model(zone_index, out_k_dc, out_tau_s, out_dead_time_s);
+}
+
+bool coupling_at(uint8_t zone_index, float T_c, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    (void)T_c;
+    return zones_config_get_coupling(zone_index, out_row);
+}
+
 /* PID_EXPANSION_PLAN.md sec 3.2 ("the solver switch itself"): profile_
  * executor_feedforward.c's s_coupling_use_measured_diag_k_dc is compiled to
  * false in this executable (same as shipped firmware), so
@@ -7542,6 +7560,85 @@ static void test_on_off_zone_tick_cap_denies_last_after_heaters(void)
     TEST_CHECK(r.actuated_on, "must be granted -- a slot is free");
 }
 
+// ---------------------------------------------------------------------------
+// UART trace (profile_executor_on_off_log_transition(), profile_executor_
+// relay_io.c) -- the owner's decision on 2026-09-08 was "trust the GPIO
+// flip, but use UART logging to determine if it worked correctly," which
+// makes the log TEXT the evidence a bench firing will be judged by. These
+// tests assert the rendered message content via test/stubs/esp_log.h's
+// capture buffer (esp_log_test_capture_reset()/_contains()), not just that
+// the function runs without crashing -- a silent regression in wording or a
+// dropped line would otherwise remove that coverage while every other host
+// test (which never reads the capture buffer) stayed green.
+// ---------------------------------------------------------------------------
+
+static void test_on_off_log_transition_decide_line_names_the_blocking_axis(void)
+{
+    TEST_SECTION("profile_executor_on_off_log_transition(): a DECIDE transition to OFF names the specific "
+                 "axis that stopped the rule from holding true (axis_temp_false here), so a reader does not "
+                 "have to re-derive the hysteresis math by hand from raw temp/threshold numbers");
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+    oin.rule.temp_cmp = ON_OFF_TEMP_CMP_ABOVE;
+    oin.rule.temp_threshold_c = 500.0f;
+    oin.hyst_c = 2.0f;
+    oin.temp_measurement_c = 490.0f; /* below the OFF-side edge (500 - 1 = 499) while previously ON */
+
+    esp_log_test_capture_reset();
+    profile_executor_on_off_log_transition(/*zi=*/2, &oin, /*prev_decided_on=*/true, /*decided_on=*/false,
+                                            /*prev_actuated_on=*/true, /*actuated_on=*/false,
+                                            /*held_s=*/45.0f, /*min_on_s=*/30, /*min_off_s=*/30,
+                                            /*bypass_hold=*/false);
+    TEST_CHECK(esp_log_test_capture_contains("onoff z2 DECIDE ON->OFF reason=axis_temp_false"),
+               "DECIDE line must name the zone, the transition direction, and the specific blocking axis");
+    TEST_CHECK(esp_log_test_capture_contains("onoff z2 RELAY ON->OFF"),
+               "actuated_on changed the same tick -- a RELAY line must fire too, so a reader can see the "
+               "decision and the actuation together");
+}
+
+static void test_on_off_log_transition_hold_line_shows_required_vs_held_seconds(void)
+{
+    TEST_SECTION("profile_executor_on_off_log_transition(): when the actuation-layer hold suppresses a "
+                 "fresh decision, the HOLD line must carry both held_s and the required min_on_s/min_off_s "
+                 "so the 30s hold requirement is verifiable from timestamps alone (this line's time + the "
+                 "required-seconds field == when the RELAY line should appear)");
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+
+    esp_log_test_capture_reset();
+    profile_executor_on_off_log_transition(/*zi=*/1, &oin, /*prev_decided_on=*/false, /*decided_on=*/true,
+                                            /*prev_actuated_on=*/false, /*actuated_on=*/false,
+                                            /*held_s=*/5.0f, /*min_on_s=*/30, /*min_off_s=*/30,
+                                            /*bypass_hold=*/false);
+    TEST_CHECK(esp_log_test_capture_contains("onoff z1 DECIDE OFF->ON"),
+               "the decision core's own verdict flip must still be logged even while the actuation gate "
+               "holds the relay back");
+    TEST_CHECK(esp_log_test_capture_contains("onoff z1 HOLD suppresses OFF->ON: held 5.0s of required 30s"),
+               "the min_off_s hold must be named with both the elapsed hold and the requirement");
+    TEST_CHECK(!esp_log_test_capture_contains("onoff z1 RELAY"),
+               "actuated_on did not change this tick -- no RELAY line should fire");
+}
+
+static void test_on_off_log_transition_silent_when_nothing_changed(void)
+{
+    TEST_SECTION("profile_executor_on_off_log_transition(): a steady tick (decided_on == prev, "
+                 "actuated_on == prev) emits NOTHING -- the volume-budget claim (silent for a heater-only "
+                 "board / steady on/off zone) depends on this being edge-triggered, not gated on some other "
+                 "condition that could quietly regress into per-tick spam");
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+
+    esp_log_test_capture_reset();
+    profile_executor_on_off_log_transition(/*zi=*/0, &oin, /*prev_decided_on=*/true, /*decided_on=*/true,
+                                            /*prev_actuated_on=*/true, /*actuated_on=*/true, /*held_s=*/40.0f,
+                                            /*min_on_s=*/30, /*min_off_s=*/30, /*bypass_hold=*/false);
+    TEST_CHECK(g_esp_log_capture_count == 0, "a fully steady tick must not emit any onoff log line");
+}
+
+static void run_test_on_off_log_transition(void)
+{
+    test_on_off_log_transition_decide_line_names_the_blocking_axis();
+    test_on_off_log_transition_hold_line_shows_required_vs_held_seconds();
+    test_on_off_log_transition_silent_when_nothing_changed();
+}
+
 static void run_test_on_off_actuation(void)
 {
     test_on_off_zone_tick_rule_turns_relay_on_through_owner();
@@ -7556,6 +7653,7 @@ static void run_test_on_off_actuation(void)
     test_on_off_actuation_gate_bounds_a_chattering_decision_core();
     test_on_off_cap_denies_pure_predicate();
     test_on_off_zone_tick_cap_denies_last_after_heaters();
+    run_test_on_off_log_transition();
 }
 
 void run_test_profile_executor_prestart(void)

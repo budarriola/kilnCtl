@@ -1371,10 +1371,35 @@ void executor_task_entry(void *arg)
                  * header comment for why this whole chain is one production
                  * function rather than inline code here. */
                 bool bypass_hold = run_ending_failsafe || guard_5_6_tripped_now || !run_running_now;
+                /* Captured BEFORE the tick call: both on_off_trigger_decide()
+                 * (inside profile_executor_on_off_zone_tick(), via
+                 * z->on_off_trigger_state) and the actuation-gate hold
+                 * mutate their state in place, so this is the only chance to
+                 * see the "before" side of either transition. prev_decided_on
+                 * also doubles as axis_temp()'s on_ref for the diagnostic
+                 * mirror above -- the hysteresis memory is the state from
+                 * BEFORE this tick's call, same as the real decision core
+                 * uses. */
+                bool prev_decided_on = z->on_off_trigger_state.commanded_on;
+                bool prev_actuated_on = z->on_off_actuated_on;
                 on_off_zone_tick_result_t tick_result = profile_executor_on_off_zone_tick(
                     &z->on_off_trigger_state, &z->on_off_actuated_on, &z->on_off_actuated_held_s,
                     &oin, bypass_hold, relays_on_count, on_off_cap);
                 bool actuated_on = tick_result.actuated_on;
+                bool decided_on = z->on_off_trigger_state.commanded_on;
+
+                /* UART trace for the owner's bench-readiness decision
+                 * (docs/audits/on_off_zone_bench_readiness_2026-09-08.md's
+                 * reading guide has the annotated walkthrough) -- pulled out
+                 * to profile_executor_relay_io.c so a host test can call it
+                 * directly, the same reason profile_executor_on_off_
+                 * actuation_gate() itself is a separate function rather than
+                 * inline code here. See that function's own header comment
+                 * for the volume budget and edge-trigger reasoning. */
+                profile_executor_on_off_log_transition(zi, &oin, prev_decided_on, decided_on,
+                                                        prev_actuated_on, actuated_on,
+                                                        z->on_off_actuated_held_s, min_on_s, min_off_s,
+                                                        bypass_hold);
                 if (tick_result.cap_denied) {
                     ESP_LOGW(PE_TAG, "zone %u (on/off) denied its relay this tick: "
                                   "max_simultaneous_relays (%u) already reached by other zones -- "

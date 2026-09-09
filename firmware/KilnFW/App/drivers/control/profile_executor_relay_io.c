@@ -252,6 +252,131 @@ bool profile_executor_on_off_cap_denies(uint8_t relays_on_count, uint8_t cap)
     return cap > 0 && relays_on_count >= cap;
 }
 
+/* Diagnostic-only mirror of on_off_trigger_decide.c's axis_phase/axis_
+ * direction/axis_temp/axis_time -- NOT the decision core itself (that
+ * file's top comment forbids logging/FreeRTOS/side effects leaking in, on
+ * purpose, so a host test can drive it with plain vectors). This exists
+ * solely to put a name to WHY on_off_trigger_decide() returned what it
+ * returned, for the UART trace the owner asked for 2026-09-08 ("trust the
+ * GPIO flip, but use UART logging to prove it was done for the right
+ * reason"). It runs strictly AFTER the real decision already happened (see
+ * profile_executor_on_off_log_transition() below), so if this ever drifts
+ * from the real axis_* functions the worst case is a wrong LOG line, never
+ * a wrong relay.
+ *
+ * on_ref is the hysteresis memory axis_temp() itself uses: the state's
+ * commanded_on from BEFORE this tick's on_off_trigger_decide() call, not
+ * after. Returns a short machine-greppable token, not a sentence, so log
+ * lines stay compact (see the caller's volume budget). */
+static const char *on_off_axis_reason(const on_off_trigger_input_t *in, bool on_ref)
+{
+    if (in->failsafe_override) {
+        return "failsafe_override";
+    }
+    if (in->guard_5_6_tripped) {
+        return "guard5_6_trip";
+    }
+    if (!in->run_running) {
+        return (in->run_paused && !in->failsafe_on_pause) ? "paused_hold_last" : "run_not_active_failsafe";
+    }
+    if (!in->rule.enable) {
+        return "no_rule_for_segment";
+    }
+    uint8_t current_bit = in->current_phase_is_dwell ? (uint8_t)ON_OFF_PHASE_DWELL : (uint8_t)ON_OFF_PHASE_RAMP;
+    bool phase_ok = (in->rule.phase_mask == 0) || ((in->rule.phase_mask & current_bit) != 0);
+    bool dir_ok = (in->rule.direction_mask == 0) || ((in->rule.direction_mask & in->current_direction) != 0);
+    bool temp_ok = true;
+    if (in->rule.temp_cmp != ON_OFF_TEMP_CMP_NONE) {
+        float half = in->hyst_c * 0.5f;
+        float t = in->temp_measurement_c;
+        if (in->rule.temp_cmp == ON_OFF_TEMP_CMP_ABOVE) {
+            float edge = on_ref ? (in->rule.temp_threshold_c - half) : (in->rule.temp_threshold_c + half);
+            temp_ok = t >= edge;
+        } else {
+            float edge = on_ref ? (in->rule.temp_threshold_c + half) : (in->rule.temp_threshold_c - half);
+            temp_ok = t <= edge;
+        }
+    }
+    bool time_ok = (in->segment_elapsed_s >= (float)in->rule.time_start_s) &&
+                   (in->rule.time_stop_s == 0 || in->segment_elapsed_s < (float)in->rule.time_stop_s);
+    bool axes_true = phase_ok && dir_ok && temp_ok && time_ok;
+    if (in->rule.invert) {
+        axes_true = !axes_true;
+    }
+    if (axes_true) {
+        return in->rule.invert ? "rule_true_inverted" : "rule_true";
+    }
+    if (!phase_ok) return "axis_phase_false";
+    if (!dir_ok) return "axis_direction_false";
+    if (!temp_ok) return "axis_temp_false";
+    if (!time_ok) return "axis_time_false";
+    return "rule_false_inverted"; /* every axis true but invert flipped it */
+}
+
+/* UART trace for the owner's on/off-zone bench-readiness decision
+ * (docs/audits/on_off_zone_bench_readiness_2026-09-08.md's reading guide has
+ * the annotated walkthrough of what a healthy sequence and each known
+ * failure signature look like). Called once per on/off zone per tick from
+ * profile_executor.c's tick loop, AFTER profile_executor_on_off_zone_tick()
+ * has already produced this tick's actuated_on -- nothing here can affect
+ * the relay, it only narrates what already happened. Split into its own
+ * function (like profile_executor_on_off_actuation_gate() before it) so a
+ * host test can call it directly against the log-capture stub
+ * (test/stubs/esp_log.h's esp_log_test_capture_*) without running the whole
+ * FreeRTOS executor task.
+ *
+ * Every line is edge-triggered: it fires only the tick a value actually
+ * CHANGES, never once per steady tick, so a heater-only board (every board
+ * flashed today -- no zone is typed ZONE_TYPE_ON_OFF yet) calls this
+ * function every tick but it prints nothing, ever, because prev_* always
+ * equals the new value for a zone whose relay never moves. Volume budget for
+ * an on/off zone that IS configured: at most one DECIDE line and one RELAY
+ * line per transition (2 lines), plus at most one HOLD line the tick a hold
+ * newly suppresses a transition. Ordinary operation (30 s default min_on_s/
+ * min_off_s) bounds relay flips to at most 2/min, so at most ~6 lines/min.
+ * Worst case is a pathological config (min_on_s=min_off_s=0, hyst_c=0, a
+ * threshold sitting exactly on a noisy reading): the decision core's own
+ * level-4 hold cannot floor the transition rate below the 1 Hz executor tick
+ * (PROFILE_EXECUTOR_TICK_MS), so up to 3 lines/tick x 60 ticks/min = 180
+ * lines/min in that worst case, all at INFO -- WARN/ERROR eviction
+ * protection (b12faf41/cb6f3cd5) is untouched either way since this never
+ * logs above INFO. */
+void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_input_t *in,
+                                             bool prev_decided_on, bool decided_on,
+                                             bool prev_actuated_on, bool actuated_on, float held_s,
+                                             uint16_t min_on_s, uint16_t min_off_s, bool bypass_hold)
+{
+    if (decided_on != prev_decided_on) {
+        ESP_LOGI(PE_TAG, "onoff z%u DECIDE %s->%s reason=%s temp=%.1fC thr=%.1fC hyst=%.1fC "
+                      "seg_elapsed=%.0fs dwell=%d dir=0x%02X",
+                 zi, prev_decided_on ? "ON" : "OFF", decided_on ? "ON" : "OFF",
+                 on_off_axis_reason(in, prev_decided_on), (double)in->temp_measurement_c,
+                 (double)in->rule.temp_threshold_c, (double)in->hyst_c, (double)in->segment_elapsed_s,
+                 (int)in->current_phase_is_dwell, (unsigned)in->current_direction);
+    }
+    if (actuated_on != prev_actuated_on) {
+        ESP_LOGI(PE_TAG, "onoff z%u RELAY %s->%s decided=%s held_prior_s=%.1f min_on_s=%u "
+                      "min_off_s=%u bypass_hold=%d",
+                 zi, prev_actuated_on ? "ON" : "OFF", actuated_on ? "ON" : "OFF",
+                 decided_on ? "ON" : "OFF", (double)held_s, (unsigned)min_on_s, (unsigned)min_off_s,
+                 (int)bypass_hold);
+    } else if (decided_on != actuated_on && !bypass_hold && prev_decided_on == prev_actuated_on) {
+        /* The actuation-layer hold (requirement 4's independent second
+         * timer, profile_executor_on_off_actuation_gate()) is suppressing a
+         * transition the decision core just asked for -- logged exactly
+         * once, on the tick decided_on and actuated_on first diverge (prev
+         * tick they agreed; this tick they don't, and the RELAY line above
+         * did not fire, so this is the only line explaining why the relay
+         * hasn't followed). Lets a reader confirm "yes, the min_on/min_off
+         * hold is the reason" from timestamps alone: this line's timestamp
+         * plus the required-seconds field is exactly the timestamp the
+         * RELAY ...->... line should appear at once the hold clears. */
+        ESP_LOGI(PE_TAG, "onoff z%u HOLD suppresses %s->%s: held %.1fs of required %us",
+                 zi, actuated_on ? "ON" : "OFF", decided_on ? "ON" : "OFF", (double)held_s,
+                 (unsigned)(actuated_on ? min_on_s : min_off_s));
+    }
+}
+
 on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
     on_off_trigger_state_t *decide_state, bool *actuated_on, float *actuated_held_s,
     const on_off_trigger_input_t *in, bool bypass_hold, uint8_t relays_on_count, uint8_t cap)

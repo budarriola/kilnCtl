@@ -209,3 +209,107 @@ watch for these specific shapes:
 - **Time cost:** ~20-30 minutes added to the existing 3-4 hour estimate —
   it needs no heat and no cooldown, only configuration + a handful of
   forced transitions with a stopwatch for the min-on/min-off checks.
+
+## 7. Reading the UART log (owner's decision, 2026-09-08)
+
+The owner's call on this feature: *"For now I will trust that you can flip a
+GPIO properly. But use UART logging to determine if it worked correctly."*
+No dry-contact jig, no scope, no meter is required to judge §2's test —
+`profile_executor_on_off_log_transition()`
+(`firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`) is the
+whole of the evidence. It runs once per on/off zone per control tick, is
+edge-triggered (fires only the tick something actually changes — see its own
+header comment for the full volume budget), and emits three line shapes, all
+at INFO:
+
+- `onoff z<N> DECIDE <A>-><B> reason=<token> temp=... thr=... hyst=... seg_elapsed=... dwell=... dir=...`
+  — the pure decision core's own verdict changed. `reason` names the axis
+  that flipped it: `rule_true`/`rule_true_inverted` for a transition TO the
+  rule's answer, or `axis_phase_false`/`axis_direction_false`/
+  `axis_temp_false`/`axis_time_false` for a transition AWAY from it (whichever
+  axis is false first, phase/direction/temp/time order) — or
+  `failsafe_override`/`guard5_6_trip`/`paused_hold_last`/
+  `run_not_active_failsafe`/`no_rule_for_segment` for the higher-precedence
+  paths.
+- `onoff z<N> RELAY <A>-><B> decided=<C> held_prior_s=... min_on_s=... min_off_s=... bypass_hold=...`
+  — the ACTUATED state (what `apply_relay()` was actually called with) just
+  changed. `decided` shows what the decision core wants right now, which can
+  differ from the RELAY transition itself if the hold released on a tick
+  where the decision core had already moved on.
+- `onoff z<N> HOLD suppresses <A>-><B>: held <X>s of required <Y>s` — the
+  decision core wants a transition but the independent actuation-layer
+  min_on_s/min_off_s hold (requirement 4) is blocking it. Fires exactly once,
+  the tick DECIDE and RELAY first disagree.
+
+### 7.1 Annotated CORRECT sequence
+
+```
+12:00:00 onoff z2 DECIDE OFF->ON reason=rule_true temp=201.3C thr=200.0C hyst=2.0C seg_elapsed=14s dwell=0 dir=0x01
+12:00:00 onoff z2 HOLD suppresses OFF->ON: held 0.0s of required 30s
+12:00:30 onoff z2 RELAY OFF->ON decided=ON held_prior_s=30.0 min_on_s=30 min_off_s=30 bypass_hold=0
+12:04:12 onoff z2 DECIDE ON->OFF reason=axis_temp_false temp=196.8C thr=200.0C hyst=2.0C seg_elapsed=266s dwell=0 dir=0x01
+12:04:42 onoff z2 RELAY ON->OFF decided=OFF held_prior_s=30.0 min_on_s=30 min_off_s=30 bypass_hold=0
+```
+
+Reading it: the rule became true at 12:00:00 (temp crossed the ON-side edge,
+201.3 >= 200+1); the hold immediately shows `held 0.0s of required 30s`
+(nothing has elapsed yet); the RELAY line lands exactly 30.0s later, with
+`held_prior_s=30.0` proving the full min_on_s was honoured before the relay
+actually moved. The OFF transition at 12:04:12 is symmetric (`axis_temp_false`
+— the reading fell below the OFF-side edge, 196.8 <= 200-1) and its own RELAY
+line lands 30s after that. **The min-on/min-off holds are verifiable purely
+from the HOLD/RELAY timestamp delta — no meter needed.**
+
+### 7.2 Failure signatures in the log
+
+- **Chattering at a threshold (hysteresis not applied).** Multiple
+  `DECIDE ... reason=rule_true` / `reason=axis_temp_false` pairs within
+  seconds of each other, with `temp=` values that never actually clear
+  `thr ± hyst_c/2`. If `hyst=0.0C` appears in the line, the configured
+  `hyst_c` did not survive the 0-means-default substitution — check
+  `GET /api/zones` before assuming a logic bug. Because the actuation-layer
+  hold still exists underneath, true relay chatter is bounded (a HOLD line
+  should appear suppressing each rapid DECIDE), but repeated DECIDE lines at
+  sub-hysteresis spacing are themselves the signature — the RELAY line
+  staying quiet does not mean nothing is wrong.
+- **A device left energised after an abort (fail-safe missed).** The
+  expected shape is `DECIDE ...->OFF reason=failsafe_override` followed
+  within the same tick by a `RELAY ...->OFF` line (bypass_hold=1, so no HOLD
+  line ever appears — precedence 1 is never held). If an abort is observed
+  (Stop/E-stop/guard trip in `/api/status`) with **no** matching
+  `reason=failsafe_override` DECIDE/RELAY pair in the same second, the
+  fail-safe path did not fire — this is the single highest-value defect this
+  logging exists to catch, per §4's "Device left energised after abort" entry.
+- **A guard tripping on an on/off zone.** Look for `guard5_6_trip` as a
+  `reason` — that's expected (guards 5/6 stay active by design, §3's table).
+  Any OTHER guard-shaped disruption (a run going FAULTED with no
+  `failsafe_override`/`guard5_6_trip` reason ever appearing for this zone)
+  means a guard 1/2/3/4/9 exclusion did not reach this zone — cross-reference
+  against the run's own FAULTED reason in `/api/status`.
+- **Relay-cycle mis-attribution.** Count the `RELAY` lines for zone N across
+  the session and compare against `GET /api/status`'s `relay_cycles` entry
+  for that zone's relay mask — see §4's existing "Relay cycles
+  mis-attributed" entry. A mismatch here is now directly attributable: the
+  log gives an independent count of what the executor believes it commanded.
+
+### 7.3 What this logging CANNOT prove
+
+UART logging proves the firmware's own decisions and the calls it made
+(`kiln_io_owner_command_set_relay_mask_authorized()` returning `ESP_OK`, per
+`apply_relay()`'s existing `ESP_LOGW` on failure). It does **not** prove:
+
+- That the physical contact actually closed or opened — no feedback wire
+  exists for this feature (§5, "no dry-contact jig" is a policy decision, not
+  a hardware gap, but the ABSENCE of hardware confirmation is what makes this
+  true regardless).
+- That the wiring is correct — a relay wired to the wrong terminal or a
+  swapped NO/NC contact would produce an identical, "correct-looking" log
+  while doing the physically wrong thing.
+- Anything load-side — inrush, contact wear, whether the device the relay
+  drives actually responds as intended (§5's existing "actual thermal
+  effect"/"load-side electrical behaviour" entries are unchanged by this
+  logging work).
+
+The owner's own framing captures this precisely: the evidence covers
+"you flipped a GPIO properly," not what the GPIO is wired to or what it did
+once flipped.

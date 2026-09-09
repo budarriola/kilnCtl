@@ -1059,6 +1059,14 @@ typedef struct {
 on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
     on_off_trigger_state_t *decide_state, bool *actuated_on, float *actuated_held_s,
     const on_off_trigger_input_t *in, bool bypass_hold, uint8_t relays_on_count, uint8_t cap);
+/* UART trace for the on/off-zone bench-readiness decision -- see the
+ * definition in profile_executor_relay_io.c for the full volume budget and
+ * edge-trigger reasoning, and docs/audits/on_off_zone_bench_readiness_
+ * 2026-09-08.md for the reading guide. */
+void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_input_t *in,
+                                             bool prev_decided_on, bool decided_on,
+                                             bool prev_actuated_on, bool actuated_on, float held_s,
+                                             uint16_t min_on_s, uint16_t min_off_s, bool bypass_hold);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 void release_profile_relay_claim(void);
