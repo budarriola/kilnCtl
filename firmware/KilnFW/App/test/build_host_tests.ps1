@@ -73,6 +73,7 @@ try {
         (Join-Path $testDir "test_diagnostics_safety_tc_state.c"),
         (Join-Path $testDir "test_dashboard_protocol_version.c"),
         (Join-Path $testDir "test_crash_report.c"),
+        (Join-Path $testDir "test_estop_verification.c"),
         (Join-Path $testDir "test_dualwrite_window.c"),
         (Join-Path $testDir "test_watchdog_cfg.c"),
         (Join-Path $testDir "test_ramp_assist_cfg.c"),

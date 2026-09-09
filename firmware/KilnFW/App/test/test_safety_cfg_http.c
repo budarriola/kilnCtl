@@ -284,6 +284,32 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
     return s_stub_commit_result;
 }
 
+// ---------------------------------------------------------------------------
+// estop_verification.h stub bodies. This is its own separate host-test
+// executable (test_safety_cfg_http.c #includes safety_cfg_http.c directly),
+// so it cannot link the real estop_verification.c the way main_boot_early.c
+// does on target -- a fake here, same as every safety_link.h/safety_cfg_
+// store.h stub above, is enough to prove apply_pairs() calls the clear on a
+// 0x0212 commit and NOT on any other param.
+// ---------------------------------------------------------------------------
+static int s_stub_estop_verif_clear_calls = 0;
+
+esp_err_t estop_verification_clear(void)
+{
+    s_stub_estop_verif_clear_calls++;
+    return ESP_OK;
+}
+
+esp_err_t estop_verification_confirm(void)
+{
+    return ESP_OK;
+}
+
+bool estop_verification_is_verified(void)
+{
+    return false;
+}
+
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
@@ -413,6 +439,7 @@ static void reset_all(void)
     s_stub_set_ct_cal_input_k = 1.0f;
     s_stub_set_ct_cal_input_zc = 0;
     s_stub_set_ct_cal_input_calls = 0;
+    s_stub_estop_verif_clear_calls = 0;
 }
 
 static void test_parse_single_pair_no_commit(void)
@@ -664,6 +691,57 @@ static void test_apply_pairs_all_succeed_with_commit(void)
     TEST_CHECK(s_stub_set_param_calls == 2, "both pairs were staged");
     TEST_CHECK(s_stub_commit_calls == 1, "commit was sent exactly once");
     TEST_CHECK(s_stub_refetch_calls == 1, "a live read-back was forced after the commit ACKed");
+}
+
+// 2026-09-08 E-stop bench-verification pass: a successful commit of param
+// 0x0212 (estop_active_level) must invalidate any standing E-stop
+// verification (estop_verification.h) -- the operator confirmed the
+// procedure against a specific polarity, and this ESP has no way to prove a
+// re-sent polarity value is the SAME one that was verified against.
+static void test_apply_pairs_estop_polarity_commit_clears_verification(void)
+{
+    TEST_SECTION("apply_pairs -- a landed commit of param 0x0212 (estop_active_level) clears "
+                 "estop_verification");
+    reset_all();
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_U8;
+    safety_cfg_post_pair_t pairs[1] = {
+        { .param_id = 0x0212u, .value_text = "1" },
+    };
+    s_stub_params[0].param_id = 0x0212u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.u8_val = 1;
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == true, "commit landed");
+    TEST_CHECK(s_stub_estop_verif_clear_calls == 1,
+               "a landed commit that includes 0x0212 clears the E-stop verification exactly once");
+}
+
+// A commit that does NOT touch 0x0212 must leave a standing verification
+// alone -- proves the hook is keyed on the specific param, not fired on
+// every successful commit.
+static void test_apply_pairs_unrelated_commit_does_not_clear_verification(void)
+{
+    TEST_SECTION("apply_pairs -- a landed commit of an unrelated param does NOT clear "
+                 "estop_verification");
+    reset_all();
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = {
+        { .param_id = 513, .value_text = "100" },
+    };
+    s_stub_params[0].param_id = 513;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_U16;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.u16_val = 100;
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == true, "commit landed");
+    TEST_CHECK(s_stub_estop_verif_clear_calls == 0,
+               "a landed commit of an unrelated param must NOT touch estop_verification");
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1337,8 @@ int main(void)
     test_build_json_still_reports_set_when_peer_reliable();
     test_stale_flag_reflects_crc_mismatch();
     test_apply_pairs_all_succeed_with_commit();
+    test_apply_pairs_estop_polarity_commit_clears_verification();
+    test_apply_pairs_unrelated_commit_does_not_clear_verification();
     test_apply_pairs_unknown_id_is_refused_and_named();
     test_apply_pairs_refused_commit_surfaces_reason();
     test_apply_pairs_rejected_commit_names_field_and_reason();

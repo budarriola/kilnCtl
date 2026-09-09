@@ -15,6 +15,7 @@
 #include "cfg_fs_mount.h"
 #include "cfg_fs_status.h"
 #include "crash_report.h"
+#include "estop_verification.h"
 #include "danger_mode.h"
 #include "dashboard_http.h"
 #include "display_power_cfg.h"
@@ -396,6 +397,28 @@ static esp_err_t crash_report_ack_post_handler(httpd_req_t *req)
 static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
 {
     esp_err_t err = crash_report_clear();
+    char json[128];
+    int n;
+    if (err == ESP_OK) {
+        n = snprintf(json, sizeof(json), "{\"ok\":true}");
+    } else {
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(err));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, (n > 0) ? (size_t)n : 0);
+}
+
+/* POST /api/estop/verify -- the deliberate operator confirmation
+ * firmware/SaftyFW/README.md's bench verification procedure ends with:
+ * "I have verified the E-stop interlock" (both poles, per that section).
+ * This is the ONLY way this flag is ever set -- never inferred from a GPIO
+ * read or a config value, because the whole reason it exists is that pole 1
+ * (the external line contactor's coil circuit) is wiring firmware cannot
+ * see. See estop_verification.h for what invalidates it again. */
+static esp_err_t estop_verify_post_handler(httpd_req_t *req)
+{
+    esp_err_t err = estop_verification_confirm();
     char json[128];
     int n;
     if (err == ESP_OK) {
@@ -1503,6 +1526,9 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     static const httpd_uri_t danger_enable_uri = {
         .uri = "/api/diagnostics/danger/enable", .method = HTTP_POST, .handler = danger_enable_post_handler,
     };
+    static const httpd_uri_t estop_verify_uri = {
+        .uri = "/api/estop/verify", .method = HTTP_POST, .handler = estop_verify_post_handler,
+    };
 
     esp_err_t err = httpd_register_uri_handler(server, &diagnostics_uri);
     if (err != ESP_OK) {
@@ -1612,6 +1638,11 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     err = httpd_register_uri_handler(server, &danger_enable_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/enable) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &estop_verify_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/estop/verify) failed: %s", esp_err_to_name(err));
         return err;
     }
 

@@ -10,6 +10,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+#include "estop_verification.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h" // vTaskDelay/pdMS_TO_TICKS -- ct_auto_zero_post_handler()'s poll loop
 
@@ -696,6 +698,15 @@ static const char *commit_reject_reason_words(uint8_t reason)
  * a real id from a newer Pico this ESP predates) falls back to reporting the
  * numeric id, same "refused individually... reported by numeric id" fallback
  * the unknown-id case just below already uses. */
+/* param 0x0212 (estop_active_level) -- see safety_cfg_store.h's table entry
+ * and discrete_pin_policy.h. A successful commit that includes this param
+ * must invalidate any standing E-stop bench-verification record
+ * (estop_verification.h): the operator's confirmation was made against a
+ * specific polarity, and a re-send of this param -- even one that ends up
+ * setting the SAME value -- is grounds to distrust a verification made
+ * before this ESP can prove which polarity it was against. */
+#define SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL 0x0212u
+
 static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
                         bool commit, char *reason_out, size_t reason_cap)
 {
@@ -763,6 +774,16 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
          * is allowed to report success. */
         if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap)) {
             return false;
+        }
+        /* Landed for real -- now invalidate a standing E-stop verification if
+         * estop_active_level was one of the committed params. See
+         * SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL's comment above for why this
+         * fires on ANY commit of the param, not just a value change. */
+        for (int i = 0; i < n_pairs; i++) {
+            if (pairs[i].param_id == SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL) {
+                estop_verification_clear();
+                break;
+            }
         }
     }
     reason_out[0] = '\0';

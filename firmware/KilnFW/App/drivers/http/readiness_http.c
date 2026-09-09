@@ -11,6 +11,7 @@
 #include "cfg_fs.h"
 #include "crash_report.h"
 #include "dashboard_http.h"
+#include "estop_verification.h"
 #include "nvs_report.h"
 #include "profiles_builtin.h"
 #include "profiles_http.h"
@@ -763,6 +764,44 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "safety_context", "Safety link command delivery", st, detail,
+                        "/safety", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 16. E-stop interlock verified. 2026-09-08 follow-on to 3b5ced00
+     * (firmware-side E-stop is test-locked, polarity now configurable via
+     * param 0x0212). The board only provides POLE 2 (GPIO9/R10/C3/J1) --
+     * POLE 1, in series with the external line contactor's coil, is wiring
+     * the OWNER adds and no firmware check can ever exercise it. This item
+     * reports whether the OPERATOR has confirmed running the bench
+     * verification procedure (firmware/SaftyFW/README.md) -- see
+     * readiness_estop_verification_status()'s doc comment in
+     * readiness_http.h for why this is unconditionally blocking, and
+     * estop_verification.h for exactly what invalidates a standing
+     * verification (a commit to param 0x0212, or a "kiln"/"all"-scope
+     * factory reset). The detail string also surfaces the two gaps no layer
+     * currently covers, so an operator learns them here rather than in an
+     * audit: a WELDED line contactor (stuck closed) is undetectable by
+     * either pole, and at ACTIVE_LOW polarity a CUT signal line reads
+     * identical to healthy because R10 pulls the input up -- ACTIVE_HIGH
+     * (the default) is the polarity where a cut line is instead caught. */
+    {
+        bool verified = estop_verification_is_verified();
+        readiness_status_t st = readiness_estop_verification_status(verified);
+        char detail[180];
+        if (verified) {
+            snprintf(detail, sizeof(detail),
+                     "confirmed by operator. Known gaps: welded contactor undetectable; ACTIVE_LOW "
+                     "polarity can't see a cut signal line -- use ACTIVE_HIGH default");
+        } else {
+            snprintf(detail, sizeof(detail),
+                     "never confirmed -- pole 1 (contactor coil) is wiring firmware can't see. Run the "
+                     "README.md bench procedure, no heat, then confirm via /safety");
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "estop_verified", "E-stop interlock verified", st, detail,
                         "/safety", &dropped);
         if (o != before_o) {
             first = false;

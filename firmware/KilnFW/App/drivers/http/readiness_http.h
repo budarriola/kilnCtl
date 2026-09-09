@@ -313,6 +313,46 @@ static inline readiness_status_t readiness_safety_context_status(bool link_up, b
     return (diag_context_age_100ms >= READINESS_CONTEXT_STALE_100MS) ? READY_NOT_DONE : READY_OK;
 }
 
+/* Pure decision for the "E-stop interlock verified" item, 2026-09-08's
+ * follow-on to 3b5ced00: that pass made the FIRMWARE side of E-stop
+ * test-locked (relay_owner de-energises on TRIP, negative-tested), but the
+ * board only provides POLE 2 (GPIO9/R10/C3/J1) -- POLE 1, in series with the
+ * external line contactor's coil, is wiring the OWNER adds and firmware
+ * structurally cannot observe. No amount of host testing or GPIO reading can
+ * ever cover that pole, so the honest coverage is a documented bench
+ * procedure (firmware/SaftyFW/README.md) plus a durable, DELIBERATE record
+ * that a human ran it -- see estop_verification.h for the full record
+ * lifecycle (set only by POST /api/estop/verify, cleared by a polarity
+ * commit or a kiln/all-scope factory reset).
+ *
+ * UNCONDITIONALLY BLOCKING (READY_NOT_DONE) whenever unverified -- considered
+ * and rejected: gating this on whether a firing has ever been attempted (so
+ * a bench that has never fired reads merely informational) sounds appealing,
+ * but the only readily-available "has this board ever fired" signal in this
+ * codebase is relay_cycles.c's per-relay cycle counts, and those are
+ * DELIBERATELY operator-resettable (relay_cycles_reset(), "a contact was
+ * replaced"). Building a safety-blocking/informational split on top of a
+ * counter the operator is expected to zero for routine maintenance would let
+ * a legitimate maintenance action silently downgrade this item back to
+ * informational after real firings had already happened -- exactly the
+ * "reset one side of a pair" bug class this codebase has been burned by four
+ * times already (see CLAUDE.md's standing note on that class). Inventing a
+ * SEPARATE, non-resettable "has ever fired" bit just to support a grace
+ * period would be new state solely in service of relaxing a safety item,
+ * which is the wrong direction to add complexity in. This readiness page's
+ * entire stated purpose (this header's own top comment: "is this kiln ready
+ * to fire?") already implies "before you fire" for every other blocking item
+ * on it (guard_max_temp, safety_trip, crash_report, recovery_mode all block
+ * unconditionally too) -- there is no reason for the E-stop item alone to
+ * carry a bench exemption the rest of the page does not offer, and the cost
+ * of one extra confirmation click on a board that has never seen line
+ * voltage is far smaller than the cost of this item going quiet exactly when
+ * it starts to matter. */
+static inline readiness_status_t readiness_estop_verification_status(bool verified)
+{
+    return verified ? READY_OK : READY_NOT_DONE;
+}
+
 /* Registers /readiness + GET /api/readiness on the server
  * wifi_provision_http.c already started. No hardware pointers needed --
  * every hardware-adjacent fact (io_ready/thermo_ready/safety_ready) is read

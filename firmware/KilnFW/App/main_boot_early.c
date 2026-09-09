@@ -33,6 +33,7 @@
 #include "cfg_fs_mount.h"
 #include "watchdog_cfg.h"
 #include "crash_report.h"
+#include "estop_verification.h"
 #include "MAX31856.h"
 #include "hal_spi_esp_owner.h" /* ILI9488_start() still takes a raw spi_owner_t*
                                  * -- see that header's comment for why this
@@ -260,6 +261,13 @@ void main_boot_early(main_boot_ctx_t *ctx)
         // Never fails app_main; every error is logged and swallowed inside
         // crash_report_init() itself.
         crash_report_init();
+
+        // estop_verification.c: brings up the same KILN_NVS_PARTITION
+        // namespace to read/persist the operator's E-stop bench-verification
+        // confirmation (readiness item "estop_verified"). Own module, own
+        // init call, same reasoning as crash_report_init() just above --
+        // never fails app_main, every error logged inside the call itself.
+        estop_verification_init();
     }
 
     // --- ESP32-S3 internal die-temperature sensor (TODO.md 10.7) -----------

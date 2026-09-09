@@ -296,3 +296,20 @@ void run_test_readiness_safety_context(void)
     TEST_CHECK(readiness_safety_context_status(true, true, 254) == READY_NOT_DONE,
                 "a saturated (254) context age with the link up must read not_done");
 }
+
+void run_test_readiness_estop_verification(void)
+{
+    TEST_SECTION("readiness estop_verified item -- unverified interlock must block completeness");
+
+    /* Never confirmed -- the whole point of this item: pole 1 (the line
+     * contactor coil) is wiring firmware cannot see, so there is no fact to
+     * check other than the operator's own deliberate confirmation. */
+    TEST_CHECK(readiness_estop_verification_status(false) == READY_NOT_DONE,
+                "unverified must read not_done -- unconditionally blocking, same as safety_trip/"
+                "crash_report/recovery_mode above");
+
+    /* Confirmed -- reads ok until something invalidates it (a polarity
+     * commit, or a kiln/all-scope factory reset -- see estop_verification.h). */
+    TEST_CHECK(readiness_estop_verification_status(true) == READY_OK,
+                "a standing confirmation must read ok");
+}

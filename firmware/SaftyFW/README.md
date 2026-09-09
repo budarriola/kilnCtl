@@ -160,6 +160,62 @@ current will keep flowing. Nor does anything cover pole 2 being wired but pole
 would then be the only thing between you and a live element, which is why the
 series contact — not the firmware — is the interlock.
 
+## Bench verification procedure
+
+Run this **once**, after wiring, before the first real firing, and again
+after any rewiring of the E-stop circuit. **No heat is needed or wanted** —
+the board can sit cold on the bench the whole time. It tests each pole
+independently, because they are independent circuits and either one can be
+wrong while the other reads perfectly healthy.
+
+1. **Power up normally**, E-stop **not** pressed. Confirm the board is idle
+   and no guard is tripped (`/safety` or `GET /api/status`).
+2. **Press and hold the E-stop.**
+   - **Pole 1 (the interlock):** watch or listen to the external line
+     contactor. *Correct result:* it audibly/visibly drops out — the same
+     click it makes on any normal de-energize. *Failure:* the contactor
+     stays engaged, or you cannot tell either way (no visibility into the
+     contactor) — stop here and fix the wiring before going further; nothing
+     downstream of this pole can be verified by any other step.
+   - **Pole 2 (telemetry):** on the same button press, confirm the processor
+     saw it — `GET /api/status` (or the diagnostics/safety page) should show
+     guard **S7** TRIPPED within about a second. *Correct result:* S7 latches
+     TRIPPED. *Failure:* S7 stays clear while the button is held — GPIO9/R10/
+     C3/J1 or the button's pole-2 contact is wrong; fix it and re-test before
+     proceeding, since an unseen E-stop means the board cannot even report or
+     retry the software-side relay drop.
+3. **Release the E-stop** and confirm S7 clears (or stays latched if your
+   commissioning has it require a manual reset — check whichever behavior
+   your commissioning page shows as expected) and the contactor re-engages
+   when a heating command is next issued.
+4. **Record the result.** If both poles behaved correctly, mark the
+   interlock verified: `POST /api/estop/verify` on the main board (or the
+   equivalent control on the `/safety` page). This clears the
+   `estop_verified` item on `/readiness` — see `estop_verification.h` in
+   `KilnFW/App/drivers/safety/` for exactly what is recorded and what later
+   invalidates it (changing `estop_active_level`, or a `kiln`/`all`-scope
+   factory reset). If either pole failed, **do not confirm** — fix the wiring
+   and repeat this whole procedure from step 1.
+
+**Two gaps this procedure — and every layer on this board — leaves open,
+regardless of the result above:**
+
+- **A welded line contactor.** If the contactor's contacts are physically
+  stuck closed, dropping its coil (pole 1) does nothing, and neither
+  firmware nor this procedure has a way to detect it (see "What is covered,
+  and what is not" above; guard S3 will eventually report the current that
+  keeps flowing, but that is a consequence, not a prevention).
+- **`ACTIVE_LOW` polarity plus a cut signal line.** At `estop_active_level =
+  1`, the 1 k pull-up's HIGH is "all clear" — a cut cable, a pulled
+  connector, or a dead button all read identically to healthy. This is a
+  genuine reason to leave the polarity at its **`ACTIVE_HIGH` default**: only
+  under that setting does a broken pole-2 line read as a stop rather than as
+  silence. If your installation genuinely requires `ACTIVE_LOW`, know that
+  this bench procedure's pole-2 check (step 2) is not, on its own, proof
+  against a cut line — it will still show S7 tripping on a healthy button
+  press, and there is no line-cut fault to inject on a bench pass to
+  distinguish the two.
+
 ## Three things to know before touching this
 
 **The isolated UART pin map is now a measurement, not a trace.** Measured on

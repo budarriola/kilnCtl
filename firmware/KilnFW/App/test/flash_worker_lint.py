@@ -115,6 +115,20 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): crash_report_save() runs from the panic/
     # boot path, before normal task concurrency exists.
     "crash_report.c",
+    # Pattern 3 (internal-SRAM-stack caller, reached live, not init-time) --
+    # same shape as display_power_cfg.c's/profiles_builtin.c's own entries.
+    # estop_verification_confirm()'s only call site is diagnostics_http.c's
+    # POST /api/estop/verify handler; estop_verification_clear()'s only call
+    # sites are safety_cfg_http.c's apply_pairs() (a commit of param 0x0212,
+    # reached from a POST /api/safety/config-family commissioning handler)
+    # and factory_reset.c's partition erase does not call this file at all
+    # (the record is invalidated for free by KILN_NVS_PARTITION being erased
+    # whole -- see estop_verification.h). Both real call sites are httpd
+    # handlers running on wifi_provision_http.c's httpd task -- internal-
+    # SRAM stack, never PSRAM, never the flash worker -- so neither
+    # dispatches through uart_bridge_ext_run_on_flash_worker() and the
+    # re-entrancy half of this lint does not apply here.
+    "estop_verification.c",
     # Pattern 2 (local caller_stack_is_external() guard), same shape and
     # same reasoning as run_state.c's/kiln_cfg_store.c's own entries:
     # persist_locked() checks it before every hal_kv_set_blob()/
