@@ -141,6 +141,15 @@ static inline BaseType_t ota_http_test_xSemaphoreTake(SemaphoreHandle_t sem, Tic
 #include "../drivers/http/factory_reset.c"
 #undef TAG
 
+// sw_reset_http.c -- owner request 2026-09-08's non-destructive reboot item.
+// Same "#include the .c directly" reasoning as factory_reset.c just above:
+// sw_reset_post_handler() is `static`, and this file needs it directly to
+// prove the firing-refusal property (this pass's negative test). Its own TAG
+// definition needs the same rename-around-the-include treatment.
+#define TAG SW_RESET_TAG_UNUSED
+#include "../drivers/http/sw_reset_http.c"
+#undef TAG
+
 #undef xSemaphoreTake
 #undef asm
 
@@ -276,14 +285,24 @@ uint32_t boot_button_bypass_remaining_ms(void) { return g_stub_boot_button_bypas
 // FIRST, unconditionally, every time it runs -- used as decision 3's "did
 // the interlock check actually run" probe.
 bool g_probe_interlock_called = false;
+// Settable so sw_reset's firing-refusal test (this pass, owner request
+// 2026-09-08) can report a firing in progress; defaults to PROFILE_EXEC_IDLE
+// (0) so every existing test in this file that never touches this global is
+// completely unaffected.
+static profile_exec_state_t g_stub_profile_state = PROFILE_EXEC_IDLE;
 void profile_executor_get_status(profile_exec_status_t *out)
 {
     g_probe_interlock_called = true;
-    if (out) memset(out, 0, sizeof(*out)); // PROFILE_EXEC_IDLE == 0
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->state = g_stub_profile_state;
+    }
 }
 
-// autotune_engine.h
-bool autotune_engine_is_active(void) { return false; }
+// autotune_engine.h -- settable so sw_reset's autotune-refusal test (this
+// pass) can report autotune active; defaults false, unaffected otherwise.
+static bool g_stub_autotune_active = false;
+bool autotune_engine_is_active(void) { return g_stub_autotune_active; }
 
 // safety_link.h -- never actually invoked by any test here (ota_http_safety is
 // left NULL for every test -- ota_http_start()'s io_or_null/safety_or_null
@@ -509,6 +528,7 @@ static const char *ctx_str_for(ota_http_context_t ctx)
         case OTA_HTTP_CONTEXT_RECOVERY_EXIT: return "recovery";
         case OTA_HTTP_CONTEXT_FACTORY_RESET: return "factory-reset";
         case OTA_HTTP_CONTEXT_PICO_ROLLBACK: return "pico-rollback";
+        case OTA_HTTP_CONTEXT_SW_RESET: return "sw-reset";
         default: return "?";
     }
 }
@@ -549,6 +569,7 @@ static void reset_all_lockouts(void)
     memset(&s_lockout_recovery_exit, 0, sizeof(s_lockout_recovery_exit));
     memset(&s_lockout_factory_reset, 0, sizeof(s_lockout_factory_reset));
     memset(&s_lockout_pico_rollback, 0, sizeof(s_lockout_pico_rollback));
+    memset(&s_lockout_sw_reset, 0, sizeof(s_lockout_sw_reset));
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,6 +1048,193 @@ static void test_pico_rollback_status_reports_all_four_outcomes_honestly(void)
 }
 
 // ---------------------------------------------------------------------------
+// sw_reset_http.c -- owner request 2026-09-08's non-destructive reboot item.
+// Exercised through the real (static, #include'd) sw_reset_post_handler(),
+// same idiom as reset_post_handler() above. Every test authenticates for
+// OTA_HTTP_CONTEXT_SW_RESET and sets X-Ota-Ack-No-Safety: 1 so it reaches
+// PAST the "no safety link" precondition (ota_http_safety is NULL for the
+// whole file -- see that stub's own comment) into the profile-state check
+// that is this section's actual subject.
+// ---------------------------------------------------------------------------
+
+static bool sw_reset_authenticate(void)
+{
+    reset_all_lockouts();
+    g_stub_boot_button_bypass = false;
+    g_stub_ap_password = "sw-reset-test-password";
+
+    uint8_t nonce[OTA_AUTH_NONCE_LEN];
+    issue_nonce(nonce);
+    uint8_t mac[32];
+    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_SW_RESET), mac);
+    char hex[65];
+    hex_encode(mac, sizeof(mac), hex);
+    stub_headers_reset();
+    stub_header_set("X-Ota-Mac", hex);
+    stub_header_set("X-Ota-Ack-No-Safety", "1");
+    return true;
+}
+
+// THE NEGATIVE-TEST TARGET (task's "test that matters most"): a firing in
+// progress must refuse the reboot. Proven RED by temporarily changing
+// sw_reset_post_handler()'s interlock call in sw_reset_http.c to
+// `ota_interlock_result_t gate = OTA_INTERLOCK_OK;` (skipping
+// ota_http_check_interlocks() entirely) -- with that edit in place this
+// test's TEST_CHECK(gate != OTA_INTERLOCK_OK) / "reboot must be refused"
+// line below fails: `s_last_err_code == 0 ("reboot must be refused while a
+// firing (PROFILE_EXEC_RUNNING) is in progress")`. The edit was applied
+// directly to sw_reset_http.c, this test rerun to confirm the failure and
+// its exact message, then reversed by hand (the file was restored to match
+// this pass's original edit exactly) and this test rerun again to confirm
+// GREEN -- see this pass's report for the same red/green pair quoted
+// verbatim. The driver file itself carries no trace of the temporary edit.
+static void test_sw_reset_refuses_during_firing(void)
+{
+    TEST_SECTION("sw_reset_post_handler -- refuses while a firing (PROFILE_EXEC_RUNNING) is in progress");
+    sw_reset_authenticate();
+    g_stub_profile_state = PROFILE_EXEC_RUNNING;
+    s_last_err_code = 0;
+    s_last_err_msg[0] = '\0';
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = sw_reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "sw_reset_post_handler must always return ESP_OK");
+    // Interlock refusals go through httpd_resp_set_status()+httpd_resp_send()
+    // (ota_http_send_interlock_refusal()), not httpd_resp_send_err() -- see
+    // that function's own doc comment on the 409/428 split -- so the
+    // refusal is observed via s_last_resp_status, not s_last_err_code.
+    TEST_CHECK(strstr(s_last_resp_status, "409") != NULL,
+              "reboot must be refused (409) while a firing (PROFILE_EXEC_RUNNING) is in progress");
+    TEST_CHECK(g_probe_interlock_called, "the interlock check must actually have run");
+
+    g_stub_profile_state = PROFILE_EXEC_IDLE; // restore for later tests
+}
+
+// Same property, the other running-shaped state: PAUSED is still a firing
+// the operator can resume, not an ended one (ota_interlock.h's own doc
+// comment on check #4).
+static void test_sw_reset_refuses_while_paused(void)
+{
+    TEST_SECTION("sw_reset_post_handler -- refuses while a firing is PAUSED");
+    sw_reset_authenticate();
+    g_stub_profile_state = PROFILE_EXEC_PAUSED;
+    s_last_resp_status[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    (void)sw_reset_post_handler(&req);
+
+    TEST_CHECK(strstr(s_last_resp_status, "409") != NULL,
+              "reboot must be refused while a firing is PAUSED, same as RUNNING");
+
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+}
+
+// Autotune-active refusal -- the OTHER heat-in-progress state
+// ota_interlock_check() gates on, independent of profile_state.
+static void test_sw_reset_refuses_during_autotune(void)
+{
+    TEST_SECTION("sw_reset_post_handler -- refuses while autotune is active");
+    sw_reset_authenticate();
+    g_stub_autotune_active = true;
+    s_last_resp_status[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    (void)sw_reset_post_handler(&req);
+
+    TEST_CHECK(strstr(s_last_resp_status, "409") != NULL, "reboot must be refused while autotune is active");
+
+    g_stub_autotune_active = false;
+}
+
+// Control case: idle kiln, correctly authenticated -> accepted (no error
+// status set; sw_reset_post_handler()'s success path only ever calls
+// httpd_resp_sendstr(), which this file's stub does not record as an error).
+static void test_sw_reset_ok_when_idle(void)
+{
+    TEST_SECTION("sw_reset_post_handler -- accepted when idle (control case for the refusal tests above)");
+    sw_reset_authenticate();
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    s_last_err_code = 0;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = sw_reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "sw_reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "an idle kiln's reboot request must not be refused");
+}
+
+// Auth-before-interlock, same property as decision 3's factory_reset test
+// above: an unauthenticated caller must never reach the interlock (or a
+// firing/temperature-naming refusal reason).
+static void test_sw_reset_missing_auth_never_reaches_interlock(void)
+{
+    TEST_SECTION("sw_reset_post_handler -- a missing X-Ota-Mac header is refused BEFORE the interlock check");
+    reset_all_lockouts();
+    stub_headers_reset(); // no X-Ota-Mac at all
+    g_probe_interlock_called = false;
+    s_last_err_code = 0;
+    s_last_err_msg[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = sw_reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "sw_reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 400, "a missing X-Ota-Mac header must be refused with 400");
+    TEST_CHECK(!g_probe_interlock_called, "the interlock check must never run for an unauthenticated caller");
+}
+
+// THE "does not touch configuration" property (task requirement 2): runs
+// the ACCEPTED path (idle kiln, authenticated) against a real fake_kv-backed
+// NVS partition with a pre-existing key, and confirms that key is
+// byte-for-byte unchanged afterward. sw_reset_http.c links against no
+// hal_kv_*() function at all (grep its own source -- true by construction),
+// so this is a belt-and-suspenders runtime confirmation of that fact using
+// the exact partition/namespace factory_reset.c's "kiln" scope would erase,
+// proving this is a genuinely different code path, not just an untested one.
+static void test_sw_reset_does_not_touch_nvs(void)
+{
+    TEST_SECTION("sw_reset_post_handler -- the accepted path leaves an existing kiln_nvs key untouched");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs partition");
+    TEST_CHECK(hal_kv_open(&h, "probe_ns", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK,
+              "setup: open a handle on kiln_nvs");
+    const uint8_t sentinel[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
+    TEST_CHECK(hal_kv_set_blob(&h, "probe_key", sentinel, sizeof(sentinel)) == HAL_OK,
+              "setup: write a sentinel key");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit the sentinel so it would survive a real erase's "
+                                             "de-init/re-init, matching what a genuine wipe would have to beat");
+
+    sw_reset_authenticate();
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    s_last_err_code = 0;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = sw_reset_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "sw_reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "setup sanity: the accepted path must not have been refused");
+
+    uint8_t readback[4] = { 0 };
+    size_t readback_len = sizeof(readback);
+    TEST_CHECK(hal_kv_get_blob(&h, "probe_key", readback, &readback_len) == HAL_OK,
+              "the sentinel key must still exist after sw_reset -- an erase would have de-inited "
+              "the partition out from under this handle");
+    TEST_CHECK(readback_len == sizeof(sentinel) && memcmp(readback, sentinel, sizeof(sentinel)) == 0,
+              "the sentinel key's bytes must be byte-for-byte unchanged -- no config was touched");
+
+    hal_kv_close(&h);
+}
+
+// ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
 {
@@ -1056,6 +1264,13 @@ void run_test_ota_http(void)
     test_pico_rollback_status_reports_idle_before_any_request();
     test_pico_rollback_status_reports_pending_while_in_progress();
     test_pico_rollback_status_reports_all_four_outcomes_honestly();
+
+    test_sw_reset_missing_auth_never_reaches_interlock();
+    test_sw_reset_refuses_during_firing();
+    test_sw_reset_refuses_while_paused();
+    test_sw_reset_refuses_during_autotune();
+    test_sw_reset_ok_when_idle();
+    test_sw_reset_does_not_touch_nvs();
 }
 
 int main(void)

@@ -34,6 +34,7 @@
 #include "settings_http.h"
 #include "cfg_fs_format_http.h"
 #include "factory_reset.h"
+#include "sw_reset_http.h"
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
 #include "monitor_task.h"
@@ -387,6 +388,16 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (factory_reset_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "factory_reset_http_start failed: %s -- no reset/factory-default endpoint this boot",
                  esp_err_to_name(factory_reset_err));
+    }
+
+    // Owner request 2026-09-08: a non-destructive "reboot both processors"
+    // item in the same reset menu, for clearing stuck state (e.g. an S6a
+    // trip) without JTAG. Same safety pointer as ota_http_start() above, so
+    // the ANNOUNCE_REBOOT courtesy notice reaches the real link handle.
+    esp_err_t sw_reset_err = sw_reset_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+    if (sw_reset_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "sw_reset_http_start failed: %s -- no sw-reset endpoint this boot",
+                 esp_err_to_name(sw_reset_err));
     }
 
     // cfg_fs_mount_device() (main_boot_early.c) may have refused to

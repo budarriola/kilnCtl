@@ -44,6 +44,15 @@ typedef enum {
     OTA_HTTP_CONTEXT_RECOVERY_EXIT,
     OTA_HTTP_CONTEXT_FACTORY_RESET,
     OTA_HTTP_CONTEXT_PICO_ROLLBACK,
+    // POST /api/sw_reset (sw_reset_http.c) -- its own context, not a reuse of
+    // OTA_HTTP_CONTEXT_FACTORY_RESET, even though both sit in the same
+    // "danger zone"/reset-menu family and share the same interlock gate: a
+    // MAC signed for the destructive erase-and-reboot route must not double
+    // as authorization for the non-destructive reboot-only route, and a
+    // wrong-password guess against one must not burn the other's 3-strikes
+    // budget. Same reasoning as every other *_ROLLBACK/_RECOVERY_EXIT split
+    // above.
+    OTA_HTTP_CONTEXT_SW_RESET,
 } ota_http_context_t;
 
 // --- Heat interlock, the OTHER direction (TODO.md 9.4/ROADMAP.md M8's

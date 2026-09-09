@@ -88,6 +88,26 @@
      danger-zone heading below carries an id so the menu's "Reset" item
      (href="/settings#danger") lands directly on it instead of at the top of
      an otherwise-empty page. -->
+<!-- Owner request 2026-09-08: a non-destructive reboot item in the SAME reset
+     menu as the danger-zone erases below, reusing their confirm-then-POST-
+     then-report idiom, but NOT one of the danger-btn scopes -- it erases
+     nothing at all, so it sits above the "Danger zone" heading rather than
+     inside it, with no --bad styling. Immediately useful for clearing a
+     stuck safety-processor trip without JTAG. -->
+<h2 id="sw-reset">Reboot</h2>
+<p>Reboots the ESP right now, and tells the safety processor to expect that
+so it does not raise a false link-lost alarm. This does <strong>not</strong>
+erase or change any configuration -- zones, profiles, Wi-Fi credentials and
+saved settings are all left exactly as they are. Refused while a firing or
+autotune is running, or with any heater commanded on. (The safety processor
+itself is only notified, not rebooted -- there is currently no way to make it
+reboot from here; see the board's documentation if you need to clear its
+state, e.g. with a physical reset.)</p>
+<p>
+<button type="button" id="swResetBtn">Reboot ESP (no config changes)</button>
+</p>
+<p id="swResetStatus"></p>
+
 <h2 id="danger" style="border-top-color: var(--bad);">Danger zone</h2>
 <!-- Moved verbatim off main_page.html (UI_PLAN.md item 4): same four
      scopes, same wording, same confirm-then-POST-then-report flow. The
@@ -187,6 +207,25 @@ document.getElementById('cfgFsFormatConfirmBtn').addEventListener('click', funct
     }
   }).catch(function () {
     status.textContent = 'Request failed -- check the board is reachable and try again.';
+  });
+});
+
+// Non-destructive reboot -- own handler, own status line, deliberately NOT
+// mixed into the danger-btn loop below: no scope, no "erases X" wording, and
+// a different confirm message reflecting that nothing is being erased.
+document.getElementById('swResetBtn').addEventListener('click', function () {
+  if (!kcConfirm('This reboots the ESP right now (the safety processor is only notified, not '
+               + 'rebooted). No configuration is erased or changed. Continue?')) {
+    return;
+  }
+  var status = document.getElementById('swResetStatus');
+  status.textContent = 'Rebooting...';
+  fetch('/api/sw_reset', { method: 'POST' }).then(function (r) {
+    return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+  }).then(function (res) {
+    status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
+  }).catch(function () {
+    status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
   });
 });
 

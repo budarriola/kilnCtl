@@ -482,6 +482,7 @@ $exemptCreatedNames = @{
     "ota_rollback_reboot"  = "ota_http_esp.c ota_rollback_reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_pico_rollback"    = "ota_http_pico.c ota_pico_rollback_task: one-shot reboot-after-delay, never returns to measure"
     "recovery_exit_reboot" = "ota_http_recovery.c ota_recovery_exit_reboot_task: registered under the shortened name 'recovery_exit' (see that file's comment), not this FreeRTOS task-name string"
+    "sw_reset_reboot"      = "sw_reset_http.c sw_reset_reboot_task: one-shot reboot-after-delay (send ANNOUNCE_REBOOT, then hal_wdt_reboot()), never returns to measure -- same shape as factory_reset_reboot/ota_rollback_reboot above"
     "ota_pico_relay"    = "ota_pico_relay.c relay_task_fn: one-shot relay session, self-deletes"
     "wifi_prov_owner"   = "wifi_prov.c owner_task: provisioning-only command owner, torn down with the provisioning session"
     "info_boot_push"    = "uart_bridge_info.c info_boot_push_task: one-shot boot version push, self-deletes"

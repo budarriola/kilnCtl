@@ -168,6 +168,9 @@ static ota_auth_lockout_state_t s_lockout_factory_reset;
 // Same reasoning again for POST /api/ota/pico/rollback -- see ota_http.h's
 // doc comment on OTA_HTTP_CONTEXT_PICO_ROLLBACK.
 static ota_auth_lockout_state_t s_lockout_pico_rollback;
+// Same reasoning again for POST /api/sw_reset -- see ota_state.h's doc
+// comment on OTA_HTTP_CONTEXT_SW_RESET.
+static ota_auth_lockout_state_t s_lockout_sw_reset;
 
 // opus-review finding 3: safety_link_send_rollback_ex() blocks its caller
 // for up to ~6.3s (4 sends * 250ms + one reply window + the 5s boot_id
@@ -345,6 +348,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
         case OTA_HTTP_CONTEXT_RECOVERY_EXIT:  ctx_str = "recovery";     lockout = &s_lockout_recovery_exit; break;
         case OTA_HTTP_CONTEXT_FACTORY_RESET:  ctx_str = "factory-reset"; lockout = &s_lockout_factory_reset; break;
         case OTA_HTTP_CONTEXT_PICO_ROLLBACK:  ctx_str = "pico-rollback"; lockout = &s_lockout_pico_rollback; break;
+        case OTA_HTTP_CONTEXT_SW_RESET:       ctx_str = "sw-reset";     lockout = &s_lockout_sw_reset;      break;
         case OTA_HTTP_CONTEXT_PICO:
         default:                              ctx_str = "pico";         lockout = &s_lockout_pico;         break;
     }
