@@ -127,6 +127,36 @@ static void json_escape(const char *src, char *out, size_t out_cap)
     out[o] = '\0';
 }
 
+/* httpd-stack-budget fix (2026-09-09, check_httpd_task_stack_budget RED at
+ * 4848 B / 4832 B ceiling): this handler's own frame carried a `profile_t p`
+ * (~376 B: 12-entry segments[] + 8-entry on_off_rules[]) inside the profile
+ * loop, plus a second cluster of locals inside the zone loop (name[16],
+ * name_escaped[31], three MAX31856_CHANNEL_COUNT-wide float arrays, a
+ * SRC_GROUP_COUNT settings_source_group[], and ~20 scalar floats/uint8s read
+ * one accessor call at a time) that the compiler could not prove
+ * non-overlapping with the profile loop's own locals since both loops are
+ * siblings in the same function body. Same fix as this file's
+ * `setup_progress_http.c`/`safety_cfg_http.c` precedents cited in
+ * check_httpd_task_stack_budget.py's own history comment: heap-allocate the
+ * two scratch blocks instead of declaring them as stack locals, freed on
+ * every return path. Neither struct is touched by more than one loop
+ * iteration at a time, so one instance of each, reused per iteration, is
+ * enough -- no need to size either for PROFILES_MAX_COUNT/
+ * MAX31856_CHANNEL_COUNT-many entries at once. */
+typedef struct {
+    profile_t p;
+    char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
+} backup_export_profile_scratch_t;
+
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
+    float coupling_row[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_row[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_row[MAX31856_CHANNEL_COUNT];
+    uint8_t settings_source_group[SRC_GROUP_COUNT];
+} backup_export_zone_scratch_t;
+
 esp_err_t backup_export_get_handler(httpd_req_t *req)
 {
     /* HEAP in PSRAM, not internal DRAM: same fix, same reasoning as
@@ -136,7 +166,15 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
      * worker's DRAM pressure this file's siblings document elsewhere. Freed
      * on every return path below. */
     char *buf = heap_caps_malloc(BACKUP_STREAM_BUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
+    /* Both scratch blocks allocated up front, before anything is sent, so an
+     * OOM here is a clean 500 rather than a truncated mid-stream response --
+     * same "allocate before the first byte goes out" ordering as buf above. */
+    backup_export_profile_scratch_t *ps = heap_caps_malloc(sizeof(*ps), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    backup_export_zone_scratch_t *zs = heap_caps_malloc(sizeof(*zs), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf || !ps || !zs) {
+        free(buf);
+        free(ps);
+        free(zs);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;
     }
@@ -153,23 +191,23 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
 
     bool first_profile = true;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        profile_t p;
+        profile_t *p = &ps->p;
         /* id < PROFILES_MAX_COUNT never resolves to a builtin catalogue
          * entry (those live at id >= PROFILE_BUILTIN_ID_BASE, 128) -- this
          * only ever returns a real user-saved slot, or false for an unused
          * one. Builtins are shipped-in-flash and not this board's data to
          * back up; an operator who copied one into a slot already has it
          * here as that slot's own entry. */
-        if (!profiles_http_get(id, &p)) {
+        if (!profiles_http_get(id, p)) {
             continue;
         }
-        char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
-        json_escape(p.name, name_escaped, sizeof(name_escaped));
+        char *name_escaped = ps->name_escaped;
+        json_escape(p->name, name_escaped, PROFILE_NAME_MAX_LEN * 2 + 1);
         backup_stream_printf(&s, "%s{\"id\":%u,\"name\":\"%s\",\"zone_mask\":%u,\"segments\":[",
-                            first_profile ? "" : ",", id, name_escaped, p.zone_mask);
+                            first_profile ? "" : ",", id, name_escaped, p->zone_mask);
         first_profile = false;
-        for (uint8_t i = 0; i < p.segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
-            const profile_segment_t *seg = &p.segments[i];
+        for (uint8_t i = 0; i < p->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
+            const profile_segment_t *seg = &p->segments[i];
             backup_stream_printf(&s, "%s{\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu}",
                                 i == 0 ? "" : ",", (double)seg->target_c, (double)seg->ramp_c_per_hr,
                                 (unsigned long)seg->dwell_min);
@@ -216,10 +254,10 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
          * have_model/have_tc above there is no "not yet measured" state for
          * any of them to skip. */
         {
-            char name[ZONE_NAME_MAX_LEN + 1];
-            zones_config_get_name(zi, name, sizeof(name));
-            char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
-            json_escape(name, name_escaped, sizeof(name_escaped));
+            char *name = zs->name;
+            zones_config_get_name(zi, name, ZONE_NAME_MAX_LEN + 1);
+            char *name_escaped = zs->name_escaped;
+            json_escape(name, name_escaped, ZONE_NAME_MAX_LEN * 2 + 1);
             uint8_t relay_mask = 0, thermo_mask = 0, ct_mask = 0;
             zones_config_get_relay_mask(zi, &relay_mask);
             zones_config_get_thermo_mask(zi, &thermo_mask);
@@ -251,15 +289,18 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * have_model/have_tc. */
             float fuzzy_strength_pct = 0.0f;
             zones_config_get_fuzzy_strength_pct(zi, &fuzzy_strength_pct);
-            float coupling_row[MAX31856_CHANNEL_COUNT] = {0};
+            float *coupling_row = zs->coupling_row;
+            memset(coupling_row, 0, sizeof(zs->coupling_row));
             zones_config_get_coupling(zi, coupling_row);
             /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the tau/L
              * siblings of coupling_row above -- same "always answerable"
              * reasoning, same getters' own zeroed-array contract on a zone
              * with nothing measured yet. */
-            float coupling_tau_row[MAX31856_CHANNEL_COUNT] = {0};
+            float *coupling_tau_row = zs->coupling_tau_row;
+            memset(coupling_tau_row, 0, sizeof(zs->coupling_tau_row));
             zones_config_get_coupling_tau(zi, coupling_tau_row);
-            float coupling_dead_row[MAX31856_CHANNEL_COUNT] = {0};
+            float *coupling_dead_row = zs->coupling_dead_row;
+            memset(coupling_dead_row, 0, sizeof(zs->coupling_dead_row));
             zones_config_get_coupling_dead_time(zi, coupling_dead_row);
             /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21) split this
              * into SRC_GROUP_COUNT independent bytes. Opus review of 5672719
@@ -272,7 +313,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * choice for all five. An import from a version-4 backup that
              * only has the scalar key falls back to applying it to every
              * group -- see backup_import_apply()'s matching parse. */
-            uint8_t settings_source_group[SRC_GROUP_COUNT];
+            uint8_t *settings_source_group = zs->settings_source_group;
             for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
                 settings_source_group[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
                 zones_config_get_settings_source(zi, g, &settings_source_group[g]);
@@ -363,6 +404,8 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
 
     backup_stream_flush(&s);
     free(buf);
+    free(ps);
+    free(zs);
     if (s.err == ESP_OK) {
         httpd_resp_send_chunk(req, NULL, 0); /* terminates the chunked response */
     }
