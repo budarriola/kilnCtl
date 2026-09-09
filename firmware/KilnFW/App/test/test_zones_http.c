@@ -6378,6 +6378,93 @@ static void test_nvs_load_from_v22_blob_defaults_zone_type_and_failsafe_to_zero(
     nvs_test_clear();
 }
 
+// docs/audits/high_temperature_transfer_analysis_2026-09-08.md item 4: a v23
+// blob upconverts to v24 with model_fit_temp_c/model_fit_ambient_c landing on
+// the ZONE_MODEL_FIT_TEMP_UNKNOWN sentinel -- NEVER 0.0f, which would read as
+// a plausible genuine ambient fit rather than "no context recorded" -- even
+// for a zone whose model_k_dc/tau/dead_time ARE real, pre-existing values.
+// Round-trip leg proves a real fit context written after migration survives
+// a genuine v24-native NVS reload, same discipline the v22->v23 test above
+// uses for zone_type.
+static void test_nvs_load_from_v23_blob_defaults_model_fit_context_to_unknown(void)
+{
+    TEST_SECTION("nvs_load_from -- a v23 blob upconverts to v24: every zone's new "
+                 "model_fit_temp_c/model_fit_ambient_c land on the ZONE_MODEL_FIT_TEMP_UNKNOWN "
+                 "sentinel, never 0.0f, even when model_k_dc/tau/dead_time are real pre-existing values");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v23_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 23;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    /* A REAL, pre-existing fit -- exactly the "old fit, unknown operating
+     * point" scenario docs/audits/high_temperature_transfer_analysis_
+     * 2026-09-08.md's backfill requirement targets. */
+    src.zones[0].model_k_dc = 500.0f;
+    src.zones[0].model_tau_s = 300.0f;
+    src.zones[0].model_dead_time_s = 20.0f;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src.zones[0].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src.zones[1].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+
+    src.crc32 = 0; // v23's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v23 blob must migrate to a valid current (v24) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    for (uint8_t j = 0; j < 2; j++) {
+        TEST_CHECK(out_cfg.zones[j].model_fit_temp_c == ZONE_MODEL_FIT_TEMP_UNKNOWN,
+                  "v23 has no model_fit_temp_c -- the raw migrated field lands on the UNKNOWN sentinel, "
+                  "never 0.0f");
+        TEST_CHECK(out_cfg.zones[j].model_fit_ambient_c == ZONE_MODEL_FIT_TEMP_UNKNOWN,
+                  "v23 has no model_fit_ambient_c -- lands on the UNKNOWN sentinel, never 0.0f");
+    }
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 500.0f, 1e-6, "sibling model_k_dc survives the hop unchanged");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 300.0f, 1e-6, "sibling model_tau_s survives the hop unchanged");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_dead_time_s, 20.0f, 1e-6,
+                    "sibling model_dead_time_s survives the hop unchanged");
+
+    /* Round-trip leg: a real fit context written after migration must
+     * survive a genuine v24-native NVS reload -- not only migrate onto the
+     * sentinel. */
+    s_zones.cfg = out_cfg;
+    TEST_CHECK(zones_config_set_model_fit_context(0, 875.0f, 22.0f),
+              "set(zone 0, real fit context) on the migrated config succeeds");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "reload of the v24-native save must succeed");
+    float rt_temp = 0.0f, rt_ambient = 0.0f;
+    TEST_CHECK(zones_config_get_model_fit_context(0, &rt_temp, &rt_ambient) && rt_temp == 875.0f &&
+                  rt_ambient == 22.0f,
+              "the real fit context survives a genuine v24-native NVS round trip, bit-identical");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // docs/ON_OFF_ZONE_PLAN.md sec 1/sec 2 predicates.
 static void test_zone_is_on_off_and_zone_needs_ceiling(void)
 {
@@ -9462,6 +9549,7 @@ void run_test_zones_http(void)
     test_zone_type_accessor_get_set_and_range();
     test_zero_initialized_zone_cfg_is_heater_and_failsafe_off();
     test_nvs_load_from_v22_blob_defaults_zone_type_and_failsafe_to_zero();
+    test_nvs_load_from_v23_blob_defaults_model_fit_context_to_unknown();
     test_zone_is_on_off_and_zone_needs_ceiling();
     test_NEGATIVE_wrong_zone_band_read_is_caught();
     test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught();

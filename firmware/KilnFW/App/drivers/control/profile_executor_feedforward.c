@@ -84,7 +84,12 @@ bool zone_load_model(uint8_t zi)
      * the three outputs means "no model has been identified for this zone" --
      * the expected state of a zone that has never been autotuned, not an
      * error. Either way there is nothing to compute with. */
-    bool have = zones_config_get_model(zi, &k_dc, &tau_s, &dead_time_s) &&
+    /* zone_model_at() seam (docs/audits/high_temperature_transfer_analysis_
+     * 2026-09-08.md item 2) -- passthrough to zones_config_get_model() today,
+     * bit-identical; T_c is a placeholder for a future gain schedule and is
+     * unused. z->actual_c is the closest thing to "the temperature this read
+     * is happening at" available here. */
+    bool have = zone_model_at(zi, z->actual_c, &k_dc, &tau_s, &dead_time_s) &&
                 isfinite(k_dc) && isfinite(tau_s) && isfinite(dead_time_s) &&
                 k_dc > 0.0f && tau_s > 0.0f && dead_time_s > 0.0f;
 
@@ -457,7 +462,10 @@ float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, fl
      * anything that affects control. */
     float coupling_correction = 0.0f;
     float coupling_row[MAX31856_CHANNEL_COUNT];
-    if (zones_config_get_coupling(zi, coupling_row)) {
+    /* coupling_at() seam -- see zone_model_at()'s own comment just above in
+     * this file; passthrough to zones_config_get_coupling() today, T_c
+     * unused. */
+    if (coupling_at(zi, s_exec.zones[zi].actual_c, coupling_row)) {
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
             if (j == zi) continue;
             float c_ij = coupling_row[j];

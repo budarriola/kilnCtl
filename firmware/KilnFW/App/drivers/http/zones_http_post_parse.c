@@ -425,6 +425,18 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     z->tuning_raw_rise_c = current_z->tuning_raw_rise_c;
     z->tuning_rise_inf_c = current_z->tuning_rise_inf_c;
     z->tuning_seq = current_z->tuning_seq;
+    /* model_fit_temp_c/model_fit_ambient_c (ZONES_CFG_VERSION 23->24):
+     * exactly the same reset-one-side hazard as the tuning_* block just
+     * above, for exactly the same reason -- these have no z%u_ POST key
+     * either (zones_page.html never reads or writes them; only
+     * zones_config_set_model_fit_context() does, from autotune's accept
+     * path), so without this explicit carry-through every whole-page save
+     * would silently zero a real fit's recorded operating point -- which,
+     * unlike model_k_dc's own "0 means no model" convention, is NOT this
+     * field's documented sentinel (ZONE_MODEL_FIT_TEMP_UNKNOWN, -273.15f)
+     * and would misrepresent a known fit as one taken at a genuine 0 degC. */
+    z->model_fit_temp_c = current_z->model_fit_temp_c;
+    z->model_fit_ambient_c = current_z->model_fit_ambient_c;
     /* ZONES_CFG_VERSION 13->14's adaptive_tune_enabled, carried through for
      * exactly the same reason as the tuning_* block just above and for the
      * same reason coupling_diag_k_dc/fuzzy_strength_pct take the

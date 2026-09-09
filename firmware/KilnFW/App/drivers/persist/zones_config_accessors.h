@@ -72,6 +72,16 @@ extern "C" {
 #define ZONE_MODEL_K_MAX 5000.0f
 #define ZONE_MODEL_TIME_MAX_S 86400.0f
 
+/* Sentinel for zone_cfg_t::model_fit_temp_c/model_fit_ambient_c (ZONES_CFG_
+ * VERSION 23->24, docs/audits/high_temperature_transfer_analysis_2026-09-08.md):
+ * "no operating point recorded for this fit". Deliberately NOT 0.0f -- 0 degC
+ * is a plausible genuine ambient/operating temperature (a cold shop), so
+ * using it as "unknown" would make a real measurement indistinguishable from
+ * a missing one, exactly the conflation this sentinel exists to prevent.
+ * -273.15 (absolute zero) is physically unreachable on a kiln, so no real
+ * fit can ever collide with it. */
+#define ZONE_MODEL_FIT_TEMP_UNKNOWN (-273.15f)
+
 /* Every bound below moved out of zones_http.c (2026-08-21, backup-widening
  * pass) for the identical reason ZONE_MODEL_K_MAX/ZONE_MODEL_TIME_MAX_S moved
  * here first: backup_http.c's import validation pass must reject an
@@ -627,6 +637,41 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
  * (e.g. after the kiln's load or element set changed enough that the old
  * fit is a lie); it is not treated as a validation failure. */
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
+
+/* model_fit_temp_c/model_fit_ambient_c getter/setter (ZONES_CFG_VERSION
+ * 23->24) -- the operating point a model was fitted at, deliberately kept
+ * separate from zones_config_get/set_model() itself rather than widening
+ * that function's signature: every existing caller of set_model() (the
+ * adaptive-tune blend path, the UART bridge, backup restore) writes a K/tau/
+ * dead-time triple without necessarily having a fresh measured temperature
+ * in hand, and forcing all of them to invent one would be exactly the
+ * "invented sentinel" this pass exists to avoid. Callers that DO have a real
+ * measurement (autotune_engine_guard.c's accept path, immediately after its
+ * own zones_config_set_model() call) call this separately, with the actual
+ * baseline/ambient the step test measured -- never the setpoint.
+ *
+ * Out-of-range zone_index, or a non-finite/wildly-implausible temperature
+ * that is not the ZONE_MODEL_FIT_TEMP_UNKNOWN sentinel, is refused without
+ * writing anything, same reject-nothing-half-applied discipline as
+ * zones_config_set_model(). Passing the sentinel for both is how a caller
+ * explicitly marks a fit's context as unknown/cleared. */
+bool zones_config_get_model_fit_context(uint8_t zone_index, float *out_fit_temp_c, float *out_fit_ambient_c);
+bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c);
+
+/* zone_model_at()/coupling_at() -- HIGH_TEMPERATURE_TRANSFER_ANALYSIS's
+ * "cheap seam" (item 2): every control-path reader of a zone's plant model
+ * or coupling row goes through here instead of calling zones_config_get_
+ * model()/zones_config_get_coupling() directly. Today T_c is accepted and
+ * ignored -- these are exact passthroughs to today's constant reads, bit-
+ * identical to calling the underlying getter directly -- so a later
+ * temperature-dependent implementation (the gain schedule the analysis
+ * argues ki, not Kp, will need) touches this one function instead of every
+ * call site that reads a model or coupling row. Deliberately NOT
+ * implemented as a schedule this pass -- see that doc's own conclusion:
+ * scheduling now, on the single unrecorded operating point every existing
+ * fit was taken at, would be fitting noise. */
+bool zone_model_at(uint8_t zone_index, float T_c, float *out_k_dc, float *out_tau_s, float *out_dead_time_s);
+bool coupling_at(uint8_t zone_index, float T_c, float out_row[MAX31856_CHANNEL_COUNT]);
 
 /* ZONES_CFG_VERSION 12->13 (2026-09-01, owner: "in the pid stistics
  * consider, maybe there should be 2 sets, one for the pid tuneing that

@@ -60,7 +60,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 23
+#define ZONES_CFG_VERSION 24
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -809,7 +809,157 @@ typedef struct {
      * same reasoning as hyst_c above. */
     uint16_t min_on_s;
     uint16_t min_off_s;
+    /* ---- ZONES_CFG_VERSION 23->24 (2026-09-08, docs/audits/
+     * high_temperature_transfer_analysis_2026-09-08.md): every model_k_dc/
+     * model_tau_s/model_dead_time_s fit ever taken was measured at some real
+     * operating temperature, but nothing before this pass recorded what that
+     * temperature was -- so none of this project's existing plant fits can
+     * ever be placed on a gain-schedule axis retrospectively (the analysis's
+     * central argument: a fit without its operating point can never be
+     * assembled into a schedule later). These two fields close that gap for
+     * every future fit, at zero behaviour change today -- nothing reads them
+     * yet beyond the passthrough zone_model_at()/coupling_at() seam this
+     * same pass adds (zones_config_accessors.h), which does not use them
+     * either.
+     *
+     * Populated by zones_config_set_model_fit_context(), called right after
+     * zones_config_set_model() at the one real identification site
+     * (autotune_engine_guard.c's accept path), from the ACTUAL measured
+     * baseline temperature and step ambient at the moment of the fit --
+     * never from the setpoint, which is what the plant was being driven
+     * toward, not what it was measured at.
+     *
+     * ZONE_MODEL_FIT_TEMP_UNKNOWN (-273.15f, physically unreachable --
+     * zones_config_accessors.h) is the sentinel for "no context recorded",
+     * deliberately NOT 0.0f: 0 degC is a plausible genuine ambient
+     * temperature (a cold shop), so using it as "unknown" would make a real
+     * measurement indistinguishable from a missing one -- exactly the
+     * conflation this field exists to prevent. Every zone migrated up from a
+     * pre-v24 blob lands on this sentinel (zones_config_json_decode_blob()'s
+     * explicit backfill, zones_config_migrate.c), honestly representing
+     * "unknown" rather than inventing a plausible-looking value -- no
+     * historical version ever recorded this. Meaningful only when a model
+     * actually exists (model_k_dc > 0 -- see that field's own "0 in ANY of
+     * the three means no model" convention above); a zone with no model has
+     * nothing for these to describe either. */
+    float model_fit_temp_c;
+    float model_fit_ambient_c;
 } zone_cfg_t;
+
+/* Frozen v23 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 23->24): predates model_fit_temp_c/
+ * model_fit_ambient_c. Field order hand-copied from v23's actual shape,
+ * never derived from the live struct -- same discipline as every other
+ * frozen zone_cfg_vN_t in this file. Sized/offset-checked against a
+ * standalone layout replica of this exact struct (see the _Static_assert
+ * comment below), never sizeof(zone_cfg_t). */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source[SRC_GROUP_COUNT];
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+    float error_band_c;
+    float rate_band_c_per_s;
+    uint8_t relay_type;
+    float progress_band_c;
+    uint8_t zone_type;
+    uint8_t failsafe_state;
+    float hyst_c;
+    uint16_t min_on_s;
+    uint16_t min_off_s;
+} zone_cfg_v23_t;
+
+/* 232 = 220 (zone_cfg_v22_t's own byte-for-byte size) + 1 (zone_type) +
+ * 1 (failsafe_state) + 2 (padding to hyst_c's natural 4-byte float
+ * alignment) + 4 (hyst_c) + 2 (min_on_s) + 2 (min_off_s). Confirmed against
+ * a standalone layout replica of this exact struct, never sizeof(zone_cfg_t)
+ * -- see zone_cfg_v22_t's own assert comment for why that name is never safe
+ * to use for this purpose. */
+_Static_assert(sizeof(zone_cfg_v23_t) == 232,
+               "zone_cfg_v23_t must match the on-flash v23 layout byte-for-byte (232 bytes)"); /* v23 -- predates model_fit_temp_c */
+
+/* Per-field offsetof assertions for zone_cfg_v23_t -- same rationale as
+ * zone_cfg_v22_t's own block below it. */
+_Static_assert(offsetof(zone_cfg_v23_t, name) == 0,
+               "zone_cfg_v23_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v23_t, cal_offset_c) == 16,
+               "zone_cfg_v23_t::cal_offset_c must stay at byte offset 16");
+_Static_assert(offsetof(zone_cfg_v23_t, relay_mask) == 148,
+               "zone_cfg_v23_t::relay_mask must stay at byte offset 148");
+_Static_assert(offsetof(zone_cfg_v23_t, control_mode) == 149,
+               "zone_cfg_v23_t::control_mode must stay at byte offset 149");
+_Static_assert(offsetof(zone_cfg_v23_t, settings_source) == 154,
+               "zone_cfg_v23_t::settings_source must stay at byte offset 154");
+_Static_assert(offsetof(zone_cfg_v23_t, coupling_diag_k_dc) == 192,
+               "zone_cfg_v23_t::coupling_diag_k_dc must stay at byte offset 192");
+_Static_assert(offsetof(zone_cfg_v23_t, ease_off_window_mult) == 196,
+               "zone_cfg_v23_t::ease_off_window_mult must stay at byte offset 196");
+_Static_assert(offsetof(zone_cfg_v23_t, approach_rate_cap_c_per_hr) == 200,
+               "zone_cfg_v23_t::approach_rate_cap_c_per_hr must stay at byte offset 200");
+_Static_assert(offsetof(zone_cfg_v23_t, error_band_c) == 204,
+               "zone_cfg_v23_t::error_band_c must stay at byte offset 204");
+_Static_assert(offsetof(zone_cfg_v23_t, rate_band_c_per_s) == 208,
+               "zone_cfg_v23_t::rate_band_c_per_s must stay at byte offset 208");
+_Static_assert(offsetof(zone_cfg_v23_t, relay_type) == 212,
+               "zone_cfg_v23_t::relay_type must stay at byte offset 212");
+_Static_assert(offsetof(zone_cfg_v23_t, progress_band_c) == 216,
+               "zone_cfg_v23_t::progress_band_c must stay at byte offset 216");
+_Static_assert(offsetof(zone_cfg_v23_t, zone_type) == 220,
+               "zone_cfg_v23_t::zone_type must stay at byte offset 220");
+_Static_assert(offsetof(zone_cfg_v23_t, failsafe_state) == 221,
+               "zone_cfg_v23_t::failsafe_state must stay at byte offset 221");
+_Static_assert(offsetof(zone_cfg_v23_t, hyst_c) == 224,
+               "zone_cfg_v23_t::hyst_c must stay at byte offset 224");
+_Static_assert(offsetof(zone_cfg_v23_t, min_on_s) == 228,
+               "zone_cfg_v23_t::min_on_s must stay at byte offset 228");
+_Static_assert(offsetof(zone_cfg_v23_t, min_off_s) == 230,
+               "zone_cfg_v23_t::min_off_s must stay at byte offset 230");
 
 /* Frozen v22 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 22->23): predates zone_type/failsafe_state/
@@ -2765,6 +2915,29 @@ typedef struct {
     uint32_t crc32;
 } zones_cfg_v22_t; /* v22 -- what zones_cfg_t looked like immediately before THIS
                      * pass; predates zone_type. */
+
+/* Frozen v23 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 23->24): zones[] is the per-zone shape that
+ * predates this pass's model_fit_temp_c/model_fit_ambient_c addition
+ * (zone_cfg_v23_t, frozen above). Same shape as v22's own wrapper -- no
+ * wrapper-level scalar removed here either, just zones[] pinned to the
+ * smaller, historical per-zone type. This is what a LIVE, already-
+ * commissioned v23 board looks like on flash right now -- the exact blob a
+ * v23->v24 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v23_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v23_t; /* v23 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates model_fit_temp_c/model_fit_ambient_c. */
 
 /* Frozen v21 layout -- what zones_cfg_t looked like immediately before THIS
  * pass (ZONES_CFG_VERSION 21->22): zones[] is the per-zone shape that

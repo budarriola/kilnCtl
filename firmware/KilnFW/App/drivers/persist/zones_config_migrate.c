@@ -798,6 +798,43 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * struct. */
         return true;
     }
+    case 23: {
+        /* v23 -> v24 (THIS pass, docs/audits/high_temperature_transfer_
+         * analysis_2026-09-08.md): model_fit_temp_c/model_fit_ambient_c are
+         * brand new, appended at the true tail after min_off_s --
+         * zone_cfg_v23_t is therefore a byte-for-byte prefix of the current
+         * (v24) zone_cfg_t, same "plain memcpy of the smaller historical
+         * shape" technique case 22 uses just above. Every zone's
+         * model_fit_temp_c/model_fit_ambient_c are left at 0 by this
+         * function's entry memset here, but that is NOT this field's
+         * "unknown" sentinel (ZONE_MODEL_FIT_TEMP_UNKNOWN, deliberately
+         * -273.15f, never 0 -- see that field's own comment) -- so unlike
+         * every prior tail-append, this one cannot rely on the entry
+         * memset's zero being the correct default. zones_config_json_
+         * decode_blob() backfills the real sentinel onto every zone right
+         * after this function returns, for every pre-v24 version uniformly,
+         * rather than duplicating that assignment in each case here. */
+        zones_cfg_v23_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v23 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].model_fit_temp_c/model_fit_ambient_c backfilled
+             * to the UNKNOWN sentinel by the caller -- see this case's own
+             * top comment. */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v23
+         * shape; nvs_save() stamps a fresh one over the current (v24)
+         * struct. */
+        return true;
+    }
     default:
         /* No known historical (or current) layout for this version --
          * zones_cfg_expected_len_for_version() already returned 0 for it and
@@ -927,6 +964,23 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
          * in the current format yet, so there is no stored CRC to check
          * against. nvs_save() stamps a real one the next time this config is
          * written, current or not. */
+
+        /* model_fit_temp_c/model_fit_ambient_c backfill (ZONES_CFG_VERSION
+         * 23->24): every version this function can migrate FROM predates
+         * this field, so it is always 0 (this function's own entry memset)
+         * coming out of convert_versioned_blob_to_current() above -- and 0
+         * is NOT this field's "unknown" meaning (ZONE_MODEL_FIT_TEMP_UNKNOWN,
+         * deliberately -273.15f -- see zone_cfg_t's own comment on why 0
+         * would be indistinguishable from a genuine ambient fit). Applied
+         * centrally here, once, for every historical version uniformly,
+         * rather than duplicated inside each per-version case above -- an
+         * old record with a real, previously-fitted model_k_dc/tau/dead_time
+         * honestly reads its fit context as unknown rather than inventing a
+         * plausible-looking temperature nobody ever measured. */
+        for (uint8_t bi = 0; bi < MAX31856_CHANNEL_COUNT; bi++) {
+            out->zones[bi].model_fit_temp_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+            out->zones[bi].model_fit_ambient_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+        }
     }
 
     /* Before zones_config_json_validate(), not after: zones_config_json_validate() now

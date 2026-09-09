@@ -457,6 +457,27 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                  "autotune zone %u: gains accepted but plant model (K=%.2f tau=%.1f L=%.1f) was rejected or "
                  "failed to persist -- feedforward will stay off for this zone",
                  zone, (double)m.k_gain_c_per_duty, (double)m.tau_s, (double)m.dead_time_s);
+    } else {
+        /* docs/audits/high_temperature_transfer_analysis_2026-09-08.md item
+         * 1: record the operating point this fit was actually taken at, from
+         * the same measured values the tuning-quality record just below uses
+         * (m.baseline_c -- the real measured temperature the step began
+         * from, and step_ambient_c -- the real measured ambient at that
+         * moment), never from the setpoint the run was driving toward. Gated
+         * on model_persisted for the same reason coupling_diag_k_dc/the
+         * ceiling adoption below are: writing a fit context for a model that
+         * did NOT land would describe a fit that, as far as this zone's
+         * config is concerned, never happened. Best-effort like the model
+         * write's own failure path -- a rejected context leaves the model
+         * usable but its operating point unrecorded (same as any pre-v24
+         * record), not a reason to undo the model or gains that already
+         * landed. */
+        if (!zones_config_set_model_fit_context(zone, m.baseline_c, step_ambient_c)) {
+            ESP_LOGW(AT_TAG,
+                     "autotune zone %u: plant model persisted but its fit context (T=%.1f ambient=%.1f) was "
+                     "rejected or failed to persist -- this fit's operating point will read as unknown",
+                     zone, (double)m.baseline_c, (double)step_ambient_c);
+        }
     }
     /* TODO.md 6A.4, "autotune's predicted ramp ceiling is shown but not
      * wired into max_ramp_c_per_hr" -- opt-in only (adopt_ceiling defaults

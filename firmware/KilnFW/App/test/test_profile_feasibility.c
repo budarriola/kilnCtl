@@ -141,6 +141,25 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
     return true;
 }
 
+/* zone_model_at()/coupling_at() -- the passthrough seam
+ * (docs/audits/high_temperature_transfer_analysis_2026-09-08.md item 2)
+ * profile_feasibility.c now calls instead of zones_config_get_model()/
+ * zones_config_get_coupling() directly. Real production T_c is unused by
+ * the real implementation too (bit-identical passthrough), so the stub just
+ * forwards to the same fakes this file/test_backup_import.c already
+ * provide. */
+bool zone_model_at(uint8_t zone_index, float T_c, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
+{
+    (void)T_c;
+    return zones_config_get_model(zone_index, out_k_dc, out_tau_s, out_dead_time_s);
+}
+
+bool coupling_at(uint8_t zone_index, float T_c, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    (void)T_c;
+    return zones_config_get_coupling(zone_index, out_row);
+}
+
 bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
 {
     if (zone_index >= STUB_MAX_ZONES || !s_zones[zone_index].max_ramp_getter_answers) {

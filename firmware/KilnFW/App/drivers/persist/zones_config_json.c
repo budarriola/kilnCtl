@@ -366,6 +366,28 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone min_off_s out of range";
             return false;
         }
+        /* ZONES_CFG_VERSION 23->24: model_fit_temp_c/model_fit_ambient_c.
+         * ZONE_MODEL_FIT_TEMP_UNKNOWN (-273.15f) is always legal -- it is the
+         * documented "no context recorded" sentinel, same "sentinel is
+         * always legal" discipline model_k_dc's own all-zero encoding uses.
+         * Anything else must be finite and inside the same generous
+         * physically-plausible range zones_config_set_model_fit_context()
+         * enforces at write time -- kept in sync with that function
+         * deliberately rather than sharing one helper, since one lives in
+         * zones_config_accessors.c (RAM-only setters) and this one runs over
+         * a blob that may never have gone through that setter at all (a
+         * migrated or hand-crafted one). */
+        if (z->model_fit_temp_c != ZONE_MODEL_FIT_TEMP_UNKNOWN &&
+            (!isfinite(z->model_fit_temp_c) || z->model_fit_temp_c <= -50.0f || z->model_fit_temp_c >= 1300.0f)) {
+            *err_reason = "zone model_fit_temp_c out of range";
+            return false;
+        }
+        if (z->model_fit_ambient_c != ZONE_MODEL_FIT_TEMP_UNKNOWN &&
+            (!isfinite(z->model_fit_ambient_c) || z->model_fit_ambient_c <= -50.0f ||
+             z->model_fit_ambient_c >= 1300.0f)) {
+            *err_reason = "zone model_fit_ambient_c out of range";
+            return false;
+        }
         if (!isfinite(z->max_temp_c) || z->max_temp_c < 0.0f || z->max_temp_c > ZONE_MAX_TEMP_C_MAX) {
             *err_reason = "zone max_temp_c out of range";
             return false;

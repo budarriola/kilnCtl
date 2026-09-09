@@ -183,10 +183,14 @@ static profile_seg_verdict_t segment_verdict(uint8_t zone_index, uint8_t zone_ma
  * (zones_config_get_coupling_tau()) describes how fast a neighbour's heat
  * arrives, which shifts the transient, while this module's only question is
  * the sustained rate a segment needs. Same reasoning as dead_time_s below. */
-static float effective_k_dc(uint8_t zone_index, uint8_t zone_mask, float k_dc)
+static float effective_k_dc(uint8_t zone_index, uint8_t zone_mask, float k_dc, float t_c)
 {
     float row[MAX31856_CHANNEL_COUNT];
-    if (!zones_config_get_coupling(zone_index, row)) {
+    /* coupling_at() seam (docs/audits/high_temperature_transfer_analysis_
+     * 2026-09-08.md item 2) -- passthrough to zones_config_get_coupling()
+     * today, bit-identical; t_c is a placeholder for a future gain schedule
+     * and is unused. */
+    if (!coupling_at(zone_index, t_c, row)) {
         return k_dc;
     }
     float k_eff = k_dc;
@@ -239,7 +243,11 @@ static profile_seg_verdict_t segment_verdict(uint8_t zone_index, uint8_t zone_ma
     }
 
     float k_dc = 0.0f, tau_s = 0.0f, dead_time_s = 0.0f;
-    if (!zones_config_get_model(zone_index, &k_dc, &tau_s, &dead_time_s)) {
+    /* zone_model_at() seam -- see effective_k_dc()'s own comment below;
+     * passthrough to zones_config_get_model() today, bit-identical, start_c
+     * (this segment's own starting temperature, not the setpoint) is a
+     * placeholder for a future gain schedule and is unused. */
+    if (!zone_model_at(zone_index, start_c, &k_dc, &tau_s, &dead_time_s)) {
         return PROFILE_SEG_UNKNOWN; /* getter could not answer at all */
     }
     /* zones_http.c documents all-zeros as the "no model identified" encoding,
@@ -260,7 +268,7 @@ static profile_seg_verdict_t segment_verdict(uint8_t zone_index, uint8_t zone_ma
 
     /* Gain the whole run actually delivers to this zone, neighbours included
      * -- see effective_k_dc() above for the model and why it matters. */
-    const float k_eff = effective_k_dc(zone_index, zone_mask, k_dc);
+    const float k_eff = effective_k_dc(zone_index, zone_mask, k_dc, start_c);
 
     const float ceiling_c = t_amb + k_eff; /* steady state at u = 1: T - T_amb = K_eff */
 

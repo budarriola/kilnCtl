@@ -1494,6 +1494,61 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
     return nvs_save() == ESP_OK;
 }
 
+/* Accepts the ZONE_MODEL_FIT_TEMP_UNKNOWN sentinel outright (that is the
+ * documented "no context recorded" encoding, same "sentinel is always
+ * legal" convention zones_config_set_model()'s all-zero triple uses); any
+ * other value must be finite and inside a generous physically-plausible
+ * kiln range, wide enough to never reject a real measurement while still
+ * catching a typo/garbage value. */
+static bool zone_model_fit_temp_valid(float v)
+{
+    if (v == ZONE_MODEL_FIT_TEMP_UNKNOWN) {
+        return true;
+    }
+    return isfinite(v) && v > -50.0f && v < 1300.0f;
+}
+
+bool zones_config_get_model_fit_context(uint8_t zone_index, float *out_fit_temp_c, float *out_fit_ambient_c)
+{
+    if (!out_fit_temp_c || !out_fit_ambient_c || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    *out_fit_temp_c = z->model_fit_temp_c;
+    *out_fit_ambient_c = z->model_fit_ambient_c;
+    return true;
+}
+
+bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!zone_model_fit_temp_valid(fit_temp_c) || !zone_model_fit_temp_valid(fit_ambient_c)) {
+        return false;
+    }
+    zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    z->model_fit_temp_c = fit_temp_c;
+    z->model_fit_ambient_c = fit_ambient_c;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
+/* Passthrough seams -- see their own header comment (zones_config_accessors.h)
+ * for why T_c is accepted but not yet used. (void)-cast rather than an
+ * unnamed parameter so the seam's future consumer is easy to grep for. */
+bool zone_model_at(uint8_t zone_index, float T_c, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
+{
+    (void)T_c;
+    return zones_config_get_model(zone_index, out_k_dc, out_tau_s, out_dead_time_s);
+}
+
+bool coupling_at(uint8_t zone_index, float T_c, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    (void)T_c;
+    return zones_config_get_coupling(zone_index, out_row);
+}
+
 bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *out)
 {
     if (!out || zone_index >= s_zones.cfg.thermo_count) {

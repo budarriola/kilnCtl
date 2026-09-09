@@ -649,6 +649,26 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
     return s_stub_set_model_result;
 }
 
+/* docs/audits/high_temperature_transfer_analysis_2026-09-08.md item 1:
+ * autotune_engine_accept()'s accept path now calls this right after
+ * zones_config_set_model() succeeds, with the fit's measured baseline/
+ * ambient. Default true (this run's real behavior for existing tests never
+ * asserting on it) plus call-count/last-args capture, same convention as
+ * s_stub_set_coupling_diag_k_dc_* below. */
+static bool s_stub_set_model_fit_context_result = true;
+static int s_stub_set_model_fit_context_call_count = 0;
+static uint8_t s_stub_set_model_fit_context_zone = 0xFF;
+static float s_stub_set_model_fit_context_temp_c = 0.0f;
+static float s_stub_set_model_fit_context_ambient_c = 0.0f;
+bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
+{
+    s_stub_set_model_fit_context_call_count++;
+    s_stub_set_model_fit_context_zone = zone_index;
+    s_stub_set_model_fit_context_temp_c = fit_temp_c;
+    s_stub_set_model_fit_context_ambient_c = fit_ambient_c;
+    return s_stub_set_model_fit_context_result;
+}
+
 /* PID_EXPANSION_PLAN.md section 3.2 follow-up: autotune_engine_accept()'s
  * on-board coupling_diag_k_dc identification pass writes this alongside
  * zones_config_set_model() above, from the SAME fitted gain. Configurable
