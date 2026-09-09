@@ -70,6 +70,28 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * asserted against the real thing at the point of use. */
 #define READINESS_TRUNC_RESERVE 288u
 
+/* One uniform size for every item's local `detail` buffer. Previously each
+ * item picked its own (64..180) by eye, and the recovery-mode item's 112 was
+ * one such guess that a clean (non-ccache) build rejected outright: its
+ * longest branch is 127 chars + NUL, so -Werror=format-truncation= failed the
+ * whole build. Sized from a worst-case audit of EVERY branch of EVERY item,
+ * expanding each conversion to its type's maximum width (%u -> 10 digits,
+ * %04X -> 8, %s -> its longest literal alternative): the largest is 152 bytes
+ * including the NUL (the recovery-mode branch), and three other items
+ * (commissioning, safety_trip, safety_context) were also over their own
+ * buffers at the range extremes even though today's real values fit. 192
+ * clears all of them with ~40 bytes of headroom, so adding a clause to any
+ * message does not silently re-open this. Deliberately NOT sized to the
+ * current longest string plus one.
+ *
+ * append_item()'s detail_esc[] is intentionally left at 192 rather than
+ * doubled to match: escaping only grows strings containing '"' or '\', which
+ * none of these messages contain, json_escape() truncates safely (never
+ * overruns), and this runs on the shared 8 KB httpd stack alongside
+ * json[4096] -- see the httpd-stack-blob notes; growing frames here is not
+ * free. */
+#define READINESS_DETAIL_MAX 192
+
 /* Appends one checklist item object to *o within cap, returning the new
  * offset (unchanged, i.e. truncated, if it would overflow -- same
  * "stop rather than corrupt" convention as every APPEND macro elsewhere in
@@ -136,7 +158,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     {
         wifi_prov_mode_t mode = wifi_prov_get_mode();
         readiness_status_t st;
-        char detail[96];
+        char detail[READINESS_DETAIL_MAX];
         if (mode == WIFI_PROV_MODE_AP) {
             st = READY_DELIBERATELY_OFF;
             snprintf(detail, sizeof(detail), "AP-only mode chosen -- no home network join attempted");
@@ -165,7 +187,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * exist (bullet 2's example is literally this one). */
     {
         readiness_status_t st = thermo_count > 0 ? READY_OK : READY_NOT_DONE;
-        char detail[64];
+        char detail[READINESS_DETAIL_MAX];
         snprintf(detail, sizeof(detail), "%u of %u channels configured", thermo_count,
                  (unsigned)MAX31856_CHANNEL_COUNT);
         size_t before_o = o;
@@ -179,7 +201,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     /* 3. Relays assigned to zones. */
     {
         readiness_status_t st;
-        char detail[80];
+        char detail[READINESS_DETAIL_MAX];
         if (thermo_count == 0) {
             st = READY_CANNOT_YET;
             snprintf(detail, sizeof(detail), "set thermocouple count first");
@@ -215,7 +237,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * "mode explicitly set" flag this pass does not add. */
     {
         readiness_status_t st = (thermo_count > 0) ? READY_OK : READY_CANNOT_YET;
-        char detail[80];
+        char detail[READINESS_DETAIL_MAX];
         if (thermo_count == 0) {
             snprintf(detail, sizeof(detail), "set thermocouple count first");
         } else {
@@ -263,7 +285,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * not_done instead. */
     {
         readiness_status_t st;
-        char detail[112];
+        char detail[READINESS_DETAIL_MAX];
         if (thermo_count == 0) {
             st = READY_CANNOT_YET;
             snprintf(detail, sizeof(detail), "set thermocouple count first");
@@ -311,7 +333,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * anything at all (zones_http.h: "stays inert on a single-zone kiln"). */
     {
         readiness_status_t st;
-        char detail[96];
+        char detail[READINESS_DETAIL_MAX];
         if (thermo_count < 2) {
             st = READY_CANNOT_YET;
             snprintf(detail, sizeof(detail), "needs at least 2 zones to mean anything (guard is inert otherwise)");
@@ -363,7 +385,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * is missing and no red cross is warranted. */
     {
         readiness_status_t st;
-        char detail[80];
+        char detail[READINESS_DETAIL_MAX];
         if (thermo_count == 0) {
             st = READY_CANNOT_YET;
             snprintf(detail, sizeof(detail), "set thermocouple count first");
@@ -424,7 +446,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             }
         }
         bool any = (saved > 0) || (builtin_visible > 0);
-        char detail[96];
+        char detail[READINESS_DETAIL_MAX];
         if (!any) {
             snprintf(detail, sizeof(detail),
                      "no profiles saved and every shipped schedule has been removed");
@@ -445,7 +467,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * per TODO.md 8.3's own wording ("or gains entered by hand"). */
     {
         readiness_status_t st;
-        char detail[96];
+        char detail[READINESS_DETAIL_MAX];
         if (thermo_count == 0) {
             st = READY_CANNOT_YET;
             snprintf(detail, sizeof(detail), "set thermocouple count first");
@@ -488,7 +510,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         bool io_ready = false, thermo_ready = false, safety_ready = false;
         dashboard_http_get_hw_ready(&io_ready, &thermo_ready, &safety_ready);
         readiness_status_t st = (io_ready && thermo_ready && safety_ready) ? READY_OK : READY_NOT_DONE;
-        char detail[96];
+        char detail[READINESS_DETAIL_MAX];
         snprintf(detail, sizeof(detail), "io=%s thermo=%s safety=%s", io_ready ? "up" : "down",
                  thermo_ready ? "up" : "down", safety_ready ? "up" : "down");
         /* fix_url used to be "/" -- owner report: "the ready to fire hardware
@@ -533,7 +555,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         bool io_ready = false, thermo_ready = false, safety_ready = false;
         dashboard_http_get_hw_ready(&io_ready, &thermo_ready, &safety_ready);
 
-        char detail[128];
+        char detail[READINESS_DETAIL_MAX];
         uint16_t cached_crc = safety_cfg_store_cached_crc();
         size_t count = safety_cfg_store_param_count();
 
@@ -612,7 +634,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         uint16_t trip_mask = 0;
         dashboard_http_get_safety_trip(&link_up, &trip_mask);
         readiness_status_t st = readiness_safety_trip_status(link_up, trip_mask);
-        char detail[96];
+        char detail[READINESS_DETAIL_MAX];
         if (!link_up) {
             snprintf(detail, sizeof(detail), "safety link is down -- cannot tell tripped from unknown");
         } else if (trip_mask != 0u) {
@@ -646,7 +668,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             }
         }
         readiness_status_t st = (zones_valid && all_mounted) ? READY_OK : READY_NOT_DONE;
-        char detail[96];
+        char detail[READINESS_DETAIL_MAX];
         if (!zones_valid) {
             snprintf(detail, sizeof(detail), "zone config failed to load cleanly -- see /settings/zones");
         } else if (!all_mounted) {
@@ -673,7 +695,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         bool have_record = crash_report_get(&rec);
         bool acknowledged = have_record && rec.acknowledged != 0;
         readiness_status_t st = readiness_crash_report_status(have_record, acknowledged);
-        char detail[128];
+        char detail[READINESS_DETAIL_MAX];
         if (!have_record) {
             snprintf(detail, sizeof(detail), "no crash on record");
         } else if (!acknowledged) {
@@ -699,7 +721,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     {
         bool recovery = boot_guard_is_recovery_mode();
         readiness_status_t st = readiness_recovery_mode_status(recovery);
-        char detail[112];
+        char detail[READINESS_DETAIL_MAX];
         snprintf(detail, sizeof(detail), "%s",
                  recovery ? "this boot is in RECOVERY MODE -- profile executor, autotune, and rules are "
                             "not running; reflash or clear the boot-guard counter"
@@ -720,7 +742,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     {
         bool mounted = cfg_fs_is_available();
         readiness_status_t st = readiness_cfg_fs_status(mounted);
-        char detail[128];
+        char detail[READINESS_DETAIL_MAX];
         if (mounted) {
             snprintf(detail, sizeof(detail), "cfg filesystem mounted -- config is file-backed with NVS mirror");
         } else {
@@ -748,7 +770,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         uint8_t context_age = 0;
         dashboard_http_get_safety_context_health(&link_up, &diag_ever_received, &context_age);
         readiness_status_t st = readiness_safety_context_status(link_up, diag_ever_received, context_age);
-        char detail[128];
+        char detail[READINESS_DETAIL_MAX];
         if (!link_up) {
             snprintf(detail, sizeof(detail), "safety link is down -- cannot tell delivery healthy from unknown");
         } else if (!diag_ever_received) {
@@ -790,7 +812,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     {
         bool verified = estop_verification_is_verified();
         readiness_status_t st = readiness_estop_verification_status(verified);
-        char detail[180];
+        char detail[READINESS_DETAIL_MAX];
         if (verified) {
             snprintf(detail, sizeof(detail),
                      "confirmed by operator. Known gaps: welded contactor undetectable; ACTIVE_LOW "
