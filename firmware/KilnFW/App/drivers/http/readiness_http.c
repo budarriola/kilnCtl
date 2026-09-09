@@ -800,7 +800,10 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * reports whether the OPERATOR has confirmed running the bench
      * verification procedure (firmware/SaftyFW/README.md) -- see
      * readiness_estop_verification_status()'s doc comment in
-     * readiness_http.h for why this is unconditionally blocking, and
+     * readiness_http.h for why this always reads NOT_DONE when unconfirmed --
+     * and for why that is a CHECKLIST status, not an interlock: nothing
+     * enforces this item, an operator can start a firing with it red. See
+     * also
      * estop_verification.h for exactly what invalidates a standing
      * verification (a commit to param 0x0212, or a "kiln"/"all"-scope
      * factory reset). The detail string also surfaces the two gaps no layer

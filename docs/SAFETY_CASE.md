@@ -300,7 +300,41 @@ here; none is copied from an unverified summary.
    not treated as a defect elsewhere in this document; see
    `firmware/KilnFW/docs/SAFETY_MODEL.md` for the full correction.
 
-10. **Refusal of a relay-on command is invisible on the wire** — a refused
+10. **`/api/readiness` is an advisory checklist, not a firing interlock**
+    (stated 2026-09-09, after an opus review found the header/test wording
+    "unconditionally blocking" being read as enforcement). Precisely what it
+    does and does not do today:
+
+    - **What it is.** `readiness_http.c` is a read-only aggregator. Every
+      item calls a getter some other consumer already calls, renders a
+      status (`ok` / `not_done` / `cannot_yet` / `deliberately_off`), and
+      returns it as JSON. It owns no state and changes no behaviour.
+    - **What "blocking" means in that module.** An item described as
+      "unconditionally blocking" means only that it reports
+      `READY_NOT_DONE` whenever its condition holds — never a partial or
+      informational status. That makes the CHECKLIST incomplete. It does
+      not make anything refuse to run.
+    - **What actually consumes it.** Only two browser pages:
+      `readiness_page.html` (renders the list) and `main_page.html` (the
+      setup-wizard completeness banner). Nothing in firmware reads it — a
+      repo-wide grep finds no C caller, and neither the start path
+      (`profile_executor_run.c`) nor `capability_preflight` consults any
+      readiness item.
+    - **Consequence.** An operator can start a firing with `estop_verified`,
+      `safety_trip`, `crash_report` or `recovery_mode` showing red on the
+      readiness page. Those conditions may still be refused elsewhere by
+      their OWN independent enforcement (an active safety trip refuses heat
+      at the Pico; recovery mode never starts `profile_executor`;
+      `capability_preflight` refuses a run on an unacknowledged crash) —
+      but that enforcement is separate code, and an item with no such
+      independent enforcement is advisory only. `estop_verified` is the
+      clearest example: nothing anywhere enforces it.
+    - **Making it a real interlock** would be a behavioural change to a
+      safety-critical start path and is an owner decision, not something
+      this document assumes. See the recommendation recorded with the
+      2026-09-09 wording fix.
+
+11. **Refusal of a relay-on command is invisible on the wire** — a refused
     `SET_RELAY` produces no reply; a GUI infers it only from state not
     changing within one report period. No explicit "refused, and here is why"
     signal exists today.

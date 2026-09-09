@@ -305,8 +305,10 @@ void run_test_readiness_estop_verification(void)
      * contactor coil) is wiring firmware cannot see, so there is no fact to
      * check other than the operator's own deliberate confirmation. */
     TEST_CHECK(readiness_estop_verification_status(false) == READY_NOT_DONE,
-                "unverified must read not_done -- unconditionally blocking, same as safety_trip/"
-                "crash_report/recovery_mode above");
+                "unverified must read not_done -- always, never a partial or informational status, "
+                "same as safety_trip/crash_report/recovery_mode above. NOTE: that is a CHECKLIST "
+                "status only -- nothing in firmware consumes /api/readiness, so this item does not "
+                "stop a firing (readiness_http.h's top comment, docs/SAFETY_CASE.md sec 3 item 10)");
 
     /* Confirmed -- reads ok until something invalidates it (a polarity
      * commit, or a kiln/all-scope factory reset -- see estop_verification.h). */

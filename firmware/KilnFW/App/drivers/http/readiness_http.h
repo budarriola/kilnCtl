@@ -12,6 +12,28 @@
 // Serves GET /readiness (the page) and GET /api/readiness (the JSON the page
 // polls). See readiness_http.c's status_get_handler() doc comment for the
 // exact JSON shape and the four possible per-item status values.
+//
+// WHAT "BLOCKING" MEANS HERE -- read this before adding an item or relying
+// on one (wording corrected 2026-09-09 after an opus review found the
+// phrase "unconditionally blocking" below being read as enforcement; the
+// full statement lives in docs/SAFETY_CASE.md sec 3 item 10):
+//
+//   An item called "blocking" in this file reports READY_NOT_DONE whenever
+//   its condition holds -- never a partial or informational status. That is
+//   ALL it means. It makes the CHECKLIST incomplete. It does NOT stop a
+//   firing, and NOTHING in firmware consumes this endpoint: the only
+//   consumers are two browser pages (readiness_page.html's list and
+//   main_page.html's setup-wizard banner). Neither profile_executor_run.c's
+//   start path nor capability_preflight reads any readiness item, so an
+//   operator can start a firing with any item on this page showing red.
+//
+//   Several of these conditions ARE separately enforced by their own code
+//   (an active safety trip refuses heat at the Pico; recovery mode never
+//   starts profile_executor; capability_preflight refuses a run on an
+//   unacknowledged crash) -- but that enforcement lives in those modules,
+//   not here, and an item with no such independent enforcement (today:
+//   estop_verified) is ADVISORY ONLY. Do not add an item here and consider
+//   a hazard covered by having added it.
 #ifndef READINESS_HTTP_H
 #define READINESS_HTTP_H
 
@@ -166,8 +188,10 @@ static inline readiness_status_t readiness_guard_max_temp_status(uint8_t thermo_
  * not_done/cannot_yet item -- saw nothing to refuse on. complete=true,
  * reasons=[] on a kiln that would immediately refuse to fire.
  *
- * A live trip is unconditionally blocking (READY_NOT_DONE) whenever it is
- * known: this is not a "some zones, some not" partial-credit item like
+ * A live trip always reads READY_NOT_DONE whenever it is known (checklist-
+ * blocking in this header's sense -- NOT a firing interlock, see the top
+ * comment; the Pico's own refusal to enable heat is what actually stops a
+ * tripped board): this is not a "some zones, some not" partial-credit item like
  * max_temp_c above, because ANY tripped guard means the safety processor is
  * currently refusing to let the main board command heat at all -- there is
  * no such thing as a kiln that is "partially ready to fire" while tripped.
@@ -221,7 +245,9 @@ static inline readiness_status_t readiness_crash_report_status(bool have_record,
  * (main_boot_early.c's boot_guard_is_recovery_mode() gate) -- it cannot fire
  * a profile, run autotune, or serve most of the cfg mount's normal
  * consumers no matter what every other readiness item says, so this is
- * unconditionally blocking whenever true. There is no "cannot tell yet"
+ * always READY_NOT_DONE whenever true (checklist-blocking in this header's
+ * sense -- the actual protection is main_boot_early.c not starting those
+ * subsystems, not this item). There is no "cannot tell yet"
  * case: boot_guard_is_recovery_mode() is a local, always-answerable fact
  * about THIS boot (stable for its lifetime, per that function's own doc
  * comment), never dependent on a link or a peer that could be down. */
@@ -341,9 +367,12 @@ static inline readiness_status_t readiness_safety_context_status(bool link_up, b
  * period would be new state solely in service of relaxing a safety item,
  * which is the wrong direction to add complexity in. This readiness page's
  * entire stated purpose (this header's own top comment: "is this kiln ready
- * to fire?") already implies "before you fire" for every other blocking item
- * on it (guard_max_temp, safety_trip, crash_report, recovery_mode all block
- * unconditionally too) -- there is no reason for the E-stop item alone to
+ * to fire?") already implies "before you fire" for every other item on it
+ * that reads NOT_DONE unconditionally (guard_max_temp, safety_trip,
+ * crash_report, recovery_mode) -- bearing in mind that "block" throughout
+ * this file means "makes the checklist incomplete," not "stops a firing":
+ * this item in particular has NO independent enforcement anywhere (see the
+ * top comment), so it is advisory and an operator can fire past it -- there is no reason for the E-stop item alone to
  * carry a bench exemption the rest of the page does not offer, and the cost
  * of one extra confirmation click on a board that has never seen line
  * voltage is far smaller than the cost of this item going quiet exactly when
