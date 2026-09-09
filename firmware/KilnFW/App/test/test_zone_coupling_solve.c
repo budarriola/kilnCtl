@@ -4,15 +4,20 @@
 // exercised indirectly through test_profile_executor_prestart.c/
 // test_adaptive_tune.c's larger fixtures, neither of which pins WHICH value
 // G[row][row] actually uses. This file exists to make that provenance
-// choice an explicit, falsifiable fact instead of an implicit one: today
-// the diagonal is `ff_k_dc` (the step-identified per-zone gain), never the
-// coupling matrix's own diagonal cell (contractually 0 in storage --
-// zones_http.h's zones_config_get_coupling() doc comment). See sec 3.2 for
-// why that choice was analysed and left unchanged: switching it needs
-// persisted per-zone storage for the matrix's own diagonal that does not
-// exist on the board today (zones_config_set_coupling() rejects a nonzero
-// diagonal cell outright), and adding that storage is out of scope for the
-// analysis pass that produced these numbers.
+// choice an explicit, falsifiable fact instead of an implicit one.
+//
+// UPDATED 2026-09-09 (docs/audits/dc_gain_factor_of_ten_2026-09-09.md sec 4).
+// The answer these tests used to pin -- an `ff_k_dc` diagonal from the
+// single-zone FOPDT step test sitting beside off-diagonals from the coupling
+// identification -- was a matrix describing no single experiment, and on this
+// bench's own data it solves the observed 70 degC three-zone hold as
+// u = [0.076, -0.118, 2.085]. coupling_matrix_provenance_ok() now REFUSES to
+// assemble that combination at all; the diagonal must come from the same
+// identification as the off-diagonals beside it, or the caller gets the
+// uncoupled per-zone feedforward instead. Every test below that previously
+// pinned a mixed answer now pins the refusal and the value handed back in its
+// place, and the mixed answer is explicitly ruled out so removing the guard
+// turns them red rather than merely changing a number.
 //
 // Own executable (build_host_tests.ps1), same reason test_zones_http.c/
 // test_adaptive_tune.c are: this file supplies its own tiny fake
@@ -114,23 +119,27 @@ static zone_coupling_neighbor_t neighbor(bool qualifies, float ff_k_dc)
     return n;
 }
 
-// ---- test 1: diagonal provenance is ff_k_dc, not the matrix's own cell ----
+// ---- test 1: the ff_k_dc diagonal is REFUSED beside measured off-diagonals
 //
 // Two-member system (z0 + z1 only, z2 unqualified), dT=30 -- representative
 // of the bench dwell tests sec 3.2's figures were measured against
-// (55C target, ~25C ambient). Two independently hand-solved 2x2 systems:
+// (55C target, ~25C ambient). Three hand-solved answers exist for it:
 //
-//   hybrid (production code, diag=ff_k_dc):    u0 = 0.1614
-//   own-diagonal (the analysed alternative):   u0 = 0.2632
+//   mixed (pre-2026-09-09 code, diag=ff_k_dc):  u0 = 0.1614
+//   self-consistent (own diagonal):             u0 = 0.2631
+//   refused -> uncoupled 1x1 (dT/ff_k_dc):      u0 = 0.7644
 //
-// The two solutions differ by ~0.10 duty -- comfortably outside float
-// rounding, so this is a real fork in behaviour, not a tolerance question.
-// Mutate G[row][row]'s assignment in zone_coupling_solve.c (e.g. swap
-// `k_dc_s` for a hard-coded own-diagonal constant) and this test goes red
-// against the wrong branch's number; that is the point of it.
-static void test_hold_diagonal_is_ff_k_dc(void)
+// The mixed answer is the one docs/audits/dc_gain_factor_of_ten_2026-09-09.md
+// sec 4 showed describes no single experiment: an ff_k_dc diagonal from the
+// single-zone FOPDT step test beside off-diagonals from the coupling
+// identification. With use_measured_diag_k_dc=false against a matrix that HAS
+// measured off-diagonals, coupling_matrix_provenance_ok() now refuses to
+// assemble it at all. This test pins the refusal AND the value the caller is
+// handed instead, and explicitly rules out the mixed answer -- delete the
+// guard and 0.1614 comes straight back.
+static void test_hold_ff_k_dc_diagonal_is_refused(void)
 {
-    TEST_SECTION("zone_coupling_solve: diagonal provenance == ff_k_dc");
+    TEST_SECTION("zone_coupling_solve: ff_k_dc diagonal + measured off-diagonals == refused");
     setup_adopted_matrix();
 
     zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
@@ -147,30 +156,31 @@ static void test_hold_diagonal_is_ff_k_dc(void)
     float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &membership_changed, &cache, &prev_sig);
 
-    TEST_CHECK(reason == COUPLING_SOLVE_OK, "2-member hold solve should succeed");
-    TEST_CHECK(used_matrix, "2-member hold solve should report used_matrix");
-    // Pins the HYBRID answer (0.1614), not the own-diagonal answer (0.2632)
-    // hand-solved in this file's header comment -- proves today's code path,
-    // and flips red the moment G[row][row] stops being ff_k_dc.
-    TEST_CHECK_NEAR(u0, 0.1614, 0.001, "z0 hold duty should match the ff_k_dc-diagonal hybrid solve");
-    // The own-diagonal alternative is far enough away that a passing test
-    // against 0.1614 also rules it out; check it explicitly anyway so the
-    // "not this value" half of the claim is asserted, not just implied.
-    TEST_CHECK(fabs((double)u0 - 0.2632) > 0.05, "z0 hold duty should NOT match the own-diagonal solve");
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE,
+               "flag off + measured off-diagonals is the mixed matrix -- must be refused, not assembled");
+    TEST_CHECK(!used_matrix, "a refused matrix must not be reported as a genuine solve");
+    TEST_CHECK_NEAR(u0, 0.7644, 0.001, "a refusal hands back the uncoupled dT/ff_k_dc feedforward");
+    TEST_CHECK(fabs((double)u0 - 0.1614) > 0.05, "the mixed-matrix answer must NOT come out of this call");
 }
 
-// ---- test 2: full 3-zone seam-step regression pin -----------------------
+// ---- test 2: full 3-zone regression pin, self-consistent matrix ---------
 //
-// All three zones qualify (steady dwell, no interlocks flapping) -- pins the
-// full n=3 solve against the hybrid (ff_k_dc-diagonal) formula so any future
-// change to the diagonal source, the matrix, or the elimination itself shows
-// up here as a numeric drift rather than silently. See sec 3.2 for the
-// derivation of the own-diagonal alternative (u0=0.1395/u1=0.3529/u2=0.6924)
-// this is NOT pinned against.
-static void test_hold_full_system_hybrid_regression(void)
+// All three zones qualify (steady dwell, no interlocks flapping) and every
+// zone's coupling_diag_k_dc is populated from the same identification as the
+// off-diagonals, so the matrix is assemblable. Pins the full n=3 solve so any
+// future change to the diagonal source, the matrix, or the elimination itself
+// shows up here as numeric drift rather than silently. The mixed
+// (ff_k_dc-diagonal) triple this is NOT pinned against is
+// u0=0.0802/u1=0.3586/u2=0.7852 -- see
+// docs/audits/dc_gain_factor_of_ten_2026-09-09.md sec 4 for why it is not a
+// candidate.
+static void test_hold_full_system_self_consistent_regression(void)
 {
-    TEST_SECTION("zone_coupling_solve: full 3-zone hybrid solve regression pin");
+    TEST_SECTION("zone_coupling_solve: full 3-zone self-consistent solve regression pin");
     setup_adopted_matrix();
+    set_diag_k_dc(0, OWN_DIAG_Z0);
+    set_diag_k_dc(1, OWN_DIAG_Z1);
+    set_diag_k_dc(2, OWN_DIAG_Z2);
 
     zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
     zones[0] = neighbor(true, FF_K_DC_Z0);
@@ -185,28 +195,34 @@ static void test_hold_full_system_hybrid_regression(void)
     bool used_matrix, infeasible, changed;
     coupling_solve_reason_t reason;
 
-    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache0, &sig0);
-    float u1 = zone_coupling_solve_hold(true, FF_K_DC_Z1, 1, false, zones, 3, 55.0f, 25.0f, &used_matrix,
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "a fully self-consistent matrix must actually solve");
+    float u1 = zone_coupling_solve_hold(true, FF_K_DC_Z1, 1, true, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache1, &sig1);
-    float u2 = zone_coupling_solve_hold(true, FF_K_DC_Z2, 2, false, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float u2 = zone_coupling_solve_hold(true, FF_K_DC_Z2, 2, true, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache2, &sig2);
 
-    TEST_CHECK_NEAR(u0, 0.0802, 0.001, "z0 full-system hybrid hold duty");
-    TEST_CHECK_NEAR(u1, 0.3586, 0.001, "z1 full-system hybrid hold duty");
-    TEST_CHECK_NEAR(u2, 0.7852, 0.001, "z2 full-system hybrid hold duty");
+    TEST_CHECK_NEAR(u0, 0.1395, 0.001, "z0 full-system self-consistent hold duty");
+    TEST_CHECK_NEAR(u1, 0.3529, 0.001, "z1 full-system self-consistent hold duty");
+    TEST_CHECK_NEAR(u2, 0.6924, 0.001, "z2 full-system self-consistent hold duty");
+    TEST_CHECK(fabs((double)u0 - 0.0802) > 0.02 && fabs((double)u2 - 0.7852) > 0.02,
+               "the mixed-matrix triple must not be what comes back");
 }
 
 // ---- test 3: membership-transition seam step, z0-z1 pair -----------------
 //
 // Sizes what actually happens at the moment z1 joins z0's system: before,
-// z0 is on the 1x1 fallback (duty = dT/ff_k_dc); after, it is on the 2x2
-// hybrid solve from test 1. Both computed here so the transition step itself
+// z0 is on the 1x1 fallback (duty = dT/coupling_diag_k_dc, since the flag is
+// on and z0's own diagonal is measured); after, it is on the 2x2
+// self-consistent solve. Both computed here so the transition step itself
 // is pinned, independent of whether it is later judged acceptable.
 static void test_hold_membership_transition_step(void)
 {
     TEST_SECTION("zone_coupling_solve: 1x1->2x2 transition step size (z0, z1 joins)");
     setup_adopted_matrix();
+    set_diag_k_dc(0, OWN_DIAG_Z0);
+    set_diag_k_dc(1, OWN_DIAG_Z1);
 
     zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
     zones[0] = neighbor(true, FF_K_DC_Z0);
@@ -220,18 +236,18 @@ static void test_hold_membership_transition_step(void)
     coupling_solve_reason_t reason;
 
     // Before: no qualifying neighbours -- 1x1 fallback.
-    float before = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float before = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
                                             &infeasible, &reason, &changed, &cache, &prev_sig);
     TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS, "no neighbours yet -- 1x1 fallback expected");
-    TEST_CHECK_NEAR(before, 0.7644, 0.001, "1x1 fallback duty == dT/ff_k_dc");
+    TEST_CHECK_NEAR(before, 0.7868, 0.001, "1x1 fallback duty == dT/coupling_diag_k_dc with the flag on");
 
     // z1 now qualifies -- membership changes on this same call.
     zones[1].qualifies = true;
-    float after = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
+    float after = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
                                            &infeasible, &reason, &changed, &cache, &prev_sig);
     TEST_CHECK(reason == COUPLING_SOLVE_OK, "z1 joining should produce a genuine 2-member solve");
     TEST_CHECK(changed, "membership change must be reported on the joining tick");
-    TEST_CHECK_NEAR(after, 0.1614, 0.001, "post-join duty matches test 1's hybrid 2x2 solve");
+    TEST_CHECK_NEAR(after, 0.2631, 0.001, "post-join duty matches the self-consistent 2x2 solve");
 
     double step = fabs((double)before - (double)after);
     // ~0.60 duty -- the coupling contribution itself, not a diagonal-choice
@@ -315,8 +331,9 @@ static void test_hold_measured_diag_flag_falls_back_when_unmeasured(void)
     float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache, &prev_sig);
 
-    TEST_CHECK(reason == COUPLING_SOLVE_OK, "flag-on, unmeasured-diag hold solve should still succeed");
-    TEST_CHECK_NEAR(u0, 0.1614, 0.001, "flag on but unmeasured diag should fall back to the ff_k_dc hybrid solve");
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE,
+               "flag on but NO measured diagonal is still the mixed matrix -- must be refused");
+    TEST_CHECK_NEAR(u0, 0.7644, 0.001, "a refusal hands back the uncoupled dT/ff_k_dc feedforward");
 }
 
 // ---- tests 6-10: flag on, getter reports TRUE, but the stored value is
@@ -351,14 +368,14 @@ static void run_present_but_unusable_case(const char *label, float bad_value)
     float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache, &prev_sig);
 
-    TEST_CHECK(reason == COUPLING_SOLVE_OK, label);
-    // z1's diagonal is the own-diagonal value (OWN_DIAG_Z1) in this call, not
-    // FF_K_DC_Z1 -- so this is not test 1's exact hybrid answer (0.1614) or
-    // test 4's exact own-diagonal answer (0.2632); it is a THIRD, distinct
-    // number sitting between them, computed independently below so the
-    // check is falsifiable rather than accidentally matching either pinned
-    // constant.
-    TEST_CHECK_NEAR(u0, 0.25279, 0.001, label);
+    // z1's diagonal IS usable here, z0's is not -- a half-populated matrix,
+    // which coupling_matrix_provenance_ok() refuses whole rather than
+    // completing z0's row from ff_k_dc. Before 2026-09-09 this produced a
+    // THIRD number (0.25279) sitting between test 1's mixed answer and the
+    // self-consistent one: one matrix assembled from three sources at once.
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE, label);
+    TEST_CHECK_NEAR(u0, 0.7644, 0.001, label);
+    TEST_CHECK(fabs((double)u0 - 0.25279) > 0.05, label);
 }
 
 static void test_hold_measured_diag_present_but_zero_falls_back(void)
@@ -412,7 +429,8 @@ static void test_hold_zero_row_and_zero_diag_is_solvable_with_guard(void)
                  "produces a solvable (non-singular) system via the ff_k_dc fallback diagonal");
     setup_adopted_matrix();
     set_matrix_row(1, 0.0f, 0.0f, 0.0f); // z1: no measured coupling to anyone
-    set_diag_k_dc(1, 0.0f);              // and its own diag_k_dc reads present-but-zero
+    set_diag_k_dc(0, OWN_DIAG_Z0);
+    set_diag_k_dc(1, OWN_DIAG_Z1);       // both diagonals measured -- the matrix IS assemblable
 
     zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
     zones[0] = neighbor(true, FF_K_DC_Z0);
@@ -427,11 +445,11 @@ static void test_hold_zero_row_and_zero_diag_is_solvable_with_guard(void)
 
     float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
                                         &infeasible, &reason, &changed, &cache, &prev_sig);
-    (void)u0;
 
-    TEST_CHECK(reason == COUPLING_SOLVE_OK, "z1's ff_k_dc-diagonal fallback keeps the system solvable "
-              "even though z1's own coupling row and measured diag are both entirely unmeasured");
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "an all-zero coupling ROW is still a solvable system as long "
+              "as that zone's own measured diagonal is present -- a zero row is data, not a missing half");
     TEST_CHECK(used_matrix, "a genuine (non-fallback) 2x2 solve must engage here");
+    TEST_CHECK_NEAR(u0, 0.1880, 0.001, "z0 duty for the zero-z1-row self-consistent system");
 }
 
 // ---- tests 12-14: climb-term coverage of the same flag, mirroring the
@@ -468,14 +486,24 @@ static void test_climb_diagonal_is_ff_k_dc(void)
     bool used_matrix = false, infeasible = false, changed = false;
     coupling_solve_reason_t reason;
 
+    // The mixed answer this used to pin was
     // numpy.linalg.solve([[39.2459,27.32],[14.30,31.9669]], [60,75]) ==
-    // [-0.15162281, 2.41400343] (verified A@u reproduces b).
+    // [-0.15162281, 2.41400343]. It is now refused for the same reason the
+    // hold term's is (test 1): an ff_k_dc diagonal beside measured
+    // off-diagonals is two experiments in one matrix. The climb term must
+    // refuse exactly what the hold term refuses -- if it did not, the two
+    // halves of the same tick's feedforward would be computed from two
+    // different systems, which is the failure mode
+    // project_feedforward_climb_uncoupled.md already records once.
     float u0 = zone_coupling_solve_climb(true, FF_K_DC_Z0, TAU_Z0, 0, false, zones, 3, CLIMB_RATE_C_PER_S,
                                          &used_matrix, &infeasible, &reason, &changed, &cache, &prev_sig);
 
-    TEST_CHECK(reason == COUPLING_SOLVE_OK, "2-member climb solve should succeed");
-    TEST_CHECK(used_matrix, "2-member climb solve should report used_matrix");
-    TEST_CHECK_NEAR(u0, -0.15162, 0.001, "z0 climb duty should match the ff_k_dc-diagonal hybrid solve");
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE,
+               "climb must refuse the mixed matrix, exactly as hold does");
+    TEST_CHECK(!used_matrix, "a refused matrix must not be reported as a genuine climb solve");
+    TEST_CHECK_NEAR(u0, (double)(CLIMB_RATE_C_PER_S * TAU_Z0) / (double)FF_K_DC_Z0, 0.001,
+                    "a refusal hands back the uncoupled rate*tau/ff_k_dc climb feedforward");
+    TEST_CHECK(fabs((double)u0 + 0.15162) > 0.05, "the mixed-matrix climb answer must not come back");
 }
 
 // ---- test 13: use_measured_diag_k_dc=true switches the climb diagonal ----
@@ -535,9 +563,10 @@ static void test_climb_measured_diag_flag_falls_back_when_unmeasured(void)
     float u0 = zone_coupling_solve_climb(true, FF_K_DC_Z0, TAU_Z0, 0, true, zones, 3, CLIMB_RATE_C_PER_S,
                                          &used_matrix, &infeasible, &reason, &changed, &cache, &prev_sig);
 
-    TEST_CHECK(reason == COUPLING_SOLVE_OK, "flag-on, unmeasured-diag climb solve should still succeed");
-    TEST_CHECK_NEAR(u0, -0.15162, 0.001, "flag on but unmeasured diag should fall back to the ff_k_dc "
-                    "hybrid climb solve");
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE,
+               "flag on but NO measured diagonal is still the mixed matrix -- climb must refuse it too");
+    TEST_CHECK_NEAR(u0, (double)(CLIMB_RATE_C_PER_S * TAU_Z0) / (double)FF_K_DC_Z0, 0.001,
+                    "a refusal hands back the uncoupled rate*tau/ff_k_dc climb feedforward");
 }
 
 // ---- test 15: 1x1 fallback (no qualifying neighbours) now honours
@@ -633,10 +662,57 @@ static void test_climb_out_of_range_zi_falls_back_even_with_flag_on(void)
                     "out-of-range zi should degrade to the legacy ff_k_dc formula, not crash or read garbage");
 }
 
+// ---- test 18: a system with NO measured off-diagonals is NOT refused ----
+//
+// The provenance guard's own boundary, and the reason it is stated as "if
+// the system carries any measured off-diagonal" rather than "if the
+// diagonals are not measured". With every coupling_coeff cell zero, G is
+// diagonal: the solve reduces to exactly the uncoupled per-zone formula it
+// always was, no coupling-identification number enters it anywhere, and
+// there is therefore nothing to mix and nothing to refuse -- even with
+// use_measured_diag_k_dc false and no coupling_diag_k_dc stored. Refusing
+// this case would take coupled feedforward away from a board whose matrix
+// simply has not been commissioned yet, for no safety gain.
+//
+// Falsifiable both ways: it goes red if the guard is widened to refuse on
+// the diagonals' provenance alone, and (with test 1) red if the guard is
+// removed entirely.
+static void test_hold_no_measured_off_diagonals_is_not_refused(void)
+{
+    TEST_SECTION("zone_coupling_solve: an all-zero coupling matrix is not a provenance mixture");
+    setup_adopted_matrix();
+    set_matrix_row(0, 0.0f, 0.0f, 0.0f);
+    set_matrix_row(1, 0.0f, 0.0f, 0.0f);
+    set_matrix_row(2, 0.0f, 0.0f, 0.0f);
+    // No diag_k_dc stored for anyone, and the flag is off below -- the exact
+    // combination test 1 shows is refused the moment a real off-diagonal
+    // exists.
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_hold_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, false, zones, 3, 55.0f, 25.0f, &used_matrix,
+                                        &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "a diagonal-only G has no mixture in it and must still solve");
+    TEST_CHECK(used_matrix, "and must be reported as a genuine solve");
+    // A diagonal G means the solve IS dT/ff_k_dc -- identical to the 1x1
+    // fallback, which is the whole point: nothing changed for this board.
+    TEST_CHECK_NEAR(u0, 0.7644, 0.001, "a diagonal-only G solves to exactly the uncoupled formula");
+}
+
 int main(void)
 {
-    test_hold_diagonal_is_ff_k_dc();
-    test_hold_full_system_hybrid_regression();
+    test_hold_ff_k_dc_diagonal_is_refused();
+    test_hold_full_system_self_consistent_regression();
     test_hold_membership_transition_step();
     test_hold_measured_diag_flag_switches_diagonal();
     test_hold_measured_diag_flag_falls_back_when_unmeasured();
@@ -652,6 +728,7 @@ int main(void)
     test_hold_no_neighbors_fallback_honours_measured_diag_flag();
     test_hold_no_neighbors_fallback_falls_back_when_unmeasured();
     test_climb_out_of_range_zi_falls_back_even_with_flag_on();
+    test_hold_no_measured_off_diagonals_is_not_refused();
 
     printf("zone_coupling_solve: %d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;

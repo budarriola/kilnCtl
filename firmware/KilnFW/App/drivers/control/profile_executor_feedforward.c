@@ -160,19 +160,34 @@ uint8_t count_qualifying_coupling_neighbors(uint8_t zi)
 static zone_coupling_hold_cache_t s_coupling_hold_cache[MAX31856_CHANNEL_COUNT];
 static uint16_t s_coupling_prev_membership_sig[MAX31856_CHANNEL_COUNT];
 
-/* PID_EXPANSION_PLAN.md sec 3.2 ("STORAGE LANDED 2026-09-02f" / "the solver
- * switch itself"): whether the coupled hold/climb solve prefers the coupling
- * matrix's own measured diagonal cell (coupling_diag_k_dc) over the step-
- * identified ff_k_dc, when the former is available. Deliberately false --
- * the plan section explicitly scopes "flip this on" as its own, separately
- * reviewed decision: coupling_diag_k_dc has no autotune writer on this board
- * today (hand-set/PC-preset only), and whether the UNCOUPLED 1x1 fallback
- * (diagonal_hold/diagonal_climb in zone_coupling_solve.c, which never routes
- * through this flag at all) should switch too is a separate, unresolved
- * question this flag does not answer. Flipping this one constant is now the
- * entire remaining step -- see zone_coupling_solve.h's own doc comment on
- * `use_measured_diag_k_dc` for the guarded-fallback contract this enables. */
-static const bool s_coupling_use_measured_diag_k_dc = false;
+/* PID_EXPANSION_PLAN.md sec 3.2 ("the solver switch itself"), resolved
+ * 2026-09-09 by docs/audits/dc_gain_factor_of_ten_2026-09-09.md sec 4:
+ * whether the coupled hold/climb solve uses the coupling matrix's own
+ * measured diagonal cell (coupling_diag_k_dc) rather than the separately
+ * step-identified ff_k_dc.
+ *
+ * NOW TRUE, and it is no longer the load-bearing decision it was. `false`
+ * used to mean "keep the hybrid": every diagonal came from the single-zone
+ * FOPDT step test while every off-diagonal came from the coupling
+ * identification, so the assembled matrix described no single experiment.
+ * On this bench's own adopted data that mixture solves the observed 70 degC
+ * three-zone hold as u = [0.076, -0.118, 2.085] (2-norm condition 14.19) --
+ * a negative duty and one at twice full scale -- against [0.207, 0.523,
+ * 1.027] (condition 4.64) for the column-consistent matrix. It is a strong
+ * candidate cause of the ff_hold infeasibility documented above roughly
+ * ambient+38 degC.
+ *
+ * The durable fix is NOT this constant: it is
+ * coupling_column_provenance_ok() in zone_coupling_solve.c, which REFUSES to
+ * assemble a half-populated matrix at all (returning
+ * COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE and the untouched uncoupled
+ * diagonal feedforward) instead of quietly completing one experiment's
+ * column with another's number. `false` here is one of the states that
+ * guard refuses whenever measured off-diagonals exist, so setting this
+ * constant back to false does not restore the old mixed matrix -- it
+ * disables the coupled solve outright. Which is the point: there is no
+ * configuration in which the two halves can be silently combined again. */
+static const bool s_coupling_use_measured_diag_k_dc = true;
 
 static float solve_hold_for_zone(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float ambient_c,
                                   bool *out_used_matrix, bool *out_infeasible,

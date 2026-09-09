@@ -26,6 +26,7 @@
 #include "../drivers/hw/max31856_codec.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -57,11 +58,50 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     for (int j = 0; j < NZ; j++) out_row[j] = g_coupling_coeff[zone_index][j];
     return true;
 }
+// The COUPLING RUN's OWN diagonal (docs/audits/high_temperature_transfer_
+// analysis_2026-09-08.md's full 3x3, and test_zone_coupling_solve.c's
+// OWN_DIAG_Z*): the direct gain measured by the SAME coupled excitation runs
+// that produced g_coupling_coeff above, as opposed to g_k_dc, which is the
+// separate single-zone FOPDT step test's gain. Not a new measurement and not
+// invented here -- these are the already-adopted numbers, carried in so this
+// harness can run the column-consistent matrix as well as the mixed one.
+static const float g_own_diag[NZ] = { 38.13f, 35.90f, 35.32f };
+
+// Whether zones_config_get_coupling_diag_k_dc() below reports the coupling
+// run's own diagonal as measured. false models a board that has never had a
+// coupling identification persist its diagonal -- on which
+// coupling_column_provenance_ok() now refuses the matrix outright rather
+// than completing it from g_k_dc (see docs/audits/
+// dc_gain_factor_of_ten_2026-09-09.md sec 4). g_diag_scale mirrors the
+// power_scale applied to ff_k_dc in run_firing2(): the diagonal is a gain in
+// exactly the same units, so it must be scaled by exactly the same factor or
+// the matrix is inconsistent for a second, unrelated reason.
+static bool  g_diag_measured = true;
+static float g_diag_scale = 1.0f;
+
 bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
 {
-    (void)zone_index; (void)out_k_dc;
-    return false; // not measured -- diagonal always falls back to ff_k_dc, matching the shipped default
+    if (zone_index >= NZ) return false;
+    if (!g_diag_measured) {
+        *out_k_dc = 0.0f; // the field's own "never measured" value, getter still reports true
+        return true;
+    }
+    *out_k_dc = g_own_diag[zone_index] * g_diag_scale;
+    return true;
 }
+
+// Mirrors profile_executor_feedforward.c's s_coupling_use_measured_diag_k_dc.
+// Kept as one named constant rather than two inline `false` literals at the
+// call sites, so this harness cannot silently drift away from the production
+// value the way it had (production's flag has been flipped to true).
+// -DKILN_SWEEP_USE_MEASURED_DIAG=0 exists ONLY so the PRE-FIX arm (flag
+// false, i.e. the mixed matrix) can still be run for a before/after
+// comparison against a checkout of the old zone_coupling_solve.c; nothing in
+// the shipped build defines it.
+#ifndef KILN_SWEEP_USE_MEASURED_DIAG
+#define KILN_SWEEP_USE_MEASURED_DIAG 1
+#endif
+static const bool SWEEP_USE_MEASURED_DIAG_K_DC = (KILN_SWEEP_USE_MEASURED_DIAG != 0);
 
 // ---- G3: relay actuation lag. Not bench-measured (ITER_TUNE_REDESIGN_PLAN
 // sec 6.1's G3 row: "default from the bench-measured lag" -- no such
@@ -265,6 +305,8 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
     float max_scale_step = 0.0f; // largest tick-to-tick jump in the schedule scale -- "smoothness of handover"
     bool any_infeasible = false;
     long first_infeasible_tick = -1;
+    long infeasible_ticks = 0;   // ticks on which ANY zone's ff_hold solve clamped a duty down to 1.0
+    long total_ticks_run = 0;
     float last_hold[NZ] = {0}, last_climb[NZ] = {0};
     float last_reading[NZ] = { ambient_c, ambient_c, ambient_c };
     float prev_reading[NZ] = { ambient_c, ambient_c, ambient_c };
@@ -274,7 +316,10 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
 
     zone_coupling_neighbor_t nb[NZ];
 
+    g_diag_scale = power_scale; // see g_diag_scale's own comment: same units as ff_k_dc
+
     for (long t = 0; t < total_ticks; t++) {
+        total_ticks_run++;
         bool in_ramp = ((float)t < ramp_time_s);
         for (int i = 0; i < NZ; i++) {
             if (in_ramp) {
@@ -325,6 +370,7 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
         }
 
         float duty_cmd[NZ];
+        bool infeasible_this_tick = false;
         for (int i = 0; i < NZ; i++) {
             // BUG FOUND DURING THIS PASS: an earlier version of this loop
             // read one shared `infeasible` local for both calls below, so
@@ -338,11 +384,13 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
             // what changes once this is corrected.
             bool used_matrix, hold_infeasible, climb_infeasible, membership_changed;
             coupling_solve_reason_t reason;
-            float hold = zone_coupling_solve_hold(nb[i].qualifies, k_dc_eff[i], (uint8_t)i, false,
+            float hold = zone_coupling_solve_hold(nb[i].qualifies, k_dc_eff[i], (uint8_t)i,
+                                                   SWEEP_USE_MEASURED_DIAG_K_DC,
                                                    nb, NZ, setpoint_c[i], ambient_c,
                                                    &used_matrix, &hold_infeasible, &reason, &membership_changed,
                                                    &ctl.hold_cache[i], &ctl.hold_sig[i]);
-            float climb = zone_coupling_solve_climb(nb[i].qualifies, k_dc_eff[i], g_tau_s[i], (uint8_t)i, false,
+            float climb = zone_coupling_solve_climb(nb[i].qualifies, k_dc_eff[i], g_tau_s[i], (uint8_t)i,
+                                                     SWEEP_USE_MEASURED_DIAG_K_DC,
                                                      nb, NZ, rate_now,
                                                      &used_matrix, &climb_infeasible, &reason, &membership_changed,
                                                      &ctl.climb_cache[i], &ctl.climb_sig[i]);
@@ -350,6 +398,7 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
             last_climb[i] = climb;
             if (hold_infeasible || climb_infeasible) {
                 any_infeasible = true;
+                infeasible_this_tick = true;
                 if (first_infeasible_tick < 0) first_infeasible_tick = t;
             }
             float ff_u = hold + climb;
@@ -374,6 +423,8 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
             float duty = pid_update(&ctl.pid[i], &pcfg_i, setpoint_c[i], last_reading[i], dt_s, ff_u, hold);
             duty_cmd[i] = duty;
         }
+
+        if (infeasible_this_tick) infeasible_ticks++;
 
         bool relay_cmd[NZ], relay_actual[NZ];
         for (int i = 0; i < NZ; i++) {
@@ -418,11 +469,14 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
     printf("  max_rate=%.2fC/min (S8 guard default 33.3C/min: %s) max_schedule_step=%.3f\n",
            max_rate_c_per_min, (max_rate_c_per_min > 33.3f) ? "WOULD TRIP" : "clear", max_scale_step);
     if (any_infeasible) {
-        printf("  ff_hold INFEASIBLE first at tick %ld (elapsed %.1fs, approx temp %.1fC)\n",
+        printf("  ff_hold INFEASIBLE first at tick %ld (elapsed %.1fs, approx temp %.1fC); "
+               "infeasible on %ld of %ld ticks (%.1f%%)\n",
                first_infeasible_tick, (double)first_infeasible_tick,
-               ambient_c + rate_c_per_s * (float)first_infeasible_tick);
+               ambient_c + rate_c_per_s * (float)first_infeasible_tick,
+               infeasible_ticks, total_ticks_run,
+               100.0 * (double)infeasible_ticks / (double)(total_ticks_run ? total_ticks_run : 1));
     } else {
-        printf("  ff_hold never reported infeasible over this firing\n");
+        printf("  ff_hold never reported infeasible over this firing (0 of %ld ticks)\n", total_ticks_run);
     }
 }
 
@@ -432,6 +486,20 @@ int main(void)
     printf("# Results above ~62C are EXTRAPOLATION: radiative_coeff_w_per_k4 is NOT measured on this kiln.\n\n");
 
     verify_coupling_step_test();
+
+    // Provenance arm (docs/audits/dc_gain_factor_of_ten_2026-09-09.md sec 4).
+    // KILN_SWEEP_DIAG_MEASURED=0 in the environment models a board whose
+    // coupling identification has NOT persisted its own diagonal: the matrix
+    // is half-populated, coupling_column_provenance_ok() refuses it, and
+    // every zone falls back to the uncoupled diagonal feedforward. Default
+    // (unset, or any other value) models a board that HAS one, i.e. the
+    // column-consistent matrix.
+    {
+        const char *env = getenv("KILN_SWEEP_DIAG_MEASURED");
+        if (env != NULL && env[0] == '0') g_diag_measured = false;
+        printf("# coupling diagonal measured (column-consistent matrix): %s\n",
+               g_diag_measured ? "yes" : "no -- provenance guard refuses the matrix");
+    }
 
     // Nominal radiative coefficient picked ONLY to visibly bend gain over
     // the sweep -- not a measurement (units are the G1 mapping's "nominal"

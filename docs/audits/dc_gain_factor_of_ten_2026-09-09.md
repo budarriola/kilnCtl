@@ -166,3 +166,120 @@ single-zone FOPDT run.
 - Whether the coupling matrix's off-diagonals suffer the same truncation bias as the
   diagonal. They were fitted from the same `cpl_z*` runs, which *are* settled (§2),
   so probably not — but I did not refit them.
+
+---
+
+## 6. Resolution (same day, separate pass): the mixture is now refused, not combined
+
+Verified against the code first. `profile_executor_feedforward.c`'s
+`s_coupling_use_measured_diag_k_dc = false` did ship, and
+`coupling_diagonal_k_dc()` degraded to `ff_k_dc` per cell, so §4's mixture was
+real. Both of §4's numbers reproduce, using the real production elimination
+(`zone_coupling_gauss_solve_partial_pivot()` in `zone_coupling_solve.c`, linked
+into a driver — not a Python or test-local re-implementation of the solve) at
+`dT = 44.5 °C`:
+
+| `G` | cond (2-norm) | cond (inf-norm) | solved `u` |
+|---|---|---|---|
+| shipped mixed (`model_k_dc` diagonal) | **14.194** | 22.841 | `[0.076, -0.118, 2.085]` |
+| self-consistent (coupling run's own diagonal) | **4.641** | 6.655 | `[0.207, 0.523, 1.027]` |
+
+§4 quoted the 2-norm figures; both match to three decimals.
+
+### What was changed
+
+`coupling_matrix_provenance_ok()` (`zone_coupling_solve.c`), called by BOTH
+`zone_coupling_solve_hold()` and `zone_coupling_solve_climb()` after membership
+is built and before `G` is assembled. The invariant: **if the system carries any
+measured off-diagonal, no member's diagonal may come from the `ff_k_dc`
+fallback** — every member needs a usable `coupling_diag_k_dc` and
+`use_measured_diag_k_dc` must be true, or the matrix is refused whole and the
+caller gets the untouched uncoupled diagonal feedforward
+(`COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE`, appended at the end of the enum
+because `zone_runtime_t::ff_hold_reason` reaches the dashboard JSON as a
+number). A system with no measured off-diagonals is left alone: `G` is diagonal,
+the solve reduces to the formula it already was, and nothing foreign entered it.
+
+`s_coupling_use_measured_diag_k_dc` is now `true`, but it is no longer the
+load-bearing decision — setting it back to `false` no longer restores the mixed
+matrix, it disables the coupled solve. There is no configuration in which the
+two halves can be silently combined again.
+
+`autotune_engine_guard.c:631`'s write was NOT removed. Re-reading it against
+`autotune_engine_coupling.c`, the matrix is identified column by column:
+stepping zone *j* fills every `coupling_coeff[i][j]` via
+`zones_config_set_coupling_cell()` and that same trace's direct gain is column
+*j*'s diagonal. That write is same-experiment; §4's worry that it "would
+populate it with the FOPDT number anyway" is true numerically but the number is
+that run's own diagonal.
+
+### Effect on `ff_hold` infeasibility
+
+`sim_wide_temp_sweep.c`, which links the real `zone_coupling_solve.c`. It gained
+an infeasible-tick fraction (it only reported first-occurrence before) and a
+switchable diagonal stub; the adopted matrix values are unchanged.
+
+| arm | first infeasible | infeasible ticks |
+|---|---|---|
+| **before** — mixed matrix, 60 °C run | 41.4 °C | 2471 / 3240 (**76.3 %**) |
+| **before** — mixed matrix, 90 °C run | 41.4 °C | 2967 / 3480 (**85.3 %**) |
+| **after**, diagonal not persisted (today's board) — both runs | never | 0 (**0 %**) |
+| **after**, self-consistent matrix, 60 °C run | never | 0 (**0 %**) |
+| **after**, self-consistent matrix, 90 °C run | 63.3 °C | 2440 / 3480 (70.1 %) |
+
+The 41.4 °C reference point at zero radiative coefficient reproduces exactly.
+The self-consistent matrix moves first infeasibility from 41.4 °C to 63.3 °C —
+i.e. onto the documented "~62 °C" boundary rather than 20 °C below it, which is
+what `project_ff_hold_infeasible_above_62c` should have been describing all
+along. The mixed matrix was making the feasible region roughly half as wide as
+the data supports.
+
+### Could this solve have caused the 2026-09-09 `profile_executor` panic? No
+
+Checked explicitly, because a plant that does not respond is the kind of input
+that makes a fitted-model solve degenerate:
+
+- **The solve's matrix has no measurement input at all.** `G` is built entirely
+  from `zones_config_get_coupling()` and the per-zone gains; the right-hand side
+  is `setpoint − ambient` (and `rate × tau` for climb). Temperature readings
+  reach this module only through `zone_coupling_qualifies_as_neighbor()`, which
+  can add or remove a row but cannot change a coefficient. A kiln sitting flat
+  at 31.9 °C under duty 1.0 cannot degrade the conditioning of this matrix by
+  any path — it is the same `G` it would be with a healthy plant.
+- **No non-finite value escapes.** `gauss_solve_partial_pivot_vec()` rejects a
+  non-finite `G` entry or `b` (`_NONFINITE` / `_SINGULAR`), an all-zero matrix,
+  and any pivot under the conditioning floor, and re-checks `isfinite()` on
+  every back-substitution result; `out_u[]` is documented as unreadable unless
+  `COUPLING_SOLVE_OK`. `zone_feedforward()` then rejects a non-finite
+  `hold + climb` before clamping to `[0,1]`.
+- **There is no assert, `abort()` or `ESP_ERROR_CHECK` anywhere in
+  `zone_coupling_solve.c` or `profile_executor_feedforward.c`**, and the new
+  guard is a pure predicate with an early return — it refuses cleanly, it cannot
+  panic. Every buffer is a fixed `MAX31856_CHANNEL_COUNT` stack array with
+  `n <= MAX31856_CHANNEL_COUNT` enforced.
+
+So the `[0.076, -0.118, 2.085]` solve is a control-quality defect, not a crash
+mechanism: `-0.118` and `2.085` are finite, and the caller clamps them. The
+panic needs a different cause.
+
+### Recommendation, not a change: re-identify the matrix on hardware
+
+No matrix value was altered. Today's board has measured off-diagonals and no
+persisted `coupling_diag_k_dc`, so the guard leaves it on uncoupled per-zone
+feedforward until a joint identification lands. The capture needed is the one
+§5 already asks for, run to completion: **from a rested baseline (every zone at
+ambient, per `project_autotune_needs_rested_baseline`), step each zone in turn
+and fit that zone's whole COLUMN — the diagonal and the two cross-gains — from
+the same trace**, then persist all three together. The on-board autotune path
+already does exactly this shape (`zones_config_set_coupling_cell()` plus
+`zones_config_set_coupling_diag_k_dc()` from one accept); it has simply never
+been run for all three zones against the currently adopted off-diagonals.
+
+### Residual gap this cannot close
+
+Two columns each internally complete but identified in DIFFERENT runs — an
+autotune of zone 0 rewriting column 0 beside off-diagonals adopted weeks
+earlier — is undetectable here. Catching it needs a provenance stamp stored
+beside the cells, i.e. a new `zone_cfg_t` field and a `ZONES_CFG_VERSION` bump.
+That bump carries the documented rollback-to-default-gains hazard, so it is the
+owner's call and was NOT made in this pass.

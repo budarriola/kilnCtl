@@ -205,6 +205,85 @@ static float coupling_diagonal_k_dc(uint8_t member_zi, float fallback_ff_k_dc, b
     return fallback_ff_k_dc;
 }
 
+/* PROVENANCE GUARD (docs/audits/dc_gain_factor_of_ten_2026-09-09.md sec 4).
+ *
+ * The coupling matrix is identified COLUMN BY COLUMN: stepping zone j fills
+ * every coupling_coeff[i][j] for i != j (autotune_engine_coupling.c's
+ * zones_config_set_coupling_cell(affected=i, stepped=j, ...)) and that same
+ * trace's own direct gain, which is column j's DIAGONAL cell
+ * (zones_config_set_coupling_diag_k_dc(j, ...), autotune_engine_guard.c).
+ * One excitation, one column, both halves.
+ *
+ * Before this guard the solve could assemble a matrix whose off-diagonals
+ * came from the coupling identification and whose diagonal came from a
+ * completely separate single-zone FOPDT step test (`ff_k_dc`/`model_k_dc`),
+ * because `use_measured_diag_k_dc` was false -- or was true with the field
+ * unpopulated -- and coupling_diagonal_k_dc() silently degraded to that
+ * fallback, cell by cell. The resulting matrix describes no single
+ * experiment. On this bench's own adopted data that mixture solves the
+ * observed 70 degC three-zone hold as u = [0.076, -0.118, 2.085] at 2-norm
+ * condition 14.19 -- a negative duty and one at twice full scale -- where
+ * the self-consistent matrix gives [0.207, 0.523, 1.027] at condition 4.64,
+ * within 0.01 of the observed z1 duty. This is the repo's named "reset one
+ * side of a pair" shape: two halves of ONE matrix, each internally
+ * consistent, joined by a contract ("these cells came from the same runs")
+ * that nothing enforced.
+ *
+ * The invariant enforced here, stated once: IF the system carries any
+ * measured off-diagonal at all, THEN no member's diagonal may come from the
+ * `ff_k_dc` fallback. Concretely, every member must have a usable
+ * coupling_diag_k_dc (finite and > 0 -- this field's own "measured"
+ * convention, see coupling_diagonal_k_dc() above) AND
+ * `use_measured_diag_k_dc` must be true, or the matrix is refused whole.
+ * `use_measured_diag_k_dc == false` is therefore itself a refusal whenever
+ * measured off-diagonals exist: that flag forces every diagonal to the
+ * FOPDT value while the off-diagonals stay measured, which is the mixture
+ * by construction.
+ *
+ * A system with NO measured off-diagonals among its members is left alone:
+ * G is then diagonal, the solve reduces to the uncoupled per-zone formula
+ * it already was, and no foreign experiment's number has entered anything.
+ * There is nothing to mix, so there is nothing to refuse.
+ *
+ * A refusal is NOT an error: the caller gets the untouched legacy uncoupled
+ * diagonal feedforward, exactly as for every other coupling_solve_reason_t
+ * fallback, and the PID still closes the loop on the setpoint. It is
+ * strictly safer than the mixture -- see the numbers above.
+ *
+ * NOT detectable here, and deliberately out of scope: two columns that are
+ * each internally complete but came from DIFFERENT identification runs
+ * (say, an autotune of zone 0 rewriting column 0 beside off-diagonals
+ * adopted months earlier). Distinguishing those needs a provenance stamp
+ * stored alongside the cells, i.e. a new zone_cfg_t field and a
+ * ZONES_CFG_VERSION bump. See the audit for that recommendation. */
+static bool coupling_matrix_provenance_ok(const uint8_t *members, uint8_t n, bool use_measured_diag_k_dc)
+{
+    bool any_measured_off_diagonal = false;
+    for (uint8_t row = 0; row < n && !any_measured_off_diagonal; row++) {
+        float coupling_row[MAX31856_CHANNEL_COUNT];
+        if (!zones_config_get_coupling(members[row], coupling_row)) continue;
+        for (uint8_t col = 0; col < n; col++) {
+            if (members[col] == members[row]) continue;
+            float c = coupling_row[members[col]];
+            if (isfinite(c) && c != 0.0f) {
+                any_measured_off_diagonal = true;
+                break;
+            }
+        }
+    }
+    if (!any_measured_off_diagonal) return true;
+
+    if (!use_measured_diag_k_dc) return false;
+    for (uint8_t row = 0; row < n; row++) {
+        float measured = 0.0f;
+        if (!(zones_config_get_coupling_diag_k_dc(members[row], &measured) && isfinite(measured) &&
+              measured > 0.0f)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi, bool use_measured_diag_k_dc,
                                const zone_coupling_neighbor_t *zones, uint8_t zone_count,
                                float setpoint_c, float ambient_c, bool *out_used_matrix, bool *out_infeasible,
@@ -265,6 +344,14 @@ float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi, bo
          * k_dc, not an approximation of it, so there is nothing to gain by
          * routing it through the general n x n machinery below. */
         *out_reason = COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS;
+        return diagonal_hold;
+    }
+
+    /* See coupling_column_provenance_ok() above: refuse to ASSEMBLE a matrix
+     * whose diagonal and off-diagonals come from different experiments,
+     * rather than assembling it and hoping the numbers are compatible. */
+    if (!coupling_matrix_provenance_ok(members, n, use_measured_diag_k_dc)) {
+        *out_reason = COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE;
         return diagonal_hold;
     }
 
@@ -421,6 +508,14 @@ float zone_coupling_solve_climb(bool z_qualifies, float z_ff_k_dc, float z_ff_ta
 
     if (n == 1) {
         *out_reason = COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS;
+        return diagonal_climb;
+    }
+
+    /* Same provenance refusal as the hold term's -- the climb term solves the
+     * SAME G with the same membership, so a matrix the hold term refuses to
+     * assemble must not be assembled here either. */
+    if (!coupling_matrix_provenance_ok(members, n, use_measured_diag_k_dc)) {
+        *out_reason = COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE;
         return diagonal_climb;
     }
 

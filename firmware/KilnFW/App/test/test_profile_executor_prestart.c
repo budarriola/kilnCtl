@@ -787,8 +787,30 @@ static bool  g_stub_coupling_diag_present[MAX31856_CHANNEL_COUNT];
 static float g_stub_coupling_diag[MAX31856_CHANNEL_COUNT];
 bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
 {
-    if (zone_index >= MAX31856_CHANNEL_COUNT || !g_stub_coupling_diag_present[zone_index]) {
-        return false;
+    if (zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    if (!g_stub_coupling_diag_present[zone_index]) {
+        /* UPDATED 2026-09-09 (docs/audits/dc_gain_factor_of_ten_2026-09-09.md
+         * sec 4/6). The default is no longer "not measured": with
+         * s_coupling_use_measured_diag_k_dc now true and
+         * coupling_matrix_provenance_ok() refusing any matrix whose diagonal
+         * and off-diagonals came from different experiments, a fixture that
+         * reported "no measured diagonal" beside populated off-diagonals
+         * would be refused, and every coupled-solve test in this file would
+         * be testing the refusal path instead of the wiring it is actually
+         * about.
+         *
+         * So the default declares the diagonal to be this zone's own ff_k_dc
+         * -- i.e. this fixture asserts "the diagonal and the off-diagonals
+         * came from the same identification", which is exactly the state a
+         * jointly-identified board is in. Every expected number in this file
+         * is unchanged by that, because the value on the diagonal is
+         * identical either way; what changes is only that the matrix is now
+         * declarable as self-consistent. A test that needs a DISTINCT
+         * own-diagonal (to prove the flag is really read) still sets
+         * g_stub_coupling_diag_present/g_stub_coupling_diag explicitly -- see
+         * test_hold_wiring_uses_measured_diag_when_populated(). */
+        if (out_k_dc) *out_k_dc = s_exec.zones[zone_index].ff_k_dc;
+        return true;
     }
     if (out_k_dc) *out_k_dc = g_stub_coupling_diag[zone_index];
     return true;
@@ -3863,16 +3885,21 @@ static void test_hold_singular_matrix_falls_back(void)
  * `s_coupling_use_measured_diag_k_dc`, or if that constant itself were ever
  * flipped, G[row][row] would pick up own_diag[] instead of ff_k_dc and this
  * test's TEST_CHECK_NEAR against the ff_k_dc-diagonal answer would go red.
- * Verified by mutation: temporarily forcing the call site's
- * `s_coupling_use_measured_diag_k_dc` argument to a literal `true` and
- * rebuilding reproduces exactly that failure (see this repo's report for
- * the quoted output); reverted immediately after. */
-static void test_hold_wiring_ignores_measured_diag_while_flag_is_off(void)
+ * UPDATED 2026-09-09: the constant is now TRUE
+ * (docs/audits/dc_gain_factor_of_ten_2026-09-09.md sec 6), so the assertion
+ * is inverted -- own_diag[] MUST now be what lands on the diagonal, for both
+ * the hold and the climb term, and the ff_k_dc answer must not come out. The
+ * test stays exactly as sensitive to the constant as before, in the other
+ * direction: setting it back to false no longer merely changes the diagonal,
+ * it makes coupling_matrix_provenance_ok() refuse the matrix outright, so
+ * every check below goes red rather than silently passing. */
+static void test_hold_wiring_uses_measured_diag_when_populated(void)
 {
     TEST_SECTION("solve_hold_for_zone()/solve_climb_for_zone() production wiring -- with "
-                 "s_coupling_use_measured_diag_k_dc compiled false, a POPULATED, DISTINCT "
-                 "coupling_diag_k_dc must be completely ignored -- proves the suite is sensitive "
-                 "to that constant, not merely to the flag argument in isolation");
+                 "s_coupling_use_measured_diag_k_dc compiled TRUE (2026-09-09), a POPULATED, "
+                 "DISTINCT coupling_diag_k_dc must be what lands on G's diagonal, and the "
+                 "ff_k_dc-diagonal answer must NOT come out -- proves the suite is sensitive to "
+                 "that constant, not merely to the flag argument in isolation");
     reset_coupling_test_state();
 
     const float diag[3]     = {31.9609f, 23.4805f, 21.7422f};
@@ -3900,11 +3927,26 @@ static void test_hold_wiring_ignores_measured_diag_while_flag_is_off(void)
         g_stub_coupling_diag[i] = own_diag[i];
     }
 
+    /* Reference solve, through the SAME production elimination the wiring
+     * uses, with own_diag[] on the diagonal -- computed here rather than
+     * hand-pinned so this test cannot drift away from the matrix above. */
+    float own_hold_G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    memset(own_hold_G, 0, sizeof(own_hold_G));
+    own_hold_G[0][0] = own_diag[0]; own_hold_G[0][1] = 12.0586f; own_hold_G[0][2] = 6.0039f;
+    own_hold_G[1][0] = 5.7656f;     own_hold_G[1][1] = own_diag[1]; own_hold_G[1][2] = 6.7734f;
+    own_hold_G[2][0] = 2.4062f;     own_hold_G[2][1] = 4.1094f;     own_hold_G[2][2] = own_diag[2];
+    float own_hold_u[MAX31856_CHANNEL_COUNT];
+    TEST_CHECK(zone_coupling_gauss_solve_partial_pivot(3, own_hold_G, setpoint_c - ambient_c,
+                                                       own_hold_u) == COUPLING_SOLVE_OK,
+               "the own-diagonal reference hold solve must itself succeed");
+
     for (uint8_t zi = 0; zi < 3; zi++) {
         float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f, NULL);
-        TEST_CHECK_NEAR(u_ff, expect_u[zi], 1e-4, "with the flag compiled off, a populated "
-                        "coupling_diag_k_dc must not move the hold duty at all -- the exact "
-                        "ff_k_dc-diagonal answer must still come out");
+        TEST_CHECK_NEAR(u_ff, own_hold_u[zi], 1e-4, "with the flag compiled true, a populated "
+                        "coupling_diag_k_dc IS what lands on the diagonal");
+        TEST_CHECK(fabsf(u_ff - expect_u[zi]) > 0.01f, "and the ff_k_dc-diagonal answer must NOT "
+                  "come out -- flipping s_coupling_use_measured_diag_k_dc back to false would now "
+                  "refuse this matrix outright (mixed provenance), which this check also catches");
     }
 
     /* Climb-term counterpart, same production wiring, same "populated but
@@ -3939,9 +3981,10 @@ static void test_hold_wiring_ignores_measured_diag_while_flag_is_off(void)
         zone_coupling_gauss_solve_partial_pivot_vec(3, own_diag_G, b_climb, own_u);
     TEST_CHECK(own_reason == COUPLING_SOLVE_OK, "the own-diagonal reference solve itself must succeed "
               "for the disagreement check below to mean anything");
-    TEST_CHECK(fabsf(climb0 - own_u[0]) > 0.01f, "the production climb answer must NOT match what an "
-              "own-diagonal solve would have given -- if it did, the flag-off wiring silently used "
-              "coupling_diag_k_dc anyway");
+    TEST_CHECK_NEAR(climb0, own_u[0], 1e-4, "the production climb answer MUST match the own-diagonal "
+                    "solve -- the climb term reads the same constant as the hold term, and a climb "
+                    "term that quietly diverged from an already-fixed hold term is the exact history "
+                    "project_feedforward_climb_uncoupled.md records");
 }
 
 /* Live-board defect (2026-08-31 firing): the CLIMB half of zone_feedforward()
@@ -4269,6 +4312,18 @@ static void test_hold_pathological_inputs_never_nan_or_inf(void)
     memset(&z_zero, 0, sizeof(z_zero));
     z_zero.ff_k_dc = 0.0f;
     z_zero.ff_enabled = true;
+    /* Declare zone 0's coupling diagonal explicitly "present but 0.0f" --
+     * which is precisely what a real board reports for a field that was
+     * never written (zones_config_accessors.c's getter returns true for any
+     * in-range zone; the field default-initializes to 0.0f). Needed here
+     * because this fixture's stub otherwise defaults the diagonal to
+     * s_exec.zones[0].ff_k_dc, and this case deliberately drives a LOCAL
+     * z_zero whose ff_k_dc is 0 while s_exec.zones[0] still carries case 1's
+     * 31.96 -- without this line the 1x1 fallback would divide by that
+     * unrelated zone record instead of by z_zero's own zero, and the
+     * divide-by-zero this case exists to exercise would never happen. */
+    g_stub_coupling_diag_present[0] = true;
+    g_stub_coupling_diag[0] = 0.0f;
     bool used_matrix = true, infeasible = true; /* pre-set to catch a function that forgets to write them */
     coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false; (void)reason; (void)membership_changed;
     float hold_zero = solve_hold_for_zone(&z_zero, 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
@@ -7950,7 +8005,7 @@ void run_test_profile_executor_prestart(void)
     test_hold_diagonal_only_matches_legacy_exactly();
     test_hold_matrix_solves_real_measured_gain_matrix();
     test_hold_singular_matrix_falls_back();
-    test_hold_wiring_ignores_measured_diag_while_flag_is_off();
+    test_hold_wiring_uses_measured_diag_when_populated();
     test_climb_matrix_solves_real_measured_gain_matrix();
     test_climb_zero_coupling_is_bit_identical_to_legacy_formula();
     test_climb_singular_matrix_falls_back();

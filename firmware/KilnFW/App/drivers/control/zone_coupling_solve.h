@@ -139,6 +139,20 @@ typedef enum {
                                              * conditioning floor -- singular/ill-conditioned data */
     COUPLING_SOLVE_FALLBACK_NONFINITE,      /* gauss_solve_partial_pivot() produced a non-finite
                                              * component despite every pivot clearing the floor */
+    COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE, /* the matrix would have been assembled from two
+                                             * different identification experiments -- a member
+                                             * column carries measured off-diagonals but no
+                                             * measured coupling_diag_k_dc (or the reverse), or
+                                             * use_measured_diag_k_dc is false while measured
+                                             * off-diagonals exist. See
+                                             * coupling_column_provenance_ok() in
+                                             * zone_coupling_solve.c and
+                                             * docs/audits/dc_gain_factor_of_ten_2026-09-09.md
+                                             * sec 4. Appended at the END of this enum
+                                             * deliberately: zone_runtime_t::ff_hold_reason is a
+                                             * uint8_t copy of it that reaches the dashboard JSON
+                                             * as a number, so renumbering an existing value
+                                             * would silently relabel historical logs. */
 } coupling_solve_reason_t;
 
 typedef struct {
