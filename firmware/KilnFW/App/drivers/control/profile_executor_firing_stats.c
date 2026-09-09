@@ -505,17 +505,29 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
                          "worker for the established pattern.");
         return;
     }
-    profile_firing_history_blob_t blob;
-    firing_stats_load(rec->profile_id, &blob); /* empty blob on any failure -- still safe to prepend into */
+    /* HEAP, not the executor task's 4096 B stack (2026-09-09 panic,
+     * docs/audits/executor_panic_stack_overflow_2026-09-09.md): this is the
+     * WRITE-path twin of the same 1364 B blob that firing_stats_load() above
+     * already heap-allocates -- the 2026-09-08 fix moved only the read path
+     * (httpd_worker) off the stack; this call, from executor_task_entry()'s
+     * run-end sequence, was left on the smaller stack and overflowed it one
+     * day later. Internal DRAM -- this path touches NVS/flash. */
+    profile_firing_history_blob_t *blob = heap_caps_malloc(sizeof(*blob), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (blob == NULL) {
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): malloc(%u) failed -- this run's history was not saved",
+                 (unsigned)rec->profile_id, (unsigned)sizeof(*blob));
+        return;
+    }
+    firing_stats_load(rec->profile_id, blob); /* empty blob on any failure -- still safe to prepend into */
 
-    uint8_t keep = (blob.count < PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH)
-                       ? blob.count
+    uint8_t keep = (blob->count < PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH)
+                       ? blob->count
                        : (PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH - 1);
     if (keep > 0) {
-        memmove(&blob.runs[1], &blob.runs[0], keep * sizeof(blob.runs[0]));
+        memmove(&blob->runs[1], &blob->runs[0], keep * sizeof(blob->runs[0]));
     }
-    blob.runs[0] = *rec;
-    blob.count = keep + 1;
+    blob->runs[0] = *rec;
+    blob->count = keep + 1;
 
     // cfg-filesystem dual-write (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
     // item 7): FILE FIRST (best-effort, failure logged and swallowed -- NVS
@@ -528,7 +540,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     // cheap, always-correct source of truth for "what rev came before this
     // save."
     uint32_t new_rev = firing_stats_cfg_fs_read_rev(rec->profile_id) + 1;
-    esp_err_t file_err = firing_stats_cfg_fs_save(rec->profile_id, &blob, new_rev);
+    esp_err_t file_err = firing_stats_cfg_fs_save(rec->profile_id, blob, new_rev);
     if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(PE_TAG, "firing_stats_persist(%u): file write failed: %s -- NVS remains the source "
                          "of truth this boot", (unsigned)rec->profile_id, esp_err_to_name(file_err));
@@ -542,13 +554,15 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     if (err != HAL_OK) {
         ESP_LOGE(PE_TAG, "firing_stats_persist(%u): hal_kv_open failed: %s", (unsigned)rec->profile_id,
                  hal_status_to_name(err));
+        free(blob);
         return;
     }
-    err = hal_kv_set_blob(&h, key, &blob, sizeof(blob));
+    err = hal_kv_set_blob(&h, key, blob, sizeof(*blob));
     if (err != HAL_OK) {
         ESP_LOGE(PE_TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
                  hal_status_to_name(err));
         hal_kv_close(&h);
+        free(blob);
         return;
     }
     err = hal_kv_commit(&h);
@@ -556,10 +570,11 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     if (err != HAL_OK) {
         ESP_LOGE(PE_TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
                  hal_status_to_name(err));
+        free(blob);
         return;
     }
     ESP_LOGI(PE_TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
-             (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob.count,
+             (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob->count,
              (unsigned)PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
     // Rev key write happens AFTER the blob's own NVS commit succeeds -- if
     // this fails, the next load's nvs_rev is stale-low, which just means a
@@ -570,6 +585,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
         ESP_LOGW(PE_TAG, "firing_stats_persist(%u): rev key write failed: %s", (unsigned)rec->profile_id,
                  esp_err_to_name(rev_err));
     }
+    free(blob);
 }
 
 /* Called from the tick loop's non-RUNNING branch (DONE/FAULTED) and from

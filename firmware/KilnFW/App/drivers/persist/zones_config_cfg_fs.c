@@ -1,6 +1,7 @@
 // See zones_config_cfg_fs.h for the full design/rationale.
 #include "zones_config_cfg_fs.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -161,10 +162,20 @@ esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
         return ESP_ERR_NO_MEM;
     }
 
-    zones_cfg_t stamped = *cfg;
-    stamped.crc32 = zones_config_json_compute_crc(&stamped);
+    /* NOT a `zones_cfg_t stamped = *cfg` local anymore (2026-09-09 panic,
+     * docs/audits/executor_panic_stack_overflow_2026-09-09.md): that ~900 B
+     * stack copy was the other half of this frame's overflow on
+     * profile_executor's 4096 B stack, alongside `raw` above (fixed
+     * separately, same day). Copy straight into the heap buffer instead,
+     * compute the CRC in place there (zones_config_json_compute_crc() itself
+     * no longer needs a whole-struct copy either, see its own comment), and
+     * stamp the result back into the copy's own crc32 field -- never touches
+     * the caller's cfg. */
     put_u32_le(raw, rev);
-    memcpy(raw + 4, &stamped, blob_len);
+    memcpy(raw + 4, cfg, blob_len);
+    zones_cfg_t *raw_cfg = (zones_cfg_t *)(raw + 4);
+    uint32_t crc = zones_config_json_compute_crc(raw_cfg);
+    put_u32_le(raw + 4 + offsetof(zones_cfg_t, crc32), crc);
 
     esp_err_t err = s_write_fn(ZONES_CFG_FILE_PATH, raw, 4 + blob_len);
     free(raw);

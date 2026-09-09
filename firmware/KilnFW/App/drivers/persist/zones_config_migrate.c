@@ -4,6 +4,7 @@
 #include "zones_config_json_internal.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -849,9 +850,26 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
  * re-validating an already-loaded cfg's crc32 is never mutated by asking. */
 uint32_t zones_config_json_compute_crc(const zones_cfg_t *cfg)
 {
-    zones_cfg_t tmp = *cfg;
-    tmp.crc32 = 0;
-    return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+    /* NOT a `zones_cfg_t tmp = *cfg` local anymore (2026-09-09 panic,
+     * docs/audits/executor_panic_stack_overflow_2026-09-09.md): that ~900 B
+     * copy was one frame of the run-end path (adaptive_tune_run_end -> ... ->
+     * nvs_save -> zones_config_cfg_fs_save -> zones_config_json_compute_crc)
+     * that overflowed profile_executor's 4096 B stack. This function is also
+     * reached routinely from main/httpd_worker (larger stacks, never in
+     * danger), so the fix has to hold for every caller, not just this one.
+     *
+     * `crc32` is the LAST field of zones_cfg_t (_Static_assert below pins
+     * that), so "compute the CRC as if crc32 were zero" needs no copy of the
+     * struct and no mutation of the caller's cfg at all: CRC everything
+     * before the field over the real struct in place, then feed exactly 4
+     * zero bytes for the field itself. esp_crc32_le()'s running-seed
+     * argument makes that a two-call chain rather than a buffer to build. */
+    _Static_assert(offsetof(zones_cfg_t, crc32) + sizeof(((zones_cfg_t *)0)->crc32) == sizeof(zones_cfg_t),
+                   "zones_config_json_compute_crc()'s zero-copy trick assumes crc32 is the last field");
+    static const uint8_t zero4[sizeof(cfg->crc32)] = {0};
+    uint32_t crc = esp_crc32_le(0, (const uint8_t *)cfg, offsetof(zones_cfg_t, crc32));
+    crc = esp_crc32_le(crc, zero4, sizeof(zero4));
+    return crc;
 }
 
 
