@@ -30,9 +30,16 @@
  *
  * Backend selection: SaftyFW's pico target builds with arm-none-eabi-gcc
  * (see firmware/SaftyFW/CMakeLists.txt's toolchain comment), which predefines
- * `__GNUC__` and `__arm__` -- the ARM GCC/CMSIS `__DMB()` builtin lowers to a
- * real `dmb` instruction on Cortex-M0+. The host build (test/build_host_
- * tests.ps1) uses MSVC (`_MSC_VER`), which has no `__DMB()` builtin;
+ * `__GNUC__` and `__arm__`. Rather than reach for the CMSIS `__DMB()`
+ * builtin directly (which needs core_cm0plus.h pulled in through some
+ * include chain this header cannot guarantee), this backend includes
+ * pico-sdk's own "hardware/sync.h" and uses its documented `__dmb()`
+ * wrapper -- the same header firmware/hwAbstraction/pico/uart/uart_owner.c
+ * already includes for save_and_disable_interrupts(), so this is the
+ * established way this codebase reaches pico-sdk's sync primitives, not a
+ * new dependency. It lowers to the identical real `dmb` instruction on
+ * Cortex-M0+. The host build (test/build_host_tests.ps1) uses MSVC
+ * (`_MSC_VER`), which has neither of those;
  * `_ReadWriteBarrier()` (compiler-only fence, from <intrin.h>) is combined
  * with `MemoryBarrier()` (a real hardware fence on x86/x64, also
  * <intrin.h>/<windows.h>) so the host build's concurrency test (real
@@ -47,7 +54,8 @@
 #define HAL_BARRIER_H
 
 #if defined(__GNUC__) && defined(__arm__)
-#define HAL_DMB() __DMB()
+#include "hardware/sync.h" /* pico-sdk's __dmb() wrapper */
+#define HAL_DMB() __dmb()
 #elif defined(_MSC_VER)
 #include <intrin.h>
 #include <windows.h> /* MemoryBarrier() */
