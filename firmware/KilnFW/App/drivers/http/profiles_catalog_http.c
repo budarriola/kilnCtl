@@ -10,6 +10,7 @@
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
 #include "web_encoding.h"
+#include "zones_config_query.h"  /* zones_config_get_thermo_count() -- builtin_effective_zone_mask() */
 
 /* TODO.md 10.6a: embedded pre-gzipped (CMakeLists.txt gzips it at configure
  * time before idf_component_register runs), hence the "_gz" in both the
@@ -108,13 +109,39 @@ static esp_err_t send_chunk_checked(httpd_req_t *req, const char *buf, int n, si
     return httpd_resp_send_chunk(req, buf, (size_t)n);
 }
 
+/* The zone set a builtin catalogue entry will actually be RUN on.
+ *
+ * builtin_profile_t carries no zone assignment of its own -- the catalogue is
+ * zone-agnostic. profiles_http.c's profile getter (the one profile_executor_
+ * run() uses) resolves that absence to "every configured zone" before the
+ * executor ever sees it, and profile_feasibility_profile_mask() resolves an
+ * incoming 0 the same way, for the same stated reason. This helper is that
+ * one fact written once for THIS file's responses, so what a client is told
+ * a builtin targets is the set it would really run on -- not a literal 0 a
+ * consumer has to guess the meaning of.
+ *
+ * Emitting the resolved mask (rather than 0) is what makes main_page.html's
+ * computeProfileLimitWarning() work for builtins at all: it walks zone_mask's
+ * bits, so a 0 meant "check no zones" and the profile-vs-ceiling warning was
+ * silently inert for the entire builtin catalogue -- the exact class most
+ * likely to exceed a bench board's configured ceiling (BQ1000 targets over
+ * 1000C against an 80C bench ceiling and showed no icon at all). A board with
+ * no zones configured still reports 0, which is honest: there is no zone to
+ * judge against, and profiles_http.c's getter says the same. */
+static uint8_t builtin_effective_zone_mask(void)
+{
+    uint8_t n = zones_config_get_thermo_count();
+    return (n >= 8) ? 0xFFu : (uint8_t)((1u << n) - 1u);
+}
+
 /* Appends one builtin entry's summary (no segments) to a chunked response. */
 static esp_err_t send_builtin_summary(httpd_req_t *req, uint8_t id, const builtin_profile_t *b, bool first)
 {
     profile_t p;
+    const uint8_t zone_mask = builtin_effective_zone_mask();
     profile_seg_verdict_t rollup = PROFILE_SEG_UNKNOWN;
     if (profiles_builtin_get(id, &p)) {
-        rollup = profile_feasibility_profile_mask(0, &p, NULL, 0);
+        rollup = profile_feasibility_profile_mask(zone_mask, &p, NULL, 0);
     }
 
     char code_e[PROFILE_NAME_MAX_LEN * 2 + 1];
@@ -124,12 +151,12 @@ static esp_err_t send_builtin_summary(httpd_req_t *req, uint8_t id, const builti
     int n = snprintf(chunk, sizeof(chunk),
                      "%s{\"id\":%u,\"builtin\":true,\"name\":\"%s\",\"code\":\"%s\",\"title\":\"%s\","
                      "\"slug\":\"%s\",\"url\":\"https://digitalfire.com/schedule/%s\",\"hidden\":%s,"
-                     "\"zone_mask\":0,\"segment_count\":%u,\"feasibility\":\"%s\"}",
+                     "\"zone_mask\":%u,\"segment_count\":%u,\"feasibility\":\"%s\"}",
                      first ? "" : ",", id, esc(b->code, code_e, sizeof(code_e)),
                      esc(b->code, code_e, sizeof(code_e)), esc(b->title, title_e, sizeof(title_e)),
                      esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
-                     profiles_builtin_is_hidden(id) ? "true" : "false", b->segment_count,
-                     profile_feasibility_verdict_str(rollup));
+                     profiles_builtin_is_hidden(id) ? "true" : "false", (unsigned)zone_mask,
+                     b->segment_count, profile_feasibility_verdict_str(rollup));
     return send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin summary");
 }
 
@@ -138,12 +165,13 @@ static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_p
 {
     profile_t p;
     profile_seg_verdict_t per_seg[PROFILE_MAX_SEGMENTS];
+    const uint8_t zone_mask = builtin_effective_zone_mask();
     profile_seg_verdict_t rollup = PROFILE_SEG_UNKNOWN;
     for (size_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
         per_seg[i] = PROFILE_SEG_UNKNOWN;
     }
     if (profiles_builtin_get(id, &p)) {
-        rollup = profile_feasibility_profile_mask(0, &p, per_seg, PROFILE_MAX_SEGMENTS);
+        rollup = profile_feasibility_profile_mask(zone_mask, &p, per_seg, PROFILE_MAX_SEGMENTS);
     }
 
     char code_e[PROFILE_NAME_MAX_LEN * 2 + 1];
@@ -153,13 +181,13 @@ static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_p
     int n = snprintf(chunk, sizeof(chunk),
                      "%s{\"id\":%u,\"builtin\":true,\"read_only\":true,\"name\":\"%s\",\"code\":\"%s\","
                      "\"title\":\"%s\",\"slug\":\"%s\",\"url\":\"https://digitalfire.com/schedule/%s\","
-                     "\"hidden\":%s,\"zone_mask\":0,\"segment_count\":%u,\"feasibility\":\"%s\","
+                     "\"hidden\":%s,\"zone_mask\":%u,\"segment_count\":%u,\"feasibility\":\"%s\","
                      "\"segments\":[",
                      first ? "" : ",", id, esc(b->code, code_e, sizeof(code_e)),
                      esc(b->code, code_e, sizeof(code_e)), esc(b->title, title_e, sizeof(title_e)),
                      esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
-                     profiles_builtin_is_hidden(id) ? "true" : "false", b->segment_count,
-                     profile_feasibility_verdict_str(rollup));
+                     profiles_builtin_is_hidden(id) ? "true" : "false", (unsigned)zone_mask,
+                     b->segment_count, profile_feasibility_verdict_str(rollup));
     esp_err_t err = send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin header");
     if (err != ESP_OK) {
         return err;
@@ -167,8 +195,19 @@ static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_p
 
     for (uint8_t i = 0; i < b->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
         n = snprintf(chunk, sizeof(chunk),
-                     "%s{\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,\"feasibility\":\"%s\"}",
-                     i == 0 ? "" : ",", (double)b->segments[i].target_c,
+                     /* seg_kind is emitted EXPLICITLY, matching the user-slot
+                      * emitter below. Omitting it left main_page.html's
+                      * computeProfileLimitWarning() reading `undefined !== 0`
+                      * and bailing out of every builtin segment; a missing
+                      * field must never be read as "kind 0" by accident, so
+                      * the producer states it rather than the consumer
+                      * guessing. Every builtin schedule segment IS a zone
+                      * ramp -- builtin_profile_t has no relay/IO concept at
+                      * all -- so the constant, not a stored field. */
+                     "%s{\"seg_kind\":%u,\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,"
+                     "\"feasibility\":\"%s\"}",
+                     i == 0 ? "" : ",", (unsigned)PROFILE_SEG_KIND_ZONE_RAMP,
+                     (double)b->segments[i].target_c,
                      (double)b->segments[i].ramp_c_per_hr, (unsigned long)b->segments[i].dwell_min,
                      profile_feasibility_verdict_str(per_seg[i]));
         err = send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin segment");

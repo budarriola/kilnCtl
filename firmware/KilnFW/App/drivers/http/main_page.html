@@ -2506,6 +2506,11 @@ var LIMIT_RAMP_NEAR_FRAC = 0.9;    // rate has no natural "5C"-equivalent unit -
 
 var LIMIT_RANK = { exceeds: 3, at_limit: 2, near_limit: 1, comfortable: 0 };
 
+// Mirrors zones_config_accessors.h's zone_control_mode_t. Named rather than
+// spelled 0 inline so the comparison in computeProfileLimitWarning() reads
+// the same way profile_executor_start.c's own precheck does.
+var ZONE_CONTROL_MODE_OFF = 0;
+
 function classifyMargin(margin, nearBandC) {
   if (margin < 0) return 'exceeds';
   if (margin <= LIMIT_AT_LIMIT_EPS_C) return 'at_limit';
@@ -2524,11 +2529,37 @@ function computeProfileLimitWarning(zones, profileData) {
   var worst = 'comfortable';
   var items = [];
   (profileData.segments || []).forEach(function (s, i) {
-    if (s.seg_kind !== 0) return; // PROFILE_SEG_KIND_ZONE_RAMP=0; others carry no target_c/ramp_c_per_hr
+    // PROFILE_SEG_KIND_ZONE_RAMP=0; others carry no target_c/ramp_c_per_hr.
+    // Strict !== 0 is safe because BOTH producers state seg_kind explicitly:
+    // profiles_catalog_http.c's user-slot emitter always did, and its builtin
+    // emitter now does too (it used to omit the field entirely, which made
+    // `undefined !== 0` bail out of every builtin segment and left this whole
+    // warning silently inert for the shipped catalogue). A missing field is
+    // deliberately NOT treated as kind 0 here -- that would re-hide the next
+    // producer that forgets it.
+    if (s.seg_kind !== 0) return;
     for (var zi = 0; zi < 8; zi++) {
       if (!(zoneMask & (1 << zi))) continue;
       var z = zones[zi];
-      if (!z || !(z.max_temp_c > 0)) continue; // uncommissioned zone -- nothing real to compare against
+      if (!z) continue;
+      // max_temp_c == 0 is NOT "use the firmware default" for this field.
+      // zones_config_accessors.h is explicit that there is no repo-established
+      // safe absolute-temperature default to substitute (the 2026-08-27 "guard
+      // 5's absolute ceiling is off by default" audit), so nothing here may
+      // invent one. What the firmware actually does with a 0 is REFUSE the
+      // firing: profile_executor_start.c's ceiling precheck returns false for
+      // any zone in the mask whose control_mode is not OFF and whose
+      // max_temp_c is <= 0. So this is reported as 'exceeds' -- the run will
+      // be refused at start, exactly like a target above a real ceiling --
+      // rather than skipped, which is what previously hid it. An OFF zone is
+      // skipped, matching that same precheck.
+      if (!(z.max_temp_c > 0)) {
+        if (z.control_mode !== ZONE_CONTROL_MODE_OFF) {
+          items.push({ n: i + 1, zone: zi, kind: 'unset_ceiling', level: 'exceeds' });
+          worst = 'exceeds';
+        }
+        continue;
+      }
 
       var tempLevel = classifyMargin(z.max_temp_c - s.target_c, LIMIT_HEADROOM_WARN_C);
       if (tempLevel !== 'comfortable') {
@@ -2570,6 +2601,12 @@ function limitBodyHtml(summary) {
   html += '<ul>';
   summary.items.forEach(function (it) {
     var zoneLabel = zoneName(it.zone);
+    if (it.kind === 'unset_ceiling') {
+      html += '<li>Segment ' + it.n + ' (' + zoneLabel + '): this zone has <b>no maximum temperature ' +
+              'configured</b> and is not switched off -- the firing will be <b>refused at start</b> ' +
+              'until a ceiling is set on the Thermocouples &amp; Zones page.</li>';
+      return;
+    }
     var unit = it.kind === 'temp' ? 'C' : 'C/hr';
     var what = it.kind === 'temp' ? 'target' : 'ramp rate';
     html += '<li>Segment ' + it.n + ' (' + zoneLabel + '): ' + what + ' ' + it.target.toFixed(1) + unit +

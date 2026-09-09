@@ -334,9 +334,15 @@ httpd_handle_t wifi_provision_http_get_server(void)
 // rejection -- that is parse_profile_fields()/profile_post_handler()
 // territory, already covered indirectly by zones_http.c's own tests using
 // the same pattern for zones config.
+// Overridable so the builtin-catalogue emitter test below can pin a
+// realistic 3-zone board and assert the exact zone_mask that produces (0x7),
+// rather than only the all-ones 0xFF an 8-zone stand-in gives -- 0xFF is the
+// one value that would still look right if the resolution helper were wrong
+// in the "n >= 8" direction.
+static uint8_t g_stub_thermo_count = 8;
 uint8_t zones_config_get_thermo_count(void)
 {
-    return 8;
+    return g_stub_thermo_count;
 }
 bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
 {
@@ -394,10 +400,11 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
 
 // ---- profile_feasibility.h -- only reached from the JSON GET handlers'
 // per-entry feasibility annotation, never asserted on by these tests.
+static uint8_t g_last_feasibility_zone_mask = 0xAA; /* sentinel: never a real mask here */
 profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const profile_t *p,
                                                        profile_seg_verdict_t *out_segments, size_t out_cap)
 {
-    (void)zone_mask;
+    g_last_feasibility_zone_mask = zone_mask;
     (void)p;
     for (size_t i = 0; i < out_cap; i++) {
         out_segments[i] = PROFILE_SEG_UNKNOWN;
@@ -416,21 +423,32 @@ const char *profile_feasibility_verdict_str(profile_seg_verdict_t v)
 const builtin_profile_t g_builtin_profiles[1] = { { { 0 }, NULL, NULL, NULL, PROFILE_FIRING_BISQUE, 0, 0, { { 0 } } } };
 const size_t g_builtin_profile_count = 0;
 
+// One optional fake catalogue entry, off by default so every test above is
+// untouched. g_builtin_profiles/g_builtin_profile_count deliberately STAY
+// empty: the list handlers' loops walk those, and the emitter test below
+// calls send_builtin_summary()/send_builtin_full() directly (both are
+// `static` in profiles_catalog_http.c, which this file #includes), so it
+// drives the real production emitters without perturbing any existing
+// list-response assertion.
+static bool              g_fake_builtin_on = false;
+static builtin_profile_t g_fake_builtin;
+static profile_t         g_fake_builtin_profile;
+
 bool profiles_builtin_id_valid(uint8_t id)
 {
-    (void)id;
-    return false;
+    return g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE;
 }
 bool profiles_builtin_get(uint8_t id, profile_t *out)
 {
-    (void)id;
-    (void)out;
-    return false;
+    if (!profiles_builtin_id_valid(id) || !out) {
+        return false;
+    }
+    *out = g_fake_builtin_profile;
+    return true;
 }
 const builtin_profile_t *profiles_builtin_entry(uint8_t id)
 {
-    (void)id;
-    return NULL;
+    return profiles_builtin_id_valid(id) ? &g_fake_builtin : NULL;
 }
 bool profiles_builtin_is_hidden(uint8_t id)
 {
@@ -1664,6 +1682,100 @@ static void test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack(void)
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Builtin catalogue JSON: seg_kind and a resolved zone_mask.
+//
+// Both fields were missing/zero before 2026-09-09, which made main_page.html's
+// computeProfileLimitWarning() silently inert for the ENTIRE shipped builtin
+// catalogue -- the class most likely to exceed a bench board's ceiling
+// (BQ1000 peaks over 1000C; this bench's zones are capped at 80C). The JS side
+// walks zone_mask's bits (0 -> no zone checked) and requires seg_kind === 0
+// (absent -> `undefined !== 0` -> every segment skipped), so EITHER omission
+// alone was enough to hide the warning.
+//
+// This drives the real emitters, not a hand-written fixture: send_builtin_*
+// are the same static functions builtin_list_get_handler() and
+// profile_detail_get_handler() call.
+// ---------------------------------------------------------------------------
+static void test_builtin_json_emits_seg_kind_and_resolved_zone_mask(void)
+{
+    TEST_SECTION("builtin catalogue JSON carries seg_kind and the zone_mask the schedule "
+                 "would really run on, so the dashboard's configured-limit warning is not "
+                 "silently inert for every shipped profile");
+
+    g_stub_thermo_count = 3; /* a realistic board, and 0x7 != 0xFF */
+    memset(&g_fake_builtin, 0, sizeof(g_fake_builtin));
+    memcpy((char *)g_fake_builtin.code, "BQ1000", 7);
+    g_fake_builtin.title = "Bench Bisque 1000";
+    g_fake_builtin.slug = "bench-bisque";
+    g_fake_builtin.family = "Test";
+    g_fake_builtin.firing_type = PROFILE_FIRING_BISQUE;
+    g_fake_builtin.segment_count = 2;
+    g_fake_builtin.segments[0].target_c = 600.0f;
+    g_fake_builtin.segments[0].ramp_c_per_hr = 100.0f;
+    g_fake_builtin.segments[1].target_c = 1000.0f;
+    g_fake_builtin.segments[1].ramp_c_per_hr = 60.0f;
+
+    memset(&g_fake_builtin_profile, 0, sizeof(g_fake_builtin_profile));
+    g_fake_builtin_profile.segment_count = g_fake_builtin.segment_count;
+    g_fake_builtin_profile.segments[0] = g_fake_builtin.segments[0];
+    g_fake_builtin_profile.segments[1] = g_fake_builtin.segments[1];
+    g_fake_builtin_on = true;
+    g_last_feasibility_zone_mask = 0xAA;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    s_chunk_capture_len = 0;
+    s_chunk_capture[0] = '\0';
+    s_chunk_capture_on = true;
+    esp_err_t err = send_builtin_full(&req, PROFILE_BUILTIN_ID_BASE, &g_fake_builtin, true);
+    s_chunk_capture_on = false;
+
+    TEST_CHECK(err == ESP_OK, "the builtin detail emitter must not error");
+    TEST_CHECK(strstr(s_chunk_capture, "\"zone_mask\":7") != NULL,
+              "a builtin must report the zone set it would actually run on (all 3 configured "
+              "zones -> 7), not the literal 0 that made every consumer check no zones at all");
+    TEST_CHECK(strstr(s_chunk_capture, "\"zone_mask\":0,") == NULL,
+              "the old hardcoded zero mask must be gone");
+    TEST_CHECK(count_occurrences(s_chunk_capture, "\"seg_kind\":0") == 2,
+              "every builtin segment must state seg_kind explicitly -- a missing field must "
+              "never be left for a consumer to guess as kind 0");
+    TEST_CHECK(g_last_feasibility_zone_mask == 0x7,
+              "the same resolved mask must reach the feasibility roll-up, so the emitted "
+              "zone_mask and the emitted feasibility verdict describe one zone set, not two");
+    TEST_CHECK(json_is_well_formed(s_chunk_capture),
+              "the widened per-segment object must still fit its chunk buffer -- a truncated "
+              "chunk would be the silent failure mode of adding a field here");
+
+    /* The summary emitter (GET /api/profiles' listing rows) resolves the same
+     * way -- the dashboard's <select> is populated from THAT response, so a
+     * mask of 0 there would mislabel every builtin as targeting no zones. */
+    s_chunk_capture_len = 0;
+    s_chunk_capture[0] = '\0';
+    s_chunk_capture_on = true;
+    err = send_builtin_summary(&req, PROFILE_BUILTIN_ID_BASE, &g_fake_builtin, true);
+    s_chunk_capture_on = false;
+    TEST_CHECK(err == ESP_OK, "the builtin summary emitter must not error");
+    TEST_CHECK(strstr(s_chunk_capture, "\"zone_mask\":7") != NULL,
+              "the listing summary must resolve the mask the same way the detail response does");
+
+    /* A board with no zones configured honestly reports 0 -- there is no zone
+     * to judge against, and profiles_http.c's own getter says the same. */
+    g_stub_thermo_count = 0;
+    s_chunk_capture_len = 0;
+    s_chunk_capture[0] = '\0';
+    s_chunk_capture_on = true;
+    err = send_builtin_summary(&req, PROFILE_BUILTIN_ID_BASE, &g_fake_builtin, true);
+    s_chunk_capture_on = false;
+    TEST_CHECK(err == ESP_OK, "the zero-zone case must not error");
+    TEST_CHECK(strstr(s_chunk_capture, "\"zone_mask\":0,") != NULL,
+              "a board with no zones configured reports 0, not a phantom zone");
+
+    g_fake_builtin_on = false;
+    g_stub_thermo_count = 8;
+}
+
 void run_test_profiles_http(void)
 {
     test_v1_blob_loads_and_preserves_all_fields();
@@ -1688,6 +1800,7 @@ void run_test_profiles_http(void)
     test_profiles_list_marks_exceeds_ceiling();
     test_nvs_save_slot_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack();
+    test_builtin_json_emits_seg_kind_and_resolved_zone_mask();
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
     test_pcfg_file_wins_when_it_has_the_higher_rev();
@@ -1698,6 +1811,7 @@ void run_test_profiles_http(void)
     test_pcfg_interrupted_write_leaves_old_file_intact();
     test_pcfg_save_load_delete_round_trip_through_real_api();
 }
+
 
 int main(void)
 {
