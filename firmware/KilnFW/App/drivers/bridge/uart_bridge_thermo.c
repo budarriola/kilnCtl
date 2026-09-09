@@ -472,12 +472,14 @@ esp_err_t uart_bridge_start_thermo_task(uart_protocol_t *proto, MAX31856BusClass
      * bus only through thermo_owner_command_*() (thermo_owner_task keeps its
      * own internal stack for the actual SPI transactions), and never touches
      * flash/NVS. */
+    static TaskHandle_t s_thermo_bridge_task_handle; /* lives for the program's duration, same as ctx */
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(thermo_bridge_task, "thermo_uart_bridge", 4096,
-                                                         &ctx, 5, NULL, tskNO_AFFINITY,
+                                                         &ctx, 5, &s_thermo_bridge_task_handle, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_THERMO);
         return ESP_ERR_NO_MEM;
     }
+    stack_margin_register("thermo_uart_bridge", &s_thermo_bridge_task_handle, 4096);
     return ESP_OK;
 }

@@ -291,12 +291,14 @@ esp_err_t uart_bridge_start_safety_task(uart_protocol_t *proto, SafetyLinkClass 
      * isolated link to the RP2040 lives in safety_link.c and is unaffected by
      * whether this task exists, so a failure here costs visibility, not
      * safety. It still should not fail for want of a contiguous 4KB. */
+    static TaskHandle_t s_safety_bridge_task_handle; /* lives for the program's duration, same as ctx */
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(safety_bridge_task, "safety_uart_bridge",
-                                                         4096, &ctx, 5, NULL, tskNO_AFFINITY,
+                                                         4096, &ctx, 5, &s_safety_bridge_task_handle, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_SAFETY);
         return ESP_ERR_NO_MEM;
     }
+    stack_margin_register("safety_uart_bridge", &s_safety_bridge_task_handle, 4096);
     return ESP_OK;
 }

@@ -95,8 +95,14 @@ extern "C" {
  * "i2c_owner_sx1509" / "i2c_owner_ns2009" respectively -- see i2c_owner.c,
  * SX1509.c, NS2009.c, and tools/check_stack_margin_registration.ps1's new
  * duplicate-name check. The 40-task cap and its slot cost above are
- * unchanged by this fix -- it renames two entries, it doesn't remove one. */
-#define STACK_MARGIN_MAX_TASKS 40u
+ * unchanged by this fix -- it renames two entries, it doesn't remove one.
+ *
+ * 2026-09-08: raised 40 -> 48 when the five long-lived UART bridge tasks
+ * (thermo/touch/ui_test/io/uart_log) were registered for the first time
+ * (docs/audits/2026-09-08-stack-margin-audit.md) -- they existed and ran
+ * every boot before this, just with no stack_margin_register() call site,
+ * so this raise adds real headroom rather than just tracking a rename. */
+#define STACK_MARGIN_MAX_TASKS 48u
 #define STACK_MARGIN_NAME_MAX  20u
 
 /* Registers one task for reporting. `task_handle_slot` is a `TaskHandle_t *`

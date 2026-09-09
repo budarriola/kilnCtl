@@ -49,19 +49,44 @@ typedef struct {
 static void system_bridge_task(void *arg)
 {
     system_bridge_ctx_t *ctx = (system_bridge_ctx_t *)arg;
-    uart_proto_message_t msg;
+
+    /* 2026-09-08 stack-budget fix (docs/audits/2026-09-08-stack-margin-audit.md,
+     * check_system_uart_bridge_stack_budget.py): `msg` used to be a plain
+     * ~336-byte uart_proto_message_t stack local, present in system_bridge_task's
+     * own frame on EVERY call, not just the deep factory-reset path -- moving
+     * it to a heap allocation removes that fixed cost from this task's
+     * measured stack depth the same way cfgfs_status_get_handler's request
+     * buffers were moved off httpd_worker's stack. Allocated ONCE before the
+     * loop, never freed: this task never returns (its `while (true)` runs for
+     * the life of the program, same as every other bridge task), so there is
+     * no per-iteration malloc/free churn and no "free on every return path"
+     * to get wrong -- the one allocation IS the task's lifetime allocation.
+     * Internal DRAM, not PSRAM: this buffer is touched from the
+     * SYSTEM_CMD_FACTORY_RESET path, which reaches flash (factory_reset_execute()
+     * -> cfg_fs_confirm_format_device()), and this codebase's convention
+     * (uart_bridge_ext.c's own comment) is PSRAM-backed buffers must never be
+     * read from inside a flash operation. */
+    uart_proto_message_t *msg = heap_caps_malloc(sizeof(*msg), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (msg == NULL) {
+        ESP_LOGE(TAG, "system_bridge_task: heap_caps_malloc(%u B, INTERNAL) failed -- system "
+                      "command dispatch (relay/CT-cal/danger-mode/factory-reset/watchdog-cfg) "
+                      "unavailable this boot, degrading cleanly instead of dereferencing NULL",
+                 (unsigned)sizeof(*msg));
+        vTaskDelete(NULL);
+        return;
+    }
 
     while (true) {
-        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
+        if (uart_protocol_receive(ctx->inbox, msg, portMAX_DELAY) != ESP_OK) {
             continue;
         }
-        if (msg.length < 1) {
+        if (msg->length < 1) {
             ESP_LOGW(TAG, "system: empty payload -- rejected");
             continue;
         }
         bridge_note_link_activity();
 
-        switch (msg.payload[0]) {
+        switch (msg->payload[0]) {
             case SYSTEM_CMD_RESTART_UART: {
                 esp_err_t err = uart_owner_restart(ctx->owner);
                 if (err == ESP_OK) {
@@ -72,23 +97,23 @@ static void system_bridge_task(void *arg)
                 break;
             }
             case SYSTEM_CMD_FACTORY_RESET: {
-                if (!bridge_args_ok("system", &msg, 2)) {
+                if (!bridge_args_ok("system", msg, 2)) {
                     break;
                 }
                 /* No reply either way -- see uart_task_ids.h's doc comment:
                  * the reboot itself (a fresh unsolicited GET_FW_VERSION push
                  * from INFO) is the real confirmation, and this command's own
                  * ACK is already the delivery confirmation. */
-                esp_err_t err = factory_reset_execute((factory_reset_scope_t)msg.payload[1]);
+                esp_err_t err = factory_reset_execute((factory_reset_scope_t)msg->payload[1]);
                 if (err == ESP_ERR_INVALID_ARG) {
                     ESP_LOGW(TAG, "system: FACTORY_RESET scope %u out of range -- rejected, nothing erased",
-                             msg.payload[1]);
+                             msg->payload[1]);
                 } else if (err != ESP_OK) {
                     ESP_LOGE(TAG, "system: FACTORY_RESET scope %u erase failed: %s -- rebooting anyway",
-                             msg.payload[1], esp_err_to_name(err));
+                             msg->payload[1], esp_err_to_name(err));
                 } else {
                     ESP_LOGW(TAG, "system: FACTORY_RESET scope %u requested by host -- erasing and rebooting",
-                             msg.payload[1]);
+                             msg->payload[1]);
                 }
                 break;
             }
@@ -98,7 +123,7 @@ static void system_bridge_task(void *arg)
                 uint8_t reply[2];
                 reply[0] = SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED;
                 reply[1] = watchdog_cfg_panic_disabled() ? 1 : 0;
-                esp_err_t err = uart_protocol_send(ctx->proto, msg.device, msg.task_id, UART_TASK_ID_SYSTEM,
+                esp_err_t err = uart_protocol_send(ctx->proto, msg->device, msg->task_id, UART_TASK_ID_SYSTEM,
                                                    reply, sizeof(reply), BRIDGE_REPLY_ACK_TIMEOUT_MS);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "system: GET_WATCHDOG_PANIC_DISABLED reply failed: %s", esp_err_to_name(err));
@@ -106,18 +131,18 @@ static void system_bridge_task(void *arg)
                 break;
             }
             case SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED: {
-                if (!bridge_args_ok("system", &msg, 2)) {
+                if (!bridge_args_ok("system", msg, 2)) {
                     break;
                 }
-                bool disabled = msg.payload[1] != 0;
+                bool disabled = msg->payload[1] != 0;
                 watchdog_cfg_set_panic_disabled(disabled, "UART SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED");
                 break;
             }
             case SYSTEM_CMD_SET_TELEMETRY_ENABLED: {
-                if (!bridge_args_ok("system", &msg, 2)) {
+                if (!bridge_args_ok("system", msg, 2)) {
                     break;
                 }
-                bool enabled = msg.payload[1] != 0;
+                bool enabled = msg->payload[1] != 0;
                 telemetry_log_set_enabled(enabled);
                 break;
             }
@@ -125,7 +150,7 @@ static void system_bridge_task(void *arg)
                 uint8_t reply[2];
                 reply[0] = SYSTEM_CMD_GET_TELEMETRY_ENABLED;
                 reply[1] = telemetry_log_is_enabled() ? 1 : 0;
-                esp_err_t err = uart_protocol_send(ctx->proto, msg.device, msg.task_id, UART_TASK_ID_SYSTEM,
+                esp_err_t err = uart_protocol_send(ctx->proto, msg->device, msg->task_id, UART_TASK_ID_SYSTEM,
                                                    reply, sizeof(reply), BRIDGE_REPLY_ACK_TIMEOUT_MS);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "system: GET_TELEMETRY_ENABLED reply failed: %s", esp_err_to_name(err));
@@ -133,8 +158,8 @@ static void system_bridge_task(void *arg)
                 break;
             }
             default:
-                ESP_LOGW(TAG, "system: unknown subcmd 0x%02X -- rejected", msg.payload[0]);
-                bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_SYSTEM, msg.payload[0]);
+                ESP_LOGW(TAG, "system: unknown subcmd 0x%02X -- rejected", msg->payload[0]);
+                bridge_reply_unsupported(ctx->proto, msg, UART_TASK_ID_SYSTEM, msg->payload[0]);
                 break;
         }
     }

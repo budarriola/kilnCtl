@@ -649,12 +649,14 @@ esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io)
      * only through kiln_io_owner_command_*() (kiln_io_owner_task keeps its
      * own internal stack for the actual I2C transactions), and never touches
      * flash/NVS. */
+    static TaskHandle_t s_io_bridge_task_handle; /* lives for the program's duration, same as ctx */
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(io_bridge_task, "io_uart_bridge", 4096, &ctx, 5,
-                                                         NULL, tskNO_AFFINITY,
+                                                         &s_io_bridge_task_handle, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_IO);
         return ESP_ERR_NO_MEM;
     }
+    stack_margin_register("io_uart_bridge", &s_io_bridge_task_handle, 4096);
     return ESP_OK;
 }

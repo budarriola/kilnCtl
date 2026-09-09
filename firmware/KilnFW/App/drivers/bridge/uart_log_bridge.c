@@ -10,6 +10,7 @@
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "stack_margin.h"
 #include "uart_task_ids.h"
 
 /* How many formatted-but-not-yet-sent log lines we're willing to hold. Sized
@@ -374,5 +375,6 @@ esp_err_t uart_log_bridge_start(uart_protocol_t *proto)
         s_bridge.proto = NULL;
         return ESP_ERR_NO_MEM;
     }
+    stack_margin_register("uart_log_bridge", &s_bridge.sender_task, 4096);
     return ESP_OK;
 }

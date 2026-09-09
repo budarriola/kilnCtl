@@ -13,7 +13,7 @@ list, cross-checked against live `xTaskCreate*()` call sites)
 
 | task | configured | live free | honest headroom* | status |
 |---|---|---|---|---|
-| httpd_worker | 8192 | 1636 | **-164 B** (existing 1800 B check) | CRITICAL |
+| httpd_worker | 8192 | 1636 | **1560 B** (19.0%, per `check_httpd_task_stack_budget.py`) | LOW, not CRITICAL |
 | system_uart_bridge | 3072 | 892 | **292 B** (9.5%) | MARGINAL, new check added |
 | info_uart_bridge | 3584 (PSRAM) | 1116 | 516 B (14.4%) | thin, DRAM-free |
 | safety_owner_evt | 3072 | 1196 | 596 B (19.4%) | marginal |
@@ -79,8 +79,25 @@ negative-tested edit).
 
 ## Risk ranking (smallest honest headroom first)
 
-1. **httpd_worker** — already CRITICAL, already checked (existing 1800 B
-   allowance check).
+1. **Correction (this pass):** the table above previously showed
+   httpd_worker's honest headroom as **-164 B / CRITICAL**, computed by
+   subtracting the 1800 B unmodelled-overhead allowance from the *live*
+   high-water free figure (1636 - 1800 = -164). That double-counts: the
+   live high-water mark, being an actual runtime measurement, already
+   includes whatever the ESP-IDF dispatch overhead and ISR window-spill
+   actually cost on this board — the 1800 B allowance exists only to
+   correct the *static* ELF walk's naive free figure (`8192 -
+   CEILING_BYTES`, which sees none of that runtime cost), not to be
+   applied a second time on top of a live reading.
+   `check_httpd_task_stack_budget.py` applies the allowance correctly, to
+   the static naive free (3360 B): 8192 - 4832 - 1800 = **1560 B
+   (19.0%)**, which matches the live 1528-1636 B readings within 0.3
+   points — the intended cross-check, not a coincidence. The right
+   number is **1560 B / 19.0%, classified LOW** (marginal, not yet
+   panicking), not -164 B / CRITICAL. No firmware or formula change
+   needed; only this doc's table was wrong, and it has been corrected
+   above. httpd_worker remains the tightest task and worth watching, but
+   it is not already over budget.
 2. **system_uart_bridge** — 292 B honest headroom, internal DRAM (no
    MALLOC_CAP_SPIRAM), and an active command dispatcher (relay set, CT
    cal, danger-mode, factory-reset, watchdog-cfg). New ELF check added

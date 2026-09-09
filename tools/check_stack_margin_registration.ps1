@@ -151,8 +151,20 @@ $requiredNames = @(
     "safety_owner_evt", "safety_proto_rx", "safety_poll",
     "screen_idle", "telemetry_log", "thermo_owner", "link_watchdog",
     "bx_flash_worker", "info_uart_bridge", "system_uart_bridge", "httpd_worker",
-    "uart_owner_evt_task", "uart_proto_rx"
+    "uart_owner_evt_task", "uart_proto_rx",
+    "thermo_uart_bridge", "touch_uart_bridge", "ui_test_uart_bridge",
+    "io_uart_bridge", "uart_log_bridge", "safety_uart_bridge"
 )
+# 2026-09-08: the six UART bridge tasks above (thermo/touch/ui_test/io/
+# uart_log/safety) were long-lived (`while (true)`, never self-deleting)
+# peers of system_uart_bridge/info_uart_bridge that existed and ran every
+# boot with NO stack_margin_register() call site at all -- this
+# required-name list, being hand-maintained, could not see that gap by
+# construction (docs/audits/2026-09-08-stack-margin-audit.md, "Unregistered
+# long-lived tasks" -- that audit named five; safety_uart_bridge was found
+# and fixed in the same pass, same bug, same file family). See the
+# create-vs-register cross-check further down for the mechanical guard
+# against this happening again for a task this list doesn't yet name.
 # safety_owner_task / uart_owner_task (the uart_owner request-queue worker
 # task, one per owner instance) were deleted 2026-09-06 (uart collapse):
 # uart_owner_transfer() -- the only caller that ever reached that task -- had
@@ -410,5 +422,96 @@ if (Test-Path $hwAbstractionRoot) {
 } else {
     Write-Host "WARNING: $hwAbstractionRoot not found -- skipping hwAbstraction stack-margin boundary check." -ForegroundColor Yellow
 }
+
+# --- Create-vs-register cross-check ---------------------------------------
+#
+# 2026-09-08 fix (docs/audits/2026-09-08-stack-margin-audit.md): the
+# required-name list above is hand-maintained, so it can only ever catch a
+# task LOSING a call site it once had -- it cannot see a task that never had
+# one, because nobody added its name to the list either. That is exactly how
+# thermo_bridge_task/touch_bridge_task/ui_test_bridge_task/io_bridge_task/
+# uart_log_bridge_task/safety_bridge_task went unmeasured: six long-lived
+# (`while (true)`, never self-deleting) tasks, created every boot, invisible
+# to this script because they were never in $requiredNames either. This
+# section is the mechanical guard against that class reopening: it finds
+# EVERY xTaskCreate*() call site under the same scanned files, extracts the
+# FreeRTOS task-name string literal (the 2nd argument -- a debug-visible
+# symbol that survives file moves/splits, unlike a path), and requires each
+# one to either already be a registered stack_margin name OR appear in the
+# explicit, commented exemption list below. An unrecognised name -- not
+# registered, not exempted -- fails loud, by name: that is the "a required
+# task losing its registration" AND "a task nobody ever wired in" cases both
+# covered by one mechanism, keyed on the created task's own name rather than
+# on which file happened to create it.
+$createPattern2 = 'xTaskCreate\w*\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*"([^"]+)"'
+$createdTasks = @()
+foreach ($f in $sourceFiles) {
+    $codeLines = Get-CodeOnlyLines -Path $f.FullName
+    $joined = [string]::Join("`n", $codeLines)
+    foreach ($m in [regex]::Matches($joined, $createPattern2)) {
+        $createdTasks += [PSCustomObject]@{
+            FreeRtosName = $m.Groups[2].Value
+            TaskFunction = $m.Groups[1].Value
+            File         = $f.Name
+        }
+    }
+}
+
+# Exemptions: tasks legitimately not tracked by stack_margin_register(),
+# each with a stated reason. Two categories --
+#   (a) short-lived / self-deleting helper tasks (the required-name list's
+#       own design already excludes these; this is the same exclusion,
+#       applied mechanically instead of by omission)
+#   (b) long-lived tasks registered for real, but under a documented,
+#       DIFFERENT literal name than the FreeRTOS task-name string (so an
+#       exact-string match against $registeredSet would false-positive) --
+#       each of these has its own explanatory comment elsewhere in this
+#       codebase (i2c_owner.c, esp_spi_owner.c, ota_http_recovery.c).
+$exemptCreatedNames = @{
+    # (a) short-lived / self-deleting -- exits on its own, no ongoing stack
+    # margin to track past the moment it was created.
+    "wifi_mode_ui"      = "ui_page_network.c mode_worker_task: one-shot Wi-Fi mode change, self-deletes"
+    "wifi_ap_id_ui"     = "ui_page_network.c ap_identity_worker_task: one-shot AP identity fetch, self-deletes"
+    "wifi_connect_ui"   = "ui_page_network_manage.c connect_worker_task: one-shot connect attempt, self-deletes"
+    "wifi_scan_ui"      = "ui_page_network_manage.c scan_worker_task: one-shot Wi-Fi scan, self-deletes"
+    "ota_confirm"       = "main_network_http.c main_ota_rollback_confirm_task: one-shot OTA confirm timer, self-deletes"
+    "cfg_autofmt"       = "cfg_fs_mount.c cfg_fs_auto_format_task: one-shot cfg filesystem format, self-deletes"
+    "dns_hijack"        = "wifi_prov_link.c dns_hijack_task: provisioning-only captive-portal DNS, self-deletes"
+    "zone_sweep"        = "zones_current_sweep_task.c zone_sweep_task: one-shot per-zone current sweep, self-deletes"
+    "factory_reset_reboot" = "factory_reset.c reboot_task: one-shot reboot-after-delay, never returns to measure"
+    "ota_rollback_reboot"  = "ota_http_esp.c ota_rollback_reboot_task: one-shot reboot-after-delay, never returns to measure"
+    "ota_pico_rollback"    = "ota_http_pico.c ota_pico_rollback_task: one-shot reboot-after-delay, never returns to measure"
+    "recovery_exit_reboot" = "ota_http_recovery.c ota_recovery_exit_reboot_task: registered under the shortened name 'recovery_exit' (see that file's comment), not this FreeRTOS task-name string"
+    "ota_pico_relay"    = "ota_pico_relay.c relay_task_fn: one-shot relay session, self-deletes"
+    "wifi_prov_owner"   = "wifi_prov.c owner_task: provisioning-only command owner, torn down with the provisioning session"
+    "info_boot_push"    = "uart_bridge_info.c info_boot_push_task: one-shot boot version push, self-deletes"
+    # (b) long-lived, registered for real, under a different literal name.
+    "i2c_owner_task"    = "i2c_owner.c owner_task: registered per-caller under 'i2c_owner_sx1509'/'i2c_owner_ns2009' (SX1509.c/NS2009.c), not this FreeRTOS task-name string -- see i2c_owner.c's own comment"
+    "spi_owner_task"    = "esp_spi_owner.c spi_owner_task: registered as 'spi_owner' (its own stack_margin_register() call site), not this FreeRTOS task-name string"
+    # Known pre-existing gaps, out of scope for this pass (not part of the
+    # 6-task fix above; flagged rather than silently exempted so a future
+    # pass has a named target instead of rediscovering these from scratch):
+    "monitor_task"      = "monitor_task.c monitor_task_entry: long-lived heartbeat task, NOT YET registered for stack-margin reporting -- pre-existing gap, out of scope for docs/audits/2026-09-08-stack-margin-audit.md, flagged for a follow-up pass"
+}
+
+$unrecognized = @()
+foreach ($t in $createdTasks) {
+    $freeRtosName = $t.FreeRtosName
+    if ($registeredSet.Contains($freeRtosName)) { continue }
+    if ($exemptCreatedNames.ContainsKey($freeRtosName)) { continue }
+    $unrecognized += "$freeRtosName (task function '$($t.TaskFunction)' in $($t.File))"
+}
+
+if ($unrecognized.Count -gt 0) {
+    Write-Host "STACK MARGIN CREATE-VS-REGISTER CHECK FAILED:" -ForegroundColor Red
+    Write-Host "  The following xTaskCreate*() call site(s) create a task that is neither" -ForegroundColor Red
+    Write-Host "  a registered stack_margin name nor a documented exemption:" -ForegroundColor Red
+    foreach ($u in $unrecognized) {
+        Write-Host "    $u" -ForegroundColor Red
+    }
+    throw "A task is created (xTaskCreate*()) without a stack_margin_register() call site and without being added to this script's `$exemptCreatedNames allowlist with a stated reason -- its high-water mark is unreachable by any tooling. Either add a stack_margin_register() call site (and, if long-lived, add it to `$requiredNames above), or add it to `$exemptCreatedNames with a one-line justification (short-lived/self-deleting, or registered under a documented different name)."
+}
+
+Write-Host "Stack margin create-vs-register check passed: $($createdTasks.Count) xTaskCreate*() call site(s) all accounted for (registered or exempted)." -ForegroundColor Green
 
 exit 0

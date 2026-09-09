@@ -271,12 +271,14 @@ esp_err_t uart_bridge_start_touch_task(uart_protocol_t *proto, screen_idle_t *id
     /* 2026-08-22: PSRAM stack -- touch_bridge_task only calls
      * screen_idle_get_state()/lvgl_port_inject_touch(), neither of which
      * touches hardware directly or reaches flash/NVS. */
+    static TaskHandle_t s_touch_bridge_task_handle; /* lives for the program's duration, same as ctx */
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(touch_bridge_task, "touch_uart_bridge", 3072,
-                                                         &ctx, 5, NULL, tskNO_AFFINITY,
+                                                         &ctx, 5, &s_touch_bridge_task_handle, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_TOUCH);
         return ESP_ERR_NO_MEM;
     }
+    stack_margin_register("touch_uart_bridge", &s_touch_bridge_task_handle, 3072);
     return ESP_OK;
 }

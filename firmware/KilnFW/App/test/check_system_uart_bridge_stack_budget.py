@@ -63,7 +63,17 @@ CONFIGURED_STACK_BYTES = 3072  # must match uart_bridge_start_system_task()'s xT
 # module's docstring for the "TODO.md section 13" unresized-stack context.
 # Retighten to the new worst case if it legitimately moves; do not raise it
 # to paper over a regression without checking the code that deepened it.
-CEILING_BYTES = 2192
+#
+# 2026-09-08 follow-up (same day, same audit): system_bridge_task's own
+# uart_proto_message_t `msg` (~256 B on this build) moved from a plain stack
+# local to a single heap_caps_malloc(..., MALLOC_CAP_INTERNAL) allocation
+# made once before the task's `while (true)` loop (never freed -- the task
+# never returns) -- see uart_bridge_system.c's comment at that allocation.
+# That shrank system_bridge_task's OWN frame from 336 B to 80 B, dropping
+# the deepest reachable path (still through the cfg_fs_confirm_format_device
+# chain -- see this module's docstring; that chain is off-limits cfg_fs*
+# code and was not touched) from 2192 B to 1936 B. Retightened to match.
+CEILING_BYTES = 1936
 
 UNMODELED_OVERHEAD_BYTES = 300
 

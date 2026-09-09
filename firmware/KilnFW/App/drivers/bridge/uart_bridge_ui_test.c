@@ -212,12 +212,14 @@ esp_err_t uart_bridge_start_ui_test_task(uart_protocol_t *proto)
      * was picked to keep clear margin rather than trimmed to a measured
      * minimum; check uxTaskGetStackHighWaterMark() if this ever needs to
      * shrink. */
+    static TaskHandle_t s_ui_test_bridge_task_handle; /* lives for the program's duration, same as ctx */
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(ui_test_bridge_task, "ui_test_uart_bridge",
-                                                         8192, &ctx, 5, NULL, tskNO_AFFINITY,
+                                                         8192, &ctx, 5, &s_ui_test_bridge_task_handle, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_UI_TEST);
         return ESP_ERR_NO_MEM;
     }
+    stack_margin_register("ui_test_uart_bridge", &s_ui_test_bridge_task_handle, 8192);
     return ESP_OK;
 }
