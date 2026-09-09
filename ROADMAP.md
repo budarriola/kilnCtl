@@ -1,6 +1,36 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-05, roadmap-upkeep audit
+> **Status:** planning · **Last reviewed:** 2026-09-09, roadmap-upkeep audit
+> (eighth sweep) — closed a day's worth of shipped-but-undocumented work: the
+> `READINESS_DETAIL_MAX 192` unification (`e8cfe344`, fixed a
+> `-Werror=format-truncation` break that had made `main` unbuildable), the
+> `iter_tune` redesign's steps 1/2/5 (`8f80a4de`, three latent defects fixed
+> same day in `249ce287` — see the iter_tune rows below), a real Pico
+> reboot-in-place command (`8b0e799a`, wire 0x29/0x2A,
+> `KILNLINK_PROTOCOL_VERSION` deliberately not bumped — see M8), E-stop
+> read-back verification and five related fixes (`69c43f39` and the five
+> commits before it), the zones model-fit sentinel plus GET exposure
+> (`5d3bc854`/`13588e40`), a builtin-profile `zone_mask`/`seg_kind` fix
+> (`4f41190f`), the serial-port identity correction — **COM14 is the MAIN
+> BOARD, not `UnitTestFixture`** (`3530e598` then `9e9dfb45`, which found
+> `3530e598` itself had inherited the old, backwards record — the two boards'
+> UART bridges were recorded swapped since `402ab01a`, 2026-09-05), and the
+> DC-gain audit (`3605f278`) that resolves the "factor of ten" apparent
+> identification error as a three-zone coupling hold attributed to one zone.
+> Also recorded as still-open, owner-side: `/api/readiness` becoming a real
+> firing gate on `safety_trip`/`recovery_mode`/`crash_report`/`estop_verified`
+> with **no override path** — in progress as of this sweep
+> (`profile_executor_run.c`'s `readiness_gate_block_t` interlock, being edited
+> concurrently with this pass; re-read it rather than trusting this line),
+> `check_httpd_task_stack_budget` red on `api_readiness_get_handler` (5408 B
+> against 4832 B, cost is `ac405f0b`'s `char json[4096]`, not the detail
+> buffers), the coupling matrix's FOPDT-diagonal/coupling-off-diagonal mixing
+> (fix in flight, not this sweep), and that `ff_hold` infeasibility above
+> roughly ambient+38 °C is **neither** the radiative term **nor** a
+> fitted-slope error — both explanations were checked and ruled out, so ask
+> before re-proposing either. Full detail for closed items before this sweep
+> lives in `docs/COMPLETED_2026-09.md`.
+> **Last reviewed before that:** 2026-09-05, roadmap-upkeep audit
 > (seventh sweep) — landed the cone-unrated bucket (`1501f0c`+`3b0c82e`), the
 > `safety_cfg_http.c` PSRAM move (`541b357`, flashed and re-baselined —
 > `af17e3d` plus the follow-up dram_margin.h/doc pass),
@@ -85,14 +115,19 @@ open is short:
 | XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
 | — | **Guard evidence is mostly host-tested, not hardware-verified.** Of ~20 tracked guard-level claims, 19 are host-tested and only **3** are hardware-verified (S5's sensor fit/masking finding, KilnFW thermal_guard guard 6, the E-stop polarity fix) — everything else, including all of S1–S4/S6–S14's trip logic and KilnFW guards 1/2/3/4/5/7/9, has never been provoked on real silicon | `docs/SAFETY_CASE.md` §4 rollup; `GUARD_TEST_MATRIX.md` §3 |
 
-**Current owner-dependent items, 2026-09-07 sweep** (nothing in the code can close these; listed together so they don't have to be re-derived per session):
+**Current owner-dependent items, 2026-09-09 sweep** (nothing in the code can close these; listed together so they don't have to be re-derived per session):
 
 | Item | Blocks | Where |
 |---|---|---|
-| Attach the safety thermocouple to the safety processor's own MAX31856 (J7) | S5 blocks firing while absent | `firmware/SaftyFW/docs/SAFETY_MODEL.md` §S5 |
+| ~~Attach the safety thermocouple to the safety processor's own MAX31856 (J7)~~ — **stale, corrected 2026-09-09: fitted 2026-08-24**, reading `30.20 C (CJ 28.08 C)`; see M3 above. This row was left behind after the fact | — | `firmware/SaftyFW/docs/SAFETY_MODEL.md` §S5 |
 | Bench webcam re-aim + LCD colour verification (numeric pixel sampling, not eyeball) | Display power / colour items above | `CLAUDE.md` "Camera aim (2026-09-06)"; `DISPLAY_ST7796_PLAN.md` §4 |
-| ~~`iter_tune.c` wire-vs-delete decision~~ — **decided 2026-09-08: keep it, redesign it.** Three open questions for the owner in `ITER_TUNE_REDESIGN_PLAN.md` §9 | Steps 1-7 of the redesign need no answer; step 9 (first hardware trial) does | `docs/ITER_TUNE_REDESIGN_PLAN.md` §9 |
-| CT commissioning step 6 (bench run with the owner) | CT_COMMISSIONING_PLAN close-out | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md` |
+| ~~`iter_tune.c` wire-vs-delete decision~~ — **decided 2026-09-08: keep it, redesign it.** Three open questions for the owner in `ITER_TUNE_REDESIGN_PLAN.md` §9 are settled by that section itself (auto-snapshot anchor, 6-trial budget, bench-fixture-only scope). **Steps 1, 2 and 5 landed 2026-09-09** (`8f80a4de`, three latent defects found in review fixed same day, `249ce287`): `control/firing_score.c`/`firing_compare.c` plus a rewritten `iter_tune.c` decision core (old whole-firing IAE path deleted, not left dual), validated by a Monte-Carlo sim harness (`sim_iter_tune.c`) — 24/24 converged, 660 null comparisons 0% false-accept, 660 mismatched-plant runs 13 better/0 worse/0 cage violations. **Steps 3-4 and 6-9 still open**: the §6.5 credibility gate against a real recorded firing, the noise-floor artifact, persistence/HTTP surface, shadow mode, and step 9's first hardware trial (owner present) | `docs/ITER_TUNE_REDESIGN_PLAN.md` §8/§9 |
+| CT commissioning step 6 (bench run with the owner) — steps 1-5 done, step 0 (noise-floor capture) still needs taking too, both need a reflash first | CT_COMMISSIONING_PLAN close-out | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md` |
+| CT gain calibration needs a known load with the owner present; `ct_channel_map` is unset so `commissioned=false` | S3/S4/S9/S14 stay off | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`; M5 |
+| E-stop double-pole switch (owner's design, `firmware/SaftyFW/docs/HARDWARE.md` §5.1) is not yet fitted — pole 1 in series with the external line contactor coil is external wiring the owner must add | Full E-stop hardware coverage beyond GPIO9's software-visible pole | `firmware/SaftyFW/docs/HARDWARE.md` §5.1/§5.2 |
+| `abs_max_temp_c` must be raised **Pico-first, then ESP**, before a real (non-bench) firing — and the Pico's ceiling must never end up tighter than the ESP's | Real-kiln firing readiness | `docs/SETUP_WIZARD_PLAN.md`; `docs/ON_OFF_ZONE_PLAN.md` |
+| S8's 33.3 °C/min bench default still needs re-tuning for a real kiln (compiled default only, guard stays DORMANT until commissioned) | S8 (rate-of-rise) real-world accuracy | M3 row above; `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` |
+| RP2040 `config_store`'s `next_write_slot` torn-slot reprogramming defect — flagged, untouched | Config-store write atomicity | `docs/audits/flash_endurance_review_2026-09-07.md` R2 follow-on; `docs/CONFIG_FILESYSTEM.md` |
 
 ### Software, doable now — no hardware, no decisions
 
@@ -102,7 +137,7 @@ open is short:
 | XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict, `esp_random.h` classified 2026-09-06). Open: a hardware timing re-check (safety-link reply, display frame time, thermo read latency) — see `docs/HW_ABSTRACTION.md` | M16; `docs/HW_ABSTRACTION.md` |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
 | S | ~~`thermal_guard_cfg_t.progress_band_c` unwired.~~ Done (`992f3954`, review conditions landed `e5375594`): `zone_cfg_t::progress_band_c` (ZONES_CFG_VERSION 21->22), `zones_config_get/set_progress_band_c()`, both build sites (`profile_executor_run.c`, `autotune_engine.c`), zones GET/POST wire (`z%u_progressband`). 0 = 3 °C firmware default, matching `error_band_c`'s sentinel convention. See `docs/audits/consumer_without_producer_2026-09-06.md` | M13 |
-| **L** | **`iter_tune` redesign — owner decision 2026-09-08: keep it, redesign it.** The 2026-09-07 brief (`3bf773af`) recommended wiring `control/iter_tune.c` (`fe14ddf`, `17f7ebd`) as-is; that brief is now **superseded**. The owner's requirement is that the score measure *tracking quality against the target profile*, that it **not require the same starting point** (the existing whole-firing `iae_normalized` plus a 2.0 °C start-temperature window makes it near-permanently idle — the only comparable capture pair differs by 4.8 °C), and that it be **validated in simulation before it touches the kiln**. The redesign scores **matched profile segments**, not whole firings: capture-transient and saturation ticks excluded, three sub-scores (ramp lag in *seconds*, dwell-entry overshoot, steady dwell RMS), a non-dominance accept rule with the owner's 0.5 °C floor as the day-one bar and a simulated statistical floor as a second bar. **Design only, nothing implemented.** Validated in simulation first, by **extending the existing `firmware/KilnFW/App/test/sim_plant.c`** (live, already used by `test_sim_kiln.c`/`test_iter_tune.c` — *not* the deleted `SimFW`/`kilnsim`, which were a bench fixture, not a plant model) with four gaps: the 60 s PWM window, relay actuation lag, MAX31856 quantisation, and — most important — loading the **real measured** `model_k_dc`/`tau`/`dead_time` and the adopted coupling matrix (`78f2134`, `813ad90`) instead of invented constants. 10 ordered steps (0-9), no kiln time before step 8, 3 owner questions. See `docs/audits/consumer_without_producer_2026-09-06.md` for how the module got here | `docs/ITER_TUNE_REDESIGN_PLAN.md`; `PID_EXPANSION_PLAN.md` |
+| **L** | **`iter_tune` redesign — owner decision 2026-09-08: keep it, redesign it.** The 2026-09-07 brief (`3bf773af`) recommended wiring `control/iter_tune.c` (`fe14ddf`, `17f7ebd`) as-is; that brief is now **superseded**. The owner's requirement is that the score measure *tracking quality against the target profile*, that it **not require the same starting point** (the existing whole-firing `iae_normalized` plus a 2.0 °C start-temperature window makes it near-permanently idle — the only comparable capture pair differs by 4.8 °C), and that it be **validated in simulation before it touches the kiln**. The redesign scores **matched profile segments**, not whole firings: capture-transient and saturation ticks excluded, three sub-scores (ramp lag in *seconds*, dwell-entry overshoot, steady dwell RMS), a non-dominance accept rule with the owner's 0.5 °C floor as the day-one bar and a simulated statistical floor as a second bar. **Steps 1, 2 and 5 landed 2026-09-09** (`8f80a4de`+`249ce287`) — see the row above for numbers; steps 3-4 and 6-9 remain design-only. Validated in simulation first, by **extending the existing `firmware/KilnFW/App/test/sim_plant.c`** (live, already used by `test_sim_kiln.c`/`test_iter_tune.c` — *not* the deleted `SimFW`/`kilnsim`, which were a bench fixture, not a plant model) with four gaps: the 60 s PWM window, relay actuation lag, MAX31856 quantisation, and — most important — loading the **real measured** `model_k_dc`/`tau`/`dead_time` and the adopted coupling matrix (`78f2134`, `813ad90`) instead of invented constants. 10 ordered steps (0-9), no kiln time before step 8, 3 owner questions. See `docs/audits/consumer_without_producer_2026-09-06.md` for how the module got here | `docs/ITER_TUNE_REDESIGN_PLAN.md`; `PID_EXPANSION_PLAN.md` |
 
 ### Blocked on hardware that does not exist yet
 

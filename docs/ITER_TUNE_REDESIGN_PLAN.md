@@ -11,11 +11,12 @@
 > and hardware trials) are NOT done; nothing is wired into
 > `profile_executor.c` and the module proposes nothing on hardware.
 >
-> **Status:** design only, nothing implemented. **Owner decision, 2026-09-08:**
+> **Owner decision, 2026-09-08:**
 > *keep `iter_tune`, but redesign it* — "design it better so it does not
 > require the same starting point. what i care about is how well it tracks the
 > target temperature. test it in simulation until you are confident we have a
-> good algorithm."
+> good algorithm." (The "design only, nothing implemented" line that used to
+> stand here is stale as of 2026-09-09 — see the status update above.)
 >
 > This document **supersedes** `docs/audits/iter_tune_decision_2026-09-07.md`
 > (`3bf773af`), whose recommendation was "wire the existing module as-is".

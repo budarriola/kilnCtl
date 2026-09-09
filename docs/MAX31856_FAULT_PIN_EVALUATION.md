@@ -1,4 +1,4 @@
-# MAX31856 `~FAULT` pin: interrupt-driven fault handling — evaluation and plan
+# MAX31856 `~FAULT` pin: interrupt-driven fault handling — evaluation (closed, keep polling)
 
 Status: **evaluation complete, recommendation is KEEP POLLING.** One documentation
 defect fixed in this pass (§6). The interrupt work below is specified but
