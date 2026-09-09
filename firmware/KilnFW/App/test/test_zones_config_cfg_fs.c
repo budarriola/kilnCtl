@@ -35,6 +35,10 @@
 #include "hal_kv.h"
 
 #include "cfg_fs.h"
+#include "zones_config_accessors.h" /* zones_config_get/set_pid/coupling*() -- real accessors,
+                                      * defined by zones_http.c's textual #include of
+                                      * zones_config_accessors.c in test_zones_http.c, this TU's
+                                      * link-mate in the same executable. */
 #include "zones_config_cfg_fs.h"
 #include "zones_http_internal.h" /* s_zones, nvs_load()/nvs_save() */
 
@@ -211,6 +215,116 @@ static void test_dual_write_keeps_file_and_nvs_in_sync(void)
     TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "load succeeds");
     TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "v3") == 0, "NVS agrees with the file -- no divergence after "
                                                               "three consecutive dual-writes");
+}
+
+// ---------------------------------------------------------------------
+// 3b. PID_EXPANSION_PLAN.md 2026-09-08: the coupling matrix and PID gains
+//     are the most expensive data on this board (multi-hour bench runs to
+//     regenerate) and now go through this same dual-write path. Nothing in
+//     this file previously exercised pid_ki/pid_kd, coupling_coeff[],
+//     coupling_diag_k_dc, coupling_tau_s[]/coupling_dead_time_s[], or a
+//     3-zone config through a real save -> "reboot" (memset + nvs_load) ->
+//     reload cycle -- test_dual_write_keeps_file_and_nvs_in_sync above only
+//     ever checks name/pid_kp on a single zone. Goes through the REAL
+//     production accessors (zones_config_accessors.c, textually #included
+//     by test_zones_http.c, this TU's link-mate), not direct struct pokes,
+//     so this also exercises each setter's own validation/nvs_save() path.
+// ---------------------------------------------------------------------
+static void test_coupling_matrix_and_gains_round_trip_through_dual_write(void)
+{
+    TEST_SECTION("zones cfg_fs: coupling matrix + PID gains survive save -> reboot -> reload");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+
+    // Base 3-zone config, one save to establish it (mirrors fill_valid_cfg's
+    // single-zone shape, extended to 3 zones -- same field set
+    // test_zones_http.c's own multi-zone fixtures use).
+    fill_valid_cfg(&s_zones.cfg, "z0", 12.5f);
+    s_zones.cfg.thermo_count = 3;
+    s_zones.cfg.relay_count = 3;
+    s_zones.cfg.max_simultaneous_relays = 3;
+    snprintf(s_zones.cfg.zones[1].name, sizeof(s_zones.cfg.zones[1].name), "z1");
+    s_zones.cfg.zones[1].relay_mask = 0x02;
+    s_zones.cfg.zones[1].thermo_mask = 0x02;
+    s_zones.cfg.zones[1].max_temp_c = 1200.0f;
+    s_zones.cfg.zones[1].model_k_dc = 31.9669f;
+    snprintf(s_zones.cfg.zones[2].name, sizeof(s_zones.cfg.zones[2].name), "z2");
+    s_zones.cfg.zones[2].relay_mask = 0x04;
+    s_zones.cfg.zones[2].thermo_mask = 0x04;
+    s_zones.cfg.zones[2].max_temp_c = 1200.0f;
+    s_zones.cfg.zones[2].model_k_dc = 31.6810f;
+    TEST_CHECK(nvs_save() == ESP_OK, "base 3-zone config saves");
+
+    // Real-shaped values: §2's adopted coupling matrix (affected][stepped])
+    // and its zone-0/z1/z2 identified gains, via the real setters so their
+    // own validation runs too.
+    TEST_CHECK(zones_config_set_pid(0, 12.5f, 0.045f, 3.2f), "zone 0 PID gains set");
+    TEST_CHECK(zones_config_set_pid(1, 9.8f, 0.038f, 2.1f), "zone 1 PID gains set");
+    TEST_CHECK(zones_config_set_pid(2, 10.4f, 0.041f, 2.4f), "zone 2 PID gains set");
+
+    TEST_CHECK(zones_config_set_coupling_cell(0, 1, 27.32f, 620.0f, 145.0f), "z0<-z1 coupling cell set");
+    TEST_CHECK(zones_config_set_coupling_cell(0, 2, 21.72f, 705.0f, 158.0f), "z0<-z2 coupling cell set");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 0, 14.30f, 655.0f, 135.0f), "z1<-z0 coupling cell set");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 2, 22.15f, 730.0f, 150.0f), "z1<-z2 coupling cell set");
+    TEST_CHECK(zones_config_set_coupling_cell(2, 0, 8.33f, 680.0f, 140.0f), "z2<-z0 coupling cell set");
+    TEST_CHECK(zones_config_set_coupling_cell(2, 1, 12.42f, 700.0f, 142.0f), "z2<-z1 coupling cell set");
+
+    TEST_CHECK(zones_config_set_coupling_diag_k_dc(0, 39.2459f), "zone 0 coupling_diag_k_dc set");
+    TEST_CHECK(zones_config_set_coupling_diag_k_dc(1, 35.90f), "zone 1 coupling_diag_k_dc set");
+    TEST_CHECK(zones_config_set_coupling_diag_k_dc(2, 35.32f), "zone 2 coupling_diag_k_dc set");
+
+    // File must actually hold the LAST write, not a stale earlier rev.
+    zones_cfg_t raw;
+    uint32_t rev = 0;
+    bool raw_valid = false;
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid, "file holds a valid blob after the setter round");
+    TEST_CHECK_NEAR(raw.zones[2].coupling_diag_k_dc, 35.32f, 1e-4, "file's LAST write (z2 diag k_dc) landed");
+
+    // "Reboot": wipe the in-RAM struct exactly like a power cycle would,
+    // then reload through the real dual-write resolve/decode path -- not a
+    // direct struct copy.
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "reload after simulated reboot succeeds");
+
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd) && kp == 12.5f && ki == 0.045f && kd == 3.2f,
+               "zone 0 PID gains round-trip exactly");
+    TEST_CHECK(zones_config_get_pid(1, &kp, &ki, &kd) && kp == 9.8f && ki == 0.038f && kd == 2.1f,
+               "zone 1 PID gains round-trip exactly");
+    TEST_CHECK(zones_config_get_pid(2, &kp, &ki, &kd) && kp == 10.4f && ki == 0.041f && kd == 2.4f,
+               "zone 2 PID gains round-trip exactly");
+
+    float row0[MAX31856_CHANNEL_COUNT] = {0};
+    float row1[MAX31856_CHANNEL_COUNT] = {0};
+    float row2[MAX31856_CHANNEL_COUNT] = {0};
+    TEST_CHECK(zones_config_get_coupling(0, row0) && row0[0] == 0.0f && row0[1] == 27.32f && row0[2] == 21.72f,
+               "zone 0 coupling row round-trips, diagonal still 0");
+    TEST_CHECK(zones_config_get_coupling(1, row1) && row1[0] == 14.30f && row1[1] == 0.0f && row1[2] == 22.15f,
+               "zone 1 coupling row round-trips, diagonal still 0");
+    TEST_CHECK(zones_config_get_coupling(2, row2) && row2[0] == 8.33f && row2[1] == 12.42f && row2[2] == 0.0f,
+               "zone 2 coupling row round-trips, diagonal still 0");
+
+    float tau0[MAX31856_CHANNEL_COUNT] = {0};
+    float dt0[MAX31856_CHANNEL_COUNT] = {0};
+    TEST_CHECK(zones_config_get_coupling_tau(0, tau0) && tau0[1] == 620.0f && tau0[2] == 705.0f,
+               "zone 0 coupling tau_s round-trips");
+    TEST_CHECK(zones_config_get_coupling_dead_time(0, dt0) && dt0[1] == 145.0f && dt0[2] == 158.0f,
+               "zone 0 coupling dead_time_s round-trips");
+
+    float diag = 0.0f;
+    TEST_CHECK(zones_config_get_coupling_diag_k_dc(0, &diag) && diag == 39.2459f, "zone 0 diag k_dc round-trips");
+    TEST_CHECK(zones_config_get_coupling_diag_k_dc(1, &diag) && diag == 35.90f, "zone 1 diag k_dc round-trips");
+    TEST_CHECK(zones_config_get_coupling_diag_k_dc(2, &diag) && diag == 35.32f, "zone 2 diag k_dc round-trips");
+
+    // Belt and braces: file and NVS must agree after the reload too, same
+    // "no divergence" property test_dual_write_keeps_file_and_nvs_in_sync
+    // checks for name/pid_kp.
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && raw.zones[1].coupling_coeff[2] == 22.15f && raw.zones[1].pid_ki == 0.038f,
+               "file still agrees with NVS on both coupling and PID gains after reload");
 }
 
 // ---------------------------------------------------------------------
@@ -466,6 +580,7 @@ void run_test_zones_config_cfg_fs(void)
     test_partition_absent_falls_through_to_nvs_only();
     test_nvs_fallback_then_file_preferred_after_migration();
     test_dual_write_keeps_file_and_nvs_in_sync();
+    test_coupling_matrix_and_gains_round_trip_through_dual_write();
     test_divergence_tie_break_both_directions();
     test_file_migration_matches_direct_blob_decode_v21();
     test_interrupted_file_write_leaves_old_or_new();

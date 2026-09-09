@@ -5794,3 +5794,46 @@ tracking-error degradation (no capture, see above).
 this section wants can actually be built, and so the `ff_hold_infeasible`
 transition tick (when each zone first flips, vs. temperature) can be read
 from the capture instead of inferred from a single end-of-run snapshot.
+
+---
+
+## 9. Control roadmap sweep (2026-09-08) — verified against code, no hardware touched
+
+Read every §3/§7 item and checked it against the current tree rather than
+trusting its heading. Nothing was reopened; three items confirmed already
+closed with the doc's own evidence, and one gap found and closed below.
+
+**Confirmed still open (needs a firing or hardware, not attempted here):**
+- `iter_tune.c` wire-vs-delete — owner decision pending
+  (`docs/audits/iter_tune_decision_2026-09-07.md`), left untouched per
+  standing instruction.
+- §3.6 "fuzzy layer has never run above `strength_pct = 0` on hardware."
+- §3.7 validation gap — bench rig is 0-80 °C, radiative (`T⁴`) behaviour at
+  cone temperature is unmeasured; stays open until a real firing.
+- §7's ramp-assist default OFF→ON — same reason, needs a cone-temperature
+  firing, not a bench run.
+
+**Re-confirmed CLOSED, not reopened** (matches memory notes that predate
+this doc's own later corrections — the doc is authoritative): §3.8 load
+sensitivity (not observable, both z0/z1/z2 fits close negative); §7.3/§7.6.1
+dwell credit (credit gate fixed 2026-09-03, now fires at light load,
+10-24% of nominal dwell — the "structurally unreachable" verdict was the
+bug, already retracted in §7.6.1 itself).
+
+**Gap found and closed:** no host test exercised the coupling matrix
+(`coupling_coeff[]`, `coupling_tau_s[]`/`coupling_dead_time_s[]`,
+`coupling_diag_k_dc`) or `pid_ki`/`pid_kd` through the dual-write
+save -> simulated reboot -> reload path — `test_zones_config_cfg_fs.c` only
+ever checked `name`/`pid_kp` on a single zone
+(`test_dual_write_keeps_file_and_nvs_in_sync`). Added
+`test_coupling_matrix_and_gains_round_trip_through_dual_write`: a 3-zone
+config, §2's adopted matrix values and per-zone PID gains set through the
+real `zones_config_accessors.c` setters, `memset(&s_zones.cfg, ...)` to
+simulate a reboot, reload via the real `nvs_load()`, then every value
+re-read through the real getters and checked for an exact match, plus a
+file/NVS agreement check after reload. Negative-tested by dropping the
+`coupling_diag_k_dc` write in `zones_config_set_coupling_diag_k_dc()` —
+failed 4 checks with the exact expected/actual values quoted (`got 0.0000,
+want 35.3200`, plus the three round-trip checks) — reverted by hand,
+`git diff` on the production file empty. Full suite: 32/32 host-test
+executables built and passed after the fix and after the revert.
