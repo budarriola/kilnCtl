@@ -35,7 +35,23 @@
 #include "thermo_task_drdy_recovery.h" // pure missed-edge decision, see its own header
 #include "watchdog_task.h"
 
-#define THERMO_TASK_STACK_WORDS configMINIMAL_STACK_SIZE
+// 2026-09-09: check_saftyfw_task_stack_budgets.py's ARM/Thumb static-call-graph
+// walk (firmware/SaftyFW/test/stack_budget_lib_arm.py) measures a resolved
+// lower bound of 800 B for thermo_task_fn's own call graph against a bare
+// configMINIMAL_STACK_SIZE (1024 B on this target) -- the SAME shape as the
+// current_task/discrete_task overflow fixed in 3afc5ea6 the same day
+// (bare configMINIMAL_STACK_SIZE, overflowed on core 1, confirmed via SWD
+// register reads: core 1 parked in vApplicationStackOverflowHook, core 0
+// deadlocked). thermo_task_fn's path also runs through gpio_set_irq_enabled_
+// with_callback()/pico-sdk internals containing at least one register-
+// indirect `blx`, so 800 B is a floor, not the true worst case -- the
+// checker reports this task INDETERMINATE for exactly that reason. 800 B
+// known-floor against a 1024 B stack is too thin a margin to leave on a
+// task already shown to run through unresolvable dispatch; bumped by the
+// same *4 factor discrete_task.c already uses (4096 B) rather than waiting
+// for a third hardware overflow to prove it. See stack_budget_lib_arm.py's
+// module docstring for what the checker can and cannot measure on this ISA.
+#define THERMO_TASK_STACK_WORDS   (configMINIMAL_STACK_SIZE * 4)
 
 // DRDY-silence margin (THERMOCOUPLE.md section 1: "~2x the expected
 // conversion interval"). Applied to max31856_conversion_time_ms() at
