@@ -271,6 +271,53 @@ class CheckTargetsWithinCeilingTest(unittest.TestCase):
             rq.check_targets_within_ceiling(_plan([]), _zones([80.0]))
 
 
+class CtFieldTest(unittest.TestCase):
+    """_ct_field()/_capture_line() -- docs/audits/
+    cplval75_aborted_executor_panic_2026-09-09.md's fix: a heating capture
+    that never records raw CT counts cannot tell "no mains" apart from an
+    ordinary control stall. See http_capture_log.py's CtFromLine tests for
+    the reader side."""
+
+    def test_present_status_yields_ct_block(self):
+        status = {"ct_counts": [16, 17, 80], "ct_topology": "summed",
+                   "ct_fitted": [False, False, True], "ct_current_a": [None, None, None]}
+        ct = rq._ct_field(status)
+        self.assertEqual(ct, {"counts": [16, 17, 80], "topology": "summed",
+                               "fitted": [False, False, True], "current_a": [None, None, None]})
+
+    def test_no_power_frame_yet_is_none_counts_not_zero(self):
+        # ct_counts_valid == false on the board renders as a JSON null, not
+        # a per-element 0 -- must not be silently rendered as "reads zero".
+        status = {"ct_counts": None, "ct_topology": "summed",
+                   "ct_fitted": [False, False, True]}
+        ct = rq._ct_field(status)
+        self.assertIsNone(ct["counts"])
+
+    def test_no_ct_fields_at_all_returns_none_not_empty_dict(self):
+        # An older firmware build / malformed poll -- told apart from "the
+        # board answered and it was genuinely empty" by returning None.
+        self.assertIsNone(rq._ct_field({"io_ready": True}))
+        self.assertIsNone(rq._ct_field({}))
+
+    def test_capture_line_adds_ct_key_additively(self):
+        exec_body = {"state": "running", "zones": []}
+        status_body = {"ct_counts": [16, 17, 80], "ct_topology": "summed",
+                        "ct_fitted": [False, False, True]}
+        line = json.loads(rq._capture_line(123.0, exec_body, status_body))
+        # existing keys unchanged -- this is additive, not a format change.
+        self.assertEqual(line["exec"], exec_body)
+        self.assertEqual(line["status"], status_body)
+        self.assertEqual(line["ct"]["counts"], [16, 17, 80])
+
+    def test_capture_line_omits_ct_key_when_status_has_none(self):
+        # Backward compatibility check: a status body with no CT fields at
+        # all (older firmware, or a fixture predating this feature) must
+        # produce a line with NO "ct" key -- not a "ct": null -- so an old
+        # parser and a new one see byte-identical output for that case.
+        line = json.loads(rq._capture_line(123.0, {"state": "running", "zones": []}, {"io_ready": True}))
+        self.assertNotIn("ct", line)
+
+
 # --------------------------------------------------------------------------
 # HTTP transport tests -- patched urllib.request.urlopen.
 # --------------------------------------------------------------------------

@@ -8,6 +8,7 @@ with no ``exec`` body) to exercise the skip path.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 
@@ -182,3 +183,97 @@ def test_write_split_runs_empty_file_writes_nothing(tmp_path):
 def test_write_split_runs_missing_file_raises(tmp_path):
     with pytest.raises((FileNotFoundError, OSError)):
         hc.write_split_runs(str(tmp_path / "does_not_exist.jsonl"), str(tmp_path / "out"))
+
+
+# ---------------------------------------------------------------------------
+# ct_from_line / HttpPollRow.ct / write_no_heat_diagnostic_tsv --
+# docs/audits/cplval75_aborted_executor_panic_2026-09-09.md's fix: a capture
+# that logs setpoint/temperature/duty but not raw CT current cannot tell
+# "no mains" apart from an ordinary control stall. See run_queue.py's
+# _ct_field() for the writer side this reads back.
+# ---------------------------------------------------------------------------
+
+def _exec_body(zone_actuals):
+    return {
+        "dwelling": False, "segment_index": 0, "segment_count": 1,
+        "target_c": 10.0, "elapsed_s": 5,
+        "zones": [{"zone": z, "actual_c": c, "duty": 1.0} for z, c in enumerate(zone_actuals)],
+    }
+
+
+def test_ct_from_line_reads_new_top_level_ct_key():
+    obj = {"t": 1.0, "exec": _exec_body([31.0]), "status": {},
+           "ct": {"counts": [16, 17, 80], "topology": "summed",
+                  "fitted": [False, False, True], "current_a": [None, None, None]}}
+    ct = hc.ct_from_line(obj)
+    assert ct == {"counts": [16, 17, 80], "topology": "summed",
+                  "fitted": [False, False, True], "current_a": [None, None, None]}
+
+
+def test_ct_from_line_derives_from_status_for_older_captures_with_no_ct_key():
+    # A capture made before run_queue.py grew the top-level "ct" key still
+    # carries the same data inside "status" (firmware has emitted ct_counts
+    # there since 2026-09-06) -- must not read back as "no data".
+    obj = {"t": 1.0, "exec": _exec_body([31.0]),
+           "status": {"ct_counts": [16, 17, 80], "ct_topology": "summed",
+                      "ct_fitted": [False, False, True]}}
+    ct = hc.ct_from_line(obj)
+    assert ct["counts"] == [16, 17, 80]
+    assert ct["topology"] == "summed"
+    assert ct["fitted"] == [False, False, True]
+
+
+def test_ct_from_line_none_when_neither_source_has_ct_fields():
+    obj = {"t": 1.0, "exec": _exec_body([31.0]), "status": {"io_ready": True}}
+    assert hc.ct_from_line(obj) is None
+    assert hc.ct_from_line({"t": 1.0, "exec": _exec_body([31.0])}) is None
+
+
+def test_parse_http_capture_jsonl_populates_row_ct(tmp_path):
+    p = tmp_path / "with_ct.jsonl"
+    p.write_text(json.dumps({
+        "t": 1.0, "exec": _exec_body([31.0]),
+        "status": {}, "ct": {"counts": [16, 17, 80], "topology": "summed",
+                              "fitted": [False, False, True], "current_a": None},
+    }) + "\n")
+    rows = hc.parse_http_capture_jsonl(str(p))
+    assert len(rows) == 1
+    assert rows[0].ct["counts"] == [16, 17, 80]
+
+
+def test_parse_http_capture_jsonl_ct_none_for_old_format_line(tmp_path):
+    p = tmp_path / "no_ct.jsonl"
+    p.write_text(json.dumps({"t": 1.0, "exec": _exec_body([31.0]), "status": {}}) + "\n")
+    rows = hc.parse_http_capture_jsonl(str(p))
+    assert len(rows) == 1
+    assert rows[0].ct is None
+
+
+def test_write_no_heat_diagnostic_tsv_distinguishes_no_data_from_zero(tmp_path):
+    # Row 1: real board reading (16/17/80, channel 2 the only fitted one).
+    # Row 2: firmware never reported a POWER frame -- counts must be BLANK,
+    # never rendered as 0, or a genuinely-dead heat path would be
+    # indistinguishable from "no data yet" in the derived file.
+    p = tmp_path / "cap.jsonl"
+    p.write_text(
+        json.dumps({"t": 1.0, "exec": _exec_body([31.0, 31.5]),
+                    "status": {}, "ct": {"counts": [16, 17, 80], "topology": "summed",
+                                         "fitted": [False, False, True], "current_a": None}}) + "\n"
+        + json.dumps({"t": 6.0, "exec": _exec_body([31.0, 31.5]), "status": {}}) + "\n"
+    )
+    rows = hc.parse_http_capture_jsonl(str(p))
+    out = tmp_path / "diag.tsv"
+    n = hc.write_no_heat_diagnostic_tsv(rows, str(out))
+    assert n == 4  # 2 polls x 2 zones
+    lines = out.read_text().splitlines()
+    assert lines[0].split("\t") == list(hc._NO_HEAT_TSV_HEADER)
+    data_rows = [dict(zip(lines[0].split("\t"), line.split("\t"))) for line in lines[1:]]
+    row1 = [r for r in data_rows if r["wall_time"] == rows[0].poll.wall_time and r["zone"] == "0"][0]
+    assert row1["ct_ch0"] == "16"
+    assert row1["ct_ch1"] == "17"
+    assert row1["ct_ch2"] == "80"
+    assert row1["ct_topology"] == "summed"
+    row2 = [r for r in data_rows if r["wall_time"] == rows[1].poll.wall_time and r["zone"] == "0"][0]
+    assert row2["ct_ch0"] == ""
+    assert row2["ct_ch1"] == ""
+    assert row2["ct_ch2"] == ""

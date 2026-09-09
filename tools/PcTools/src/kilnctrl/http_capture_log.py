@@ -76,11 +76,24 @@ class HttpPollRow:
     ``GET /api/control`` body (``run_queue.py``'s optional ``"control"``
     capture key, PID_EXPANSION_PLAN.md sec 3.6b) -- ``None`` for any capture
     made with ``RunQueueConfig.capture_control_bd=False`` (or predating this
-    key entirely)."""
+    key entirely).
+
+    ``ct`` is the raw-CT-counts convenience block (``run_queue.py``'s
+    additive ``"ct"`` capture key, docs/audits/
+    cplval75_aborted_executor_panic_2026-09-09.md) -- ``None`` when the line
+    has no ``"ct"`` key AND its ``status`` body carries none of
+    ``ct_counts``/``ct_topology``/``ct_fitted``/``ct_current_a`` either.
+    Populated from the line's own ``"ct"`` key when present (captures made
+    after this field existed); otherwise DERIVED on the fly from ``status``
+    (older captures, made before the top-level key was added, still carry
+    the same data inside ``status`` -- the firmware has put ``ct_counts``
+    et al. in ``GET /api/status`` since 2026-09-06 -- so nothing is lost by
+    reading an old file with new code)."""
     t: float
     poll: la.PollRow
     status: Optional[dict]
     control: Optional[dict] = None
+    ct: Optional[dict] = None
 
 
 def bd_fields_by_zone(control_body: Optional[dict]) -> dict:
@@ -105,6 +118,27 @@ def bd_fields_by_zone(control_body: Optional[dict]) -> dict:
     return out
 
 
+def ct_from_line(obj: dict) -> Optional[dict]:
+    """The ``"ct"`` block for one raw capture-line object, per
+    ``HttpPollRow.ct``'s docstring: the line's own ``"ct"`` key if present,
+    else derived from its ``"status"`` body for a capture made before that
+    key existed. Returns ``None`` if neither has any CT field at all."""
+    ct = obj.get("ct")
+    if isinstance(ct, dict):
+        return ct
+    status = obj.get("status")
+    if not isinstance(status, dict):
+        return None
+    if not any(k in status for k in ("ct_counts", "ct_topology", "ct_fitted", "ct_current_a")):
+        return None
+    return {
+        "counts": status.get("ct_counts"),
+        "topology": status.get("ct_topology"),
+        "fitted": status.get("ct_fitted"),
+        "current_a": status.get("ct_current_a"),
+    }
+
+
 def _wall_time(t: float) -> str:
     return datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc).strftime("%H:%M:%S")
 
@@ -125,7 +159,8 @@ def parse_http_capture_jsonl(path: str) -> list[HttpPollRow]:
         except (TypeError, ValueError):
             continue
         poll = la.poll_row_from_exec_body(_wall_time(t), body)
-        rows.append(HttpPollRow(t=t, poll=poll, status=obj.get("status"), control=obj.get("control")))
+        rows.append(HttpPollRow(t=t, poll=poll, status=obj.get("status"), control=obj.get("control"),
+                                 ct=ct_from_line(obj)))
     return rows
 
 
@@ -216,3 +251,54 @@ def starting_temps_c(rows: Sequence[la.PollRow]) -> dict:
         return {}
     first = rows[0]
     return {z: s.actual_c for z, s in first.zones.items()}
+
+
+#: Column order for write_no_heat_diagnostic_tsv() -- one row per captured
+#: poll, zone temperature/duty/relay alongside the same-poll raw CT reading,
+#: so a no-heat run (docs/audits/cplval75_aborted_executor_panic_2026-09-09.md)
+#: can be read off one file instead of cross-referencing a separate ambient/
+#: safety sidecar by hand.
+_NO_HEAT_TSV_HEADER = (
+    "wall_time", "elapsed_s", "zone", "actual_c", "duty",
+    "ct_ch0", "ct_ch1", "ct_ch2", "ct_topology", "ct_fitted",
+)
+
+
+def write_no_heat_diagnostic_tsv(rows: Sequence[HttpPollRow], out_path: str) -> int:
+    """Write one TSV row per (poll, zone) pair -- ``_NO_HEAT_TSV_HEADER``'s
+    columns -- distilling an HTTP capture (``parse_http_capture_jsonl``'s
+    output) into exactly the columns a no-heat post-mortem needs: is the
+    zone commanding duty, and did the raw CT counts move at all while it
+    did. This is the derived-TSV half of the cplval75 fix --
+    the committed analogue of that incident's hand-built
+    ``cplval75_20260909_observations.tsv``.
+
+    A row's CT columns are BLANK (not ``0``) when that poll's ``ct`` block
+    is ``None`` or ``counts`` is ``None`` -- "no data" must never render as
+    the same blank-vs-zero ambiguity this whole feature exists to resolve
+    at the raw-counts layer; see ``fitted`` for the separate "reads a
+    number but it is not a wired/calibrated channel" case, which the
+    ``ct_fitted`` column carries through per-channel as-is (e.g.
+    ``[False, False, True]`` in summed CT topology) rather than collapsing
+    it into the counts.
+
+    Returns the number of data rows written. Raises the same ``OSError`` a
+    caller would get from opening ``out_path`` directly.
+    """
+    n = 0
+    with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\t".join(_NO_HEAT_TSV_HEADER) + "\n")
+        for row in rows:
+            ct = row.ct or {}
+            counts = ct.get("counts")
+            c0, c1, c2 = (counts + [None, None, None])[:3] if isinstance(counts, list) else (None, None, None)
+            topology = ct.get("topology")
+            fitted = ct.get("fitted")
+            for zone in sorted(row.poll.zones):
+                sample = row.poll.zones[zone]
+                fh.write("\t".join(str(v) if v is not None else "" for v in (
+                    row.poll.wall_time, row.poll.elapsed_s, zone, sample.actual_c, sample.duty,
+                    c0, c1, c2, topology, fitted,
+                )) + "\n")
+                n += 1
+    return n

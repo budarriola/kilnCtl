@@ -23,6 +23,17 @@ mocked in tests, no real socket, no live board), against
     {"t": <unix float>, "exec": <verbatim GET /api/profile_exec body>,
      "status": <verbatim GET /api/status body>}
 
+CT COUNTS (docs/audits/cplval75_aborted_executor_panic_2026-09-09.md). A
+fourth, additive top-level key, "ct", is present whenever ``status``
+carries any CT field at all -- see ``_ct_field()`` below for exactly what
+it holds and why (raw ADC counts, never calibrated amps, plus enough
+context -- ``fitted``/``topology`` -- to tell an uncalibrated channel from
+a genuinely zero one). It costs no extra poll: everything in it already
+rode along inside the same ``status`` body. Older captures, and any run
+against firmware predating ``ct_counts``, simply lack this key -- every
+existing reader of this format ignores unknown keys, so this is a pure
+addition, not a format change.
+
 CONTROL/BD CAPTURE (PID_EXPANSION_PLAN.md sec 3.6b's standing pre-flight
 check -- ``docs/kilnctrl/bd_reachability_check.py``'s own module docstring
 has the full story). When ``RunQueueConfig.capture_control_bd`` is True, a
@@ -829,11 +840,64 @@ def wait_until_paired_start(cfg: RunQueueConfig, reference_status: dict,
         cfg.sleep(cfg.poll_interval_s)
 
 
+def _ct_field(status_body: dict) -> Optional[dict]:
+    """Raw CT (current-transformer) reading extracted from a
+    ``GET /api/status`` body, as a small explicit convenience block --
+    docs/audits/cplval75_aborted_executor_panic_2026-09-09.md's finding:
+    a heating capture that logs setpoint/temperature/duty/relay state but
+    not CT current cannot, on its own, tell "no mains / open relay path" or
+    "broken element" apart from an ordinary control-tuning stall -- a live
+    element draws current under duty, a dead one does not, and this is the
+    one field that shows that directly.
+
+    Returns RAW ADC counts (``ct_counts``, dashboard_status_http.c), never
+    calibrated amps: this bench's CTs are uncommissioned
+    (``ct_channel_map`` unset), so ``ct_current_a`` is null/meaningless here
+    and raw counts are the only signal that actually distinguishes current
+    flow from no current. ``counts`` is ``None`` when the firmware has never
+    reported a valid POWER frame (pre-protocol-11 Pico, or no frame yet) --
+    genuinely no data, not a reading of zero. ``fitted`` (``ct_fitted``) is
+    the separate per-channel signal for "not fitted / not calibrated" (e.g.
+    channels 0/1 read a real but physically meaningless number in summed
+    topology -- only channel 2, the GPIO28 summed-heater CT, is wired) --
+    keeping ``counts``, ``fitted`` and ``topology`` as three distinct fields
+    (rather than collapsing "uncalibrated" into a null count) is what lets a
+    reader tell "uncalibrated channel" apart from "a genuinely zero,
+    calibrated-and-wired reading" after the fact, per this task's own
+    requirement.
+
+    Returns ``None`` (not an empty dict) if ``status_body`` carries none of
+    these keys at all -- an older firmware build, or a malformed/short poll
+    -- so old captures made before this field existed, and any capture
+    against pre-``ct_counts`` firmware, are told apart from "board reported
+    it, and it was empty" by a caller checking ``is None`` first.
+
+    Costs nothing extra over the wire: ``status_body`` is the SAME
+    ``GET /api/status`` response ``_poll_capture_until`` already fetched
+    once per ``poll_interval_s`` for the existing capture line -- this only
+    pulls fields already present in that one response into their own key,
+    it does not add a poll, a request, or a second cadence.
+    """
+    if not isinstance(status_body, dict):
+        return None
+    if not any(k in status_body for k in ("ct_counts", "ct_topology", "ct_fitted", "ct_current_a")):
+        return None
+    return {
+        "counts": status_body.get("ct_counts"),          # raw ADC counts [ch0, ch1, ch2], or null
+        "topology": status_body.get("ct_topology"),        # "summed" | "per_zone" | null
+        "fitted": status_body.get("ct_fitted"),           # per-channel [bool, bool, bool], or null
+        "current_a": status_body.get("ct_current_a"),       # calibrated amps, null where not fitted/calibrated
+    }
+
+
 def _capture_line(t: float, exec_body: dict, status_body: dict,
                    control_body: Optional[dict] = None) -> str:
     line = {"t": t, "exec": exec_body, "status": status_body}
     if control_body is not None:
         line["control"] = control_body
+    ct = _ct_field(status_body)
+    if ct is not None:
+        line["ct"] = ct
     return json.dumps(line)
 
 
