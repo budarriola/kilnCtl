@@ -289,6 +289,24 @@ document, do not solve.
    unmeasured; nothing divides by a fixed channel count that would be wrong
    for one shared CT.
 
+   **6a done (2026-09-08).** `safety_set_commissioning_fields({"ct_installed":
+   1, "ct_topology": 1})` written and read-back verified; no firing/autotune
+   in progress at the time (`profiles_get_exec_status` state=0), so the write
+   was not blocked by ARMED. Full before/after param dump compared field by
+   field: only `ct_installed` (0->1) and `ct_topology` (0->1) changed;
+   `abs_max_temp_c` (80), `max_rate_c_per_min` (33.3), `tc_type` (3),
+   `tc_offset_c` (0) and every other one of the ~65 stored params were
+   unchanged. `commissioned` flipped `true`->`false` as a result -- expected,
+   not a regression: `ct_channel_map[0..2]` are still unset, which
+   `safety_get_commissioning` already lists as still required. S5 was
+   latched-tripped (stuck-DRDY thermocouple, trip_reason 5 per
+   `safety_get_diag`) throughout and was left alone -- the commissioning
+   write is independent of that trip and was not blocked by it. `control_get_zones`
+   shows all three zones' `ct_mask=1`, consistent with one shared summed
+   channel. S14/S15 remain DORMANT (no `i_normal_a` measured yet); this
+   step does not include the heating run above or any `ct_cal`/auto-zero
+   calibration, which stay outstanding bench steps.
+
 ## Order and ownership
 
 Step 0 first (it may make step 3's under-current warn moot on this bench).
