@@ -781,7 +781,24 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
          * fires on ANY commit of the param, not just a value change. */
         for (int i = 0; i < n_pairs; i++) {
             if (pairs[i].param_id == SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL) {
-                estop_verification_clear();
+                /* The clear's own result decides this POST's result. If the
+                 * record could not be cleared (and estop_verification_clear()
+                 * only returns ESP_OK once a read-back confirms it), a
+                 * standing verified=1 survives a polarity commit and
+                 * /api/readiness keeps reporting "confirmed by operator" for
+                 * a polarity nobody verified. Answering {"ok":true} there
+                 * would be this file's own "logging unchecked success" class
+                 * -- the commit DID land, so the reason says so explicitly
+                 * rather than implying the values were not written. */
+                esp_err_t clear_err = estop_verification_clear();
+                if (clear_err != ESP_OK) {
+                    snprintf(reason_out, reason_cap,
+                             "estop_active_level WAS committed, but the standing E-stop verification "
+                             "record could NOT be cleared (%s) -- re-run the bench procedure and do "
+                             "not trust the readiness page's estop_verified item",
+                             esp_err_to_name(clear_err));
+                    return false;
+                }
                 break;
             }
         }

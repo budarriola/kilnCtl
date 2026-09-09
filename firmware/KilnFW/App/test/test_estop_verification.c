@@ -91,6 +91,48 @@ static void test_corrupt_version_reads_as_unverified(void)
                "fail-safe, not fail-open");
 }
 
+// 2026-09-09 (opus review defect A). estop_verification_clear() used to
+// report ESP_OK on the strength of the erase/commit return code alone, and
+// safety_cfg_http.c's apply_pairs() discarded even that. CLAUDE.md's
+// standing rule from docs/audits/boot_guard_recovery_loop_2026-09-08.md is
+// that an NVS write on this board can report success while the persisted
+// value never changes -- so the clear is now confirmed by READ-BACK, with
+// one bounded retry. fake_kv_script_silent_erase_noops() models exactly
+// that lie (an honest failure would exit on the return code and never reach
+// the read-back at all).
+static void test_clear_refuses_to_report_success_when_the_erase_lies(void)
+{
+    TEST_SECTION("estop_verification -- clear() refuses success when the record still reads verified "
+                 "after an erase that claimed HAL_OK");
+    reset_all();
+    TEST_CHECK(estop_verification_confirm() == ESP_OK, "confirmed first");
+    TEST_CHECK(estop_verification_is_verified() == true, "verified before clear()");
+
+    // Both the first attempt AND the bounded retry lie.
+    fake_kv_script_silent_erase_noops(2u);
+    esp_err_t err = estop_verification_clear();
+    TEST_CHECK(err != ESP_OK,
+               "clear() reports FAILURE when the record still reads verified after both attempts -- "
+               "a return-code-only clear would have reported ESP_OK here, leaving a standing "
+               "'confirmed by operator' record alive across an estop_active_level commit");
+    TEST_CHECK(estop_verification_is_verified() == true,
+               "and the record is indeed still verified -- the failure report is truthful, not "
+               "defensive noise");
+}
+
+static void test_clear_retry_recovers_a_single_lying_erase(void)
+{
+    TEST_SECTION("estop_verification -- clear()'s bounded retry recovers when only the first erase "
+                 "lies (the check is discriminating, not vacuously failing)");
+    reset_all();
+    TEST_CHECK(estop_verification_confirm() == ESP_OK, "confirmed first");
+
+    fake_kv_script_silent_erase_noops(1u);
+    esp_err_t err = estop_verification_clear();
+    TEST_CHECK(err == ESP_OK, "clear() succeeds once the retry genuinely lands");
+    TEST_CHECK(estop_verification_is_verified() == false, "and the record really is gone");
+}
+
 void run_test_estop_verification(void)
 {
     test_unverified_by_default();
@@ -98,6 +140,8 @@ void run_test_estop_verification(void)
     test_clear_reverts_to_unverified();
     test_clear_on_already_unverified_is_a_harmless_no_op();
     test_corrupt_version_reads_as_unverified();
+    test_clear_refuses_to_report_success_when_the_erase_lies();
+    test_clear_retry_recovers_a_single_lying_erase();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

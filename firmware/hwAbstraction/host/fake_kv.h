@@ -135,6 +135,18 @@ bool fake_kv_script_corrupt_key(const char *partition, const char *namespace_nam
  * injection per the plan's "error injection ... no-space" spec. */
 void fake_kv_script_next_write_status(hal_status_t status);
 
+/* Arms `count` subsequent hal_kv_erase_key() calls to report HAL_OK while
+ * leaving the key exactly where it was -- a write that LIES about having
+ * succeeded, rather than one that fails honestly (which is what
+ * fake_kv_script_next_write_status() models). Added 2026-09-09: this is the
+ * shape real hardware showed in docs/audits/boot_guard_recovery_loop_
+ * 2026-09-08.md, where an NVS write returned HAL_OK on a board whose
+ * persisted value never changed, and it is the ONLY way to exercise a
+ * caller's read-back verification -- an honest failure exits on the return
+ * code long before the read-back runs. Consumed one call at a time; cleared
+ * by fake_kv_reset_all(). */
+void fake_kv_script_silent_erase_noops(unsigned count);
+
 /* hal_kv_get_u32/set_u32 (profiles_builtin.c's NVS_KEY_HIDDEN mask) are
  * modeled as a plain 4-byte blob under the same key-slot storage
  * hal_kv_get/set_blob use -- no separate scalar storage needed. */

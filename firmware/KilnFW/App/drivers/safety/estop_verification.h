@@ -82,8 +82,16 @@ esp_err_t estop_verification_confirm(void);
 // NOT from anywhere else, since every additional call site is one more place
 // that has to independently reason about whether it invalidates the physical
 // wiring fact this record stands in for. A missing/never-written record is
-// already "unverified," so this is idempotent and its own failure is
-// logged but not fatal to the caller.
+// already "unverified," so this is idempotent.
+//
+// The clear is confirmed by READ-BACK before ESP_OK is returned (one
+// bounded erase-then-retry, then ESP_ERR_INVALID_STATE) -- see the
+// implementation's comment for why a return code alone is not trusted for
+// an NVS write on this board. A non-ESP_OK return means a standing
+// "verified" record may still be readable, so the caller MUST surface the
+// failure rather than logging it and reporting success: a stale
+// "confirmed by operator" outliving a polarity change is the exact hazard
+// this function exists to remove.
 esp_err_t estop_verification_clear(void);
 
 #ifdef __cplusplus

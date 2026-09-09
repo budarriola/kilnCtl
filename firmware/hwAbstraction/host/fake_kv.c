@@ -55,6 +55,7 @@ static bool                   s_write_safe_here = true;
 static bool                   s_next_write_fail_armed = false;
 static hal_status_t           s_next_write_fail_status = HAL_OK;
 static bool                   s_lossy_uncommitted = false;
+static unsigned               s_silent_erase_noops = 0u;
 
 static const char *norm_partition(const char *partition)
 {
@@ -124,6 +125,7 @@ void fake_kv_reset_all(void)
     s_next_write_fail_armed = false;
     s_next_write_fail_status = HAL_OK;
     s_lossy_uncommitted = false;
+    s_silent_erase_noops = 0u;
 }
 
 bool fake_kv_handle_is_live(const hal_kv_handle_t *h)
@@ -211,6 +213,11 @@ void fake_kv_script_next_write_status(hal_status_t status)
 {
     s_next_write_fail_armed = true;
     s_next_write_fail_status = status;
+}
+
+void fake_kv_script_silent_erase_noops(unsigned count)
+{
+    s_silent_erase_noops = count;
 }
 
 void fake_kv_set_write_safe_here(bool safe)
@@ -467,6 +474,13 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
     if (s_next_write_fail_armed) {
         s_next_write_fail_armed = false;
         return s_next_write_fail_status;
+    }
+
+    if (s_silent_erase_noops > 0u) {
+        /* The lie: report success, change nothing. See
+         * fake_kv_script_silent_erase_noops()'s header comment. */
+        s_silent_erase_noops--;
+        return HAL_OK;
     }
 
     fake_kv_namespace_t *ns = &s_partitions[hs->partition_slot].namespaces[hs->ns_slot];

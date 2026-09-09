@@ -146,7 +146,15 @@ $patterns = @(
     "kiln_io_all_relays_off",
     "safety_link_request_enable",
     "nvs_save_store",
-    "zone_normals_save"
+    "zone_normals_save",
+    # WIDENED 2026-09-09 (opus review defect A): safety_cfg_http.c's
+    # apply_pairs() called estop_verification_clear() as a bare statement and
+    # then returned true, so a failed clear left a standing "verified"
+    # E-stop record while the POST reported success -- the same discard shape
+    # as the 2026-08-31 findings, on the record that stands in for wiring
+    # firmware cannot observe. Its own header now requires the caller to
+    # surface a non-ESP_OK; this line is the mechanical half of that.
+    "estop_verification_clear"
 )
 
 # A definition line looks like "esp_err_t kiln_io_owner_command_all_relays_off(void)"

@@ -122,23 +122,49 @@ esp_err_t estop_verification_confirm(void)
     return err;
 }
 
-esp_err_t estop_verification_clear(void)
+/* One erase+commit attempt. Split out so estop_verification_clear() can run
+ * it twice (see that function's read-back comment) without duplicating the
+ * open/erase/commit/close sequence. */
+static hal_status_t erase_once(void)
 {
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
-        return hal_status_to_esp_err(err);
+        return err;
     }
     err = hal_kv_erase_key(&h, NVS_KEY_ESTOP_VERIF);
     if (err == HAL_OK || err == HAL_NOT_FOUND) {
         hal_status_t commit_err = hal_kv_commit(&h);
-        if (commit_err != HAL_OK) {
-            err = commit_err;
-        } else {
-            err = HAL_OK;
-        }
+        err = (commit_err != HAL_OK) ? commit_err : HAL_OK;
     }
     hal_kv_close(&h);
+    return err;
+}
+
+esp_err_t estop_verification_clear(void)
+{
+    /* READ-BACK, not the return code alone. boot_guard.c's 2026-09-08 audit
+     * (docs/audits/boot_guard_recovery_loop_2026-09-08.md) established that
+     * an NVS write on this board can report HAL_OK while the persisted value
+     * never changes -- and CLAUDE.md's standing rule from that audit is that
+     * no module may trust a boot_guard-style write's return code again. This
+     * record is exactly that shape: one meaningful bit whose stale survival
+     * is the unsafe direction (a standing "verified" outliving a polarity
+     * change is precisely what this function exists to prevent), and the
+     * read-back costs one NVS read on a path that runs at most once per
+     * commissioning commit. One bounded retry, then give up loudly -- same
+     * shape as boot_guard's verified-clear-with-retry helper. */
+    hal_status_t err = erase_once();
+    if (err == HAL_OK && estop_verification_is_verified()) {
+        ESP_LOGW(TAG, "E-stop verification record still reads VERIFIED after an erase that reported "
+                      "success -- retrying once");
+        err = erase_once();
+        if (err == HAL_OK && estop_verification_is_verified()) {
+            ESP_LOGE(TAG, "E-stop verification record STILL reads VERIFIED after a second erase -- "
+                          "the record is stale and must not be trusted");
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
     if (err != HAL_OK) {
         ESP_LOGW(TAG, "could not clear E-stop verification record: %s", hal_status_to_name(err));
     } else {
