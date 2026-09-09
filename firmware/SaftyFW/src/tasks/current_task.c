@@ -26,7 +26,18 @@
 typedef char current_task_ct_cal_channel_counts_match
     [(CT_AMPS_CAL_NUM_CHANNELS == CONFIG_STORE_CT_CAL_NUM_CHANNELS) ? 1 : -1];
 
-#define CURRENT_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
+// 2026-09-09: configMINIMAL_STACK_SIZE overflowed on core1 (confirmed via
+// SWD -- core1 halted forever inside vApplicationStackOverflowHook, core0
+// then deadlocked forever inside xQueueGenericSend's spin_lock_unsafe_
+// blocking, since the two-struct-copy critical section here never
+// completed) after CT_COMMISSIONING_PLAN.md step 2's auto idle-offset
+// calibration state and the current_task_reload_cal()/current_sense_
+// sample()/get_snapshot()/get_power() call chain grew past the minimal
+// stack's margin. Sized like link_task.c/safety_core.c's own *6, which
+// carry the same "a bare configMINIMAL_STACK_SIZE looked fine until this
+// task's call depth grew" lesson -- see safety_core.c's comment above
+// SAFETY_CORE_STACK_WORDS.
+#define CURRENT_TASK_STACK_WORDS   (configMINIMAL_STACK_SIZE * 6)
 
 static TaskHandle_t s_task_handle = NULL;
 

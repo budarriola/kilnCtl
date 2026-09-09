@@ -25,7 +25,15 @@
 #include "task_priorities.h"
 #include "watchdog_task.h"
 
-#define DISCRETE_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
+// 2026-09-09: configMINIMAL_STACK_SIZE overflowed on core1 (confirmed via
+// SWD -- core1 halted forever inside vApplicationStackOverflowHook, core0
+// then deadlocked forever inside xQueueGenericSend's spin_lock_unsafe_
+// blocking) during the 2026-09-09 dual-processor flash/commissioning pass.
+// Same treatment as current_task.c's CURRENT_TASK_STACK_WORDS: a per-task
+// bump rather than raising configMINIMAL_STACK_SIZE itself (that global
+// bump was tried and reverted -- see FreeRTOSConfig.h's comment -- because
+// every *N-multiplied task's stack scales off it too and it blew the heap).
+#define DISCRETE_TASK_STACK_WORDS   (configMINIMAL_STACK_SIZE * 4)
 
 // SAFTYFW_ESTOP_DEBOUNCE_MS / SAFTYFW_MAIN_FAULT_DEBOUNCE_MS /
 // SAFTYFW_DEBOUNCE_SAMPLES() now live in debounce_policy.h (2026-09-04) so

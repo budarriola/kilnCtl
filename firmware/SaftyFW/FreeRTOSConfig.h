@@ -48,6 +48,15 @@
 /* 8 priority levels (0..7) -- covers SAFTYFW_PRIO_RELAY_OWNER == 7, the
  * highest value task_priorities.h assigns, plus the idle task at 0. */
 #define configMAX_PRIORITIES                    8
+// 2026-09-09: tried raising this 256->512 to fix a discrete_task.c overflow
+// (see that file's own DISCRETE_TASK_STACK_WORDS comment) but reverted --
+// every *N-multiplied stack size (link_task/safety_core/current_task's *6,
+// update_task's *3, log_task's *2) scales off THIS constant too, so the
+// global bump inflated total static stack allocation by ~29KB, not the ~5KB
+// intended, and traded the overflow for pvPortMalloc() failing during
+// startup (core parked forever in vApplicationMallocFailedHook, confirmed
+// via SWD). Fixed per-task instead (current_task.c, discrete_task.c) so
+// only the two tasks that actually needed more got it.
 #define configMINIMAL_STACK_SIZE                256
 #define configMAX_TASK_NAME_LEN                 16
 #define configTICK_TYPE_WIDTH_IN_BITS           TICK_TYPE_WIDTH_32_BITS
@@ -85,7 +94,11 @@
  * creation calls in main(). */
 #define configSUPPORT_STATIC_ALLOCATION         1
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
-#define configTOTAL_HEAP_SIZE                   (32 * 1024)
+// 2026-09-09: raised 32K->40K for headroom after current_task.c's and
+// discrete_task.c's per-task stack bumps (see each file's own comment) --
+// smaller and more targeted than the reverted global configMINIMAL_STACK_
+// SIZE bump above. RP2040 has 264KB SRAM total, so 40K leaves ample margin.
+#define configTOTAL_HEAP_SIZE                   (40 * 1024)
 #define configAPPLICATION_ALLOCATED_HEAP        0
 #define configENABLE_HEAP_PROTECTOR             0
 #define configKERNEL_PROVIDED_STATIC_MEMORY     1
