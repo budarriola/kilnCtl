@@ -87,6 +87,33 @@ the harness file's comment at the fix site).
   matrix active. If it pins in that range on real hardware, this is not a
   simulation artifact.
 
+**2026-09-08 reconciliation with the documented ~62 C figure
+(`project_ff_hold_infeasible_above_62c.md`, `cplval70` 2026-09-05):** the
+aliasing bug above was confined to this new host-only harness
+(`sim_wide_temp_sweep.c`), never in production firmware — `pid.c`/
+`profile_executor_feedforward.c` keep `hold_infeasible`/`climb_infeasible`
+as separate locals and separate struct fields
+(`ff_hold_infeasible`/`ff_climb_infeasible` in `profile_executor_state.h`)
+throughout. `cplval70`'s 62-67 C reading (`ambient + 38.0 C`, PID_EXPANSION_
+PLAN.md §3.6e/§3.6i, 30+ captures plus one direct on-board flag read at the
+end of a 70 C dwell) is therefore a genuine, independent hardware
+measurement, not an artifact of this harness's bug. A live read attempted
+against the board on 2026-09-08 at ~34 C ambient (no profile running) could
+not observe `ff_hold`/`ff_hold_infeasible` at all -- those fields are only
+populated by `profile_executor_feedforward.c` during an active profile
+tick, so an idle-board reading is structurally unavailable without running
+a firing. **Verdict: the ~62 C (`ambient + 38 C`) hardware figure stands;
+this sim's ~41 C figure is not confirmed** -- most likely explained by the
+"algebraic first-cut" coupling-conductance mapping this harness uses
+(§1 G1, `g_ij = h_i * coupling_coeff[i][j] / k_dc[j]`, called out above as
+verified only by a single one-zone step test, not the full iterative
+re-fit), rather than by the aliasing bug, which did not touch production
+code. The confirming test in the bullet above (a slow multi-zone ramp
+through 35-70 C with `/api/control` polled for `ff_hold`/
+`ff_hold_infeasible`) remains the right way to settle the onset precisely
+and should be folded into the next scheduled capture (e.g. `cplval75`)
+rather than run standalone.
+
 ## 3. Single gain set across a full firing, and gain scheduling
 
 **The literal cone-temperature sweep the owner asked for turned out not to
