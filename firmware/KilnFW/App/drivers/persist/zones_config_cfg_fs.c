@@ -120,9 +120,8 @@ esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;
     }
-    uint8_t raw[ZCFG_FILE_BUF_MAX];
     size_t blob_len = sizeof(*cfg);
-    if (4 + blob_len > sizeof(raw)) {
+    if (4 + blob_len > (size_t)ZCFG_FILE_BUF_MAX) {
         /* Cannot happen given the _Static_assert on zones_cfg_t's size, but
          * fail loudly rather than silently truncate a partial write if that
          * ever regresses. */
@@ -146,12 +145,29 @@ esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
      * caller's copy before it got here. A local, properly-aligned copy (not
      * a cast of `raw + 4`) avoids any alignment assumption about a byte
      * buffer. */
+    /* HEAP, never the stack -- the same rule the load path above already
+     * follows, and for the same reason. 2026-09-09: this was the one
+     * remaining stack copy of this buffer, and with `stamped` beside it this
+     * frame measured 1952 B. That is reached from httpd handlers as well as
+     * from `main` (revert_post_handler -> adaptive_tune_revert ->
+     * zones_config_set_model -> nvs_save -> here), and it pushed
+     * revert_post_handler to 4880 B against check_httpd_task_stack_budget's
+     * 4832 B ceiling on the shared 8 KB httpd_worker stack. Allocating it
+     * takes ~1 KB off every one of those paths at once. */
+    uint8_t *raw = malloc(ZCFG_FILE_BUF_MAX);
+    if (!raw) {
+        ESP_LOGW(ZCFG_FS_TAG, "zones config file write buffer alloc failed -- file not written (rev %lu)",
+                 (unsigned long)rev);
+        return ESP_ERR_NO_MEM;
+    }
+
     zones_cfg_t stamped = *cfg;
     stamped.crc32 = zones_config_json_compute_crc(&stamped);
     put_u32_le(raw, rev);
     memcpy(raw + 4, &stamped, blob_len);
 
     esp_err_t err = s_write_fn(ZONES_CFG_FILE_PATH, raw, 4 + blob_len);
+    free(raw);
     if (err != ESP_OK) {
         ESP_LOGW(ZCFG_FS_TAG, "zones config file write (rev %lu) failed: %s", (unsigned long)rev,
                  esp_err_to_name(err));

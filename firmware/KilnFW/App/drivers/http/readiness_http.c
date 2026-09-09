@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -90,6 +91,10 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * overruns), and this runs on the shared 8 KB httpd stack alongside
  * json[4096] -- see the httpd-stack-blob notes; growing frames here is not
  * free. */
+/* Body buffer size. Heap-allocated in api_readiness_get_handler() -- see the
+ * long comment there for why it must never become a stack array again. */
+#define READINESS_JSON_CAP 4096u
+
 #define READINESS_DETAIL_MAX 192
 
 /* Appends one checklist item object to *o within cap, returning the new
@@ -138,18 +143,43 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     /* 3072 -> 4096, 2026-09-08: four new items (crash_report, recovery_mode,
      * cfg_fs, safety_context) pushed the previous size close enough to
      * READINESS_TRUNC_RESERVE that the truncation notice could plausibly
-     * fire on a board with long detail strings on every item. */
-    char json[4096];
+     * fire on a board with long detail strings on every item.
+     *
+     * HEAP, not stack, 2026-09-09. This handler runs on the SHARED 8 KB httpd
+     * task stack, and a 4096-byte local on it is exactly the "httpd stack
+     * blob" class that has already cost this board two panics (see CLAUDE.md).
+     * check_httpd_task_stack_budget caught it here at 5408 B against a 4832 B
+     * ceiling once e8cfe344 replaced the 18 per-item detail buffers with a
+     * uniform READINESS_DETAIL_MAX. The body buffer is the single largest
+     * thing in the frame and it is needed exactly once, for the length of one
+     * request, so it belongs on the heap; moving it there drops the frame by
+     * ~4 KB and leaves real margin rather than squeaking under the ceiling.
+     * Do NOT turn this back into an array, and do NOT "fix" a future overrun
+     * of this check by shrinking READINESS_DETAIL_MAX -- e8cfe344's audit
+     * found four items whose worst case exceeds the old per-item buffers
+     * (recovery_mode 152, safety_context 136, safety_commissioned 130,
+     * safety_trip 97), so truncating detail text again reintroduces a
+     * -Werror=format-truncation build break. */
+    char *json = malloc(READINESS_JSON_CAP);
+    if (!json) {
+        /* Out of heap is a real, reportable condition on this board (see the
+         * DRAM-exhaustion history), not something to paper over with a
+         * half-built body. 503 tells the page to say so. */
+        ESP_LOGE(TAG, "readiness body alloc (%u B) failed", (unsigned)READINESS_JSON_CAP);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"error\":\"out of memory building readiness report\"}");
+    }
     size_t o = 0;
-    int n = snprintf(json, sizeof(json), "{\"items\":[");
-    o = (n < 0 || (size_t)n >= sizeof(json)) ? sizeof(json) - 1 : (size_t)n;
+    int n = snprintf(json, READINESS_JSON_CAP, "{\"items\":[");
+    o = (n < 0 || (size_t)n >= READINESS_JSON_CAP) ? READINESS_JSON_CAP - 1 : (size_t)n;
     bool first = true;
 
     /* The item loop may only use the buffer up to item_cap; the rest is held
      * for the truncation notice and the closing "]}", so neither can itself be
      * the thing that gets truncated. */
     bool dropped = false;
-    const size_t item_cap = sizeof(json) - READINESS_TRUNC_RESERVE;
+    const size_t item_cap = READINESS_JSON_CAP - READINESS_TRUNC_RESERVE;
 
     /* 1. Network configured. AP-only is an explicit, recordable choice
      * (wifi_prov.c's mode model -- "AP only, forever, by user choice"), not
@@ -840,7 +870,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * what is unknown. */
     if (dropped) {
         bool notice_dropped = false;
-        o = append_item(json, sizeof(json), o, first,
+        o = append_item(json, READINESS_JSON_CAP, o, first,
                         "checklist_truncated", "Checklist incomplete", READY_CANNOT_YET,
                         "the board ran out of room to report every check -- items are missing "
                         "from this list, so treat it as inconclusive, not as a pass",
@@ -853,12 +883,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    n = snprintf(json + o, sizeof(json) - o, "]}");
-    if (n < 0 || (size_t)n >= sizeof(json) - o) {
+    n = snprintf(json + o, READINESS_JSON_CAP - o, "]}");
+    if (n < 0 || (size_t)n >= READINESS_JSON_CAP - o) {
         /* Unreachable while the reserve holds, but an unterminated body is
          * invalid JSON, and the page's fetch would throw and render nothing at
          * all -- so close the document by force rather than ship a fragment. */
-        o = sizeof(json) - 3;
+        o = READINESS_JSON_CAP - 3;
         memcpy(json + o, "]}", 2);
         o += 2;
         ESP_LOGE(TAG, "readiness JSON had no room to close -- forced terminator");
@@ -867,7 +897,9 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     }
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t send_err = httpd_resp_send(req, json, o);
+    free(json);
+    return send_err;
 }
 
 /* TODO.md 10.6a: content negotiation lives in web_encoding.h's shared
