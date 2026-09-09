@@ -170,48 +170,88 @@ function Mirror-Tree([string]$src, [string]$dst, [string[]]$excludeDirs, [string
     }
 }
 
-Write-Host "Mirroring current firmware/KilnFW and firmware/hwAbstraction into $WorktreePath ..."
-Mirror-Tree (Join-Path $repoRoot "firmware\KilnFW") (Join-Path $WorktreePath "firmware\KilnFW") `
-    @("build", "components\lvgl", ".git") @("sdkconfig")
-Mirror-Tree (Join-Path $repoRoot "firmware\hwAbstraction") (Join-Path $WorktreePath "firmware\hwAbstraction") `
-    @(".git") @()
-
-Copy-Item -Path $MainSdkconfig -Destination $WorktreeSdkconfig -Force
-$mainHash = (Get-FileHash $MainSdkconfig -Algorithm SHA256).Hash
-$worktreeHash = (Get-FileHash $WorktreeSdkconfig -Algorithm SHA256).Hash
-if ($mainHash -ne $worktreeHash) {
-    Fail "sdkconfig copy did not verify (hash mismatch) -- refusing to build against an unconfirmed config"
+# HOSTILE ENVIRONMENT: idf.py refuses to configure correctly (or silently
+# no-ops the build, leaving a STALE elf/bin in place from a previous run) when
+# MSYSTEM/MSYS-flavoured environment is inherited into the process -- e.g.
+# when this script is launched from a git-bash/MSYS2 shell (the Bash tool)
+# rather than native PowerShell. That no-op looks exactly like "produced no
+# .bin/.elf" (or worse: reports exit 0 against artifacts that were not
+# actually rebuilt). Strip it unconditionally so this check behaves the same
+# no matter which shell launched it, instead of relying on every caller
+# remembering to use PowerShell.
+foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", "MSYS", "MSYS2_PATH_TYPE")) {
+    if (Test-Path "Env:$v") { Remove-Item "Env:$v" }
 }
 
-& $IdfProfile *>&1 | Out-Null
-
-$env:CCACHE_DISABLE = "1"
-
-Write-Host "Building KilnFW target (CCACHE_DISABLE=1) in $WorktreePath ..."
-$buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
-$buildExit = $LASTEXITCODE
-
-$buildOutput | Write-Host
-
-if ($buildExit -ne 0) {
-    Fail "idf.py build failed (exit $buildExit) -- see output above. This is exactly the class of break check_00_kilnfw_target_build.ps1 exists to catch (e.g. commit 9bc155ea's -Werror=format-truncation in readiness_http.c)."
-}
-
-$binPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.bin"
-$elfPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.elf"
-if (-not (Test-Path $binPath) -or -not (Test-Path $elfPath)) {
-    Fail "idf.py build reported success (exit 0) but $binPath / $elfPath does not exist -- refusing to report PASS without a real build artifact."
-}
-
-# Publish into the shared main-tree build/ directory so the ELF-reading
-# checks that sort after this one (check_httpd_task_stack_budget.ps1 and
-# siblings, see header) see a build that is current with the source they
-# just ran against -- not whatever was last built by hand, hours or days
-# ago. Locked because the shared tree may have another build/check running
-# against the same directory concurrently.
-$mainBuildDir = Join-Path $repoRoot "firmware\KilnFW\build"
-$lock = Enter-BuildLock -Name "kilnfw_main_build_dir_publish"
+# The whole mirror -> build -> verify -> publish sequence operates on the ONE
+# shared, persistent worktree/build dir (C:\wt\checkbuild and the main tree's
+# firmware\KilnFW\build\), so the lock must span all of it, not just the
+# final publish copy -- two concurrent runs building into the same worktree
+# at once would race ninja/cmake exactly like the two check_bootloader_builds.ps1
+# runs documented in build_lock.ps1's header, and a lock that only wrapped the
+# publish step would not have prevented that.
+$lock = Enter-BuildLock -Name "kilnfw_checkbuild_worktree"
 try {
+    Write-Host "Mirroring current firmware/KilnFW and firmware/hwAbstraction into $WorktreePath ..."
+    Mirror-Tree (Join-Path $repoRoot "firmware\KilnFW") (Join-Path $WorktreePath "firmware\KilnFW") `
+        @("build", "components\lvgl", ".git") @("sdkconfig")
+    Mirror-Tree (Join-Path $repoRoot "firmware\hwAbstraction") (Join-Path $WorktreePath "firmware\hwAbstraction") `
+        @(".git") @()
+
+    Copy-Item -Path $MainSdkconfig -Destination $WorktreeSdkconfig -Force
+    $mainHash = (Get-FileHash $MainSdkconfig -Algorithm SHA256).Hash
+    $worktreeHash = (Get-FileHash $WorktreeSdkconfig -Algorithm SHA256).Hash
+    if ($mainHash -ne $worktreeHash) {
+        Fail "sdkconfig copy did not verify (hash mismatch) -- refusing to build against an unconfirmed config"
+    }
+
+    & $IdfProfile *>&1 | Out-Null
+
+    $env:CCACHE_DISABLE = "1"
+
+    $binPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.bin"
+    $elfPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.elf"
+
+    # Snapshot for the freshness check below: a build that reports exit 0
+    # without actually re-linking (the MSYSTEM no-op case above, or any other
+    # silent short-circuit) must not be allowed to pass off a PRE-EXISTING,
+    # stale elf/bin from a previous run as this run's output -- downstream
+    # ELF-reading checks (check_httpd_task_stack_budget.ps1 and siblings)
+    # trust whatever this check just published as current.
+    $buildStart = Get-Date
+
+    Write-Host "Building KilnFW target (CCACHE_DISABLE=1) in $WorktreePath ..."
+    $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
+    $buildExit = $LASTEXITCODE
+
+    $buildOutput | Write-Host
+
+    if ($buildExit -ne 0) {
+        Fail "idf.py build failed (exit $buildExit) -- see output above. This is exactly the class of break check_00_kilnfw_target_build.ps1 exists to catch (e.g. commit 9bc155ea's -Werror=format-truncation in readiness_http.c)."
+    }
+
+    if (-not (Test-Path $binPath) -or -not (Test-Path $elfPath)) {
+        Fail "idf.py build reported success (exit 0) but $binPath / $elfPath does not exist -- refusing to report PASS without a real build artifact."
+    }
+
+    # Positive freshness check, not just existence: both artifacts' last-write
+    # time must fall AT OR AFTER $buildStart. A stale elf/bin left over from a
+    # prior run (e.g. the MSYSTEM no-op) predates $buildStart and must FAIL
+    # loudly here rather than be mistaken for a fresh build.
+    $binTime = (Get-Item $binPath).LastWriteTime
+    $elfTime = (Get-Item $elfPath).LastWriteTime
+    # Small negative tolerance for filesystem timestamp granularity/clock skew.
+    $tolerance = [TimeSpan]::FromSeconds(2)
+    if (($binTime -lt $buildStart.Subtract($tolerance)) -or ($elfTime -lt $buildStart.Subtract($tolerance))) {
+        Fail "idf.py build reported success (exit 0) but $binPath (mtime $binTime) / $elfPath (mtime $elfTime) predate this run's build start ($buildStart) -- the build silently did not relink (known cause: MSYSTEM/MSYS environment inherited from a git-bash launcher confusing idf.py). Refusing to publish a stale artifact as current."
+    }
+
+    # Publish into the shared main-tree build/ directory so the ELF-reading
+    # checks that sort after this one (check_httpd_task_stack_budget.ps1 and
+    # siblings, see header) see a build that is current with the source they
+    # just ran against -- not whatever was last built by hand, hours or days
+    # ago.
+    $mainBuildDir = Join-Path $repoRoot "firmware\KilnFW\build"
     New-Item -ItemType Directory -Force -Path $mainBuildDir | Out-Null
     Copy-Item -Path $elfPath -Destination (Join-Path $mainBuildDir "KilnCtrl.elf") -Force
     Copy-Item -Path $binPath -Destination (Join-Path $mainBuildDir "KilnCtrl.bin") -Force
