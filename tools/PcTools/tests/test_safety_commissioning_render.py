@@ -46,13 +46,18 @@ def _sample_get(commissioned: bool = False, reliable: bool = True, stale: bool =
                  live_crc: int = 1, cached_crc: int = 1, **set_values):
     params = [
         {"id": 257, "name": "tc_source", "type": "u8"},
+        {"id": 258, "name": "borrowed_zone_index", "type": "u8"},
+        {"id": 259, "name": "tc_placement_mode", "type": "u8"},
         {"id": 260, "name": "abs_max_temp_c", "type": "f32"},
+        {"id": 261, "name": "tc_type", "type": "u8"},
         {"id": 265, "name": "ct_installed", "type": "u8"},
         {"id": 516, "name": "max_rate_c_per_min", "type": "f32"},
+        {"id": 782, "name": "mains_voltage_v", "type": "f32"},
         {"id": 794, "name": "i_normal_a[0]", "type": "f32"},
         {"id": 795, "name": "i_normal_a[1]", "type": "f32"},
         {"id": 796, "name": "i_normal_a[2]", "type": "f32"},
         {"id": 799, "name": "ct_topology", "type": "u8"},
+        {"id": 530, "name": "estop_active_level", "type": "u8"},
     ]
     for p in params:
         if p["name"] in set_values:
@@ -171,6 +176,52 @@ class CommissionedRenderTest(unittest.TestCase):
         self.assertIn("unset_reporting_reliable=false", out)
         s1_line = next(l for l in out.splitlines() if l.startswith("S1"))
         self.assertIn("DORMANT", s1_line)
+
+
+class PreviouslyUnprintedParamsTest(unittest.TestCase):
+    """2026-09-09 (docs/audits/commissioning_gap_and_no_heat_2026-09-09.md
+    sec 4): estop_active_level and several other commissioning params were
+    always present in the underlying GET /api/safety/commissioning response
+    but never rendered. These prove the fix actually surfaces them, using
+    the SAME field/value pairs a live board would return -- not a
+    test-local stand-in for the render logic."""
+
+    def test_estop_active_level_default_renders_as_active_high(self):
+        data = _sample_get(estop_active_level=0)
+        out = mss._describe_commissioning(data)
+        self.assertIn("estop_active_level=0", out)
+        self.assertIn("ACTIVE_HIGH", out)
+
+    def test_estop_active_level_one_renders_as_active_low(self):
+        data = _sample_get(estop_active_level=1)
+        out = mss._describe_commissioning(data)
+        self.assertIn("estop_active_level=1", out)
+        self.assertIn("ACTIVE_LOW", out)
+
+    def test_estop_active_level_unset_says_so_not_a_bare_zero(self):
+        data = _sample_get()  # estop_active_level never in set_values -> set=False
+        out = mss._describe_commissioning(data)
+        line = next(l for l in out.splitlines() if l.startswith("estop_active_level"))
+        self.assertIn("(unset)", line)
+
+    def test_borrowed_zone_index_tc_placement_mains_tc_type_all_render(self):
+        data = _sample_get(borrowed_zone_index=1, tc_placement_mode=0,
+                            mains_voltage_v=240.0, tc_type=3)
+        out = mss._describe_commissioning(data)
+        self.assertIn("borrowed_zone_index=1", out)
+        self.assertIn("tc_placement_mode=0", out)
+        self.assertIn("CHAMBER_AGREED", out)
+        self.assertIn("mains_voltage_v=240", out)
+        self.assertIn("tc_type=3", out)
+
+    def test_unfetched_fields_are_omitted_not_invented(self):
+        # A response missing a param entirely (older firmware, or a field
+        # this table has not learned about yet) must not be rendered at
+        # all -- never fabricated as 0/unset.
+        data = _sample_get()
+        data["params"] = [p for p in data["params"] if p["name"] != "mains_voltage_v"]
+        out = mss._describe_commissioning(data)
+        self.assertNotIn("mains_voltage_v", out)
 
 
 class NegativeTest(unittest.TestCase):

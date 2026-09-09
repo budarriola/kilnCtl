@@ -617,6 +617,54 @@ def _describe_commissioning(data: dict) -> str:
                      + (f" zone_index={data.get('borrowed_zone_index')}"
                         if data.get("borrowed") and "borrowed_zone_index" in data else ""))
 
+    # 2026-09-09 (docs/audits/commissioning_gap_and_no_heat_2026-09-09.md
+    # sec 4): these params were always present in the underlying GET
+    # /api/safety/commissioning response but never rendered, which left
+    # estop_active_level in particular unreadable by any tool during a
+    # live investigation. Same numeric()/unset-reliability handling as
+    # every other field above -- reported as "(unset)" rather than a bare
+    # 0 when the board cannot distinguish "never commissioned" from a
+    # genuine 0.
+    def render_u8(name: str, label: str, decode=None) -> "str | None":
+        p = params.get(name)
+        if p is None:
+            return None
+        is_set = bool(p.get("set")) and reliable
+        raw = p.get("value")
+        if not is_set:
+            return f"{label}={raw} (unset)"
+        decoded = f" ({decode(raw)})" if decode else ""
+        return f"{label}={raw}{decoded}"
+
+    estop_line = render_u8(
+        "estop_active_level", "estop_active_level",
+        lambda v: "ACTIVE_LOW" if v else "ACTIVE_HIGH (default -- asserted when GPIO9 reads high; "
+                                          "the only polarity under which a cut line is detectable)")
+    if estop_line:
+        lines.append(estop_line)
+
+    borrowed_zone_line = render_u8("borrowed_zone_index", "borrowed_zone_index")
+    if borrowed_zone_line and not data.get("borrowed_known"):
+        # Printed above already when borrowed_known; this covers the case
+        # (tc_source=OWN_J7) where the endpoint's own borrowed/borrowed_known
+        # summary omits it even though the raw param is still set.
+        lines.append(borrowed_zone_line)
+
+    tc_placement_line = render_u8(
+        "tc_placement_mode", "tc_placement_mode",
+        lambda v: {0: "CHAMBER_AGREED", 1: "CHAMBER_INDEPENDENT"}.get(int(v), f"unknown({v})"))
+    if tc_placement_line:
+        lines.append(tc_placement_line)
+
+    mains_p = params.get("mains_voltage_v")
+    if mains_p is not None:
+        mains_val, mains_set = numeric("mains_voltage_v")
+        lines.append(f"mains_voltage_v={mains_val:g}" + ("" if mains_set else " (unset)"))
+
+    tc_type_line = render_u8("tc_type", "tc_type")
+    if tc_type_line:
+        lines.append(tc_type_line)
+
     return "\n".join(lines)
 
 
