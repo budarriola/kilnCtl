@@ -1359,33 +1359,56 @@ static void test_sw_reset_does_not_touch_nvs(void)
 // only one did.
 static void test_sw_reset_pico_outcome_mapping(void)
 {
-    TEST_SECTION("sw_reset_classify_pico_outcome -- only an explicit accepted=1 reads as ACCEPTED");
+    TEST_SECTION("sw_reset_classify_pico_outcome -- only an explicit accepted=1 reads as ACCEPTED, "
+                 "and a REFUSED outcome maps to the reason the wire actually sent");
 
-    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED) ==
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED,
+                                              KILNLINK_REBOOT_RESULT_REASON_NONE) ==
                    SW_RESET_PICO_ACCEPTED,
                "an explicit ACCEPTED outcome reports the safety processor as accepted");
-    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_REFUSED) ==
-                   SW_RESET_PICO_REFUSED,
-               "an explicit REFUSED outcome reports a refusal, distinct from silence");
 
-    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY) ==
+    // 2026-09-09 fix: the reason byte is decoded into a DISTINCT report per
+    // refusal reason, not collapsed onto one fixed "relay armed" claim --
+    // KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE has nothing to do with
+    // relay state and must never render as if it did.
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_REFUSED,
+                                              KILNLINK_REBOOT_RESULT_REASON_ARMED) ==
+                   SW_RESET_PICO_REFUSED_ARMED,
+               "REFUSED + ARMED reason reports the relay-armed refusal");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_REFUSED,
+                                              KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE) ==
+                   SW_RESET_PICO_REFUSED_TRANSFER,
+               "REFUSED + TRANSFER_ACTIVE reason reports the transfer-in-progress refusal, "
+               "NOT the relay-armed one");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_REFUSED,
+                                              KILNLINK_REBOOT_RESULT_REASON_UNKNOWN) ==
+                   SW_RESET_PICO_REFUSED_OTHER,
+               "REFUSED + an explicit UNKNOWN reason reports the generic refusal, not a specific claim");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_REFUSED,
+                                              (uint8_t)(KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE + 1)) ==
+                   SW_RESET_PICO_REFUSED_OTHER,
+               "REFUSED + a reason byte this build's enum does not name (a newer peer) reports the "
+               "generic refusal rather than aliasing onto ARMED or TRANSFER");
+
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY, 0) ==
                    SW_RESET_PICO_UNCONFIRMED,
                "silence (a Pico predating this command, or a lost reply) is UNCONFIRMED, never accepted");
-    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN) ==
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN, 0) ==
                    SW_RESET_PICO_UNCONFIRMED,
                "a link that was already down is UNCONFIRMED, never accepted");
-    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED) ==
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED, 0) ==
                    SW_RESET_PICO_UNCONFIRMED,
                "a local send failure is UNCONFIRMED, never accepted");
 
     // A driver-level error must not be able to smuggle an ACCEPTED through
     // on the back of whatever happened to be left in *out_outcome.
     TEST_CHECK(sw_reset_classify_pico_outcome(ESP_ERR_INVALID_STATE,
-                                              SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED) ==
+                                              SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED, 0) ==
                    SW_RESET_PICO_UNCONFIRMED,
                "a non-ESP_OK return is UNCONFIRMED even when the outcome argument says ACCEPTED");
     TEST_CHECK(sw_reset_classify_pico_outcome(ESP_ERR_INVALID_ARG,
-                                              SAFETY_LINK_REBOOT_OUTCOME_REFUSED) ==
+                                              SAFETY_LINK_REBOOT_OUTCOME_REFUSED,
+                                              KILNLINK_REBOOT_RESULT_REASON_ARMED) ==
                    SW_RESET_PICO_UNCONFIRMED,
                "a non-ESP_OK return is UNCONFIRMED rather than a refusal it cannot actually vouch for");
 
@@ -1393,7 +1416,7 @@ static void test_sw_reset_pico_outcome_mapping(void)
     // through to UNCONFIRMED, not to accepted. Cast a value past the end of
     // the enum to stand in for one.
     TEST_CHECK(sw_reset_classify_pico_outcome(
-                   ESP_OK, (safety_link_reboot_outcome_t)(SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY + 1)) ==
+                   ESP_OK, (safety_link_reboot_outcome_t)(SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY + 1), 0) ==
                    SW_RESET_PICO_UNCONFIRMED,
                "an unrecognized outcome value reads as UNCONFIRMED, so a future outcome cannot "
                "silently become success");
@@ -1408,18 +1431,42 @@ static void test_sw_reset_pico_sentences_are_honest(void)
     TEST_SECTION("sw_reset_pico_sentence -- no non-accepted outcome claims the safety processor rebooted");
 
     const char *accepted = sw_reset_pico_sentence(SW_RESET_PICO_ACCEPTED);
-    const char *refused = sw_reset_pico_sentence(SW_RESET_PICO_REFUSED);
+    const char *refused_armed = sw_reset_pico_sentence(SW_RESET_PICO_REFUSED_ARMED);
+    const char *refused_transfer = sw_reset_pico_sentence(SW_RESET_PICO_REFUSED_TRANSFER);
+    const char *refused_other = sw_reset_pico_sentence(SW_RESET_PICO_REFUSED_OTHER);
     const char *unconfirmed = sw_reset_pico_sentence(SW_RESET_PICO_UNCONFIRMED);
     const char *no_link = sw_reset_pico_sentence(SW_RESET_PICO_NO_LINK);
 
     TEST_CHECK(strstr(accepted, "accepted") != NULL,
                "the accepted sentence says the safety processor accepted");
-    TEST_CHECK(strstr(refused, "REFUSED") != NULL, "the refusal sentence says REFUSED");
+    TEST_CHECK(strstr(refused_armed, "REFUSED") != NULL, "the armed-refusal sentence says REFUSED");
+    TEST_CHECK(strstr(refused_transfer, "REFUSED") != NULL,
+               "the transfer-refusal sentence says REFUSED");
+    TEST_CHECK(strstr(refused_other, "REFUSED") != NULL,
+               "the generic-refusal sentence says REFUSED");
     TEST_CHECK(strstr(unconfirmed, "NOT confirmed") != NULL,
                "the unconfirmed sentence says NOT confirmed, in as many words");
 
-    TEST_CHECK(strstr(refused, "accepted") == NULL,
-               "the refusal sentence must never contain the word accepted");
+    // The load-bearing property from the 2026-09-09 fix: the transfer-active
+    // refusal must NOT claim the relay is armed, and the generic/unknown
+    // refusal must not claim EITHER specific cause -- an unrecognized reason
+    // must never render as a specific claim.
+    TEST_CHECK(strstr(refused_transfer, "relay") == NULL,
+               "the transfer-in-progress refusal sentence must never mention the relay -- that "
+               "was the defect: every refusal used to render as \"its heating relay is armed\" "
+               "regardless of the real reason");
+    TEST_CHECK(strstr(refused_transfer, "transfer") != NULL,
+               "the transfer-in-progress refusal sentence names the real cause");
+    TEST_CHECK(strstr(refused_other, "relay") == NULL && strstr(refused_other, "transfer") == NULL,
+               "the generic/unrecognized-reason refusal sentence must not claim either specific "
+               "cause");
+
+    TEST_CHECK(strstr(refused_armed, "accepted") == NULL,
+               "the armed-refusal sentence must never contain the word accepted");
+    TEST_CHECK(strstr(refused_transfer, "accepted") == NULL,
+               "the transfer-refusal sentence must never contain the word accepted");
+    TEST_CHECK(strstr(refused_other, "accepted") == NULL,
+               "the generic-refusal sentence must never contain the word accepted");
     TEST_CHECK(strstr(unconfirmed, "accepted") == NULL,
                "the unconfirmed sentence must never contain the word accepted");
     TEST_CHECK(strstr(no_link, "accepted") == NULL,
@@ -1427,10 +1474,18 @@ static void test_sw_reset_pico_sentences_are_honest(void)
 
     // Every outcome must have its own distinct sentence -- a duplicate would
     // mean two genuinely different results read identically to the operator.
-    TEST_CHECK(strcmp(accepted, refused) != 0 && strcmp(accepted, unconfirmed) != 0 &&
-                   strcmp(accepted, no_link) != 0 && strcmp(refused, unconfirmed) != 0 &&
-                   strcmp(refused, no_link) != 0 && strcmp(unconfirmed, no_link) != 0,
-               "all four outcome sentences are distinct");
+    const char *all[] = {accepted, refused_armed, refused_transfer, refused_other, unconfirmed, no_link};
+    const size_t n = sizeof(all) / sizeof(all[0]);
+    bool all_distinct = true;
+    for (size_t i = 0; i < n && all_distinct; i++) {
+        for (size_t j = i + 1; j < n; j++) {
+            if (strcmp(all[i], all[j]) == 0) {
+                all_distinct = false;
+                break;
+            }
+        }
+    }
+    TEST_CHECK(all_distinct, "all six outcome sentences are distinct");
 }
 
 // ---------------------------------------------------------------------------

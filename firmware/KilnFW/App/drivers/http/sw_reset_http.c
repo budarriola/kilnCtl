@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -14,6 +15,11 @@
 #include "ota_http.h" /* interlocks + challenge/response auth -- same idiom as
                         * factory_reset.c's reset_post_handler(), see there for
                         * the full rationale on auth-before-interlock ordering */
+#include "kilnlink/kilnlink_reboot_result.h" /* kilnlink_reboot_result_reason_t --
+                                                * decoding the Pico's REFUSED reason so
+                                                * the operator-facing sentence names the
+                                                * REAL refusal (relay armed vs. a firmware
+                                                * transfer in flight), not a fixed guess */
 #include "safety_link.h" /* safety_link_send_reboot() -- the real Pico
                            * reboot-in-place command (SAFETY_CMD_REBOOT,
                            * 0x29); safety_link_send_announce_reboot() is
@@ -86,7 +92,11 @@ static SafetyLinkClass *s_safety;
 // therefore says "accepted"/"commanded", never "rebooted".
 typedef enum {
     SW_RESET_PICO_ACCEPTED = 0,
-    SW_RESET_PICO_REFUSED,
+    SW_RESET_PICO_REFUSED_ARMED,     /* relay energized -- heating permission is live */
+    SW_RESET_PICO_REFUSED_TRANSFER,  /* a firmware transfer into the inactive slot is in flight */
+    SW_RESET_PICO_REFUSED_OTHER,     /* refused for a reason this build does not recognize --
+                                       * an older or newer peer; NEVER render this as a specific
+                                       * claim about relay state */
     SW_RESET_PICO_UNCONFIRMED, /* sent but unanswered -- or link down, or send failed */
     SW_RESET_PICO_NO_LINK,     /* no safety processor configured on this boot at all */
 } sw_reset_pico_report_t;
@@ -109,32 +119,49 @@ typedef enum {
 // stays up -- without it, that Pico's S6b link-dead guard would nuisance-trip
 // on this ESP's 10-15 second silence.
 
-// Set by the handler once the response has been written and it is safe for
-// the task below to take the board down. The task is CREATED before the Pico
-// is commanded (see the handler), so without this flag a task that happened
-// to run immediately could reboot this ESP while the handler was still
-// waiting on the Pico's reply -- which would produce exactly the divergence
-// this ordering exists to prevent: no response written, and a report nobody
-// ever reads. volatile, written once by the handler task, read by the reboot
-// task; no lock needed for a single-word flag with one writer.
-static volatile bool s_reboot_armed = false;
+// Per-REQUEST arm flag, heap-allocated by the handler and owned by exactly
+// one reboot task -- 2026-09-09 replaced what used to be a single static
+// s_reboot_armed shared across every request. That single flag had a real
+// two-request window: esp_http_server dispatches one request at a time, but
+// a first request's reboot task is still ALIVE (delaying, then polling) while
+// a second request is being handled on the request task, and the second
+// handler's very first act used to be `s_reboot_armed = false` -- disarming
+// the first task's flag. If task creation for that second request then
+// failed, the 500 response correctly says "NEITHER processor was rebooted"
+// for the SECOND request, but the FIRST task, now re-armed to false and
+// waiting again, still goes on to reboot the board once its own poll window
+// re-passes -- making the "NEITHER" claim false the moment it was printed.
+// Giving each request its own heap-allocated flag (freed by whichever side
+// finishes last: the task on the reboot path, the handler on a
+// task-creation-failure path) makes that collision structurally impossible
+// rather than merely unlikely.
+typedef struct {
+    volatile bool armed;
+} sw_reset_reboot_ctx_t;
 
 static void sw_reset_reboot_task(void *arg)
 {
-    (void)arg;
+    sw_reset_reboot_ctx_t *ctx = (sw_reset_reboot_ctx_t *)arg;
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Wait for the handler to finish (bounded). Every path through the
-    // handler arms this flag before returning, so the timeout is defensive
-    // only: 5 s is far longer than the Pico exchange (~345 ms worst case)
-    // plus the response write, and expiring reboots anyway rather than
-    // leaking a task that never dies.
+    // Wait for the handler to finish (bounded). This is NOT merely
+    // defensive: arming happens in the handler AFTER httpd_resp_sendstr()
+    // returns (see the handler below), and sendstr() can block on a slow or
+    // stalled TCP client for longer than this task's own 500 ms initial
+    // delay. Without this wait, such a client could hold the send past that
+    // delay and this task would reboot the board mid-response -- the very
+    // divergence (no response actually delivered, a report nobody reads)
+    // this ordering exists to prevent. 5 s is chosen as generously longer
+    // than the Pico exchange (~345 ms worst case) plus any ordinary response
+    // write; expiring the wait reboots anyway rather than leaking a task
+    // that never dies, on the theory that a client stalled 5 s past a 345 ms
+    // exchange is not coming back for the response either way.
     const int kArmPollMs = 20;
     const int kArmWaitMs = 5000;
-    for (int waited = 0; !s_reboot_armed && waited < kArmWaitMs; waited += kArmPollMs) {
+    for (int waited = 0; !ctx->armed && waited < kArmWaitMs; waited += kArmPollMs) {
         vTaskDelay(pdMS_TO_TICKS(kArmPollMs));
     }
-    if (!s_reboot_armed) {
+    if (!ctx->armed) {
         ESP_LOGW(TAG, "sw_reset: reboot task armed-flag never set after %d ms -- rebooting anyway",
                  kArmWaitMs);
     }
@@ -151,6 +178,7 @@ static void sw_reset_reboot_task(void *arg)
     }
 
     ESP_LOGW(TAG, "sw_reset: rebooting ESP now (no configuration touched)");
+    free(ctx);
     hal_wdt_reboot(); /* esp_restart() under the hood -- never returns on real hardware */
     vTaskDelete(NULL); /* defensive only, see factory_reset.c's identical comment */
 }
@@ -159,8 +187,25 @@ static void sw_reset_reboot_task(void *arg)
 // vocabulary. Pure mapping, no policy -- and in particular it NEVER upgrades
 // an unconfirmed outcome to accepted. Non-static so the host test can pin
 // that property without an httpd_req_t.
+//
+// reason_code is the wire byte from SAFETY_CMD_REBOOT_RESULT, meaningful only
+// when outcome is REFUSED (kilnlink_reboot_result.h). It is decoded here into
+// a DISTINCT report per refusal reason so the operator-facing sentence can
+// name the real cause instead of a single fixed guess -- 2026-09-09 fixed a
+// defect where every refusal, including the new
+// KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE (a firmware transfer in
+// flight, nothing to do with relay state), rendered as "its heating relay is
+// armed": a heating-permission claim that was simply false for that reason,
+// and dangerous precisely because it is a heating-permission claim -- an
+// operator who believes the relay is armed while the board is idle hunts a
+// stuck interlock, or dismisses a genuinely armed relay next time. Any reason
+// byte this build does not recognize (an older or newer peer,
+// KILNLINK_REBOOT_RESULT_REASON_UNKNOWN, or a future enumerator) maps to the
+// generic OTHER report, which never claims a specific cause -- never let an
+// unknown reason render as a specific claim.
 sw_reset_pico_report_t sw_reset_classify_pico_outcome(esp_err_t err,
-                                                      safety_link_reboot_outcome_t outcome)
+                                                      safety_link_reboot_outcome_t outcome,
+                                                      uint8_t reason_code)
 {
     if (err != ESP_OK) {
         // A local/driver error, not an answer from the peer. Not knowing is
@@ -171,7 +216,19 @@ sw_reset_pico_report_t sw_reset_classify_pico_outcome(esp_err_t err,
     case SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED:
         return SW_RESET_PICO_ACCEPTED;
     case SAFETY_LINK_REBOOT_OUTCOME_REFUSED:
-        return SW_RESET_PICO_REFUSED;
+        switch ((kilnlink_reboot_result_reason_t)reason_code) {
+        case KILNLINK_REBOOT_RESULT_REASON_ARMED:
+            return SW_RESET_PICO_REFUSED_ARMED;
+        case KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE:
+            return SW_RESET_PICO_REFUSED_TRANSFER;
+        case KILNLINK_REBOOT_RESULT_REASON_NONE:
+        case KILNLINK_REBOOT_RESULT_REASON_UNKNOWN:
+        default:
+            // Includes NONE (should not pair with a refusal at all) and any
+            // reason byte this build's enum does not name -- an older or
+            // newer peer. Never render as a specific claim.
+            return SW_RESET_PICO_REFUSED_OTHER;
+        }
     case SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN:
     case SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED:
     case SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY:
@@ -192,9 +249,17 @@ const char *sw_reset_pico_sentence(sw_reset_pico_report_t report)
     case SW_RESET_PICO_ACCEPTED:
         return "The safety processor accepted the reboot and is resetting into the same firmware; "
                "its configuration was not touched.";
-    case SW_RESET_PICO_REFUSED:
+    case SW_RESET_PICO_REFUSED_ARMED:
         return "The safety processor REFUSED to reboot (its heating relay is armed). It stays "
                "running; only this controller is rebooting.";
+    case SW_RESET_PICO_REFUSED_TRANSFER:
+        return "The safety processor REFUSED to reboot (a firmware transfer into it is in "
+               "progress). It stays running; only this controller is rebooting. Retry after the "
+               "transfer finishes.";
+    case SW_RESET_PICO_REFUSED_OTHER:
+        return "The safety processor REFUSED to reboot for a reason this controller's firmware "
+               "does not recognize (it may be running older or newer firmware). It stays running; "
+               "only this controller is rebooting.";
     case SW_RESET_PICO_NO_LINK:
         return "No safety processor is configured on this boot, so nothing was sent to one. Only "
                "this controller is rebooting.";
@@ -258,21 +323,40 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
     // rebooting regardless -- this repo's "logging unchecked success"
     // class).
     //
-    // The created-but-not-yet-run window is closed by s_reboot_armed: the
-    // task delays, then waits for the handler to arm it, so it cannot
-    // reboot this ESP out from under the Pico exchange or the response.
+    // The created-but-not-yet-run window is closed by ctx->armed: the task
+    // delays, then waits for THIS request's handler to arm it, so it cannot
+    // reboot this ESP out from under the Pico exchange or the response. The
+    // context is per-request (heap-allocated here, freed by whichever side
+    // finishes last) precisely so that a second, concurrent-in-flight
+    // request's flag can never disarm this one's task -- see the struct's
+    // own comment above for the two-request window this closes.
     //
     // 2026-08-22-style PSRAM-stack note: sw_reset_reboot_task() only
     // vTaskDelay()s, sends one fire-and-forget UART frame and calls
     // hal_wdt_reboot() -- no flash access on this task's own stack, so
     // unlike factory_reset.c's erase path there is no flash-worker dispatch
     // needed here.
-    s_reboot_armed = false;
+    sw_reset_reboot_ctx_t *ctx = (sw_reset_reboot_ctx_t *)heap_caps_malloc(
+        sizeof(sw_reset_reboot_ctx_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ctx) {
+        ESP_LOGE(TAG, "sw_reset from %s: could not allocate the reboot context -- NOTHING was "
+                      "rebooted; the safety processor was deliberately not commanded",
+                 ip);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req,
+                           "FAILED -- could not start this controller's reboot (out of memory). "
+                           "NEITHER processor was rebooted: the safety processor was deliberately "
+                           "not commanded, so nothing is half-reset. No configuration was changed. "
+                           "Try again; if it keeps failing, power-cycle the board.");
+        return ESP_OK;
+    }
+    ctx->armed = false;
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(sw_reset_reboot_task, "sw_reset_reboot",
-                                                         3072, NULL, tskIDLE_PRIORITY + 1, NULL,
+                                                         3072, ctx, tskIDLE_PRIORITY + 1, NULL,
                                                          tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
+        free(ctx);
         ESP_LOGE(TAG, "sw_reset from %s: could not create the reboot task (%d) -- NOTHING was "
                       "rebooted; the safety processor was deliberately not commanded",
                  ip, (int)created);
@@ -297,7 +381,7 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
         safety_link_reboot_outcome_t outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
         uint8_t reason_code = 0;
         esp_err_t reboot_err = safety_link_send_reboot(s_safety, &outcome, &reason_code);
-        pico_report = sw_reset_classify_pico_outcome(reboot_err, outcome);
+        pico_report = sw_reset_classify_pico_outcome(reboot_err, outcome, reason_code);
         ESP_LOGW(TAG, "sw_reset: safety processor reboot -> outcome=%d err=%s reason=%u: %s",
                  (int)outcome, esp_err_to_name(reboot_err), (unsigned)reason_code,
                  sw_reset_pico_sentence(pico_report));
@@ -341,11 +425,11 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
                                 "This reboot WILL latch an S6a main-fault trip: clear it with POST "
                                 "/api/safety/clear_trip (Safety page) before heating. See the log "
                                 "for the safety processor's own outcome.");
-        s_reboot_armed = true;
+        ctx->armed = true;
         return ESP_OK;
     }
     httpd_resp_sendstr(req, body);
-    s_reboot_armed = true;
+    ctx->armed = true;
     return ESP_OK;
 }
 
