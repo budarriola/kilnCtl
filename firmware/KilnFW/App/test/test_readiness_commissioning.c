@@ -218,3 +218,81 @@ void run_test_readiness_safety_trip(void)
     TEST_CHECK(readiness_safety_trip_status(false, 0x0010) == READY_CANNOT_YET,
                 "link down must read cannot_yet even if a stale mask looks tripped");
 }
+
+/* readiness_crash_report_status(): 2026-09-08 follow-on to safety_trip
+ * above -- capability_preflight already refuses to start a run on a board
+ * with an unacknowledged crash; this item closes the gap so readiness
+ * agrees rather than showing green while another layer refuses. */
+void run_test_readiness_crash_report(void)
+{
+    TEST_SECTION("readiness crash_report item -- unacknowledged crash must block completeness");
+
+    TEST_CHECK(readiness_crash_report_status(false, false) == READY_OK,
+                "no crash record at all must read ok");
+    TEST_CHECK(readiness_crash_report_status(true, false) == READY_NOT_DONE,
+                "an unacknowledged crash record must read not_done, not ok");
+    TEST_CHECK(readiness_crash_report_status(true, true) == READY_OK,
+                "an acknowledged crash record must read ok");
+}
+
+/* readiness_recovery_mode_status(): a board in recovery mode has skipped
+ * starting profile_executor/autotune_engine/rules_task and cannot fire
+ * regardless of every other item's state. */
+void run_test_readiness_recovery_mode(void)
+{
+    TEST_SECTION("readiness recovery_mode item -- recovery boot must block completeness");
+
+    TEST_CHECK(readiness_recovery_mode_status(false) == READY_OK,
+                "a normal boot must read ok");
+    TEST_CHECK(readiness_recovery_mode_status(true) == READY_NOT_DONE,
+                "a recovery-mode boot must read not_done, not ok");
+}
+
+/* readiness_cfg_fs_status(): a failed/absent cfg_fs mount is degraded (NVS
+ * fallback keeps config working), not blocking -- deliberately
+ * DELIBERATELY_OFF rather than NOT_DONE, same idiom as the calibration
+ * item's "nothing to do, but say so" state. */
+void run_test_readiness_cfg_fs(void)
+{
+    TEST_SECTION("readiness cfg_fs item -- mount failure must be informational, not blocking");
+
+    TEST_CHECK(readiness_cfg_fs_status(true) == READY_OK,
+                "a mounted cfg filesystem must read ok");
+    TEST_CHECK(readiness_cfg_fs_status(false) == READY_DELIBERATELY_OFF,
+                "an unmounted/failed cfg filesystem must read deliberately_off, not not_done");
+}
+
+/* readiness_safety_context_status(): the fourth 2026-09-08 blind spot -- a
+ * Pico that keeps answering GET_STATUS while PUSH_CONTEXT delivery has
+ * wedged must not read as healthy just because link_up is true. */
+void run_test_readiness_safety_context(void)
+{
+    TEST_SECTION("readiness safety_context item -- wedged command delivery must block completeness");
+
+    /* Link down: cannot tell wedged from unknown. */
+    TEST_CHECK(readiness_safety_context_status(false, false, 0) == READY_CANNOT_YET,
+                "link down must read cannot_yet");
+    TEST_CHECK(readiness_safety_context_status(false, true, 254) == READY_CANNOT_YET,
+                "link down must read cannot_yet even with a stale-looking cached age");
+
+    /* Link up but no DIAG frame ever received: an older Pico build, or one
+     * not yet heard from -- the age field is meaningless, must not read as
+     * a false healthy ok. */
+    TEST_CHECK(readiness_safety_context_status(true, false, 0) == READY_CANNOT_YET,
+                "no DIAG frame yet must read cannot_yet, not a false ok");
+
+    /* Link up, DIAG frames flowing, context fresh: genuinely healthy. */
+    TEST_CHECK(readiness_safety_context_status(true, true, 0) == READY_OK,
+                "a fresh context age must read ok");
+    TEST_CHECK(readiness_safety_context_status(true, true, READINESS_CONTEXT_STALE_100MS - 1) == READY_OK,
+                "just under the stale threshold must still read ok");
+
+    /* The exact wedge scenario: GET_STATUS keeps answering (link_up true,
+     * diag frames arriving) but the context age has grown past the
+     * threshold -- commands are not landing. Must block, not read as a bare
+     * pass the way link_up-only checks would. */
+    TEST_CHECK(readiness_safety_context_status(true, true, READINESS_CONTEXT_STALE_100MS) == READY_NOT_DONE,
+                "a context age at the stale threshold must read not_done");
+    TEST_CHECK(readiness_safety_context_status(true, true, 254) == READY_NOT_DONE,
+                "a saturated (254) context age with the link up must read not_done");
+}

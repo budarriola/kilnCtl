@@ -190,6 +190,129 @@ static inline readiness_status_t readiness_safety_trip_status(bool link_up, uint
     return (diag_trip_mask != 0u) ? READY_NOT_DONE : READY_OK;
 }
 
+/* Pure decision for the "Unacknowledged crash report" item, 2026-09-08's
+ * follow-on to the safety_trip fix above -- that pass named four remaining
+ * blind spots where readiness disagreed with what another layer (here,
+ * capability_preflight, tools/PcTools/src/kilnctrl/capability_preflight.py)
+ * already knows and already refuses on. `capability_preflight` refuses to
+ * start a run on a board with an unacknowledged crash regardless of what the
+ * run needs; readiness had no item for it at all, so a board could show
+ * every light green while a different layer was already blocking it -- the
+ * exact split that let a live trip through before safety_trip existed.
+ *
+ * Unconditionally blocking (READY_NOT_DONE) whenever an unacknowledged
+ * record exists: an unreviewed panic is not a "some zones ready" partial
+ * state, and the operator has an unambiguous, always-available action
+ * (POST /api/crash_report/ack, or /clear) to resolve it -- there is no
+ * "cannot tell yet" case here the way a Pico-side fact can be unknown while
+ * the link is down. `have_record` false (crash_report_get() found nothing,
+ * or has never been asked) reads ok, same as "no trip" reads ok above. */
+static inline readiness_status_t readiness_crash_report_status(bool have_record, bool acknowledged)
+{
+    if (have_record && !acknowledged) {
+        return READY_NOT_DONE;
+    }
+    return READY_OK;
+}
+
+/* Pure decision for the "Recovery-mode boot" item (boot_guard.h,
+ * RECOVERY_MODE_ENABLED): a board that booted into recovery mode has
+ * deliberately skipped starting profile_executor/autotune_engine/rules_task
+ * (main_boot_early.c's boot_guard_is_recovery_mode() gate) -- it cannot fire
+ * a profile, run autotune, or serve most of the cfg mount's normal
+ * consumers no matter what every other readiness item says, so this is
+ * unconditionally blocking whenever true. There is no "cannot tell yet"
+ * case: boot_guard_is_recovery_mode() is a local, always-answerable fact
+ * about THIS boot (stable for its lifetime, per that function's own doc
+ * comment), never dependent on a link or a peer that could be down. */
+static inline readiness_status_t readiness_recovery_mode_status(bool recovery_mode)
+{
+    return recovery_mode ? READY_NOT_DONE : READY_OK;
+}
+
+/* Pure decision for the "Config filesystem (cfg_fs)" item (cfg_fs.h,
+ * docs/FILESYSTEM_USER_DATA_PLAN.md): user config (zones, kiln_cfg_store,
+ * profiles, and the pref-backed items) is now file-backed on the `cfg`
+ * LittleFS partition with NVS as the dual-write mirror. A mount failure
+ * (CFG_FS_STATUS_UNAVAILABLE) or an init that was simply never reached
+ * (CFG_FS_STATUS_UNMOUNTED, at the point this item is evaluated -- boot has
+ * long since called cfg_fs_init()) means every *_cfg_fs.c bridge falls back
+ * to reading/writing its NVS copy alone, per each bridge's own documented
+ * fallback contract -- degraded, not broken: the board keeps loading and
+ * saving config, just without the file-backed copy or the divergence
+ * checking that copy enables.
+ *
+ * Chosen NON-BLOCKING (READY_DELIBERATELY_OFF rather than READY_NOT_DONE):
+ * unlike a live trip or recovery mode, there is nothing here that stops a
+ * firing, and the operator has no action that fixes it from the readiness
+ * page (a failed LittleFS mount is not cleared by re-clicking anything --
+ * see cfg_fs_format_http.h for the one recovery path, a deliberate reformat,
+ * which is a destructive action this page should never nudge anyone toward
+ * as if it were a routine checklist step). Following the same idiom the
+ * "Thermocouple calibration offsets" item above already uses for "nothing
+ * is missing and no red cross is warranted, but the operator should still be
+ * able to see it": DELIBERATELY_OFF, not a bare OK, so the detail string
+ * stays visible on the page instead of the item disappearing into an
+ * indistinguishable green light. */
+static inline readiness_status_t readiness_cfg_fs_status(bool mounted)
+{
+    return mounted ? READY_OK : READY_DELIBERATELY_OFF;
+}
+
+/* SAFETY_POLL_PERIOD_MS default (settings.h) is 500 ms, and
+ * safety_link_poll.c sends SAFETY_CMD_PUSH_CONTEXT on that same cadence
+ * (its own comment: "same cadence as the GET_STATUS poll above"), so a
+ * healthy diag_context_age_100ms should never drift far past one or two
+ * poll periods plus scheduling jitter -- a few hundred ms, not seconds. This
+ * threshold (10 s = 100 in these units) is an order of magnitude past that,
+ * comfortably below the field's own 254 (25.4 s) saturation ceiling
+ * (link_task_context_age_100ms() in SaftyFW, which clamps rather than wraps
+ * specifically so a genuinely stale age is never misread as the 255 "never
+ * received" sentinel) -- so a value at or beyond it cannot be ordinary
+ * jitter, only a sustained failure to land PUSH_CONTEXT despite GET_STATUS
+ * still answering. */
+#define READINESS_CONTEXT_STALE_100MS 100u
+
+/* Pure decision for the "Safety link command delivery" item -- the fourth
+ * 2026-09-08 blind spot: "a wedged-but-technically-up link (frames flowing
+ * but commands ignored) is indistinguishable from healthy." GET_STATUS
+ * replies (what link_up measures) and PUSH_CONTEXT delivery (what actually
+ * carries setpoints/relay commands TO the Pico) are two different frame
+ * exchanges on the same wire -- a Pico that keeps answering GET_STATUS while
+ * silently failing to parse/apply PUSH_CONTEXT (a firmware bug on either
+ * side, a framing issue specific to the longer context payload, etc.) reads
+ * link_up=true and every other item that only checks link_up would read
+ * clean, exactly the split this pass exists to close.
+ *
+ * diag_context_age_100ms (Frame B, byte 11) is the one honest signal
+ * available for this: it is the Pico's OWN report of how long since it last
+ * parsed a well-formed PUSH_CONTEXT, not something this ESP infers from its
+ * own send-side counters (which would only prove the ESP attempted to send,
+ * never that the Pico did anything with it). No round-trip command-ack or
+ * sequence-counter equivalent exists for PUSH_CONTEXT today -- it is sent as
+ * a broadcast, not a request/reply exchange (safety_link_poll.c's own
+ * comment: "independent of whether the exchange above got a reply: this is
+ * a broadcast, not part of that request/reply pairing") -- so this is the
+ * real signal, not an invented proxy.
+ *
+ * `link_up` gates it the same way every other Pico-dependent item above
+ * does: a down link cannot distinguish "context wedged" from "nothing has
+ * been exchanged at all," so that combination reads CANNOT_YET.
+ * `diag_ever_received` false means no DIAG frame (Frame B) has arrived this
+ * boot at all -- an older Pico build that predates Frame B, or one this ESP
+ * has not yet heard from -- and diag_context_age_100ms is meaningless in
+ * that case, so it also reads CANNOT_YET rather than trusting a
+ * zero-initialized field as a false "healthy." Only once both a link and a
+ * real DIAG frame exist does the age value mean anything to gate on. */
+static inline readiness_status_t readiness_safety_context_status(bool link_up, bool diag_ever_received,
+                                                                  uint8_t diag_context_age_100ms)
+{
+    if (!link_up || !diag_ever_received) {
+        return READY_CANNOT_YET;
+    }
+    return (diag_context_age_100ms >= READINESS_CONTEXT_STALE_100MS) ? READY_NOT_DONE : READY_OK;
+}
+
 /* Registers /readiness + GET /api/readiness on the server
  * wifi_provision_http.c already started. No hardware pointers needed --
  * every hardware-adjacent fact (io_ready/thermo_ready/safety_ready) is read

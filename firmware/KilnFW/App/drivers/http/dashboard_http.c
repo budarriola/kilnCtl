@@ -553,6 +553,35 @@ void dashboard_http_get_safety_trip(bool *out_link_up, uint16_t *out_diag_trip_m
     }
 }
 
+/* See dashboard_http.h's doc comment. Same safety_link_get_status() call as
+ * dashboard_http_get_safety_trip() above, additionally surfacing
+ * diag_ever_received and diag_context_age_100ms so readiness_http.c can
+ * tell "commands landing" from "merely answering status polls." */
+void dashboard_http_get_safety_context_health(bool *out_link_up, bool *out_diag_ever_received,
+                                              uint8_t *out_diag_context_age_100ms)
+{
+    bool link_up = false;
+    bool diag_ever_received = false;
+    uint8_t context_age = 0;
+    if (s_dash.safety) {
+        safety_link_status_t sl;
+        if (safety_link_get_status(s_dash.safety, &sl) == ESP_OK) {
+            link_up = sl.link_up;
+            diag_ever_received = sl.diag_ever_received;
+            context_age = sl.diag_context_age_100ms;
+        }
+    }
+    if (out_link_up) {
+        *out_link_up = link_up;
+    }
+    if (out_diag_ever_received) {
+        *out_diag_ever_received = diag_ever_received;
+    }
+    if (out_diag_context_age_100ms) {
+        *out_diag_context_age_100ms = context_age;
+    }
+}
+
 /* See dashboard_http.h's doc comment -- the plain-C action function
  * extracted from relay_post_handler() so a non-HTTP caller (ui_page_temperature.c)
  * goes through the same ownership/safety gate and the same kiln_io write,

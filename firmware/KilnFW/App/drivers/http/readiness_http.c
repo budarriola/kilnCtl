@@ -7,6 +7,9 @@
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "boot_guard.h"
+#include "cfg_fs.h"
+#include "crash_report.h"
 #include "dashboard_http.h"
 #include "nvs_report.h"
 #include "profiles_builtin.h"
@@ -109,7 +112,11 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * once up front rather than re-deriving the same gate per item. */
     uint8_t thermo_count = zones_config_get_thermo_count();
 
-    char json[3072];
+    /* 3072 -> 4096, 2026-09-08: four new items (crash_report, recovery_mode,
+     * cfg_fs, safety_context) pushed the previous size close enough to
+     * READINESS_TRUNC_RESERVE that the truncation notice could plausibly
+     * fire on a board with long detail strings on every item. */
+    char json[4096];
     size_t o = 0;
     int n = snprintf(json, sizeof(json), "{\"items\":[");
     o = (n < 0 || (size_t)n >= sizeof(json)) ? sizeof(json) - 1 : (size_t)n;
@@ -649,6 +656,114 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "storage", "Storage sections compatible", st, detail,
                         "/settings/zones", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 12. Unacknowledged crash report. 2026-09-08 follow-on to the
+     * safety_trip item above: capability_preflight (tools/PcTools) already
+     * refuses to start a run on a board with an unacknowledged crash, but
+     * this page never asked, so readiness could show every light green
+     * while a different layer was already refusing. See
+     * readiness_crash_report_status()'s doc comment in readiness_http.h. */
+    {
+        crash_report_record_t rec;
+        bool have_record = crash_report_get(&rec);
+        bool acknowledged = have_record && rec.acknowledged != 0;
+        readiness_status_t st = readiness_crash_report_status(have_record, acknowledged);
+        char detail[128];
+        if (!have_record) {
+            snprintf(detail, sizeof(detail), "no crash on record");
+        } else if (!acknowledged) {
+            snprintf(detail, sizeof(detail),
+                     "unacknowledged crash on record (%s, task %s) -- review /diagnostics before firing",
+                     rec.exc_cause_str[0] ? rec.exc_cause_str : "unknown cause", rec.exc_task);
+        } else {
+            snprintf(detail, sizeof(detail), "last crash on record has been acknowledged");
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "crash_report", "Unacknowledged crash report", st, detail,
+                        "/diagnostics", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 13. Recovery-mode boot. 2026-09-08 follow-on: a board in recovery mode
+     * has skipped starting profile_executor/autotune_engine/rules_task
+     * (boot_guard.h's RECOVERY_MODE_ENABLED gate) and cannot fire a profile
+     * this boot no matter what every other item says. See
+     * readiness_recovery_mode_status()'s doc comment in readiness_http.h. */
+    {
+        bool recovery = boot_guard_is_recovery_mode();
+        readiness_status_t st = readiness_recovery_mode_status(recovery);
+        char detail[112];
+        snprintf(detail, sizeof(detail), "%s",
+                 recovery ? "this boot is in RECOVERY MODE -- profile executor, autotune, and rules are "
+                            "not running; reflash or clear the boot-guard counter"
+                          : "not in recovery mode");
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "recovery_mode", "Recovery-mode boot", st, detail,
+                        "/diagnostics", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 14. Config filesystem (cfg_fs). 2026-09-08 follow-on: a failed/absent
+     * `cfg` LittleFS mount leaves every *_cfg_fs.c bridge running on its NVS
+     * fallback alone -- degraded, not broken, so this is deliberately
+     * non-blocking. See readiness_cfg_fs_status()'s doc comment in
+     * readiness_http.h for why DELIBERATELY_OFF rather than NOT_DONE. */
+    {
+        bool mounted = cfg_fs_is_available();
+        readiness_status_t st = readiness_cfg_fs_status(mounted);
+        char detail[128];
+        if (mounted) {
+            snprintf(detail, sizeof(detail), "cfg filesystem mounted -- config is file-backed with NVS mirror");
+        } else {
+            snprintf(detail, sizeof(detail),
+                     "cfg filesystem not mounted -- running on NVS-only fallback storage (degraded, not "
+                     "blocking; see /diagnostics)");
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "cfg_fs", "Config filesystem (cfg_fs)", st, detail,
+                        "/diagnostics", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 15. Safety link command delivery. 2026-09-08 follow-on, the fourth
+     * blind spot: a Pico that keeps answering GET_STATUS while its
+     * PUSH_CONTEXT handling has wedged reads link_up=true and every item
+     * above that only checks link_up reads clean. See
+     * readiness_safety_context_status()'s doc comment in readiness_http.h
+     * for why diag_context_age_100ms is the one honest signal for this and
+     * why no round-trip command-ack equivalent exists to use instead. */
+    {
+        bool link_up = false, diag_ever_received = false;
+        uint8_t context_age = 0;
+        dashboard_http_get_safety_context_health(&link_up, &diag_ever_received, &context_age);
+        readiness_status_t st = readiness_safety_context_status(link_up, diag_ever_received, context_age);
+        char detail[128];
+        if (!link_up) {
+            snprintf(detail, sizeof(detail), "safety link is down -- cannot tell delivery healthy from unknown");
+        } else if (!diag_ever_received) {
+            snprintf(detail, sizeof(detail),
+                     "no DIAG frame received yet -- cannot tell command delivery healthy from unknown");
+        } else if (st == READY_NOT_DONE) {
+            snprintf(detail, sizeof(detail),
+                     "safety processor has not applied a context update in %u.%us -- link answers status polls "
+                     "but commands may not be landing",
+                     (unsigned)(context_age / 10u), (unsigned)(context_age % 10u));
+        } else {
+            snprintf(detail, sizeof(detail), "safety processor is applying context updates normally");
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "safety_context", "Safety link command delivery", st, detail,
+                        "/safety", &dropped);
         if (o != before_o) {
             first = false;
         }

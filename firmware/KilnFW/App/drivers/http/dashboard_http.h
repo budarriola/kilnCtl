@@ -569,6 +569,21 @@ void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, boo
  * reads 0). */
 void dashboard_http_get_safety_trip(bool *out_link_up, uint16_t *out_diag_trip_mask);
 
+/* Read-only accessor for readiness_http.c's "Safety link command delivery"
+ * item (2026-09-08, the fourth blind spot in that pass): a Pico that keeps
+ * answering GET_STATUS while its PUSH_CONTEXT handling has wedged reads
+ * link_up=true just like dashboard_http_get_safety_trip() above, so that
+ * item alone cannot see the fault. Same "one owner, read through the
+ * existing SafetyLinkClass pointer" discipline as its siblings above --
+ * *out_link_up mirrors their link_up bit exactly, *out_diag_ever_received
+ * and *out_diag_context_age_100ms are safety_link_status_t's fields
+ * verbatim and are only meaningful when both *out_link_up and
+ * *out_diag_ever_received are true. Safe to call even if
+ * dashboard_http_start() was never reached (link_up/diag_ever_received read
+ * false, age reads 0). */
+void dashboard_http_get_safety_context_health(bool *out_link_up, bool *out_diag_ever_received,
+                                              uint8_t *out_diag_context_age_100ms);
+
 #ifdef __cplusplus
 }
 #endif
