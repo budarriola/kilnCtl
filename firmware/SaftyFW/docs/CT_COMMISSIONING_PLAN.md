@@ -307,6 +307,43 @@ document, do not solve.
    step does not include the heating run above or any `ct_cal`/auto-zero
    calibration, which stay outstanding bench steps.
 
+   **CT zero calibration done (2026-09-08), separately from `6a`.** Root
+   cause of the latched trip found by
+   `docs/audits/s6a_unclearable_trip_2026-09-08.md`: the board's latched
+   trip was S3 (`LOAD_STUCK_ON`), not S6a as first reported -- channel 2
+   (GPIO28/ADC2, the summed CT) still read 59-66 raw counts against the
+   25-count safety margin because it had never been zero-calibrated, so S3
+   correctly saw "current present with no relay commanded" and latched.
+   Preconditions confirmed before touching anything: `profiles_get_exec_status`
+   state=0 (idle, no run in progress), `safety_get_status`/`io_read` showed
+   all four relays off (`relays: 0`), link up and stable. Raw counts before:
+   a 15s capture (all relays off) read ch0 mean=16.63 std=0.481, ch1
+   mean=17.00 std=0.000, ch2 mean=63.19 std=1.320 (min 62 / max 66) --
+   consistent with the 2026-09-06 60s baseline in `CURRENT_SENSE.md` §4
+   (ch2 mean 66.89 std 4.678). No `ct_auto_zero` MCP tool exists yet, and
+   the ESP's `POST /api/safety/commissioning/ct_auto_zero` handler itself
+   refuses without an already-committed `a_fs` to convert against, which
+   channel 2 has never had -- so the zero was written the other documented
+   way: `safety_set_commissioning_fields({"zero_counts[2]": 63})`, the
+   same `zero_counts[2]` field (`config_params.c` id `0x0304`) that
+   `current_sense.c`'s conversion actually reads (`CURRENT_SENSE.md` §5.2),
+   not the separate legacy `ct_cal[3]`/`safety_set_ct_cal` gain-offset
+   record, which stayed at "uncalibrated" throughout and was left alone.
+   Read-back confirmed `zero_counts[2]=63`. Only that one field changed --
+   `abs_max_temp_c` (80), `max_rate_c_per_min` (33.3) and `tc_source` all
+   read unchanged in `safety_get_commissioning` immediately after. Gain
+   (`k_ct_v_per_a[2]`/`gain[2]`) was deliberately left untouched -- that is
+   a bench step needing a known load with the owner present, and stays
+   outstanding; `current_a[2]` still reads `0.00 A` for that reason,
+   expected. Raw counts after settled at 58-70 (mean ~61-65 across three
+   post-write captures), consistent with a genuine near-zero reading once
+   the offset is subtracted. `safety_clear_trip()` cleared S3 immediately
+   and it stayed clear (`safety_get_status`: "not tripped") through a 65s
+   poll window with no relays touched or heating attempted. Remaining
+   blockers to firing: CT gain calibration (bench step, owner present,
+   known load), and `ct_channel_map[0..2]` still unset -- the reason
+   `safety_get_commissioning` still reports `commissioned=False`.
+
 ## Order and ownership
 
 Step 0 first (it may make step 3's under-current warn moot on this bench).
