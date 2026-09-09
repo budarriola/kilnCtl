@@ -243,16 +243,25 @@ static void test_index_for_id_finds_known_and_rejects_unknown(void)
 {
     TEST_SECTION("index_for_id -- every table row is reachable by its own id, an unknown id is not");
 
-    // 0x0101 is the table's first row (tc_source); 0x010A (tc_offset_c,
-    // owner request 2026-09-08) is now its last, appended at the very end
-    // per this table's own "only ever appended to" rule -- ct_topology
-    // (0x031F, the previous last row) is now second-to-last. Both ends, not
-    // just one, so a future off-by-one in the table's bounds shows up here.
+    // 0x0101 is the table's first row (tc_source); 0x0212 (estop_active_level,
+    // owner decision 2026-09-08, commit 3b5ced00) is now its last, appended at
+    // the very end per this table's own "only ever appended to" rule --
+    // tc_offset_c (0x010A, the previous last row) is now second-to-last. Both
+    // ends, not just one, so a future off-by-one in the table's bounds shows up
+    // here.
+    //
+    // MAINTENANCE: appending a row to SAFETY_CFG_PARAM_TABLE REQUIRES updating
+    // the two ids below. That is deliberate -- the whole point of pinning the
+    // tail is that it cannot be satisfied by anything read back out of the
+    // table itself, so an append has to be acknowledged by a human here. It
+    // has been missed once already (3b5ced00 appended estop_active_level and
+    // left these two checks pinned to tc_offset_c, which is what made them
+    // fail).
     TEST_CHECK(index_for_id(0x0101) == 0, "first table row (tc_source) is index 0");
-    TEST_CHECK(index_for_id(0x010A) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
-               "last table row (tc_offset_c) is the last index");
-    TEST_CHECK(index_for_id(0x031F) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
-               "ct_topology, the last row before tc_offset_c was appended, is second-to-last");
+    TEST_CHECK(index_for_id(0x0212) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
+               "last table row (estop_active_level) is the last index");
+    TEST_CHECK(index_for_id(0x010A) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
+               "tc_offset_c, the last row before estop_active_level was appended, is second-to-last");
     TEST_CHECK(index_for_id(0xBEEF) == -1, "an id no CONFIG_REFERENCE.md section uses is not found");
     TEST_CHECK(safety_cfg_store_param_count() == SAFETY_CFG_PARAM_COUNT,
                "safety_cfg_store_param_count() matches the table size exactly");
