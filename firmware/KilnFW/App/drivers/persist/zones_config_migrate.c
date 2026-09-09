@@ -910,6 +910,21 @@ static void raise_heater_timing_to_floors(zones_cfg_t *cfg)
  * and zones_config_json_validate() run on every path, not just import. Item 4 (CRC)
  * is folded in here too, for the current-version case only -- see
  * zones_cfg_t::crc32's comment for why older versions have no CRC to check. */
+/* See zones_config_json.h for the full rationale (opus review defect D):
+ * the migration branch below and nvs_load_from()'s defaults path are the
+ * complete set of ways an unfitted zones_cfg_t comes into existence, and
+ * both must land on the sentinel rather than 0.0f. */
+void zones_config_json_apply_model_fit_defaults(zones_cfg_t *cfg)
+{
+    if (cfg == NULL) {
+        return;
+    }
+    for (uint8_t bi = 0; bi < MAX31856_CHANNEL_COUNT; bi++) {
+        cfg->zones[bi].model_fit_temp_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+        cfg->zones[bi].model_fit_ambient_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    }
+}
+
 zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len, zones_cfg_t *out,
                                                 const char **err_reason)
 {
@@ -977,10 +992,7 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
          * old record with a real, previously-fitted model_k_dc/tau/dead_time
          * honestly reads its fit context as unknown rather than inventing a
          * plausible-looking temperature nobody ever measured. */
-        for (uint8_t bi = 0; bi < MAX31856_CHANNEL_COUNT; bi++) {
-            out->zones[bi].model_fit_temp_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
-            out->zones[bi].model_fit_ambient_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
-        }
+        zones_config_json_apply_model_fit_defaults(out);
     }
 
     /* Before zones_config_json_validate(), not after: zones_config_json_validate() now

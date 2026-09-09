@@ -89,7 +89,38 @@ esp_err_t nvs_partition_init(const char *partition)
  * to run a kiln against right now." A newer-refuses-to-load blob is found
  * but not valid; a migrated older blob is both; genuine corruption is
  * neither. */
+static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
+                                       bool *out_valid);
+
+/* Thin wrapper around the real load below, added 2026-09-09 (opus review
+ * defect D). Every path through nvs_load_from_decode() that does NOT end in
+ * a decoded, valid config leaves *out_cfg zero-initialised (blank NVS, an
+ * unreadable blob, a refused newer-than-firmware blob, genuine corruption --
+ * see the switch below and this function's own entry memset). Zero is the
+ * wrong default for model_fit_temp_c/model_fit_ambient_c specifically: 0
+ * degC is a plausible genuine ambient, so a virgin board reported every zone
+ * as "fitted at 0 C" -- the exact conflation zone_cfg_t's comment says the
+ * sentinel exists to prevent, and one zones_config_json_validate() cannot
+ * catch (0.0 is inside its accepted range). The migration branch already
+ * backfilled the sentinel; this covers the other half. Applied here, once,
+ * around every return path rather than at each of them, so a future early
+ * return cannot forget it. Nothing else about the defaults changes, and
+ * neither the struct layout nor ZONES_CFG_VERSION moves. */
 static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool *out_found, bool *out_valid)
+{
+    bool valid = false;
+    esp_err_t err = nvs_load_from_decode(partition, out_cfg, out_found, &valid);
+    if (!valid) {
+        zones_config_json_apply_model_fit_defaults(out_cfg);
+    }
+    if (out_valid) {
+        *out_valid = valid;
+    }
+    return err;
+}
+
+static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
+                                       bool *out_valid)
 {
     if (out_found) {
         *out_found = false;

@@ -2984,6 +2984,26 @@ typedef enum {
 zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len, zones_cfg_t *out,
                                                      const char **err_reason);
 
+/* Stamps ZONE_MODEL_FIT_TEMP_UNKNOWN into every zone's model_fit_temp_c/
+ * model_fit_ambient_c. Two callers, and they are the complete set of paths
+ * that can produce a zones_cfg_t nobody has ever fitted a model against:
+ * zones_config_json_decode_blob()'s migration branch (a pre-v24 blob, which
+ * predates these fields) and zones_http.c's nvs_load_from() (a DEFAULTS
+ * config -- blank NVS, an unreadable read, a refused newer-than-firmware
+ * blob, or genuine corruption -- all of which leave the struct
+ * zero-initialised).
+ *
+ * 2026-09-09 (opus review defect D): the migration branch had this backfill
+ * and the defaults path did not, so a virgin board read 0.0f in both fields
+ * -- and zones_config_json_validate() accepts 0.0 (it only rejects <= -50
+ * and >= 1300), so nothing caught it. 0.0 is precisely the value
+ * zone_cfg_t's own comment argues must never be allowed to mean "unknown":
+ * 0 degC is a plausible genuine ambient (a cold shop), so a virgin board
+ * would have reported every zone as honestly "fitted at 0 C". Neither the
+ * struct layout nor ZONES_CFG_VERSION changes -- this only writes a
+ * different in-RAM default into an existing field. */
+void zones_config_json_apply_model_fit_defaults(zones_cfg_t *cfg);
+
 /* esp_crc32_le() over the struct with crc32 itself zeroed, computed over a
  * local copy so a caller re-validating an already-loaded cfg's crc32 is
  * never mutated by asking. Used by zones_http.c's nvs_save() to stamp a

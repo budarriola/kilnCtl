@@ -463,6 +463,26 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                z->tuning_tau_consistent ? "true" : "false",
                (double)z->tuning_baseline_c, (double)z->tuning_step_ambient_c,
                (double)z->tuning_raw_rise_c, (double)z->tuning_rise_inf_c, (unsigned)z->tuning_seq);
+        /* ZONES_CFG_VERSION 23->24's model_fit_temp_c/model_fit_ambient_c --
+         * the operating point the plant model in model_k_dc/model_tau_s/
+         * model_dead_time_s was actually fitted at. Read-only, same as the
+         * tuning_* record above (measured data, never operator-entered; the
+         * POST side carries the stored values through untouched rather than
+         * accepting them -- zones_http_post_parse.c).
+         *
+         * Added 2026-09-09 (opus review defect D): the schema bump that
+         * introduced these fields recorded them but exposed them NOWHERE --
+         * zones_config_get_model_fit_context() had no production caller and
+         * no JSON key existed -- so the retrospective gain-schedule use case
+         * that motivated the bump could not read its own data off the board.
+         * -273.15 is ZONE_MODEL_FIT_TEMP_UNKNOWN, "no operating point
+         * recorded" (zones_config_accessors.h); emitted verbatim, like every
+         * other raw sentinel on this endpoint, so a consumer can tell
+         * "unknown" from a real measurement rather than having a plausible
+         * number substituted for it. Always emitted, same always-emit
+         * convention as model_k_dc/tuning_* above. */
+        APPEND("\"model_fit_temp_c\":%.2f,\"model_fit_ambient_c\":%.2f,",
+               (double)z->model_fit_temp_c, (double)z->model_fit_ambient_c);
         /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): emits both
          * forms. "settings_source_groups" is the real, current per-group
          * data -- one key per SRC_GROUP_NAMES entry, current page's own

@@ -1402,6 +1402,49 @@ static void test_nvs_load_from_too_short_is_corrupt_not_refused(void)
     nvs_test_clear();
 }
 
+// 2026-09-09 (opus review defect D). The model_fit_temp_c/model_fit_ambient_c
+// sentinel backfill existed only in the MIGRATION branch. A board booting on
+// blank/unreadable/refused/corrupt NVS keeps the zero-initialised struct, so
+// both fields read 0.0f -- and zones_config_json_validate() accepts 0.0 (it
+// only rejects <= -50 and >= 1300), so a virgin board reported every zone as
+// honestly "fitted at 0 C", the exact value zone_cfg_t's comment says must
+// never mean "unknown". Covers both no-record and corrupt, since they are
+// different return paths.
+static void test_nvs_load_from_defaults_carry_the_model_fit_unknown_sentinel(void)
+{
+    TEST_SECTION("nvs_load_from -- a DEFAULTS config (nothing stored, and separately a corrupt blob) "
+                 "reports model_fit_temp_c/model_fit_ambient_c as the UNKNOWN sentinel, never 0.0 "
+                 "(which is a plausible genuine ambient and would read as a real fit)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_t out_cfg;
+    bool found = true, valid = true;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+    TEST_CHECK(err == ESP_OK && !found && !valid, "precondition: nothing stored -- defaults");
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        TEST_CHECK(out_cfg.zones[z].model_fit_temp_c == ZONE_MODEL_FIT_TEMP_UNKNOWN,
+                   "a never-configured zone's model_fit_temp_c must be the UNKNOWN sentinel, not 0.0");
+        TEST_CHECK(out_cfg.zones[z].model_fit_ambient_c == ZONE_MODEL_FIT_TEMP_UNKNOWN,
+                   "and the same for model_fit_ambient_c");
+    }
+
+    // Genuine corruption takes a different return path (the switch's CORRUPT
+    // case, after zones_config_json_decode_blob() has re-zeroed the struct)
+    // -- it must land on the sentinel too.
+    stage_zones_blob("", 0);
+    found = true; valid = true;
+    err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+    TEST_CHECK(err == ESP_OK && !valid, "precondition: corrupt blob -- defaults again");
+    TEST_CHECK(out_cfg.zones[0].model_fit_temp_c == ZONE_MODEL_FIT_TEMP_UNKNOWN,
+               "the corrupt path must land on the sentinel as well -- decode_blob re-zeroes the "
+               "struct after this function's own entry memset, so a fix applied only at entry "
+               "would silently miss this path");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 static void test_nvs_load_from_wrong_size_current_version_is_corrupt_not_refused(void)
 {
     TEST_SECTION("nvs_load_from -- current-version blob at the wrong size is corrupt: found=false, valid=false");
@@ -3993,6 +4036,17 @@ static void test_post_then_get_round_trips_new_fields(void)
               "GET reports the posted per-zone ease_off_window_mult exactly");
     TEST_CHECK(strstr(s_last_resp_body, "\"settings_source\":255") != NULL,
               "GET reports the posted settings_source (CUSTOM) exactly");
+    /* 2026-09-09 (opus review defect D): the v23->v24 schema bump recorded
+     * model_fit_temp_c/model_fit_ambient_c but exposed them nowhere -- no
+     * JSON key, and zones_config_get_model_fit_context() had no production
+     * caller -- so the recorded operating point could not be read off the
+     * board at all and the retrospective-schedule use case that motivated
+     * the bump was unreachable. Read-only, like the tuning_* record: the
+     * POST above never sent these, and they must still appear. */
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_temp_c\":") != NULL,
+              "GET must emit model_fit_temp_c -- otherwise the fit's operating point is unreadable");
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_ambient_c\":") != NULL,
+              "GET must emit model_fit_ambient_c too");
 }
 
 // Opus review of 992f3954 (zones v22, progress_band_c), item 3: json_cap in
@@ -4118,6 +4172,11 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->hyst_c = ZONE_HYST_C_MAX;
         z->min_on_s = ZONE_MIN_ON_OFF_S_MAX;
         z->min_off_s = ZONE_MIN_ON_OFF_S_MAX;
+        /* ZONES_CFG_VERSION 23->24's model_fit_temp_c/model_fit_ambient_c,
+         * emitted at %.2f -- widest render is the same 7 characters for the
+         * max temperature and for the -273.15 UNKNOWN sentinel. */
+        z->model_fit_temp_c = ZONE_MAX_TEMP_C_MAX;
+        z->model_fit_ambient_c = ZONE_MAX_TEMP_C_MAX;
     }
 
     httpd_req_t req;
@@ -9472,6 +9531,7 @@ void run_test_zones_http(void)
     test_zones_pid_post_ignores_safety_tc_type();
 
     test_nvs_load_from_too_short_is_corrupt_not_refused();
+    test_nvs_load_from_defaults_carry_the_model_fit_unknown_sentinel();
     test_nvs_load_from_wrong_size_current_version_is_corrupt_not_refused();
     test_nvs_load_from_current_version_happy_path();
     test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes();
