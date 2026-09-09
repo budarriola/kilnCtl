@@ -850,11 +850,24 @@ async function sweepOnePage(port, fileUrl, width, fixtureScript) {
 //
 // isTransientHarnessError() narrowly matches known harness/transport failure
 // signatures -- Node's fetch() network errors, CDP's own "connection closed"
-// /"timed out" wrappers (CdpSession, above) -- and deliberately does NOT
-// match `fixture script threw:` / `setup script threw:` / `page script
-// threw:` (sweepOnePage's own wraps around a REAL exception the page's own
-// JS raised) or anything else: those stay hard FAILs. A regression that
+// /"timed out" wrappers (CdpSession, above), and the specific `ws.addEvent
+// Listener('error', reject)` failure text Node's native WebSocket produces
+// for sweepOnePage()'s own CDP socket (above) when the debugger connection
+// itself never comes up or drops -- and deliberately does NOT match
+// `fixture script threw:` / `setup script threw:` / `page script threw:`
+// (sweepOnePage's own wraps around a REAL exception the page's own JS
+// raised) or anything else: those stay hard FAILs. A regression that
 // actually breaks page JS must never be swallowed as "just the harness".
+//
+// 2026-09-09: the WebSocket branch used to be a bare `/WebSocket/i.test(msg)`
+// -- broad enough to downgrade ANY error whose message merely contained the
+// word "WebSocket" to a SKIP, including a real page-JS exception that
+// happens to mention it (e.g. a feature-detection message like "WebSocket
+// API is not supported"). Every OTHER branch above is anchored to a specific
+// transport-failure signature; this was the one exception. Tightened to the
+// actual phrasings Node's native WebSocket implementation uses for a
+// connection-establishment/transport failure, matching this file's own
+// convention of anchoring on ^ where the signature is a whole-message shape.
 function isTransientHarnessError(e) {
   const msg = (e && e.message) || String(e);
   if (/^fixture script threw:|^setup script threw:|^page script threw:/.test(msg)) {
@@ -864,7 +877,8 @@ function isTransientHarnessError(e) {
       || /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND/i.test(msg)
       || /^CDP call .* timed out/i.test(msg)
       || /^CDP connection closed:/i.test(msg)
-      || /WebSocket/i.test(msg);
+      || /^WebSocket (was closed before the connection was established|is already in CLOSING or CLOSED state)/i.test(msg)
+      || /^WebSocket connection to .* failed/i.test(msg);
 }
 
 // Bounded retry for a transient harness error -- 3 total attempts (2
