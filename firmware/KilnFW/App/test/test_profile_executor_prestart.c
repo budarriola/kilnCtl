@@ -1041,6 +1041,46 @@ bool zones_current_sweep_is_active(void)
     return s_test_sweep_active;
 }
 
+// THE READINESS FIRING INTERLOCK (owner decision 2026-09-09,
+// App/drivers/safety/readiness_gate.h). profile_executor_run() now calls
+// readiness_gate_refuses_start() before anything else it does, so this file
+// -- which #includes profile_executor_run.c directly -- must supply a body
+// for the one symbol that gate declares rather than defines. Everything that
+// DECIDES anything is static inline in readiness_gate.h and runs FOR REAL
+// here: these tests drive the actual interlock, not a stand-in for it.
+//
+// DEFAULT IS FULLY READY (not zeroed): a zeroed readiness_gate_facts_t is a
+// board with an unverified E-stop and a down safety link, which the real gate
+// refuses -- every pre-existing test in this file that expects
+// profile_executor_run() to get past its early guards would have started
+// failing for a reason that has nothing to do with what it is testing. The
+// default therefore describes a board with nothing wrong with it, and the
+// three tests below are the only ones that change it (each restoring the
+// default afterwards).
+static readiness_gate_facts_t s_test_readiness_facts = {
+    .recovery_mode = false,
+    .safety_link_up = true,
+    .safety_trip_mask = 0u,
+    .crash_have_record = false,
+    .crash_acknowledged = false,
+    .estop_verified = true,
+};
+void readiness_gate_collect(readiness_gate_facts_t *out)
+{
+    if (out != NULL) {
+        *out = s_test_readiness_facts;
+    }
+}
+static void reset_readiness_facts_to_ready(void)
+{
+    s_test_readiness_facts.recovery_mode = false;
+    s_test_readiness_facts.safety_link_up = true;
+    s_test_readiness_facts.safety_trip_mask = 0u;
+    s_test_readiness_facts.crash_have_record = false;
+    s_test_readiness_facts.crash_acknowledged = false;
+    s_test_readiness_facts.estop_verified = true;
+}
+
 // ---------------------------------------------------------------------------
 // Tests -- profile_executor_start() is DELIBERATELY never called anywhere in
 // this file. s_exec is a static struct with internal linkage in
@@ -1057,6 +1097,94 @@ static void test_run_refuses_before_start(void)
     bool ok = profile_executor_run(0, err, sizeof(err));
     TEST_CHECK(!ok, "must refuse, not crash, when s_exec.lock is NULL");
     TEST_CHECK(err[0] != '\0', "an error message is filled in for the caller");
+}
+
+// ---------------------------------------------------------------------------
+// THE READINESS FIRING INTERLOCK at its real call site (owner decision
+// 2026-09-09, App/drivers/safety/readiness_gate.h).
+//
+// test_readiness_gate.c proves the DECISION over all 64 fact combinations.
+// These tests prove the WIRING: that profile_executor_run() -- the single
+// choke point every start path funnels through (HTTP, both LCD buttons,
+// benchproto) -- actually consults it, actually refuses, and actually hands
+// the operator the gate's message rather than swallowing it.
+//
+// The distinguishing observation is available even here, with s_exec.lock
+// still NULL: the gate runs BEFORE that guard, so a blocked board answers the
+// gate's message while a READY board falls through to "profile executor not
+// started". "Did the run get past the gate?" is therefore directly testable
+// without a full executor harness -- and test_run_refuses_before_start()
+// above is itself the "a ready board is allowed past the gate" case, since it
+// runs on the default fully-ready facts and still sees the OLD message.
+//
+// NEGATIVE TEST (performed 2026-09-09, RED confirmed, restored by hand):
+// deleting the `if (readiness_gate_refuses_start(...)) { ... return false; }`
+// block from profile_executor_run.c fails all three tests below with
+//   FAIL: ... refused by the readiness interlock, naming the item
+// (each instead sees "profile executor not started"). Restored by retyping
+// the block; `git diff` on profile_executor_run.c then comes back empty.
+static void run_and_expect_gate_refusal(const char *what, const char *needle)
+{
+    char err[192] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, what);
+    TEST_CHECK(strstr(err, needle) != NULL,
+               "profile_executor_run() reports the readiness interlock's message, naming the item");
+    TEST_CHECK(strcmp(err, "profile executor not started") != 0,
+               "the gate ran BEFORE the generic prestart guard, so the operator sees the real reason");
+    reset_readiness_facts_to_ready();
+}
+
+static void test_run_refused_by_readiness_recovery_mode(void)
+{
+    TEST_SECTION("profile_executor_run() is refused by the readiness interlock -- recovery mode");
+    reset_readiness_facts_to_ready();
+    s_test_readiness_facts.recovery_mode = true;
+    run_and_expect_gate_refusal("a recovery-mode boot refuses a firing at run()", "RECOVERY MODE");
+}
+
+static void test_run_refused_by_readiness_safety_trip(void)
+{
+    TEST_SECTION("profile_executor_run() is refused by the readiness interlock -- latched safety trip");
+    reset_readiness_facts_to_ready();
+    s_test_readiness_facts.safety_trip_mask = 0x0040u; /* S6a mainFault -- what a reboot latches */
+    run_and_expect_gate_refusal("a latched safety trip refuses a firing at run()", "TRIP");
+}
+
+static void test_run_refused_by_readiness_crash_report(void)
+{
+    TEST_SECTION("profile_executor_run() is refused by the readiness interlock -- unacknowledged crash");
+    reset_readiness_facts_to_ready();
+    s_test_readiness_facts.crash_have_record = true;
+    s_test_readiness_facts.crash_acknowledged = false;
+    run_and_expect_gate_refusal("an unacknowledged crash report refuses a firing at run()",
+                                "UNACKNOWLEDGED CRASH REPORT");
+}
+
+static void test_run_refused_by_readiness_estop_unverified(void)
+{
+    /* The one genuinely NEW enforcement: before this pass estop_verified had
+     * no independent enforcement anywhere and a firing could be started with
+     * it red. */
+    TEST_SECTION("profile_executor_run() is refused by the readiness interlock -- E-stop unverified");
+    reset_readiness_facts_to_ready();
+    s_test_readiness_facts.estop_verified = false;
+    run_and_expect_gate_refusal("an unverified E-stop interlock refuses a firing at run()",
+                                "E-STOP INTERLOCK");
+}
+
+static void test_run_passes_the_readiness_gate_when_ready(void)
+{
+    /* The half that a refuse-everything gate fails. A ready board must get
+     * PAST the interlock -- observable here as reaching the next refusal down
+     * (the prestart guard) with its own, different message. */
+    TEST_SECTION("profile_executor_run() passes the readiness interlock on a fully-ready board");
+    reset_readiness_facts_to_ready();
+    char err[192] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "still refused here, but by the prestart guard, not the interlock");
+    TEST_CHECK(strcmp(err, "profile executor not started") == 0,
+               "a fully-ready board reaches the guard BELOW the interlock (the gate let it through)");
 }
 
 static void test_halt_is_a_silent_noop_before_start(void)
@@ -1429,6 +1557,29 @@ static void test_escalate_guard_trip_all_zones_faulted_releases_relay_claim(void
     TEST_CHECK(g_relay_release_calls == 1, "relay_authority_release_mask() must be called exactly once, on the "
                                             "trip that actually ends the run");
     TEST_CHECK(g_last_release_mask == 0x0F, "must release exactly claimed_relay_mask");
+}
+
+static void test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted(void)
+{
+    TEST_SECTION("escalate_guard_trip() per-zone trip, continue-on-trip policy -- "
+                 "an on/off zone (a vent/fan, not a heat source) must not count toward "
+                 "'the run is still alive', and must not itself block the FAULTED "
+                 "aggregation either (docs/ON_OFF_ZONE_PLAN.md sec 1, executor watchdog inputs row)");
+    reset_relay_claim_test_state();
+    g_continue_on_zone_trip = true;
+    s_exec.zones[0].active = true; /* heater */
+    s_exec.zones[1].active = true; /* on/off (vent), stays healthy throughout */
+    g_stub_zone_is_on_off[1] = true;
+    s_exec.claimed_relay_mask = 0x0F;
+
+    bool run_faulted = escalate_guard_trip(0, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 0 guard 1");
+    TEST_CHECK(run_faulted, "zone 0 was the only HEATER zone; its fault must end the run even though "
+                            "zone 1 (an on/off vent) is still unfaulted and active");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED,
+              "state must be FAULTED once every active HEATER zone has faulted, regardless of on/off zone state");
+    TEST_CHECK(g_relay_release_calls == 1, "relay_authority_release_mask() must be called exactly once");
+
+    g_stub_zone_is_on_off[1] = false; /* restore for other tests sharing this stub array */
 }
 
 static void test_pause_keeps_claim_resume_reclaims_it(void)
@@ -7729,6 +7880,11 @@ static void run_test_on_off_actuation(void)
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
+    test_run_refused_by_readiness_recovery_mode();
+    test_run_refused_by_readiness_safety_trip();
+    test_run_refused_by_readiness_crash_report();
+    test_run_refused_by_readiness_estop_unverified();
+    test_run_passes_the_readiness_gate_when_ready();
     test_halt_is_a_silent_noop_before_start();
     test_firing_stats_persist_refuses_when_calling_stack_is_external_ram();
     test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack();
@@ -7744,6 +7900,7 @@ void run_test_profile_executor_prestart(void)
     test_escalate_guard_trip_global_releases_relay_claim();
     test_escalate_guard_trip_abort_policy_releases_relay_claim();
     test_escalate_guard_trip_all_zones_faulted_releases_relay_claim();
+    test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted();
     test_pause_keeps_claim_resume_reclaims_it();
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();

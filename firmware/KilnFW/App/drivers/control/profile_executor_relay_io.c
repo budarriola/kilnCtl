@@ -768,14 +768,24 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
         return true;
     }
 
-    bool all_faulted = true;
+    /* docs/ON_OFF_ZONE_PLAN.md sec 1's "Executor watchdog inputs" row:
+     * PROFILE_EXEC_FAULTED fires when every active HEATER zone is faulted,
+     * regardless of on/off zone state -- an on/off zone (a vent, a fan) is
+     * not a heat source, so a run whose only unfaulted zone is one of these
+     * is not a running firing, it is a stuck run with nothing left heating
+     * it. Skip on/off zones on both sides of this check: an unfaulted one
+     * must not be read as "the run is still alive", and a faulted one must
+     * not be read as evidence toward "everything faulted" either -- it
+     * simply does not participate. */
+    bool all_heaters_faulted = true;
     for (uint8_t zi2 = 0; zi2 < MAX31856_CHANNEL_COUNT; zi2++) {
-        if (s_exec.zones[zi2].active && !s_exec.zones[zi2].faulted) {
-            all_faulted = false;
+        if (!s_exec.zones[zi2].active || zone_is_on_off(zi2)) continue;
+        if (!s_exec.zones[zi2].faulted) {
+            all_heaters_faulted = false;
             break;
         }
     }
-    if (all_faulted) {
+    if (all_heaters_faulted) {
         s_exec.state = PROFILE_EXEC_FAULTED;
         snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason), "every active zone individually faulted; last: %s",
                 detail);

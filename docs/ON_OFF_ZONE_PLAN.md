@@ -11,11 +11,25 @@
 > actuation) DONE 2026-09-08 (host-tested only) -- see its row below,
 > **UNEXERCISED ON HARDWARE**: no on/off zone has ever actuated a physical
 > relay. Step 9 (bench firing, owner present, dry contacts only) remains
-> open and is the only way to close that gap. Steps 2/3/9 still design-only
-> (2's read-only exclusions were already covered by step 1's widened scope;
-> 3's guard gating was likewise already covered by step 1 via
-> `thermal_guard_input_t.on_off_zone`, so there is no separate `on_off_guard_
-> tick()`). **Opened:** 2026-09-07.
+> open and is the only way to close that gap -- **it is now the only open
+> item in this plan.** Steps 2 and 3 are DONE, folded into step 1's commit
+> rather than landing as separate ones: `zone_is_on_off()`/`zone_needs_
+> ceiling()` (`persist/zones_config_accessors.c`), the ramp-lock/lag/
+> feasibility/firing-stats/cross-zone-guard-9/coupling-row-column exclusions,
+> and guard 5/6/7-only gating via `thermal_guard_input_t.on_off_zone` all
+> verified present in code 2026-09-09 -- there never was a separate
+> `on_off_guard_tick()` because `thermal_guard_tick()`'s own guard table
+> already branches on `on_off_zone` per-guard, which covers the same ground.
+> **A genuine gap was found and fixed 2026-09-09, not merely a stale status
+> marker**: `escalate_guard_trip()`'s per-zone "every active zone faulted ->
+> PROFILE_EXEC_FAULTED" aggregation (`profile_executor_relay_io.c`) counted
+> on/off zones on both sides of the check, contrary to this doc's own
+> "Executor watchdog inputs" row (sec 1) -- a run whose only unfaulted zone
+> was a vent read as "still alive" instead of faulting. Fixed to skip
+> `zone_is_on_off()` zones entirely in that loop; negative-tested by hand
+> (reverted to the old unconditional loop, confirmed RED via the new
+> `test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted()`, restored,
+> confirmed GREEN, `git diff` clean). **Opened:** 2026-09-07.
 > Owner request, verbatim: *"add a feature that a zone may instead of being a
 > heater it can be a on off device. this should be an option to set in a profile
 > at a specific part of a ramp or dwell. for this if the dwell time if
